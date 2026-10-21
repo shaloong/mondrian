@@ -69,7 +69,7 @@ pub struct NativeAudioReprepareInstallReceipt {
 // Inline receipt storage, not another allocation/registry. Drop glue retires
 // every old owner and preparation alias BEFORE the original logical fee.
 struct RetiredReprepareOwners {
-    _constants: Vec<f64>,
+    _constants: Vec<Option<f64>>,
     _candidate: Option<crate::NativeConfigurationCandidate>,
     _factory: Option<Arc<dyn crate::AudioProcessorFactory>>,
     _plan: Option<Arc<PreparedAudioPlan>>,
@@ -432,7 +432,7 @@ impl AudioProgramRuntime {
         }
         let serial = self.native_author_installation_serial()?;
         let lanes = self.session.native_reprepare_lane_count(ticket)?;
-        let values_bytes = std::alloc::Layout::array::<f64>(lanes)
+        let values_bytes = std::alloc::Layout::array::<Option<f64>>(lanes)
             .map_err(|_| AudioRuntimeBuildError::InvalidResourceReplacement)?
             .size();
         let format =
@@ -539,7 +539,7 @@ impl AudioProgramRuntime {
                         .selection
                         .constants
                         .capacity()
-                        .checked_mul(std::mem::size_of::<f64>())?,
+                        .checked_mul(std::mem::size_of::<Option<f64>>())?,
                 )
             })
             .and_then(|total| total.checked_add(std::mem::size_of::<NativeReprepareAttempt>()))
@@ -1249,7 +1249,7 @@ mod inline_admission_tests {
             ..AudioRuntimeResourceFootprint::default()
         };
         let n = CONFIGURATION_LIMIT;
-        let v = 8;
+        let v = std::mem::size_of::<Option<f64>>();
         let parent = std::mem::size_of::<NativeReprepareAttempt>()
             + NativeHostAllocationLedger::storage_layout(CAPTURE_OWNER_SLOTS)
                 .unwrap()

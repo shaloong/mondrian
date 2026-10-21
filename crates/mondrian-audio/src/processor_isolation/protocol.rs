@@ -270,7 +270,8 @@ impl WorkerCommand {
             CommandKind::Process => 2,
             CommandKind::Shutdown => 3,
             CommandKind::PollPending => 4,
-            CommandKind::ServiceConfiguration => 5,
+            // Tag 5 was the dense all-constant body and must not decode as Option lanes.
+            CommandKind::ServiceConfiguration => 14,
             CommandKind::PollConfigurationCohort => 6,
             CommandKind::StageConfigurationSeed => 7,
             CommandKind::CommitConfigurationSeed => 8,
@@ -309,7 +310,7 @@ impl WorkerCommand {
             2 => CommandKind::Process,
             3 => CommandKind::Shutdown,
             4 => CommandKind::PollPending,
-            5 => CommandKind::ServiceConfiguration,
+            14 => CommandKind::ServiceConfiguration,
             6 => CommandKind::PollConfigurationCohort,
             7 => CommandKind::StageConfigurationSeed,
             8 => CommandKind::CommitConfigurationSeed,

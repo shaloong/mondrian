@@ -649,7 +649,7 @@ mod tests {
             NativeRequestCohort::new(7, mondrian_core::NativeAudioReprepareRequest::ClapRestart)
                 .expect("cohort");
         let token = NonZeroU64::new(31).expect("token");
-        let values = [-9.25, 0.75];
+        let values = [None, Some(0.75)];
         let mut wire = Vec::new();
         WorkerCommand {
             kind: CommandKind::ServiceConfiguration,

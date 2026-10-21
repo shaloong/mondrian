@@ -26,7 +26,7 @@ fn installed_vst3_retained_configuration_candidate_uses_actual_component_profile
             .expect("profile factory")
             .create(None)
             .expect("retained profile child");
-        let cohort = trigger_vst3_configuration(&mut *processor, &keys, &ids, mode);
+        let cohort = trigger_vst3_configuration(&mut *processor, &keys, &ids, mode, Some(0.5));
         let token = NonZeroU64::new(17).expect("service token");
         // A controller mirror value cannot substitute for the actual successful
         // component DSP configuration. Wrong scalar profile leaves requests live.
@@ -34,7 +34,7 @@ fn installed_vst3_retained_configuration_candidate_uses_actual_component_profile
             .service_native_configuration(NativeConfigurationControlRequest {
                 expected_cohort: cohort,
                 control_token: token,
-                canonical_constant_values: &[0.25],
+                canonical_constant_values: &[Some(0.25)],
                 configuration_limit_bytes: 128 * 1024,
                 control_buffer_grant_bytes: 1024 * 1024,
             })
@@ -53,7 +53,7 @@ fn installed_vst3_retained_configuration_candidate_uses_actual_component_profile
             .service_native_configuration(NativeConfigurationControlRequest {
                 expected_cohort: cohort,
                 control_token: token,
-                canonical_constant_values: &[0.5],
+                canonical_constant_values: &[Some(0.5)],
                 configuration_limit_bytes: 128 * 1024,
                 control_buffer_grant_bytes: 128 * 1024,
             })
@@ -74,7 +74,7 @@ fn installed_vst3_retained_configuration_candidate_uses_actual_component_profile
             .service_native_configuration(NativeConfigurationControlRequest {
                 expected_cohort: cohort,
                 control_token: token,
-                canonical_constant_values: &[0.5],
+                canonical_constant_values: &[Some(0.5)],
                 configuration_limit_bytes: 128 * 1024,
                 control_buffer_grant_bytes: 1024 * 1024,
             })
@@ -100,6 +100,56 @@ fn installed_vst3_retained_configuration_candidate_uses_actual_component_profile
     }
 }
 
+#[test]
+#[ignore = "current Product and owned VST3 mode5; native-owned lane retained without canonical parameter replay"]
+fn installed_vst3_retained_configuration_captures_native_owned_lane_without_parameter_replay() {
+    let catalog = DiscoveredVst3AudioProcessorSpecResolver::discover(
+        native_path("MONDRIAN_VST3_TEST_HELPER"),
+        [native_path("MONDRIAN_VST3_SIDECHAIN_TEST_PLUGIN")],
+    )
+    .unwrap();
+    let class = &catalog.descriptors()[0].class_id;
+    for mode in [AudioProcessingMode::Realtime, AudioProcessingMode::Offline] {
+        let render = AudioRenderContract { processing_mode: mode, ..test_render_contract() };
+        let authored = catalog
+            .create_instance(class, render, Some(vst3_sidechain_snapshot(0.5, 5)))
+            .unwrap();
+        let ids = authored.parameters.keys().cloned().collect::<Vec<_>>();
+        let spec = configuration_spec(&catalog, &authored, render);
+        let keys = auxiliary_keys(&spec);
+        let mut processor =
+            IsolatedAudioProcessorFactory::prepare(spec).unwrap().create(None).unwrap();
+        let cohort = trigger_vst3_configuration(&mut *processor, &keys, &ids, mode, None);
+        let before = processor.native_audio_object_observation().unwrap().unwrap();
+        let outcome = processor
+            .service_native_configuration(NativeConfigurationControlRequest {
+                expected_cohort: cohort,
+                control_token: NonZeroU64::new(83).unwrap(),
+                canonical_constant_values: &[None],
+                configuration_limit_bytes: 128 * 1024,
+                control_buffer_grant_bytes: 1024 * 1024,
+            })
+            .unwrap();
+        let NativeConfigurationControlOutcome::ReadyForInstall(candidate) = outcome else {
+            panic!("actual native-owned candidate: {outcome:?}");
+        };
+        assert_eq!(
+            processor.native_audio_object_observation().unwrap(),
+            Some(before)
+        );
+        assert_candidate(
+            &candidate,
+            cohort,
+            NonZeroU64::new(83).unwrap(),
+            NativeConfigurationFormat::Vst3ComponentAndController,
+        );
+        assert_blocked_retained(&mut *processor, &keys, 8, mode);
+        let fresh = catalog
+            .create_instance(class, render, Some(candidate.configuration.clone()))
+            .unwrap();
+        assert_fresh_candidate(&catalog, &fresh, render, candidate.observed_contract);
+    }
+}
 #[test]
 #[ignore = "fresh production helper + owned CLAP mode7; typed retained control and independent restored seed PCM"]
 fn installed_clap_retained_configuration_candidate_captures_actual_activated_profile() {
@@ -353,7 +403,10 @@ fn trigger_vst3_configuration(
     keys: &[String],
     ids: &[ParameterId],
     mode: AudioProcessingMode,
+    explicit_value: Option<f64>,
 ) -> NativeRequestCohort {
+    let events = explicit_value.map(|value| AudioParameterEvent { sample_offset: 0, value });
+    let events = events.as_slice();
     let restart = mondrian_core::NativeAudioReprepareRequest::Vst3Restart { flags: 8 };
     processor.enter_state(0).expect("old epoch");
     for start in [0, 4] {
@@ -367,8 +420,8 @@ fn trigger_vst3_configuration(
                 start,
                 4,
                 ids,
-                std::slice::from_ref(&(0..1)),
-                &[AudioParameterEvent { sample_offset: 0, value: 0.5 }],
+                std::slice::from_ref(&(0..events.len())),
+                events,
             ),
         );
         if start == 0 {
@@ -411,8 +464,8 @@ fn trigger_vst3_configuration(
                 8,
                 4,
                 ids,
-                std::slice::from_ref(&(0..1)),
-                &[AudioParameterEvent { sample_offset: 0, value: 0.5 }],
+                std::slice::from_ref(&(0..events.len())),
+                events,
             ),
         ),
         Err(AudioProcessorHostError::ReprepareRequired(
@@ -570,7 +623,7 @@ fn installed_vst3_configuration_seed_commit_preserves_new_profile_on_fresh_enter
         let keys = auxiliary_keys(&spec);
         let factory = IsolatedAudioProcessorFactory::prepare(spec).expect("factory");
         let mut processor = factory.create(None).expect("same persistent child");
-        let cohort = trigger_vst3_configuration(&mut *processor, &keys, &ids, mode);
+        let cohort = trigger_vst3_configuration(&mut *processor, &keys, &ids, mode, Some(0.5));
         let before_service = processor
             .native_audio_object_observation()
             .expect("actual retained object before configuration service")
@@ -579,7 +632,7 @@ fn installed_vst3_configuration_seed_commit_preserves_new_profile_on_fresh_enter
             .service_native_configuration(NativeConfigurationControlRequest {
                 expected_cohort: cohort,
                 control_token: NonZeroU64::new(71).expect("token"),
-                canonical_constant_values: &[0.5],
+                canonical_constant_values: &[Some(0.5)],
                 configuration_limit_bytes: 128 * 1024,
                 control_buffer_grant_bytes: 1024 * 1024,
             })
@@ -683,13 +736,13 @@ fn installed_vst3_configuration_seed_commit_allows_new_contract_state_entry() {
             .expect("actual profile factory")
             .create(None)
             .expect("same persistent native child");
-        let cohort = trigger_vst3_configuration(&mut *processor, &keys, &ids, mode);
+        let cohort = trigger_vst3_configuration(&mut *processor, &keys, &ids, mode, Some(0.5));
         let token = NonZeroU64::new(79).expect("control token");
         let outcome = processor
             .service_native_configuration(NativeConfigurationControlRequest {
                 expected_cohort: cohort,
                 control_token: token,
-                canonical_constant_values: &[0.5],
+                canonical_constant_values: &[Some(0.5)],
                 configuration_limit_bytes: 128 * 1024,
                 control_buffer_grant_bytes: 1024 * 1024,
             })

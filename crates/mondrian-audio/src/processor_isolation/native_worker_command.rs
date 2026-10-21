@@ -32,7 +32,7 @@ impl NativeCommand {
                 request
                     .value_bytes()
                     .map_err(|error| failed("configuration request capacity", error))?,
-                align_of::<f64>(),
+                align_of::<Option<f64>>(),
             ),
             Self::StageSeed(DecodedStage::Owned(seed)) => {
                 (seed.configuration.capacity(), align_of::<u8>())
@@ -114,7 +114,7 @@ mod inline_command_contracts {
                 2 => CommandKind::Process,
                 3 => CommandKind::Shutdown,
                 4 => CommandKind::PollPending,
-                5 => CommandKind::ServiceConfiguration,
+                14 => CommandKind::ServiceConfiguration,
                 6 => CommandKind::PollConfigurationCohort,
                 7 => CommandKind::StageConfigurationSeed,
                 8 => CommandKind::CommitConfigurationSeed,
@@ -161,7 +161,21 @@ mod inline_command_contracts {
     }
 
     #[test]
-    fn native_inline_decoder_preserves_all_original_tags_and_each_exact_body() {
+    fn native_inline_decoder_rejects_old_dense_configuration_tag_before_body() {
+        let mut bytes = Vec::new();
+        header(14).write_to(&mut bytes).unwrap();
+        bytes[8..12].copy_from_slice(&5_u32.to_le_bytes());
+        bytes.extend_from_slice(&[0x5a; 64]);
+        let mut reader = std::io::Cursor::new(bytes);
+        assert!(decode(&mut reader, 2).is_err());
+        assert_eq!(
+            reader.position(),
+            32,
+            "old tag cannot consume a scalar body"
+        );
+    }
+    #[test]
+    fn native_inline_decoder_preserves_unaffected_tags_and_exact_optional_configuration_body() {
         use super::super::native_worker_command::{decode, NativeCommand};
         paired_socket(|parent, child| {
             let bytes = [3, 5, 7];
@@ -177,7 +191,7 @@ mod inline_command_contracts {
                     "old outer schema cannot dispatch"
                 );
             }
-            for tag in 1..=8 {
+            for tag in [1, 2, 3, 4, 6, 7, 8, 14] {
                 let command = header(tag);
                 let mut wire = Vec::new();
                 command.write_to(&mut wire).expect("existing command codec");
@@ -189,12 +203,12 @@ mod inline_command_contracts {
                 use std::io::Write;
                 parent.write_all(&wire).expect("same authenticated transport");
                 match tag {
-                    5 => super::super::native_configuration_wire::write_request(
+                    14 => super::super::native_configuration_wire::write_request(
                         parent,
                         &NativeConfigurationControlRequest {
                             expected_cohort: seed.serviced_cohort,
                             control_token: seed.control_token,
-                            canonical_constant_values: &[-9.25, 0.75],
+                            canonical_constant_values: &[Some(-9.25), Some(0.75)],
                             configuration_limit_bytes: 32,
                             control_buffer_grant_bytes: 64,
                         },
@@ -216,11 +230,14 @@ mod inline_command_contracts {
                 match decode(child, 2).expect("exact command plus its body") {
                     NativeCommand::Plain(observed) => assert_eq!(observed, command),
                     NativeCommand::Configuration(request) => {
-                        assert_eq!(tag, 5);
+                        assert_eq!(tag, 14);
                         let observed = request.borrow().expect("bounded decoded request");
                         assert_eq!(observed.expected_cohort, seed.serviced_cohort);
                         assert_eq!(observed.control_token, seed.control_token);
-                        assert_eq!(observed.canonical_constant_values, &[-9.25, 0.75]);
+                        assert_eq!(
+                            observed.canonical_constant_values,
+                            &[Some(-9.25), Some(0.75)]
+                        );
                     }
                     NativeCommand::StageSeed(
                         super::super::native_configuration_seed_wire::DecodedStage::Owned(observed),

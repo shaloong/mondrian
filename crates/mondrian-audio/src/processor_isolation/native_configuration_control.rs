@@ -65,16 +65,18 @@ impl NativeObservedRequest {
 /// Borrowed non-RT command for the exact retained processor object.
 ///
 /// The caller must quiesce admitted DSP/output before servicing. Constant values
-/// refer to the prepared lane order, in canonical definition coordinates; the
-/// caller must establish that the canonical automation profile is constant. This
-/// command does not evaluate curves or authorize a new plan, PDC or Clock Master.
+/// occupy the full prepared lane order, in canonical definition coordinates; the
+/// caller must establish that every present canonical curve is constant. None
+/// lanes remain native-owned. This command does not evaluate curves or authorize
+/// a new plan, PDC or Clock Master.
 pub struct NativeConfigurationControlRequest<'a> {
     /// Non-consuming snapshot expected by the caller.
     pub expected_cohort: NativeRequestCohort,
     /// Distinguishes this service result from any other attempted installation.
     pub control_token: NonZeroU64,
-    /// Canonical scalar configuration in the admitted lane order.
-    pub canonical_constant_values: &'a [f64],
+    /// Full ordered ownership profile: None preserves native configuration;
+    /// Some is an explicit canonical constant, never a sampled controller value.
+    pub canonical_constant_values: &'a [Option<f64>],
     /// Upper bound on the returned canonical native configuration bytes.
     pub configuration_limit_bytes: usize,
     /// Additional request/capture/envelope byte buffers, excluding retained owners.

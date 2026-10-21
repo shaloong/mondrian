@@ -153,6 +153,18 @@ pub(super) fn product_plugin_interfaces() -> vst3_host::PluginInterfaceSupport {
 const MAX_PARAMETERS: usize = vst3_host::initial_parameter_input::MAX_INITIAL_PARAMETERS;
 const MAX_EVENTS_PER_BLOCK: usize = 4096;
 
+// This is only evidence for explicit canonical constants. An absent lane keeps
+// its original native-state authority; cached host delivery never fills it in.
+fn retained_constants_match_successful_delivery(
+    expected: &[Option<f64>],
+    delivered: &[Option<f64>],
+) -> bool {
+    expected.len() == delivered.len()
+        && expected.iter().zip(delivered).all(|(expected, actual)| {
+            expected.is_none_or(|value| value.is_finite() && *actual == Some(value))
+        })
+}
+
 /// Stable VST3 parameter facts in normalized VST3 coordinates.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Vst3ParameterDescriptor {
@@ -1410,14 +1422,13 @@ impl IsolatedAudioProcessorWorker for Vst3Worker {
         {
             return Ok(Outcome::CapabilityRefused(Refusal::ConfigurationTooLarge));
         }
-        if request.canonical_constant_values.len() != self.last_parameter_values.len()
-            || self
-                .last_parameter_values
-                .iter()
-                .zip(request.canonical_constant_values)
-                .any(|(actual, expected)| !expected.is_finite() || *actual != Some(*expected))
-        {
-            // Only successful delivered DSP values prove component configuration.
+        if !retained_constants_match_successful_delivery(
+            request.canonical_constant_values,
+            &self.last_parameter_values,
+        ) {
+            // Only explicit constants require successful delivered DSP evidence.
+            // None remains owned by the real native state, regardless of any
+            // earlier host-delivery cache; do not clear or synthesize that cache.
             // Controller mirrors and setParamNormalized are not such evidence.
             return Ok(Outcome::CapabilityRefused(
                 Refusal::UnsupportedConstantProfile,
@@ -3142,6 +3153,39 @@ mod retained_parameter_contracts {
 #[cfg(test)]
 mod bus_contract_tests {
     use super::*;
+    #[test]
+    fn retained_vst3_native_owned_profile_does_not_invent_successful_parameter_delivery() {
+        let delivered = [None, Some(0.5), Some(0.75)];
+        let before = delivered;
+        assert!(retained_constants_match_successful_delivery(
+            &[None, Some(0.5), None],
+            &delivered
+        ));
+        assert!(retained_constants_match_successful_delivery(
+            &[None, None, None],
+            &delivered
+        ));
+        assert!(!retained_constants_match_successful_delivery(
+            &[Some(0.25), None, None],
+            &delivered
+        ));
+        assert!(!retained_constants_match_successful_delivery(
+            &[None, Some(0.25), None],
+            &delivered
+        ));
+        assert!(!retained_constants_match_successful_delivery(
+            &[None, Some(f64::NAN), None],
+            &delivered
+        ));
+        assert!(!retained_constants_match_successful_delivery(
+            &[None, None],
+            &delivered
+        ));
+        assert_eq!(
+            delivered, before,
+            "None may not erase or synthesize delivery evidence"
+        );
+    }
     use vst3_host::audio::{AudioBusConfig, NativeAudioBusConstraint, NativeAudioBusInfo};
 
     fn assert_borrowed_matches_owned(

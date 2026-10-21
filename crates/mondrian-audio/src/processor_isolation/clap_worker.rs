@@ -1914,10 +1914,12 @@ impl IsolatedAudioProcessorWorker for ClapWorker {
         if request.canonical_constant_values.len() != self.parameter_lanes.len()
             || self.parameter_lanes.iter().zip(request.canonical_constant_values).any(
                 |(&(_, min, max, stepped), value)| {
-                    !value.is_finite()
-                        || *value < min
-                        || *value > max
-                        || (stepped && value.fract() != 0.0)
+                    value.is_some_and(|value| {
+                        !value.is_finite()
+                            || value < min
+                            || value > max
+                            || (stepped && value.fract() != 0.0)
+                    })
                 },
             )
         {
@@ -1950,6 +1952,7 @@ impl IsolatedAudioProcessorWorker for ClapWorker {
         for (&(id, _, _, _), &value) in
             self.parameter_lanes.iter().zip(request.canonical_constant_values)
         {
+            let Some(value) = value else { continue };
             if !self
                 .input_events
                 .try_push(ParamValueEvent::new(0, id, Pckn::match_all(), value))
@@ -1964,7 +1967,10 @@ impl IsolatedAudioProcessorWorker for ClapWorker {
                 .instance
                 .inactive_plugin_handle()
                 .ok_or_else(|| invalid("CLAP service still active before parameter flush"))?;
-            if !self.parameter_lanes.is_empty() {
+            // Native-owned lanes have no synthetic inactive parameter write.
+            // An all-None profile must not create an empty flush just because
+            // the admitted directory is nonempty.
+            if request.canonical_constant_values.iter().any(Option::is_some) {
                 let params = handle
                     .get_extension::<PluginParams>()
                     .ok_or_else(|| invalid("CLAP admitted parameters lost their extension"))?;
@@ -4733,6 +4739,7 @@ mod tests {
         active: AtomicBool,
         mode_configured: AtomicBool,
         input_present: AtomicBool,
+        configuration_values: [std::sync::atomic::AtomicU64; 2],
     }
     struct LifecycleMain<'a>(&'a LifecycleShared<'a>);
     struct LifecycleProcessor<'a, const CASE: usize> {
@@ -4745,6 +4752,8 @@ mod tests {
         failures: AtomicU32,
         active_port_queries: AtomicU32,
         activations: AtomicU32,
+        configuration_flushes: AtomicU32,
+        configuration_events: AtomicU32,
     }
     impl LifecycleAudit {
         const fn new() -> Self {
@@ -4753,6 +4762,8 @@ mod tests {
                 failures: AtomicU32::new(0),
                 active_port_queries: AtomicU32::new(0),
                 activations: AtomicU32::new(0),
+                configuration_flushes: AtomicU32::new(0),
+                configuration_events: AtomicU32::new(0),
             }
         }
         fn clear(&self) {
@@ -4760,9 +4771,11 @@ mod tests {
             self.failures.store(0, TestOrdering::SeqCst);
             self.active_port_queries.store(0, TestOrdering::SeqCst);
             self.activations.store(0, TestOrdering::SeqCst);
+            self.configuration_flushes.store(0, TestOrdering::SeqCst);
+            self.configuration_events.store(0, TestOrdering::SeqCst);
         }
     }
-    static LIFECYCLE_AUDITS: [LifecycleAudit; 12] = [const { LifecycleAudit::new() }; 12];
+    static LIFECYCLE_AUDITS: [LifecycleAudit; 13] = [const { LifecycleAudit::new() }; 13];
     static CALLBACK_COUNTS: [AtomicU32; 2] = [const { AtomicU32::new(0) }; 2];
     const INIT: u32 = 1;
     const CALLBACK: u32 = 2;
@@ -4815,15 +4828,41 @@ mod tests {
         }
     }
 
-    // Only case11 advertises Params. Its actual active flush callback and
+    // Case12 is the retained optional-profile consumer with two native values.
+    // Case11 retains its zero-parameter active flush callback and
     // native start/process stages distinguish failure from consuming a request.
     impl PluginMainThreadParams for LifecycleMain<'_> {
         fn count(&self) -> u32 {
-            0
+            if self.0.case == 12 {
+                2
+            } else {
+                0
+            }
         }
-        fn get_info(&self, _index: u32, _writer: &mut ParamInfoWriter) {}
-        fn get_value(&self, _id: ClapId) -> Option<f64> {
-            None
+        fn get_info(&self, index: u32, writer: &mut ParamInfoWriter) {
+            if self.0.case == 12 && index < 2 {
+                writer.set(&ParamInfo {
+                    id: ClapId::new(index + 1),
+                    flags: ParamInfoFlags::IS_AUTOMATABLE,
+                    cookie: Default::default(),
+                    name: if index == 0 { b"First" } else { b"Second" },
+                    module: b"",
+                    min_value: 0.0,
+                    max_value: 1.0,
+                    default_value: if index == 0 { 0.25 } else { 0.75 },
+                });
+            }
+        }
+        fn get_value(&self, id: ClapId) -> Option<f64> {
+            if self.0.case != 12 {
+                return None;
+            }
+            [ClapId::new(1), ClapId::new(2)]
+                .iter()
+                .position(|candidate| *candidate == id)
+                .map(|index| {
+                    f64::from_bits(self.0.configuration_values[index].load(TestOrdering::SeqCst))
+                })
         }
         fn value_to_text(
             &self,
@@ -4836,8 +4875,29 @@ mod tests {
         fn text_to_value(&self, _id: ClapId, _text: &CStr) -> Option<f64> {
             None
         }
-        fn flush(&self, _input: &clack_plugin::prelude::InputEvents, _output: &mut OutputEvents) {
+        fn flush(&self, input: &clack_plugin::prelude::InputEvents, _output: &mut OutputEvents) {
             self.0.check(FLUSH, false);
+            if self.0.case == 12 {
+                assert!(!self.0.active.load(TestOrdering::SeqCst));
+                let audit = &LIFECYCLE_AUDITS[12];
+                audit.configuration_flushes.fetch_add(1, TestOrdering::SeqCst);
+                let mut previous = 0;
+                for event in input.iter() {
+                    let Some(CoreEventSpace::ParamValue(value)) = event.as_core_event() else {
+                        panic!("only explicit scalar events are admitted");
+                    };
+                    let index = [ClapId::new(1), ClapId::new(2)]
+                        .iter()
+                        .position(|id| Some(*id) == value.param_id())
+                        .expect("actual native id");
+                    assert!(index + 1 > previous, "actual events preserve lane order");
+                    previous = index + 1;
+                    assert_eq!(event.header().time(), 0);
+                    self.0.configuration_values[index]
+                        .store(value.value().to_bits(), TestOrdering::SeqCst);
+                    audit.configuration_events.fetch_add(1, TestOrdering::SeqCst);
+                }
+            }
         }
     }
 
@@ -4864,10 +4924,10 @@ mod tests {
                 .register::<PluginRender>()
                 .register::<PluginLatency>()
                 .register::<PluginTail>();
-            if matches!(CASE, 8..=10) {
+            if matches!(CASE, 8..=10 | 12) {
                 builder.register::<PluginState>();
             }
-            if CASE == 11 {
+            if matches!(CASE, 11 | 12) {
                 builder.register::<PluginParams>();
             }
         }
@@ -4890,6 +4950,10 @@ mod tests {
                 active: AtomicBool::new(false),
                 mode_configured: AtomicBool::new(false),
                 input_present: AtomicBool::new(CASE != 9),
+                configuration_values: [
+                    std::sync::atomic::AtomicU64::new(0.25_f64.to_bits()),
+                    std::sync::atomic::AtomicU64::new(0.75_f64.to_bits()),
+                ],
             };
             shared.check(INIT, false);
             if let Some(check) = host.get_extension::<HostThreadCheck>() {
@@ -4908,7 +4972,7 @@ mod tests {
                 }
             }
             host.request_callback();
-            if matches!(CASE, 8..=10) {
+            if matches!(CASE, 8..=10 | 12) {
                 host.request_restart();
             }
             Ok(shared)
@@ -4958,6 +5022,11 @@ mod tests {
     impl PluginStateImpl for LifecycleMain<'_> {
         fn save(&self, output: &mut OutputStream) -> Result<(), PluginError> {
             output.write_all(&[0x43])?;
+            if self.0.case == 12 {
+                for value in &self.0.configuration_values {
+                    output.write_all(&value.load(TestOrdering::SeqCst).to_le_bytes())?;
+                }
+            }
             Ok(())
         }
         fn load(&self, input: &mut InputStream) -> Result<(), PluginError> {
@@ -4965,6 +5034,13 @@ mod tests {
             input.read_exact(&mut byte)?;
             if byte != [0x43] {
                 return Err(PluginError::Message("owned lifecycle state"));
+            }
+            if self.0.case == 12 {
+                for value in &self.0.configuration_values {
+                    let mut bytes = [0; 8];
+                    input.read_exact(&mut bytes)?;
+                    value.store(u64::from_le_bytes(bytes), TestOrdering::SeqCst);
+                }
             }
             Ok(())
         }
@@ -5093,6 +5169,100 @@ mod tests {
         }
     }
 
+    #[test]
+    fn clap_configuration_service_preserves_native_owned_lanes_and_flushes_only_explicit_constants()
+    {
+        use super::super::{NativeConfigurationControlOutcome, NativeConfigurationControlRequest};
+        for (profile, expected, flushes, event_count) in [
+            ([None, None], [0.25, 0.75], 0, 0),
+            ([None, Some(0.5)], [0.25, 0.5], 1, 1),
+            ([Some(0.5), None], [0.5, 0.75], 1, 1),
+            ([Some(0.5), Some(1.0)], [0.5, 1.0], 1, 2),
+        ] {
+            LIFECYCLE_AUDITS[12].clear();
+            let entry = PluginEntry::load_from_clack::<SinglePluginEntry<LifecyclePlugin<12>>>(
+                c"/test/configuration-native-owned-values",
+            )
+            .unwrap();
+            let mut request = sidechain_request();
+            request.auxiliary_inputs = AudioProcessorAuxiliaryInputContract::default();
+            request.render_contract.max_block_frames = 16;
+            request.plugin_execution_contract = AudioProcessorExecutionContract::new(
+                5,
+                AudioProcessorTail::Finite(5),
+                true,
+                true,
+                true,
+                0,
+            )
+            .unwrap();
+            let parameters = [0.25, 0.75]
+                .into_iter()
+                .enumerate()
+                .map(|(index, value)| ClapParameterDescriptor {
+                    id: index as u32 + 1,
+                    name: if index == 0 { "First" } else { "Second" }.to_owned(),
+                    min_value: 0.0,
+                    max_value: 1.0,
+                    default_value: value,
+                    current_value: value,
+                    automatable: true,
+                    stepped: false,
+                    enumeration: false,
+                    read_only: false,
+                    hidden: false,
+                })
+                .collect::<Vec<_>>();
+            let mut worker = prepare_loaded(
+                request,
+                entry,
+                c"org.mondrian.test.render-lifecycle",
+                None,
+                &parameters,
+                &[1, 2],
+            )
+            .unwrap();
+            let current_values = |worker: &ClapWorker| {
+                let handle = worker.instance.plugin_handle();
+                let params = handle.get_extension::<PluginParams>().unwrap();
+                [ClapId::new(1), ClapId::new(2)].map(|id| params.get_value(&handle, id).unwrap())
+            };
+            assert_eq!(current_values(&worker), [0.25, 0.75]);
+            let cohort = worker.native_configuration_cohort().unwrap();
+            let outcome = worker
+                .service_native_configuration(NativeConfigurationControlRequest {
+                    expected_cohort: cohort,
+                    control_token: std::num::NonZeroU64::new(79).unwrap(),
+                    canonical_constant_values: &profile,
+                    configuration_limit_bytes: 64,
+                    control_buffer_grant_bytes: 128 * 1024,
+                })
+                .unwrap();
+            let NativeConfigurationControlOutcome::ReadyForInstall(candidate) = outcome else {
+                panic!("actual retained candidate: {outcome:?}");
+            };
+            assert_eq!(candidate.serviced_cohort, cohort);
+            assert_eq!(current_values(&worker), expected);
+            let mut expected_state = vec![0x43];
+            for value in expected {
+                expected_state.extend_from_slice(&value.to_le_bytes());
+            }
+            assert_eq!(
+                candidate.configuration, expected_state,
+                "actual State save retains None values"
+            );
+            assert_eq!(
+                LIFECYCLE_AUDITS[12].configuration_flushes.load(TestOrdering::SeqCst),
+                flushes
+            );
+            assert_eq!(
+                LIFECYCLE_AUDITS[12].configuration_events.load(TestOrdering::SeqCst),
+                event_count
+            );
+            drop(worker);
+            assert_eq!(LIFECYCLE_AUDITS[12].failures.load(TestOrdering::SeqCst), 0);
+        }
+    }
     #[test]
     fn clap_configuration_service_scans_audio_ports_only_while_deactivated() {
         LIFECYCLE_AUDITS[8].clear();

@@ -10,7 +10,7 @@ pub(crate) struct ReprepareSelection {
     pub(crate) lease: crate::AudioNativeProcessorOwnerLease,
     pub(crate) object: crate::NativeAudioObjectObservation,
     pub(crate) cohort: crate::NativeRequestCohort,
-    pub(crate) constants: Vec<f64>,
+    pub(crate) constants: Vec<Option<f64>>,
 }
 
 // One real inline capacity slot per Hosted occurrence. Existing metadata
@@ -155,10 +155,13 @@ impl PreparedProcessorHost {
             .try_reserve_exact(prepared.parameter_ids.len())
             .map_err(|_| Error::Admission("constant-profile allocation failed"))?;
         for curve in &prepared.parameter_curves {
-            let curve = curve.as_ref().filter(|curve| curve.is_constant()).ok_or(
-                Error::Admission("a native parameter has no canonical constant value"),
-            )?;
-            constants.push(curve.constant_value());
+            // Preserve the full admitted lane order: None belongs to the native
+            // configuration, not a controller/default scalar invented by restart.
+            constants.push(match curve {
+                None => None,
+                Some(curve) if curve.is_constant() => Some(curve.constant_value()),
+                Some(_) => return Err(Error::Admission("a native parameter is not constant")),
+            });
         }
         if constants.len() != prepared.parameter_ids.len() {
             return Err(Error::Admission(

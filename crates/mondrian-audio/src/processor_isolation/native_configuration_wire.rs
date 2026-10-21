@@ -12,6 +12,9 @@ const MAX_LANES: usize = 4096;
 const MAX_STATE: usize = 128 * 1024;
 const MAX_BUFFER_GRANT: usize = 1024 * 1024;
 const REQUEST_SIZE: usize = 40;
+// Private tag14 requests carry one canonical (ownership tag, scalar bits) pair
+// for every admitted lane. This wire extent is independent of Rust Option Layout.
+const VALUE_WIRE_SIZE: usize = 16;
 const READY_SIZE: usize = 112;
 
 fn invalid(detail: &'static str) -> io::Error {
@@ -182,7 +185,7 @@ pub(super) fn read_cohort_reply(reader: &mut impl Read) -> io::Result<Option<Nat
 pub(super) struct OwnedControlRequest {
     cohort: NativeRequestCohort,
     token: NonZeroU64,
-    values: Vec<f64>,
+    values: Vec<Option<f64>>,
     state_limit: usize,
     buffer_grant: usize,
 }
@@ -190,7 +193,7 @@ impl OwnedControlRequest {
     pub(super) fn value_bytes(&self) -> io::Result<usize> {
         self.values
             .capacity()
-            .checked_mul(size_of::<f64>())
+            .checked_mul(size_of::<Option<f64>>())
             .ok_or_else(|| invalid("request capacity overflow"))
     }
     pub(super) fn borrow(&self) -> io::Result<NativeConfigurationControlRequest<'_>> {
@@ -216,10 +219,14 @@ pub(super) fn validate_request(request: &NativeConfigurationControlRequest<'_>) 
     let value_bytes = request
         .canonical_constant_values
         .len()
-        .checked_mul(size_of::<f64>())
+        .checked_mul(size_of::<Option<f64>>())
         .ok_or_else(|| invalid("request value extent overflow"))?;
     if request.canonical_constant_values.len() > MAX_LANES
-        || request.canonical_constant_values.iter().any(|value| !value.is_finite())
+        || request
+            .canonical_constant_values
+            .iter()
+            .flatten()
+            .any(|value| !value.is_finite())
         || request.configuration_limit_bytes == 0
         || request.configuration_limit_bytes > MAX_STATE
         || request.control_buffer_grant_bytes < value_bytes
@@ -248,7 +255,12 @@ pub(super) fn write_request(
     put_u64(&mut bytes, 32, request.control_buffer_grant_bytes as u64);
     writer.write_all(&bytes)?;
     for value in request.canonical_constant_values {
-        writer.write_all(&value.to_le_bytes())?;
+        let mut lane = [0; VALUE_WIRE_SIZE];
+        if let Some(value) = value {
+            put_u64(&mut lane, 0, 1);
+            put_u64(&mut lane, 8, value.to_bits());
+        }
+        writer.write_all(&lane)?;
     }
     writer.flush()
 }
@@ -265,7 +277,7 @@ pub(super) fn read_request(
     let state_limit = usize_at(&bytes, 24)?;
     let buffer_grant = usize_at(&bytes, 32)?;
     let value_bytes = lanes
-        .checked_mul(size_of::<f64>())
+        .checked_mul(size_of::<Option<f64>>())
         .ok_or_else(|| invalid("control values overflow"))?;
     if lanes != admitted_lanes
         || lanes > MAX_LANES
@@ -284,18 +296,26 @@ pub(super) fn read_request(
         .map_err(|_| invalid("control values allocation failed"))?;
     if values
         .capacity()
-        .checked_mul(size_of::<f64>())
+        .checked_mul(size_of::<Option<f64>>())
         .is_none_or(|actual| actual > buffer_grant)
     {
         return Err(invalid("control values actual capacity exceeds grant"));
     }
     for _ in 0..lanes {
-        let mut value = [0; 8];
-        reader.read_exact(&mut value)?;
-        let value = f64::from_le_bytes(value);
-        if !value.is_finite() {
-            return Err(invalid("nonfinite native control scalar"));
-        }
+        let mut lane = [0; VALUE_WIRE_SIZE];
+        reader.read_exact(&mut lane)?;
+        let bits = u64_at(&lane, 8)?;
+        let value = match u64_at(&lane, 0)? {
+            0 if bits == 0 => None,
+            1 => {
+                let value = f64::from_bits(bits);
+                if !value.is_finite() {
+                    return Err(invalid("nonfinite native control scalar"));
+                }
+                Some(value)
+            }
+            _ => return Err(invalid("noncanonical native control ownership tag")),
+        };
         values.push(value);
     }
     Ok(OwnedControlRequest { cohort, token, values, state_limit, buffer_grant })
@@ -552,19 +572,19 @@ mod tests {
         let request = NativeConfigurationControlRequest {
             expected_cohort: cohort,
             control_token: NonZeroU64::new(17).expect("token"),
-            canonical_constant_values: &[0.5],
+            canonical_constant_values: &[Some(0.5)],
             configuration_limit_bytes: 16,
             control_buffer_grant_bytes: 32,
         };
         let mut bytes = Vec::new();
         write_request(&mut bytes, &request).expect("request");
-        assert_eq!(bytes.len(), REQUEST_SIZE + 8);
+        assert_eq!(bytes.len(), REQUEST_SIZE + VALUE_WIRE_SIZE);
         assert_eq!(
             read_request(&mut bytes.as_slice(), 1)
                 .expect("valid request")
                 .value_bytes()
                 .expect("bytes"),
-            8
+            size_of::<Option<f64>>()
         );
         put_u32(&mut bytes, 20, u32::MAX);
         assert!(read_request(&mut bytes.as_slice(), 1).is_err());
@@ -576,7 +596,7 @@ mod tests {
     #[test]
     fn native_configuration_wire_keeps_full_4096_lane_admission_and_independent_byte_limits() {
         let values = (0..4096)
-            .map(|index| if index % 2 == 0 { 0.25 } else { 0.75 })
+            .map(|index| if index % 2 == 0 { None } else { Some(0.75) })
             .collect::<Vec<_>>();
         let request = NativeConfigurationControlRequest {
             expected_cohort: NativeRequestCohort::new(1, NativeAudioReprepareRequest::ClapRestart)
@@ -603,7 +623,11 @@ mod tests {
         );
         assert_eq!(bad.len() - reader.len(), REQUEST_SIZE);
         let mut bad = bytes.clone();
-        put_u64(&mut bad, 32, (values.len() * size_of::<f64>() - 1) as u64);
+        put_u64(
+            &mut bad,
+            32,
+            (values.len() * size_of::<Option<f64>>() - 1) as u64,
+        );
         let mut reader = bad.as_slice();
         assert_eq!(
             read_request(&mut reader, 4096).err().unwrap().to_string(),
@@ -613,10 +637,63 @@ mod tests {
         let mut bad = bytes;
         put_u64(&mut bad, 24, (MAX_STATE + 1) as u64);
         assert!(read_request(&mut bad.as_slice(), 4096).is_err());
-        let too_many = vec![0.5; 4097];
+        let too_many = vec![Some(0.5); 4097];
         let invalid = NativeConfigurationControlRequest {
             canonical_constant_values: &too_many,
             control_buffer_grant_bytes: MAX_BUFFER_GRANT,
+            ..request
+        };
+        let mut unpublished = Vec::new();
+        assert!(write_request(&mut unpublished, &invalid).is_err());
+        assert!(unpublished.is_empty());
+    }
+    #[test]
+    fn native_configuration_wire_preserves_native_owned_lanes_and_rejects_malformed_profiles() {
+        let values = [None, Some(-0.0), Some(0.75), None];
+        let request = NativeConfigurationControlRequest {
+            expected_cohort: NativeRequestCohort::new(1, NativeAudioReprepareRequest::ClapRestart)
+                .unwrap(),
+            control_token: NonZeroU64::new(17).unwrap(),
+            canonical_constant_values: &values,
+            configuration_limit_bytes: 16,
+            control_buffer_grant_bytes: MAX_BUFFER_GRANT,
+        };
+        let mut bytes = Vec::new();
+        write_request(&mut bytes, &request).unwrap();
+        let decoded = read_request(&mut bytes.as_slice(), values.len()).unwrap();
+        assert_eq!(decoded.values.len(), values.len());
+        assert_eq!(decoded.values[0], None);
+        assert_eq!(decoded.values[1].unwrap().to_bits(), (-0.0_f64).to_bits());
+        assert_eq!(decoded.values[2], Some(0.75));
+        assert_eq!(decoded.values[3], None);
+        assert_eq!(
+            decoded.value_bytes().unwrap(),
+            decoded.values.capacity() * size_of::<Option<f64>>()
+        );
+        assert_eq!(
+            decoded.borrow().unwrap().control_buffer_grant_bytes,
+            request.control_buffer_grant_bytes - decoded.value_bytes().unwrap()
+        );
+        for (offset, word) in [
+            (REQUEST_SIZE, 2_u64), // Unknown ownership tag.
+            (REQUEST_SIZE + 8, 1), // None cannot hide scalar bits.
+            (REQUEST_SIZE + VALUE_WIRE_SIZE + 8, f64::NAN.to_bits()),
+            (REQUEST_SIZE + VALUE_WIRE_SIZE + 8, f64::INFINITY.to_bits()),
+        ] {
+            let mut invalid = bytes.clone();
+            put_u64(&mut invalid, offset, word);
+            assert!(read_request(&mut invalid.as_slice(), values.len()).is_err());
+        }
+        assert!(read_request(&mut &bytes[..bytes.len() - 1], values.len()).is_err());
+        // The old dense body has too few bytes even behind the new private tag;
+        // the outer decoder separately refuses the old command tag5.
+        let mut dense = bytes[..REQUEST_SIZE].to_vec();
+        for _ in values {
+            dense.extend_from_slice(&0.5_f64.to_le_bytes());
+        }
+        assert!(read_request(&mut dense.as_slice(), values.len()).is_err());
+        let invalid = NativeConfigurationControlRequest {
+            canonical_constant_values: &[None, Some(f64::NAN)],
             ..request
         };
         let mut unpublished = Vec::new();
@@ -630,7 +707,7 @@ mod tests {
         let request = NativeConfigurationControlRequest {
             expected_cohort: cohort,
             control_token: NonZeroU64::new(17).expect("token"),
-            canonical_constant_values: &[0.5],
+            canonical_constant_values: &[Some(0.5)],
             configuration_limit_bytes: 16,
             control_buffer_grant_bytes: 32,
         };
@@ -651,7 +728,7 @@ mod tests {
             format: NativeConfigurationFormat::ClapState,
             configuration,
             buffers: NativeControlBufferReceipt {
-                request_value_capacity_bytes: 8,
+                request_value_capacity_bytes: size_of::<Option<f64>>(),
                 capture_payload_bytes: 0,
                 configuration_capacity_bytes: 16,
             },
