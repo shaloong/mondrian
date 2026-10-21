@@ -222,7 +222,7 @@ mod tests {
     fn fact() -> NativeAudioParameterFact {
         NativeAudioParameterFact {
             revision: 3,
-            parameter: ParameterId::new("gain").unwrap(),
+            parameter: ParameterId::new("clap.param.17").unwrap(),
             event_flags: 0,
             value_bits: Some(250.0_f64.to_bits()),
             author_value_bits: Some(0.25_f64.to_bits()),
