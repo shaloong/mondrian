@@ -1441,6 +1441,9 @@ fn installed_vst3_mne8_roles_product_refuses_same_count_role_drift() {
     let materials = Materials::load();
     let render = render(48_000, AudioChannelLayout::Stereo);
     let factory = roles_factory(&materials, false);
+    // Cold plug-in declarations and prepared host storage are distinct complete contracts.
+    let plugin_contract = factory.spec.plugin_execution_contract;
+    let prepared_contract = factory.execution_contract();
     let mut original = factory.create(None).expect("original Aux-only/three-Main Ready");
     let object = original.native_audio_object_observation().unwrap().unwrap();
     let child = Child::observe_mode(object, Some(&materials.directory), 8);
@@ -1457,17 +1460,18 @@ fn installed_vst3_mne8_roles_product_refuses_same_count_role_drift() {
         assert_eq!(alternative.main_audio_input,
             if auxiliary_input { Vst3MainAudioInput::Absent } else { Vst3MainAudioInput::Present });
         assert_eq!(alternative.auxiliary_inputs.buses.len(), usize::from(auxiliary_input));
-        assert_eq!(alternative.execution_contract, factory.execution_contract());
+        assert_eq!(alternative.execution_contract, plugin_contract);
         let seeded = factory.with_native_configuration_seed(
             NativeConfigurationFormat::Vst3ComponentAndController, &state,
         ).unwrap().unwrap();
-        assert_eq!(seeded.execution_contract(), factory.execution_contract());
+        assert_eq!(seeded.execution_contract(), prepared_contract);
         assert_eq!(seeded.auxiliary_input_contract(), factory.auxiliary_input_contract());
         assert_eq!(seeded.auxiliary_output_contract(), factory.auxiliary_output_contract());
         assert_eq!(seeded.note_input_contract(), factory.note_input_contract());
         let error = seeded.create(None).err().expect("same count cannot conceal a cold role change");
         assert!(matches!(error, AudioProcessorHostError::WorkerFailed { operation: "startup", detail }
             if detail == expected));
+        assert_eq!(factory.execution_contract(), prepared_contract);
         assert_eq!(original.native_audio_object_observation().unwrap(), Some(object));
     }
     // The rejected candidates cannot mutate or poison the original live owner.
@@ -1497,6 +1501,7 @@ fn installed_vst3_mne8_roles_product_refuses_same_count_role_drift() {
             }
         }
     }
+    assert_eq!(factory.execution_contract(), prepared_contract);
     assert_eq!(
         original.native_audio_object_observation().unwrap(),
         Some(object)
