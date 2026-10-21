@@ -3063,7 +3063,12 @@ fn qualify_clip_query_counts_resident_and_graph(
         input, original_input,
         "native queries and Basic preserve Source"
     );
-    shutdown.expect("same resident closes within the original budget");
+    // Preserve the original close failure while checking the independent Graph
+    // owner. Drop may retry cleanup, but cannot replace this frozen result.
+    if let Err(error) = &shutdown {
+        eprintln!("native query-count original direct shutdown retained: {error:?}");
+    }
+    drop(direct);
 
     let kind = register_selected_openfx_filter(product_executable(), &inspection, identifier)
         .expect("canonical native provider");
@@ -3190,6 +3195,7 @@ fn qualify_clip_query_counts_resident_and_graph(
         effect, original_effect,
         "queries do not mutate canonical author state"
     );
+    shutdown.expect("same resident closes within the original budget");
 }
 
 #[test]
