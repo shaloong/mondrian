@@ -323,6 +323,35 @@ mod tests {
         assert!(reprepare_payload_output_bound(payload.len(), MAX_STATE_BYTES).is_some());
         assert!(reprepare_payload_output_bound(payload.len(), MAX_STATE_BYTES + 1).is_none());
         assert!(reprepare_payload_output_bound(payload.len(), usize::MAX).is_none());
+        // Synthetic raw metadata isolates the borrowed state writer's complete
+        // envelope boundary; parameter schema admission remains the typed path.
+        let state = vec![255; MAX_STATE_BYTES];
+        let base = payload_with_reprepare_configuration(payload.as_bytes(), &state, &mut |_| {})
+            .unwrap()
+            .len();
+        let exact = payload.replace(
+            "\"parameters\":[]",
+            &format!("\"parameters\":\"{}\"", "x".repeat(limit - base)),
+        );
+        let mut peak = 0;
+        let output = payload_with_reprepare_configuration(exact.as_bytes(), &state, &mut |n| {
+            peak = peak.max(n)
+        })
+        .unwrap();
+        assert_eq!(output.len(), limit);
+        assert_eq!(
+            peak,
+            reprepare_codec_bound(exact.len()).unwrap() + output.capacity()
+        );
+        drop(output);
+        let too_large = exact.replace("\"parameters\":\"", "\"parameters\":\"x");
+        peak = 0;
+        assert!(
+            payload_with_reprepare_configuration(too_large.as_bytes(), &state, &mut |n| peak =
+                peak.max(n))
+            .is_err()
+        );
+        assert_eq!(peak, reprepare_codec_bound(too_large.len()).unwrap());
         // A valid raw object can still exceed the original concrete output cap;
         // count-first refusal must report codec custody, never truncate the seed.
         let large = payload.replace(

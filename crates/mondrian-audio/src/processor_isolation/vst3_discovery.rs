@@ -842,14 +842,14 @@ mod version_tests {
             .is_err()
         );
         assert!(!allocated);
-        let response = DiscoveryResponse::Probe {
+        let mut response = DiscoveryResponse::Probe {
             schema_version: DISCOVERY_VERSION,
             main_audio_input: Vst3MainAudioInput::Present,
             audio_output_count: 1,
             main_audio_output_count: 1,
             event_bus_contract: Vst3EventBusContractV1::empty(),
             class_id: "0123456789ABCDEF0123456789ABCDEF".into(),
-            vendor: Some("x".repeat(MAX_RESPONSE_BYTES as usize - 128 * 1024)),
+            vendor: Some(String::new()),
             latency_frames: 0,
             tail_frames: 0,
             parameters: vec![],
@@ -858,13 +858,30 @@ mod version_tests {
             auxiliary_buses: vec![],
             input_names: vec![],
         };
+        let base = super::super::encode_native_configuration_payload(&response).unwrap().len();
+        if let DiscoveryResponse::Probe { vendor, .. } = &mut response {
+            *vendor = Some("x".repeat(MAX_RESPONSE_BYTES as usize - base));
+        }
+        let exact =
+            super::super::encode_native_configuration_payload_observed(&response, &mut |_| {
+                allocated = true
+            })
+            .unwrap();
+        assert!(allocated);
+        assert_eq!(exact.len(), MAX_RESPONSE_BYTES as usize);
+        assert!(decode_response(&exact).is_ok());
+        drop(exact);
+        if let DiscoveryResponse::Probe { vendor, .. } = &mut response {
+            vendor.as_mut().unwrap().push('x');
+        }
+        allocated = false;
         assert!(
             super::super::encode_native_configuration_payload_observed(&response, &mut |_| {
                 allocated = true
             })
             .is_err()
         );
-        assert!(!allocated);
+        assert!(!allocated, "one extra byte is refused during measurement");
         let oversized = vec![b' '; MAX_RESPONSE_BYTES as usize + 1];
         assert!(decode_request(&oversized).err().unwrap().to_string().contains("metadata limit"));
         assert!(decode_response(&oversized)

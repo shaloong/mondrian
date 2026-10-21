@@ -943,7 +943,9 @@ fn installed_vst3_sidechain_preserves_native_buses_state_delay_and_partitions() 
                 let mut payload: serde_json::Value =
                     serde_json::from_slice(&stale.preparation_payload).expect("worker payload");
                 let changed_state = vst3_sidechain_snapshot(0.5, 2);
-                payload["state"] = serde_json::json!(changed_state);
+                payload["state"] =
+                    serde_json::to_value(vst3_state_json::StateBytes(&changed_state))
+                        .expect("VST3 state bytes");
                 stale.preparation_payload =
                     serde_json::to_vec(&payload).expect("changed-state payload");
                 let stale = IsolatedAudioProcessorFactory::prepare(stale)
@@ -1773,14 +1775,15 @@ pub(super) fn pure_seed_factory(
     format: NativeConfigurationFormat,
     state: Option<&[u8]>,
 ) -> IsolatedAudioProcessorFactory {
+    use base64::Engine as _;
     let payload = match format {
         NativeConfigurationFormat::Vst3ComponentAndController => serde_json::json!({
-            "schema_version":5,
+            "schema_version":6,
             "main_audio_input":Vst3MainAudioInput::Present,
             "audio_output_count":1,"main_audio_output_count":1,
             "event_bus_contract":{"schema_version":1,"inputs":[],"outputs":[]},
             "binary_path":"nonexistent-owned-plugin.vst3", "class_id":"00112233445566778899AABBCCDDEEFF",
-            "vendor":"Owned", "binary_sha256":vec![7_u8; 32], "state":state,
+            "vendor":"Owned", "binary_sha256":vec![7_u8; 32], "state":state.map(|bytes| base64::engine::general_purpose::STANDARD.encode(bytes)),
             "parameters":[], "parameter_ids":[],
         }),
         NativeConfigurationFormat::ClapState => serde_json::json!({
@@ -1881,7 +1884,11 @@ fn native_factory_seed_pure_rebind_preserves_all_prepared_facts_without_loading(
             serde_json::from_slice(&old_bytes).expect("before payload");
         let mut after: serde_json::Value =
             serde_json::from_slice(&replacement.spec.preparation_payload).expect("after payload");
-        assert_eq!(after["state"], serde_json::json!([44, 55, 255]));
+        let expected = match format {
+            NativeConfigurationFormat::Vst3ComponentAndController => serde_json::json!("LDf/"),
+            NativeConfigurationFormat::ClapState => serde_json::json!([44, 55, 255]),
+        };
+        assert_eq!(after["state"], expected);
         before.as_object_mut().expect("object").remove("state");
         after.as_object_mut().expect("object").remove("state");
         assert_eq!(before, after);
@@ -1911,7 +1918,11 @@ fn native_factory_seed_pure_rebind_keeps_explicit_empty_configuration() {
             original.rebind_configuration_seed(format, &[]).expect("empty native seed");
         let after: serde_json::Value =
             serde_json::from_slice(&replacement.spec.preparation_payload).expect("payload");
-        assert_eq!(after["state"], serde_json::json!([]));
+        let expected = match format {
+            NativeConfigurationFormat::Vst3ComponentAndController => serde_json::json!(""),
+            NativeConfigurationFormat::ClapState => serde_json::json!([]),
+        };
+        assert_eq!(after["state"], expected);
         assert_ne!(
             replacement.spec.preparation_payload,
             original.spec.preparation_payload

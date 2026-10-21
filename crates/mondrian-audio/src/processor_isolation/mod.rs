@@ -2520,11 +2520,11 @@ mod note_spec_contracts {
         )
         .unwrap();
         spec.preparation_payload = serde_json::to_vec(&serde_json::json!({
-            "schema_version": 5, "main_audio_input": Vst3MainAudioInput::Present,
+            "schema_version": 6, "main_audio_input": Vst3MainAudioInput::Present,
             "audio_output_count": 1, "main_audio_output_count": 1,
             "event_bus_contract": Vst3EventBusContractV1::empty(),
             "binary_path": "not-loaded.vst3", "class_id": "unchanged", "vendor": "",
-            "binary_sha256": vec![7;32], "state": [1,2],
+            "binary_sha256": vec![7;32], "state": "AQI=",
             "parameters": [], "parameter_ids": [],
         }))
         .unwrap();
@@ -2691,9 +2691,9 @@ mod note_spec_contracts {
         let before: serde_json::Value = serde_json::from_slice(&old_payload).unwrap();
         let mut after: serde_json::Value =
             serde_json::from_slice(&next.spec.preparation_payload).unwrap();
-        assert_eq!(after["state"], serde_json::json!(configuration));
+        assert_eq!(after["state"], serde_json::json!("/wAJ"));
         after["state"] = before["state"].clone();
-        assert_eq!(after, before, "all nine non-state fields remain identical");
+        assert_eq!(after, before, "all non-state fields remain identical");
         let public = factory
             .with_native_reprepare_configuration(identity, &configuration, &mut |_| {})
             .unwrap()

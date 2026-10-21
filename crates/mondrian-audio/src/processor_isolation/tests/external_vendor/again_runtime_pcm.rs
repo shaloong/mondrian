@@ -51,15 +51,15 @@ fn external_vst3_again_runtime_gain_and_native_bypass_pcm() {
     let captured = strict_json(&probe_lease.read());
     exact_keys(&list, &["kind", "schema_version", "descriptors"]);
     let DiscoveryResponse::List { schema_version, descriptors } =
-        serde_json::from_value(list.clone()).expect("strict current List6")
+        serde_json::from_value(list.clone()).expect("strict current List7")
     else {
         panic!("current List response required");
     };
-    assert_eq!(schema_version, 6);
+    assert_eq!(schema_version, 7);
     assert_eq!(
         list,
         json!({
-            "kind":"list_v6", "schema_version":6,
+            "kind":"list_v7", "schema_version":7,
             "descriptors":[
                 {"class_id":CLASS_ID,"name":"AGain Sample Accurate","vendor":"Steinberg Media Technologies","version":"3.8.0.0"},
                 {"class_id":"CC48BF25529043DA80223510FFE8BD02","name":"Advanced Tutorial","vendor":"Steinberg Media Technologies","version":"3.8.0.0"}
@@ -105,11 +105,11 @@ fn external_vst3_again_runtime_gain_and_native_bypass_pcm() {
         captured_state,
         auxiliary_buses,
         input_names,
-    } = serde_json::from_value(captured.clone()).expect("strict current Probe6")
+    } = serde_json::from_value(captured.clone()).expect("strict current Probe7")
     else {
         panic!("current Probe response required");
     };
-    assert_eq!(schema_version, 6);
+    assert_eq!(schema_version, 7);
     assert_eq!(main_audio_input, crate::Vst3MainAudioInput::Present);
     assert_eq!(audio_output_count, 1);
     assert_eq!(main_audio_output_count, 1);
