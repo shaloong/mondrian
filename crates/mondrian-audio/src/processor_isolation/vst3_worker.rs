@@ -2418,23 +2418,34 @@ fn retained_parameter_fields_valid(title: &[u16; 128], default: f64, steps: i32)
     bytes != 0
 }
 
+// Both cold inventories keep their independent native count/Info/value query.
+// Share only the existing admission bound and one inline SDK output slot.
+pub(super) fn visit_parameter_inventory(
+    plugin: &Plugin,
+    visitor: &mut dyn FnMut(usize, vst3_host::controller_parameters::ControllerParameterRef<'_>),
+) -> vst3_host::Result<usize> {
+    let mut frame = vst3_host::controller_parameters::ControllerParameterQueryFrame::default();
+    plugin.visit_parameters_bounded(MAX_PARAMETERS, &mut frame, visitor)
+}
+
 pub(super) fn parameter_descriptors(
     plugin: &Plugin,
 ) -> Result<Vec<Vst3ParameterDescriptor>, AudioProcessorHostError> {
-    let parameters = plugin
-        .get_parameters()
-        .map_err(|error| invalid(format!("VST3 parameter query failed: {error}")))?
-        .into_iter()
-        .map(|parameter| Vst3ParameterDescriptor {
-            id: parameter.id,
-            name: parameter.name,
-            default_normalized: parameter.default,
-            step_count: parameter.step_count,
-            can_automate: parameter.can_automate,
-            read_only: parameter.is_read_only,
-            flags: parameter.flags,
-        })
-        .collect::<Vec<_>>();
+    let mut parameters = Vec::new();
+    visit_parameter_inventory(plugin, &mut |_, parameter| {
+        let title = parameter.title_utf16();
+        let end = title.iter().position(|code| *code == 0).unwrap_or(title.len());
+        parameters.push(Vst3ParameterDescriptor {
+            id: parameter.id(),
+            name: String::from_utf16_lossy(&title[..end]),
+            default_normalized: parameter.default_normalized(),
+            step_count: parameter.step_count(),
+            can_automate: parameter.can_automate(),
+            read_only: parameter.is_read_only(),
+            flags: parameter.flags(),
+        });
+    })
+    .map_err(|error| invalid(format!("VST3 parameter query failed: {error}")))?;
     for parameter in &parameters {
         validate_parameter(parameter)?;
     }

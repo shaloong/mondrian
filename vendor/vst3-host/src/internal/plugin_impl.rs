@@ -2984,9 +2984,9 @@ impl PluginInternal for PluginImpl {
                 return Ok(0);
             }
             if raw_count as usize > maximum {
-                return Err(Error::InvalidParameter(
-                    "native parameter count exceeds admitted bound".to_owned(),
-                ));
+                return Err(Error::InvalidParameter(format!(
+                    "native parameter count exceeds admitted bound: reported={raw_count} maximum={maximum}"
+                )));
             }
             let mut dense = 0;
             for index in 0..raw_count {

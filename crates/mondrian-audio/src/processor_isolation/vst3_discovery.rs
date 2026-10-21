@@ -3,7 +3,7 @@
 use super::protocol::{auxiliary_from_wire, auxiliary_to_wire, AuxiliaryBusWire};
 use super::vst3_worker::{
     fingerprint, parameter_descriptors, prepare_audio_inputs, validate_main_audio_output_count,
-    MAX_STATE_BYTES,
+    visit_parameter_inventory, MAX_STATE_BYTES,
 };
 use super::{
     Vst3EventBusContractV1, Vst3MainAudioInput, Vst3ParameterDescriptor, Vst3PluginRegistration,
@@ -424,12 +424,11 @@ fn probe_loaded(
         prepare_audio_inputs(&mut plugin, layout)?;
     let event_bus_contract = Vst3EventBusContractV1::observe(&plugin)?;
     let parameters = parameter_descriptors(&plugin)?;
-    let current_values = plugin
-        .get_parameters()
-        .map_err(|error| invalid(format!("VST3 probe parameter query failed: {error}")))?
-        .into_iter()
-        .map(|parameter| (parameter.id, parameter.value))
-        .collect();
+    let mut current_values = Vec::new();
+    visit_parameter_inventory(&plugin, &mut |_, parameter| {
+        current_values.push((parameter.id(), parameter.normalized()));
+    })
+    .map_err(|error| invalid(format!("VST3 probe parameter query failed: {error}")))?;
     let captured_state = if capture_default_state {
         let state = plugin
             .save_state()

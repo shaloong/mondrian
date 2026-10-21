@@ -252,6 +252,7 @@ pub(super) fn bounds_and_allocations(plugin: &mut PluginImpl) {
                     seen += 1;
                     matches &= row.id() == 100 + dense as u32 + u32::from(mismatch);
                     assert!(row.title_matches("Gain"));
+                    assert_eq!(row.normalized().to_bits(), 0.25_f64.to_bits());
                     assert!(row.can_automate() && row.is_read_only());
                     assert_eq!(row.flags() & (1 << 30), 1 << 30);
                 })
@@ -263,22 +264,31 @@ pub(super) fn bounds_and_allocations(plugin: &mut PluginImpl) {
             operations, 0,
             "successful scan and legal mismatch retain no metadata containers"
         );
-        assert_eq!(probe.lock().unwrap().calls.len(), 2049);
+        let expected = std::iter::once(("count", 0))
+            .chain((0..1024).flat_map(|index| [("info", index), ("value", 100 + index)]))
+            .collect::<Vec<_>>();
+        assert_eq!(probe.lock().unwrap().calls, expected);
     }
-    {
-        let mut p = probe.lock().unwrap();
-        p.count = 1025;
-        p.skip = Some(0);
-        p.calls.clear();
+    for count in [1025, 2855] {
+        {
+            let mut p = probe.lock().unwrap();
+            p.count = count;
+            p.skip = Some(0);
+            p.calls.clear();
+        }
+        plugin.deferred_controller_sync.push((101, 0.75)).unwrap();
+        let mut seen = 0;
+        let error = plugin
+            .visit_parameters_bounded(1024, &mut frame, &mut |_, _| seen += 1)
+            .unwrap_err();
+        assert!(matches!(error, Error::InvalidParameter(detail)
+            if detail == format!("native parameter count exceeds admitted bound: reported={count} maximum=1024")));
+        assert_eq!(seen, 0);
+        assert_eq!(
+            probe.lock().unwrap().calls,
+            [("set", 101), ("count", 0)],
+            "original drain precedes the single count; no INFO/value query after over-limit rejection"
+        );
+        assert!(plugin.deferred_controller_sync.is_empty());
     }
-    let mut seen = 0;
-    assert!(plugin
-        .visit_parameters_bounded(1024, &mut frame, &mut |_, _| seen += 1)
-        .is_err());
-    assert_eq!(seen, 0);
-    assert_eq!(
-        probe.lock().unwrap().calls,
-        [("count", 0)],
-        "raw count is bounded before INFO, not inferred from successful rows"
-    );
 }
