@@ -838,6 +838,7 @@ fn process_io(
     render: AudioRenderContract,
     start: usize,
     io: &mut Io,
+    musical_time_reference: Option<MusicalTimeReference>,
 ) -> Result<(), AudioProcessorHostError> {
     let frames = io.frames();
     let context = crate::AudioProcessorProcessContext::new(
@@ -847,7 +848,9 @@ fn process_io(
         render.processing_mode,
         AudioKernelBackend::ScalarReference,
     )
-    .with_musical_time_reference(Some(reference(render.sample_rate)));
+    // This must equal the factory's frozen reference, independently of
+    // whether the current audio block contains any Note events.
+    .with_musical_time_reference(musical_time_reference);
     processor.process(
         context,
         io,
@@ -892,7 +895,14 @@ fn installed_vst3_mne7_outputs_product_covers_present_input_mono_and_32_bus_stor
             let mut start = 0;
             for frames in [3_usize, 2, 4, 3, 2] {
                 let mut io = Io::new(render, outputs as usize, start, frames, input);
-                process_io(processor.as_mut(), render, start, &mut io).unwrap();
+                process_io(
+                    processor.as_mut(),
+                    render,
+                    start,
+                    &mut io,
+                    Some(reference(render.sample_rate)),
+                )
+                .unwrap();
                 for (index, pcm) in std::iter::once((0, &io.main))
                     .chain(io.auxiliary.iter().enumerate().map(|(i, (_, pcm))| (i + 1, pcm)))
                 {
@@ -1178,7 +1188,14 @@ fn installed_vst3_mne8_roles_product_routes_aux0_for_none_and_some_without_main_
                         })
                         .collect(),
                 );
-                process_io(processor.as_mut(), render, start, &mut io).unwrap();
+                process_io(
+                    processor.as_mut(),
+                    render,
+                    start,
+                    &mut io,
+                    notes.then(|| reference(render.sample_rate)),
+                )
+                .unwrap();
                 for (index, pcm) in std::iter::once((0, &io.main))
                     .chain(io.auxiliary.iter().enumerate().map(|(i, (_, pcm))| (i + 1, pcm)))
                 {
@@ -1461,7 +1478,7 @@ fn installed_vst3_mne8_roles_product_refuses_same_count_role_drift() {
     }
     io.notes.clear();
     io.input_pcm = Some(vec![1.0, -2.0, 2.0, -4.0, 3.0, -6.0, 4.0, -8.0]);
-    process_io(original.as_mut(), render, 0, &mut io).unwrap();
+    process_io(original.as_mut(), render, 0, &mut io, None).unwrap();
     for (index, pcm) in std::iter::once((0, &io.main))
         .chain(io.auxiliary.iter().enumerate().map(|(i, (_, pcm))| (i + 1, pcm)))
     {
