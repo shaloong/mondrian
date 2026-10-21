@@ -2182,12 +2182,17 @@ namespace OFX {
         }
 
         ImageEffect::Base *effectBase = reinterpret_cast<ImageEffect::Base*>(instanceHandle);
-        ImageEffect::Instance *effectInstance = reinterpret_cast<ImageEffect::Instance*>(effectBase);
         Memory::Instance* memory;
 
-        if(effectInstance){
-
-          if (!effectInstance->verifyMagic()) {
+        if(effectBase){
+          if (!effectBase->verifyMagic()) {
+            *memoryHandle = NULL;
+            return kOfxStatErrBadHandle;
+          }
+          // A live descriptor is also a Base handle, but cannot own an
+          // instance allocation. Admit its actual type before instance calls.
+          ImageEffect::Instance *effectInstance = dynamic_cast<ImageEffect::Instance*>(effectBase);
+          if (!effectInstance) {
             *memoryHandle = NULL;
             return kOfxStatErrBadHandle;
           }
