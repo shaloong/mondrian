@@ -224,9 +224,12 @@ fn app_ring_out_headless_startup_author_handoff_closes_before_first_dsp() {
         );
     }
     let gain = ParameterId::new("clap.param.7").unwrap();
-    let gain_curve = instance.parameters[&gain].automation.as_ref().unwrap();
-    assert_eq!(gain_curve.default_value.to_bits(), (-6.0_f64).to_bits());
-    assert!(gain_curve.keyframes.is_empty());
+    assert!(
+        instance.parameters.values().all(|parameter| parameter.automation.is_none()),
+        "all captured writable values stay native-owned"
+    );
+    // The actual same-owner MainQuery below independently verifies Gain Out=-6;
+    // an absent author curve must not be filled with this observation.
     assert_eq!(
         instance.opaque_state.as_ref().unwrap().as_slice(),
         state_bytes.as_slice()

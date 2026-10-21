@@ -821,26 +821,12 @@ fn app_owned_vst3_editor_group_commits_through_same_source() {
     let mode = mondrian_core::ParameterId::new("vst3.param.2").unwrap();
     assert_eq!(original.parameters.len(), 3);
     for (id, parameter) in &original.parameters {
-        let curve = parameter
-            .automation
-            .as_ref()
-            .expect("every original writable constant lane retained");
-        assert_eq!(&curve.parameter_id, id);
-        assert!(curve.keyframes.is_empty());
+        assert_eq!(&parameter.schema.parameter_id, id);
+        assert!(
+            parameter.automation.is_none(),
+            "captured native state owns each initial value"
+        );
     }
-    assert_eq!(
-        original.parameters[&gain].automation.as_ref().unwrap().default_value.to_bits(),
-        0.5_f64.to_bits()
-    );
-    assert_eq!(
-        original.parameters[&balance]
-            .automation
-            .as_ref()
-            .unwrap()
-            .default_value
-            .to_bits(),
-        0.5_f64.to_bits()
-    );
     assert_editor_configuration(
         original.opaque_state.as_ref().unwrap().as_ref(),
         0.5,
@@ -1138,16 +1124,20 @@ fn app_owned_vst3_editor_group_commits_through_same_source() {
         let current = &after.parameters[id];
         assert_eq!(current.schema, prior.schema);
         assert_eq!(current.ui, prior.ui);
-        let curve = current.automation.as_ref().expect("all original lanes retained");
-        assert!(curve.keyframes.is_empty());
-        let expected = if *id == gain {
-            0.75_f64
-        } else if *id == balance {
-            0.25_f64
+        if *id == gain || *id == balance {
+            let curve =
+                current.automation.as_ref().expect("actual GUI edit creates the author curve");
+            assert_eq!(&curve.parameter_id, id);
+            assert!(curve.keyframes.is_empty());
+            let expected = if *id == gain { 0.75_f64 } else { 0.25_f64 };
+            assert_eq!(curve.default_value.to_bits(), expected.to_bits());
         } else {
-            prior.automation.as_ref().unwrap().default_value
-        };
-        assert_eq!(curve.default_value.to_bits(), expected.to_bits());
+            assert_eq!(id, &mode);
+            assert!(
+                current.automation.is_none(),
+                "unedited native mode is not adopted"
+            );
+        }
     }
     assert_eq!(after.parameters[&mode], original.parameters[&mode]);
     assert_ne!(after.opaque_state, original.opaque_state);
@@ -1390,10 +1380,10 @@ fn prepare_app_clap_editor_author_closed_with_hooks(
     assert_eq!(numeric.len(), 1);
     assert_eq!(numeric[0].hard_range.min.to_bits(), 0.0_f64.to_bits());
     assert_eq!(numeric[0].hard_range.max.to_bits(), 1.0_f64.to_bits());
-    let curve = original_parameter.automation.as_ref().expect("original writable Volume lane");
-    assert_eq!(curve.parameter_id, volume);
-    assert!(curve.keyframes.is_empty());
-    assert_eq!(curve.default_value.to_bits(), 1.0_f64.to_bits());
+    assert!(
+        original_parameter.automation.is_none(),
+        "captured Volume stays native-owned"
+    );
     assert_eq!(
         original.opaque_state.as_ref().expect("actual initial state").as_slice(),
         &1.0_f32.to_le_bytes()
@@ -2059,12 +2049,21 @@ fn app_owned_clap_editor_undo_redo_restores_native_state() {
                 );
                 let parameter =
                     instance.parameters.get(&volume).context("restored Volume schema/lane")?;
-                let curve = parameter.automation.as_ref().context("restored writable lane")?;
-                anyhow::ensure!(
-                    curve.default_value.to_bits() == expected.to_bits()
-                        && curve.keyframes.is_empty(),
-                    "{stage} restores the authored unkeyed Volume"
-                );
+                if redo {
+                    let curve =
+                        parameter.automation.as_ref().context("restored explicit Volume")?;
+                    anyhow::ensure!(
+                        curve.parameter_id == volume
+                            && curve.default_value.to_bits() == expected.to_bits()
+                            && curve.keyframes.is_empty(),
+                        "{stage} restores the explicit unkeyed Volume"
+                    );
+                } else {
+                    anyhow::ensure!(
+                        parameter.automation.is_none(),
+                        "{stage} restores the original native-owned Volume"
+                    );
+                }
                 anyhow::ensure!(
                     instance.opaque_state.as_ref().map(|value| value.as_slice())
                         == Some((expected as f32).to_le_bytes().as_slice()),
@@ -2080,7 +2079,9 @@ fn app_owned_clap_editor_undo_redo_restores_native_state() {
                 let source_available = state.audio_playback.native_editor_source_available();
                 let presentation = state.native_audio_parameter_presentation(&payload, &volume);
                 observations.push(serde_json::json!({
-                    "stage": stage, "author_value_bits": expected.to_bits(),
+                    "stage": stage,
+                    "author_value_bits": parameter.automation.as_ref().map(|curve| curve.default_value.to_bits()),
+                    "expected_native_value_bits": expected.to_bits(),
                     "native_state": instance.opaque_state.as_ref().map(|value| value.as_slice()),
                     "undo_entries": history.undo_entries, "redo_entries": history.redo_entries,
                     "old_claim": format!("{previous_claim_status:?}"),
