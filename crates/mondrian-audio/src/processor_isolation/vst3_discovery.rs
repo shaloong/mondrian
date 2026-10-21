@@ -729,6 +729,85 @@ mod version_tests {
     use serde_json::json;
 
     #[test]
+    fn discovery_state_bytes_use_bounded_base64_in_both_directions() {
+        for state in [
+            None,
+            Some(vec![]),
+            Some(vec![0, 255, 128]),
+            Some(vec![255; MAX_STATE_BYTES]),
+        ] {
+            let request = DiscoveryRequest {
+                schema_version: DISCOVERY_VERSION,
+                binary_path: PathBuf::from("never-opened.vst3"),
+                operation: DiscoveryOperation::Probe {
+                    class_id: "0123456789ABCDEF0123456789ABCDEF".into(),
+                    sample_rate: 48_000,
+                    channel_layout: AudioChannelLayout::Stereo,
+                    max_block_frames: 256,
+                    offline: true,
+                    state: state.clone(),
+                    capture_default_state: false,
+                },
+            };
+            let bytes = super::super::encode_native_configuration_payload(&request).unwrap();
+            let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            let wire = &value["operation"]["state"];
+            match state.as_deref() {
+                None => assert!(wire.is_null()),
+                Some([]) => assert_eq!(wire, ""),
+                Some([0, 255, 128]) => assert_eq!(wire, "AP+A"),
+                Some(_) => {
+                    let encoded = wire.as_str().expect("bounded state is a base64 string");
+                    assert_eq!(encoded.len(), 174_764);
+                    assert!(encoded.ends_with("//8="));
+                }
+            }
+            let DiscoveryOperation::Probe { state: decoded, .. } =
+                decode_request(&bytes).unwrap().operation
+            else {
+                panic!("probe round trip changed operation");
+            };
+            assert_eq!(decoded, state);
+            let response = DiscoveryResponse::Probe {
+                schema_version: DISCOVERY_VERSION,
+                main_audio_input: Vst3MainAudioInput::Present,
+                audio_output_count: 1,
+                main_audio_output_count: 1,
+                event_bus_contract: Vst3EventBusContractV1::empty(),
+                class_id: "0123456789ABCDEF0123456789ABCDEF".into(),
+                vendor: None,
+                latency_frames: 0,
+                tail_frames: 0,
+                parameters: vec![],
+                current_values: vec![],
+                captured_state: state.clone(),
+                auxiliary_buses: vec![],
+                input_names: vec![],
+            };
+            let bytes = super::super::encode_native_configuration_payload(&response).unwrap();
+            let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(&value["captured_state"], wire);
+            let DiscoveryResponse::Probe { captured_state, .. } = decode_response(&bytes).unwrap()
+            else {
+                panic!("probe round trip changed response");
+            };
+            assert_eq!(captured_state, state);
+            for invalid in [
+                json!([0, 255, 128]),
+                json!("AP+A="),
+                json!("AP-A"),
+                json!("AB=="),
+                json!("AA"),
+                json!(false),
+                json!({"base64":"AP+A"}),
+            ] {
+                let mut bad = value.clone();
+                bad["captured_state"] = invalid;
+                assert!(decode_response(&serde_json::to_vec(&bad).unwrap()).is_err());
+            }
+        }
+    }
+    #[test]
     fn discovery_v6_refuses_legacy_missing_unknown_and_wrong_versions_in_both_directions() {
         // Frozen legacy request/response discriminators: the old request denied
         // unknown fields and the old response only recognized list/probe.

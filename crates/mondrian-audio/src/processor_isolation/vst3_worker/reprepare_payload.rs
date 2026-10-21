@@ -172,6 +172,34 @@ mod tests {
     }
 
     #[test]
+    fn vst3_state_byte_wire_reprepare_keeps_maximum_seed_and_rejects_array_state() {
+        let payload = test_payload();
+        let state = vec![255; MAX_STATE_BYTES];
+        let output =
+            payload_with_reprepare_configuration(payload.as_bytes(), &state, &mut |_| {}).unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&output).unwrap();
+        let encoded = value["state"].as_str().expect("replacement uses a base64 string");
+        assert_eq!(encoded.len(), 174_764);
+        assert!(encoded.ends_with("//8="));
+        assert_eq!(
+            super::super::decode_payload(&output).unwrap().state,
+            Some(state)
+        );
+        assert!(output.len() <= super::super::super::MAX_PREPARATION_PAYLOAD_BYTES);
+        for invalid in [
+            serde_json::json!([1, 2]),
+            serde_json::json!("AB=="),
+            serde_json::json!("AQI"),
+            serde_json::json!({"base64":"AQI="}),
+        ] {
+            let mut value: serde_json::Value = serde_json::from_str(&payload).unwrap();
+            value["state"] = invalid;
+            let bytes = serde_json::to_vec(&value).unwrap();
+            assert!(super::super::decode_payload(&bytes).is_err());
+            assert!(payload_with_reprepare_configuration(&bytes, &[9], &mut |_| {}).is_err());
+        }
+    }
+    #[test]
     fn vst3_reprepare_raw_codec_preserves_twelve_field_fragments_and_option_defaults() {
         let payload = test_payload().replace(
             "\"parameters\":[]",
