@@ -2103,6 +2103,8 @@ namespace OFX {
         if (!clip) {
           return kOfxStatErrBadHandle;
         }
+        *clip = NULL;
+        if (propertySet) { *propertySet = NULL; }
 
         ImageEffect::Base *effectBase = reinterpret_cast<ImageEffect::Base*>(imageEffect);
 
@@ -2110,7 +2112,8 @@ namespace OFX {
           return kOfxStatErrBadHandle;
         }
 
-        ImageEffect::Instance *effectInstance = reinterpret_cast<ImageEffect::Instance*>(effectBase);
+        // Descriptor is also a valid Base, but cannot supply instance clips.
+        ImageEffect::Instance *effectInstance = dynamic_cast<ImageEffect::Instance*>(effectBase);
 
         if(effectInstance){
           ClipInstance* instance = effectInstance->getClip(name);
@@ -2124,6 +2127,8 @@ namespace OFX {
 
         return kOfxStatErrBadHandle;
         } catch (...) {
+          if (clip) { *clip = NULL; }
+          if (propertySet) { *propertySet = NULL; }
           return kOfxStatErrBadHandle;
         }
       }
