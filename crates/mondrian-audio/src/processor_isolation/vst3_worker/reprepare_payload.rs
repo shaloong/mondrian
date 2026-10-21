@@ -83,10 +83,9 @@ pub(in crate::processor_isolation) fn reprepare_payload_output_bound(
     if configuration_bytes > MAX_STATE_BYTES {
         return None;
     }
-    // At most three decimal digits and a comma per byte, plus all old raw
-    // fragments, twelve quoted keys/colons/commas, braces, [] and default null.
-    configuration_bytes
-        .checked_mul(4)?
+    // Streamed base64 has no separate encoded owner. Include its exact length,
+    // all old raw fragments, twelve keys/punctuation, quotes and default null.
+    super::super::vst3_state_json::encoded_len(configuration_bytes)?
         .checked_add(n)?
         .checked_add(FIELD_NAME_BYTES + 4 * FIELD_NAMES.len() + 8)
 }
@@ -118,7 +117,10 @@ pub(in crate::processor_isolation) fn payload_with_reprepare_configuration(
     super::validate_main_audio_output_count(output_count, main_output_count)?;
     // Original Option fields admit both absent and null. The old state is never
     // decoded/allocated; absent vendor re-emits null just like the typed codec.
-    let _old_state = view.state;
+    if let Some(old_state) = view.state {
+        super::super::vst3_state_json::validate_json(old_state)
+            .map_err(|error| invalid(format!("invalid retained VST3 state: {error}")))?;
+    }
     struct Replacement<'a, 'b> {
         metadata: &'a Metadata<'b>,
         state: &'a [u8],
@@ -137,7 +139,10 @@ pub(in crate::processor_isolation) fn payload_with_reprepare_configuration(
             object.serialize_field("class_id", v.class_id)?;
             object.serialize_field("vendor", &v.vendor)?;
             object.serialize_field("binary_sha256", v.binary_sha256)?;
-            object.serialize_field("state", &self.state)?;
+            object.serialize_field(
+                "state",
+                &super::super::vst3_state_json::StateBytes(self.state),
+            )?;
             object.serialize_field("parameters", v.parameters)?;
             object.serialize_field("parameter_ids", v.parameter_ids)?;
             object.end()
@@ -230,7 +235,7 @@ mod tests {
             ]
         };
         assert_eq!(fragments(&before), fragments(&after));
-        assert_eq!(after.state.unwrap().get(), "[255,0,9]");
+        assert_eq!(after.state.unwrap().get(), "\"/wAJ\"");
         assert!(peak >= reprepare_codec_bound(payload.len()).unwrap() + output.capacity());
         assert!(
             peak <= reprepare_codec_bound(payload.len()).unwrap()
@@ -244,8 +249,8 @@ mod tests {
         ] {
             for optional in [
                 optional.clone(),
-                optional.replace("\"state\":[1,2],", ""),
-                optional.replace("\"state\":[1,2]", "\"state\":null"),
+                optional.replace("\"state\":\"AQI=\",", ""),
+                optional.replace("\"state\":\"AQI=\"", "\"state\":null"),
             ] {
                 let output =
                     payload_with_reprepare_configuration(optional.as_bytes(), &[], &mut |_| {})
@@ -270,8 +275,8 @@ mod tests {
             payload.replacen("{", "{\"vendor\":null,", 1),
             payload.replacen("{", "{\"state\":null,", 1),
             payload.replacen("{", "{\"audio_output_count\":3,", 1),
-            payload.replace("\"schema_version\":5", "\"schema_version\":4"),
-            payload.replace("\"schema_version\":5", "\"schema_version\":6"),
+            payload.replace("\"schema_version\":6", "\"schema_version\":5"),
+            payload.replace("\"schema_version\":6", "\"schema_version\":7"),
             payload.replacen("{", "{\"main_audio_output_count\":2,", 1),
             payload.replacen("{", "{\"main_audio_output_cou\\u006et\":2,", 1),
             payload.replace(
@@ -286,7 +291,7 @@ mod tests {
             payload.replace("\"audio_output_count\":3", "\"audio_output_count\":0"),
             payload.replace("\"audio_output_count\":3", "\"audio_output_count\":33"),
             payload.replace("\"audio_output_count\":3", "\"audio_output_count\":256"),
-            payload.replace("\"schema_version\":5,", ""),
+            payload.replace("\"schema_version\":6,", ""),
             "[]".to_owned(),
         ] {
             let mut peak = 0;
@@ -304,7 +309,7 @@ mod tests {
             let missing = serde_json::to_vec(&value).unwrap();
             assert!(payload_with_reprepare_configuration(&missing, &[8], &mut |_| {}).is_err());
         }
-        let first = payload.replacen("{", "{\"extra\":0,", 1).replace("\"schema_version\":5,", "");
+        let first = payload.replacen("{", "{\"extra\":0,", 1).replace("\"schema_version\":6,", "");
         let error =
             payload_with_reprepare_configuration(first.as_bytes(), &[8], &mut |_| {}).unwrap_err();
         assert!(

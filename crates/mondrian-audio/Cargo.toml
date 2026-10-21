@@ -17,6 +17,7 @@ pulp.workspace = true
 serde.workspace = true
 serde_json = { workspace = true, features = ["raw_value"] }
 sha2.workspace = true
+base64.workspace = true
 tempfile.workspace = true
 memmap2.workspace = true
 bytemuck.workspace = true

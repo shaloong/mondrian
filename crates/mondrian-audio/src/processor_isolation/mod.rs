@@ -44,6 +44,7 @@ mod supervisor;
 mod vst3_catalog;
 mod vst3_discovery;
 mod vst3_processing_metadata;
+mod vst3_state_json;
 mod vst3_worker;
 mod worker;
 

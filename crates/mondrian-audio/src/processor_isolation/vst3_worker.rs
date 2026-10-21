@@ -50,7 +50,7 @@ use vst3_host::{PluginEvent, PluginEventData, Vst3Host};
 pub const VST3_AUDIO_WORKER_ARGUMENT: &str = "--internal-vst3-audio-worker-v1";
 const MAX_BINARY_BYTES: u64 = 512 * 1024 * 1024;
 pub(super) const MAX_STATE_BYTES: usize = 128 * 1024;
-const PAYLOAD_VERSION: u32 = 5;
+const PAYLOAD_VERSION: u32 = 6;
 
 // VST3 has direction-local ordered bus indices. Keep these immutable keys in
 // static storage: the child retains only the admitted count, not another Vec.
@@ -488,11 +488,12 @@ impl IsolatedAudioProcessorSpecResolver for Vst3AudioProcessorSpecResolver {
             parameter_ids.push(id.clone());
             vst3_ids.push(descriptor.id);
         }
-        let state = request.opaque_state().map(ToOwned::to_owned);
-        if state.as_ref().is_some_and(|state| state.len() > MAX_STATE_BYTES) {
+        let state = request.opaque_state();
+        if state.is_some_and(|state| state.len() > MAX_STATE_BYTES) {
             return Err(invalid("VST3 state exceeds the worker payload limit"));
         }
-        let payload = serde_json::to_vec(&Vst3Payload {
+        let state = state.map(ToOwned::to_owned);
+        let payload = super::encode_native_configuration_payload(&Vst3Payload {
             schema_version: PAYLOAD_VERSION,
             main_audio_input: plugin.main_audio_input,
             audio_output_count: plugin.audio_output_count,
@@ -565,12 +566,16 @@ struct Vst3Payload {
     class_id: String,
     vendor: Option<String>,
     binary_sha256: [u8; 32],
+    #[serde(default, with = "super::vst3_state_json")]
     state: Option<Vec<u8>>,
     parameters: Vec<Vst3ParameterDescriptor>,
     parameter_ids: Vec<u32>,
 }
 
 fn decode_payload(bytes: &[u8]) -> Result<Vst3Payload, AudioProcessorHostError> {
+    if bytes.len() > super::MAX_PREPARATION_PAYLOAD_BYTES {
+        return Err(invalid("VST3 worker payload exceeds the metadata limit"));
+    }
     let payload: Vst3Payload = serde_json::from_slice(bytes)
         .map_err(|error| invalid(format!("invalid VST3 worker payload: {error}")))?;
     if payload.schema_version != PAYLOAD_VERSION {
@@ -3893,7 +3898,7 @@ mod bus_contract_tests {
     }
 
     #[test]
-    fn payload_v5_seed_keeps_audio_shape_and_event_contract_and_refuses_legacy_or_unknown_metadata()
+    fn payload_v6_seed_keeps_audio_shape_and_event_contract_and_refuses_legacy_or_unknown_metadata()
     {
         use super::super::{Vst3EventBusContractRow, Vst3EventBusContractRows, Vst3EventBusRole};
         let event_bus_contract = Vst3EventBusContractV1 {
@@ -3923,9 +3928,13 @@ mod bus_contract_tests {
             parameter_ids: vec![],
         };
         let original = serde_json::to_value(&payload).unwrap();
-        for state in [None, Some(vec![]), Some(vec![1, 2])] {
+        for state in [
+            serde_json::Value::Null,
+            serde_json::json!(""),
+            serde_json::json!("AQI="),
+        ] {
             let mut before = original.clone();
-            before["state"] = serde_json::json!(state);
+            before["state"] = state;
             let updated =
                 payload_with_configuration_seed(&serde_json::to_vec(&before).unwrap(), &[3, 4])
                     .unwrap();
@@ -3936,7 +3945,7 @@ mod bus_contract_tests {
             assert_eq!(decoded.event_bus_contract, event_bus_contract);
             assert_eq!(decoded.state, Some(vec![3, 4]));
             let mut expected = before;
-            expected["state"] = serde_json::json!([3, 4]);
+            expected["state"] = serde_json::json!("AwQ=");
             assert_eq!(
                 serde_json::from_slice::<serde_json::Value>(&updated).unwrap(),
                 expected
@@ -3967,7 +3976,8 @@ mod bus_contract_tests {
             ("schema_version", serde_json::json!(2)),
             ("schema_version", serde_json::json!(3)),
             ("schema_version", serde_json::json!(4)),
-            ("schema_version", serde_json::json!(6)),
+            ("schema_version", serde_json::json!(5)),
+            ("schema_version", serde_json::json!(7)),
             ("audio_output_count", serde_json::json!(0)),
             ("audio_output_count", serde_json::json!(33)),
             ("audio_output_count", serde_json::json!(256)),
