@@ -11515,10 +11515,10 @@ mod tests {
     fn heterogeneous_cpu_dag_graph() -> Arc<CompiledEffectGraph> {
         static NEXT_DEFINITION_ID: AtomicUsize = AtomicUsize::new(1);
         let definition_id = NEXT_DEFINITION_ID.fetch_add(1, Ordering::Relaxed);
-        let cpu_type = mondrian_effects::EffectType::Plugin(format!(
+        let cpu_type = mondrian_effects::EffectType::External(format!(
             "test.export.heterogeneous.cpu-dag.{definition_id}.cpu"
         ));
-        let gpu_type = mondrian_effects::EffectType::Plugin(format!(
+        let gpu_type = mondrian_effects::EffectType::External(format!(
             "test.export.heterogeneous.cpu-dag.{definition_id}.gpu"
         ));
         mondrian_effects::register_effect_definition(
@@ -17117,7 +17117,7 @@ mod tests {
         .expect("blocked child Clip");
         let blocked_id = blocked.id;
         blocked.add_effect_node(mondrian_effects::EffectNode::new(
-            mondrian_effects::EffectType::Plugin("vendor.missing.child.effect".to_owned()),
+            mondrian_effects::EffectType::External("vendor.missing.child.effect".to_owned()),
         ));
         child.video_tracks[0].add_clip(blocked).expect("add blocked child Clip");
 
@@ -17211,7 +17211,7 @@ mod tests {
             mondrian_core::TimelineTimeRange::new(tt(28, time_base), tt(4, time_base))
                 .expect("Transition range"),
         );
-        transition.transition_type = mondrian_timeline::VideoTransitionType::Plugin {
+        transition.transition_type = mondrian_timeline::VideoTransitionType::External {
             definition_id: "vendor.missing.transition".to_owned(),
         };
         let transition_id = transition.id;
@@ -17267,7 +17267,7 @@ mod tests {
 
         let evaluations = Arc::new(AtomicUsize::new(0));
         let evaluations_for_builder = Arc::clone(&evaluations);
-        let effect_type = EffectType::Plugin(format!(
+        let effect_type = EffectType::External(format!(
             "test.export.preflight.unrelated.{}",
             AssetId::new()
         ));
@@ -17363,7 +17363,7 @@ mod tests {
         let replacement_builds = Arc::new(AtomicUsize::new(0));
         let replacement_builds_for_definition = Arc::clone(&replacement_builds);
         let effect_type =
-            EffectType::Plugin(format!("test.export.frozen-definition.{}", AssetId::new()));
+            EffectType::External(format!("test.export.frozen-definition.{}", AssetId::new()));
         let definition = |temporal_input, builder: mondrian_effects::EffectGraphBuilder| {
             EffectDefinition::new(
                 effect_type.key(),
@@ -17530,7 +17530,7 @@ mod tests {
             EffectTemporalInputExtent, EffectType,
         };
 
-        let effect_type = EffectType::Plugin(format!(
+        let effect_type = EffectType::External(format!(
             "test.export.preflight.stateful_identity.{}",
             AssetId::new()
         ));
@@ -17615,7 +17615,7 @@ mod tests {
             EffectTemporalInputExtent, EffectType,
         };
 
-        let effect_type = EffectType::Plugin(format!(
+        let effect_type = EffectType::External(format!(
             "test.export.preflight.u8_only_identity.{}",
             AssetId::new()
         ));
@@ -17686,7 +17686,7 @@ mod tests {
             EffectTemporalInputExtent, EffectType,
         };
 
-        let effect_type = EffectType::Plugin(format!(
+        let effect_type = EffectType::External(format!(
             "test.export.preflight.dynamic_panic.{}",
             AssetId::new()
         ));
@@ -17782,7 +17782,7 @@ mod tests {
         let evaluations_for_builder = Arc::clone(&evaluations);
         let emit_blocked_domain = Arc::new(AtomicBool::new(false));
         let emit_blocked_domain_for_builder = Arc::clone(&emit_blocked_domain);
-        let effect_type = EffectType::Plugin(format!(
+        let effect_type = EffectType::External(format!(
             "test.export.render.dynamic_readmission.{}",
             AssetId::new()
         ));

@@ -8,6 +8,13 @@ These docs are the product and engineering contract for Mondrian's current self-
 - `specs/`: data contracts for project files, assets, sequences, clips, effects, masks, color, export, and shortcuts.
 - `ui/`: product UI design rules and interaction patterns for the self-hosted editor.
 - `dev/`: setup, build, testing, debugging, profiling, and module-boundary rules.
+- `adr/`: accepted architectural decisions and their rationale.
+- [extensions/](extensions/README.md): the planned general Extension platform,
+  including Web/Rust execution, contributions, and managed permissions.
+- [extensions/effects/](extensions/effects/README.md): the existing source-integrated Effect SDK;
+  [native-format plugin hosts](architecture/native-plugin-hosts.md) document
+  OpenFX/VST3/CLAP separately. Source naming and project data compatibility have
+  distinct contracts.
 
 ## Documentation languages
 
@@ -24,7 +31,7 @@ Do not rewrite or reformat the CLA or its signing records for language cleanup.
 
 ## Maintenance Rules
 
-- Update docs when changing a public data shape, crate boundary, UI interaction contract, persistence format, render path, or plugin-facing API.
+- Update docs when changing a public data shape, crate boundary, UI interaction contract, persistence format, render path, or extension-facing API.
 - Prefer documenting stable principles and current constraints over implementation trivia.
 - If code and docs disagree, either update the code or explicitly mark the doc section as a target direction with migration notes.
 - Do not resurrect legacy egui architecture as a compatibility target. The self-hosted UI is now the main product line.

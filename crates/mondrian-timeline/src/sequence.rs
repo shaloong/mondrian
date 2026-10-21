@@ -3197,8 +3197,8 @@ pub(crate) fn flat_video_transition_definition_snapshot(
         crate::video_transition::VideoTransitionType::CrossDissolve => {
             FlatVideoTransitionDefinition::CrossDissolve
         }
-        crate::video_transition::VideoTransitionType::Plugin { definition_id } => {
-            FlatVideoTransitionDefinition::Plugin { definition_id: definition_id.clone() }
+        crate::video_transition::VideoTransitionType::External { definition_id } => {
+            FlatVideoTransitionDefinition::External { definition_id: definition_id.clone() }
         }
     };
     Arc::new(FlatVideoTransitionDefinitionSnapshot {
@@ -3679,7 +3679,7 @@ mod tests {
         let time_base = sequence.time_base();
 
         let transition = &mut sequence.video_transitions[0];
-        transition.transition_type = crate::VideoTransitionType::Plugin {
+        transition.transition_type = crate::VideoTransitionType::External {
             definition_id: "com.example.page-curl".to_owned(),
         };
         transition.params = serde_json::json!({
@@ -3690,7 +3690,7 @@ mod tests {
         });
 
         let clip = &mut sequence.video_tracks[0].clips[0];
-        clip.effects[0].effect_type = EffectType::Plugin("com.example.glow".to_owned());
+        clip.effects[0].effect_type = EffectType::External("com.example.glow".to_owned());
         clip.effects[0].params = serde_json::json!({
             "kernel": [1.0, 0.5, 0.25],
             "resource": "project://luts/glow.cube"
@@ -3779,7 +3779,7 @@ mod tests {
             .shares_allocation_with(&original.sequences[0].audio_program.track_channels));
 
         candidate.sequences[0].video_tracks[0].clips[0].effects.push(EffectNode::new(
-            EffectType::Plugin("com.example.detached".to_owned()),
+            EffectType::External("com.example.detached".to_owned()),
         ));
 
         assert!(!candidate.sequences.shares_allocation_with(&original.sequences));

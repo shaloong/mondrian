@@ -272,7 +272,7 @@ foundation:
   and HSL/3D Qualifier/matte-refinement mathematics, explicit RGB/AlphaMask
   domain graph compilation/execution, mask rasterization, deterministic bounded
   object/planar tracking analysis, and visual
-  plugin-effect contracts; it is not the audio processor host and owns no wgpu
+  effect-extension contracts; it is not the audio processor host and owns no wgpu
   objects.
 - `mondrian-renderer`: revision-bound Prepared Visual Program compilation,
   per-Clip Effect and visual Transition readiness, per-Sequence render-plan
@@ -427,7 +427,7 @@ candidate.
   are derived coordinates; floating-point seconds and field-derived ordering
   are forbidden for persisted timeline semantics.
 - UI visual values must come from theme tokens, not hardcoded colors/spacing/radii.
-- Command/menu/shortcut/plugin entry points should flow through a command registry, not private per-menu business logic.
+- Command/menu/shortcut/Extension entry points should flow through a command registry, not private per-menu business logic.
 - Preview and export should share render semantics. Different scheduling or caching is allowed; different interpretation is not.
 - Interlaced Program Output is two exact progressive field-time evaluations,
   never one woven Effect/compositor input. Media owns deinterlacing; Renderer
@@ -436,6 +436,12 @@ candidate.
 - Realtime transport has exactly one Clock Master and is owned by the
   [Playback Engine](playback-engine.md); Viewer, decode, render, and audio
   adapters report observations rather than mutating transport.
+
+The planned [Extension system](extension-system.md) adds managed contributions,
+isolated real Web UI and Rust execution, and brokered permissions over these
+domain boundaries. It follows native audio/video plugin-host work and is not
+implemented by the current source-integrated Effect SDK or supervised Workers.
+See [ADR 0011](../adr/0011-use-managed-extension-platform.md).
 
 The validation-only Media runtime may depend on the platform-neutral
 `mondrian-platform-core` capsule-closure value contract. That foundation owns

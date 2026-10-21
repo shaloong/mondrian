@@ -53,7 +53,7 @@ fn temporal_sample_effect(sample_offset: TimelineTime) -> mondrian_effects::Effe
 
     static NEXT_TEMPORAL_EFFECT: AtomicU64 = AtomicU64::new(1);
     let serial = NEXT_TEMPORAL_EFFECT.fetch_add(1, Ordering::Relaxed);
-    let effect_type = EffectType::Plugin(format!("test.preview.temporal-blend.{serial}"));
+    let effect_type = EffectType::External(format!("test.preview.temporal-blend.{serial}"));
     let temporal_input = if sample_offset.is_negative() {
         EffectTemporalInputExtent {
             past: EffectTemporalSpan::Finite(
@@ -106,7 +106,7 @@ fn preview_gpu_only_point_effect(label: &str) -> mondrian_effects::EffectNode {
     };
 
     let effect_type =
-        EffectType::Plugin(format!("test.preview.gpu-only.{label}.{}", AssetId::new()));
+        EffectType::External(format!("test.preview.gpu-only.{label}.{}", AssetId::new()));
     register_effect_definition(
         EffectDefinition::new(
             effect_type.key(),
@@ -353,7 +353,7 @@ fn preview_execution_admission_fails_before_media_demand_or_decode() {
     };
     use std::sync::Arc;
 
-    let effect_type = EffectType::Plugin(format!(
+    let effect_type = EffectType::External(format!(
         "test.preview.predecode.unavailable.{}",
         AssetId::new()
     ));
@@ -499,7 +499,7 @@ fn production_timeline_prepares_heterogeneous_route_before_media_materialization
     let time_base = sequence.time_base();
     let mut clip = Clip::new(asset_id, TimelineTime::ZERO, tt(24, time_base)).expect("media Clip");
     let blur = EffectNode::with_defaults(EffectType::GaussianBlur);
-    let gpu_only_type = EffectType::Plugin(format!("test.preview.gpu-only.{}", AssetId::new()));
+    let gpu_only_type = EffectType::External(format!("test.preview.gpu-only.{}", AssetId::new()));
     register_effect_definition(
         EffectDefinition::new(
             gpu_only_type.key(),

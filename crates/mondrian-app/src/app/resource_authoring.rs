@@ -108,8 +108,8 @@ mod tests {
         contract: ParameterResourceContract,
     ) -> EffectType {
         use mondrian_effects::*;
-        let kind = EffectType::Plugin(format!("test.resource.defaults.{}", uuid::Uuid::new_v4()));
-        let definition = EffectPluginDefinitionBuilder::new(
+        let kind = EffectType::External(format!("test.resource.defaults.{}", uuid::Uuid::new_v4()));
+        let definition = EffectExtensionDefinitionBuilder::new(
             kind.key(),
             "Resource defaults",
             EffectColorDomainContract::SCENE_LINEAR,

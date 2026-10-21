@@ -1158,7 +1158,7 @@ Normal mode to `EffectPassBlendPolicy::Mix`; other authored modes become
 coefficient derived from exact elapsed/duration author time. Timeline
 evaluation replaces the two endpoint placements with this single Track-stack
 item, evaluates Clip effects and transforms independently for each endpoint,
-and never clamps a demanded source time to zero. Unknown plugin Transition
+and never clamps a demanded source time to zero. Unknown external Transition
 definitions and unsupported built-in parameter payloads fail plan compilation
 instead of substituting a Cross Dissolve.
 

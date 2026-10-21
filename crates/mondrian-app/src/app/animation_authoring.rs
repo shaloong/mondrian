@@ -2037,11 +2037,12 @@ mod tests {
         };
         use mondrian_effects::{
             instantiate_effect_node, register_effect_definition, EffectColorDomainContract,
-            EffectDeterminism, EffectExecutionContract, EffectExecutionModes, EffectGraphTopology,
-            EffectPluginDefinitionBuilder, EffectRenderOp, EffectResourceLifetime,
-            EffectRoiPropagation, EffectStateModel, EffectTemporalInputExtent,
+            EffectDeterminism, EffectExecutionContract, EffectExecutionModes,
+            EffectExtensionDefinitionBuilder, EffectGraphTopology, EffectRenderOp,
+            EffectResourceLifetime, EffectRoiPropagation, EffectStateModel,
+            EffectTemporalInputExtent,
         };
-        let kind = EffectType::Plugin("plugin.test.integer_author_curve".to_owned());
+        let kind = EffectType::External("plugin.test.integer_author_curve".to_owned());
         let path = "plugin.test.integer_author_curve.count";
         let mut descriptor = PropertyDescriptor::new(path, "Count", PropertyValue::Int(2))
             .with_parameter_id(kind.parameter_id("count").expect("parameter"))
@@ -2060,7 +2061,7 @@ mod tests {
             ParameterInterpolation::Hold,
             ParameterInterpolation::Bezier,
         ];
-        let definition = EffectPluginDefinitionBuilder::new(
+        let definition = EffectExtensionDefinitionBuilder::new(
             kind.key(),
             "Integer curve",
             EffectColorDomainContract::SCENE_LINEAR,

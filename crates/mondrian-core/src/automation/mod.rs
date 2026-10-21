@@ -1,7 +1,7 @@
 //! 自动化 / 关键帧基础设施
 //!
 //! 提供共享的关键帧轨道、动态属性值、属性包和 mutation API，
-//! 让内建属性、效果参数和未来插件属性走同一条链路。
+//! 让内建属性、效果参数和未来 Extension 属性走同一条链路。
 
 mod query;
 pub use query::{AutomationQueryError, AutomationQueryTime, PreparedPropertyQuery};
@@ -789,7 +789,7 @@ impl ParameterSchema {
         self
     }
 
-    /// Validate metadata that can also arrive from serialized plugin definitions.
+    /// Validate metadata that can also arrive from serialized external definitions.
     pub fn validate(&self) -> std::result::Result<(), ParameterSchemaError> {
         if self.schema_version == 0 {
             return Err(ParameterSchemaError::ZeroSchemaVersion);
@@ -1349,7 +1349,7 @@ pub enum ParameterInvalidValuePolicy {
     Clamp,
 }
 
-/// Invalid static or plugin-supplied parameter schema metadata.
+/// Invalid static or externally supplied parameter schema metadata.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum ParameterSchemaError {
     #[error("parameter schema version must be greater than zero")]
@@ -1711,12 +1711,12 @@ pub struct PropertyDescriptor {
 
 impl PropertyDescriptor {
     /// Define a property from an address alias, returning an error for
-    /// untrusted (plugin/authoring) input instead of panicking the host.
+    /// untrusted (Extension/authoring) input instead of panicking the host.
     ///
     /// The convenience constructor derives a namespaced identity for local
     /// prototypes and tests. Product definitions must immediately call
     /// [`Self::with_parameter_id`] so address changes cannot rename persisted
-    /// parameter identity. A plugin-supplied path must flow through this
+    /// parameter identity. An externally supplied path must flow through this
     /// fallible entry point so malformed input surfaces as a typed error.
     pub fn try_new(
         path: impl Into<String>,
@@ -1743,7 +1743,7 @@ impl PropertyDescriptor {
     /// This convenience constructor derives a namespaced identity for local
     /// prototypes and tests. Product definitions must immediately call
     /// [`Self::with_parameter_id`] so address changes cannot rename persisted
-    /// parameter identity. For untrusted input (plugin authoring, external
+    /// parameter identity. For untrusted input (Extension authoring, external
     /// files), use [`Self::try_new`] and propagate the typed error instead of
     /// panicking the host.
     pub fn new(
@@ -6802,9 +6802,9 @@ mod tests {
     }
 
     #[test]
-    fn property_descriptor_try_new_rejects_invalid_plugin_paths_without_panicking() {
+    fn property_descriptor_try_new_rejects_invalid_extension_paths_without_panicking() {
         let invalid_characters =
-            PropertyDescriptor::try_new("plugin radius!", "Radius", PropertyValue::Float(4.0));
+            PropertyDescriptor::try_new("extension radius!", "Radius", PropertyValue::Float(4.0));
         assert!(invalid_characters.is_err());
         let too_long =
             PropertyDescriptor::try_new("x".repeat(512), "Radius", PropertyValue::Float(4.0));
@@ -6901,7 +6901,7 @@ mod tests {
                 "operation": "exclude"
             }
         ]))
-        .expect("structurally deserialize invalid legacy/plugin sample set");
+        .expect("structurally deserialize invalid external sample set");
         let schema = ParameterSchema::v1(
             ParameterId::new_static("mondrian.test.qualifier.samples"),
             PropertyValue::QualifierSamples(invalid_samples),
@@ -7261,7 +7261,7 @@ mod tests {
     }
 
     #[test]
-    fn property_bag_supports_plugin_style_keyframe_mutation() {
+    fn property_bag_supports_extension_style_keyframe_mutation() {
         let mut bag = PropertyBag::default();
         bag.define(PropertyDescriptor::new(
             "effect.gaussian_blur.radius",

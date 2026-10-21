@@ -11,7 +11,7 @@ use std::collections::BTreeSet;
 
 /// Definition selected for a two-input visual transition.
 ///
-/// Built-ins and plugins share one persistent shape. A missing plugin remains
+/// Built-ins and external definitions share one persistent shape. A missing definition remains
 /// recoverable author intent; execution must report it as unavailable rather
 /// than substituting another transition.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -20,7 +20,9 @@ pub enum VideoTransitionType {
     /// Scene-linear two-input cross dissolve.
     CrossDissolve,
     /// External transition definition selected by its stable registry key.
-    Plugin { definition_id: String },
+    /// The serde tag preserves the existing project wire representation.
+    #[serde(rename = "plugin")]
+    External { definition_id: String },
 }
 
 impl AuthoringFootprint for VideoTransitionType {
@@ -30,7 +32,7 @@ impl AuthoringFootprint for VideoTransitionType {
     ) -> Result<(), AuthoringFootprintError> {
         match self {
             Self::CrossDissolve => Ok(()),
-            Self::Plugin { definition_id } => collector.collect(definition_id),
+            Self::External { definition_id } => collector.collect(definition_id),
         }
     }
 }
@@ -40,7 +42,7 @@ impl VideoTransitionType {
     pub fn definition_id(&self) -> &str {
         match self {
             Self::CrossDissolve => "mondrian.video_transition.cross_dissolve",
-            Self::Plugin { definition_id } => definition_id,
+            Self::External { definition_id } => definition_id,
         }
     }
 }
@@ -61,7 +63,7 @@ pub struct VideoTransition {
     pub right: ClipId,
     /// Sole authoritative half-open Sequence-time interval.
     pub sequence_range: TimelineTimeRange,
-    /// Built-in or plugin transition definition.
+    /// Built-in or externally registered transition definition.
     pub transition_type: VideoTransitionType,
     /// Definition-described, exactly timed parameter state.
     pub properties: PropertyBag,
@@ -521,6 +523,25 @@ mod tests {
     use super::*;
     use mondrian_core::{AssetId, FramePosition, Rational};
     use std::collections::BTreeSet;
+
+    #[test]
+    fn external_transition_preserves_project_wire_and_definition_identity() {
+        let wire =
+            serde_json::json!({ "type": "plugin", "definition_id": "plugin.saved.transition" });
+        let definition: VideoTransitionType =
+            serde_json::from_value(wire.clone()).expect("read transition");
+        assert_eq!(
+            definition,
+            VideoTransitionType::External {
+                definition_id: "plugin.saved.transition".to_owned()
+            }
+        );
+        assert_eq!(definition.definition_id(), "plugin.saved.transition");
+        assert_eq!(
+            serde_json::to_value(&definition).expect("write transition"),
+            wire
+        );
+    }
 
     fn tt(frame: i64) -> TimelineTime {
         TimelineTime::from_frame_position(FramePosition::new(frame, Rational::new(1, 25)))

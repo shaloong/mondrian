@@ -41,9 +41,9 @@ This table describes the current implementation boundary, not an M1 acceptance
 claim. Product verification remains governed by the Reference Corpus and
 Golden Project gates in `docs/ROADMAP.md`.
 
-Plugin effects use `EffectType::Plugin(key)`. Registration, API compatibility,
+Externally registered effects use `EffectType::External(key)`. Registration, API compatibility,
 runtime availability, graph construction and the chosen execution backend are
-separate checks. An unavailable persisted plugin definition remains authored
+separate checks. An unavailable persisted effect definition remains authored
 intent and must produce a structured execution failure; it is not silently
 reinterpreted as identity.
 
@@ -84,7 +84,7 @@ following before a frame can be accepted:
 
 Failure of any condition returns `EffectGraphBuildError` or a typed backend
 blocker. Preview and export consume the same timeline render-plan compiler, so
-an enabled unknown/unimplemented effect, unbound or invalid LUT, plugin builder
+an enabled unknown/unimplemented effect, unbound or invalid LUT, external effect builder
 panic, or invalid graph aborts plan evaluation instead of silently producing an
 unchanged image. A future user-approved bypass must remain explicit in project
 or session state and visible in diagnostics; merely logging a warning is not a

@@ -9,7 +9,7 @@ English · [简体中文](README.zh-CN.md)
 Mondrian is a native non-linear video editor built in Rust, with a multitrack timeline, GPU preview, color processing, and media export.
 
 > [!NOTE]
-> Mondrian is in active development. The core editing, preview, and export pipeline is functional. Expect continued iteration on effects, audio, and plugin APIs.
+> Mondrian is in active development. The core editing, preview, and export pipeline is functional. Expect continued iteration on effect and audio APIs. The general Extension platform is planned.
 
 ## 🏗️ Architecture overview
 
@@ -150,7 +150,8 @@ See [the roadmap](docs/ROADMAP.md).
 | [Execution resources](docs/architecture/execution-resource-coordination.md) | Media and CPU scheduling |
 | [Asset library](docs/architecture/project-model.md) | Reuse across projects |
 | [Effects](docs/architecture/effect-system.md) | LUTs / filters / transitions |
-| [Plugin handbook](docs/plugins/README.md) | Source-crate effect SDK |
+| [Extension platform](docs/extensions/README.md) | Planned general extensibility, sandboxing and permissions |
+| [Effect SDK handbook](docs/extensions/effects/README.md) | Current source-integrated Rust Effect SDK |
 | [Delivery](docs/architecture/professional-delivery.md) | Render queues |
 | [Design system](docs/ui/design-system.md) | UI/UX rules |
 | [Technology choices](docs/architecture/overview.md) | Design rationale |
@@ -167,7 +168,7 @@ Read [the contribution guide](docs/CONTRIBUTING.md). External PRs target `develo
 
 Mondrian is available under **AGPL-3.0-or-later** or a separately negotiated
 **commercial license**. Independent extensions may choose their own terms and
-pricing under the [Plugin Additional Permission](LICENSES/PLUGIN-EXCEPTION.md),
+pricing under the [Extension Additional Permission](LICENSES/EXTENSION-EXCEPTION.md),
 including extensions that change or replace functionality. Copied or adapted
 Mondrian implementation does not receive that exemption.
 

@@ -52,7 +52,7 @@ impl NativeVisualAuthorView {
     pub fn retained_bytes(&self) -> usize {
         std::mem::size_of::<Self>()
             + match &self.definition {
-                EffectType::Plugin(key) => key.capacity(),
+                EffectType::External(key) => key.capacity(),
                 _ => 0,
             }
     }

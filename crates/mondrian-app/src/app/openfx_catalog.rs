@@ -540,7 +540,7 @@ mod tests {
 
     fn prepared_catalog() -> (OpenFxCatalog, mondrian_effects::EffectType) {
         let key = format!("test.openfx.catalog.{}", mondrian_core::ProjectId::new());
-        let effect_type = mondrian_effects::EffectType::Plugin(key.clone());
+        let effect_type = mondrian_effects::EffectType::External(key.clone());
         let definition = EffectDefinition::new(
             key,
             "Prepared catalog control",
@@ -657,7 +657,7 @@ mod tests {
             "test.openfx.notice-budget.{}",
             mondrian_core::ProjectId::new()
         );
-        let effect_type = mondrian_effects::EffectType::Plugin(key.clone());
+        let effect_type = mondrian_effects::EffectType::External(key.clone());
         let mut preparation = BundlePreparation {
             result: Ok((Vec::new(), Vec::new())),
             notices: CatalogNotices::default(),

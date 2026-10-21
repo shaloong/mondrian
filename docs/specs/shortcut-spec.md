@@ -23,7 +23,7 @@ Context includes the focused widget and focused panel.
 
 ## Command Registry
 
-Built-in shortcuts should be declared in `app_ui::commands`. Menus, preferences, command palette, and future plugins should read the same descriptors.
+Built-in shortcuts should be declared in `app_ui::commands`. Menus, preferences, command palette, and future Extensions should read the same descriptors.
 
 ## Unmatched Shortcuts
 

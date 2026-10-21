@@ -774,7 +774,7 @@ mod tests {
     fn cpu_raster_contract_refuses_before_processor_and_scratch_mutation() {
         use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
         static NEXT_TYPE: AtomicU64 = AtomicU64::new(1);
-        let effect_type = mondrian_effects::EffectType::Plugin(format!(
+        let effect_type = mondrian_effects::EffectType::External(format!(
             "test.preview.raster-preflight.{}",
             NEXT_TYPE.fetch_add(1, Ordering::Relaxed)
         ));
