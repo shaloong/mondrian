@@ -2187,6 +2187,161 @@ bool effectDoubleQueryCounts(const void* handle) {
   return true;
 }
 
+// Exercise all four real raw types, then the existing Clip String GetHook.
+// Negative counts are a host admission rule; positive raw overdimension retains
+// the existing clamp. Every output slot and pointer canary is valid storage.
+bool rawPropertyQueryCounts(const void* handle, OfxPropertySetHandle in) {
+  unsigned attempted = 0, accepted = 0;
+  const auto failure = [&](const std::string& point, OfxStatus status) {
+    describeActionReceipt("raw-property-count", point.c_str(), attempted, accepted, status);
+    return false;
+  };
+  OfxImageClipHandle source = nullptr;
+  OfxPropertySetHandle image = nullptr;
+  double time = 0.0;
+  if (gPropHost->propGetDouble(in, kOfxPropTime, 0, &time) != kOfxStatOK ||
+      gEffectHost->clipGetHandle((OfxImageEffectHandle)handle, kOfxImageEffectSimpleSourceClipName,
+                                &source, nullptr) != kOfxStatOK || !source ||
+      gEffectHost->clipGetImage(source, time, nullptr, &image) != kOfxStatOK || !image) {
+    return failure("image-handle", kOfxStatFailed);
+  }
+  const auto checkImage = [&]() {
+    int dimension = 0;
+    auto status = gPropHost->propGetDimension(image, kOfxImagePropBounds, &dimension);
+    if (status != kOfxStatOK || dimension != 4) { return failure("ImageBounds-dimension", status); }
+    const int bounds[] = {0, 0, 3, 5};
+    for (int count : {-1, 0, 1, 2, 3, 4, 5}) {
+      const std::array<int, 7> untouched{{-8192, -16384, -32768, -65536, -131072, -262144, -524288}};
+      auto values = untouched;
+      auto expected = untouched;
+      if (count > 0) {
+        for (int component = 0; component < std::min(count, 4); ++component) { expected[component + 1] = bounds[component]; }
+      }
+      ++attempted;
+      status = gPropHost->propGetIntN(image, kOfxImagePropBounds, count, values.data() + 1);
+      const auto point = "ImageBounds-count" + std::to_string(count);
+      // First safe RED: the old negative-count clamp writes four valid slots.
+      // The outer scope always releases this Image before returning failure.
+      if (values != expected) { return failure(point + "-write", status); }
+      if (status != (count < 0 ? kOfxStatErrBadIndex : kOfxStatOK)) { return failure(point + "-status", status); }
+      ++accepted;
+    }
+    status = gPropHost->propGetDimension(image, kOfxImagePropPixelAspectRatio, &dimension);
+    if (status != kOfxStatOK || dimension != 1) { return failure("ImagePAR-dimension", status); }
+    for (int count : {-1, 0, 1, 2}) {
+      const std::array<double, 4> untouched{{-8192.25, -16384.5, -32768.75, -65536.125}};
+      auto values = untouched;
+      auto expected = untouched;
+      if (count > 0) { expected[1] = 2.0; }
+      ++attempted;
+      status = gPropHost->propGetDoubleN(image, kOfxImagePropPixelAspectRatio, count, values.data() + 1);
+      if (values != expected || status != (count < 0 ? kOfxStatErrBadIndex : kOfxStatOK)) {
+        return failure("ImagePAR-count" + std::to_string(count), status);
+      }
+      ++accepted;
+    }
+    void* data = nullptr;
+    status = gPropHost->propGetDimension(image, kOfxImagePropData, &dimension);
+    if (status != kOfxStatOK || dimension != 1 ||
+        gPropHost->propGetPointer(image, kOfxImagePropData, 0, &data) != kOfxStatOK || !data) {
+      return failure("ImageData-scalar", status);
+    }
+    for (int count : {-1, 0, 1, 2}) {
+      std::array<int, 4> storage{{11, 22, 33, 44}};
+      const auto originalStorage = storage;
+      const std::array<void*, 4> untouched{{&storage[0], &storage[1], &storage[2], &storage[3]}};
+      auto values = untouched;
+      auto expected = untouched;
+      if (count > 0) { expected[1] = data; }
+      ++attempted;
+      status = gPropHost->propGetPointerN(image, kOfxImagePropData, count, values.data() + 1);
+      if (values != expected || storage != originalStorage ||
+          status != (count < 0 ? kOfxStatErrBadIndex : kOfxStatOK)) {
+        return failure("ImageData-count" + std::to_string(count), status);
+      }
+      ++accepted;
+    }
+    // Handle/name/type checks retain priority over the shared count admission.
+    const std::array<int, 4> ints{{-11, -22, -33, -44}};
+    auto intValues = ints;
+    ++attempted;
+    status = gPropHost->propGetIntN(nullptr, kOfxImagePropBounds, -1, intValues.data() + 1);
+    if (status != kOfxStatErrBadHandle || intValues != ints) { return failure("null-handle-priority", status); }
+    ++accepted;
+    ++attempted;
+    status = gPropHost->propGetIntN(image, "MondrianMissingRawCountProperty", -1, intValues.data() + 1);
+    if (status != kOfxStatErrUnknown || intValues != ints) { return failure("name-priority", status); }
+    ++accepted;
+    const std::array<double, 4> doubles{{-1.25, -2.5, -3.75, -5.0}};
+    auto doubleValues = doubles;
+    ++attempted;
+    status = gPropHost->propGetDoubleN(image, kOfxImagePropBounds, -1, doubleValues.data() + 1);
+    if (status != kOfxStatErrUnknown || doubleValues != doubles) { return failure("type-priority", status); }
+    ++accepted;
+    return true;
+  };
+  bool imageValid = false;
+  try { imageValid = checkImage(); }
+  catch (...) {
+    gEffectHost->clipReleaseImage(image);
+    throw;
+  }
+  const auto released = gEffectHost->clipReleaseImage(image);
+  if (released != kOfxStatOK) { return failure("image-release", released); }
+  if (!imageValid) { return false; }
+  describeActionReceipt("raw-property-count", "image", attempted, accepted, kOfxStatOK);
+  attempted = accepted = 0;
+  const auto checkStrings = [&](OfxPropertySetHandle set, const char* name,
+                                const std::string& label, const char* expectedValue,
+                                OfxStatus overdimensionStatus) {
+    int dimension = 0;
+    char* scalar = nullptr;
+    auto status = gPropHost->propGetDimension(set, name, &dimension);
+    if (status != kOfxStatOK || dimension != 1 ||
+        gPropHost->propGetString(set, name, 0, &scalar) != kOfxStatOK || !scalar ||
+        std::strcmp(scalar, expectedValue) != 0) { return failure(label + "-scalar", status); }
+    for (int count : {-1, 0, 1, 2}) {
+      char a[] = "guard-a", b[] = "guard-b", c[] = "guard-c", d[] = "guard-d";
+      const std::array<char*, 4> untouched{{a, b, c, d}};
+      auto values = untouched;
+      const auto expectedStatus = count < 0 ? kOfxStatErrBadIndex
+          : count == 2 ? overdimensionStatus : kOfxStatOK;
+      const bool writes = count > 0 && expectedStatus == kOfxStatOK;
+      ++attempted;
+      status = gPropHost->propGetStringN(set, name, count, values.data() + 1);
+      const bool valuesValid = writes
+          ? values[0] == a && values[2] == c && values[3] == d && values[1] && std::strcmp(values[1], expectedValue) == 0
+          : values == untouched;
+      if (status != expectedStatus || !valuesValid || std::strcmp(a, "guard-a") ||
+          std::strcmp(b, "guard-b") || std::strcmp(c, "guard-c") || std::strcmp(d, "guard-d")) {
+        return failure(label + "-count" + std::to_string(count), status);
+      }
+      ++accepted;
+    }
+    return true;
+  };
+  OfxParamSetHandle parameters = nullptr;
+  OfxParamHandle scale = nullptr;
+  OfxPropertySetHandle label = nullptr;
+  if (gEffectHost->getParamSet((OfxImageEffectHandle)handle, &parameters) != kOfxStatOK ||
+      gParamHost->paramGetHandle(parameters, "scale", &scale, nullptr) != kOfxStatOK || !scale ||
+      gParamHost->paramGetPropertySet(scale, &label) != kOfxStatOK || !label) {
+    return failure("parameter-handle", kOfxStatFailed);
+  }
+  if (!checkStrings(label, kOfxPropLabel, "ParamLabel", "scale", kOfxStatOK)) { return false; }
+  for (const char* name : {kOfxImageEffectSimpleSourceClipName, kOfxImageEffectOutputClipName}) {
+    OfxImageClipHandle clip = nullptr;
+    OfxPropertySetHandle properties = nullptr;
+    if (gEffectHost->clipGetHandle((OfxImageEffectHandle)handle, name, &clip, &properties) != kOfxStatOK ||
+        !clip || !properties) { return failure("clip-handle", kOfxStatFailed); }
+    // Negative count now has the generic BadIndex result; count2 retains the
+    // existing hook Value refusal, distinct from the raw String clamp above.
+    if (!checkStrings(properties, kOfxImageEffectPropComponents, name,
+                      kOfxImageComponentRGBA, kOfxStatErrValue)) { return false; }
+  }
+  describeActionReceipt("raw-property-count", "strings", attempted, accepted, kOfxStatOK);
+  return true;
+}
 // Fixed-canvas oracle only: time selects independent output, never invocation
 // history. Rust checks separate literal tables in top-down storage order.
 OfxStatus fixedCanvasPartialOutput(const void* handle, OfxPropertySetHandle in) {
@@ -3047,6 +3202,8 @@ OfxStatus probeAction(const char* action, const void* handle,
       !clipDoubleQueryCounts(handle)) { return kOfxStatFailed; }
   if (selected == "effect_double_query_count" && operation == kOfxImageEffectActionRender &&
       !effectDoubleQueryCounts(handle)) { return kOfxStatFailed; }
+  if (selected == "raw_property_query_count" && operation == kOfxImageEffectActionRender &&
+      !rawPropertyQueryCounts(handle, in)) { return kOfxStatFailed; }
   if (selected == "optional_unmapped" && operation == kOfxImageEffectActionRender &&
       !optionalUnmappedFormat(handle, in)) { return kOfxStatFailed; }
   const OfxStatus result = selected == "fixed_canvas_partial_output" && operation == kOfxImageEffectActionRender
@@ -3382,6 +3539,10 @@ OfxStatus probe(const char* action, const void* handle,
        std::strcmp(action, kOfxActionDestroyInstance) == 0 ||
        std::strcmp(action, kOfxImageEffectActionGetClipPreferences) == 0)) { observed = action; }
   if (mode() == "effect_double_query_count" &&
+      (std::strcmp(action, kOfxActionCreateInstance) == 0 ||
+       std::strcmp(action, kOfxActionDestroyInstance) == 0 ||
+       std::strcmp(action, kOfxImageEffectActionGetClipPreferences) == 0)) { observed = action; }
+  if (mode() == "raw_property_query_count" &&
       (std::strcmp(action, kOfxActionCreateInstance) == 0 ||
        std::strcmp(action, kOfxActionDestroyInstance) == 0 ||
        std::strcmp(action, kOfxImageEffectActionGetClipPreferences) == 0)) { observed = action; }

@@ -3235,6 +3235,18 @@ fn product_worker_preserves_effect_double_query_counts_in_resident_and_graph() {
 }
 
 #[test]
+#[ignore = "requires current Product, SessionProbe raw_property_query_count and an empty action-receipt directory"]
+fn product_worker_preserves_raw_property_query_counts_in_resident_and_graph() {
+    qualify_property_query_counts_resident_and_graph(
+        "raw_property_query_count",
+        "raw-property-count",
+        &[
+            "raw-property-count image attempted=18 accepted=18 status=0 complete=1",
+            "raw-property-count strings attempted=12 accepted=12 status=0 complete=1",
+        ],
+    );
+}
+#[test]
 #[ignore = "requires current product and SessionProbe mode cpu_unsupported_descriptor"]
 fn product_worker_refuses_gpu_only_descriptor_before_registration() {
     let inspection = cpu_contract_probe("cpu_unsupported_descriptor");
