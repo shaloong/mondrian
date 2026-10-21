@@ -3,6 +3,7 @@
 // Test-only global allocation replacement around the actual HostSupport suite.
 #include "ofxhPluginCache.h"
 #include "ofxhImageEffectAPI.h"
+#include "ofxhClip.h"
 #include "host_descriptor.h"
 #include "frame_state.h"
 #include "effect_instance.h"
@@ -240,6 +241,99 @@ bool imageFetchFailureAndRecovery(const OfxImageEffectSuiteV1& suite,
   return passed;
 }
 
+bool clipDescriptorRefusal(const OfxImageEffectSuiteV1& suite,
+                           const OFX::Host::ImageEffect::ClipDescriptor& descriptor,
+                           const MondrianOpenFx::FilterClipInstance& clip,
+                           MondrianOpenFx::FrameState& frame, bool imageQuery, const char* path) {
+  unsigned char sourceBefore[sizeof(OfxRGBAColourF)], outputBefore[sizeof(OfxRGBAColourF)];
+  std::memcpy(sourceBefore, frame.input, sizeof(sourceBefore));
+  std::memcpy(outputBefore, frame.output, sizeof(outputBefore));
+  const size_t handlesBefore = frame.imageHandles.load();
+  const bool fetchedBefore = clip.outputFetched();
+  const bool invalidBefore = frame.invalidImageLifetime;
+  // These are real Basic ClipBase objects of the wrong kind. Only the image
+  // output starts with a sentinel; it is never submitted as an input handle.
+  OfxPropertySetHandle image = reinterpret_cast<OfxPropertySetHandle>(&probe);
+  OfxRectD bounds{11, 13, 17, 19};
+  probe = {};
+  probe.armed = true;
+  OfxStatus status;
+  try {
+    status = imageQuery ?
+        suite.clipGetImage(descriptor.getHandle(), frame.info.frame, nullptr, &image) :
+        suite.clipGetRegionOfDefinition(descriptor.getHandle(), frame.info.frame, &bounds);
+  } catch (...) {
+    probe.armed = false;
+    std::fprintf(stderr, "clip descriptor query exception escaped for %s\n", path);
+    return false;
+  }
+  probe.armed = false;
+  const bool outNull = image == nullptr;
+  const bool boundsZero = bounds.x1 == 0 && bounds.y1 == 0 && bounds.x2 == 0 && bounds.y2 == 0;
+  const size_t handlesAfter = frame.imageHandles.load();
+  const bool pixelsUnchanged = std::memcmp(sourceBefore, frame.input, sizeof(sourceBefore)) == 0 &&
+      std::memcmp(outputBefore, frame.output, sizeof(outputBefore)) == 0;
+  const bool fetchedUnchanged = clip.outputFetched() == fetchedBefore;
+  const bool lifetimeUnchanged = frame.invalidImageLifetime == invalidBefore;
+  const bool passed = status == kOfxStatErrBadHandle && (imageQuery ? outNull : boundsZero) &&
+      !probe.unexpected && probe.scalar_allocations == 0 && probe.scalar_deletions == 0 &&
+      probe.array_calls == 0 && probe.array_failures == 0 && probe.scalar_failures == 0 &&
+      probe.live_owners == 0 && handlesBefore == 0 && handlesAfter == 0 && pixelsUnchanged &&
+      fetchedUnchanged && !invalidBefore && lifetimeUnchanged;
+  std::printf("{\"path\":\"%s\",\"status\":%d,\"out_null\":%s,\"bounds_zero\":%s,"
+              "\"scalar_allocations\":%u,\"scalar_deletions\":%u,\"array_calls\":%u,"
+              "\"array_failures\":%u,\"scalar_failures\":%u,\"live_owners\":%d,\"unexpected\":%s,"
+              "\"image_handles_before\":%zu,\"image_handles_after\":%zu,\"pixels_unchanged\":%s,"
+              "\"output_fetched_unchanged\":%s,\"invalid_lifetime_unchanged\":%s,\"passed\":%s}\n",
+              path, status, outNull ? "true" : "false", boundsZero ? "true" : "false",
+              probe.scalar_allocations, probe.scalar_deletions, probe.array_calls,
+              probe.array_failures, probe.scalar_failures, probe.live_owners,
+              probe.unexpected ? "true" : "false", handlesBefore, handlesAfter,
+              pixelsUnchanged ? "true" : "false", fetchedUnchanged ? "true" : "false",
+              lifetimeUnchanged ? "true" : "false", passed ? "true" : "false");
+  std::fflush(stdout);
+  return passed;
+}
+
+bool clipInstanceRecovery(const OfxImageEffectSuiteV1& suite, OfxImageEffectHandle instance,
+                          const OFX::Host::ImageEffect::ClipDescriptor& descriptor,
+                          MondrianOpenFx::FilterClipInstance& clip,
+                          MondrianOpenFx::FrameState& frame, const char* name, const char* path) {
+  // The normal image fetch is deliberately unarmed: constructing its real
+  // FrameImage and property set is expected to allocate, unlike a refusal.
+  unsigned char sourceBefore[sizeof(OfxRGBAColourF)], outputBefore[sizeof(OfxRGBAColourF)];
+  std::memcpy(sourceBefore, frame.input, sizeof(sourceBefore));
+  std::memcpy(outputBefore, frame.output, sizeof(outputBefore));
+  OfxImageClipHandle handle = nullptr;
+  OfxPropertySetHandle properties = nullptr, image = nullptr;
+  const auto handleStatus = suite.clipGetHandle(instance, name, &handle, &properties);
+  const bool exactHandle = handleStatus == kOfxStatOK && handle == clip.getHandle() &&
+      handle != descriptor.getHandle() && properties == clip.getPropHandle();
+  OfxRectD bounds{11, 13, 17, 19};
+  const auto rodStatus = suite.clipGetRegionOfDefinition(handle, frame.info.frame, &bounds);
+  const bool exactBounds = bounds.x1 == 0 && bounds.y1 == 0 && bounds.x2 == 1 && bounds.y2 == 1;
+  const auto fetchStatus = suite.clipGetImage(handle, frame.info.frame, nullptr, &image);
+  const size_t handlesFetched = frame.imageHandles.load();
+  const auto releaseStatus = image ? suite.clipReleaseImage(image) : kOfxStatFailed;
+  const size_t handlesAfter = frame.imageHandles.load();
+  const OfxRGBAColourF transparent{0, 0, 0, 0};
+  const bool pixelsCorrect = std::memcmp(sourceBefore, frame.input, sizeof(sourceBefore)) == 0 &&
+      (clip.isOutput() ? std::memcmp(&transparent, frame.output, sizeof(transparent)) == 0 :
+                        std::memcmp(outputBefore, frame.output, sizeof(outputBefore)) == 0);
+  const bool passed = !probe.armed && exactHandle && rodStatus == kOfxStatOK && exactBounds &&
+      fetchStatus == kOfxStatOK && image && handlesFetched == 1 && releaseStatus == kOfxStatOK &&
+      handlesAfter == 0 && pixelsCorrect && !frame.invalidImageLifetime;
+  std::printf("{\"path\":\"%s\",\"handle_status\":%d,\"exact_handle\":%s,"
+              "\"rod_status\":%d,\"exact_bounds\":%s,\"fetch_status\":%d,\"out_nonnull\":%s,"
+              "\"image_handles_fetched\":%zu,\"release_status\":%d,\"image_handles_after\":%zu,"
+              "\"pixels_correct\":%s,\"passed\":%s}\n",
+              path, handleStatus, exactHandle ? "true" : "false", rodStatus,
+              exactBounds ? "true" : "false", fetchStatus, image ? "true" : "false",
+              handlesFetched, releaseStatus, handlesAfter, pixelsCorrect ? "true" : "false",
+              passed ? "true" : "false");
+  return passed;
+}
+
 int exercise(MondrianOpenFx::Host& host, const char* binaryPath, const char* bundlePath) {
   OFX::Host::ImageEffect::PluginCache images(host);
   OFX::Host::PluginCache plugins;
@@ -287,8 +381,33 @@ int exercise(MondrianOpenFx::Host& host, const char* binaryPath, const char* bun
   const bool contextRefused = descriptorRefusal(*suite, *context, "filter-descriptor");
   const bool hostRecovered = memoryAllocationRecovery(*suite, nullptr, "host-recovery");
   const bool instanceRecovered = memoryAllocationRecovery(*suite, instance->getHandle(), "instance-recovery");
+  // The original eight controls and their output remain intact before any
+  // wrong-kind Clip query reaches the old unchecked virtual dispatch.
+  std::fflush(stdout);
+  const auto& clips = context->getClips();
+  const auto* sourceDescriptor = clips.at("Source");
+  const auto* outputDescriptor = clips.at("Output");
+  if (!sourceDescriptor || !outputDescriptor || sourceDescriptor == outputDescriptor ||
+      sourceDescriptor->getHandle() == source->getHandle() ||
+      outputDescriptor->getHandle() == output->getHandle()) {
+    throw std::runtime_error("actual Basic Clip descriptors are missing or aliased");
+  }
+  const bool sourceImageRefused = clipDescriptorRefusal(*suite, *sourceDescriptor, *source, frame,
+      true, "source-clip-descriptor-image");
+  const bool outputImageRefused = clipDescriptorRefusal(*suite, *outputDescriptor, *output, frame,
+      true, "output-clip-descriptor-image");
+  const bool sourceRodRefused = clipDescriptorRefusal(*suite, *sourceDescriptor, *source, frame,
+      false, "source-clip-descriptor-rod");
+  const bool outputRodRefused = clipDescriptorRefusal(*suite, *outputDescriptor, *output, frame,
+      false, "output-clip-descriptor-rod");
+  const bool sourceClipRecovered = clipInstanceRecovery(*suite, instance->getHandle(),
+      *sourceDescriptor, *source, frame, "Source", "source-clip-recovery");
+  const bool outputClipRecovered = clipInstanceRecovery(*suite, instance->getHandle(),
+      *outputDescriptor, *output, frame, "Output", "output-clip-recovery");
   return hostPassed && instancePassed && sourcePassed && outputPassed &&
-      rootRefused && contextRefused && hostRecovered && instanceRecovered ? 0 : 1;
+      rootRefused && contextRefused && hostRecovered && instanceRecovered && sourceImageRefused &&
+      outputImageRefused && sourceRodRefused && outputRodRefused && sourceClipRecovered &&
+      outputClipRecovered ? 0 : 1;
 }
 }
 
