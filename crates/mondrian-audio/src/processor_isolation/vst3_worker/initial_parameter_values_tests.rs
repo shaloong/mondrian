@@ -580,7 +580,11 @@ fn native_initial_paused_bind_cannot_reclassify_later_native_callbacks_as_startu
 }
 
 fn entered_rescan_worker() -> (Vst3Worker, crate::NativeAudioObjectBindRequest) {
-    let mut worker = prepare(0.375, 13);
+    entered_rescan_worker_for_mode(13)
+}
+
+fn entered_rescan_worker_for_mode(mode: u32) -> (Vst3Worker, crate::NativeAudioObjectBindRequest) {
+    let mut worker = prepare(0.375, mode);
     worker.enter_state(73).expect("real initial-only handoff and first Enter");
     let binding = crate::NativeAudioObjectBindRequest {
         binding: mondrian_core::AudioProcessorBindingId::new(),
@@ -2100,4 +2104,291 @@ fn native_externally_retired_rescan_cannot_enter_selected_terminal_rebuild() {
             0
         )
     );
+}
+
+#[test]
+#[ignore = "requires rebuilt owned mode16 SDK fixture under native Job runner"]
+fn native_unchanged_parameter_info_delivers_empty_rescan_and_settles_exactly_once() {
+    use crate::{
+        NativeAudioAuthorDeliveryState as Delivery, NativeAudioAuthorEvent as Event,
+        NativeAudioAuthorRefusal as Refusal, NativeAudioObservationConsumption as Consumption,
+    };
+    let (mut worker, binding) = entered_rescan_worker_for_mode(16);
+    let object = worker.native_audio_object_observation().unwrap();
+    let seed = worker.payload.state.clone();
+    let before = audit(&worker);
+    assert_eq!(
+        late_rescan_dsp(&mut worker, &[(2, 0.75)]),
+        [0.375, 0.375, 0.75, 0.75]
+    );
+    let cursor = worker.last_end;
+    let actual = worker.poll_native_observations(Consumption::DrainAuthor(binding)).unwrap();
+    let author = actual.author.unwrap();
+    let Delivery::Delivered(delivery) = author.delivery else {
+        panic!("actual unchanged-info notification requires a retained delivery");
+    };
+    let [Event::ParameterValuesRescanned { kind, values }] = delivery.events() else {
+        panic!("one exact information-only scan, not fabricated parameter edits");
+    };
+    assert_eq!(
+        *kind,
+        mondrian_core::NativeAudioParameterRescanKind::NoValueRefresh
+    );
+    assert!(values.is_empty());
+    assert_eq!(
+        values.capacity(),
+        0,
+        "Info never reserves writable scalar storage"
+    );
+    assert_eq!(
+        delivery.completion(),
+        mondrian_core::NativeAudioAuthorCompletion::CoherentConfiguration
+    );
+    let configuration = delivery.configuration().unwrap();
+    assert_eq!(configuration.len(), 28 + 24 + 44);
+    assert_eq!(&configuration[36..44], &0.75_f64.to_le_bytes());
+    let prefix = delivery.request_cohort().unwrap();
+    assert_eq!(
+        prefix.request,
+        mondrian_core::NativeAudioReprepareRequest::Vst3Restart { flags: 16 }
+    );
+    let after = audit(&worker);
+    assert_eq!(after.process, before.process + 1);
+    assert_eq!(after.setters, before.setters + 1);
+    assert_eq!(after.metadata, before.metadata + 1);
+    assert_eq!(after.values, before.values + 2);
+    assert_eq!(after.observed.to_bits(), 0.75_f64.to_bits());
+    assert_eq!(after.wrong_thread, 0);
+    let source = rescan_source_snapshot(&worker);
+    assert!(source.0.closed_empty() && source.1.is_empty());
+    assert_eq!(source.2.unwrap().flags().bits(), 16);
+    assert_eq!(source.2.unwrap().serial(), prefix.serial);
+    assert_eq!(worker.payload.state, seed, "collection is not acceptance");
+    let awaiting = worker.poll_native_observations(Consumption::DrainAuthor(binding)).unwrap();
+    assert_eq!(
+        awaiting.author.unwrap().delivery,
+        Delivery::AwaitingAcknowledgement {
+            binding,
+            revision: delivery.revision(),
+            request_cohort: Some(prefix),
+        }
+    );
+    assert_eq!(rescan_source_snapshot(&worker), source);
+    let installed = crate::NativeAudioObjectBindRequest {
+        binding: mondrian_core::AudioProcessorBindingId::new(),
+        expected_object: binding.expected_object,
+    };
+    assert!(matches!(
+        worker.bind_native_audio_object(installed).unwrap(),
+        crate::NativeAudioObjectBindOutcome::Bound(_)
+    ));
+    let ack = crate::NativeAudioAuthorAcknowledgement {
+        source_binding: binding,
+        installed_binding: installed,
+        revision: delivery.revision(),
+    };
+    let stale = crate::NativeAudioAuthorAcknowledgement { revision: ack.revision + 1, ..ack };
+    let refused = worker.poll_native_observations(Consumption::AcknowledgeAuthor(stale)).unwrap();
+    assert_eq!(
+        refused.author.unwrap().delivery,
+        Delivery::Refused(Refusal::StaleDelivery)
+    );
+    assert_eq!(rescan_source_snapshot(&worker), source);
+    assert_eq!(worker.payload.state, seed);
+    let accepted = worker.poll_native_observations(Consumption::AcknowledgeAuthor(ack)).unwrap();
+    assert_eq!(
+        accepted.author.unwrap().delivery,
+        Delivery::Acknowledged { acknowledgement: ack, request_cohort: Some(prefix) }
+    );
+    assert!(accepted.pending_reprepare.is_none());
+    assert_eq!(worker.payload.state.as_deref(), delivery.configuration());
+    assert!(worker.native_author_delivery.is_none());
+    assert!(!rescan_source_snapshot(&worker).2.unwrap().pending());
+    let repeated = worker.poll_native_observations(Consumption::AcknowledgeAuthor(ack)).unwrap();
+    assert_eq!(
+        repeated.author.unwrap().delivery,
+        Delivery::Refused(Refusal::StaleDelivery)
+    );
+    let unchanged = audit(&worker);
+    assert_eq!(
+        (
+            unchanged.process,
+            unchanged.setters,
+            unchanged.metadata,
+            unchanged.values,
+            unchanged.wrong_thread
+        ),
+        (
+            after.process,
+            after.setters,
+            after.metadata,
+            after.values,
+            0
+        )
+    );
+    assert_eq!(worker.native_audio_object_observation().unwrap(), object);
+    assert_eq!(worker.native_binding.unwrap().binding(), installed.binding);
+    assert_eq!(worker.last_end, cursor);
+}
+
+#[test]
+#[ignore = "requires rebuilt owned modes16-20 SDK fixture under native Job runner"]
+fn native_parameter_info_rejects_admitted_drift_without_consuming_source() {
+    use crate::{
+        NativeAudioAuthorDeliveryState as Delivery, NativeAudioAuthorRefusal as Refusal,
+        NativeAudioObservationConsumption as Consumption,
+    };
+    for (mode, case) in [
+        (17, "default"),
+        (18, "steps"),
+        (19, "flags"),
+        (20, "title"),
+        (16, "id"),
+        (16, "count"),
+    ] {
+        let (mut worker, binding) = entered_rescan_worker_for_mode(mode);
+        let _ = late_rescan_dsp(&mut worker, &[(2, 0.75)]);
+        worker
+            .plugin
+            .as_mut()
+            .unwrap()
+            .borrow_editor_control()
+            .unwrap()
+            .service_controller()
+            .unwrap();
+        // ID/count controls corrupt the admitted projection only. Modes17-20
+        // change real native metadata at the actual armed controller setter.
+        match case {
+            "id" => worker.payload.parameters[0].id = 99,
+            "count" => worker.payload.parameters.push(worker.payload.parameters[0].clone()),
+            _ => {}
+        }
+        let before = audit(&worker);
+        let source = rescan_source_snapshot(&worker);
+        assert_eq!(source.1.len(), 1);
+        assert_eq!(source.2.unwrap().flags().bits(), 16);
+        let seed = worker.payload.state.clone();
+        let object = worker.native_audio_object_observation().unwrap();
+        let cursor = worker.last_end;
+        let observed = worker.poll_native_observations(Consumption::DrainAuthor(binding)).unwrap();
+        assert_eq!(
+            observed.author.unwrap().delivery,
+            Delivery::Refused(Refusal::SourceChanged),
+            "case={case}"
+        );
+        assert_eq!(rescan_source_snapshot(&worker), source, "case={case}");
+        assert!(worker.native_author_delivery.is_none());
+        assert_eq!(worker.payload.state, seed);
+        assert_eq!(worker.native_audio_object_observation().unwrap(), object);
+        assert_eq!(worker.native_binding.unwrap().binding(), binding.binding);
+        assert_eq!(worker.last_end, cursor);
+        let after = audit(&worker);
+        assert_eq!(
+            (after.metadata, after.values),
+            (before.metadata + 1, before.values + 1),
+            "one real metadata/current observation: {case}"
+        );
+        assert_eq!(
+            (after.setters, after.process, after.wrong_thread),
+            (before.setters, before.process, 0)
+        );
+    }
+}
+
+#[test]
+#[ignore = "requires rebuilt owned modes13/16 SDK fixture under native Job runner"]
+fn native_parameter_info_ack_keeps_same_kind_suffix_and_refuses_mixed_or_retired_prefix() {
+    use crate::{
+        NativeAudioAuthorDeliveryState as Delivery, NativeAudioAuthorRefusal as Refusal,
+        NativeAudioObservationConsumption as Consumption,
+    };
+    for case in ["same_kind", "mixed_values", "external_retire"] {
+        let (mut worker, binding) = entered_rescan_worker_for_mode(16);
+        let _ = late_rescan_dsp(&mut worker, &[(2, 0.75)]);
+        let observed = worker.poll_native_observations(Consumption::DrainAuthor(binding)).unwrap();
+        let Delivery::Delivered(delivery) = observed.author.unwrap().delivery else {
+            panic!("A must retain its actual coherent prefix");
+        };
+        let (witness, prefix) = match worker.native_author_delivery.as_ref().unwrap() {
+            super::native_author::PendingDelivery::Delivered {
+                rescan_witness: Some(witness),
+                request_cohort: Some(prefix),
+                ..
+            } => (*witness, *prefix),
+            _ => panic!("A retains its original witness and exact cohort"),
+        };
+        assert_eq!(witness.cohort().flags().bits(), 16);
+        let seed = worker.payload.state.clone();
+        let object = worker.native_audio_object_observation().unwrap();
+        let cursor = worker.last_end;
+        if case == "mixed_values" {
+            // Adversarial test setup only: this actual native restore issues
+            // Values4 after the held Info16. Ack must not retire their union20.
+            worker.plugin.as_mut().unwrap().load_state(&state(0.625, 13)).unwrap();
+        } else {
+            if case == "external_retire" {
+                assert!(worker
+                    .plugin
+                    .as_mut()
+                    .unwrap()
+                    .retire_restart_cohort(witness.cohort())
+                    .unwrap());
+            }
+            // A real second setter produces B; its original DSP point remains
+            // queued throughout Ack. No getter/flush is used to discard it.
+            worker.plugin.as_mut().unwrap().set_parameter_at(0, 0.625, 1).unwrap();
+        }
+        let suffix = rescan_source_snapshot(&worker);
+        assert_eq!(
+            suffix.2.unwrap().flags().bits(),
+            if case == "mixed_values" { 20 } else { 16 }
+        );
+        assert!(suffix.2.unwrap().serial() > witness.cohort().serial());
+        let pending_input =
+            worker.plugin.as_ref().unwrap().pending_processor_parameter_input().unwrap();
+        let pending = worker.pending_reprepare();
+        let installed = crate::NativeAudioObjectBindRequest {
+            binding: mondrian_core::AudioProcessorBindingId::new(),
+            expected_object: binding.expected_object,
+        };
+        assert!(matches!(
+            worker.bind_native_audio_object(installed).unwrap(),
+            crate::NativeAudioObjectBindOutcome::Bound(_)
+        ));
+        let ack = crate::NativeAudioAuthorAcknowledgement {
+            source_binding: binding,
+            installed_binding: installed,
+            revision: delivery.revision(),
+        };
+        let observed =
+            worker.poll_native_observations(Consumption::AcknowledgeAuthor(ack)).unwrap();
+        let expected = if case == "same_kind" {
+            Delivery::Acknowledged { acknowledgement: ack, request_cohort: Some(prefix) }
+        } else {
+            Delivery::Refused(Refusal::StaleDelivery)
+        };
+        assert_eq!(observed.author.unwrap().delivery, expected, "case={case}");
+        assert_eq!(observed.pending_reprepare, pending);
+        assert_eq!(rescan_source_snapshot(&worker), suffix);
+        assert_eq!(
+            worker.plugin.as_ref().unwrap().pending_processor_parameter_input().unwrap(),
+            pending_input
+        );
+        if case == "same_kind" {
+            assert!(worker.native_author_delivery.is_none());
+            assert_eq!(worker.payload.state.as_deref(), delivery.configuration());
+        } else {
+            assert_eq!(worker.payload.state, seed);
+            assert!(matches!(worker.native_author_delivery.as_ref(),
+                Some(super::native_author::PendingDelivery::Delivered {
+                    binding: original, revision, rescan_witness: Some(actual), request_cohort,
+                    configuration: Some(configuration),
+                }) if *original == binding && *revision == delivery.revision()
+                    && *actual == witness && *request_cohort == Some(prefix)
+                    && Some(configuration.bytes()) == delivery.configuration()));
+        }
+        assert_eq!(worker.native_audio_object_observation().unwrap(), object);
+        assert_eq!(worker.native_binding.unwrap().binding(), installed.binding);
+        assert_eq!(worker.last_end, cursor);
+    }
 }
