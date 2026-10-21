@@ -2911,37 +2911,16 @@ fn run_surge_xt_vst3_app_editor_control(explicit_query: bool) {
                     _ => unreachable!(),
                 };
                 if phase == 1 && complete && explicit_query && !query_requested {
-                    use crate::app_ui::audio_automation::AudioAutomationTimeContext;
-                    use crate::app_ui::audio_processor_rack::{
-                        bind_audio_scalar_author_lease, project_audio_processor_rack,
-                    };
-                    use crate::app_ui::localization::{AppUiLocale, Localizer};
                     assert!(state
                         .native_audio_parameter_presentation(&payload, &query_parameter)
                         .is_none());
-                    let sequence = state.active_sequence().unwrap();
-                    let localizer = Localizer::new(AppUiLocale::EnUs).unwrap();
-                    let mut rack = project_audio_processor_rack(
-                        sequence,
+                    let request = crate::app_ui::test_utils::native_parameter_query_payload(
+                        &state,
                         payload.address,
-                        &localizer,
-                        AudioAutomationTimeContext::at_sequence_time(sequence, TimelineTime::ZERO),
-                    );
-                    bind_audio_scalar_author_lease(std::slice::from_mut(&mut rack), &state);
-                    let request = rack
-                        .processors
-                        .iter()
-                        .find(|processor| processor.processor_id == original.id)
-                        .unwrap()
-                        .parameters
-                        .iter()
-                        .find(|parameter| parameter.parameter_id == query_parameter)
-                        .unwrap()
-                        .native_query
-                        .clone()
-                        .expect(
-                            "actual visible Idle Opened/noFact None row has a manual query action",
-                        );
+                        original.id,
+                        &query_parameter,
+                    )
+                    .expect("actual visible Idle Opened/noFact None row has a manual query action");
                     let scalar = (*request.target).clone();
                     query_history = Some(state.authoring.as_ref().unwrap().history().diagnostics());
                     state

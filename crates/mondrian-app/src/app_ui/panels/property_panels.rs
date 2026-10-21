@@ -7384,7 +7384,7 @@ mod explicit_native_parameter_query_controls {
                 AudioProductAction::QueryNativeParameter(payload)
             ))
         );
-        let mut disabled = audio_processor_static_parameter_control(
+        let disabled = audio_processor_static_parameter_control(
             &rack, processor, &parameter, numeric, false, &localizer,
         );
         assert_eq!(disabled.child_count(), 0);

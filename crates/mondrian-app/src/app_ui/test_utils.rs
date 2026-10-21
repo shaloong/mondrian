@@ -288,6 +288,38 @@ pub(crate) fn native_sidechain_source_action(
     connection.expect("shared named connection action")
 }
 
+/// Select the exact manual query payload projected by the real visible Rack.
+/// Keep private UI projection modules behind this existing test-only seam.
+pub(crate) fn native_parameter_query_payload(
+    state: &crate::app::AppState,
+    address: mondrian_timeline::AudioProcessorRackAddress,
+    processor_id: mondrian_core::AudioProcessorInstanceId,
+    parameter: &mondrian_core::ParameterId,
+) -> Option<crate::app::product_action::AudioNativeParameterQueryPayload> {
+    use super::audio_automation::AudioAutomationTimeContext;
+    use super::audio_processor_rack::{
+        bind_audio_scalar_author_lease, project_audio_processor_rack,
+    };
+    use super::localization::{AppUiLocale, Localizer};
+    let sequence = state.active_sequence()?;
+    let localizer = Localizer::new(AppUiLocale::EnUs).expect("native Rack locale");
+    let mut rack = project_audio_processor_rack(
+        sequence,
+        address,
+        &localizer,
+        AudioAutomationTimeContext::at_sequence_time(sequence, mondrian_core::TimelineTime::ZERO),
+    );
+    bind_audio_scalar_author_lease(std::slice::from_mut(&mut rack), state);
+    rack.processors
+        .iter()
+        .find(|processor| processor.processor_id == processor_id)?
+        .parameters
+        .iter()
+        .find(|row| &row.parameter_id == parameter)?
+        .native_query
+        .clone()
+}
+
 /// Native primary modifier for actual text/NumberInput Host fixture events.
 /// Explicit curve, timeline and classifier shortcut vectors keep their declared modifiers.
 pub(crate) fn primary_text_modifiers() -> Modifiers {
