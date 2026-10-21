@@ -249,7 +249,8 @@ fn external_clap_effect_runtime_renders_finite_nonzero_pcm() {
         actual.binary_sha256.as_slice(),
         decode_hash(&plugin.sha256).as_slice()
     );
-    assert_eq!(actual.parameters, parameters);
+    let facts = Facts::Clap(parameters);
+    facts.check_native_current(&Facts::Clap(actual.parameters));
     assert_eq!(actual.main_audio_input, ClapMainAudioInput::Present);
     assert_eq!(actual.main_audio_output_id, 1);
     assert!(actual.auxiliary_inputs.buses.is_empty() && actual.auxiliary_outputs.buses.is_empty());
@@ -277,7 +278,7 @@ fn external_clap_effect_runtime_renders_finite_nonzero_pcm() {
         author.opaque_state.as_deref().map(Vec::as_slice),
         Some(state.as_slice())
     );
-    Facts::Clap(parameters).check_native_owned_author(&author);
+    facts.check_native_owned_author(&author);
     let instance_id = author.id;
     let mut sequence = Sequence::new("finite external CLAP effect Runtime PCM");
     sequence.settings.audio_sample_rate = render.sample_rate;

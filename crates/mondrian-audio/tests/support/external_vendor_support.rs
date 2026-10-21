@@ -284,21 +284,13 @@ pub(super) enum Facts {
     Vst3(Vec<Vst3ParameterDescriptor>, Vec<(u32, f64)>),
 }
 impl Facts {
-    pub(super) fn check_author(&self, instance: &AudioProcessorInstance) {
-        self.check_author_profile(instance, false);
-    }
-
+    // This checks a known newly constructed stateful instance, never infers
+    // ownership from the opaque bytes of an arbitrary edited author.
     pub(super) fn check_native_owned_author(&self, instance: &AudioProcessorInstance) {
         assert!(
             instance.opaque_state.is_some(),
             "known stateful factory capture"
         );
-        self.check_author_profile(instance, true);
-    }
-
-    // The caller chooses a known construction contract; opaque bytes never
-    // infer the ownership of an arbitrary existing or explicitly edited author.
-    fn check_author_profile(&self, instance: &AudioProcessorInstance, native_owned: bool) {
         let count = match self {
             Self::Clap(p) => p.len(),
             Self::Vst3(p, _) => p.len(),
@@ -319,21 +311,10 @@ impl Facts {
             assert_eq!(actual.ui.display_name.as_deref(), Some(name));
             assert_eq!(actual.ui.hidden, hidden);
             assert!(value.is_finite(), "actual current scalar is finite");
-            if native_owned {
-                assert!(
-                    actual.automation.is_none(),
-                    "native state owns each initial value"
-                );
-            } else {
-                let curve = actual.automation.as_ref().expect("explicit constant author value");
-                assert_eq!(curve.parameter_id, id);
-                assert!(curve.keyframes.is_empty());
-                assert_eq!(
-                    curve.default_value.to_bits(),
-                    value.to_bits(),
-                    "explicit current value"
-                );
-            }
+            assert!(
+                actual.automation.is_none(),
+                "native state owns each initial value"
+            );
         };
         match self {
             Self::Clap(p) => {
