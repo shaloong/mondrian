@@ -256,7 +256,7 @@ pub struct AudioBusObservationRef<'a> {
     pub layout_inputs: &'a [AudioBusConfig],
     /// Existing ProcessData output channels and same-owner activation ACKs.
     pub layout_outputs: &'a [AudioBusConfig],
-    /// Fresh input arrangements, with legacy zero-initialized/status-ignored queries.
+    /// Fresh input arrangements, published only after each native query succeeds.
     pub input_arrangements: &'a [SpeakerArrangement],
     /// Fresh output arrangements, independently enumerated after the inputs.
     pub output_arrangements: &'a [SpeakerArrangement],

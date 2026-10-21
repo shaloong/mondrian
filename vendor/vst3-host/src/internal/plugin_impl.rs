@@ -1379,6 +1379,34 @@ impl PluginImpl {
         })
     }
 
+    // A native failure never authenticates its output, even when the plugin
+    // wrote a plausible mask. Keep this rule identical for owned inventories
+    // and the stopped fixed-frame observation; callers own their census bounds.
+    fn query_audio_bus_arrangement(
+        &self,
+        direction: i32,
+        index: i32,
+    ) -> Result<crate::audio::SpeakerArrangement> {
+        let mut arrangement = 0u64;
+        // SAFETY: all callers use a live processor and a direction-local index
+        // from that direction's native census, with valid scalar output storage.
+        let status = unsafe {
+            self.processor
+                .getBusArrangement(direction, index, &mut arrangement)
+        };
+        if status != kResultOk {
+            let direction = if direction == kInput as i32 {
+                "input"
+            } else {
+                "output"
+            };
+            return Err(Error::InterfaceError(format!(
+                "getBusArrangement failed: direction={direction} index={index} status={status:#x}"
+            )));
+        }
+        Ok(crate::audio::SpeakerArrangement::from_raw(arrangement))
+    }
+
     fn bounded_bus_arrangements(
         &self,
         bounds: crate::audio::ProcessingResourceBounds,
@@ -1388,12 +1416,7 @@ impl PluginImpl {
             let mut result =
                 crate::audio::processing_resources::vector(bounds.native_buses(count)?)?;
             for index in 0..count {
-                let mut arrangement = 0u64;
-                unsafe {
-                    self.processor
-                        .getBusArrangement(direction, index, &mut arrangement);
-                }
-                result.push(crate::audio::SpeakerArrangement::from_raw(arrangement));
+                result.push(self.query_audio_bus_arrangement(direction, index)?);
             }
             Ok(result)
         };
@@ -3156,14 +3179,7 @@ impl PluginInternal for PluginImpl {
                 ));
             }
             for index in 0..count {
-                let mut arrangement = 0u64;
-                // The legacy API deliberately ignores status, including a failed
-                // call that wrote a value. Do not synthesize a new query error.
-                unsafe {
-                    self.processor
-                        .getBusArrangement(direction, index, &mut arrangement);
-                }
-                rows[index as usize] = SpeakerArrangement::from_raw(arrangement);
+                rows[index as usize] = self.query_audio_bus_arrangement(direction, index)?;
             }
             Ok(count as usize)
         };
@@ -3389,19 +3405,17 @@ impl PluginInternal for PluginImpl {
         }
         use crate::audio::SpeakerArrangement;
         unsafe {
-            let read = |dir: i32| -> Vec<SpeakerArrangement> {
+            let read = |dir: i32| -> Result<Vec<SpeakerArrangement>> {
                 let count = self.component.getBusCount(kAudio as i32, dir);
-                (0..count)
-                    .map(|idx| {
-                        let mut arr: u64 = 0;
-                        self.processor.getBusArrangement(dir, idx, &mut arr);
-                        SpeakerArrangement::from_raw(arr)
-                    })
-                    .collect()
+                let mut arrangements = Vec::with_capacity(count.max(0) as usize);
+                for index in 0..count {
+                    arrangements.push(self.query_audio_bus_arrangement(dir, index)?);
+                }
+                Ok(arrangements)
             };
             Ok(crate::audio::BusArrangements {
-                inputs: read(kInput as i32),
-                outputs: read(kOutput as i32),
+                inputs: read(kInput as i32)?,
+                outputs: read(kOutput as i32)?,
             })
         }
     }
