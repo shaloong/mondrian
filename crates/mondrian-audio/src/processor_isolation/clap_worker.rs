@@ -5234,12 +5234,12 @@ mod tests {
                 &[1, 2],
             )
             .unwrap();
-            let current_values = |worker: &ClapWorker| {
+            let current_values = |worker: &mut ClapWorker| {
                 let handle = worker.instance.plugin_handle();
                 let params = handle.get_extension::<PluginParams>().unwrap();
                 [ClapId::new(1), ClapId::new(2)].map(|id| params.get_value(&handle, id).unwrap())
             };
-            assert_eq!(current_values(&worker), [0.25, 0.75]);
+            assert_eq!(current_values(&mut worker), [0.25, 0.75]);
             let cohort = worker.native_configuration_cohort().unwrap();
             let outcome = worker
                 .service_native_configuration(NativeConfigurationControlRequest {
@@ -5254,7 +5254,7 @@ mod tests {
                 panic!("actual retained candidate: {outcome:?}");
             };
             assert_eq!(candidate.serviced_cohort, cohort);
-            assert_eq!(current_values(&worker), expected);
+            assert_eq!(current_values(&mut worker), expected);
             let mut expected_state = vec![0x43];
             for value in expected {
                 expected_state.extend_from_slice(&value.to_le_bytes());
