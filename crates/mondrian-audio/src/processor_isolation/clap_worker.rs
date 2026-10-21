@@ -5172,7 +5172,10 @@ mod tests {
     #[test]
     fn clap_configuration_service_preserves_native_owned_lanes_and_flushes_only_explicit_constants()
     {
-        use super::super::{NativeConfigurationControlOutcome, NativeConfigurationControlRequest};
+        use super::super::{
+            ClapParameterDescriptor, NativeConfigurationControlOutcome,
+            NativeConfigurationControlRequest,
+        };
         for (profile, expected, flushes, event_count) in [
             ([None, None], [0.25, 0.75], 0, 0),
             ([None, Some(0.5)], [0.25, 0.5], 1, 1),
@@ -5213,11 +5216,20 @@ mod tests {
                     hidden: false,
                 })
                 .collect::<Vec<_>>();
-            let mut worker = prepare_loaded(
+            #[cfg(windows)]
+            let native_main = std::rc::Rc::new(
+                vst3_host::window::WindowsEditorMainThread::initialize()
+                    .expect("same existing owned native-main initialization"),
+            );
+            let mut worker = prepare_loaded_on_main(
+                #[cfg(windows)]
+                native_main,
                 request,
                 entry,
                 c"org.mondrian.test.render-lifecycle",
                 None,
+                ClapMainAudioInput::Present,
+                0,
                 &parameters,
                 &[1, 2],
             )
