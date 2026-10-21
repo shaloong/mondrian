@@ -681,7 +681,7 @@ mod native_object_wire_contracts {
             );
         }
         let mut unknown = bytes.clone();
-        unknown[8..12].copy_from_slice(&14_u32.to_le_bytes());
+        unknown[8..12].copy_from_slice(&u32::MAX.to_le_bytes());
         assert!(
             WorkerCommand::read_from(&mut Cursor::new(unknown)).is_err(),
             "future/unknown kind cannot enter foreign dispatch"
@@ -809,8 +809,8 @@ mod native_log_wire_contracts {
         let mut bytes = Vec::new();
         write_reply(&mut bytes, ObjectReply::Observation(&good)).expect("baseline");
         // Current fixed fields: envelope12 + PID4 + object1 + cleanup4 +
-        // observed-request16 + author1 + parameter-revision8 + parameter-count4.
-        const LOG_COUNT_OFFSET: usize = 50;
+        // observed-request16 + author1 + parameter-revision8 + fact-format4 + parameter-count4.
+        const LOG_COUNT_OFFSET: usize = 54;
         assert_eq!(
             &bytes[LOG_COUNT_OFFSET..LOG_COUNT_OFFSET + 4],
             &2_u32.to_le_bytes()
@@ -824,7 +824,7 @@ mod native_log_wire_contracts {
         );
         assert_eq!(
             oversized.position(),
-            58,
+            62,
             "count and loss header is read, but no untrusted record or storage extent is consumed"
         );
         for cut in 0..bytes.len() {
