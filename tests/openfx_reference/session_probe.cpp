@@ -1980,6 +1980,53 @@ bool optionalUnmappedFormat(const void* handle, OfxPropertySetHandle in) {
   return valid;
 }
 
+// Exercise the actual ClipInstance GetHook through the public suite. Scalar
+// metadata alone cannot qualify the equivalent one-element bulk query.
+bool clipIntegerQueryCounts(const void* handle) {
+  unsigned attempted = 0, accepted = 0;
+  const auto failure = [&](const std::string& point, OfxStatus status) {
+    describeActionReceipt("clip-int-count", point.c_str(), attempted, accepted, status);
+    return false;
+  };
+  for (const char* name : {"Source", "Output", "DisconnectedOptional"}) {
+    OfxImageClipHandle clip = nullptr;
+    OfxPropertySetHandle properties = nullptr;
+    const auto clipStatus = gEffectHost->clipGetHandle((OfxImageEffectHandle)handle, name, &clip, &properties);
+    if (clipStatus != kOfxStatOK || !clip || !properties) { return failure(std::string(name) + "-handle", clipStatus); }
+    for (const auto& property : {
+        std::make_pair("Connected", kOfxImageClipPropConnected),
+        std::make_pair("ContinuousSamples", kOfxImageClipPropContinuousSamples)}) {
+      const std::string point = std::string(name) + "-" + property.first;
+      const int expected = std::strcmp(property.first, "Connected") == 0 &&
+          std::strcmp(name, "DisconnectedOptional") != 0 ? 1 : 0;
+      int dimension = -1, scalar = -1;
+      auto status = gPropHost->propGetDimension(properties, property.second, &dimension);
+      if (status != kOfxStatOK || dimension != 1) { return failure(point + "-dimension", status); }
+      status = gPropHost->propGetInt(properties, property.second, 0, &scalar);
+      if (status != kOfxStatOK || scalar != expected) { return failure(point + "-scalar", status); }
+      // count=1 is intentionally first: the old hook refuses it before the
+      // zero-count write can run. All destinations remain valid even on RED.
+      for (int count : {1, 0, -1, 2}) {
+        const std::array<int, 4> untouched{{0x1357, 0x2468, 0x369a, 0x48bc}};
+        auto values = untouched;
+        ++attempted;
+        status = gPropHost->propGetIntN(properties, property.second, count, values.data() + 1);
+        auto expectedValues = untouched;
+        if (count == 1) { expectedValues[1] = expected; }
+        // The host rejects invalid query extents at this hook; this does not
+        // extend temporal/continuous sampling or change other suite errors.
+        const auto expectedStatus = count < 0 || count > dimension ? kOfxStatErrBadIndex : kOfxStatOK;
+        if (status != expectedStatus || values != expectedValues) {
+          return failure(point + "-count" + std::to_string(count), status);
+        }
+        ++accepted;
+      }
+    }
+  }
+  describeActionReceipt("clip-int-count", "checks", attempted, accepted, kOfxStatOK);
+  return true;
+}
+
 // Fixed-canvas oracle only: time selects independent output, never invocation
 // history. Rust checks separate literal tables in top-down storage order.
 OfxStatus fixedCanvasPartialOutput(const void* handle, OfxPropertySetHandle in) {
@@ -2834,6 +2881,8 @@ OfxStatus probeAction(const char* action, const void* handle,
       (operation == kOfxActionCreateInstance || operation == kOfxActionBeginInstanceChanged ||
        operation == kOfxActionInstanceChanged || operation == kOfxImageEffectActionRender ||
        operation == kOfxActionDestroyInstance) && !canonicalCurves(handle)) { return kOfxStatFailed; }
+  if (selected == "clip_integer_query_count" && operation == kOfxImageEffectActionRender &&
+      !clipIntegerQueryCounts(handle)) { return kOfxStatFailed; }
   if (selected == "optional_unmapped" && operation == kOfxImageEffectActionRender &&
       !optionalUnmappedFormat(handle, in)) { return kOfxStatFailed; }
   const OfxStatus result = selected == "fixed_canvas_partial_output" && operation == kOfxImageEffectActionRender
@@ -2841,7 +2890,8 @@ OfxStatus probeAction(const char* action, const void* handle,
       : selected == "angle" && operation == kOfxImageEffectActionRender
       ? angleOutput(handle, in) : pluginMain(action, handle, in, out);
   if (result == kOfxStatOK || result == kOfxStatReplyDefault) {
-    if (selected == "optional_unmapped" && operation == kOfxImageEffectActionDescribeInContext) {
+    if ((selected == "optional_unmapped" || selected == "clip_integer_query_count") &&
+        operation == kOfxImageEffectActionDescribeInContext) {
       OfxPropertySetHandle clip = nullptr;
       if (gEffectHost->clipDefine((OfxImageEffectHandle)handle, "DisconnectedOptional", &clip) != kOfxStatOK || !clip ||
           gPropHost->propSetString(clip, kOfxImageEffectPropSupportedComponents, 0, kOfxImageComponentRGBA) != kOfxStatOK ||
@@ -3157,6 +3207,10 @@ OfxStatus probe(const char* action, const void* handle,
   }
   if (mode() == "optional_unmapped" &&
       (std::strcmp(action, kOfxActionCreateInstance) == 0 ||
+       std::strcmp(action, kOfxImageEffectActionGetClipPreferences) == 0)) { observed = action; }
+  if (mode() == "clip_integer_query_count" &&
+      (std::strcmp(action, kOfxActionCreateInstance) == 0 ||
+       std::strcmp(action, kOfxActionDestroyInstance) == 0 ||
        std::strcmp(action, kOfxImageEffectActionGetClipPreferences) == 0)) { observed = action; }
   if ((mode() == "identity_current" || nonCurrentIdentityMode(mode())) &&
       std::strcmp(action, kOfxImageEffectActionIsIdentity) == 0) {

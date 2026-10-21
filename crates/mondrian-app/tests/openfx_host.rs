@@ -2901,6 +2901,276 @@ fn product_worker_reports_none_for_disconnected_optional_clip_unmapped_format() 
     session.shutdown().expect("original bounded shutdown of the same resident");
 }
 
+fn clip_integer_query_action_rows(directory: &Path, pid: u32) -> Vec<String> {
+    use std::io::Read;
+    let mut bytes = Vec::new();
+    std::fs::File::open(directory.join(format!("actions-{pid}.txt")))
+        .expect("actual resident action file")
+        .take(4097)
+        .read_to_end(&mut bytes)
+        .expect("bounded resident actions");
+    assert!(!bytes.is_empty() && bytes.len() <= 4096 && bytes.is_ascii());
+    let text = std::str::from_utf8(&bytes).expect("ASCII actions");
+    assert!(text.ends_with('\n') && text.lines().count() < 32);
+    text.lines()
+        .enumerate()
+        .map(|(index, row)| {
+            let fields: Vec<_> = row.split_whitespace().collect();
+            assert_eq!(fields.len(), 9);
+            assert_eq!(fields[0].parse::<usize>().expect("ordinal"), index + 1);
+            assert_eq!(&fields[1..3], ["D=0", "I=0"], "actual resident role");
+            assert_eq!(fields[8], "complete=1");
+            fields[3..].join(" ")
+        })
+        .collect()
+}
+
+fn assert_clip_integer_query_actions(rows: &[String], cleanup: &str) {
+    let actual: Vec<_> = rows
+        .iter()
+        .filter(|row| {
+            [
+                "OfxActionCreateInstance ",
+                "OfxActionDestroyInstance ",
+                "OfxImageEffectActionGetClipPreferences ",
+                "OfxImageEffectActionRender ",
+                "clip-int-count ",
+            ]
+            .iter()
+            .any(|prefix| row.starts_with(prefix))
+        })
+        .map(|row| {
+            // Clip preferences permit ReplyDefault as well as OK. This gate
+            // checks query counts independently of Basic's optional action.
+            if row.starts_with("OfxImageEffectActionGetClipPreferences return ") {
+                assert!(
+                    row.ends_with("status=0 complete=1") || row.ends_with("status=14 complete=1")
+                );
+                row.replace("status=14 complete=1", "status=0 complete=1")
+            } else {
+                row.clone()
+            }
+        })
+        .collect();
+    let mut expected = vec![
+        "OfxActionCreateInstance enter attempted=0 accepted=0 status=0 complete=1".to_owned(),
+        "OfxActionCreateInstance return attempted=0 accepted=0 status=0 complete=1".to_owned(),
+    ];
+    for _ in 0..2 {
+        expected.extend([
+            "OfxImageEffectActionGetClipPreferences enter attempted=0 accepted=0 status=0 complete=1".to_owned(),
+            "OfxImageEffectActionGetClipPreferences return attempted=0 accepted=0 status=0 complete=1".to_owned(),
+            "OfxImageEffectActionRender enter attempted=0 accepted=0 status=0 complete=1".to_owned(),
+            "clip-int-count checks attempted=24 accepted=24 status=0 complete=1".to_owned(),
+            "OfxImageEffectActionRender return attempted=0 accepted=0 status=0 complete=1".to_owned(),
+        ]);
+    }
+    expected.extend([
+        "OfxActionDestroyInstance enter attempted=0 accepted=0 status=0 complete=1".to_owned(),
+        "OfxActionDestroyInstance return attempted=0 accepted=0 status=0 complete=1".to_owned(),
+    ]);
+    assert_eq!(
+        actual, expected,
+        "native query-count contract; original cleanup: {cleanup}"
+    );
+}
+
+#[test]
+#[ignore = "requires current Product, SessionProbe clip_integer_query_count and an empty action-receipt directory"]
+fn product_worker_preserves_clip_integer_query_counts_in_resident_and_graph() {
+    use mondrian_effects::{
+        EffectExecutionSession, EffectExecutionSessionConfig, EffectProcessorControl,
+    };
+    let directory = PathBuf::from(
+        std::env::var_os("MONDRIAN_OPENFX_DESCRIBE_ACTION_RECEIPT_DIRECTORY")
+            .expect("new empty native action directory"),
+    );
+    assert!(directory.is_absolute() && directory.is_dir());
+    assert!(std::fs::read_dir(&directory).expect("action directory").next().is_none());
+    let inspection = cpu_contract_probe("clip_integer_query_count");
+    assert_eq!(inspection.plugins.len(), 1);
+    let identifier = "uk.co.thefoundry.BasicGainPlugin";
+    let description = describe_openfx_filter(product_executable(), &inspection, identifier)
+        .expect("actual Basic descriptor with a disconnected optional clip");
+    let input = cpu_contract_input();
+    let original_input = input.clone();
+    let assert_half_gain = |output: &EffectFloatFrame| {
+        assert_eq!(
+            (output.width(), output.height(), output.format()),
+            (input.width(), input.height(), input.format())
+        );
+        assert_eq!(output.pixels().len(), input.pixels().len());
+        for (actual, source) in output.pixels().iter().zip(input.pixels()) {
+            assert_eq!(
+                actual.map(f32::to_bits),
+                source.map(|value| (value * 0.5).to_bits())
+            );
+        }
+    };
+    let parameters = constant_parameters([("scale".to_owned(), OpenFxParameterValue::Double(0.5))]);
+    let mut direct = OpenFxFilterSession::prepare(
+        product_executable(),
+        &inspection,
+        identifier,
+        input.width(),
+        input.height(),
+        input.format(),
+        &mut || Ok(()),
+    )
+    .expect("actual native query-count resident");
+    let direct_pid = direct.worker_process_id();
+    let mut direct_outputs = Vec::new();
+    for frame in [0.0, 42.0] {
+        let output = direct.render(
+            &OpenFxRenderTiming { frame, ..cpu_contract_timing(2.0) },
+            &parameters,
+            &input,
+            &mut || Ok(()),
+        );
+        let failed = output.is_err();
+        direct_outputs.push(output);
+        if failed {
+            break;
+        }
+        assert_eq!(direct.worker_process_id(), direct_pid);
+    }
+    // Always consume the same owner before asserting the target RED. Its
+    // original shutdown failure remains visible beside a query failure.
+    let shutdown = direct.shutdown();
+    let direct_rows = clip_integer_query_action_rows(&directory, direct_pid);
+    assert_clip_integer_query_actions(&direct_rows, &format!("{shutdown:?}"));
+    assert_eq!(direct_outputs.len(), 2);
+    for output in direct_outputs {
+        assert_half_gain(&output.expect("Basic renders after all real clip queries"));
+    }
+    assert_eq!(
+        input, original_input,
+        "native queries and Basic preserve Source"
+    );
+    shutdown.expect("same resident closes within the original budget");
+
+    let kind = register_selected_openfx_filter(product_executable(), &inspection, identifier)
+        .expect("canonical native provider");
+    let mut effect = instantiate_effect_node(kind).expect("canonical author node");
+    let scale = description
+        .parameters
+        .iter()
+        .find(|parameter| parameter.name == "scale")
+        .expect("Basic gain metadata");
+    let parameter_id = effect
+        .properties
+        .iter()
+        .find(|(_, property)| property.descriptor.display_name == scale.label)
+        .expect("canonical gain control")
+        .1
+        .descriptor
+        .parameter_id()
+        .clone();
+    effect
+        .set_static_value_by_parameter(&parameter_id, PropertyValue::Double(0.5))
+        .expect("author half gain");
+    let original_effect = effect.clone();
+    let program = PreparedEffectProgram::prepare_hierarchical_with_frame_context(
+        std::slice::from_ref(&effect),
+        &[],
+        &[],
+        &[],
+        WorkingColorSpace::LinearRec709,
+        EffectFrameContext::new(
+            Rational::FPS_24,
+            SampleAspectRatio::new(2, 1).expect("PAR two"),
+            TimelineTimeRange::new(TimelineTime::ZERO, TimelineTime::new(101, 24).expect("end"))
+                .expect("source range"),
+        )
+        .expect("canonical frame context"),
+        &LutPreparationCache::uncached(),
+    )
+    .expect("canonical graph");
+    let mut retained = EffectExecutionSession::new(EffectExecutionSessionConfig {
+        max_processor_instances: 1,
+        max_processor_bytes: 64 * 1024 * 1024,
+        max_working_bytes: 128 * 1024 * 1024,
+        max_cache_entries: 0,
+        max_cache_bytes: 0,
+        max_gpu_plan_entries: 0,
+        max_gpu_plan_bytes: 0,
+    });
+    retained.bind_generation(1);
+    let mut graph_outputs = Vec::new();
+    for frame in [0, 42] {
+        let graph = program
+            .evaluate(TimelineTime::new(frame, 24).expect("exact seek"))
+            .expect("canonical evaluated graph");
+        let output = retained.apply_compiled_rgba_f32(
+            input.view(),
+            &graph,
+            frame,
+            &mut EffectProcessorControl::uncancelled(),
+        );
+        let failed = output.is_err();
+        graph_outputs.push(output);
+        if failed {
+            break;
+        }
+        assert_eq!(retained.diagnostics().processor_instances, 1);
+        assert_eq!(retained.diagnostics().cache_entries, 0);
+    }
+    retained.retire_processor_resources();
+    assert_eq!(retained.diagnostics().processor_instances, 0);
+    drop(retained);
+    let entries: Vec<_> = std::fs::read_dir(&directory)
+        .expect("closed action directory")
+        .take(17)
+        .collect::<Result<_, _>>()
+        .expect("bounded native action entries");
+    assert!(entries.len() <= 16);
+    let mut rendered_pids = Vec::new();
+    for entry in entries {
+        use std::io::Read;
+        assert!(entry.file_type().expect("file type").is_file());
+        let name = entry.file_name().into_string().expect("ASCII native action filename");
+        let pid = name
+            .strip_prefix("actions-")
+            .and_then(|name| name.strip_suffix(".txt"))
+            .expect("native PID filename")
+            .parse::<u32>()
+            .expect("actual PID");
+        let mut bytes = Vec::new();
+        std::fs::File::open(entry.path())
+            .expect("closed native action file")
+            .take(4097)
+            .read_to_end(&mut bytes)
+            .expect("bounded native action read");
+        assert!(bytes.len() <= 4096 && bytes.is_ascii());
+        if std::str::from_utf8(&bytes).expect("ASCII actions").contains(" clip-int-count ") {
+            rendered_pids.push(pid);
+        }
+    }
+    assert_eq!(
+        rendered_pids.len(),
+        2,
+        "only direct and retained-Graph residents rendered"
+    );
+    assert!(rendered_pids.contains(&direct_pid));
+    let graph_pid = *rendered_pids
+        .iter()
+        .find(|pid| **pid != direct_pid)
+        .expect("distinct actual Graph resident");
+    assert_clip_integer_query_actions(
+        &clip_integer_query_action_rows(&directory, graph_pid),
+        "retired Graph owner",
+    );
+    assert_eq!(graph_outputs.len(), 2);
+    for output in graph_outputs {
+        assert_half_gain(&output.expect("canonical Basic output after all real clip queries"));
+    }
+    assert_eq!(input, original_input);
+    assert_eq!(
+        effect, original_effect,
+        "queries do not mutate canonical author state"
+    );
+}
+
 #[test]
 #[ignore = "requires current product and SessionProbe mode cpu_unsupported_descriptor"]
 fn product_worker_refuses_gpu_only_descriptor_before_registration() {
