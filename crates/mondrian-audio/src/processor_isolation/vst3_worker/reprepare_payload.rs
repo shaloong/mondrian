@@ -172,7 +172,7 @@ mod tests {
     }
 
     #[test]
-    fn vst3_reprepare_raw_codec_preserves_eleven_field_fragments_and_option_defaults() {
+    fn vst3_reprepare_raw_codec_preserves_twelve_field_fragments_and_option_defaults() {
         let payload = test_payload().replace(
             "\"parameters\":[]",
             "\"parameters\":[ {\"raw\": [1e99999,-0.0,1.2300]} ]",
