@@ -89,6 +89,9 @@ pub(super) struct NativeAudioEditorProductContext {
     owner: NativeAudioAuthorOwner,
     schemas: BTreeMap<ParameterId, mondrian_core::automation::ParameterSchema>,
     parameter_observation: Option<mondrian_core::NativeAudioParameterObservation>,
+    // Callback and fact revisions share one source only on this exact target.
+    // Keep the floor across cache clears; a new binding/object resets the domain.
+    parameter_revision_floor: u64,
     queued: Option<Intent>,
     target: Option<NativeAudioEditorTarget>,
     attachment_target: Option<NativeAudioEditorTarget>,
@@ -181,6 +184,42 @@ impl NativeAudioSingleAuthorWork {
 }
 
 impl NativeAudioEditorProductContext {
+    fn set_target(&mut self, target: Option<NativeAudioEditorTarget>) {
+        if self.target != target {
+            self.parameter_observation = None;
+            self.parameter_revision_floor = 0;
+        }
+        self.target = target;
+    }
+
+    fn invalidate_parameter_facts_before(
+        &mut self,
+        target: NativeAudioEditorTarget,
+        revision: u64,
+    ) {
+        if self.target == Some(target) && self.locator.matches_target(target) {
+            // Keep any same-completion MainQuery at this revision. CLAP may not
+            // query it again until the native source itself advances.
+            self.parameter_revision_floor = self.parameter_revision_floor.max(revision);
+        }
+    }
+
+    fn parameter_fact(&self, id: &ParameterId) -> Option<&mondrian_core::NativeAudioParameterFact> {
+        let observation = self.parameter_observation.as_ref()?;
+        if self.target != Some(observation.target())
+            || observation.source_revision() < self.parameter_revision_floor
+        {
+            return None;
+        }
+        // A current batch can also contain historical DSP/output records. Its
+        // envelope revision cannot make an older individual fact current.
+        observation
+            .facts()
+            .iter()
+            .rev()
+            .find(|fact| &fact.parameter == id && fact.revision >= self.parameter_revision_floor)
+    }
+
     /// Only live surface attachment/control belongs to presentation custody.
     pub(super) fn blocks_source_replacement(&self) -> bool {
         self.queued.is_some() || self.attachment_target.is_some()
@@ -197,10 +236,7 @@ impl NativeAudioEditorProductContext {
         {
             return;
         }
-        if self.target != Some(observation.current) {
-            self.parameter_observation = None;
-        }
-        self.target = Some(observation.current);
+        self.set_target(Some(observation.current));
         // Keep the original attachment receipt for already queued Close. The
         // sole Runtime maps only this exact same-object receipt to its current
         // lease. An observed replacement clears presentation, never opens it.
@@ -326,6 +362,7 @@ impl AppState {
             owner,
             schemas,
             parameter_observation: None,
+            parameter_revision_floor: 0,
             queued: None,
             target: None,
             attachment_target: None,
@@ -442,7 +479,7 @@ impl AppState {
             }
             if let Some(context) = &mut self.native_audio_editor {
                 context.queued = None;
-                context.target = None;
+                context.set_target(None);
                 context.attachment_target = None;
             }
             self.set_status_hint(AppMessage::new("native-editor-owner-changed"), true);
@@ -455,14 +492,14 @@ impl AppState {
         let key = match outcome {
             Outcome::Opened { target, .. } if context.locator.matches_target(target) => {
                 context.surface_renderer = self.native_audio_renderer.clone();
-                context.target = Some(target);
+                context.set_target(Some(target));
                 context.attachment_target = Some(target);
                 "native-editor-opened"
             }
             Outcome::Closed { target } if context.locator.matches_target(target) => {
                 // Retain processor facts for the already-owned author delivery;
                 // only the genuine view attachment controls the UI open state.
-                context.target = Some(target);
+                context.set_target(Some(target));
                 context.attachment_target = None;
                 "native-editor-closed"
             }
@@ -525,6 +562,7 @@ impl AppState {
         // incarnation. A new target makes this previous observation unavailable.
         if context.target == Some(observation.target())
             && context.locator.matches_target(observation.target())
+            && observation.source_revision() >= context.parameter_revision_floor
             && context.parameter_observation.as_ref().is_none_or(|previous| {
                 previous.target() != observation.target()
                     || (previous.process_id() == observation.process_id()
@@ -545,11 +583,7 @@ impl AppState {
         if !context.same_surface(payload) {
             return None;
         }
-        let observation = context.parameter_observation.as_ref()?;
-        if context.target != Some(observation.target()) {
-            return None;
-        }
-        observation.facts().iter().rev().find(|fact| &fact.parameter == id)
+        context.parameter_fact(id)
     }
 
     /// Read the sole presentation cache after checking the complete static
@@ -559,14 +593,16 @@ impl AppState {
         scalar: &super::parameter_gesture::AudioScalarGestureTarget,
     ) -> Option<super::parameter_gesture::DisplayedNativeParameterIdentity> {
         use super::parameter_gesture::{AudioScalarOwner, DisplayedNativeParameterIdentity};
-        let AudioScalarOwner::Parameter {
-            owner, processor_id, definition, parameter_schema,
-        } = &scalar.owner else {
+        let AudioScalarOwner::Parameter { owner, processor_id, definition, parameter_schema } =
+            &scalar.owner
+        else {
             return None;
         };
         let context = self.native_audio_editor.as_ref()?;
         if context.queued.is_some()
-            || self.native_audio_author_work.as_ref()
+            || self
+                .native_audio_author_work
+                .as_ref()
                 .is_some_and(NativeAudioAuthorWork::blocks_source_replacement)
             || context.payload.session_id != scalar.lease.session_id
             || context.payload.sequence_id != scalar.lease.sequence_id
@@ -591,7 +627,8 @@ impl AppState {
                 (None, native_owner, insertion)
             }
             mondrian_audio::AudioProcessorInputInspectionTarget::ProcessingScope {
-                scope_id, occurrence,
+                scope_id,
+                occurrence,
             } => (
                 Some(occurrence),
                 Owner::Contribution { edit_id: occurrence.edit_id, scope_id },
@@ -612,9 +649,11 @@ impl AppState {
         {
             return None;
         }
-        let fact = observation.facts().iter().rev()
-            .find(|fact| fact.parameter == parameter_schema.parameter_id)?;
-        if !matches!(fact.origin, mondrian_core::NativeAudioParameterObservationOrigin::MainQuery { .. }) {
+        let fact = context.parameter_fact(&parameter_schema.parameter_id)?;
+        if !matches!(
+            fact.origin,
+            mondrian_core::NativeAudioParameterObservationOrigin::MainQuery { .. }
+        ) {
             return None;
         }
         DisplayedNativeParameterIdentity::from_observation(observation, fact)
@@ -727,6 +766,22 @@ impl AppState {
             .as_ref()
             .and_then(NativeAudioAuthorWork::single)
             .and_then(|work| work.gesture.clone());
+        if proposal.callbacks().iter().any(|callback| {
+            matches!(
+                callback,
+                mondrian_core::NativeAudioAuthorCallback::ParameterValuesRescanned {
+                    kind: mondrian_core::NativeAudioParameterRescanKind::NoValueRefresh,
+                    ..
+                }
+            )
+        }) {
+            // Every target/owner/schema and captured-source check above already
+            // succeeded. This invalidates presentation only, not author values.
+            self.native_audio_editor
+                .as_mut()
+                .expect("validated surface")
+                .invalidate_parameter_facts_before(proposal.target(), proposal.revision());
+        }
         let author =
             self.authoring.as_mut().ok_or_else(|| failure("native author Session closed"))?;
         let gesture = match gesture {
@@ -937,7 +992,7 @@ impl AppState {
                 }
                 if surface_matches {
                     let context = self.native_audio_editor.as_mut().expect("matched surface");
-                    context.target = if state_entry { None } else { Some(*target) };
+                    context.set_target(if state_entry { None } else { Some(*target) });
                     if state_entry {
                         context.attachment_target = None;
                         self.set_status_hint(AppMessage::new("native-editor-closed"), false);
@@ -956,7 +1011,7 @@ impl AppState {
                     {
                         context.attachment_target = None;
                     }
-                    context.target = Some(*target);
+                    context.set_target(Some(*target));
                 }
                 self.set_status_hint(AppMessage::new("native-editor-control-pending"), false);
             }
@@ -1241,6 +1296,7 @@ mod attachment_continuity_contracts {
             owner: NativeAudioAuthorOwner::ChannelStrip { owner, rack },
             schemas: BTreeMap::new(),
             parameter_observation: None,
+            parameter_revision_floor: 0,
             queued: None,
             target: Some(target),
             attachment_target: Some(target),
@@ -1894,8 +1950,380 @@ mod attachment_continuity_contracts {
             assert!(state.shutdown_audio_playback_and_wait().all_workers_terminated());
         }
     }
-}
 
+    mod parameter_presentation_floor_contracts {
+        use super::*;
+        use mondrian_core::{
+            NativeAudioAuthorBoundaryFacts, NativeAudioAuthorCallback as Callback,
+            NativeAudioAuthorCompletion as Completion, NativeAudioAuthorProposal,
+            NativeAudioParameterFact as Fact, NativeAudioParameterObservation as Observation,
+            NativeAudioParameterObservationOrigin as Origin,
+            NativeAudioParameterRescanKind as Kind,
+        };
+        use std::num::{NonZeroU32, NonZeroU64};
+
+        // Model already-authenticated Media facts on actual App/Session handlers.
+        // These ordinary controls do not certify a native object, query or Ack.
+        fn fact(id: &ParameterId, revision: u64, name: &str) -> Fact {
+            Fact {
+                parameter: id.clone(),
+                revision,
+                event_flags: 0,
+                value_bits: Some(0.375_f64.to_bits()),
+                author_value_bits: Some(0.375_f64.to_bits()),
+                origin: Origin::MainQuery { rescan_flags: 0 },
+                hidden: Some(false),
+                periodic: Some(false),
+                name: Some(name.to_owned()),
+                module: None,
+                info_flags: Some(0),
+                display: Some("37.5 %".to_owned()),
+            }
+        }
+
+        fn observation(
+            target: NativeAudioEditorTarget,
+            revision: u64,
+            facts: Vec<Fact>,
+        ) -> Observation {
+            Observation::project(
+                target,
+                NonZeroU32::new(17).unwrap(),
+                NonZeroU64::new(19).unwrap(),
+                revision,
+                facts,
+            )
+            .unwrap()
+        }
+
+        fn info(
+            target: NativeAudioEditorTarget,
+            sequence: mondrian_core::SequenceId,
+            revision: u64,
+        ) -> NativeAudioAuthorProposal {
+            NativeAudioAuthorProposal::project(
+                target,
+                sequence,
+                revision,
+                NativeAudioAuthorBoundaryFacts {
+                    completion: Completion::CoherentConfiguration,
+                    open_parameter_edits: 0,
+                    group_depth: 0,
+                },
+                vec![Callback::ParameterValuesRescanned {
+                    kind: Kind::NoValueRefresh,
+                    values: vec![],
+                }],
+                Some(vec![1, 2, 3, 4]),
+            )
+            .unwrap()
+        }
+
+        #[test]
+        fn validated_info_floor_hides_old_facts_without_changing_author_parameters() {
+            let (_directory, mut state, original, _renderer) = super::opened_author();
+            let context = state.native_audio_editor.as_ref().unwrap();
+            let id = context.schemas.keys().next().unwrap().clone();
+            let payload = context.payload.clone();
+            let before = state.active_sequence().unwrap().audio_program.outputs[0]
+                .strip
+                .pre_fader
+                .processors[0]
+                .parameters
+                .clone();
+            state.observe_native_audio_parameter_observation(observation(
+                original.target(),
+                7,
+                vec![fact(&id, 7, "Captured old caption")],
+            ));
+            assert!(state.native_audio_parameter_presentation(&payload, &id).is_some());
+            let proposal = info(original.target(), original.sequence(), 8);
+            state.observe_native_audio_author_proposal(proposal.clone()).unwrap();
+            assert_eq!(
+                state.native_audio_editor.as_ref().unwrap().parameter_revision_floor,
+                8
+            );
+            assert!(state.native_audio_parameter_presentation(&payload, &id).is_none());
+            assert_eq!(
+                state.active_sequence().unwrap().audio_program.outputs[0]
+                    .strip
+                    .pre_fader
+                    .processors[0]
+                    .parameters,
+                before
+            );
+            assert!(
+                state.native_audio_editor.as_ref().unwrap().parameter_observation.is_some(),
+                "the sole cached owner remains; only stale facts become unavailable"
+            );
+            state.observe_native_audio_author_proposal(proposal).unwrap();
+            let context = state.native_audio_editor.as_mut().unwrap();
+            context.invalidate_parameter_facts_before(original.target(), 6);
+            assert_eq!(
+                context.parameter_revision_floor, 8,
+                "repeat/lower notices never lower the floor"
+            );
+        }
+
+        #[test]
+        fn same_revision_query_survives_info_and_is_received_while_author_is_outstanding() {
+            for parameters_first in [true, false] {
+                let (_directory, mut state, original, _renderer) = super::opened_author();
+                let context = state.native_audio_editor.as_ref().unwrap();
+                let id = context.schemas.keys().next().unwrap().clone();
+                let payload = context.payload.clone();
+                let current =
+                    observation(original.target(), 8, vec![fact(&id, 8, "Current caption")]);
+                if parameters_first {
+                    // Media delivers parameters before author on one completion.
+                    state.observe_native_audio_parameter_observation(current.clone());
+                }
+                let proposal = info(original.target(), original.sequence(), 8);
+                state.observe_native_audio_author_proposal(proposal.clone()).unwrap();
+                assert!(state
+                    .native_audio_author_work
+                    .as_ref()
+                    .unwrap()
+                    .single()
+                    .unwrap()
+                    .outstanding
+                    .is_some());
+                if !parameters_first {
+                    state.observe_native_audio_parameter_observation(current);
+                }
+                assert_eq!(
+                    state
+                        .native_audio_parameter_presentation(&payload, &id)
+                        .unwrap()
+                        .name
+                        .as_deref(),
+                    Some("Current caption")
+                );
+                state
+                    .observe_native_audio_author_handoff(
+                        proposal,
+                        mondrian_media::AudioPcmNativeAuthorHandoffStatus::Acknowledged {
+                            target: Box::new(original.target()),
+                            continuity:
+                                mondrian_media::AudioPcmNativeAuthorHandoffContinuity::Preserved,
+                        },
+                    )
+                    .unwrap();
+                assert_eq!(
+                    state.native_audio_editor.as_ref().unwrap().parameter_revision_floor,
+                    8
+                );
+                assert_eq!(
+                    state
+                        .native_audio_parameter_presentation(&payload, &id)
+                        .unwrap()
+                        .name
+                        .as_deref(),
+                    Some("Current caption")
+                );
+            }
+        }
+
+        #[test]
+        fn mixed_current_batch_uses_each_fact_revision_for_presentation_and_adoption() {
+            let (_directory, mut state, edit) =
+                super::super::displayed_parameter_adoption_contracts::fixture(
+                    false, 0.375, true, false,
+                );
+            let context = state.native_audio_editor.as_ref().unwrap();
+            let target = context.target.unwrap();
+            let payload = context.payload.clone();
+            let id = context.schemas.keys().next().unwrap().clone();
+            let mut old_output = fact(&id, 7, "not a live caption");
+            old_output.origin = Origin::ActiveFlush { raw_offset: 0 };
+            old_output.author_value_bits = None;
+            old_output.hidden = None;
+            old_output.periodic = None;
+            old_output.info_flags = None;
+            old_output.name = None;
+            old_output.display = None;
+            state.observe_native_audio_parameter_observation(observation(
+                target,
+                9,
+                vec![fact(&id, 8, "Current query"), old_output],
+            ));
+            state
+                .native_audio_editor
+                .as_mut()
+                .unwrap()
+                .invalidate_parameter_facts_before(target, 8);
+            let visible = state.native_audio_parameter_presentation(&payload, &id).unwrap();
+            assert_eq!(visible.revision, 8);
+            assert_eq!(visible.name.as_deref(), Some("Current query"));
+            let adopt = state.native_audio_parameter_adoption_snapshot(&edit.target).unwrap();
+            assert_eq!(adopt.fact_revision, 8);
+            assert_eq!(adopt.author_value_bits, 0.375_f64.to_bits());
+            let mut latest_output = fact(&id, 9, "not a queried caption");
+            latest_output.origin = Origin::ActiveFlush { raw_offset: 0 };
+            latest_output.author_value_bits = None;
+            latest_output.hidden = None;
+            latest_output.periodic = None;
+            latest_output.info_flags = None;
+            latest_output.name = None;
+            latest_output.display = None;
+            state.observe_native_audio_parameter_observation(observation(
+                target,
+                10,
+                vec![fact(&id, 8, "Earlier query"), latest_output],
+            ));
+            assert_eq!(
+                state.native_audio_parameter_presentation(&payload, &id).unwrap().revision,
+                9
+            );
+            assert!(
+                state.native_audio_parameter_adoption_snapshot(&edit.target).is_none(),
+                "a newer output record cannot fall back to an earlier MainQuery for adoption"
+            );
+        }
+
+        #[test]
+        fn foreign_info_targets_and_observation_objects_cannot_pollute_current_floor() {
+            let (_directory, mut state, original, _renderer) = super::opened_author();
+            let id = state
+                .native_audio_editor
+                .as_ref()
+                .unwrap()
+                .schemas
+                .keys()
+                .next()
+                .unwrap()
+                .clone();
+            let current = observation(original.target(), 8, vec![fact(&id, 8, "Current")]);
+            state.observe_native_audio_parameter_observation(current.clone());
+            for boundary in 0..3 {
+                let mut target = original.target();
+                let mut sequence = original.sequence();
+                match boundary {
+                    0 => target.binding = mondrian_core::AudioProcessorBindingId::new(),
+                    1 => sequence = mondrian_core::SequenceId::new(),
+                    2 => target.owner = Owner::Output(mondrian_core::ProgramOutputId::new()),
+                    _ => unreachable!(),
+                }
+                assert!(state
+                    .observe_native_audio_author_proposal(info(target, sequence, 99))
+                    .is_err());
+                assert_eq!(
+                    state.native_audio_editor.as_ref().unwrap().parameter_revision_floor,
+                    0
+                );
+            }
+            state
+                .native_audio_editor
+                .as_mut()
+                .unwrap()
+                .invalidate_parameter_facts_before(original.target(), 8);
+            for boundary in 0..4 {
+                let mut target = original.target();
+                let mut pid = current.process_id();
+                let mut serial = current.object_serial();
+                let mut revision = 99;
+                match boundary {
+                    0 => target.binding = mondrian_core::AudioProcessorBindingId::new(),
+                    1 => pid = NonZeroU32::new(18).unwrap(),
+                    2 => serial = NonZeroU64::new(20).unwrap(),
+                    3 => revision = 7,
+                    _ => unreachable!(),
+                }
+                state.observe_native_audio_parameter_observation(
+                    Observation::project(
+                        target,
+                        pid,
+                        serial,
+                        revision,
+                        vec![fact(&id, revision, "Foreign/stale")],
+                    )
+                    .unwrap(),
+                );
+                let context = state.native_audio_editor.as_ref().unwrap();
+                assert_eq!(context.parameter_observation.as_ref(), Some(&current));
+                assert_eq!(context.parameter_revision_floor, 8);
+            }
+        }
+
+        #[test]
+        fn cache_clear_keeps_floor_but_new_binding_accepts_a_new_low_revision_domain() {
+            let (_directory, mut state, original, _renderer) = super::opened_author();
+            let context = state.native_audio_editor.as_ref().unwrap();
+            let id = context.schemas.keys().next().unwrap().clone();
+            let payload = context.payload.clone();
+            state.observe_native_audio_parameter_observation(observation(
+                original.target(),
+                8,
+                vec![fact(&id, 8, "Current")],
+            ));
+            state
+                .native_audio_editor
+                .as_mut()
+                .unwrap()
+                .invalidate_parameter_facts_before(original.target(), 8);
+            state.invalidate_native_audio_parameter_presentation();
+            assert_eq!(
+                state.native_audio_editor.as_ref().unwrap().parameter_revision_floor,
+                8
+            );
+            state.observe_native_audio_parameter_observation(observation(
+                original.target(),
+                7,
+                vec![fact(&id, 7, "Late old query")],
+            ));
+            assert!(state.native_audio_editor.as_ref().unwrap().parameter_observation.is_none());
+            let mut next = original.target();
+            next.binding = mondrian_core::AudioProcessorBindingId::new();
+            let pid = NonZeroU32::new(23).unwrap();
+            let serial = NonZeroU64::new(31).unwrap();
+            state.observe_native_audio_editor_attachment(
+                mondrian_core::NativeAudioEditorAttachmentObservation {
+                    previous: original.target(),
+                    current: next,
+                    process_id: pid,
+                    object_serial: serial,
+                    retained: false,
+                },
+            );
+            assert_eq!(
+                state.native_audio_editor.as_ref().unwrap().parameter_revision_floor,
+                0
+            );
+            assert_eq!(next.instance, original.target().instance);
+            state.observe_native_audio_parameter_observation(
+                Observation::project(
+                    next,
+                    pid,
+                    serial,
+                    1,
+                    vec![fact(&id, 1, "Fresh incarnation")],
+                )
+                .unwrap(),
+            );
+            assert_eq!(
+                state
+                    .native_audio_parameter_presentation(&payload, &id)
+                    .unwrap()
+                    .name
+                    .as_deref(),
+                Some("Fresh incarnation")
+            );
+            state.observe_native_audio_parameter_observation(observation(
+                original.target(),
+                99,
+                vec![fact(&id, 99, "Late old target")],
+            ));
+            assert_eq!(
+                state
+                    .native_audio_parameter_presentation(&payload, &id)
+                    .unwrap()
+                    .name
+                    .as_deref(),
+                Some("Fresh incarnation")
+            );
+        }
+    }
+}
 
 #[cfg(test)]
 impl AppState {
@@ -2499,6 +2927,19 @@ mod displayed_parameter_adoption_contracts {
             refused_without_side_effects(&mut state, edit, Some(gesture));
             drop(pending_owner);
         }
+    }
+
+    #[test]
+    fn displayed_native_parameter_adoption_rejects_fact_below_info_floor_before_finish() {
+        let (_directory, mut state, mut edit) = fixture(false, 0.375, true, false);
+        let gesture = begin_trim(&mut state);
+        edit.expected_author_generation = state.project_author_generation();
+        let context = state.native_audio_editor.as_mut().unwrap();
+        let target = context.target.unwrap();
+        // The batch is revision7 but its displayed MainQuery is revision3.
+        context.invalidate_parameter_facts_before(target, 4);
+        assert!(state.native_audio_parameter_adoption_snapshot(&edit.target).is_none());
+        refused_without_side_effects(&mut state, edit, Some(gesture));
     }
 
     #[test]
