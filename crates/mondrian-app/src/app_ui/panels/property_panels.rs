@@ -7158,3 +7158,110 @@ mod temporal_handle_tests {
         }
     }
 }
+
+
+#[cfg(test)]
+mod displayed_native_parameter_control_contracts {
+    use super::*;
+    use crate::app::parameter_gesture::ParameterGestureAction;
+    use crate::app_ui::audio_processor_rack::{
+        bind_audio_scalar_author_lease, project_audio_processor_rack, static_parameter_target,
+    };
+
+    #[test]
+    fn native_owned_control_adopts_only_the_shown_canonical_snapshot_then_uses_old_slider() {
+        let _guard = crate::app_ui::test_utils::theme_test_guard();
+        let (_directory, mut state, edit) =
+            crate::app::AppState::displayed_native_parameter_fixture_for_test(false, 0.375, true);
+        let localizer = Localizer::new(crate::app_ui::localization::AppUiLocale::ZhCn).unwrap();
+        let project = |state: &crate::app::AppState| {
+            let sequence = state.active_sequence().unwrap();
+            let mut rack = project_audio_processor_rack(
+                sequence,
+                edit.target.owner.processor_address().unwrap(),
+                &localizer,
+                crate::app_ui::audio_automation::AudioAutomationTimeContext::at_sequence_time(
+                    sequence,
+                    mondrian_core::TimelineTime::ZERO,
+                ),
+            );
+            bind_audio_scalar_author_lease(std::slice::from_mut(&mut rack), state);
+            rack
+        };
+        let (_missing_directory, missing_state, missing_edit) =
+            crate::app::AppState::displayed_native_parameter_fixture_for_test(false, 0.375, false);
+        let missing_sequence = missing_state.active_sequence().unwrap();
+        let mut without_fact = project_audio_processor_rack(
+            missing_sequence,
+            missing_edit.target.owner.processor_address().unwrap(),
+            &localizer,
+            crate::app_ui::audio_automation::AudioAutomationTimeContext::at_sequence_time(
+                missing_sequence,
+                mondrian_core::TimelineTime::ZERO,
+            ),
+        );
+        bind_audio_scalar_author_lease(std::slice::from_mut(&mut without_fact), &missing_state);
+        assert!(without_fact.processors[0].parameters[0].static_value.is_none());
+        assert!(without_fact.processors[0].parameters[0].native_presentation.is_none());
+        assert!(without_fact.processors[0].parameters[0].native_adoption.is_none());
+
+        let before = state.active_sequence().unwrap().clone();
+        let generation = state.project_author_generation();
+        let history = state.authoring_history().unwrap().diagnostics();
+        let rack = project(&state);
+        let processor = &rack.processors[0];
+        let parameter = &processor.parameters[0];
+        assert!(parameter.static_value.is_none());
+        assert!(!parameter.is_static_editable());
+        assert!(static_parameter_target(&rack, processor, parameter).is_none());
+        let fact = parameter.native_presentation.as_ref().unwrap();
+        assert!(fact.value_bits.is_none() && fact.display.is_none());
+        assert_eq!(fact.author_value_bits, Some(0.375_f64.to_bits()));
+        let numeric = parameter.schema.numeric.as_ref().unwrap()[0];
+
+        let mut missing = parameter.clone();
+        missing.native_presentation = None;
+        missing.native_adoption = None;
+        let unavailable = audio_processor_static_parameter_control(
+            &rack, processor, &missing, numeric, true, &localizer,
+        );
+        assert_eq!(
+            unavailable.as_any().unwrap().downcast_ref::<Label>().unwrap().text(),
+            localizer.text("audio-rack-native-controlled-parameter")
+        );
+
+        let control = audio_processor_static_parameter_control(
+            &rack, processor, parameter, numeric, true, &localizer,
+        );
+        assert_eq!(control.child_count(), 2);
+        let label = control.child(0).unwrap().as_any().unwrap().downcast_ref::<Label>().unwrap();
+        assert!(label.text().contains(&localizer.text("audio-rack-native-controlled-parameter")));
+        assert!(
+            label.text().contains("0.38"),
+            "canonical schema-formatted fallback"
+        );
+        assert!(control.child(1).unwrap().as_any().unwrap().is::<Button>());
+        let disabled = audio_processor_static_parameter_control(
+            &rack, processor, parameter, numeric, false, &localizer,
+        );
+        assert!(disabled.as_any().unwrap().is::<Label>());
+        assert!(state.active_sequence().unwrap().author_state_eq_ignoring_revision(&before));
+        assert_eq!(state.project_author_generation(), generation);
+        assert_eq!(state.authoring_history().unwrap().diagnostics(), history);
+
+        let snapshot = parameter.native_adoption.clone().unwrap();
+        assert_eq!(snapshot.expected.author_value_bits, 0.375_f64.to_bits());
+        state
+            .dispatch_action(
+                ParameterGestureAction::AdoptDisplayedNativeParameter { edit: snapshot }.action(),
+            )
+            .unwrap();
+        let adopted = project(&state);
+        let processor = &adopted.processors[0];
+        let parameter = &processor.parameters[0];
+        assert_eq!(parameter.static_value, Some(0.375));
+        assert!(parameter.native_adoption.is_none());
+        assert!(parameter.is_static_editable());
+        assert!(static_parameter_target(&adopted, processor, parameter).is_some());
+    }
+}

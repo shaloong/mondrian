@@ -623,7 +623,10 @@ impl AppState {
         let processor =
             self.current_audio_scalar_processor(*owner, *processor_id, definition)?;
         let parameter = processor.parameters.get(&parameter_schema.parameter_id)?;
-        if parameter.schema != **parameter_schema || parameter.automation.is_some() {
+        if parameter.schema != **parameter_schema
+            || parameter.schema.numeric.is_none()
+            || parameter.automation.is_some()
+        {
             return None;
         }
         let current = self.native_audio_parameter_adoption_snapshot(&edit.target)?;

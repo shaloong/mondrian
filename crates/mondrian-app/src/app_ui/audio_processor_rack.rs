@@ -176,7 +176,14 @@ pub(crate) fn bind_audio_scalar_author_lease(
                 .zip(rack.input_inspection_target);
             for parameter in &mut processor.parameters {
                 parameter.native_adoption = adoption_owner
-                    .filter(|_| parameter.static_value.is_none())
+                    .filter(|_| {
+                        parameter.static_value.is_none()
+                            && parameter.native_presentation.as_ref().is_some_and(|fact| {
+                                fact.author_value_bits.is_some()
+                                    && matches!(fact.origin,
+                                        mondrian_core::NativeAudioParameterObservationOrigin::MainQuery { .. })
+                            })
+                    })
                     .and_then(|(lease, owner)| {
                         state.displayed_native_parameter_adoption(
                             crate::app::parameter_gesture::AudioScalarGestureTarget {

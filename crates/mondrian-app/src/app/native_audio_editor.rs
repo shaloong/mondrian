@@ -1883,3 +1883,691 @@ mod attachment_continuity_contracts {
         }
     }
 }
+
+
+#[cfg(test)]
+impl AppState {
+    pub(crate) fn displayed_native_parameter_fixture_for_test(
+        integer: bool,
+        value: f64,
+        with_fact: bool,
+    ) -> (
+        tempfile::TempDir,
+        Self,
+        super::parameter_gesture::AdoptDisplayedNativeParameterEdit,
+    ) {
+        let (directory, mut state, edit) =
+            displayed_parameter_adoption_contracts::fixture(integer, value, true, false);
+        displayed_parameter_adoption_contracts::replace_observation(&mut state, value, |fact| {
+            fact.value_bits = None;
+            fact.display = None;
+        });
+        if !with_fact {
+            state.invalidate_native_audio_parameter_presentation();
+        }
+        (directory, state, edit)
+    }
+}
+
+#[cfg(test)]
+mod displayed_parameter_adoption_contracts {
+    use super::super::parameter_gesture::{
+        AdoptDisplayedNativeParameterEdit, AudioScalarAuthorLease, AudioScalarGestureTarget,
+        AudioScalarOwner, AudioScalarValueEdit, ParameterGestureAction, ParameterGestureEdit,
+    };
+    use super::super::product_action::{AudioProductAction, ProductAction};
+    use super::*;
+    use mondrian_core::automation::{
+        ParameterInvalidValuePolicy, ParameterNumericContract, ParameterSchema, ParameterUnit,
+    };
+    use mondrian_core::{ExactAutomationCurve, ExactAutomationKeyframe, TimelineTime};
+    use std::num::{NonZeroU32, NonZeroU64};
+
+    pub(super) fn fixture(
+        integer: bool,
+        value: f64,
+        bounded: bool,
+        scope: bool,
+    ) -> (
+        tempfile::TempDir,
+        AppState,
+        AdoptDisplayedNativeParameterEdit,
+    ) {
+        let (directory, mut state, proposal) =
+            super::attachment_continuity_contracts::pending_open_with_parameter(true);
+        let mut sequence = state.active_sequence().unwrap().clone();
+        let id = ParameterId::new("clap.param.7").unwrap();
+        let mut processor = sequence.audio_program.outputs[0].strip.pre_fader.processors.remove(0);
+        let mut schema = ParameterSchema::v1(
+            id.clone(),
+            if integer {
+                mondrian_core::PropertyValue::Int(0)
+            } else {
+                mondrian_core::PropertyValue::Double(0.25)
+            },
+        );
+        if bounded {
+            schema = schema.with_numeric_contract(
+                ParameterUnit::Unitless,
+                ParameterNumericContract::closed(
+                    0.0,
+                    if integer { 7.0 } else { 1.0 },
+                    integer.then_some(1.0),
+                    ParameterInvalidValuePolicy::Reject,
+                )
+                .unwrap(),
+            );
+        }
+        let mut parameter =
+            mondrian_timeline::audio::AudioProcessorParameter::from_schema(schema.clone()).unwrap();
+        parameter.automation = None;
+        processor.parameters = BTreeMap::from([(id.clone(), parameter)]).into();
+        let definition = processor.definition.clone();
+        let processor_id = processor.id;
+        let (address, occurrence, input_owner) = if scope {
+            let track_id = sequence.audio_tracks[0].id;
+            let clip = mondrian_timeline::Clip::new(
+                mondrian_core::AssetId::new(),
+                TimelineTime::ZERO,
+                TimelineTime::ONE,
+            )
+            .unwrap();
+            let clip_id = clip.id;
+            sequence
+                .add_media_audio_clip(
+                    track_id,
+                    clip,
+                    mondrian_core::AudioSourceComponentId::primary(),
+                )
+                .unwrap();
+            let edit = &sequence.audio_tracks[0].clips[0].audio_components[0];
+            let scope_id = edit.processing.scope_id;
+            let occurrence =
+                mondrian_timeline::AudioComponentAddress { track_id, clip_id, edit_id: edit.id };
+            sequence
+                .audio_program
+                .processing_scopes
+                .iter_mut()
+                .find(|candidate| candidate.id == scope_id)
+                .unwrap()
+                .processors
+                .processors
+                .push(processor);
+            (
+                AudioProcessorRackAddress::ProcessingScope { scope_id },
+                Some(occurrence),
+                mondrian_audio::AudioProcessorInputInspectionTarget::ProcessingScope {
+                    scope_id,
+                    occurrence,
+                },
+            )
+        } else {
+            let owner = AudioChannelStripOwner::ProgramOutput {
+                output_id: sequence.audio_program.outputs[0].id,
+            };
+            let rack = AudioChannelStripRack::PreFader;
+            sequence.audio_program.outputs[0]
+                .strip
+                .pre_fader
+                .processors
+                .insert(0, processor);
+            (
+                AudioProcessorRackAddress::ChannelStrip { owner, rack },
+                None,
+                mondrian_audio::AudioProcessorInputInspectionTarget::ChannelStrip { owner, rack },
+            )
+        };
+        state.test_set_sequence(Some(sequence));
+        if let Some(occurrence) = occurrence {
+            state.select_clip_by_id(occurrence.clip_id).unwrap();
+        }
+        let lease = AudioScalarAuthorLease::from_state(&state, state.active_sequence_id().unwrap())
+            .unwrap();
+        let payload = AudioNativeEditorPayload {
+            session_id: lease.session_id,
+            sequence_id: lease.sequence_id,
+            address,
+            occurrence,
+            processor_id,
+            definition: definition.clone(),
+            sequence_time: mondrian_core::DomainTime::new(
+                AuthoringTimeDomain::Sequence(lease.sequence_id),
+                TimelineTime::ZERO,
+            ),
+            open: true,
+        };
+        let mut context = state.prepare_native_audio_editor_context(payload).unwrap();
+        context.target = Some(NativeAudioEditorTarget {
+            instance: processor_id,
+            owner: context.locator.owner,
+            insertion: context.locator.insertion,
+            ..proposal.target()
+        });
+        state.native_audio_editor = Some(context);
+        replace_observation(&mut state, value, |_| {});
+        let target = AudioScalarGestureTarget {
+            lease,
+            owner: AudioScalarOwner::Parameter {
+                owner: input_owner,
+                processor_id,
+                definition,
+                parameter_schema: Box::new(schema),
+            },
+        };
+        let edit = AdoptDisplayedNativeParameterEdit {
+            expected: state.native_audio_parameter_adoption_snapshot(&target).unwrap(),
+            target: Box::new(target),
+            expected_author_generation: state.project_author_generation(),
+        };
+        (directory, state, edit)
+    }
+
+    pub(super) fn replace_observation(
+        state: &mut AppState,
+        value: f64,
+        change: impl FnOnce(&mut mondrian_core::NativeAudioParameterFact),
+    ) {
+        let context = state.native_audio_editor.as_mut().unwrap();
+        let mut fact = mondrian_core::NativeAudioParameterFact {
+            parameter: ParameterId::new("clap.param.7").unwrap(),
+            revision: 3,
+            event_flags: 0,
+            // Deliberately different from the canonical author coordinate.
+            value_bits: Some(1000.125_f64.to_bits()),
+            author_value_bits: Some(value.to_bits()),
+            origin: mondrian_core::NativeAudioParameterObservationOrigin::MainQuery {
+                rescan_flags: 0,
+            },
+            hidden: Some(false),
+            periodic: Some(false),
+            name: Some("Native value".into()),
+            module: None,
+            info_flags: Some(0),
+            display: Some("Native display".into()),
+        };
+        change(&mut fact);
+        context.parameter_observation = Some(
+            mondrian_core::NativeAudioParameterObservation::project(
+                context.target.unwrap(),
+                NonZeroU32::new(17).unwrap(),
+                NonZeroU64::new(19).unwrap(),
+                7,
+                vec![fact],
+            )
+            .unwrap(),
+        );
+    }
+
+    fn action(edit: AdoptDisplayedNativeParameterEdit) -> mondrian_editor_state::Action {
+        ParameterGestureAction::AdoptDisplayedNativeParameter { edit }.action()
+    }
+
+    fn parameter<'a>(
+        state: &'a AppState,
+        edit: &AdoptDisplayedNativeParameterEdit,
+    ) -> &'a mondrian_timeline::audio::AudioProcessorParameter {
+        let AudioScalarOwner::Parameter { owner, processor_id, parameter_schema, .. } =
+            &edit.target.owner
+        else {
+            panic!("parameter")
+        };
+        &mondrian_audio::inspect_audio_processor_input_author(
+            state.active_sequence().unwrap(),
+            *owner,
+            *processor_id,
+        )
+        .unwrap()
+        .parameters[&parameter_schema.parameter_id]
+    }
+
+    fn begin_trim(state: &mut AppState) -> mondrian_core::AuthoringGestureId {
+        let id = mondrian_core::AuthoringGestureId::new();
+        let sequence = state.active_sequence().unwrap();
+        let target = AudioScalarGestureTarget {
+            lease: AudioScalarAuthorLease::from_state(state, sequence.id).unwrap(),
+            owner: AudioScalarOwner::Trim {
+                owner: AudioChannelStripOwner::ProgramOutput {
+                    output_id: sequence.audio_program.outputs[0].id,
+                },
+            },
+        };
+        state
+            .dispatch_action(
+                ParameterGestureAction::Begin {
+                    gesture_id: id,
+                    edit: ParameterGestureEdit::AudioScalar(AudioScalarValueEdit {
+                        target: Box::new(target),
+                        value: -1.0,
+                    }),
+                }
+                .action(),
+            )
+            .unwrap();
+        assert!(state.parameter_gesture_owns(id));
+        id
+    }
+
+    fn refused_without_side_effects(
+        state: &mut AppState,
+        edit: AdoptDisplayedNativeParameterEdit,
+        gesture: Option<mondrian_core::AuthoringGestureId>,
+    ) {
+        let author = state.authoring.as_ref().unwrap();
+        let document = serde_json::to_value(author.document()).unwrap();
+        let history = author.history().diagnostics();
+        let generation = state.project_author_generation();
+        let dirty = author.is_dirty();
+        let queued = state.native_audio_editor.as_ref().and_then(|c| c.queued.clone());
+        let observation =
+            state.native_audio_editor.as_ref().and_then(|c| c.parameter_observation.clone());
+        let pending = state
+            .native_audio_author_work
+            .as_ref()
+            .is_some_and(NativeAudioAuthorWork::blocks_source_replacement);
+        assert!(state.dispatch_action(action(edit)).is_err());
+        let author = state.authoring.as_ref().unwrap();
+        assert_eq!(serde_json::to_value(author.document()).unwrap(), document);
+        assert_eq!(author.history().diagnostics(), history);
+        assert_eq!(state.project_author_generation(), generation);
+        assert_eq!(author.is_dirty(), dirty);
+        assert_eq!(
+            state.native_audio_editor.as_ref().and_then(|c| c.queued.clone()),
+            queued
+        );
+        assert_eq!(
+            state.native_audio_editor.as_ref().and_then(|c| c.parameter_observation.clone()),
+            observation
+        );
+        assert_eq!(
+            state
+                .native_audio_author_work
+                .as_ref()
+                .is_some_and(NativeAudioAuthorWork::blocks_source_replacement),
+            pending
+        );
+        if let Some(gesture) = gesture {
+            assert!(
+                state.parameter_gesture_owns(gesture),
+                "refusal must precede finish"
+            );
+        }
+    }
+
+    #[test]
+    fn displayed_native_parameter_adoption_commits_exact_none_value_and_undo_redo() {
+        for (integer, value, scope) in [
+            (false, 0.375_123_456_789_f64, false),
+            (false, -0.0, false),
+            (true, 3.0, true),
+        ] {
+            let (_directory, mut state, edit) = fixture(integer, value, true, scope);
+            assert!(parameter(&state, &edit).automation.is_none());
+            assert!(state.displayed_native_parameter_adoption((*edit.target).clone()).is_some());
+            let original = state.active_sequence().unwrap().clone();
+            state.dispatch_action(action(edit.clone())).unwrap();
+            let curve = parameter(&state, &edit).automation.as_ref().unwrap();
+            assert_eq!(curve.default_value.to_bits(), value.to_bits());
+            assert!(curve.keyframes.is_empty());
+            let accepted = state.active_sequence().unwrap().clone();
+            refused_without_side_effects(&mut state, edit.clone(), None);
+            assert!(state.undo_timeline().unwrap());
+            assert!(parameter(&state, &edit).automation.is_none());
+            assert!(state.active_sequence().unwrap().author_state_eq_ignoring_revision(&original));
+            assert!(state.redo_timeline().unwrap());
+            assert!(state.active_sequence().unwrap().author_state_eq_ignoring_revision(&accepted));
+        }
+    }
+
+    #[test]
+    fn displayed_native_parameter_adoption_seals_a_valid_other_gesture_then_commits_once() {
+        let (_directory, mut state, mut edit) = fixture(false, 0.375, true, false);
+        let gesture = begin_trim(&mut state);
+        replace_observation(&mut state, 0.375, |_| {});
+        edit.expected_author_generation = state.project_author_generation();
+        state.dispatch_action(action(edit.clone())).unwrap();
+        assert!(!state.parameter_gesture_owns(gesture));
+        assert_eq!(
+            parameter(&state, &edit).automation.as_ref().unwrap().default_value,
+            0.375
+        );
+        assert!(state.undo_timeline().unwrap());
+        assert!(parameter(&state, &edit).automation.is_none());
+        assert!(
+            state.undo_timeline().unwrap(),
+            "the prior trim remains a separate undo"
+        );
+    }
+
+    #[test]
+    fn displayed_native_parameter_adoption_rejects_aba_and_stale_slider_after_clear() {
+        let (_directory, mut state, edit) = fixture(false, 0.375, true, false);
+        state.dispatch_action(action(edit.clone())).unwrap();
+        let slider = edit.target.set_action(0.5).unwrap();
+        let AudioScalarOwner::Parameter { processor_id, definition, parameter_schema, .. } =
+            &edit.target.owner
+        else {
+            panic!("parameter")
+        };
+        state
+            .dispatch_product_action(ProductAction::Audio(AudioProductAction::EditProcessorRack(
+                mondrian_timeline::AudioProcessorRackEditRequest {
+                    address: edit.target.owner.processor_address().unwrap(),
+                    edit: mondrian_timeline::AudioProcessorRackEdit::SetNativeAuthorState {
+                        processor_id: *processor_id,
+                        expected_definition: definition.clone(),
+                        update: mondrian_timeline::NativeAudioAuthorUpdate {
+                            parameters: vec![
+                                mondrian_timeline::NativeAudioParameterOperation::ClearAutomation {
+                                    parameter_id: parameter_schema.parameter_id.clone(),
+                                },
+                            ],
+                            opaque_state: None,
+                        },
+                    },
+                },
+            )))
+            .unwrap();
+        assert!(parameter(&state, &edit).automation.is_none());
+        assert_ne!(
+            state.project_author_generation(),
+            edit.expected_author_generation
+        );
+        refused_without_side_effects(&mut state, edit.clone(), None);
+        let history = state.authoring.as_ref().unwrap().history().diagnostics();
+        assert!(
+            state.dispatch_action(slider).is_err(),
+            "old slider stays Some-only"
+        );
+        assert_eq!(
+            state.authoring.as_ref().unwrap().history().diagnostics(),
+            history
+        );
+        assert!(state.undo_timeline().unwrap()); // Clear -> Some
+        assert!(state.undo_timeline().unwrap()); // Adopt -> None
+        assert!(parameter(&state, &edit).automation.is_none());
+        refused_without_side_effects(&mut state, edit, None);
+    }
+
+    #[test]
+    fn displayed_native_parameter_adoption_closed_codec_has_no_nested_author_escape() {
+        let (_directory, _state, edit) = fixture(false, 0.375, true, false);
+        let typed = ParameterGestureAction::AdoptDisplayedNativeParameter { edit };
+        assert!(matches!(
+            ParameterGestureAction::decode(&typed.action()).unwrap(),
+            Some(ParameterGestureAction::AdoptDisplayedNativeParameter { .. })
+        ));
+        for level in ["action", "edit", "expected", "target", "owner"] {
+            let mut encoded = serde_json::to_value(&typed).unwrap();
+            let object = match level {
+                "action" => &mut encoded,
+                "edit" => &mut encoded["edit"],
+                "expected" => &mut encoded["edit"]["expected"],
+                "target" => &mut encoded["edit"]["target"],
+                "owner" => &mut encoded["edit"]["target"]["owner"],
+                _ => unreachable!(),
+            };
+            object
+                .as_object_mut()
+                .unwrap()
+                .insert("untrusted_author_operation".into(), true.into());
+            assert!(
+                serde_json::from_value::<ParameterGestureAction>(encoded).is_err(),
+                "{level}"
+            );
+        }
+    }
+
+    #[test]
+    fn displayed_native_parameter_adoption_rejects_each_stale_identity_before_finish() {
+        for boundary in 0..26 {
+            let (_directory, mut state, mut edit) = fixture(false, 0.375, true, false);
+            let gesture = begin_trim(&mut state);
+            replace_observation(&mut state, 0.375, |_| {});
+            edit.expected_author_generation = state.project_author_generation();
+            match boundary {
+                0 => edit.expected_author_generation += 1,
+                1 => {
+                    edit.target.lease.session_id =
+                        serde_json::from_str("\"00000000-0000-4000-8000-000000000009\"").unwrap()
+                }
+                2 => edit.target.lease.sequence_id = mondrian_core::SequenceId::new(),
+                3 => edit.expected.root_plan = mondrian_core::AudioPreparedPlanId::new(),
+                4 => edit.expected.root_session = mondrian_core::AudioRenderSessionId::new(),
+                5 => edit.expected.local_plan = mondrian_core::AudioPreparedPlanId::new(),
+                6 => edit.expected.local_session = mondrian_core::AudioRenderSessionId::new(),
+                7 => edit.expected.continuity_epoch = Some(1),
+                8 => edit.expected.binding = mondrian_core::AudioProcessorBindingId::new(),
+                9 => edit.expected.installed_generation = NonZeroU64::new(999).unwrap(),
+                10 => edit.expected.process_id = NonZeroU32::new(999).unwrap(),
+                11 => edit.expected.object_serial = NonZeroU64::new(999).unwrap(),
+                12 => edit.expected.source_revision += 1,
+                13 => edit.expected.fact_revision += 1,
+                14 => edit.expected.author_value_bits = 0.5_f64.to_bits(),
+                15..=19 => {
+                    let AudioScalarOwner::Parameter {
+                        owner,
+                        processor_id,
+                        definition,
+                        parameter_schema,
+                    } = &mut edit.target.owner
+                    else {
+                        panic!("parameter")
+                    };
+                    match boundary {
+                        15 => *processor_id = mondrian_core::AudioProcessorInstanceId::new(),
+                        16 => {
+                            *definition =
+                                mondrian_timeline::audio::AudioProcessorDefinitionRef::Clap {
+                                    plugin_id: "other.native".into(),
+                                    schema_version: 1,
+                                    binary_sha256: Some([8; 32]),
+                                }
+                        }
+                        17 => parameter_schema.schema_version += 1,
+                        18 => {
+                            parameter_schema.parameter_id =
+                                ParameterId::new("clap.param.8").unwrap()
+                        }
+                        19 => {
+                            let mondrian_audio::AudioProcessorInputInspectionTarget::ChannelStrip {
+                                rack,
+                                ..
+                            } = owner
+                            else {
+                                panic!("strip")
+                            };
+                            *rack = AudioChannelStripRack::PostFader;
+                        }
+                        _ => unreachable!(),
+                    }
+                }
+                20 => {
+                    state.native_audio_editor.as_mut().unwrap().locator.insertion =
+                        Insertion::PostFader
+                }
+                21 => {
+                    state.native_audio_editor.as_mut().unwrap().target.as_mut().unwrap().binding =
+                        mondrian_core::AudioProcessorBindingId::new()
+                }
+                22 => state.native_audio_editor = None,
+                23 => edit.expected.author_value_bits = f64::NAN.to_bits(),
+                24 => edit.expected.author_value_bits = f64::INFINITY.to_bits(),
+                25 => edit.expected_author_generation = 0,
+                _ => unreachable!(),
+            }
+            refused_without_side_effects(&mut state, edit, Some(gesture));
+        }
+    }
+
+    #[test]
+    fn displayed_native_parameter_adoption_rejects_unavailable_raw_and_changed_facts() {
+        for boundary in 0..8 {
+            let (_directory, mut state, mut edit) = fixture(false, 0.375, true, false);
+            let gesture = begin_trim(&mut state);
+            replace_observation(&mut state, 0.375, |fact| match boundary {
+                0 => fact.author_value_bits = None, // Plain/display never substitute.
+                1 => {
+                    fact.author_value_bits = None;
+                    fact.origin =
+                        mondrian_core::NativeAudioParameterObservationOrigin::ActiveFlush {
+                            raw_offset: 0,
+                        };
+                }
+                2 => fact.revision += 1,
+                3 => fact.author_value_bits = Some(0.5_f64.to_bits()),
+                4 => fact.parameter = ParameterId::new("clap.param.8").unwrap(),
+                _ => {}
+            });
+            if boundary == 5 {
+                state.native_audio_editor.as_mut().unwrap().parameter_observation = None;
+            } else if boundary == 6 {
+                let context = state.native_audio_editor.as_mut().unwrap();
+                let previous = context.parameter_observation.as_ref().unwrap();
+                context.parameter_observation = Some(
+                    mondrian_core::NativeAudioParameterObservation::project(
+                        previous.target(),
+                        previous.process_id(),
+                        previous.object_serial(),
+                        previous.source_revision() + 1,
+                        previous.facts().to_vec(),
+                    )
+                    .unwrap(),
+                );
+            }
+            if boundary == 7 {
+                let context = state.native_audio_editor.as_mut().unwrap();
+                let previous = context.parameter_observation.as_ref().unwrap();
+                let mut latest = previous.facts()[0].clone();
+                latest.author_value_bits = None;
+                latest.value_bits = Some(0.75_f64.to_bits());
+                latest.origin = mondrian_core::NativeAudioParameterObservationOrigin::ActiveFlush {
+                    raw_offset: 0,
+                };
+                context.parameter_observation = Some(
+                    mondrian_core::NativeAudioParameterObservation::project(
+                        previous.target(),
+                        previous.process_id(),
+                        previous.object_serial(),
+                        previous.source_revision(),
+                        vec![previous.facts()[0].clone(), latest],
+                    )
+                    .unwrap(),
+                );
+            }
+            edit.expected_author_generation = state.project_author_generation();
+            refused_without_side_effects(&mut state, edit, Some(gesture));
+        }
+    }
+
+    #[test]
+    fn displayed_native_parameter_adoption_rejects_pending_and_outstanding_work() {
+        for pending_kind in 0..4 {
+            let (_directory, mut state, mut edit) = fixture(false, 0.375, true, false);
+            let gesture = begin_trim(&mut state);
+            replace_observation(&mut state, 0.375, |_| {});
+            edit.expected_author_generation = state.project_author_generation();
+            let pending_owner = if pending_kind != 0 {
+                let (directory, mut other, proposal, renderer) =
+                    super::attachment_continuity_contracts::opened_author();
+                other.observe_native_audio_author_proposal(proposal).unwrap();
+                let work = other.native_audio_author_work.as_mut().unwrap().single_mut().unwrap();
+                if pending_kind == 2 {
+                    work.outstanding = None;
+                }
+                if pending_kind == 3 {
+                    work.gesture = None;
+                }
+                state.native_audio_author_work = other.native_audio_author_work.take();
+                Some((directory, other, renderer))
+            } else {
+                let context = state.native_audio_editor.as_mut().unwrap();
+                context.queued = Some(Intent::Close { target: context.target.unwrap() });
+                None
+            };
+            refused_without_side_effects(&mut state, edit, Some(gesture));
+            drop(pending_owner);
+        }
+    }
+
+    #[test]
+    fn displayed_native_parameter_adoption_retains_numeric_contract_and_timeline_validation() {
+        for (integer, value, bounded) in [
+            (false, 0.375, false), // Original slider requires a numeric contract.
+            (false, 1.5, true),
+            (true, 1.5, true),
+            (true, 8.0, true),
+        ] {
+            let (_directory, mut state, mut edit) = fixture(integer, value, bounded, false);
+            let gesture = begin_trim(&mut state);
+            replace_observation(&mut state, value, |_| {});
+            edit.expected_author_generation = state.project_author_generation();
+            assert!(state.displayed_native_parameter_adoption((*edit.target).clone()).is_none());
+            refused_without_side_effects(&mut state, edit, Some(gesture));
+        }
+    }
+
+    #[test]
+    fn displayed_native_parameter_adoption_rejects_changed_scope_selection_and_occurrence() {
+        for boundary in 0..3 {
+            let (_directory, mut state, mut edit) = fixture(false, 0.375, true, true);
+            let AudioScalarOwner::Parameter { owner, .. } = &mut edit.target.owner else {
+                panic!("parameter")
+            };
+            let mondrian_audio::AudioProcessorInputInspectionTarget::ProcessingScope {
+                scope_id,
+                occurrence,
+            } = owner
+            else {
+                panic!("scope")
+            };
+            match boundary {
+                0 => state.clear_selection(),
+                1 => occurrence.edit_id = mondrian_core::AudioComponentEditId::new(),
+                2 => {
+                    let sequence = state.active_sequence_id().unwrap();
+                    state.selection.audio_scope_occurrences.insert(
+                        (sequence, *scope_id),
+                        mondrian_timeline::AudioComponentAddress {
+                            edit_id: mondrian_core::AudioComponentEditId::new(),
+                            ..*occurrence
+                        },
+                    );
+                }
+                _ => unreachable!(),
+            }
+            let gesture = begin_trim(&mut state);
+            replace_observation(&mut state, 0.375, |_| {});
+            edit.expected_author_generation = state.project_author_generation();
+            refused_without_side_effects(&mut state, edit, Some(gesture));
+        }
+    }
+
+    #[test]
+    fn displayed_native_parameter_adoption_rejects_both_constant_and_keyed_some() {
+        for keyed in [false, true] {
+            let (_directory, mut state, mut edit) = fixture(false, 0.375, true, false);
+            let id = ParameterId::new("clap.param.7").unwrap();
+            let sequence = state.active_sequence_id().unwrap();
+            state
+                .commit_sequence_edit(sequence, "existing host reference", |sequence| {
+                    let parameter = sequence.audio_program.outputs[0].strip.pre_fader.processors[0]
+                        .parameters
+                        .get_mut(&id)
+                        .unwrap();
+                    let mut curve = ExactAutomationCurve::new(id.clone(), 0.25).unwrap();
+                    if keyed {
+                        curve
+                            .keyframes
+                            .push(ExactAutomationKeyframe::linear(TimelineTime::ZERO, 0.5));
+                    }
+                    parameter.set_automation(curve).unwrap();
+                    Ok(())
+                })
+                .unwrap();
+            let gesture = begin_trim(&mut state);
+            replace_observation(&mut state, 0.375, |_| {});
+            edit.expected_author_generation = state.project_author_generation();
+            refused_without_side_effects(&mut state, edit, Some(gesture));
+        }
+    }
+}
