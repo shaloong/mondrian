@@ -285,6 +285,20 @@ pub(super) enum Facts {
 }
 impl Facts {
     pub(super) fn check_author(&self, instance: &AudioProcessorInstance) {
+        self.check_author_profile(instance, false);
+    }
+
+    pub(super) fn check_native_owned_author(&self, instance: &AudioProcessorInstance) {
+        assert!(
+            instance.opaque_state.is_some(),
+            "known stateful factory capture"
+        );
+        self.check_author_profile(instance, true);
+    }
+
+    // The caller chooses a known construction contract; opaque bytes never
+    // infer the ownership of an arbitrary existing or explicitly edited author.
+    fn check_author_profile(&self, instance: &AudioProcessorInstance, native_owned: bool) {
         let count = match self {
             Self::Clap(p) => p.len(),
             Self::Vst3(p, _) => p.len(),
@@ -304,19 +318,32 @@ impl Facts {
             assert_eq!(actual.schema, schema, "native schema after restore");
             assert_eq!(actual.ui.display_name.as_deref(), Some(name));
             assert_eq!(actual.ui.hidden, hidden);
-            let curve = actual.automation.as_ref().expect("constant native author value");
-            assert_eq!(curve.parameter_id, id);
-            assert!(curve.keyframes.is_empty());
-            assert_eq!(
-                curve.default_value.to_bits(),
-                value.to_bits(),
-                "native restored current value"
-            );
+            assert!(value.is_finite(), "actual current scalar is finite");
+            if native_owned {
+                assert!(
+                    actual.automation.is_none(),
+                    "native state owns each initial value"
+                );
+            } else {
+                let curve = actual.automation.as_ref().expect("explicit constant author value");
+                assert_eq!(curve.parameter_id, id);
+                assert!(curve.keyframes.is_empty());
+                assert_eq!(
+                    curve.default_value.to_bits(),
+                    value.to_bits(),
+                    "explicit current value"
+                );
+            }
         };
         match self {
             Self::Clap(p) => {
                 for d in p {
                     assert!(!d.read_only, "readonly cases need a later explicit slice");
+                    assert!(
+                        d.current_value.is_finite()
+                            && (d.min_value..=d.max_value).contains(&d.current_value)
+                            && (!d.stepped || d.current_value.fract() == 0.0)
+                    );
                     check(
                         d.parameter_id().expect("CLAP unsigned ID"),
                         d.authoring_schema().expect("CLAP schema"),
@@ -340,6 +367,33 @@ impl Facts {
                     );
                 }
             }
+        }
+    }
+    /// Compare independent actual restored queries, never an author curve.
+    pub(super) fn check_native_current(&self, actual: &Self) {
+        match (self, actual) {
+            (Self::Clap(expected), Self::Clap(actual)) => {
+                assert_eq!(actual, expected, "full native restored metadata");
+                for (actual, expected) in actual.iter().zip(expected) {
+                    assert_eq!(
+                        actual.current_value.to_bits(),
+                        expected.current_value.to_bits()
+                    );
+                }
+            }
+            (Self::Vst3(expected, values), Self::Vst3(actual, current)) => {
+                assert_eq!(actual, expected, "full native restored metadata");
+                assert_eq!(current.len(), values.len());
+                for ((id, value), (expected_id, expected_value)) in current.iter().zip(values) {
+                    assert_eq!(id, expected_id);
+                    assert_eq!(
+                        value.to_bits(),
+                        expected_value.to_bits(),
+                        "actual restored current"
+                    );
+                }
+            }
+            _ => panic!("native current query format changed"),
         }
     }
 }

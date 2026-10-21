@@ -401,7 +401,7 @@ fn run_case(format: Format) {
         Some(state.as_slice())
     );
     assert_eq!(instance.parameters.len(), case.expected_parameter_count);
-    facts.check_author(&instance);
+    facts.check_native_owned_author(&instance);
     let prefix = if format == Format::Clap {
         "clap"
     } else {
@@ -432,7 +432,33 @@ fn run_case(format: Format) {
         render,
         restored_author.opaque_state.as_ref().expect("persisted opaque bytes").as_ref(),
     );
-    facts.check_author(&fresh);
+    facts.check_native_owned_author(&fresh);
+    let restored_current = match &facts {
+        Facts::Clap(_) => Facts::Clap(
+            probe_clap_plugin_registration(
+                &helper.path,
+                &plugin.path,
+                &case.expected_identity,
+                render,
+                Some(&state),
+            )
+            .expect("independent actual fresh CLAP restored current")
+            .parameters,
+        ),
+        Facts::Vst3(_, _) => {
+            let probe = super::super::vst3_discovery::probe_vst3_plugin_registration_with_state(
+                &helper.path,
+                &plugin.path,
+                &case.expected_identity,
+                render,
+                Some(&state),
+                false,
+            )
+            .expect("independent actual fresh VST3 restored current");
+            Facts::Vst3(probe.registration.parameters, probe.current_values)
+        }
+    };
+    facts.check_native_current(&restored_current);
     assert_eq!(fresh.definition, restored_author.definition);
     assert_eq!(fresh.parameters, restored_author.parameters);
     assert_eq!(fresh.opaque_state, restored_author.opaque_state);
@@ -553,21 +579,27 @@ fn process_case(
     assert_eq!(entered.process_id(), before.process_id());
     assert!(entered.object_serial() >= before.object_serial());
     let ids: Vec<_> = author.parameters.keys().cloned().collect();
-    let ranges: Vec<_> = (0..ids.len()).map(|i| i..i + 1).collect();
-    let events: Vec<_> = ids
+    let mut events = Vec::new();
+    let ranges: Vec<_> = ids
         .iter()
-        .map(|id| AudioParameterEvent {
-            sample_offset: 0,
-            value: author
-                .parameters
-                .get(id)
-                .expect("canonical constant")
-                .automation
-                .as_ref()
-                .expect("author curve")
-                .default_value,
+        .map(|id| {
+            let start = events.len();
+            if let Some(curve) = &author.parameters[id].automation {
+                assert_eq!(&curve.parameter_id, id);
+                assert!(
+                    curve.keyframes.is_empty(),
+                    "this control sends explicit constants only"
+                );
+                events.push(AudioParameterEvent { sample_offset: 0, value: curve.default_value });
+            }
+            start..events.len()
         })
         .collect();
+    assert_eq!(
+        ranges.len(),
+        ids.len(),
+        "native-owned lanes remain present and empty"
+    );
     let mut output = Vec::with_capacity(input.len());
     let mut offset = 0;
     while offset < FRAMES {

@@ -143,6 +143,21 @@ fn author_projection_matches(
     metadata: &[ClapParameterDescriptor],
     author: &AudioProcessorInstance,
 ) -> bool {
+    author_projection_matches_profile(metadata, author, false)
+}
+
+fn native_owned_author_projection_matches(
+    metadata: &[ClapParameterDescriptor],
+    author: &AudioProcessorInstance,
+) -> bool {
+    author.opaque_state.is_some() && author_projection_matches_profile(metadata, author, true)
+}
+
+fn author_projection_matches_profile(
+    metadata: &[ClapParameterDescriptor],
+    author: &AudioProcessorInstance,
+    native_owned: bool,
+) -> bool {
     let expected: BTreeSet<_> = metadata
         .iter()
         .filter(|descriptor| !descriptor.read_only)
@@ -167,11 +182,15 @@ fn author_projection_matches(
         parameter.schema == schema
             && parameter.ui.display_name.as_deref() == Some(descriptor.name.as_str())
             && parameter.ui.hidden == descriptor.hidden
-            && parameter.automation.as_ref().is_some_and(|curve| {
-                curve.parameter_id == id
-                    && curve.keyframes.is_empty()
-                    && curve.default_value.to_bits() == descriptor.current_value.to_bits()
-            })
+            && if native_owned {
+                parameter.automation.is_none()
+            } else {
+                parameter.automation.as_ref().is_some_and(|curve| {
+                    curve.parameter_id == id
+                        && curve.keyframes.is_empty()
+                        && curve.default_value.to_bits() == descriptor.current_value.to_bits()
+                })
+            }
     })
 }
 
@@ -330,7 +349,10 @@ fn external_clap_readonly_author_projection_default_state_load() {
         .create_instance(&case.expected_identity, render(), None)
         .expect("actual default author capture");
     assert!(!default.bypassed);
-    assert!(author_projection_matches(&metadata.parameters, &default));
+    assert!(native_owned_author_projection_matches(
+        &metadata.parameters,
+        &default
+    ));
     assert_eq!(
         default.opaque_state.as_ref().map(AsRef::as_ref),
         Some(state.as_slice())
@@ -343,7 +365,10 @@ fn external_clap_readonly_author_projection_default_state_load() {
     let fresh = catalog
         .create_instance(&case.expected_identity, render(), Some(state.clone()))
         .expect("actual inactive-main PluginState.load default seed");
-    assert!(author_projection_matches(&metadata.parameters, &fresh));
+    assert!(native_owned_author_projection_matches(
+        &metadata.parameters,
+        &fresh
+    ));
     assert_eq!(fresh.definition, reopened.definition);
     assert_eq!(fresh.parameters, reopened.parameters);
     assert_eq!(fresh.opaque_state, reopened.opaque_state);
@@ -535,6 +560,22 @@ fn captured_readonly_metadata_controls_keep_author_and_observation_sets_distinct
             .collect()
     );
     assert!(author_projection_matches(&metadata.parameters, &author));
+    assert!(!native_owned_author_projection_matches(
+        &metadata.parameters,
+        &author
+    ));
+    let mut native_owned = author.clone();
+    for parameter in native_owned.parameters.values_mut() {
+        parameter.automation = None;
+    }
+    assert!(native_owned_author_projection_matches(
+        &metadata.parameters,
+        &native_owned
+    ));
+    assert!(!author_projection_matches(
+        &metadata.parameters,
+        &native_owned
+    ));
     let reopened: AudioProcessorInstance =
         serde_json::from_slice(&serde_json::to_vec(&author).expect("serde author"))
             .expect("reopen author");

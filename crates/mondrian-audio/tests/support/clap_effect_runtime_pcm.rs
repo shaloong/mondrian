@@ -277,7 +277,7 @@ fn external_clap_effect_runtime_renders_finite_nonzero_pcm() {
         author.opaque_state.as_deref().map(Vec::as_slice),
         Some(state.as_slice())
     );
-    Facts::Clap(parameters).check_author(&author);
+    Facts::Clap(parameters).check_native_owned_author(&author);
     let instance_id = author.id;
     let mut sequence = Sequence::new("finite external CLAP effect Runtime PCM");
     sequence.settings.audio_sample_rate = render.sample_rate;

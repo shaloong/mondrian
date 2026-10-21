@@ -100,7 +100,20 @@ fn observe_runtime_pcm_inner(
     let mut author = catalog
         .create_instance(&case.expected_identity, render, Some(state.to_vec()))
         .expect("fresh canonical author from the original VST3 state");
-    facts.check_author(&author);
+    facts.check_native_owned_author(&author);
+    let actual = super::super::super::vst3_discovery::probe_vst3_plugin_registration_with_state(
+        &case.helper.path,
+        &case.plugin.path,
+        &case.expected_identity,
+        render,
+        Some(state),
+        false,
+    )
+    .expect("independent actual Runtime seed restored current values");
+    facts.check_native_current(&Facts::Vst3(
+        actual.registration.parameters,
+        actual.current_values,
+    ));
     assert_eq!(author.parameters.len(), case.expected_parameter_count);
     assert!(
         !author.bypassed,

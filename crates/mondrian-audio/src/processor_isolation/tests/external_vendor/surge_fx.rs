@@ -116,7 +116,20 @@ fn external_vst3_effect_auxiliary_restore_pcm_observations() {
     let facts = Facts::Vst3(parameters, current);
     let catalog = Catalog::Vst3(catalog);
     let author = catalog.instance(&case.expected_identity, render, &state);
-    facts.check_author(&author);
+    facts.check_native_owned_author(&author);
+    let actual = super::super::super::vst3_discovery::probe_vst3_plugin_registration_with_state(
+        &helper.path,
+        &plugin.path,
+        &case.expected_identity,
+        render,
+        Some(&state),
+        false,
+    )
+    .expect("independent actual restored Surge FX current values");
+    facts.check_native_current(&Facts::Vst3(
+        actual.registration.parameters,
+        actual.current_values,
+    ));
     assert_eq!(author.parameters.len(), 14);
     assert!(
         !author.bypassed,

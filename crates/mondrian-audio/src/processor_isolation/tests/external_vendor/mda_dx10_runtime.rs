@@ -453,6 +453,7 @@ fn external_mda_dx10_vst3_rescan_handoff_preserves_note_score_pcm() {
             current.parameters.len(),
             "complete actual writable parameter census"
         );
+        let prior_parameters = current.parameters.clone();
         let mut ids = std::collections::BTreeSet::new();
         let mut writes = Vec::with_capacity(values.len());
         for (id, bits) in values {
@@ -461,15 +462,20 @@ fn external_mda_dx10_vst3_rescan_handoff_preserves_note_score_pcm() {
                 "actual rescan must not duplicate a parameter identity"
             );
             let parameter = current.parameters.get(id).expect("actual probed canonical schema");
-            assert!(parameter.automation.as_ref().unwrap().keyframes.is_empty());
-            writes.push(
-                NativeAudioParameterWrite {
-                    schema: Box::new(parameter.schema.clone()),
-                    value: f64::from_bits(*bits),
-                    mode: NativeAudioParameterWriteMode::Unkeyed,
-                }
-                .into(),
-            );
+            let value = f64::from_bits(*bits);
+            assert!(value.is_finite());
+            // A full native census is not permission to adopt an absent lane.
+            // Match the App: only an existing unkeyed reference is refreshed.
+            if parameter.automation.as_ref().is_some_and(|curve| curve.keyframes.is_empty()) {
+                writes.push(
+                    NativeAudioParameterWrite {
+                        schema: Box::new(parameter.schema.clone()),
+                        value,
+                        mode: NativeAudioParameterWriteMode::Unkeyed,
+                    }
+                    .into(),
+                );
+            }
         }
         let request = AudioProcessorRackEditRequest {
             address: AudioProcessorRackAddress::ChannelStrip {
@@ -496,10 +502,23 @@ fn external_mda_dx10_vst3_rescan_handoff_preserves_note_score_pcm() {
             .pre_fader
             .processors[0];
         assert_eq!(accepted.opaque_state.as_ref(), Some(state));
+        assert_eq!(accepted.parameters.len(), prior_parameters.len());
         for (id, bits) in values {
-            let curve = accepted.parameters.get(id).unwrap().automation.as_ref().unwrap();
-            assert!(curve.keyframes.is_empty());
-            assert_eq!(curve.default_value.to_bits(), *bits);
+            let prior = &prior_parameters[id];
+            let actual = &accepted.parameters[id];
+            assert_eq!(actual.schema, prior.schema);
+            assert_eq!(actual.ui, prior.ui);
+            if prior.automation.as_ref().is_some_and(|curve| curve.keyframes.is_empty()) {
+                let curve =
+                    actual.automation.as_ref().expect("existing unkeyed reference retained");
+                assert!(curve.keyframes.is_empty());
+                assert_eq!(curve.default_value.to_bits(), *bits);
+            } else {
+                assert_eq!(
+                    actual.automation, prior.automation,
+                    "absent and keyed authority stays unchanged"
+                );
+            }
         }
         assert_eq!(
             sequence.audio_program.note_lanes.as_slice(),
