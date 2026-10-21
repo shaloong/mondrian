@@ -2293,7 +2293,7 @@ mod displayed_parameter_adoption_contracts {
         let (_directory, _state, edit) = fixture(false, 0.375, true, false);
         let typed = ParameterGestureAction::AdoptDisplayedNativeParameter { edit };
         assert!(matches!(
-            ParameterGestureAction::decode(&typed.action()).unwrap(),
+            ParameterGestureAction::decode(&typed.clone().action()).unwrap(),
             Some(ParameterGestureAction::AdoptDisplayedNativeParameter { .. })
         ));
         for level in ["action", "edit", "expected", "target", "owner"] {
