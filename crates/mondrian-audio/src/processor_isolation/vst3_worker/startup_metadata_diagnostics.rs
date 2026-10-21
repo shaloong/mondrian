@@ -529,6 +529,7 @@ fn native_startup_metadata_phase_observation() {
             schema_version: PAYLOAD_VERSION,
             main_audio_input,
             audio_output_count: 1,
+            main_audio_output_count: 1,
             event_bus_contract,
             class_id,
             vendor,

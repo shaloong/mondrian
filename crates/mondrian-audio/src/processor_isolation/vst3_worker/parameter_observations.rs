@@ -783,6 +783,7 @@ mod tests {
             schema_version: PAYLOAD_VERSION,
             main_audio_input: registration.main_audio_input,
             audio_output_count: registration.audio_output_count,
+            main_audio_output_count: registration.main_audio_output_count,
             event_bus_contract: registration.event_bus_contract,
             binary_path: registration.binary_path,
             class_id: registration.class_id,

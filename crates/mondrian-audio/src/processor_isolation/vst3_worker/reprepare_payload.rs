@@ -17,6 +17,8 @@ struct Metadata<'a> {
     #[serde(borrow)]
     audio_output_count: &'a RawValue,
     #[serde(borrow)]
+    main_audio_output_count: &'a RawValue,
+    #[serde(borrow)]
     event_bus_contract: &'a RawValue,
     #[serde(borrow)]
     binary_path: &'a RawValue,
@@ -34,10 +36,11 @@ struct Metadata<'a> {
     parameter_ids: &'a RawValue,
 }
 
-const FIELD_NAMES: [&str; 11] = [
+const FIELD_NAMES: [&str; 12] = [
     "schema_version",
     "main_audio_input",
     "audio_output_count",
+    "main_audio_output_count",
     "event_bus_contract",
     "binary_path",
     "class_id",
@@ -61,7 +64,7 @@ const FIELD_NAME_BYTES: usize = {
 // reusable Vec as an iterative nesting stack, and escaped root keys reuse it.
 // A requested-layout envelope of 16*(N+K) covers that input-sized scratch and
 // cold single-layer escaped-key/Display diagnostics. K is derived from these
-// ELEVEN names: four bytes per name byte for the expected-field list plus 512 for
+// TWELVE names: four bytes per name byte for the expected-field list plus 512 for
 // fixed prefixes, punctuation and numeric locations. This is not allocator/SDK
 // telemetry. Output and owning Factory clones are admitted separately.
 pub(in crate::processor_isolation) fn reprepare_codec_bound(n: usize) -> Option<usize> {
@@ -81,7 +84,7 @@ pub(in crate::processor_isolation) fn reprepare_payload_output_bound(
         return None;
     }
     // At most three decimal digits and a comma per byte, plus all old raw
-    // fragments, eleven quoted keys/colons/commas, braces, [] and default null.
+    // fragments, twelve quoted keys/colons/commas, braces, [] and default null.
     configuration_bytes
         .checked_mul(4)?
         .checked_add(n)?
@@ -110,7 +113,9 @@ pub(in crate::processor_isolation) fn payload_with_reprepare_configuration(
     }
     let output_count: u8 = serde_json::from_str(view.audio_output_count.get())
         .map_err(|error| invalid(format!("invalid retained VST3 output count: {error}")))?;
-    super::validate_audio_output_count(output_count)?;
+    let main_output_count: u8 = serde_json::from_str(view.main_audio_output_count.get())
+        .map_err(|error| invalid(format!("invalid retained VST3 Main output prefix: {error}")))?;
+    super::validate_main_audio_output_count(output_count, main_output_count)?;
     // Original Option fields admit both absent and null. The old state is never
     // decoded/allocated; absent vendor re-emits null just like the typed codec.
     let _old_state = view.state;
@@ -126,6 +131,7 @@ pub(in crate::processor_isolation) fn payload_with_reprepare_configuration(
             object.serialize_field("schema_version", v.schema_version)?;
             object.serialize_field("main_audio_input", v.main_audio_input)?;
             object.serialize_field("audio_output_count", v.audio_output_count)?;
+            object.serialize_field("main_audio_output_count", v.main_audio_output_count)?;
             object.serialize_field("event_bus_contract", v.event_bus_contract)?;
             object.serialize_field("binary_path", v.binary_path)?;
             object.serialize_field("class_id", v.class_id)?;
@@ -152,6 +158,7 @@ mod tests {
             schema_version: super::super::PAYLOAD_VERSION,
             main_audio_input: super::super::Vst3MainAudioInput::Present,
             audio_output_count: 3,
+            main_audio_output_count: 2,
             event_bus_contract: super::super::Vst3EventBusContractV1::empty(),
             binary_path: std::env::current_exe().unwrap(),
             class_id: "00112233445566778899aabbccddeeff".to_owned(),
@@ -184,6 +191,7 @@ mod tests {
                 v.schema_version.get().to_owned(),
                 v.main_audio_input.get().to_owned(),
                 v.audio_output_count.get().to_owned(),
+                v.main_audio_output_count.get().to_owned(),
                 v.event_bus_contract.get().to_owned(),
                 v.binary_path.get().to_owned(),
                 v.class_id.get().to_owned(),
@@ -234,12 +242,23 @@ mod tests {
             payload.replacen("{", "{\"vendor\":null,", 1),
             payload.replacen("{", "{\"state\":null,", 1),
             payload.replacen("{", "{\"audio_output_count\":3,", 1),
-            payload.replace("\"schema_version\":4", "\"schema_version\":3"),
-            payload.replace("\"schema_version\":4", "\"schema_version\":5"),
+            payload.replace("\"schema_version\":5", "\"schema_version\":4"),
+            payload.replace("\"schema_version\":5", "\"schema_version\":6"),
+            payload.replacen("{", "{\"main_audio_output_count\":2,", 1),
+            payload.replacen("{", "{\"main_audio_output_cou\\u006et\":2,", 1),
+            payload.replace(
+                "\"main_audio_output_count\":2",
+                "\"main_audio_output_count\":0",
+            ),
+            payload.replace(
+                "\"main_audio_output_count\":2",
+                "\"main_audio_output_count\":4",
+            ),
+            payload.replace("\"main_audio_output_count\":2,", ""),
             payload.replace("\"audio_output_count\":3", "\"audio_output_count\":0"),
             payload.replace("\"audio_output_count\":3", "\"audio_output_count\":33"),
             payload.replace("\"audio_output_count\":3", "\"audio_output_count\":256"),
-            payload.replace("\"schema_version\":4,", ""),
+            payload.replace("\"schema_version\":5,", ""),
             "[]".to_owned(),
         ] {
             let mut peak = 0;
@@ -257,7 +276,7 @@ mod tests {
             let missing = serde_json::to_vec(&value).unwrap();
             assert!(payload_with_reprepare_configuration(&missing, &[8], &mut |_| {}).is_err());
         }
-        let first = payload.replacen("{", "{\"extra\":0,", 1).replace("\"schema_version\":4,", "");
+        let first = payload.replacen("{", "{\"extra\":0,", 1).replace("\"schema_version\":5,", "");
         let error =
             payload_with_reprepare_configuration(first.as_bytes(), &[8], &mut |_| {}).unwrap_err();
         assert!(

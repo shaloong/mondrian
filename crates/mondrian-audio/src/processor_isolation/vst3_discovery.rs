@@ -2,7 +2,7 @@
 
 use super::protocol::{auxiliary_from_wire, auxiliary_to_wire, AuxiliaryBusWire};
 use super::vst3_worker::{
-    fingerprint, parameter_descriptors, prepare_audio_inputs, validate_audio_output_count,
+    fingerprint, parameter_descriptors, prepare_audio_inputs, validate_main_audio_output_count,
     MAX_STATE_BYTES,
 };
 use super::{
@@ -32,7 +32,7 @@ const DEADLINE: Duration = Duration::from_secs(10);
 const MAX_REQUEST_BYTES: u64 = 512 * 1024;
 const MAX_RESPONSE_BYTES: u64 = 512 * 1024;
 const MAX_DESCRIPTORS: usize = 4096;
-const DISCOVERY_VERSION: u32 = 5;
+const DISCOVERY_VERSION: u32 = 6;
 
 /// One audio-effect class exported by an installed VST3 library.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -77,16 +77,17 @@ enum DiscoveryOperation {
     reason = "cold-path bounded metadata stays inline below 1 KiB to avoid another heap owner; this enum never enters DSP"
 )]
 pub(super) enum DiscoveryResponse {
-    #[serde(rename = "list_v5")]
+    #[serde(rename = "list_v6")]
     List {
         schema_version: u32,
         descriptors: Vec<Vst3PluginDescriptor>,
     },
-    #[serde(rename = "probe_v5")]
+    #[serde(rename = "probe_v6")]
     Probe {
         schema_version: u32,
         main_audio_input: Vst3MainAudioInput,
         audio_output_count: u8,
+        main_audio_output_count: u8,
         event_bus_contract: Vst3EventBusContractV1,
         class_id: String,
         vendor: Option<String>,
@@ -223,6 +224,7 @@ pub(super) fn probe_vst3_plugin_registration_with_state_and_settlement(
         event_bus_contract,
         main_audio_input,
         audio_output_count,
+        main_audio_output_count,
         ..
     } = response
     else {
@@ -265,6 +267,7 @@ pub(super) fn probe_vst3_plugin_registration_with_state_and_settlement(
         execution_contract: contract,
         main_audio_input,
         audio_output_count,
+        main_audio_output_count,
         auxiliary_inputs,
         parameters,
         event_bus_contract,
@@ -417,7 +420,7 @@ fn probe_loaded(
     plugin
         .set_process_mode(mode)
         .map_err(|error| invalid(format!("VST3 probe mode is unsupported: {error}")))?;
-    let (main_audio_input, audio_inputs, audio_output_count) =
+    let (main_audio_input, audio_inputs, audio_output_count, main_audio_output_count) =
         prepare_audio_inputs(&mut plugin, layout)?;
     let event_bus_contract = Vst3EventBusContractV1::observe(&plugin)?;
     let parameters = parameter_descriptors(&plugin)?;
@@ -442,6 +445,7 @@ fn probe_loaded(
         schema_version: DISCOVERY_VERSION,
         main_audio_input,
         audio_output_count,
+        main_audio_output_count,
         event_bus_contract,
         class_id: plugin.info().uid.clone(),
         vendor: (!plugin.info().vendor.is_empty()).then(|| plugin.info().vendor.clone()),
@@ -641,8 +645,9 @@ fn decode_response(bytes: &[u8]) -> Result<DiscoveryResponse, AudioProcessorHost
     if version != DISCOVERY_VERSION {
         return Err(invalid("unsupported VST3 discovery response version"));
     }
-    if let DiscoveryResponse::Probe { audio_output_count, .. } = &response {
-        validate_audio_output_count(*audio_output_count)?;
+    if let DiscoveryResponse::Probe { audio_output_count, main_audio_output_count, .. } = &response
+    {
+        validate_main_audio_output_count(*audio_output_count, *main_audio_output_count)?;
     }
     Ok(response)
 }
@@ -725,7 +730,7 @@ mod version_tests {
     use serde_json::json;
 
     #[test]
-    fn discovery_v4_refuses_legacy_missing_unknown_and_wrong_versions_in_both_directions() {
+    fn discovery_v6_refuses_legacy_missing_unknown_and_wrong_versions_in_both_directions() {
         // Frozen legacy request/response discriminators: the old request denied
         // unknown fields and the old response only recognized list/probe.
         #[derive(Deserialize)]
@@ -784,7 +789,8 @@ mod version_tests {
             ("schema_version", json!(2)),
             ("schema_version", json!(3)),
             ("schema_version", json!(4)),
-            ("schema_version", json!(6)),
+            ("schema_version", json!(5)),
+            ("schema_version", json!(7)),
             ("unexpected", json!(true)),
         ] {
             let mut bad = request.clone();
@@ -794,18 +800,24 @@ mod version_tests {
         let mut bad = request.clone();
         bad["operation"]["unexpected"] = json!(true);
         assert!(decode_request(&serde_json::to_vec(&bad).unwrap()).is_err());
-        for (old_kind, new_kind) in [("list", "list_v5"), ("probe", "probe_v5")] {
+        for (old_kind, new_kind) in [("list", "list_v6"), ("probe", "probe_v6")] {
             let mut current = if old_kind == "list" {
-                json!({"kind":new_kind,"schema_version":5,"descriptors":[]})
+                json!({"kind":new_kind,"schema_version":6,"descriptors":[]})
             } else {
-                json!({"kind":new_kind,"schema_version":5,"class_id":"0123456789ABCDEF0123456789ABCDEF","vendor":null,"latency_frames":0,"tail_frames":0,"parameters":[],"current_values":[],"captured_state":null,"auxiliary_buses":[],"input_names":[],"main_audio_input":"present","audio_output_count":1,"event_bus_contract":{"schema_version":1,"inputs":[],"outputs":[]}})
+                json!({"kind":new_kind,"schema_version":6,"class_id":"0123456789ABCDEF0123456789ABCDEF","vendor":null,"latency_frames":0,"tail_frames":0,"parameters":[],"current_values":[],"captured_state":null,"auxiliary_buses":[],"input_names":[],"main_audio_input":"present","audio_output_count":1,"main_audio_output_count":1,"event_bus_contract":{"schema_version":1,"inputs":[],"outputs":[]}})
             };
             assert!(decode_response(&serde_json::to_vec(&current).unwrap()).is_ok());
             assert!(serde_json::from_value::<LegacyResponse>(current.clone()).is_err());
             assert!(serde_json::from_value::<PreviousResponse>(current.clone()).is_err());
             assert!(serde_json::from_value::<PreviousV3Response>(current.clone()).is_err());
             assert!(serde_json::from_value::<PreviousV4Response>(current.clone()).is_err());
+            let mut previous_v5 = current.clone();
+            previous_v5["kind"] = json!(format!("{old_kind}_v5"));
+            previous_v5["schema_version"] = json!(5);
+            previous_v5.as_object_mut().unwrap().remove("main_audio_output_count");
+            assert!(decode_response(&serde_json::to_vec(&previous_v5).unwrap()).is_err());
             let mut previous_v4 = current.clone();
+            previous_v4.as_object_mut().unwrap().remove("main_audio_output_count");
             previous_v4["kind"] = json!(format!("{old_kind}_v4"));
             previous_v4["schema_version"] = json!(4);
             previous_v4.as_object_mut().unwrap().remove("audio_output_count");
@@ -834,7 +846,8 @@ mod version_tests {
                 ("schema_version", json!(2)),
                 ("schema_version", json!(3)),
                 ("schema_version", json!(4)),
-                ("schema_version", json!(6)),
+                ("schema_version", json!(5)),
+                ("schema_version", json!(7)),
                 ("unexpected", json!(true)),
             ] {
                 let mut bad = current.clone();
@@ -847,6 +860,7 @@ mod version_tests {
                     "input_names",
                     "main_audio_input",
                     "audio_output_count",
+                    "main_audio_output_count",
                 ] {
                     let mut missing = current.clone();
                     missing.as_object_mut().unwrap().remove(field);
@@ -860,6 +874,24 @@ mod version_tests {
                 for count in [1, 3, 32] {
                     let mut valid = current.clone();
                     valid["audio_output_count"] = json!(count);
+                    assert!(decode_response(&serde_json::to_vec(&valid).unwrap()).is_ok());
+                }
+                for prefix in [
+                    json!(0),
+                    json!(2),
+                    json!(33),
+                    json!(256),
+                    json!(null),
+                    json!("1"),
+                ] {
+                    let mut bad = current.clone();
+                    bad["main_audio_output_count"] = prefix;
+                    assert!(decode_response(&serde_json::to_vec(&bad).unwrap()).is_err());
+                }
+                for (total, main) in [(1, 1), (3, 1), (3, 2), (3, 3), (32, 32)] {
+                    let mut valid = current.clone();
+                    valid["audio_output_count"] = json!(total);
+                    valid["main_audio_output_count"] = json!(main);
                     assert!(decode_response(&serde_json::to_vec(&valid).unwrap()).is_ok());
                 }
                 for shape in [json!(null), json!(false), json!("unknown")] {

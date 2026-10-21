@@ -2519,8 +2519,8 @@ mod note_spec_contracts {
         )
         .unwrap();
         spec.preparation_payload = serde_json::to_vec(&serde_json::json!({
-            "schema_version": 4, "main_audio_input": Vst3MainAudioInput::Present,
-            "audio_output_count": 1,
+            "schema_version": 5, "main_audio_input": Vst3MainAudioInput::Present,
+            "audio_output_count": 1, "main_audio_output_count": 1,
             "event_bus_contract": Vst3EventBusContractV1::empty(),
             "binary_path": "not-loaded.vst3", "class_id": "unchanged", "vendor": "",
             "binary_sha256": vec![7;32], "state": [1,2],

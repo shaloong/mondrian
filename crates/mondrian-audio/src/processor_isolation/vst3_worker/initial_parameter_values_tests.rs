@@ -44,6 +44,7 @@ pub(super) fn prepare(gain: f64, mode: u32) -> Vst3Worker {
         schema_version: PAYLOAD_VERSION,
         main_audio_input: Vst3MainAudioInput::Present,
         audio_output_count: 1,
+        main_audio_output_count: 1,
         event_bus_contract: Vst3EventBusContractV1::empty(),
         class_id: "61921CF43A2B4A68AE5AE08241D85E22".to_owned(),
         vendor: Some("Vendor".to_owned()),
