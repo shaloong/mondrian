@@ -2036,9 +2036,16 @@ namespace OFX {
           return kOfxStatErrBadHandle;
         }
 
-        ClipInstance *clipInstance = reinterpret_cast<ClipInstance*>(h1);
+        ClipBase *clipBase = reinterpret_cast<ClipBase*>(h1);
 
-        if (!clipInstance || !clipInstance->verifyMagic()) {
+        if (!clipBase || !clipBase->verifyMagic()) {
+          *h3 = NULL;
+          return kOfxStatErrBadHandle;
+        }
+
+        // A live ClipDescriptor is a ClipBase, but cannot fetch an image.
+        ClipInstance *clipInstance = dynamic_cast<ClipInstance*>(clipBase);
+        if (!clipInstance) {
           *h3 = NULL;
           return kOfxStatErrBadHandle;
         }
@@ -2130,11 +2137,18 @@ namespace OFX {
           return kOfxStatErrBadHandle;
         }
 
-        ClipInstance *clipInstance = reinterpret_cast<ClipInstance*>(clip);
+        ClipBase *clipBase = reinterpret_cast<ClipBase*>(clip);
 
-        if (!clipInstance || !clipInstance->verifyMagic()) {
+        if (!clipBase || !clipBase->verifyMagic()) {
           bounds->x1 = bounds->y1 = bounds->x2 = bounds->y2 = 0.;
 
+          return kOfxStatErrBadHandle;
+        }
+
+        // Region queries also require an instance, not a live descriptor.
+        ClipInstance *clipInstance = dynamic_cast<ClipInstance*>(clipBase);
+        if (!clipInstance) {
+          bounds->x1 = bounds->y1 = bounds->x2 = bounds->y2 = 0.;
           return kOfxStatErrBadHandle;
         }
 
