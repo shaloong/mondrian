@@ -687,18 +687,13 @@ fn external_surge_xt_vst3_captured_state_notes_main_runtime_without_media() {
     let settled = unsafe { WaitForSingleObject(handle.as_raw_handle().cast(), 0) };
     let mut exit = u32::MAX;
     let queried = unsafe { GetExitCodeProcess(handle.as_raw_handle().cast(), &mut exit) };
-    println!(
-        "{}",
-        json!({"case":"surge-xt-vst3-main-runtime","stage":"completed",
+    let mut completed = json!({"case":"surge-xt-vst3-main-runtime","stage":"completed",
         "class":CLASS,"plugin_version":descriptor.version,"state_bytes":state.len(),
         "parameters":PARAMETERS,"automatable":AUTOMATABLE,"nonautomatable":PARAMETERS-AUTOMATABLE,
         "musical_reference":reference,"rate":48000,"block":BLOCK,"frames":TOTAL,
         "note_on":ON,"note_off":OFF,"next_input_signal_sample":processed_through,
         "main_energy":energy,"main_peak":peak,
-        "sustain_window":[SUSTAIN_START,SUSTAIN_END],"sustain_block_frames":BLOCK,
-        "sustain_blocks_measured":sustain_blocks_measured,"sustain_block_energy":sustain_block_energy,
-        "sustain_energy":sustain_energy,"minimum_sustain_energy_exclusive":MIN_SUSTAIN_ENERGY,
-        "native_owned_none_parameters":native_owned_parameters.len(),"author_handoffs":handoffs,
+        "author_handoffs":handoffs,
         "nonempty_rescan_handoffs":rescans,"nonconsuming_held_requests":held_requests,
         "native_pid":pid,"object_serial":object.object_serial().get(),"media_resolves":0,
         "fixed_resident_bytes":final_footprint.fixed_resident_bytes,
@@ -707,8 +702,15 @@ fn external_surge_xt_vst3_captured_state_notes_main_runtime_without_media() {
         "finite_runtime_grant":true,"complete_heap_qualified":false,
         "auxiliary_output_sound_qualified":false,"algorithm_or_note_release_qualified":false,
         "terminal_off_acoustics_qualified":false,"native_ffi_tuple_qualified":false,
-        "graceful_ack_qualified":false,"realtime_qualified":false})
-    );
+        "graceful_ack_qualified":false,"realtime_qualified":false});
+    completed["sustain_window"] = json!([SUSTAIN_START, SUSTAIN_END]);
+    completed["sustain_block_frames"] = json!(BLOCK);
+    completed["sustain_blocks_measured"] = json!(sustain_blocks_measured);
+    completed["sustain_block_energy"] = json!(sustain_block_energy);
+    completed["sustain_energy"] = json!(sustain_energy);
+    completed["minimum_sustain_energy_exclusive"] = json!(MIN_SUSTAIN_ENERGY);
+    completed["native_owned_none_parameters"] = json!(native_owned_parameters.len());
+    println!("{completed}");
     assert_eq!(
         settled, WAIT_OBJECT_0,
         "processing child exits after original Drop"
