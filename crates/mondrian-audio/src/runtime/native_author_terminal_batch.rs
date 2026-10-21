@@ -210,35 +210,38 @@ impl AudioProgramRuntime {
                 .host_allocation()
                 .map_err(AudioRuntimeBuildError::from)?,
         );
-        let plan = local.plan.as_ref().ok_or(AudioNativeOwnerError::OwnerUnavailable)?;
-        for actual in std::iter::once(self.session.resource_plan())
-            .chain(std::iter::once(plan.next_plan().as_ref()))
-        {
-            actual.visit_native_host_owned_storage(&mut |owner| {
-                if let Some(allocation) = owner.complete_allocation() {
-                    extra.push(allocation);
-                } else {
-                    unresolved = unresolved.checked_add(1).ok_or(
-                        crate::AudioProcessorFactoryStorageError::Owner(
-                            crate::NativeHostLedgerError::ExtentOverflow,
-                        ),
-                    )?;
-                }
-                Ok(())
-            })?;
-        }
-        let (events, lanes) = plan.resource_buffers();
-        let replacements = [AudioParameterPlanResourceReplacement::new(
-            &self.session,
-            plan.next_plan(),
-            events,
-            lanes,
-        )];
-        let resources = self
-            .admit_parameter_plan_overlap(&replacements, &extra)?
-            .into_commit(self, &replacements)?;
-        drop(extra);
-        drop(replacements);
+        // Only the owned commit escapes the borrowed overlap-admission views.
+        let resources = {
+            let plan = local.plan.as_ref().ok_or(AudioNativeOwnerError::OwnerUnavailable)?;
+            for actual in std::iter::once(self.session.resource_plan())
+                .chain(std::iter::once(plan.next_plan().as_ref()))
+            {
+                actual.visit_native_host_owned_storage(&mut |owner| {
+                    if let Some(allocation) = owner.complete_allocation() {
+                        extra.push(allocation);
+                    } else {
+                        unresolved = unresolved.checked_add(1).ok_or(
+                            crate::AudioProcessorFactoryStorageError::Owner(
+                                crate::NativeHostLedgerError::ExtentOverflow,
+                            ),
+                        )?;
+                    }
+                    Ok(())
+                })?;
+            }
+            let (events, lanes) = plan.resource_buffers();
+            let replacements = [AudioParameterPlanResourceReplacement::new(
+                &self.session,
+                plan.next_plan(),
+                events,
+                lanes,
+            )];
+            let resources = self
+                .admit_parameter_plan_overlap(&replacements, &extra)?
+                .into_commit(self, &replacements)?;
+            drop(extra);
+            resources
+        };
         drop(locators);
         let (old_logical, new_logical) = resources.logical_role_weights();
         if new_logical > requested_logical {
