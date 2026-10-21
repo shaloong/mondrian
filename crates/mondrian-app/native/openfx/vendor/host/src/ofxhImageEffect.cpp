@@ -498,33 +498,33 @@ namespace OFX {
       double Instance::getDoubleProperty(const std::string &name, int index) const
       {
         if(name==kOfxImageEffectPropProjectSize){
-          if(index>=2) throw Property::Exception(kOfxStatErrBadIndex);
+          if(index<0 || index>=2) throw Property::Exception(kOfxStatErrBadIndex);
           double values[2];
           getProjectSize(values[0],values[1]);
           return values[index];
         }
         else if(name==kOfxImageEffectPropProjectOffset){
-          if(index>=2) throw Property::Exception(kOfxStatErrBadIndex);
+          if(index<0 || index>=2) throw Property::Exception(kOfxStatErrBadIndex);
           double values[2];
           getProjectOffset(values[0],values[1]);
           return values[index];
         }
         else if(name==kOfxImageEffectPropProjectExtent){
-          if(index>=2) throw Property::Exception(kOfxStatErrBadIndex);
+          if(index<0 || index>=2) throw Property::Exception(kOfxStatErrBadIndex);
           double values[2];
           getProjectExtent(values[0],values[1]);
           return values[index];
         }
         else if(name==kOfxImageEffectPropProjectPixelAspectRatio){
-          if(index>=1) throw Property::Exception(kOfxStatErrBadIndex);
+          if(index<0 || index>=1) throw Property::Exception(kOfxStatErrBadIndex);
           return getProjectPixelAspectRatio();
         }
         else if(name==kOfxImageEffectInstancePropEffectDuration){
-          if(index>=1) throw Property::Exception(kOfxStatErrBadIndex);
+          if(index<0 || index>=1) throw Property::Exception(kOfxStatErrBadIndex);
           return getEffectDuration();
         }
         else if(name==kOfxImageEffectPropFrameRate){
-          if(index>=1) throw Property::Exception(kOfxStatErrBadIndex);
+          if(index<0 || index>=1) throw Property::Exception(kOfxStatErrBadIndex);
           return getFrameRate();
         }
         else
@@ -534,28 +534,37 @@ namespace OFX {
       void Instance::getDoublePropertyN(const std::string &name, double* first, int n) const
       {
         if(name==kOfxImageEffectPropProjectSize){
-          if(n>2) throw Property::Exception(kOfxStatErrBadIndex);
-          getProjectSize(first[0],first[1]);
+          if(n<0 || n>2) throw Property::Exception(kOfxStatErrBadIndex);
+          if(n==0) return;
+          double values[2];
+          getProjectSize(values[0],values[1]);
+          for(int i=0; i<n; ++i) first[i] = values[i];
         }
         else if(name==kOfxImageEffectPropProjectOffset){
-          if(n>2) throw Property::Exception(kOfxStatErrBadIndex);
-          getProjectOffset(first[0],first[1]);
+          if(n<0 || n>2) throw Property::Exception(kOfxStatErrBadIndex);
+          if(n==0) return;
+          double values[2];
+          getProjectOffset(values[0],values[1]);
+          for(int i=0; i<n; ++i) first[i] = values[i];
         }
         else if(name==kOfxImageEffectPropProjectExtent){
-          if(n>2) throw Property::Exception(kOfxStatErrBadIndex);
-          getProjectExtent(first[0],first[1]);
+          if(n<0 || n>2) throw Property::Exception(kOfxStatErrBadIndex);
+          if(n==0) return;
+          double values[2];
+          getProjectExtent(values[0],values[1]);
+          for(int i=0; i<n; ++i) first[i] = values[i];
         }
         else if(name==kOfxImageEffectPropProjectPixelAspectRatio){
-          if(n>1) throw Property::Exception(kOfxStatErrBadIndex);
-          *first = getProjectPixelAspectRatio();
+          if(n<0 || n>1) throw Property::Exception(kOfxStatErrBadIndex);
+          if(n==1) *first = getProjectPixelAspectRatio();
         }
         else if(name==kOfxImageEffectInstancePropEffectDuration){
-          if(n>1) throw Property::Exception(kOfxStatErrBadIndex);
-          *first = getEffectDuration();
+          if(n<0 || n>1) throw Property::Exception(kOfxStatErrBadIndex);
+          if(n==1) *first = getEffectDuration();
         }
         else if(name==kOfxImageEffectPropFrameRate){
-          if(n>1) throw Property::Exception(kOfxStatErrBadIndex);
-          *first = getFrameRate();
+          if(n<0 || n>1) throw Property::Exception(kOfxStatErrBadIndex);
+          if(n==1) *first = getFrameRate();
         }
         else
           throw Property::Exception(kOfxStatErrUnknown);
