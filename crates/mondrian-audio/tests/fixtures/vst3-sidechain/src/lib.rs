@@ -1718,7 +1718,31 @@ mod profile_notification_contracts {
                 let handler = host.to_com_ptr::<IComponentHandler>().unwrap();
                 let editor = controller.to_com_ptr::<IEditController>().unwrap();
                 assert_eq!(editor.setComponentHandler(handler.as_ptr()), kResultOk);
+                let mut inputs = [SpeakerArr::kStereo; 3];
+                let mut output = SpeakerArr::kStereo;
+                assert_eq!(
+                    signal.setBusArrangements(inputs.as_mut_ptr(), 3, &mut output, 1),
+                    kResultTrue
+                );
+                for bus in 0..3 {
+                    assert_eq!(
+                        control.activateBus(MediaTypes_::kAudio, BusDirections_::kInput, bus, 1),
+                        kResultOk
+                    );
+                }
+                assert_eq!(
+                    control.activateBus(MediaTypes_::kAudio, BusDirections_::kOutput, 0, 1),
+                    kResultOk
+                );
+                let mut setup = ProcessSetup {
+                    processMode: ProcessModes_::kRealtime,
+                    symbolicSampleSize: SymbolicSampleSizes_::kSample32,
+                    maxSamplesPerBlock: 4,
+                    sampleRate: 48000.0,
+                };
+                assert_eq!(signal.setupProcessing(&mut setup), kResultOk);
                 assert_eq!(control.setActive(1), kResultOk);
+                assert_eq!(signal.setProcessing(1), kResultOk);
             }
             Self { component, signal, controller, host }
         }
@@ -1770,7 +1794,18 @@ mod profile_notification_contracts {
             let dropped = Arc::clone(&self.host.dropped);
             unsafe {
                 let control = self.component.to_com_ptr::<IComponent>().unwrap();
+                assert_eq!(self.signal.setProcessing(0), kResultOk);
                 assert_eq!(control.setActive(0), kResultOk);
+                for bus in 0..3 {
+                    assert_eq!(
+                        control.activateBus(MediaTypes_::kAudio, BusDirections_::kInput, bus, 0),
+                        kResultOk
+                    );
+                }
+                assert_eq!(
+                    control.activateBus(MediaTypes_::kAudio, BusDirections_::kOutput, 0, 0),
+                    kResultOk
+                );
                 let component_peer = self.component.to_com_ptr::<IConnectionPoint>().unwrap();
                 let controller_peer = self.controller.to_com_ptr::<IConnectionPoint>().unwrap();
                 assert_eq!(
@@ -1869,8 +1904,10 @@ mod profile_notification_contracts {
                 "later scalar sync stays idempotent"
             );
             let control = fixture.component.to_com_ptr::<IComponent>().unwrap();
+            assert_eq!(fixture.signal.setProcessing(0), kResultOk);
             assert_eq!(control.setActive(0), kResultOk);
             assert_eq!(control.setActive(1), kResultOk);
+            assert_eq!(fixture.signal.setProcessing(1), kResultOk);
         }
         assert_eq!(
             fixture.component.configured_latency.load(Ordering::Acquire),
@@ -1915,6 +1952,7 @@ mod profile_notification_contracts {
             receiver.onDataExchangeBlocksReceived(PROFILE_CONTEXT, 1, ptr::null_mut(), 0);
             block.size = 3;
             receiver.onDataExchangeBlocksReceived(PROFILE_CONTEXT, 1, &mut block, 0);
+            assert_eq!(fixture.signal.setProcessing(0), kResultOk);
             assert_eq!(
                 fixture.component.to_com_ptr::<IComponent>().unwrap().setActive(0),
                 kResultOk
@@ -1944,6 +1982,7 @@ mod profile_notification_contracts {
         assert_eq!(fixture.host.returns.get(), 1);
         // No explicit dispatch: legal queue close delivers the pending foreground
         // notification before queueClosed, exactly as the existing host does.
+        assert_eq!(unsafe { fixture.signal.setProcessing(0) }, kResultOk);
         assert_eq!(
             unsafe { fixture.component.to_com_ptr::<IComponent>().unwrap().setActive(0) },
             kResultOk
