@@ -143,7 +143,6 @@ pub(super) fn validate_json(value: &serde_json::value::RawValue) -> Result<(), s
 #[cfg(test)]
 mod tests {
     use super::*;
-    use base64::Engine as _;
     use serde::Deserialize;
 
     #[derive(Serialize, Deserialize, Debug, PartialEq)]
