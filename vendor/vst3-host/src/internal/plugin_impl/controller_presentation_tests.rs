@@ -291,17 +291,18 @@ fn bounded_presentations_reject_selection_count_thread_and_pending_sync_before_q
     assert_eq!(f.deferred.pop(), Some((0, 0.75)));
     let mut f = Fixture::new();
     let other_thread = thread::spawn(|| thread::current().id()).join().unwrap();
-    let mut fields = f.fields();
-    fields.control_thread = other_thread;
-    assert!(fields
-        .visit_controller_parameter_presentations_bounded(
-            2,
-            &[0],
-            &mut ControllerParameterPresentationFrame::default(),
-            &mut |_, _| panic!("wrong thread visit")
-        )
-        .is_err());
-    drop(fields);
+    {
+        let mut fields = f.fields();
+        fields.control_thread = other_thread;
+        assert!(fields
+            .visit_controller_parameter_presentations_bounded(
+                2,
+                &[0],
+                &mut ControllerParameterPresentationFrame::default(),
+                &mut |_, _| panic!("wrong thread visit")
+            )
+            .is_err());
+    }
     assert!(f.probe.lock().unwrap().calls.is_empty());
 }
 #[test]
