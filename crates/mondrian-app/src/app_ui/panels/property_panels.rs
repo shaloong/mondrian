@@ -2378,6 +2378,28 @@ pub(super) fn audio_processor_static_parameter_control(
             })
             .unwrap_or_else(|| localizer.text("audio-rack-native-controlled-parameter"));
         let label = Box::new(Label::new(text).muted());
+        if let Some(query) = parameter.native_query.as_ref().filter(|_| can_edit) {
+            let action = crate::app::product_action::ProductAction::Audio(
+                crate::app::product_action::AudioProductAction::QueryNativeParameter(query.clone()),
+            )
+            .into_external_action();
+            let button = Button::new(localizer.text("audio-rack-query-native-parameter"))
+                .with_control_inspection_key(audio_rack_control_inspection_key(
+                    rack,
+                    Some(processor),
+                    "parameter-query-native",
+                    AudioRackControlSubject::Parameter(&parameter.schema),
+                ))
+                .minimal()
+                .on_click(Some(action));
+            return Box::new(
+                FlexContainer::row(vec![
+                    FlexChild::flex(label, 1.0),
+                    FlexChild::fixed(Box::new(button)),
+                ])
+                .with_gap(mondrian_ui_theme::current_theme().spacing.xs),
+            );
+        }
         let action = parameter.native_adoption.as_ref().filter(|_| can_edit).map(|edit| {
             crate::app::parameter_gesture::ParameterGestureAction::AdoptDisplayedNativeParameter {
                 edit: edit.clone(),
@@ -7275,5 +7297,108 @@ mod displayed_native_parameter_control_contracts {
         assert!(parameter.native_adoption.is_none());
         assert!(parameter.is_static_editable());
         assert!(static_parameter_target(&adopted, processor, parameter).is_some());
+    }
+}
+
+#[cfg(test)]
+mod explicit_native_parameter_query_controls {
+    use super::*;
+    use crate::app::product_action::{AudioNativeParameterQueryPayload, AudioProductAction};
+    use crate::app_ui::audio_processor_rack::{
+        bind_audio_scalar_author_lease, project_audio_processor_rack,
+    };
+    use crate::app_ui::test_utils::{event_ctx, DummyFocus, DummyShortcut, DummyTooltip};
+    use mondrian_ui_core::widget::EventRequests;
+    use mondrian_ui_core::{KeyCode, Modifiers, UiEvent};
+    use std::cell::RefCell;
+
+    #[test]
+    fn native_owned_no_fact_query_button_is_manual_and_some_keeps_original_control() {
+        let _guard = crate::app_ui::test_utils::theme_test_guard();
+        let (_directory, state, edit) =
+            crate::app::AppState::displayed_native_parameter_fixture_for_test(false, 0.375, false);
+        let sequence = state.active_sequence().unwrap();
+        let localizer = Localizer::new(crate::app_ui::localization::AppUiLocale::EnUs).unwrap();
+        let mut rack = project_audio_processor_rack(
+            sequence,
+            edit.target.owner.processor_address().unwrap(),
+            &localizer,
+            crate::app_ui::audio_automation::AudioAutomationTimeContext::at_sequence_time(
+                sequence,
+                mondrian_core::TimelineTime::ZERO,
+            ),
+        );
+        bind_audio_scalar_author_lease(std::slice::from_mut(&mut rack), &state);
+        let processor = &rack.processors[0];
+        let mut parameter = processor.parameters[0].clone();
+        assert!(parameter.static_value.is_none() && parameter.native_presentation.is_none());
+        // Widget contract only: App's independent controls qualify the actual
+        // VST3/Opened/Source admission; this DTO models a prepared row action.
+        let payload = AudioNativeParameterQueryPayload {
+            target: edit.target,
+            expected_author_generation: state.project_author_generation(),
+        };
+        parameter.native_query = Some(payload.clone());
+        let numeric = parameter.schema.numeric.as_ref().unwrap()[0];
+        let before = serde_json::to_value(state.authoring.as_ref().unwrap().document()).unwrap();
+        let mut control = audio_processor_static_parameter_control(
+            &rack, processor, &parameter, numeric, true, &localizer,
+        );
+        assert_eq!(control.child_count(), 2);
+        assert!(
+            super::super::tests::owned_panel_status_painted_text(control.as_mut())
+                .contains(&localizer.text("audio-rack-query-native-parameter"))
+        );
+        let actions = RefCell::new(Vec::new());
+        assert!(
+            actions.borrow().is_empty(),
+            "building a row never runs its query"
+        );
+        let mut requests = EventRequests::default();
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut context = event_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+        let button = control.child_mut(1).unwrap();
+        assert!(button.can_focus());
+        assert_eq!(
+            button.control_inspection_state().unwrap().role,
+            mondrian_ui_core::AccessibilityRole::Button
+        );
+        button.event(
+            &UiEvent::KeyDown { key: KeyCode::Enter, modifiers: Modifiers::none() },
+            &mut context,
+        );
+        let actions = actions.into_inner();
+        assert_eq!(actions.len(), 1);
+        assert_eq!(
+            ProductAction::decode_external(&actions[0]).unwrap(),
+            Some(ProductAction::Audio(
+                AudioProductAction::QueryNativeParameter(payload)
+            ))
+        );
+        let mut disabled = audio_processor_static_parameter_control(
+            &rack, processor, &parameter, numeric, false, &localizer,
+        );
+        assert_eq!(disabled.child_count(), 0);
+        parameter.static_value = Some(0.25);
+        let mut owned = audio_processor_static_parameter_control(
+            &rack, processor, &parameter, numeric, true, &localizer,
+        );
+        assert!(
+            !super::super::tests::owned_panel_status_painted_text(owned.as_mut())
+                .contains(&localizer.text("audio-rack-query-native-parameter"))
+        );
+        assert_eq!(
+            serde_json::to_value(state.authoring.as_ref().unwrap().document()).unwrap(),
+            before
+        );
     }
 }
