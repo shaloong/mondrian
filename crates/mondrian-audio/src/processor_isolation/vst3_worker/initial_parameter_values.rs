@@ -157,7 +157,12 @@ impl Vst3Worker {
                     vst3_host::Error::InvalidParameter("unadmitted controller parameter".to_owned())
                 })?;
                 if observed.id() != expected.id
-                    || !observed.title_matches(&expected.name)
+                    || validate_parameter(expected).is_err()
+                    || !retained_parameter_fields_valid(
+                        observed.title_utf16(),
+                        observed.default_normalized(),
+                        observed.step_count(),
+                    )
                     || observed.default_normalized() != expected.default_normalized
                     || observed.step_count() != expected.step_count
                     || observed.flags() != expected.flags
@@ -195,7 +200,7 @@ fn invalid_native_parameter() -> vst3_host::Error {
     vst3_host::Error::InvalidParameter("controller identity or normalized value changed".to_owned())
 }
 
-/// Two same-owner consumers share the admitted metadata comparison, not a
+/// Same-owner consumers share processing checks and caption admission, not a
 /// second parameter inventory. The callback receives each actual current value.
 pub(super) fn visit_admitted_controller_values(
     plugin: &Plugin,
@@ -212,7 +217,12 @@ pub(super) fn visit_admitted_controller_values(
         &mut |index, observed| {
             let expected = admitted.get(index).ok_or_else(invalid_native_parameter)?;
             if observed.id() != expected.id
-                || !observed.title_matches(&expected.name)
+                || validate_parameter(expected).is_err()
+                || !retained_parameter_fields_valid(
+                    observed.title_utf16(),
+                    observed.default_normalized(),
+                    observed.step_count(),
+                )
                 || observed.default_normalized().to_bits() != expected.default_normalized.to_bits()
                 || observed.step_count() != expected.step_count
                 || observed.flags() != expected.flags

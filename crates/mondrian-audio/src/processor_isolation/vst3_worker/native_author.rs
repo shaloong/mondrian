@@ -574,30 +574,33 @@ fn current_source(
     )
 }
 
-/// Native Values and verified unchanged Info are different author contracts.
+/// Values and information with a stable processing contract are distinct.
+/// Valid captions may change; defaults, steps, flags and identity remain fixed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RescanKind {
     Values,
-    UnchangedInfo,
+    ProcessingStableInfo,
 }
 impl RescanKind {
     fn from_flags(flags: i32) -> Option<Self> {
         match flags {
             4 => Some(Self::Values),
-            16 => Some(Self::UnchangedInfo),
+            16 => Some(Self::ProcessingStableInfo),
             _ => None,
         }
     }
     fn flags(self) -> i32 {
         match self {
             Self::Values => 4,
-            Self::UnchangedInfo => 16,
+            Self::ProcessingStableInfo => 16,
         }
     }
     fn projection(self) -> mondrian_core::NativeAudioParameterRescanKind {
         match self {
             Self::Values => mondrian_core::NativeAudioParameterRescanKind::Values,
-            Self::UnchangedInfo => mondrian_core::NativeAudioParameterRescanKind::NoValueRefresh,
+            Self::ProcessingStableInfo => {
+                mondrian_core::NativeAudioParameterRescanKind::NoValueRefresh
+            }
         }
     }
 }
@@ -662,10 +665,10 @@ impl Vst3Worker {
             &mut frame,
             &mut |index, normalized| {
                 let descriptor = &parameters[index];
-                // The shared visitor proves the complete ordered admitted
-                // descriptor projection, including names/defaults/steps/flags.
-                // Its current values never become overrides for Info-only.
-                if kind == RescanKind::UnchangedInfo || descriptor.read_only {
+                // The shared visitor proves the complete ordered processing
+                // contract and admits actual captions independently. Caption
+                // refresh uses ephemeral facts, never an author-value override.
+                if kind == RescanKind::ProcessingStableInfo || descriptor.read_only {
                     return Ok(());
                 }
                 let projected = (|| {
@@ -907,10 +910,10 @@ mod rescan_tests {
         let info = cohort(3, 16);
         assert_eq!(
             classify_rescan(&[marker(info)], source(1), Some(info)),
-            Ok(Some((RescanKind::UnchangedInfo, info)))
+            Ok(Some((RescanKind::ProcessingStableInfo, info)))
         );
         assert_eq!(
-            RescanKind::UnchangedInfo.projection(),
+            RescanKind::ProcessingStableInfo.projection(),
             mondrian_core::NativeAudioParameterRescanKind::NoValueRefresh
         );
         for (events, live) in [
@@ -943,7 +946,7 @@ mod rescan_tests {
         assert!(captured_rescan_prefix(
             &events,
             2,
-            RescanKind::UnchangedInfo,
+            RescanKind::ProcessingStableInfo,
             info
         ));
         assert!(!captured_rescan_prefix(
@@ -955,7 +958,7 @@ mod rescan_tests {
         assert!(!captured_rescan_prefix(
             &events,
             1,
-            RescanKind::UnchangedInfo,
+            RescanKind::ProcessingStableInfo,
             info
         ));
         for suffix in [
@@ -967,7 +970,7 @@ mod rescan_tests {
             assert!(!captured_rescan_prefix(
                 &[marker(info), suffix],
                 2,
-                RescanKind::UnchangedInfo,
+                RescanKind::ProcessingStableInfo,
                 info
             ));
         }

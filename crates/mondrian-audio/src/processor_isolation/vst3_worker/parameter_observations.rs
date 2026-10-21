@@ -113,7 +113,8 @@ fn fact(
     let name = text(value.title, 255)?;
     if expected.read_only
         || expected.id != value.id
-        || expected.name != name
+        || name.is_empty()
+        || name.chars().any(char::is_control)
         || expected.default_normalized.to_bits() != value.default.to_bits()
         || expected.step_count != value.steps
         || expected.flags != value.flags
@@ -398,6 +399,34 @@ mod tests {
     }
 
     #[test]
+    fn vst3_current_presentations_refresh_valid_caption_without_changing_processing_schema() {
+        let expected = parameter(0);
+        let historical = expected.clone();
+        for caption in ["Other", "Gain Updated", "音量 · 更新"] {
+            let actual = capture_with(
+                std::slice::from_ref(&expected),
+                &[0],
+                || Some(snapshot()),
+                |_, visit| {
+                    visit(current(&expected, &wide(caption), &wide("250 Hz")))?;
+                    Ok(1)
+                },
+            )
+            .expect("a valid current caption is presentation, not processing identity");
+            assert_eq!(actual.facts.len(), 1);
+            let fact = &actual.facts[0];
+            assert_eq!(fact.name.as_deref(), Some(caption));
+            assert_eq!(fact.parameter, expected.parameter_id().unwrap());
+            assert_eq!(fact.author_value_bits, Some(0.25_f64.to_bits()));
+            assert_eq!(fact.value_bits, Some(250.0_f64.to_bits()));
+            assert_eq!(fact.info_flags, Some(expected.flags));
+            assert_eq!(
+                expected, historical,
+                "the saved descriptor is an offline snapshot"
+            );
+        }
+    }
+    #[test]
     fn vst3_current_presentation_projects_actual_stepped_normalized_value_without_plain_conversion()
     {
         let expected = Vst3ParameterDescriptor { step_count: 4, ..parameter(0) };
@@ -477,7 +506,7 @@ mod tests {
                 &[0],
                 || Some(snapshot()),
                 |_, visit| {
-                    let title = wide(if drift == 4 { "Other" } else { "Gain" });
+                    let title = wide(if drift == 4 { "" } else { "Gain" });
                     let display = wide("250 Hz");
                     let mut value = current(&parameters[0], &title, &display);
                     match drift {

@@ -165,12 +165,12 @@ fn retained_constants_match_successful_delivery(
         })
 }
 
-/// Stable VST3 parameter facts in normalized VST3 coordinates.
+/// Admitted processing facts and a captured UI caption in VST3 coordinates.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Vst3ParameterDescriptor {
     /// VST3 definition-local `ParamID`.
     pub id: u32,
-    /// Plugin supplied display name.
+    /// Captured plugin display name, not a native processing identity.
     pub name: String,
     /// Default normalized value.
     pub default_normalized: f64,
@@ -2026,9 +2026,22 @@ fn prepare_loaded_metadata(
         return Err(invalid("VST3 audio output shape changed since probe"));
     }
     let parameters = parameter_descriptors(plugin)?;
-    if parameters != registration.parameters {
+    // Both directories retain their complete shape and valid captions. A
+    // restored state can legitimately rename parameters without changing the
+    // processing contract. Keep the original numeric PartialEq policy here.
+    if parameters.len() != registration.parameters.len()
+        || parameters.iter().zip(&registration.parameters).any(|(actual, expected)| {
+            validate_parameter(expected).is_err()
+                || actual.id != expected.id
+                || actual.default_normalized != expected.default_normalized
+                || actual.step_count != expected.step_count
+                || actual.can_automate != expected.can_automate
+                || actual.read_only != expected.read_only
+                || actual.flags != expected.flags
+        })
+    {
         return Err(invalid(
-            "VST3 parameter metadata changed since contract probe",
+            "VST3 parameter processing metadata changed since contract probe",
         ));
     }
     if Vst3EventBusContractV1::observe(plugin)? != registration.event_bus_contract {
@@ -2417,8 +2430,8 @@ fn retained_parameters_match(
                 observed.step_count(),
             );
             matches &= admitted.get(index).is_some_and(|expected| {
-                observed.id() == expected.id
-                    && observed.title_matches(&expected.name)
+                validate_parameter(expected).is_ok()
+                    && observed.id() == expected.id
                     // Preserve the descriptor's numeric PartialEq, including ±0.
                     && observed.default_normalized() == expected.default_normalized
                     && observed.step_count() == expected.step_count

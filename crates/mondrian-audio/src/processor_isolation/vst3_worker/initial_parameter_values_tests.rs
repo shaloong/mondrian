@@ -691,11 +691,24 @@ fn rescan_source_snapshot(
 #[test]
 #[ignore = "requires rebuilt owned mode13 SDK fixture under native Job runner"]
 fn native_late_rescan_collects_and_settles_one_current_proposal_exactly_once() {
+    qualify_current_value_rescan("Gain");
+}
+
+#[test]
+#[ignore = "requires rebuilt owned mode13 SDK fixture under native Job runner"]
+fn native_late_value_rescan_keeps_valid_saved_caption_out_of_processing_identity() {
+    // An independent real Values4 on the entered owner compares processing
+    // metadata against a historical caption; this is not a mode16 -> 4 sequence.
+    qualify_current_value_rescan("Saved Gain Caption");
+}
+
+fn qualify_current_value_rescan(captured_caption: &str) {
     use crate::{
         NativeAudioAuthorDeliveryState as Delivery, NativeAudioAuthorEvent as Event,
         NativeAudioObservationConsumption as Consumption,
     };
     let (mut worker, binding) = entered_rescan_worker();
+    worker.payload.parameters[0].name = captured_caption.to_owned();
     let object = worker.native_audio_object_observation().unwrap();
     let seed = worker.payload.state.clone();
     let initial_cursor = worker.last_end;
@@ -845,6 +858,7 @@ fn native_late_rescan_collects_and_settles_one_current_proposal_exactly_once() {
     assert_eq!(worker.native_audio_object_observation().unwrap(), object);
     assert_eq!(worker.native_binding.unwrap().binding(), installed.binding);
     assert_eq!(worker.last_end, cursor);
+    assert_eq!(worker.payload.parameters[0].name, captured_caption);
 }
 
 #[test]
@@ -1056,7 +1070,7 @@ fn native_late_rescan_refuses_multiple_retired_and_metadata_drift_without_draini
         NativeAudioAuthorDeliveryState as Delivery, NativeAudioAuthorRefusal as Refusal,
         NativeAudioObservationConsumption as Consumption,
     };
-    for case in ["multiple", "retired", "id", "title", "flags"] {
+    for case in ["multiple", "retired", "id", "flags"] {
         let (mut worker, binding) = entered_rescan_worker();
         let changes: &[(i32, f64)] = if case == "multiple" {
             &[(0, 0.625), (2, 0.75)]
@@ -1080,7 +1094,6 @@ fn native_late_rescan_refuses_multiple_retired_and_metadata_drift_without_draini
         }
         match case {
             "id" => worker.payload.parameters[0].id = 99,
-            "title" => worker.payload.parameters[0].name.push_str(" drift"),
             "flags" => worker.payload.parameters[0].flags ^= 1,
             _ => {}
         }
@@ -2109,11 +2122,15 @@ fn native_externally_retired_rescan_cannot_enter_selected_terminal_rebuild() {
 #[test]
 #[ignore = "requires rebuilt owned mode16 SDK fixture under native Job runner"]
 fn native_unchanged_parameter_info_delivers_empty_rescan_and_settles_exactly_once() {
+    qualify_processing_stable_info(16);
+}
+
+fn qualify_processing_stable_info(mode: u32) -> (Vst3Worker, crate::NativeAudioObjectBindRequest) {
     use crate::{
         NativeAudioAuthorDeliveryState as Delivery, NativeAudioAuthorEvent as Event,
         NativeAudioAuthorRefusal as Refusal, NativeAudioObservationConsumption as Consumption,
     };
-    let (mut worker, binding) = entered_rescan_worker_for_mode(16);
+    let (mut worker, binding) = entered_rescan_worker_for_mode(mode);
     let object = worker.native_audio_object_observation().unwrap();
     let seed = worker.payload.state.clone();
     let before = audit(&worker);
@@ -2122,10 +2139,11 @@ fn native_unchanged_parameter_info_delivers_empty_rescan_and_settles_exactly_onc
         [0.375, 0.375, 0.75, 0.75]
     );
     let cursor = worker.last_end;
+    let input_values = worker.last_parameter_values.clone();
     let actual = worker.poll_native_observations(Consumption::DrainAuthor(binding)).unwrap();
     let author = actual.author.unwrap();
     let Delivery::Delivered(delivery) = author.delivery else {
-        panic!("actual unchanged-info notification requires a retained delivery");
+        panic!("processing-stable info notification requires a retained delivery");
     };
     let [Event::ParameterValuesRescanned { kind, values }] = delivery.events() else {
         panic!("one exact information-only scan, not fabricated parameter edits");
@@ -2229,6 +2247,90 @@ fn native_unchanged_parameter_info_delivers_empty_rescan_and_settles_exactly_onc
     assert_eq!(worker.native_audio_object_observation().unwrap(), object);
     assert_eq!(worker.native_binding.unwrap().binding(), installed.binding);
     assert_eq!(worker.last_end, cursor);
+    assert_eq!(
+        worker.last_parameter_values, input_values,
+        "Info cannot change DSP delivery ownership"
+    );
+    (worker, installed)
+}
+
+#[test]
+#[ignore = "requires rebuilt owned mode20 SDK fixture under native Job runner"]
+fn native_caption_info_refreshes_facts_and_retained_contract_without_author_fill() {
+    use crate::{
+        NativeAudioAuthorDeliveryState as Delivery,
+        NativeAudioObservationConsumption as Consumption,
+    };
+    // Mode20 changes a real current title at the armed controller setter. Run
+    // every original empty-info delivery, source/witness and exact-Ack assertion.
+    let (mut worker, installed) = qualify_processing_stable_info(20);
+    let object = worker.native_audio_object_observation().unwrap();
+    assert_eq!(
+        worker.payload.parameters[0].name, "Gain",
+        "saved UI snapshot stays historical"
+    );
+    let observed = worker.poll_native_observations(Consumption::DrainAuthor(installed)).unwrap();
+    assert!(matches!(
+        observed.author.unwrap().delivery,
+        Delivery::Preserved
+    ));
+    assert_eq!(observed.parameters.len(), 1);
+    let current = &observed.parameters[0];
+    assert_eq!(current.name.as_deref(), Some("Gain Updated"));
+    assert_eq!(
+        current.parameter,
+        worker.payload.parameters[0].parameter_id().unwrap()
+    );
+    assert_eq!(
+        current.author_value_bits,
+        Some(0.75_f64.to_bits()),
+        "ephemeral query only"
+    );
+    assert_eq!(worker.native_audio_object_observation().unwrap(), object);
+
+    // The stopped retained consumer must compare processing fields too, rather
+    // than reject this same valid current title against the saved descriptor.
+    worker.plugin.as_mut().unwrap().stop_processing().unwrap();
+    assert!(
+        retained_parameters_match(worker.plugin.as_ref().unwrap(), &worker.payload.parameters)
+            .unwrap()
+    );
+    worker.plugin.as_mut().unwrap().start_processing().unwrap();
+
+    assert_eq!(worker.native_audio_object_observation().unwrap(), object);
+    assert_eq!(worker.payload.parameters[0].name, "Gain");
+}
+
+#[test]
+#[ignore = "requires owned mode1 SDK fixture under native Job runner"]
+fn native_initial_and_fresh_state_entry_keep_valid_saved_captions_out_of_processing_identity() {
+    let mut worker = prepare(0.375, 1);
+    worker.payload.parameters[0].name = "Saved Gain Caption".to_owned();
+    worker
+        .enter_state(73)
+        .expect("initial value service accepts a valid historical caption");
+    process(&mut worker, 73);
+    let old = worker.native_audio_object_observation().unwrap().unwrap();
+    let state = worker.payload.state.clone();
+    worker
+        .enter_state(100)
+        .expect("fresh native metadata and initial handoff compare processing identity");
+    let fresh = worker.native_audio_object_observation().unwrap().unwrap();
+    assert_eq!(fresh.process_id(), old.process_id());
+    assert!(fresh.object_serial() > old.object_serial());
+    assert_eq!(worker.payload.state, state);
+    assert_eq!(worker.payload.parameters[0].name, "Saved Gain Caption");
+    assert!(worker.last_parameter_values.iter().all(Option::is_none));
+    assert!(worker.pending_reprepare().is_none());
+    let actual = audit(&worker);
+    assert_eq!(actual.process, 0);
+    assert_eq!(actual.setters, 0);
+    assert_eq!(actual.wrong_thread, 0);
+    assert_eq!(actual.observed, 0.375);
+    assert_eq!(
+        process(&mut worker, 100),
+        vec![0.375, 0.375, 0.375, 0.375, 0.75, 0.75, 0.75, 0.75]
+    );
 }
 
 #[test]
@@ -2242,7 +2344,6 @@ fn native_parameter_info_rejects_admitted_drift_without_consuming_source() {
         (17, "default"),
         (18, "steps"),
         (19, "flags"),
-        (20, "title"),
         (16, "id"),
         (16, "count"),
     ] {
@@ -2256,7 +2357,7 @@ fn native_parameter_info_rejects_admitted_drift_without_consuming_source() {
             .unwrap()
             .service_controller()
             .unwrap();
-        // ID/count controls corrupt the admitted projection only. Modes17-20
+        // ID/count controls corrupt the admitted projection only. Modes17-19
         // change real native metadata at the actual armed controller setter.
         match case {
             "id" => worker.payload.parameters[0].id = 99,
