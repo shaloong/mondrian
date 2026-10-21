@@ -3,11 +3,11 @@
 //! Fixed musical reference only; no algorithm, release, auxiliary sound or RT oracle.
 
 use super::surge_instrument_runtime::accept_actual_rescans;
-use super::{owner, Cursors, Facts};
+use super::{owner, Cursors};
 use crate::processor_isolation::vst3_discovery::probe_vst3_plugin_registration_with_state;
 use crate::processor_isolation::{
     DiscoveredVst3AudioProcessorSpecResolver, IsolatedAudioProcessorResolver, Vst3EventBusRole,
-    Vst3MainAudioInput,
+    Vst3MainAudioInput, Vst3ParameterDescriptor,
 };
 use crate::{
     AudioCompileRequest, AudioContinuityEpoch, AudioExecutionError, AudioMediaResolver,
@@ -17,11 +17,12 @@ use crate::{
 };
 use mondrian_core::{
     AssetId, AudioChannelLayout, AudioNoteId, AudioNoteLaneId, AudioOwnerInstallationSource,
-    AudioSourceComponentId, AuthoringList, ExecutionCancellationToken, MusicalTimeReference,
-    TimelineTime,
+    AudioSourceComponentId, AuthoringList, AuthoringMap, ExecutionCancellationToken,
+    MusicalTimeReference, ParameterId, TimelineTime,
 };
 use mondrian_timeline::audio::{
     AudioNote, AudioNoteLane, AudioNoteTarget, AudioProcessorDefinitionRef, AudioProcessorInstance,
+    AudioProcessorParameter,
 };
 use mondrian_timeline::{
     AudioProcessorOutputPort, AudioRoute, AudioRouteDestination, AudioRouteSource, Sequence,
@@ -45,6 +46,11 @@ const BLOCK: usize = 256;
 const TOTAL: usize = 16_384;
 const ON: i64 = 127;
 const OFF: i64 = 8_193;
+// Same predeclared middle window as the stopped SDK native-state witness.
+const SUSTAIN_START: usize = 2_048;
+const SUSTAIN_END: usize = 6_144;
+const SUSTAIN_BLOCKS: usize = (SUSTAIN_END - SUSTAIN_START) / BLOCK;
+const MIN_SUSTAIN_ENERGY: f64 = 1e-12;
 const OUTPUT_SENTINEL: f32 = f32::from_bits(0x7fc0_5a31);
 const GRANT: AudioRuntimeResourceGrant =
     AudioRuntimeResourceGrant::new(1, 64 * 1024 * 1024, 16 * 1024 * 1024);
@@ -94,6 +100,45 @@ fn same_progress(before: &Cursors, after: &Cursors) {
     assert_eq!(before.processors[0].state, after.processors[0].state);
 }
 
+// Check the actual native-owned author directly against the sole descriptor
+// projection. The shared Facts checker requires Some constants and must not be
+// satisfied with a fabricated Some copy of this None-owned model.
+fn check_native_owned_author(
+    instance: &AudioProcessorInstance,
+    parameters: &[Vst3ParameterDescriptor],
+) {
+    assert_eq!(parameters.len(), PARAMETERS);
+    assert_eq!(instance.parameters.len(), PARAMETERS);
+    let mut ids = std::collections::BTreeSet::new();
+    for descriptor in parameters {
+        assert!(!descriptor.read_only, "complete writable native census");
+        let id = descriptor.parameter_id().expect("actual unsigned VST3 ID");
+        assert!(ids.insert(id.clone()), "unique actual VST3 IDs");
+        let parameter = instance.parameters.get(&id).expect("complete native-owned author");
+        assert_eq!(
+            parameter.schema,
+            descriptor.authoring_schema().expect("sole canonical VST3 schema projection")
+        );
+        assert_eq!(
+            parameter.ui.display_name.as_deref(),
+            Some(descriptor.name.as_str())
+        );
+        assert!(!parameter.ui.hidden);
+        assert!(
+            parameter.automation.is_none(),
+            "native state owns every initial value"
+        );
+    }
+    assert_eq!(
+        instance.parameters.values().filter(|p| p.schema.is_animatable).count(),
+        AUTOMATABLE
+    );
+    assert_eq!(
+        instance.parameters.values().filter(|p| !p.schema.is_animatable).count(),
+        PARAMETERS - AUTOMATABLE
+    );
+}
+
 // The existing format-neutral transaction owns author acceptance, installation
 // and exact Ack. This consumer additionally validates the Source's current claim
 // and the finite aggregate grant after every actual publication.
@@ -103,7 +148,17 @@ fn service_author(
     source: &AudioOwnerInstallationSource,
     object: crate::NativeAudioObjectObservation,
     reference: Option<MusicalTimeReference>,
+    native_owned_parameters: &AuthoringMap<ParameterId, AudioProcessorParameter>,
 ) -> (usize, usize) {
+    let current = &sequence.audio_program.track_channels[&sequence.audio_tracks[0].id]
+        .strip
+        .pre_fader
+        .processors[0];
+    assert_eq!(
+        &current.parameters, native_owned_parameters,
+        "a real parameter edit cannot be disguised as native-owned None"
+    );
+    let old_state = current.opaque_state.clone();
     let old_claim = source.current_claim().unwrap().unwrap();
     let result = accept_actual_rescans(
         runtime,
@@ -117,7 +172,24 @@ fn service_author(
     let claim = source.current_claim().unwrap().unwrap();
     let verifier = runtime.native_owner_installation_verifier().unwrap();
     verifier.validate(&claim).expect("current real Source claim");
+    let current = &sequence.audio_program.track_channels[&sequence.audio_tracks[0].id]
+        .strip
+        .pre_fader
+        .processors[0];
+    assert_eq!(
+        &current.parameters, native_owned_parameters,
+        "rescan may refresh raw state but cannot synthesize host overrides"
+    );
+    let state = current
+        .opaque_state
+        .as_ref()
+        .expect("actual captured or rescanned native state");
+    assert!(!state.is_empty() && state.len() <= 128 * 1024);
     if result.0 == 0 {
+        assert_eq!(
+            current.opaque_state, old_state,
+            "no publication cannot replace raw state"
+        );
         assert_eq!(claim.generation(), old_claim.generation());
     } else {
         assert!(claim.generation() > old_claim.generation());
@@ -279,6 +351,9 @@ fn external_surge_xt_vst3_captured_state_notes_main_runtime_without_media() {
             (id, restored_id),
             "native ordinal and identity"
         );
+        parameter
+            .author_scalar_from_normalized(value)
+            .expect("actual normalized current value belongs to its canonical schema");
         assert_eq!(
             value.to_bits(),
             restored_value.to_bits(),
@@ -307,26 +382,16 @@ fn external_surge_xt_vst3_captured_state_notes_main_runtime_without_media() {
         AudioProcessorDefinitionRef::Vst3 {class_id, vendor, schema_version:1, binary_sha256:Some(hash)}
         if class_id == CLASS && vendor.as_deref() == Some("Surge Synth Team")
             && *hash == captured.registration.binary_sha256));
-    // Facts is only the existing pure typed schema/value checker. No legacy
-    // GenericCase/parser, old JSON state spelling or <=1024 case limit is used.
-    Facts::Vst3(
-        captured.registration.parameters.clone(),
-        captured.current_values.clone(),
-    )
-    .check_author(&instance);
-    assert_eq!(
-        instance.parameters.values().filter(|p| p.schema.is_animatable).count(),
-        AUTOMATABLE
-    );
-    assert_eq!(
-        instance.parameters.values().filter(|p| !p.schema.is_animatable).count(),
-        PARAMETERS - AUTOMATABLE
-    );
+    check_native_owned_author(&instance, &captured.registration.parameters);
     let author_bytes = serde_json::to_vec(&instance).expect("canonical author serialization");
     let restored_author: AudioProcessorInstance = serde_json::from_slice(&author_bytes)
         .expect("canonical author reload without a private-wire size assertion");
     assert_eq!(restored_author, instance);
     let instance = restored_author;
+    // A structurally shared test snapshot preserves the validated full schema,
+    // UI and None profile after every real Source transaction. It is never
+    // submitted as a second parameter authority or sent as DSP overrides.
+    let native_owned_parameters = instance.parameters.clone();
     let parameter_ids: Vec<_> = instance.parameters.keys().cloned().collect();
     let processor_id = instance.id;
     let mut sequence = Sequence::new("real Surge XT VST3 Note/Main Runtime control");
@@ -483,11 +548,19 @@ fn external_surge_xt_vst3_captured_state_notes_main_runtime_without_media() {
             start_sample: 0,
         })
         .expect("original state entry without a seek/reset substitute");
-    let (mut handoffs, mut rescans) =
-        service_author(&mut runtime, &mut sequence, &source, object, reference);
+    let (mut handoffs, mut rescans) = service_author(
+        &mut runtime,
+        &mut sequence,
+        &source,
+        object,
+        reference,
+        &native_owned_parameters,
+    );
     let mut held_requests = 0;
     let mut energy = 0.0_f64;
     let mut peak = 0.0_f32;
+    let mut sustain_block_energy = [0.0_f64; SUSTAIN_BLOCKS];
+    let mut sustain_blocks_measured = 0;
     for start in (0..TOTAL).step_by(BLOCK) {
         let request = AudioRenderRequest { start_sample: start as i64, frames: BLOCK };
         let before = cursors(&runtime);
@@ -516,8 +589,14 @@ fn external_surge_xt_vst3_captured_state_notes_main_runtime_without_media() {
             );
             old_verifier.validate(&source.current_claim().unwrap().unwrap()).unwrap();
             assert_eq!(media_resolves.load(Ordering::SeqCst), 0);
-            let (accepted, scanned) =
-                service_author(&mut runtime, &mut sequence, &source, object, reference);
+            let (accepted, scanned) = service_author(
+                &mut runtime,
+                &mut sequence,
+                &source,
+                object,
+                reference,
+                &native_owned_parameters,
+            );
             assert!(
                 accepted > 0,
                 "actual HOLD requires a canonical Source transaction and Ack"
@@ -536,9 +615,20 @@ fn external_surge_xt_vst3_captured_state_notes_main_runtime_without_media() {
             pcm.iter().all(|sample| sample.is_finite()),
             "complete finite stereo PCM"
         );
+        let mut block_energy = 0.0_f64;
         for sample in pcm {
-            energy += f64::from(sample) * f64::from(sample);
+            let square = f64::from(sample) * f64::from(sample);
+            energy += square;
+            block_energy += square;
             peak = peak.max(sample.abs());
+        }
+        if (SUSTAIN_START..SUSTAIN_END).contains(&start) {
+            assert!(
+                start + BLOCK <= SUSTAIN_END,
+                "complete predeclared sustain block"
+            );
+            sustain_block_energy[(start - SUSTAIN_START) / BLOCK] = block_energy;
+            sustain_blocks_measured += 1;
         }
         assert_eq!(media_resolves.load(Ordering::SeqCst), 0);
         assert_eq!(
@@ -558,8 +648,14 @@ fn external_surge_xt_vst3_captured_state_notes_main_runtime_without_media() {
             AudioProcessorCursorState::Active {epoch,next_input_signal_sample}
             if epoch == AudioContinuityEpoch::new(1)
                 && next_input_signal_sample.sample() == (start + BLOCK) as i64));
-        let (accepted, scanned) =
-            service_author(&mut runtime, &mut sequence, &source, object, reference);
+        let (accepted, scanned) = service_author(
+            &mut runtime,
+            &mut sequence,
+            &source,
+            object,
+            reference,
+            &native_owned_parameters,
+        );
         handoffs += accepted;
         rescans += scanned;
         same_progress(&now, &cursors(&runtime));
@@ -585,6 +681,7 @@ fn external_surge_xt_vst3_captured_state_notes_main_runtime_without_media() {
         WAIT_TIMEOUT
     );
     let final_footprint = runtime.resource_footprint();
+    let sustain_energy: f64 = sustain_block_energy.iter().sum();
     drop(runtime);
     // Zero wait observes original Drop without adding a shutdown allowance.
     let settled = unsafe { WaitForSingleObject(handle.as_raw_handle().cast(), 0) };
@@ -597,7 +694,11 @@ fn external_surge_xt_vst3_captured_state_notes_main_runtime_without_media() {
         "parameters":PARAMETERS,"automatable":AUTOMATABLE,"nonautomatable":PARAMETERS-AUTOMATABLE,
         "musical_reference":reference,"rate":48000,"block":BLOCK,"frames":TOTAL,
         "note_on":ON,"note_off":OFF,"next_input_signal_sample":processed_through,
-        "main_energy":energy,"main_peak":peak,"author_handoffs":handoffs,
+        "main_energy":energy,"main_peak":peak,
+        "sustain_window":[SUSTAIN_START,SUSTAIN_END],"sustain_block_frames":BLOCK,
+        "sustain_blocks_measured":sustain_blocks_measured,"sustain_block_energy":sustain_block_energy,
+        "sustain_energy":sustain_energy,"minimum_sustain_energy_exclusive":MIN_SUSTAIN_ENERGY,
+        "native_owned_none_parameters":native_owned_parameters.len(),"author_handoffs":handoffs,
         "nonempty_rescan_handoffs":rescans,"nonconsuming_held_requests":held_requests,
         "native_pid":pid,"object_serial":object.object_serial().get(),"media_resolves":0,
         "fixed_resident_bytes":final_footprint.fixed_resident_bytes,
@@ -614,4 +715,16 @@ fn external_surge_xt_vst3_captured_state_notes_main_runtime_without_media() {
     );
     assert_ne!(queried, 0);
     assert_eq!(exit, 0, "forced/error native exit cannot pass");
+    assert_eq!(
+        sustain_blocks_measured, 16,
+        "all fixed middle blocks were actually rendered"
+    );
+    assert!(
+        sustain_block_energy.iter().all(|energy| energy.is_finite() && *energy > 0.0),
+        "every complete predeclared middle block must contain finite positive Main energy"
+    );
+    assert!(
+        sustain_energy.is_finite() && sustain_energy > MIN_SUSTAIN_ENERGY,
+        "native-owned Main must sustain sound across the predeclared middle window"
+    );
 }
