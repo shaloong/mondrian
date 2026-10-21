@@ -1861,10 +1861,21 @@ impl VstSignalFields<'_> {
                         "VST3 parameter descriptor is missing".to_owned(),
                     )
                 })?;
-            let events = block.parameter_events(lane).ok_or_else(|| {
+            let mut events = block.parameter_events(lane).ok_or_else(|| {
                 AudioProcessorHostError::Process("VST3 parameter lane is missing".to_owned())
             })?;
-            for event in events {
+            let first = events.next();
+            let second = events.next();
+            // Author constant curves supply an offset-zero point every block.
+            // VST3 carries an unchanged constant implicitly after its first point.
+            // Multi-point curves and explicit nonzero-offset events stay intact.
+            let implicit_constant = second.is_none()
+                && first.is_some_and(|event| {
+                    event.sample_offset == 0
+                        && self.last_parameter_values[lane]
+                            .is_some_and(|value| value.to_bits() == event.value.to_bits())
+                });
+            for event in first.into_iter().chain(second).chain(events) {
                 event_count += 1;
                 if event_count > MAX_EVENTS_PER_BLOCK {
                     return Err(AudioProcessorHostError::Process(
@@ -1880,13 +1891,17 @@ impl VstSignalFields<'_> {
                         "VST3 parameter event is out of bounds".to_owned(),
                     ));
                 }
-                native
-                    .deliver_parameter_at(native_id, value, event.sample_offset as i32)
-                    .map_err(|error| {
-                        AudioProcessorHostError::Process(format!(
-                            "VST3 parameter delivery failed: {error}"
-                        ))
-                    })?;
+                // Omitted native points still consume the original event budget
+                // and pass every descriptor, value and sample-offset check above.
+                if !implicit_constant {
+                    native
+                        .deliver_parameter_at(native_id, value, event.sample_offset as i32)
+                        .map_err(|error| {
+                            AudioProcessorHostError::Process(format!(
+                                "VST3 parameter delivery failed: {error}"
+                            ))
+                        })?;
+                }
             }
         }
         for bus in self.buffers.inputs.iter_mut().chain(&mut self.buffers.outputs) {
@@ -1960,11 +1975,13 @@ impl VstSignalFields<'_> {
             }
         }
         for lane in 0..self.payload.parameter_ids.len() {
-            if let Some(events) = block.parameter_events(lane) {
-                for event in events {
-                    self.last_parameter_values[lane] = Some(event.value);
-                }
-            }
+            // An empty author lane cedes the value to the native state. Forget
+            // prior delivery so a later explicit same-value override is sent.
+            // Like the cursor, this evidence changes only after successful DSP
+            // and validation of every native output.
+            self.last_parameter_values[lane] = block
+                .parameter_events(lane)
+                .and_then(|events| events.last().map(|event| event.value));
         }
         *self.last_end = Some(end_sample);
         Ok(())
@@ -4451,6 +4468,7 @@ mod musical_effect_tests {
     #[derive(Default)]
     struct Native {
         calls: Vec<&'static str>,
+        parameters: Vec<(u32, f64, i32)>,
         timeline: Option<(ProcessTimelineContext, Option<ProcessMusicalReference>)>,
         reject_timeline: bool,
         reject_notes: bool,
@@ -4462,8 +4480,14 @@ mod musical_effect_tests {
     }
 
     impl VstNativeSignal for Native {
-        fn deliver_parameter_at(&mut self, _: u32, _: f64, _: i32) -> vst3_host::error::Result<()> {
+        fn deliver_parameter_at(
+            &mut self,
+            id: u32,
+            value: f64,
+            offset: i32,
+        ) -> vst3_host::error::Result<()> {
             self.calls.push("parameter");
+            self.parameters.push((id, value, offset));
             Ok(())
         }
         fn deliver_timeline(
@@ -4532,6 +4556,259 @@ mod musical_effect_tests {
             self.calls.push("notes");
             Ok(())
         }
+    }
+
+    fn process_author_parameter_block(
+        payload: &Vst3Payload,
+        native: &mut Native,
+        scratch: &mut BusAudioBuffers,
+        values: &mut Vec<Option<f64>>,
+        last_end: &mut Option<i64>,
+        events: &[SharedParameterEvent],
+    ) -> Result<(), AudioProcessorHostError> {
+        let ids: Vec<_> = payload
+            .parameters
+            .iter()
+            .map(|parameter| parameter.parameter_id().unwrap())
+            .collect();
+        let auxiliary = AudioProcessorAuxiliaryInputContract::default();
+        let mut pcm = [11.0; 8];
+        let start = last_end.expect("the test starts at an entered signal cursor");
+        VstSignalFields {
+            last_parameter_values: values,
+            configuration_phase: &NativeConfigurationPhase::Admitted,
+            payload,
+            render: render(),
+            buffers: scratch,
+            auxiliary_inputs: &auxiliary,
+            last_end,
+            note_input_contract: &Default::default(),
+            note_events: &mut Vec::new(),
+        }
+        .process(
+            native,
+            IsolatedAudioProcessorWorkerBlock::new(
+                start,
+                4,
+                render(),
+                &mut pcm,
+                &auxiliary,
+                &[],
+                &ids,
+                events,
+            ),
+        )
+    }
+
+    #[test]
+    fn vst3_author_constant_points_are_implicit_only_after_success_and_until_native_ownership() {
+        // The retained evidence uses canonical author values, including discrete
+        // indices; the native queue always receives the descriptor's normalized value.
+        for (steps, first, changed, first_normalized, changed_normalized) in
+            [(0, 0.25, 0.75, 0.25, 0.75), (4, 1.0, 3.0, 0.25, 0.75)]
+        {
+            let mut payload = payload();
+            payload.parameters[0].step_count = steps;
+            let mut native = Native::default();
+            let mut scratch = buffers();
+            let mut values = vec![None];
+            let mut last_end = Some(0);
+            let point =
+                |offset, value| SharedParameterEvent { lane: 0, sample_offset: offset, value };
+            let cases = [
+                (
+                    vec![point(0, first)],
+                    vec![(0, first_normalized, 0)],
+                    Some(first),
+                ),
+                (vec![point(0, first)], vec![], Some(first)),
+                (
+                    vec![point(0, changed)],
+                    vec![(0, changed_normalized, 0)],
+                    Some(changed),
+                ),
+                (
+                    vec![point(0, first), point(3, changed)],
+                    vec![(0, first_normalized, 0), (0, changed_normalized, 3)],
+                    Some(changed),
+                ),
+                (
+                    vec![point(0, changed), point(3, changed)],
+                    vec![(0, changed_normalized, 0), (0, changed_normalized, 3)],
+                    Some(changed),
+                ),
+                (
+                    vec![point(3, changed)],
+                    vec![(0, changed_normalized, 3)],
+                    Some(changed),
+                ),
+                (vec![], vec![], None),
+                (
+                    vec![point(0, changed)],
+                    vec![(0, changed_normalized, 0)],
+                    Some(changed),
+                ),
+            ];
+            for (index, (events, expected, retained)) in cases.into_iter().enumerate() {
+                native.calls.clear();
+                native.parameters.clear();
+                process_author_parameter_block(
+                    &payload,
+                    &mut native,
+                    &mut scratch,
+                    &mut values,
+                    &mut last_end,
+                    &events,
+                )
+                .unwrap();
+                assert_eq!(native.parameters, expected);
+                assert_eq!(native.calls.first(), Some(&"timeline"));
+                assert_eq!(native.calls.last(), Some(&"process"));
+                assert_eq!(values, [retained]);
+                assert_eq!(last_end, Some((index as i64 + 1) * 4));
+            }
+        }
+    }
+
+    #[test]
+    fn vst3_failed_dsp_or_output_validation_never_commits_parameter_evidence() {
+        let payload = payload();
+        let changed = [SharedParameterEvent { lane: 0, sample_offset: 0, value: 0.75 }];
+        for initial in [None, Some(0.25)] {
+            for empty in [false, true] {
+                for reject in [false, true] {
+                    let mut native = Native {
+                        multiple_outputs: true,
+                        reject_process: reject,
+                        nonfinite_output: (!reject).then_some(0),
+                        ..Default::default()
+                    };
+                    let mut scratch = buffers();
+                    let mut values = vec![initial];
+                    let mut last_end = Some(0);
+                    assert!(process_author_parameter_block(
+                        &payload,
+                        &mut native,
+                        &mut scratch,
+                        &mut values,
+                        &mut last_end,
+                        if empty { &[] } else { &changed },
+                    )
+                    .is_err());
+                    assert_eq!(values, [initial]);
+                    assert_eq!(last_end, Some(0));
+                    native.reject_process = false;
+                    native.nonfinite_output = None;
+                    // Failed empty input must not revoke prior evidence; a failed
+                    // first/change delivery must not make its retry implicit.
+                    let retry_value = if empty { initial.unwrap_or(0.75) } else { 0.75 };
+                    let retry =
+                        [SharedParameterEvent { lane: 0, sample_offset: 0, value: retry_value }];
+                    process_author_parameter_block(
+                        &payload,
+                        &mut native,
+                        &mut scratch,
+                        &mut values,
+                        &mut last_end,
+                        &retry,
+                    )
+                    .unwrap();
+                    let expected_count = if empty {
+                        usize::from(initial.is_none())
+                    } else {
+                        2
+                    };
+                    assert_eq!(native.parameters.len(), expected_count);
+                    assert!(native.parameters.iter().all(|&(id, value, offset)| {
+                        id == 0 && value == retry_value && offset == 0
+                    }));
+                    assert_eq!(values, [Some(retry_value)]);
+                    assert_eq!(last_end, Some(4));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn vst3_implicit_constants_still_validate_the_original_author_value() {
+        let payload = payload();
+        for invalid_value in [-1.0, 2.0, f64::NAN] {
+            let mut native = Native::default();
+            let mut scratch = buffers();
+            let mut values = vec![Some(invalid_value)];
+            let mut last_end = Some(0);
+            let events = [SharedParameterEvent { lane: 0, sample_offset: 0, value: invalid_value }];
+            assert!(process_author_parameter_block(
+                &payload,
+                &mut native,
+                &mut scratch,
+                &mut values,
+                &mut last_end,
+                &events,
+            )
+            .is_err());
+            assert_eq!(native.calls, ["timeline"]);
+            assert!(native.parameters.is_empty());
+            assert_eq!(values[0].unwrap().to_bits(), invalid_value.to_bits());
+            assert_eq!(last_end, Some(0));
+        }
+    }
+
+    #[test]
+    fn vst3_implicit_constants_still_consume_the_original_event_capacity() {
+        let mut payload = payload();
+        let prototype = payload.parameters[0].clone();
+        payload.parameters = (0..MAX_EVENTS_PER_BLOCK)
+            .map(|id| Vst3ParameterDescriptor { id: id as u32, ..prototype.clone() })
+            .collect();
+        payload.parameter_ids = payload.parameters.iter().map(|parameter| parameter.id).collect();
+        let mut events: Vec<_> = (0..MAX_EVENTS_PER_BLOCK)
+            .map(|lane| SharedParameterEvent { lane: lane as u32, sample_offset: 0, value: 0.25 })
+            .collect();
+        let mut native = Native::default();
+        let mut scratch = buffers();
+        let mut values = vec![Some(0.25); MAX_EVENTS_PER_BLOCK];
+        let mut last_end = Some(0);
+        // Exactly 4096 unchanged constants fit even though none is re-enqueued.
+        process_author_parameter_block(
+            &payload,
+            &mut native,
+            &mut scratch,
+            &mut values,
+            &mut last_end,
+            &events,
+        )
+        .unwrap();
+        assert_eq!(native.calls, ["timeline", "process"]);
+        assert!(native.parameters.is_empty());
+        // One extra original point exceeds the same budget. The last lane is
+        // now multi-point, while all preceding lanes remain implicit constants.
+        events.push(SharedParameterEvent {
+            lane: (MAX_EVENTS_PER_BLOCK - 1) as u32,
+            sample_offset: 3,
+            value: 0.75,
+        });
+        native.calls.clear();
+        let error = process_author_parameter_block(
+            &payload,
+            &mut native,
+            &mut scratch,
+            &mut values,
+            &mut last_end,
+            &events,
+        )
+        .unwrap_err();
+        assert_eq!(
+            error,
+            AudioProcessorHostError::Process("VST3 parameter event capacity exceeded".to_owned())
+        );
+        assert_eq!(native.calls, ["timeline", "parameter"]);
+        assert_eq!(
+            native.parameters,
+            [(MAX_EVENTS_PER_BLOCK as u32 - 1, 0.25, 0)]
+        );
+        assert!(values.iter().all(|value| *value == Some(0.25)));
+        assert_eq!(last_end, Some(4));
     }
 
     fn note_reference() -> MusicalTimeReference {
@@ -5219,11 +5496,16 @@ mod musical_effect_tests {
         ];
         let parameters = [SharedParameterEvent { lane: 0, sample_offset: 0, value: 0.25 }];
         for empty in [false, true] {
-            for reject in [false, true] {
+            for (reject, retained) in [
+                (false, None),
+                (false, Some(0.25)),
+                (true, None),
+                (true, Some(0.25)),
+            ] {
                 let mut native = Native { reject_notes: reject, ..Default::default() };
                 let mut pcm = [11.0; 8];
                 let mut scratch = buffers();
-                let mut values = vec![None];
+                let mut values = vec![retained];
                 let mut last_end = Some(-3);
                 let mut converted = Vec::with_capacity(contract.limits.input_events);
                 let capacity = converted.capacity();
@@ -5261,7 +5543,14 @@ mod musical_effect_tests {
                         &refused,
                     ),
                 );
-                assert_eq!(native.calls, ["timeline", "parameter", "notes"]);
+                assert_eq!(
+                    native.calls,
+                    if retained.is_none() {
+                        vec!["timeline", "parameter", "notes"]
+                    } else {
+                        vec!["timeline", "notes"]
+                    }
+                );
                 assert_eq!(converted.capacity(), capacity);
                 assert!(
                     converted.is_empty(),
@@ -5302,7 +5591,7 @@ mod musical_effect_tests {
                 }
                 if reject {
                     assert!(matches!(result, Err(AudioProcessorHostError::Process(_))));
-                    assert_eq!(values, [None]);
+                    assert_eq!(values, [retained]);
                     assert_eq!(last_end, Some(-3));
                 } else {
                     result.unwrap();
