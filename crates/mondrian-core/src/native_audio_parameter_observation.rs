@@ -37,7 +37,9 @@ pub enum NativeAudioParameterQueryRefusal {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NativeAudioParameterQueryOutcome {
     /// Exactly one current fact for the requested installed target and ID.
-    Observed(NativeAudioParameterObservation),
+    /// The parent control completion owns this allocation in addition to the
+    /// bounded fact vector and strings; it is not part of the child lane fee.
+    Observed(Box<NativeAudioParameterObservation>),
     /// Safe control refusal without substituting a value or descriptor default.
     Refused(NativeAudioParameterQueryRefusal),
 }
