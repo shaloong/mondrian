@@ -65,6 +65,34 @@ pub(super) fn capture_signatures(
     Ok(signatures)
 }
 
+// CLAP plain values already use the canonical scalar domain. A current
+// descriptor must still admit the exact value; no clamp, rounding or fallback
+// turns an unavailable or invalid native query into an author observation.
+fn author_value_bits(
+    value: Option<f64>,
+    minimum: f64,
+    maximum: f64,
+    flags: ParamInfoFlags,
+) -> Option<u64> {
+    if flags.contains(ParamInfoFlags::IS_READONLY)
+        || !minimum.is_finite()
+        || !maximum.is_finite()
+        || minimum > maximum
+    {
+        return None;
+    }
+    value
+        .filter(|value| {
+            value.is_finite()
+                && *value >= minimum
+                && *value <= maximum
+                && (!flags.contains(ParamInfoFlags::IS_STEPPED)
+                    || (value.fract() == 0.0
+                        && value.abs() <= (1_u64 << f64::MANTISSA_DIGITS) as f64))
+        })
+        .map(f64::to_bits)
+}
+
 fn output_fact(
     output: super::super::clap_output_events::ClapOutputParameterEvent,
 ) -> Result<Fact, AudioProcessorHostError> {
@@ -91,6 +119,7 @@ fn output_fact(
             .map_err(|_| invalid("CLAP output stable parameter identity unavailable"))?,
         event_flags: output.flags,
         value_bits,
+        author_value_bits: None,
         origin,
         hidden: None,
         periodic: None,
@@ -218,6 +247,12 @@ impl ClapWorker {
                     .map_err(|_| invalid("CLAP current-value identity is invalid"))?,
                 event_flags: 0,
                 value_bits: value.map(f64::to_bits),
+                author_value_bits: author_value_bits(
+                    value,
+                    info.min_value,
+                    info.max_value,
+                    info.flags,
+                ),
                 origin: Origin::MainQuery { rescan_flags: rescans },
                 hidden: Some(info.flags.contains(ParamInfoFlags::IS_HIDDEN)),
                 periodic: Some(info.flags.contains(ParamInfoFlags::IS_PERIODIC)),
@@ -234,5 +269,92 @@ impl ClapWorker {
         }
         self.parameter_observation_revision = Some(before.revision);
         Ok(facts)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::super::clap_output_events::{
+        ClapOutputOrigin, ClapOutputParameterEvent, ClapOutputParameterKind,
+    };
+    use super::*;
+
+    #[test]
+    fn clap_main_query_canonical_scalar_keeps_exact_plain_units_and_refuses_invalid_projection() {
+        let continuous = ParamInfoFlags::empty();
+        assert_eq!(
+            author_value_bits(Some(250.0), 20.0, 20_000.0, continuous),
+            Some(250.0_f64.to_bits())
+        );
+        assert_eq!(author_value_bits(None, 20.0, 20_000.0, continuous), None);
+        for value in [f64::NAN, f64::INFINITY, 19.0, 20_001.0] {
+            assert_eq!(
+                author_value_bits(Some(value), 20.0, 20_000.0, continuous),
+                None
+            );
+        }
+        assert_eq!(
+            author_value_bits(Some(250.0), 20.0, 20_000.0, ParamInfoFlags::IS_READONLY),
+            None
+        );
+        let stepped = ParamInfoFlags::IS_STEPPED;
+        assert_eq!(
+            author_value_bits(Some(2.0), -4.0, 4.0, stepped),
+            Some(2.0_f64.to_bits())
+        );
+        assert_eq!(author_value_bits(Some(2.25), -4.0, 4.0, stepped), None);
+        assert_eq!(
+            author_value_bits(Some(9_007_199_254_740_994.0), 0.0, f64::MAX, stepped),
+            None
+        );
+        for (minimum, maximum) in [(f64::NAN, 4.0), (-4.0, f64::INFINITY), (4.0, -4.0)] {
+            assert_eq!(
+                author_value_bits(Some(2.0), minimum, maximum, stepped),
+                None
+            );
+        }
+    }
+
+    #[test]
+    fn clap_raw_output_facts_keep_original_flags_time_and_plain_without_author_projection() {
+        for kind in [
+            ClapOutputParameterKind::Value(0.75),
+            ClapOutputParameterKind::GestureBegin,
+            ClapOutputParameterKind::GestureEnd,
+        ] {
+            let actual = output_fact(ClapOutputParameterEvent {
+                sequence: 3,
+                origin: ClapOutputOrigin::Process {
+                    start_sample: -7,
+                    sample_rate: 48000,
+                    frames: 4,
+                },
+                parameter: 17,
+                sample_offset: 3,
+                flags: 0x8000_0000,
+                read_only: false,
+                kind,
+            })
+            .unwrap();
+            actual.validate().unwrap();
+            assert_eq!(actual.author_value_bits, None);
+            assert_eq!(
+                actual.value_bits,
+                match kind {
+                    ClapOutputParameterKind::Value(value) => Some(value.to_bits()),
+                    _ => None,
+                }
+            );
+            assert_eq!(actual.event_flags, 0x8000_0000);
+            assert_eq!(
+                actual.origin,
+                Origin::Process {
+                    start_sample: -7,
+                    sample_rate: 48000,
+                    frames: 4,
+                    offset: 3,
+                }
+            );
+        }
     }
 }

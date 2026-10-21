@@ -11269,6 +11269,7 @@ mod tests {
                     parameter: id.clone(),
                     event_flags: 0,
                     value_bits: Some(0.75_f64.to_bits()),
+                    author_value_bits: None,
                     origin: NativeAudioParameterObservationOrigin::MainQuery { rescan_flags: 0 },
                     hidden: None,
                     periodic: None,

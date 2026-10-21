@@ -50,6 +50,10 @@ pub struct NativeAudioParameterFact {
     pub event_flags: u32,
     /// Exact optional finite plain value; no descriptor default is substituted.
     pub value_bits: Option<u64>,
+    /// Optional finite scalar in the current descriptor's canonical author domain,
+    /// projected from this same successful main query. This ephemeral observation
+    /// grants no author permission and never substitutes a descriptor default.
+    pub author_value_bits: Option<u64>,
     /// Original origin and sample/flush evidence.
     pub origin: NativeAudioParameterObservationOrigin,
     /// Actual queried UI visibility, independent of persisted schema metadata.
@@ -71,6 +75,13 @@ impl NativeAudioParameterFact {
     pub fn validate(&self) -> Result<(), NativeAudioParameterObservationError> {
         if self.parameter.storage_owner().capacity() > 255
             || self.value_bits.is_some_and(|bits| !f64::from_bits(bits).is_finite())
+            || self.author_value_bits.is_some_and(|bits| {
+                !f64::from_bits(bits).is_finite()
+                    || !matches!(
+                        self.origin,
+                        NativeAudioParameterObservationOrigin::MainQuery { .. }
+                    )
+            })
             || self.name.as_ref().is_some_and(|text| text.len() > 255 || text.contains('\0'))
             || self
                 .module
@@ -201,5 +212,90 @@ impl NativeAudioParameterObservation {
             return Err(NativeAudioParameterObservationError::Extent);
         }
         Ok(total)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fact() -> NativeAudioParameterFact {
+        NativeAudioParameterFact {
+            revision: 3,
+            parameter: ParameterId::new("gain").unwrap(),
+            event_flags: 0,
+            value_bits: Some(250.0_f64.to_bits()),
+            author_value_bits: Some(0.25_f64.to_bits()),
+            origin: NativeAudioParameterObservationOrigin::MainQuery { rescan_flags: 0 },
+            hidden: None,
+            periodic: None,
+            name: None,
+            module: None,
+            info_flags: None,
+            display: None,
+        }
+    }
+
+    #[test]
+    fn canonical_observation_is_finite_main_query_data_without_changing_plain_facts() {
+        let mut actual = fact();
+        actual.validate().unwrap();
+        assert_ne!(actual.value_bits, actual.author_value_bits);
+        actual.value_bits = None;
+        actual.validate().unwrap();
+        actual.author_value_bits = Some(f64::INFINITY.to_bits());
+        assert_eq!(
+            actual.validate(),
+            Err(NativeAudioParameterObservationError::InvalidFact)
+        );
+        for origin in [
+            NativeAudioParameterObservationOrigin::Process {
+                start_sample: -4,
+                sample_rate: 48000,
+                frames: 4,
+                offset: 3,
+            },
+            NativeAudioParameterObservationOrigin::InactiveFlush { raw_offset: 77 },
+            NativeAudioParameterObservationOrigin::ActiveFlush { raw_offset: 77 },
+        ] {
+            actual = fact();
+            actual.origin = origin;
+            assert_eq!(
+                actual.validate(),
+                Err(NativeAudioParameterObservationError::InvalidFact)
+            );
+            actual.author_value_bits = None;
+            actual.validate().unwrap();
+            assert_eq!(actual.value_bits, Some(250.0_f64.to_bits()));
+        }
+    }
+
+    #[test]
+    fn canonical_observation_uses_the_complete_actual_fact_layout_and_original_storage_bound() {
+        let mut facts = Vec::with_capacity(3);
+        facts.push(fact());
+        let inline = std::alloc::Layout::array::<NativeAudioParameterFact>(facts.capacity())
+            .unwrap()
+            .size();
+        let expected = inline + facts[0].string_capacity_bytes().unwrap();
+        assert_eq!(
+            NativeAudioParameterObservation::validate_facts(&facts),
+            Ok(expected)
+        );
+        let mut large = fact();
+        large.module = Some("m".repeat(1023));
+        large.display = Some("d".repeat(1023));
+        large.validate().unwrap();
+        assert_eq!(
+            NativeAudioParameterObservation::validate_facts(&vec![large; 128]),
+            Err(NativeAudioParameterObservationError::Extent),
+            "individually valid strings plus the complete inline layout exceed 256KiB"
+        );
+        assert_eq!(
+            NativeAudioParameterObservation::validate_facts(&Vec::with_capacity(
+                NATIVE_AUDIO_PARAMETER_FACTS + 1
+            )),
+            Err(NativeAudioParameterObservationError::Extent)
+        );
     }
 }

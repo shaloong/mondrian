@@ -761,15 +761,17 @@ mod native_log_wire_contracts {
             "no cleanup stage or pending cohort"
         );
         assert_eq!(bytes[37], 0, "no author source");
-        assert_eq!(&bytes[38..50], &[0; 12], "no parameter revision or facts");
+        assert_eq!(&bytes[38..46], &[0; 8], "no parameter revision");
+        assert_eq!(&bytes[46..50], b"NPF2", "explicit current fact-body format");
+        assert_eq!(&bytes[50..54], &[0; 4], "no parameter facts");
         assert_eq!(
-            &bytes[50..54],
+            &bytes[54..58],
             &2_u32.to_le_bytes(),
             "actual log count field"
         );
         assert_eq!(
             bytes.len(),
-            12 + 4 + 1 + 4 + 16 + 1 + 8 + 4 + 8 + (18 + 1) + (18 + 512),
+            12 + 4 + 1 + 4 + 16 + 1 + 8 + 4 + 4 + 8 + (18 + 1) + (18 + 512),
             "fields only; no Rust padding or stale version reader"
         );
         let observed =
@@ -878,11 +880,13 @@ mod native_preflight_snapshot_existing_wire_contracts {
         expected.extend_from_slice(&0_u32.to_le_bytes()); // no editor cleanup
         expected.extend_from_slice(&[0_u8; 16]); // canonical absent observed request
         expected.push(0); // V8 explicitly unavailable author source
-        expected.extend_from_slice(&[0_u8; 12]); // absent parameter revision/count
+        expected.extend_from_slice(&[0_u8; 8]); // absent parameter revision
+        expected.extend_from_slice(b"NPF2"); // independent current fact-body format
+        expected.extend_from_slice(&[0_u8; 4]); // absent parameter count
         expected.extend_from_slice(&[0_u8; 8]); // empty logs + no sticky loss
         assert_eq!(
             expected.len(),
-            58,
+            62,
             "no Rust padding or variable pending payload"
         );
         assert_eq!(

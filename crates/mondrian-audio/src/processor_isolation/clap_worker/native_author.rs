@@ -559,6 +559,7 @@ mod observation_closure_contracts {
             parameter: ParameterId::new("clap.param.17").unwrap(),
             event_flags: 0,
             value_bits: Some(0.625_f64.to_bits()),
+            author_value_bits: None,
             origin: NativeAudioParameterObservationOrigin::MainQuery { rescan_flags: 15 },
             hidden: None,
             periodic: None,

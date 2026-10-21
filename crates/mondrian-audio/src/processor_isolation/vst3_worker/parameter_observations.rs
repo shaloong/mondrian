@@ -128,6 +128,12 @@ fn fact(
         parameter: expected.parameter_id().map_err(|_| unavailable_parameter())?,
         event_flags: 0,
         value_bits: value.plain.map(f64::to_bits),
+        author_value_bits: Some(
+            expected
+                .author_scalar_from_normalized(value.normalized)
+                .map_err(|_| unavailable_parameter())?
+                .to_bits(),
+        ),
         origin: Origin::MainQuery { rescan_flags: 0 },
         hidden: Some(value.hidden),
         periodic: None,
@@ -362,6 +368,7 @@ mod tests {
         let actual = &result.facts[0];
         assert_eq!(actual.parameter, expected.parameter_id().unwrap());
         assert_eq!(actual.value_bits, Some(250.0_f64.to_bits()));
+        assert_eq!(actual.author_value_bits, Some(0.25_f64.to_bits()));
         assert_ne!(actual.value_bits, Some(0.25_f64.to_bits()));
         assert_eq!(actual.display.as_deref(), Some("250 Hz"));
         assert_eq!(actual.name.as_deref(), Some("Gain"));
@@ -383,6 +390,39 @@ mod tests {
         missing.display = None;
         let unavailable = fact(&expected, 3, missing).unwrap();
         assert_eq!((unavailable.value_bits, unavailable.display), (None, None));
+        assert_eq!(
+            unavailable.author_value_bits,
+            Some(0.25_f64.to_bits()),
+            "same-query normalized value remains available without native plain/text"
+        );
+    }
+
+    #[test]
+    fn vst3_current_presentation_projects_actual_stepped_normalized_value_without_plain_conversion()
+    {
+        let expected = Vst3ParameterDescriptor { step_count: 4, ..parameter(0) };
+        let title = wide("Gain");
+        let display = wide("250 Hz");
+        let actual = fact(
+            &expected,
+            3,
+            CurrentParameter {
+                normalized: 0.5,
+                ..current(&expected, &title, &display)
+            },
+        )
+        .unwrap();
+        assert_eq!(actual.value_bits, Some(250.0_f64.to_bits()));
+        assert_eq!(actual.author_value_bits, Some(2.0_f64.to_bits()));
+        assert_eq!(actual.display.as_deref(), Some("250 Hz"));
+        for normalized in [f64::NAN, -0.25, 1.25] {
+            assert!(fact(
+                &expected,
+                3,
+                CurrentParameter { normalized, ..current(&expected, &title, &display) },
+            )
+            .is_err());
+        }
     }
 
     #[test]
