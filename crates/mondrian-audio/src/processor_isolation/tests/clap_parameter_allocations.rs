@@ -1039,11 +1039,14 @@ fn retained_clap_ports_complete_native_validation_before_shape_and_ignore_displa
 fn retained_clap_metadata_scratch_is_charged_once_in_main_inline_obligation() {
     use super::super::clap_metadata::MetadataScanScratch;
     let profile = clap_native_worker_lane_profile().unwrap().expect("Windows scoped lane");
+    // Remove only the metadata scan owner from the baseline. The independent
+    // static-Open parameter buffer remains live in both layouts.
     let original = Layout::new::<(
         super::super::native_worker_ingress::NativeCommandIngress<'static>,
         super::super::worker::WorkerProcessContext<'static>,
         super::super::native_worker_processing::NativeDspDispatch<'static>,
         crate::NativeAudioObservations,
+        clack_extensions::params::ParamInfoBuffer,
     )>();
     let with_scratch = Layout::new::<(
         super::super::native_worker_ingress::NativeCommandIngress<'static>,
@@ -1051,6 +1054,7 @@ fn retained_clap_metadata_scratch_is_charged_once_in_main_inline_obligation() {
         super::super::native_worker_processing::NativeDspDispatch<'static>,
         crate::NativeAudioObservations,
         MetadataScanScratch,
+        clack_extensions::params::ParamInfoBuffer,
     )>();
     assert_eq!(
         profile.owning_layouts().main_inline,
