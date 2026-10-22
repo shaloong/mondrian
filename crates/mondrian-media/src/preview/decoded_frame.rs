@@ -224,13 +224,15 @@ pub struct DecodedRgbaFrameContract {
 }
 
 impl DecodedRgbaFrameContract {
-    pub(super) fn source_encoded(
+    pub(super) fn source_rgb(
         source: PreviewSourceColorContract,
         applied_matrix: DecodedVideoMatrix,
         applied_range: DecodedVideoRange,
     ) -> Self {
         let encoding = if source.is_data_texture() {
             DecodedRgbaEncoding::DataTexture
+        } else if source.is_scene_linear() {
+            DecodedRgbaEncoding::SourceLinearRgb
         } else {
             DecodedRgbaEncoding::SourceEncodedRgb
         };
@@ -827,7 +829,7 @@ mod data_texture_contract_tests {
     fn decoded_rgba_contract_marks_data_texture_without_color_encoding() {
         let source =
             PreviewSourceColorContract::data_texture(DecodedVideoRangeContract::OverrideFull);
-        let contract = DecodedRgbaFrameContract::source_encoded(
+        let contract = DecodedRgbaFrameContract::source_rgb(
             source,
             DecodedVideoMatrix::Rgb,
             DecodedVideoRange::Full,

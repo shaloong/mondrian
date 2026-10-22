@@ -618,7 +618,7 @@ fn data_texture_source_contract_round_trips_and_is_a_distinct_cache_identity() {
 }
 
 fn test_rgba_contract() -> DecodedRgbaFrameContract {
-    DecodedRgbaFrameContract::source_encoded(
+    DecodedRgbaFrameContract::source_rgb(
         test_source_color(),
         DecodedVideoMatrix::Bt709,
         DecodedVideoRange::Limited,
@@ -5236,7 +5236,7 @@ fn preview_decode_revalidates_revision_after_frame_materialization() {
         1,
         1,
         vec![0, 0, 0, 255],
-        DecodedRgbaFrameContract::source_encoded(
+        DecodedRgbaFrameContract::source_rgb(
             test_source_color(),
             DecodedVideoMatrix::Bt709,
             DecodedVideoRange::Limited,
@@ -5265,7 +5265,7 @@ fn finalizer_skips_filesystem_revalidation_for_reused_session_frames() {
         1,
         1,
         vec![0, 0, 0, 255],
-        DecodedRgbaFrameContract::source_encoded(
+        DecodedRgbaFrameContract::source_rgb(
             test_source_color(),
             DecodedVideoMatrix::Bt709,
             DecodedVideoRange::Limited,

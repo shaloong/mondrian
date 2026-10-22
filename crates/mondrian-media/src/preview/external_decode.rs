@@ -58,6 +58,11 @@ pub(super) fn try_decode_with_external_ffmpeg_cpu_rgba(
     decoded_color_range: ffmpeg::util::color::Range,
     should_cancel: &(dyn Fn() -> bool + Send + Sync),
 ) -> Option<Result<Option<RgbaFrame>>> {
+    // This optional helper publishes only RGBA8. Linear source values must
+    // retain the in-process Float32 carrier rather than enter integer output.
+    if source_color.is_scene_linear() {
+        return None;
+    }
     if width == 0 || height == 0 {
         return None;
     }
