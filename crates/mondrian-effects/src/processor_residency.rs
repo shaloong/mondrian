@@ -420,6 +420,10 @@ impl std::error::Error for EffectProcessorHostResourceRefusalReceipt {}
 /// Results must be independent of prior invocations. Instances may be evicted
 /// or recreated between any two frames; sequential state requires the separate
 /// continuity execution contract. Drop must retire every owned native worker.
+/// NoImage output storage must not exceed the actual staging allocation admitted
+/// for that invocation. Extra temporary copies belong to the factory's active
+/// peak. The post-call check prevents publication/retention, not a violating Rust
+/// provider's arbitrary allocation before it returns.
 pub trait EffectFloatProcessorInstance: std::fmt::Debug + Send {
     /// Reconcile closed GUI facts on this instance's exclusive owning worker.
     /// No render/DSP runs. Failure retires this owner through the same bank;
@@ -847,6 +851,8 @@ impl FloatProcessorResidency {
             }
             .into());
         }
+        let output_storage_bound =
+            (role == EffectFloatProcessorInputRole::NoImage).then(|| pixels.retained_bytes());
         self.trim(max_instances, max_bytes);
         let key = ResourceKey { request, revision };
         // Dimension/revision changes retire this occurrence's obsolete worker.
@@ -993,6 +999,16 @@ impl FloatProcessorResidency {
         // This same resource bank is the sole authority for every recoverable
         // disposition. No author/UI/native adapter keeps another instance.
         control.check()?;
+        // This invocation already charged this actual output allocation beside
+        // the provider's active peak. Check before every disposition that could
+        // retain the instance or publish feedback, including claimed refusals.
+        if output_storage_bound.is_some_and(|bound| pixels.retained_bytes() > bound) {
+            return Err(MondrianError::WorkflowStepFailed {
+                step_id: "effect_processor_output_storage".to_owned(),
+                reason: "source output storage exceeds the admitted staging allocation".to_owned(),
+            }
+            .into());
+        }
         let bind = |feedback: crate::EffectProcessorFeedback, retention| {
             crate::EffectProcessorFeedbackReceipt {
                 effect_id: request.effect_id,
@@ -4478,13 +4494,32 @@ mod source_tests {
     use mondrian_core::{automation::PropertyBag, TimelineTime, WorkingColorSpace};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum SourceCapacityCase {
+        Same,
+        OversizedSuccess,
+        OversizedHostRefusal,
+        OversizedUserBlocked,
+    }
     #[derive(Debug)]
     struct SourceFactory {
         calls: Arc<AtomicUsize>,
         prepared: Arc<AtomicUsize>,
+        dropped: Arc<AtomicUsize>,
+        capacity: SourceCapacityCase,
     }
     #[derive(Debug)]
-    struct SourceInstance(Arc<AtomicUsize>);
+    struct SourceInstance {
+        calls: Arc<AtomicUsize>,
+        dropped: Arc<AtomicUsize>,
+        capacity: SourceCapacityCase,
+        owner: mondrian_core::EffectProcessorOwnerId,
+    }
+    impl Drop for SourceInstance {
+        fn drop(&mut self) {
+            self.dropped.fetch_add(1, Ordering::SeqCst);
+        }
+    }
     impl EffectFloatProcessorFactory for SourceFactory {
         fn input_role(&self) -> EffectFloatProcessorInputRole {
             EffectFloatProcessorInputRole::NoImage
@@ -4493,14 +4528,19 @@ mod source_tests {
             EffectAlphaContract::SOURCE_FLOAT
         }
         fn feedback_budget_bytes(&self) -> usize {
-            0
+            if self.capacity == SourceCapacityCase::Same {
+                0
+            } else {
+                EffectProcessorFeedbackSnapshot::maximum_retained_bytes()
+            }
         }
         fn storage(
             &self,
             request: EffectFloatProcessorSizing,
         ) -> Result<EffectFloatProcessorStorage> {
             assert_eq!(request.alpha_formats, ColorFrameAlphaFormats::FLOAT_OUTPUT);
-            EffectFloatProcessorStorage::new(64, 16)
+            let retained = std::mem::size_of::<SourceInstance>();
+            EffectFloatProcessorStorage::new(64 + self.feedback_budget_bytes(), retained)
         }
         fn prepare(
             &self,
@@ -4509,7 +4549,12 @@ mod source_tests {
         ) -> Result<Box<dyn EffectFloatProcessorInstance>> {
             assert_eq!(request.input_role, EffectFloatProcessorInputRole::NoImage);
             self.prepared.fetch_add(1, Ordering::SeqCst);
-            Ok(Box::new(SourceInstance(self.calls.clone())))
+            Ok(Box::new(SourceInstance {
+                calls: self.calls.clone(),
+                dropped: self.dropped.clone(),
+                capacity: self.capacity,
+                owner: mondrian_core::EffectProcessorOwnerId::new(),
+            }))
         }
     }
     impl EffectFloatProcessorInstance for SourceInstance {
@@ -4522,17 +4567,75 @@ mod source_tests {
         ) -> std::result::Result<Option<EffectProcessorFeedback>, EffectProcessorInvocationError>
         {
             control.check()?;
-            self.0.fetch_add(1, Ordering::SeqCst);
+            self.calls.fetch_add(1, Ordering::SeqCst);
             let time = params["time"].as_f64().expect("exact evaluated source time") as f32;
             for pixel in output.pixels_mut() {
                 *pixel = [time, 0.25, 0.5, 0.75];
             }
-            Ok(None)
+            if self.capacity == SourceCapacityCase::Same {
+                return Ok(None);
+            }
+            let original_extent = output.extent();
+            let original_format = output.format();
+            let admitted_bytes = output.retained_bytes();
+            let admitted_capacity = admitted_bytes / std::mem::size_of::<[f32; 4]>();
+            let mut oversized = Vec::new();
+            oversized
+                .try_reserve_exact(admitted_capacity.checked_add(31).unwrap())
+                .expect("deliberate provider over-allocation");
+            oversized.extend_from_slice(output.pixels());
+            assert!(
+                oversized.capacity() > admitted_capacity,
+                "actual returned capacity, not logical len"
+            );
+            *output = EffectFloatFrame::from_pixels(original_extent, original_format, oversized)
+                .expect("same finite extent/format/len");
+            assert_eq!(output.extent(), EffectFrameExtent::new(3, 2));
+            assert_eq!(output.len(), 6);
+            assert!(output.retained_bytes() > admitted_bytes);
+            let blocked = self.capacity == SourceCapacityCase::OversizedUserBlocked;
+            let persistent = blocked.then(|| {
+                EffectProcessorNotice::new(
+                    EffectProcessorNoticeKind::Error,
+                    "repair".to_owned(),
+                    String::new(),
+                )
+                .unwrap()
+            });
+            let feedback = EffectProcessorFeedback {
+                owner: self.owner,
+                origin: EffectProcessorExecutionOrigin::InProcess,
+                snapshot: EffectProcessorFeedbackSnapshot::new(1, 1, 1, persistent, None, vec![])
+                    .unwrap(),
+            };
+            match self.capacity {
+                SourceCapacityCase::Same => unreachable!(),
+                SourceCapacityCase::OversizedSuccess => Ok(Some(feedback)),
+                SourceCapacityCase::OversizedHostRefusal => {
+                    Err(EffectProcessorInvocationError::HostResourceRefused(
+                        EffectProcessorHostResourceRefusal::OutputCapacity {
+                            required_bytes: output.retained_bytes(),
+                            admitted_bytes,
+                        },
+                    ))
+                }
+                SourceCapacityCase::OversizedUserBlocked => Err(
+                    EffectProcessorInvocationError::UserBlocked(Box::new(feedback)),
+                ),
+            }
         }
     }
-    fn fixture() -> (Arc<AtomicUsize>, Arc<AtomicUsize>, PreparedEffectProgram) {
+    fn fixture(
+        capacity: SourceCapacityCase,
+    ) -> (
+        Arc<AtomicUsize>,
+        Arc<AtomicUsize>,
+        Arc<AtomicUsize>,
+        PreparedEffectProgram,
+    ) {
         let calls = Arc::new(AtomicUsize::new(0));
         let prepared = Arc::new(AtomicUsize::new(0));
+        let dropped = Arc::new(AtomicUsize::new(0));
         let key = format!("test.source.{}", mondrian_core::EffectId::new());
         register_effect_definition(
             EffectDefinition::new(
@@ -4552,7 +4655,12 @@ mod source_tests {
                 Arc::new(|_, context| Ok(Some(serde_json::json!({"time":context.time.to_f64()})))),
                 None,
                 EffectCachePolicy::Uncacheable,
-                Arc::new(SourceFactory { calls: calls.clone(), prepared: prepared.clone() }),
+                Arc::new(SourceFactory {
+                    calls: calls.clone(),
+                    prepared: prepared.clone(),
+                    dropped: dropped.clone(),
+                    capacity,
+                }),
             ),
         )
         .expect("source definition");
@@ -4560,7 +4668,7 @@ mod source_tests {
         let program =
             PreparedEffectProgram::prepare(&[effect], &[], WorkingColorSpace::LinearRec709)
                 .expect("prepared source");
-        (calls, prepared, program)
+        (calls, prepared, dropped, program)
     }
     fn format() -> EffectValueFormat {
         EffectValueFormat::new(
@@ -4571,7 +4679,7 @@ mod source_tests {
     }
     #[test]
     fn zero_input_prepared_graph_reuses_same_bank_without_external_source_or_pixel_cache() {
-        let (calls, prepared, program) = fixture();
+        let (calls, prepared, _, program) = fixture(SourceCapacityCase::Same);
         let mut session = EffectExecutionSession::new(EffectExecutionSessionConfig {
             max_processor_instances: 1,
             max_processor_bytes: 128,
@@ -4611,7 +4719,7 @@ mod source_tests {
     }
     #[test]
     fn zero_input_stop_after_provider_work_never_publishes_or_retains_the_owner() {
-        let (calls, _, program) = fixture();
+        let (calls, _, _, program) = fixture(SourceCapacityCase::Same);
         let graph = program.evaluate(TimelineTime::ZERO).unwrap();
         let mut session = EffectExecutionSession::new(EffectExecutionSessionConfig {
             max_processor_instances: 1,
@@ -4637,8 +4745,66 @@ mod source_tests {
     }
 
     #[test]
+    fn oversized_source_output_is_terminal_before_all_recoverable_dispositions() {
+        for (capacity, canceled) in [
+            (SourceCapacityCase::OversizedSuccess, false),
+            (SourceCapacityCase::OversizedHostRefusal, false),
+            (SourceCapacityCase::OversizedUserBlocked, false),
+            (SourceCapacityCase::OversizedSuccess, true),
+        ] {
+            let (calls, prepared, dropped, program) = fixture(capacity);
+            let graph = program.evaluate(TimelineTime::ZERO).unwrap();
+            let mut session = EffectExecutionSession::new(EffectExecutionSessionConfig {
+                max_processor_instances: 1,
+                max_processor_bytes: 128,
+                ..EffectExecutionSessionConfig::uncached(1024 * 1024)
+            });
+            let mut stop = || {
+                (canceled && calls.load(Ordering::SeqCst) > 0)
+                    .then_some(EffectProcessorStopReason::Canceled)
+            };
+            let mut control = EffectProcessorControl::new(&mut stop);
+            let result = session.generate_compiled_rgba_f32(
+                EffectFrameExtent::new(3, 2),
+                format(),
+                &graph,
+                0,
+                &mut control,
+            );
+            if canceled {
+                assert_eq!(
+                    result,
+                    Err(EffectFloatExecutionError::Stopped {
+                        reason: EffectProcessorStopReason::Canceled
+                    })
+                );
+            } else {
+                assert!(
+                    matches!(&result,Err(EffectFloatExecutionError::CustomProcessor(EffectExecutionError::CustomProcessorFailed {reason,..}))
+                    if reason.contains("source output storage exceeds the admitted staging allocation")),
+                    "{capacity:?}: {result:?}"
+                );
+            }
+            assert_eq!(calls.load(Ordering::SeqCst), 1);
+            assert_eq!(prepared.load(Ordering::SeqCst), 1);
+            assert_eq!(
+                dropped.load(Ordering::SeqCst),
+                1,
+                "bad original owner is not retained"
+            );
+            assert_eq!(session.diagnostics().processor_instances, 0);
+            assert_eq!(session.diagnostics().processor_bytes, 0);
+            assert_eq!(session.diagnostics().cache_entries, 0);
+            assert!(
+                control.take_feedback().unwrap().is_empty(),
+                "no claimed-success or blocked receipt is published"
+            );
+        }
+    }
+
+    #[test]
     fn source_role_alpha_extent_budget_and_stop_refuse_before_provider_work() {
-        let (calls, prepared, program) = fixture();
+        let (calls, prepared, _, program) = fixture(SourceCapacityCase::Same);
         let graph = program.evaluate(TimelineTime::ZERO).unwrap();
         let mut session = EffectExecutionSession::new(EffectExecutionSessionConfig::uncached(0));
         assert!(session
@@ -4688,8 +4854,12 @@ mod source_tests {
                 &mut EffectProcessorControl::uncancelled()
             )
             .is_err());
-        let factory: Arc<dyn EffectFloatProcessorFactory> =
-            Arc::new(SourceFactory { calls: calls.clone(), prepared: prepared.clone() });
+        let factory: Arc<dyn EffectFloatProcessorFactory> = Arc::new(SourceFactory {
+            calls: calls.clone(),
+            prepared: prepared.clone(),
+            dropped: Arc::new(AtomicUsize::new(0)),
+            capacity: SourceCapacityCase::Same,
+        });
         let mut output =
             EffectFloatFrame::from_pixels(EffectFrameExtent::new(1, 1), format(), vec![[0.; 4]])
                 .unwrap();
