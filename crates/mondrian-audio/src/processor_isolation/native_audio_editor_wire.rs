@@ -51,7 +51,8 @@ pub(super) fn read_open_request(
         .map_err(|_| invalid("native editor title contains NUL"))
 }
 
-/// Tag 16 alone carries constants. An old tag-11 peer must never interpret the
+/// Tag 16 alone carries constants keyed by prepared processing lane index.
+/// An old tag-11 peer must never interpret the
 /// extra bytes as a following command or acknowledge an unsynchronized Open.
 pub(super) fn write_projected_open_request(
     writer: &mut impl Write,
@@ -63,8 +64,8 @@ pub(super) fn write_projected_open_request(
     }
     write_open_prefix(writer, request)?;
     writer.write_all(&(request.controller_values().len() as u32).to_le_bytes())?;
-    for (id, bits) in request.controller_values() {
-        writer.write_all(&id.to_le_bytes())?;
+    for (lane, bits) in request.controller_values() {
+        writer.write_all(&lane.to_le_bytes())?;
         writer.write_all(&bits.to_le_bytes())?;
     }
     writer.flush()
@@ -87,10 +88,10 @@ pub(super) fn read_projected_open_request(
     crate::native_audio_editor::controller_value_layout(request.title().len(), values.capacity())
         .map_err(|_| invalid("native editor actual request capacity exceeds local frontier"))?;
     for _ in 0..count {
-        let id = read_u32(reader)?;
+        let lane = read_u32(reader)?;
         let mut bits = [0_u8; 8];
         reader.read_exact(&mut bits)?;
-        values.push((id, u64::from_le_bytes(bits)));
+        values.push((lane, u64::from_le_bytes(bits)));
     }
     request
         .with_controller_values(values)
@@ -351,6 +352,8 @@ mod tests {
         for values in [
             vec![(0, 0.25_f64.to_bits()), (0, 0.5_f64.to_bits())],
             vec![(0, f64::NAN.to_bits())],
+            vec![(4096, 0.25_f64.to_bits())],
+            vec![(u32::MAX, 0.25_f64.to_bits())],
         ] {
             assert!(request().with_controller_values(values.clone()).is_err());
             let mut bytes = prefix.clone();
@@ -374,6 +377,8 @@ mod tests {
             "actual capacity, not length"
         );
         assert!(crate::native_audio_editor::controller_value_layout(0, usize::MAX).is_err());
+        assert!(request().with_controller_values(vec![(4096, 0.25_f64.to_bits())]).is_err());
+        assert!(request().with_controller_values(vec![(u32::MAX, 0.25_f64.to_bits())]).is_err());
         assert_eq!(
             request().owned_layout().unwrap(),
             crate::NativeHostBufferLayout { bytes: empty.title().len(), alignment: 1 }

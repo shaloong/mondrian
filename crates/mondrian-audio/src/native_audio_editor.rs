@@ -21,7 +21,9 @@ impl NativeAudioEditorOpenRequest {
         Self { binding, title, controller_values: Vec::new() }
     }
     /// One non-RT request owner, moved from the installed Plan's constant Some
-    /// lanes. The child separately owns/charges its decoded copy while this Vec
+    /// lanes, keyed by the original prepared processing lane index (not a native
+    /// parameter ID). The adapter alone maps that index to its native identity.
+    /// The child separately owns/charges its decoded copy while this Vec
     /// is live. This local frontier excludes Plan/native-private allocations and
     /// allocator bookkeeping; it does not alter the processor B*L budget.
     pub(crate) fn with_controller_values(
@@ -29,9 +31,10 @@ impl NativeAudioEditorOpenRequest {
         values: Vec<(u32, u64)>,
     ) -> Result<Self, crate::AudioProcessorHostError> {
         if values.len() > NATIVE_EDITOR_CONTROLLER_VALUES
-            || values.iter().enumerate().any(|(index, (id, bits))| {
-                !f64::from_bits(*bits).is_finite()
-                    || values[..index].iter().any(|(previous, _)| previous == id)
+            || values.iter().enumerate().any(|(index, (lane, bits))| {
+                *lane as usize >= NATIVE_EDITOR_CONTROLLER_VALUES
+                    || !f64::from_bits(*bits).is_finite()
+                    || values[..index].iter().any(|(previous, _)| previous == lane)
             })
         {
             return Err(crate::AudioProcessorHostError::InvalidContract(

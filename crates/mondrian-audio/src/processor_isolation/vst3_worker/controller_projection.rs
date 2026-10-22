@@ -22,16 +22,16 @@ impl Vst3Worker {
         {
             return Ok(false);
         }
-        // Validate the entire selection before any native setter; ID zero is a
+        // Validate the entire selection before any native setter; native ID zero is a
         // normal admitted ID. Stepped values use the original author domain.
-        for (index, (id, bits)) in values.iter().enumerate() {
-            if values[..index].iter().any(|(previous, _)| previous == id) {
+        for (index, (lane, bits)) in values.iter().enumerate() {
+            if values[..index].iter().any(|(previous, _)| previous == lane) {
                 return Err(invalid("duplicate native editor controller projection"));
             }
             projected_parameter(
                 &self.payload.parameters,
                 &self.payload.parameter_ids,
-                *id,
+                *lane,
                 *bits,
             )?;
         }
@@ -70,15 +70,15 @@ impl Vst3Worker {
         if owner.serial() != request.binding().expected_object.object_serial() {
             return Ok(false);
         }
-        for (id, bits) in values {
-            let (normalized, host_editing) = projected_parameter(
+        for (lane, bits) in values {
+            let (native_id, normalized, host_editing) = projected_parameter(
                 &self.payload.parameters,
                 &self.payload.parameter_ids,
-                *id,
+                *lane,
                 *bits,
             )?;
             editor
-                .project_controller_parameter(*id, normalized, host_editing)
+                .project_controller_parameter(native_id, normalized, host_editing)
                 .map_err(native_editor_removal_failed)?;
             if editor.attachment_owner().map_err(native_editor_removal_failed)? != owner
                 || editor.editor_event_source_status().map_err(native_editor_removal_failed)?
@@ -109,14 +109,14 @@ impl Vst3Worker {
 fn projected_parameter(
     parameters: &[Vst3ParameterDescriptor],
     admitted: &[u32],
-    id: u32,
+    lane: u32,
     author_bits: u64,
-) -> Result<(f64, bool), AudioProcessorHostError> {
-    if !admitted.contains(&id) {
-        return Err(invalid(
-            "native editor controller projection lane is not admitted",
-        ));
-    }
+) -> Result<(u32, f64, bool), AudioProcessorHostError> {
+    let index = usize::try_from(lane)
+        .map_err(|_| invalid("native editor processing lane exceeds address space"))?;
+    let id = *admitted
+        .get(index)
+        .ok_or_else(|| invalid("native editor controller projection lane is not admitted"))?;
     let descriptor = parameters
         .iter()
         .find(|parameter| parameter.id == id)
@@ -127,6 +127,7 @@ fn projected_parameter(
         ));
     }
     Ok((
+        id,
         descriptor.normalized_from_author_scalar(f64::from_bits(author_bits))?,
         !descriptor.can_automate && descriptor.flags & (1 << 4) == 0,
     ))
@@ -146,15 +147,36 @@ mod tests {
             read_only: false,
             flags: 1,
         };
+        let mut other = parameter.clone();
+        other.id = 900;
+        let mut third = parameter.clone();
+        third.id = 77;
+        // Neither the complete native census nor native IDs define processing
+        // lane order. Native ID zero is legal at a nonzero admitted lane.
+        let parameters = [parameter.clone(), third, other];
+        let admitted = [900, 77, 0];
+        let (id, value, bracket) =
+            projected_parameter(&parameters, &admitted, 2, (-0.0_f64).to_bits()).unwrap();
+        assert_eq!(id, 0);
+        assert_eq!(value.to_bits(), (-0.0_f64).to_bits());
+        assert!(!bracket);
         assert_eq!(
-            projected_parameter(&[parameter.clone()], &[0], 0, (-0.0_f64).to_bits())
-                .unwrap()
-                .0
-                .to_bits(),
-            (-0.0_f64).to_bits()
+            projected_parameter(&parameters, &admitted, 0, 0.25_f64.to_bits()).unwrap(),
+            (900, 0.25, false)
         );
-        assert!(projected_parameter(&[parameter.clone()], &[], 0, 0.25_f64.to_bits()).is_err());
-        assert!(projected_parameter(&[parameter.clone()], &[99], 99, 0.25_f64.to_bits()).is_err());
+        assert_eq!(
+            projected_parameter(&parameters, &admitted, 1, 0.25_f64.to_bits()).unwrap(),
+            (77, 0.25, false)
+        );
+        assert!(projected_parameter(&parameters, &admitted, 3, 0.25_f64.to_bits()).is_err());
+        assert!(
+            projected_parameter(&parameters, &admitted, 900, 0.25_f64.to_bits()).is_err(),
+            "native ID cannot stand in for a processing lane"
+        );
+        assert!(
+            projected_parameter(&parameters, &[42], 0, 0.25_f64.to_bits()).is_err(),
+            "mapped native descriptor must exist"
+        );
         for value in [f64::NAN, f64::INFINITY, -0.01, 1.01] {
             assert!(projected_parameter(&[parameter.clone()], &[0], 0, value.to_bits()).is_err());
         }
@@ -162,17 +184,17 @@ mod tests {
         parameter.flags = 0;
         assert_eq!(
             projected_parameter(&[parameter.clone()], &[0], 0, 0.25_f64.to_bits()).unwrap(),
-            (0.25, true)
+            (0, 0.25, true)
         );
         parameter.flags = 1 << 4;
         assert_eq!(
             projected_parameter(&[parameter.clone()], &[0], 0, 0.25_f64.to_bits()).unwrap(),
-            (0.25, false)
+            (0, 0.25, false)
         );
         parameter.step_count = 4;
         assert_eq!(
             projected_parameter(&[parameter.clone()], &[0], 0, 3.0_f64.to_bits()).unwrap(),
-            (0.75, false)
+            (0, 0.75, false)
         );
         assert!(projected_parameter(&[parameter.clone()], &[0], 0, 0.5_f64.to_bits()).is_err());
         parameter.read_only = true;

@@ -1331,7 +1331,14 @@ impl AudioRenderSession {
             let processor =
                 crate::schedule::processor(self.plan.program(), lease.address().occurrence)
                     .map_err(|_| crate::AudioNativeOwnerError::OwnerUnavailable)?;
-            native_editor_constant_values(processor)?
+            let prepared = self
+                .plan
+                .schedule
+                .processors
+                .iter()
+                .find(|prepared| prepared.occurrence == lease.address().occurrence)
+                .ok_or(crate::AudioNativeOwnerError::OwnerUnavailable)?;
+            native_editor_constant_values(processor, &prepared.parameter_ids)?
         } else {
             Vec::new()
         };
@@ -3115,12 +3122,36 @@ mod native_child_settlement_tests {
 /// optimize it as constant. No playhead/default projection is invented here.
 fn native_editor_constant_values(
     processor: &crate::plan::CompiledProcessor,
+    parameter_ids: &[mondrian_core::ParameterId],
 ) -> Result<Vec<(u32, u64)>, crate::AudioProcessorHostError> {
     if !matches!(
         processor.definition,
         mondrian_timeline::audio::AudioProcessorDefinitionRef::Vst3 { .. }
     ) {
         return Ok(Vec::new());
+    }
+    let invalid = || {
+        crate::AudioProcessorHostError::InvalidContract(
+            "native editor prepared parameter lane identity is invalid".to_owned(),
+        )
+    };
+    // The exact prepared order owns processing lanes. Validate its complete
+    // correspondence without allocating a second ID map or interpreting any
+    // adapter's canonical-ID syntax. None and keyed lanes retain their index.
+    if parameter_ids.len() != processor.parameters.len()
+        || parameter_ids.len() > crate::native_audio_editor::NATIVE_EDITOR_CONTROLLER_VALUES
+        || parameter_ids.iter().enumerate().any(|(index, id)| {
+            parameter_ids[..index].contains(id)
+                || processor.parameters.get(id).is_none_or(|parameter| {
+                    parameter.schema.parameter_id != *id
+                        || parameter
+                            .automation
+                            .as_ref()
+                            .is_some_and(|curve| curve.parameter_id != *id)
+                })
+        })
+    {
+        return Err(invalid());
     }
     let count = processor
         .parameters
@@ -3137,26 +3168,21 @@ fn native_editor_constant_values(
         )
     })?;
     crate::native_audio_editor::controller_value_layout(0, values.capacity())?;
-    for (id, parameter) in &processor.parameters {
+    for (lane, id) in parameter_ids.iter().enumerate() {
+        let parameter = processor.parameters.get(id).ok_or_else(invalid)?;
         let Some(curve) = parameter.automation.as_ref().filter(|curve| curve.keyframes.is_empty())
         else {
             continue;
         };
-        let native_id = id
-            .as_str()
-            .strip_prefix("vst3.param.")
-            .and_then(|id| id.parse::<u32>().ok())
-            .ok_or_else(|| {
-                crate::AudioProcessorHostError::InvalidContract(
-                    "native editor constant is not an admitted VST3 ID".to_owned(),
-                )
-            })?;
         if !curve.default_value.is_finite() {
             return Err(crate::AudioProcessorHostError::InvalidContract(
                 "native editor constant is not finite".to_owned(),
             ));
         }
-        values.push((native_id, curve.default_value.to_bits()));
+        values.push((
+            u32::try_from(lane).map_err(|_| invalid())?,
+            curve.default_value.to_bits(),
+        ));
     }
     Ok(values)
 }
@@ -3182,6 +3208,10 @@ mod native_editor_constant_tests {
             let mut parameter =
                 AudioProcessorParameter::from_schema(descriptor.authoring_schema().unwrap())
                     .unwrap();
+            // Shared control code cannot assume an adapter-specific ID syntax.
+            let canonical = mondrian_core::ParameterId::new(format!("owned.lane.{id}")).unwrap();
+            parameter.schema.parameter_id = canonical.clone();
+            parameter.automation.as_mut().unwrap().parameter_id = canonical;
             match id {
                 0 => parameter.automation.as_mut().unwrap().default_value = -0.0,
                 1 => parameter.automation = None,
@@ -3210,21 +3240,62 @@ mod native_editor_constant_tests {
             opaque_state: Some(vec![1, 2, 3]),
         };
         let before = processor.clone();
+        let ids: Vec<_> = processor.parameters.keys().cloned().collect();
+        // Deliberately permute the prepared order away from canonical map order.
+        // A keyed first lane and a None third lane do not compress the selection.
+        let prepared = [
+            ids[2].clone(),
+            ids[0].clone(),
+            ids[1].clone(),
+            ids[3].clone(),
+        ];
         assert_eq!(
-            native_editor_constant_values(&processor).unwrap(),
-            vec![(0, (-0.0_f64).to_bits()), (3, 0.25_f64.to_bits())]
+            native_editor_constant_values(&processor, &prepared).unwrap(),
+            vec![(1, (-0.0_f64).to_bits()), (3, 0.25_f64.to_bits())]
         );
         assert_eq!(
             processor, before,
             "derivation cannot manufacture Some/default ownership or rewrite opaque state"
         );
+        for invalid in [
+            prepared[..3].to_vec(),
+            vec![
+                ids[0].clone(),
+                ids[0].clone(),
+                ids[2].clone(),
+                ids[3].clone(),
+            ],
+            vec![
+                ids[0].clone(),
+                mondrian_core::ParameterId::new("absent").unwrap(),
+                ids[2].clone(),
+                ids[3].clone(),
+            ],
+            vec![ids[0].clone(); 4097],
+        ] {
+            assert!(native_editor_constant_values(&processor, &invalid).is_err());
+        }
+        // Validate complete schema identity, including lanes that send no value.
+        processor.parameters.get_mut(&ids[1]).unwrap().schema.parameter_id = ids[0].clone();
+        assert!(native_editor_constant_values(&processor, &prepared).is_err());
+        processor = before.clone();
+        processor
+            .parameters
+            .get_mut(&ids[2])
+            .unwrap()
+            .automation
+            .as_mut()
+            .unwrap()
+            .parameter_id = ids[0].clone();
+        assert!(native_editor_constant_values(&processor, &prepared).is_err());
+        processor = before;
         processor.definition = AudioProcessorDefinitionRef::Clap {
             plugin_id: "test".to_owned(),
             schema_version: 1,
             binary_sha256: None,
         };
         assert!(
-            native_editor_constant_values(&processor).unwrap().is_empty(),
+            native_editor_constant_values(&processor, &prepared).unwrap().is_empty(),
             "CLAP does not consume a VST3 coordinate projection"
         );
     }
