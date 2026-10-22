@@ -379,6 +379,7 @@ fn apply_custom_render_op_f32_for_role(
     control.check().map_err(|_| EffectExecutionError::CustomProcessorStopped {
         reason: control.stop_reason().unwrap_or(crate::EffectProcessorStopReason::Canceled),
     })?;
+    crate::execution::admit_image_scale(processor.image_scale_requirement(), working.sampling())?;
     let available_working_bytes = if processor.float32_factory().is_some() {
         if let Some(owner) = session.as_deref_mut() {
             let staging_bytes = if input_role == crate::EffectFloatProcessorInputRole::SingleImage {

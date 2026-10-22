@@ -1228,6 +1228,27 @@ impl EffectExecutionSession {
         {
             return Err(EffectTemporalExecutionError::ColorDomainUnsupported);
         }
+        // Only values in this time-expanded execution projection contribute,
+        // rather than every node of every sampled graph context.
+        if !request.frame_extent.is_empty() && !request.output_roi.is_empty() {
+            for address in temporal_program.ordered_values() {
+                if let TemporalValueAddress::Graph { context, node_id } = *address {
+                    let graph = &temporal_program.context(context)?.graph;
+                    let node = graph.graph().node(node_id).ok_or(
+                        EffectTemporalExecutionError::UnsupportedGraphNode {
+                            node_id,
+                            kind: "missing",
+                        },
+                    )?;
+                    if let EffectGraphNodeKind::UnaryEffect { op, .. }
+                    | EffectGraphNodeKind::DomainEffect { op, .. }
+                    | EffectGraphNodeKind::CustomSource { op, .. } = &node.kind
+                    {
+                        crate::execution::admit_render_op_image_scale(op, request.sampling)?;
+                    }
+                }
+            }
+        }
         self.bind_generation(request.generation);
         let demand = compiled.plan_execution_demand(
             request.output_time,

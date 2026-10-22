@@ -88,6 +88,15 @@ pub enum EffectExecutionError {
     /// A custom processor required by the compiled graph is not registered.
     #[error("custom effect processor `{key}` is unavailable")]
     CustomProcessorUnavailable { key: String },
+    /// The actual image sampling does not meet the frozen provider capability.
+    /// No processor work or runtime quarantine is performed for this refusal.
+    #[error("effect image scale {actual_sampling:?} does not meet {requirement:?}")]
+    ImageScaleNotAdmitted {
+        /// Immutable requirement of the work that would execute.
+        requirement: crate::EffectImageScaleRequirement,
+        /// Sampling carried by the actual input or explicit output staging.
+        actual_sampling: mondrian_core::ImageSampling,
+    },
     /// A custom processor returned an error or panicked without committing its staged pixels.
     #[error("custom effect processor `{key}` failed: {reason}")]
     CustomProcessorFailed { key: String, reason: String },
@@ -163,6 +172,27 @@ impl EffectExecutionError {
             _ => None,
         }
     }
+}
+
+/// Admit only render scale; PAR and window geometry retain their own authorities.
+pub(crate) fn admit_image_scale(
+    requirement: crate::EffectImageScaleRequirement,
+    actual_sampling: mondrian_core::ImageSampling,
+) -> Result<(), EffectExecutionError> {
+    if requirement == crate::EffectImageScaleRequirement::Unit && !actual_sampling.is_unit_scale() {
+        return Err(EffectExecutionError::ImageScaleNotAdmitted { requirement, actual_sampling });
+    }
+    Ok(())
+}
+
+pub(crate) fn admit_render_op_image_scale(
+    op: &EffectRenderOp,
+    actual_sampling: mondrian_core::ImageSampling,
+) -> Result<(), EffectExecutionError> {
+    if let EffectRenderOp::Custom { processor: Some(binding), .. } = op {
+        admit_image_scale(binding.image_scale_requirement(), actual_sampling)?;
+    }
+    Ok(())
 }
 
 /// Error returned when an effect graph cannot execute on the float/linear CPU path.
@@ -1093,6 +1123,8 @@ fn apply_compiled_effect_graph_rgba_f32_inner(
             .to_owned()
             .map_err(EffectFloatExecutionError::FrameContract);
     }
+    admit_image_scale(compiled.image_scale_requirement(), sampling)
+        .map_err(EffectFloatExecutionError::CustomProcessor)?;
     let reservations = scalar_processor_reservations(
         compiled,
         width,
@@ -4480,5 +4512,57 @@ mod effect_pass_mix_contracts {
                 "encoded implicit mix must not composite a second copy"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod image_scale_cache_tests {
+    use super::*;
+
+    #[test]
+    fn cached_float_output_cannot_bypass_actual_unit_scale_admission() {
+        let graph = crate::image_scale_admission_tests::cacheable_unit_graph();
+        let sampling = mondrian_core::ImageSampling::new(
+            mondrian_core::SampleAspectRatio::new(4, 3).unwrap(),
+            [mondrian_core::Rational::new(1, 2); 2],
+        )
+        .unwrap();
+        let input = crate::EffectFloatFrame::from_pixels(
+            crate::EffectFrameExtent::new(1, 1),
+            crate::EffectValueFormat::new(
+                EffectWorkingPrecision::Float32,
+                crate::EffectColorDomain::SceneLinearRgb,
+                mondrian_core::ColorFrameAlpha::StraightFloat,
+            ),
+            sampling,
+            vec![[0.25, 0.5, 0.75, 1.0]],
+        )
+        .unwrap();
+        let key = effect_output_cache_key_f32(input.view(), &graph, 0, None)
+            .expect("the injected entry is eligible for normal output lookup");
+        let mut session = EffectExecutionSession::default();
+        session.put_float_output(key.clone(), input.clone());
+        assert!(session.get_float_output(&key).is_some());
+        assert_eq!(
+            session
+                .apply_compiled_rgba_f32(
+                    input.view(),
+                    &graph,
+                    0,
+                    &mut crate::EffectProcessorControl::uncancelled(),
+                )
+                .unwrap_err(),
+            EffectFloatExecutionError::CustomProcessor(
+                EffectExecutionError::ImageScaleNotAdmitted {
+                    requirement: crate::EffectImageScaleRequirement::Unit,
+                    actual_sampling: sampling,
+                },
+            )
+        );
+        assert!(
+            session.get_float_output(&key).is_some(),
+            "refusal does not mutate retained cache"
+        );
+        assert_eq!(session.diagnostics().processor_instances, 0);
     }
 }

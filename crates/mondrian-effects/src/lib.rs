@@ -179,3 +179,6 @@ pub use processor_question::{
     EffectProcessorQuestionId, EffectProcessorQuestionReceipt, EffectProcessorQuestionReply,
     EffectProcessorQuestionService, EffectProcessorQuestionState, EffectProcessorQuestionView,
 };
+
+#[cfg(test)]
+mod image_scale_admission_tests;

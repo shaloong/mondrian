@@ -3222,6 +3222,21 @@ impl PreparedHeterogeneousEffectWork {
                 actual: input.pixels().len(),
             });
         }
+        // Cold route preparation may size immutable factories without a
+        // sampling value. Actual CPU work admits its own dispatch subset before
+        // sizing, retaining owners, or allocating any execution staging.
+        if !input.extent().is_empty() {
+            for dispatch in self.cpu_dispatches.iter() {
+                let node = self.compiled.graph().node(dispatch.node).ok_or(
+                    PreparedHeterogeneousEffectWorkError::InvalidCpuPrefix { node: dispatch.node },
+                )?;
+                if let EffectGraphNodeKind::UnaryEffect { op, .. }
+                | EffectGraphNodeKind::DomainEffect { op, .. } = &node.kind
+                {
+                    crate::execution::admit_render_op_image_scale(op, input.sampling())?;
+                }
+            }
+        }
         let observation_bytes = session.observation.maximum_storage_bytes();
         let observed_required = self
             .cpu_required_working_bytes
