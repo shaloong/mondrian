@@ -97,3 +97,21 @@ if(WIN32)
   target_link_libraries(ImageMemoryOwnership PRIVATE shell32)
 endif()
 target_link_libraries(ImageMemoryOwnership PRIVATE Threads::Threads ${CMAKE_DL_LIBS})
+
+# Independent output-only Generator fixture; existing reference targets stay intact.
+set(OPENFX_GENERATOR_BUNDLE_DIR "${CMAKE_BINARY_DIR}/GeneratorProbe.ofx.bundle")
+set(OPENFX_GENERATOR_BINARY_DIR "${OPENFX_GENERATOR_BUNDLE_DIR}/Contents/${OPENFX_ARCH_DIR}")
+add_library(GeneratorProbe MODULE generator_probe.cpp)
+target_compile_features(GeneratorProbe PRIVATE cxx_std_17)
+if(MSVC)
+  target_compile_options(GeneratorProbe PRIVATE /utf-8)
+endif()
+target_include_directories(GeneratorProbe PRIVATE "${OPENFX_SOURCE_DIR}/include")
+set_target_properties(GeneratorProbe PROPERTIES PREFIX "" SUFFIX ".ofx"
+  LIBRARY_OUTPUT_DIRECTORY "${OPENFX_GENERATOR_BINARY_DIR}"
+  LIBRARY_OUTPUT_DIRECTORY_RELEASE "${OPENFX_GENERATOR_BINARY_DIR}"
+  RUNTIME_OUTPUT_DIRECTORY "${OPENFX_GENERATOR_BINARY_DIR}"
+  RUNTIME_OUTPUT_DIRECTORY_RELEASE "${OPENFX_GENERATOR_BINARY_DIR}")
+file(MAKE_DIRECTORY "${OPENFX_GENERATOR_BUNDLE_DIR}/Contents")
+configure_file("${OPENFX_SOURCE_DIR}/Examples/Basic/Info.plist"
+  "${OPENFX_GENERATOR_BUNDLE_DIR}/Contents/Info.plist" COPYONLY)
