@@ -245,6 +245,12 @@ pub(super) fn fit_target_size(
         return (src_width, src_height);
     };
 
+    // Full-source RGBA materialization supports odd dimensions. Preserve its
+    // exact grid when no downscale is requested; even sizing applies only below.
+    if src_width <= max_w && src_height <= max_h {
+        return (src_width, src_height);
+    }
+
     let src_w = src_width as f64;
     let src_h = src_height as f64;
     let scale = (max_w as f64 / src_w).min(max_h as f64 / src_h).min(1.0);
