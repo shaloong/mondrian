@@ -109,6 +109,12 @@ fn product_worker_preserves_boolean_hold_animation_queries_and_graph_pixels() {
             input.width(),
             input.height(),
             input.format(),
+            mondrian_effects::EffectProjectGeometry::new(
+                input.width(),
+                input.height(),
+                mondrian_core::SampleAspectRatio::SQUARE,
+            )
+            .expect("explicit owner project geometry"),
             &mut checkpoint(&cancellation),
         )
         .expect("supervised native owner")
@@ -163,7 +169,8 @@ fn product_worker_preserves_boolean_hold_animation_queries_and_graph_pixels() {
     let authored = effect.properties.clone();
     let frame_context = EffectFrameContext::new(
         Rational::FPS_24,
-        SampleAspectRatio::new(1, 1).unwrap(),
+        mondrian_effects::EffectProjectGeometry::new(3, 5, SampleAspectRatio::new(1, 1).unwrap())
+            .expect("explicit owner project geometry"),
         TimelineTimeRange::new(
             TimelineTime::new(-1, 2).unwrap(),
             TimelineTime::new(3, 1).unwrap(),
@@ -232,6 +239,12 @@ fn product_worker_rejects_curves_for_nonanimatable_boolean_parameters() {
         input.width(),
         input.height(),
         input.format(),
+        mondrian_effects::EffectProjectGeometry::new(
+            input.width(),
+            input.height(),
+            mondrian_core::SampleAspectRatio::SQUARE,
+        )
+        .expect("explicit owner project geometry"),
         &mut checkpoint(&cancellation),
     )
     .expect("actual worker admission precedes native instance creation");
@@ -298,6 +311,12 @@ fn product_worker_zero_render_shutdown_observes_original_exit_deadline() {
         3,
         5,
         format,
+        mondrian_effects::EffectProjectGeometry::new(
+            3,
+            5,
+            mondrian_core::SampleAspectRatio::SQUARE,
+        )
+        .expect("explicit owner project geometry"),
         &mut || Ok(()),
     )
     .expect("same lazy Product session without native instance creation");

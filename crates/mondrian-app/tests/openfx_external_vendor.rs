@@ -712,6 +712,12 @@ fn execute(case: &Case, leases: &mut [Lease], deadline: Instant) -> LabResult<()
         5,
         3,
         value_format(),
+        mondrian_effects::EffectProjectGeometry::new(
+            5,
+            3,
+            mondrian_core::SampleAspectRatio::SQUARE,
+        )
+        .expect("explicit owner project geometry"),
         &mut checkpoint,
     )
     .map_err(|e| e.to_string())?;
@@ -774,6 +780,12 @@ fn execute(case: &Case, leases: &mut [Lease], deadline: Instant) -> LabResult<()
         5,
         3,
         value_format(),
+        mondrian_effects::EffectProjectGeometry::new(
+            5,
+            3,
+            mondrian_core::SampleAspectRatio::SQUARE,
+        )
+        .expect("explicit owner project geometry"),
         &mut checkpoint,
     )
     .map_err(|e| e.to_string())?;
@@ -861,8 +873,13 @@ fn execute(case: &Case, leases: &mut [Lease], deadline: Instant) -> LabResult<()
         TimelineTime::new(5, 24).map_err(|e| e.to_string())?,
     )
     .map_err(|e| e.to_string())?;
-    let frame_context = EffectFrameContext::new(Rational::FPS_24, SampleAspectRatio::SQUARE, range)
-        .map_err(|e| e.to_string())?;
+    let frame_context = EffectFrameContext::new(
+        Rational::FPS_24,
+        mondrian_effects::EffectProjectGeometry::new(5, 3, SampleAspectRatio::SQUARE)
+            .expect("explicit owner project geometry"),
+        range,
+    )
+    .map_err(|e| e.to_string())?;
     require(
         frame_context.available_frames().map_err(|e| e.to_string())? == (0, 4),
         "graph/direct time availability mismatch",

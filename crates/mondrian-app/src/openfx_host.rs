@@ -22,6 +22,7 @@ pub use resident::{
     OpenFxRenderDiagnostic, OpenFxRenderPhase,
 };
 
+use mondrian_effects::EffectProjectGeometry;
 use std::collections::BTreeMap;
 use std::ffi::{c_char, c_int, c_void, CString};
 use std::fs;
@@ -334,7 +335,8 @@ pub struct OpenFxRenderTiming {
     pub first_frame: f64,
     /// Last frame available from this filter's source Clip.
     pub last_frame: f64,
-    /// Sequence pixel width divided by pixel height.
+    /// Current Source/Output image or clip sample width divided by height.
+    /// Independent of the immutable owner project pixel aspect ratio.
     pub pixel_aspect_ratio: f64,
 }
 
@@ -397,6 +399,9 @@ struct NativeFrameInfo {
     source_alpha: c_int,
     width: c_int,
     height: c_int,
+    project_width: u32,
+    project_height: u32,
+    project_pixel_aspect_ratio: f64,
     frame: f64,
     frame_rate: f64,
     first_frame: f64,
@@ -889,6 +894,7 @@ pub fn render_openfx_filter_frame(
     timing: &OpenFxRenderTiming,
     parameters: &BTreeMap<String, OpenFxParameterBinding>,
     frame: &EffectFloatFrame,
+    project_geometry: EffectProjectGeometry,
 ) -> Result<EffectFloatFrame, OpenFxHostError> {
     let mut checkpoint = || Ok(());
     validate_render_request(timing, parameters, frame, &mut checkpoint)?;
@@ -899,6 +905,7 @@ pub fn render_openfx_filter_frame(
         frame.width(),
         frame.height(),
         frame.format(),
+        project_geometry,
         &mut checkpoint,
     )?;
     let output = session.render(timing, parameters, frame, &mut checkpoint)?;
@@ -1583,6 +1590,10 @@ pub(crate) mod shared_frame_tests {
             first_frame: 0.0,
             last_frame: 1.0,
             pixel_aspect_ratio: f64::MAX,
+
+            project_width: 3,
+            project_height: 2,
+            project_pixel_aspect_ratio: 1.0,
         };
         assert_eq!(
             NativeSession::create(
@@ -1597,6 +1608,154 @@ pub(crate) mod shared_frame_tests {
             .err(),
             Some(2)
         );
+    }
+
+    #[test]
+    fn native_invalid_project_geometry_refuses_before_binary_loading() {
+        let binary = CString::new("must-not-load-project-geometry.ofx").unwrap();
+        let bundle = CString::new("must-not-load-project-geometry.ofx.bundle").unwrap();
+        let identifier = CString::new("test.geometry").unwrap();
+        let input = [[0.0_f32; 4]; 15];
+        // SAFETY: the complete aligned array is borrowed only for this call.
+        let bytes = unsafe {
+            std::slice::from_raw_parts(input.as_ptr().cast(), std::mem::size_of_val(&input))
+        };
+        for (project_width, project_height, project_par) in [
+            (0, 7, 2.0),
+            (10, 0, 2.0),
+            (10, 7, 0.0),
+            (10, 7, -1.0),
+            (10, 7, f64::NAN),
+            (10, 7, f64::INFINITY),
+        ] {
+            let info = NativeFrameInfo {
+                source_alpha: 0,
+                width: 3,
+                height: 5,
+                project_width,
+                project_height,
+                project_pixel_aspect_ratio: project_par,
+                frame: 0.0,
+                frame_rate: 24.0,
+                first_frame: 0.0,
+                last_frame: 100.0,
+                pixel_aspect_ratio: 1.0,
+            };
+            assert_eq!(
+                NativeSession::create(
+                    mondrian_core::EffectProcessorOwnerId::new(),
+                    &binary,
+                    &bundle,
+                    &identifier,
+                    bytes,
+                    &info,
+                    &[],
+                )
+                .err(),
+                Some(2)
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "owned SessionProbe project_geometry in the existing bounded supervised qualification child"]
+    fn native_project_geometry_rebinding_refuses_before_actions_and_preserves_original_owner() {
+        const TEST: &str = "openfx_host::shared_frame_tests::native_project_geometry_rebinding_refuses_before_actions_and_preserves_original_owner";
+        if !qualification_child(
+            TEST,
+            &[("MONDRIAN_OPENFX_SESSION_PROBE_MODE", "project_geometry")],
+        ) {
+            return;
+        }
+        let path = resolve_openfx_binary(&PathBuf::from(
+            std::env::var_os("MONDRIAN_OPENFX_SESSION_PROBE_BINARY").expect("owned geometry probe"),
+        ))
+        .unwrap();
+        let bundle =
+            path.ancestors().find(|p| p.extension().is_some_and(|e| e == "bundle")).unwrap();
+        let binary = native_string(&path).unwrap();
+        let bundle = native_string(bundle).unwrap();
+        let identifier = CString::new("uk.co.thefoundry.BasicGainPlugin").unwrap();
+        let name = CString::new("scale").unwrap();
+        let parameters = [NativeParameter {
+            name: name.as_ptr(),
+            query_mode: 0,
+            kind: 1,
+            value: [0.5, 0.0, 0.0, 0.0],
+            string_value: std::ptr::null(),
+            string_length: 0,
+            query: None,
+            query_context: std::ptr::null(),
+            query_revision: 0,
+        }];
+        let input = [[-0.25_f32, 0.5, 2.0, 0.25]; 15];
+        // SAFETY: the aligned complete input stays alive throughout these synchronous calls.
+        let bytes = unsafe {
+            std::slice::from_raw_parts(input.as_ptr().cast(), std::mem::size_of_val(&input))
+        };
+        let mut info = NativeFrameInfo {
+            source_alpha: 0,
+            width: 3,
+            height: 5,
+            project_width: 10,
+            project_height: 7,
+            project_pixel_aspect_ratio: 2.0,
+            frame: 0.0,
+            frame_rate: 24.0,
+            first_frame: 0.0,
+            last_frame: 100.0,
+            pixel_aspect_ratio: 1.0,
+        };
+        let mut session = NativeSession::create(
+            mondrian_core::EffectProcessorOwnerId::new(),
+            &binary,
+            &bundle,
+            &identifier,
+            bytes,
+            &info,
+            &parameters,
+        )
+        .unwrap();
+        let mut output = vec![0xa5; bytes.len()];
+        assert_eq!(
+            session.render(bytes, &mut output, &info, &parameters),
+            Ok(mondrian_core::ColorFrameAlpha::StraightFloat)
+        );
+        let first = session.take_feedback().unwrap();
+        for (width, height, par) in [(12, 7, 2.0), (10, 9, 2.0), (10, 7, 1.0), (0, 7, 2.0)] {
+            info.project_width = width;
+            info.project_height = height;
+            info.project_pixel_aspect_ratio = par;
+            output.fill(0xa5);
+            assert_eq!(
+                session.render(bytes, &mut output, &info, &parameters),
+                Err(NativeRenderError::Rejected(2))
+            );
+            assert!(output.iter().all(|byte| *byte == 0xa5));
+            assert!(session.take_feedback().is_none());
+        }
+        info.project_width = 10;
+        info.project_height = 7;
+        info.project_pixel_aspect_ratio = 2.0;
+        info.frame = 6.0;
+        info.pixel_aspect_ratio = 1.2; // Legal image change, with unchanged project binding.
+        assert_eq!(
+            session.render(bytes, &mut output, &info, &parameters),
+            Ok(mondrian_core::ColorFrameAlpha::StraightFloat)
+        );
+        let recovered = session.take_feedback().unwrap();
+        assert_eq!(recovered.native_owner(), first.native_owner());
+        assert_eq!(
+            recovered.invocation(),
+            first.invocation() + 1,
+            "refused geometry ran no native invocation"
+        );
+        let literal = [[0.1875_f32, 0.359375, 1.075, 0.125]; 15];
+        let expected: Vec<u8> = literal
+            .iter()
+            .flat_map(|pixel| pixel.iter().flat_map(|v| v.to_ne_bytes()))
+            .collect();
+        assert_eq!(output, expected);
     }
 
     #[test]
@@ -2155,6 +2314,10 @@ pub(crate) mod shared_frame_tests {
             first_frame: 0.0,
             last_frame: 100.0,
             pixel_aspect_ratio: 1.0,
+
+            project_width: 1,
+            project_height: 1,
+            project_pixel_aspect_ratio: 1.0,
         };
         let input = [0.25_f32; 4].into_iter().flat_map(f32::to_ne_bytes).collect::<Vec<_>>();
         let specs = [
@@ -2341,6 +2504,10 @@ pub(crate) mod shared_frame_tests {
                 first_frame: 0.0,
                 last_frame: 100.0,
                 pixel_aspect_ratio: 1.0,
+
+                project_width: 1,
+                project_height: 1,
+                project_pixel_aspect_ratio: 1.0,
             };
             let input =
                 [0.25_f32; 4].iter().flat_map(|value| value.to_ne_bytes()).collect::<Vec<_>>();
@@ -2449,6 +2616,10 @@ pub(crate) mod shared_frame_tests {
             first_frame: 0.0,
             last_frame: 100.0,
             pixel_aspect_ratio: 1.0,
+
+            project_width: 2,
+            project_height: 3,
+            project_pixel_aspect_ratio: 1.0,
         };
         let original = [[-0.25_f32, 0.5, 2.0, 0.25]; 6];
         let encode = |pixels: &[[f32; 4]]| {
@@ -2591,6 +2762,10 @@ pub(crate) mod shared_frame_tests {
             first_frame: 0.0,
             last_frame: 2.0,
             pixel_aspect_ratio: 2.0,
+
+            project_width: 3,
+            project_height: 2,
+            project_pixel_aspect_ratio: 2.0,
         };
         // Aligned, disjoint Float32 storage; signed/HDR RGB and varied straight
         // alpha make both an accidental copy and an Output clear observable.
@@ -2785,6 +2960,10 @@ pub(crate) mod shared_frame_tests {
             first_frame: 0.0,
             last_frame: 100.0,
             pixel_aspect_ratio: 2.0,
+
+            project_width: 2,
+            project_height: 2,
+            project_pixel_aspect_ratio: 2.0,
         };
         for _ in 0..2 {
             let mut session = NativeSession::create(
@@ -2881,6 +3060,10 @@ pub(crate) mod shared_frame_tests {
             first_frame: 0.0,
             last_frame: 100.0,
             pixel_aspect_ratio: 1.0,
+
+            project_width: 1,
+            project_height: 1,
+            project_pixel_aspect_ratio: 1.0,
         };
         let input = [0.25_f32; 4]
             .iter()
@@ -3000,6 +3183,10 @@ pub(crate) mod shared_frame_tests {
             first_frame: 0.0,
             last_frame: 100.0,
             pixel_aspect_ratio: 2.0,
+
+            project_width: 1,
+            project_height: 1,
+            project_pixel_aspect_ratio: 2.0,
         };
         let mut previous = None;
         for owner in 0..2 {
@@ -3207,6 +3394,10 @@ pub(crate) mod shared_frame_tests {
             first_frame: 0.0,
             last_frame: 100.0,
             pixel_aspect_ratio: 1.0,
+
+            project_width: 1,
+            project_height: 1,
+            project_pixel_aspect_ratio: 1.0,
         };
         let phase = std::env::var(PHASE).expect("actual process lifecycle phase");
         let pixel = if phase == "replacement" {
@@ -3265,6 +3456,10 @@ pub(crate) mod shared_frame_tests {
             first_frame: 0.0,
             last_frame: 10.0,
             pixel_aspect_ratio: 1.0,
+
+            project_width: 1,
+            project_height: 1,
+            project_pixel_aspect_ratio: 1.0,
         };
         let input = [0.25f32, -0.5, 1.5, 0.25]
             .into_iter()
@@ -3514,6 +3709,10 @@ pub(crate) mod shared_frame_tests {
             first_frame: 0.0,
             last_frame: 100.0,
             pixel_aspect_ratio: 1.5,
+
+            project_width: 2,
+            project_height: 2,
+            project_pixel_aspect_ratio: 1.5,
         };
         for _ in 0..2 {
             parameters[0].value[0] = 1.5;
@@ -3686,6 +3885,10 @@ pub(crate) mod shared_frame_tests {
             first_frame: 0.0,
             last_frame: 100.0,
             pixel_aspect_ratio: 2.0,
+
+            project_width: 1,
+            project_height: 1,
+            project_pixel_aspect_ratio: 2.0,
         };
         let encode = |pixel: [f32; 4]| {
             pixel.iter().flat_map(|value| value.to_ne_bytes()).collect::<Vec<_>>()
@@ -3798,6 +4001,10 @@ pub(crate) mod shared_frame_tests {
             first_frame: 0.0,
             last_frame: 100.0,
             pixel_aspect_ratio: 2.0,
+
+            project_width: 1,
+            project_height: 1,
+            project_pixel_aspect_ratio: 2.0,
         };
         let encode =
             |pixel: [f32; 4]| pixel.into_iter().flat_map(f32::to_ne_bytes).collect::<Vec<_>>();
@@ -3902,6 +4109,12 @@ pub(crate) mod shared_frame_tests {
             1,
             1,
             format,
+            mondrian_effects::EffectProjectGeometry::new(
+                1,
+                1,
+                mondrian_core::SampleAspectRatio::SQUARE,
+            )
+            .expect("explicit owner project geometry"),
             &mut || Ok(()),
         )
         .expect("same supervised native owner");
@@ -4009,6 +4222,12 @@ pub(crate) mod shared_frame_tests {
             1,
             1,
             format,
+            mondrian_effects::EffectProjectGeometry::new(
+                1,
+                1,
+                mondrian_core::SampleAspectRatio::SQUARE,
+            )
+            .expect("explicit owner project geometry"),
             &mut || Ok(()),
         )
         .expect("same supervised owner");

@@ -1044,6 +1044,8 @@ pub(crate) mod question_contract_tests {
                 mondrian_effects::EffectColorDomain::SceneLinearRgb,
                 mondrian_core::ColorFrameAlpha::StraightFloat,
             ),
+
+            project_geometry: None,
         };
         let receipt = mondrian_effects::EffectProcessorLiveQuestion {
             owner: mondrian_core::EffectProcessorOwnerId::new(),

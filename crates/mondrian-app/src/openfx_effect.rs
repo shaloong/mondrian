@@ -147,6 +147,11 @@ impl EffectFloatProcessorFactory for OpenFxProcessorFactory {
         control: &mut EffectProcessorControl<'_>,
     ) -> mondrian_core::Result<Box<dyn EffectFloatProcessorInstance>> {
         control.check()?;
+        let project_geometry =
+            request.project_geometry.ok_or_else(|| MondrianError::WorkflowStepFailed {
+                step_id: "openfx_project_geometry".to_owned(),
+                reason: "compiled OpenFX occurrence has no owner project geometry".to_owned(),
+            })?;
         let result = {
             let mut checkpoint = || processor_checkpoint(control);
             OpenFxFilterSession::prepare_in_context(
@@ -156,6 +161,7 @@ impl EffectFloatProcessorFactory for OpenFxProcessorFactory {
                 request.width,
                 request.height,
                 request.format,
+                project_geometry,
                 self.context,
                 &mut checkpoint,
             )
@@ -1232,6 +1238,38 @@ mod tests {
     }
 
     #[test]
+    fn native_factory_missing_geometry_refuses_before_helper_or_binary_preparation() {
+        let factory = OpenFxProcessorFactory {
+            helper: PathBuf::from("must-not-start-geometry-helper.exe"),
+            inspection: OpenFxBinaryInspection {
+                binary_path: PathBuf::from("must-not-load-geometry.ofx"),
+                binary_sha256: "a".repeat(64),
+                plugins: Vec::new(),
+            },
+            identifier: "test.geometry".to_owned(),
+            context: OpenFxContext::Filter,
+        };
+        let request = EffectFloatProcessorPreparation {
+            input_role: mondrian_effects::EffectFloatProcessorInputRole::SingleImage,
+            format: mondrian_effects::EffectValueFormat::new(
+                mondrian_effects::EffectWorkingPrecision::Float32,
+                mondrian_effects::EffectColorDomain::SceneLinearRgb,
+                mondrian_core::ColorFrameAlpha::StraightFloat,
+            ),
+            effect_id: mondrian_core::EffectId::new(),
+            width: 3,
+            height: 5,
+            project_geometry: None,
+        };
+        let error = factory
+            .prepare(request, &mut EffectProcessorControl::uncancelled())
+            .unwrap_err();
+        assert!(
+            matches!(error, MondrianError::WorkflowStepFailed { step_id, .. } if step_id == "openfx_project_geometry")
+        );
+    }
+
+    #[test]
     fn native_transport_faults_do_not_invent_scheduler_cancellation() {
         let control = EffectProcessorControl::uncancelled();
         assert!(matches!(
@@ -1337,9 +1375,13 @@ mod tests {
             TimelineTime::new(10, 24).expect("ten frames"),
         )
         .expect("clip range");
-        let frame_context =
-            EffectFrameContext::new(Rational::FPS_24, SampleAspectRatio::SQUARE, range)
-                .expect("frame context");
+        let frame_context = EffectFrameContext::new(
+            Rational::FPS_24,
+            mondrian_effects::EffectProjectGeometry::new(2, 2, SampleAspectRatio::SQUARE)
+                .expect("explicit owner project geometry"),
+            range,
+        )
+        .expect("frame context");
         let program = PreparedEffectProgram::prepare_hierarchical_with_frame_context(
             &[effect.clone()],
             &[],
@@ -1456,10 +1498,22 @@ mod tests {
             disabled_bindings.values["gain"].value,
             OpenFxParameterValue::Double(1.5)
         );
+        let status =
+            mondrian_effects::effect_extension_runtime_status(&effect.effect_type.key()).unwrap();
+        assert!(!status.disabled);
         assert!(matches!(
-            PreparedEffectProgram::prepare(&[effect], &[], WorkingColorSpace::LinearRec709,),
+            PreparedEffectProgram::prepare(
+                std::slice::from_ref(&effect),
+                &[],
+                WorkingColorSpace::LinearRec709,
+            ),
             Err(EffectGraphBuildError::InvalidAuthorState { .. })
         ));
+        assert_eq!(
+            mondrian_effects::effect_extension_runtime_status(&effect.effect_type.key()).unwrap(),
+            status
+        );
+        compile(&effect); // Same Definition still admits a valid bound context.
     }
 
     #[test]

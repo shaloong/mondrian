@@ -28,8 +28,15 @@ bool stringIs(OfxPropertySetHandle props, const char* name, const char* expected
 bool generatorInstance(OfxImageEffectHandle effect) {
   OfxPropertySetHandle props = nullptr;
   OfxImageClipHandle source = nullptr;
+  double size[2]{}, extent[2]{}, offset[2]{}, par = 0.0;
   return images->getPropertySet(effect, &props) == kOfxStatOK && props &&
       stringIs(props, kOfxImageEffectPropContext, kOfxImageEffectContextGenerator) &&
+      properties->propGetDoubleN(props, kOfxImageEffectPropProjectSize, 2, size) == kOfxStatOK &&
+      properties->propGetDoubleN(props, kOfxImageEffectPropProjectExtent, 2, extent) == kOfxStatOK &&
+      properties->propGetDoubleN(props, kOfxImageEffectPropProjectOffset, 2, offset) == kOfxStatOK &&
+      properties->propGetDouble(props, kOfxImageEffectPropProjectPixelAspectRatio, 0, &par) == kOfxStatOK &&
+      size[0] == 6.0 && size[1] == 2.0 && extent[0] == 6.0 && extent[1] == 2.0 &&
+      offset[0] == 0.0 && offset[1] == 0.0 && par == 2.0 &&
       images->clipGetHandle(effect, kOfxImageEffectSimpleSourceClipName,
                             &source, nullptr) != kOfxStatOK && !source;
 }

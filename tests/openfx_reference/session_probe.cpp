@@ -266,11 +266,14 @@ bool writablePluginLabels(const void* handle, bool parameter) {
       gPropHost->propGetString(properties, kOfxPropLabel, 0, &observed) == kOfxStatOK && observed && std::string(observed) == label;
 }
 
+// Owner project facts remain fixed while image/clip PAR may change.
+std::map<const void*, std::array<double, 3>> canonicalProjects;
 bool canonicalProgressiveContract(const void* handle, OfxPropertySetHandle in) {
   OfxPropertySetHandle properties = nullptr;
   OfxImageClipHandle source = nullptr;
   OfxRectD rod{};
-  double par = 0.0, size[2]{}, extent[2]{}, offset[2]{}, time = 0.0;
+  double par = 0.0, imagePar = 0.0, size[2]{}, extent[2]{}, offset[2]{}, time = 0.0;
+  OfxPropertySetHandle sourceProperties = nullptr;
   const auto* timeline = static_cast<const OfxTimeLineSuiteV1*>(
       gHost->fetchSuite(gHost->host, kOfxTimeLineSuite, 1));
   if (!timeline || timeline->getTime(const_cast<void*>(handle), &time) != kOfxStatOK ||
@@ -279,12 +282,20 @@ bool canonicalProgressiveContract(const void* handle, OfxPropertySetHandle in) {
       gPropHost->propGetDoubleN(properties, kOfxImageEffectPropProjectSize, 2, size) != kOfxStatOK ||
       gPropHost->propGetDoubleN(properties, kOfxImageEffectPropProjectExtent, 2, extent) != kOfxStatOK ||
       gPropHost->propGetDoubleN(properties, kOfxImageEffectPropProjectOffset, 2, offset) != kOfxStatOK ||
-      gEffectHost->clipGetHandle((OfxImageEffectHandle)handle, "Source", &source, nullptr) != kOfxStatOK ||
+      gEffectHost->clipGetHandle((OfxImageEffectHandle)handle, "Source", &source, &sourceProperties) != kOfxStatOK ||
+      gPropHost->propGetDouble(sourceProperties, kOfxImagePropPixelAspectRatio, 0, &imagePar) != kOfxStatOK ||
       gEffectHost->clipGetRegionOfDefinition(source, time, &rod) != kOfxStatOK ||
       !std::isfinite(size[0]) || !std::isfinite(extent[0]) || par <= 0.0 ||
-      size[0] != rod.x2 || extent[0] != rod.x2 || size[1] != rod.y2 ||
-      extent[1] != rod.y2 || offset[0] != 0.0 || offset[1] != 0.0 ||
+      size[0] != extent[0] || size[1] != extent[1] ||
+      offset[0] != 0.0 || offset[1] != 0.0 ||
       rod.x1 != 0.0 || rod.y1 != 0.0) { return false; }
+  const std::array<double, 3> project{size[0], size[1], par};
+  const auto admitted = canonicalProjects.emplace(handle, project);
+  if (admitted.second) {
+    // Existing full-canvas controls bind their initial image geometry as the
+    // project. Later image PAR changes cannot redefine that owner window.
+    if (size[0] != rod.x2 || size[1] != rod.y2 || par != imagePar) { return false; }
+  } else if (admitted.first->second != project) { return false; }
   if (in) {
     char* field = nullptr;
     int window[4]{};
@@ -292,9 +303,69 @@ bool canonicalProgressiveContract(const void* handle, OfxPropertySetHandle in) {
         !field || std::string(field) != kOfxImageFieldNone ||
         gPropHost->propGetIntN(in, kOfxImageEffectPropRenderWindow, 4, window) != kOfxStatOK ||
         window[0] != 0 || window[1] != 0 ||
-        window[2] * par != rod.x2 || window[3] != rod.y2) { return false; }
+        window[2] * imagePar != rod.x2 || window[3] != rod.y2) { return false; }
   }
   return true;
+}
+
+// Independent two-window oracle, separate from the 3x5 Source/Output raster.
+std::map<const void*, std::array<double, 3>> ownerProjects;
+bool ownerProjectContract(const void* handle, OfxPropertySetHandle in) {
+  OfxPropertySetHandle props = nullptr, sourceProps = nullptr;
+  OfxImageClipHandle source = nullptr;
+  const auto* timeline = static_cast<const OfxTimeLineSuiteV1*>(gHost->fetchSuite(gHost->host, kOfxTimeLineSuite, 1));
+  double time = 0.0, par = 0.0, imagePar = 0.0, size[2]{}, extent[2]{}, offset[2]{};
+  OfxRectD rod{};
+  if (!timeline || timeline->getTime(const_cast<void*>(handle), &time) != kOfxStatOK ||
+      gEffectHost->getPropertySet((OfxImageEffectHandle)handle, &props) != kOfxStatOK ||
+      gPropHost->propGetDoubleN(props, kOfxImageEffectPropProjectSize, 2, size) != kOfxStatOK ||
+      gPropHost->propGetDoubleN(props, kOfxImageEffectPropProjectExtent, 2, extent) != kOfxStatOK ||
+      gPropHost->propGetDoubleN(props, kOfxImageEffectPropProjectOffset, 2, offset) != kOfxStatOK ||
+      gPropHost->propGetDouble(props, kOfxImageEffectPropProjectPixelAspectRatio, 0, &par) != kOfxStatOK ||
+      par != 2.0 || offset[0] != 0.0 || offset[1] != 0.0 ||
+      size[0] != extent[0] || size[1] != extent[1] ||
+      !((size[0] == 20.0 && size[1] == 7.0) || (size[0] == 24.0 && size[1] == 9.0)) ||
+      gEffectHost->clipGetHandle((OfxImageEffectHandle)handle, "Source", &source, &sourceProps) != kOfxStatOK ||
+      gPropHost->propGetDouble(sourceProps, kOfxImagePropPixelAspectRatio, 0, &imagePar) != kOfxStatOK ||
+      gEffectHost->clipGetRegionOfDefinition(source, time, &rod) != kOfxStatOK ||
+      rod.x1 != 0.0 || rod.y1 != 0.0 || rod.x2 != 3.0 * imagePar || rod.y2 != 5.0) { return false; }
+  const std::array<double, 3> project{size[0], size[1], par};
+  const auto admitted = ownerProjects.emplace(handle, project);
+  if (!admitted.second && admitted.first->second != project) { return false; }
+  if (in) {
+    int window[4]{};
+    if (gPropHost->propGetIntN(in, kOfxImageEffectPropRenderWindow, 4, window) != kOfxStatOK ||
+        window[0] != 0 || window[1] != 0 || window[2] != 3 || window[3] != 5) { return false; }
+  }
+  return true;
+}
+bool ownerProjectOutput(const void* handle, OfxPropertySetHandle in) {
+  OfxImageClipHandle output = nullptr;
+  OfxPropertySetHandle image = nullptr;
+  double time = 0.0, par = 0.0;
+  if (!ownerProjectContract(handle, in) ||
+      gPropHost->propGetDouble(in, kOfxPropTime, 0, &time) != kOfxStatOK ||
+      gEffectHost->clipGetHandle((OfxImageEffectHandle)handle, "Output", &output, nullptr) != kOfxStatOK ||
+      gEffectHost->clipGetImage(output, time, nullptr, &image) != kOfxStatOK) { return false; }
+  void* data = nullptr;
+  int bounds[4]{}, stride = 0;
+  bool valid = gPropHost->propGetPointer(image, kOfxImagePropData, 0, &data) == kOfxStatOK && data &&
+      gPropHost->propGetIntN(image, kOfxImagePropBounds, 4, bounds) == kOfxStatOK &&
+      gPropHost->propGetInt(image, kOfxImagePropRowBytes, 0, &stride) == kOfxStatOK &&
+      gPropHost->propGetDouble(image, kOfxImagePropPixelAspectRatio, 0, &par) == kOfxStatOK &&
+      bounds[0] == 0 && bounds[1] == 0 && bounds[2] == 3 && bounds[3] == 5;
+  if (valid) {
+    const auto& project = ownerProjects.at(handle);
+    for (int y = 0; y < 5; ++y) {
+      auto* row = reinterpret_cast<OfxRGBAColourF*>(static_cast<char*>(data) + y * stride);
+      for (int x = 0; x < 3; ++x) {
+        row[x].r += static_cast<float>(project[0] / 64.0);
+        row[x].g += static_cast<float>(project[1] / 64.0);
+        row[x].b += static_cast<float>(par / 16.0);
+      }
+    }
+  }
+  return gEffectHost->clipReleaseImage(image) == kOfxStatOK && valid;
 }
 
 bool canonicalCoordinateOutput(const void* handle, OfxPropertySetHandle in) {
@@ -3152,6 +3223,9 @@ OfxStatus probeAction(const char* action, const void* handle,
   if (selected == "bootstrap_skip") { std::abort(); }
   if ((selected == "bootstrap_required" || selected == "host_capabilities") &&
       operation == kOfxActionDescribe && !honestHostCapabilities(gHost)) { return kOfxStatFailed; }
+  if (selected == "project_geometry" &&
+      (operation == kOfxActionCreateInstance || operation == kOfxImageEffectActionRender) &&
+      !ownerProjectContract(handle, in)) { return kOfxStatFailed; }
   if (selected == "canonical_progressive" &&
       (operation == kOfxActionCreateInstance || operation == kOfxImageEffectActionRender) &&
       !canonicalProgressiveContract(handle, in)) { return kOfxStatFailed; }
@@ -3446,6 +3520,8 @@ OfxStatus probeAction(const char* action, const void* handle,
       !appendResidentOwnerReceipt(handle, in)) { return kOfxStatFailed; }
   if ((selected == "image_uid" || selected == "image_uid_persisted") && operation == kOfxImageEffectActionRender && result == kOfxStatOK &&
       (!imageAnalysisOutput(handle, in) || (selected == "image_uid_persisted" && !saveImageAnalysis()))) { return kOfxStatFailed; }
+  if (selected == "project_geometry" && operation == kOfxImageEffectActionRender &&
+      result == kOfxStatOK && !ownerProjectOutput(handle, in)) { return kOfxStatFailed; }
   if (selected == "canonical_progressive" && operation == kOfxImageEffectActionRender &&
       result == kOfxStatOK && !canonicalCoordinateOutput(handle, in)) { return kOfxStatFailed; }
   if ((isCurveLifecycleMode(selected) || selected == "curve_authoring" || isAuthorHistoryMode(selected)) && result == kOfxStatOK &&
@@ -3525,6 +3601,8 @@ OfxStatus probeAction(const char* action, const void* handle,
       property(handle, kOfxImageEffectInstancePropSequentialRender, 1);
     }
   } else if (operation == kOfxActionDestroyInstance) {
+    canonicalProjects.erase(handle);
+    ownerProjects.erase(handle);
     actions.erase(handle);
   } else if (operation == kOfxImageEffectActionDescribeInContext) {
     if (selected == "required" || selected == "optional") {

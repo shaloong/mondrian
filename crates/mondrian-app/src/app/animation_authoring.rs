@@ -1307,9 +1307,17 @@ mod tests {
                 TimelineTime::new(2, 1).expect("duration"),
             )
             .expect("range");
-            let context =
-                EffectFrameContext::new(Rational::FPS_24, SampleAspectRatio::SQUARE, range)
-                    .expect("context");
+            let context = EffectFrameContext::new(
+                Rational::FPS_24,
+                mondrian_effects::EffectProjectGeometry::new(
+                    state.active_sequence().unwrap().settings.resolution.width,
+                    state.active_sequence().unwrap().settings.resolution.height,
+                    SampleAspectRatio::SQUARE,
+                )
+                .expect("explicit owner project geometry"),
+                range,
+            )
+            .expect("context");
             let program = PreparedEffectProgram::prepare_hierarchical_with_frame_context(
                 &clip.effects,
                 &[],
@@ -1617,7 +1625,12 @@ mod tests {
                     state.active_sequence().expect("sequence").find_clip(clip_id).expect("clip");
                 let context = EffectFrameContext::new(
                     Rational::FPS_24,
-                    SampleAspectRatio::SQUARE,
+                    mondrian_effects::EffectProjectGeometry::new(
+                        state.active_sequence().unwrap().settings.resolution.width,
+                        state.active_sequence().unwrap().settings.resolution.height,
+                        SampleAspectRatio::SQUARE,
+                    )
+                    .expect("explicit owner project geometry"),
                     TimelineTimeRange::new(
                         TimelineTime::ZERO,
                         TimelineTime::new(2, 1).expect("duration"),

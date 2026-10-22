@@ -527,6 +527,10 @@ mod tests {
             first_frame: 0.0,
             last_frame: 9.0,
             pixel_aspect_ratio: 1.0,
+
+            project_width: 1,
+            project_height: 2,
+            project_pixel_aspect_ratio: 1.0,
         };
         let samples = [
             [-0.25_f32, 2.0, -16.0, 1.5],

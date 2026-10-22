@@ -140,8 +140,8 @@ namespace MondrianOpenFx {
 
   void FilterEffectInstance::getProjectSize(double& xSize, double& ySize) const
   {
-    xSize = _frameState.info.width * _frameState.info.pixel_aspect_ratio;
-    ySize = _frameState.info.height;
+    xSize = static_cast<double>(_frameState.info.project_width) * _frameState.info.project_pixel_aspect_ratio;
+    ySize = _frameState.info.project_height;
   }
 
   // get the project offset in CANONICAL pixels, we are at 0,0
@@ -153,13 +153,13 @@ namespace MondrianOpenFx {
 
   void FilterEffectInstance::getProjectExtent(double& xSize, double& ySize) const
   {
-    xSize = _frameState.info.width * _frameState.info.pixel_aspect_ratio;
-    ySize = _frameState.info.height;
+    xSize = static_cast<double>(_frameState.info.project_width) * _frameState.info.project_pixel_aspect_ratio;
+    ySize = _frameState.info.project_height;
   }
 
   double FilterEffectInstance::getProjectPixelAspectRatio() const
   {
-    return _frameState.info.pixel_aspect_ratio;
+    return _frameState.info.project_pixel_aspect_ratio;
   }
 
   // we are only 25 frames

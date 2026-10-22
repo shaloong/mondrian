@@ -153,6 +153,12 @@ fn product_worker_queries_canonical_sparse_curves_across_seeks() {
             mondrian_effects::EffectColorDomain::SceneLinearRgb,
             mondrian_core::ColorFrameAlpha::StraightFloat,
         ),
+        mondrian_effects::EffectProjectGeometry::new(
+            input.width(),
+            input.height(),
+            mondrian_core::SampleAspectRatio::SQUARE,
+        )
+        .expect("explicit owner project geometry"),
         &mut checkpoint(&cancellation),
     )
     .expect("prepare");
@@ -190,7 +196,12 @@ fn product_worker_queries_canonical_sparse_curves_across_seeks() {
     session.shutdown().expect("curve-querying native teardown");
     let frame_context = EffectFrameContext::new(
         Rational::new(24, 1),
-        SampleAspectRatio::new(1, 1).expect("square samples"),
+        mondrian_effects::EffectProjectGeometry::new(
+            2,
+            2,
+            SampleAspectRatio::new(1, 1).expect("square samples"),
+        )
+        .expect("explicit owner project geometry"),
         TimelineTimeRange::new(
             TimelineTime::new(-1, 2).expect("start"),
             TimelineTime::new(3, 1).expect("duration"),
@@ -318,6 +329,12 @@ fn curve_source_lifecycle(expected_mode: &str) {
             mondrian_effects::EffectColorDomain::SceneLinearRgb,
             mondrian_core::ColorFrameAlpha::StraightFloat,
         ),
+        mondrian_effects::EffectProjectGeometry::new(
+            2,
+            2,
+            mondrian_core::SampleAspectRatio::SQUARE,
+        )
+        .expect("explicit owner project geometry"),
         &mut checkpoint(&cancellation),
     )
     .expect("prepare");
@@ -440,6 +457,12 @@ fn qualify_product_compound_query_authority(sampled: bool) {
             mondrian_effects::EffectColorDomain::SceneLinearRgb,
             mondrian_core::ColorFrameAlpha::StraightFloat,
         ),
+        mondrian_effects::EffectProjectGeometry::new(
+            input.width(),
+            input.height(),
+            mondrian_core::SampleAspectRatio::SQUARE,
+        )
+        .expect("explicit owner project geometry"),
         &mut checkpoint(&cancellation),
     )
     .expect("prepare actual product worker");
@@ -528,6 +551,12 @@ fn string_filter_description_preserves_all_native_modes() {
             mondrian_effects::EffectColorDomain::SceneLinearRgb,
             mondrian_core::ColorFrameAlpha::StraightFloat,
         ),
+        mondrian_effects::EffectProjectGeometry::new(
+            2,
+            2,
+            mondrian_core::SampleAspectRatio::SQUARE,
+        )
+        .expect("explicit owner project geometry"),
         &mut || Ok(()),
     )
     .expect("String worker");
@@ -635,8 +664,13 @@ fn string_text_modes_execute_through_authored_compiled_graph() {
     }
     let range = TimelineTimeRange::new(TimelineTime::ZERO, TimelineTime::new(10, 24).expect("end"))
         .expect("range");
-    let context = EffectFrameContext::new(Rational::FPS_24, SampleAspectRatio::SQUARE, range)
-        .expect("context");
+    let context = EffectFrameContext::new(
+        Rational::FPS_24,
+        mondrian_effects::EffectProjectGeometry::new(2, 2, SampleAspectRatio::SQUARE)
+            .expect("explicit owner project geometry"),
+        range,
+    )
+    .expect("context");
     let program = PreparedEffectProgram::prepare_hierarchical_with_frame_context(
         &[effect],
         &[],
@@ -748,6 +782,12 @@ fn official_basic_filter_renders_authored_float32_pixels_in_child() {
         &timing,
         &parameters,
         &input,
+        mondrian_effects::EffectProjectGeometry::new(
+            (input).width(),
+            (input).height(),
+            mondrian_core::SampleAspectRatio::SQUARE,
+        )
+        .expect("explicit owner project geometry"),
     )
     .expect("render actual native plugin in isolated child");
     assert_eq!((output.width(), output.height()), (4, 4));
@@ -800,6 +840,12 @@ fn official_basic_filter_renders_authored_float32_pixels_in_child() {
         &component_timing,
         &component_parameters,
         &component_input,
+        mondrian_effects::EffectProjectGeometry::new(
+            (component_input).width(),
+            (component_input).height(),
+            mondrian_core::SampleAspectRatio::SQUARE,
+        )
+        .expect("explicit owner project geometry"),
     )
     .expect("render per-component authored gains without clipping HDR or alpha");
     for (actual, source) in component_output.pixels().iter().zip(component_input.pixels()) {
@@ -820,6 +866,12 @@ fn official_basic_filter_renders_authored_float32_pixels_in_child() {
         &timing,
         &parameters,
         &invalid,
+        mondrian_effects::EffectProjectGeometry::new(
+            (invalid).width(),
+            (invalid).height(),
+            mondrian_core::SampleAspectRatio::SQUARE,
+        )
+        .expect("explicit owner project geometry"),
     );
     assert!(
         matches!(
@@ -849,6 +901,12 @@ fn official_basic_filter_renders_authored_float32_pixels_in_child() {
             &timing,
             &out_of_range,
             &input,
+            mondrian_effects::EffectProjectGeometry::new(
+                (input).width(),
+                (input).height(),
+                mondrian_core::SampleAspectRatio::SQUARE
+            )
+            .expect("explicit owner project geometry"),
         ),
         Err(OpenFxHostError::WorkerFailed(_))
     ));
@@ -874,7 +932,8 @@ fn official_basic_filter_renders_authored_float32_pixels_in_child() {
         .expect("author the gain control");
     let frame_context = EffectFrameContext::new(
         Rational::FPS_24,
-        SampleAspectRatio::SQUARE,
+        mondrian_effects::EffectProjectGeometry::new(4, 4, SampleAspectRatio::SQUARE)
+            .expect("explicit owner project geometry"),
         TimelineTimeRange::new(
             TimelineTime::ZERO,
             TimelineTime::new(101, 24).expect("source duration"),
@@ -924,6 +983,12 @@ fn official_basic_resident_sessions_reuse_workers_and_isolate_frames() {
             mondrian_effects::EffectColorDomain::SceneLinearRgb,
             mondrian_core::ColorFrameAlpha::StraightFloat,
         ),
+        mondrian_effects::EffectProjectGeometry::new(
+            2,
+            3,
+            mondrian_core::SampleAspectRatio::SQUARE,
+        )
+        .expect("explicit owner project geometry"),
         &mut checkpoint(&cancellation),
     )
     .expect("preview worker");
@@ -938,6 +1003,12 @@ fn official_basic_resident_sessions_reuse_workers_and_isolate_frames() {
             mondrian_effects::EffectColorDomain::SceneLinearRgb,
             mondrian_core::ColorFrameAlpha::StraightFloat,
         ),
+        mondrian_effects::EffectProjectGeometry::new(
+            2,
+            3,
+            mondrian_core::SampleAspectRatio::SQUARE,
+        )
+        .expect("explicit owner project geometry"),
         &mut checkpoint(&cancellation),
     )
     .expect("export worker");
@@ -1063,6 +1134,12 @@ fn resident_worker_cancellation_retires_and_reaps_a_hung_native_render() {
             mondrian_effects::EffectColorDomain::SceneLinearRgb,
             mondrian_core::ColorFrameAlpha::StraightFloat,
         ),
+        mondrian_effects::EffectProjectGeometry::new(
+            1,
+            1,
+            mondrian_core::SampleAspectRatio::SQUARE,
+        )
+        .expect("explicit owner project geometry"),
         &mut checkpoint(&cancellation),
     )
     .expect("resident worker");
@@ -1147,6 +1224,12 @@ fn execution_owner_deadline_interrupts_native_render_without_a_mirror_token() {
             mondrian_effects::EffectColorDomain::SceneLinearRgb,
             mondrian_core::ColorFrameAlpha::StraightFloat,
         ),
+        mondrian_effects::EffectProjectGeometry::new(
+            1,
+            1,
+            mondrian_core::SampleAspectRatio::SQUARE,
+        )
+        .expect("explicit owner project geometry"),
         &mut || Ok(()),
     )
     .expect("prepare worker");
@@ -1209,6 +1292,12 @@ fn official_basic_resident_transfer_preserves_partial_blocks_and_changed_rasters
             mondrian_effects::EffectColorDomain::SceneLinearRgb,
             mondrian_core::ColorFrameAlpha::StraightFloat,
         ),
+        mondrian_effects::EffectProjectGeometry::new(
+            257,
+            257,
+            mondrian_core::SampleAspectRatio::SQUARE,
+        )
+        .expect("explicit owner project geometry"),
         &mut || Ok(()),
     )
     .expect("resident worker");
@@ -1289,7 +1378,8 @@ fn authored_filter_graph(
     }
     let frame_context = EffectFrameContext::new(
         Rational::FPS_24,
-        SampleAspectRatio::SQUARE,
+        mondrian_effects::EffectProjectGeometry::new(2, 2, SampleAspectRatio::SQUARE)
+            .expect("explicit owner project geometry"),
         TimelineTimeRange::new(
             TimelineTime::ZERO,
             TimelineTime::new(10, 24).expect("duration"),
@@ -1865,6 +1955,12 @@ fn integer_filter_preserves_typed_authoring_and_native_pixels() {
             &timing,
             &constant_parameters([("count".to_owned(), OpenFxParameterValue::Integer(value))]),
             &input,
+            mondrian_effects::EffectProjectGeometry::new(
+                (input).width(),
+                (input).height(),
+                mondrian_core::SampleAspectRatio::SQUARE,
+            )
+            .expect("explicit owner project geometry"),
         )
         .expect("native integer");
         for (actual, original) in output.pixels().iter().zip(input.pixels()) {
@@ -1885,7 +1981,13 @@ fn integer_filter_preserves_typed_authoring_and_native_pixels() {
             identifier,
             &timing,
             &constant_parameters([("count".to_owned(), value)]),
-            &input
+            &input,
+            mondrian_effects::EffectProjectGeometry::new(
+                (input).width(),
+                (input).height(),
+                mondrian_core::SampleAspectRatio::SQUARE
+            )
+            .expect("explicit owner project geometry"),
         )
         .is_err());
     }
@@ -1931,8 +2033,13 @@ fn integer_filter_preserves_typed_authoring_and_native_pixels() {
         .expect("second integer key");
     let range = TimelineTimeRange::new(TimelineTime::ZERO, TimelineTime::new(10, 24).expect("end"))
         .expect("range");
-    let context = EffectFrameContext::new(Rational::FPS_24, SampleAspectRatio::SQUARE, range)
-        .expect("context");
+    let context = EffectFrameContext::new(
+        Rational::FPS_24,
+        mondrian_effects::EffectProjectGeometry::new(2, 2, SampleAspectRatio::SQUARE)
+            .expect("explicit owner project geometry"),
+        range,
+    )
+    .expect("context");
     let program = PreparedEffectProgram::prepare_hierarchical_with_frame_context(
         &[effect],
         &[],
@@ -2059,6 +2166,12 @@ fn qualify_native_discrete_filter(string_choice: bool) {
             mondrian_effects::EffectColorDomain::SceneLinearRgb,
             mondrian_core::ColorFrameAlpha::StraightFloat,
         ),
+        mondrian_effects::EffectProjectGeometry::new(
+            2,
+            2,
+            mondrian_core::SampleAspectRatio::SQUARE,
+        )
+        .expect("explicit owner project geometry"),
         &mut || Ok(()),
     )
     .expect("resident choice worker");
@@ -2130,6 +2243,12 @@ fn qualify_native_discrete_filter(string_choice: bool) {
                 native_value(value),
             )])),
             &input,
+            mondrian_effects::EffectProjectGeometry::new(
+                (input).width(),
+                (input).height(),
+                mondrian_core::SampleAspectRatio::SQUARE,
+            )
+            .expect("explicit owner project geometry"),
         )
         .expect("native choice");
         for (actual, original) in output.pixels().iter().zip(input.pixels()) {
@@ -2158,7 +2277,13 @@ fn qualify_native_discrete_filter(string_choice: bool) {
             identifier,
             &timing,
             &sampled_control(constant_parameters([("mode".to_owned(), value)])),
-            &input
+            &input,
+            mondrian_effects::EffectProjectGeometry::new(
+                (input).width(),
+                (input).height(),
+                mondrian_core::SampleAspectRatio::SQUARE
+            )
+            .expect("explicit owner project geometry"),
         )
         .is_err());
     }
@@ -2182,8 +2307,13 @@ fn qualify_native_discrete_filter(string_choice: bool) {
         .is_err());
     let range = TimelineTimeRange::new(TimelineTime::ZERO, TimelineTime::new(10, 24).expect("end"))
         .expect("range");
-    let context = EffectFrameContext::new(Rational::FPS_24, SampleAspectRatio::SQUARE, range)
-        .expect("context");
+    let context = EffectFrameContext::new(
+        Rational::FPS_24,
+        mondrian_effects::EffectProjectGeometry::new(2, 2, SampleAspectRatio::SQUARE)
+            .expect("explicit owner project geometry"),
+        range,
+    )
+    .expect("context");
     let program = PreparedEffectProgram::prepare_hierarchical_with_frame_context(
         &[effect],
         &[],
@@ -2270,8 +2400,13 @@ fn plugin_interpolation_metadata_controls_new_author_keys_and_readonly_instances
         .expect("second key");
     let range = TimelineTimeRange::new(TimelineTime::ZERO, TimelineTime::new(10, 24).expect("end"))
         .expect("range");
-    let context = EffectFrameContext::new(Rational::FPS_24, SampleAspectRatio::SQUARE, range)
-        .expect("context");
+    let context = EffectFrameContext::new(
+        Rational::FPS_24,
+        mondrian_effects::EffectProjectGeometry::new(2, 2, SampleAspectRatio::SQUARE)
+            .expect("explicit owner project geometry"),
+        range,
+    )
+    .expect("context");
     let program = PreparedEffectProgram::prepare_hierarchical_with_frame_context(
         &[effect],
         &[],
@@ -2428,6 +2563,12 @@ fn qualify_cpu_contract_resident_and_graph(mode: &str, coordinate_output: bool) 
                 mondrian_effects::EffectColorDomain::SceneLinearRgb,
                 mondrian_core::ColorFrameAlpha::StraightFloat,
             ),
+            mondrian_effects::EffectProjectGeometry::new(
+                input.width(),
+                input.height(),
+                mondrian_core::SampleAspectRatio::new(2, 1).unwrap(),
+            )
+            .expect("explicit owner project geometry"),
             &mut checkpoint(&cancellation),
         )
         .expect("exclusive native session");
@@ -2498,7 +2639,12 @@ fn qualify_cpu_contract_resident_and_graph(mode: &str, coordinate_output: bool) 
         .expect("author gain");
     let frame_context = EffectFrameContext::new(
         Rational::FPS_24,
-        SampleAspectRatio::new(2, 1).expect("non-square samples"),
+        mondrian_effects::EffectProjectGeometry::new(
+            3,
+            5,
+            SampleAspectRatio::new(2, 1).expect("non-square samples"),
+        )
+        .expect("explicit owner project geometry"),
         TimelineTimeRange::new(
             TimelineTime::ZERO,
             TimelineTime::new(101, 24).expect("duration"),
@@ -2839,6 +2985,12 @@ fn product_worker_reports_none_for_disconnected_optional_clip_unmapped_format() 
         input.width(),
         input.height(),
         input.format(),
+        mondrian_effects::EffectProjectGeometry::new(
+            input.width(),
+            input.height(),
+            mondrian_core::SampleAspectRatio::new(2, 1).unwrap(),
+        )
+        .expect("explicit owner project geometry"),
         &mut || Ok(()),
     )
     .expect("actual native session with an unconnected optional clip");
@@ -3026,6 +3178,12 @@ fn qualify_property_query_counts_resident_and_graph(
         input.width(),
         input.height(),
         input.format(),
+        mondrian_effects::EffectProjectGeometry::new(
+            input.width(),
+            input.height(),
+            mondrian_core::SampleAspectRatio::new(2, 1).unwrap(),
+        )
+        .expect("explicit owner project geometry"),
         &mut || Ok(()),
     )
     .expect("actual native query-count resident");
@@ -3099,7 +3257,12 @@ fn qualify_property_query_counts_resident_and_graph(
         WorkingColorSpace::LinearRec709,
         EffectFrameContext::new(
             Rational::FPS_24,
-            SampleAspectRatio::new(2, 1).expect("PAR two"),
+            mondrian_effects::EffectProjectGeometry::new(
+                3,
+                5,
+                SampleAspectRatio::new(2, 1).expect("PAR two"),
+            )
+            .expect("explicit owner project geometry"),
             TimelineTimeRange::new(TimelineTime::ZERO, TimelineTime::new(101, 24).expect("end"))
                 .expect("source range"),
         )
@@ -3293,6 +3456,12 @@ fn product_worker_refuses_cpu_disabled_instance_before_rendering() {
         &cpu_contract_timing(1.0),
         &BTreeMap::new(),
         &cpu_contract_input(),
+        mondrian_effects::EffectProjectGeometry::new(
+            (cpu_contract_input()).width(),
+            (cpu_contract_input()).height(),
+            mondrian_core::SampleAspectRatio::SQUARE,
+        )
+        .expect("explicit owner project geometry"),
     );
     assert!(
         matches!(output, Err(OpenFxHostError::WorkerFailed(reason)) if reason.contains("native status 7"))
@@ -3316,6 +3485,12 @@ fn product_worker_refuses_cpu_disabled_changed_instance_without_stale_output() {
             mondrian_effects::EffectColorDomain::SceneLinearRgb,
             mondrian_core::ColorFrameAlpha::StraightFloat,
         ),
+        mondrian_effects::EffectProjectGeometry::new(
+            input.width(),
+            input.height(),
+            mondrian_core::SampleAspectRatio::SQUARE,
+        )
+        .expect("explicit owner project geometry"),
         &mut checkpoint(&cancellation),
     )
     .expect("prepare CPU session");
@@ -3438,6 +3613,12 @@ fn product_negotiates_native_output_alpha_for_resident_and_compiled_graph() {
                 mondrian_effects::EffectColorDomain::SceneLinearRgb,
                 mondrian_core::ColorFrameAlpha::StraightFloat,
             ),
+            mondrian_effects::EffectProjectGeometry::new(
+                input.width(),
+                input.height(),
+                mondrian_core::SampleAspectRatio::new(2, 1).unwrap(),
+            )
+            .expect("explicit owner project geometry"),
             &mut || Ok(()),
         )
         .expect("resident alpha host");
@@ -3521,7 +3702,12 @@ fn product_negotiates_native_output_alpha_for_resident_and_compiled_graph() {
         }
         let context = EffectFrameContext::new(
             Rational::FPS_24,
-            SampleAspectRatio::new(2, 1).expect("PAR"),
+            mondrian_effects::EffectProjectGeometry::new(
+                2,
+                2,
+                SampleAspectRatio::new(2, 1).expect("PAR"),
+            )
+            .expect("explicit owner project geometry"),
             TimelineTimeRange::new(
                 TimelineTime::ZERO,
                 TimelineTime::new(101, 24).expect("duration"),
@@ -3565,6 +3751,12 @@ fn product_rejects_unknown_representation_or_nonfinite_native_pixels_without_pub
                 mondrian_effects::EffectColorDomain::SceneLinearRgb,
                 mondrian_core::ColorFrameAlpha::StraightFloat,
             ),
+            mondrian_effects::EffectProjectGeometry::new(
+                input.width(),
+                input.height(),
+                mondrian_core::SampleAspectRatio::SQUARE,
+            )
+            .expect("explicit owner project geometry"),
             &mut || Ok(()),
         )
         .expect("resident failure probe");
@@ -3752,6 +3944,12 @@ fn official_basic_production_resident_steady_frame_performance_gate() {
             mondrian_effects::EffectColorDomain::SceneLinearRgb,
             mondrian_core::ColorFrameAlpha::StraightFloat,
         ),
+        mondrian_effects::EffectProjectGeometry::new(
+            width,
+            height,
+            mondrian_core::SampleAspectRatio::SQUARE,
+        )
+        .expect("explicit owner project geometry"),
         &mut || Ok(()),
     )
     .expect("prepare real production resident worker");
@@ -3879,6 +4077,12 @@ fn product_preserves_complete_finite_associated_output_without_retiring_valid_wo
             mondrian_effects::EffectColorDomain::SceneLinearRgb,
             mondrian_core::ColorFrameAlpha::StraightFloat,
         ),
+        mondrian_effects::EffectProjectGeometry::new(
+            input.width(),
+            input.height(),
+            mondrian_core::SampleAspectRatio::SQUARE,
+        )
+        .expect("explicit owner project geometry"),
         &mut || Ok(()),
     )
     .expect("owned native Float session");
@@ -3993,6 +4197,12 @@ fn native_source_reports_actual_association_and_refuses_rebinding_before_dsp() {
             1,
             1,
             format,
+            mondrian_effects::EffectProjectGeometry::new(
+                1,
+                1,
+                mondrian_core::SampleAspectRatio::SQUARE,
+            )
+            .expect("explicit owner project geometry"),
             &mut || Ok(()),
         )
         .expect("typed session");
@@ -4083,6 +4293,12 @@ fn raw_native_float_survives_disk_cache_nested_over_and_real_opaque_output() {
         input.width(),
         input.height(),
         input.format(),
+        mondrian_effects::EffectProjectGeometry::new(
+            input.width(),
+            input.height(),
+            mondrian_core::SampleAspectRatio::SQUARE,
+        )
+        .expect("explicit owner project geometry"),
         &mut || Ok(()),
     )
     .expect("native Float session");
@@ -4281,6 +4497,12 @@ fn product_actual_image_metadata_frames() {
         1,
         1,
         format,
+        mondrian_effects::EffectProjectGeometry::new(
+            1,
+            1,
+            mondrian_core::SampleAspectRatio::new(2, 1).unwrap(),
+        )
+        .expect("explicit owner project geometry"),
         &mut checkpoint(&cancellation),
     )
     .expect("prepare bounded actual-image worker");
@@ -4404,6 +4626,12 @@ fn product_workers_bind_parent_namespace_and_restore_plugin_private_analysis_cor
             1,
             1,
             input.format(),
+            mondrian_effects::EffectProjectGeometry::new(
+                1,
+                1,
+                mondrian_core::SampleAspectRatio::SQUARE,
+            )
+            .expect("explicit owner project geometry"),
             &mut || Ok(()),
         )
         .expect("fresh parent lifetime");
@@ -4471,6 +4699,12 @@ fn qualify_product_legacy_render_priority(selected: &str, recoverable: bool) {
             2,
             2,
             format,
+            mondrian_effects::EffectProjectGeometry::new(
+                2,
+                2,
+                mondrian_core::SampleAspectRatio::SQUARE,
+            )
+            .expect("explicit owner project geometry"),
             &mut || Ok(()),
         )
         .expect("actual native owner");
@@ -4620,7 +4854,8 @@ fn native_persistent_error_repairs_through_real_effects_residency_without_owner_
     let compile = |node: &mondrian_effects::EffectNode| {
         let frame_context = EffectFrameContext::new(
             Rational::FPS_24,
-            SampleAspectRatio::SQUARE,
+            mondrian_effects::EffectProjectGeometry::new(2, 2, SampleAspectRatio::SQUARE)
+                .expect("explicit owner project geometry"),
             TimelineTimeRange::new(
                 TimelineTime::ZERO,
                 TimelineTime::new(10, 24).expect("canonical available duration"),
@@ -4809,6 +5044,12 @@ fn native_log_messages_reach_product_tracing_with_exact_supervised_owner() {
         1,
         1,
         input.format(),
+        mondrian_effects::EffectProjectGeometry::new(
+            1,
+            1,
+            mondrian_core::SampleAspectRatio::SQUARE,
+        )
+        .expect("explicit owner project geometry"),
         &mut || Ok(()),
     )
     .expect("actual supervised owner");
@@ -4924,7 +5165,8 @@ fn native_live_progress_flows_through_real_effects_residency_before_frame_comple
     let effect = instantiate_effect_node(kind).expect("real authored occurrence");
     let frame_context = EffectFrameContext::new(
         Rational::FPS_24,
-        SampleAspectRatio::SQUARE,
+        mondrian_effects::EffectProjectGeometry::new(2, 2, SampleAspectRatio::SQUARE)
+            .expect("explicit owner project geometry"),
         TimelineTimeRange::new(
             TimelineTime::ZERO,
             TimelineTime::new(10, 24).expect("canonical available duration"),
@@ -5151,6 +5393,12 @@ fn product_worker_obeys_current_source_identity_and_default_render() {
         3,
         2,
         format,
+        mondrian_effects::EffectProjectGeometry::new(
+            3,
+            2,
+            mondrian_core::SampleAspectRatio::new(2, 1).unwrap(),
+        )
+        .expect("explicit owner project geometry"),
         &mut || Ok(()),
     )
     .expect("one actual current-source identity resident");
@@ -5336,6 +5584,12 @@ fn product_worker_preserves_fixed_canvas_subset_and_empty_outputs() {
         input.width(),
         input.height(),
         input.format(),
+        mondrian_effects::EffectProjectGeometry::new(
+            input.width(),
+            input.height(),
+            mondrian_core::SampleAspectRatio::new(2, 1).unwrap(),
+        )
+        .expect("explicit owner project geometry"),
         &mut || Ok(()),
     )
     .expect("actual fixed-canvas resident");
@@ -5366,7 +5620,12 @@ fn product_worker_preserves_fixed_canvas_subset_and_empty_outputs() {
         WorkingColorSpace::LinearRec709,
         EffectFrameContext::new(
             Rational::FPS_24,
-            SampleAspectRatio::new(2, 1).expect("PAR two"),
+            mondrian_effects::EffectProjectGeometry::new(
+                3,
+                5,
+                SampleAspectRatio::new(2, 1).expect("PAR two"),
+            )
+            .expect("explicit owner project geometry"),
             TimelineTimeRange::new(TimelineTime::ZERO, TimelineTime::new(101, 24).expect("end"))
                 .expect("source range"),
         )
@@ -5454,3 +5713,6 @@ fn product_worker_preserves_fixed_canvas_subset_and_empty_outputs() {
 
 #[path = "openfx_host/generator.rs"]
 mod generator;
+
+#[path = "openfx_host/project_geometry.rs"]
+mod project_geometry;

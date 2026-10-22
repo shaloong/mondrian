@@ -480,6 +480,8 @@ mod tests {
                     mondrian_effects::EffectColorDomain::SceneLinearRgb,
                     mondrian_core::ColorFrameAlpha::StraightCoverage,
                 ),
+
+                project_geometry: None,
             },
             provider_revision: 3,
             retention,

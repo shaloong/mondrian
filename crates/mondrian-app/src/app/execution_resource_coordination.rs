@@ -4134,7 +4134,8 @@ mod tests {
             mondrian_effects::instantiate_effect_node(effect_type).expect("author occurrence");
         let context = EffectFrameContext::new(
             Rational::FPS_24,
-            SampleAspectRatio::SQUARE,
+            mondrian_effects::EffectProjectGeometry::new(3840, 2160, SampleAspectRatio::SQUARE)
+                .expect("explicit owner project geometry"),
             TimelineTimeRange::new(
                 TimelineTime::ZERO,
                 TimelineTime::new(10, 24).expect("duration"),

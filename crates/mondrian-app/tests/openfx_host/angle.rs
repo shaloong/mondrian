@@ -212,6 +212,12 @@ fn product_worker_preserves_scalar_angle_degrees_curves_and_pixels() {
         input.width(),
         input.height(),
         input.format(),
+        mondrian_effects::EffectProjectGeometry::new(
+            input.width(),
+            input.height(),
+            mondrian_core::SampleAspectRatio::SQUARE,
+        )
+        .expect("explicit owner project geometry"),
         &mut checkpoint(&cancel),
     )
     .expect("actual Angle resident");
@@ -308,7 +314,12 @@ fn canonical_graph_preserves_unwrapped_angle_degrees_across_seeks() {
         WorkingColorSpace::LinearRec709,
         EffectFrameContext::new(
             Rational::FPS_24,
-            SampleAspectRatio::new(1, 1).unwrap(),
+            mondrian_effects::EffectProjectGeometry::new(
+                3,
+                5,
+                SampleAspectRatio::new(1, 1).unwrap(),
+            )
+            .expect("explicit owner project geometry"),
             TimelineTimeRange::new(
                 TimelineTime::new(-1, 2).unwrap(),
                 TimelineTime::new(5, 2).unwrap(),

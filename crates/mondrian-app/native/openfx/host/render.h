@@ -61,6 +61,9 @@ struct MondrianOpenFxFrameInfo {
   int source_alpha; // Filter input or Generator output staging: 0 straight Float, 1 associated Float, 2 opaque
   int width;
   int height;
+  uint32_t project_width;
+  uint32_t project_height;
+  double project_pixel_aspect_ratio;
   double frame;
   double frame_rate;
   double first_frame;

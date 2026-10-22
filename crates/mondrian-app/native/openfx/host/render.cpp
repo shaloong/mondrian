@@ -277,6 +277,9 @@ static int loadFrame(MondrianOpenFx::FrameState& state, const void* input,
 {
   if ((generator ? input != nullptr : input == nullptr) || info.source_alpha < 0 || info.source_alpha > 2 || info.width <= 0 || info.height <= 0 ||
       info.width > 8192 || info.height > 8192 ||
+      info.project_width == 0 || info.project_height == 0 ||
+      !std::isfinite(info.project_pixel_aspect_ratio) || info.project_pixel_aspect_ratio <= 0.0 ||
+      !std::isfinite(static_cast<double>(info.project_width) * info.project_pixel_aspect_ratio) ||
       !std::isfinite(info.frame) || !std::isfinite(info.frame_rate) ||
       !std::isfinite(info.first_frame) || !std::isfinite(info.last_frame) ||
       !std::isfinite(info.pixel_aspect_ratio) || info.frame_rate <= 0.0 ||
@@ -615,6 +618,12 @@ struct MondrianOpenFxSession {
              const MondrianOpenFxParameter* parameters, int count, MondrianOpenFxRenderReport& report, Probe& probe) {
     auto phase = probe.start();
     if (failed) { return 2; }
+    // Project geometry is an immutable owner binding, independent of image
+    // PAR and raster extent. Refuse a changed binding before loadFrame or any
+    // native callback; the original instance and output remain usable.
+    if (info.project_width != frame.info.project_width ||
+        info.project_height != frame.info.project_height ||
+        info.project_pixel_aspect_ratio != frame.info.project_pixel_aspect_ratio) { return 2; }
     // A prepared session has a fixed image-storage contract. Violating it is
     // a transport fault, unlike an author snapshot rejected before assignment.
     if (!output || info.width != frame.info.width || info.height != frame.info.height || info.source_alpha != frame.info.source_alpha ||

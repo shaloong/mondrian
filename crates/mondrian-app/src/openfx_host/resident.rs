@@ -22,10 +22,10 @@ pub use diagnostic::OpenFxRenderPhase;
 use diagnostic::{ParentProbe, ProbeEvent};
 
 /// Hidden executable mode for a context-bound resident native CPU session.
-pub const OPENFX_RESIDENT_WORKER_ARGUMENT: &str = "--internal-openfx-session-v9";
+pub const OPENFX_RESIDENT_WORKER_ARGUMENT: &str = "--internal-openfx-session-v10";
 const ENDPOINT_ENV: &str = "MONDRIAN_INTERNAL_OPENFX_ENDPOINT";
 const NONCE_ENV: &str = "MONDRIAN_INTERNAL_OPENFX_NONCE";
-const VERSION: u16 = 9;
+const VERSION: u16 = 10;
 const POLL: Duration = Duration::from_millis(20);
 const RETIRE: Duration = Duration::from_millis(100);
 const FRAME_TRANSFER_BYTES: usize = 1024 * 1024;
@@ -41,6 +41,7 @@ struct Prepare {
     bundle_path: PathBuf,
     binary_sha256: String,
     plugin_identifier: String,
+    project_geometry: EffectProjectGeometry,
     width: u32,
     height: u32,
     shared_path: PathBuf,
@@ -589,6 +590,7 @@ impl OpenFxFilterSession {
         width: u32,
         height: u32,
         input_format: mondrian_effects::EffectValueFormat,
+        project_geometry: EffectProjectGeometry,
         owner_checkpoint: &mut dyn FnMut() -> Result<(), OpenFxHostError>,
     ) -> Result<Self, OpenFxHostError> {
         Self::prepare_in_context(
@@ -598,6 +600,7 @@ impl OpenFxFilterSession {
             width,
             height,
             input_format,
+            project_geometry,
             OpenFxContext::Filter,
             owner_checkpoint,
         )
@@ -611,6 +614,7 @@ impl OpenFxFilterSession {
         width: u32,
         height: u32,
         output_format: mondrian_effects::EffectValueFormat,
+        project_geometry: EffectProjectGeometry,
         owner_checkpoint: &mut dyn FnMut() -> Result<(), OpenFxHostError>,
     ) -> Result<Self, OpenFxHostError> {
         Self::prepare_in_context(
@@ -620,6 +624,7 @@ impl OpenFxFilterSession {
             width,
             height,
             output_format,
+            project_geometry,
             OpenFxContext::Generator,
             owner_checkpoint,
         )
@@ -633,6 +638,7 @@ impl OpenFxFilterSession {
         width: u32,
         height: u32,
         input_format: mondrian_effects::EffectValueFormat,
+        project_geometry: EffectProjectGeometry,
         context: OpenFxContext,
         owner_checkpoint: &mut dyn FnMut() -> Result<(), OpenFxHostError>,
     ) -> Result<Self, OpenFxHostError> {
@@ -725,6 +731,7 @@ impl OpenFxFilterSession {
             bundle_path: bundle,
             binary_sha256: inspection.binary_sha256.clone(),
             plugin_identifier: identifier.to_owned(),
+            project_geometry,
             width,
             height,
             shared_path: file.path().to_path_buf(),
@@ -2264,6 +2271,9 @@ fn render_worker_request(
         },
         width: prepare.width as c_int,
         height: prepare.height as c_int,
+        project_width: prepare.project_geometry.width(),
+        project_height: prepare.project_geometry.height(),
+        project_pixel_aspect_ratio: prepare.project_geometry.pixel_aspect_ratio().to_f64(),
         frame: timing.frame,
         frame_rate: timing.frame_rate,
         first_frame: timing.first_frame,
@@ -2723,6 +2733,13 @@ mod tests {
                 shared_path: file.path().to_path_buf(),
                 input_alpha: mondrian_core::ColorFrameAlpha::StraightFloat,
                 owner: mondrian_core::EffectProcessorOwnerId::new(),
+
+                project_geometry: mondrian_effects::EffectProjectGeometry::new(
+                    1,
+                    1,
+                    mondrian_core::SampleAspectRatio::SQUARE,
+                )
+                .expect("explicit owner project geometry"),
             };
             assert!(
                 matches!(map_frames(&prepare), Err(OpenFxHostError::Invalid(reason)) if reason == "shared frame has an invalid size")
@@ -2745,9 +2762,16 @@ mod tests {
             shared_path: PathBuf::from("must-never-map"),
             input_alpha: mondrian_core::ColorFrameAlpha::StraightFloat,
             owner: mondrian_core::EffectProcessorOwnerId::new(),
+
+            project_geometry: mondrian_effects::EffectProjectGeometry::new(
+                1,
+                1,
+                mondrian_core::SampleAspectRatio::SQUARE,
+            )
+            .expect("explicit owner project geometry"),
         };
         assert!(validate_prepare_envelope(&prepare, "actual nonce").is_ok());
-        for stale in [0, 1, 2, 3, 4, 5, 6, 7, 8, u16::MAX] {
+        for stale in [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, u16::MAX] {
             prepare.version = stale;
             assert!(matches!(
                 validate_prepare_envelope(&prepare, "actual nonce"),
@@ -2756,7 +2780,7 @@ mod tests {
         }
         prepare.version = VERSION;
         assert!(validate_prepare_envelope(&prepare, "wrong nonce").is_err());
-        for field in ["owner", "context"] {
+        for field in ["owner", "context", "project_geometry"] {
             let mut missing = serde_json::to_value(&prepare).expect("canonical Prepare schema");
             missing.as_object_mut().expect("schema object").remove(field);
             assert!(
@@ -2764,10 +2788,24 @@ mod tests {
                 "no schema fallback without {field}"
             );
         }
+        for geometry in [
+            serde_json::json!({"width":0,"height":7,"pixel_aspect_ratio":{"numerator":2,"denominator":1}}),
+            serde_json::json!({"width":10,"height":0,"pixel_aspect_ratio":{"numerator":2,"denominator":1}}),
+            serde_json::json!({"width":10,"height":7,"pixel_aspect_ratio":{"numerator":0,"denominator":1}}),
+            serde_json::json!({"width":10,"height":7,"pixel_aspect_ratio":{"numerator":2,"denominator":0}}),
+            serde_json::json!({"width":10,"height":7,"pixel_aspect_ratio":{"numerator":2,"denominator":1},"offset":[1,0]}),
+        ] {
+            let mut invalid = serde_json::to_value(&prepare).unwrap();
+            invalid["project_geometry"] = geometry;
+            assert!(
+                serde_json::from_value::<Prepare>(invalid).is_err(),
+                "invalid geometry cannot reach map/load"
+            );
+        }
         prepare.owner = mondrian_core::EffectProcessorOwnerId(uuid::Uuid::nil());
         assert!(validate_prepare_envelope(&prepare, "actual nonce").is_err());
         assert!(
-            OPENFX_RESIDENT_WORKER_ARGUMENT.ends_with("-v9"),
+            OPENFX_RESIDENT_WORKER_ARGUMENT.ends_with("-v10"),
             "sole worker dispatch uses the current generation"
         );
     }
@@ -3198,6 +3236,12 @@ mod output_resource_tests {
             1,
             1,
             format,
+            mondrian_effects::EffectProjectGeometry::new(
+                1,
+                1,
+                mondrian_core::SampleAspectRatio::SQUARE,
+            )
+            .expect("explicit owner project geometry"),
             &mut || Ok(()),
         )
         .expect("actual owned worker");
@@ -3303,6 +3347,12 @@ mod ingress_owner_boundary_tests {
             256,
             257,
             format,
+            mondrian_effects::EffectProjectGeometry::new(
+                256,
+                257,
+                mondrian_core::SampleAspectRatio::SQUARE,
+            )
+            .expect("explicit owner project geometry"),
             &mut || Ok(()),
         )
         .expect("actual isolated ready owner");
@@ -3950,6 +4000,12 @@ mod process_retirement_tests {
             1,
             1,
             format,
+            mondrian_effects::EffectProjectGeometry::new(
+                1,
+                1,
+                mondrian_core::SampleAspectRatio::SQUARE,
+            )
+            .expect("explicit owner project geometry"),
             &mut || Ok(()),
         )
         .expect("actual native Ready");
@@ -4025,6 +4081,12 @@ mod process_retirement_tests {
             1,
             1,
             format,
+            mondrian_effects::EffectProjectGeometry::new(
+                1,
+                1,
+                mondrian_core::SampleAspectRatio::SQUARE,
+            )
+            .expect("explicit owner project geometry"),
             &mut || Ok(()),
         )
         .expect("actual native session");
@@ -4117,6 +4179,13 @@ mod generator_storage_tests {
             shared_path: file.path().to_path_buf(),
             input_alpha: mondrian_core::ColorFrameAlpha::StraightFloat,
             owner: mondrian_core::EffectProcessorOwnerId::new(),
+
+            project_geometry: mondrian_effects::EffectProjectGeometry::new(
+                3,
+                2,
+                mondrian_core::SampleAspectRatio::SQUARE,
+            )
+            .expect("explicit owner project geometry"),
         };
         {
             let (_, source, output) = map_frames(&prepare).expect("only Output mapping");

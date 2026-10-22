@@ -201,6 +201,12 @@ mod qualification {
                 mondrian_effects::EffectColorDomain::SceneLinearRgb,
                 mondrian_core::ColorFrameAlpha::StraightFloat,
             ),
+            mondrian_effects::EffectProjectGeometry::new(
+                width,
+                height,
+                mondrian_core::SampleAspectRatio::SQUARE,
+            )
+            .expect("explicit owner project geometry"),
             &mut || Ok(()),
         )
         .expect("prepare real production resident worker");
@@ -465,6 +471,12 @@ mod qualification {
                 mondrian_effects::EffectColorDomain::SceneLinearRgb,
                 mondrian_core::ColorFrameAlpha::StraightFloat,
             ),
+            mondrian_effects::EffectProjectGeometry::new(
+                width,
+                height,
+                mondrian_core::SampleAspectRatio::SQUARE,
+            )
+            .expect("explicit owner project geometry"),
             &mut || Ok(()),
         )
         .expect("prepare real production resident worker");

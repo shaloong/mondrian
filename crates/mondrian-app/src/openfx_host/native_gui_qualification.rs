@@ -100,6 +100,10 @@ fn native_generic_gui_pairs_failed_begin_end_and_honest_question_replies() {
             first_frame: 0.0,
             last_frame: 100.0,
             pixel_aspect_ratio: 1.0,
+
+            project_width: 1,
+            project_height: 1,
+            project_pixel_aspect_ratio: 1.0,
         };
         let input = [0.125_f32, -2.0, 16.0, 0.5]
             .iter()
@@ -301,7 +305,12 @@ fn actual_bank_render_idle_end_render_preserves_native_owner_and_distinct_action
         mondrian_effects::instantiate_effect_node(kind).expect("actual authored occurrence");
     let context = mondrian_effects::EffectFrameContext::new(
         mondrian_core::Rational::FPS_24,
-        mondrian_core::SampleAspectRatio::SQUARE,
+        mondrian_effects::EffectProjectGeometry::new(
+            1,
+            1,
+            mondrian_core::SampleAspectRatio::SQUARE,
+        )
+        .expect("explicit owner project geometry"),
         mondrian_core::TimelineTimeRange::new(
             mondrian_core::TimelineTime::ZERO,
             mondrian_core::TimelineTime::new(10, 24).expect("duration"),
@@ -579,6 +588,10 @@ fn run_parameter_permission_session(gui_open: bool) {
         first_frame: 0.0,
         last_frame: 100.0,
         pixel_aspect_ratio: 1.0,
+
+        project_width: 1,
+        project_height: 1,
+        project_pixel_aspect_ratio: 1.0,
     };
     let input = [0.125_f32, -2.0, 16.0, 0.5]
         .into_iter()

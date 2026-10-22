@@ -7153,7 +7153,12 @@ mod tests {
             .expect("range");
             let context = EffectFrameContext::new(
                 mondrian_core::Rational::FPS_24,
-                mondrian_core::SampleAspectRatio::SQUARE,
+                mondrian_effects::EffectProjectGeometry::new(
+                    state.active_sequence().unwrap().settings.resolution.width,
+                    state.active_sequence().unwrap().settings.resolution.height,
+                    mondrian_core::SampleAspectRatio::SQUARE,
+                )
+                .expect("explicit owner project geometry"),
                 range,
             )
             .expect("context");
@@ -7564,9 +7569,17 @@ mod tests {
             let range =
                 TimelineTimeRange::new(TimelineTime::ZERO, TimelineTime::new(1, 1).expect("end"))
                     .expect("range");
-            let context =
-                EffectFrameContext::new(Rational::FPS_24, SampleAspectRatio::SQUARE, range)
-                    .expect("context");
+            let context = EffectFrameContext::new(
+                Rational::FPS_24,
+                mondrian_effects::EffectProjectGeometry::new(
+                    state.active_sequence().unwrap().settings.resolution.width,
+                    state.active_sequence().unwrap().settings.resolution.height,
+                    SampleAspectRatio::SQUARE,
+                )
+                .expect("explicit owner project geometry"),
+                range,
+            )
+            .expect("context");
             let program = PreparedEffectProgram::prepare_hierarchical_with_frame_context(
                 &clip.effects,
                 &[],

@@ -76,6 +76,12 @@ fn output_only_generator_direct_and_prepared_graph_preserve_time_extent_and_owne
         3,
         2,
         format(),
+        mondrian_effects::EffectProjectGeometry::new(
+            3,
+            2,
+            mondrian_core::SampleAspectRatio::new(2, 1).unwrap(),
+        )
+        .expect("explicit owner project geometry"),
         &mut checkpoint(&token),
     )
     .expect("one Generator owner");
@@ -128,7 +134,8 @@ fn output_only_generator_direct_and_prepared_graph_preserve_time_extent_and_owne
         .expect("canonical gain");
     let frame_context = EffectFrameContext::new(
         Rational::FPS_24,
-        SampleAspectRatio::new(2, 1).unwrap(),
+        mondrian_effects::EffectProjectGeometry::new(3, 2, SampleAspectRatio::new(2, 1).unwrap())
+            .expect("explicit owner project geometry"),
         TimelineTimeRange::new(TimelineTime::ZERO, TimelineTime::new(13, 24).unwrap()).unwrap(),
     )
     .unwrap();
@@ -248,6 +255,12 @@ fn output_only_generator_cannot_publish_success_without_current_output_fetch() {
         3,
         2,
         format(),
+        mondrian_effects::EffectProjectGeometry::new(
+            3,
+            2,
+            mondrian_core::SampleAspectRatio::new(2, 1).unwrap(),
+        )
+        .expect("explicit owner project geometry"),
         &mut checkpoint(&token),
     )
     .expect("Generator owner");

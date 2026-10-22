@@ -874,7 +874,7 @@ mod tests {
             serde_json::from_value::<Response>(null),
             Ok(Response::GuiClosed { feedback: None, .. })
         ));
-        assert_eq!(VERSION, 9);
+        assert_eq!(VERSION, 10);
     }
 
     #[test]
@@ -1396,6 +1396,10 @@ mod tests {
             first_frame: 0.0,
             last_frame: 100.0,
             pixel_aspect_ratio: 1.0,
+
+            project_width: 1,
+            project_height: 1,
+            project_pixel_aspect_ratio: 1.0,
         };
         let input = [[0.25_f32, -0.5, 1.5, 0.25]];
         let input_bytes: &[u8] = bytemuck::cast_slice(&input);
