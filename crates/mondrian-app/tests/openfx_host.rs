@@ -6251,3 +6251,181 @@ fn native_ok_clip_preferences_apply_opaque_alpha() {
 fn native_ok_clip_preferences_reject_unknown_alpha_before_render() {
     qualify_native_default_clip_preferences("prefs_ok_alpha_invalid", true);
 }
+
+// Fixed-progressive output cannot accept OK field remapping. Default residuals
+// remain unhandled, independently of the existing PAR and alpha preference gates.
+fn qualify_native_clip_preferences_fielding(mode: &str, rejected: bool) {
+    const HALF: [[f32; 4]; 15] = [
+        [-0.25, 0.0625, 1.0, 0.125],
+        [-0.21875, 0.078125, 0.9921875, 0.140625],
+        [-0.1875, 0.09375, 0.984375, 0.15625],
+        [-0.15625, 0.109375, 0.9765625, 0.171875],
+        [-0.125, 0.125, 0.96875, 0.1875],
+        [-0.09375, 0.140625, 0.9609375, 0.203125],
+        [-0.0625, 0.15625, 0.953125, 0.21875],
+        [-0.03125, 0.171875, 0.9453125, 0.234375],
+        [0.0, 0.1875, 0.9375, 0.25],
+        [0.03125, 0.203125, 0.9296875, 0.265625],
+        [0.0625, 0.21875, 0.921875, 0.28125],
+        [0.09375, 0.234375, 0.9140625, 0.296875],
+        [0.125, 0.25, 0.90625, 0.3125],
+        [0.15625, 0.265625, 0.8984375, 0.328125],
+        [0.1875, 0.28125, 0.890625, 0.34375],
+    ];
+    let directory = PathBuf::from(
+        std::env::var_os("MONDRIAN_OPENFX_DESCRIBE_ACTION_RECEIPT_DIRECTORY")
+            .expect("fresh empty native action directory"),
+    );
+    assert!(directory.is_absolute() && directory.is_dir());
+    assert!(std::fs::read_dir(&directory).unwrap().next().is_none());
+    let inspection = cpu_contract_probe(mode);
+    let input = cpu_contract_input();
+    let original = input.clone();
+    let mut session = OpenFxFilterSession::prepare(
+        product_executable(),
+        &inspection,
+        "uk.co.thefoundry.BasicGainPlugin",
+        input.width(),
+        input.height(),
+        input.format(),
+        mondrian_effects::EffectProjectGeometry::new(10, 7, SampleAspectRatio::new(2, 1).unwrap())
+            .unwrap(),
+        &mut || Ok(()),
+    )
+    .expect("one original fixed-progressive native owner");
+    let pid = session.worker_process_id();
+    let owner = session.processor_owner();
+    let parameters = constant_parameters([("scale".to_owned(), OpenFxParameterValue::Double(0.5))]);
+    let requests = [(0.0, 1.0), (6.0, 1.2), (3.0, 1.0)];
+    let mut results = Vec::new();
+    for &(frame, par) in &requests[..if rejected { 1 } else { requests.len() }] {
+        let sampled = cpu_contract_image_par(&input, par);
+        let output = session.render(
+            &OpenFxRenderTiming { frame, ..cpu_contract_timing() },
+            &parameters,
+            &sampled,
+            &mut || Ok(()),
+        );
+        let feedback = if output.is_ok() {
+            session.take_feedback()
+        } else {
+            None
+        };
+        let failed = output.is_err();
+        results.push((sampled, output, feedback));
+        if failed {
+            break;
+        }
+    }
+    // Preserve original cleanup even when the baseline target is RED.
+    let cleanup = session.shutdown();
+    let rows = property_query_action_rows(&directory, pid);
+    assert!(
+        rows.iter()
+            .any(|row| row
+                == "prefs-fielding preferences attempted=1 accepted=1 status=0 complete=1"),
+        "real FieldOrder suite write/readback must complete; cleanup={cleanup:?}: {rows:?}"
+    );
+    let status = if mode.starts_with("fielding_default_") {
+        14
+    } else {
+        0
+    };
+    assert!(rows.iter().any(|row| row == &format!(
+        "OfxImageEffectActionGetClipPreferences return attempted=0 accepted=0 status={status} complete=1"
+    )), "probe must return its actual OK/Default status; cleanup={cleanup:?}: {rows:?}");
+    assert_eq!(input, original);
+    for (sampled, _, _) in &results {
+        assert_eq!(
+            sampled.pixels(),
+            original.pixels(),
+            "actual Source pixels remain immutable"
+        );
+    }
+    if rejected {
+        assert!(
+            !rows.iter().any(|row| row.starts_with("OfxImageEffectActionRender enter ")),
+            "unsupported OK fielding reached Render; cleanup={cleanup:?}: {rows:?}"
+        );
+        assert_eq!(results.len(), 1);
+        assert!(
+            matches!(&results[0].1, Err(OpenFxHostError::WorkerFailed(reason)) if reason == "native status 4"),
+            "unsupported fielding must fail at preference admission; cleanup={cleanup:?}: {:?}",
+            results[0].1
+        );
+    } else {
+        assert_eq!(
+            results.len(),
+            3,
+            "all warm requests must complete; cleanup={cleanup:?}"
+        );
+        let mut native_owner = None;
+        for (index, (sampled, output, feedback)) in results.into_iter().enumerate() {
+            let output = output.expect("same None or Default preserves progressive rendering");
+            assert_eq!(output.extent(), sampled.extent());
+            assert_eq!(output.format(), sampled.format());
+            assert_eq!(output.sampling(), sampled.sampling());
+            assert_eq!(output.pixels().len(), HALF.len());
+            for (actual, expected) in output.pixels().iter().zip(HALF) {
+                assert_eq!(actual.map(f32::to_bits), expected.map(f32::to_bits));
+            }
+            let feedback = feedback.expect("actual original Render feedback");
+            assert_eq!(feedback.owner, owner);
+            assert_eq!(feedback.snapshot.invocation(), index as u64 + 1);
+            let actual = feedback.snapshot.native_owner();
+            if let Some(previous) = native_owner {
+                assert_eq!(actual, previous);
+            }
+            native_owner = Some(actual);
+        }
+        for marker in [
+            "prefs-default images attempted=2 accepted=2 status=0 complete=1",
+            "prefs-fielding images attempted=2 accepted=2 status=0 complete=1",
+        ] {
+            assert_eq!(
+                rows.iter().filter(|row| row.as_str() == marker).count(),
+                3,
+                "all actual clip/image and Render field checks must complete: {marker}"
+            );
+        }
+        // Preference action frequency is deliberately not an oracle.
+    }
+    assert_eq!(session.worker_process_id(), pid);
+    cleanup.expect("original fixed-progressive owner shutdown");
+}
+
+#[test]
+#[ignore = "normal Product, SessionProbe fielding_ok_upper, fresh action directory"]
+fn native_clip_preferences_reject_upper_fielding_before_render() {
+    qualify_native_clip_preferences_fielding("fielding_ok_upper", true);
+}
+
+#[test]
+#[ignore = "normal Product, SessionProbe fielding_ok_lower, fresh action directory"]
+fn native_clip_preferences_reject_lower_fielding_before_render() {
+    qualify_native_clip_preferences_fielding("fielding_ok_lower", true);
+}
+
+#[test]
+#[ignore = "normal Product, SessionProbe fielding_ok_invalid, fresh action directory"]
+fn native_clip_preferences_reject_unknown_fielding_before_render() {
+    qualify_native_clip_preferences_fielding("fielding_ok_invalid", true);
+}
+
+#[test]
+#[ignore = "normal Product, SessionProbe fielding_ok_none, fresh action directory"]
+fn native_clip_preferences_same_none_fielding_preserves_warm_images_and_owner() {
+    qualify_native_clip_preferences_fielding("fielding_ok_none", false);
+}
+
+#[test]
+#[ignore = "normal Product, SessionProbe fielding_default_upper, fresh action directory"]
+fn native_clip_preferences_default_upper_fielding_preserves_warm_images_and_owner() {
+    qualify_native_clip_preferences_fielding("fielding_default_upper", false);
+}
+
+#[test]
+#[ignore = "normal Product, SessionProbe fielding_default_invalid, fresh action directory"]
+fn native_clip_preferences_default_unknown_fielding_preserves_warm_images_and_owner() {
+    qualify_native_clip_preferences_fielding("fielding_default_invalid", false);
+}

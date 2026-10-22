@@ -3279,6 +3279,53 @@ bool clipPreferencesDefaultImages(const void* handle, OfxPropertySetHandle in,
   return true;
 }
 
+bool clipPreferencesFieldingMode(const std::string& selected) {
+  for (const char* candidate : {"fielding_ok_upper", "fielding_ok_lower", "fielding_ok_invalid",
+      "fielding_ok_none", "fielding_default_upper", "fielding_default_invalid"}) {
+    if (selected == candidate) { return true; }
+  }
+  return false;
+}
+
+OfxStatus clipPreferencesFielding(OfxPropertySetHandle out, const std::string& selected) {
+  int setable = -1, dimension = 0;
+  if (!out || gPropHost->propGetInt(gHost->host, kOfxImageEffectPropSetableFielding,
+      0, &setable) != kOfxStatOK || setable != 0 ||
+      gPropHost->propGetDimension(out, kOfxImageClipPropFieldOrder, &dimension) != kOfxStatOK || dimension != 1 ||
+      !preferenceStringIs(out, kOfxImageClipPropFieldOrder, kOfxImageFieldNone)) { return kOfxStatFailed; }
+  const char* requested = selected.find("_upper") != std::string::npos ? kOfxImageFieldUpper
+      : selected.find("_lower") != std::string::npos ? kOfxImageFieldLower
+      : selected.find("_invalid") != std::string::npos ? "org.mondrian.test.UnknownFieldOrder"
+      : kOfxImageFieldNone;
+  if (gPropHost->propSetString(out, kOfxImageClipPropFieldOrder, 0, requested) != kOfxStatOK ||
+      !preferenceStringIs(out, kOfxImageClipPropFieldOrder, requested)) { return kOfxStatFailed; }
+  // Prove a writable real request, not a fixture failure before negotiation.
+  describeActionReceipt("prefs-fielding", "preferences", 1, 1, kOfxStatOK);
+  return selected.find("fielding_default_") == 0 ? kOfxStatReplyDefault : kOfxStatOK;
+}
+
+bool clipPreferencesFieldingImages(const void* handle, OfxPropertySetHandle in,
+                                   const std::string& selected) {
+  // The current progressive raster is the oracle even on the RED host: a
+  // disallowed request must not make this probe demand fabricated field pixels.
+  if (!clipPreferencesDefaultImages(handle, in, selected) ||
+      !preferenceStringIs(in, kOfxImageEffectPropFieldToRender, kOfxImageFieldNone)) { return false; }
+  double time = 0.0;
+  if (gPropHost->propGetDouble(in, kOfxPropTime, 0, &time) != kOfxStatOK) { return false; }
+  for (const char* name : {"Source", "Output"}) {
+    OfxImageClipHandle clip = nullptr;
+    OfxPropertySetHandle props = nullptr, image = nullptr;
+    if (gEffectHost->clipGetHandle((OfxImageEffectHandle)handle, name, &clip, &props) != kOfxStatOK ||
+        !preferenceStringIs(props, kOfxImageClipPropFieldOrder, kOfxImageFieldNone) ||
+        gEffectHost->clipGetImage(clip, time, nullptr, &image) != kOfxStatOK || !image) { return false; }
+    const bool valid = preferenceStringIs(image, kOfxImagePropField, kOfxImageFieldNone);
+    const auto released = gEffectHost->clipReleaseImage(image);
+    if (!valid || released != kOfxStatOK) { return false; }
+  }
+  describeActionReceipt("prefs-fielding", "images", 2, 2, kOfxStatOK);
+  return true;
+}
+
 OfxStatus probeAction(const char* action, const void* handle,
                 OfxPropertySetHandle in, OfxPropertySetHandle out) {
   const std::string operation(action);
@@ -3606,6 +3653,10 @@ OfxStatus probeAction(const char* action, const void* handle,
       ? fixedCanvasPartialOutput(handle, in)
       : selected == "angle" && operation == kOfxImageEffectActionRender
       ? angleOutput(handle, in) : pluginMain(action, handle, in, out);
+  if (clipPreferencesFieldingMode(selected) && (result == kOfxStatOK || result == kOfxStatReplyDefault)) {
+    if (operation == kOfxImageEffectActionGetClipPreferences) { return clipPreferencesFielding(out, selected); }
+    if (operation == kOfxImageEffectActionRender && !clipPreferencesFieldingImages(handle, in, selected)) { return kOfxStatFailed; }
+  }
   if (clipPreferencesDefaultMode(selected) && (result == kOfxStatOK || result == kOfxStatReplyDefault)) {
     if (operation == kOfxImageEffectActionGetClipPreferences) { return clipPreferencesDefault(out, selected); }
     if (operation == kOfxImageEffectActionRender && !clipPreferencesDefaultImages(handle, in, selected)) { return kOfxStatFailed; }
@@ -3962,7 +4013,7 @@ OfxStatus probe(const char* action, const void* handle,
       std::strcmp(action, kOfxImageEffectActionIsIdentity) == 0) {
     observed = action;
   }
-  if (clipPreferencesParMode(mode()) || clipPreferencesDefaultMode(mode())) {
+  if (clipPreferencesParMode(mode()) || clipPreferencesDefaultMode(mode()) || clipPreferencesFieldingMode(mode())) {
     // Keep these new modes bounded without altering any historical receipts.
     observed = std::strcmp(action, kOfxImageEffectActionGetClipPreferences) == 0 ||
         std::strcmp(action, kOfxImageEffectActionRender) == 0 ||
