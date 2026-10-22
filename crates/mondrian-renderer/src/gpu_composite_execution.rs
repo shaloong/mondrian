@@ -587,4 +587,39 @@ mod tests {
             GpuCompositeRect { x: 24, y: 24, width: 51, height: 51 }
         );
     }
+
+    #[test]
+    fn magnified_image_damage_covers_complete_source_support() {
+        // Public recorder-consumed planning, with literal corner-space geometry:
+        // the full 1x1 square scaled to each canvas covers every pixel center.
+        for (width, height) in [(2, 2), (4, 4), (4, 2)] {
+            let plan = GpuCompositeExecutionPlanner::plan(
+                width,
+                height,
+                &[GpuCompositeLayerFootprint::TransformedSource {
+                    source_width: 1,
+                    source_height: 1,
+                    transform: [width as f32, 0., 0., 0., height as f32, 0.],
+                    crop: GpuCompositeSourceCrop::default(),
+                    fused_point_operations: 0,
+                }],
+                GpuCompositeExecutionPolicy::default(),
+            )
+            .expect("bounded complete image support");
+            let canvas = GpuCompositeRect { x: 0, y: 0, width, height };
+            assert_eq!(plan.layers.len(), 1);
+            assert_eq!(
+                plan.layers[0].damage, canvas,
+                "{width}x{height}: no first-pixel strip may be culled"
+            );
+            assert_eq!(plan.layers[0].tiles, [canvas]);
+            assert!(plan.layers[0].preserved_regions.is_empty());
+            assert_eq!(plan.diagnostics.eliminated_layers, 0);
+            assert_eq!(
+                plan.diagnostics.shaded_pixels,
+                u64::from(width) * u64::from(height)
+            );
+            assert_eq!(plan.diagnostics.avoided_shader_pixels, 0);
+        }
+    }
 }

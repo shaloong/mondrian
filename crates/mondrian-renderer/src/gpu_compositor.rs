@@ -7526,6 +7526,221 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    #[ignore = "requires physical GPU; corner-space image coverage and Nearest readback"]
+    async fn physical_gpu_image_borders_use_corner_space_coverage() {
+        let context = crate::GpuContext::new().await.expect("actual GPU adapter required");
+        let adapter = context.adapter.get_info();
+        eprintln!("GPU_IMAGE_BORDER_NATIVE_PRIMARY: {adapter:?}");
+        assert!(
+            matches!(
+                adapter.device_type,
+                wgpu::DeviceType::DiscreteGpu | wgpu::DeviceType::IntegratedGpu
+            ),
+            "image-border qualification requires physical hardware: {adapter:?}"
+        );
+        assert_eq!(
+            product_gpu_working_texture_format(),
+            GpuColorFrameTextureFormat::Rgba32Float
+        );
+        let working = WorkingColorSpace::LinearRec709;
+        let mut failures = Vec::new();
+        let run = |label: &str,
+                   source: &CpuColorFrame,
+                   width: u32,
+                   height: u32,
+                   transform: [f32; 6],
+                   opaque_background: bool,
+                   expected: &[[f32; 4]],
+                   shaded_pixels: u64,
+                   failures: &mut Vec<String>| {
+            let mut layers = Vec::new();
+            if opaque_background {
+                // This exact opaque identity base selects fs_opaque_normal for
+                // the subsequent transformed source, rather than guessing from alpha.
+                layers.push(GpuCompositeLayer {
+                    source: GpuCompositeLayerSource::SolidColor(Color {
+                        r: 0.,
+                        g: 0.,
+                        b: 0.,
+                        a: 1.,
+                    }),
+                    opacity: 1.0,
+                    blend_policy: mondrian_effects::EffectPassBlendPolicy::Blend(BlendMode::Normal),
+                    transform: [1., 0., 0., 0., 1., 0.],
+                    effect_plan: None,
+                    frame_seed: 0,
+                });
+            }
+            layers.push(GpuCompositeLayer {
+                source: GpuCompositeLayerSource::CpuFrame(source),
+                opacity: 1.0,
+                blend_policy: mondrian_effects::EffectPassBlendPolicy::Blend(BlendMode::Normal),
+                transform,
+                effect_plan: None,
+                frame_seed: 0,
+            });
+            let (actual, diagnostics) =
+                readback_test_composite_with_diagnostics(&context, &layers, width, height, working);
+            assert_eq!(actual.len(), expected.len(), "{label}");
+            assert_eq!(diagnostics.gpu_passthrough_frames, 0, "{label}");
+            assert_eq!(diagnostics.gpu_with_upload_composites, 1, "{label}");
+            assert_eq!(diagnostics.cpu_fallback_composites, 0, "{label}");
+            assert_eq!(
+                diagnostics.gpu_composited_pixels,
+                u64::from(width) * u64::from(height),
+                "{label}"
+            );
+            assert_eq!(
+                diagnostics.opaque_normal_single_accumulator_composites,
+                u64::from(opaque_background),
+                "{label}: actual pipeline evidence"
+            );
+            assert_eq!(
+                diagnostics.execution.render_passes,
+                if opaque_background { 2 } else { 1 },
+                "{label}"
+            );
+            assert_eq!(
+                diagnostics.execution.tile_draws, diagnostics.execution.render_passes,
+                "{label}"
+            );
+            if diagnostics.execution.shaded_pixels != shaded_pixels {
+                failures.push(format!(
+                    "{label}: shaded {} expected {shaded_pixels}",
+                    diagnostics.execution.shaded_pixels
+                ));
+            }
+            for (index, (actual, expected)) in actual.iter().zip(expected).enumerate() {
+                for channel in 0..4 {
+                    if !actual[channel].is_finite()
+                        || (actual[channel] - expected[channel]).abs() > 1.0e-6
+                    {
+                        failures.push(format!(
+                            "{label}: pixel {index} channel {channel}: {} expected {}",
+                            actual[channel], expected[channel]
+                        ));
+                    }
+                }
+            }
+            eprintln!("GPU_IMAGE_BORDER_CASE: {label} {width}x{height} {diagnostics:?}");
+        };
+        // A 1x1 image occupies corner-space [0,1)^2. Inverse-mapped
+        // destination centers .25/.75 (2x) or .125/.375/.625/.875 (4x)
+        // all lie inside. Nearest samples the same literal texel everywhere.
+        for alpha in [0.5_f32, 1.0] {
+            let color = [0.25, 0.5, 0.75, alpha];
+            let source = CpuColorFrame::working(WorkingRgbaF32Frame {
+                width: 1,
+                height: 1,
+                color_space: working,
+                alpha: crate::ColorFrameAlpha::StraightCoverage,
+                sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
+                data: vec![color],
+            });
+            for size in [2_u32, 4] {
+                for opaque in [false, true] {
+                    let expected = if opaque {
+                        [color[0] * alpha, color[1] * alpha, color[2] * alpha, 1.0]
+                    } else {
+                        color
+                    };
+                    run(
+                        &format!("scale{size}-alpha{alpha}-opaque{opaque}"),
+                        &source,
+                        size,
+                        size,
+                        [size as f32, 0., 0., 0., size as f32, 0.],
+                        opaque,
+                        &vec![expected; (size * size) as usize],
+                        u64::from(size * size) * if opaque { 2 } else { 1 },
+                        &mut failures,
+                    );
+                }
+            }
+        }
+        let color = [0.25, 0.5, 0.75, 0.5];
+        let source = CpuColorFrame::working(WorkingRgbaF32Frame {
+            width: 1,
+            height: 1,
+            color_space: working,
+            alpha: crate::ColorFrameAlpha::StraightCoverage,
+            sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
+            data: vec![color],
+        });
+        for opaque in [false, true] {
+            let clear = if opaque { [0., 0., 0., 1.] } else { [0.; 4] };
+            let foreground = if opaque {
+                [0.125, 0.25, 0.375, 1.]
+            } else {
+                color
+            };
+            // The transformed source is [1,3)^2: exactly the central four
+            // pixel centers are covered, and the other twelve remain clear.
+            let expected = [
+                clear, clear, clear, clear, clear, foreground, foreground, clear, clear,
+                foreground, foreground, clear, clear, clear, clear, clear,
+            ];
+            run(
+                &format!("translated-alpha.5-opaque{opaque}"),
+                &source,
+                4,
+                4,
+                [2., 0., 1., 0., 2., 1.],
+                opaque,
+                &expected,
+                if opaque { 20 } else { 4 },
+                &mut failures,
+            );
+        }
+        // This diamond's AABB includes uncovered centers. Exact inverse
+        // coordinates are ((x+y-2)/4,(-x+y+2)/4): zero is inside and one is
+        // outside. ClampToEdge must not smear the texel over those exterior points.
+        let clear = [0.; 4];
+        let expected = [
+            clear, color, color, clear, color, color, color, color, clear, color, color, clear,
+            clear, clear, clear, clear,
+        ];
+        run(
+            "diamond-half-open-support",
+            &source,
+            4,
+            4,
+            [2., -2., 2., 2., 2., 0.],
+            false,
+            &expected,
+            16,
+            &mut failures,
+        );
+        let red = [1., 0., 0., 1.];
+        let green = [0., 1., 0., 1.];
+        let source = CpuColorFrame::working(WorkingRgbaF32Frame {
+            width: 2,
+            height: 1,
+            color_space: working,
+            alpha: crate::ColorFrameAlpha::StraightCoverage,
+            sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
+            data: vec![red, green],
+        });
+        // Preserve the existing Nearest policy: no interpolated middle color.
+        run(
+            "nearest-two-texel-control",
+            &source,
+            4,
+            2,
+            [2., 0., 0., 0., 2., 0.],
+            false,
+            &[red, red, green, green, red, red, green, green],
+            8,
+            &mut failures,
+        );
+        assert!(
+            failures.is_empty(),
+            "physical GPU image-border mismatches:\n{}",
+            failures.join("\n")
+        );
+    }
+
     fn readback_test_composite(
         context: &crate::GpuContext,
         layers: &[GpuCompositeLayer<'_>],
