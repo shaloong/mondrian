@@ -44,8 +44,8 @@ BadHandle、clip/property输出为空、零分配且图像状态不变，随后�
 0xC0000005，修复为 RTTI 实例准入并清空失败输出后二十项全过、stderr0。
 原180秒/185秒外层/2秒清理与owner正常退出，独立源码、构建和结果复核通过。
 资格限真实有效 Base/ClipBase 错误类型及有限内存/图像生命周期；不保证任意野指针、
-整宿主泄漏、RSS/预算、实时性/性能、GPU或其它平台。图像/RoD 修复此前已重链正常 Product，
-本次 clipGetHandle 修复尚未重链；直接 Host/Basic 验收不授 IPC 资格。此前 Product bootstrap memory
+整宿主泄漏、RSS/预算、实时性/性能、GPU或其它平台。图像/RoD 与本次 clipGetHandle 修复均已重链正常 Product（当前44310，dev opt1/debug2）；
+构建已独立复核，直接 Host/Basic 验收仍不授该入口 Product IPC 运行资格。此前 Product bootstrap memory
 曾通过，后来配对门在 shutdown 超时（2441行）、Graph 未执行，仍保持 HOLD。
 2026-10-17 修复前 Product 的新增压力门仍有缺口：4096 总参数用例在
 resident `shutdown()` 超时，后续 Graph 未执行；单次观测中 inner 已于约53.77ms
@@ -59,7 +59,8 @@ cleanup 的查询/kill/wait 记录，另记最后一个认证 Child Mapping 的�
 六项映射普通控制全部 exact PASS；既有期限/真实 OS Child 分支资格保持，
 解码器148项纯字节控制通过。原预算不变；不是插件退出时限或性能资格。
 
-当前配对的非 harness Product/集成测试为 test-profile opt0/debuginfo0。
+下述退出观测当时配对的非 harness Product/集成测试为 test-profile opt0/debuginfo0；
+它与上述当前 dev Product 是不同产物角色。
 原同 Child 事件等待已替代 Windows 轮询，仍有无 trace 的 fixed-canvas 原门和
 Choice 正向第二次 shutdown 报 DeadlineExceeded，不能用新等待方式宣布根因关闭。
 2026-10-21 一次无 debugger 的 schema5 fixed-canvas 完整原门通过：direct 与
