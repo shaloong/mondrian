@@ -568,10 +568,10 @@ fn sample_layer(src_center: vec2<f32>) -> vec4<f32> {
 
 fn source_inside(src_center: vec2<f32>) -> bool {
     let src_size = uniforms.geometry.zw;
-    return src_center.x >= 0.5 &&
-        src_center.y >= 0.5 &&
-        src_center.x < src_size.x + 0.5 &&
-        src_center.y < src_size.y + 0.5;
+    return src_center.x >= 0.0 &&
+        src_center.y >= 0.0 &&
+        src_center.x < src_size.x &&
+        src_center.y < src_size.y;
 }
 
 fn grain_noise(position: vec2<f32>) -> f32 {

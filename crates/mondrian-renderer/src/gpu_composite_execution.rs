@@ -328,14 +328,48 @@ fn transformed_source_damage(
     let crop = crop.clamped();
     let source_width = f64::from(source_width);
     let source_height = f64::from(source_height);
-    let left = 0.5_f64.max(f64::from(crop.left) * source_width);
-    let top = 0.5_f64.max(f64::from(crop.top) * source_height);
-    let right = (source_width + 0.5).min((1.0 - f64::from(crop.right)) * source_width);
-    let bottom = (source_height + 0.5).min((1.0 - f64::from(crop.bottom)) * source_height);
+    let left = f64::from(crop.left) * source_width;
+    let top = f64::from(crop.top) * source_height;
+    let right = (1.0 - f64::from(crop.right)) * source_width;
+    let bottom = (1.0 - f64::from(crop.bottom)) * source_height;
     if right <= left || bottom <= top {
         return None;
     }
 
+    // Image support uses physical pixel corners, independently of the
+    // conservative crop optimization. Include every pixel cell touched by its
+    // transformed bounds; integer-aligned support needs no extra border draw.
+    let [minimum_x, minimum_y, maximum_x, maximum_y] =
+        transformed_source_bounds(transform, [0.0, 0.0, source_width, source_height]);
+    let mut start_x = clamp_floor(minimum_x, canvas.width);
+    let mut start_y = clamp_floor(minimum_y, canvas.height);
+    let mut end_x = clamp_ceil(maximum_x, canvas.width);
+    let mut end_y = clamp_ceil(maximum_y, canvas.height);
+
+    if crop != GpuCompositeSourceCrop::default() {
+        let [minimum_x, minimum_y, maximum_x, maximum_y] =
+            transformed_source_bounds(transform, [left, top, right, bottom]);
+        // Keep the crop's conservative lower pixel-center bound. Its upper
+        // closure may be included after reflection, so retain a center exactly
+        // on that edge before intersecting with complete image support.
+        start_x = start_x.max(clamp_floor(minimum_x - 0.5, canvas.width));
+        start_y = start_y.max(clamp_floor(minimum_y - 0.5, canvas.height));
+        end_x = end_x.min(clamp_floor((maximum_x - 0.5).floor() + 1.0, canvas.width));
+        end_y = end_y.min(clamp_floor((maximum_y - 0.5).floor() + 1.0, canvas.height));
+    }
+    if end_x <= start_x || end_y <= start_y {
+        return None;
+    }
+    Some(GpuCompositeRect {
+        x: start_x,
+        y: start_y,
+        width: end_x - start_x,
+        height: end_y - start_y,
+    })
+}
+
+fn transformed_source_bounds(transform: [f32; 6], bounds: [f64; 4]) -> [f64; 4] {
+    let [left, top, right, bottom] = bounds;
     let points = [(left, top), (right, top), (left, bottom), (right, bottom)];
     let mut minimum_x = f64::INFINITY;
     let mut minimum_y = f64::INFINITY;
@@ -351,20 +385,7 @@ fn transformed_source_damage(
         maximum_x = maximum_x.max(output_x);
         maximum_y = maximum_y.max(output_y);
     }
-
-    // Pixel centers are x + 0.5/y + 0.5. Floor the lower edge to remain
-    // conservative under affine floating-point roundoff; the half-open upper
-    // edge can use ceil directly.
-    let start_x = clamp_floor(minimum_x - 0.5, canvas.width);
-    let start_y = clamp_floor(minimum_y - 0.5, canvas.height);
-    let end_x = clamp_ceil(maximum_x - 0.5, canvas.width);
-    let end_y = clamp_ceil(maximum_y - 0.5, canvas.height);
-    (end_x > start_x && end_y > start_y).then_some(GpuCompositeRect {
-        x: start_x,
-        y: start_y,
-        width: end_x - start_x,
-        height: end_y - start_y,
-    })
+    [minimum_x, minimum_y, maximum_x, maximum_y]
 }
 
 fn clamp_floor(value: f64, maximum: u32) -> u32 {
