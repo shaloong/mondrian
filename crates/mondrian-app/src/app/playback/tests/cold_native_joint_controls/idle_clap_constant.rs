@@ -18,7 +18,8 @@ use mondrian_media::{
 fn app_owned_clap_idle_open_exposes_static_some_independently_of_opaque_state() {
     let volume = mondrian_core::ParameterId::new("clap.param.1").unwrap();
     let ColdNativeControl { mut state, _directory, output, renderer: weak } =
-        prepare_app_clap_editor_control_with_initializer(|sequence, _, _| {
+        prepare_app_clap_editor_control_with_initializer(|sequence, library, root| {
+            super::project_state_roundtrip::initialize_nonzero_audio(sequence, library, root);
             let instance = &mut sequence.audio_program.outputs[0].strip.pre_fader.processors[0];
             assert_eq!(instance.parameters.len(), 1);
             assert!(instance.parameters[&volume].automation.is_none());
