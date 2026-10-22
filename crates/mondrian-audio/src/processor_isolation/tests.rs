@@ -1459,6 +1459,7 @@ fn stateful_vst3_snapshot_round_trips_and_restores_isolated_worker_audio() {
         [
             "6E4F05A12D8B4C639F017B42A4C2E611",
             "AE4C8B1910234F819CA26D315F8702A1",
+            "B64C8B1910234F819CA26D315F8702A1",
         ]
     );
     let class_id = &descriptors
