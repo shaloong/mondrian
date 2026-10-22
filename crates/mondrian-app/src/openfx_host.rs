@@ -2122,7 +2122,8 @@ pub(crate) mod shared_frame_tests {
             .find(|path| path.extension().is_some_and(|extension| extension == "bundle"))
             .expect("probe bundle");
         let described = describe_in_worker(&DescribeRequest {
-            schema_version: 2,
+            schema_version: 3,
+            context: OpenFxContext::Filter,
             binary_path: path.clone(),
             bundle_path: bundle.to_path_buf(),
             binary_sha256: sha256_file(&path).expect("fixture identity"),
@@ -2310,7 +2311,8 @@ pub(crate) mod shared_frame_tests {
                 .expect("probe bundle");
             let identifier = "uk.co.thefoundry.BasicGainPlugin";
             let description = describe_in_worker(&DescribeRequest {
-                schema_version: 2,
+                schema_version: 3,
+                context: OpenFxContext::Filter,
                 binary_path: path.clone(),
                 bundle_path: bundle_path.to_path_buf(),
                 binary_sha256: sha256_file(&path).expect("probe fingerprint"),
