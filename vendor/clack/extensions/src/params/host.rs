@@ -435,6 +435,14 @@ impl PluginParams {
         }
     }
 
+    /// Whether this same instance supplies the native bidirectional flush callback.
+    ///
+    /// This is a read-only capability check; it neither exchanges events nor
+    /// changes the active/inactive lifecycle required by the actual operation.
+    pub fn supports_flush(&self, plugin: &PluginSharedHandle<'_>) -> bool {
+        plugin.use_extension(&self.0).flush.is_some()
+    }
+
     /// Flushes a set of parameter changes when the plugin is active.
     /// This method cannot be called concurrently with `process`, which is statically guaranteed by the [`PluginAudioProcessorHandle`] type.
     ///
