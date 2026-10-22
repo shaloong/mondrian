@@ -74,6 +74,13 @@ namespace MondrianOpenFx {
     if (status != kOfxStatOK || !outArgs || std::strcmp(action, kOfxImageEffectActionGetClipPreferences) != 0) {
       return status;
     }
+    // SetableFrameRate is false: frame-based output keeps the current
+    // invocation's rate rather than accepting a preference-only remapping.
+    if (outArgs->getDimension(kOfxImageEffectPropFrameRate) != 1) { return kOfxStatFailed; }
+    const double outputRate = outArgs->getDoubleProperty(kOfxImageEffectPropFrameRate);
+    if (!std::isfinite(outputRate) || outputRate <= 0.0 || outputRate != getFrameRate()) {
+      return kOfxStatFailed;
+    }
     // SetableFielding is false: the actual clip, image and Render raster are
     // progressive. Refuse a handled request that cannot preserve that contract.
     if (outArgs->getDimension(kOfxImageClipPropFieldOrder) != 1 ||
