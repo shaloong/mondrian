@@ -3191,6 +3191,94 @@ bool clipPreferencesParImages(const void* handle, OfxPropertySetHandle in) {
   return true;
 }
 
+bool clipPreferencesDefaultMode(const std::string& selected) {
+  for (const char* candidate : {
+      "prefs_default_components_alpha", "prefs_default_components_invalid",
+      "prefs_default_alpha_opaque", "prefs_default_alpha_invalid",
+      "prefs_ok_components_alpha", "prefs_ok_components_invalid",
+      "prefs_ok_alpha_opaque", "prefs_ok_alpha_invalid"}) {
+    if (selected == candidate) { return true; }
+  }
+  return false;
+}
+
+bool preferenceStringIs(OfxPropertySetHandle props, const char* name, const char* expected) {
+  char* actual = nullptr;
+  return gPropHost->propGetString(props, name, 0, &actual) == kOfxStatOK &&
+      actual && std::strcmp(actual, expected) == 0;
+}
+
+OfxStatus clipPreferencesDefault(OfxPropertySetHandle out, const std::string& selected) {
+  int multipleDepths = -1;
+  if (!out || gPropHost->propGetInt(gHost->host, kOfxImageEffectPropSupportsMultipleClipDepths,
+      0, &multipleDepths) != kOfxStatOK || multipleDepths != 0 ||
+      !preferenceStringIs(out, kOfxImageEffectPropPreMultiplication, kOfxImageUnPreMultiplied)) {
+    return kOfxStatFailed;
+  }
+  // Depth is genuinely read-only on this single-depth host. Do not manufacture
+  // writable residuals by changing the host capability or property descriptor.
+  unsigned depthAttempts = 0;
+  for (const char* name : {"Source", "Output"}) {
+    const std::string depth = std::string("OfxImageClipPropDepth_") + name;
+    const std::string components = std::string("OfxImageClipPropComponents_") + name;
+    if (!preferenceStringIs(out, depth.c_str(), kOfxBitDepthFloat) ||
+        !preferenceStringIs(out, components.c_str(), kOfxImageComponentRGBA)) { return kOfxStatFailed; }
+    for (const char* requested : {kOfxBitDepthByte, "org.mondrian.test.UnknownDepth"}) {
+      if (gPropHost->propSetString(out, depth.c_str(), 0, requested) != kOfxStatErrValue ||
+          !preferenceStringIs(out, depth.c_str(), kOfxBitDepthFloat)) { return kOfxStatFailed; }
+      ++depthAttempts;
+    }
+  }
+  describeActionReceipt("prefs-default", "depth-readonly", depthAttempts, 0, kOfxStatErrValue);
+  const bool components = selected.find("_components_") != std::string::npos;
+  const bool invalid = selected.find("_invalid") != std::string::npos;
+  const char* requested = components
+      ? (invalid ? "org.mondrian.test.UnknownComponents" : kOfxImageComponentAlpha)
+      : (invalid ? "org.mondrian.test.UnknownAlpha" : kOfxImageOpaque);
+  unsigned writes = 0;
+  for (const char* name : {"Source", "Output"}) {
+    if (!components && std::strcmp(name, "Source") == 0) { continue; }
+    const std::string property = components
+        ? std::string("OfxImageClipPropComponents_") + name
+        : kOfxImageEffectPropPreMultiplication;
+    if (gPropHost->propSetString(out, property.c_str(), 0, requested) != kOfxStatOK ||
+        !preferenceStringIs(out, property.c_str(), requested)) { return kOfxStatFailed; }
+    ++writes;
+  }
+  // Only real successful writes/readbacks may precede the action result.
+  describeActionReceipt("prefs-default", "preferences", writes, writes, kOfxStatOK);
+  return selected.find("prefs_default_") == 0 ? kOfxStatReplyDefault : kOfxStatOK;
+}
+
+bool clipPreferencesDefaultImages(const void* handle, OfxPropertySetHandle in,
+                                  const std::string& selected) {
+  double imagePar = 0.0, time = 0.0;
+  if (!clipPreferencesParFacts(handle, imagePar) ||
+      gPropHost->propGetDouble(in, kOfxPropTime, 0, &time) != kOfxStatOK ||
+      (time != 0.0 && time != 6.0 && time != 3.0) ||
+      imagePar != (time == 6.0 ? 1.2 : 1.0)) { return false; }
+  for (const char* name : {"Source", "Output"}) {
+    OfxImageClipHandle clip = nullptr;
+    OfxPropertySetHandle props = nullptr, image = nullptr;
+    const char* alpha = selected == "prefs_ok_alpha_opaque" && std::strcmp(name, "Output") == 0
+        ? kOfxImageOpaque : kOfxImageUnPreMultiplied;
+    if (gEffectHost->clipGetHandle((OfxImageEffectHandle)handle, name, &clip, &props) != kOfxStatOK ||
+        !preferenceStringIs(props, kOfxImageEffectPropPixelDepth, kOfxBitDepthFloat) ||
+        !preferenceStringIs(props, kOfxImageEffectPropComponents, kOfxImageComponentRGBA) ||
+        !preferenceStringIs(props, kOfxImageEffectPropPreMultiplication, alpha) ||
+        gEffectHost->clipGetImage(clip, time, nullptr, &image) != kOfxStatOK || !image) { return false; }
+    double actualPar = 0.0;
+    const bool valid = preferenceStringIs(image, kOfxImageEffectPropPixelDepth, kOfxBitDepthFloat) &&
+        preferenceStringIs(image, kOfxImageEffectPropComponents, kOfxImageComponentRGBA) &&
+        preferenceStringIs(image, kOfxImageEffectPropPreMultiplication, alpha) &&
+        gPropHost->propGetDouble(image, kOfxImagePropPixelAspectRatio, 0, &actualPar) == kOfxStatOK && actualPar == imagePar;
+    const auto released = gEffectHost->clipReleaseImage(image);
+    if (!valid || released != kOfxStatOK) { return false; }
+  }
+  describeActionReceipt("prefs-default", "images", 2, 2, kOfxStatOK);
+  return true;
+}
+
 OfxStatus probeAction(const char* action, const void* handle,
                 OfxPropertySetHandle in, OfxPropertySetHandle out) {
   const std::string operation(action);
@@ -3518,6 +3606,10 @@ OfxStatus probeAction(const char* action, const void* handle,
       ? fixedCanvasPartialOutput(handle, in)
       : selected == "angle" && operation == kOfxImageEffectActionRender
       ? angleOutput(handle, in) : pluginMain(action, handle, in, out);
+  if (clipPreferencesDefaultMode(selected) && (result == kOfxStatOK || result == kOfxStatReplyDefault)) {
+    if (operation == kOfxImageEffectActionGetClipPreferences) { return clipPreferencesDefault(out, selected); }
+    if (operation == kOfxImageEffectActionRender && !clipPreferencesDefaultImages(handle, in, selected)) { return kOfxStatFailed; }
+  }
   if (clipPreferencesParMode(selected) && (result == kOfxStatOK || result == kOfxStatReplyDefault)) {
     if (operation == kOfxImageEffectActionGetClipPreferences) { return clipPreferencesPar(handle, out, selected); }
     if (operation == kOfxImageEffectActionRender && !clipPreferencesParImages(handle, in)) { return kOfxStatFailed; }
@@ -3870,7 +3962,7 @@ OfxStatus probe(const char* action, const void* handle,
       std::strcmp(action, kOfxImageEffectActionIsIdentity) == 0) {
     observed = action;
   }
-  if (clipPreferencesParMode(mode())) {
+  if (clipPreferencesParMode(mode()) || clipPreferencesDefaultMode(mode())) {
     // Keep these new modes bounded without altering any historical receipts.
     observed = std::strcmp(action, kOfxImageEffectActionGetClipPreferences) == 0 ||
         std::strcmp(action, kOfxImageEffectActionRender) == 0 ||

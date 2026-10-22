@@ -6047,3 +6047,207 @@ fn native_generator_clip_preferences_default_uses_actual_output_par() {
     assert_eq!(session.worker_process_id(), pid);
     cleanup.expect("original Generator owner shutdown");
 }
+
+// The current single-depth host rejects Depth writes at the suite boundary.
+// Writable Components/PreMultiplication residuals distinguish Default from OK.
+fn qualify_native_default_clip_preferences(mode: &str, rejected: bool) {
+    const HALF: [[f32; 4]; 15] = [
+        [-0.25, 0.0625, 1.0, 0.125],
+        [-0.21875, 0.078125, 0.9921875, 0.140625],
+        [-0.1875, 0.09375, 0.984375, 0.15625],
+        [-0.15625, 0.109375, 0.9765625, 0.171875],
+        [-0.125, 0.125, 0.96875, 0.1875],
+        [-0.09375, 0.140625, 0.9609375, 0.203125],
+        [-0.0625, 0.15625, 0.953125, 0.21875],
+        [-0.03125, 0.171875, 0.9453125, 0.234375],
+        [0.0, 0.1875, 0.9375, 0.25],
+        [0.03125, 0.203125, 0.9296875, 0.265625],
+        [0.0625, 0.21875, 0.921875, 0.28125],
+        [0.09375, 0.234375, 0.9140625, 0.296875],
+        [0.125, 0.25, 0.90625, 0.3125],
+        [0.15625, 0.265625, 0.8984375, 0.328125],
+        [0.1875, 0.28125, 0.890625, 0.34375],
+    ];
+    let directory = PathBuf::from(
+        std::env::var_os("MONDRIAN_OPENFX_DESCRIBE_ACTION_RECEIPT_DIRECTORY")
+            .expect("fresh empty native action directory"),
+    );
+    assert!(directory.is_absolute() && directory.is_dir());
+    assert!(std::fs::read_dir(&directory).unwrap().next().is_none());
+    let inspection = cpu_contract_probe(mode);
+    let input = cpu_contract_input();
+    let original = input.clone();
+    let mut session = OpenFxFilterSession::prepare(
+        product_executable(),
+        &inspection,
+        "uk.co.thefoundry.BasicGainPlugin",
+        input.width(),
+        input.height(),
+        input.format(),
+        mondrian_effects::EffectProjectGeometry::new(10, 7, SampleAspectRatio::new(2, 1).unwrap())
+            .unwrap(),
+        &mut || Ok(()),
+    )
+    .expect("one original native preference owner");
+    let pid = session.worker_process_id();
+    let owner = session.processor_owner();
+    let parameters = constant_parameters([("scale".to_owned(), OpenFxParameterValue::Double(0.5))]);
+    let mut results = Vec::new();
+    let requests = [(0.0, 1.0), (6.0, 1.2), (3.0, 1.0)];
+    for &(frame, par) in &requests[..if rejected { 1 } else { requests.len() }] {
+        let sampled = cpu_contract_image_par(&input, par);
+        let output = session.render(
+            &OpenFxRenderTiming { frame, ..cpu_contract_timing() },
+            &parameters,
+            &sampled,
+            &mut || Ok(()),
+        );
+        let feedback = if output.is_ok() {
+            session.take_feedback()
+        } else {
+            None
+        };
+        let failed = output.is_err();
+        results.push((sampled, output, feedback));
+        if failed {
+            break;
+        }
+    }
+    // Always settle the actual owner before a target assertion, including RED.
+    let cleanup = session.shutdown();
+    let rows = property_query_action_rows(&directory, pid);
+    assert!(
+        rows.iter().any(|row| row
+            == "prefs-default depth-readonly attempted=4 accepted=0 status=11 complete=1"),
+        "Source/Output Byte and unknown Depth writes must be refused and remain Float; cleanup={cleanup:?}: {rows:?}"
+    );
+    let writes = if mode.contains("_components_") { 2 } else { 1 };
+    assert!(
+        rows.iter().any(|row| row == &format!(
+            "prefs-default preferences attempted={writes} accepted={writes} status=0 complete=1"
+        )),
+        "the actual suite must accept and read back every writable residual; cleanup={cleanup:?}: {rows:?}"
+    );
+    let status = if mode.starts_with("prefs_default_") {
+        14
+    } else {
+        0
+    };
+    assert!(rows.iter().any(|row| row == &format!(
+        "OfxImageEffectActionGetClipPreferences return attempted=0 accepted=0 status={status} complete=1"
+    )), "the probe must return the selected Default/OK status; cleanup={cleanup:?}: {rows:?}");
+    assert_eq!(input, original, "supplied Source must remain immutable");
+    for (sampled, _, _) in &results {
+        assert_eq!(
+            sampled.pixels(),
+            original.pixels(),
+            "actual supplied Source pixels must remain immutable"
+        );
+    }
+    if rejected {
+        assert!(
+            !rows.iter().any(|row| row.starts_with("OfxImageEffectActionRender enter ")),
+            "unsupported OK preferences must fail before Render; cleanup={cleanup:?}: {rows:?}"
+        );
+        assert_eq!(results.len(), 1);
+        assert!(
+            matches!(&results[0].1, Err(OpenFxHostError::WorkerFailed(reason)) if reason.starts_with("native status 7:")),
+            "the existing Float/RGBA/alpha admission must reject OK residuals; cleanup={cleanup:?}: {:?}",
+            results[0].1
+        );
+    } else {
+        assert_eq!(
+            results.len(),
+            3,
+            "all warm requests must complete; cleanup={cleanup:?}"
+        );
+        let opaque = mode == "prefs_ok_alpha_opaque";
+        let alpha = if opaque {
+            mondrian_core::ColorFrameAlpha::Opaque
+        } else {
+            mondrian_core::ColorFrameAlpha::StraightFloat
+        };
+        let mut native_owner = None;
+        for (index, (sampled, output, feedback)) in results.into_iter().enumerate() {
+            let output = output.expect("Default ignores residuals; OK applies supported alpha");
+            assert_eq!(output.extent(), sampled.extent());
+            assert_eq!(output.format(), sampled.format().with_alpha(alpha));
+            assert_eq!(output.sampling(), sampled.sampling());
+            assert_eq!(output.pixels().len(), HALF.len());
+            for (actual, mut expected) in output.pixels().iter().zip(HALF) {
+                if opaque {
+                    expected[3] = 1.0;
+                }
+                assert_eq!(actual.map(f32::to_bits), expected.map(f32::to_bits));
+            }
+            let feedback = feedback.expect("actual native Render feedback");
+            assert_eq!(feedback.owner, owner);
+            assert_eq!(feedback.snapshot.invocation(), index as u64 + 1);
+            let actual = feedback.snapshot.native_owner();
+            if let Some(previous) = native_owner {
+                assert_eq!(actual, previous);
+            }
+            native_owner = Some(actual);
+        }
+        assert_eq!(
+            rows.iter()
+                .filter(
+                    |row| *row == "prefs-default images attempted=2 accepted=2 status=0 complete=1"
+                )
+                .count(),
+            3,
+            "each actual Render must inspect current clip/image Float RGBA alpha and PAR"
+        );
+        // Clip-preference action frequency is not an oracle.
+    }
+    assert_eq!(session.worker_process_id(), pid);
+    cleanup.expect("original native preference owner shutdown");
+}
+
+#[test]
+#[ignore = "current normal Product, SessionProbe prefs_default_components_alpha, fresh action directory"]
+fn native_default_clip_preferences_ignore_alpha_components() {
+    qualify_native_default_clip_preferences("prefs_default_components_alpha", false);
+}
+
+#[test]
+#[ignore = "current normal Product, SessionProbe prefs_default_components_invalid, fresh action directory"]
+fn native_default_clip_preferences_ignore_unknown_components() {
+    qualify_native_default_clip_preferences("prefs_default_components_invalid", false);
+}
+
+#[test]
+#[ignore = "current normal Product, SessionProbe prefs_default_alpha_opaque, fresh action directory"]
+fn native_default_clip_preferences_ignore_opaque_alpha() {
+    qualify_native_default_clip_preferences("prefs_default_alpha_opaque", false);
+}
+
+#[test]
+#[ignore = "current normal Product, SessionProbe prefs_default_alpha_invalid, fresh action directory"]
+fn native_default_clip_preferences_ignore_unknown_alpha() {
+    qualify_native_default_clip_preferences("prefs_default_alpha_invalid", false);
+}
+
+#[test]
+#[ignore = "current normal Product, SessionProbe prefs_ok_components_alpha, fresh action directory"]
+fn native_ok_clip_preferences_reject_alpha_components_before_render() {
+    qualify_native_default_clip_preferences("prefs_ok_components_alpha", true);
+}
+
+#[test]
+#[ignore = "current normal Product, SessionProbe prefs_ok_components_invalid, fresh action directory"]
+fn native_ok_clip_preferences_reject_unknown_components_before_render() {
+    qualify_native_default_clip_preferences("prefs_ok_components_invalid", true);
+}
+
+#[test]
+#[ignore = "current normal Product, SessionProbe prefs_ok_alpha_opaque, fresh action directory"]
+fn native_ok_clip_preferences_apply_opaque_alpha() {
+    qualify_native_default_clip_preferences("prefs_ok_alpha_opaque", false);
+}
+
+#[test]
+#[ignore = "current normal Product, SessionProbe prefs_ok_alpha_invalid, fresh action directory"]
+fn native_ok_clip_preferences_reject_unknown_alpha_before_render() {
+    qualify_native_default_clip_preferences("prefs_ok_alpha_invalid", true);
+}
