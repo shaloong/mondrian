@@ -45,6 +45,8 @@ static RESIZES: AtomicUsize = AtomicUsize::new(0);
 
 static STATIC_PARAMETERS_MODE: AtomicUsize = AtomicUsize::new(0);
 static STATIC_FLUSHES: AtomicUsize = AtomicUsize::new(0);
+static STATIC_STATE_SAVES: AtomicUsize = AtomicUsize::new(0);
+static STATIC_STATE_LOADS: AtomicUsize = AtomicUsize::new(0);
 static STATIC_METADATA_CHANGED: AtomicBool = AtomicBool::new(false);
 static STATIC_POST_FLUSH_REQUESTED: AtomicBool = AtomicBool::new(false);
 struct GuiPlugin;
@@ -88,6 +90,11 @@ impl Plugin for GuiPlugin {
         builder.register::<PluginAudioPorts>().register::<PluginTimer>();
         if STATIC_PARAMETERS_MODE.load(AuditOrdering::SeqCst) != 15 {
             builder.register::<PluginGui>();
+        }
+        // Only the new accepted-configuration control advertises State. Existing
+        // GUI and parameter cases retain their original State capability.
+        if STATIC_PARAMETERS_MODE.load(AuditOrdering::SeqCst) == 16 {
+            builder.register::<PluginState>();
         }
         if STATIC_PARAMETERS_MODE.load(AuditOrdering::SeqCst) == 9 {
             builder.register::<MissingFlushParams>();
@@ -411,6 +418,8 @@ impl<'a> clack_plugin::plugin::PluginAudioProcessor<'a, GuiShared<'a>, GuiMain<'
 fn reset_audit() {
     STATIC_PARAMETERS_MODE.store(0, AuditOrdering::SeqCst);
     STATIC_FLUSHES.store(0, AuditOrdering::SeqCst);
+    STATIC_STATE_SAVES.store(0, AuditOrdering::SeqCst);
+    STATIC_STATE_LOADS.store(0, AuditOrdering::SeqCst);
     STATIC_METADATA_CHANGED.store(false, AuditOrdering::SeqCst);
     STATIC_POST_FLUSH_REQUESTED.store(false, AuditOrdering::SeqCst);
     for value in [
@@ -876,11 +885,14 @@ use clack_extensions::params::{
     ParamDisplayWriter, ParamInfo, ParamInfoFlags, ParamInfoWriter, PluginAudioProcessorParams,
     PluginMainThreadParams, PluginParams,
 };
+use clack_extensions::state::PluginStateImpl;
 use clack_host::prelude::{InputEvents, OutputEvents};
+use clack_host::stream::{InputStream, OutputStream};
 use clack_plugin::extensions::prelude::{
     Extension, ExtensionImplementation, PluginExtensionSide, RawExtension,
     RawExtensionImplementation,
 };
+use std::io::{Read, Write};
 
 // Keep the original metadata callbacks, replacing only the real optional flush
 // function pointer. This exercises supports_flush on the actual same instance.
@@ -979,7 +991,7 @@ impl PluginMainThreadParams for GuiMain<'_> {
 impl PluginAudioProcessorParams for GuiProcessor<'_> {
     fn flush(&mut self, input: &InputEvents, output: &mut OutputEvents) {
         self.0.check(Some(true), true); // same full main owner temporarily owns audio
-        STATIC_FLUSHES.fetch_add(1, AuditOrdering::SeqCst);
+        let flush = STATIC_FLUSHES.fetch_add(1, AuditOrdering::SeqCst) + 1;
         let mut received = 0;
         for event in input.iter() {
             let Some(clack_host::events::spaces::CoreEventSpace::ParamValue(value)) =
@@ -1007,6 +1019,21 @@ impl PluginAudioProcessorParams for GuiProcessor<'_> {
                         0.5
                     ))
                     .is_err());
+            }
+            16 if flush == 1 => {
+                // A real recordable value and actual private state, captured
+                // by the original full-owner Poll before its exact Ack.
+                assert!(output
+                    .try_push(
+                        ParamValueEvent::new(
+                            0,
+                            ClapId::new(900),
+                            Pckn::match_all(),
+                            f64::from_bits(self.0.static_value.load(AuditOrdering::Acquire))
+                        )
+                        .with_flags(EventFlags::IS_LIVE)
+                    )
+                    .is_ok());
             }
             3 => self.0.host.request_restart(),
             10 => STATIC_METADATA_CHANGED.store(true, AuditOrdering::SeqCst),
@@ -1052,6 +1079,30 @@ impl PluginAudioProcessorParams for GuiProcessor<'_> {
             }
             _ => {}
         }
+    }
+}
+
+impl PluginStateImpl for GuiMain<'_> {
+    fn save(&self, output: &mut OutputStream) -> Result<(), PluginError> {
+        self.shared.check(Some(true), false);
+        assert_eq!(self.shared.static_mode, 16);
+        STATIC_STATE_SAVES.fetch_add(1, AuditOrdering::SeqCst);
+        output.write_all(&self.shared.static_value.load(AuditOrdering::Acquire).to_le_bytes())?;
+        Ok(())
+    }
+    fn load(&self, input: &mut InputStream) -> Result<(), PluginError> {
+        self.shared.check(Some(true), false);
+        assert_eq!(self.shared.static_mode, 16);
+        STATIC_STATE_LOADS.fetch_add(1, AuditOrdering::SeqCst);
+        let mut bytes = [0; 8];
+        input.read_exact(&mut bytes)?;
+        let bits = u64::from_le_bytes(bytes);
+        let value = f64::from_bits(bits);
+        if !value.is_finite() || !(0.0..=1.0).contains(&value) {
+            return Err(PluginError::Message("invalid static control state"));
+        }
+        self.shared.static_value.store(bits, AuditOrdering::Release);
+        Ok(())
     }
 }
 
@@ -1358,5 +1409,135 @@ fn clap_idle_static_values_mutation_failures_are_errors_without_fake_opened() {
         assert_eq!(PROCESSES.load(AuditOrdering::SeqCst), 0);
         drop(worker);
     }
+    reset_audit();
+}
+
+#[test]
+fn clap_idle_static_values_reopen_after_real_configuration_ack_without_signal_entry() {
+    use crate::{
+        NativeAudioAuthorAcknowledgement, NativeAudioAuthorDeliveryState as Delivery,
+        NativeAudioObservationConsumption as Consumption,
+    };
+    let _serial = SERIAL.lock().unwrap();
+    reset_audit();
+    let mut worker = static_parameter_worker(16);
+    let object = worker.native_object;
+    let instance = worker.instance.plugin_handle().as_raw_ptr();
+    assert_eq!(object.process_id().get(), std::process::id());
+    assert!(worker.configuration_seed.is_none());
+    assert_eq!(worker.last_end, None);
+    assert!(worker.initial_signal_available);
+    assert!(matches!(
+        static_open(&mut worker, 1, 0.25).unwrap(),
+        crate::NativeAudioEditorOutcome::Opened { .. }
+    ));
+    let receipt = worker.native_binding.unwrap();
+    let source_binding = crate::NativeAudioObjectBindRequest {
+        binding: receipt.binding(),
+        expected_object: receipt.object(),
+    };
+    let observed = worker
+        .poll_native_observations(Consumption::DrainAuthor(source_binding))
+        .unwrap();
+    assert_eq!(observed.object, Some(object));
+    let Delivery::Delivered(delivery) = observed.author.unwrap().delivery else {
+        panic!("the original actual flush prefix must supply a real delivery");
+    };
+    assert_eq!(delivery.binding, source_binding);
+    assert_eq!(delivery.events.len(), 1);
+    let expected_seed = 0.25_f64.to_bits().to_le_bytes();
+    assert_eq!(
+        delivery.configuration.as_ref().unwrap().bytes(),
+        &expected_seed
+    );
+    assert_eq!(STATIC_STATE_SAVES.load(AuditOrdering::SeqCst), 1);
+    assert!(worker.native_author_delivery.is_some());
+    assert!(
+        worker.configuration_seed.is_none(),
+        "delivery alone does not accept a seed"
+    );
+    let installed_binding = crate::NativeAudioObjectBindRequest {
+        binding: AudioProcessorBindingId::new(),
+        expected_object: object,
+    };
+    assert!(matches!(
+        worker.bind_native_audio_object(installed_binding).unwrap(),
+        crate::NativeAudioObjectBindOutcome::Bound(_)
+    ));
+    let ack = NativeAudioAuthorAcknowledgement {
+        source_binding,
+        installed_binding,
+        revision: delivery.revision,
+    };
+    let accepted = worker.poll_native_observations(Consumption::AcknowledgeAuthor(ack)).unwrap();
+    let author = accepted.author.unwrap();
+    assert!(
+        matches!(author.delivery, Delivery::Acknowledged { acknowledgement, request_cohort: None } if acknowledgement == ack)
+    );
+    assert!(author.source.closed_empty());
+    assert!(worker.native_author_delivery.is_none());
+    assert_eq!(
+        worker.configuration_seed.as_deref(),
+        Some(expected_seed.as_slice())
+    );
+    assert_eq!(
+        worker.last_end, None,
+        "Ack does not manufacture signal entry"
+    );
+    assert!(worker.initial_signal_available);
+    assert!(worker.processor.is_some());
+    assert!(worker
+        .instance
+        .access_shared_handler(|host| host.services.active.load(Ordering::Acquire)));
+    assert_eq!(worker.instance.plugin_handle().as_raw_ptr(), instance);
+    assert_eq!(worker.native_object, object);
+    assert_eq!(
+        worker.close_native_audio_editor(installed_binding).unwrap(),
+        crate::NativeAudioEditorOutcome::Closed { binding: installed_binding }
+    );
+    assert!(worker.author_source_status().closed_empty());
+    assert_eq!(
+        worker.configuration_seed.as_deref(),
+        Some(expected_seed.as_slice())
+    );
+    assert!(
+        matches!(static_open(&mut worker, 1, 0.25).unwrap(), crate::NativeAudioEditorOutcome::Opened { binding, .. } if binding == installed_binding)
+    );
+    assert_eq!(
+        STATIC_FLUSHES.load(AuditOrdering::SeqCst),
+        2,
+        "reopen executes a real active exchange"
+    );
+    assert_eq!(worker.native_object, object);
+    assert_eq!(worker.instance.plugin_handle().as_raw_ptr(), instance);
+    assert_eq!(worker.last_end, None);
+    assert!(worker.initial_signal_available);
+    assert!(worker.author_source_status().closed_empty());
+    assert_eq!(
+        worker.configuration_seed.as_deref(),
+        Some(expected_seed.as_slice()),
+        "accepted future-entry seed is retained without rewrite"
+    );
+    let handle = worker.instance.plugin_handle();
+    assert_eq!(
+        handle
+            .get_extension::<PluginParams>()
+            .unwrap()
+            .get_value(&handle, ClapId::new(900))
+            .unwrap()
+            .to_bits(),
+        0.25_f64.to_bits()
+    );
+    assert_eq!(STATIC_STATE_SAVES.load(AuditOrdering::SeqCst), 1);
+    assert_eq!(STATIC_STATE_LOADS.load(AuditOrdering::SeqCst), 0);
+    assert_eq!(PROCESSES.load(AuditOrdering::SeqCst), 0);
+    assert_eq!(RESETS.load(AuditOrdering::SeqCst), 0);
+    worker.close_native_audio_editor(installed_binding).unwrap();
+    drop(worker);
+    assert_eq!(CREATED.load(AuditOrdering::SeqCst), 2);
+    assert_eq!(DESTROYED.load(AuditOrdering::SeqCst), 2);
+    assert_eq!(WRONG_THREAD.load(AuditOrdering::SeqCst), 0);
+    assert_eq!(PROCESSES.load(AuditOrdering::SeqCst), 0);
+    assert_eq!(RESETS.load(AuditOrdering::SeqCst), 0);
     reset_audit();
 }

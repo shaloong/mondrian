@@ -23,7 +23,6 @@ impl ClapWorker {
         if self.native_author_delivery.is_some()
             || self.configuration_phase.blocked_request().is_some()
             || self.configuration_phase.ready_token().is_some()
-            || self.configuration_seed.is_some() && self.last_end.is_none()
             || !self.author_source_status().closed_empty()
             || self.output_events.has_refusals()
             || self
