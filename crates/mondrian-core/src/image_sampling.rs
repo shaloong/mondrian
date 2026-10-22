@@ -217,6 +217,26 @@ mod tests {
             third.render_scale(),
             [Rational::new(11_184_811, 33_554_432); 2]
         );
+        let denominator_boundary = f32::from_bits((127 - 62) << 23);
+        assert_eq!(
+            ImageSampling::from_uniform_f32(shape, denominator_boundary)
+                .unwrap()
+                .render_scale(),
+            [Rational::new(1, 1_i64 << 62); 2]
+        );
+        let numerator_limit = f32::from_bits((127 + 63) << 23);
+        assert_eq!(
+            ImageSampling::from_uniform_f32(shape, f32::from_bits(numerator_limit.to_bits() - 1))
+                .unwrap()
+                .render_scale(),
+            [Rational::new(16_777_215_i64 << 39, 1); 2]
+        );
+        for scale in [f32::from_bits((127 - 63) << 23), numerator_limit] {
+            assert_eq!(
+                ImageSampling::from_uniform_f32(shape, scale),
+                Err(ImageSamplingError::ScaleNotRepresentable)
+            );
+        }
         for scale in [f32::MIN_POSITIVE, f32::MAX, f32::from_bits(1)] {
             assert_eq!(
                 ImageSampling::from_uniform_f32(shape, scale),
