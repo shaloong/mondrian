@@ -10,7 +10,7 @@ impl Vst3Worker {
         &mut self,
         request: &crate::NativeAudioEditorOpenRequest,
     ) -> Result<bool, AudioProcessorHostError> {
-        let values = request.controller_values();
+        let values = request.static_parameter_values();
         if values.is_empty() {
             return Ok(true);
         }

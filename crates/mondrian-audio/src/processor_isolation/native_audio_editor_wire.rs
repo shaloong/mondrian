@@ -16,8 +16,8 @@ pub(super) fn write_open_request(
     writer: &mut impl Write,
     request: &NativeAudioEditorOpenRequest,
 ) -> io::Result<()> {
-    if !request.controller_values().is_empty() {
-        return Err(invalid("tag 11 cannot carry controller projection values"));
+    if !request.static_parameter_values().is_empty() {
+        return Err(invalid("tag 11 cannot carry static parameter values"));
     }
     write_open_prefix(writer, request)
 }
@@ -59,12 +59,14 @@ pub(super) fn write_projected_open_request(
     request: &NativeAudioEditorOpenRequest,
 ) -> io::Result<()> {
     request.owned_layout().map_err(|_| invalid("native editor request storage"))?;
-    if request.controller_values().is_empty() {
-        return Err(invalid("projected editor open requires controller values"));
+    if request.static_parameter_values().is_empty() {
+        return Err(invalid(
+            "projected editor open requires static parameter values",
+        ));
     }
     write_open_prefix(writer, request)?;
-    writer.write_all(&(request.controller_values().len() as u32).to_le_bytes())?;
-    for (lane, bits) in request.controller_values() {
+    writer.write_all(&(request.static_parameter_values().len() as u32).to_le_bytes())?;
+    for (lane, bits) in request.static_parameter_values() {
         writer.write_all(&lane.to_le_bytes())?;
         writer.write_all(&bits.to_le_bytes())?;
     }
@@ -77,16 +79,21 @@ pub(super) fn read_projected_open_request(
     let request = read_open_request(reader)?;
     let count = read_u32(reader)? as usize;
     if count == 0 {
-        return Err(invalid("projected editor open requires controller values"));
+        return Err(invalid(
+            "projected editor open requires static parameter values",
+        ));
     }
-    crate::native_audio_editor::controller_value_layout(request.title().len(), count)
-        .map_err(|_| invalid("native editor controller count exceeds local frontier"))?;
+    crate::native_audio_editor::static_parameter_value_layout(request.title().len(), count)
+        .map_err(|_| invalid("native editor static parameter count exceeds local frontier"))?;
     let mut values = Vec::new();
     values
         .try_reserve_exact(count)
         .map_err(|_| invalid("native editor request allocation"))?;
-    crate::native_audio_editor::controller_value_layout(request.title().len(), values.capacity())
-        .map_err(|_| invalid("native editor actual request capacity exceeds local frontier"))?;
+    crate::native_audio_editor::static_parameter_value_layout(
+        request.title().len(),
+        values.capacity(),
+    )
+    .map_err(|_| invalid("native editor actual request capacity exceeds local frontier"))?;
     for _ in 0..count {
         let lane = read_u32(reader)?;
         let mut bits = [0_u8; 8];
@@ -94,8 +101,8 @@ pub(super) fn read_projected_open_request(
         values.push((lane, u64::from_le_bytes(bits)));
     }
     request
-        .with_controller_values(values)
-        .map_err(|_| invalid("invalid native editor controller value selection"))
+        .with_static_parameter_values(values)
+        .map_err(|_| invalid("invalid native editor static parameter selection"))
 }
 fn read_u32(reader: &mut impl Read) -> io::Result<u32> {
     let mut bytes = [0_u8; 4];
@@ -264,10 +271,10 @@ mod tests {
                 )
             })
             .collect();
-        let expected = request().with_controller_values(values).unwrap();
+        let expected = request().with_static_parameter_values(values).unwrap();
         let mut bytes = Vec::new();
         WorkerCommand {
-            kind: CommandKind::EditorOpenWithControllerValues,
+            kind: CommandKind::EditorOpenWithStaticParameters,
             start_sample: 0,
             frames: 0,
             event_count: 0,
@@ -311,7 +318,8 @@ mod tests {
     #[cfg(target_os = "windows")]
     #[test]
     fn projected_open_actual_tuple_alignment_is_charged_by_original_child_lane() {
-        let request = request().with_controller_values(vec![(0, 0.25_f64.to_bits())]).unwrap();
+        let request =
+            request().with_static_parameter_values(vec![(0, 0.25_f64.to_bits())]).unwrap();
         let actual = NativeCommand::EditorOpen(request).owned_input_layout().unwrap();
         let profile = super::super::vst3_worker::native_worker_lane_profile().unwrap().unwrap();
         let mut overlap = profile.control_overlap();
@@ -355,7 +363,7 @@ mod tests {
             vec![(4096, 0.25_f64.to_bits())],
             vec![(u32::MAX, 0.25_f64.to_bits())],
         ] {
-            assert!(request().with_controller_values(values.clone()).is_err());
+            assert!(request().with_static_parameter_values(values.clone()).is_err());
             let mut bytes = prefix.clone();
             bytes.extend_from_slice(&(values.len() as u32).to_le_bytes());
             for (id, bits) in values {
@@ -364,7 +372,7 @@ mod tests {
             }
             assert!(read_projected_open_request(&mut bytes.as_slice()).is_err());
         }
-        let value = request().with_controller_values(vec![(0, 0.25_f64.to_bits())]).unwrap();
+        let value = request().with_static_parameter_values(vec![(0, 0.25_f64.to_bits())]).unwrap();
         let mut bytes = Vec::new();
         write_projected_open_request(&mut bytes, &value).unwrap();
         for end in 0..bytes.len() {
@@ -373,12 +381,16 @@ mod tests {
         let mut overallocated = Vec::with_capacity(4097);
         overallocated.push((0, 0.25_f64.to_bits()));
         assert!(
-            request().with_controller_values(overallocated).is_err(),
+            request().with_static_parameter_values(overallocated).is_err(),
             "actual capacity, not length"
         );
-        assert!(crate::native_audio_editor::controller_value_layout(0, usize::MAX).is_err());
-        assert!(request().with_controller_values(vec![(4096, 0.25_f64.to_bits())]).is_err());
-        assert!(request().with_controller_values(vec![(u32::MAX, 0.25_f64.to_bits())]).is_err());
+        assert!(crate::native_audio_editor::static_parameter_value_layout(0, usize::MAX).is_err());
+        assert!(request()
+            .with_static_parameter_values(vec![(4096, 0.25_f64.to_bits())])
+            .is_err());
+        assert!(request()
+            .with_static_parameter_values(vec![(u32::MAX, 0.25_f64.to_bits())])
+            .is_err());
         assert_eq!(
             request().owned_layout().unwrap(),
             crate::NativeHostBufferLayout { bytes: empty.title().len(), alignment: 1 }

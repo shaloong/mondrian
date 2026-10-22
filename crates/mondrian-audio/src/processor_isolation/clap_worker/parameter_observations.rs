@@ -29,6 +29,17 @@ fn signature(info: &clack_extensions::params::ParamInfo<'_>) -> ParameterSignatu
     }
 }
 
+impl ParameterSignature {
+    /// Reuse the admitted native processing schema; presentation-only bits may change.
+    pub(super) fn matches(&self, info: &clack_extensions::params::ParamInfo<'_>) -> bool {
+        info.flags.bits() & !ParamInfoFlags::all().bits() == 0 && *self == signature(info)
+    }
+
+    pub(super) const fn id(self) -> u32 {
+        self.id
+    }
+}
+
 pub(super) fn capture_signatures(
     handle: &clack_host::prelude::PluginMainThreadHandle<'_>,
 ) -> Result<Vec<ParameterSignature>, AudioProcessorHostError> {
@@ -202,18 +213,11 @@ impl ClapWorker {
             let info = params
                 .get_info(&handle, index as u32, &mut buffer)
                 .ok_or(AudioProcessorHostError::NativeParameterSourceUnavailable)?;
-            let actual = signature(&info);
             let expected = self.parameter_signatures[index];
             // Cookie invalidation after ALL is safe because all production
             // input events carry no cached native cookie. Critical schema
             // changes require a real canonical candidate, retained unacknowledged.
-            if actual.id != expected.id
-                || actual.critical_flags != expected.critical_flags
-                || actual.min_bits != expected.min_bits
-                || actual.max_bits != expected.max_bits
-                || actual.default_bits != expected.default_bits
-                || info.flags.bits() & !ParamInfoFlags::all().bits() != 0
-            {
+            if !expected.matches(&info) {
                 return Err(AudioProcessorHostError::NativeParameterSourceUnavailable);
             }
             let id = info.id;

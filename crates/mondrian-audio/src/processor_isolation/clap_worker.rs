@@ -67,6 +67,9 @@ mod beat_position;
 mod native_author;
 #[path = "clap_worker/parameter_observations.rs"]
 mod parameter_observations;
+#[cfg(windows)]
+#[path = "clap_worker/static_parameters.rs"]
+mod static_parameters;
 
 pub(super) struct ClapHost;
 
@@ -1796,9 +1799,6 @@ impl IsolatedAudioProcessorWorker for ClapWorker {
     ) -> Result<crate::NativeAudioEditorOutcome, AudioProcessorHostError> {
         use crate::{NativeAudioEditorOutcome as Outcome, NativeAudioEditorRefusal as Refusal};
         let binding = request.binding();
-        if !request.controller_values().is_empty() {
-            return Ok(Outcome::Refused(Refusal::UnsupportedAdapter));
-        }
         if !self.native_editor_binding_matches(binding) {
             return Ok(Outcome::Refused(Refusal::OwnerChanged));
         }
@@ -1809,7 +1809,30 @@ impl IsolatedAudioProcessorWorker for ClapWorker {
         {
             return Ok(Outcome::Refused(Refusal::ConfigurationPending));
         }
-        let Some(size) = self.gui.open(&mut self.instance, request.title())? else {
+        let preflight = self.gui.prepare_open(&mut self.instance);
+        match preflight {
+            super::clap_gui_owner::ClapGuiOpenPreflight::Unavailable => {
+                return Ok(Outcome::Refused(Refusal::NoEditor));
+            }
+            super::clap_gui_owner::ClapGuiOpenPreflight::Attached(size) => {
+                // Preserve live Open idempotence; this synchronization slice
+                // initializes only a genuinely new surface, never re-flushes it.
+                self.parameter_observation_revision = None;
+                return Ok(Outcome::Opened { binding, width: size.width, height: size.height });
+            }
+            super::clap_gui_owner::ClapGuiOpenPreflight::Create(_) => {}
+        }
+        if let Some(refusal) = self.project_idle_static_parameters(&request)? {
+            return Ok(Outcome::Refused(refusal));
+        }
+        let projected = !request.static_parameter_values().is_empty();
+        let Some(size) = self.gui.open_prepared(&mut self.instance, request.title(), preflight)?
+        else {
+            if projected {
+                return Err(invalid(
+                    "CLAP native GUI create failed after static parameter exchange",
+                ));
+            }
             return Ok(Outcome::Refused(Refusal::NoEditor));
         };
         // A newly opened surface gets one actual presentation query even when
@@ -6159,6 +6182,7 @@ pub(super) fn clap_native_worker_lane_profile(
                 super::native_worker_processing::NativeDspDispatch<'static>,
                 crate::NativeAudioObservations,
                 super::clap_metadata::MetadataScanScratch,
+                clack_extensions::params::ParamInfoBuffer,
             )>()),
             runtime_main_role: clap_native_layout(
                 std::alloc::Layout::new::<ClapMainRole<'static>>(),

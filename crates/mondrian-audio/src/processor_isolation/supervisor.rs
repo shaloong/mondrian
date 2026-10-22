@@ -859,8 +859,8 @@ impl SupervisedAudioWorker {
         }
         let result = (|| -> io::Result<_> {
             WorkerCommand {
-                kind: if open.is_some_and(|request| !request.controller_values().is_empty()) {
-                    super::protocol::CommandKind::EditorOpenWithControllerValues
+                kind: if open.is_some_and(|request| !request.static_parameter_values().is_empty()) {
+                    super::protocol::CommandKind::EditorOpenWithStaticParameters
                 } else if open.is_some() {
                     super::protocol::CommandKind::EditorOpen
                 } else {
@@ -873,7 +873,7 @@ impl SupervisedAudioWorker {
             }
             .write_to(&mut self.control)?;
             if let Some(request) = open {
-                if request.controller_values().is_empty() {
+                if request.static_parameter_values().is_empty() {
                     wire::write_open_request(&mut self.control, request)?;
                 } else {
                     wire::write_projected_open_request(&mut self.control, request)?;

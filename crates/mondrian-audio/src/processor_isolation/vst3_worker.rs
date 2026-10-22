@@ -1210,7 +1210,7 @@ impl IsolatedAudioProcessorWorker for Vst3Worker {
         if !self.project_idle_controller_values(&request)? {
             return Ok(Outcome::Refused(Refusal::ConfigurationPending));
         }
-        let projected = !request.controller_values().is_empty();
+        let projected = !request.static_parameter_values().is_empty();
         let plugin = self
             .plugin
             .as_mut()

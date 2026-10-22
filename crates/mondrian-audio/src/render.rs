@@ -3127,6 +3127,7 @@ fn native_editor_constant_values(
     if !matches!(
         processor.definition,
         mondrian_timeline::audio::AudioProcessorDefinitionRef::Vst3 { .. }
+            | mondrian_timeline::audio::AudioProcessorDefinitionRef::Clap { .. }
     ) {
         return Ok(Vec::new());
     }
@@ -3139,7 +3140,7 @@ fn native_editor_constant_values(
     // correspondence without allocating a second ID map or interpreting any
     // adapter's canonical-ID syntax. None and keyed lanes retain their index.
     if parameter_ids.len() != processor.parameters.len()
-        || parameter_ids.len() > crate::native_audio_editor::NATIVE_EDITOR_CONTROLLER_VALUES
+        || parameter_ids.len() > crate::native_audio_editor::NATIVE_EDITOR_STATIC_PARAMETER_VALUES
         || parameter_ids.iter().enumerate().any(|(index, id)| {
             parameter_ids[..index].contains(id)
                 || processor.parameters.get(id).is_none_or(|parameter| {
@@ -3160,14 +3161,14 @@ fn native_editor_constant_values(
             parameter.automation.as_ref().is_some_and(|curve| curve.keyframes.is_empty())
         })
         .count();
-    crate::native_audio_editor::controller_value_layout(0, count)?;
+    crate::native_audio_editor::static_parameter_value_layout(0, count)?;
     let mut values = Vec::new();
     values.try_reserve_exact(count).map_err(|_| {
         crate::AudioProcessorHostError::InvalidContract(
             "native editor constant request allocation failed".to_owned(),
         )
     })?;
-    crate::native_audio_editor::controller_value_layout(0, values.capacity())?;
+    crate::native_audio_editor::static_parameter_value_layout(0, values.capacity())?;
     for (lane, id) in parameter_ids.iter().enumerate() {
         let parameter = processor.parameters.get(id).ok_or_else(invalid)?;
         let Some(curve) = parameter.automation.as_ref().filter(|curve| curve.keyframes.is_empty())
@@ -3294,9 +3295,12 @@ mod native_editor_constant_tests {
             schema_version: 1,
             binary_sha256: None,
         };
-        assert!(
-            native_editor_constant_values(&processor, &prepared).unwrap().is_empty(),
-            "CLAP does not consume a VST3 coordinate projection"
+        let clap_before = processor.clone();
+        assert_eq!(
+            native_editor_constant_values(&processor, &prepared).unwrap(),
+            vec![(1, (-0.0_f64).to_bits()), (3, 0.25_f64.to_bits())],
+            "both adapters consume the same prepared-lane static author selection"
         );
+        assert_eq!(processor, clap_before);
     }
 }

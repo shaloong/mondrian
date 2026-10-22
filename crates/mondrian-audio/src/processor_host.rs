@@ -1203,7 +1203,7 @@ impl PreparedProcessorHost {
         &mut self,
         lease: crate::AudioNativeProcessorOwnerLease,
         title: Option<mondrian_core::NativeAudioEditorTitle>,
-        controller_values: Vec<(u32, u64)>,
+        static_parameter_values: Vec<(u32, u64)>,
     ) -> Result<crate::NativeAudioEditorOutcome, crate::AudioNativeOwnerError> {
         self.validate_native_owner(lease)?;
         let instance = self
@@ -1226,7 +1226,7 @@ impl PreparedProcessorHost {
             Some(title) => isolate_adapter_call("native editor open", || {
                 instance.processor.open_native_audio_editor(
                     crate::NativeAudioEditorOpenRequest::new(binding, title)
-                        .with_controller_values(controller_values)?,
+                        .with_static_parameter_values(static_parameter_values)?,
                 )
             }),
             None => isolate_adapter_call("native editor close", || {

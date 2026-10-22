@@ -84,7 +84,7 @@ pub(super) fn decode(
         CommandKind::EditorOpen => super::native_audio_editor_wire::read_open_request(stream)
             .map(NativeCommand::EditorOpen)
             .map_err(|error| failed("native editor open request", error)),
-        CommandKind::EditorOpenWithControllerValues => {
+        CommandKind::EditorOpenWithStaticParameters => {
             super::native_audio_editor_wire::read_projected_open_request(stream)
                 .map(NativeCommand::EditorOpen)
                 .map_err(|error| failed("native projected editor open request", error))

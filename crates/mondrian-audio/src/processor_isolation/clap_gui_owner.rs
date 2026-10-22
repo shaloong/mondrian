@@ -28,6 +28,14 @@ pub(super) struct ClapGuiOwner {
     created: Option<CreatedGui>,
 }
 
+/// A same-owner, synchronous capability result, never a persistent attachment.
+/// Actual create can still fail after a parameter exchange has mutated native state.
+pub(super) enum ClapGuiOpenPreflight {
+    Unavailable,
+    Attached(GuiSize),
+    Create(PluginGui),
+}
+
 impl ClapGuiOwner {
     pub(super) fn new(main: Rc<WindowsEditorMainThread>) -> Self {
         Self {
@@ -37,24 +45,45 @@ impl ClapGuiOwner {
         }
     }
 
-    /// Open only the same caller-admitted current native object. This helper
-    /// has no ability to mint or bypass the outer Runtime/Hosted binding lease.
-    pub(super) fn open(
-        &mut self,
+    /// Check the original same-instance GUI capability before parameter mutation.
+    /// A live attachment retains the old idempotent Open contract.
+    pub(super) fn prepare_open(
+        &self,
         instance: &mut PluginInstance<ClapHost>,
-        title: &str,
-    ) -> Result<Option<GuiSize>, AudioProcessorHostError> {
+    ) -> ClapGuiOpenPreflight {
         if let Some(created) = &self.created {
-            return Ok((!created.gui_destroyed && !created.close_requested).then_some(created.size));
+            return if !created.gui_destroyed && !created.close_requested {
+                ClapGuiOpenPreflight::Attached(created.size)
+            } else {
+                ClapGuiOpenPreflight::Unavailable
+            };
         }
         let handle = instance.plugin_handle();
         let Some(gui) = handle.get_extension::<PluginGui>() else {
-            return Ok(None);
+            return ClapGuiOpenPreflight::Unavailable;
         };
         let configuration = GuiConfiguration { api_type: GuiApiType::WIN32, is_floating: false };
         if !gui.is_api_supported(&handle, configuration) {
-            return Ok(None);
+            return ClapGuiOpenPreflight::Unavailable;
         }
+        ClapGuiOpenPreflight::Create(gui)
+    }
+
+    /// Consume only the immediately preceding same-owner capability result.
+    /// GUI calls remain outside the exclusive active parameter audio role.
+    pub(super) fn open_prepared(
+        &mut self,
+        instance: &mut PluginInstance<ClapHost>,
+        title: &str,
+        preflight: ClapGuiOpenPreflight,
+    ) -> Result<Option<GuiSize>, AudioProcessorHostError> {
+        let gui = match preflight {
+            ClapGuiOpenPreflight::Unavailable => return Ok(None),
+            ClapGuiOpenPreflight::Attached(size) => return Ok(Some(size)),
+            ClapGuiOpenPreflight::Create(gui) => gui,
+        };
+        let handle = instance.plugin_handle();
+        let configuration = GuiConfiguration { api_type: GuiApiType::WIN32, is_floating: false };
         let incarnation =
             self.incarnation.issue().ok_or_else(|| failed("GUI incarnation exhausted"))?;
         if gui.create(&handle, configuration).is_err() {

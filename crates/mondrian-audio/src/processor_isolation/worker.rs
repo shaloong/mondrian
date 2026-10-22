@@ -604,7 +604,7 @@ fn dispatch_native_owner_command(
                 | CommandKind::PollNativeObservations
                 | CommandKind::BindNativeObject
                 | CommandKind::EditorOpen
-                | CommandKind::EditorOpenWithControllerValues
+                | CommandKind::EditorOpenWithStaticParameters
                 | CommandKind::EditorClose
                 | CommandKind::QueryParameter
                 | CommandKind::PrepareAuthorStateEntry => Err(invalid_contract(

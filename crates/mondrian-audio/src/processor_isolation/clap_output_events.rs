@@ -379,6 +379,12 @@ impl ClapOutputEvents {
             .ok_or_else(|| invalid("CLAP output actual owner bytes overflowed"))
     }
 
+    /// Local sticky rejections include failures which do not set the shared source.
+    /// Reading this never clears the original accepted output prefix.
+    pub(super) const fn has_refusals(&self) -> bool {
+        self.refusals != 0
+    }
+
     /// Every observed refusal remains explicit; reading never clears accepted events.
     pub const fn refused(&self, reason: ClapOutputRefusal) -> bool {
         self.refusals & (1 << (reason as u8)) != 0
