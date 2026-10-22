@@ -186,8 +186,8 @@ pub(crate) fn viewer_preview_cache_key_for_resolved_plan(
     color_context: &ProgramColorContext,
     sampling: mondrian_core::ImageSampling,
 ) -> PreviewOutputKey {
-    // v4 invalidates former decoded-storage precision and YUV alpha semantics.
-    let mut builder = PreviewSemanticIdentityBuilder::new(b"mondrian.preview.viewer-plan.v4");
+    // v5 invalidates GPU image coverage computed with a half-pixel-shifted support.
+    let mut builder = PreviewSemanticIdentityBuilder::new(b"mondrian.preview.viewer-plan.v5");
     sampling.hash(&mut builder);
     color_context.working_color_space().hash(&mut builder);
     color_context.output_color_space().hash(&mut builder);
