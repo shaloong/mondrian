@@ -1196,6 +1196,7 @@ fn assert_installed_vst3_gain(plugin_env: &str, sample_accurate: bool) {
             [
                 "6E4F05A12D8B4C639F017B42A4C2E611",
                 "AE4C8B1910234F819CA26D315F8702A1",
+                "B64C8B1910234F819CA26D315F8702A1",
             ]
         );
         descriptors
