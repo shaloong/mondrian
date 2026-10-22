@@ -12637,11 +12637,14 @@ mod restored_audio_activation_tests {
         fail_bus: Option<(i32, i32)>,
         apply_result: tresult,
         setup_result: tresult,
+        stop_processing_result: tresult,
+        deactivate_result: tresult,
         audio_info_failure: bool,
         audio_channels: i32,
         event_default_active: bool,
         arrangement_queries: usize,
         lifecycle: Vec<(&'static str, i32)>,
+        stop_calls: Vec<(&'static str, i32)>,
         setup_modes: Vec<i32>,
         restored_audio_channels: Option<i32>,
         setups: usize,
@@ -12770,7 +12773,20 @@ mod restored_audio_activation_tests {
         }
         unsafe fn setActive(&self, active: u8) -> tresult {
             let mut p = self.0.lock().unwrap();
-            assert!(!p.processing, "stop DSP before changing component activity");
+            if active != 0
+                || p.stop_processing_result == kResultOk
+                || p.stop_processing_result == kNotImplemented
+            {
+                assert!(!p.processing, "stop DSP before changing component activity");
+            }
+            if active == 0 {
+                // Deliberately refused stops must expose the host's call order
+                // to Rust assertions, never panic across the generated COM ABI.
+                p.stop_calls.push(("set_active", 0));
+                if p.deactivate_result != kResultOk {
+                    return p.deactivate_result;
+                }
+            }
             p.active = active != 0;
             kResultOk
         }
@@ -12821,8 +12837,16 @@ mod restored_audio_activation_tests {
             let mut p = self.0.lock().unwrap();
             if processing != 0 {
                 assert!(p.active);
+            } else {
+                p.stop_calls.push(("set_processing", 0));
+                let result = p.stop_processing_result;
+                if result != kResultOk && result != kNotImplemented {
+                    return result;
+                }
+                p.processing = false;
+                return result;
             }
-            p.processing = processing != 0;
+            p.processing = true;
             kResultOk
         }
         unsafe fn process(&self, data: *mut ProcessData) -> tresult {
@@ -12914,11 +12938,14 @@ mod restored_audio_activation_tests {
                 fail_bus: None,
                 apply_result: kResultOk,
                 setup_result: kResultOk,
+                stop_processing_result: kResultOk,
+                deactivate_result: kResultOk,
                 audio_info_failure: false,
                 audio_channels: 2,
                 event_default_active: false,
                 arrangement_queries: 0,
                 lifecycle: Vec::with_capacity(64),
+                stop_calls: Vec::with_capacity(8),
                 setup_modes: Vec::with_capacity(64),
                 restored_audio_channels: None,
                 setups: 0,
@@ -13041,6 +13068,131 @@ mod restored_audio_activation_tests {
                 Err(Error::NotProcessing)
             ));
             assert_eq!(self.probe.lock().unwrap().dsp_calls, 0);
+        }
+    }
+
+    #[test]
+    fn stop_processing_refusal_preserves_flags_notes_and_skips_deactivation() {
+        for result in [kResultFalse, kInvalidArgument] {
+            let mut f = Fixture::new(vec![true], vec![true]);
+            f.plugin.start_processing().unwrap();
+            assert!(matches!(
+                &f.plugin.bus_activation.event_readiness,
+                Some(Ok(()))
+            ));
+            let notes = vec![(17, 0, 60), (23, 2, 72)];
+            f.plugin.active_notes = notes.clone();
+            let lifecycle = f.probe.lock().unwrap().lifecycle.clone();
+            f.probe.lock().unwrap().stop_processing_result = result;
+            let stopped = f.plugin.stop_processing();
+            let (calls, processing, active, after_lifecycle, dsp_calls) = {
+                let p = f.probe.lock().unwrap();
+                (
+                    p.stop_calls.clone(),
+                    p.processing,
+                    p.active,
+                    p.lifecycle.clone(),
+                    p.dsp_calls,
+                )
+            };
+            assert_eq!(
+                calls,
+                [("set_processing", 0)],
+                "failed notification must not reach deactivation ({result:#x})"
+            );
+            assert!(stopped.is_err(), "failed stop must propagate ({result:#x})");
+            assert!(f.plugin.is_processing && f.plugin.is_active);
+            assert!(processing && active);
+            assert!(f.plugin.bus_activation.event_readiness.is_none());
+            assert_eq!(f.plugin.active_notes, notes);
+            assert_eq!(
+                after_lifecycle, lifecycle,
+                "no reconfiguration or reset on failure"
+            );
+            assert_eq!(dsp_calls, 0);
+        }
+    }
+
+    #[test]
+    fn stop_deactivation_refusal_preserves_partial_flags_and_notes() {
+        for processing_result in [kResultOk, kNotImplemented] {
+            for result in [kResultFalse, kNotImplemented, kInvalidArgument] {
+                let mut f = Fixture::new(vec![true], vec![true]);
+                f.plugin.start_processing().unwrap();
+                assert!(matches!(
+                    &f.plugin.bus_activation.event_readiness,
+                    Some(Ok(()))
+                ));
+                let notes = vec![(17, 0, 60), (23, 2, 72)];
+                f.plugin.active_notes = notes.clone();
+                let lifecycle = f.probe.lock().unwrap().lifecycle.clone();
+                {
+                    let mut p = f.probe.lock().unwrap();
+                    p.stop_processing_result = processing_result;
+                    p.deactivate_result = result;
+                }
+                let stopped = f.plugin.stop_processing();
+                let (calls, processing, active, after_lifecycle, dsp_calls) = {
+                    let p = f.probe.lock().unwrap();
+                    (
+                        p.stop_calls.clone(),
+                        p.processing,
+                        p.active,
+                        p.lifecycle.clone(),
+                        p.dsp_calls,
+                    )
+                };
+                assert_eq!(calls, [("set_processing", 0), ("set_active", 0)]);
+                assert!(
+                    stopped.is_err(),
+                    "failed deactivation must propagate ({result:#x})"
+                );
+                assert!(!f.plugin.is_processing && f.plugin.is_active);
+                assert!(!processing && active);
+                assert!(f.plugin.bus_activation.event_readiness.is_none());
+                assert_eq!(f.plugin.active_notes, notes);
+                assert_eq!(
+                    after_lifecycle, lifecycle,
+                    "no rollback or reset after accepted stop"
+                );
+                assert_eq!(dsp_calls, 0);
+            }
+        }
+    }
+
+    #[test]
+    fn stop_accepted_notifications_deactivate_clear_notes_and_repeat_without_com() {
+        assert_eq!(
+            kResultTrue, kResultOk,
+            "the SDK's True and Ok share one result value"
+        );
+        for result in [kResultOk, kNotImplemented] {
+            let mut f = Fixture::new(vec![true], vec![true]);
+            f.plugin.start_processing().unwrap();
+            assert!(matches!(
+                &f.plugin.bus_activation.event_readiness,
+                Some(Ok(()))
+            ));
+            f.plugin.active_notes = vec![(17, 0, 60), (23, 2, 72)];
+            f.probe.lock().unwrap().stop_processing_result = result;
+            f.plugin
+                .stop_processing()
+                .expect("accepted stop and deactivation");
+            assert!(!f.plugin.is_processing && !f.plugin.is_active);
+            assert!(f.plugin.bus_activation.event_readiness.is_none());
+            assert!(f.plugin.active_notes.is_empty());
+            let (calls, processing, active, dsp_calls) = {
+                let p = f.probe.lock().unwrap();
+                (p.stop_calls.clone(), p.processing, p.active, p.dsp_calls)
+            };
+            assert_eq!(calls, [("set_processing", 0), ("set_active", 0)]);
+            assert!(!processing && !active);
+            assert_eq!(dsp_calls, 0);
+            f.plugin
+                .stop_processing()
+                .expect("an already stopped owner is a no-op");
+            let repeated_calls = f.probe.lock().unwrap().stop_calls.clone();
+            assert_eq!(repeated_calls, calls);
         }
     }
 
