@@ -3267,7 +3267,7 @@ mod native_editor_constant_tests {
             ],
             vec![
                 ids[0].clone(),
-                mondrian_core::ParameterId::new("absent").unwrap(),
+                mondrian_core::ParameterId::new("native.absent").unwrap(),
                 ids[2].clone(),
                 ids[3].clone(),
             ],
