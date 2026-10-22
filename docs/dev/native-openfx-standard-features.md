@@ -117,6 +117,22 @@ Close/Destroy、输入/作者值及 Float 像素均通过。其它 setter 复用
 analysis Render 写权限和 C2 canonical author 桥仍缺，不代表插件写入已可 Undo/save、
 Product GUI、旧退出修复或完整标准兼容。
 
+2026-10-22 Windows x64：项目几何与图像栅格分离的限定切片通过。
+Effects 的 `EffectProjectGeometry` 来自 owner Sequence，并参与原图身份和
+processor 绑定；原 resident v10/C ABI 独立传递 project width/height/PAR。
+固定零 offset 的 project Size/Extent/PAR 不再由本帧 raster 推导。owned
+SessionProbe 在 3×5 图像、10×7/PAR2 项目下验证 Create/Render 查询与全部15像素；
+Direct image PAR1→1.2→1 合法，真实 Graph 同项目复用、12×9 项目替换 owner。
+独立 raw App libtest 门验证 width/height/PAR 改绑拒绝、不发布 output、原 owner
+恢复可用；拒绝发生在 `loadFrame` 之前由源码审查确认，运行断言检查无新增 invocation。
+raw 门不执行 Product worker；集成门使用正常 dev Product。
+两新门和 Generator 两门、官方 Basic 两门、capabilities 回归共七门均 exact1、
+stderr0、原180秒/190秒外层/2秒清理通过。Effects334/strict零诊断、Renderer55加
+独立 context1、App281、OFX113、Export2及 validation API 检查通过。
+资格仅限上述 Windows CPU/owned 子集。Timeline 现仍在 raw Source 效果执行前
+丢失独立图像 SAR，由 project PAR 填 image PAR；Direct 正控不关闭这一缺口。
+proxy/Reduced 的 renderScale、空间默认值和 Rectangle 仍未实现或验收。
+
 ## 1. 规范版本与证据
 
 官方 GitHub `releases/latest` 实际返回 **OFX_Release_1.5.1**，发布时间为
@@ -238,7 +254,7 @@ Contexts 是协商能力，标准并不要求任意 Host 支持六个。
 | I05 | Source premult/opaque 与 pixels一致，条件必需 | 实现：immutable prepared format 的 actual Straight/PM/Opaque association 传到 Source clip/image，pixels 不被隐式 unassociate；preference 与 supplied format 不符拒绝，不存在裸 Vec 旁路 | `EffectValueFormat`; `OpenFxFilterSession::input_format`; `FrameState`; `FilterClipInstance::getPremult` | [Premult](https://openfx.readthedocs.io/en/main/Reference/ofxImageClip.html) |
 | I06 | Output Straight/PM/Opaque，条件必需 | 实现：clip/image 与 Output preference 一致；public output 为 actual StraightFloat/PMFloat/Opaque typed frame，PM 不再强制除回 coverage；Opaque A=1，所有实际输出 lane finite/extent checked。r103 raw output、Source association 与 nested/opaque product 控制通过，整批 source/artifact lease 稳定 | `render.cpp::outputAlpha`; `resident.rs::materialize_native_output`; `EffectFloatFrame::from_pixels_controlled` | [Clip preferences](https://openfx.readthedocs.io/en/main/Reference/ofxClipPreferences.html) |
 | I07 | 完整 finite Float PM/RGBA，包括HDR/负色/zeroα emission，条件必需 | 实现限定域：native→Core/Effects→Normal Over→缓存→nested→opaque output 的 finite Float signal 已接实际调用链；r103 原始 cache bits、独立 nested oracle 与真实 opaque 输出闭环通过。PM zero-alpha emission、signed/>1/HDR/negative 不 clamp。非线性 blend/OCIO/GPU coverage consumer 经 explicit format/admission，不能直接消费所有 Float。r76 GPU 独立 overflow/recovery GREEN，其他新载体待验收 | `mondrian-core::ColorFrameAlpha`; `EffectFloatFrame`; `float_frame::over_float_sample`; `float_frame/exact_over.rs`; `heterogeneous_gpu.rs`; render-cache typed header | [Pixels](https://github.com/AcademySoftwareFoundation/openfx/blob/OFX_Release_1.5.1/include/ofxImageEffect.h)，[OpenEXR association](https://openexr.com/en/latest/TechnicalIntroduction.html) |
-| I08 | PAR/canonical project size/extent/offset/clipRoD，必需 | 实现：canonical x=width*PAR/y=height/offset0；Rust/native按结果是否finite拒绝overflow；imagebounds/renderwindow保持pixel坐标 | `getProjectSize/Extent`; `getRegionOfDefinition`; `loadFrame`; geometry fixtures | [Coordinates](https://openfx.readthedocs.io/en/main/Reference/ofxCoordSystem.html) |
+| I08 | PAR/canonical project size/extent/offset/clipRoD，必需 | 部分支持：owner Sequence 项目几何独立于 image raster/PAR，canonical project x=projectWidth*projectPAR/y=projectHeight、offset0；改变项目替换原 owner，raw 改绑拒绝。Direct image PAR 动态正控通过；image bounds/renderWindow 为 pixel 坐标，clip RoD 使用 image PAR。Timeline 源 SAR 传递、proxy/renderScale、非零 offset 尚未闭合 | `EffectProjectGeometry`; `getProjectSize/Extent`; `getRegionOfDefinition`; `loadFrame`; `project_geometry` 与 raw 改绑测试 | [Coordinates](https://openfx.readthedocs.io/en/main/Reference/ofxCoordSystem.html) |
 | I09 | 底部原点、negative rowBytes/连续RGBA存储，必需 | 实现并有不对称raster oracle；Source/Output scope handles独立，parent借用mapping只在action内。`clipGetImage` bad_alloc 返回 ErrMemory/null；图像、RoD与clipGetHandle按实际实例准入，拒绝真实Descriptor且保留正常实例恢复。Host/Basic二十项有限控制通过；新修复无正常Product IPC资格，完整故障/生命周期边界见上方 | `FrameImage`; `ImageAccess`; `imageHandles`; actualBasic fixtures | [Images](https://openfx.readthedocs.io/en/main/Reference/ofxImages.html) |
 | I10 | `kOfxImagePropUniqueIdentifier`，必需image metadata | 实现：parent 单次 typed EffectProcessorOwnerId namespace 经 wire4 Prepare/16-byte CABI 初始化，session generation 每次 image authority 改变递增，Source/Output distinct，同 action repeated fetch stable；fresh worker/seek 不重用裸 process-local namespace。r76 原实现跨子进程 stale-analysis 实际 RED；r103 新 namespace 的 native 与 public cache 断言通过，整批 source/artifact lease 稳定 | `frame_state.h::FrameState`; `image_clip.cpp::FrameImage`; `resident.rs::{Prepare,OpenFxFilterSession::prepare}` | [Image header](https://github.com/AcademySoftwareFoundation/openfx/blob/OFX_Release_1.5.1/include/ofxImageEffect.h) |
 | I11 | Progressive FieldNone，必需image metadata | 实现：实际 Source/Output Image 的 Field=FieldNone，clip order 与 Render field 亦 None；仅 progressive CPU，不含 interlaced 调度。r103 对应真实 native field 断言通过，整批 source/artifact lease 稳定 | `image_clip.cpp::FrameImage`; `getFieldOrder`; `render.cpp::render` | [Fields](https://github.com/AcademySoftwareFoundation/openfx/blob/OFX_Release_1.5.1/include/ofxImageEffect.h) |

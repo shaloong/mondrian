@@ -99,7 +99,19 @@ Transition handles; they do not claim rendered transparent pixels or audio DSP.
 
 The table describes implementation boundaries. Qualification below states the tested conditions; detailed consumer obligations remain in the linked audio and OpenFX feature matrices.
 
-## Current qualification summary (2026-10-21)
+## Current qualification summary (2026-10-22)
+
+OpenFX owner project geometry now has finite Windows CPU qualification:
+SessionProbe checks project10x7/PAR2 independently of image3x5, Direct image
+PAR1→1.2→1, all15 literal pixels, same-project Graph owner reuse and project12x9
+replacement. A separate raw App libtest checks rebinding refusal and original-owner
+recovery; it does not execute Product IPC. Both new gates and five affected
+Generator/Basic/capability regressions pass exact1/stderr0 with original180s/190s/2s
+ownership budgets; worker gates use the normal dev Product. Fixed zero offset
+only. Timeline still fills image PAR from project PAR before source composition,
+so unequal source/project SAR and proxy/renderScale remain open. Spatial defaults,
+Rectangle, full contexts, GPU, realtime/performance, old exit-root closure and
+other platforms remain unqualified.
 
 | Area | Result and conditions | Limit |
 | --- | --- | --- |
