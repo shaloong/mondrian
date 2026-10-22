@@ -326,6 +326,7 @@ pub use mondrian_effects::EffectFloatFrame;
 
 /// Exact sequence facts lowered to the OpenFX double-valued frame contract.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct OpenFxRenderTiming {
     /// Frame position supplied to the OFX render action.
     pub frame: f64,
@@ -335,9 +336,6 @@ pub struct OpenFxRenderTiming {
     pub first_frame: f64,
     /// Last frame available from this filter's source Clip.
     pub last_frame: f64,
-    /// Current Source/Output image or clip sample width divided by height.
-    /// Independent of the immutable owner project pixel aspect ratio.
-    pub pixel_aspect_ratio: f64,
 }
 
 /// Native host failure that leaves the caller's input frame unchanged.
@@ -353,6 +351,11 @@ pub enum OpenFxHostError {
     /// The complete Float image cannot satisfy its declared representation.
     #[error(transparent)]
     Frame(#[from] mondrian_effects::EffectFloatFrameError),
+    /// The actual image cannot enter this host's unit render-scale contract.
+    #[error("OpenFX requires unit image render scale, got {sampling:?}")]
+    UnsupportedImageSampling {
+        sampling: mondrian_core::ImageSampling,
+    },
     /// The request cannot be represented by the admitted filter contract.
     #[error("invalid OpenFX host request: {0}")]
     Invalid(String),
@@ -1219,13 +1222,26 @@ fn validate_render_request(
     checkpoint()?;
     validate_frame(frame.width(), frame.height(), frame.pixels().len())?;
     validate_timing(timing)?;
-    if !(f64::from(frame.width()) * timing.pixel_aspect_ratio).is_finite() {
+    validate_native_sampling(frame.width(), frame.sampling())?;
+    validate_parameters(parameters)?;
+    frame.view().validate_controlled(&mut || checkpoint())
+}
+
+// The native ABI advertises unit render scale. PAR is the original sample
+// shape; it must never absorb a Reduced or nonuniform raster density.
+fn validate_native_sampling(
+    width: u32,
+    sampling: mondrian_core::ImageSampling,
+) -> Result<(), OpenFxHostError> {
+    if !sampling.is_unit_scale() {
+        return Err(OpenFxHostError::UnsupportedImageSampling { sampling });
+    }
+    if !(f64::from(width) * sampling.sample_aspect_ratio().to_f64()).is_finite() {
         return Err(invalid(
             "OpenFX canonical frame extent is not representable",
         ));
     }
-    validate_parameters(parameters)?;
-    frame.view().validate_controlled(&mut || checkpoint())
+    Ok(())
 }
 
 fn validate_frame(width: u32, height: u32, pixels: usize) -> Result<usize, OpenFxHostError> {
@@ -1252,9 +1268,7 @@ fn validate_timing(timing: &OpenFxRenderTiming) -> Result<(), OpenFxHostError> {
         || !timing.frame_rate.is_finite()
         || !timing.first_frame.is_finite()
         || !timing.last_frame.is_finite()
-        || !timing.pixel_aspect_ratio.is_finite()
         || timing.frame_rate <= 0.0
-        || timing.pixel_aspect_ratio <= 0.0
         || timing.first_frame > timing.frame
         || timing.frame > timing.last_frame
     {
@@ -1542,32 +1556,49 @@ pub(crate) mod shared_frame_tests {
     use super::*;
 
     #[test]
-    fn canonical_geometry_overflow_is_rejected_before_worker_admission() {
-        let frame = mondrian_effects::EffectFloatFrame::from_pixels(
-            mondrian_effects::EffectFrameExtent::new(3, 2),
-            mondrian_effects::EffectValueFormat::new(
-                mondrian_effects::EffectWorkingPrecision::Float32,
-                mondrian_effects::EffectColorDomain::SceneLinearRgb,
-                mondrian_core::ColorFrameAlpha::StraightFloat,
-            ),
-            mondrian_core::ImageSampling::UNIT_SQUARE,
-            vec![[0.0; 4]; 6],
-        )
-        .expect("owned Float fixture");
+    fn actual_sampling_requires_unit_density_and_admits_maximum_typed_par() {
+        let format = mondrian_effects::EffectValueFormat::new(
+            mondrian_effects::EffectWorkingPrecision::Float32,
+            mondrian_effects::EffectColorDomain::SceneLinearRgb,
+            mondrian_core::ColorFrameAlpha::StraightFloat,
+        );
         let timing = OpenFxRenderTiming {
             frame: 0.0,
             frame_rate: 24.0,
             first_frame: 0.0,
             last_frame: 1.0,
-            pixel_aspect_ratio: f64::MAX,
         };
-        assert!(matches!(
-            validate_render_request(&timing, &BTreeMap::new(), &frame, &mut || Ok(())),
-            Err(OpenFxHostError::Invalid(_))
-        ));
-        let finite = OpenFxRenderTiming { pixel_aspect_ratio: f64::MAX / 4.0, ..timing };
-        validate_render_request(&finite, &BTreeMap::new(), &frame, &mut || Ok(()))
-            .expect("very large finite geometry has no arbitrary PAR cutoff");
+        let par = mondrian_core::SampleAspectRatio::new(u32::MAX, 1).unwrap();
+        for scale in [
+            [mondrian_core::Rational::new(1, 2); 2],
+            [
+                mondrian_core::Rational::new(1, 1),
+                mondrian_core::Rational::new(2, 3),
+            ],
+        ] {
+            let sampling = mondrian_core::ImageSampling::new(par, scale).unwrap();
+            let frame = EffectFloatFrame::from_pixels(
+                mondrian_effects::EffectFrameExtent::new(3, 2),
+                format,
+                sampling,
+                vec![[0.0; 4]; 6],
+            )
+            .unwrap();
+            assert!(matches!(
+                validate_render_request(&timing, &BTreeMap::new(), &frame, &mut || Ok(())),
+                Err(OpenFxHostError::UnsupportedImageSampling { sampling: actual }) if actual == sampling
+            ));
+        }
+        let frame = EffectFloatFrame::from_pixels(
+            mondrian_effects::EffectFrameExtent::new(3, 2),
+            format,
+            mondrian_core::ImageSampling::new(par, [mondrian_core::Rational::new(1, 1); 2])
+                .unwrap(),
+            vec![[0.0; 4]; 6],
+        )
+        .unwrap();
+        validate_render_request(&timing, &BTreeMap::new(), &frame, &mut || Ok(()))
+            .expect("maximum typed SAR is valid; raw f64 ABI overflow remains separately rejected");
     }
 
     #[test]
@@ -4127,7 +4158,6 @@ pub(crate) mod shared_frame_tests {
             frame_rate: 24.0,
             first_frame: 0.0,
             last_frame: 100.0,
-            pixel_aspect_ratio: 1.0,
         };
         let mut canceled_after_started = false;
         let result = session.render(&timing, &BTreeMap::new(), &frame, &mut || {
@@ -4242,7 +4272,6 @@ pub(crate) mod shared_frame_tests {
             frame_rate: 24.0,
             first_frame: 0.0,
             last_frame: 100.0,
-            pixel_aspect_ratio: 1.0,
         };
         let mut saw_live = false;
         let mut last_revision = 0;

@@ -12,7 +12,7 @@ fn input() -> EffectFloatFrame {
     EffectFloatFrame::from_pixels(
         EffectFrameExtent::new(3, 5),
         cpu_contract_input().format(),
-        mondrian_core::ImageSampling::UNIT_SQUARE,
+        cpu_contract_sampling(2.0),
         vec![[-0.25, 0.5, 2.0, 0.25]; 15],
     )
     .unwrap()
@@ -57,10 +57,12 @@ fn owner_project_geometry_is_independent_of_filter_raster_and_replaces_native_ow
             (6.0, 1.2, 0.25, [0.25, 0.234375, 0.575, 0.0625]),
             (3.0, 1.0, 0.5, [0.1875, 0.359375, 1.0625, 0.125]),
         ] {
-            let timing = OpenFxRenderTiming { frame, ..cpu_contract_timing(image_par) };
+            let sampled_input = cpu_contract_image_par(&input, image_par);
+            let timing = OpenFxRenderTiming { frame, ..cpu_contract_timing() };
             let parameters =
                 constant_parameters([("scale".to_owned(), OpenFxParameterValue::Double(gain))]);
-            let output = direct.render(&timing, &parameters, &input, &mut || Ok(())).unwrap();
+            let output =
+                direct.render(&timing, &parameters, &sampled_input, &mut || Ok(())).unwrap();
             literal(&output, expected);
             let feedback = direct.take_feedback().expect("actual native receipt");
             assert_eq!(feedback.owner, direct_owner);
@@ -149,29 +151,99 @@ fn owner_project_geometry_is_independent_of_filter_raster_and_replaces_native_ow
                 u64,
             ),
         )> = None;
-        for (frame, project, program, expected) in [
-            (0, first_geometry, &first, [0.1875, 0.359375, 1.125, 0.125]),
+        for (frame, project, program, image_par, expected) in [
+            (
+                0,
+                first_geometry,
+                &first,
+                2.0,
+                [0.1875, 0.359375, 1.125, 0.125],
+            ),
             (
                 6,
                 first_geometry,
                 &first_changed,
+                2.0,
                 [0.25, 0.234375, 0.625, 0.0625],
             ),
-            (3, second_geometry, &second, [0.25, 0.390625, 1.125, 0.125]),
+            (
+                6,
+                first_geometry,
+                &first_changed,
+                1.2,
+                [0.25, 0.234375, 0.575, 0.0625],
+            ),
+            (
+                3,
+                first_geometry,
+                &first,
+                1.0,
+                [0.1875, 0.359375, 1.0625, 0.125],
+            ),
+            (
+                3,
+                second_geometry,
+                &second,
+                2.0,
+                [0.25, 0.390625, 1.125, 0.125],
+            ),
             (
                 6,
                 second_geometry,
                 &second_changed,
+                2.0,
                 [0.3125, 0.265625, 0.625, 0.0625],
             ),
-            (0, first_geometry, &first, [0.1875, 0.359375, 1.125, 0.125]),
+            (
+                0,
+                first_geometry,
+                &first,
+                2.0,
+                [0.1875, 0.359375, 1.125, 0.125],
+            ),
         ] {
             let graph = program.evaluate(TimelineTime::new(frame, 24).unwrap()).unwrap();
+            let sampled_input = cpu_contract_image_par(&input, image_par);
+            if previous.is_some_and(|(previous_project, _)| previous_project == project) {
+                for density in [
+                    [Rational::new(1, 2); 2],
+                    [Rational::new(1, 2), Rational::new(3, 4)],
+                ] {
+                    let refused_input = EffectFloatFrame::from_pixels(
+                        input.extent(),
+                        input.format(),
+                        mondrian_core::ImageSampling::new(
+                            sampled_input.sampling().sample_aspect_ratio(),
+                            density,
+                        )
+                        .unwrap(),
+                        input.pixels().to_vec(),
+                    )
+                    .unwrap();
+                    let mut control = EffectProcessorControl::uncancelled();
+                    let failure = session
+                        .apply_compiled_rgba_f32(refused_input.view(), &graph, -999, &mut control)
+                        .expect_err("shared Unit admission precedes the native provider");
+                    assert!(
+                        matches!(failure, mondrian_effects::EffectFloatExecutionError::CustomProcessor(
+                        mondrian_effects::EffectExecutionError::ImageScaleNotAdmitted {
+                            requirement: mondrian_effects::EffectImageScaleRequirement::Unit, actual_sampling
+                        }) if actual_sampling == refused_input.sampling())
+                    );
+                    assert_eq!(control.take_feedback().unwrap().len(), 0);
+                    assert_eq!(session.diagnostics().processor_instances, 1);
+                    assert_eq!(
+                        mondrian_effects::effect_extension_runtime_status(&kind.key()).unwrap(),
+                        status
+                    );
+                }
+            }
             let mut control = EffectProcessorControl::uncancelled();
             let output = session
-                .apply_compiled_rgba_f32(input.view(), &graph, -999, &mut control)
+                .apply_compiled_rgba_f32(sampled_input.view(), &graph, -999, &mut control)
                 .unwrap();
             literal(&output, expected);
+            assert_eq!(output.sampling(), sampled_input.sampling());
             let batch = control.take_feedback().unwrap();
             assert_eq!(batch.len(), 1);
             let receipt = batch.iter().next().unwrap();

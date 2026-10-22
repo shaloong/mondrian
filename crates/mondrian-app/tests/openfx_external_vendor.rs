@@ -734,7 +734,6 @@ fn execute(case: &Case, leases: &mut [Lease], deadline: Instant) -> LabResult<()
             frame_rate: 24.0,
             first_frame: 0.0,
             last_frame: 4.0,
-            pixel_aspect_ratio: 1.0,
         };
         let parameters = values(case, *bits, *mix)?;
         write_json(
@@ -802,7 +801,6 @@ fn execute(case: &Case, leases: &mut [Lease], deadline: Instant) -> LabResult<()
                 frame_rate: 24.0,
                 first_frame: 0.0,
                 last_frame: 4.0,
-                pixel_aspect_ratio: 1.0,
             },
             &values(case, 4, 1.0)?,
             &input,

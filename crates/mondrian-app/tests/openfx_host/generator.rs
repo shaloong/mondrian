@@ -30,7 +30,6 @@ fn timing(frame: f64) -> OpenFxRenderTiming {
         frame_rate: 24.0,
         first_frame: 0.0,
         last_frame: 12.0,
-        pixel_aspect_ratio: 2.0,
     }
 }
 fn literal(output: &EffectFloatFrame, frame: f32, gain: f32) {
@@ -94,7 +93,7 @@ fn output_only_generator_direct_and_prepared_graph_preserve_time_extent_and_owne
             let output = direct
                 .generate(
                     &timing(frame),
-                    mondrian_core::ImageSampling::UNIT_SQUARE,
+                    cpu_contract_sampling(2.0),
                     &parameters,
                     &mut checkpoint(&token),
                 )
@@ -108,7 +107,7 @@ fn output_only_generator_direct_and_prepared_graph_preserve_time_extent_and_owne
         assert!(matches!(
             direct.generate(
                 &invalid,
-                mondrian_core::ImageSampling::UNIT_SQUARE,
+                cpu_contract_sampling(2.0),
                 &BTreeMap::new(),
                 &mut checkpoint(&token)
             ),
@@ -204,7 +203,7 @@ fn output_only_generator_direct_and_prepared_graph_preserve_time_extent_and_owne
                 .generate_compiled_rgba_f32(
                     EffectFrameExtent::new(3, 2),
                     format(),
-                    mondrian_core::ImageSampling::UNIT_SQUARE,
+                    cpu_contract_sampling(2.0),
                     &graph,
                     -999,
                     &mut control,
@@ -277,7 +276,7 @@ fn output_only_generator_cannot_publish_success_without_current_output_fetch() {
     .expect("Generator owner");
     let result = session.generate(
         &timing(3.0),
-        mondrian_core::ImageSampling::UNIT_SQUARE,
+        cpu_contract_sampling(2.0),
         &BTreeMap::new(),
         &mut checkpoint(&token),
     );

@@ -3226,6 +3226,22 @@ OfxStatus probeAction(const char* action, const void* handle,
   if (selected == "project_geometry" &&
       (operation == kOfxActionCreateInstance || operation == kOfxImageEffectActionRender) &&
       !ownerProjectContract(handle, in)) { return kOfxStatFailed; }
+  if (selected == "image_sampling" &&
+      (operation == kOfxActionCreateInstance || operation == kOfxImageEffectActionGetClipPreferences || operation == kOfxImageEffectActionRender)) {
+    const bool rendering = operation == kOfxImageEffectActionRender;
+    if (!ownerProjectContract(handle, rendering ? in : nullptr)) { return kOfxStatFailed; }
+    OfxImageClipHandle source = nullptr;
+    OfxPropertySetHandle sourceProps = nullptr;
+    double imagePar = 0.0;
+    if (gEffectHost->clipGetHandle((OfxImageEffectHandle)handle, "Source", &source, &sourceProps) != kOfxStatOK ||
+        gPropHost->propGetDouble(sourceProps, kOfxImagePropPixelAspectRatio, 0, &imagePar) != kOfxStatOK ||
+        (operation == kOfxActionCreateInstance && imagePar != 1.2)) { return kOfxStatFailed; }
+    if (rendering) {
+      double scale[2]{};
+      if (gPropHost->propGetDoubleN(in, kOfxImageEffectPropRenderScale, 2, scale) != kOfxStatOK ||
+          scale[0] != 1.0 || scale[1] != 1.0) { return kOfxStatFailed; }
+    }
+  }
   if (selected == "canonical_progressive" &&
       (operation == kOfxActionCreateInstance || operation == kOfxImageEffectActionRender) &&
       !canonicalProgressiveContract(handle, in)) { return kOfxStatFailed; }
@@ -3520,7 +3536,7 @@ OfxStatus probeAction(const char* action, const void* handle,
       !appendResidentOwnerReceipt(handle, in)) { return kOfxStatFailed; }
   if ((selected == "image_uid" || selected == "image_uid_persisted") && operation == kOfxImageEffectActionRender && result == kOfxStatOK &&
       (!imageAnalysisOutput(handle, in) || (selected == "image_uid_persisted" && !saveImageAnalysis()))) { return kOfxStatFailed; }
-  if (selected == "project_geometry" && operation == kOfxImageEffectActionRender &&
+  if ((selected == "project_geometry" || selected == "image_sampling") && operation == kOfxImageEffectActionRender &&
       result == kOfxStatOK && !ownerProjectOutput(handle, in)) { return kOfxStatFailed; }
   if (selected == "canonical_progressive" && operation == kOfxImageEffectActionRender &&
       result == kOfxStatOK && !canonicalCoordinateOutput(handle, in)) { return kOfxStatFailed; }

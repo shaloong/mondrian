@@ -97,6 +97,9 @@ fn processor_host_error(
 }
 
 impl EffectFloatProcessorFactory for OpenFxProcessorFactory {
+    fn image_scale_requirement(&self) -> mondrian_effects::EffectImageScaleRequirement {
+        mondrian_effects::EffectImageScaleRequirement::Unit
+    }
     fn input_role(&self) -> mondrian_effects::EffectFloatProcessorInputRole {
         match self.context {
             OpenFxContext::Filter => mondrian_effects::EffectFloatProcessorInputRole::SingleImage,
@@ -666,7 +669,6 @@ fn build_definition_in_context(
                 frame_rate: frame_context.frame_rate().to_f64(),
                 first_frame: first as f64,
                 last_frame: last as f64,
-                pixel_aspect_ratio: frame_context.pixel_aspect_ratio().to_f64(),
             };
             let mut values = BTreeMap::new();
             for parameter in parameters.iter() {

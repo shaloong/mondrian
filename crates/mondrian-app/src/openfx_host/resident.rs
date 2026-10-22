@@ -11,6 +11,8 @@ use child_diagnostic::ChildProbe;
 pub use child_diagnostic::{
     OpenFxChildRenderDiagnostic, OpenFxChildRenderPhase, OpenFxNativeRenderPhase,
 };
+#[cfg(test)]
+mod image_sampling_tests;
 pub(super) mod pump;
 pub(super) mod question;
 pub(super) mod question_budget;
@@ -22,10 +24,10 @@ pub use diagnostic::OpenFxRenderPhase;
 use diagnostic::{ParentProbe, ProbeEvent};
 
 /// Hidden executable mode for a context-bound resident native CPU session.
-pub const OPENFX_RESIDENT_WORKER_ARGUMENT: &str = "--internal-openfx-session-v10";
+pub const OPENFX_RESIDENT_WORKER_ARGUMENT: &str = "--internal-openfx-session-v11";
 const ENDPOINT_ENV: &str = "MONDRIAN_INTERNAL_OPENFX_ENDPOINT";
 const NONCE_ENV: &str = "MONDRIAN_INTERNAL_OPENFX_NONCE";
-const VERSION: u16 = 10;
+const VERSION: u16 = 11;
 const POLL: Duration = Duration::from_millis(20);
 const RETIRE: Duration = Duration::from_millis(100);
 const FRAME_TRANSFER_BYTES: usize = 1024 * 1024;
@@ -59,6 +61,7 @@ enum Request {
         interactive_render: bool,
         question_work: bool,
         timing: OpenFxRenderTiming,
+        sampling: mondrian_core::ImageSampling,
         parameters: BTreeMap<String, OpenFxParameterBinding>,
         diagnostic: bool,
     },
@@ -847,8 +850,8 @@ impl OpenFxFilterSession {
     }
 
     /// Render an Output-only Generator without any incoming image storage.
-    /// The caller supplies the actual output sampling; this preserves Rust frame
-    /// metadata and does not reinterpret native timing or project geometry.
+    /// The caller supplies the actual output sampling. Its PAR is the native
+    /// image authority; project geometry remains the immutable owner binding.
     pub fn generate(
         &mut self,
         timing: &OpenFxRenderTiming,
@@ -989,6 +992,7 @@ impl OpenFxFilterSession {
             {
                 return Err(invalid("frame extent differs from the native session"));
             }
+            validate_native_sampling(self.width, frame.sampling)?;
             match (self.context, frame.input) {
                 (OpenFxContext::Filter, Some(input)) => {
                     validate_render_request(timing, parameters, input, &mut || {
@@ -998,9 +1002,6 @@ impl OpenFxFilterSession {
                 (OpenFxContext::Generator, None) => {
                     validate_timing(timing)?;
                     validate_parameters(parameters)?;
-                    if !(f64::from(self.width) * timing.pixel_aspect_ratio).is_finite() {
-                        return Err(invalid("Generator canonical extent is not representable"));
-                    }
                     self.process.check(&mut owner_checkpoint, deadline)
                 }
                 _ => Err(invalid(
@@ -1111,6 +1112,7 @@ impl OpenFxFilterSession {
             interactive_render: gui.is_user_edited(),
             question_work: gui.allows_question(),
             timing: timing.clone(),
+            sampling: frame.sampling,
             parameters: parameters.clone(),
             diagnostic: probe.measure_child(),
         };
@@ -2118,6 +2120,7 @@ fn run_openfx_resident_worker_inner(
                 owner,
                 sequence: received,
                 timing,
+                sampling,
                 parameters,
                 diagnostic,
                 ..
@@ -2155,12 +2158,18 @@ fn run_openfx_resident_worker_inner(
                         input.as_ref().map_or(0, |input| input.len()),
                     );
                     let started = Instant::now();
-                    let mut result =
-                        render_worker_request(context, sequence, timing, parameters, &mut report)?;
+                    let mut result = render_worker_request(
+                        context,
+                        sequence,
+                        timing,
+                        sampling,
+                        parameters,
+                        &mut report,
+                    )?;
                     result.response = report.attach(result.response, started);
                     result
                 } else {
-                    render_worker_request(context, sequence, timing, parameters, &mut ())?
+                    render_worker_request(context, sequence, timing, sampling, parameters, &mut ())?
                 };
                 let completion = pump.shared.complete(result.response)?;
                 pump.shared.wait_acknowledged(completion)?;
@@ -2192,6 +2201,7 @@ fn render_worker_request(
     context: WorkerRenderContext<'_>,
     sequence: u64,
     timing: OpenFxRenderTiming,
+    sampling: mondrian_core::ImageSampling,
     mut parameters: BTreeMap<String, OpenFxParameterBinding>,
     probe: &mut impl ChildProbe,
 ) -> Result<WorkerRenderResult, OpenFxHostError> {
@@ -2208,6 +2218,7 @@ fn render_worker_request(
     } = context;
     let phase = probe.start();
     validate_timing(&timing)?;
+    validate_native_sampling(prepare.width, sampling)?;
     validate_parameters(&parameters)?;
     let mut candidate_curves = BTreeMap::new();
     for (name, binding) in &mut parameters {
@@ -2297,7 +2308,7 @@ fn render_worker_request(
         frame_rate: timing.frame_rate,
         first_frame: timing.first_frame,
         last_frame: timing.last_frame,
-        pixel_aspect_ratio: timing.pixel_aspect_ratio,
+        pixel_aspect_ratio: sampling.sample_aspect_ratio().to_f64(),
     };
 
     probe.finish(OpenFxChildRenderPhase::ParameterArena, phase);
@@ -2790,7 +2801,7 @@ mod tests {
             .expect("explicit owner project geometry"),
         };
         assert!(validate_prepare_envelope(&prepare, "actual nonce").is_ok());
-        for stale in [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, u16::MAX] {
+        for stale in [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, u16::MAX] {
             prepare.version = stale;
             assert!(matches!(
                 validate_prepare_envelope(&prepare, "actual nonce"),
@@ -3272,7 +3283,6 @@ mod output_resource_tests {
             frame_rate: 24.0,
             first_frame: 0.0,
             last_frame: 24.0,
-            pixel_aspect_ratio: 1.0,
         };
         let parameters = BTreeMap::from([(
             "scale".to_owned(),
@@ -3385,7 +3395,6 @@ mod ingress_owner_boundary_tests {
             frame_rate: 24.0,
             first_frame: 0.0,
             last_frame: 24.0,
-            pixel_aspect_ratio: 1.0,
         };
         let parameters = BTreeMap::from([(
             "scale".to_owned(),
@@ -4040,7 +4049,6 @@ mod process_retirement_tests {
                 frame_rate: 24.0,
                 first_frame: 0.0,
                 last_frame: 24.0,
-                pixel_aspect_ratio: 1.0,
             },
             &BTreeMap::new(),
             &input,
@@ -4135,7 +4143,6 @@ mod process_retirement_tests {
             frame_rate: 24.0,
             first_frame: 0.0,
             last_frame: 24.0,
-            pixel_aspect_ratio: 1.0,
         };
         let parameters = BTreeMap::from([(
             "scale".to_owned(),

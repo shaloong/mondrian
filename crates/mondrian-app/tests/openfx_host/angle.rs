@@ -14,7 +14,6 @@ fn timing(frame: f64) -> OpenFxRenderTiming {
         frame_rate: 24.0,
         first_frame: -12.0,
         last_frame: 60.0,
-        pixel_aspect_ratio: 1.0,
     }
 }
 

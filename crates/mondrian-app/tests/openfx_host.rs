@@ -170,7 +170,6 @@ fn product_worker_queries_canonical_sparse_curves_across_seeks() {
             frame_rate: 24.0,
             first_frame: -12.0,
             last_frame: 60.0,
-            pixel_aspect_ratio: 1.0,
         };
         let output = session
             .render(&timing, &bindings, &input, &mut checkpoint(&cancellation))
@@ -317,7 +316,6 @@ fn curve_source_lifecycle(expected_mode: &str) {
         frame_rate: 24.0,
         first_frame: 0.0,
         last_frame: 48.0,
-        pixel_aspect_ratio: 1.0,
     };
     let cancellation = mondrian_core::ExecutionCancellationToken::new();
     let mut session = OpenFxFilterSession::prepare(
@@ -446,7 +444,6 @@ fn qualify_product_compound_query_authority(sampled: bool) {
         frame_rate: 24.0,
         first_frame: 0.0,
         last_frame: 10.0,
-        pixel_aspect_ratio: 1.0,
     };
     let cancellation = mondrian_core::ExecutionCancellationToken::new();
     let mut session = OpenFxFilterSession::prepare(
@@ -542,7 +539,6 @@ fn string_filter_description_preserves_all_native_modes() {
         frame_rate: 24.0,
         first_frame: 0.0,
         last_frame: 10.0,
-        pixel_aspect_ratio: 1.0,
     };
     let mut session = OpenFxFilterSession::prepare(
         product_executable(),
@@ -779,7 +775,6 @@ fn official_basic_filter_renders_authored_float32_pixels_in_child() {
         frame_rate: 24.0,
         first_frame: 0.0,
         last_frame: 100.0,
-        pixel_aspect_ratio: 1.0,
     };
     let output = render_openfx_filter_frame(
         product_executable(),
@@ -835,11 +830,8 @@ fn official_basic_filter_renders_authored_float32_pixels_in_child() {
         ("scaleB".to_owned(), OpenFxParameterValue::Double(1.0)),
         ("scaleA".to_owned(), OpenFxParameterValue::Double(3.0)),
     ]);
-    let component_timing = OpenFxRenderTiming {
-        frame: 42.0,
-        pixel_aspect_ratio: 1.2,
-        ..timing.clone()
-    };
+    let component_input = cpu_contract_image_par(&component_input, 1.2);
+    let component_timing = OpenFxRenderTiming { frame: 42.0, ..timing.clone() };
     let component_output = render_openfx_filter_frame(
         product_executable(),
         &inspection,
@@ -1027,7 +1019,6 @@ fn official_basic_resident_sessions_reuse_workers_and_isolate_frames() {
         frame_rate: 24.0,
         first_frame: 0.0,
         last_frame: 100.0,
-        pixel_aspect_ratio: 1.0,
     };
     let mut input = mondrian_effects::EffectFloatFrame::from_pixels(
         mondrian_effects::EffectFrameExtent::new(2, 3),
@@ -1047,7 +1038,7 @@ fn official_basic_resident_sessions_reuse_workers_and_isolate_frames() {
         (1.0, 1.25, 1.0),
     ] {
         timing.frame = frame;
-        timing.pixel_aspect_ratio = aspect;
+        input = cpu_contract_image_par(&input, aspect);
         let values =
             constant_parameters([("scale".to_owned(), OpenFxParameterValue::Double(gain))]);
         let output = preview
@@ -1161,7 +1152,6 @@ fn resident_worker_cancellation_retires_and_reaps_a_hung_native_render() {
         frame_rate: 24.0,
         first_frame: 0.0,
         last_frame: 10.0,
-        pixel_aspect_ratio: 1.0,
     };
     let input = mondrian_effects::EffectFloatFrame::from_pixels(
         mondrian_effects::EffectFrameExtent::new(1, 1),
@@ -1247,7 +1237,6 @@ fn execution_owner_deadline_interrupts_native_render_without_a_mirror_token() {
         frame_rate: 24.0,
         first_frame: 0.0,
         last_frame: 10.0,
-        pixel_aspect_ratio: 1.0,
     };
     let input = mondrian_effects::EffectFloatFrame::from_pixels(
         mondrian_effects::EffectFrameExtent::new(1, 1),
@@ -1316,7 +1305,6 @@ fn official_basic_resident_transfer_preserves_partial_blocks_and_changed_rasters
         frame_rate: 24.0,
         first_frame: 0.0,
         last_frame: 100.0,
-        pixel_aspect_ratio: 1.0,
     };
     let mut input = mondrian_effects::EffectFloatFrame::from_pixels(
         mondrian_effects::EffectFrameExtent::new(257, 257),
@@ -1974,7 +1962,6 @@ fn integer_filter_preserves_typed_authoring_and_native_pixels() {
         frame_rate: 24.0,
         first_frame: 0.0,
         last_frame: 10.0,
-        pixel_aspect_ratio: 1.0,
     };
     for value in [0, 1, 9] {
         let output = render_openfx_filter_frame(
@@ -2183,7 +2170,6 @@ fn qualify_native_discrete_filter(string_choice: bool) {
         frame_rate: 24.0,
         first_frame: 0.0,
         last_frame: 10.0,
-        pixel_aspect_ratio: 1.0,
     };
     let mut resident = OpenFxFilterSession::prepare(
         product_executable(),
@@ -2531,13 +2517,30 @@ fn cpu_contract_input() -> EffectFloatFrame {
     .expect("owned Float fixture")
 }
 
-fn cpu_contract_timing(par: f64) -> OpenFxRenderTiming {
+fn cpu_contract_sampling(par: f64) -> mondrian_core::ImageSampling {
+    let numerator = (par * 1_000_000.0).round() as u32;
+    let par = SampleAspectRatio::new(numerator, 1_000_000).expect("positive fixture PAR");
+    mondrian_core::ImageSampling::new(par, [Rational::new(1, 1); 2]).unwrap()
+}
+
+fn cpu_contract_image_par(frame: &EffectFloatFrame, par: f64) -> EffectFloatFrame {
+    let sampling = cpu_contract_sampling(par);
+    assert_eq!(sampling.sample_aspect_ratio().to_f64(), par);
+    EffectFloatFrame::from_pixels(
+        frame.extent(),
+        frame.format(),
+        sampling,
+        frame.pixels().to_vec(),
+    )
+    .unwrap()
+}
+
+fn cpu_contract_timing() -> OpenFxRenderTiming {
     OpenFxRenderTiming {
         frame: 0.0,
         frame_rate: 24.0,
         first_frame: 0.0,
         last_frame: 100.0,
-        pixel_aspect_ratio: par,
     }
 }
 
@@ -2581,7 +2584,7 @@ fn qualify_cpu_contract_resident_and_graph(mode: &str, coordinate_output: bool) 
         .iter()
         .find(|parameter| parameter.name == "scale")
         .expect("gain control");
-    let input = cpu_contract_input();
+    let input = cpu_contract_image_par(&cpu_contract_input(), 2.0);
     let cancellation = mondrian_core::ExecutionCancellationToken::new();
     for _ in 0..2 {
         let mut session = OpenFxFilterSession::prepare(
@@ -2611,13 +2614,19 @@ fn qualify_cpu_contract_resident_and_graph(mode: &str, coordinate_output: bool) 
             (42.0, 0.5, 1.5),
             (0.0, 2.0, 0.5),
         ] {
-            let timing = OpenFxRenderTiming { frame, ..cpu_contract_timing(par) };
+            let sampled_input = cpu_contract_image_par(&input, par);
+            let timing = OpenFxRenderTiming { frame, ..cpu_contract_timing() };
             let parameters = constant_parameters([(
                 "scale".to_owned(),
                 OpenFxParameterValue::Double(f64::from(gain)),
             )]);
             let output = session
-                .render(&timing, &parameters, &input, &mut checkpoint(&cancellation))
+                .render(
+                    &timing,
+                    &parameters,
+                    &sampled_input,
+                    &mut checkpoint(&cancellation),
+                )
                 .expect("progressive exact-PAR native output");
             assert_eq!(session.worker_process_id(), worker);
             assert_cpu_contract_pixels(
@@ -2627,17 +2636,28 @@ fn qualify_cpu_contract_resident_and_graph(mode: &str, coordinate_output: bool) 
                 coordinate_output.then_some(par),
             );
         }
-        let invalid = cpu_contract_timing(f64::MAX);
+        let invalid = cpu_contract_timing();
+        let reduced = EffectFloatFrame::from_pixels(
+            input.extent(),
+            input.format(),
+            mondrian_core::ImageSampling::new(
+                input.sampling().sample_aspect_ratio(),
+                [Rational::new(1, 2); 2],
+            )
+            .unwrap(),
+            input.pixels().to_vec(),
+        )
+        .unwrap();
         assert!(matches!(
             session.render(
                 &invalid,
                 &BTreeMap::new(),
-                &input,
+                &reduced,
                 &mut checkpoint(&cancellation)
             ),
-            Err(OpenFxHostError::Invalid(_))
+            Err(OpenFxHostError::UnsupportedImageSampling { .. })
         ));
-        let valid = cpu_contract_timing(2.0);
+        let valid = cpu_contract_timing();
         let parameters =
             constant_parameters([("scale".to_owned(), OpenFxParameterValue::Double(0.5))]);
         let output = session
@@ -3008,7 +3028,7 @@ fn product_worker_reports_none_for_disconnected_optional_clip_unmapped_format() 
     assert!(std::fs::read_dir(&directory).unwrap().next().is_none());
     let inspection = cpu_contract_probe("optional_unmapped");
     assert_eq!(inspection.plugins.len(), 1);
-    let input = cpu_contract_input();
+    let input = cpu_contract_image_par(&cpu_contract_input(), 2.0);
     let original_input = input.clone();
     let mut session = OpenFxFilterSession::prepare(
         product_executable(),
@@ -3028,9 +3048,7 @@ fn product_worker_reports_none_for_disconnected_optional_clip_unmapped_format() 
     .expect("actual native session with an unconnected optional clip");
     let pid = session.worker_process_id();
     let parameters = constant_parameters([("scale".to_owned(), OpenFxParameterValue::Double(0.5))]);
-    let rendered = session.render(&cpu_contract_timing(2.0), &parameters, &input, &mut || {
-        Ok(())
-    });
+    let rendered = session.render(&cpu_contract_timing(), &parameters, &input, &mut || Ok(()));
     // Read the actual resident's checks before asserting render success: a RED
     // must identify the raw metadata mismatch rather than merely native failure.
     let mut bytes = Vec::new();
@@ -3187,7 +3205,7 @@ fn qualify_property_query_counts_resident_and_graph(
     let identifier = "uk.co.thefoundry.BasicGainPlugin";
     let description = describe_openfx_filter(product_executable(), &inspection, identifier)
         .expect("actual Basic descriptor");
-    let input = cpu_contract_input();
+    let input = cpu_contract_image_par(&cpu_contract_input(), 2.0);
     let original_input = input.clone();
     let assert_half_gain = |output: &EffectFloatFrame| {
         assert_eq!(
@@ -3223,7 +3241,7 @@ fn qualify_property_query_counts_resident_and_graph(
     let mut direct_outputs = Vec::new();
     for frame in [0.0, 42.0] {
         let output = direct.render(
-            &OpenFxRenderTiming { frame, ..cpu_contract_timing(2.0) },
+            &OpenFxRenderTiming { frame, ..cpu_contract_timing() },
             &parameters,
             &input,
             &mut || Ok(()),
@@ -3485,7 +3503,7 @@ fn product_worker_refuses_cpu_disabled_instance_before_rendering() {
         product_executable(),
         &inspection,
         "uk.co.thefoundry.BasicGainPlugin",
-        &cpu_contract_timing(1.0),
+        &cpu_contract_timing(),
         &BTreeMap::new(),
         &cpu_contract_input(),
         mondrian_effects::EffectProjectGeometry::new(
@@ -3526,7 +3544,7 @@ fn product_worker_refuses_cpu_disabled_changed_instance_without_stale_output() {
         &mut checkpoint(&cancellation),
     )
     .expect("prepare CPU session");
-    let timing = cpu_contract_timing(1.0);
+    let timing = cpu_contract_timing();
     let initial = constant_parameters([("scale".to_owned(), OpenFxParameterValue::Double(0.5))]);
     let output = session
         .render(&timing, &initial, &input, &mut checkpoint(&cancellation))
@@ -3633,7 +3651,7 @@ fn product_negotiates_native_output_alpha_for_resident_and_compiled_graph() {
     let identifier = "uk.co.thefoundry.BasicGainPlugin";
     let description = describe_openfx_filter(product_executable(), &inspection, identifier)
         .expect("describe negotiated alpha choice");
-    let input = output_alpha_input();
+    let input = cpu_contract_image_par(&output_alpha_input(), 2.0);
     for _ in 0..2 {
         let mut session = OpenFxFilterSession::prepare(
             product_executable(),
@@ -3663,7 +3681,7 @@ fn product_negotiates_native_output_alpha_for_resident_and_compiled_graph() {
             (0.0, 1, 0.75),
             (0.0, 0, 0.5),
         ] {
-            let timing = OpenFxRenderTiming { frame, ..cpu_contract_timing(2.0) };
+            let timing = OpenFxRenderTiming { frame, ..cpu_contract_timing() };
             let parameters = constant_parameters([
                 (
                     "scale".into(),
@@ -3684,7 +3702,7 @@ fn product_negotiates_native_output_alpha_for_resident_and_compiled_graph() {
         raw.pixels_mut()[3][3] = 2.5;
         let output = session
             .render(
-                &cpu_contract_timing(2.0),
+                &cpu_contract_timing(),
                 &constant_parameters([
                     ("scale".into(), OpenFxParameterValue::Double(0.5)),
                     ("alphaMode".into(), OpenFxParameterValue::Choice(0)),
@@ -3799,16 +3817,14 @@ fn product_rejects_unknown_representation_or_nonfinite_native_pixels_without_pub
         ]);
         assert!(
             session
-                .render(&cpu_contract_timing(1.0), &parameters, &input, &mut || Ok(
-                    ()
-                ))
+                .render(&cpu_contract_timing(), &parameters, &input, &mut || Ok(()))
                 .is_err(),
             "invalid or unsupported alpha mode {mode} published an output"
         );
         assert!(
             session
                 .render(
-                    &cpu_contract_timing(1.0),
+                    &cpu_contract_timing(),
                     &constant_parameters([("alphaMode".into(), OpenFxParameterValue::Choice(0)),]),
                     &input,
                     &mut || Ok(())
@@ -3994,7 +4010,6 @@ fn official_basic_production_resident_steady_frame_performance_gate() {
         frame_rate: f64::from(rate_num) / f64::from(rate_den),
         first_frame: 0.0,
         last_frame: f64::from(count + warmup),
-        pixel_aspect_ratio: 1.0,
     };
     let mut durations = Vec::with_capacity(count as usize);
     let mut errors = Vec::new();
@@ -4124,7 +4139,7 @@ fn product_preserves_complete_finite_associated_output_without_retiring_valid_wo
     for mode in [1, 5, 6, 7, 8, 2, 0] {
         let output = session
             .render(
-                &cpu_contract_timing(1.0),
+                &cpu_contract_timing(),
                 &constant_parameters([
                     ("scale".into(), OpenFxParameterValue::Double(1.0)),
                     ("alphaMode".into(), OpenFxParameterValue::Choice(mode)),
@@ -4247,9 +4262,7 @@ fn native_source_reports_actual_association_and_refuses_rebinding_before_dsp() {
         ]);
         let worker = session.worker_process_id();
         let output = session
-            .render(&cpu_contract_timing(1.0), &parameters, &input, &mut || {
-                Ok(())
-            })
+            .render(&cpu_contract_timing(), &parameters, &input, &mut || Ok(()))
             .expect("independent plugin checked Source clip and image association");
         assert_eq!(output.alpha(), expected_alpha);
         assert_eq!(
@@ -4271,7 +4284,7 @@ fn native_source_reports_actual_association_and_refuses_rebinding_before_dsp() {
         .expect("same bytes with a different declaration");
         assert!(matches!(
             session.render(
-                &cpu_contract_timing(1.0),
+                &cpu_contract_timing(),
                 &parameters,
                 &rebound,
                 &mut || Ok(())
@@ -4284,9 +4297,7 @@ fn native_source_reports_actual_association_and_refuses_rebinding_before_dsp() {
             "caller format mismatch is not a plugin fault"
         );
         session
-            .render(&cpu_contract_timing(1.0), &parameters, &input, &mut || {
-                Ok(())
-            })
+            .render(&cpu_contract_timing(), &parameters, &input, &mut || Ok(()))
             .expect("unchanged valid session remains reusable");
         session.shutdown().expect("complete native lifecycle");
     }
@@ -4340,7 +4351,7 @@ fn raw_native_float_survives_disk_cache_nested_over_and_real_opaque_output() {
     .expect("native Float session");
     let raw = native
         .render(
-            &cpu_contract_timing(1.0),
+            &cpu_contract_timing(),
             &constant_parameters([
                 ("scale".into(), OpenFxParameterValue::Double(1.0)),
                 ("alphaMode".into(), OpenFxParameterValue::Choice(8)),
@@ -4555,7 +4566,6 @@ fn product_actual_image_metadata_frames() {
         frame_rate: 24.0,
         first_frame: 0.0,
         last_frame: 100.0,
-        pixel_aspect_ratio: 2.0,
     };
     for (time, pixel) in [
         (0.0, [0.25, -0.5, 1.5, 0.75]),
@@ -4567,7 +4577,7 @@ fn product_actual_image_metadata_frames() {
         let frame = mondrian_effects::EffectFloatFrame::from_pixels(
             mondrian_effects::EffectFrameExtent::new(1, 1),
             format,
-            mondrian_core::ImageSampling::UNIT_SQUARE,
+            cpu_contract_sampling(2.0),
             vec![pixel],
         )
         .expect("actual finite source frame");
@@ -4682,9 +4692,7 @@ fn product_workers_bind_parent_namespace_and_restore_plugin_private_analysis_cor
         .expect("fresh parent lifetime");
         let owner = session.processor_owner();
         let output = session
-            .render(&cpu_contract_timing(1.0), &parameters, &input, &mut || {
-                Ok(())
-            })
+            .render(&cpu_contract_timing(), &parameters, &input, &mut || Ok(()))
             .expect("correct analysis after real process/cache reopen");
         assert_eq!(output.pixels(), [pixel.map(|channel| channel * 2.0)]);
         let record = std::fs::read(&path).expect("actual plugin-private persisted analysis");
@@ -4720,7 +4728,7 @@ fn qualify_product_legacy_render_priority(selected: &str, recoverable: bool) {
     let input = mondrian_effects::EffectFloatFrame::from_pixels(
         mondrian_effects::EffectFrameExtent::new(2, 2),
         format,
-        mondrian_core::ImageSampling::UNIT_SQUARE,
+        cpu_contract_sampling(1.5),
         vec![
             [-0.0, -0.25, 2.0, 0.0],
             [2.0, -4.0, 8.0, f32::MIN_POSITIVE],
@@ -4735,7 +4743,6 @@ fn qualify_product_legacy_render_priority(selected: &str, recoverable: bool) {
         frame_rate: 24.0,
         first_frame: 0.0,
         last_frame: 100.0,
-        pixel_aspect_ratio: 1.5,
     };
     for _ in 0..2 {
         let mut session = OpenFxFilterSession::prepare(
@@ -5081,7 +5088,7 @@ fn native_log_messages_reach_product_tracing_with_exact_supervised_owner() {
             mondrian_effects::EffectColorDomain::SceneLinearRgb,
             mondrian_core::ColorFrameAlpha::StraightCoverage,
         ),
-        mondrian_core::ImageSampling::UNIT_SQUARE,
+        cpu_contract_sampling(2.0),
         vec![[0.25, -0.5, 1.5, 0.25]],
     )
     .expect("complete independent frame");
@@ -5112,7 +5119,6 @@ fn native_log_messages_reach_product_tracing_with_exact_supervised_owner() {
                 frame_rate: 24.0,
                 first_frame: 0.0,
                 last_frame: 100.0,
-                pixel_aspect_ratio: 2.0,
             };
             let output = session
                 .render(&timing, &BTreeMap::new(), &input, &mut || Ok(()))
@@ -5456,12 +5462,12 @@ fn product_worker_obeys_current_source_identity_and_default_render() {
         let input = EffectFloatFrame::from_pixels(
             mondrian_effects::EffectFrameExtent::new(3, 2),
             format,
-            mondrian_core::ImageSampling::UNIT_SQUARE,
+            cpu_contract_sampling(2.0),
             pixels.to_vec(),
         )
         .expect("literal Float32 straight Source");
         let original = input.clone();
-        let timing = OpenFxRenderTiming { frame: phase as f64, ..cpu_contract_timing(2.0) };
+        let timing = OpenFxRenderTiming { frame: phase as f64, ..cpu_contract_timing() };
         let parameters = constant_parameters([(
             "scale".to_owned(),
             OpenFxParameterValue::Double(if phase == 1 { 0.5 } else { 1.0 }),
@@ -5625,7 +5631,7 @@ fn product_worker_preserves_fixed_canvas_subset_and_empty_outputs() {
     let inspection = cpu_contract_probe("fixed_canvas_partial_output");
     assert_eq!(inspection.plugins.len(), 1);
     let identifier = "uk.co.thefoundry.BasicGainPlugin";
-    let input = cpu_contract_input();
+    let input = cpu_contract_image_par(&cpu_contract_input(), 2.0);
     let original_input = input.clone();
     let mut direct = OpenFxFilterSession::prepare(
         product_executable(),
@@ -5647,7 +5653,7 @@ fn product_worker_preserves_fixed_canvas_subset_and_empty_outputs() {
     for phase in 0..3 {
         let timing = OpenFxRenderTiming {
             frame: f64::from(phase as u32),
-            ..cpu_contract_timing(2.0)
+            ..cpu_contract_timing()
         };
         let output = direct
             .render(&timing, &BTreeMap::new(), &input, &mut || Ok(()))

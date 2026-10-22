@@ -218,7 +218,6 @@ mod qualification {
             frame_rate: f64::from(rate_num) / f64::from(rate_den),
             first_frame: 0.0,
             last_frame: f64::from(count + warmup),
-            pixel_aspect_ratio: 1.0,
         };
         let mut durations = Vec::with_capacity(count as usize);
         let mut errors = Vec::new();
@@ -489,7 +488,6 @@ mod qualification {
             frame_rate: f64::from(rate_num) / f64::from(rate_den),
             first_frame: 0.0,
             last_frame: f64::from(count + warmup),
-            pixel_aspect_ratio: 1.0,
         };
         let instrumented = match std::env::var("MONDRIAN_OPENFX_DIAGNOSTIC_PHASES").as_deref() {
             Ok("0") => false,

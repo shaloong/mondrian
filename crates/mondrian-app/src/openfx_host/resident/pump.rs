@@ -842,8 +842,8 @@ mod tests {
                 frame_rate: 24.0,
                 first_frame: 0.0,
                 last_frame: 100.0,
-                pixel_aspect_ratio: 1.0,
             },
+            sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
             parameters: BTreeMap::new(),
             diagnostic: false,
         }
@@ -858,6 +858,7 @@ mod tests {
             "interactive_render",
             "question_work",
             "diagnostic",
+            "sampling",
         ] {
             let mut missing = canonical.clone();
             missing.as_object_mut().expect("request object").remove(field);
@@ -874,7 +875,42 @@ mod tests {
             serde_json::from_value::<Response>(null),
             Ok(Response::GuiClosed { feedback: None, .. })
         ));
-        assert_eq!(VERSION, 10);
+        assert_eq!(VERSION, 11);
+    }
+
+    #[test]
+    fn current_render_wire_has_one_required_checked_sampling_authority() {
+        let value =
+            serde_json::to_value(render(mondrian_core::EffectProcessorOwnerId::new(), 1)).unwrap();
+        for sampling in [
+            serde_json::Value::Null,
+            serde_json::json!({"sample_aspect_ratio":{"numerator":0,"denominator":1},
+                "render_scale":[{"num":1,"den":1},{"num":1,"den":1}]}),
+            serde_json::json!({"sample_aspect_ratio":{"numerator":1,"denominator":1},
+                "render_scale":[{"num":0,"den":1},{"num":1,"den":1}]}),
+        ] {
+            let mut invalid = value.clone();
+            invalid["sampling"] = sampling;
+            assert!(serde_json::from_value::<Request>(invalid).is_err());
+        }
+        let mut old_timing = value;
+        old_timing["timing"]["pixel_aspect_ratio"] = serde_json::json!(2.0);
+        assert!(
+            serde_json::from_value::<Request>(old_timing).is_err(),
+            "no second PAR authority"
+        );
+        let mut packet = packet_owner(MAX_WORKER_REQUEST_BYTES + 4).unwrap();
+        let capacity = packet.capacity();
+        encode_packet(
+            &mut packet,
+            &render(mondrian_core::EffectProcessorOwnerId::new(), 1),
+        )
+        .unwrap();
+        assert_eq!(
+            packet.capacity(),
+            capacity,
+            "required sampling fits the existing charged packet owner"
+        );
     }
 
     #[test]
