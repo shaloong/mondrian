@@ -5020,6 +5020,125 @@ mod tests {
         assert!(diagnostics.uses_legacy_rgba8());
     }
 
+    fn composite_border_fixture(
+        width: u32,
+        height: u32,
+        pixels: Vec<[f32; 4]>,
+        output_width: u32,
+        output_height: u32,
+        transform: [f32; 6],
+    ) -> Vec<[f32; 4]> {
+        let media = CpuColorFrame::working(WorkingRgbaF32Frame {
+            sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
+            alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
+            width,
+            height,
+            data: pixels,
+            color_space: WorkingColorSpace::LinearRec709,
+        });
+        let layer = TimelineCompositeElement::Media(TimelineMediaLayer {
+            frame: &media,
+            opacity: 1.0,
+            blend_mode: BlendMode::Normal,
+            transform,
+            effect_graph: compile_reference_effect_graph(&EffectRenderPlan::default())
+                .expect("identity effect graph"),
+            frame_seed: 0,
+        });
+        let output = composite_timeline_elements_color_frame_with_diagnostics(
+            output_width,
+            output_height,
+            &[layer],
+            TimelineCompositeOptions::default(),
+            test_color_runtime(WorkingColorSpace::LinearRec709),
+            &mut TimelineCompositeScratch::default(),
+            &mut mondrian_effects::EffectProcessorControl::uncancelled(),
+        )
+        .expect("ordinary CPU affine compositor");
+        assert_eq!(output.diagnostics.float_linear_composites, 1);
+        assert!(!output.diagnostics.uses_legacy_rgba8());
+        output.frame.rgba_f32().data.clone()
+    }
+
+    #[test]
+    fn float_compositor_preserves_opaque_source_edges_under_scale_and_f32_affine() {
+        let color = [0.25, 0.5, 1.5, 1.0];
+        let enlarged =
+            composite_border_fixture(1, 1, vec![color], 2, 2, [2.0, 0.0, 0.0, 0.0, 2.0, 0.0]);
+        assert_eq!(
+            enlarged,
+            vec![color; 4],
+            "all four centers are inside the enlarged source"
+        );
+
+        // This actual f32 affine maps the first output center just below the
+        // first source texel center while still inside the physical raster.
+        let rounded_affine = composite_border_fixture(
+            3,
+            5,
+            vec![color; 15],
+            1,
+            1,
+            [
+                f32::from_bits(0x3f80_0001),
+                0.0,
+                0.0,
+                0.0,
+                f32::from_bits(0x3ecc_cccd),
+                0.0,
+            ],
+        );
+        assert_eq!(
+            rounded_affine,
+            vec![color],
+            "interior coverage is independent of a tap crossing zero"
+        );
+    }
+
+    #[test]
+    fn float_compositor_bilinear_edges_preserve_other_axis_without_extending_coverage() {
+        let pixels = vec![
+            [1.0, 0.0, 0.0, 1.0],
+            [0.0, 1.0, 0.0, 1.0],
+            [0.0, 0.0, 1.0, 1.0],
+            [1.0, 1.0, 1.0, 1.0],
+        ];
+        // The translation maps the one output center to the stated physical
+        // source position. Edge extension affects taps, never raster coverage.
+        for (source_center, expected) in [
+            ([0.25, 1.0], [0.5, 0.0, 0.5, 1.0]),
+            ([1.75, 1.0], [0.5, 1.0, 0.5, 1.0]),
+            ([1.0, 0.25], [0.5, 0.5, 0.0, 1.0]),
+            ([1.0, 1.75], [0.5, 0.5, 1.0, 1.0]),
+            ([0.0, 1.0], [0.5, 0.0, 0.5, 1.0]),
+            ([-0.25, 1.0], [0.0; 4]),
+            ([2.0, 1.0], [0.0; 4]),
+            ([1.0, -0.25], [0.0; 4]),
+            ([1.0, 2.0], [0.0; 4]),
+        ] {
+            let output = composite_border_fixture(
+                2,
+                2,
+                pixels.clone(),
+                1,
+                1,
+                [
+                    1.0,
+                    0.0,
+                    0.5 - source_center[0],
+                    0.0,
+                    1.0,
+                    0.5 - source_center[1],
+                ],
+            );
+            assert_eq!(
+                output,
+                vec![expected],
+                "physical source center {source_center:?}"
+            );
+        }
+    }
+
     #[test]
     fn float_linear_compositor_handles_non_identity_transform() {
         let mut scratch = TimelineCompositeScratch::default();
