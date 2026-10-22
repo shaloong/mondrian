@@ -65,7 +65,7 @@ affected App 694 and Export 4 (including two actual FFmpeg controls). The App
 selection and existing exclusions are unchanged. These cover value propagation,
 Unit original-source requests through transitions/lookahead, odd-raster decode,
 effects/masks and sampling refusal; they do not qualify native unequal-PAR
-rendering, GPU interoperability or other platforms.
+Media Preview rendering, GPU interoperability or other platforms.
 
 The shared provider requirement and pre-processing scale admission now pass 352
 ordinary Effects controls and strict checks. Native v11 carries actual sampling;
@@ -78,5 +78,16 @@ correct producer before native execution can be admitted.
 CPU affine composition tests physical raster coverage before converting to texel
 centers, then clamps interpolation taps independently. Two regressions reproduce
 the former lost borders and now pass with the affected Renderer controls. Cache
-identity v5 and private viewer key v3 invalidate those former composite outputs;
+identity v6 and private viewer key v4 invalidate former border, decoded-storage
+precision and YUV alpha outputs;
 the artifact layout stays v3. GPU coverage requires separate device validation.
+Decoded storage and source transfer are independent. Physical FLOAT reaches the
+supported planar-F32 reader or an explicit refusal before integer paths. Linear
+integer RGB uses the existing native-depth reader and float resize; one RGB
+contract constructor retains matrix, range and alpha while deriving data,
+linear or encoded interpretation. YUVA12 preserves alpha; other alpha-bearing
+YUV layouts are explicitly unsupported. The optional RGBA8 decoder declines
+linear and physical-float inputs. Windows default+validation Preview 219 and
+the affected Renderer 207, cache 19, App 694, Export 4 and ordinary OpenFX 114
+controls pass with independent review. These do not qualify the native Media
+Preview chain, GPU, realtime performance or other platforms.
