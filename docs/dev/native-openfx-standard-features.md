@@ -1,6 +1,6 @@
 # OpenFX 标准能力与实际支持矩阵
 
-规范版本审计日期：2026-10-08；2026-10-23 复核 SinglePAR 协商与限定 Windows owned 原生门，
+规范版本审计日期：2026-10-08；2026-10-23 复核 SinglePAR/ReplyDefault 协商与限定 Windows owned 原生门，
 2026-10-20 复核退出观测，2026-10-17 增量验证 Host 属性和参数准入，
 2026-10-16 复核 Message/Progress/Timeline 及通知调用链。范围：实际 native host、Rust
 adapter、Effects 图与产品接入。此文记录可定位的源码能力及限制，**不是编译、
@@ -136,16 +136,20 @@ Unit/Any 的原始源/代理/质量分流、过渡与前瞻一致性，以及奇
 native v11 actual sampling 现通过 Windows owned 采样门。2026-10-23 的真实媒体门
 验证原始 PPM3×5、Clip PAR4/3 经 Unit native 后再合成 Preview2×2/3×2；全部像素、
 双轴 sampling、同一 owner、递增 invocation、作者状态与 consuming cleanup 均通过。
-SinglePAR 协商现通过九个新门及七个受影响 worker 控制：成功的偏好请求不得
-改写已连接 clip 的实际 PAR；零/NaN 与 Source/Output/共同 remap 在 Render 前拒绝，
-同值与 ReplyDefault 合法/NaN 残值保持三帧 PAR1→1.2→1、像素及同一 owner。
-Generator 初始偏好使用实际 Output PAR，project PAR2 独立；断开可选 clip 的
-属性/fetch/Render 正控也通过，但未测试其 PAR 改写。Product 为正常 dev opt1/debug2
-的 f553；固定 f40 integration 客户端的所选 Rust/协议/fixture 路径未变，全部原生
-处理进入当前 worker。不授 parent direct-CABI 或完整客户端重建资格。
-16门均 exact1、stderr0、原180/190/2与 owner 清理通过。旧 baseline 的关闭超时
-仍开放；这些新通过不能证明 F06 根因已修复。原生 OFX 仍为 Uncacheable，限制
-传递至嵌套图/Preview/persistent cache；未来启用复用前必须纳入宿主执行语义身份。
+SinglePAR 九门与七个受影响 worker 控制在当前 SDK 修复后全部回归通过：成功偏好请求
+不得改写 connected clip 的实际 PAR；零/NaN 与 Source/Output/共同 remap 在 Render 前
+拒绝。同值和 ReplyDefault 合法/NaN 残值保持三帧 PAR1→1.2→1、像素及同一 owner。
+Generator 使用实际 Output PAR，project PAR2 独立；断开可选 clip 的属性/fetch/Render
+通过，但未测试其 PAR 改写。`541630cb` 进一步修复 SDK 将 ReplyDefault 当 OK 消费
+outArgs 的根因：调用前已安装宿主默认值，Default 直接保留它们，不新增快照或状态源。
+新增八门验证 writable components/alpha 的 Default/OK 对照：七门完整通过；Default
+Opaque 的三帧 literal、association、sampling 和 owner 断言全部通过，最终原 shutdown
+却返回 DeadlineExceeded，整门仍 FAIL/HOLD。Depth 只验证实际拒写，不声称成功残值。
+当前正常 dev opt1/debug2 Product 与同期 opt0/debug0 integration 已重建并独立复核。
+24项原生门准确为23整门通过、1关闭失败；另有三模块114项普通测试通过。所有原生门
+stderr0、原180/190/2与外层 Job 回收正常；不授 parent direct-CABI、完整 Default 字段、
+Generator 全 Default 或 F06 根因修复资格。原生 OFX 仍为 Uncacheable，限制传递至嵌套图、
+Preview/persistent cache；未来启用复用前必须纳入宿主执行语义身份。
 此资格限固定帧/owned 插件，不授完整 Timeline 编辑/Export、其它插件或完整 Context。
 Unit+Temporal
 源物化明确拒绝；合法 Unit Title crop、作者尺寸 Nested 和 Full accumulator
@@ -238,7 +242,7 @@ NEXT；页脚显示 1.5.1 并不证明所有后续符号已发布。
 | A06 | PurgeCaches，memory-pressure 条件必需 | 未接入，没有 plugin cache 压力/内存错误 retry 请求 | `vendor Instance::purgeCachesAction`; resident `Request` | [Purge](https://github.com/AcademySoftwareFoundation/openfx/blob/OFX_Release_1.5.1/include/ofxCore.h) |
 | A07 | BeginSequenceRender/Render/EndSequenceRender，必需 | 普通 Render 分支实现独立帧：一帧一 begin/end、frameStep=1、scale=1、FieldNone；Render 必须 OK、取过 Output、image handles 完整释放、完整有限 staging、End 成功后 publish；可用的 A13 identity 由宿主复制，不伪造 Render 或 Output fetch | `render.cpp::render`; `resident.rs::render` | [Render actions](https://github.com/AcademySoftwareFoundation/openfx/blob/OFX_Release_1.5.1/include/ofxImageEffect.h) |
 | A08 | 必须顺序 / optional sequential，协商 | Required(1) 明确拒绝；0/optional(2) 按独立帧执行。无长序列 begin/end、连续 state、ordered seek/reset/abort/restart 闭环 | `admitsIndependentFrames`; `render.cpp` | [Thread safety](https://openfx.readthedocs.io/en/main/Reference/ofxThreadSafety.html) |
-| A09 | GetClipPreferences，必需 | 部分验证：Filter 检查 Float/RGBA/真实 Source association 与协商 Output association，Generator 仅实际 Output。SinglePAR 的 connected 默认值来自实际 frame；OK 请求仅允许合法同值 PAR，违规在 Render 前拒绝，ReplyDefault PAR 残值忽略；九门与七回归通过，条件见上文。SDK 对其它 ReplyDefault 偏好字段仍消费残值，尚待独立修复；完整协商未验收。typed alpha/coverage 边界仍见 I05–I07 | `FilterEffectInstance::setCustomOutArgs/mainEntry`; `render.cpp::render`; `FilterClipInstance::getPremult`; `resident.rs::materialize_native_output` | [Clip preferences](https://openfx.readthedocs.io/en/main/Reference/ofxClipPreferences.html) |
+| A09 | GetClipPreferences，必需 | 部分验证：Filter 检查 Float/RGBA/真实 Source association 与协商 Output association，Generator 仅实际 Output。SinglePAR 的 connected 默认值来自实际 frame；OK 请求仅允许合法同值 PAR，违规在 Render 前拒绝，ReplyDefault PAR 残值忽略；九门与七回归通过，条件见上文。SDK 现保留已安装的全部 Default；components/alpha 八门七整门通过，一门功能通过但关闭失败，条件见上文。其它字段及完整协商未验收。typed alpha/coverage 边界仍见 I05–I07 | `FilterEffectInstance::setCustomOutArgs/mainEntry`; `render.cpp::render`; `FilterClipInstance::getPremult`; `resident.rs::materialize_native_output` | [Clip preferences](https://openfx.readthedocs.io/en/main/Reference/ofxClipPreferences.html) |
 | A10 | GetRegionOfDefinition，image-domain 条件必需 | Filter/Generator 均未接入 effect RoD；实际 clip RoD 为 owner canvas，Output 固定 canvas。没有接受 expanded/infinite output 的 evidence | `image_clip.cpp::getRegionOfDefinition`; product render no effect RoD dispatch | [Image actions](https://github.com/AcademySoftwareFoundation/openfx/blob/OFX_Release_1.5.1/include/ofxImageEffect.h) |
 | A11 | GetRegionsOfInterest，ROI 条件必需 | 部分：SDK wrapper 会调用或按非 tiles fallback；结果不用于 source scheduling/alloc。host full-frame/1x 路线 | `render.cpp` map rois；`vendor getRegionOfInterestAction` | [Coordinates](https://openfx.readthedocs.io/en/main/Reference/ofxCoordSystem.html) |
 | A12 | GetFramesNeeded，temporal 条件必需 | 拒绝/未接入：effect 与受支持 Source/Output clip 的 temporal 声明独立检查；未连接 optional 不施加依赖；getImage 只准 supplied current time | `admitsIndependentFrames`; `FilterClipInstance::getImage` | [Frames](https://github.com/AcademySoftwareFoundation/openfx/blob/OFX_Release_1.5.1/include/ofxImageEffect.h) |
