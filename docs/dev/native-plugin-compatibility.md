@@ -108,8 +108,11 @@ replacement. A separate raw App libtest checks rebinding refusal and original-ow
 recovery; it does not execute Product IPC. Both new gates and five affected
 Generator/Basic/capability regressions pass exact1/stderr0 with original180s/190s/2s
 ownership budgets; worker gates use the normal dev Product. Fixed zero offset
-only. Timeline still fills image PAR from project PAR before source composition,
-so unequal source/project SAR and proxy/renderScale remain open. Spatial defaults,
+only. CPU working values and cache now preserve independent PAR and X/Y sampling:
+Effects340, affected Renderer205, cache19, affected App688 and Export3 controls pass;
+Export includes two actual FFmpeg controls. The native adapter still fills image
+PAR from owner timing, so unequal source/project SAR and demand-driven unit-scale
+inputs remain open. Spatial defaults,
 Rectangle, full contexts, GPU, realtime/performance, old exit-root closure and
 other platforms remain unqualified.
 

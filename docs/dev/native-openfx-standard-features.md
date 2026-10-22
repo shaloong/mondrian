@@ -129,9 +129,12 @@ raw 门不执行 Product worker；集成门使用正常 dev Product。
 两新门和 Generator 两门、官方 Basic 两门、capabilities 回归共七门均 exact1、
 stderr0、原180秒/190秒外层/2秒清理通过。Effects334/strict零诊断、Renderer55加
 独立 context1、App281、OFX113、Export2及 validation API 检查通过。
-资格仅限上述 Windows CPU/owned 子集。Timeline 现仍在 raw Source 效果执行前
-丢失独立图像 SAR，由 project PAR 填 image PAR；Direct 正控不关闭这一缺口。
-proxy/Reduced 的 renderScale、空间默认值和 Rectangle 仍未实现或验收。
+资格仅限上述 Windows CPU/owned 子集。后续 CPU 图像值与缓存已携带独立
+PAR/双轴采样率：Effects340、相关 Renderer205、缓存19、相关 App688、Export3
+控制通过；Export 含两个真实 FFmpeg 控制。native adapter 仍从 owner timing
+填 image PAR，真实 unequal-PAR 与配套 Unit-grid 输入需求尚未闭合；Direct
+正控不关闭该缺口。proxy/Reduced 的 native renderScale、空间默认值与 Rectangle
+仍未实现或验收，GPU 与其它平台不在此资格内。
 
 ## 1. 规范版本与证据
 

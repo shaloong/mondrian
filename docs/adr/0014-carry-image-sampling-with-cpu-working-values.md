@@ -4,7 +4,8 @@ status: accepted
 
 # Carry image sampling with CPU working values
 
-Domain contract only; implementation and runtime qualification pending.
+CPU value and cache propagation implemented. Native OpenFX image sampling and
+demand-driven unit-scale materialization remain pending.
 
 ## Problem
 
@@ -58,3 +59,8 @@ test cache mismatches and old-artifact refusal. Exercise real unequal source and
 project PAR, owner reuse and NoImage. Current OpenFX scale1 admission must be
 matched by demand-driven full-source decode; merely rejecting proxy/Reduced at
 the consumer would regress playback. GPU/window/temporal support remains separate.
+
+Windows CPU controls pass: Effects 340, affected Renderer 205, render cache 19,
+affected App 688 and Export 3 (including two actual FFmpeg controls). These cover
+value propagation and sampling mismatch refusal; they do not qualify native
+unequal-PAR rendering, GPU interoperability or other platforms.
