@@ -1736,6 +1736,13 @@ namespace OFX {
           return false;
         }
 
+        // setupClipPreferencesArgs already installed the host defaults.
+        // ReplyDefault leaves them in effect; outArgs may contain residual writes.
+        if(st == kOfxStatReplyDefault) {
+          _clipPrefsDirty = false;
+          return true;
+        }
+
 #       ifdef OFX_DEBUG_ACTIONS
           std::cout << ": ";
 #       endif
