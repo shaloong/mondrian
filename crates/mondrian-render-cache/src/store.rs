@@ -326,6 +326,7 @@ mod tests {
         TimelineRenderCacheFrame::new(
             TimelineRenderCacheIdentity::from_digest([identity_byte; 32]),
             WorkingRgbaF32Frame {
+                sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
                 width: 8,
                 height: 8,
                 data: vec![[value; 4]; 64],

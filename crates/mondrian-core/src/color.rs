@@ -566,6 +566,8 @@ pub struct FfmpegColorTags {
 /// OCIO processor and is never inferred from the working-space primaries.
 #[derive(Debug, Clone, PartialEq)]
 pub struct WorkingRgbaF32Frame {
+    /// Sample shape and current sampling rates, independent of placement and crop.
+    pub sampling: crate::ImageSampling,
     /// Exact RGB association and numeric alpha domain of this complete value.
     pub alpha: crate::ColorFrameAlpha,
     /// Frame width in pixels.

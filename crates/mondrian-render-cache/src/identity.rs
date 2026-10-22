@@ -1,4 +1,4 @@
-use mondrian_core::{ColorFrameAlphaFormats, ResolvedVisualFrameIdentity};
+use mondrian_core::{ColorFrameAlphaFormats, ImageSampling, ResolvedVisualFrameIdentity};
 use sha2::{Digest, Sha256};
 use std::{
     fmt,
@@ -32,6 +32,7 @@ impl TimelineRenderCacheFormat {
 pub struct TimelineRenderCacheIdentity {
     digest: [u8; 32],
     expected_extent: Option<(u32, u32)>,
+    expected_sampling: Option<ImageSampling>,
     alpha_admission: ColorFrameAlphaFormats,
 }
 
@@ -40,6 +41,7 @@ impl TimelineRenderCacheIdentity {
         Self {
             digest,
             expected_extent: None,
+            expected_sampling: None,
             alpha_admission: ColorFrameAlphaFormats::ALL,
         }
     }
@@ -51,13 +53,15 @@ impl TimelineRenderCacheIdentity {
         height: u32,
         format: TimelineRenderCacheFormat,
         alpha_admission: ColorFrameAlphaFormats,
+        sampling: ImageSampling,
     ) -> Self {
         let mut hasher = Sha256::new();
-        hasher.update(b"mondrian.timeline-render-cache.identity.v3");
+        hasher.update(b"mondrian.timeline-render-cache.identity.v4");
         field(&mut hasher, b"resolved-visual", &visual.digest());
         field(&mut hasher, b"width", &width.to_le_bytes());
         field(&mut hasher, b"height", &height.to_le_bytes());
         field(&mut hasher, b"format", &[format.code()]);
+        field(&mut hasher, b"sampling", &sampling_bytes(sampling));
         field(
             &mut hasher,
             b"alpha-admission",
@@ -66,6 +70,7 @@ impl TimelineRenderCacheIdentity {
         Self {
             digest: hasher.finalize().into(),
             expected_extent: Some((width, height)),
+            expected_sampling: Some(sampling),
             alpha_admission,
         }
     }
@@ -77,6 +82,10 @@ impl TimelineRenderCacheIdentity {
 
     pub(crate) const fn expected_extent(self) -> Option<(u32, u32)> {
         self.expected_extent
+    }
+
+    pub(crate) const fn expected_sampling(self) -> Option<ImageSampling> {
+        self.expected_sampling
     }
 
     /// Complete actual-association admission bound into the semantic signature.
@@ -93,6 +102,20 @@ impl TimelineRenderCacheIdentity {
         }
         output
     }
+}
+
+// Fixed-width canonical representation shared by the identity and artifact.
+pub(crate) fn sampling_bytes(sampling: ImageSampling) -> [u8; 40] {
+    let mut bytes = [0; 40];
+    let par = sampling.sample_aspect_ratio();
+    bytes[0..4].copy_from_slice(&par.numerator().to_le_bytes());
+    bytes[4..8].copy_from_slice(&par.denominator().to_le_bytes());
+    for (axis, scale) in sampling.render_scale().into_iter().enumerate() {
+        let start = 8 + axis * 16;
+        bytes[start..start + 8].copy_from_slice(&scale.num.to_le_bytes());
+        bytes[start + 8..start + 16].copy_from_slice(&scale.den.to_le_bytes());
+    }
+    bytes
 }
 
 impl PartialEq for TimelineRenderCacheIdentity {
@@ -136,6 +159,7 @@ mod tests {
             2160,
             TimelineRenderCacheFormat::LosslessRgba32FloatZstd,
             ColorFrameAlphaFormats::only(mondrian_core::ColorFrameAlpha::StraightCoverage),
+            ImageSampling::UNIT_SQUARE,
         )
     }
 
@@ -146,11 +170,49 @@ mod tests {
     }
 
     #[test]
+    fn sampling_shape_and_both_rates_are_identity() {
+        let materialization =
+            mondrian_core::ResolvedVisualNodeMaterializationIdentity::from_canonical_bytes(
+                b"sampling",
+            );
+        let visual = ResolvedVisualFrameIdentity::from_materialization(materialization);
+        let key = |par, scales| {
+            TimelineRenderCacheIdentity::for_resolved_visual(
+                visual,
+                2,
+                1,
+                TimelineRenderCacheFormat::LosslessRgba32FloatZstd,
+                ColorFrameAlphaFormats::ALL,
+                ImageSampling::new(par, scales).expect("sampling"),
+            )
+        };
+        let unit = [mondrian_core::Rational::new(1, 1); 2];
+        let square = mondrian_core::SampleAspectRatio::SQUARE;
+        let baseline = key(square, unit);
+        assert_ne!(
+            baseline,
+            key(mondrian_core::SampleAspectRatio::new(4, 3).unwrap(), unit)
+        );
+        assert_ne!(
+            baseline,
+            key(square, [mondrian_core::Rational::new(1, 2), unit[1]])
+        );
+        assert_ne!(
+            baseline,
+            key(square, [unit[0], mondrian_core::Rational::new(1, 2)])
+        );
+        assert_eq!(
+            baseline,
+            key(square, [mondrian_core::Rational::new(2, 2); 2])
+        );
+    }
+
+    #[test]
     fn hexadecimal_identity_is_complete() {
         let hex = identity(b"frame-10", 3840).hex();
         assert_eq!(
             hex,
-            "4ac3cedc2e9e815a4de8b2c8e7d8b27770302ffb0511e9ea091c945ccb384e3d"
+            "cfa4caa273b08997b9a96bcb02f310abfa3fec7ff282da14b3304cfbc652bdb0"
         );
         assert_eq!(hex.len(), 64);
         assert!(hex.bytes().all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase()));

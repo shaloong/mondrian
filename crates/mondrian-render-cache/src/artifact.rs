@@ -1,13 +1,14 @@
 use crate::{TimelineRenderCacheFormat, TimelineRenderCacheIdentity};
 use mondrian_core::{
-    ColorFrameAlpha, ColorFrameAlphaFormats, WorkingColorSpace, WorkingRgbaF32Frame,
+    ColorFrameAlpha, ColorFrameAlphaFormats, ImageSampling, Rational, SampleAspectRatio,
+    WorkingColorSpace, WorkingRgbaF32Frame,
 };
 use sha2::{Digest, Sha256};
 use std::io::{Cursor, Read};
 
-const MAGIC: &[u8; 8] = b"MNDRC002";
-const SCHEMA_VERSION: u16 = 2;
-const HEADER_BYTES: usize = 101;
+const MAGIC: &[u8; 8] = b"MNDRC003";
+const SCHEMA_VERSION: u16 = 3;
+const HEADER_BYTES: usize = 141;
 const FLOATS_PER_PIXEL: u64 = 4;
 const BYTES_PER_FLOAT: u64 = 4;
 
@@ -24,6 +25,14 @@ impl TimelineRenderCacheFrame {
         identity: TimelineRenderCacheIdentity,
         frame: WorkingRgbaF32Frame,
     ) -> Result<Self, TimelineRenderCacheFrameValidationError> {
+        if let Some(expected) = identity.expected_sampling()
+            && frame.sampling != expected
+        {
+            return Err(TimelineRenderCacheFrameValidationError::IdentitySampling {
+                expected,
+                actual: frame.sampling,
+            });
+        }
         if let Some((expected_width, expected_height)) = identity.expected_extent()
             && (frame.width != expected_width || frame.height != expected_height)
         {
@@ -83,6 +92,14 @@ impl TimelineRenderCacheFrame {
 /// Invalid working-frame shape supplied by a cache producer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum TimelineRenderCacheFrameValidationError {
+    /// Payload sampling differs from the immutable cache envelope.
+    #[error("Timeline render-cache sampling {actual:?} differs from identity {expected:?}")]
+    IdentitySampling {
+        /// Sampling bound into the lookup identity.
+        expected: ImageSampling,
+        /// Sampling declared by the producer.
+        actual: ImageSampling,
+    },
     /// The complete frame is outside the signature's exact alpha admission.
     #[error("Timeline render-cache alpha {actual:?} is not admitted by {admitted:?}")]
     IdentityAlpha {
@@ -186,6 +203,7 @@ pub(crate) fn encode_artifact(
         frame.width,
         frame.height,
         frame.color_space,
+        frame.sampling,
         &raw,
     );
     let compressed = zstd::stream::encode_all(Cursor::new(raw), 1)?;
@@ -204,6 +222,7 @@ pub(crate) fn encode_artifact(
     bytes.push(working_color_space_code(frame.color_space));
     bytes.extend_from_slice(&frame.width.to_le_bytes());
     bytes.extend_from_slice(&frame.height.to_le_bytes());
+    bytes.extend_from_slice(&crate::identity::sampling_bytes(frame.sampling));
     bytes.extend_from_slice(&decoded_bytes.to_le_bytes());
     bytes.extend_from_slice(&compressed_len.to_le_bytes());
     bytes.extend_from_slice(&cached.identity().digest());
@@ -258,6 +277,16 @@ pub(crate) fn decode_artifact(
     }
     let width = read_u32(&mut cursor)?;
     let height = read_u32(&mut cursor)?;
+    let sampling = read_sampling(&mut cursor)?;
+    if let Some(expected) = requested.expected_sampling()
+        && sampling != expected
+    {
+        return Err(TimelineRenderCacheFrameValidationError::IdentitySampling {
+            expected,
+            actual: sampling,
+        }
+        .into());
+    }
     let declared_decoded_len = read_u64(&mut cursor)?;
     let compressed_len = read_u64(&mut cursor)?;
     let mut identity = [0_u8; 32];
@@ -295,7 +324,7 @@ pub(crate) fn decode_artifact(
             actual: actual_decoded_len,
         });
     }
-    let actual_checksum = artifact_checksum(alpha, width, height, color_space, &raw);
+    let actual_checksum = artifact_checksum(alpha, width, height, color_space, sampling, &raw);
     if actual_checksum != expected_checksum {
         return Err(TimelineRenderCacheArtifactError::ChecksumMismatch);
     }
@@ -318,7 +347,7 @@ pub(crate) fn decode_artifact(
     }
     TimelineRenderCacheFrame::new(
         requested,
-        WorkingRgbaF32Frame { alpha, width, height, data, color_space },
+        WorkingRgbaF32Frame { alpha, width, height, data, color_space, sampling },
     )
     .map_err(Into::into)
 }
@@ -328,13 +357,15 @@ fn artifact_checksum(
     width: u32,
     height: u32,
     color_space: WorkingColorSpace,
+    sampling: ImageSampling,
     raw: &[u8],
 ) -> [u8; 32] {
     let mut hash = Sha256::new();
-    hash.update(b"mondrian.render-cache.working-frame.v2");
+    hash.update(b"mondrian.render-cache.working-frame.v3");
     hash.update([alpha.identity_code(), working_color_space_code(color_space)]);
     hash.update(width.to_le_bytes());
     hash.update(height.to_le_bytes());
+    hash.update(crate::identity::sampling_bytes(sampling));
     hash.update(raw);
     hash.finalize().into()
 }
@@ -387,6 +418,24 @@ fn read_u64(cursor: &mut Cursor<&[u8]>) -> Result<u64, std::io::Error> {
     Ok(u64::from_le_bytes(bytes))
 }
 
+fn read_sampling(
+    cursor: &mut Cursor<&[u8]>,
+) -> Result<ImageSampling, TimelineRenderCacheArtifactError> {
+    let par = SampleAspectRatio::new(read_u32(cursor)?, read_u32(cursor)?).ok_or(
+        TimelineRenderCacheArtifactError::InvalidHeader("sample aspect ratio"),
+    )?;
+    let mut scales = [Rational::new(1, 1); 2];
+    for scale in &mut scales {
+        let mut bytes = [0; 8];
+        cursor.read_exact(&mut bytes)?;
+        let numerator = i64::from_le_bytes(bytes);
+        cursor.read_exact(&mut bytes)?;
+        *scale = Rational::new(numerator, i64::from_le_bytes(bytes));
+    }
+    ImageSampling::new(par, scales)
+        .map_err(|_| TimelineRenderCacheArtifactError::InvalidHeader("render scale"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -395,6 +444,7 @@ mod tests {
         TimelineRenderCacheFrame::new(
             TimelineRenderCacheIdentity::from_digest([7; 32]),
             WorkingRgbaF32Frame {
+                sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
                 alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
                 width: 2,
                 height: 1,
@@ -419,6 +469,98 @@ mod tests {
         for (actual, expected) in decoded.frame().data.iter().zip(&frame.frame().data) {
             assert_eq!(actual.map(f32::to_bits), expected.map(f32::to_bits));
         }
+    }
+
+    #[test]
+    fn sampling_roundtrips_and_is_bound_to_publication_lookup_and_checksum() {
+        let sampling = ImageSampling::new(
+            SampleAspectRatio::new(4, 3).unwrap(),
+            [Rational::new(960, 1921), Rational::new(540, 1081)],
+        )
+        .unwrap();
+        let visual = mondrian_core::ResolvedVisualFrameIdentity::from_materialization(
+            mondrian_core::ResolvedVisualNodeMaterializationIdentity::from_canonical_bytes(
+                b"sampling-contract",
+            ),
+        );
+        let identity = TimelineRenderCacheIdentity::for_resolved_visual(
+            visual,
+            2,
+            1,
+            TimelineRenderCacheFormat::LosslessRgba32FloatZstd,
+            ColorFrameAlphaFormats::ALL,
+            sampling,
+        );
+        let mut pixels = cached_frame().into_frame();
+        assert!(matches!(
+            TimelineRenderCacheFrame::new(identity, pixels.clone()),
+            Err(TimelineRenderCacheFrameValidationError::IdentitySampling { .. })
+        ));
+        pixels.sampling = sampling;
+        let frame = TimelineRenderCacheFrame::new(identity, pixels).expect("matching sampling");
+        let bytes = encode_artifact(&frame, 1_048_576).unwrap();
+        let restored =
+            decode_artifact(identity, WorkingColorSpace::LinearRec709, &bytes, 1_048_576).unwrap();
+        assert_eq!(restored.frame().sampling, sampling);
+        assert_eq!(restored.frame(), frame.frame());
+
+        // Change a valid PAR in the header, preserving the lookup digest and pixels.
+        let mut tampered = bytes.clone();
+        tampered[21..25].copy_from_slice(&5_u32.to_le_bytes());
+        assert!(matches!(
+            decode_artifact(
+                identity,
+                WorkingColorSpace::LinearRec709,
+                &tampered,
+                1_048_576
+            ),
+            Err(TimelineRenderCacheArtifactError::Frame(
+                TimelineRenderCacheFrameValidationError::IdentitySampling { .. }
+            ))
+        ));
+        // The private disk index has only the digest; checksum validation still protects metadata.
+        assert!(matches!(
+            decode_artifact(
+                TimelineRenderCacheIdentity::from_digest(identity.digest()),
+                WorkingColorSpace::LinearRec709,
+                &tampered,
+                1_048_576
+            ),
+            Err(TimelineRenderCacheArtifactError::ChecksumMismatch)
+        ));
+        let mut invalid = bytes.clone();
+        invalid[25..29].fill(0);
+        assert!(matches!(
+            decode_artifact(
+                identity,
+                WorkingColorSpace::LinearRec709,
+                &invalid,
+                1_048_576
+            ),
+            Err(TimelineRenderCacheArtifactError::InvalidHeader(
+                "sample aspect ratio"
+            ))
+        ));
+        let mut invalid = bytes.clone();
+        invalid[29..37].copy_from_slice(&(-1_i64).to_le_bytes());
+        assert!(matches!(
+            decode_artifact(
+                identity,
+                WorkingColorSpace::LinearRec709,
+                &invalid,
+                1_048_576
+            ),
+            Err(TimelineRenderCacheArtifactError::InvalidHeader(
+                "render scale"
+            ))
+        ));
+        let mut old = bytes;
+        old[..8].copy_from_slice(b"MNDRC002");
+        old[8..10].copy_from_slice(&2_u16.to_le_bytes());
+        assert!(matches!(
+            decode_artifact(identity, WorkingColorSpace::LinearRec709, &old, 1_048_576),
+            Err(TimelineRenderCacheArtifactError::InvalidHeader(_))
+        ));
     }
 
     #[test]
@@ -478,11 +620,13 @@ mod tests {
             1,
             TimelineRenderCacheFormat::LosslessRgba32FloatZstd,
             ColorFrameAlphaFormats::only(ColorFrameAlpha::StraightCoverage),
+            ImageSampling::UNIT_SQUARE,
         );
         assert!(matches!(
             TimelineRenderCacheFrame::new(
                 identity,
                 WorkingRgbaF32Frame {
+                    sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
                     alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
                     width: 1,
                     height: 2,
@@ -531,10 +675,12 @@ mod tests {
                 1,
                 TimelineRenderCacheFormat::LosslessRgba32FloatZstd,
                 ColorFrameAlphaFormats::ALL,
+                ImageSampling::UNIT_SQUARE,
             );
             let frame = TimelineRenderCacheFrame::new(
                 identity,
                 WorkingRgbaF32Frame {
+                    sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
                     alpha,
                     width: 2,
                     height: 1,
@@ -592,6 +738,7 @@ mod tests {
                 TimelineRenderCacheFrame::new(
                     identity,
                     WorkingRgbaF32Frame {
+                        sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
                         width: 1,
                         height: 1,
                         alpha,
@@ -612,11 +759,13 @@ mod tests {
             1,
             TimelineRenderCacheFormat::LosslessRgba32FloatZstd,
             ColorFrameAlphaFormats::only(ColorFrameAlpha::StraightCoverage),
+            ImageSampling::UNIT_SQUARE,
         );
         assert!(matches!(
             TimelineRenderCacheFrame::new(
                 identity,
                 WorkingRgbaF32Frame {
+                    sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
                     width: 1,
                     height: 1,
                     alpha: ColorFrameAlpha::PremultipliedFloat,
