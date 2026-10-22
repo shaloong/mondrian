@@ -641,10 +641,10 @@ impl AudioRenderSession {
 
     /// Reset mutable execution history and enter one fresh continuity epoch.
     pub fn enter_state(&mut self, entry: AudioStateEntry) -> Result<(), AudioExecutionError> {
-        self.validate_vst3_note_initial_entry(entry)?;
+        self.validate_vst3_note_entry(entry)?;
         self.validate_note_entry_context(entry, false)?;
         self.processor_host.set_native_entry_context(None, self.native_owner_identity());
-        self.preflight_native_control()?;
+        self.preflight_native_control(true)?;
         self.enter_state_admitted(entry, None)
     }
 
@@ -669,39 +669,67 @@ impl AudioRenderSession {
         entry: AudioStateEntry,
         cancellation: Option<&ExecutionCancellationToken>,
     ) -> Result<(), AudioExecutionError> {
-        self.validate_state_entry(entry)?;
-        self.validate_vst3_note_initial_entry(entry)?;
-        self.processor_host.validate_note_entry(entry)?;
-        // State entry can reset several delay/processor instances before one
-        // later instance fails. Consume and poison the new epoch first so a
-        // partially reset Session can never resume either old or new history.
-        self.processor_host.revoke_native_bindings_for_entry();
-        self.continuity = SessionContinuity::Poisoned { epoch: entry.epoch };
-        for delay in self
-            .contribution_delay_lines
-            .iter_mut()
-            .chain(self.route_delay_lines.iter_mut())
-            .chain(self.sidechain_delay_lines.iter_mut())
-            .chain(self.processor_delay_lines.iter_mut())
-        {
-            delay.reset();
-        }
-        self.processor_host
-            .enter_state(&self.plan.schedule.processors, entry, cancellation)?;
-        self.continuity = SessionContinuity::Active {
-            epoch: entry.epoch,
-            next_public_sample: entry.start_sample,
-            next_execution_sample: entry.start_sample,
-            alignment_primed: self.public_output_lookahead_frames() == 0,
-        };
-        Ok(())
+        let result = (|| {
+            self.validate_state_entry(entry)?;
+            self.validate_vst3_note_entry(entry)?;
+            self.processor_host.validate_note_entry(entry)?;
+            // Runtime may already have revoked all tree bindings. Once entry
+            // is admitted, any later context/Bind failure consumes this epoch.
+            self.continuity = SessionContinuity::Poisoned { epoch: entry.epoch };
+            self.processor_host.arm_current_note_reentry(
+                self.plan.program(),
+                entry,
+                cancellation,
+            )?;
+            // State entry can reset several delay/processor instances before one
+            // later instance fails. Consume and poison the new epoch first so a
+            // partially reset Session can never resume either old or new history.
+            self.processor_host.revoke_native_bindings_for_entry();
+            for delay in self
+                .contribution_delay_lines
+                .iter_mut()
+                .chain(self.route_delay_lines.iter_mut())
+                .chain(self.sidechain_delay_lines.iter_mut())
+                .chain(self.processor_delay_lines.iter_mut())
+            {
+                delay.reset();
+            }
+            self.processor_host.enter_state(
+                self.plan.program(),
+                &self.plan.schedule.processors,
+                entry,
+                cancellation,
+            )?;
+            self.processor_host.ensure_note_entry_permits_consumed()?;
+            self.continuity = SessionContinuity::Active {
+                epoch: entry.epoch,
+                next_public_sample: entry.start_sample,
+                next_execution_sample: entry.start_sample,
+                alignment_primed: self.public_output_lookahead_frames() == 0,
+            };
+            Ok(())
+        })();
+        self.processor_host.clear_note_entry_permits();
+        result
     }
 
-    pub(crate) fn validate_vst3_note_initial_entry(
+    pub(crate) fn poison_note_entry(&mut self, entry: AudioStateEntry) {
+        if !self.plan.schedule.notes.is_empty() {
+            self.continuity = SessionContinuity::Poisoned { epoch: entry.epoch };
+            self.processor_host.clear_note_entry_permits();
+        }
+    }
+
+    pub(crate) fn validate_vst3_note_entry(
         &self,
         entry: AudioStateEntry,
     ) -> Result<(), AudioExecutionError> {
-        self.processor_host.validate_vst3_note_initial_entry(self.plan.program(), entry)
+        if !self.plan.schedule.notes.is_empty()
+            && matches!(self.continuity, SessionContinuity::Poisoned { .. })
+        {
+            return Err(crate::AudioProcessorHostError::PoisonedInstance.into());
+        }
+        self.processor_host.validate_vst3_note_entry(self.plan.program(), entry)
     }
 
     pub(crate) fn validate_note_entry_context(
@@ -719,6 +747,25 @@ impl AudioRenderSession {
     ) {
         let local = self.native_owner_identity();
         self.processor_host.set_native_entry_context(context, local);
+    }
+
+    pub(crate) fn arm_note_reentry(
+        &mut self,
+        entry: AudioStateEntry,
+        context: Option<&crate::native_runtime_owner::NativeStateEntryBindingContext>,
+        cancellation: &ExecutionCancellationToken,
+    ) -> Result<(), AudioExecutionError> {
+        let context = context.cloned().map(|context| (context, self.native_owner_identity()));
+        let result = self.processor_host.arm_note_reentry(
+            self.plan.program(),
+            entry,
+            context.as_ref(),
+            Some(cancellation),
+        );
+        if result.is_err() {
+            self.processor_host.clear_note_entry_permits();
+        }
+        result
     }
 
     pub(crate) fn revoke_native_bindings_for_entry(&mut self) {
@@ -855,8 +902,14 @@ impl AudioRenderSession {
             public_output_lookahead_frames: self.public_output_lookahead_frames(),
             state: crate::AudioSessionCursorState::Active {
                 epoch,
-                next_public_sample: mondrian_core::AudioSamplePosition::new(next_public_sample, sample_rate),
-                next_execution_sample: mondrian_core::AudioSamplePosition::new(next_execution_sample, sample_rate),
+                next_public_sample: mondrian_core::AudioSamplePosition::new(
+                    next_public_sample,
+                    sample_rate,
+                ),
+                next_execution_sample: mondrian_core::AudioSamplePosition::new(
+                    next_execution_sample,
+                    sample_rate,
+                ),
                 alignment_primed: true,
             },
         })
@@ -867,7 +920,10 @@ impl AudioRenderSession {
         next: crate::AudioSessionCursorIdentity,
         serial: std::num::NonZeroU64,
         cancellation: &mondrian_core::ExecutionCancellationToken,
-    ) -> Result<crate::processor_host::host_output_fader::PreparedHostFaderBindings, crate::NativeAudioAuthorAdmissionError> {
+    ) -> Result<
+        crate::processor_host::host_output_fader::PreparedHostFaderBindings,
+        crate::NativeAudioAuthorAdmissionError,
+    > {
         self.processor_host.prepare_host_fader_bindings(
             self.native_owner_identity(), next, serial, self.plan.program(), &self.plan.schedule, cancellation,
         )
@@ -1424,11 +1480,14 @@ impl AudioRenderSession {
         destination: &mut [f32],
     ) -> Result<(), AudioExecutionError> {
         self.reject_empty_note_request(request)?;
-        self.preflight_native_control()?;
+        self.preflight_native_control(false)?;
         self.render_into_admitted(source, request, destination, None)
     }
 
-    pub(crate) fn preflight_native_control(&mut self) -> Result<(), AudioExecutionError> {
+    pub(crate) fn preflight_native_control(
+        &mut self,
+        entering: bool,
+    ) -> Result<(), AudioExecutionError> {
         // The exact old Session remains blocked after child request flags are
         // consumed. Only real replacement installs a new schedule/PDC owner.
         if let Some(ticket) = self.pending_reprepare_ticket {
@@ -1440,7 +1499,10 @@ impl AudioRenderSession {
         if !self.requires_state_entry() && self.processor_host.has_failed_instance() {
             return Err(crate::AudioProcessorHostError::PoisonedInstance.into());
         }
-        if let Some((occurrence, request)) = self.processor_host.preflight_native_control()? {
+        if let Some((occurrence, request)) = self
+            .processor_host
+            .preflight_native_control(entering.then_some(self.plan.program()))?
+        {
             let continuity_epoch = match self.continuity {
                 SessionContinuity::Unentered => None,
                 SessionContinuity::Active { epoch, .. } | SessionContinuity::Poisoned { epoch } => {

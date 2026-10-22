@@ -704,10 +704,13 @@ fn installed_vst3_note_worker_failures_do_not_replay_or_rebuild() {
                     if detail == "audio processor block execution failed: VST3 processing failed: Plugin process() failed: 0x1"
             ));
         } else {
+            // This direct factory owner never performed Bind. Repeated entry
+            // cannot replace an unauthorised producer; -17 is a legal signal
+            // coordinate, not a canonical public-origin refusal.
             let error = subject.processor.enter_state(-17).unwrap_err();
             assert!(
                 matches!(error, AudioProcessorHostError::WorkerFailed { operation: "state entry", detail }
-                if detail == "audio processor state entry failed: VST3 Note input supports only initial state entry")
+                if detail == "audio processor state entry failed: VST3 Note reentry requires its current bound producer")
             );
         }
         assert_eq!(failed.main, original);

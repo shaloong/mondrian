@@ -1993,10 +1993,10 @@ impl AudioProgramRuntime {
         } else if let Some(context) = &self.native_installation.entry_context {
             context.validate(Some(cancellation))?;
         }
-        // A VST Note producer is initial-entry only. Reject before any native
-        // poll, Source/binding revocation, delay reset or ledger mutation.
-        self.session.validate_vst3_note_initial_entry(entry)?;
-        self.preflight_native_control()?;
+        // Unsupported Note entry must refuse before native observation or revoke.
+        self.session.validate_vst3_note_entry(entry)?;
+        self.session.validate_state_entry(entry)?;
+        self.preflight_native_control(true)?;
         self.enter_state_admitted(entry, cancellation)
     }
 
@@ -2025,6 +2025,7 @@ impl AudioProgramRuntime {
         }
         // Unsupported score entry must retain every existing installed owner.
         self.session.validate_note_entry_context(entry, context.is_some())?;
+        self.session.arm_note_reentry(entry, context.as_ref(), cancellation)?;
         self.revoke_native_bindings_for_entry_recursively();
         self.set_native_entry_context_recursively(context.clone());
         let result = self
@@ -2042,6 +2043,7 @@ impl AudioProgramRuntime {
         if let Err(error) = result {
             // Accepted partial Bind acknowledgements are never published as a
             // mixed ready prefix when Source/cancellation changed mid-entry.
+            self.session.poison_note_entry(entry);
             self.revoke_native_bindings_recursively();
             return Err(error);
         }
@@ -2133,7 +2135,7 @@ impl AudioProgramRuntime {
         }
         self.session.reject_empty_note_request(request)?;
         self.reject_nested_note_execution()?;
-        self.preflight_native_control()?;
+        self.preflight_native_control(false)?;
         self.session.preflight_note_window(request)
     }
 
@@ -2152,14 +2154,14 @@ impl AudioProgramRuntime {
         Ok(())
     }
 
-    fn preflight_native_control(&mut self) -> Result<(), AudioExecutionError> {
+    fn preflight_native_control(&mut self, entering: bool) -> Result<(), AudioExecutionError> {
         if let Some(hold) = self.native_scope_control_hold() {
             return Err(AudioExecutionError::NativeAuthorPending(Box::new(hold)));
         }
-        self.session.preflight_native_control()?;
+        self.session.preflight_native_control(entering)?;
         for source in self.sources.entries.values_mut() {
             if let RuntimeSource::Nested(nested) = source {
-                nested.runtime.preflight_native_control()?;
+                nested.runtime.preflight_native_control(entering)?;
             }
         }
         Ok(())

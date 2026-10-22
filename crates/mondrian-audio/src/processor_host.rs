@@ -830,6 +830,7 @@ impl PreparedProcessorHost {
     }
 
     pub(crate) fn revoke_native_bindings(&mut self) {
+        self.clear_note_entry_permits();
         for instance in &mut self.instances {
             instance.native_editor_attachment = None;
             instance.native_editor_detached = None;
@@ -842,6 +843,8 @@ impl PreparedProcessorHost {
         root: crate::AudioSessionCursorIdentity,
         local: crate::AudioSessionCursorIdentity,
     ) -> Result<bool, crate::AudioNativeOwnerError> {
+        // Observation/publication rebind cannot carry a lifecycle transaction.
+        notes::clear_pending_entry(instance);
         let Some(object) = isolate_adapter_call("native object observation", || {
             instance.processor.native_audio_object_observation()
         })?
@@ -1592,6 +1595,7 @@ impl PreparedProcessorHost {
 
     pub(crate) fn preflight_native_control(
         &mut self,
+        entry_program: Option<&crate::CompiledAudioProgram>,
     ) -> Result<Option<(AudioProcessorOccurrence, crate::NativeObservedRequest)>, AudioExecutionError>
     {
         for instance in &mut self.instances {
@@ -1617,6 +1621,36 @@ impl PreparedProcessorHost {
                         return Err(AudioProcessorHostError::PoisonedInstance.into())
                     }
                     None => {}
+                }
+                if let Some(program) = entry_program
+                    && instance.notes.as_ref().is_some_and(|notes| notes.ledger.origin().is_some())
+                    && matches!(
+                        &crate::schedule::processor(program, instance.occurrence)
+                            .map_err(|_| AudioExecutionError::InvalidPreparedSchedule)?
+                            .definition,
+                        mondrian_timeline::AudioProcessorDefinitionRef::Vst3 { .. }
+                    )
+                {
+                    if instance.native_editor_attachment.is_some()
+                        || instance.native_editor_detached.is_some()
+                    {
+                        return Err(notes::refusal(
+                            "Note replacement requires the native editor to be closed",
+                        )
+                        .into());
+                    }
+                    crate::native_audio_author_runtime::closed_source(
+                        observations.author.as_ref(),
+                        instance.native_author_outstanding.is_some(),
+                    )
+                    .map_err(|reason| {
+                        AudioExecutionError::NativeAuthorPending(Box::new(
+                            crate::NativeAudioAuthorExecutionHold {
+                                target: lease.editor_target(),
+                                reason,
+                            },
+                        ))
+                    })?;
                 }
                 // Preserve ordered source edits before configuration service
                 // or constant parameter delivery can overwrite the controller.
@@ -1650,6 +1684,7 @@ impl PreparedProcessorHost {
 
     pub(crate) fn enter_state(
         &mut self,
+        program: &crate::CompiledAudioProgram,
         processors: &[PreparedProcessor],
         entry: AudioStateEntry,
         cancellation: Option<&mondrian_core::ExecutionCancellationToken>,
@@ -1686,6 +1721,27 @@ impl PreparedProcessorHost {
             } else {
                 let signal_start_sample =
                     subtract_signal_delay(entry.start_sample, processor.input_signal_delay_frames)?;
+                let replacement_required =
+                    instance.notes.as_ref().is_some_and(|notes| notes.ledger.origin().is_some())
+                        && matches!(
+                            &crate::schedule::processor(program, instance.occurrence)
+                                .map_err(|_| AudioExecutionError::InvalidPreparedSchedule)?
+                                .definition,
+                            mondrian_timeline::AudioProcessorDefinitionRef::Vst3 { .. }
+                        );
+                let pending_note_entry = match Self::take_note_entry(
+                    instance,
+                    entry,
+                    entry_binding.as_ref(),
+                    cancellation,
+                    replacement_required,
+                ) {
+                    Ok(pending) => pending,
+                    Err(error) => {
+                        instance.continuity = HostedProcessorContinuity::Failed;
+                        return Err(error);
+                    }
+                };
                 if let Err(error) = isolate_adapter_call("state entry", || {
                     instance.processor.enter_state(signal_start_sample)
                 }) {
@@ -1699,7 +1755,7 @@ impl PreparedProcessorHost {
                 if let Err(error) =
                     Self::bind_entered_instance(instance, entry_binding.as_ref(), cancellation)
                         .map_err(AudioExecutionError::from)
-                        .and_then(|()| Self::bind_note_cold_entry(instance))
+                        .and_then(|()| Self::bind_note_cold_entry(instance, pending_note_entry))
                 {
                     // Preserve the existing note-free cancellation evidence.
                     // A Note owner cannot resume an unconfirmed ledger entry.
@@ -1761,6 +1817,7 @@ impl PreparedProcessorHost {
             if instance.occurrence != processor.occurrence {
                 return Err(AudioExecutionError::InvalidPreparedSchedule);
             }
+            Self::refuse_pending_note_entry_pcm(instance)?;
             let signal_request = AudioRenderRequest {
                 start_sample: subtract_signal_delay(
                     request.start_sample,

@@ -715,7 +715,7 @@ fn installed_vst3_canonical_note_origin_reentry_rebuilds_without_reusing_ids() {
 }
 
 #[test]
-#[ignore = "fresh normal Product and owned MNE4; Source/owner preserving cold and repeated-entry refusal"]
+#[ignore = "fresh normal Product and owned MNE4; Source/owner preserving cold, seek and reused-epoch refusal"]
 fn installed_vst3_canonical_note_entry_refusals_preserve_source_and_pending_off() {
     let materials = Materials::load();
     let render = render(48_000);
@@ -755,7 +755,7 @@ fn installed_vst3_canonical_note_entry_refusals_preserve_source_and_pending_off(
     let before = cursors(&subject.runtime);
     let lease = owner(&subject.runtime);
     let generation = subject.source.current_claim().unwrap().unwrap().generation();
-    for (epoch, start) in [(2, 0), (2, 3), (3, 9)] {
+    for (epoch, start) in [(1, 0), (2, 3), (3, 9)] {
         let error = subject
             .runtime
             .enter_state(AudioStateEntry {
@@ -763,12 +763,14 @@ fn installed_vst3_canonical_note_entry_refusals_preserve_source_and_pending_off(
                 start_sample: start,
             })
             .unwrap_err();
-        assert_eq!(
-            error,
+        let expected = if epoch == 1 {
+            AudioExecutionError::ReusedContinuityEpoch(AudioContinuityEpoch::new(1))
+        } else {
             AudioExecutionError::ProcessorHost(AudioProcessorHostError::NoteExecutionRefused(
-                "VST3 Note score supports only initial entry"
+                "Note score cold entry requires public origin zero; seek replay is unsupported",
             ))
-        );
+        };
+        assert_eq!(error, expected);
         assert_eq!(cursors(&subject.runtime), before);
         assert_eq!(
             owner(&subject.runtime),

@@ -519,6 +519,34 @@ impl NoteLedger {
         Ok(())
     }
 
+    /// Only the enclosing entry transaction can construct this consumed proof.
+    /// Ordinary Bind/continuing rebind must retain the DifferentProducer gate.
+    pub(super) fn commit_confirmed_replacement(
+        &mut self,
+        proof: super::notes::ConfirmedNoteProducerReplacement,
+    ) -> Result<(), LedgerError> {
+        let (prior, next) = proof.into_origins();
+        self.require_origin(prior)?;
+        if next.address.root != prior.address.root
+            || next.address.local != prior.address.local
+            || next.address.occurrence != prior.address.occurrence
+        {
+            return Err(LedgerError::DifferentCursorOrOccurrence);
+        }
+        if next.address.epoch.is_none() {
+            return Err(LedgerError::UnenteredOrigin);
+        }
+        if next.address.epoch == prior.address.epoch {
+            return Err(LedgerError::UnchangedEpoch);
+        }
+        self.records.fill(None);
+        self.retained_records = 0;
+        self.active_voices = 0;
+        self.origin = Some(next);
+        // Never recycle IDs, even though the old producer was retired.
+        Ok(())
+    }
+
     fn bound_origin(&self) -> Result<LedgerOrigin, LedgerError> {
         self.origin.ok_or(LedgerError::UnboundOrigin)
     }

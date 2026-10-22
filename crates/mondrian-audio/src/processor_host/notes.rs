@@ -18,6 +18,101 @@ pub(super) struct HostedNoteState {
     pub(super) end_limit: usize,
     pub(super) ports: usize,
     pub(super) output_refused: bool,
+    // One entry transaction only; included in storage_bytes through size_of<Self>().
+    pending_entry: Option<PendingNoteEntry>,
+}
+
+// Not Clone/Copy: capture only from a currently Installed owner, before revoke.
+pub(super) struct PendingNoteEntry {
+    lease: crate::AudioNativeProcessorOwnerLease,
+    object: crate::NativeAudioObjectObservation,
+    entry: AudioStateEntry,
+}
+
+pub(super) struct ConfirmedNoteProducerReplacement {
+    prior: LedgerOrigin,
+    next: LedgerOrigin,
+}
+
+impl ConfirmedNoteProducerReplacement {
+    pub(super) fn into_origins(self) -> (LedgerOrigin, LedgerOrigin) {
+        (self.prior, self.next)
+    }
+}
+
+impl PendingNoteEntry {
+    fn capture(
+        instance: &HostedProcessorInstance,
+        entry: AudioStateEntry,
+        context: &crate::native_runtime_owner::NativeStateEntryBindingContext,
+        local: crate::AudioSessionCursorIdentity,
+    ) -> Result<Self, AudioProcessorHostError> {
+        let actual = origin(instance)?;
+        let crate::native_runtime_owner::NativeHostedBinding::Installed { lease, .. } =
+            instance.native_binding
+        else {
+            unreachable!("origin checked installed owner")
+        };
+        let captured = Self { lease, object: actual.object, entry };
+        captured.validate(
+            entry,
+            &instance.notes.as_ref().expect("Note origin").ledger,
+            context,
+            local,
+        )?;
+        Ok(captured)
+    }
+
+    fn prior(&self) -> LedgerOrigin {
+        LedgerOrigin {
+            address: self.lease.address(),
+            binding: self.lease.binding(),
+            object: self.object,
+        }
+    }
+
+    fn validate(
+        &self,
+        entry: AudioStateEntry,
+        ledger: &NoteLedger,
+        context: &crate::native_runtime_owner::NativeStateEntryBindingContext,
+        local: crate::AudioSessionCursorIdentity,
+    ) -> Result<(), AudioProcessorHostError> {
+        if self.entry != entry
+            || ledger.origin() != Some(self.prior())
+            || self.lease.address().root != context.root
+            || self.lease.address().local != local
+            || self.lease.installed_root_serial() != context.claim.generation()
+        {
+            return Err(refusal(
+                "Note entry transaction no longer matches its installed owner",
+            ));
+        }
+        Ok(())
+    }
+
+    fn confirm(
+        self,
+        next: LedgerOrigin,
+        next_lease: crate::AudioNativeProcessorOwnerLease,
+    ) -> Result<ConfirmedNoteProducerReplacement, AudioProcessorHostError> {
+        let prior = self.prior();
+        if next.address.root != prior.address.root
+            || next.address.local != prior.address.local
+            || next.address.occurrence != prior.address.occurrence
+            || next.address.epoch != Some(self.entry.epoch)
+            || next.address.epoch == prior.address.epoch
+            || next.binding == prior.binding
+            || next_lease.installed_root_serial() != self.lease.installed_root_serial()
+            || next.object.process_id() != prior.object.process_id()
+            || next.object.object_serial() <= prior.object.object_serial()
+        {
+            return Err(refusal(
+                "Note entry did not bind the confirmed fresh producer",
+            ));
+        }
+        Ok(ConfirmedNoteProducerReplacement { prior, next })
+    }
 }
 
 pub(super) fn refusal(reason: &'static str) -> AudioProcessorHostError {
@@ -127,6 +222,7 @@ impl HostedNoteState {
             end_limit: limits.output_ends,
             ports: contract.ports.len(),
             output_refused: false,
+            pending_entry: None,
         })))
     }
 
@@ -474,6 +570,48 @@ impl HostedNoteState {
     }
 }
 
+fn validate_note_reentry_arm(
+    instance: &HostedProcessorInstance,
+    entry: AudioStateEntry,
+    context: &crate::native_runtime_owner::NativeStateEntryBindingContext,
+    local: crate::AudioSessionCursorIdentity,
+) -> Result<(), AudioProcessorHostError> {
+    let notes = instance.notes.as_ref().expect("selected Note reentry");
+    if entry.start_sample != 0
+        || !matches!(
+            instance.occurrence.owner,
+            AudioProcessorOccurrenceOwner::Track(_)
+        )
+        || !matches!(instance.continuity, HostedProcessorContinuity::Active { epoch, .. } if epoch != entry.epoch)
+        || instance.native_editor_attachment.is_some()
+        || instance.native_editor_detached.is_some()
+    {
+        return Err(refusal(
+            "Note replacement requires a closed eager Track owner and fresh origin epoch",
+        ));
+    }
+    if let Some(pending) = &notes.pending_entry {
+        pending.validate(entry, &notes.ledger, context, local)?;
+        if !matches!(
+            instance.native_binding,
+            crate::native_runtime_owner::NativeHostedBinding::Unbound
+        ) {
+            return Err(refusal(
+                "Note entry transaction cannot be recaptured or rebound",
+            ));
+        }
+    } else {
+        PendingNoteEntry::capture(instance, entry, context, local)?;
+    }
+    Ok(())
+}
+
+pub(super) fn clear_pending_entry(instance: &mut HostedProcessorInstance) {
+    if let Some(notes) = &mut instance.notes {
+        notes.pending_entry = None;
+    }
+}
+
 pub(super) fn origin(
     instance: &HostedProcessorInstance,
 ) -> Result<LedgerOrigin, AudioProcessorHostError> {
@@ -522,7 +660,7 @@ impl PreparedProcessorHost {
 
     /// Read only the actual selected occurrence and existing Hosted/ledger
     /// state. Completion policy and raw event-bus presence grant no entry.
-    pub(crate) fn validate_vst3_note_initial_entry(
+    pub(crate) fn validate_vst3_note_entry(
         &self,
         program: &crate::CompiledAudioProgram,
         entry: AudioStateEntry,
@@ -552,7 +690,18 @@ impl PreparedProcessorHost {
                 ) {
                     return Err(AudioProcessorHostError::PoisonedInstance.into());
                 }
-                deferred_refusal.get_or_insert("VST3 Note score supports only initial entry");
+                if !matches!(
+                    instance.occurrence.owner,
+                    AudioProcessorOccurrenceOwner::Track(_)
+                ) {
+                    deferred_refusal
+                        .get_or_insert("Note producer replacement requires an eager Track owner");
+                }
+                if entry.start_sample != 0 {
+                    deferred_refusal.get_or_insert(
+                        "Note score cold entry requires public origin zero; seek replay is unsupported",
+                    );
+                }
             } else if !matches!(instance.continuity, HostedProcessorContinuity::Unentered) {
                 return Err(AudioProcessorHostError::PoisonedInstance.into());
             } else if entry.start_sample != 0 {
@@ -582,6 +731,15 @@ impl PreparedProcessorHost {
         installed_root: bool,
     ) -> Result<(), AudioExecutionError> {
         if self.instances.iter().any(|instance| instance.notes.is_some()) {
+            if self.instances.iter().any(|instance| {
+                instance.notes.is_some()
+                    && !matches!(
+                        instance.occurrence.owner,
+                        AudioProcessorOccurrenceOwner::Track(_)
+                    )
+            }) {
+                return Err(refusal("Note entry requires an eager Track owner").into());
+            }
             if entry.start_sample != 0 {
                 return Err(refusal(
                     "Note score cold entry requires public origin zero; seek replay is unsupported",
@@ -597,20 +755,152 @@ impl PreparedProcessorHost {
         Ok(())
     }
 
+    pub(crate) fn clear_note_entry_permits(&mut self) {
+        for instance in &mut self.instances {
+            if let Some(notes) = &mut instance.notes {
+                notes.pending_entry = None;
+            }
+        }
+    }
+
+    pub(crate) fn ensure_note_entry_permits_consumed(&self) -> Result<(), AudioExecutionError> {
+        if self.instances.iter().any(|instance| {
+            instance.notes.as_ref().is_some_and(|notes| notes.pending_entry.is_some())
+        }) {
+            return Err(refusal("Note entry transaction was not consumed by eager entry").into());
+        }
+        Ok(())
+    }
+
+    pub(crate) fn arm_current_note_reentry(
+        &mut self,
+        program: &crate::CompiledAudioProgram,
+        entry: AudioStateEntry,
+        cancellation: Option<&mondrian_core::ExecutionCancellationToken>,
+    ) -> Result<(), AudioExecutionError> {
+        let context = self.entry_binding.clone();
+        self.arm_note_reentry(program, entry, context.as_ref(), cancellation)
+    }
+
+    pub(crate) fn arm_note_reentry(
+        &mut self,
+        program: &crate::CompiledAudioProgram,
+        entry: AudioStateEntry,
+        context: Option<&(
+            crate::native_runtime_owner::NativeStateEntryBindingContext,
+            crate::AudioSessionCursorIdentity,
+        )>,
+        cancellation: Option<&mondrian_core::ExecutionCancellationToken>,
+    ) -> Result<(), AudioExecutionError> {
+        // Validate the complete finite owner set before writing any slot.
+        for instance in &self.instances {
+            let Some(notes) = &instance.notes else {
+                continue;
+            };
+            let processor = crate::schedule::processor(program, instance.occurrence)
+                .map_err(|_| AudioExecutionError::InvalidPreparedSchedule)?;
+            if !matches!(
+                &processor.definition,
+                mondrian_timeline::AudioProcessorDefinitionRef::Vst3 { .. }
+            ) || notes.ledger.origin().is_none()
+            {
+                continue;
+            }
+            let (context, local) = context
+                .ok_or_else(|| refusal("Note replacement needs the installed root owner"))?;
+            context.validate(cancellation)?;
+            validate_note_reentry_arm(instance, entry, context, *local)?;
+        }
+        for instance in &mut self.instances {
+            let Some(notes) = &mut instance.notes else {
+                continue;
+            };
+            if notes.pending_entry.is_some() || notes.ledger.origin().is_none() {
+                continue;
+            }
+            let processor = crate::schedule::processor(program, instance.occurrence)
+                .map_err(|_| AudioExecutionError::InvalidPreparedSchedule)?;
+            if matches!(
+                &processor.definition,
+                mondrian_timeline::AudioProcessorDefinitionRef::Vst3 { .. }
+            ) {
+                let crate::native_runtime_owner::NativeHostedBinding::Installed { lease, object } =
+                    instance.native_binding
+                else {
+                    unreachable!("validated installed Note owner")
+                };
+                notes.pending_entry = Some(PendingNoteEntry { lease, object, entry });
+            }
+        }
+        Ok(())
+    }
+
+    pub(super) fn take_note_entry(
+        instance: &mut HostedProcessorInstance,
+        entry: AudioStateEntry,
+        context: Option<&(
+            crate::native_runtime_owner::NativeStateEntryBindingContext,
+            crate::AudioSessionCursorIdentity,
+        )>,
+        cancellation: Option<&mondrian_core::ExecutionCancellationToken>,
+        replacement_required: bool,
+    ) -> Result<Option<PendingNoteEntry>, AudioExecutionError> {
+        let Some(notes) = &mut instance.notes else {
+            return Ok(None);
+        };
+        let Some(pending) = notes.pending_entry.take() else {
+            return if replacement_required {
+                Err(refusal("Note replacement has no captured installed producer").into())
+            } else {
+                Ok(None)
+            };
+        };
+        let (context, local) =
+            context.ok_or_else(|| refusal("Note entry lost its installed context"))?;
+        context.validate(cancellation)?;
+        pending.validate(entry, &notes.ledger, context, *local)?;
+        Ok(Some(pending))
+    }
+
+    pub(super) fn refuse_pending_note_entry_pcm(
+        instance: &mut HostedProcessorInstance,
+    ) -> Result<(), AudioExecutionError> {
+        if instance
+            .notes
+            .as_mut()
+            .is_some_and(|notes| notes.pending_entry.take().is_some())
+        {
+            instance.continuity = HostedProcessorContinuity::Failed;
+            return Err(refusal("Note entry transaction cannot be consumed by PCM").into());
+        }
+        Ok(())
+    }
+
     pub(super) fn bind_note_cold_entry(
         instance: &mut HostedProcessorInstance,
+        pending: Option<PendingNoteEntry>,
     ) -> Result<(), AudioExecutionError> {
         if instance.notes.is_none() {
             return Ok(());
         }
         let next = origin(instance)?;
-        instance
-            .notes
-            .as_mut()
-            .expect("observed Note owner")
-            .ledger
-            .commit_confirmed_cold_entry(next)
-            .map_err(ledger_refusal)?;
+        let replacement = if let Some(pending) = pending {
+            let crate::native_runtime_owner::NativeHostedBinding::Installed { lease, .. } =
+                instance.native_binding
+            else {
+                unreachable!("origin checked installed owner")
+            };
+            Some(pending.confirm(next, lease)?)
+        } else {
+            None
+        };
+        let ledger = &mut instance.notes.as_mut().expect("observed Note owner").ledger;
+        if let Some(proof) = replacement {
+            ledger.commit_confirmed_replacement(proof)
+        } else {
+            ledger.commit_confirmed_cold_entry(next)
+        }
+        .map_err(ledger_refusal)?;
         Ok(())
     }
 

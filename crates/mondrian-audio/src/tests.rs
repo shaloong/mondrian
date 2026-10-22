@@ -4736,7 +4736,6 @@ mod vst3_note_entry_controls {
     use std::num::{NonZeroU32, NonZeroU64};
 
     const KEY: &str = "vst3.note-input.0";
-    const REPEAT: &str = "VST3 Note score supports only initial entry";
 
     #[derive(Debug, Clone, PartialEq)]
     enum Call {
@@ -5234,13 +5233,24 @@ mod vst3_note_entry_controls {
                     for start in [0, 3] {
                         let before = probe.lock().unwrap().clone();
                         let before_cursors = cursors(&runtime);
-                        assert!(matches!(
-                            runtime.enter_state(entry(8, start)),
-                            Err(AudioExecutionError::ProcessorHost(
-                                AudioProcessorHostError::NoteExecutionRefused(REPEAT)
-                            ))
-                        ));
-                        assert_eq!(*probe.lock().unwrap(), before);
+                        let error = runtime.enter_state(entry(8, start)).unwrap_err();
+                        if start == 0 {
+                            // This synthetic adapter supplies no normative author
+                            // source; a same-object Bind is not fresh cold proof.
+                            assert!(matches!(error, AudioExecutionError::NativeAuthorPending(ref hold)
+                                if hold.target == lease.editor_target()
+                                    && hold.reason == NativeAudioAuthorHoldReason::UnsupportedSource));
+                            let mut expected = before.clone();
+                            expected.calls.push(Call::Poll);
+                            assert_eq!(*probe.lock().unwrap(), expected);
+                        } else {
+                            assert_eq!(error, AudioExecutionError::ProcessorHost(
+                                AudioProcessorHostError::NoteExecutionRefused(
+                                    "Note score cold entry requires public origin zero; seek replay is unsupported",
+                                ),
+                            ));
+                            assert_eq!(*probe.lock().unwrap(), before);
+                        }
                         assert_eq!(cursors(&runtime), before_cursors);
                         assert_eq!(runtime.native_owner_lease(address).unwrap(), lease);
                         assert_eq!(runtime.resource_root_identity(), identity);

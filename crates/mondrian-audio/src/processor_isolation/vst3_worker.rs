@@ -1,9 +1,9 @@
 //! VST3 audio effects run only inside the supervised native worker.
 
 mod author_state_entry;
-mod initial_parameter_values;
 #[cfg(target_os = "windows")]
 mod controller_projection;
+mod initial_parameter_values;
 #[cfg(test)]
 mod initial_parameter_values_tests;
 mod native_author;
@@ -1659,11 +1659,11 @@ impl IsolatedAudioProcessorWorker for Vst3Worker {
     }
 
     fn enter_state(&mut self, start_sample: i64) -> Result<(), AudioProcessorHostError> {
-        if !self.note_input_contract.ports.is_empty()
-            && self.initial_signal_phase == InitialSignalPhase::Entered
-        {
+        let note_reentry = !self.note_input_contract.ports.is_empty()
+            && self.initial_signal_phase == InitialSignalPhase::Entered;
+        if note_reentry && self.prepared_author_entry.is_some() {
             return Err(AudioProcessorHostError::StateEntry(
-                "VST3 Note input supports only initial state entry".to_owned(),
+                "VST3 Note reentry cannot consume a prepared author transaction".to_owned(),
             ));
         }
         if self.enter_prepared_author_state(start_sample)? {
@@ -1688,11 +1688,54 @@ impl IsolatedAudioProcessorWorker for Vst3Worker {
             return Ok(());
         }
         self.require_delivered_parameter_input()?;
+        if note_reentry {
+            // Parent entry revokes its published lease locally, while the child
+            // retains this exact old Bind receipt until retirement starts.
+            // An unbound direct factory owner cannot authorize replacement.
+            let binding = self.native_binding.ok_or_else(|| {
+                AudioProcessorHostError::StateEntry(
+                    "VST3 Note reentry requires its current bound producer".to_owned(),
+                )
+            })?;
+            if !self.author_binding_current(crate::NativeAudioObjectBindRequest {
+                binding: binding.binding(),
+                expected_object: binding.object(),
+            })? {
+                return Err(AudioProcessorHostError::StateEntry(
+                    "VST3 Note reentry requires its current bound producer".to_owned(),
+                ));
+            }
+            // Last live check on the actual old producer. Preserve never drains
+            // or acknowledges a batch arriving after the parent's preflight.
+            // A closed author boundary is distinct from a closed native GUI.
+            if self.native_parent.is_some()
+                || self.native_editor_detach_stage().is_some()
+                || self.pending_reprepare().is_some()
+                || self.prepared_author_entry.is_some()
+            {
+                return Err(AudioProcessorHostError::StateEntry(
+                    "VST3 Note reentry has live editor/author/configuration work".to_owned(),
+                ));
+            }
+            let author =
+                self.observe_native_author(crate::NativeAudioObservationConsumption::Preserve)?;
+            crate::native_audio_author_runtime::closed_source(
+                author.as_ref(),
+                self.native_author_delivery.is_some(),
+            )
+            .map_err(|reason| {
+                AudioProcessorHostError::StateEntry(format!(
+                    "VST3 Note reentry source is not closed: {reason:?}"
+                ))
+            })?;
+        }
         // Native close/retirement may partially fail; the old author lease must
         // already be revoked once this non-preflight work starts.
         self.native_binding = None;
-        self.close_native_editor_owner()?;
-        self.prepared_author_entry = None;
+        if !note_reentry {
+            self.close_native_editor_owner()?;
+            self.prepared_author_entry = None;
+        }
         self.rebuild_native_state(None)?;
         if let Some(request) = self.pending_reprepare() {
             return Err(AudioProcessorHostError::ReprepareRequired(request));
@@ -3130,6 +3173,13 @@ impl Vst3Worker {
         })?;
         validate_started_execution(&fresh, self.contract)?;
         let fresh_owner = fresh.native_editor_attachment_owner();
+        if !self.note_input_contract.ports.is_empty()
+            && !matches!((previous_owner, fresh_owner), (Some(old), Some(new)) if new.serial() > old.serial())
+        {
+            return Err(AudioProcessorHostError::StateEntry(
+                "VST3 Note entry did not construct a fresh producer".to_owned(),
+            ));
+        }
         // Install before inspecting callbacks. Refused fresh source/cohorts stay
         // on this actual object rather than being dropped/reloaded to erase them.
         self.plugin = Some(fresh);
