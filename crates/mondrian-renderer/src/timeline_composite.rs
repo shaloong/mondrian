@@ -5670,6 +5670,7 @@ pub(crate) mod source_materialization_tests {
             )
             .with_execution_contract(EffectExecutionContract {
                 execution_modes: EffectExecutionModes::CPU_F32,
+                determinism: mondrian_effects::EffectDeterminism::Nondeterministic,
                 roi_propagation: EffectRoiPropagation::UnknownRequiresFullFrame,
                 ..EffectExecutionContract::IDENTITY
             })
