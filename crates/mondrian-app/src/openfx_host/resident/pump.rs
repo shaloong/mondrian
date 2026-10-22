@@ -874,7 +874,7 @@ mod tests {
             serde_json::from_value::<Response>(null),
             Ok(Response::GuiClosed { feedback: None, .. })
         ));
-        assert_eq!(VERSION, 8);
+        assert_eq!(VERSION, 9);
     }
 
     #[test]

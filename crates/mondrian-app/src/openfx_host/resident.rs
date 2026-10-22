@@ -2756,16 +2756,18 @@ mod tests {
         }
         prepare.version = VERSION;
         assert!(validate_prepare_envelope(&prepare, "wrong nonce").is_err());
-        let mut missing = serde_json::to_value(&prepare).expect("canonical Prepare schema");
-        missing.as_object_mut().expect("schema object").remove("owner");
-        assert!(
-            serde_json::from_value::<Prepare>(missing).is_err(),
-            "no ownerless schema fallback"
-        );
+        for field in ["owner", "context"] {
+            let mut missing = serde_json::to_value(&prepare).expect("canonical Prepare schema");
+            missing.as_object_mut().expect("schema object").remove(field);
+            assert!(
+                serde_json::from_value::<Prepare>(missing).is_err(),
+                "no schema fallback without {field}"
+            );
+        }
         prepare.owner = mondrian_core::EffectProcessorOwnerId(uuid::Uuid::nil());
         assert!(validate_prepare_envelope(&prepare, "actual nonce").is_err());
         assert!(
-            OPENFX_RESIDENT_WORKER_ARGUMENT.ends_with("-v8"),
+            OPENFX_RESIDENT_WORKER_ARGUMENT.ends_with("-v9"),
             "sole worker dispatch uses the current generation"
         );
     }
