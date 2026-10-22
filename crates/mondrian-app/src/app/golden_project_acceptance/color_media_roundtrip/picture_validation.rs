@@ -148,6 +148,7 @@ fn execute_preview(
         PREVIEW_RESOLUTION.height,
         &resolved.plan.elements,
         &resolved.plan.color_context,
+        resolved.plan.sampling,
         &mut scratch,
         &mut mondrian_effects::EffectProcessorControl::uncancelled(),
     )?;
@@ -157,6 +158,7 @@ fn execute_preview(
         PREVIEW_RESOLUTION.height,
         &resolved.plan.elements[..1],
         &resolved.plan.color_context,
+        resolved.plan.sampling,
         &mut base_scratch,
         &mut mondrian_effects::EffectProcessorControl::uncancelled(),
     )?
@@ -167,6 +169,7 @@ fn execute_preview(
         PREVIEW_RESOLUTION.height,
         &resolved.plan.elements,
         &resolved.plan.color_context,
+        resolved.plan.sampling,
         &mut program_scratch,
         &mut mondrian_effects::EffectProcessorControl::uncancelled(),
     )?;

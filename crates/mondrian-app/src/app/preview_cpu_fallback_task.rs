@@ -76,6 +76,7 @@ pub(crate) struct PreviewCpuFallbackRequest {
     pub(crate) elements: Arc<[ResolvedPreviewElement]>,
     pub(crate) color_context: ProgramColorContext,
     pub(crate) render_cache_identity: Option<TimelineRenderCacheIdentity>,
+    pub(crate) sampling: mondrian_core::ImageSampling,
     pub(crate) cached_working: Option<CpuColorFrame>,
     pub(crate) monitoring_tap: mondrian_core::ProgramScopesTap,
     pub(crate) monitoring_settings: mondrian_core::SignalMonitoringSettings,
@@ -439,6 +440,7 @@ fn execute_cpu_fallback_observed(
             request.height,
             &request.elements,
             &request.color_context,
+            request.sampling,
             scratch,
             &mut control,
         )?,
@@ -560,6 +562,7 @@ mod tests {
     fn working_request() -> PreviewCpuFallbackRequest {
         let sequence = mondrian_timeline::Sequence::new("CPU working output");
         PreviewCpuFallbackRequest {
+            sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
             attempt: None,
             working_reservation: None,
             output_target: PreviewCpuOutputTarget::WorkingGpu,
@@ -605,6 +608,7 @@ mod tests {
     fn cpu_working_completion_preserves_hdr_alpha_and_skips_display_conversion() {
         let mut request = working_request();
         let original = CpuColorFrame::working(mondrian_core::WorkingRgbaF32Frame {
+            sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
             width: 1,
             height: 1,
             data: vec![[-0.5, 3.0, 0.8, 0.5]],
@@ -699,6 +703,7 @@ mod tests {
             max_retained_scratch_bytes: 0,
         };
         let mut request = PreviewCpuFallbackRequest {
+            sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
             attempt: None,
             working_reservation: None,
             output_target: PreviewCpuOutputTarget::Raster,

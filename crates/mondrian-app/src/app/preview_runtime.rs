@@ -786,6 +786,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             elements: Arc::clone(&resolved.elements),
             color_context: resolved.color_context.clone(),
             render_cache_identity: resolved.render_cache_identity,
+            sampling: resolved.sampling,
             cached_working,
             monitoring_tap: self.viewer_signal_monitoring.get().0,
             monitoring_settings: self.viewer_signal_monitoring.get().1,
@@ -1666,6 +1667,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                 None => prepare_gpu_composite_layers_with_heterogeneous_effects(
                     &resolved.elements,
                     resolved.color_context.working_color_space(),
+                    resolved.sampling,
                     &mut scratch,
                     heterogeneous_decision.cpu_prefix_grant(),
                 )

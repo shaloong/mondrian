@@ -4199,6 +4199,7 @@ mod tests {
                     EffectFloatFrameView::new(
                         EffectFrameExtent::new(width, height),
                         format,
+                        mondrian_core::ImageSampling::UNIT_SQUARE,
                         &input,
                     ),
                     &graph,
@@ -4260,7 +4261,12 @@ mod tests {
             .expect("same actual author program");
         let output = execution
             .apply_compiled_rgba_f32(
-                EffectFloatFrameView::new(EffectFrameExtent::new(width, height), format, &input),
+                EffectFloatFrameView::new(
+                    EffectFrameExtent::new(width, height),
+                    format,
+                    mondrian_core::ImageSampling::UNIT_SQUARE,
+                    &input,
+                ),
                 &graph,
                 8,
                 &mut EffectProcessorControl::uncancelled(),

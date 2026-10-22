@@ -184,8 +184,10 @@ pub(crate) fn viewer_preview_cache_key_for_resolved_plan(
     height: u32,
     elements: &[ResolvedPreviewElement],
     color_context: &ProgramColorContext,
+    sampling: mondrian_core::ImageSampling,
 ) -> PreviewOutputKey {
-    let mut builder = PreviewSemanticIdentityBuilder::new(b"mondrian.preview.viewer-plan.v1");
+    let mut builder = PreviewSemanticIdentityBuilder::new(b"mondrian.preview.viewer-plan.v2");
+    sampling.hash(&mut builder);
     color_context.working_color_space().hash(&mut builder);
     color_context.output_color_space().hash(&mut builder);
     color_context.output_tone_map().hash(&mut builder);
@@ -474,6 +476,7 @@ pub(crate) fn gpu_layer_for_cached_working(
 pub(crate) fn prepare_gpu_composite_layers_with_heterogeneous_effects(
     resolved: &[ResolvedPreviewElement],
     working_color_space: WorkingColorSpace,
+    sampling: mondrian_core::ImageSampling,
     scratch: &mut TimelineCompositeScratch,
     cpu_prefix_grant: HeterogeneousCpuPrefixBatchGrant,
 ) -> Result<PreparedPreviewViewerGpuLayers, PreviewViewerGpuLayerPreparationError> {
@@ -485,7 +488,7 @@ pub(crate) fn prepare_gpu_composite_layers_with_heterogeneous_effects(
         }
     }
 
-    let mut builder = HeterogeneousPreviewLayerBuilder::new(working_color_space, scratch);
+    let mut builder = HeterogeneousPreviewLayerBuilder::new(working_color_space, sampling, scratch);
     let mut layers = Vec::with_capacity(resolved.len());
     let mut has_composited_layer = false;
     for element in resolved {
@@ -588,6 +591,7 @@ pub(crate) fn prepare_gpu_composite_layers_with_heterogeneous_effects(
 
 struct HeterogeneousPreviewLayerBuilder<'a> {
     working_color_space: WorkingColorSpace,
+    sampling: mondrian_core::ImageSampling,
     scratch: &'a mut TimelineCompositeScratch,
     identity_effect_plan: Option<Arc<mondrian_effects::CompiledEffectGpuPlan>>,
     items: Vec<HeterogeneousCpuPrefixBatchItem>,
@@ -597,10 +601,12 @@ struct HeterogeneousPreviewLayerBuilder<'a> {
 impl<'a> HeterogeneousPreviewLayerBuilder<'a> {
     fn new(
         working_color_space: WorkingColorSpace,
+        sampling: mondrian_core::ImageSampling,
         scratch: &'a mut TimelineCompositeScratch,
     ) -> Self {
         Self {
             working_color_space,
+            sampling,
             scratch,
             identity_effect_plan: None,
             items: Vec::new(),
@@ -707,6 +713,7 @@ impl<'a> HeterogeneousPreviewLayerBuilder<'a> {
         self.items.push(HeterogeneousCpuPrefixBatchItem::new_solid_color(
             address,
             route,
+            self.sampling,
             layer.color,
             self.working_color_space,
             layer.frame_seed,
@@ -1097,6 +1104,7 @@ mod heterogeneous_tests {
             let prepared = prepare_gpu_composite_layers_with_heterogeneous_effects(
                 &resolved,
                 WORKING_SPACE,
+                mondrian_core::ImageSampling::UNIT_SQUARE,
                 &mut TimelineCompositeScratch::default(),
                 cpu_grant(),
             )
@@ -1118,6 +1126,7 @@ mod heterogeneous_tests {
     #[test]
     fn verified_render_cache_frame_lowers_as_one_identity_working_layer() {
         let frame = CpuColorFrame::working(WorkingRgbaF32Frame {
+            sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
             alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
             width: WIDTH,
             height: HEIGHT,
@@ -1158,6 +1167,7 @@ mod heterogeneous_tests {
         identity_salt.hash(&mut identity);
         MediaPreviewFrame::from_working(
             CpuColorFrame::working(WorkingRgbaF32Frame {
+                sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
                 alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
                 width: WIDTH,
                 height: HEIGHT,
@@ -1176,6 +1186,7 @@ mod heterogeneous_tests {
             PreviewSemanticIdentityBuilder::new(b"mondrian.preview.data-texture-plan-test.v1");
         identity_salt.hash(&mut identity);
         let numeric = CpuColorFrame::working(WorkingRgbaF32Frame {
+            sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
             alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
             width: WIDTH,
             height: HEIGHT,
@@ -1282,6 +1293,7 @@ mod heterogeneous_tests {
         let prepared = prepare_gpu_composite_layers_with_heterogeneous_effects(
             &resolved,
             WORKING_SPACE,
+            mondrian_core::ImageSampling::UNIT_SQUARE,
             &mut TimelineCompositeScratch::default(),
             cpu_grant(),
         )
@@ -1339,6 +1351,7 @@ mod heterogeneous_tests {
         let prepared = prepare_gpu_composite_layers_with_heterogeneous_effects(
             &resolved,
             WORKING_SPACE,
+            mondrian_core::ImageSampling::UNIT_SQUARE,
             &mut TimelineCompositeScratch::default(),
             cpu_grant(),
         )
@@ -1388,6 +1401,7 @@ mod heterogeneous_tests {
         let prepared = prepare_gpu_composite_layers_with_heterogeneous_effects(
             &[solid(Arc::clone(&graph))],
             WORKING_SPACE,
+            mondrian_core::ImageSampling::UNIT_SQUARE,
             &mut TimelineCompositeScratch::default(),
             cpu_grant(),
         )
@@ -1440,6 +1454,7 @@ mod heterogeneous_tests {
         let prepared = prepare_gpu_composite_layers_with_heterogeneous_effects(
             &[transition],
             WORKING_SPACE,
+            mondrian_core::ImageSampling::UNIT_SQUARE,
             &mut TimelineCompositeScratch::default(),
             cpu_grant(),
         )
@@ -1508,6 +1523,7 @@ mod heterogeneous_tests {
         let prepared = prepare_gpu_composite_layers_with_heterogeneous_effects(
             &[transition],
             WORKING_SPACE,
+            mondrian_core::ImageSampling::UNIT_SQUARE,
             &mut TimelineCompositeScratch::default(),
             cpu_grant(),
         )

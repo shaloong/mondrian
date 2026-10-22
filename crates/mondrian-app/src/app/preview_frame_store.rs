@@ -442,6 +442,7 @@ mod working_tests {
         data.push([-0.5, 2.0, 0.25, 0.5]);
         let bytes = data.capacity() * std::mem::size_of::<[f32; 4]>();
         let frame = mondrian_renderer::CpuColorFrame::working(mondrian_core::WorkingRgbaF32Frame {
+            sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
             width: 1,
             height: 1,
             data,
@@ -482,6 +483,7 @@ mod working_tests {
     #[test]
     fn cpu_working_external_owner_remains_charged_after_store_clear() {
         let frame = mondrian_renderer::CpuColorFrame::working(mondrian_core::WorkingRgbaF32Frame {
+            sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
             width: 1,
             height: 1,
             data: vec![[0.5, 0.25, 0.75, 1.0]],
@@ -508,6 +510,7 @@ mod working_tests {
         assert!(store.viewer_working_frame(&key).is_none());
         let another =
             mondrian_renderer::CpuColorFrame::working(mondrian_core::WorkingRgbaF32Frame {
+                sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
                 width: 1,
                 height: 1,
                 data: vec![[0.1, 0.2, 0.3, 1.0]],

@@ -244,6 +244,7 @@ pub(crate) fn composite_resolved_preview_working(
     height: u32,
     resolved: &[ResolvedPreviewElement],
     color_context: &ProgramColorContext,
+    sampling: mondrian_core::ImageSampling,
     scratch: &mut TimelineCompositeScratch,
     control: &mut mondrian_effects::EffectProcessorControl<'_>,
 ) -> Result<PreviewWorkingCompositeOutput, PreviewCpuExecutionError> {
@@ -358,6 +359,7 @@ pub(crate) fn composite_resolved_preview_working(
         TimelineEffectColorRuntime::new(
             color_context.engine(),
             color_context.working_color_space(),
+            sampling,
         ),
         scratch,
         control,
@@ -469,6 +471,7 @@ pub(crate) fn composite_resolved_preview(
     height: u32,
     resolved: &[ResolvedPreviewElement],
     color_context: &ProgramColorContext,
+    sampling: mondrian_core::ImageSampling,
     scratch: &mut TimelineCompositeScratch,
     control: &mut mondrian_effects::EffectProcessorControl<'_>,
 ) -> Result<PreviewCompositeOutput, PreviewCpuExecutionError> {
@@ -477,6 +480,7 @@ pub(crate) fn composite_resolved_preview(
         height,
         resolved,
         color_context,
+        sampling,
         scratch,
         control,
     )?;
@@ -490,6 +494,7 @@ pub(crate) fn composite_resolved_preview_with_signal_monitoring(
     height: u32,
     resolved: &[ResolvedPreviewElement],
     color_context: &ProgramColorContext,
+    sampling: mondrian_core::ImageSampling,
     tap: mondrian_core::ProgramScopesTap,
     settings: mondrian_core::SignalMonitoringSettings,
     scratch: &mut TimelineCompositeScratch,
@@ -500,6 +505,7 @@ pub(crate) fn composite_resolved_preview_with_signal_monitoring(
         height,
         resolved,
         color_context,
+        sampling,
         scratch,
         control,
     )?;

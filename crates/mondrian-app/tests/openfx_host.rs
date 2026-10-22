@@ -138,6 +138,7 @@ fn product_worker_queries_canonical_sparse_curves_across_seeks() {
             mondrian_effects::EffectColorDomain::SceneLinearRgb,
             mondrian_core::ColorFrameAlpha::StraightFloat,
         ),
+        mondrian_core::ImageSampling::UNIT_SQUARE,
         vec![[-0.25, 0.5, 2.0, 0.25]; 4],
     )
     .expect("owned Float fixture");
@@ -307,6 +308,7 @@ fn curve_source_lifecycle(expected_mode: &str) {
             mondrian_effects::EffectColorDomain::SceneLinearRgb,
             mondrian_core::ColorFrameAlpha::StraightFloat,
         ),
+        mondrian_core::ImageSampling::UNIT_SQUARE,
         vec![[-0.25, 0.5, 2.0, 0.25]; 4],
     )
     .expect("owned Float fixture");
@@ -435,6 +437,7 @@ fn qualify_product_compound_query_authority(sampled: bool) {
             mondrian_effects::EffectColorDomain::SceneLinearRgb,
             mondrian_core::ColorFrameAlpha::StraightFloat,
         ),
+        mondrian_core::ImageSampling::UNIT_SQUARE,
         vec![[-0.25, 0.5, 2.0, 0.25]; 4],
     )
     .expect("owned Float fixture");
@@ -530,6 +533,7 @@ fn string_filter_description_preserves_all_native_modes() {
             mondrian_effects::EffectColorDomain::SceneLinearRgb,
             mondrian_core::ColorFrameAlpha::StraightFloat,
         ),
+        mondrian_core::ImageSampling::UNIT_SQUARE,
         vec![[0.1, 0.2, 0.3, 0.05]; 4],
     )
     .expect("owned Float fixture");
@@ -691,6 +695,7 @@ fn string_text_modes_execute_through_authored_compiled_graph() {
                 mondrian_effects::EffectColorDomain::SceneLinearRgb,
                 mondrian_core::ColorFrameAlpha::StraightFloat,
             ),
+            mondrian_core::ImageSampling::UNIT_SQUARE,
             &input,
         ),
         &graph,
@@ -758,6 +763,7 @@ fn official_basic_filter_renders_authored_float32_pixels_in_child() {
             mondrian_effects::EffectColorDomain::SceneLinearRgb,
             mondrian_core::ColorFrameAlpha::StraightFloat,
         ),
+        mondrian_core::ImageSampling::UNIT_SQUARE,
         (0..16).map(|index| [index as f32 / 16.0, 0.2, 0.3, 0.4]).collect(),
     )
     .expect("owned Float fixture");
@@ -804,6 +810,7 @@ fn official_basic_filter_renders_authored_float32_pixels_in_child() {
             mondrian_effects::EffectColorDomain::SceneLinearRgb,
             mondrian_core::ColorFrameAlpha::StraightFloat,
         ),
+        mondrian_core::ImageSampling::UNIT_SQUARE,
         (0..15)
             .map(|index| {
                 let index = index as f32;
@@ -1029,6 +1036,7 @@ fn official_basic_resident_sessions_reuse_workers_and_isolate_frames() {
             mondrian_effects::EffectColorDomain::SceneLinearRgb,
             mondrian_core::ColorFrameAlpha::StraightFloat,
         ),
+        mondrian_core::ImageSampling::UNIT_SQUARE,
         vec![[-0.25, 0.5, 2.0, 0.25]; 6],
     )
     .expect("owned Float fixture");
@@ -1162,6 +1170,7 @@ fn resident_worker_cancellation_retires_and_reaps_a_hung_native_render() {
             mondrian_effects::EffectColorDomain::SceneLinearRgb,
             mondrian_core::ColorFrameAlpha::StraightFloat,
         ),
+        mondrian_core::ImageSampling::UNIT_SQUARE,
         vec![[0.25; 4]],
     )
     .expect("owned Float fixture");
@@ -1247,6 +1256,7 @@ fn execution_owner_deadline_interrupts_native_render_without_a_mirror_token() {
             mondrian_effects::EffectColorDomain::SceneLinearRgb,
             mondrian_core::ColorFrameAlpha::StraightFloat,
         ),
+        mondrian_core::ImageSampling::UNIT_SQUARE,
         vec![[0.25; 4]],
     )
     .expect("owned Float fixture");
@@ -1315,6 +1325,7 @@ fn official_basic_resident_transfer_preserves_partial_blocks_and_changed_rasters
             mondrian_effects::EffectColorDomain::SceneLinearRgb,
             mondrian_core::ColorFrameAlpha::StraightFloat,
         ),
+        mondrian_core::ImageSampling::UNIT_SQUARE,
         (0..257 * 257)
             .map(|index| {
                 [
@@ -1448,6 +1459,7 @@ fn authored_native_factory_reuses_instances_and_rejects_stale_output() {
                         mondrian_effects::EffectColorDomain::SceneLinearRgb,
                         mondrian_core::ColorFrameAlpha::StraightFloat,
                     ),
+                    mondrian_core::ImageSampling::UNIT_SQUARE,
                     &input,
                 ),
                 &graph,
@@ -1522,6 +1534,7 @@ fn authored_native_factory_reuses_instances_and_rejects_stale_output() {
                         mondrian_effects::EffectColorDomain::SceneLinearRgb,
                         mondrian_core::ColorFrameAlpha::StraightFloat
                     ),
+                    mondrian_core::ImageSampling::UNIT_SQUARE,
                     &input
                 ),
                 &graph,
@@ -1548,6 +1561,7 @@ fn authored_native_factory_reuses_instances_and_rejects_stale_output() {
                     mondrian_effects::EffectColorDomain::SceneLinearRgb,
                     mondrian_core::ColorFrameAlpha::StraightFloat
                 ),
+                mondrian_core::ImageSampling::UNIT_SQUARE,
                 &input
             ),
             &graph,
@@ -1568,6 +1582,7 @@ fn authored_native_factory_reuses_instances_and_rejects_stale_output() {
                         mondrian_effects::EffectColorDomain::SceneLinearRgb,
                         mondrian_core::ColorFrameAlpha::StraightFloat
                     ),
+                    mondrian_core::ImageSampling::UNIT_SQUARE,
                     &input
                 ),
                 &graph,
@@ -1660,7 +1675,12 @@ fn authored_native_factory_observes_mixed_execution_deadline() {
     let result = work.execute_cpu_prefix_with_checkpoint(
         &mut session,
         42,
-        mondrian_effects::EffectFloatFrameView::new(EffectFrameExtent::new(1, 1), format, &input),
+        mondrian_effects::EffectFloatFrameView::new(
+            EffectFrameExtent::new(1, 1),
+            format,
+            mondrian_core::ImageSampling::UNIT_SQUARE,
+            &input,
+        ),
         0,
         WorkingColorSpace::LinearRec709,
         &mut || {
@@ -1722,6 +1742,7 @@ fn authored_native_factory_observes_scalar_and_timeline_owner_stops() {
                 mondrian_effects::EffectColorDomain::SceneLinearRgb,
                 mondrian_core::ColorFrameAlpha::StraightFloat,
             ),
+            mondrian_core::ImageSampling::UNIT_SQUARE,
             &input,
         ),
         &graph,
@@ -1768,7 +1789,11 @@ fn authored_native_factory_observes_scalar_and_timeline_owner_stops() {
         1,
         &elements,
         TimelineCompositeOptions::default(),
-        TimelineEffectColorRuntime::new(context.engine(), context.working_color_space()),
+        TimelineEffectColorRuntime::new(
+            context.engine(),
+            context.working_color_space(),
+            mondrian_core::ImageSampling::UNIT_SQUARE,
+        ),
         &mut TimelineCompositeScratch::default(),
         &mut EffectProcessorControl::new(&mut checkpoint),
     );
@@ -1836,6 +1861,7 @@ fn authored_uhd_filter_fits_professional_working_grant() {
                     mondrian_effects::EffectColorDomain::SceneLinearRgb,
                     mondrian_core::ColorFrameAlpha::StraightFloat
                 ),
+                mondrian_core::ImageSampling::UNIT_SQUARE,
                 &input
             ),
             &graph,
@@ -1859,6 +1885,7 @@ fn authored_uhd_filter_fits_professional_working_grant() {
                     mondrian_effects::EffectColorDomain::SceneLinearRgb,
                     mondrian_core::ColorFrameAlpha::StraightFloat,
                 ),
+                mondrian_core::ImageSampling::UNIT_SQUARE,
                 &input,
             ),
             &graph,
@@ -1892,6 +1919,7 @@ fn authored_uhd_filter_fits_professional_working_grant() {
                     mondrian_effects::EffectColorDomain::SceneLinearRgb,
                     mondrian_core::ColorFrameAlpha::StraightFloat,
                 ),
+                mondrian_core::ImageSampling::UNIT_SQUARE,
                 &input,
             ),
             &graph,
@@ -1937,6 +1965,7 @@ fn integer_filter_preserves_typed_authoring_and_native_pixels() {
             mondrian_effects::EffectColorDomain::SceneLinearRgb,
             mondrian_core::ColorFrameAlpha::StraightFloat,
         ),
+        mondrian_core::ImageSampling::UNIT_SQUARE,
         vec![[0.1, 0.2, 0.3, 0.05]; 4],
     )
     .expect("owned Float fixture");
@@ -2145,6 +2174,7 @@ fn qualify_native_discrete_filter(string_choice: bool) {
             mondrian_effects::EffectColorDomain::SceneLinearRgb,
             mondrian_core::ColorFrameAlpha::StraightFloat,
         ),
+        mondrian_core::ImageSampling::UNIT_SQUARE,
         vec![[0.1, 0.2, 0.3, 0.05]; 4],
     )
     .expect("owned Float fixture");
@@ -2429,6 +2459,7 @@ fn plugin_interpolation_metadata_controls_new_author_keys_and_readonly_instances
                     mondrian_effects::EffectColorDomain::SceneLinearRgb,
                     mondrian_core::ColorFrameAlpha::StraightFloat,
                 ),
+                mondrian_core::ImageSampling::UNIT_SQUARE,
                 &input,
             ),
             &graph,
@@ -2484,6 +2515,7 @@ fn cpu_contract_input() -> EffectFloatFrame {
             mondrian_effects::EffectColorDomain::SceneLinearRgb,
             mondrian_core::ColorFrameAlpha::StraightFloat,
         ),
+        mondrian_core::ImageSampling::UNIT_SQUARE,
         (0..15)
             .map(|index| {
                 let value = index as f32;
@@ -3543,6 +3575,7 @@ fn output_alpha_input() -> EffectFloatFrame {
             mondrian_effects::EffectColorDomain::SceneLinearRgb,
             mondrian_core::ColorFrameAlpha::StraightFloat,
         ),
+        mondrian_core::ImageSampling::UNIT_SQUARE,
         vec![
             [-0.25, 0.5, 2.0, 0.0],
             [2.0, -4.0, 8.0, f32::MIN_POSITIVE],
@@ -3924,6 +3957,7 @@ fn official_basic_production_resident_steady_frame_performance_gate() {
             mondrian_effects::EffectColorDomain::SceneLinearRgb,
             mondrian_core::ColorFrameAlpha::StraightFloat,
         ),
+        mondrian_core::ImageSampling::UNIT_SQUARE,
         (0..pixels)
             .map(|index| {
                 let x = (index % width as usize) as f32 / width as f32;
@@ -4187,6 +4221,7 @@ fn native_source_reports_actual_association_and_refuses_rebinding_before_dsp() {
         let input = EffectFloatFrame::from_pixels(
             mondrian_effects::EffectFrameExtent::new(1, 1),
             format,
+            mondrian_core::ImageSampling::UNIT_SQUARE,
             vec![sample],
         )
         .expect("exact complete input");
@@ -4230,6 +4265,7 @@ fn native_source_reports_actual_association_and_refuses_rebinding_before_dsp() {
         let rebound = EffectFloatFrame::from_pixels(
             input.extent(),
             format.with_alpha(changed_alpha),
+            mondrian_core::ImageSampling::UNIT_SQUARE,
             vec![sample],
         )
         .expect("same bytes with a different declaration");
@@ -4331,6 +4367,7 @@ fn raw_native_float_survives_disk_cache_nested_over_and_real_opaque_output() {
         raw.height(),
         TimelineRenderCacheFormat::LosslessRgba32FloatZstd,
         ColorFrameAlphaFormats::ALL,
+        mondrian_core::ImageSampling::UNIT_SQUARE,
     );
     // This explicit fixture identity is exhaustive over actual raster bytes;
     // it does not grant production caching to an uncacheable native graph.
@@ -4341,6 +4378,7 @@ fn raw_native_float_survives_disk_cache_nested_over_and_real_opaque_output() {
     let cached = TimelineRenderCacheFrame::new(
         identity,
         WorkingRgbaF32Frame {
+            sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
             width: raw.width(),
             height: raw.height(),
             alpha: raw.alpha(),
@@ -4378,7 +4416,11 @@ fn raw_native_float_survives_disk_cache_nested_over_and_real_opaque_output() {
         .evaluate(TimelineTime::ZERO)
         .expect("sole compiled identity");
     let engine = mondrian_core::ColorEngine::mondrian_standard();
-    let runtime = TimelineEffectColorRuntime::new(&engine, WorkingColorSpace::LinearRec709);
+    let runtime = TimelineEffectColorRuntime::new(
+        &engine,
+        WorkingColorSpace::LinearRec709,
+        mondrian_core::ImageSampling::UNIT_SQUARE,
+    );
     let mut scratch = TimelineCompositeScratch::default();
     let nested_layer = TimelineMediaLayer {
         frame: &source,
@@ -4444,6 +4486,7 @@ fn raw_native_float_survives_disk_cache_nested_over_and_real_opaque_output() {
     let actual = mondrian_renderer::CpuColorTransformExecutor::transform(&delivered, &transform)
         .expect("actual stock OCIO encoder");
     let oracle = CpuColorFrame::working(WorkingRgbaF32Frame {
+        sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
         width: raw.width(),
         height: raw.height(),
         alpha: ColorFrameAlpha::Opaque,
@@ -4524,6 +4567,7 @@ fn product_actual_image_metadata_frames() {
         let frame = mondrian_effects::EffectFloatFrame::from_pixels(
             mondrian_effects::EffectFrameExtent::new(1, 1),
             format,
+            mondrian_core::ImageSampling::UNIT_SQUARE,
             vec![pixel],
         )
         .expect("actual finite source frame");
@@ -4616,6 +4660,7 @@ fn product_workers_bind_parent_namespace_and_restore_plugin_private_analysis_cor
                 mondrian_effects::EffectColorDomain::SceneLinearRgb,
                 mondrian_core::ColorFrameAlpha::StraightCoverage,
             ),
+            mondrian_core::ImageSampling::UNIT_SQUARE,
             vec![pixel],
         )
         .expect("owned source");
@@ -4675,6 +4720,7 @@ fn qualify_product_legacy_render_priority(selected: &str, recoverable: bool) {
     let input = mondrian_effects::EffectFloatFrame::from_pixels(
         mondrian_effects::EffectFrameExtent::new(2, 2),
         format,
+        mondrian_core::ImageSampling::UNIT_SQUARE,
         vec![
             [-0.0, -0.25, 2.0, 0.0],
             [2.0, -4.0, 8.0, f32::MIN_POSITIVE],
@@ -4883,6 +4929,7 @@ fn native_persistent_error_repairs_through_real_effects_residency_without_owner_
             mondrian_effects::EffectColorDomain::SceneLinearRgb,
             mondrian_core::ColorFrameAlpha::StraightCoverage,
         ),
+        mondrian_core::ImageSampling::UNIT_SQUARE,
         vec![[0.25, -0.5, 1.5, 0.25]],
     )
     .expect("complete frame");
@@ -5034,6 +5081,7 @@ fn native_log_messages_reach_product_tracing_with_exact_supervised_owner() {
             mondrian_effects::EffectColorDomain::SceneLinearRgb,
             mondrian_core::ColorFrameAlpha::StraightCoverage,
         ),
+        mondrian_core::ImageSampling::UNIT_SQUARE,
         vec![[0.25, -0.5, 1.5, 0.25]],
     )
     .expect("complete independent frame");
@@ -5194,6 +5242,7 @@ fn native_live_progress_flows_through_real_effects_residency_before_frame_comple
             mondrian_effects::EffectColorDomain::SceneLinearRgb,
             mondrian_core::ColorFrameAlpha::StraightCoverage,
         ),
+        mondrian_core::ImageSampling::UNIT_SQUARE,
         pixels.to_vec(),
     )
     .expect("actual finite authored input");
@@ -5407,6 +5456,7 @@ fn product_worker_obeys_current_source_identity_and_default_render() {
         let input = EffectFloatFrame::from_pixels(
             mondrian_effects::EffectFrameExtent::new(3, 2),
             format,
+            mondrian_core::ImageSampling::UNIT_SQUARE,
             pixels.to_vec(),
         )
         .expect("literal Float32 straight Source");

@@ -205,6 +205,7 @@ pub(crate) struct ResolvedFrameEvaluation {
     pub(crate) dependencies: Arc<[EvaluationDependency]>,
     /// Persistent post-composite cache identity, only for reusable enabled plans.
     pub(crate) render_cache_identity: Option<TimelineRenderCacheIdentity>,
+    pub(crate) sampling: mondrian_core::ImageSampling,
 }
 
 /// Spatial quality of the resolved evaluation itself.

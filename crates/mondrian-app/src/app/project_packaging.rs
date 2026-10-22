@@ -1234,6 +1234,7 @@ mod tests {
             2,
             &[crate::app::preview_viewer_plan::ResolvedPreviewElement::SolidColor(layer.clone())],
             &color_context,
+            mondrian_core::ImageSampling::UNIT_SQUARE,
             &mut preview_scratch,
             &mut mondrian_effects::EffectProcessorControl::uncancelled(),
         )
@@ -1248,6 +1249,7 @@ mod tests {
             TimelineEffectColorRuntime::new(
                 color_context.engine(),
                 color_context.working_color_space(),
+                mondrian_core::ImageSampling::UNIT_SQUARE,
             ),
             &mut export_scratch,
             &mut mondrian_effects::EffectProcessorControl::uncancelled(),

@@ -559,6 +559,7 @@ fn render_program_reference(
         resolution.height,
         &resolved.plan.elements,
         &resolved.plan.color_context,
+        resolved.plan.sampling,
         &mut scratch,
         &mut mondrian_effects::EffectProcessorControl::uncancelled(),
     )?;

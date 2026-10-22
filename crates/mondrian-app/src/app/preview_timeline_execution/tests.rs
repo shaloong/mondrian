@@ -165,6 +165,7 @@ fn ready_temporal_media_frame(
     std::hash::Hasher::write_u64(&mut identity, identity_salt);
     PreviewTimelineMediaFrame::Ready(MediaPreviewFrame::from_working(
         CpuColorFrame::working(WorkingRgbaF32Frame {
+            sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
             alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
             width: request.target_resolution.width,
             height: request.target_resolution.height,
@@ -1088,6 +1089,7 @@ fn preview_executes_cross_dissolve_through_shared_working_compositor() {
         1,
         &resolved.plan.elements,
         &resolved.plan.color_context,
+        mondrian_core::ImageSampling::UNIT_SQUARE,
         &mut scratch,
         &mut mondrian_effects::EffectProcessorControl::uncancelled(),
     )
@@ -1306,6 +1308,7 @@ fn nested_temporal_preview_and_export_share_prepared_semantics_and_pixels() {
         resolution.height,
         &preview.plan.elements,
         &preview.plan.color_context,
+        mondrian_core::ImageSampling::UNIT_SQUARE,
         &mut preview_scratch,
         &mut mondrian_effects::EffectProcessorControl::uncancelled(),
     )
@@ -1744,6 +1747,7 @@ fn basic_title_enters_the_shared_working_linear_preview_path() {
                     request.title_safe_margin,
                     request.target_resolution,
                     request.working_color_space,
+                    mondrian_core::SampleAspectRatio::SQUARE,
                 )
                 .expect("title raster"),
         )
@@ -1807,6 +1811,7 @@ fn nested_sequence_propagates_non_reusable_inner_execution_semantics() {
         PreviewTimelineMediaFrame::Ready(
             MediaPreviewFrame::from_working(
                 CpuColorFrame::working(mondrian_core::WorkingRgbaF32Frame {
+                    sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
                     alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
                     width: request.target_resolution.width,
                     height: request.target_resolution.height,
@@ -1876,6 +1881,7 @@ fn nested_child_source_change_rotates_root_render_cache_identity() {
             std::hash::Hasher::write_u64(&mut identity, salt);
             PreviewTimelineMediaFrame::Ready(MediaPreviewFrame::from_working(
                 CpuColorFrame::working(mondrian_core::WorkingRgbaF32Frame {
+                    sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
                     alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
                     width: 1,
                     height: 1,

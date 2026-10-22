@@ -448,6 +448,7 @@ fn execute_nested_frame(state: &AppState, frame: i64) -> anyhow::Result<NestedEx
         EXECUTION_RESOLUTION.height,
         &resolved.plan.elements,
         &resolved.plan.color_context,
+        resolved.plan.sampling,
         &mut scratch,
         &mut mondrian_effects::EffectProcessorControl::uncancelled(),
     )?;

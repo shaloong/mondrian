@@ -253,6 +253,10 @@ fn color_context() -> ProgramColorContext {
 
 fn color_contract() -> ThumbnailColorContract {
     ThumbnailColorContract {
+        picture_geometry: mondrian_core::ResolvedPictureGeometry::square(
+            mondrian_core::Resolution { width: 2, height: 1 },
+        )
+        .unwrap(),
         video_stream_index: 0,
         source_color_space: ColorSpace::Rec709,
         source_range: DecodedVideoRangeContract::Automatic {
@@ -1256,5 +1260,58 @@ fn failure_codes_are_stable_and_distinct() {
     assert_ne!(
         ThumbnailFailureReason::DecodeCanceled.code(),
         ThumbnailFailureReason::DecodeFailed.code()
+    );
+}
+
+#[test]
+fn thumbnail_identity_includes_frozen_picture_geometry_and_actual_sampling_axes() {
+    let mut job = ThumbnailJob {
+        key: key(AssetId::new(), 91),
+        generation: 1,
+        cancellation: mondrian_core::ExecutionCancellationToken::new(),
+    };
+    let original = thumbnail_key(&job, 3, 5).unwrap();
+    job.key.color.picture_geometry = mondrian_core::ResolvedPictureGeometry::resolve(
+        mondrian_core::Resolution { width: 1921, height: 1081 },
+        mondrian_core::PictureStreamMetadata {
+            sample_aspect_ratio: mondrian_core::SampleAspectRatio::new(4, 3),
+            orientation: mondrian_core::PictureOrientation::RotateClockwise90,
+            ..Default::default()
+        },
+        None,
+        None,
+    )
+    .unwrap();
+    let sampling = job
+        .key
+        .color
+        .picture_geometry
+        .image_sampling(mondrian_core::Resolution { width: 3, height: 5 })
+        .unwrap();
+    assert_eq!(
+        sampling.sample_aspect_ratio(),
+        mondrian_core::SampleAspectRatio::new(4, 3).unwrap()
+    );
+    assert_eq!(
+        sampling.render_scale(),
+        [Rational::new(3, 1921), Rational::new(5, 1081)]
+    );
+    assert_ne!(original, thumbnail_key(&job, 3, 5).unwrap());
+    let same = thumbnail_key(&job, 3, 5).unwrap();
+    job.key.color.picture_geometry = mondrian_core::ResolvedPictureGeometry::resolve(
+        mondrian_core::Resolution { width: 1921, height: 1081 },
+        mondrian_core::PictureStreamMetadata {
+            sample_aspect_ratio: mondrian_core::SampleAspectRatio::new(8, 3),
+            orientation: mondrian_core::PictureOrientation::RotateClockwise90,
+            ..Default::default()
+        },
+        None,
+        None,
+    )
+    .unwrap();
+    assert_ne!(
+        same,
+        thumbnail_key(&job, 3, 5).unwrap(),
+        "same payload extent needs a new pixel-shape identity"
     );
 }

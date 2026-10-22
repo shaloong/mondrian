@@ -335,6 +335,7 @@ fn actual_bank_render_idle_end_render_preserves_native_owner_and_distinct_action
             mondrian_effects::EffectColorDomain::SceneLinearRgb,
             mondrian_core::ColorFrameAlpha::StraightCoverage,
         ),
+        mondrian_core::ImageSampling::UNIT_SQUARE,
         vec![[0.125, -2.0, 16.0, 0.5]],
     )
     .expect("finite independent HDR/negative input");

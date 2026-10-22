@@ -92,7 +92,12 @@ fn output_only_generator_direct_and_prepared_graph_preserve_time_extent_and_owne
             let parameters =
                 constant_parameters([("gain".to_owned(), OpenFxParameterValue::Double(gain))]);
             let output = direct
-                .generate(&timing(frame), &parameters, &mut checkpoint(&token))
+                .generate(
+                    &timing(frame),
+                    mondrian_core::ImageSampling::UNIT_SQUARE,
+                    &parameters,
+                    &mut checkpoint(&token),
+                )
                 .expect("actual no-input Generator Render");
             literal(&output, frame as f32, gain as f32);
             assert_eq!(direct.worker_process_id(), pid);
@@ -101,7 +106,12 @@ fn output_only_generator_direct_and_prepared_graph_preserve_time_extent_and_owne
         let mut invalid = timing(0.0);
         invalid.frame = 13.0;
         assert!(matches!(
-            direct.generate(&invalid, &BTreeMap::new(), &mut checkpoint(&token)),
+            direct.generate(
+                &invalid,
+                mondrian_core::ImageSampling::UNIT_SQUARE,
+                &BTreeMap::new(),
+                &mut checkpoint(&token)
+            ),
             Err(OpenFxHostError::Invalid(_))
         ));
         assert_eq!(
@@ -194,6 +204,7 @@ fn output_only_generator_direct_and_prepared_graph_preserve_time_extent_and_owne
                 .generate_compiled_rgba_f32(
                     EffectFrameExtent::new(3, 2),
                     format(),
+                    mondrian_core::ImageSampling::UNIT_SQUARE,
                     &graph,
                     -999,
                     &mut control,
@@ -264,7 +275,12 @@ fn output_only_generator_cannot_publish_success_without_current_output_fetch() {
         &mut checkpoint(&token),
     )
     .expect("Generator owner");
-    let result = session.generate(&timing(3.0), &BTreeMap::new(), &mut checkpoint(&token));
+    let result = session.generate(
+        &timing(3.0),
+        mondrian_core::ImageSampling::UNIT_SQUARE,
+        &BTreeMap::new(),
+        &mut checkpoint(&token),
+    );
     let shutdown = session.shutdown();
     drop(session);
     assert!(

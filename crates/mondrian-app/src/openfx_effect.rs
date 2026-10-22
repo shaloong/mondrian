@@ -310,6 +310,7 @@ impl EffectFloatProcessorInstance for OpenFxProcessorInstance {
                 ),
                 OpenFxContext::Generator => self.session.generate_observed(
                     &parameters.timing,
+                    frame.sampling(),
                     &parameters.values,
                     deadline,
                     gui,

@@ -1088,7 +1088,7 @@ fn media_preview_cpu_result(
     decode_elapsed_us: u64,
     outcome: PreviewDecodeOutcome,
 ) -> MediaPreviewResult {
-    let (decoded, diagnostics, execution, evidence) = match outcome {
+    let (decoded, diagnostics, execution, evidence, sampled_resolution) = match outcome {
         PreviewDecodeOutcome::Frame(frame) => {
             let diagnostics = frame.diagnostics;
             let execution = frame.decode_execution;
@@ -1101,11 +1101,14 @@ fn media_preview_cpu_result(
                 sampling: diagnostics.decoded_video_sampling,
                 execution,
             };
+            let sampled_resolution =
+                mondrian_core::Resolution { width: frame.width, height: frame.height };
             (
                 mondrian_renderer::DecodedCpuSourceFrame::from(frame),
                 diagnostics,
                 execution,
                 evidence,
+                sampled_resolution,
             )
         }
         PreviewDecodeOutcome::FloatFrame(frame) => {
@@ -1120,11 +1123,14 @@ fn media_preview_cpu_result(
                 sampling: diagnostics.decoded_video_sampling,
                 execution,
             };
+            let sampled_resolution =
+                mondrian_core::Resolution { width: frame.width, height: frame.height };
             (
                 mondrian_renderer::DecodedCpuSourceFrame::from(frame),
                 diagnostics,
                 execution,
                 evidence,
+                sampled_resolution,
             )
         }
         PreviewDecodeOutcome::Unorm16Frame(frame) => {
@@ -1139,11 +1145,14 @@ fn media_preview_cpu_result(
                 sampling: diagnostics.decoded_video_sampling,
                 execution,
             };
+            let sampled_resolution =
+                mondrian_core::Resolution { width: frame.width, height: frame.height };
             (
                 mondrian_renderer::DecodedCpuSourceFrame::from(frame),
                 diagnostics,
                 execution,
                 evidence,
+                sampled_resolution,
             )
         }
         PreviewDecodeOutcome::CpuYuvFrame(_)
@@ -1164,11 +1173,24 @@ fn media_preview_cpu_result(
             );
         }
     };
+    let sampling = match job.key.picture_geometry.image_sampling(sampled_resolution) {
+        Ok(sampling) => sampling,
+        Err(error) => {
+            return media_preview_alpha_failure(
+                job,
+                queue_wait_us,
+                decode_elapsed_us,
+                diagnostics,
+                error.to_string(),
+            )
+        }
+    };
     let frame_identity = media_preview_frame_identity(&job.key, evidence);
     let prepared_source = match prepare_decoded_cpu_source_frame(
         decoded,
         job.key.alpha_interpretation,
         job.key.preparation_intent.clone(),
+        sampling,
     ) {
         Ok(source) => source,
         Err(error) => {

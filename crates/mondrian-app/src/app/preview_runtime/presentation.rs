@@ -308,6 +308,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                             height,
                             &evaluation.elements,
                             &evaluation.color_context,
+                            evaluation.sampling,
                             monitoring_tap,
                             monitoring_settings,
                             &mut self.scratch.borrow_mut(),

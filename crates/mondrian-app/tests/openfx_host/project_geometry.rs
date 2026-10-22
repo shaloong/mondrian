@@ -12,6 +12,7 @@ fn input() -> EffectFloatFrame {
     EffectFloatFrame::from_pixels(
         EffectFrameExtent::new(3, 5),
         cpu_contract_input().format(),
+        mondrian_core::ImageSampling::UNIT_SQUARE,
         vec![[-0.25, 0.5, 2.0, 0.25]; 15],
     )
     .unwrap()

@@ -798,6 +798,7 @@ fn evaluation_working_set_invalidates_only_the_exact_media_sample() {
 
     // A Ready evaluation retains the same exact dependency.
     let ready = Arc::new(ResolvedFrameEvaluation {
+        sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
         cpu_materialization_active_bytes: 0,
         key,
         output_key: PreviewOutputKey::new(
@@ -855,6 +856,7 @@ fn completed_gpu_evaluation_release_is_exact_and_preserves_other_owners() {
     );
     let dependency = test_media_key(961);
     let current = Arc::new(ResolvedFrameEvaluation {
+        sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
         cpu_materialization_active_bytes: 0,
         key: current_key,
         output_key: output.clone(),
@@ -870,6 +872,7 @@ fn completed_gpu_evaluation_release_is_exact_and_preserves_other_owners() {
     set.insert(
         successor_key,
         Arc::new(ResolvedFrameEvaluation {
+            sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
             cpu_materialization_active_bytes: 0,
             key: successor_key,
             output_key: output.clone(),
@@ -955,6 +958,7 @@ fn completed_gpu_evaluation_release_is_exact_and_preserves_other_owners() {
         set.insert(
             current_key,
             Arc::new(ResolvedFrameEvaluation {
+                sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
                 cpu_materialization_active_bytes: 0,
                 key: current_key,
                 output_key: output.clone(),
@@ -1032,6 +1036,7 @@ fn completed_cpu_evaluation_releases_prefetch_headroom_without_clearing_store() 
     set.insert(
         key,
         Arc::new(ResolvedFrameEvaluation {
+            sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
             cpu_materialization_active_bytes: 0,
             key,
             output_key: output.clone(),
@@ -1120,6 +1125,7 @@ fn evaluation_working_set_retires_native_decoder_resource_owners() {
         PreviewDecodeExecutionSummary::default(),
     );
     let evaluation = Arc::new(ResolvedFrameEvaluation {
+        sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
         cpu_materialization_active_bytes: 0,
         key,
         output_key: PreviewOutputKey::new(
@@ -1198,6 +1204,7 @@ fn evaluation_working_set_retires_native_decoder_resource_owners() {
     set.insert(
         key,
         Arc::new(ResolvedFrameEvaluation {
+            sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
             cpu_materialization_active_bytes: 0,
             key,
             output_key: output.clone(),
@@ -2303,6 +2310,7 @@ fn cpu_raster_preview_retains_program_output_before_srgb_adaptation() {
         2,
         &resolved,
         &color_context,
+        mondrian_core::ImageSampling::UNIT_SQUARE,
         &mut scratch,
         &mut mondrian_effects::EffectProcessorControl::uncancelled(),
     )
@@ -4091,6 +4099,7 @@ fn generation_rotation_retires_transient_evaluations_and_preserves_exact_reuse()
         EvaluationReusePolicy::Reusable,
     ] {
         let evaluation = Arc::new(ResolvedFrameEvaluation {
+            sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
             cpu_materialization_active_bytes: 0,
             key,
             output_key: PreviewOutputKey::new(
@@ -11760,6 +11769,7 @@ fn resolved_media_preview_cache_key_includes_media_frame_identity() {
         180,
         &make_plan(100),
         &color_context,
+        mondrian_core::ImageSampling::UNIT_SQUARE,
     );
     let second = viewer_preview_cache_key_for_resolved_plan(
         sequence_id,
@@ -11767,6 +11777,7 @@ fn resolved_media_preview_cache_key_includes_media_frame_identity() {
         180,
         &make_plan(200),
         &color_context,
+        mondrian_core::ImageSampling::UNIT_SQUARE,
     );
 
     assert_ne!(first, second);
@@ -11798,6 +11809,7 @@ fn uncacheable_effect_retains_semantic_identity_without_admitting_viewer_reuse()
         180,
         &resolved,
         &color_context,
+        mondrian_core::ImageSampling::UNIT_SQUARE,
     );
     let second = viewer_preview_cache_key_for_resolved_plan(
         sequence_id,
@@ -11805,6 +11817,7 @@ fn uncacheable_effect_retains_semantic_identity_without_admitting_viewer_reuse()
         180,
         &resolved,
         &color_context,
+        mondrian_core::ImageSampling::UNIT_SQUARE,
     );
 
     assert_eq!(first, second, "semantic identity remains available");
@@ -11877,6 +11890,7 @@ fn stable_parameter_value_changes_compiled_graph_and_viewer_cache_identity() {
         180,
         &make_plan(first_graph),
         &color_context,
+        mondrian_core::ImageSampling::UNIT_SQUARE,
     );
     let second = viewer_preview_cache_key_for_resolved_plan(
         sequence_id,
@@ -11884,6 +11898,7 @@ fn stable_parameter_value_changes_compiled_graph_and_viewer_cache_identity() {
         180,
         &make_plan(second_graph),
         &color_context,
+        mondrian_core::ImageSampling::UNIT_SQUARE,
     );
     assert_ne!(first, second);
 }
@@ -11905,10 +11920,22 @@ fn resolved_media_preview_cache_key_includes_color_context() {
 
     let rec709 = test_color_context(ColorSpace::Rec709);
     let srgb = test_color_context(ColorSpace::Srgb);
-    let first =
-        viewer_preview_cache_key_for_resolved_plan(sequence_id, 320, 180, &resolved, &rec709);
-    let second =
-        viewer_preview_cache_key_for_resolved_plan(sequence_id, 320, 180, &resolved, &srgb);
+    let first = viewer_preview_cache_key_for_resolved_plan(
+        sequence_id,
+        320,
+        180,
+        &resolved,
+        &rec709,
+        mondrian_core::ImageSampling::UNIT_SQUARE,
+    );
+    let second = viewer_preview_cache_key_for_resolved_plan(
+        sequence_id,
+        320,
+        180,
+        &resolved,
+        &srgb,
+        mondrian_core::ImageSampling::UNIT_SQUARE,
+    );
 
     assert_ne!(first, second);
 }
@@ -11930,8 +11957,22 @@ fn resolved_media_preview_cache_key_includes_resolved_display_color_space() {
 
     let sdr = test_color_context(ColorSpace::Rec709);
     let p3 = test_color_context(ColorSpace::DisplayP3);
-    let first = viewer_preview_cache_key_for_resolved_plan(sequence_id, 320, 180, &resolved, &sdr);
-    let second = viewer_preview_cache_key_for_resolved_plan(sequence_id, 320, 180, &resolved, &p3);
+    let first = viewer_preview_cache_key_for_resolved_plan(
+        sequence_id,
+        320,
+        180,
+        &resolved,
+        &sdr,
+        mondrian_core::ImageSampling::UNIT_SQUARE,
+    );
+    let second = viewer_preview_cache_key_for_resolved_plan(
+        sequence_id,
+        320,
+        180,
+        &resolved,
+        &p3,
+        mondrian_core::ImageSampling::UNIT_SQUARE,
+    );
 
     assert_ne!(first, second);
 }
@@ -11958,10 +11999,22 @@ fn resolved_media_preview_cache_key_includes_versioned_output_transform_intent()
             package: mondrian_core::MondrianStandardPackageIdentity::V2,
         },
     );
-    let first =
-        viewer_preview_cache_key_for_resolved_plan(sequence_id, 320, 180, &resolved, &current);
-    let second =
-        viewer_preview_cache_key_for_resolved_plan(sequence_id, 320, 180, &resolved, &legacy);
+    let first = viewer_preview_cache_key_for_resolved_plan(
+        sequence_id,
+        320,
+        180,
+        &resolved,
+        &current,
+        mondrian_core::ImageSampling::UNIT_SQUARE,
+    );
+    let second = viewer_preview_cache_key_for_resolved_plan(
+        sequence_id,
+        320,
+        180,
+        &resolved,
+        &legacy,
+        mondrian_core::ImageSampling::UNIT_SQUARE,
+    );
 
     assert_ne!(first, second);
 }
@@ -11983,10 +12036,22 @@ fn resolved_media_preview_cache_key_includes_output_transform_intent() {
 
     let standard = test_color_context(ColorSpace::Rec709);
     let colorimetric = test_colorimetric_context(ColorSpace::Rec709);
-    let first =
-        viewer_preview_cache_key_for_resolved_plan(sequence_id, 320, 180, &resolved, &standard);
-    let second =
-        viewer_preview_cache_key_for_resolved_plan(sequence_id, 320, 180, &resolved, &colorimetric);
+    let first = viewer_preview_cache_key_for_resolved_plan(
+        sequence_id,
+        320,
+        180,
+        &resolved,
+        &standard,
+        mondrian_core::ImageSampling::UNIT_SQUARE,
+    );
+    let second = viewer_preview_cache_key_for_resolved_plan(
+        sequence_id,
+        320,
+        180,
+        &resolved,
+        &colorimetric,
+        mondrian_core::ImageSampling::UNIT_SQUARE,
+    );
 
     assert_ne!(first, second);
 }
@@ -12012,10 +12077,22 @@ fn resolved_media_preview_cache_key_includes_exact_standard_package() {
         ColorEngine::MondrianStandard { package: legacy_package },
     );
 
-    let current_key =
-        viewer_preview_cache_key_for_resolved_plan(sequence_id, 320, 180, &resolved, &current);
-    let legacy_key =
-        viewer_preview_cache_key_for_resolved_plan(sequence_id, 320, 180, &resolved, &legacy);
+    let current_key = viewer_preview_cache_key_for_resolved_plan(
+        sequence_id,
+        320,
+        180,
+        &resolved,
+        &current,
+        mondrian_core::ImageSampling::UNIT_SQUARE,
+    );
+    let legacy_key = viewer_preview_cache_key_for_resolved_plan(
+        sequence_id,
+        320,
+        180,
+        &resolved,
+        &legacy,
+        mondrian_core::ImageSampling::UNIT_SQUARE,
+    );
 
     assert_ne!(current_key, legacy_key);
 }
@@ -12030,6 +12107,7 @@ fn preview_working_composite_boundary_uses_resolved_display_view() {
         2,
         &[],
         &color_context,
+        mondrian_core::ImageSampling::UNIT_SQUARE,
         &mut scratch,
         &mut mondrian_effects::EffectProcessorControl::uncancelled(),
     )
@@ -12910,6 +12988,7 @@ fn preview_single_media_color_output_matches_export_composite_contract() {
         1,
         &resolved,
         &color_context,
+        mondrian_core::ImageSampling::UNIT_SQUARE,
         &mut preview_scratch,
         &mut mondrian_effects::EffectProcessorControl::uncancelled(),
     )
@@ -12941,6 +13020,7 @@ fn preview_single_media_color_output_matches_export_composite_contract() {
         TimelineEffectColorRuntime::new(
             color_context.engine(),
             color_context.working_color_space(),
+            mondrian_core::ImageSampling::UNIT_SQUARE,
         ),
         &mut export_scratch,
         &mut mondrian_effects::EffectProcessorControl::uncancelled(),
@@ -13021,6 +13101,7 @@ fn preview_camera_log_input_matches_export_frame_hash() {
         2,
         &resolved,
         &color_context,
+        mondrian_core::ImageSampling::UNIT_SQUARE,
         &mut preview_scratch,
         &mut mondrian_effects::EffectProcessorControl::uncancelled(),
     )
@@ -13031,6 +13112,7 @@ fn preview_camera_log_input_matches_export_frame_hash() {
     let export_input = SourceColorModule::execute_cpu_with_intent(
         &CpuSourceColorFrame::from(source.clone()),
         &input_transform,
+        mondrian_core::ImageSampling::UNIT_SQUARE,
         &mut export_color_session,
     )
     .expect("export camera-log input transform");
@@ -13051,6 +13133,7 @@ fn preview_camera_log_input_matches_export_frame_hash() {
         TimelineEffectColorRuntime::new(
             color_context.engine(),
             color_context.working_color_space(),
+            mondrian_core::ImageSampling::UNIT_SQUARE,
         ),
         &mut export_scratch,
         &mut mondrian_effects::EffectProcessorControl::uncancelled(),
@@ -13110,6 +13193,7 @@ fn preview_multilayer_color_output_matches_export_frame_hash() {
             false,
             ColorEngine::mondrian_standard(),
         ),
+        mondrian_core::ImageSampling::UNIT_SQUARE,
         &mut source_color_session,
     )
     .expect("media input transform")
@@ -13155,6 +13239,7 @@ fn preview_multilayer_color_output_matches_export_frame_hash() {
         2,
         &resolved,
         &color_context,
+        mondrian_core::ImageSampling::UNIT_SQUARE,
         &mut preview_scratch,
         &mut mondrian_effects::EffectProcessorControl::uncancelled(),
     )
@@ -13183,6 +13268,7 @@ fn preview_multilayer_color_output_matches_export_frame_hash() {
             TimelineEffectColorRuntime::new(
                 color_context.engine(),
                 color_context.working_color_space(),
+                mondrian_core::ImageSampling::UNIT_SQUARE,
             ),
             &mut export_scratch,
             &mut mondrian_effects::EffectProcessorControl::uncancelled(),
@@ -19037,6 +19123,7 @@ fn retired_transport_releases_cpu_evaluation_guards_without_clearing_store() {
     set.insert(
         key,
         Arc::new(ResolvedFrameEvaluation {
+            sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
             cpu_materialization_active_bytes: 0,
             key,
             output_key: output.clone(),
@@ -19887,4 +19974,43 @@ fn canonical_program_raster_uses_full_source_in_current_and_future_media() {
     runtime.shutdown();
     drop(state);
     std::fs::remove_dir_all(root).expect("remove fixture");
+}
+
+#[test]
+fn preview_empty_output_preserves_owner_sampling_and_separates_memory_identity() {
+    let context = test_color_context(ColorSpace::Rec709);
+    let sampling = mondrian_core::ImageSampling::from_full_raster(
+        mondrian_core::SampleAspectRatio::new(4, 3).unwrap(),
+        mondrian_core::Resolution { width: 7, height: 9 },
+        mondrian_core::Resolution { width: 3, height: 5 },
+    )
+    .unwrap();
+    let sequence = SequenceId::new();
+    let key = viewer_preview_cache_key_for_resolved_plan(sequence, 3, 5, &[], &context, sampling);
+    let other = viewer_preview_cache_key_for_resolved_plan(
+        sequence,
+        3,
+        5,
+        &[],
+        &context,
+        mondrian_core::ImageSampling::UNIT_SQUARE,
+    );
+    assert_ne!(
+        key, other,
+        "same empty canvas cannot reuse a different sampling contract"
+    );
+    let output = composite_resolved_preview_working(
+        3,
+        5,
+        &[],
+        &context,
+        sampling,
+        &mut TimelineCompositeScratch::default(),
+        &mut mondrian_effects::EffectProcessorControl::uncancelled(),
+    )
+    .unwrap();
+    let actual = output.frame.rgba_f32();
+    assert_eq!(actual.sampling, sampling);
+    assert_eq!((actual.width, actual.height), (3, 5));
+    assert_eq!(actual.data, vec![[0.0, 0.0, 0.0, 0.0]; 15]);
 }

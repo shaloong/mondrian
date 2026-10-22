@@ -458,8 +458,13 @@ fn frame_from_bytes(bytes: &[u8]) -> LabResult<EffectFloatFrame> {
             lanes
         })
         .collect();
-    EffectFloatFrame::from_pixels(EffectFrameExtent::new(5, 3), value_format(), pixels)
-        .map_err(|e| e.to_string())
+    EffectFloatFrame::from_pixels(
+        EffectFrameExtent::new(5, 3),
+        value_format(),
+        mondrian_core::ImageSampling::UNIT_SQUARE,
+        pixels,
+    )
+    .map_err(|e| e.to_string())
 }
 fn output(
     directory: &Path,

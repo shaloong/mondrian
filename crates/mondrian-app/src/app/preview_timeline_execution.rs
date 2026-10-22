@@ -107,6 +107,7 @@ pub(crate) enum PreviewTimelineMediaWait {
 pub(crate) struct PreviewTimelineTitleRequest {
     pub(crate) title: mondrian_core::EvaluatedBasicTitle,
     pub(crate) author_resolution: Resolution,
+    pub(crate) sample_aspect_ratio: mondrian_core::SampleAspectRatio,
     pub(crate) title_safe_margin: f32,
     pub(crate) target_resolution: Resolution,
     pub(crate) working_color_space: mondrian_core::WorkingColorSpace,
@@ -120,6 +121,7 @@ impl PreviewTimelineTitleRequest {
             self.title_safe_margin,
             self.target_resolution,
             self.working_color_space,
+            self.sample_aspect_ratio,
         )
     }
 }
@@ -155,6 +157,7 @@ pub(crate) struct ResolvedPreviewPlan {
     pub(crate) cache_reusable: bool,
     pub(crate) color_context: ProgramColorContext,
     pub(crate) render_cache_identity: Option<TimelineRenderCacheIdentity>,
+    pub(crate) sampling: mondrian_core::ImageSampling,
 }
 
 /// Ordered execution fact emitted while materializing nested Sequences.
@@ -456,6 +459,20 @@ where
         Ok(closure) => closure,
         Err(reason) => return PreviewTimelineResolution::Unavailable { reason },
     };
+    let sampling = match closure
+        .node(closure.root())
+        .and_then(|node| node.materialization_contract().image_sampling(target_resolution).ok())
+    {
+        Some(sampling) => sampling,
+        None => {
+            return PreviewTimelineResolution::Unavailable {
+                reason: PreviewUnavailability::failed(
+                    PreviewOutputStage::TimelineEvaluation,
+                    "frozen Preview owner has invalid output sampling",
+                ),
+            }
+        }
+    };
     #[cfg(test)]
     let semantic_trace = match prepared_visual_execution_semantic_trace(&closure) {
         Ok(trace) => trace,
@@ -569,6 +586,7 @@ where
         target_resolution.height,
         &elements,
         &color_context,
+        sampling,
     );
     let cache_reusable = viewer_preview_plan_allows_cross_call_reuse(&elements);
     let render_cache_identity = (cache_reusable && sequence.settings.preview.cache_enabled)
@@ -581,10 +599,12 @@ where
                 target_resolution.height,
                 TimelineRenderCacheFormat::LosslessRgba32FloatZstd,
                 mondrian_core::ColorFrameAlphaFormats::ALL,
+                sampling,
             )
         });
     PreviewTimelineResolution::Ready(ResolvedPreviewTimeline {
         plan: ResolvedPreviewPlan {
+            sampling,
             cpu_materialization_active_bytes: materialization_bytes,
             elements,
             cache_key,
@@ -784,6 +804,7 @@ where
             node.author_resolution(),
             node.frame(),
             node.execution_resolution(),
+            node.materialization_contract(),
             inbound.parent_working_color_space(),
             node.color_context().clone(),
             resolved.unwrap_or_default(),
@@ -1029,6 +1050,7 @@ where
         let frame = MediaPreviewFrame::from_working(
             CpuColorFrame::working(WorkingRgbaF32Frame {
                 alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
+                sampling: tile.sampling(),
                 width: tile.frame_extent().width(),
                 height: tile.frame_extent().height(),
                 data: tile.pixels().to_vec(),
@@ -1184,6 +1206,14 @@ where
             let extent = demand.effect_request.frame_extent();
             let frame = CpuColorFrame::working(WorkingRgbaF32Frame {
                 alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
+                sampling: materialization
+                    .image_sampling(Resolution { width: extent.width(), height: extent.height() })
+                    .map_err(|error| {
+                        PreviewTimelineAbort::Unavailable(PreviewUnavailability::failed(
+                            PreviewOutputStage::GeneratedSource,
+                            error.to_string(),
+                        ))
+                    })?,
                 width: extent.width(),
                 height: extent.height(),
                 data: vec![
@@ -1303,6 +1333,7 @@ fn preview_temporal_tile(
     EffectFrameTileF32::new(
         demand.effect_request.time(),
         demand.effect_request.frame_extent(),
+        source.sampling,
         roi,
         demand.effect_request.time().numerator(),
         pixels,
@@ -2020,6 +2051,7 @@ where
     let request = PreviewTimelineTitleRequest {
         title: title.title.clone(),
         author_resolution,
+        sample_aspect_ratio: materialization.sample_aspect_ratio(),
         title_safe_margin: materialization.title_safe_margin(),
         target_resolution,
         working_color_space,
@@ -2070,6 +2102,7 @@ fn materialize_prepared_nested_node(
     author_resolution: Resolution,
     frame: i64,
     target_resolution: Resolution,
+    materialization: PreparedVisualMaterializationContract,
     parent_working_color_space: mondrian_core::WorkingColorSpace,
     color_context: ProgramColorContext,
     resolved: Vec<ResolvedPreviewElement>,
@@ -2086,6 +2119,12 @@ fn materialize_prepared_nested_node(
         target_resolution.height,
         &resolved,
         &color_context,
+        materialization.image_sampling(target_resolution).map_err(|error| {
+            PreviewTimelineAbort::Unavailable(PreviewUnavailability::failed(
+                PreviewOutputStage::TimelineComposite,
+                error.to_string(),
+            ))
+        })?,
     )
     .plan_identity;
     let cross_call_reusable = viewer_preview_plan_allows_cross_call_reuse(&resolved);
@@ -2101,6 +2140,12 @@ fn materialize_prepared_nested_node(
         target_resolution.height,
         &resolved,
         &color_context,
+        materialization.image_sampling(target_resolution).map_err(|error| {
+            PreviewTimelineAbort::Unavailable(PreviewUnavailability::failed(
+                PreviewOutputStage::TimelineComposite,
+                error.to_string(),
+            ))
+        })?,
         &mut scratch,
         &mut control,
     )

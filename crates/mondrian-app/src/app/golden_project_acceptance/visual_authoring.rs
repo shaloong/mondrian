@@ -867,6 +867,7 @@ fn execute_visual_frame(state: &AppState, frame: i64) -> anyhow::Result<VisualEx
                 request.title_safe_margin,
                 request.target_resolution,
                 request.working_color_space,
+                request.sample_aspect_ratio,
             ) {
                 Ok(frame) => {
                     raster_identities.push(frame.identity().to_string());
@@ -945,6 +946,7 @@ fn execute_visual_frame(state: &AppState, frame: i64) -> anyhow::Result<VisualEx
         PREVIEW_RESOLUTION.height,
         &resolved.plan.elements,
         &resolved.plan.color_context,
+        resolved.plan.sampling,
         &mut scratch,
         &mut mondrian_effects::EffectProcessorControl::uncancelled(),
     )?;

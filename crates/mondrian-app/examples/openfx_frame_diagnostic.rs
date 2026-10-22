@@ -181,6 +181,7 @@ mod qualification {
                 mondrian_effects::EffectColorDomain::SceneLinearRgb,
                 mondrian_core::ColorFrameAlpha::StraightFloat,
             ),
+            mondrian_core::ImageSampling::UNIT_SQUARE,
             (0..pixels)
                 .map(|index| {
                     let x = (index % width as usize) as f32 / width as f32;
@@ -451,6 +452,7 @@ mod qualification {
                 mondrian_effects::EffectColorDomain::SceneLinearRgb,
                 mondrian_core::ColorFrameAlpha::StraightFloat,
             ),
+            mondrian_core::ImageSampling::UNIT_SQUARE,
             (0..pixels)
                 .map(|index| {
                     let x = (index % width as usize) as f32 / width as f32;

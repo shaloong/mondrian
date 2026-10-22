@@ -1550,6 +1550,7 @@ pub(crate) mod shared_frame_tests {
                 mondrian_effects::EffectColorDomain::SceneLinearRgb,
                 mondrian_core::ColorFrameAlpha::StraightFloat,
             ),
+            mondrian_core::ImageSampling::UNIT_SQUARE,
             vec![[0.0; 4]; 6],
         )
         .expect("owned Float fixture");
@@ -4099,6 +4100,7 @@ pub(crate) mod shared_frame_tests {
         let frame = mondrian_effects::EffectFloatFrame::from_pixels(
             mondrian_effects::EffectFrameExtent::new(1, 1),
             format,
+            mondrian_core::ImageSampling::UNIT_SQUARE,
             vec![[0.25, -0.5, 1.5, 0.25]],
         )
         .expect("complete finite input");
@@ -4212,6 +4214,7 @@ pub(crate) mod shared_frame_tests {
         let frame = mondrian_effects::EffectFloatFrame::from_pixels(
             mondrian_effects::EffectFrameExtent::new(1, 1),
             format,
+            mondrian_core::ImageSampling::UNIT_SQUARE,
             pixels.to_vec(),
         )
         .expect("independent finite HDR input");

@@ -425,10 +425,12 @@ mod tests {
             1,
             TimelineRenderCacheFormat::LosslessRgba32FloatZstd,
             mondrian_core::ColorFrameAlphaFormats::ALL,
+            mondrian_core::ImageSampling::UNIT_SQUARE,
         );
         let frame = TimelineRenderCacheFrame::new(
             identity,
             WorkingRgbaF32Frame {
+                sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
                 alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
                 width: 2,
                 height: 1,

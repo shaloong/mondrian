@@ -248,6 +248,7 @@ fn grade_graph_relative_resources_bind_once_and_survive_undo_and_reopen() {
                     mondrian_effects::EffectColorDomain::SceneLinearRgb,
                     mondrian_core::ColorFrameAlpha::StraightCoverage,
                 ),
+                mondrian_core::ImageSampling::UNIT_SQUARE,
                 &[[0.125, 0.25, 0.75, 0.375], [0.75, 0.5, 0.125, 0.0]],
             ),
             &compiled,

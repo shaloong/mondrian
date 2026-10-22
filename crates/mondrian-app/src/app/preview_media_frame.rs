@@ -588,7 +588,11 @@ impl MediaPreviewGpuSourceFrame {
         input_transform: RenderInputTransform,
     ) -> Self {
         Self {
-            prepared_source: PreparedSourceFrame::from_typed_source(source, input_transform),
+            prepared_source: PreparedSourceFrame::from_typed_source(
+                source,
+                input_transform,
+                mondrian_core::ImageSampling::UNIT_SQUARE,
+            ),
             decoder_residency: DecodedFrameResidency::CpuRgba,
             decoder_handle_kind: None,
             decoded_surface_format: DecodedVideoSurfaceFormat::Unknown,
@@ -640,4 +644,66 @@ struct MediaPreviewWorkingFrameCacheEntry {
     frame: CpuColorFrame,
     color_diagnostics: Option<RenderColorTransformDiagnostics>,
     stage_diagnostics: RenderColorStageDiagnostics,
+}
+
+#[cfg(test)]
+mod sampling_tests {
+    use super::*;
+
+    #[test]
+    fn lazy_media_working_cache_preserves_actual_source_sampling() {
+        let geometry = mondrian_core::ResolvedPictureGeometry::resolve(
+            Resolution { width: 1921, height: 1081 },
+            mondrian_core::PictureStreamMetadata {
+                sample_aspect_ratio: mondrian_core::SampleAspectRatio::new(4, 3),
+                orientation: mondrian_core::PictureOrientation::RotateClockwise90,
+                ..Default::default()
+            },
+            None,
+            None,
+        )
+        .unwrap();
+        let sampling = geometry.image_sampling(Resolution { width: 3, height: 5 }).unwrap();
+        let encoded = mondrian_renderer::CpuEncodedColorFrame::source_rgba8(
+            3,
+            5,
+            ColorSpace::Rec709,
+            [0_u8, 0, 0, 255].repeat(15),
+        );
+        let transform = RenderInputTransform::to_working(
+            mondrian_core::WorkingColorSpace::LinearRec709,
+            false,
+            mondrian_core::ColorEngine::mondrian_standard(),
+        );
+        let mut source = MediaPreviewGpuSourceFrame::new(encoded.clone(), transform.clone());
+        source.prepared_source =
+            PreparedSourceFrame::from_typed_source(encoded, transform, sampling);
+        let frame = MediaPreviewFrame::from_source(
+            source,
+            geometry.encoded_resolution(),
+            PreviewSemanticIdentity::from_complete_fingerprint([19; 32]),
+            FramePresentationQuality::Ready,
+            PreviewDecodeExecutionSummary::default(),
+        )
+        .with_picture_geometry(geometry);
+        let first = frame.working_frame().unwrap();
+        let cached = frame.working_frame().unwrap();
+        assert_eq!(
+            first.frame.rgba_f32().sampling.sample_aspect_ratio(),
+            mondrian_core::SampleAspectRatio::new(4, 3).unwrap()
+        );
+        assert_eq!(
+            first.frame.rgba_f32().sampling.render_scale(),
+            [
+                mondrian_core::Rational::new(3, 1921),
+                mondrian_core::Rational::new(5, 1081)
+            ]
+        );
+        assert_eq!(cached.frame.rgba_f32().sampling, sampling);
+        assert!(
+            std::ptr::eq(first.frame.rgba_f32(), cached.frame.rgba_f32()),
+            "the original lazy cache retains the same working value"
+        );
+        assert_eq!(first.frame.rgba_f32().data.len(), 15);
+    }
 }

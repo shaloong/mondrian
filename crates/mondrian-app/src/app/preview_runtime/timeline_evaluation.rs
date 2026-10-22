@@ -107,6 +107,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                     reuse_policy,
                     dependencies: dependencies.into(),
                     render_cache_identity: plan.render_cache_identity,
+                    sampling: plan.sampling,
                 });
                 // Far cold-source activation exists only to build native
                 // import/color backend objects. Inserting it into the

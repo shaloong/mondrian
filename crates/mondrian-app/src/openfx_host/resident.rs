@@ -418,6 +418,7 @@ struct ActiveQuestion {
 struct FrameRequest<'a> {
     extent: mondrian_effects::EffectFrameExtent,
     format: mondrian_effects::EffectValueFormat,
+    sampling: mondrian_core::ImageSampling,
     input: Option<&'a EffectFloatFrame>,
 }
 impl<'a> FrameRequest<'a> {
@@ -425,6 +426,7 @@ impl<'a> FrameRequest<'a> {
         Self {
             extent: frame.extent(),
             format: frame.format(),
+            sampling: frame.sampling(),
             input: Some(frame),
         }
     }
@@ -845,14 +847,18 @@ impl OpenFxFilterSession {
     }
 
     /// Render an Output-only Generator without any incoming image storage.
+    /// The caller supplies the actual output sampling; this preserves Rust frame
+    /// metadata and does not reinterpret native timing or project geometry.
     pub fn generate(
         &mut self,
         timing: &OpenFxRenderTiming,
+        sampling: mondrian_core::ImageSampling,
         parameters: &BTreeMap<String, OpenFxParameterBinding>,
         owner_checkpoint: &mut dyn FnMut() -> Result<(), OpenFxHostError>,
     ) -> Result<EffectFloatFrame, OpenFxHostError> {
         self.generate_observed(
             timing,
+            sampling,
             parameters,
             None,
             mondrian_effects::EffectProcessorGuiAdmission::CLOSED,
@@ -866,6 +872,7 @@ impl OpenFxFilterSession {
     pub(crate) fn generate_observed(
         &mut self,
         timing: &OpenFxRenderTiming,
+        sampling: mondrian_core::ImageSampling,
         parameters: &BTreeMap<String, OpenFxParameterBinding>,
         owner_deadline: Option<Instant>,
         gui: mondrian_effects::EffectProcessorGuiAdmission,
@@ -882,6 +889,7 @@ impl OpenFxFilterSession {
             FrameRequest {
                 extent: mondrian_effects::EffectFrameExtent::new(self.width, self.height),
                 format: self.input_format,
+                sampling,
                 input: None,
             },
             owner_deadline,
@@ -1248,6 +1256,7 @@ impl OpenFxFilterSession {
             }..],
             output_owner,
             format,
+            frame.sampling,
             &mut checkpoint,
             probe,
         )?;
@@ -1774,13 +1783,21 @@ fn materialize_native_output(
     format: mondrian_effects::EffectValueFormat,
     checkpoint: &mut dyn FnMut() -> Result<(), OpenFxHostError>,
 ) -> Result<EffectFloatFrame, OpenFxHostError> {
-    materialize_native_output_profiled(source, owner, format, checkpoint, &mut ())
+    materialize_native_output_profiled(
+        source,
+        owner,
+        format,
+        mondrian_core::ImageSampling::UNIT_SQUARE,
+        checkpoint,
+        &mut (),
+    )
 }
 
 fn materialize_native_output_profiled(
     source: &[u8],
     owner: NativeOutputAllocation,
     format: mondrian_effects::EffectValueFormat,
+    sampling: mondrian_core::ImageSampling,
     checkpoint: &mut dyn FnMut() -> Result<(), OpenFxHostError>,
     probe: &mut impl ParentProbe,
 ) -> Result<EffectFloatFrame, OpenFxHostError> {
@@ -1831,7 +1848,9 @@ fn materialize_native_output_profiled(
     }
     let phase = probe.start();
     let admitted =
-        EffectFloatFrame::from_pixels_controlled(extent, format, pixels, &mut || checkpoint());
+        EffectFloatFrame::from_pixels_controlled(extent, format, sampling, pixels, &mut || {
+            checkpoint()
+        });
     probe.finish(OpenFxRenderPhase::OutputAdmission, phase);
     admitted
 }
@@ -3226,6 +3245,7 @@ mod output_resource_tests {
         let input = EffectFloatFrame::from_pixels(
             EffectFrameExtent::new(1, 1),
             format,
+            mondrian_core::ImageSampling::UNIT_SQUARE,
             vec![[0.25, 0.5, 0.75, 0.5]],
         )
         .expect("input signal");
@@ -3337,6 +3357,7 @@ mod ingress_owner_boundary_tests {
         let mut frame = EffectFloatFrame::from_pixels(
             EffectFrameExtent::new(256, 257),
             format,
+            mondrian_core::ImageSampling::UNIT_SQUARE,
             vec![[0.25, -0.5, 1.5, 0.25]; 256 * 257],
         )
         .expect("initial valid complete image");
@@ -3990,6 +4011,7 @@ mod process_retirement_tests {
         let input = EffectFloatFrame::from_pixels(
             mondrian_effects::EffectFrameExtent::new(1, 1),
             format,
+            mondrian_core::ImageSampling::UNIT_SQUARE,
             vec![[0.25, 0.5, 0.75, 0.5]],
         )
         .expect("authored frame");
@@ -4071,6 +4093,7 @@ mod process_retirement_tests {
         let input = EffectFloatFrame::from_pixels(
             mondrian_effects::EffectFrameExtent::new(1, 1),
             format,
+            mondrian_core::ImageSampling::UNIT_SQUARE,
             vec![[0.25, 0.5, 0.75, 0.5]],
         )
         .expect("authored frame");
