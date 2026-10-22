@@ -189,7 +189,7 @@ fn project(
 }
 
 impl ClapWorker {
-    fn author_source_status(&self) -> NativeAudioAuthorSourceStatus {
+    pub(super) fn author_source_status(&self) -> NativeAudioAuthorSourceStatus {
         source_status(
             self.shared.parameter_source.snapshot(),
             self.instance.access_shared_handler(|host| {

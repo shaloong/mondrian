@@ -886,7 +886,7 @@ use clack_extensions::params::{
     PluginMainThreadParams, PluginParams,
 };
 use clack_extensions::state::PluginStateImpl;
-use clack_host::prelude::{InputEvents, OutputEvents};
+use clack_host::prelude::{Event, InputEvents, OutputEvents};
 use clack_host::stream::{InputStream, OutputStream};
 use clack_plugin::extensions::prelude::{
     Extension, ExtensionImplementation, PluginExtensionSide, RawExtension,
@@ -896,6 +896,7 @@ use std::io::{Read, Write};
 
 // Keep the original metadata callbacks, replacing only the real optional flush
 // function pointer. This exercises supports_flush on the actual same instance.
+#[derive(Clone, Copy)]
 struct MissingFlushParams;
 // SAFETY: this test table has exactly the CLAP params ABI and identifier.
 unsafe impl Extension for MissingFlushParams {
@@ -905,24 +906,27 @@ unsafe impl Extension for MissingFlushParams {
         Self
     }
 }
+// The ABI table itself owns a real static lifetime; no callback borrows a
+// temporary produced while constructing RawExtensionImplementation.
+static MISSING_FLUSH_PARAMS: clap_sys::ext::params::clap_plugin_params = {
+    let original = <PluginParams as ExtensionImplementation<GuiPlugin>>::IMPLEMENTATION;
+    // SAFETY: PluginParams exposes this exact permanently live C record.
+    let original =
+        unsafe { &*original.as_ptr().as_ptr().cast::<clap_sys::ext::params::clap_plugin_params>() };
+    clap_sys::ext::params::clap_plugin_params {
+        count: original.count,
+        get_info: original.get_info,
+        get_value: original.get_value,
+        value_to_text: original.value_to_text,
+        text_to_value: original.text_to_value,
+        flush: None,
+    }
+};
 // SAFETY: the original static implementation belongs to this exact GuiPlugin;
 // all copied callbacks and the replacement optional function have matching ABI.
 unsafe impl ExtensionImplementation<GuiPlugin> for MissingFlushParams {
-    const IMPLEMENTATION: RawExtensionImplementation = {
-        let original = <PluginParams as ExtensionImplementation<GuiPlugin>>::IMPLEMENTATION;
-        // SAFETY: PluginParams exposes this exact permanently live C record.
-        let original = unsafe {
-            &*original.as_ptr().as_ptr().cast::<clap_sys::ext::params::clap_plugin_params>()
-        };
-        RawExtensionImplementation::new(&clap_sys::ext::params::clap_plugin_params {
-            count: original.count,
-            get_info: original.get_info,
-            get_value: original.get_value,
-            value_to_text: original.value_to_text,
-            text_to_value: original.text_to_value,
-            flush: None,
-        })
-    };
+    const IMPLEMENTATION: RawExtensionImplementation =
+        RawExtensionImplementation::new(&MISSING_FLUSH_PARAMS);
 }
 
 fn static_flags(id: u32, mode: usize) -> ParamInfoFlags {

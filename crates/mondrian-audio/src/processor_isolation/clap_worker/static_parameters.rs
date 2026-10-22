@@ -77,7 +77,10 @@ impl ClapWorker {
             // Full-owner dispatch is after real DSP join. The exclusive SDK
             // handle forbids concurrent process; only flush owns the audio role.
             let _audio_role = self.shared.enter_audio_thread();
-            let mut output = self.output_events.writer(ClapOutputOrigin::ActiveFlush)?;
+            let mut output = self
+                .output_events
+                .writer(ClapOutputOrigin::ActiveFlush)
+                .map_err(|_| AudioProcessorHostError::NativeParameterSourceUnavailable)?;
             params.flush_active(
                 &mut native.plugin_handle(),
                 &self.input_events.as_input(),
