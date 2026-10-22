@@ -37,9 +37,10 @@ restore. Project geometry from ADR 0013 remains a separate owner contract.
 - Keep the existing processor bank, graph execution and cache. Image sampling
   participates in image-cache identity and output admission, not immutable native
   owner identity. Project changes still replace the owner; dynamic image PAR can
-  reuse it. Initial Create/clip-preference sampling must be supplied from the real
-  first image, or NoImage's explicit first output target without a Source;
-  its factory API is a remaining implementation prerequisite.
+  reuse it. The existing resident creates the native instance lazily on first
+  Render, after receiving the actual frame. Derive Create/clip-preference sampling
+  there from that value, or NoImage's explicit output staging without a Source;
+  do not add an initial-sampling field to factory preparation or its identity.
 - Extend the current persistent cache identity envelope and artifact together.
   Publish and restore compare the payload's sampling with the requested contract.
   Reject old artifacts and recompute; never restore missing metadata as square.

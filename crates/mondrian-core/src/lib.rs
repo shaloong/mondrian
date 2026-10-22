@@ -35,6 +35,8 @@ pub mod hdr_metadata;
 pub mod icc;
 pub mod image_alpha;
 pub use image_alpha::{ColorFrameAlpha, ColorFrameAlphaFormats};
+pub mod image_sampling;
+pub use image_sampling::{ImageSampling, ImageSamplingError};
 pub mod mask_data;
 pub mod media_contract;
 pub mod musical_time;
