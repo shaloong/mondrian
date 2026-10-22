@@ -6151,7 +6151,7 @@ fn qualify_native_default_clip_preferences(mode: &str, rejected: bool) {
         );
         assert_eq!(results.len(), 1);
         assert!(
-            matches!(&results[0].1, Err(OpenFxHostError::WorkerFailed(reason)) if reason.starts_with("native status 7:")),
+            matches!(&results[0].1, Err(OpenFxHostError::WorkerFailed(reason)) if reason == "native status 7"),
             "the existing Float/RGBA/alpha admission must reject OK residuals; cleanup={cleanup:?}: {:?}",
             results[0].1
         );
