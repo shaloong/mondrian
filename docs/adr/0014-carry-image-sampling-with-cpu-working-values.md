@@ -60,10 +60,12 @@ project PAR, owner reuse and NoImage. Current OpenFX scale1 admission must be
 matched by demand-driven full-source decode; merely rejecting proxy/Reduced at
 the consumer would regress playback. GPU/window/temporal support remains separate.
 
-Windows CPU controls pass: Effects 340, affected Renderer 207, render cache 19,
-affected App 688 and Export 3 (including two actual FFmpeg controls). These cover
-value propagation and sampling mismatch refusal; they do not qualify native
-unequal-PAR rendering, GPU interoperability or other platforms.
+Windows CPU controls pass: Effects 352, affected Renderer 207, render cache 19,
+affected App 694 and Export 4 (including two actual FFmpeg controls). The App
+selection and existing exclusions are unchanged. These cover value propagation,
+Unit original-source requests through transitions/lookahead, odd-raster decode,
+effects/masks and sampling refusal; they do not qualify native unequal-PAR
+rendering, GPU interoperability or other platforms.
 
 The shared provider requirement and pre-processing scale admission now pass 352
 ordinary Effects controls and strict checks. Native v11 carries actual sampling;

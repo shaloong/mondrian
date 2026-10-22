@@ -109,11 +109,14 @@ recovery; it does not execute Product IPC. Both new gates and five affected
 Generator/Basic/capability regressions pass exact1/stderr0 with original180s/190s/2s
 ownership budgets; worker gates use the normal dev Product. Fixed zero offset
 only. CPU working values and cache now preserve independent PAR and X/Y sampling:
-Effects340, affected Renderer205, cache19, affected App688 and Export3 controls pass;
-Export includes two actual FFmpeg controls. Shared Any/Unit requirements and
-pre-provider admission pass 352 Effects controls and strict checks. Native v11
-sampling and original Full CPU media materialization are now integrated but await
-current App/Export/native runtime qualification. Unit temporal source materialization
+Effects352, affected Renderer207, cache19, affected App694 and Export4 controls pass;
+Export includes two actual FFmpeg controls. The App selection and existing
+exclusions are unchanged. Unit requests preserve the original Full CPU source
+through transitions and lookahead while Any retains its proxy/quality policy;
+the new odd-raster effect/mask and Export decode controls pass. Shared Any/Unit
+requirements and pre-provider admission also pass strict checks. Native v11
+sampling is integrated but awaits real native and media-to-native qualification.
+Unit temporal source materialization
 is explicitly unsupported; actual non-Unit native inputs refuse before provider
 work without quarantine. This does not qualify the unequal source/project PAR
 media-to-native path. Spatial defaults,

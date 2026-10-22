@@ -127,14 +127,14 @@ Direct image PAR1→1.2→1 合法，真实 Graph 同项目复用、12×9 项目
 恢复可用；拒绝发生在 `loadFrame` 之前由源码审查确认，运行断言检查无新增 invocation。
 raw 门不执行 Product worker；集成门使用正常 dev Product。
 两新门和 Generator 两门、官方 Basic 两门、capabilities 回归共七门均 exact1、
-stderr0、原180秒/190秒外层/2秒清理通过。Effects334/strict零诊断、Renderer55加
-独立 context1、App281、OFX113、Export2及 validation API 检查通过。
+stderr0、原180秒/190秒外层/2秒清理通过。
 资格仅限上述 Windows CPU/owned 子集。后续 CPU 图像值与缓存已携带独立
-PAR/双轴采样率：Effects340、相关 Renderer205、缓存19、相关 App688、Export3
-控制通过；Export 含两个真实 FFmpeg 控制。共享 Any/Unit 能力与 provider 前
-typed 准入已有 Effects352/strict 独立验收。后续已集成 native v11 actual sampling
-及逐媒体 Clip 的原始 Full CPU 请求、完整图执行与真实合成缩放；这部分尚待
-当前 App/Export/native 运行验收，不授真实 unequal-PAR 纵切资格。Unit+Temporal
+PAR/双轴采样率：Effects352、相关 Renderer207、缓存19、相关 App694、Export4
+控制通过；Export 含两个真实 FFmpeg 控制。App 保留原筛选与既有排除项，
+Unit/Any 的原始源/代理/质量分流、过渡与前瞻一致性，以及奇数源 effect/mask
+和 Export 解码均通过。共享 Any/Unit 能力与 provider 前 typed 准入也通过 strict。
+native v11 actual sampling 已集成，真实 native 与媒体 unequal-PAR 纵切仍待验收。
+Unit+Temporal
 源物化明确拒绝；合法 Unit Title crop、作者尺寸 Nested 和 Full accumulator
 保持原语义，实际非 Unit 输入在 provider 前拒绝且不 quarantine。
 proxy/Reduced 的 native renderScale、空间默认值与 Rectangle 仍未实现或验收，
