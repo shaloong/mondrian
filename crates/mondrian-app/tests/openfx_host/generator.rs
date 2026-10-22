@@ -172,11 +172,13 @@ fn output_only_generator_direct_and_prepared_graph_preserve_time_extent_and_owne
             let graph = program
                 .evaluate(TimelineTime::new(frame, 24).unwrap())
                 .expect("exact current frame");
-            assert!(graph.schedule().ordered_nodes.iter().all(|id| !matches!(
+            // Public profiles cover exactly the compiled reachable nodes; the
+            // executor's private schedule stays inside mondrian-effects.
+            assert!(graph.node_profiles().keys().all(|id| !matches!(
                 graph.graph().node(*id).unwrap().kind,
                 EffectGraphNodeKind::Source
             )));
-            assert!(graph.schedule().ordered_nodes.iter().any(|id| matches!(
+            assert!(graph.node_profiles().keys().any(|id| matches!(
                 graph.graph().node(*id).unwrap().kind,
                 EffectGraphNodeKind::CustomSource { .. }
             )));
