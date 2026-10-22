@@ -380,11 +380,29 @@ pub struct PreparedVisualProgramDiagnostics {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PreparedVisualMaterializationContract {
     author_resolution: Resolution,
+    sample_aspect_ratio: mondrian_core::SampleAspectRatio,
     authored_preview_resolution_scale: f32,
     title_safe_margin: f32,
 }
 
 impl PreparedVisualMaterializationContract {
+    /// Exact sample shape of this frozen Sequence owner.
+    pub const fn sample_aspect_ratio(self) -> mondrian_core::SampleAspectRatio {
+        self.sample_aspect_ratio
+    }
+
+    /// Sampling of this owner canvas at its actual materialized extent.
+    pub fn image_sampling(
+        self,
+        sampled: Resolution,
+    ) -> std::result::Result<mondrian_core::ImageSampling, mondrian_core::ImageSamplingError> {
+        mondrian_core::ImageSampling::from_full_raster(
+            self.sample_aspect_ratio,
+            self.author_resolution,
+            sampled,
+        )
+    }
+
     /// Sequence's authored logical raster.
     pub const fn author_resolution(self) -> Resolution {
         self.author_resolution
@@ -728,6 +746,7 @@ impl PreparedVisualProgram {
             key,
             materialization: PreparedVisualMaterializationContract {
                 author_resolution: sequence.settings.resolution,
+                sample_aspect_ratio: pixel_aspect_ratio,
                 authored_preview_resolution_scale: sequence.settings.preview.resolution_scale,
                 title_safe_margin: sequence.settings.title_safe_margin,
             },
@@ -2792,6 +2811,7 @@ mod tests {
                         mondrian_effects::EffectColorDomain::SceneLinearRgb,
                         mondrian_core::ColorFrameAlpha::StraightCoverage,
                     ),
+                    mondrian_core::ImageSampling::UNIT_SQUARE,
                     &[keyed_pixel],
                 ),
                 &solid.effect_graph,

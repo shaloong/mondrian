@@ -1806,6 +1806,7 @@ mod tests {
                         mondrian_effects::EffectColorDomain::SceneLinearRgb,
                         mondrian_core::ColorFrameAlpha::StraightCoverage,
                     ),
+                    mondrian_core::ImageSampling::UNIT_SQUARE,
                     &samples,
                 );
                 let output = mondrian_effects::apply_compiled_effect_graph_pass_rgba_f32(

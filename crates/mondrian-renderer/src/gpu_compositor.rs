@@ -4940,6 +4940,7 @@ mod tests {
             (PremultipliedFloat, [7.0, -3.0, 11.0, 0.0]),
         ] {
             let frame = CpuColorFrame::working(WorkingRgbaF32Frame {
+                sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
                 width: 4,
                 height: 4,
                 alpha,
@@ -6234,6 +6235,7 @@ mod tests {
             })
             .collect::<Vec<_>>();
         let frame = CpuColorFrame::working(WorkingRgbaF32Frame {
+            sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
             alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
             width: 4,
             height: 4,
@@ -6413,6 +6415,7 @@ mod tests {
                     mondrian_effects::EffectColorDomain::SceneLinearRgb,
                     mondrian_core::ColorFrameAlpha::StraightCoverage,
                 ),
+                mondrian_core::ImageSampling::UNIT_SQUARE,
                 &frame.rgba_f32().data,
             ),
             &graph,
@@ -6451,6 +6454,7 @@ mod tests {
                     mondrian_effects::EffectColorDomain::SceneLinearRgb,
                     mondrian_core::ColorFrameAlpha::StraightCoverage,
                 ),
+                mondrian_core::ImageSampling::UNIT_SQUARE,
                 &frame.rgba_f32().data,
             ),
             &graph,
@@ -6479,6 +6483,7 @@ mod tests {
         assert_test_pixels_accurate(&expected_adjustment, &actual_adjustment);
 
         let aces_frame = CpuColorFrame::working(WorkingRgbaF32Frame {
+            sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
             alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
             width: 2,
             height: 2,
@@ -6510,6 +6515,7 @@ mod tests {
                     mondrian_effects::EffectColorDomain::SceneLinearRgb,
                     mondrian_core::ColorFrameAlpha::StraightCoverage,
                 ),
+                mondrian_core::ImageSampling::UNIT_SQUARE,
                 &aces_frame.rgba_f32().data,
             ),
             &aces_graph,
@@ -6708,6 +6714,7 @@ mod tests {
             [0.87, 0.13, 0.57, 0.73],
         ];
         let base = CpuColorFrame::working(WorkingRgbaF32Frame {
+            sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
             alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
             width: 4,
             height: 4,
@@ -6715,6 +6722,7 @@ mod tests {
             data: base_data.clone(),
         });
         let overlay = CpuColorFrame::working(WorkingRgbaF32Frame {
+            sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
             alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
             width: 4,
             height: 4,
@@ -6805,6 +6813,7 @@ mod tests {
         };
         let edge = 1.0 / 65_535.0;
         let low_coverage = CpuColorFrame::working(WorkingRgbaF32Frame {
+            sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
             alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
             width: 4,
             height: 4,
@@ -6827,6 +6836,7 @@ mod tests {
         let base_pixel = [0.1, 0.3, 0.7, 1.0];
         let source_pixel = [1.5, -0.5, 0.125, 1.0];
         let base = CpuColorFrame::working(WorkingRgbaF32Frame {
+            sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
             alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
             width: 4,
             height: 4,
@@ -6834,6 +6844,7 @@ mod tests {
             data: vec![base_pixel; 16],
         });
         let source = CpuColorFrame::working(WorkingRgbaF32Frame {
+            sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
             alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
             width: 4,
             height: 4,
@@ -6897,6 +6908,7 @@ mod tests {
                     mondrian_effects::EffectColorDomain::SceneLinearRgb,
                     mondrian_core::ColorFrameAlpha::StraightCoverage,
                 ),
+                mondrian_core::ImageSampling::UNIT_SQUARE,
                 &vec![[color.r, color.g, color.b, color.a]; 16],
             ),
             &graph,
@@ -6939,6 +6951,7 @@ mod tests {
             return;
         };
         let base = CpuColorFrame::working(WorkingRgbaF32Frame {
+            sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
             alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
             width: 4,
             height: 4,
@@ -6946,6 +6959,7 @@ mod tests {
             data: vec![[0.0, 0.0, 1.0, 1.0]; 16],
         });
         let overlay = CpuColorFrame::working(WorkingRgbaF32Frame {
+            sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
             alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
             width: 2,
             height: 2,
@@ -7685,6 +7699,7 @@ mod tests {
     #[test]
     fn gpu_composite_request_accepts_media_extent_mismatch_with_affine_transform() {
         let frame = CpuColorFrame::working(WorkingRgbaF32Frame {
+            sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
             alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
             width: 8,
             height: 8,
@@ -7839,6 +7854,7 @@ mod tests {
     #[test]
     fn gpu_composite_request_skips_zero_area_media_transform() {
         let frame = CpuColorFrame::working(WorkingRgbaF32Frame {
+            sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
             alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
             width: 8,
             height: 8,
@@ -7867,6 +7883,7 @@ mod tests {
     #[test]
     fn gpu_composite_request_rejects_source_color_space_mismatch() {
         let frame = CpuColorFrame::working(WorkingRgbaF32Frame {
+            sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
             alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
             width: 8,
             height: 8,

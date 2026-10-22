@@ -1385,6 +1385,7 @@ mod tests {
             .await
             .expect("physical timestamp device");
         let frame = crate::CpuColorFrame::working(WorkingRgbaF32Frame {
+            sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
             width: 3840,
             height: 2160,
             data: (0..3840 * 2160)
@@ -1499,6 +1500,7 @@ mod tests {
             }
         }
         let frame = crate::CpuColorFrame::working(WorkingRgbaF32Frame {
+            sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
             alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
             width: 8,
             height: 8,
@@ -1568,6 +1570,7 @@ mod tests {
 
         let reference = crate::execute_cpu_output_boundary_rgba8(
             &crate::CpuColorFrame::working(WorkingRgbaF32Frame {
+                sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
                 alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
                 width: 1,
                 height: 1,
@@ -1589,6 +1592,7 @@ mod tests {
             return;
         };
         let frame = crate::CpuColorFrame::working(WorkingRgbaF32Frame {
+            sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
             alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
             width: 8,
             height: 8,
@@ -1658,6 +1662,7 @@ mod tests {
             context.adapter.get_info()
         );
         let frame = crate::CpuColorFrame::working(WorkingRgbaF32Frame {
+            sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
             alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
             width,
             height,

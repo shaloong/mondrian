@@ -893,7 +893,7 @@ pub fn record_heterogeneous_gpu_continuation(
                     reason: "frontier_actual_format_mismatch",
                 });
             }
-            let (extent, format, pixels) = frame.into_parts();
+            let (extent, format, sampling, pixels) = frame.into_parts();
             if uploaded_handles.contains_key(&transfer.gpu_materialization()) {
                 return Err(HeterogeneousGpuContinuationError::InvalidPlan {
                     reason: "gpu_frontier_materialization_reused",
@@ -909,6 +909,7 @@ pub fn record_heterogeneous_gpu_continuation(
             let upload_plan = match transfer.format().domain() {
                 EffectColorDomain::SceneLinearRgb => {
                     let frame = CpuColorFrame::working(WorkingRgbaF32Frame {
+                        sampling,
                         alpha: format.alpha(),
                         width,
                         height,
@@ -1547,10 +1548,12 @@ impl HeterogeneousGpuContinuationRuntime {
         completion: PreparedHeterogeneousCpuCompletion,
         cancellation: &ExecutionCancellationToken,
         deadline: Instant,
+        sampling: mondrian_core::ImageSampling,
     ) -> Result<HeterogeneousGpuCompletedFrame, HeterogeneousGpuContinuationError> {
         if self.poisoned {
             return Err(HeterogeneousGpuContinuationError::RuntimePoisoned);
         }
+        validate_gpu_readback_sampling(&completion, sampling)?;
         if let Some(error) =
             heterogeneous_gpu_execution_stop(cancellation.is_canceled(), Instant::now(), deadline)
         {
@@ -1726,6 +1729,7 @@ impl HeterogeneousGpuContinuationRuntime {
             components,
             binding.frame_extent(),
             completed.output.descriptor().alpha,
+            sampling,
         ) {
             Ok(frame) => frame,
             Err(error) => {
@@ -1745,9 +1749,10 @@ impl HeterogeneousGpuContinuationRuntime {
                 return Err(error);
             }
         };
-        let (extent, format, pixels) = admitted.into_parts();
+        let (extent, format, sampling, pixels) = admitted.into_parts();
         completed.evidence.readback_bytes = Some(readback_plan.buffer_size);
         let frame = CpuColorFrame::working(WorkingRgbaF32Frame {
+            sampling,
             alpha: format.alpha(),
             width: extent.width(),
             height: extent.height(),
@@ -2655,10 +2660,29 @@ fn gpu_readback_frame_error(
     }
 }
 
+// This readback route performs same-grid Effects. All CPU upload frontiers
+// must name the source grid declared by the caller, before any GPU submission.
+fn validate_gpu_readback_sampling(
+    completion: &PreparedHeterogeneousCpuCompletion,
+    sampling: mondrian_core::ImageSampling,
+) -> Result<(), HeterogeneousGpuContinuationError> {
+    if completion
+        .boundary_values()
+        .iter()
+        .any(|value| value.frame().sampling() != sampling)
+    {
+        return Err(HeterogeneousGpuContinuationError::InvalidPlan {
+            reason: "readback_source_sampling_mismatch",
+        });
+    }
+    Ok(())
+}
+
 fn admit_gpu_readback_frame(
     components: Vec<f32>,
     extent: EffectFrameExtent,
     alpha: mondrian_core::ColorFrameAlpha,
+    sampling: mondrian_core::ImageSampling,
 ) -> Result<mondrian_effects::EffectFloatFrame, HeterogeneousGpuContinuationError> {
     let chunks = components.chunks_exact(4);
     if !chunks.remainder().is_empty() {
@@ -2678,6 +2702,7 @@ fn admit_gpu_readback_frame(
     mondrian_effects::EffectFloatFrame::from_samples(
         extent,
         format,
+        sampling,
         chunks.map(|rgba| [rgba[0], rgba[1], rgba[2], rgba[3]]),
     )
     .map_err(gpu_readback_frame_error)
@@ -2969,6 +2994,7 @@ mod tests {
                         mondrian_effects::EffectColorDomain::SceneLinearRgb,
                         mondrian_core::ColorFrameAlpha::StraightCoverage,
                     ),
+                    mondrian_core::ImageSampling::UNIT_SQUARE,
                     input,
                 ),
                 FRAME_SEED,
@@ -2997,6 +3023,33 @@ mod tests {
         let mut builder = EffectGraphBuilderState::new();
         builder.append_unary(EffectRenderOp::GaussianBlur { radius: 1.0 });
         compile_reference_render_graph(builder.finish()).expect("CPU-only graph")
+    }
+
+    #[test]
+    fn cpu_frontier_refuses_readback_sampling_relabel_before_gpu_execution() {
+        let graph = cpu_only_graph();
+        let completion = cpu_completion_with_gpu_node_count(graph, &test_input(), 0);
+        assert!(!completion.boundary_values().is_empty());
+        validate_gpu_readback_sampling(&completion, mondrian_core::ImageSampling::UNIT_SQUARE)
+            .unwrap();
+        let other = mondrian_core::ImageSampling::new(
+            mondrian_core::SampleAspectRatio::new(2, 1).unwrap(),
+            [
+                mondrian_core::Rational::new(1, 2),
+                mondrian_core::Rational::new(3, 4),
+            ],
+        )
+        .unwrap();
+        assert!(matches!(
+            validate_gpu_readback_sampling(&completion, other),
+            Err(HeterogeneousGpuContinuationError::InvalidPlan {
+                reason: "readback_source_sampling_mismatch"
+            })
+        ));
+        assert!(completion
+            .boundary_values()
+            .iter()
+            .all(|value| value.frame().sampling() == mondrian_core::ImageSampling::UNIT_SQUARE));
     }
 
     #[test]
@@ -3069,6 +3122,7 @@ mod tests {
                 completion,
                 &ExecutionCancellationToken::new(),
                 gpu_test_deadline(),
+                mondrian_core::ImageSampling::UNIT_SQUARE,
             )
             .expect("actual upload and readback");
         assert_eq!(output.frame().rgba_f32().data, expected);
@@ -3201,6 +3255,7 @@ mod tests {
                         mondrian_effects::EffectColorDomain::SceneLinearRgb,
                         mondrian_core::ColorFrameAlpha::StraightCoverage,
                     ),
+                    mondrian_core::ImageSampling::UNIT_SQUARE,
                     &input,
                 ),
                 FRAME_SEED,
@@ -3296,6 +3351,7 @@ mod tests {
                 completion,
                 &cancellation,
                 gpu_test_deadline(),
+                mondrian_core::ImageSampling::UNIT_SQUARE,
             )
             .expect(
                 "finite positive control must execute and read back before the overflow oracle",
@@ -3322,6 +3378,7 @@ mod tests {
             completion,
             &cancellation,
             gpu_test_deadline(),
+            mondrian_core::ImageSampling::UNIT_SQUARE,
         );
         assert!(
             !runtime.is_poisoned(),
@@ -3337,6 +3394,7 @@ mod tests {
                 cpu_completion_with_gpu_node_count(Arc::clone(&graph), &positive, 1),
                 &cancellation,
                 gpu_test_deadline(),
+                mondrian_core::ImageSampling::UNIT_SQUARE,
             )
             .expect("the same healthy GPU runtime must accept the next finite frame");
         assert!(recovered
@@ -3377,6 +3435,7 @@ mod tests {
                     mondrian_effects::EffectColorDomain::SceneLinearRgb,
                     mondrian_core::ColorFrameAlpha::StraightCoverage,
                 ),
+                mondrian_core::ImageSampling::UNIT_SQUARE,
                 &input,
             ),
             &graph,
@@ -3402,6 +3461,7 @@ mod tests {
                     completion,
                     &cancellation,
                     gpu_test_deadline(),
+                    mondrian_core::ImageSampling::UNIT_SQUARE,
                 )
                 .expect("execute and read back heterogeneous GPU continuation");
 
@@ -3449,6 +3509,7 @@ mod tests {
                     mondrian_effects::EffectColorDomain::SceneLinearRgb,
                     mondrian_core::ColorFrameAlpha::StraightCoverage,
                 ),
+                mondrian_core::ImageSampling::UNIT_SQUARE,
                 &input,
             ),
             &graph,
@@ -3479,6 +3540,7 @@ mod tests {
                         mondrian_effects::EffectColorDomain::SceneLinearRgb,
                         mondrian_core::ColorFrameAlpha::StraightCoverage,
                     ),
+                    mondrian_core::ImageSampling::UNIT_SQUARE,
                     &input,
                 ),
                 FRAME_SEED,
@@ -3497,6 +3559,7 @@ mod tests {
                 completion,
                 &ExecutionCancellationToken::new(),
                 gpu_test_deadline(),
+                mondrian_core::ImageSampling::UNIT_SQUARE,
             )
             .expect("execute GPU DAG and read back");
         assert!(
@@ -3539,6 +3602,7 @@ mod tests {
                     mondrian_effects::EffectColorDomain::SceneLinearRgb,
                     mondrian_core::ColorFrameAlpha::StraightCoverage,
                 ),
+                mondrian_core::ImageSampling::UNIT_SQUARE,
                 &input,
             ),
             &graph,
@@ -3593,6 +3657,7 @@ mod tests {
                         mondrian_effects::EffectColorDomain::SceneLinearRgb,
                         mondrian_core::ColorFrameAlpha::StraightCoverage,
                     ),
+                    mondrian_core::ImageSampling::UNIT_SQUARE,
                     &input,
                 ),
                 FRAME_SEED,
@@ -3611,6 +3676,7 @@ mod tests {
                 completion,
                 &ExecutionCancellationToken::new(),
                 gpu_test_deadline(),
+                mondrian_core::ImageSampling::UNIT_SQUARE,
             )
             .expect("execute GPU MultiInput and read back");
         assert_eq!(
@@ -3651,6 +3717,7 @@ mod tests {
                     mondrian_effects::EffectColorDomain::SceneLinearRgb,
                     mondrian_core::ColorFrameAlpha::StraightCoverage,
                 ),
+                mondrian_core::ImageSampling::UNIT_SQUARE,
                 &input,
             ),
             &graph,
@@ -3695,6 +3762,7 @@ mod tests {
                         mondrian_effects::EffectColorDomain::SceneLinearRgb,
                         mondrian_core::ColorFrameAlpha::StraightCoverage,
                     ),
+                    mondrian_core::ImageSampling::UNIT_SQUARE,
                     &input,
                 ),
                 FRAME_SEED,
@@ -3712,6 +3780,7 @@ mod tests {
                 completion,
                 &ExecutionCancellationToken::new(),
                 gpu_test_deadline(),
+                mondrian_core::ImageSampling::UNIT_SQUARE,
             )
             .expect("execute GPU identity copy and read back");
         assert_eq!(
@@ -3741,6 +3810,7 @@ mod tests {
                     mondrian_effects::EffectColorDomain::SceneLinearRgb,
                     mondrian_core::ColorFrameAlpha::StraightCoverage,
                 ),
+                mondrian_core::ImageSampling::UNIT_SQUARE,
                 &input,
             ),
             &graph,
@@ -3795,6 +3865,7 @@ mod tests {
                         mondrian_effects::EffectColorDomain::SceneLinearRgb,
                         mondrian_core::ColorFrameAlpha::StraightCoverage,
                     ),
+                    mondrian_core::ImageSampling::UNIT_SQUARE,
                     &input,
                 ),
                 FRAME_SEED,
@@ -3813,6 +3884,7 @@ mod tests {
                 completion,
                 &ExecutionCancellationToken::new(),
                 gpu_test_deadline(),
+                mondrian_core::ImageSampling::UNIT_SQUARE,
             )
             .expect("execute multi-frontier GPU join and read back");
         assert_eq!(completed.evidence().completed_uploads().len(), 2);
@@ -3867,6 +3939,7 @@ mod tests {
                             mondrian_effects::EffectColorDomain::SceneLinearRgb,
                             mondrian_core::ColorFrameAlpha::StraightCoverage,
                         ),
+                        mondrian_core::ImageSampling::UNIT_SQUARE,
                         &input,
                     ),
                     &graph,
@@ -3931,6 +4004,7 @@ mod tests {
                                 mondrian_effects::EffectColorDomain::SceneLinearRgb,
                                 mondrian_core::ColorFrameAlpha::StraightCoverage,
                             ),
+                            mondrian_core::ImageSampling::UNIT_SQUARE,
                             &input,
                         ),
                         FRAME_SEED,
@@ -3946,6 +4020,7 @@ mod tests {
                         completion,
                         &ExecutionCancellationToken::new(),
                         gpu_test_deadline(),
+                        mondrian_core::ImageSampling::UNIT_SQUARE,
                     )
                     .expect("execute GPU Mask and read back");
                 assert_eq!(completed.evidence().completed_uploads().len(), 2);
@@ -4069,6 +4144,7 @@ mod tests {
                     mondrian_effects::EffectColorDomain::SceneLinearRgb,
                     mondrian_core::ColorFrameAlpha::StraightCoverage,
                 ),
+                mondrian_core::ImageSampling::UNIT_SQUARE,
                 &input,
             ),
             &graph,
@@ -4102,6 +4178,7 @@ mod tests {
                         mondrian_effects::EffectColorDomain::SceneLinearRgb,
                         mondrian_core::ColorFrameAlpha::StraightCoverage,
                     ),
+                    mondrian_core::ImageSampling::UNIT_SQUARE,
                     &input,
                 ),
                 FRAME_SEED,
@@ -4129,6 +4206,7 @@ mod tests {
                 completion,
                 &ExecutionCancellationToken::new(),
                 gpu_test_deadline(),
+                mondrian_core::ImageSampling::UNIT_SQUARE,
             )
             .expect("execute GPU Power Window and read back");
         assert_eq!(
@@ -4190,6 +4268,7 @@ mod tests {
                         mondrian_effects::EffectColorDomain::SceneLinearRgb,
                         mondrian_core::ColorFrameAlpha::StraightCoverage,
                     ),
+                    mondrian_core::ImageSampling::UNIT_SQUARE,
                     &input,
                 ),
                 &graph,
@@ -4275,6 +4354,7 @@ mod tests {
                             mondrian_effects::EffectColorDomain::SceneLinearRgb,
                             mondrian_core::ColorFrameAlpha::StraightCoverage,
                         ),
+                        mondrian_core::ImageSampling::UNIT_SQUARE,
                         &input,
                     ),
                     FRAME_SEED,
@@ -4287,6 +4367,7 @@ mod tests {
                     completion,
                     &ExecutionCancellationToken::new(),
                     gpu_test_deadline(),
+                    mondrian_core::ImageSampling::UNIT_SQUARE,
                 )
                 .expect("execute GPU Qualifier and read back");
             assert_eq!(
@@ -4343,6 +4424,7 @@ mod tests {
             cpu_completion(Arc::clone(&graph), &input),
             &cancellation,
             gpu_test_deadline(),
+            mondrian_core::ImageSampling::UNIT_SQUARE,
         ) {
             Ok(_) => panic!("readback grant must fail before submission"),
             Err(error) => error,
@@ -4363,6 +4445,7 @@ mod tests {
             cpu_completion(Arc::clone(&graph), &input),
             &cancellation,
             gpu_test_deadline(),
+            mondrian_core::ImageSampling::UNIT_SQUARE,
         ) {
             Ok(_) => panic!("repeated readback grant must fail before submission"),
             Err(error) => error,
@@ -4404,9 +4487,13 @@ mod tests {
                 [1.0, -2.0, -0.0, 0.0],
             ),
         ] {
-            let frame =
-                admit_gpu_readback_frame(sample.to_vec(), EffectFrameExtent::new(1, 1), alpha)
-                    .expect("complete readback materializes its actual finite association");
+            let frame = admit_gpu_readback_frame(
+                sample.to_vec(),
+                EffectFrameExtent::new(1, 1),
+                alpha,
+                mondrian_core::ImageSampling::UNIT_SQUARE,
+            )
+            .expect("complete readback materializes its actual finite association");
             assert_eq!(frame.alpha(), alpha);
             assert_eq!(
                 frame.pixels()[0].map(f32::to_bits),
@@ -4423,7 +4510,7 @@ mod tests {
                 let mut sample = [0.25, 0.5, 0.75, 0.5];
                 sample[lane] = value;
                 assert!(
-                    matches!(admit_gpu_readback_frame(sample.to_vec(), EffectFrameExtent::new(1, 1), alpha),
+                    matches!(admit_gpu_readback_frame(sample.to_vec(), EffectFrameExtent::new(1, 1), alpha, mondrian_core::ImageSampling::UNIT_SQUARE),
                     Err(HeterogeneousGpuContinuationError::FrameContract(mondrian_effects::EffectFloatFrameError::InvalidSample { index: 0, alpha: actual })) if actual == alpha)
                 );
             }
@@ -4433,7 +4520,7 @@ mod tests {
             (mondrian_core::ColorFrameAlpha::StraightCoverage, 1.5),
         ] {
             assert!(
-                matches!(admit_gpu_readback_frame(vec![0.25, 0.5, 0.75, value], EffectFrameExtent::new(1, 1), alpha),
+                matches!(admit_gpu_readback_frame(vec![0.25, 0.5, 0.75, value], EffectFrameExtent::new(1, 1), alpha, mondrian_core::ImageSampling::UNIT_SQUARE),
                 Err(HeterogeneousGpuContinuationError::FrameContract(mondrian_effects::EffectFloatFrameError::InvalidSample { index: 0, alpha: actual })) if actual == alpha)
             );
         }
@@ -4446,14 +4533,20 @@ mod tests {
             admit_gpu_readback_frame(
                 vec![0.25, 0.5, 0.75, 0.5],
                 EffectFrameExtent::new(2, 1),
-                alpha
+                alpha,
+                mondrian_core::ImageSampling::UNIT_SQUARE
             ),
             Err(HeterogeneousGpuContinuationError::FrameContract(
                 mondrian_effects::EffectFloatFrameError::ExtentMismatch { expected: 2, actual: 1 }
             ))
         ));
         assert!(matches!(
-            admit_gpu_readback_frame(vec![0.25; 5], EffectFrameExtent::new(1, 1), alpha),
+            admit_gpu_readback_frame(
+                vec![0.25; 5],
+                EffectFrameExtent::new(1, 1),
+                alpha,
+                mondrian_core::ImageSampling::UNIT_SQUARE
+            ),
             Err(HeterogeneousGpuContinuationError::InvalidReadbackComponents { components: 5 })
         ));
     }

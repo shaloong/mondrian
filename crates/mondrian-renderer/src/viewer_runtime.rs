@@ -4495,6 +4495,7 @@ mod tests {
         let effect_plan =
             Arc::new(lower_effect_graph_to_gpu_plan(&graph).expect("GPU effect plan"));
         let frame = CpuColorFrame::working(WorkingRgbaF32Frame {
+            sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
             alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
             width: 4,
             height: 4,
@@ -4590,6 +4591,7 @@ mod tests {
         let effect_plan =
             Arc::new(lower_effect_graph_to_gpu_plan(&graph).expect("GPU effect plan"));
         let frame = CpuColorFrame::working(WorkingRgbaF32Frame {
+            sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
             alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
             width: 4,
             height: 4,
@@ -4952,6 +4954,7 @@ mod tests {
             16 << 20,
         );
         let cpu_input = CpuColorFrame::working(WorkingRgbaF32Frame {
+            sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
             alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
             width: WIDTH,
             height: HEIGHT,
@@ -5171,8 +5174,12 @@ mod tests {
             false,
             ColorEngine::mondrian_standard(),
         );
-        let working = crate::execute_cpu_source_input_stage(&source, &cpu_input_transform)
-            .expect("CPU HLG input reference");
+        let working = crate::execute_cpu_source_input_stage(
+            &source,
+            &cpu_input_transform,
+            mondrian_core::ImageSampling::UNIT_SQUARE,
+        )
+        .expect("CPU HLG input reference");
         let expected = crate::execute_cpu_output_boundary_rgba8(&working.result.frame, &boundary)
             .expect("CPU Program Output reference");
         let mut runtime =

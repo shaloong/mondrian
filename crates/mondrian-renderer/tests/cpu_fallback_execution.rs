@@ -19,6 +19,7 @@ static COLOR_ENGINE: ColorEngine = ColorEngine::mondrian_standard();
 
 fn working_frame(color: [f32; 4]) -> CpuColorFrame {
     CpuColorFrame::working(WorkingRgbaF32Frame {
+        sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
         alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
         width: WIDTH,
         height: HEIGHT,
@@ -55,7 +56,11 @@ fn media<'a>(frame: &'a CpuColorFrame, opacity: f32) -> TimelineCompositeElement
 }
 
 fn runtime() -> TimelineEffectColorRuntime<'static> {
-    TimelineEffectColorRuntime::new(&COLOR_ENGINE, WorkingColorSpace::LinearRec709)
+    TimelineEffectColorRuntime::new(
+        &COLOR_ENGINE,
+        WorkingColorSpace::LinearRec709,
+        mondrian_core::ImageSampling::UNIT_SQUARE,
+    )
 }
 
 #[test]

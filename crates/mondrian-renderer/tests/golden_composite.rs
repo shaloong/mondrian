@@ -22,7 +22,11 @@ const IDENTITY_TRANSFORM: [f32; 6] = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0];
 static TEST_COLOR_ENGINE: ColorEngine = ColorEngine::mondrian_standard();
 
 fn test_color_runtime() -> TimelineEffectColorRuntime<'static> {
-    TimelineEffectColorRuntime::new(&TEST_COLOR_ENGINE, WorkingColorSpace::LinearRec709)
+    TimelineEffectColorRuntime::new(
+        &TEST_COLOR_ENGINE,
+        WorkingColorSpace::LinearRec709,
+        mondrian_core::ImageSampling::UNIT_SQUARE,
+    )
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────
@@ -66,6 +70,7 @@ fn prepare_source(source: CpuEncodedColorFrame, intent: &RenderInputTransform) -
     SourceColorModule::execute_cpu_with_intent(
         &CpuSourceColorFrame::from(source),
         intent,
+        mondrian_core::ImageSampling::UNIT_SQUARE,
         &mut session,
     )
     .expect("prepare golden source")

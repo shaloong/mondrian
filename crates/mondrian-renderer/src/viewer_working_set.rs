@@ -1398,6 +1398,7 @@ mod tests {
         let (_, effect_plan) = identity_effect();
         let frame = || {
             CpuColorFrame::working(WorkingRgbaF32Frame {
+                sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
                 alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
                 width: 4,
                 height: 4,

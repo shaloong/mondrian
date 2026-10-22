@@ -63,9 +63,13 @@ fn canonical_program_output_lowers_to_clean_feed_video_and_exact_audio() {
         .to_vec(),
     ));
     let mut color_session = RenderCpuColorExecutionSession::new(8);
-    let working =
-        SourceColorModule::execute_cpu(&source, &context.media_input(false), &mut color_session)
-            .expect("working source");
+    let working = SourceColorModule::execute_cpu(
+        &source,
+        &context.media_input(false),
+        mondrian_core::ImageSampling::UNIT_SQUARE,
+        &mut color_session,
+    )
+    .expect("working source");
     let audio = vec![0.0_f32; 1_920 * 2];
 
     let first = program

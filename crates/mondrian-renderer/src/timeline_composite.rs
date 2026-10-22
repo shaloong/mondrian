@@ -107,6 +107,8 @@ impl TimelineCompositeOptions {
 /// Renderer-owned runtime for resolving effect RGB domains through stock OCIO.
 #[derive(Debug, Clone, Copy)]
 pub struct TimelineEffectColorRuntime<'a> {
+    /// Explicit sampling of this invocation's target canvas.
+    pub sampling: mondrian_core::ImageSampling,
     /// Exact project color engine/config provider.
     pub engine: &'a ColorEngine,
     /// Sequence working space represented by `SceneLinearRgb`.
@@ -115,8 +117,12 @@ pub struct TimelineEffectColorRuntime<'a> {
 
 impl<'a> TimelineEffectColorRuntime<'a> {
     /// Bind a project color engine to one sequence working space.
-    pub const fn new(engine: &'a ColorEngine, working_color_space: WorkingColorSpace) -> Self {
-        Self { engine, working_color_space }
+    pub const fn new(
+        engine: &'a ColorEngine,
+        working_color_space: WorkingColorSpace,
+        sampling: mondrian_core::ImageSampling,
+    ) -> Self {
+        Self { engine, working_color_space, sampling }
     }
 
     fn cache_key(self) -> EffectDomainProcessorCacheKey {
@@ -397,6 +403,7 @@ impl TimelineCompositeScratch {
         prepared: &PreparedHeterogeneousEffectWork,
         generation: u64,
         extent: mondrian_effects::EffectFrameExtent,
+        sampling: mondrian_core::ImageSampling,
         color: Color,
         frame_seed: i64,
         working_color_space: WorkingColorSpace,
@@ -423,6 +430,7 @@ impl TimelineCompositeScratch {
             mondrian_effects::EffectFloatFrameView::new(
                 extent,
                 scene_linear_float_format(ColorFrameAlpha::StraightCoverage),
+                sampling,
                 &self.solid_fill_f32,
             ),
             frame_seed,
@@ -1576,6 +1584,7 @@ fn exact_zero_copy_identity_passthrough<'frame>(
         && layer.effect_graph.graph().is_identity()
         && descriptor.width == width
         && descriptor.height == height
+        && layer.frame.rgba_f32().sampling == runtime.sampling
         && descriptor.color_space == ColorFrameSpace::Working(runtime.working_color_space)
         && descriptor.domain == ColorFrameDomain::Working
         && descriptor.encoding == ColorFrameEncoding::LinearFloat
@@ -1618,15 +1627,25 @@ fn composite_supported_elements_to_working_frame(
     };
     let format = scene_linear_float_format(initial_alpha);
     let (mut canvas, mut has_composited_layer, consumed_elements) = if let Some(pixels) =
-        initialize_from_two_full_frame_normal_media_layers(width, height, elements, options)
-    {
+        initialize_from_two_full_frame_normal_media_layers(
+            width,
+            height,
+            elements,
+            options,
+            runtime.sampling,
+        ) {
         execution.direct_first_layer_initializations =
             execution.direct_first_layer_initializations.saturating_add(1);
         execution.fused_first_two_full_frame_normal_blends =
             execution.fused_first_two_full_frame_normal_blends.saturating_add(1);
         (
-            mondrian_effects::EffectFloatFrame::from_pixels(extent, format, pixels)
-                .map_err(EffectFloatExecutionError::FrameContract)?,
+            mondrian_effects::EffectFloatFrame::from_pixels(
+                extent,
+                format,
+                runtime.sampling,
+                pixels,
+            )
+            .map_err(EffectFloatExecutionError::FrameContract)?,
             true,
             2,
         )
@@ -1637,7 +1656,8 @@ fn composite_supported_elements_to_working_frame(
                 && layer.opacity > 0.0
                 && is_identity_transform(layer.transform)
                 && layer.frame.rgba_f32().width == width
-                && layer.frame.rgba_f32().height == height =>
+                && layer.frame.rgba_f32().height == height
+                && layer.frame.rgba_f32().sampling == runtime.sampling =>
         {
             Some(layer)
         }
@@ -1681,7 +1701,7 @@ fn composite_supported_elements_to_working_frame(
             layer.opacity,
         )?;
         let source_alpha = owned.alpha();
-        let (_, format, mut pixels) = owned.into_parts();
+        let (_, format, _, mut pixels) = owned.into_parts();
         for (index, pixel) in pixels.iter_mut().enumerate() {
             if index % 4096 == 0 {
                 timeline_processor_checkpoint(control)?;
@@ -1705,6 +1725,7 @@ fn composite_supported_elements_to_working_frame(
             mondrian_effects::EffectFloatFrame::from_pixels(
                 extent,
                 format.with_alpha(output_alpha),
+                runtime.sampling,
                 pixels,
             )?,
             true,
@@ -1715,6 +1736,7 @@ fn composite_supported_elements_to_working_frame(
             mondrian_effects::EffectFloatFrame::from_pixels(
                 extent,
                 format,
+                runtime.sampling,
                 vec![initial_pixel; pixel_count],
             )
             .map_err(EffectFloatExecutionError::FrameContract)?,
@@ -1809,6 +1831,7 @@ fn composite_supported_elements_to_working_frame(
                 let input = mondrian_effects::EffectFloatFrameView::new(
                     extent,
                     scene_linear_float_format(ColorFrameAlpha::StraightCoverage),
+                    runtime.sampling,
                     &scratch.solid_fill_f32,
                 );
                 let effect_output;
@@ -1884,12 +1907,14 @@ fn composite_supported_elements_to_working_frame(
                 let mut left = mondrian_effects::EffectFloatFrame::from_pixels(
                     extent,
                     canvas.format(),
+                    runtime.sampling,
                     left_pixels,
                 )
                 .map_err(EffectFloatExecutionError::FrameContract)?;
                 let mut right = mondrian_effects::EffectFloatFrame::from_pixels(
                     extent,
                     canvas.format(),
+                    runtime.sampling,
                     right_pixels,
                 )
                 .map_err(EffectFloatExecutionError::FrameContract)?;
@@ -1923,16 +1948,17 @@ fn composite_supported_elements_to_working_frame(
                     right.pixels(),
                     transition.progress,
                 ));
-                scratch.transition_left_f32 = left.into_parts().2;
-                scratch.transition_right_f32 = right.into_parts().2;
+                scratch.transition_left_f32 = left.into_parts().3;
+                scratch.transition_right_f32 = right.into_parts().3;
                 canvas.validate().map_err(EffectFloatExecutionError::FrameContract)?;
                 has_composited_layer = true;
             }
         }
     }
     timeline_processor_checkpoint(control)?;
-    let (extent, format, data) = canvas.into_parts();
+    let (extent, format, sampling, data) = canvas.into_parts();
     Ok(WorkingRgbaF32Frame {
+        sampling,
         width: extent.width(),
         height: extent.height(),
         alpha: format.alpha(),
@@ -1953,6 +1979,7 @@ fn working_float_view(frame: &WorkingRgbaF32Frame) -> mondrian_effects::EffectFl
     mondrian_effects::EffectFloatFrameView::new(
         mondrian_effects::EffectFrameExtent::new(frame.width, frame.height),
         scene_linear_float_format(frame.alpha),
+        frame.sampling,
         &frame.data,
     )
 }
@@ -2002,7 +2029,10 @@ fn alpha_blend_typed_float_layer(
         canvas.validate().map_err(EffectFloatExecutionError::FrameContract)?;
         return Ok((canvas, evidence));
     }
-    if is_identity_transform(transform) && canvas.extent() == source.extent() {
+    if is_identity_transform(transform)
+        && canvas.extent() == source.extent()
+        && canvas.sampling() == source.sampling()
+    {
         mondrian_effects::blend_float_frames_controlled(
             &mut canvas,
             source,
@@ -2050,6 +2080,7 @@ fn initialize_from_two_full_frame_normal_media_layers(
     height: u32,
     elements: &[TimelineCompositeElement<'_>],
     options: TimelineCompositeOptions,
+    sampling: mondrian_core::ImageSampling,
 ) -> Option<Vec<[f32; 4]>> {
     if options.background != TimelineCompositeBackground::Transparent {
         return None;
@@ -2060,7 +2091,9 @@ fn initialize_from_two_full_frame_normal_media_layers(
         return None;
     };
     let pixel_count = (width as usize).checked_mul(height as usize)?;
-    if !is_exact_full_frame_identity_normal_media(first, width, height, pixel_count)
+    if first.frame.rgba_f32().sampling != sampling
+        || second.frame.rgba_f32().sampling != sampling
+        || !is_exact_full_frame_identity_normal_media(first, width, height, pixel_count)
         || !is_exact_full_frame_identity_normal_media(second, width, height, pixel_count)
         || !has_positive_coverage(first.opacity.clamp(0.0, 1.0))
         || !has_positive_coverage(second.opacity.clamp(0.0, 1.0))
@@ -2885,6 +2918,7 @@ fn working_frame_from_normalized_rgba8(
         })
         .collect();
     WorkingRgbaF32Frame {
+        sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
         alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
         width,
         height,
@@ -3101,7 +3135,11 @@ mod tests {
     fn test_color_runtime(
         working_color_space: WorkingColorSpace,
     ) -> TimelineEffectColorRuntime<'static> {
-        TimelineEffectColorRuntime::new(&TEST_COLOR_ENGINE, working_color_space)
+        TimelineEffectColorRuntime::new(
+            &TEST_COLOR_ENGINE,
+            working_color_space,
+            mondrian_core::ImageSampling::UNIT_SQUARE,
+        )
     }
 
     fn working_frame(rgba: &[u8], width: u32, height: u32) -> CpuColorFrame {
@@ -3448,6 +3486,7 @@ mod tests {
     #[test]
     fn typed_identity_passthrough_is_zero_copy_and_requires_no_compositor_working_set() {
         let media = CpuColorFrame::working(WorkingRgbaF32Frame {
+            sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
             alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
             width: 2,
             height: 1,
@@ -3482,6 +3521,7 @@ mod tests {
     #[test]
     fn first_two_full_frame_normal_media_layers_fuse_without_color_drift() {
         let first = CpuColorFrame::working(WorkingRgbaF32Frame {
+            sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
             alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
             width: 5,
             height: 1,
@@ -3495,6 +3535,7 @@ mod tests {
             color_space: WorkingColorSpace::LinearRec709,
         });
         let second = CpuColorFrame::working(WorkingRgbaF32Frame {
+            sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
             alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
             width: 5,
             height: 1,
@@ -3579,6 +3620,7 @@ mod tests {
     #[test]
     fn direct_first_layer_initialization_discards_hidden_rgb_like_canonical_source_over() {
         let media = CpuColorFrame::working(WorkingRgbaF32Frame {
+            sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
             alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
             width: 2,
             height: 1,
@@ -3673,6 +3715,7 @@ mod tests {
     #[test]
     fn identity_passthrough_rejects_any_operation_or_output_contract_change() {
         let media = CpuColorFrame::working(WorkingRgbaF32Frame {
+            sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
             alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
             width: 1,
             height: 1,
@@ -3767,6 +3810,7 @@ mod tests {
     #[test]
     fn compositor_rejects_mislabeled_working_frames_before_pixel_execution() {
         let media = CpuColorFrame::working(WorkingRgbaF32Frame {
+            sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
             alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
             width: 1,
             height: 1,
@@ -4349,6 +4393,7 @@ mod tests {
     fn float_linear_compositor_runs_color_adjust_effect_without_rgba8_scratch() {
         let mut scratch = TimelineCompositeScratch::default();
         let media = CpuColorFrame::working(WorkingRgbaF32Frame {
+            sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
             alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
             width: 1,
             height: 1,
@@ -4394,6 +4439,7 @@ mod tests {
     fn float_linear_compositor_runs_normal_adjustment_without_rgba8_scratch() {
         let mut scratch = TimelineCompositeScratch::default();
         let media = CpuColorFrame::working(WorkingRgbaF32Frame {
+            sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
             alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
             width: 1,
             height: 1,
@@ -4751,7 +4797,11 @@ mod tests {
             1,
             &elements,
             TimelineCompositeOptions::default(),
-            TimelineEffectColorRuntime::new(&unavailable_engine, WorkingColorSpace::LinearRec709),
+            TimelineEffectColorRuntime::new(
+                &unavailable_engine,
+                WorkingColorSpace::LinearRec709,
+                mondrian_core::ImageSampling::UNIT_SQUARE,
+            ),
             &mut scratch,
             &mut mondrian_effects::EffectProcessorControl::uncancelled(),
         )
@@ -4812,7 +4862,11 @@ mod tests {
             1,
             &elements,
             TimelineCompositeOptions::default(),
-            TimelineEffectColorRuntime::new(&engine, WorkingColorSpace::LinearRec709),
+            TimelineEffectColorRuntime::new(
+                &engine,
+                WorkingColorSpace::LinearRec709,
+                mondrian_core::ImageSampling::UNIT_SQUARE,
+            ),
             &mut scratch,
             &mut mondrian_effects::EffectProcessorControl::uncancelled(),
         )
@@ -4882,7 +4936,11 @@ mod tests {
             1,
             &elements,
             TimelineCompositeOptions::default(),
-            TimelineEffectColorRuntime::new(&engine, WorkingColorSpace::LinearRec709),
+            TimelineEffectColorRuntime::new(
+                &engine,
+                WorkingColorSpace::LinearRec709,
+                mondrian_core::ImageSampling::UNIT_SQUARE,
+            ),
             &mut TimelineCompositeScratch::default(),
             &mut mondrian_effects::EffectProcessorControl::uncancelled(),
         )
@@ -5209,6 +5267,7 @@ mod tests {
             [0.001, -0.002, 0.004, f32::MIN_POSITIVE],
         ];
         let source = CpuColorFrame::working(WorkingRgbaF32Frame {
+            sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
             width: 4,
             height: 1,
             alpha: ColorFrameAlpha::PremultipliedFloat,
@@ -5262,6 +5321,7 @@ mod tests {
         let encoded = crate::CpuColorTransformExecutor::transform(&delivered.frame, &transform)
             .expect("actual stock OCIO and encoded output consume Opaque");
         let reference = CpuColorFrame::working(WorkingRgbaF32Frame {
+            sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
             width: 4,
             height: 1,
             alpha: ColorFrameAlpha::Opaque,
@@ -5279,6 +5339,7 @@ mod tests {
     fn huge_signed_straight_alpha_keeps_equal_opaque_color_through_real_delivery() {
         use crate::color::program_output::{ProgramOutputBoundary, ProgramOutputModule};
         let background = CpuColorFrame::working(WorkingRgbaF32Frame {
+            sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
             width: 4,
             height: 1,
             alpha: ColorFrameAlpha::Opaque,
@@ -5293,6 +5354,7 @@ mod tests {
         ]
         .map(|alpha| [1.0, 1.0, 1.0, alpha]);
         let source = CpuColorFrame::working(WorkingRgbaF32Frame {
+            sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
             width: 4,
             height: 1,
             alpha: ColorFrameAlpha::StraightFloat,
@@ -5339,6 +5401,7 @@ mod tests {
     fn huge_rgb_products_cancel_before_nontrivial_opacity_and_real_linear_float_delivery() {
         use crate::color::program_output::{ProgramOutputBoundary, ProgramOutputModule};
         let background = CpuColorFrame::working(WorkingRgbaF32Frame {
+            sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
             width: 2,
             height: 1,
             alpha: ColorFrameAlpha::Opaque,
@@ -5346,6 +5409,7 @@ mod tests {
             color_space: WorkingColorSpace::LinearRec709,
         });
         let source = CpuColorFrame::working(WorkingRgbaF32Frame {
+            sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
             width: 2,
             height: 1,
             alpha: ColorFrameAlpha::StraightFloat,
@@ -5417,6 +5481,7 @@ mod tests {
             ),
         ] {
             let media = CpuColorFrame::working(WorkingRgbaF32Frame {
+                sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
                 width: 2,
                 height: 1,
                 alpha,
@@ -5476,6 +5541,7 @@ mod tests {
             ),
         ] {
             let media = CpuColorFrame::working(WorkingRgbaF32Frame {
+                sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
                 width: 1,
                 height: 1,
                 alpha,
@@ -5509,6 +5575,7 @@ mod tests {
     #[test]
     fn timeline_media_identity_admission_observes_owner_stop_inside_borrowed_raster() {
         let media = CpuColorFrame::working(WorkingRgbaF32Frame {
+            sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
             width: 65_537,
             height: 1,
             alpha: ColorFrameAlpha::StraightCoverage,
@@ -5544,6 +5611,7 @@ mod tests {
     #[test]
     fn timeline_media_full_float_admission_does_not_expand_artistic_coverage_consumers() {
         let media = CpuColorFrame::working(WorkingRgbaF32Frame {
+            sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
             width: 1,
             height: 1,
             alpha: ColorFrameAlpha::PremultipliedFloat,
@@ -5770,7 +5838,11 @@ pub(crate) mod source_materialization_tests {
                 2,
                 &[element],
                 TimelineCompositeOptions::default(),
-                TimelineEffectColorRuntime::new(&engine, WorkingColorSpace::LinearRec709),
+                TimelineEffectColorRuntime::new(
+                    &engine,
+                    WorkingColorSpace::LinearRec709,
+                    mondrian_core::ImageSampling::UNIT_SQUARE,
+                ),
                 &mut scratch,
                 &mut control,
             );
@@ -5793,6 +5865,7 @@ pub(crate) mod source_materialization_tests {
                     EffectColorDomain::SceneLinearRgb,
                     ColorFrameAlpha::StraightFloat,
                 ),
+                mondrian_core::ImageSampling::UNIT_SQUARE,
                 &graph,
                 0,
                 &mut EffectProcessorControl::uncancelled(),
@@ -5833,7 +5906,11 @@ pub(crate) mod source_materialization_tests {
             2,
             &[TimelineCompositeElement::SolidColor(solid(graph))],
             TimelineCompositeOptions::default(),
-            TimelineEffectColorRuntime::new(&engine, WorkingColorSpace::LinearRec709),
+            TimelineEffectColorRuntime::new(
+                &engine,
+                WorkingColorSpace::LinearRec709,
+                mondrian_core::ImageSampling::UNIT_SQUARE,
+            ),
             &mut scratch,
             &mut EffectProcessorControl::uncancelled(),
         );

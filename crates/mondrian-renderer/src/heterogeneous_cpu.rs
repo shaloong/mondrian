@@ -158,6 +158,8 @@ pub enum HeterogeneousCpuPrefixSource {
     SolidColor {
         /// Exact raster frozen by route preparation.
         extent: EffectFrameExtent,
+        /// Explicit sampling of this procedural raster.
+        sampling: mondrian_core::ImageSampling,
         /// Straight-alpha authored working-domain color.
         color: Color,
     },
@@ -170,8 +172,12 @@ impl HeterogeneousCpuPrefixSource {
     }
 
     /// Bind a procedural Solid Color without allocating its raster.
-    pub const fn solid_color(extent: EffectFrameExtent, color: Color) -> Self {
-        Self::SolidColor { extent, color }
+    pub const fn solid_color(
+        extent: EffectFrameExtent,
+        sampling: mondrian_core::ImageSampling,
+        color: Color,
+    ) -> Self {
+        Self::SolidColor { extent, sampling, color }
     }
 
     fn extent(&self) -> EffectFrameExtent {
@@ -219,6 +225,7 @@ impl HeterogeneousCpuPrefixBatchItem {
     pub fn new_solid_color(
         address: u32,
         route: PreparedHeterogeneousEffectRoute,
+        sampling: mondrian_core::ImageSampling,
         color: Color,
         working_color_space: WorkingColorSpace,
         frame_seed: i64,
@@ -227,7 +234,7 @@ impl HeterogeneousCpuPrefixBatchItem {
         Self {
             address,
             route,
-            source: HeterogeneousCpuPrefixSource::solid_color(extent, color),
+            source: HeterogeneousCpuPrefixSource::solid_color(extent, sampling, color),
             working_color_space,
             frame_seed,
         }
@@ -645,6 +652,7 @@ impl HeterogeneousCpuPrefixBatchExecutor {
                                 mondrian_effects::EffectColorDomain::SceneLinearRgb,
                                 input.rgba_f32().alpha,
                             ),
+                            input.rgba_f32().sampling,
                             &input.rgba_f32().data,
                         ),
                         item.frame_seed,
@@ -652,11 +660,12 @@ impl HeterogeneousCpuPrefixBatchExecutor {
                         &mut checkpoint,
                     )
                 }
-                HeterogeneousCpuPrefixSource::SolidColor { extent, color } => {
+                HeterogeneousCpuPrefixSource::SolidColor { extent, sampling, color } => {
                     self.scratch.execute_prepared_heterogeneous_solid_cpu_prefix_with_checkpoint(
                         item.route.work(),
                         generation,
                         extent,
+                        sampling,
                         color,
                         item.frame_seed,
                         item.working_color_space,
@@ -916,6 +925,7 @@ mod tests {
             address,
             route,
             CpuColorFrame::working(WorkingRgbaF32Frame {
+                sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
                 alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
                 width: EXTENT.width(),
                 height: EXTENT.height(),
@@ -932,7 +942,14 @@ mod tests {
         let route =
             PreparedHeterogeneousEffectRoute::prepare(graph(), EXTENT, grant.graph_execution())
                 .expect("prepare heterogeneous route");
-        HeterogeneousCpuPrefixBatchItem::new_solid_color(address, route, color, WORKING_SPACE, 19)
+        HeterogeneousCpuPrefixBatchItem::new_solid_color(
+            address,
+            route,
+            mondrian_core::ImageSampling::UNIT_SQUARE,
+            color,
+            WORKING_SPACE,
+            19,
+        )
     }
 
     fn two_frontier_graph() -> Arc<CompiledEffectGraph> {
@@ -957,6 +974,7 @@ mod tests {
             address,
             route,
             CpuColorFrame::working(WorkingRgbaF32Frame {
+                sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
                 alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
                 width: EXTENT.width(),
                 height: EXTENT.height(),
@@ -1126,6 +1144,7 @@ mod tests {
             5,
             route,
             CpuColorFrame::working(WorkingRgbaF32Frame {
+                sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
                 alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
                 width: EXTENT.width(),
                 height: EXTENT.height(),

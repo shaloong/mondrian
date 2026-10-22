@@ -235,6 +235,9 @@ impl TimelineTemporalDemandBatch {
 /// Fail-closed Timeline temporal preparation error.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum TimelineTemporalPreparationError {
+    /// The owner canvas has no representable image sampling.
+    #[error(transparent)]
+    Sampling(#[from] mondrian_core::ImageSamplingError),
     /// Placement mapping or media interpretation failed.
     #[error("temporal source sampling failed for Clip {clip_id}: {reason}")]
     SourceSampling {
@@ -698,6 +701,10 @@ fn collect_batch(
         continuity,
         placement.clip_time,
         frame_extent,
+        program.materialization_contract().image_sampling(mondrian_core::Resolution {
+            width: frame_extent.width(),
+            height: frame_extent.height(),
+        })?,
         output_roi,
         cancellation,
     )
@@ -1225,6 +1232,7 @@ mod tests {
                 let tile = EffectFrameTileF32::new(
                     request.time(),
                     request.frame_extent(),
+                    request.sampling(),
                     roi,
                     request.time().numerator(),
                     pixels,

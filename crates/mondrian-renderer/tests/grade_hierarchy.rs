@@ -252,7 +252,11 @@ fn composite_grade_plan(plan: &TimelineRenderPlan) -> Vec<[f32; 4]> {
         1,
         &elements,
         TimelineCompositeOptions::default(),
-        TimelineEffectColorRuntime::new(&engine, WorkingColorSpace::LinearRec709),
+        TimelineEffectColorRuntime::new(
+            &engine,
+            WorkingColorSpace::LinearRec709,
+            mondrian_core::ImageSampling::UNIT_SQUARE,
+        ),
         &mut TimelineCompositeScratch::default(),
         &mut mondrian_effects::EffectProcessorControl::uncancelled(),
     )

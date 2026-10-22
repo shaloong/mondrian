@@ -81,19 +81,21 @@ impl SourceColorModule {
     pub fn execute_cpu(
         frame: &CpuSourceColorFrame,
         context: &MediaInputColorContext,
+        sampling: mondrian_core::ImageSampling,
         session: &mut RenderCpuColorExecutionSession,
     ) -> Result<SourceColorRecord, crate::RenderColorTransformError> {
-        Self::execute_cpu_with_intent(frame, &Self::cpu_intent(context), session)
+        Self::execute_cpu_with_intent(frame, &Self::cpu_intent(context), sampling, session)
     }
 
     /// Execute a source payload with a previously resolved source intent.
     pub fn execute_cpu_with_intent(
         frame: &CpuSourceColorFrame,
         intent: &RenderInputTransform,
+        sampling: mondrian_core::ImageSampling,
         session: &mut RenderCpuColorExecutionSession,
     ) -> Result<SourceColorRecord, crate::RenderColorTransformError> {
         let execution = crate::color_stage::execute_cpu_source_input_stage_with_session(
-            frame, intent, session,
+            frame, intent, sampling, session,
         )?;
         Ok(SourceColorRecord {
             frame: execution.result.frame,

@@ -71,6 +71,7 @@ pub(super) fn composite_transition_input_f32(
             let input = mondrian_effects::EffectFloatFrameView::new(
                 extent,
                 scene_linear_float_format(ColorFrameAlpha::StraightCoverage),
+                runtime.sampling,
                 &scratch.solid_fill_f32,
             );
             let effect_output;

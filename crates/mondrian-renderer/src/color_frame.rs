@@ -3748,10 +3748,15 @@ impl LinearFloatSource {
     /// Convert to a working-space [`CpuColorFrame`] without any u8
     /// quantization. The caller must ensure the data is already in the target
     /// working color space.
-    pub fn to_working_frame(self, working_color_space: WorkingColorSpace) -> CpuColorFrame {
+    pub fn to_working_frame(
+        self,
+        working_color_space: WorkingColorSpace,
+        sampling: mondrian_core::ImageSampling,
+    ) -> CpuColorFrame {
         let pixels: Vec<[f32; 4]> =
             self.data.chunks_exact(4).map(|c| [c[0], c[1], c[2], c[3]]).collect();
         let frame = WorkingRgbaF32Frame {
+            sampling,
             alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
             width: self.descriptor.width,
             height: self.descriptor.height,
@@ -5276,7 +5281,10 @@ mod tests {
                         WorkingColorSpace::LinearRec709,
                         pixel.to_vec(),
                     )
-                    .to_working_frame(WorkingColorSpace::LinearRec709);
+                    .to_working_frame(
+                        WorkingColorSpace::LinearRec709,
+                        mondrian_core::ImageSampling::UNIT_SQUARE,
+                    );
                     GpuColorFrameUploadPlan::from_cpu_color_frame(
                         id,
                         &frame,
@@ -5384,6 +5392,7 @@ mod tests {
 
         fn working(alpha: ColorFrameAlpha, samples: Vec<[f32; 4]>) -> CpuColorFrame {
             CpuColorFrame::working(WorkingRgbaF32Frame {
+                sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
                 width: samples.len() as u32,
                 height: 1,
                 color_space: WorkingColorSpace::LinearRec709,
@@ -5541,6 +5550,7 @@ mod tests {
     #[test]
     fn gpu_color_frame_upload_plan_packs_cpu_linear_float_as_rgba32float() {
         let frame = CpuColorFrame::working(WorkingRgbaF32Frame {
+            sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
             alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
             width: 2,
             height: 1,
@@ -6003,6 +6013,7 @@ mod tests {
     #[test]
     fn cpu_color_frame_clone_shares_linear_payload() {
         let frame = CpuColorFrame::working(WorkingRgbaF32Frame {
+            sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
             alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
             width: 2,
             height: 1,
@@ -6066,6 +6077,7 @@ mod tests {
     #[test]
     fn gpu_color_frame_upload_plan_rejects_unsupported_cpu_formats() {
         let frame = CpuColorFrame::working(WorkingRgbaF32Frame {
+            sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
             alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
             width: 1,
             height: 1,

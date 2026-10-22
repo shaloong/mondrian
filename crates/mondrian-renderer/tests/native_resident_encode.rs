@@ -153,6 +153,7 @@ async fn compare_production_output(
         .expect("same-device native codec session");
 
     let frame = CpuColorFrame::working(WorkingRgbaF32Frame {
+        sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
         alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
         width,
         height: HEIGHT,
