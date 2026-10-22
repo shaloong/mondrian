@@ -16,6 +16,85 @@ use std::cell::Cell;
 use std::io::{Read, Write};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
 
+// Only mode15's Windows witness crosses this narrow test-fixture ABI boundary.
+// Every successful OpenEvent creates one OwnedHandle; its Drop closes exactly
+// once. Each NUL-terminated UTF16 name outlives its synchronous OpenEvent call.
+#[cfg(windows)]
+#[allow(unsafe_code)]
+mod idle_events {
+    use clack_plugin::prelude::PluginError;
+    use std::ffi::c_void;
+    use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn OpenEventW(access: u32, inherit: i32, name: *const u16) -> *mut c_void;
+        fn WaitForSingleObject(handle: *mut c_void, milliseconds: u32) -> u32;
+        fn SetEvent(handle: *mut c_void) -> i32;
+        fn GetCurrentProcessId() -> u32;
+        fn GetLastError() -> u32;
+    }
+    pub(super) struct Events {
+        arm: OwnedHandle,
+        witness: OwnedHandle,
+    }
+    fn open_one(
+        nonce: [u8; 16],
+        kind: &str,
+        access: u32,
+    ) -> Result<Option<OwnedHandle>, PluginError> {
+        // SAFETY: GetCurrentProcessId has no argument or ownership obligation.
+        let pid = unsafe { GetCurrentProcessId() };
+        let name: Vec<u16> = format!(
+            "Local\\MondrianClapIdle-{pid}-{:032x}-{kind}",
+            u128::from_le_bytes(nonce)
+        )
+        .encode_utf16()
+        .chain([0])
+        .collect();
+        // SAFETY: live UTF16 name; no inherited handle; access is narrowly
+        // SYNCHRONIZE for Arm or EVENT_MODIFY_STATE for Witness.
+        let raw = unsafe { OpenEventW(access, 0, name.as_ptr()) };
+        if raw.is_null() {
+            // Earlier probe PIDs have no event. Only the retained target PID
+            // receives objects after the parent's last initial owner RPC.
+            return if unsafe { GetLastError() } == 2 {
+                Ok(None)
+            } else {
+                Err(PluginError::Message("idle witness OpenEvent failed"))
+            };
+        }
+        // SAFETY: successful OpenEvent transferred this one owned handle.
+        Ok(Some(unsafe { OwnedHandle::from_raw_handle(raw) }))
+    }
+    pub(super) fn open(nonce: [u8; 16]) -> Result<Option<Events>, PluginError> {
+        let Some(arm) = open_one(nonce, "Arm", 0x0010_0000)? else {
+            return Ok(None);
+        };
+        let Some(witness) = open_one(nonce, "Witness", 2)? else {
+            return Ok(None);
+        };
+        Ok(Some(Events { arm, witness }))
+    }
+    impl Events {
+        pub(super) fn armed(&self) -> Result<bool, PluginError> {
+            // SAFETY: borrowed live event with SYNCHRONIZE permission.
+            match unsafe { WaitForSingleObject(self.arm.as_raw_handle(), 0) } {
+                0 => Ok(true),
+                258 => Ok(false),
+                _ => Err(PluginError::Message("idle witness Arm wait failed")),
+            }
+        }
+        pub(super) fn signal(&self) -> Result<(), PluginError> {
+            // SAFETY: borrowed live Witness with EVENT_MODIFY_STATE permission.
+            if unsafe { SetEvent(self.witness.as_raw_handle()) } == 0 {
+                Err(PluginError::Message("idle witness SetEvent failed"))
+            } else {
+                Ok(())
+            }
+        }
+    }
+}
+
 /// CLAP's audio role may coincide with main or run on another physical thread.
 #[derive(Clone, Copy, Debug)]
 enum RoleRequirement {
@@ -91,7 +170,7 @@ impl DefaultPluginFactory for SidechainFixture {
         host: HostMainThreadHandle<'a>,
         shared: &'a Shared<'a>,
     ) -> Result<Main<'a>, PluginError> {
-        Ok(Main(shared, host, Cell::new(TimerFixtureState::Dormant), Cell::new(None)))
+        Ok(Main(shared, host, Cell::new(TimerFixtureState::Dormant), Cell::new(None), Cell::new(None)))
     }
 }
 
@@ -157,6 +236,7 @@ impl Drop for Shared<'_> {
 enum TimerFixtureState {
     Dormant,
     Registered { a: TimerId, b: TimerId },
+    IdleRegistered { id: TimerId, awaiting_arm: bool },
     Finished,
 }
 
@@ -166,6 +246,7 @@ pub struct Main<'a>(
     HostMainThreadHandle<'a>,
     Cell<TimerFixtureState>,
     Cell<Option<BeatReference>>,
+    Cell<Option<[u8; 16]>>, // mode15 configuration nonce, never native timing.
 );
 
 /// Mode11's independent expected reference, configured by the test state rather
@@ -342,6 +423,59 @@ impl Main<'_> {
     }
 }
 
+#[cfg(windows)]
+impl Main<'_> {
+    fn register_idle_timer(&self) -> Result<(), PluginError> {
+        self.timer_main_role()?;
+        if self.4.get().is_none() {
+            return Err(PluginError::Message("idle nonce absent"));
+        }
+        let timer = self
+            .1
+            .get_extension::<HostTimer>()
+            .ok_or(PluginError::Message("idle host timer absent"))?;
+        let id = timer.register_timer(&self.1, 1)?;
+        self.2.set(TimerFixtureState::IdleRegistered { id, awaiting_arm: false });
+        self.timer_log(c"idle:registered")
+    }
+    fn consume_idle_timer(&self, actual_id: TimerId) -> Result<(), PluginError> {
+        self.timer_main_role()?;
+        let TimerFixtureState::IdleRegistered { id, awaiting_arm } = self.2.get() else {
+            return Err(PluginError::Message("idle timer repeated after finish"));
+        };
+        if id != actual_id {
+            return Err(PluginError::Message("wrong idle timer id"));
+        }
+        let nonce = self.4.get().ok_or(PluginError::Message("idle nonce absent"))?;
+        let Some(events) = idle_events::open(nonce)? else {
+            return Ok(());
+        };
+        let armed = events.armed()?;
+        if !awaiting_arm {
+            if armed {
+                return Err(PluginError::Message("idle Arm preceded first witness"));
+            }
+            self.2.set(TimerFixtureState::IdleRegistered { id, awaiting_arm: true });
+            self.timer_log(c"idle:disarmed:main=true:audio=false")?;
+            events.signal()?;
+            // The parent may arm immediately after this signal. This callback
+            // must return: only a later host timer tick can finish the handshake.
+            return Ok(());
+        }
+        if !armed {
+            return Ok(());
+        }
+        let timer = self
+            .1
+            .get_extension::<HostTimer>()
+            .ok_or(PluginError::Message("idle host timer absent"))?;
+        timer.unregister_timer(&self.1, id)?;
+        self.2.set(TimerFixtureState::Finished);
+        self.timer_log(c"idle:armed:main=true:audio=false:unregistered")?;
+        events.signal()
+    }
+}
+
 impl<'a> PluginMainThread<'a, Shared<'a>> for Main<'a> {
     fn on_main_thread(&self) {
         let _ = self.0.check_role(RoleRequirement::Main);
@@ -351,11 +485,25 @@ impl<'a> PluginMainThread<'a, Shared<'a>> for Main<'a> {
         {
             let _ = self.timer_log(c"timer:registration-failed");
         }
+        #[cfg(windows)]
+        if self.0.mode.load(Ordering::Relaxed) == 15
+            && matches!(self.2.get(), TimerFixtureState::Dormant)
+            && self.register_idle_timer().is_err()
+        {
+            let _ = self.timer_log(c"idle:registration-failed");
+        }
     }
 }
 
 impl PluginTimerImpl for Main<'_> {
     fn on_timer(&self, id: TimerId) {
+        #[cfg(windows)]
+        if self.0.mode.load(Ordering::Relaxed) == 15 {
+            if self.consume_idle_timer(id).is_err() {
+                let _ = self.timer_log(c"idle:callback-failed");
+            }
+            return;
+        }
         if self.consume_fixture_timer(id).is_err() {
             let _ = self.timer_log(c"timer:unexpected-callback-or-unregister-failure");
         }
@@ -367,6 +515,9 @@ impl PluginStateImpl for Main<'_> {
         self.0.check_role(RoleRequirement::Main)?;
         output.write_all(&[self.0.mode.load(Ordering::Relaxed)])?;
         output.write_all(&self.0.gain.load(Ordering::Relaxed).to_le_bytes())?;
+        if self.0.mode.load(Ordering::Relaxed) == 15 {
+            output.write_all(&self.4.get().ok_or(PluginError::Message("idle nonce absent"))?)?;
+        }
         if (7..=9).contains(&self.0.mode.load(Ordering::Relaxed)) {
             output.write_all(&[u8::from(self.0.restart_seen.load(Ordering::Relaxed))])?;
         }
@@ -399,6 +550,13 @@ impl PluginStateImpl for Main<'_> {
         let mut bytes = [0; 5];
         input.read_exact(&mut bytes)?;
         let gain = configuration_gain(bytes)?;
+        let nonce = if bytes[0] == 15 {
+            let mut nonce = [0; 16];
+            input.read_exact(&mut nonce)?;
+            if nonce == [0; 16] { return Err(PluginError::Message("zero idle nonce")); }
+            Some(nonce)
+        } else { None };
+        self.4.set(nonce);
         let restart_seen = if (7..=9).contains(&bytes[0]) {
             let mut flag = [0];
             input.read_exact(&mut flag)?;
@@ -495,9 +653,10 @@ const ECHO_FRAMES: usize = 256;
 // Only the existing five-byte mode/gain header is configuration. Modes 7–9
 // retain their separate restart flag; mode12 never serializes its live ring.
 // Isolated mode13 appends only a bounded configuration generation 0..=2.
+// Mode15 appends a fixed 16-byte Windows event nonce; no live timer state is saved.
 fn configuration_gain(bytes: [u8; 5]) -> Result<f32, PluginError> {
     let gain = f32::from_le_bytes([bytes[1], bytes[2], bytes[3], bytes[4]]);
-    if bytes[0] > 14 || !gain.is_finite() || !(0.0..=1.0).contains(&gain) {
+    if bytes[0] > 15 || !gain.is_finite() || !(0.0..=1.0).contains(&gain) {
         return Err(PluginError::Message("invalid fixture state"));
     }
     Ok(gain)
@@ -581,7 +740,7 @@ impl<'a> PluginAudioProcessor<'a, Shared<'a>, Main<'a>> for Processor<'a> {
         config: PluginAudioConfiguration,
     ) -> Result<Self, PluginError> {
         shared.check_role(RoleRequirement::Main)?;
-        if shared.mode.load(Ordering::Relaxed) == 14 {
+        if matches!(shared.mode.load(Ordering::Relaxed), 14 | 15) {
             // Registration runs through the actual plugin main callback, after
             // the normal restored-state/render-mode/activation path.
             shared.host.request_callback();
@@ -874,7 +1033,7 @@ mod finite_echo_tests {
         for _ in 0..=ECHO_FRAMES {
             assert_eq!(live.process_frame([0.0; 2]), [0.0; 2]);
         }
-        bytes[0] = 15;
+        bytes[0] = 16;
         assert!(configuration_gain(bytes).is_err());
     }
 }
@@ -897,7 +1056,7 @@ mod repeat_restart_tests {
         }
         assert!(read_repeat_restart_count(&mut &[][..]).is_err());
         assert!(read_repeat_restart_count(&mut &[3][..]).is_err());
-        header[0] = 15;
+        header[0] = 16;
         assert!(configuration_gain(header).is_err());
     }
 
