@@ -20308,6 +20308,16 @@ fn openfx_unit_media_original_decode_reaches_native_before_preview_downscale() {
     assert_eq!((stream.width, stream.height), (3, 5));
     let library = AssetLibrary::open(root.path().join("library")).unwrap();
     let asset = commit_preview_test_media(&library, source.clone(), info);
+    let registered_source = library
+        .get_asset(asset)
+        .unwrap()
+        .unwrap()
+        .file_path()
+        .expect("registered original file")
+        .to_path_buf();
+    // Asset Library persists ordinary Windows paths; canonical I/O may use
+    // a verbatim prefix. Both spellings must still identify the original file.
+    assert_eq!(registered_source.canonicalize().unwrap(), source);
     let mut state = AppState::new();
     pin_standard_execution_resources(&mut state);
     *state.test_project_color_environment_mut() =
@@ -20397,7 +20407,7 @@ fn openfx_unit_media_original_decode_reaches_native_before_preview_downscale() {
                             true,
                         )
                         .unwrap();
-                    assert_eq!(key.decode.source().path(), source);
+                    assert_eq!(key.decode.source().path(), registered_source);
                     assert_eq!(
                         key.decode.representation(),
                         mondrian_media::PreviewDecodeRepresentation::NativeCpu
