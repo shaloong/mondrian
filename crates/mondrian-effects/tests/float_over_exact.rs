@@ -40,12 +40,14 @@ fn complete_float_frame_publishes_finite_three_exponent_cancellation() {
     let mut base = EffectFloatFrame::from_pixels(
         extent,
         format(ColorFrameAlpha::StraightFloat),
+        mondrian_core::ImageSampling::UNIT_SQUARE,
         vec![[0x6c11_8e00, 0x6c11_8e00, 0x6c11_8e00, 0x69e1_2000].map(f32::from_bits)],
     )
     .expect("finite base");
     let source = EffectFloatFrame::from_pixels(
         extent,
         format(ColorFrameAlpha::PremultipliedFloat),
+        mondrian_core::ImageSampling::UNIT_SQUARE,
         vec![[0x8000_0001, 0x8000_0001, 0x8000_0001, 0x3f80_0001].map(f32::from_bits)],
     )
     .expect("finite source");
@@ -78,12 +80,14 @@ fn complete_float_opaque_delivery_keeps_identical_color_at_extreme_signed_alpha(
             let mut base = EffectFloatFrame::from_pixels(
                 extent,
                 format(ColorFrameAlpha::Opaque),
+                mondrian_core::ImageSampling::UNIT_SQUARE,
                 vec![[color[0], color[1], color[2], 1.0]],
             )
             .expect("finite opaque base");
             let source = EffectFloatFrame::from_pixels(
                 extent,
                 format(ColorFrameAlpha::StraightFloat),
+                mondrian_core::ImageSampling::UNIT_SQUARE,
                 vec![[color[0], color[1], color[2], alpha]],
             )
             .expect("finite extended alpha source");
@@ -111,12 +115,14 @@ fn complete_float_frame_zero_opacity_preserves_original_signed_zero_bits() {
     let mut base = EffectFloatFrame::from_pixels(
         extent,
         format(ColorFrameAlpha::StraightFloat),
+        mondrian_core::ImageSampling::UNIT_SQUARE,
         vec![original.map(f32::from_bits)],
     )
     .expect("finite base");
     let source = EffectFloatFrame::from_pixels(
         extent,
         format(ColorFrameAlpha::PremultipliedFloat),
+        mondrian_core::ImageSampling::UNIT_SQUARE,
         vec![[7.0, -3.0, 11.0, 0.0]],
     )
     .expect("finite emission");

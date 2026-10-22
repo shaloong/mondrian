@@ -24,13 +24,14 @@ fn associated_float_frame_preserves_emission_signed_alpha_and_extended_color() {
     let frame = EffectFloatFrame::from_pixels(
         EffectFrameExtent::new(4, 1),
         format(ColorFrameAlpha::PremultipliedFloat),
+        mondrian_core::ImageSampling::UNIT_SQUARE,
         pixels.clone(),
     )
     .expect("finite OFX Float domain retains complete association");
     assert_eq!(frame.format(), format(ColorFrameAlpha::PremultipliedFloat));
     assert_eq!(frame.pixels(), pixels);
     assert_eq!(frame.view().format(), frame.format());
-    assert_eq!(frame.clone().into_parts().2, pixels);
+    assert_eq!(frame.clone().into_parts().3, pixels);
 }
 
 #[test]
@@ -92,6 +93,7 @@ fn finite_float_and_normalized_coverage_are_distinct_exact_contracts() {
         assert!(EffectFloatFrame::from_pixels(
             EffectFrameExtent::new(1, 1),
             format(ColorFrameAlpha::StraightFloat),
+            mondrian_core::ImageSampling::UNIT_SQUARE,
             vec![pixel]
         )
         .is_ok());
@@ -99,6 +101,7 @@ fn finite_float_and_normalized_coverage_are_distinct_exact_contracts() {
             EffectFloatFrame::from_pixels(
                 EffectFrameExtent::new(1, 1),
                 format(ColorFrameAlpha::StraightCoverage),
+                mondrian_core::ImageSampling::UNIT_SQUARE,
                 vec![pixel]
             ),
             Err(EffectFloatFrameError::InvalidSample {
@@ -114,6 +117,7 @@ fn finite_float_and_normalized_coverage_are_distinct_exact_contracts() {
             assert!(EffectFloatFrame::from_pixels(
                 EffectFrameExtent::new(1, 1),
                 format(ColorFrameAlpha::PremultipliedFloat),
+                mondrian_core::ImageSampling::UNIT_SQUARE,
                 vec![pixel]
             )
             .is_err());
@@ -1811,12 +1815,14 @@ fn typed_normal_blend_keeps_huge_alpha_equal_color_identity_and_no_op_base() {
         let mut base = EffectFloatFrame::from_pixels(
             EffectFrameExtent::new(1, 1),
             format(ColorFrameAlpha::Opaque),
+            mondrian_core::ImageSampling::UNIT_SQUARE,
             vec![[1.0, -2.0, 0.125, 1.0]],
         )
         .expect("opaque base");
         let source = EffectFloatFrame::from_pixels(
             EffectFrameExtent::new(1, 1),
             format(ColorFrameAlpha::StraightFloat),
+            mondrian_core::ImageSampling::UNIT_SQUARE,
             vec![[1.0, -2.0, 0.125, source_alpha]],
         )
         .expect("finite extended straight alpha");
@@ -1846,6 +1852,7 @@ fn typed_normal_blend_cancels_huge_products_before_applying_nontrivial_opacity()
             let original = EffectFloatFrame::from_pixels(
                 EffectFrameExtent::new(1, 1),
                 format(ColorFrameAlpha::Opaque),
+                mondrian_core::ImageSampling::UNIT_SQUARE,
                 vec![[f32::MAX, -f32::MAX, f32::MAX, 1.0]],
             )
             .expect("finite opaque HDR raster");
@@ -1853,6 +1860,7 @@ fn typed_normal_blend_cancels_huge_products_before_applying_nontrivial_opacity()
             let source = EffectFloatFrame::from_pixels(
                 EffectFrameExtent::new(1, 1),
                 format(ColorFrameAlpha::StraightFloat),
+                mondrian_core::ImageSampling::UNIT_SQUARE,
                 vec![[f32::MAX, -f32::MAX, f32::MAX, alpha]],
             )
             .expect("valid finite straight values do not require intermediate Float32 association");

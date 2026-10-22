@@ -79,6 +79,7 @@ pub struct EffectTemporalExecutionRequest {
     output_time: TimelineTime,
     output_frame_seed: i64,
     frame_extent: EffectFrameExtent,
+    sampling: mondrian_core::ImageSampling,
     output_roi: EffectPixelRoi,
     cancellation: ExecutionCancellationToken,
 }
@@ -90,6 +91,7 @@ impl EffectTemporalExecutionRequest {
         continuity: EffectExecutionContinuity,
         output_time: TimelineTime,
         frame_extent: EffectFrameExtent,
+        sampling: mondrian_core::ImageSampling,
         output_roi: EffectPixelRoi,
         cancellation: ExecutionCancellationToken,
     ) -> Self {
@@ -99,6 +101,7 @@ impl EffectTemporalExecutionRequest {
             output_time,
             output_frame_seed: frame_seed_for_output(output_time),
             frame_extent,
+            sampling,
             output_roi,
             cancellation,
         }
@@ -139,6 +142,11 @@ impl EffectTemporalExecutionRequest {
         self.frame_extent
     }
 
+    /// Original sample shape and X/Y density; cropping preserves this metadata.
+    pub const fn sampling(&self) -> mondrian_core::ImageSampling {
+        self.sampling
+    }
+
     /// Requested half-open output region.
     pub const fn output_roi(&self) -> EffectPixelRoi {
         self.output_roi
@@ -156,6 +164,7 @@ pub struct EffectTemporalFrameRequest {
     generation: u64,
     time: TimelineTime,
     frame_extent: EffectFrameExtent,
+    sampling: mondrian_core::ImageSampling,
     input_roi: EffectInputRoi,
     exact_halo: Option<EffectRoiHalo>,
     precision: EffectWorkingPrecision,
@@ -245,6 +254,11 @@ impl EffectTemporalFrameRequest {
         self.frame_extent
     }
 
+    /// Original sample shape and X/Y density; cropping preserves this metadata.
+    pub const fn sampling(&self) -> mondrian_core::ImageSampling {
+        self.sampling
+    }
+
     /// Concrete required source region and strength of its ROI evidence.
     pub const fn input_roi(self) -> EffectInputRoi {
         self.input_roi
@@ -267,6 +281,7 @@ impl EffectTemporalFrameRequest {
 pub struct EffectFrameTileF32 {
     time: TimelineTime,
     frame_extent: EffectFrameExtent,
+    sampling: mondrian_core::ImageSampling,
     roi: EffectPixelRoi,
     frame_seed: i64,
     pixels: Arc<Vec<[f32; 4]>>,
@@ -277,16 +292,25 @@ impl EffectFrameTileF32 {
     pub fn new(
         time: TimelineTime,
         frame_extent: EffectFrameExtent,
+        sampling: mondrian_core::ImageSampling,
         roi: EffectPixelRoi,
         frame_seed: i64,
         pixels: Vec<[f32; 4]>,
     ) -> Result<Self, EffectTemporalFrameProviderError> {
-        Self::from_shared(time, frame_extent, roi, frame_seed, Arc::new(pixels))
+        Self::from_shared(
+            time,
+            frame_extent,
+            sampling,
+            roi,
+            frame_seed,
+            Arc::new(pixels),
+        )
     }
 
     fn from_shared(
         time: TimelineTime,
         frame_extent: EffectFrameExtent,
+        sampling: mondrian_core::ImageSampling,
         roi: EffectPixelRoi,
         frame_seed: i64,
         pixels: Arc<Vec<[f32; 4]>>,
@@ -315,7 +339,14 @@ impl EffectFrameTileF32 {
                 return Err(EffectTemporalFrameProviderError::InvalidTile { reason: format!("normalized straight source tile sample {index} violates its exact contract") });
             }
         }
-        Ok(Self { time, frame_extent, roi, frame_seed, pixels })
+        Ok(Self {
+            time,
+            frame_extent,
+            sampling,
+            roi,
+            frame_seed,
+            pixels,
+        })
     }
 
     /// Exact source time.
@@ -326,6 +357,11 @@ impl EffectFrameTileF32 {
     /// Complete source coordinate extent.
     pub const fn frame_extent(&self) -> EffectFrameExtent {
         self.frame_extent
+    }
+
+    /// Original sample shape and X/Y density; cropping preserves this metadata.
+    pub const fn sampling(&self) -> mondrian_core::ImageSampling {
+        self.sampling
     }
 
     /// Half-open source region represented by `pixels`.
@@ -512,6 +548,7 @@ impl EffectTemporalFrameProvider for PreparedTemporalFrameSet {
             prepared.generation == request.generation
                 && prepared.time == request.time
                 && prepared.frame_extent == request.frame_extent
+                && prepared.sampling == request.sampling
                 && prepared.precision == request.precision
                 && roi_contains(tile.roi, requested_roi)
         });
@@ -881,6 +918,7 @@ fn prepare_temporal_execution_inner(
                 generation: request.generation,
                 time,
                 frame_extent: demand.frame_extent(),
+                sampling: request.sampling,
                 input_roi: demand.input_roi(),
                 exact_halo: demand.exact_halo(),
                 precision: EffectWorkingPrecision::Float32,
@@ -1224,6 +1262,7 @@ impl EffectExecutionSession {
             let tile = EffectFrameTileF32::from_shared(
                 request.output_time,
                 prepared.demand.frame_extent(),
+                request.sampling,
                 prepared.demand.output_roi(),
                 cached.frame_seed,
                 cached.pixels,
@@ -1240,6 +1279,7 @@ impl EffectExecutionSession {
             let tile = EffectFrameTileF32::new(
                 request.output_time,
                 prepared.demand.frame_extent(),
+                request.sampling,
                 prepared.demand.output_roi(),
                 request.output_frame_seed,
                 Vec::new(),
@@ -1329,6 +1369,7 @@ impl EffectExecutionSession {
         let tile = EffectFrameTileF32::from_shared(
             request.output_time,
             prepared.demand.frame_extent(),
+            request.sampling,
             prepared.demand.output_roi(),
             output_seed,
             output_pixels,
@@ -1408,6 +1449,7 @@ impl EffectExecutionSession {
                 output_time: request.output_time,
                 output_frame_seed: request.output_frame_seed,
                 frame_extent: request.frame_extent,
+                sampling: request.sampling,
                 output_roi: tile_roi,
                 cancellation: request.cancellation.clone(),
             };
@@ -1471,6 +1513,7 @@ impl EffectExecutionSession {
         let tile = EffectFrameTileF32::from_shared(
             request.output_time,
             prepared.demand.frame_extent(),
+            request.sampling,
             output_roi,
             request.output_frame_seed,
             output_pixels,
@@ -1744,7 +1787,10 @@ impl<'a> ScalarTemporalEvaluator<'a> {
                                             mondrian_core::ColorFrameAlpha::StraightCoverage,
                                         );
                                         let mut frame = crate::EffectFloatFrame::from_pixels(
-                                            extent, format, output,
+                                            extent,
+                                            format,
+                                            self.request.sampling,
+                                            output,
                                         )?;
                                         let processor_bytes = apply_custom_render_op_f32(
                                             &mut frame,
@@ -1768,7 +1814,7 @@ impl<'a> ScalarTemporalEvaluator<'a> {
                                             crate::EffectAlphaConsumer::StraightCoverageOperation,
                                             &mut || temporal_cancellation_checkpoint(&cancellation),
                                         )?;
-                                        output = frame.into_parts().2;
+                                        output = frame.into_parts().3;
                                         self.working.ensure_transient(
                                             scratch_bytes.saturating_add(processor_bytes),
                                         )?;
@@ -1992,6 +2038,7 @@ impl<'a> ScalarTemporalEvaluator<'a> {
             generation: self.request.generation,
             time,
             frame_extent: self.request.frame_extent,
+            sampling: self.request.sampling,
             input_roi: self.input_roi,
             exact_halo: self.exact_halo,
             precision: EffectWorkingPrecision::Float32,
@@ -2154,6 +2201,11 @@ fn validate_provider_tile(
             reason: "tile frame extent does not match the exact request".to_owned(),
         });
     }
+    if tile.sampling != request.sampling {
+        return Err(EffectTemporalFrameProviderError::InvalidTile {
+            reason: "tile sampling does not match the exact request".to_owned(),
+        });
+    }
     if tile.roi != request.input_roi.region() {
         return Err(EffectTemporalFrameProviderError::InvalidTile {
             reason: "tile ROI does not match the exact request".to_owned(),
@@ -2170,7 +2222,7 @@ fn temporal_cache_identity(
     temporal_program_fingerprint: [u8; 32],
 ) -> [u8; 32] {
     let mut hasher = Sha256::new();
-    hasher.update(b"mondrian.effect-temporal-roi-execution.v3");
+    hasher.update(b"mondrian.effect-temporal-roi-execution.v4");
     hasher.update(compiled.semantic_fingerprint());
     hasher.update(temporal_program_fingerprint);
     hasher.update(source_identity.semantic_fingerprint());
@@ -2179,6 +2231,13 @@ fn temporal_cache_identity(
     hasher.update(request.output_frame_seed.to_le_bytes());
     hasher.update(request.frame_extent.width().to_le_bytes());
     hasher.update(request.frame_extent.height().to_le_bytes());
+    let par = request.sampling.sample_aspect_ratio();
+    hasher.update(par.numerator().to_le_bytes());
+    hasher.update(par.denominator().to_le_bytes());
+    for scale in request.sampling.render_scale() {
+        hasher.update(scale.num.to_le_bytes());
+        hasher.update(scale.den.to_le_bytes());
+    }
     hash_roi(&mut hasher, request.output_roi);
     match input_roi {
         EffectInputRoi::Exact(roi) => {
@@ -2702,6 +2761,7 @@ mod tests {
             EffectExecutionContinuity::Discontinuous,
             TimelineTime::new(1, 4).expect("time"),
             extent,
+            mondrian_core::ImageSampling::UNIT_SQUARE,
             EffectPixelRoi::new(1, 0, 2, 1),
             ExecutionCancellationToken::new(),
         );
@@ -2747,6 +2807,7 @@ mod tests {
             EffectExecutionContinuity::Discontinuous,
             TimelineTime::new(1, 4).expect("time"),
             extent,
+            mondrian_core::ImageSampling::UNIT_SQUARE,
             EffectPixelRoi::new(1, 0, 2, 1),
             ExecutionCancellationToken::new(),
         );
@@ -2840,6 +2901,7 @@ mod tests {
             EffectExecutionContinuity::Continuous,
             output_time,
             extent,
+            mondrian_core::ImageSampling::UNIT_SQUARE,
             extent.full_frame_roi(),
             ExecutionCancellationToken::new(),
         );
@@ -2920,6 +2982,7 @@ mod tests {
             EffectExecutionContinuity::Discontinuous,
             TimelineTime::new(3, 2).expect("time"),
             extent,
+            mondrian_core::ImageSampling::UNIT_SQUARE,
             extent.full_frame_roi(),
             ExecutionCancellationToken::new(),
         )
@@ -2944,6 +3007,7 @@ mod tests {
                 let tile = EffectFrameTileF32::new(
                     demand.time(),
                     demand.frame_extent(),
+                    mondrian_core::ImageSampling::UNIT_SQUARE,
                     roi,
                     demand.time().numerator(),
                     pixels,
@@ -2988,6 +3052,7 @@ mod tests {
             EffectExecutionContinuity::Continuous,
             TimelineTime::ONE,
             extent,
+            mondrian_core::ImageSampling::UNIT_SQUARE,
             extent.full_frame_roi(),
             ExecutionCancellationToken::new(),
         );
@@ -3008,6 +3073,7 @@ mod tests {
             EffectExecutionContinuity::Discontinuous,
             TimelineTime::ONE,
             extent,
+            mondrian_core::ImageSampling::UNIT_SQUARE,
             extent.full_frame_roi(),
             ExecutionCancellationToken::new(),
         )
@@ -3045,6 +3111,7 @@ mod tests {
                 let tile = EffectFrameTileF32::new(
                     demand.time(),
                     demand.frame_extent(),
+                    mondrian_core::ImageSampling::UNIT_SQUARE,
                     demand.input_roi().region(),
                     0,
                     vec![[demand.time().to_f64() as f32, 0.0, 0.0, 1.0]],
@@ -3146,6 +3213,7 @@ mod tests {
             EffectExecutionContinuity::Continuous,
             output_time,
             extent,
+            mondrian_core::ImageSampling::UNIT_SQUARE,
             partial_roi,
             ExecutionCancellationToken::new(),
         );
@@ -3225,6 +3293,7 @@ mod tests {
             EffectExecutionContinuity::Continuous,
             output_time,
             extent,
+            mondrian_core::ImageSampling::UNIT_SQUARE,
             extent.full_frame_roi(),
             ExecutionCancellationToken::new(),
         );
@@ -3394,6 +3463,7 @@ mod tests {
                     crate::EffectColorDomain::SceneLinearRgb,
                     mondrian_core::ColorFrameAlpha::StraightCoverage,
                 ),
+                mondrian_core::ImageSampling::UNIT_SQUARE,
                 &mixed,
             ),
             &reference_graph,
@@ -3416,6 +3486,7 @@ mod tests {
             EffectExecutionContinuity::Continuous,
             output_time,
             extent,
+            mondrian_core::ImageSampling::UNIT_SQUARE,
             output_roi,
             ExecutionCancellationToken::new(),
         )
@@ -3462,6 +3533,7 @@ mod tests {
             EffectExecutionContinuity::Continuous,
             output_time,
             extent,
+            mondrian_core::ImageSampling::UNIT_SQUARE,
             extent.full_frame_roi(),
             ExecutionCancellationToken::new(),
         )
@@ -3484,6 +3556,7 @@ mod tests {
                 let tile = EffectFrameTileF32::new(
                     demand.time(),
                     demand.frame_extent(),
+                    mondrian_core::ImageSampling::UNIT_SQUARE,
                     roi,
                     demand.time().numerator(),
                     pixels,
@@ -3615,6 +3688,7 @@ mod tests {
             EffectExecutionContinuity::Continuous,
             TimelineTime::ONE,
             extent,
+            mondrian_core::ImageSampling::UNIT_SQUARE,
             extent.full_frame_roi(),
             cancellation.clone(),
         );
@@ -3660,6 +3734,7 @@ mod tests {
             EffectExecutionContinuity::Continuous,
             TimelineTime::ONE,
             extent,
+            mondrian_core::ImageSampling::UNIT_SQUARE,
             extent.full_frame_roi(),
             ExecutionCancellationToken::new(),
         );
@@ -3703,6 +3778,7 @@ mod tests {
             EffectExecutionContinuity::Continuous,
             TimelineTime::ONE,
             extent,
+            mondrian_core::ImageSampling::UNIT_SQUARE,
             output_roi,
             ExecutionCancellationToken::new(),
         );
@@ -3766,6 +3842,7 @@ mod tests {
             EffectExecutionContinuity::Continuous,
             TimelineTime::ONE,
             extent,
+            mondrian_core::ImageSampling::UNIT_SQUARE,
             extent.full_frame_roi(),
             ExecutionCancellationToken::new(),
         );
@@ -3789,6 +3866,7 @@ mod tests {
         let tile = EffectFrameTileF32::new(
             stale.time(),
             stale.frame_extent(),
+            mondrian_core::ImageSampling::UNIT_SQUARE,
             roi,
             0,
             vec![[0.0; 4]; checked_pixel_count(roi).expect("pixel count")],
@@ -3843,6 +3921,7 @@ mod tests {
                     EffectExecutionContinuity::Continuous,
                     time,
                     extent,
+                    mondrian_core::ImageSampling::UNIT_SQUARE,
                     tile_roi,
                     ExecutionCancellationToken::new(),
                 ),
@@ -3857,6 +3936,7 @@ mod tests {
                     EffectExecutionContinuity::Continuous,
                     time,
                     extent,
+                    mondrian_core::ImageSampling::UNIT_SQUARE,
                     extent.full_frame_roi(),
                     ExecutionCancellationToken::new(),
                 ),
@@ -3902,6 +3982,7 @@ mod tests {
                 EffectExecutionContinuity::Continuous,
                 time,
                 extent,
+                mondrian_core::ImageSampling::UNIT_SQUARE,
                 roi,
                 ExecutionCancellationToken::new(),
             )
@@ -3961,6 +4042,7 @@ mod tests {
             EffectExecutionContinuity::Continuous,
             TimelineTime::ZERO,
             extent,
+            mondrian_core::ImageSampling::UNIT_SQUARE,
             output_roi,
             ExecutionCancellationToken::new(),
         );
@@ -4025,6 +4107,7 @@ mod tests {
             EffectExecutionContinuity::Continuous,
             TimelineTime::ONE,
             extent,
+            mondrian_core::ImageSampling::UNIT_SQUARE,
             extent.full_frame_roi(),
             ExecutionCancellationToken::new(),
         );
@@ -4074,6 +4157,7 @@ mod tests {
             EffectExecutionContinuity::Continuous,
             TimelineTime::ONE,
             extent,
+            mondrian_core::ImageSampling::UNIT_SQUARE,
             EffectPixelRoi::new(0, 0, 0, 0),
             ExecutionCancellationToken::new(),
         )
@@ -4089,6 +4173,122 @@ mod tests {
         assert!(output.tile().pixels().is_empty());
         assert_eq!(output.provider_requests(), 0);
         assert!(provider.requests.is_empty());
+    }
+
+    #[test]
+    fn temporal_nonuniform_sampling_survives_roi_and_isolates_result_cache() {
+        let graph = bind_linear(
+            [crate::EffectRenderOp::GaussianBlur { radius: 2.0 }],
+            temporal_contract(
+                TimelineTime::ZERO,
+                EffectRoiPropagation::Expand { horizontal_pixels: 3, vertical_pixels: 3 },
+            ),
+        );
+        let extent = EffectFrameExtent::new(16, 12);
+        let sampling = mondrian_core::ImageSampling::new(
+            mondrian_core::SampleAspectRatio::new(3, 2).unwrap(),
+            [
+                mondrian_core::Rational::new(1, 2),
+                mondrian_core::Rational::new(2, 3),
+            ],
+        )
+        .unwrap();
+        let request = EffectTemporalExecutionRequest::new(
+            1,
+            EffectExecutionContinuity::Continuous,
+            TimelineTime::ZERO,
+            extent,
+            sampling,
+            EffectPixelRoi::new(4, 3, 3, 2),
+            ExecutionCancellationToken::new(),
+        );
+        assert_eq!(request.sampling(), sampling);
+        let mut provider = GradientProvider::new(extent);
+        let mut session = EffectExecutionSession::default();
+        let first = session.execute_temporal_roi_f32(&graph, &request, &mut provider).unwrap();
+        assert_eq!(first.tile().sampling(), sampling);
+        assert_eq!(first.tile().roi(), request.output_roi());
+        assert!(provider.requests.iter().all(|demand| demand.sampling() == sampling));
+        let calls = provider.requests.len();
+        assert!(calls > 0);
+        let cached = session.execute_temporal_roi_f32(&graph, &request, &mut provider).unwrap();
+        assert_eq!(cached.tile().sampling(), sampling);
+        assert_eq!(cached.tile().pixels(), first.tile().pixels());
+        assert_eq!(provider.requests.len(), calls);
+        let changed = EffectTemporalExecutionRequest {
+            sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
+            ..request
+        };
+        let other = session.execute_temporal_roi_f32(&graph, &changed, &mut provider).unwrap();
+        assert_ne!(first.cache_identity(), other.cache_identity());
+        assert_eq!(other.tile().sampling(), changed.sampling());
+        assert!(provider.requests.len() > calls);
+    }
+
+    #[test]
+    fn prepared_temporal_tiles_refuse_sampling_relabel_at_nonzero_roi() {
+        let extent = EffectFrameExtent::new(8, 6);
+        let sampling = mondrian_core::ImageSampling::new(
+            mondrian_core::SampleAspectRatio::new(4, 3).unwrap(),
+            [
+                mondrian_core::Rational::new(1, 2),
+                mondrian_core::Rational::new(3, 4),
+            ],
+        )
+        .unwrap();
+        let roi = EffectPixelRoi::new(2, 1, 3, 2);
+        let request = EffectTemporalFrameRequest {
+            generation: 7,
+            time: TimelineTime::ZERO,
+            frame_extent: extent,
+            sampling,
+            input_roi: EffectInputRoi::Exact(roi),
+            exact_halo: None,
+            precision: EffectWorkingPrecision::Float32,
+        };
+        let pixels = vec![[0.25, 0.5, 0.75, 1.0]; 6];
+        let wrong = EffectFrameTileF32::new(
+            request.time(),
+            extent,
+            mondrian_core::ImageSampling::UNIT_SQUARE,
+            roi,
+            9,
+            pixels.clone(),
+        )
+        .unwrap();
+        assert!(matches!(
+            validate_provider_tile(&wrong, request),
+            Err(EffectTemporalFrameProviderError::InvalidTile { .. })
+        ));
+        let tile =
+            EffectFrameTileF32::new(request.time(), extent, sampling, roi, 9, pixels.clone())
+                .unwrap();
+        assert_eq!(tile.sampling(), sampling);
+        validate_provider_tile(&tile, request).unwrap();
+        let batch = EffectTemporalFrameDemandBatch {
+            generation: 7,
+            requests: Arc::from([request]),
+            coverage_bytes: 6 * std::mem::size_of::<[f32; 4]>(),
+        };
+        let mut frames = PreparedTemporalFrameSet::prepare(
+            EffectTemporalSourceIdentity::from_complete_semantic_fingerprint([17; 32]),
+            batch,
+            [(request, tile)],
+        )
+        .unwrap();
+        let mut copied = Vec::with_capacity(6);
+        let changed = EffectTemporalFrameRequest {
+            sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
+            ..request
+        };
+        assert!(frames
+            .copy_frame(changed, &ExecutionCancellationToken::new(), &mut copied)
+            .is_err());
+        assert!(copied.is_empty());
+        frames
+            .copy_frame(request, &ExecutionCancellationToken::new(), &mut copied)
+            .unwrap();
+        assert_eq!(copied, pixels);
     }
 
     #[test]
@@ -4110,6 +4310,7 @@ mod tests {
             EffectExecutionContinuity::Continuous,
             TimelineTime::ZERO,
             extent,
+            mondrian_core::ImageSampling::UNIT_SQUARE,
             extent.full_frame_roi(),
             canceled,
         );
@@ -4125,6 +4326,7 @@ mod tests {
             EffectExecutionContinuity::Continuous,
             TimelineTime::ZERO,
             extent,
+            mondrian_core::ImageSampling::UNIT_SQUARE,
             extent.full_frame_roi(),
             ExecutionCancellationToken::new(),
         );
@@ -4142,6 +4344,7 @@ mod tests {
             EffectExecutionContinuity::Discontinuous,
             TimelineTime::ZERO,
             extent,
+            mondrian_core::ImageSampling::UNIT_SQUARE,
             extent.full_frame_roi(),
             ExecutionCancellationToken::new(),
         );

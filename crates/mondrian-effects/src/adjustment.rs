@@ -415,6 +415,7 @@ fn apply_custom_render_op_f32_for_role(
         let empty = crate::EffectFloatFrame::from_validated_parts(
             crate::EffectFrameExtent::new(0, 0),
             working.format(),
+            working.sampling(),
             Vec::new(),
         );
         std::mem::replace(working, empty)
@@ -438,6 +439,7 @@ fn apply_custom_render_op_f32_for_role(
         .into());
     }
     let input_format = staged.format();
+    let input_sampling = staged.sampling();
     let extent = staged.extent();
     let result = catch_unwind(AssertUnwindSafe(|| {
         let result = if let Some(callback) = processor.float32_processor() {
@@ -483,6 +485,7 @@ fn apply_custom_render_op_f32_for_role(
             &staged,
             extent,
             input_format,
+            input_sampling,
             contract,
             input_role,
             control,
@@ -3090,6 +3093,7 @@ mod panic_payload_contract_tests {
                 crate::EffectColorDomain::SceneLinearRgb,
                 mondrian_core::ColorFrameAlpha::StraightCoverage,
             ),
+            mondrian_core::ImageSampling::UNIT_SQUARE,
             vec![[2.0, -0.25, 0.5, 1.0]],
         )
         .expect("finite HDR coverage frame")

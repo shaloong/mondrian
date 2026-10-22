@@ -1995,6 +1995,7 @@ mod tests {
                     crate::EffectColorDomain::SceneLinearRgb,
                     mondrian_core::ColorFrameAlpha::StraightCoverage,
                 ),
+                mondrian_core::ImageSampling::UNIT_SQUARE,
                 &input,
             ),
             &graph,
@@ -2002,7 +2003,7 @@ mod tests {
         )
         .expect("execute Power Window graph")
         .into_parts()
-        .2
+        .3
     }
 
     #[test]
@@ -2335,6 +2336,7 @@ mod tests {
             crate::EffectExecutionContinuity::Continuous,
             TimelineTime::ONE,
             extent,
+            mondrian_core::ImageSampling::UNIT_SQUARE,
             extent.full_frame_roi(),
             mondrian_core::ExecutionCancellationToken::new(),
         );
@@ -2365,6 +2367,7 @@ mod tests {
             crate::EffectExecutionContinuity::Discontinuous,
             TimelineTime::ONE,
             extent,
+            mondrian_core::ImageSampling::UNIT_SQUARE,
             extent.full_frame_roi(),
             mondrian_core::ExecutionCancellationToken::new(),
         );
@@ -2597,6 +2600,7 @@ mod tests {
                         crate::EffectColorDomain::SceneLinearRgb,
                         mondrian_core::ColorFrameAlpha::StraightCoverage
                     ),
+                    mondrian_core::ImageSampling::UNIT_SQUARE,
                     &[[0.0, 0.0, 0.0, 1.0]; 9]
                 ),
                 &graph,
@@ -2674,6 +2678,7 @@ mod tests {
                         crate::EffectColorDomain::SceneLinearRgb,
                         mondrian_core::ColorFrameAlpha::StraightCoverage
                     ),
+                    mondrian_core::ImageSampling::UNIT_SQUARE,
                     &[[0.0, 0.0, 0.0, 1.0]]
                 ),
                 &graph,

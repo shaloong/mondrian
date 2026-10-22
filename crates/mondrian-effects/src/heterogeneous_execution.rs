@@ -1890,6 +1890,7 @@ pub struct HeterogeneousCpuCompletionEvidence {
     graph_fingerprint: [u8; 32],
     generation: u64,
     frame_extent: EffectFrameExtent,
+    sampling: mondrian_core::ImageSampling,
     frame_seed: i64,
     working_color_space: WorkingColorSpace,
     completed_cpu_nodes: Arc<[EffectGraphNodeId]>,
@@ -2247,6 +2248,11 @@ impl HeterogeneousCpuCompletionEvidence {
     /// Exact frame extent.
     pub const fn frame_extent(&self) -> EffectFrameExtent {
         self.frame_extent
+    }
+
+    /// Actual CPU value sampling carried by this runtime completion.
+    pub const fn sampling(&self) -> mondrian_core::ImageSampling {
+        self.sampling
     }
 
     /// Frame seed used by deterministic/frame-seeded operations.
@@ -3320,6 +3326,7 @@ impl PreparedHeterogeneousEffectWork {
                 graph_fingerprint: self.compiled.semantic_fingerprint(),
                 generation,
                 frame_extent: self.frame_extent,
+                sampling: input.sampling(),
                 frame_seed,
                 working_color_space,
                 completed_cpu_nodes: Arc::clone(&self.cpu_nodes),
@@ -3542,6 +3549,7 @@ fn execute_cpu_dag_prefix(
                     crate::EffectAlphaConsumer::AlphaMask,
                     checkpoint,
                 )?;
+                output.ensure_same_sampling(mask.sampling())?;
                 apply_alpha_mask_f32_region_controlled(
                     &mut output,
                     &mask,
@@ -3580,6 +3588,7 @@ fn execute_cpu_dag_prefix(
                     crate::EffectAlphaConsumer::AlphaMask,
                     checkpoint,
                 )?;
+                left.ensure_same_sampling(right.sampling())?;
                 combine_alpha_masks_f32_controlled(&mut left, &right, mask_op, checkpoint)?;
                 left
             }
@@ -3621,6 +3630,8 @@ fn execute_cpu_dag_prefix(
                     crate::EffectAlphaConsumer::AlphaMask,
                     checkpoint,
                 )?;
+                base.ensure_same_sampling(graded.sampling())?;
+                base.ensure_same_sampling(matte.sampling())?;
                 matte_mix_f32_controlled(&mut base, &graded, &matte, checkpoint)?;
                 base
             }
@@ -3668,6 +3679,7 @@ fn execute_cpu_dag_prefix(
                         EffectColorDomain::AlphaMask,
                         mondrian_core::ColorFrameAlpha::StraightCoverage,
                     ),
+                    input.sampling(),
                     output,
                 )?
             }
@@ -3797,6 +3809,7 @@ fn copy_cpu_pixels_controlled(
     Ok(crate::EffectFloatFrame::from_pixels(
         source.extent(),
         source.format(),
+        source.sampling(),
         copy,
     )?)
 }
@@ -5047,6 +5060,14 @@ mod tests {
             work.gpu_suffix().input_materializations(),
             [work.plan().output_materialization()]
         );
+        let sampling = mondrian_core::ImageSampling::new(
+            mondrian_core::SampleAspectRatio::new(3, 2).unwrap(),
+            [
+                mondrian_core::Rational::new(1, 2),
+                mondrian_core::Rational::new(2, 3),
+            ],
+        )
+        .unwrap();
         let input = vec![
             [-0.5, 2.0, 0.25, 0.0],
             [0.2, 0.3, 0.4, 0.25],
@@ -5073,12 +5094,15 @@ mod tests {
                 crate::EffectFloatFrameView::new(
                     extent,
                     request(extent).input_residency().format().exact_format().expect("exact input"),
+                    sampling,
                     &input,
                 ),
                 19,
                 WorkingColorSpace::LinearRec2020,
             )
             .expect("complete CPU output remains pending until its real upload completes");
+        assert_eq!(completion.evidence().sampling(), sampling);
+        assert_eq!(completion.boundary_values()[0].sampling(), sampling);
         assert_eq!(completion.boundary_values().len(), 1);
         assert_eq!(completion.boundary_values()[0].pixels(), expected);
         let transfer = completion.evidence().transfers()[0];
@@ -5198,6 +5222,7 @@ mod tests {
                         crate::EffectColorDomain::SceneLinearRgb,
                         mondrian_core::ColorFrameAlpha::StraightCoverage,
                     ),
+                    mondrian_core::ImageSampling::UNIT_SQUARE,
                     &input,
                 ),
                 19,
@@ -5234,7 +5259,7 @@ mod tests {
                         crate::EffectWorkingPrecision::Float32,
                         crate::EffectColorDomain::SceneLinearRgb,
                         mondrian_core::ColorFrameAlpha::StraightCoverage
-                    ),
+                    ), mondrian_core::ImageSampling::UNIT_SQUARE,
                     &input
                 ),
                 19,
@@ -5319,6 +5344,7 @@ mod tests {
                         crate::EffectColorDomain::SceneLinearRgb,
                         mondrian_core::ColorFrameAlpha::StraightCoverage,
                     ),
+                    mondrian_core::ImageSampling::UNIT_SQUARE,
                     &input,
                 ),
                 3,
@@ -5346,6 +5372,7 @@ mod tests {
                         crate::EffectColorDomain::SceneLinearRgb,
                         mondrian_core::ColorFrameAlpha::StraightCoverage,
                     ),
+                    mondrian_core::ImageSampling::UNIT_SQUARE,
                     &input,
                 ),
                 3,
@@ -5751,6 +5778,7 @@ mod tests {
                         crate::EffectColorDomain::SceneLinearRgb,
                         mondrian_core::ColorFrameAlpha::StraightCoverage,
                     ),
+                    mondrian_core::ImageSampling::UNIT_SQUARE,
                     &input,
                 ),
                 23,
@@ -5804,6 +5832,7 @@ mod tests {
                         crate::EffectColorDomain::SceneLinearRgb,
                         mondrian_core::ColorFrameAlpha::StraightCoverage,
                     ),
+                    mondrian_core::ImageSampling::UNIT_SQUARE,
                     &input,
                 ),
                 5,
@@ -5827,6 +5856,7 @@ mod tests {
                         crate::EffectColorDomain::SceneLinearRgb,
                         mondrian_core::ColorFrameAlpha::StraightCoverage,
                     ),
+                    mondrian_core::ImageSampling::UNIT_SQUARE,
                     &input,
                 ),
                 5,
@@ -5886,6 +5916,7 @@ mod tests {
                         crate::EffectColorDomain::SceneLinearRgb,
                         mondrian_core::ColorFrameAlpha::StraightCoverage,
                     ),
+                    mondrian_core::ImageSampling::UNIT_SQUARE,
                     &input,
                 ),
                 5,
@@ -5945,6 +5976,7 @@ mod tests {
                 crate::EffectColorDomain::SceneLinearRgb,
                 mondrian_core::ColorFrameAlpha::StraightCoverage,
             ),
+            mondrian_core::ImageSampling::UNIT_SQUARE,
             &source,
         );
         let result = copy_cpu_pixels_controlled(source_view, &mut || {
@@ -6152,6 +6184,7 @@ mod tests {
                         crate::EffectColorDomain::SceneLinearRgb,
                         mondrian_core::ColorFrameAlpha::StraightCoverage,
                     ),
+                    mondrian_core::ImageSampling::UNIT_SQUARE,
                     &input,
                 ),
                 31,

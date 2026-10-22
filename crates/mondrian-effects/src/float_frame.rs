@@ -1,7 +1,7 @@
 //! Exact CPU Float32 graph-value payloads and shared association algebra.
 
 use crate::{EffectAlphaConsumer, EffectFrameExtent, EffectValueFormat, EffectWorkingPrecision};
-use mondrian_core::ColorFrameAlpha;
+use mondrian_core::{ColorFrameAlpha, ImageSampling};
 
 mod exact_over;
 
@@ -83,6 +83,14 @@ pub enum EffectFloatFrameError {
         /// Actual staged representation.
         actual: EffectValueFormat,
     },
+    /// Pixelwise inputs address different canonical sampling grids.
+    #[error("Float image sampling {actual:?} differs from required {expected:?}")]
+    SamplingMismatch {
+        /// Sampling of the destination or admitted input.
+        expected: ImageSampling,
+        /// Sampling of the incompatible image.
+        actual: ImageSampling,
+    },
     /// Author opacity does not satisfy its normalized, finite domain.
     #[error("Float compositor opacity is outside its finite normalized domain")]
     InvalidOpacity,
@@ -106,6 +114,7 @@ pub enum EffectAlphaConversionFailure {
 pub struct EffectFloatFrameView<'a> {
     extent: EffectFrameExtent,
     format: EffectValueFormat,
+    sampling: ImageSampling,
     pixels: &'a [[f32; 4]],
 }
 
@@ -114,9 +123,10 @@ impl<'a> EffectFloatFrameView<'a> {
     pub const fn new(
         extent: EffectFrameExtent,
         format: EffectValueFormat,
+        sampling: ImageSampling,
         pixels: &'a [[f32; 4]],
     ) -> Self {
-        Self { extent, format, pixels }
+        Self { extent, format, sampling, pixels }
     }
     /// Addressed image extent.
     pub const fn extent(self) -> EffectFrameExtent {
@@ -125,6 +135,10 @@ impl<'a> EffectFloatFrameView<'a> {
     /// Exact sample and alpha representation.
     pub const fn format(self) -> EffectValueFormat {
         self.format
+    }
+    /// Original pixel shape and current X/Y sampling density.
+    pub const fn sampling(self) -> ImageSampling {
+        self.sampling
     }
     /// Borrow the original samples without normalizing their channels.
     pub const fn pixels(self) -> &'a [[f32; 4]] {
@@ -154,7 +168,12 @@ impl<'a> EffectFloatFrameView<'a> {
     }
     /// Materialize this complete value in one newly owned raster.
     pub fn to_owned(self) -> Result<EffectFloatFrame, EffectFloatFrameError> {
-        EffectFloatFrame::from_samples(self.extent, self.format, self.pixels.iter().copied())
+        EffectFloatFrame::from_samples(
+            self.extent,
+            self.format,
+            self.sampling,
+            self.pixels.iter().copied(),
+        )
     }
 }
 impl std::ops::Deref for EffectFloatFrameView<'_> {
@@ -172,6 +191,7 @@ impl std::ops::Deref for EffectFloatFrameView<'_> {
 pub struct EffectFloatFrame {
     extent: EffectFrameExtent,
     format: EffectValueFormat,
+    sampling: ImageSampling,
     pixels: Vec<[f32; 4]>,
 }
 
@@ -180,10 +200,11 @@ impl EffectFloatFrame {
     pub fn from_pixels(
         extent: EffectFrameExtent,
         format: EffectValueFormat,
+        sampling: ImageSampling,
         pixels: Vec<[f32; 4]>,
     ) -> Result<Self, EffectFloatFrameError> {
         validate_storage(extent, format, &pixels)?;
-        Ok(Self { extent, format, pixels })
+        Ok(Self { extent, format, sampling, pixels })
     }
     /// Admit one existing owned raster with bounded scheduler checkpoints.
     ///
@@ -193,17 +214,19 @@ impl EffectFloatFrame {
     pub fn from_pixels_controlled<E: From<EffectFloatFrameError>>(
         extent: EffectFrameExtent,
         format: EffectValueFormat,
+        sampling: ImageSampling,
         pixels: Vec<[f32; 4]>,
         checkpoint: &mut impl FnMut() -> Result<(), E>,
     ) -> Result<Self, E> {
         require_float32(format)?;
         validate_float32_frame_storage_controlled(extent, format.alpha(), &pixels, checkpoint)?;
-        Ok(Self { extent, format, pixels })
+        Ok(Self { extent, format, sampling, pixels })
     }
     /// Build an output while validating its samples in the same collection pass.
     pub fn from_samples(
         extent: EffectFrameExtent,
         format: EffectValueFormat,
+        sampling: ImageSampling,
         samples: impl IntoIterator<Item = [f32; 4]>,
     ) -> Result<Self, EffectFloatFrameError> {
         require_float32(format)?;
@@ -228,12 +251,13 @@ impl EffectFloatFrame {
         if pixels.len() != expected {
             return Err(EffectFloatFrameError::ExtentMismatch { expected, actual: pixels.len() });
         }
-        Ok(Self { extent, format, pixels })
+        Ok(Self { extent, format, sampling, pixels })
     }
     /// Collect transport samples with fallible owner checkpoints and one validation pass.
     pub fn try_from_samples<E: From<EffectFloatFrameError>>(
         extent: EffectFrameExtent,
         format: EffectValueFormat,
+        sampling: ImageSampling,
         samples: impl IntoIterator<Item = Result<[f32; 4], E>>,
     ) -> Result<Self, E> {
         require_float32(format)?;
@@ -262,7 +286,7 @@ impl EffectFloatFrame {
                 EffectFloatFrameError::ExtentMismatch { expected, actual: pixels.len() }.into(),
             );
         }
-        Ok(Self { extent, format, pixels })
+        Ok(Self { extent, format, sampling, pixels })
     }
     /// Addressed image extent.
     pub const fn extent(&self) -> EffectFrameExtent {
@@ -280,6 +304,10 @@ impl EffectFloatFrame {
     pub const fn format(&self) -> EffectValueFormat {
         self.format
     }
+    /// Original pixel shape and current X/Y sampling density.
+    pub const fn sampling(&self) -> ImageSampling {
+        self.sampling
+    }
     /// Storage association and numeric alpha domain.
     pub const fn alpha(&self) -> ColorFrameAlpha {
         self.format.alpha()
@@ -296,11 +324,18 @@ impl EffectFloatFrame {
     }
     /// Borrow this exact value for another invocation.
     pub fn view(&self) -> EffectFloatFrameView<'_> {
-        EffectFloatFrameView::new(self.extent, self.format, &self.pixels)
+        EffectFloatFrameView::new(self.extent, self.format, self.sampling, &self.pixels)
     }
-    /// Consume the complete value into its extent, format and owned storage.
-    pub fn into_parts(self) -> (EffectFrameExtent, EffectValueFormat, Vec<[f32; 4]>) {
-        (self.extent, self.format, self.pixels)
+    /// Consume the complete extent, format, sampling and owned storage.
+    pub fn into_parts(
+        self,
+    ) -> (
+        EffectFrameExtent,
+        EffectValueFormat,
+        ImageSampling,
+        Vec<[f32; 4]>,
+    ) {
+        (self.extent, self.format, self.sampling, self.pixels)
     }
     /// Validate a processor's complete staged result before publication.
     pub fn validate(&self) -> Result<(), EffectFloatFrameError> {
@@ -325,9 +360,22 @@ impl EffectFloatFrame {
     pub(crate) fn from_validated_parts(
         extent: EffectFrameExtent,
         format: EffectValueFormat,
+        sampling: ImageSampling,
         pixels: Vec<[f32; 4]>,
     ) -> Self {
-        Self { extent, format, pixels }
+        Self { extent, format, sampling, pixels }
+    }
+    pub(crate) fn ensure_same_sampling(
+        &self,
+        actual: ImageSampling,
+    ) -> Result<(), EffectFloatFrameError> {
+        if self.sampling != actual {
+            return Err(EffectFloatFrameError::SamplingMismatch {
+                expected: self.sampling,
+                actual,
+            });
+        }
+        Ok(())
     }
     pub(crate) fn allocation_mut(&mut self) -> &mut Vec<[f32; 4]> {
         &mut self.pixels
@@ -440,6 +488,13 @@ pub fn blend_float_frames_controlled<E: From<EffectFloatFrameError>>(
         return Err(EffectFloatFrameError::ExtentMismatch {
             expected: base.len(),
             actual: source.pixels().len(),
+        }
+        .into());
+    }
+    if base.sampling() != source.sampling() {
+        return Err(EffectFloatFrameError::SamplingMismatch {
+            expected: base.sampling(),
+            actual: source.sampling(),
         }
         .into());
     }
@@ -619,6 +674,7 @@ fn validate_float32_frame_storage_controlled<E: From<EffectFloatFrameError>>(
 fn validate_storage(
     extent: EffectFrameExtent,
     format: EffectValueFormat,
+    sampling: ImageSampling,
     pixels: &[[f32; 4]],
 ) -> Result<(), EffectFloatFrameError> {
     require_float32(format)?;
@@ -733,9 +789,14 @@ mod tests {
                 crate::EffectColorDomain::SceneLinearRgb,
                 alpha,
             );
-            EffectFloatFrameView::new(extent, format, &samples)
-                .validate()
-                .expect("the existing complete-frame validator shares the same storage contract");
+            EffectFloatFrameView::new(
+                extent,
+                format,
+                mondrian_core::ImageSampling::UNIT_SQUARE,
+                &samples,
+            )
+            .validate()
+            .expect("the existing complete-frame validator shares the same storage contract");
         }
     }
 
@@ -814,9 +875,13 @@ mod controlled_storage_tests {
         let pixels = vec![[7.0, -0.0, -f32::from_bits(1), 0.0]];
         let pointer = pixels.as_ptr();
         let expected = pixels[0].map(f32::to_bits);
-        let frame = EffectFloatFrame::from_pixels_controlled(extent, format, pixels, &mut || {
-            Ok::<(), Stop>(())
-        })
+        let frame = EffectFloatFrame::from_pixels_controlled(
+            extent,
+            format,
+            mondrian_core::ImageSampling::UNIT_SQUARE,
+            pixels,
+            &mut || Ok::<(), Stop>(()),
+        )
         .expect("canonical raw admission");
         assert_eq!(
             frame.pixels().as_ptr(),
@@ -838,15 +903,20 @@ mod controlled_storage_tests {
         for stop_at in 1..=3 {
             let pixels = vec![[0.25, -2.0, 8.0, 1.5]; 1024 * 65];
             let mut calls = 0;
-            let result =
-                EffectFloatFrame::from_pixels_controlled(extent, format, pixels, &mut || {
+            let result = EffectFloatFrame::from_pixels_controlled(
+                extent,
+                format,
+                mondrian_core::ImageSampling::UNIT_SQUARE,
+                pixels,
+                &mut || {
                     calls += 1;
                     if calls == stop_at {
                         Err(Stop::Canceled)
                     } else {
                         Ok(())
                     }
-                });
+                },
+            );
             assert_eq!(result, Err(Stop::Canceled));
             assert_eq!(calls, stop_at);
         }
@@ -856,6 +926,7 @@ mod controlled_storage_tests {
             EffectFloatFrame::from_pixels_controlled(
                 extent,
                 format,
+                mondrian_core::ImageSampling::UNIT_SQUARE,
                 pixels,
                 &mut || Ok::<(), Stop>(())
             ),
@@ -875,7 +946,12 @@ mod controlled_storage_tests {
             ColorFrameAlpha::PremultipliedFloat,
         );
         let pixels = vec![[7.0, -0.0, -f32::from_bits(1), -2.0]; 65_537];
-        let view = EffectFloatFrameView::new(extent, format, &pixels);
+        let view = EffectFloatFrameView::new(
+            extent,
+            format,
+            mondrian_core::ImageSampling::UNIT_SQUARE,
+            &pixels,
+        );
         let pointer = view.pixels().as_ptr();
         let original = pixels[0].map(f32::to_bits);
         let mut calls = 0;
@@ -914,12 +990,13 @@ mod controlled_storage_tests {
         let mut pixels = vec![[0.25, -2.0, 8.0, 1.5]; 65_537];
         pixels[65_536][2] = f32::INFINITY;
         assert!(matches!(
-            EffectFloatFrameView::new(extent, format, &pixels).validate_controlled(&mut || Ok::<
-                (),
-                Stop,
-            >(
-                ()
-            )),
+            EffectFloatFrameView::new(
+                extent,
+                format,
+                mondrian_core::ImageSampling::UNIT_SQUARE,
+                &pixels
+            )
+            .validate_controlled(&mut || Ok::<(), Stop>(())),
             Err(Stop::Frame(EffectFloatFrameError::InvalidSample {
                 index: 65_536,
                 alpha: ColorFrameAlpha::StraightFloat,
@@ -927,12 +1004,16 @@ mod controlled_storage_tests {
         ));
         let mut calls = 0;
         assert!(matches!(
-            EffectFloatFrameView::new(extent, format, &pixels[..65_536]).validate_controlled(
-                &mut || {
-                    calls += 1;
-                    Ok::<(), Stop>(())
-                }
-            ),
+            EffectFloatFrameView::new(
+                extent,
+                format,
+                mondrian_core::ImageSampling::UNIT_SQUARE,
+                &pixels[..65_536]
+            )
+            .validate_controlled(&mut || {
+                calls += 1;
+                Ok::<(), Stop>(())
+            }),
             Err(Stop::Frame(EffectFloatFrameError::ExtentMismatch {
                 expected: 65_537,
                 actual: 65_536,
@@ -945,12 +1026,13 @@ mod controlled_storage_tests {
             ColorFrameAlpha::StraightFloat,
         );
         assert!(matches!(
-            EffectFloatFrameView::new(extent, wrong, &pixels).validate_controlled(&mut || Ok::<
-                (),
-                Stop,
-            >(
-                ()
-            )),
+            EffectFloatFrameView::new(
+                extent,
+                wrong,
+                mondrian_core::ImageSampling::UNIT_SQUARE,
+                &pixels
+            )
+            .validate_controlled(&mut || Ok::<(), Stop>(())),
             Err(Stop::Frame(EffectFloatFrameError::WrongPrecision {
                 precision: EffectWorkingPrecision::Float16,
             }))
@@ -981,6 +1063,13 @@ pub fn mix_float_frames_controlled<E: From<EffectFloatFrameError>>(
         return Err(EffectFloatFrameError::ExtentMismatch {
             expected: base.len(),
             actual: processed.pixels().len(),
+        }
+        .into());
+    }
+    if base.sampling() != processed.sampling() {
+        return Err(EffectFloatFrameError::SamplingMismatch {
+            expected: base.sampling(),
+            actual: processed.sampling(),
         }
         .into());
     }
@@ -1069,8 +1158,13 @@ mod effect_pass_mix_float_contracts {
         )
     }
     fn owned(pixel: [f32; 4], alpha: ColorFrameAlpha) -> EffectFloatFrame {
-        EffectFloatFrame::from_pixels(EffectFrameExtent::new(1, 1), format(alpha), vec![pixel])
-            .expect("actual owner")
+        EffectFloatFrame::from_pixels(
+            EffectFrameExtent::new(1, 1),
+            format(alpha),
+            mondrian_core::ImageSampling::UNIT_SQUARE,
+            vec![pixel],
+        )
+        .expect("actual owner")
     }
     // Independent high-precision mathematical image reference; it does not call
     // an adjustment, compositor, alpha converter or shader implementation.
@@ -1272,11 +1366,16 @@ mod effect_pass_mix_float_contracts {
         let extent = EffectFrameExtent::new(10000, 1);
         let mut source = vec![[1.0, 2.0, 3.0, 0.5]; 10000];
         source[9999][0] = f32::NAN;
-        let source =
-            EffectFloatFrameView::new(extent, format(ColorFrameAlpha::StraightCoverage), &source);
+        let source = EffectFloatFrameView::new(
+            extent,
+            format(ColorFrameAlpha::StraightCoverage),
+            mondrian_core::ImageSampling::UNIT_SQUARE,
+            &source,
+        );
         let mut base = EffectFloatFrame::from_pixels(
             extent,
             format(ColorFrameAlpha::StraightCoverage),
+            mondrian_core::ImageSampling::UNIT_SQUARE,
             vec![[4.0, 5.0, 6.0, 0.5]; 10000],
         )
         .expect("admitted owner");
@@ -1305,12 +1404,20 @@ mod effect_pass_mix_exact_contracts {
             crate::EffectColorDomain::SceneLinearRgb,
             alpha,
         );
-        let mut base =
-            EffectFloatFrame::from_pixels(EffectFrameExtent::new(1, 1), format, vec![left])
-                .expect("independent finite typed input");
+        let mut base = EffectFloatFrame::from_pixels(
+            EffectFrameExtent::new(1, 1),
+            format,
+            mondrian_core::ImageSampling::UNIT_SQUARE,
+            vec![left],
+        )
+        .expect("independent finite typed input");
         let source_pixels = [right];
-        let source =
-            EffectFloatFrameView::new(EffectFrameExtent::new(1, 1), format, &source_pixels);
+        let source = EffectFloatFrameView::new(
+            EffectFrameExtent::new(1, 1),
+            format,
+            mondrian_core::ImageSampling::UNIT_SQUARE,
+            &source_pixels,
+        );
         let original = base.pixels().as_ptr();
         mix_float_frames_controlled(&mut base, source, amount, &mut || {
             Ok::<(), EffectFloatFrameError>(())
@@ -2054,11 +2161,17 @@ mod effect_pass_mix_exact_fraction_contracts {
             let mut base = EffectFloatFrame::from_pixels(
                 EffectFrameExtent::new(1, 1),
                 format,
+                mondrian_core::ImageSampling::UNIT_SQUARE,
                 vec![left.map(f32::from_bits)],
             )
             .expect("exact admitted input");
             let right = [right.map(f32::from_bits)];
-            let source = EffectFloatFrameView::new(EffectFrameExtent::new(1, 1), format, &right);
+            let source = EffectFloatFrameView::new(
+                EffectFrameExtent::new(1, 1),
+                format,
+                mondrian_core::ImageSampling::UNIT_SQUARE,
+                &right,
+            );
             let address = base.pixels().as_ptr();
             mix_float_frames_controlled(&mut base, source, f32::from_bits(amount), &mut || {
                 Ok::<(), EffectFloatFrameError>(())
@@ -2072,5 +2185,102 @@ mod effect_pass_mix_exact_fraction_contracts {
             assert_eq!(base.pixels().as_ptr(), address);
             assert_eq!(base.alpha(), alpha);
         }
+    }
+}
+
+#[cfg(test)]
+mod sampling_tests {
+    use super::*;
+    use mondrian_core::{Rational, SampleAspectRatio};
+
+    fn sampling() -> ImageSampling {
+        ImageSampling::new(
+            SampleAspectRatio::new(3, 2).unwrap(),
+            [Rational::new(1, 2), Rational::new(3, 4)],
+        )
+        .unwrap()
+    }
+    fn format() -> EffectValueFormat {
+        EffectValueFormat::new(
+            EffectWorkingPrecision::Float32,
+            crate::EffectColorDomain::SceneLinearRgb,
+            ColorFrameAlpha::StraightCoverage,
+        )
+    }
+
+    #[test]
+    fn borrowed_owned_and_alpha_conversions_preserve_nonuniform_sampling() {
+        let extent = EffectFrameExtent::new(2, 1);
+        let pixels = [[0.5, 0.25, 0.125, 0.5], [0.25, 0.5, 0.75, 1.0]];
+        let view = EffectFloatFrameView::new(extent, format(), sampling(), &pixels);
+        assert_eq!(view.sampling(), sampling());
+        let owned = view
+            .to_owned()
+            .unwrap()
+            .into_alpha(ColorFrameAlpha::PremultipliedCoverage)
+            .unwrap()
+            .into_alpha(ColorFrameAlpha::StraightCoverage)
+            .unwrap();
+        assert_eq!(owned.view().sampling(), sampling());
+        assert_eq!(owned.pixels(), &pixels);
+        assert_eq!(
+            owned.into_parts(),
+            (extent, format(), sampling(), pixels.to_vec())
+        );
+        let controlled = EffectFloatFrame::from_pixels_controlled(
+            extent,
+            format(),
+            sampling(),
+            pixels.to_vec(),
+            &mut || Ok::<(), EffectFloatFrameError>(()),
+        )
+        .unwrap();
+        let fallible = EffectFloatFrame::try_from_samples(
+            extent,
+            format(),
+            sampling(),
+            pixels.into_iter().map(Ok::<_, EffectFloatFrameError>),
+        )
+        .unwrap();
+        assert_eq!(controlled, fallible);
+    }
+
+    #[test]
+    fn pixelwise_blend_and_mix_refuse_different_sampling_before_writes() {
+        let pixels = vec![[0.25, 0.5, 0.75, 1.0]; 2];
+        let base = EffectFloatFrame::from_pixels(
+            EffectFrameExtent::new(2, 1),
+            format(),
+            sampling(),
+            pixels.clone(),
+        )
+        .unwrap();
+        let other =
+            EffectFloatFrameView::new(base.extent(), format(), ImageSampling::UNIT_SQUARE, &pixels);
+        let expected = EffectFloatFrameError::SamplingMismatch {
+            expected: sampling(),
+            actual: ImageSampling::UNIT_SQUARE,
+        };
+        let mut blended = base.clone();
+        assert_eq!(
+            blend_float_frames_in_place(
+                &mut blended,
+                other,
+                0.0,
+                mondrian_core::BlendMode::Normal,
+                0
+            ),
+            Err(expected.clone())
+        );
+        assert_eq!(blended, base);
+        let mut mixed = base.clone();
+        assert_eq!(
+            mix_float_frames_controlled(&mut mixed, other, 1.0, &mut || Ok::<
+                (),
+                EffectFloatFrameError,
+            >(())),
+            Err(expected)
+        );
+        assert_eq!(mixed, base);
     }
 }

@@ -102,10 +102,20 @@ fn mix_exact_changing_hd_uhd_release_cost_and_bounded_cancellation() {
     for (width, height) in [(1920_u32, 1080_u32), (3840, 2160)] {
         let extent = EffectFrameExtent::new(width, height);
         let count = width as usize * height as usize;
-        let mut base = EffectFloatFrame::from_pixels(extent, format, vec![[0.0; 4]; count])
-            .expect("actual base owner");
-        let mut source = EffectFloatFrame::from_pixels(extent, format, vec![[0.0; 4]; count])
-            .expect("actual source owner");
+        let mut base = EffectFloatFrame::from_pixels(
+            extent,
+            format,
+            mondrian_core::ImageSampling::UNIT_SQUARE,
+            vec![[0.0; 4]; count],
+        )
+        .expect("actual base owner");
+        let mut source = EffectFloatFrame::from_pixels(
+            extent,
+            format,
+            mondrian_core::ImageSampling::UNIT_SQUARE,
+            vec![[0.0; 4]; count],
+        )
+        .expect("actual source owner");
         let base_address = base.pixels().as_ptr();
         let source_address = source.pixels().as_ptr();
         let raster_bytes = count * std::mem::size_of::<[f32; 4]>();

@@ -594,6 +594,7 @@ pub(crate) fn validate_completed_processor_frame(
     pixels: &crate::EffectFloatFrame,
     extent: crate::EffectFrameExtent,
     format: crate::EffectValueFormat,
+    sampling: mondrian_core::ImageSampling,
     contract: crate::EffectAlphaContract,
     input_role: EffectFloatProcessorInputRole,
     control: &mut EffectProcessorControl<'_>,
@@ -615,6 +616,13 @@ pub(crate) fn validate_completed_processor_frame(
                 pixels.alpha(),
             ),
             actual: pixels.format(),
+        }
+        .into());
+    }
+    if pixels.sampling() != sampling {
+        return Err(crate::EffectFloatFrameError::SamplingMismatch {
+            expected: sampling,
+            actual: pixels.sampling(),
         }
         .into());
     }
@@ -986,6 +994,7 @@ impl FloatProcessorResidency {
         };
         let extent = pixels.extent();
         let format = pixels.format();
+        let sampling = pixels.sampling();
         control.check()?;
         control.current_occurrence = Some((request, revision));
         // Cleanup is local; the original panic is resumed to the existing
@@ -1061,7 +1070,9 @@ impl FloatProcessorResidency {
             }
             .into());
         }
-        validate_completed_processor_frame(pixels, extent, format, contract, role, control)?;
+        validate_completed_processor_frame(
+            pixels, extent, format, sampling, contract, role, control,
+        )?;
         let retention = self.retain_completed(key, retained, instance, retain);
         if let Some(feedback) = feedback {
             control.feedback.push(bind(feedback, retention));
@@ -1085,6 +1096,7 @@ mod tests {
                 crate::EffectColorDomain::SceneLinearRgb,
                 mondrian_core::ColorFrameAlpha::StraightCoverage,
             ),
+            mondrian_core::ImageSampling::UNIT_SQUARE,
             pixels,
         )
         .expect("complete normalized fixture")
@@ -1174,6 +1186,7 @@ mod tests {
                 *pixels = crate::EffectFloatFrame::from_pixels(
                     crate::EffectFrameExtent::new(0, 0),
                     pixels.format(),
+                    mondrian_core::ImageSampling::UNIT_SQUARE,
                     Vec::new(),
                 )
                 .expect("owned malformed extent fixture");
@@ -1264,6 +1277,7 @@ mod tests {
                                 crate::EffectColorDomain::SceneLinearRgb,
                                 mondrian_core::ColorFrameAlpha::StraightCoverage
                             ),
+                            mondrian_core::ImageSampling::UNIT_SQUARE,
                             &[]
                         ),
                         &graph,
@@ -1307,6 +1321,7 @@ mod tests {
                                 crate::EffectColorDomain::SceneLinearRgb,
                                 mondrian_core::ColorFrameAlpha::StraightCoverage
                             ),
+                            mondrian_core::ImageSampling::UNIT_SQUARE,
                             &input
                         ),
                         &graph,
@@ -1330,6 +1345,7 @@ mod tests {
                         crate::EffectColorDomain::SceneLinearRgb,
                         mondrian_core::ColorFrameAlpha::StraightCoverage,
                     ),
+                    mondrian_core::ImageSampling::UNIT_SQUARE,
                     &input,
                 ),
                 &graph,
@@ -1351,6 +1367,7 @@ mod tests {
                                 crate::EffectColorDomain::SceneLinearRgb,
                                 mondrian_core::ColorFrameAlpha::StraightCoverage
                             ),
+                            mondrian_core::ImageSampling::UNIT_SQUARE,
                             &[[source, 0.5, 0.75, 1.0]]
                         ),
                         &identity,
@@ -1371,6 +1388,7 @@ mod tests {
                                 crate::EffectColorDomain::SceneLinearRgb,
                                 mondrian_core::ColorFrameAlpha::StraightCoverage
                             ),
+                            mondrian_core::ImageSampling::UNIT_SQUARE,
                             &[[source, 0.5, 0.75, 1.0]]
                         ),
                         &graph,
@@ -1579,6 +1597,7 @@ mod tests {
                             crate::EffectColorDomain::SceneLinearRgb,
                             mondrian_core::ColorFrameAlpha::StraightCoverage,
                         ),
+                        mondrian_core::ImageSampling::UNIT_SQUARE,
                         &[[0.25, 0.5, 0.75, 1.0]],
                     ),
                     0,
@@ -1610,6 +1629,7 @@ mod tests {
                         crate::EffectColorDomain::SceneLinearRgb,
                         mondrian_core::ColorFrameAlpha::StraightCoverage,
                     ),
+                    mondrian_core::ImageSampling::UNIT_SQUARE,
                     &input,
                 ),
                 0,
@@ -1632,6 +1652,7 @@ mod tests {
                     crate::EffectColorDomain::SceneLinearRgb,
                     mondrian_core::ColorFrameAlpha::StraightCoverage,
                 ),
+                mondrian_core::ImageSampling::UNIT_SQUARE,
                 &[[0.25, 0.5, 0.75, 1.0]],
             ),
             0,
@@ -1654,6 +1675,7 @@ mod tests {
             EffectExecutionContinuity::Continuous,
             TimelineTime::ZERO,
             EffectFrameExtent::new(1, 1),
+            mondrian_core::ImageSampling::UNIT_SQUARE,
             EffectPixelRoi::new(0, 0, 1, 1),
             cancellation,
         );
@@ -1715,6 +1737,7 @@ mod tests {
                 EffectExecutionContinuity::Continuous,
                 TimelineTime::ZERO,
                 extent,
+                mondrian_core::ImageSampling::UNIT_SQUARE,
                 EffectPixelRoi::new(0, 0, 2, 3),
                 mondrian_core::ExecutionCancellationToken::new(),
             );
@@ -1757,13 +1780,14 @@ mod tests {
                                     crate::EffectColorDomain::SceneLinearRgb,
                                     mondrian_core::ColorFrameAlpha::StraightCoverage,
                                 ),
+                                mondrian_core::ImageSampling::UNIT_SQUARE,
                                 &input,
                             ),
                             &graph,
                             0,
                             &mut crate::EffectProcessorControl::uncancelled(),
                         )
-                        .map(|frame| frame.into_parts().2)
+                        .map(|frame| frame.into_parts().3)
                         .map_err(|error| format!("{error:?}")),
                     "temporal" => {
                         let request = EffectTemporalExecutionRequest::new(
@@ -1771,6 +1795,7 @@ mod tests {
                             EffectExecutionContinuity::Continuous,
                             TimelineTime::ZERO,
                             EffectFrameExtent::new(1, 1),
+                            mondrian_core::ImageSampling::UNIT_SQUARE,
                             EffectPixelRoi::new(0, 0, 1, 1),
                             mondrian_core::ExecutionCancellationToken::new(),
                         );
@@ -1793,6 +1818,7 @@ mod tests {
                                     crate::EffectColorDomain::SceneLinearRgb,
                                     mondrian_core::ColorFrameAlpha::StraightCoverage,
                                 ),
+                                mondrian_core::ImageSampling::UNIT_SQUARE,
                                 &input,
                             ),
                             0,
@@ -1893,6 +1919,7 @@ mod tests {
                                 crate::EffectColorDomain::SceneLinearRgb,
                                 mondrian_core::ColorFrameAlpha::StraightCoverage,
                             ),
+                            mondrian_core::ImageSampling::UNIT_SQUARE,
                             &input,
                         ),
                         &graph,
@@ -1906,6 +1933,7 @@ mod tests {
                         EffectExecutionContinuity::Continuous,
                         TimelineTime::ZERO,
                         EffectFrameExtent::new(1, 1),
+                        mondrian_core::ImageSampling::UNIT_SQUARE,
                         EffectPixelRoi::new(0, 0, 1, 1),
                         mondrian_core::ExecutionCancellationToken::new(),
                     );
@@ -1922,6 +1950,7 @@ mod tests {
                                 crate::EffectColorDomain::SceneLinearRgb,
                                 mondrian_core::ColorFrameAlpha::StraightCoverage,
                             ),
+                            mondrian_core::ImageSampling::UNIT_SQUARE,
                             &input,
                         ),
                         0,
@@ -3311,6 +3340,7 @@ mod tests {
         pixels = EffectFloatFrame::from_pixels(
             pixels.extent(),
             pixels.format().with_alpha(mondrian_core::ColorFrameAlpha::StraightFloat),
+            mondrian_core::ImageSampling::UNIT_SQUARE,
             pixels.pixels().to_vec(),
         )
         .expect("new admitted association");
@@ -3526,6 +3556,7 @@ mod feedback_contract_tests {
                 EffectColorDomain::SceneLinearRgb,
                 ColorFrameAlpha::StraightCoverage,
             ),
+            mondrian_core::ImageSampling::UNIT_SQUARE,
             vec![[0.25, -0.5, 1.5, 0.25]],
         )
         .expect("finite coverage fixture")
@@ -4115,6 +4146,7 @@ mod completion_boundary_tests {
                     *pixels = EffectFloatFrame::from_pixels(
                         EffectFrameExtent::new(2, 1),
                         pixels.format(),
+                        mondrian_core::ImageSampling::UNIT_SQUARE,
                         vec![[0.25, -0.5, 1.5, 0.25]; 2],
                     )
                     .expect("deliberate valid raster with forbidden changed extent");
@@ -4160,6 +4192,7 @@ mod completion_boundary_tests {
                 EffectColorDomain::SceneLinearRgb,
                 ColorFrameAlpha::StraightCoverage,
             ),
+            mondrian_core::ImageSampling::UNIT_SQUARE,
             vec![[0.25, -0.5, 1.5, 0.25]; width as usize * height as usize],
         )
         .expect("complete finite coverage input");
@@ -4653,8 +4686,13 @@ mod source_tests {
                 oversized.capacity() > admitted_capacity,
                 "actual returned capacity, not logical len"
             );
-            *output = EffectFloatFrame::from_pixels(original_extent, original_format, oversized)
-                .expect("same finite extent/format/len");
+            *output = EffectFloatFrame::from_pixels(
+                original_extent,
+                original_format,
+                mondrian_core::ImageSampling::UNIT_SQUARE,
+                oversized,
+            )
+            .expect("same finite extent/format/len");
             assert_eq!(output.extent(), EffectFrameExtent::new(3, 2));
             assert_eq!(output.len(), 6);
             assert!(output.retained_bytes() > admitted_bytes);
@@ -4762,6 +4800,7 @@ mod source_tests {
                 .generate_compiled_rgba_f32(
                     EffectFrameExtent::new(3, 2),
                     format(),
+                    mondrian_core::ImageSampling::UNIT_SQUARE,
                     &graph,
                     999,
                     &mut EffectProcessorControl::uncancelled(),
@@ -4783,6 +4822,42 @@ mod source_tests {
         assert_eq!(session.diagnostics().cache_entries, 0);
     }
     #[test]
+    fn zero_input_target_sampling_changes_without_repreparing_bank_owner() {
+        let (calls, prepared, _, program) = fixture(SourceCapacityCase::Same);
+        let graph = program.evaluate(TimelineTime::new(3, 1).unwrap()).unwrap();
+        let target = mondrian_core::ImageSampling::new(
+            mondrian_core::SampleAspectRatio::new(3, 2).unwrap(),
+            [
+                mondrian_core::Rational::new(1, 2),
+                mondrian_core::Rational::new(2, 3),
+            ],
+        )
+        .unwrap();
+        let mut session = EffectExecutionSession::new(EffectExecutionSessionConfig {
+            max_processor_instances: 1,
+            max_processor_bytes: 128,
+            ..EffectExecutionSessionConfig::uncached(4096)
+        });
+        for sampling in [target, mondrian_core::ImageSampling::UNIT_SQUARE, target] {
+            let output = session
+                .generate_compiled_rgba_f32(
+                    EffectFrameExtent::new(3, 2),
+                    format(),
+                    sampling,
+                    &graph,
+                    999,
+                    &mut EffectProcessorControl::uncancelled(),
+                )
+                .unwrap();
+            assert_eq!(output.sampling(), sampling);
+            assert_eq!(output.pixels(), &[[3.0, 0.25, 0.5, 0.75]; 6]);
+        }
+        assert_eq!(prepared.load(Ordering::SeqCst), 1);
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+        assert_eq!(session.diagnostics().processor_instances, 1);
+    }
+
+    #[test]
     fn zero_input_stop_after_provider_work_never_publishes_or_retains_the_owner() {
         let (calls, _, _, program) = fixture(SourceCapacityCase::Same);
         let graph = program.evaluate(TimelineTime::ZERO).unwrap();
@@ -4796,6 +4871,7 @@ mod source_tests {
         let result = session.generate_compiled_rgba_f32(
             EffectFrameExtent::new(3, 2),
             format(),
+            mondrian_core::ImageSampling::UNIT_SQUARE,
             &graph,
             0,
             &mut EffectProcessorControl::new(&mut stop),
@@ -4832,6 +4908,7 @@ mod source_tests {
             let result = session.generate_compiled_rgba_f32(
                 EffectFrameExtent::new(3, 2),
                 format(),
+                mondrian_core::ImageSampling::UNIT_SQUARE,
                 &graph,
                 0,
                 &mut control,
@@ -4876,6 +4953,7 @@ mod source_tests {
             .generate_compiled_rgba_f32(
                 EffectFrameExtent::new(3, 2),
                 format(),
+                mondrian_core::ImageSampling::UNIT_SQUARE,
                 &graph,
                 0,
                 &mut EffectProcessorControl::uncancelled()
@@ -4885,6 +4963,7 @@ mod source_tests {
             .generate_compiled_rgba_f32(
                 EffectFrameExtent::new(0, 2),
                 format(),
+                mondrian_core::ImageSampling::UNIT_SQUARE,
                 &graph,
                 0,
                 &mut EffectProcessorControl::uncancelled()
@@ -4895,6 +4974,7 @@ mod source_tests {
             .generate_compiled_rgba_f32(
                 EffectFrameExtent::new(3, 2),
                 format(),
+                mondrian_core::ImageSampling::UNIT_SQUARE,
                 &graph,
                 0,
                 &mut EffectProcessorControl::new(&mut stopped)
@@ -4914,6 +4994,7 @@ mod source_tests {
             .generate_compiled_rgba_f32(
                 EffectFrameExtent::new(1, 1),
                 format(),
+                mondrian_core::ImageSampling::UNIT_SQUARE,
                 &identity,
                 0,
                 &mut EffectProcessorControl::uncancelled()
@@ -4925,9 +5006,13 @@ mod source_tests {
             dropped: Arc::new(AtomicUsize::new(0)),
             capacity: SourceCapacityCase::Same,
         });
-        let mut output =
-            EffectFloatFrame::from_pixels(EffectFrameExtent::new(1, 1), format(), vec![[0.; 4]])
-                .unwrap();
+        let mut output = EffectFloatFrame::from_pixels(
+            EffectFrameExtent::new(1, 1),
+            format(),
+            mondrian_core::ImageSampling::UNIT_SQUARE,
+            vec![[0.; 4]],
+        )
+        .unwrap();
         let mut bank = FloatProcessorResidency::default();
         let mut request = EffectFloatProcessorPreparation {
             project_geometry: None,
@@ -4956,6 +5041,7 @@ mod source_tests {
         output = EffectFloatFrame::from_pixels(
             EffectFrameExtent::new(1, 1),
             request.format,
+            mondrian_core::ImageSampling::UNIT_SQUARE,
             vec![[0.; 4]],
         )
         .unwrap();

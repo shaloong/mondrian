@@ -3842,6 +3842,7 @@ mod tests {
                         crate::EffectColorDomain::SceneLinearRgb,
                         mondrian_core::ColorFrameAlpha::StraightCoverage
                     ),
+                    mondrian_core::ImageSampling::UNIT_SQUARE,
                     &[[2.0, -0.25, 0.5, 1.0]]
                 ),
                 &compiled,
@@ -4051,6 +4052,7 @@ mod tests {
                     crate::EffectColorDomain::SceneLinearRgb,
                     mondrian_core::ColorFrameAlpha::StraightCoverage,
                 ),
+                mondrian_core::ImageSampling::UNIT_SQUARE,
                 &input,
             ),
             &compiled,
@@ -4076,6 +4078,7 @@ mod tests {
                     crate::EffectColorDomain::SceneLinearRgb,
                     mondrian_core::ColorFrameAlpha::StraightCoverage,
                 ),
+                mondrian_core::ImageSampling::UNIT_SQUARE,
                 &input,
             ),
             &inverted,
@@ -4114,6 +4117,7 @@ mod tests {
                     crate::EffectColorDomain::SceneLinearRgb,
                     mondrian_core::ColorFrameAlpha::StraightCoverage,
                 ),
+                mondrian_core::ImageSampling::UNIT_SQUARE,
                 &input,
             ),
             &compiled,
@@ -4138,6 +4142,7 @@ mod tests {
                         crate::EffectColorDomain::SceneLinearRgb,
                         mondrian_core::ColorFrameAlpha::StraightCoverage
                     ),
+                    mondrian_core::ImageSampling::UNIT_SQUARE,
                     &input
                 ),
                 &reopened_graph,
@@ -4163,6 +4168,7 @@ mod tests {
                     crate::EffectColorDomain::SceneLinearRgb,
                     mondrian_core::ColorFrameAlpha::StraightCoverage,
                 ),
+                mondrian_core::ImageSampling::UNIT_SQUARE,
                 &input,
             ),
             &inverted,
@@ -4213,6 +4219,7 @@ mod tests {
                         crate::EffectColorDomain::SceneLinearRgb,
                         mondrian_core::ColorFrameAlpha::StraightCoverage
                     ),
+                    mondrian_core::ImageSampling::UNIT_SQUARE,
                     &[[2.0, -1.0, -1.0, 0.4]]
                 ),
                 &compiled,
@@ -4458,6 +4465,7 @@ mod tests {
                     crate::EffectColorDomain::SceneLinearRgb,
                     mondrian_core::ColorFrameAlpha::StraightCoverage,
                 ),
+                mondrian_core::ImageSampling::UNIT_SQUARE,
                 &input,
             ),
             &normal_compiled,
@@ -4474,6 +4482,7 @@ mod tests {
                     crate::EffectColorDomain::SceneLinearRgb,
                     mondrian_core::ColorFrameAlpha::StraightCoverage,
                 ),
+                mondrian_core::ImageSampling::UNIT_SQUARE,
                 &input,
             ),
             &preview_compiled,
@@ -4641,6 +4650,7 @@ mod tests {
                     crate::EffectColorDomain::SceneLinearRgb,
                     mondrian_core::ColorFrameAlpha::StraightCoverage,
                 ),
+                mondrian_core::ImageSampling::UNIT_SQUARE,
                 &input,
             ),
             &compiled,
