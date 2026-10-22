@@ -5772,3 +5772,278 @@ mod generator;
 
 #[path = "openfx_host/project_geometry.rs"]
 mod project_geometry;
+
+// Separate from the already-qualified image-sampling modes: these exercise
+// writable clip-preference requests while the host advertises SinglePAR.
+fn qualify_native_clip_preferences_par(mode: &str, rejected: bool) {
+    let directory = PathBuf::from(
+        std::env::var_os("MONDRIAN_OPENFX_DESCRIBE_ACTION_RECEIPT_DIRECTORY")
+            .expect("fresh empty native action directory"),
+    );
+    assert!(directory.is_absolute() && directory.is_dir());
+    assert!(std::fs::read_dir(&directory).unwrap().next().is_none());
+    let inspection = cpu_contract_probe(mode);
+    let input = cpu_contract_input();
+    let original = input.clone();
+    let mut session = OpenFxFilterSession::prepare(
+        product_executable(),
+        &inspection,
+        "uk.co.thefoundry.BasicGainPlugin",
+        input.width(),
+        input.height(),
+        input.format(),
+        mondrian_effects::EffectProjectGeometry::new(10, 7, SampleAspectRatio::new(2, 1).unwrap())
+            .unwrap(),
+        &mut || Ok(()),
+    )
+    .expect("original SinglePAR native owner");
+    let pid = session.worker_process_id();
+    let owner = session.processor_owner();
+    let parameters = constant_parameters([("scale".to_owned(), OpenFxParameterValue::Double(0.5))]);
+    let mut results = Vec::new();
+    let requests = [(0.0, 1.0), (6.0, 1.2), (3.0, 1.0)];
+    for &(frame, par) in &requests[..if rejected { 1 } else { requests.len() }] {
+        let sampled = cpu_contract_image_par(&input, par);
+        let output = session.render(
+            &OpenFxRenderTiming { frame, ..cpu_contract_timing() },
+            &parameters,
+            &sampled,
+            &mut || Ok(()),
+        );
+        let feedback = if output.is_ok() {
+            session.take_feedback()
+        } else {
+            None
+        };
+        let failed = output.is_err();
+        results.push((sampled, output, feedback));
+        if failed {
+            break;
+        }
+    }
+    // Capture the original cleanup before any target assertion, including RED.
+    let cleanup = session.shutdown();
+    let rows = property_query_action_rows(&directory, pid);
+    let writes = match mode {
+        "clip_par_both" | "clip_par_noop" | "clip_par_default" | "clip_par_default_nan" => 2,
+        _ => 1,
+    };
+    assert!(
+        rows.iter().any(|row| row
+            == &format!(
+                "clip-par preferences attempted={writes} accepted={writes} status=0 complete=1"
+            )),
+        "real native preference writes/readbacks must complete; cleanup={cleanup:?}: {rows:?}"
+    );
+    assert_eq!(
+        input, original,
+        "preference negotiation must not modify Source"
+    );
+    if rejected {
+        assert!(
+            !rows.iter().any(|row| row.starts_with("OfxImageEffectActionRender enter ")),
+            "a non-noop SinglePAR request reached Render; cleanup={cleanup:?}: {rows:?}"
+        );
+        assert_eq!(results.len(), 1);
+        assert!(
+            matches!(&results[0].1, Err(OpenFxHostError::WorkerFailed(reason)) if reason.contains("native status 4")),
+            "unsupported PAR must fail at clip-preference admission; cleanup={cleanup:?}: {:?}",
+            results[0].1
+        );
+    } else {
+        assert_eq!(
+            results.len(),
+            3,
+            "all warm requests must complete; cleanup={cleanup:?}"
+        );
+        let mut native_owner = None;
+        for (index, (sampled, output, feedback)) in results.into_iter().enumerate() {
+            let output = output.expect("same-value/default preferences preserve valid rendering");
+            assert_eq!(output.extent(), sampled.extent());
+            assert_eq!(output.format(), sampled.format());
+            assert_eq!(output.sampling(), sampled.sampling());
+            for (actual, source) in output.pixels().iter().zip(sampled.pixels()) {
+                assert_eq!(
+                    actual.map(f32::to_bits),
+                    source.map(|value| (value * 0.5).to_bits())
+                );
+            }
+            let feedback = feedback.expect("actual original native render feedback");
+            assert_eq!(feedback.owner, owner);
+            assert_eq!(feedback.snapshot.invocation(), index as u64 + 1);
+            let actual = feedback.snapshot.native_owner();
+            if let Some(previous) = native_owner {
+                assert_eq!(actual, previous);
+            }
+            native_owner = Some(actual);
+        }
+        assert_eq!(
+            rows.iter()
+                .filter(|row| *row == "clip-par images attempted=2 accepted=2 status=0 complete=1")
+                .count(),
+            3,
+            "each actual Render must inspect current clip/image PAR"
+        );
+        // Preference action frequency is intentionally not an oracle.
+    }
+    assert_eq!(session.worker_process_id(), pid);
+    cleanup.expect("original native owner shutdown");
+}
+
+#[test]
+#[ignore = "normal Product, rebuilt SessionProbe clip_par_output and fresh action directory"]
+fn native_clip_preferences_reject_output_par_remap_before_render() {
+    qualify_native_clip_preferences_par("clip_par_output", true);
+}
+
+#[test]
+#[ignore = "normal Product, rebuilt SessionProbe clip_par_both and fresh action directory"]
+fn native_clip_preferences_reject_common_par_remap_before_render() {
+    qualify_native_clip_preferences_par("clip_par_both", true);
+}
+
+#[test]
+#[ignore = "normal Product, rebuilt SessionProbe clip_par_source and fresh action directory"]
+fn native_clip_preferences_reject_source_par_remap_before_render() {
+    qualify_native_clip_preferences_par("clip_par_source", true);
+}
+
+#[test]
+#[ignore = "normal Product, rebuilt SessionProbe clip_par_zero and fresh action directory"]
+fn native_clip_preferences_reject_zero_par_before_render() {
+    qualify_native_clip_preferences_par("clip_par_zero", true);
+}
+
+#[test]
+#[ignore = "normal Product, rebuilt SessionProbe clip_par_nan and fresh action directory"]
+fn native_clip_preferences_reject_nan_par_before_render() {
+    qualify_native_clip_preferences_par("clip_par_nan", true);
+}
+
+#[test]
+#[ignore = "normal Product, rebuilt SessionProbe clip_par_noop and fresh action directory"]
+fn native_clip_preferences_same_value_warm_par_preserves_actual_images_and_owner() {
+    qualify_native_clip_preferences_par("clip_par_noop", false);
+}
+
+#[test]
+#[ignore = "normal Product, rebuilt SessionProbe clip_par_default and fresh action directory"]
+fn native_clip_preferences_reply_default_warm_par_preserves_actual_images_and_owner() {
+    qualify_native_clip_preferences_par("clip_par_default", false);
+}
+
+#[test]
+#[ignore = "normal Product, rebuilt SessionProbe clip_par_default_nan and fresh action directory"]
+fn native_clip_preferences_reply_default_nan_warm_par_preserves_actual_images_and_owner() {
+    qualify_native_clip_preferences_par("clip_par_default_nan", false);
+}
+
+#[test]
+#[ignore = "normal Product, rebuilt GeneratorProbe clip_par_defaults and fresh action directory"]
+fn native_generator_clip_preferences_default_uses_actual_output_par() {
+    use std::io::Read;
+    assert_eq!(
+        std::env::var("MONDRIAN_OPENFX_GENERATOR_MODE").unwrap(),
+        "clip_par_defaults"
+    );
+    let directory = PathBuf::from(
+        std::env::var_os("MONDRIAN_OPENFX_DESCRIBE_ACTION_RECEIPT_DIRECTORY")
+            .expect("fresh empty Generator action directory"),
+    );
+    assert!(directory.is_absolute() && directory.is_dir());
+    assert!(std::fs::read_dir(&directory).unwrap().next().is_none());
+    let binary = PathBuf::from(std::env::var_os("MONDRIAN_OPENFX_GENERATOR_BINARY").unwrap());
+    let inspection = inspect_openfx_binary(product_executable(), &binary).unwrap();
+    let format = cpu_contract_input().format();
+    let mut session = OpenFxFilterSession::prepare_generator(
+        product_executable(),
+        &inspection,
+        "org.mondrian.fixture.ofx-generator",
+        3,
+        2,
+        format,
+        mondrian_effects::EffectProjectGeometry::new(3, 2, SampleAspectRatio::new(2, 1).unwrap())
+            .unwrap(),
+        &mut || Ok(()),
+    )
+    .expect("actual Output-only Generator owner");
+    let pid = session.worker_process_id();
+    let owner = session.processor_owner();
+    let mut results = Vec::new();
+    for (frame, par) in [(0.0, 1.0), (6.0, 1.2), (3.0, 1.0)] {
+        let sampling = cpu_contract_sampling(par);
+        let output = session.generate(
+            &OpenFxRenderTiming { frame, ..cpu_contract_timing() },
+            sampling,
+            &constant_parameters([("gain".to_owned(), OpenFxParameterValue::Double(0.5))]),
+            &mut || Ok(()),
+        );
+        let feedback = if output.is_ok() {
+            session.take_feedback()
+        } else {
+            None
+        };
+        let failed = output.is_err();
+        results.push((sampling, output, feedback));
+        if failed {
+            break;
+        }
+    }
+    let cleanup = session.shutdown();
+    let mut receipt = String::new();
+    std::fs::File::open(directory.join(format!("generator-par-{pid}.txt")))
+        .expect("actual native Generator preference receipt")
+        .take(513)
+        .read_to_string(&mut receipt)
+        .expect("bounded native Generator receipt");
+    assert!(receipt.len() <= 512 && receipt.is_ascii() && receipt.ends_with('\n'));
+    assert!(
+        receipt.lines().any(|line| line == "preferences valid=1")
+            && receipt.lines().all(|line| matches!(line, "preferences valid=1" | "image valid=1")),
+        "Generator initial preference PAR must equal actual Output, independently of projectPAR; cleanup={cleanup:?}: {receipt}"
+    );
+    assert_eq!(
+        results.len(),
+        3,
+        "all original Generator warm renders must complete"
+    );
+
+    let mut native_owner = None;
+    for (index, (sampling, output, feedback)) in results.into_iter().enumerate() {
+        let (upper_blue, lower_blue) =
+            [(0.25, 0.125), (0.34375, 0.21875), (0.296875, 0.171875)][index];
+        let expected: [[f32; 4]; 6] = [
+            [0.5, 0.0625, upper_blue, 0.75],
+            [0.5, 0.125, upper_blue, 0.75],
+            [0.5, 0.1875, upper_blue, 0.75],
+            [0.5, 0.0625, lower_blue, 0.75],
+            [0.5, 0.125, lower_blue, 0.75],
+            [0.5, 0.1875, lower_blue, 0.75],
+        ];
+        let output = output.expect("Generator renders at actual Output PAR");
+        assert_eq!(
+            output.extent(),
+            mondrian_effects::EffectFrameExtent::new(3, 2)
+        );
+        assert_eq!(output.format(), format);
+        assert_eq!(output.sampling(), sampling);
+        assert_eq!(output.pixels().len(), expected.len());
+        for (actual, expected) in output.pixels().iter().zip(expected) {
+            assert_eq!(actual.map(f32::to_bits), expected.map(f32::to_bits));
+        }
+        let feedback = feedback.expect("actual Generator invocation receipt");
+        assert_eq!(feedback.owner, owner);
+        assert_eq!(feedback.snapshot.invocation(), index as u64 + 1);
+        let actual = feedback.snapshot.native_owner();
+        if let Some(previous) = native_owner {
+            assert_eq!(actual, previous);
+        }
+        native_owner = Some(actual);
+    }
+    assert_eq!(
+        receipt.lines().filter(|line| *line == "image valid=1").count(),
+        3
+    );
+    assert_eq!(session.worker_process_id(), pid);
+    cleanup.expect("original Generator owner shutdown");
+}

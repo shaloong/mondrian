@@ -3107,6 +3107,90 @@ OfxStatus nonCurrentIdentity(const void* handle, OfxPropertySetHandle in,
   return result;
 }
 
+bool clipPreferencesParMode(const std::string& selected) {
+  return selected == "clip_par_output" || selected == "clip_par_both" ||
+      selected == "clip_par_source" || selected == "clip_par_zero" ||
+      selected == "clip_par_nan" || selected == "clip_par_noop" ||
+      selected == "clip_par_default" || selected == "clip_par_default_nan";
+}
+
+bool clipPreferencesParFacts(const void* handle, double& imagePar) {
+  OfxPropertySetHandle props = nullptr;
+  double projectPar = 0.0, size[2]{}, extent[2]{}, offset[2]{};
+  int multiple = -1;
+  if (gPropHost->propGetInt(gHost->host, kOfxImageEffectPropSupportsMultipleClipPARs, 0, &multiple) != kOfxStatOK || multiple != 0 ||
+      gEffectHost->getPropertySet((OfxImageEffectHandle)handle, &props) != kOfxStatOK ||
+      gPropHost->propGetDouble(props, kOfxImageEffectPropProjectPixelAspectRatio, 0, &projectPar) != kOfxStatOK || projectPar != 2.0 ||
+      gPropHost->propGetDoubleN(props, kOfxImageEffectPropProjectSize, 2, size) != kOfxStatOK || size[0] != 20.0 || size[1] != 7.0 ||
+      gPropHost->propGetDoubleN(props, kOfxImageEffectPropProjectExtent, 2, extent) != kOfxStatOK || extent[0] != 20.0 || extent[1] != 7.0 ||
+      gPropHost->propGetDoubleN(props, kOfxImageEffectPropProjectOffset, 2, offset) != kOfxStatOK || offset[0] != 0.0 || offset[1] != 0.0) { return false; }
+  bool first = true;
+  for (const char* name : {"Source", "Output"}) {
+    OfxImageClipHandle clip = nullptr;
+    OfxPropertySetHandle clipProps = nullptr;
+    double par = 0.0;
+    if (gEffectHost->clipGetHandle((OfxImageEffectHandle)handle, name, &clip, &clipProps) != kOfxStatOK ||
+        gPropHost->propGetDouble(clipProps, kOfxImagePropPixelAspectRatio, 0, &par) != kOfxStatOK ||
+        !std::isfinite(par) || par <= 0.0 || (!first && par != imagePar)) { return false; }
+    imagePar = par;
+    first = false;
+  }
+  return true;
+}
+
+OfxStatus clipPreferencesPar(const void* handle, OfxPropertySetHandle out, const std::string& selected) {
+  double imagePar = 0.0;
+  if (!out || !clipPreferencesParFacts(handle, imagePar)) { return kOfxStatFailed; }
+  for (const char* name : {"Source", "Output"}) {
+    double initial = 0.0;
+    const std::string property = std::string("OfxImageClipPropPAR_") + name;
+    if (gPropHost->propGetDouble(out, property.c_str(), 0, &initial) != kOfxStatOK || initial != imagePar) { return kOfxStatFailed; }
+  }
+  const bool useDefault = selected == "clip_par_default" || selected == "clip_par_default_nan";
+  const bool writesSource = useDefault || selected == "clip_par_both" ||
+      selected == "clip_par_source" || selected == "clip_par_noop";
+  unsigned writes = 0;
+  for (const char* name : {"Source", "Output"}) {
+    const bool source = std::strcmp(name, "Source") == 0;
+    if ((source && !writesSource) || (!source && selected == "clip_par_source")) { continue; }
+    double requested = imagePar * 2.0;
+    if (selected == "clip_par_noop") { requested = imagePar; }
+    else if (selected == "clip_par_zero") { requested = 0.0; }
+    else if (selected == "clip_par_nan" || selected == "clip_par_default_nan") {
+      requested = std::numeric_limits<double>::quiet_NaN();
+    }
+    double readback = 0.0;
+    const std::string property = std::string("OfxImageClipPropPAR_") + name;
+    if (gPropHost->propSetDouble(out, property.c_str(), 0, requested) != kOfxStatOK ||
+        gPropHost->propGetDouble(out, property.c_str(), 0, &readback) != kOfxStatOK ||
+        (std::isnan(requested) ? !std::isnan(readback) : readback != requested)) { return kOfxStatFailed; }
+    ++writes;
+  }
+  // This receipt is emitted only after every real suite write/readback succeeds.
+  // ReplyDefault residuals are deliberately invalid remaps: the host must ignore them.
+  describeActionReceipt("clip-par", "preferences", writes, writes, kOfxStatOK);
+  return useDefault ? kOfxStatReplyDefault : kOfxStatOK;
+}
+bool clipPreferencesParImages(const void* handle, OfxPropertySetHandle in) {
+  double imagePar = 0.0, time = 0.0;
+  if (!clipPreferencesParFacts(handle, imagePar) ||
+      gPropHost->propGetDouble(in, kOfxPropTime, 0, &time) != kOfxStatOK ||
+      (time != 0.0 && time != 6.0 && time != 3.0) ||
+      imagePar != (time == 6.0 ? 1.2 : 1.0)) { return false; }
+  for (const char* name : {"Source", "Output"}) {
+    OfxImageClipHandle clip = nullptr;
+    OfxPropertySetHandle image = nullptr;
+    if (gEffectHost->clipGetHandle((OfxImageEffectHandle)handle, name, &clip, nullptr) != kOfxStatOK ||
+        gEffectHost->clipGetImage(clip, time, nullptr, &image) != kOfxStatOK || !image) { return false; }
+    double actual = 0.0;
+    const bool valid = gPropHost->propGetDouble(image, kOfxImagePropPixelAspectRatio, 0, &actual) == kOfxStatOK && actual == imagePar;
+    const auto released = gEffectHost->clipReleaseImage(image);
+    if (!valid || released != kOfxStatOK) { return false; }
+  }
+  describeActionReceipt("clip-par", "images", 2, 2, kOfxStatOK);
+  return true;
+}
+
 OfxStatus probeAction(const char* action, const void* handle,
                 OfxPropertySetHandle in, OfxPropertySetHandle out) {
   const std::string operation(action);
@@ -3434,6 +3518,10 @@ OfxStatus probeAction(const char* action, const void* handle,
       ? fixedCanvasPartialOutput(handle, in)
       : selected == "angle" && operation == kOfxImageEffectActionRender
       ? angleOutput(handle, in) : pluginMain(action, handle, in, out);
+  if (clipPreferencesParMode(selected) && (result == kOfxStatOK || result == kOfxStatReplyDefault)) {
+    if (operation == kOfxImageEffectActionGetClipPreferences) { return clipPreferencesPar(handle, out, selected); }
+    if (operation == kOfxImageEffectActionRender && !clipPreferencesParImages(handle, in)) { return kOfxStatFailed; }
+  }
   if (result == kOfxStatOK || result == kOfxStatReplyDefault) {
     if ((selected == "optional_unmapped" || selected == "clip_integer_query_count" ||
          selected == "clip_double_query_count") &&
@@ -3781,6 +3869,12 @@ OfxStatus probe(const char* action, const void* handle,
   if ((mode() == "identity_current" || nonCurrentIdentityMode(mode())) &&
       std::strcmp(action, kOfxImageEffectActionIsIdentity) == 0) {
     observed = action;
+  }
+  if (clipPreferencesParMode(mode())) {
+    // Keep these new modes bounded without altering any historical receipts.
+    observed = std::strcmp(action, kOfxImageEffectActionGetClipPreferences) == 0 ||
+        std::strcmp(action, kOfxImageEffectActionRender) == 0 ||
+        std::strcmp(action, kOfxActionDestroyInstance) == 0 ? action : nullptr;
   }
   const char* directory = std::getenv("MONDRIAN_OPENFX_DESCRIBE_ACTION_RECEIPT_DIRECTORY");
   const bool observing = directory && *directory;

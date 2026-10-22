@@ -12,6 +12,14 @@
 #include <cstdlib>
 #include <cstring>
 #include <limits>
+#include <fstream>
+#include <filesystem>
+#include <string>
+#ifdef _WIN32
+#include <process.h>
+#else
+#include <unistd.h>
+#endif
 
 namespace {
 OfxHost* host = nullptr;
@@ -102,6 +110,38 @@ OfxStatus clipPreferences(OfxPropertySetHandle out) {
       ? kOfxStatOK : kOfxStatFailed;
 }
 
+bool clipParDefaultsMode() {
+  const char* mode = std::getenv("MONDRIAN_OPENFX_GENERATOR_MODE");
+  return mode && std::strcmp(mode, "clip_par_defaults") == 0;
+}
+
+bool clipParReceipt(const char* point, bool valid) {
+  const char* directory = std::getenv("MONDRIAN_OPENFX_DESCRIBE_ACTION_RECEIPT_DIRECTORY");
+  if (!directory || !*directory) { return false; }
+#ifdef _WIN32
+  const auto pid = _getpid();
+#else
+  const auto pid = getpid();
+#endif
+  const auto path = std::filesystem::u8path(directory) / ("generator-par-" + std::to_string(pid) + ".txt");
+  std::ofstream file(path, std::ios::binary | std::ios::app);
+  file << point << " valid=" << valid << '\n';
+  file.flush();
+  return file.good();
+}
+
+OfxStatus clipParDefaults(OfxImageEffectHandle effect, OfxPropertySetHandle out) {
+  OfxImageClipHandle output = nullptr;
+  OfxPropertySetHandle props = nullptr;
+  double actual = 0.0, initial = 0.0;
+  const bool valid = generatorInstance(effect) && out &&
+      images->clipGetHandle(effect, kOfxImageEffectOutputClipName, &output, &props) == kOfxStatOK &&
+      properties->propGetDouble(props, kOfxImagePropPixelAspectRatio, 0, &actual) == kOfxStatOK &&
+      std::isfinite(actual) && actual > 0.0 &&
+      properties->propGetDouble(out, "OfxImageClipPropPAR_Output", 0, &initial) == kOfxStatOK && initial == actual;
+  return clipParReceipt("preferences", valid) && valid ? clipPreferences(out) : kOfxStatFailed;
+}
+
 // Own only the action-scoped image handle, never the host's pixel allocation.
 class ImageLease {
  public:
@@ -158,7 +198,7 @@ OfxStatus render(OfxImageEffectHandle effect, OfxPropertySetHandle in) {
   // This environment is test infrastructure, not a parameter or product policy.
   const char* mode = std::getenv("MONDRIAN_OPENFX_GENERATOR_MODE");
   if (mode && std::strcmp(mode, "no_output_fetch") == 0) { return kOfxStatOK; }
-  if (mode && *mode) { return kOfxStatErrValue; }
+  if (mode && *mode && !clipParDefaultsMode()) { return kOfxStatErrValue; }
 
   OfxPropertySetHandle image = nullptr;
   if (images->clipGetImage(output, time, nullptr, &image) != kOfxStatOK || !image) {
@@ -175,11 +215,19 @@ OfxStatus render(OfxImageEffectHandle effect, OfxPropertySetHandle in) {
       properties->propGetDoubleN(image, kOfxImageEffectPropRenderScale, 2, imageScale) != kOfxStatOK ||
       imageScale[0] != 1.0 || imageScale[1] != 1.0 ||
       properties->propGetDouble(image, kOfxImagePropPixelAspectRatio, 0, &imagePar) != kOfxStatOK ||
-      imagePar != projectPar ||
+      (!clipParDefaultsMode() && imagePar != projectPar) ||
       !stringIs(image, kOfxImageEffectPropPixelDepth, kOfxBitDepthFloat) ||
       !stringIs(image, kOfxImageEffectPropComponents, kOfxImageComponentRGBA) ||
       !stringIs(image, kOfxImageEffectPropPreMultiplication, kOfxImageUnPreMultiplied) ||
       !stringIs(image, kOfxImagePropField, kOfxImageFieldNone)) { return kOfxStatFailed; }
+  if (clipParDefaultsMode()) {
+    OfxPropertySetHandle outputProps = nullptr;
+    double clipPar = 0.0;
+    const bool valid = images->clipGetPropertySet(output, &outputProps) == kOfxStatOK &&
+        properties->propGetDouble(outputProps, kOfxImagePropPixelAspectRatio, 0, &clipPar) == kOfxStatOK && clipPar == imagePar &&
+        (time == 0.0 || time == 6.0 || time == 3.0) && imagePar == (time == 6.0 ? 1.2 : 1.0);
+    if (!clipParReceipt("image", valid) || !valid) { return kOfxStatFailed; }
+  }
   for (int index = 0; index < 4; ++index) {
     if (bounds[index] != window[index] || rod[index] != window[index]) { return kOfxStatFailed; }
   }
@@ -225,7 +273,7 @@ OfxStatus dispatch(const char* action, const void* handle,
     return generatorInstance(effect) ? kOfxStatOK : kOfxStatFailed;
   }
   if (std::strcmp(action, kOfxImageEffectActionGetClipPreferences) == 0) {
-    return clipPreferences(out);
+    return clipParDefaultsMode() ? clipParDefaults(effect, out) : clipPreferences(out);
   }
   if (std::strcmp(action, kOfxImageEffectActionRender) == 0) { return render(effect, in); }
   if (std::strcmp(action, kOfxActionDestroyInstance) == 0) { return kOfxStatOK; }
