@@ -1427,6 +1427,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                     );
                 }
                 ResolvedPlanView {
+                    sampling: evaluation.sampling,
                     cpu_materialization_active_bytes: evaluation.cpu_materialization_active_bytes,
                     elements: Arc::clone(&evaluation.elements),
                     cache_key,
@@ -3287,6 +3288,7 @@ fn join_preview_workers_until(
 /// evaluation itself becomes the single authoritative construction point
 /// (output key, elements, color context, reuse policy).
 struct ResolvedPlanView {
+    sampling: mondrian_core::ImageSampling,
     cpu_materialization_active_bytes: u64,
     elements: Arc<[ResolvedPreviewElement]>,
     cache_key: PreviewOutputKey,
