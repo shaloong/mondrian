@@ -20173,3 +20173,277 @@ fn unit_media_requests_use_original_full_cpu_without_changing_any_clip_quality()
     drop(state);
     std::fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+#[ignore = "requires current Product and owned SessionProbe image_sampling_media mode"]
+fn openfx_unit_media_original_decode_reaches_native_before_preview_downscale() {
+    use crate::app::preview_timeline_execution::{
+        resolve_preview_timeline_with_programs, PreviewTimelineMediaFrame,
+    };
+    use crate::openfx_effect::register_selected_openfx_filter;
+    use mondrian_core::timeline_data::PixelAspectRatio;
+    use mondrian_core::{PropertyValue, SampleAspectRatio};
+    use mondrian_effects::{
+        instantiate_effect_node, EffectImageScaleRequirement, EffectProcessorControl,
+        EffectProcessorExecutionOrigin, EffectProcessorStopReason, EffectProjectGeometry,
+    };
+    const TEST: &str = "app::preview_runtime::tests::openfx_unit_media_original_decode_reaches_native_before_preview_downscale";
+    if !crate::openfx_host::shared_frame_tests::qualification_child(
+        TEST,
+        &[("MONDRIAN_OPENFX_SESSION_PROBE_MODE", "image_sampling_media")],
+    ) {
+        return;
+    }
+    ensure_test_ocio_loaded();
+    let helper =
+        PathBuf::from(std::env::var_os("MONDRIAN_OPENFX_TEST_HELPER").expect("pinned Product"));
+    let binary = PathBuf::from(
+        std::env::var_os("MONDRIAN_OPENFX_SESSION_PROBE_BINARY").expect("owned SessionProbe"),
+    );
+    let inspection = crate::openfx_adapter::inspect_openfx_binary(&helper, &binary).unwrap();
+    let identifier = "uk.co.thefoundry.BasicGainPlugin";
+    let description =
+        crate::openfx_host::describe_openfx_filter(&helper, &inspection, identifier).unwrap();
+    let scale_label = &description.parameters.iter().find(|row| row.name == "scale").unwrap().label;
+    let kind = register_selected_openfx_filter(&helper, &inspection, identifier).unwrap();
+    let mut effect = instantiate_effect_node(kind.clone()).unwrap();
+    let scale = effect
+        .properties
+        .iter()
+        .find(|(_, row)| row.descriptor.display_name == *scale_label)
+        .unwrap()
+        .1
+        .descriptor
+        .parameter_id()
+        .clone();
+    effect
+        .set_static_value_by_parameter(&scale, PropertyValue::Double(0.5))
+        .unwrap();
+    let initial_status = mondrian_effects::effect_extension_runtime_status(&kind.key()).unwrap();
+    assert!(!initial_status.disabled);
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("native-original.ppm");
+    let mut ppm = b"P6\n3 5\n255\n".to_vec();
+    ppm.extend_from_slice(&[255, 0, 0].repeat(15));
+    std::fs::write(&path, ppm).unwrap();
+    let source = path.canonicalize().unwrap();
+    // Keep the real PPM probe untouched. PAR is a public Clip interpretation,
+    // independent of both this file's metadata and the Sequence owner window.
+    let info = mondrian_media::probe_media_info(&source).unwrap();
+    let stream = info.primary_video().unwrap();
+    assert_eq!((stream.width, stream.height), (3, 5));
+    let library = AssetLibrary::open(root.path().join("library")).unwrap();
+    let asset = commit_preview_test_media(&library, source.clone(), info);
+    let mut state = AppState::new();
+    pin_standard_execution_resources(&mut state);
+    state.test_set_asset_library(Some(library));
+    let mut sequence = Sequence::new("Original media through native before Preview scale");
+    let owner_extent = Resolution { width: 10, height: 7 };
+    sequence.settings.resolution = owner_extent;
+    sequence.settings.pixel_aspect_ratio = PixelAspectRatio::Anamorphic2x;
+    sequence.settings.color.working_color_space = WorkingColorSpace::LinearRec709;
+    let tb = sequence.time_base();
+    let mut clip = mondrian_timeline::clip::Clip::new(asset, tt(0, tb), tt(24, tb)).unwrap();
+    let interpretation = clip.media_interpretation_mut().unwrap();
+    interpretation.pixel_aspect_ratio_override = Some(PixelAspectRatio::HdAnamorphic1080);
+    interpretation.field_order_override =
+        Some(mondrian_core::timeline_data::FieldOrder::Progressive);
+    interpretation.color_space_override = Some(ColorSpace::LinearRec709);
+    // Source canonical width is 3 * 4/3 = 4. This authored transform fills
+    // the 10x7 raster before the real 2x2 Preview projection, without a fit shim.
+    clip.transform.set_scale(glam::Vec2::new(2.5, 1.4));
+    clip.add_effect_node(effect);
+    sequence.video_tracks[0].add_clip(clip).unwrap();
+    state.test_set_sequence(Some(sequence));
+    let document = state.authoring.as_mut().unwrap().document_mut_for_test_fixture();
+    document.settings.proxy_enabled = true;
+    document.settings.cache_dir = Some(root.path().join("cache"));
+    document.proxy_mode_assets.insert(asset);
+    let runtime = PreviewProductionRuntime::<()>::new_without_workers_for_test();
+    let mut decoder = mondrian_media::PreviewDecodeSessionContext::new();
+    let programs = RefCell::new(mondrian_renderer::PreparedVisualProgramCache::default());
+    let scratch = RefCell::new(TimelineCompositeScratch::default());
+    let cancellation = mondrian_core::ExecutionCancellationToken::new();
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let sequence = state.active_sequence().unwrap();
+        let snapshot = state.preview_execution_snapshot(Instant::now());
+        let context = sequence
+            .settings
+            .root_program_color_context(state.project_color_environment())
+            .unwrap();
+        let target = Resolution { width: 2, height: 2 };
+        let mut decoded_count = 0;
+        let resolved = resolve_preview_timeline_with_programs(
+            sequence,
+            &[],
+            0,
+            target,
+            mondrian_playback::PreviewResolutionScale::Quarter,
+            context,
+            &mut |request| {
+                assert_eq!(
+                    request.image_scale_requirement,
+                    EffectImageScaleRequirement::Unit
+                );
+                assert!(request.cpu_working_required);
+                assert_eq!(request.target_resolution, target);
+                let key = runtime
+                    .media_preview_key_for_timeline_request(
+                        &snapshot,
+                        &state,
+                        &request,
+                        mondrian_media::PreviewRepresentationQuality::Reduced {
+                            divisor: std::num::NonZeroU32::new(4).unwrap(),
+                        },
+                        false,
+                        true,
+                    )
+                    .unwrap();
+                assert_eq!(key.decode.source().path(), source);
+                assert_eq!(
+                    key.decode.representation(),
+                    mondrian_media::PreviewDecodeRepresentation::NativeCpu
+                );
+                assert_eq!(key.source_resolution, Resolution { width: 3, height: 5 });
+                assert_eq!(
+                    key.picture_geometry.sample_aspect_ratio(),
+                    SampleAspectRatio::new(4, 3).unwrap()
+                );
+                let token = cancellation.clone();
+                let decoded = crate::app::preview_media_task::decode_media_preview_with_context(
+                    MediaPreviewJob {
+                        key,
+                        generation: 0,
+                        priority: MediaPreviewRequestPriority::Current,
+                        access_mode: PreviewDecodeAccessMode::RandomAccessStillFrame,
+                        adaptive_hints: PreviewDecodeAdaptiveHints::default(),
+                        hardware_decode_request: PreviewHardwareDecodeRequest::Auto,
+                        hardware_decode_device_selector: None,
+                        enqueued_at: Instant::now(),
+                        deadline_at: None,
+                        demand_identity: None,
+                        execution_id: None,
+                        residency_work: None,
+                    },
+                    0,
+                    &mut decoder,
+                    move || token.is_canceled(),
+                );
+                assert!(!decoded.canceled);
+                assert!(
+                    decoded.error.is_none(),
+                    "actual media decode: {:?}",
+                    decoded.error
+                );
+                let media = decoded.frame.expect("real decoded/prepared CPU source");
+                assert_eq!((media.width(), media.height()), (3, 5));
+                assert_eq!(
+                    media.logical_resolution(),
+                    Resolution { width: 3, height: 5 }
+                );
+                decoded_count += 1;
+                PreviewTimelineMediaFrame::Ready(media)
+            },
+            &mut |_| panic!("media-only qualification"),
+            &programs,
+            &scratch,
+        );
+        assert_eq!(decoded_count, 1);
+        let PreviewTimelineResolution::Ready(resolved) = resolved else {
+            panic!("original source must reach the complete CPU Clip route")
+        };
+        assert!(matches!(
+            resolved.plan.elements.as_slice(),
+            [
+                crate::app::preview_viewer_plan::ResolvedPreviewElement::Media {
+                    prepared_heterogeneous_route: None,
+                    ..
+                }
+            ]
+        ));
+        let expected_sampling = mondrian_core::ImageSampling::new(
+            SampleAspectRatio::new(2, 1).unwrap(),
+            [Rational::new(1, 5), Rational::new(2, 7)],
+        )
+        .unwrap();
+        assert_eq!(resolved.plan.sampling, expected_sampling);
+        let mut checkpoint =
+            || cancellation.is_canceled().then_some(EffectProcessorStopReason::Canceled);
+        let mut control = EffectProcessorControl::new(&mut checkpoint);
+        let output = composite_resolved_preview_working(
+            2,
+            2,
+            &resolved.plan.elements,
+            &resolved.plan.color_context,
+            resolved.plan.sampling,
+            &mut scratch.borrow_mut(),
+            &mut control,
+        )
+        .unwrap();
+        let actual = output.frame.rgba_f32();
+        assert_eq!((actual.width, actual.height), (2, 2));
+        assert_eq!(actual.sampling, expected_sampling);
+        assert_eq!(actual.data.len(), 4);
+        // Real Basic gain .5 yields [.5,0,0,.5]. The independent Probe adds
+        // owner [20/64,7/64] and actual image PAR/16 = 1/12 to RGB.
+        // TimelineCompositeOptions::default() uses Transparent. Normal over
+        // zero coverage preserves straight RGB; the authored affine fills the
+        // target, yielding [.8125,.109375,1/12,.5] at every sample.
+        for pixel in &actual.data {
+            for (actual, expected) in pixel.iter().zip([0.8125_f32, 0.109375, 1.0 / 12.0, 0.5]) {
+                assert!(
+                    (*actual - expected).abs() < 2.0e-6,
+                    "native→spatial literal: {actual} vs {expected}"
+                );
+            }
+        }
+        let batch = control.take_feedback().unwrap();
+        assert_eq!(batch.len(), 1);
+        let receipt = batch.iter().next().unwrap();
+        assert_eq!(
+            (receipt.preparation.width, receipt.preparation.height),
+            (3, 5)
+        );
+        assert_eq!(
+            receipt.preparation.project_geometry,
+            Some(EffectProjectGeometry::new(10, 7, SampleAspectRatio::new(2, 1).unwrap()).unwrap())
+        );
+        assert!(matches!(
+            receipt.feedback.origin,
+            EffectProcessorExecutionOrigin::SupervisedChild { .. }
+        ));
+        assert_ne!(receipt.feedback.snapshot.native_owner(), 0);
+        assert_eq!(receipt.feedback.snapshot.invocation(), 1);
+        assert_eq!(
+            scratch.borrow().effect_execution_diagnostics().processor_instances,
+            1
+        );
+        assert_eq!(
+            mondrian_effects::effect_extension_runtime_status(&kind.key()).unwrap(),
+            initial_status
+        );
+        assert_eq!(sequence.settings.resolution, owner_extent);
+        assert_eq!(
+            sequence.settings.pixel_aspect_ratio,
+            PixelAspectRatio::Anamorphic2x
+        );
+    }));
+    // Retire the same bank synchronously and consume every Runtime owner even
+    // when an assertion unwinds. Preserve the original failure before cleanup assertions.
+    cancellation.cancel();
+    decoder.clear();
+    scratch
+        .borrow_mut()
+        .reconfigure_effect_execution(EffectExecutionSessionConfig::uncached(0));
+    let retired = scratch.borrow().effect_execution_diagnostics().processor_instances == 0;
+    drop(scratch);
+    drop(programs);
+    let shutdown = runtime.shutdown_and_wait();
+    drop(state);
+    if let Err(failure) = result {
+        std::panic::resume_unwind(failure);
+    }
+    assert!(retired);
+    assert!(shutdown.all_workers_terminated());
+    root.close().unwrap();
+}
