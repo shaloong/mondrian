@@ -20023,14 +20023,26 @@ fn unit_media_requests_use_original_full_cpu_without_changing_any_clip_quality()
     };
     use mondrian_effects::EffectImageScaleRequirement;
     let (mut state, asset, root) = state_with_invalid_video_asset_for_cpu_rgb(true);
+    // The shared CPU-RGB helper retains Limited probe levels. This proxy
+    // identity fixture explicitly interprets the RGB source as Full range.
+    let library = state.asset_library().unwrap();
+    let mut interpretation = library.get_asset(asset).unwrap().unwrap().interpretation;
+    interpretation.range = mondrian_core::timeline_data::MediaRangeInterpretation::Override {
+        range: mondrian_core::timeline_data::MediaSignalRange::Full,
+    };
+    library.set_asset_interpretation(asset, interpretation).unwrap();
     let mut sequence = Sequence::new("Unit and Any media");
     let tb = sequence.time_base();
     let mut unit = Clip::new(asset, tt(0, tb), tt(24, tb)).unwrap();
+    unit.media_interpretation_mut().unwrap().field_order_override =
+        Some(mondrian_core::timeline_data::FieldOrder::Progressive);
     unit.add_effect_node(unit_scale_test_effect());
     let left_id = unit.id;
     let mut any = Clip::new(asset, tt(24, tb), tt(24, tb)).unwrap();
     // The transition starts one frame before this Clip's visible in-edge.
     any.set_source_origin(tt(1, tb)).unwrap();
+    any.media_interpretation_mut().unwrap().field_order_override =
+        Some(mondrian_core::timeline_data::FieldOrder::Progressive);
     let right_id = any.id;
     sequence.video_tracks[0].add_clip(unit).unwrap();
     sequence.video_tracks[0].add_clip(any).unwrap();
@@ -20109,6 +20121,11 @@ fn unit_media_requests_use_original_full_cpu_without_changing_any_clip_quality()
         &context.media_input(false),
     )
     .unwrap();
+    assert_eq!(proxy_color.source_range(), DecodedVideoRange::Full);
+    assert_eq!(
+        proxy_color.source_matrix(),
+        mondrian_media::DecodedVideoMatrix::Rgb
+    );
     let generator = mondrian_media::ProxyGenerator::new(author.proxy().config().clone());
     let source_path = root.join("source.mp4");
     let proxy_path = generator.proxy_path(&source_path, proxy_color).unwrap();
@@ -20148,10 +20165,21 @@ fn unit_media_requests_use_original_full_cpu_without_changing_any_clip_quality()
             );
         } else {
             assert_eq!(key.decode.source().path(), proxy_path.as_path());
-            assert!(matches!(
+            // Proxy selects the source artifact; Quarter independently selects
+            // the decode representation within that artifact's own raster.
+            let source_extent = Resolution { width: 1280, height: 720 };
+            assert_eq!(key.decode.source().source_extent(), source_extent);
+            assert_eq!(key.decode.source().video_stream_index(), 0);
+            assert_eq!(
                 key.decode.representation(),
-                mondrian_media::PreviewDecodeRepresentation::Proxy(_)
-            ));
+                mondrian_media::PreviewDecodeRepresentation::ReducedCompactCpuYuv {
+                    divisor: std::num::NonZeroU32::new(4).unwrap()
+                }
+            );
+            assert_eq!(
+                key.decode.representation().extent_for_source(source_extent),
+                Resolution { width: 320, height: 180 }
+            );
         }
     }
     // The same request resolver serves current and lookahead demand identity.
@@ -20163,7 +20191,7 @@ fn unit_media_requests_use_original_full_cpu_without_changing_any_clip_quality()
             1,
             mondrian_playback::PreviewResolutionScale::Quarter,
             target,
-            context,
+            context.clone(),
         )
         .unwrap();
     assert!(!future.is_empty());
@@ -20171,6 +20199,50 @@ fn unit_media_requests_use_original_full_cpu_without_changing_any_clip_quality()
         .iter()
         .all(|key| key.decode.representation()
             == mondrian_media::PreviewDecodeRepresentation::NativeCpu));
+    // The lookahead seam resolves one exact frame, including both transition
+    // endpoints. Its keys must match Current for Unit and ordinary proxy input.
+    for frame in [23, 24, 25] {
+        let requests = collect_preview_timeline_media_demands(
+            sequence,
+            &[],
+            frame,
+            target,
+            mondrian_playback::PreviewResolutionScale::Quarter,
+            context.clone(),
+        )
+        .unwrap();
+        let current: std::collections::HashSet<_> = requests
+            .iter()
+            .map(|request| {
+                runtime
+                    .media_preview_key_for_timeline_request(
+                        &snapshot, &state, request, quality, false, false,
+                    )
+                    .unwrap()
+            })
+            .collect();
+        let future = runtime
+            .future_media_frame_keys_at_scale_for_test(
+                &snapshot,
+                &state,
+                sequence,
+                frame,
+                mondrian_playback::PreviewResolutionScale::Quarter,
+                target,
+                context.clone(),
+            )
+            .unwrap();
+        assert_eq!(
+            future.len(),
+            requests.len(),
+            "frame {frame} demand cardinality"
+        );
+        assert_eq!(
+            future.into_iter().collect::<std::collections::HashSet<_>>(),
+            current,
+            "frame {frame} Current and lookahead must preserve the same source requirements"
+        );
+    }
     runtime.shutdown();
     drop(state);
     std::fs::remove_dir_all(root).unwrap();
