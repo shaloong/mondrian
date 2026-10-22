@@ -5595,7 +5595,7 @@ mod image_scale_requirement_tests {
         );
         assert!(owned.factory_contract_matches());
         let literal = CustomEffectProcessorBinding::new(Arc::new(|_, _, _, _, _| Ok(())));
-        let literal_f32 = CustomEffectProcessorBinding::new_f32(Arc::new(|_, _, _, _, _| Ok(())));
+        let literal_f32 = CustomEffectProcessorBinding::new_f32(Arc::new(|_, _, _| Ok(())));
         assert_eq!(
             literal.image_scale_requirement(),
             EffectImageScaleRequirement::Any
