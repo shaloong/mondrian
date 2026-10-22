@@ -2399,17 +2399,12 @@ fn visit_composite_transition_graph<'elements, 'frame>(
 fn timeline_source_materialization_error(
     graph: &CompiledEffectGraph,
 ) -> Option<TimelineCompositeError> {
-    graph.node_profiles().keys().find_map(|id| {
-        graph
-            .graph()
-            .node(*id)
-            .filter(|node| {
-                matches!(
-                    node.kind,
-                    mondrian_effects::EffectGraphNodeKind::CustomSource { .. }
-                )
-            })
-            .map(|_| TimelineCompositeError::SourceMaterializationUnsupported { node_id: *id })
+    graph.graph().nodes.iter().find_map(|node| {
+        (matches!(
+            node.kind,
+            mondrian_effects::EffectGraphNodeKind::CustomSource { .. }
+        ) && graph.node_profiles().contains_key(&node.id))
+        .then_some(TimelineCompositeError::SourceMaterializationUnsupported { node_id: node.id })
     })
 }
 
