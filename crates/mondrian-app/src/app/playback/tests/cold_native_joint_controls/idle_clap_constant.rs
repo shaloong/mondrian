@@ -1,5 +1,6 @@
 //! First Idle Open must expose an explicit constant Some independently of opaque
-//! state. Unentered/zero queued Media work do not count native Process calls.
+//! state. Unentered/zero queued Media work precede two real Timeline PCM windows;
+//! they do not count native Process calls during the earlier Idle phase.
 use super::project_state_roundtrip::unentered_owner;
 use super::*;
 use crate::app::product_action::{AudioNativeEditorPayload, AudioProductAction, ProductAction};
@@ -7,10 +8,13 @@ use mondrian_core::{
     ExecutionCancellationToken, NativeAudioEditorControlIntent as Intent,
     NativeAudioEditorControlOutcome as Outcome, NativeAudioParameterObservationOrigin as Origin,
 };
-use mondrian_media::AudioPcmRenderer;
+use mondrian_media::{
+    AudioPcmContinuity, AudioPcmRenderGeneration, AudioPcmRenderOutcome, AudioPcmRenderRequest,
+    AudioPcmRenderer,
+};
 
 #[test]
-#[ignore = "current normal Product and owned CLAP Gain editor DLL; static Some versus opaque at first Idle Open, no native edit/manual query/PCM/device"]
+#[ignore = "current normal Product and owned CLAP Gain editor DLL; static Some versus opaque at first Idle Open, then two complete Timeline PCM windows; no native edit/manual query/device"]
 fn app_owned_clap_idle_open_exposes_static_some_independently_of_opaque_state() {
     let volume = mondrian_core::ParameterId::new("clap.param.1").unwrap();
     let ColdNativeControl { mut state, _directory, output, renderer: weak } =
@@ -309,6 +313,50 @@ fn app_owned_clap_idle_open_exposes_static_some_independently_of_opaque_state() 
         assert_eq!(state.audio_playback_snapshot().in_flight, 0);
         assert_eq!(output.lock().queued, 0);
     }));
+    let pcm_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        if target_result.is_err() || close_result.is_err() {
+            return;
+        }
+        // Only after every original Idle/Close assertion may this same installed
+        // Timeline enter signal processing. No new preparation, state restore,
+        // Source installation or editor owner may replace the operation above.
+        let timeline = weak.upgrade().expect("the original installed Timeline Source");
+        let pcm_generation = AudioPcmRenderGeneration::new(generation);
+        let cancel = ExecutionCancellationToken::new();
+        for (start_sample, continuity) in [
+            (0, AudioPcmContinuity::Enter(pcm_generation)),
+            (4, AudioPcmContinuity::Continue(pcm_generation)),
+        ] {
+            let AudioPcmRenderOutcome::Rendered(buffer) = timeline
+                .render(
+                    AudioPcmRenderRequest {
+                        start_sample,
+                        frame_count: 4,
+                        sample_rate: 48_000,
+                        channel_layout: AudioChannelLayout::Stereo,
+                        continuity,
+                    },
+                    &cancel,
+                )
+                .expect("original Source PCM after first Idle Open")
+            else {
+                panic!("two complete post-Open PCM windows are required");
+            };
+            // The original WAV is +/- .25; Host Some .25 must win over opaque
+            // unity on every sample, including the first actual signal block.
+            assert_eq!(buffer.samples, [0.0625_f32, -0.0625].repeat(4));
+            assert!(verifier.validate(&claim).is_ok());
+        }
+        assert_eq!(
+            serde_json::to_value(state.authoring.as_ref().unwrap().document()).unwrap(),
+            document
+        );
+        assert_eq!(
+            state.authoring.as_ref().unwrap().history().diagnostics(),
+            history
+        );
+        assert_eq!(output.lock().queued, 0);
+    }));
     let cleanup = state.shutdown_audio_playback_and_wait();
     assert_eq!(cleanup.render_workers_started, 1);
     assert_eq!(cleanup.render_workers_terminated, 1);
@@ -331,6 +379,9 @@ fn app_owned_clap_idle_open_exposes_static_some_independently_of_opaque_state() 
     if let Err(failure) = close_result {
         std::panic::resume_unwind(failure);
     }
+    if let Err(failure) = pcm_result {
+        std::panic::resume_unwind(failure);
+    }
     let object = native_object.unwrap();
     println!(
         "{}",
@@ -338,9 +389,10 @@ fn app_owned_clap_idle_open_exposes_static_some_independently_of_opaque_state() 
             "case":"app-owned-clap-idle-static-some", "opened":true, "closed":true,
             "parameters":1, "host_static":0.25, "opaque_factory":1.0,
             "main_query_value":0.25, "process_id":object.0.get(), "object_serial":object.1.get(),
-            "same_source_claim":true, "unentered":true, "native_process_counter_observed":false,
+            "same_source_claim":true, "unentered_before_first_signal":true, "native_process_counter_observed":false,
             "author_unchanged":true, "history_unchanged":true, "opaque_unchanged":true,
-            "manual_query":false, "pcm_qualified":false, "device_qualified":false,
+            "manual_query":false, "pcm_qualified":true, "pcm_frames":8,
+            "pcm_stereo_sample_magnitude":0.0625, "device_qualified":false,
             "realtime_qualified":false, "graceful_100ms_qualified":false
         })
     );
