@@ -958,6 +958,10 @@ mod tests {
     // does not manufacture or qualify an installed product/native authority.
     struct NoPcm;
     impl AudioProcessor for NoPcm {
+        fn enter_state(&mut self, _: i64) -> Result<(), AudioProcessorHostError> {
+            panic!("transaction controls must not execute native lifecycle")
+        }
+
         fn process(
             &mut self,
             _: AudioProcessorProcessContext,
