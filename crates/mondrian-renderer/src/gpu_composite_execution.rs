@@ -589,6 +589,82 @@ mod tests {
     }
 
     #[test]
+    fn cropped_image_damage_contains_literal_centers_after_reflection_and_rotation() {
+        let left_half_removed =
+            GpuCompositeSourceCrop { left: 0.5, ..GpuCompositeSourceCrop::default() };
+        let top_half_removed =
+            GpuCompositeSourceCrop { top: 0.5, ..GpuCompositeSourceCrop::default() };
+        // These are literal surviving destination pixel centers, not a second
+        // implementation of the planner's affine bounding-box calculation.
+        // A reflected crop's included lower source edge becomes an included
+        // upper destination edge: (0.5, 1.5] still contains center 1.5.
+        let cases = [
+            (
+                "reflected horizontal crop",
+                (3, 1),
+                (2, 1),
+                [-1.0, 0.0, 2.5, 0.0, 1.0, 0.0],
+                left_half_removed,
+                (1, 0),
+            ),
+            (
+                "reflected vertical crop",
+                (1, 3),
+                (1, 2),
+                [1.0, 0.0, 0.0, 0.0, -1.0, 2.5],
+                top_half_removed,
+                (0, 1),
+            ),
+            (
+                "quarter-turn cropped image",
+                (1, 3),
+                (2, 1),
+                [0.0, 1.0, 0.0, -1.0, 0.0, 2.5],
+                left_half_removed,
+                (0, 1),
+            ),
+            (
+                "fractionally translated crop",
+                (2, 1),
+                (2, 1),
+                [1.0, 0.0, -0.75, 0.0, 1.0, 0.0],
+                left_half_removed,
+                (0, 0),
+            ),
+        ];
+        for (label, (width, height), (source_width, source_height), transform, crop, (x, y)) in
+            cases
+        {
+            let plan = GpuCompositeExecutionPlanner::plan(
+                width,
+                height,
+                &[GpuCompositeLayerFootprint::TransformedSource {
+                    source_width,
+                    source_height,
+                    transform,
+                    crop,
+                    fused_point_operations: 0,
+                }],
+                GpuCompositeExecutionPolicy::default(),
+            )
+            .expect("bounded cropped image support");
+            assert_eq!(plan.layers.len(), 1, "{label}: a legal center survives");
+            let layer = &plan.layers[0];
+            let damage = layer.damage;
+            assert!(
+                x >= damage.x && x < damage.right() && y >= damage.y && y < damage.bottom(),
+                "{label}: literal pixel ({x}, {y}) must be inside damage {damage:?}"
+            );
+            assert!(
+                layer.tiles.iter().any(|tile| {
+                    x >= tile.x && x < tile.right() && y >= tile.y && y < tile.bottom()
+                }),
+                "{label}: a recorded tile must draw literal pixel ({x}, {y})"
+            );
+        }
+    }
+
+    #[test]
     fn magnified_image_damage_covers_complete_source_support() {
         // Public recorder-consumed planning, with literal corner-space geometry:
         // the full 1x1 square scaled to each canvas covers every pixel center.
