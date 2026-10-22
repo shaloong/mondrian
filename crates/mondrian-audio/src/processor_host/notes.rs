@@ -956,6 +956,296 @@ mod tests {
 
     // Owned scalar/IR controls: this models an already confirmed operation; it
     // does not manufacture or qualify an installed product/native authority.
+    struct NoPcm;
+    impl AudioProcessor for NoPcm {
+        fn process(
+            &mut self,
+            _: AudioProcessorProcessContext,
+            _: &mut dyn AudioProcessorAudioIo,
+            _: crate::AudioParameterEventBatch<'_>,
+        ) -> Result<(), AudioProcessorHostError> {
+            panic!("transaction controls must not execute PCM")
+        }
+    }
+
+    fn retained_note_owner() -> (
+        mondrian_core::AudioOwnerInstallationSource,
+        crate::native_runtime_owner::NativeStateEntryBindingContext,
+        HostedProcessorInstance,
+    ) {
+        let origin = operation();
+        let source = mondrian_core::AudioOwnerInstallationSource::new();
+        let (registration, verifier) = source.register().unwrap();
+        let claim = source
+            .begin_commit(source.reserve_install(&registration, None).unwrap())
+            .unwrap()
+            .commit()
+            .unwrap();
+        let context = crate::native_runtime_owner::NativeStateEntryBindingContext {
+            root: origin.address.root,
+            verifier,
+            claim,
+        };
+        let lease = crate::AudioNativeProcessorOwnerLease::issue(
+            origin.address,
+            origin.binding,
+            context.claim.generation(),
+        );
+        let instance = HostedProcessorInstance {
+            occurrence: origin.address.occurrence,
+            processor: Box::new(NoPcm),
+            continuity: HostedProcessorContinuity::Active {
+                epoch: origin.address.epoch.unwrap(),
+                next_sample: 1,
+            },
+            notes: Some(state(origin, 2)),
+            native_binding: crate::native_runtime_owner::NativeHostedBinding::Installed {
+                lease,
+                object: origin.object,
+            },
+            native_author_outstanding: None,
+            native_reprepare_seed_bytes: 0,
+            native_editor_detached: None,
+            native_editor_attachment: None,
+        };
+        (source, context, instance)
+    }
+
+    fn next_entry() -> AudioStateEntry {
+        AudioStateEntry {
+            epoch: AudioContinuityEpoch::new(2),
+            start_sample: 0,
+        }
+    }
+
+    fn stage_entry(
+        instance: &mut HostedProcessorInstance,
+        context: &crate::native_runtime_owner::NativeStateEntryBindingContext,
+    ) {
+        let pending =
+            PendingNoteEntry::capture(instance, next_entry(), context, context.root).unwrap();
+        instance.notes.as_mut().unwrap().pending_entry = Some(pending);
+        instance.native_binding = crate::native_runtime_owner::NativeHostedBinding::Unbound;
+    }
+
+    #[test]
+    fn note_reentry_permit_requires_installed_origin_and_survives_only_matching_revoke() {
+        let (_source, context, mut instance) = retained_note_owner();
+        let entry = next_entry();
+        validate_note_reentry_arm(&instance, entry, &context, context.root).unwrap();
+        stage_entry(&mut instance, &context);
+        let prior = instance.notes.as_ref().unwrap().pending_entry.as_ref().unwrap().prior();
+        // Models the two existing local revocations. Neither can re-mint from
+        // the ledger: only the captured transaction permits the second arm.
+        for _ in 0..2 {
+            instance.native_binding = crate::native_runtime_owner::NativeHostedBinding::Unbound;
+            validate_note_reentry_arm(&instance, entry, &context, context.root).unwrap();
+            assert_eq!(
+                instance.notes.as_ref().unwrap().pending_entry.as_ref().unwrap().prior(),
+                prior
+            );
+            assert!(PendingNoteEntry::capture(&instance, entry, &context, context.root).is_err());
+        }
+        let wrong = AudioStateEntry { epoch: AudioContinuityEpoch::new(3), ..entry };
+        assert!(validate_note_reentry_arm(&instance, wrong, &context, context.root).is_err());
+        // This exact helper is called before ordinary observation/publication
+        // Bind. Losing the slot cannot turn Unbound into cold proof.
+        assert!(!PreparedProcessorHost::prepare_native_binding(
+            &mut instance,
+            context.root,
+            context.root
+        )
+        .unwrap());
+        assert!(instance.notes.as_ref().unwrap().pending_entry.is_none());
+        assert!(validate_note_reentry_arm(&instance, entry, &context, context.root).is_err());
+        assert!(PreparedProcessorHost::take_note_entry(
+            &mut instance,
+            entry,
+            Some(&(context.clone(), context.root)),
+            None,
+            true
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn note_reentry_capture_rejects_wrong_claim_object_occurrence_and_open_gui() {
+        for control in 0..4 {
+            let (_source, context, mut instance) = retained_note_owner();
+            let crate::native_runtime_owner::NativeHostedBinding::Installed { lease, object } =
+                instance.native_binding
+            else {
+                unreachable!()
+            };
+            match control {
+                0 => {
+                    instance.native_binding =
+                        crate::native_runtime_owner::NativeHostedBinding::Installed {
+                            lease: crate::AudioNativeProcessorOwnerLease::issue(
+                                lease.address(),
+                                lease.binding(),
+                                NonZeroU64::new(context.claim.generation().get() + 1).unwrap(),
+                            ),
+                            object,
+                        }
+                }
+                1 => {
+                    instance.native_binding =
+                        crate::native_runtime_owner::NativeHostedBinding::Installed {
+                            lease,
+                            object: NativeAudioObjectObservation::new(
+                                object.process_id(),
+                                NonZeroU64::new(object.object_serial().get() + 1).unwrap(),
+                            ),
+                        }
+                }
+                2 => {
+                    instance.occurrence.owner = AudioProcessorOccurrenceOwner::Track(TrackId::new())
+                }
+                3 => instance.native_editor_attachment = Some((lease, object)),
+                _ => unreachable!(),
+            }
+            let before = instance.notes.as_ref().unwrap().ledger.usage().unwrap();
+            assert!(
+                validate_note_reentry_arm(&instance, next_entry(), &context, context.root).is_err()
+            );
+            assert!(instance.notes.as_ref().unwrap().pending_entry.is_none());
+            assert_eq!(
+                instance.notes.as_ref().unwrap().ledger.usage().unwrap(),
+                before
+            );
+        }
+    }
+
+    #[test]
+    fn note_reentry_permit_is_consumed_once_and_replacement_keeps_native_id_counter() {
+        let (_source, context, mut instance) = retained_note_owner();
+        let prior = origin(&instance).unwrap();
+        let score = score(prior, &[(0, 3)]);
+        instance
+            .notes
+            .as_mut()
+            .unwrap()
+            .prepare_admitted_block(
+                &score,
+                0,
+                prior,
+                AudioRenderRequest { start_sample: 0, frames: 1 },
+            )
+            .unwrap();
+        assert_eq!(
+            instance.notes.as_ref().unwrap().ledger.usage().unwrap().next_native_id,
+            1
+        );
+        stage_entry(&mut instance, &context);
+        let pending = PreparedProcessorHost::take_note_entry(
+            &mut instance,
+            next_entry(),
+            Some(&(context.clone(), context.root)),
+            None,
+            true,
+        )
+        .unwrap();
+        assert!(instance.notes.as_ref().unwrap().pending_entry.is_none());
+        assert!(PreparedProcessorHost::take_note_entry(
+            &mut instance,
+            next_entry(),
+            Some(&(context.clone(), context.root)),
+            None,
+            true
+        )
+        .is_err());
+        // Scalar proof-shape control only. The ignored native gate supplies the
+        // real Enter/retirement/Bind witnesses; these fields are not native ACKs.
+        let next = LedgerOrigin {
+            address: crate::AudioNativeProcessorAddress {
+                epoch: Some(next_entry().epoch),
+                ..prior.address
+            },
+            binding: AudioProcessorBindingId::new(),
+            object: NativeAudioObjectObservation::new(
+                prior.object.process_id(),
+                NonZeroU64::new(prior.object.object_serial().get() + 1).unwrap(),
+            ),
+        };
+        instance.native_binding = crate::native_runtime_owner::NativeHostedBinding::Installed {
+            lease: crate::AudioNativeProcessorOwnerLease::issue(
+                next.address,
+                next.binding,
+                context.claim.generation(),
+            ),
+            object: next.object,
+        };
+        instance.continuity =
+            HostedProcessorContinuity::Active { epoch: next_entry().epoch, next_sample: 0 };
+        PreparedProcessorHost::bind_note_cold_entry(&mut instance, pending).unwrap();
+        let usage = instance.notes.as_ref().unwrap().ledger.usage().unwrap();
+        assert_eq!(
+            (
+                usage.retained_records,
+                usage.active_voices,
+                usage.next_native_id
+            ),
+            (0, 0, 1)
+        );
+        instance
+            .notes
+            .as_mut()
+            .unwrap()
+            .prepare_admitted_block(
+                &score,
+                0,
+                next,
+                AudioRenderRequest { start_sample: 0, frames: 1 },
+            )
+            .unwrap();
+        assert_eq!(instance.notes.as_ref().unwrap().inputs[0].native_note_id, 1);
+    }
+
+    #[test]
+    fn note_reentry_wrong_request_and_pcm_cannot_reuse_captured_permit() {
+        for pcm in [false, true] {
+            let (_source, context, mut instance) = retained_note_owner();
+            stage_entry(&mut instance, &context);
+            let before = instance.notes.as_ref().unwrap().ledger.usage().unwrap();
+            if pcm {
+                assert!(
+                    PreparedProcessorHost::refuse_pending_note_entry_pcm(&mut instance).is_err()
+                );
+                assert!(matches!(
+                    instance.continuity,
+                    HostedProcessorContinuity::Failed
+                ));
+            } else {
+                let wrong = AudioStateEntry {
+                    epoch: AudioContinuityEpoch::new(3),
+                    ..next_entry()
+                };
+                assert!(PreparedProcessorHost::take_note_entry(
+                    &mut instance,
+                    wrong,
+                    Some(&(context.clone(), context.root)),
+                    None,
+                    true
+                )
+                .is_err());
+            }
+            assert!(instance.notes.as_ref().unwrap().pending_entry.is_none());
+            assert_eq!(
+                instance.notes.as_ref().unwrap().ledger.usage().unwrap(),
+                before
+            );
+            assert!(PreparedProcessorHost::take_note_entry(
+                &mut instance,
+                next_entry(),
+                Some(&(context.clone(), context.root)),
+                None,
+                true
+            )
+            .is_err());
+        }
+    }
+
     fn operation() -> LedgerOrigin {
         let cursor = AudioSessionCursorIdentity {
             prepared_plan_id: AudioPreparedPlanId::new(),

@@ -1995,7 +1995,6 @@ impl AudioProgramRuntime {
         }
         // Unsupported Note entry must refuse before native observation or revoke.
         self.session.validate_vst3_note_entry(entry)?;
-        self.session.validate_state_entry(entry)?;
         self.preflight_native_control(true)?;
         self.enter_state_admitted(entry, cancellation)
     }

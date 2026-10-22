@@ -729,7 +729,11 @@ impl AudioRenderSession {
         {
             return Err(crate::AudioProcessorHostError::PoisonedInstance.into());
         }
-        self.processor_host.validate_vst3_note_entry(self.plan.program(), entry)
+        self.processor_host.validate_vst3_note_entry(self.plan.program(), entry)?;
+        if !self.plan.schedule.notes.is_empty() {
+            self.validate_state_entry(entry)?;
+        }
+        Ok(())
     }
 
     pub(crate) fn validate_note_entry_context(
@@ -902,14 +906,8 @@ impl AudioRenderSession {
             public_output_lookahead_frames: self.public_output_lookahead_frames(),
             state: crate::AudioSessionCursorState::Active {
                 epoch,
-                next_public_sample: mondrian_core::AudioSamplePosition::new(
-                    next_public_sample,
-                    sample_rate,
-                ),
-                next_execution_sample: mondrian_core::AudioSamplePosition::new(
-                    next_execution_sample,
-                    sample_rate,
-                ),
+                next_public_sample: mondrian_core::AudioSamplePosition::new(next_public_sample, sample_rate),
+                next_execution_sample: mondrian_core::AudioSamplePosition::new(next_execution_sample, sample_rate),
                 alignment_primed: true,
             },
         })
@@ -920,10 +918,7 @@ impl AudioRenderSession {
         next: crate::AudioSessionCursorIdentity,
         serial: std::num::NonZeroU64,
         cancellation: &mondrian_core::ExecutionCancellationToken,
-    ) -> Result<
-        crate::processor_host::host_output_fader::PreparedHostFaderBindings,
-        crate::NativeAudioAuthorAdmissionError,
-    > {
+    ) -> Result<crate::processor_host::host_output_fader::PreparedHostFaderBindings, crate::NativeAudioAuthorAdmissionError> {
         self.processor_host.prepare_host_fader_bindings(
             self.native_owner_identity(), next, serial, self.plan.program(), &self.plan.schedule, cancellation,
         )

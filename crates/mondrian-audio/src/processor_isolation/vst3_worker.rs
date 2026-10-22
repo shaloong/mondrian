@@ -1,9 +1,9 @@
 //! VST3 audio effects run only inside the supervised native worker.
 
 mod author_state_entry;
+mod initial_parameter_values;
 #[cfg(target_os = "windows")]
 mod controller_projection;
-mod initial_parameter_values;
 #[cfg(test)]
 mod initial_parameter_values_tests;
 mod native_author;
