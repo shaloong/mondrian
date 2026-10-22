@@ -8116,8 +8116,13 @@ fn prepare_export_visual_frame_closure(
                 )
                 .map_err(|error| error.to_string())?;
             for batch in prepared_frame.batches() {
-                if batch.graph().image_scale_requirement() == mondrian_effects::EffectImageScaleRequirement::Unit {
-                    return Err(mondrian_renderer::TimelinePreviewEffectRouteError::UnitScaleTemporalUnsupported { placement: batch.placement() }.to_string());
+                if batch.graph().image_scale_requirement()
+                    == mondrian_effects::EffectImageScaleRequirement::Unit
+                {
+                    return Err(format!(
+                        "Unit-scale temporal export source materialization is unsupported for {:?}",
+                        batch.placement()
+                    ));
                 }
             }
             if prepared_frame.execution_plan().is_empty() {
