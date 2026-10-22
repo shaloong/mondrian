@@ -2685,8 +2685,7 @@ fn alpha_blend_f32_layer(
             let fy = dy as f32 + 0.5;
             let sx = inv[0] * fx + inv[1] * fy + inv[2];
             let sy = inv[3] * fx + inv[4] * fy + inv[5];
-            let Some(src_px) = sample_src_f32_bilinear(src, src_w, src_h, sx - 0.5, sy - 0.5)
-            else {
+            let Some(src_px) = sample_src_f32_bilinear(src, src_w, src_h, sx, sy) else {
                 continue;
             };
             let dst_idx = dy * dst_w + dx;
@@ -2724,25 +2723,37 @@ fn sample_src_f32_bilinear(
     sx: f32,
     sy: f32,
 ) -> Option<[f32; 4]> {
-    let x0 = sx.floor() as isize;
-    let y0 = sy.floor() as isize;
-    let x1 = x0 + 1;
-    let y1 = y0 + 1;
-
-    if x0 < 0 || y0 < 0 || x1 >= src_w as isize || y1 >= src_h as isize {
-        if x0 >= 0 && y0 >= 0 && x0 < src_w as isize && y0 < src_h as isize {
-            return Some(src[y0 as usize * src_w + x0 as usize]);
-        }
+    // The inverse affine addresses physical pixel-corner coordinates. Raster
+    // coverage is independent of the support of the interpolation kernel.
+    if src_w == 0
+        || src_h == 0
+        || !sx.is_finite()
+        || !sy.is_finite()
+        || sx < 0.0
+        || sy < 0.0
+        || sx >= src_w as f32
+        || sy >= src_h as f32
+    {
         return None;
     }
 
+    // Convert to texel-center indices only after coverage admission. Clamp
+    // each tap independently, preserving interpolation along the other axis.
+    let sx = sx - 0.5;
+    let sy = sy - 0.5;
+    let x0 = sx.floor() as isize;
+    let y0 = sy.floor() as isize;
     let fx = sx - x0 as f32;
     let fy = sy - y0 as f32;
+    let x1 = (x0 + 1).clamp(0, src_w as isize - 1) as usize;
+    let y1 = (y0 + 1).clamp(0, src_h as isize - 1) as usize;
+    let x0 = x0.clamp(0, src_w as isize - 1) as usize;
+    let y0 = y0.clamp(0, src_h as isize - 1) as usize;
 
-    let tl = src[y0 as usize * src_w + x0 as usize];
-    let tr = src[y0 as usize * src_w + x1 as usize];
-    let bl = src[y1 as usize * src_w + x0 as usize];
-    let br = src[y1 as usize * src_w + x1 as usize];
+    let tl = src[y0 * src_w + x0];
+    let tr = src[y0 * src_w + x1];
+    let bl = src[y1 * src_w + x0];
+    let br = src[y1 * src_w + x1];
 
     let mut out = [0.0f32; 4];
     for c in 0..4 {
