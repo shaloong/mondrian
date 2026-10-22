@@ -20254,7 +20254,8 @@ fn openfx_unit_media_original_decode_reaches_native_before_preview_downscale() {
         Some(mondrian_core::timeline_data::FieldOrder::Progressive);
     interpretation.color_space_override = Some(ColorSpace::LinearRec709);
     // Source canonical width is 3 * 4/3 = 4. This authored transform fills
-    // the 10x7 raster before the real 2x2 Preview projection, without a fit shim.
+    // the 10x7 raster before the real 2x2 then 3x2 Preview projections,
+    // without changing the author affine or adding a fit shim.
     clip.transform.set_scale(glam::Vec2::new(2.5, 1.4));
     clip.add_effect_node(effect);
     sequence.video_tracks[0].add_clip(clip).unwrap();
@@ -20271,165 +20272,213 @@ fn openfx_unit_media_original_decode_reaches_native_before_preview_downscale() {
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let sequence = state.active_sequence().unwrap();
         let snapshot = state.preview_execution_snapshot(Instant::now());
-        let context = sequence
-            .settings
-            .root_program_color_context(state.project_color_environment())
-            .unwrap();
-        let target = Resolution { width: 2, height: 2 };
-        let mut decoded_count = 0;
-        let resolved = resolve_preview_timeline_with_programs(
-            sequence,
-            &[],
-            0,
-            target,
-            mondrian_playback::PreviewResolutionScale::Quarter,
-            context,
-            &mut |request| {
-                assert_eq!(
-                    request.image_scale_requirement,
-                    EffectImageScaleRequirement::Unit
-                );
-                assert!(request.cpu_working_required);
-                assert_eq!(request.target_resolution, target);
-                let key = runtime
-                    .media_preview_key_for_timeline_request(
-                        &snapshot,
-                        &state,
-                        &request,
-                        mondrian_media::PreviewRepresentationQuality::Reduced {
-                            divisor: std::num::NonZeroU32::new(4).unwrap(),
+        let author = state.authoring.as_ref().unwrap();
+        let document_before = serde_json::to_value(author.document()).unwrap();
+        let history_before = author.history().diagnostics();
+        let generation_before = author.author_generation();
+        let mut native_identity = None;
+        let mut total_decoded = 0;
+        for (target, scales, pixel_count, invocation) in [
+            (
+                Resolution { width: 2, height: 2 },
+                [Rational::new(1, 5), Rational::new(2, 7)],
+                4,
+                1,
+            ),
+            (
+                Resolution { width: 3, height: 2 },
+                [Rational::new(3, 10), Rational::new(2, 7)],
+                6,
+                2,
+            ),
+        ] {
+            let context = sequence
+                .settings
+                .root_program_color_context(state.project_color_environment())
+                .unwrap();
+            let mut decoded_count = 0;
+            let resolved = resolve_preview_timeline_with_programs(
+                sequence,
+                &[],
+                0,
+                target,
+                mondrian_playback::PreviewResolutionScale::Quarter,
+                context,
+                &mut |request| {
+                    assert_eq!(
+                        request.image_scale_requirement,
+                        EffectImageScaleRequirement::Unit
+                    );
+                    assert!(request.cpu_working_required);
+                    assert_eq!(request.target_resolution, target);
+                    let key = runtime
+                        .media_preview_key_for_timeline_request(
+                            &snapshot,
+                            &state,
+                            &request,
+                            mondrian_media::PreviewRepresentationQuality::Reduced {
+                                divisor: std::num::NonZeroU32::new(4).unwrap(),
+                            },
+                            false,
+                            true,
+                        )
+                        .unwrap();
+                    assert_eq!(key.decode.source().path(), source);
+                    assert_eq!(
+                        key.decode.representation(),
+                        mondrian_media::PreviewDecodeRepresentation::NativeCpu
+                    );
+                    assert_eq!(key.source_resolution, Resolution { width: 3, height: 5 });
+                    assert_eq!(
+                        key.picture_geometry.sample_aspect_ratio(),
+                        SampleAspectRatio::new(4, 3).unwrap()
+                    );
+                    let token = cancellation.clone();
+                    let decoded = crate::app::preview_media_task::decode_media_preview_with_context(
+                        MediaPreviewJob {
+                            key,
+                            generation: 0,
+                            priority: MediaPreviewRequestPriority::Current,
+                            access_mode: PreviewDecodeAccessMode::RandomAccessStillFrame,
+                            adaptive_hints: PreviewDecodeAdaptiveHints::default(),
+                            hardware_decode_request: PreviewHardwareDecodeRequest::Auto,
+                            hardware_decode_device_selector: None,
+                            enqueued_at: Instant::now(),
+                            deadline_at: None,
+                            demand_identity: None,
+                            execution_id: None,
+                            residency_work: None,
                         },
-                        false,
-                        true,
-                    )
+                        0,
+                        &mut decoder,
+                        move || token.is_canceled(),
+                    );
+                    assert!(!decoded.canceled);
+                    assert!(
+                        decoded.error.is_none(),
+                        "actual media decode: {:?}",
+                        decoded.error
+                    );
+                    let media = decoded.frame.expect("real decoded/prepared CPU source");
+                    assert_eq!((media.width(), media.height()), (3, 5));
+                    assert_eq!(
+                        media.logical_resolution(),
+                        Resolution { width: 3, height: 5 }
+                    );
+                    decoded_count += 1;
+                    total_decoded += 1;
+                    PreviewTimelineMediaFrame::Ready(media)
+                },
+                &mut |_| panic!("media-only qualification"),
+                &programs,
+                &scratch,
+            );
+            assert_eq!(decoded_count, 1);
+            let PreviewTimelineResolution::Ready(resolved) = resolved else {
+                panic!("original source must reach the complete CPU Clip route")
+            };
+            assert!(matches!(
+                resolved.plan.elements.as_slice(),
+                [
+                    crate::app::preview_viewer_plan::ResolvedPreviewElement::Media {
+                        prepared_heterogeneous_route: None,
+                        ..
+                    }
+                ]
+            ));
+            let expected_sampling =
+                mondrian_core::ImageSampling::new(SampleAspectRatio::new(2, 1).unwrap(), scales)
                     .unwrap();
-                assert_eq!(key.decode.source().path(), source);
-                assert_eq!(
-                    key.decode.representation(),
-                    mondrian_media::PreviewDecodeRepresentation::NativeCpu
-                );
-                assert_eq!(key.source_resolution, Resolution { width: 3, height: 5 });
-                assert_eq!(
-                    key.picture_geometry.sample_aspect_ratio(),
-                    SampleAspectRatio::new(4, 3).unwrap()
-                );
-                let token = cancellation.clone();
-                let decoded = crate::app::preview_media_task::decode_media_preview_with_context(
-                    MediaPreviewJob {
-                        key,
-                        generation: 0,
-                        priority: MediaPreviewRequestPriority::Current,
-                        access_mode: PreviewDecodeAccessMode::RandomAccessStillFrame,
-                        adaptive_hints: PreviewDecodeAdaptiveHints::default(),
-                        hardware_decode_request: PreviewHardwareDecodeRequest::Auto,
-                        hardware_decode_device_selector: None,
-                        enqueued_at: Instant::now(),
-                        deadline_at: None,
-                        demand_identity: None,
-                        execution_id: None,
-                        residency_work: None,
-                    },
-                    0,
-                    &mut decoder,
-                    move || token.is_canceled(),
-                );
-                assert!(!decoded.canceled);
-                assert!(
-                    decoded.error.is_none(),
-                    "actual media decode: {:?}",
-                    decoded.error
-                );
-                let media = decoded.frame.expect("real decoded/prepared CPU source");
-                assert_eq!((media.width(), media.height()), (3, 5));
-                assert_eq!(
-                    media.logical_resolution(),
-                    Resolution { width: 3, height: 5 }
-                );
-                decoded_count += 1;
-                PreviewTimelineMediaFrame::Ready(media)
-            },
-            &mut |_| panic!("media-only qualification"),
-            &programs,
-            &scratch,
-        );
-        assert_eq!(decoded_count, 1);
-        let PreviewTimelineResolution::Ready(resolved) = resolved else {
-            panic!("original source must reach the complete CPU Clip route")
-        };
-        assert!(matches!(
-            resolved.plan.elements.as_slice(),
-            [
-                crate::app::preview_viewer_plan::ResolvedPreviewElement::Media {
-                    prepared_heterogeneous_route: None,
-                    ..
+            assert_eq!(resolved.plan.sampling, expected_sampling);
+            let mut checkpoint =
+                || cancellation.is_canceled().then_some(EffectProcessorStopReason::Canceled);
+            let mut control = EffectProcessorControl::new(&mut checkpoint);
+            let output = composite_resolved_preview_working(
+                target.width,
+                target.height,
+                &resolved.plan.elements,
+                &resolved.plan.color_context,
+                resolved.plan.sampling,
+                &mut scratch.borrow_mut(),
+                &mut control,
+            )
+            .unwrap();
+            let actual = output.frame.rgba_f32();
+            assert_eq!((actual.width, actual.height), (target.width, target.height));
+            assert_eq!(actual.sampling, expected_sampling);
+            assert_eq!(actual.data.len(), pixel_count);
+            // Real Basic gain .5 yields [.5,0,0,.5]. The independent Probe adds
+            // owner [20/64,7/64] and actual image PAR/16 = 1/12 to RGB.
+            // TimelineCompositeOptions::default() uses Transparent. Normal over
+            // zero coverage preserves straight RGB; the authored affine fills the
+            // target, yielding [.8125,.109375,1/12,.5] at every sample.
+            for pixel in &actual.data {
+                for (actual, expected) in pixel.iter().zip([0.8125_f32, 0.109375, 1.0 / 12.0, 0.5])
+                {
+                    assert!(
+                        (*actual - expected).abs() < 2.0e-6,
+                        "native→spatial literal: {actual} vs {expected}"
+                    );
                 }
-            ]
-        ));
-        let expected_sampling = mondrian_core::ImageSampling::new(
-            SampleAspectRatio::new(2, 1).unwrap(),
-            [Rational::new(1, 5), Rational::new(2, 7)],
-        )
-        .unwrap();
-        assert_eq!(resolved.plan.sampling, expected_sampling);
-        let mut checkpoint =
-            || cancellation.is_canceled().then_some(EffectProcessorStopReason::Canceled);
-        let mut control = EffectProcessorControl::new(&mut checkpoint);
-        let output = composite_resolved_preview_working(
-            2,
-            2,
-            &resolved.plan.elements,
-            &resolved.plan.color_context,
-            resolved.plan.sampling,
-            &mut scratch.borrow_mut(),
-            &mut control,
-        )
-        .unwrap();
-        let actual = output.frame.rgba_f32();
-        assert_eq!((actual.width, actual.height), (2, 2));
-        assert_eq!(actual.sampling, expected_sampling);
-        assert_eq!(actual.data.len(), 4);
-        // Real Basic gain .5 yields [.5,0,0,.5]. The independent Probe adds
-        // owner [20/64,7/64] and actual image PAR/16 = 1/12 to RGB.
-        // TimelineCompositeOptions::default() uses Transparent. Normal over
-        // zero coverage preserves straight RGB; the authored affine fills the
-        // target, yielding [.8125,.109375,1/12,.5] at every sample.
-        for pixel in &actual.data {
-            for (actual, expected) in pixel.iter().zip([0.8125_f32, 0.109375, 1.0 / 12.0, 0.5]) {
-                assert!(
-                    (*actual - expected).abs() < 2.0e-6,
-                    "native→spatial literal: {actual} vs {expected}"
+            }
+            let batch = control.take_feedback().unwrap();
+            assert_eq!(batch.len(), 1);
+            let receipt = batch.iter().next().unwrap();
+            assert_eq!(
+                (receipt.preparation.width, receipt.preparation.height),
+                (3, 5)
+            );
+            assert_eq!(
+                receipt.preparation.project_geometry,
+                Some(
+                    EffectProjectGeometry::new(10, 7, SampleAspectRatio::new(2, 1).unwrap())
+                        .unwrap()
+                )
+            );
+            assert!(matches!(
+                receipt.feedback.origin,
+                EffectProcessorExecutionOrigin::SupervisedChild { .. }
+            ));
+            assert_ne!(receipt.feedback.snapshot.native_owner(), 0);
+            assert_eq!(receipt.feedback.snapshot.invocation(), invocation);
+            let identity = (
+                receipt.effect_id,
+                receipt.preparation,
+                receipt.provider_revision,
+                receipt.feedback.owner,
+                receipt.feedback.origin,
+                receipt.feedback.snapshot.native_owner(),
+            );
+            if let Some(previous) = native_identity {
+                assert_eq!(
+                    identity, previous,
+                    "target raster changes retain the same original-source native owner"
                 );
             }
+            native_identity = Some(identity);
+            assert_eq!(
+                scratch.borrow().effect_execution_diagnostics().processor_instances,
+                1
+            );
+            assert_eq!(
+                mondrian_effects::effect_extension_runtime_status(&kind.key()).unwrap(),
+                initial_status
+            );
+            assert_eq!(sequence.settings.resolution, owner_extent);
+            assert_eq!(
+                sequence.settings.pixel_aspect_ratio,
+                PixelAspectRatio::Anamorphic2x
+            );
+            assert_eq!(
+                serde_json::to_value(author.document()).unwrap(),
+                document_before
+            );
+            assert_eq!(author.history().diagnostics(), history_before);
+            assert_eq!(author.author_generation(), generation_before);
         }
-        let batch = control.take_feedback().unwrap();
-        assert_eq!(batch.len(), 1);
-        let receipt = batch.iter().next().unwrap();
         assert_eq!(
-            (receipt.preparation.width, receipt.preparation.height),
-            (3, 5)
-        );
-        assert_eq!(
-            receipt.preparation.project_geometry,
-            Some(EffectProjectGeometry::new(10, 7, SampleAspectRatio::new(2, 1).unwrap()).unwrap())
-        );
-        assert!(matches!(
-            receipt.feedback.origin,
-            EffectProcessorExecutionOrigin::SupervisedChild { .. }
-        ));
-        assert_ne!(receipt.feedback.snapshot.native_owner(), 0);
-        assert_eq!(receipt.feedback.snapshot.invocation(), 1);
-        assert_eq!(
-            scratch.borrow().effect_execution_diagnostics().processor_instances,
-            1
-        );
-        assert_eq!(
-            mondrian_effects::effect_extension_runtime_status(&kind.key()).unwrap(),
-            initial_status
-        );
-        assert_eq!(sequence.settings.resolution, owner_extent);
-        assert_eq!(
-            sequence.settings.pixel_aspect_ratio,
-            PixelAspectRatio::Anamorphic2x
+            total_decoded, 2,
+            "both target rasters resolve through the actual decoder seam"
         );
     }));
     // Retire the same bank synchronously and consume every Runtime owner even
