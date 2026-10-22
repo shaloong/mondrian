@@ -6521,3 +6521,53 @@ fn scene_linear_yuv_preserves_matrix_range_and_float_rgb_without_metadata_guesse
         assert!(scaler.is_none());
     }
 }
+
+#[test]
+fn scene_linear_integer_rgb_rejects_invalid_signed_stride_before_plane_access() {
+    let mut decoded =
+        ffmpeg::util::frame::video::Video::new(ffmpeg::util::format::pixel::Pixel::RGB24, 3, 2);
+    // SAFETY: this test exclusively owns the allocated AVFrame. Its buffer
+    // remains intact; only the row declaration changes and is restored below.
+    let original_stride = unsafe { (*decoded.as_ptr()).linesize[0] };
+    assert!(original_stride >= 9);
+    for invalid_stride in [-original_stride, 0, 8] {
+        // SAFETY: exclusive frame owner; this does not change the AVBuffer.
+        unsafe {
+            (*decoded.as_mut_ptr()).linesize[0] = invalid_stride;
+        }
+        let mut plan = PreviewHardwareDecodePlan::resolve(
+            PreviewHardwareDecodeRequest::Auto,
+            PreviewDecodeAccessMode::RandomAccessStillFrame,
+            PreviewDecodeBackend::Software,
+            ffmpeg::codec::Id::PPM,
+            None,
+        );
+        let mut scaler = None;
+        let result = materialize_decoded_frame(
+            &decoded,
+            PreviewDecodeRepresentation::NativeCpu,
+            &mut plan,
+            &mut scaler,
+            &mut None,
+            &mut None,
+            3,
+            2,
+            Path::new("invalid-rgb-stride.ppm"),
+            PreviewSourceColorContract::new(
+                ColorSpace::LinearRec709,
+                DecodedVideoRangeContract::OverrideFull,
+            ),
+        );
+        // SAFETY: restore the original valid declaration before any assertion.
+        unsafe {
+            (*decoded.as_mut_ptr()).linesize[0] = original_stride;
+        }
+        let error = result
+            .expect_err("invalid signed rows must be refused without constructing a plane slice");
+        assert!(
+            error.to_string().contains("integer RGB row"),
+            "{invalid_stride}: {error}"
+        );
+        assert!(scaler.is_none());
+    }
+}
