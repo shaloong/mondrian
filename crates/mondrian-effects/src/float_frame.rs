@@ -674,7 +674,6 @@ fn validate_float32_frame_storage_controlled<E: From<EffectFloatFrameError>>(
 fn validate_storage(
     extent: EffectFrameExtent,
     format: EffectValueFormat,
-    sampling: ImageSampling,
     pixels: &[[f32; 4]],
 ) -> Result<(), EffectFloatFrameError> {
     require_float32(format)?;

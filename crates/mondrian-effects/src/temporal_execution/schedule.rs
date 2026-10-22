@@ -218,6 +218,7 @@ pub(super) fn plan_temporal_tiles(
             output_time: request.output_time,
             output_frame_seed: request.output_frame_seed,
             frame_extent: request.frame_extent,
+            sampling: request.sampling,
             output_roi: candidate,
             cancellation: request.cancellation.clone(),
         };

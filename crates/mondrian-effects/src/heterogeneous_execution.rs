@@ -5102,7 +5102,7 @@ mod tests {
             )
             .expect("complete CPU output remains pending until its real upload completes");
         assert_eq!(completion.evidence().sampling(), sampling);
-        assert_eq!(completion.boundary_values()[0].sampling(), sampling);
+        assert_eq!(completion.boundary_values()[0].frame().sampling(), sampling);
         assert_eq!(completion.boundary_values().len(), 1);
         assert_eq!(completion.boundary_values()[0].pixels(), expected);
         let transfer = completion.evidence().transfers()[0];
