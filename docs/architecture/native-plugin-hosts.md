@@ -65,7 +65,7 @@ full SHA-256 before/after the child and validates unique descriptors/deadlines.
 A selected bundle resolves through its platform Contents/architecture directory
 only when exactly one regular native binary is present.
 
-The application builds the selected Filter host on Windows, Linux and macOS from
+The application builds the selected CPU image host on Windows, Linux and macOS from
 BSD-3-Clause OpenFX HostSupport and product adapters. Separate description and
 resident execution children run real native actions. Description preserves
 Double/Integer scalars, numeric 2D/3D tuples, RGB/RGBA, Boolean, Choice, StrChoice
@@ -76,8 +76,10 @@ come from the canonical author evaluator; constants and current-frame samples
 retain distinct native query authority rather than pretending to be history.
 
 The parent supplies pinned binary identity, explicit time/rate/range/PAR and
-complete Float32 RGBA values with canonical Core association metadata. Resident instances reuse supervised workers
-and exact-sized paired shared mappings, with strict sequenced control packets
+complete Float32 RGBA values with canonical Core association metadata for Filter.
+Explicit Generator requests carry Output staging format and no incoming image.
+Resident instances reuse supervised workers and exact-sized shared mappings
+(Filter Source/Output, Generator Output only), with strict sequenced control packets
 and borrowed cancellation/deadline authority. Native code borrows mapped rasters
 only during legal actions; failed/unfetched output cannot publish an old frame.
 No plugin binary is loaded into the editor, and ordinary renders neither launch
@@ -85,8 +87,24 @@ a process nor serialize frame files. The graph executor owns native factory
 instances and charges controlled shared/executor storage; arbitrary private
 plugin allocations are not a bounded-RSS promise.
 
-This is the CPU Float32/RGBA Filter/current-frame subset. Tiles, temporal access,
-GPU execution, other contexts and custom/overlay interactions remain unavailable.
+Native qualification covers the CPU Float32/RGBA Filter/current-frame subset and
+limited Windows owned Output-only Generator Direct/real NoImage graph execution.
+The GeneratorProbe passes literal RGBA, retained-owner and pre-native frame13 refusal
+checks; a separate unfetched-Output negative also passes. Untouched official Basic
+authored/resident and SessionProbe capabilities regressions pass under their original
+supervision with empty stderr and clean owners. This is not a fully verified Generator
+context or third-party qualification; spatial Double/Normalised defaults required by
+official Rectangle remain unsupported.
+It uses owner-supplied extent/PAR/time without a fake Source. Catalog/Effect Browser
+insertion remains Filter-only. Renderer CPU-plan admission and typed composition
+reject reachable CustomSource nodes with `SourceMaterializationUnsupported` before
+their provider/raster work; a compositor caller may already have materialized media.
+Preview root/nested routes reject through their CPU blocker (`NoCompleteRootRoute`
+at root). Export uses the shared plan preflight and converts its error to text;
+that path is source-reviewed, without an independent negative runtime gate.
+Dead source nodes remain admitted.
+This does not add a Timeline source content type. Tiles, temporal access, GPU,
+General/Transition/Paint/Retimer and custom/overlay interactions remain unavailable.
 The untouched pinned official Basic and the separately owned SessionProbe
 qualify actual pixels, automation, instance reuse, edits/seeks, cancellation,
 failure isolation and selected contracts. A successful Basic run cannot qualify
@@ -327,7 +345,7 @@ Earlier SDK releases have different terms and are not an implicit substitute.
 The host must not ship third-party plugin binaries. Keep required SDK copyright
 and license notices, and review the trademark rules before using VST branding.
 
-The admitted OpenFX Adapter runs a user-installed CPU Filter behind a separate
+The admitted OpenFX Filter path runs a user-installed CPU Filter behind a separate
 supervised worker, with frame timing, pixel aspect, Float32 RGBA, and authored
 typed parameter values and canonical curve sources lowered into the Effect graph. The official Basic
 Gain reference plugin passed direct host and graph pixel comparison on Windows
@@ -440,9 +458,11 @@ untouched official pixel reference; it is never part of the product package.
 ### Resident OpenFX control and frame transport
 
 OpenFxFilterSession owns one supervised child, an ephemeral loopback listener,
-a control stream and an immutable two-frame shared mapping. The child proves a
-fresh random nonce and protocol version before receiving the selected binary or
-mapping path, validates the preparation envelope and exact file size, verifies
+a control stream and immutable context-sized shared storage: Filter has Source
+and Output ranges; Generator has only Output, with no Source allocation or copy.
+The child proves a fresh random nonce and protocol version before receiving the
+selected binary or mapping path, validates the preparation envelope and exact
+file size, verifies
 the selected binary SHA-256 and reports readiness. Plugin stdout/stderr are not
 part of the protocol. Native initialization is deferred to the first authored
 frame; later requests retain that same instance and shared ranges.
@@ -462,8 +482,8 @@ and operation deadline. A canceled, failed, malformed or timed-out operation
 terminates and reaps the child before output publication or mapping retirement.
 Graceful shutdown drops the native instance before acknowledging closure, then
 verifies process exit; a stalled shutdown is killed/reaped under a short cap.
-The authored Filter definition now binds an immutable processor factory. Its
-instances belong exclusively to each execution Session and author EffectId;
+The authored definition binds an immutable processor factory with an explicit
+input role. Its instances belong exclusively to each execution Session and author EffectId;
 preparation/rendering borrow EffectProcessorControl and propagate the observed
 scheduler stop through the transport. Transport/native faults remain faults,
 including the adapter's own timeout without an observed owner stop. This
@@ -477,9 +497,10 @@ creates a mirror token or listener thread. Owner stops kill and reap the child
 before the shared mapping is released or a frame is returned; native hang
 qualification covers cancellation and a shorter owner deadline independently.
 
-Source and Output handles borrow the current mapped frame only during legal
-OFX actions. Each fetch creates an independent property handle, sharing raster
-storage without owning it. The child maps Source read-only and Output writable.
+Filter Source and Output handles borrow the current mapped frame only during legal
+OFX actions; Generator exposes Output alone. Each fetch creates an independent
+property handle, sharing raster storage without owning it. Filter Source is
+read-only and Output writable; Generator has no incoming raster or Source clip.
 RAII retires caller addresses on every initialization/render exit, including
 exceptions. Source can be fetched during Render and user-edited change actions;
 Output is available during Render only. Its first fetch clears the current
@@ -502,20 +523,26 @@ may be shared. Image handles must be released before that action returns.
 ### Authored OpenFX execution instances and frame admission
 
 OpenFxProcessorFactory retains the helper path, pinned inspection and selected
-identifier, and starts no worker during graph evaluation. Each admitted native
-instance owns one OpenFxFilterSession. Parameter snapshots and exact frame
-context still come from the canonical author graph; edits and seeks do not use
-an alternate interpretation. The executor moves its atomic input stage into
-the host envelope, so this binding adds no input raster. Failures restore that
-stage before propagating the typed error; the caller's published frame remains
+identifier/context, and starts no worker during graph evaluation. Each admitted
+native instance owns one OpenFxFilterSession. Filter binds SingleImage; the explicit
+Generator registration binds NoImage and source-output alpha admission. Parameter
+snapshots and exact frame context still come from the canonical author graph;
+edits and seeks do not use an alternate interpretation. For Filter, the executor
+moves its atomic input stage into the host envelope, adding no input raster.
+Failures restore that stage before propagating the typed error; the caller's published frame remains
 unchanged. Session eviction, errors and observed owner stops retire the child.
 Changing only the frame generation preserves independent-frame instances;
 author occurrence, registration revision and raster extent remain exact keys.
 
-The current controlled host-frame charge is three complete Float32 rasters:
-two shared mapping ranges and the returned output vector at peak. Shared physical pages are counted once. This
-charge is checked before worker creation, together with executor staging and
-live graph values. Heterogeneous preparation includes active recipe charges
+The controlled native raster charge is context-specific: Filter retains two
+shared ranges and peaks at three rasters with its returned output; Generator
+retains one Output range and peaks at two. Both add the same fixed native owners;
+executor staging and live graph values are charged separately before worker creation.
+Shared physical pages are counted once. NoImage completion may not return capacity
+above its actual admitted staging allocation. The post-call check rejects before
+publication or retention; it cannot prevent arbitrary Rust provider allocation
+before return, and extra temporary copies belong to the factory active peak.
+Heterogeneous preparation includes active recipe charges
 in cpu_required_working_bytes(), which Export's existing attempt contract
 consumes; the batch scheduler must not see pixel scratch alone. Frame sizing
 has the same extent/size validation as the transport.
@@ -884,7 +911,8 @@ Golden receipts retain their named source scope.
 
 ### OpenFX CPU admission and canonical geometry
 
-The product host explicitly advertises Float32/RGBA Filter and CPU rendering.
+The product host advertises Float32/RGBA Filter and explicit Output-only Generator
+CPU contexts; Generator qualification is limited to the owned Windows controls above.
 The supported-depth array is populated before any plugin bootstrap or Describe
 call. The 1.5.1 CPU property is registered on descriptors; an instance starts with
 its descriptor value and owns subsequent overrides. Unsupported CPU capabilities
@@ -905,8 +933,10 @@ canonical X = pixel width times PAR, while image bounds and render windows stay
 in pixel coordinates. Rust request admission and the native C seam both refuse
 nonrepresentable canonical extents without imposing an arbitrary PAR maximum.
 These constant-time checks add no steady-state bootstrap calls or raster copies.
-GPU, temporal/other contexts, interact/author callbacks, colour negotiation and
-whole-host throughput qualification remain separate unfinished work.
+Filter/Generator duration remains host-owned. The pinned SDK permits GetTimeDomain
+only in General; Timeline Bounds queries do not implement that action. General,
+Transition/Paint/Retimer, GPU, temporal access, interact/author callbacks, colour
+negotiation and whole-host throughput remain separate unfinished work.
 
 ### Selected OpenFX binary API admission
 
@@ -1049,8 +1079,9 @@ request serial, copying input, sending a request, or advancing authored native
 parameters/render state. A failed allocation returns the typed Effects
 `OutputAllocation` host-resource refusal. It does not retire the valid native
 worker, quarantine the plugin definition, publish staged pixels, or replay the
-invocation. The admitted three-raster logical charge is unchanged: the output
-owner moves earlier, without adding another raster. Actual Vec capacity must
+invocation. Filter retains its three-raster active charge; Generator uses the
+two-raster active charge described above. Moving the output owner earlier adds
+no raster. Actual Vec capacity must
 fit the admitted output bytes. An allocator-provided larger capacity is a typed
 OutputCapacity refusal before DSP, not silently uncharged retained storage.
 Allocator usable-size and OS bookkeeping remain separate excluded frontiers.
