@@ -3805,13 +3805,17 @@ impl PluginInternal for PluginImpl {
         self.bus_activation.event_readiness = None;
         unsafe {
             if self.is_processing {
-                self.processor.setProcessing(0);
+                let result = self.processor.setProcessing(0);
+                if result != kResultOk && result != kNotImplemented {
+                    return Err(Error::Other(format!(
+                        "Failed to stop processing: {result:#x}"
+                    )));
+                }
                 self.is_processing = false;
             }
 
             if self.is_active {
-                self.set_component_active(false);
-                self.is_active = false;
+                self.deactivate_for_configuration()?;
             }
 
             // Nothing can still be sounding, so no note-on is outstanding.
