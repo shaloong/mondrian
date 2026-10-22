@@ -4016,3 +4016,4 @@ mod idle_vst3_controller;
 mod fresh_vst3_host_overlay;
 
 mod idle_clap_constant;
+mod fresh_clap_host_overlay;
