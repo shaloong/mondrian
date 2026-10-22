@@ -16,7 +16,7 @@ use mondrian_media::{
 };
 
 #[derive(Debug, Default, PartialEq, Eq)]
-struct UnenteredOwner {
+pub(super) struct UnenteredOwner {
     session: Option<AudioSessionCursorEvidence>,
     processor: Option<AudioProcessorCursorEvidence>,
 }
@@ -44,7 +44,7 @@ impl AudioContinuityEvidenceVisitor for UnenteredOwner {
     }
 }
 
-fn unentered_owner(
+pub(super) fn unentered_owner(
     renderer: &TimelineAudioPcmRenderer,
     instance: mondrian_core::AudioProcessorInstanceId,
 ) -> UnenteredOwner {

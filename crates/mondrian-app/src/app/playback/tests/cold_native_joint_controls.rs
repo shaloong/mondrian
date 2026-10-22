@@ -26,6 +26,24 @@ fn prepare_app_native_control(
     expected_parameters: usize,
     expected_state_bytes: usize,
 ) -> ColdNativeControl {
+    prepare_app_native_control_with_initializer(
+        plugin_environment,
+        expected_class,
+        expected_name,
+        expected_parameters,
+        expected_state_bytes,
+        |_, _, _| {},
+    )
+}
+
+fn prepare_app_native_control_with_initializer(
+    plugin_environment: &str,
+    expected_class: &str,
+    expected_name: &str,
+    expected_parameters: usize,
+    expected_state_bytes: usize,
+    initialize: impl FnOnce(&mut Sequence, &Arc<AssetLibrary>, &std::path::Path),
+) -> ColdNativeControl {
     let helper = std::path::PathBuf::from(
         std::env::var_os("MONDRIAN_VST3_TEST_HELPER")
             .expect("set the current normal Product helper"),
@@ -86,7 +104,7 @@ fn prepare_app_native_control(
         Some(expected_state_bytes)
     );
 
-    prepare_app_native_control_with_instance(clap, vst3, config, instance, |_, _, _| {})
+    prepare_app_native_control_with_instance(clap, vst3, config, instance, initialize)
 }
 
 fn prepare_app_clap_editor_control() -> ColdNativeControl {
@@ -3993,3 +4011,5 @@ mod headless_vst3_terminal_author;
 
 mod native_parameter_adoption;
 mod surge_parameter_adoption;
+
+mod idle_vst3_controller;
