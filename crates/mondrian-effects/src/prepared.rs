@@ -1342,6 +1342,9 @@ fn remap_graph_node_kind(
     let remap = |id| remap_graph_id(id, ids);
     Ok(match kind {
         EffectGraphNodeKind::Source => return Err(EffectGraphBuildError::InvalidGraph),
+        EffectGraphNodeKind::CustomSource { op, domain_contract } => {
+            EffectGraphNodeKind::CustomSource { op: op.clone(), domain_contract: *domain_contract }
+        }
         EffectGraphNodeKind::UnaryEffect { input, op } => {
             EffectGraphNodeKind::UnaryEffect { input: remap(*input)?, op: op.clone() }
         }

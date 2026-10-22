@@ -243,14 +243,16 @@ static bool accepted(OfxStatus status)
 
 static bool admitsIndependentFrames(const OFX::Host::ImageEffect::Base& effect,
                                     const OFX::Host::ImageEffect::ClipBase* source,
-                                    const OFX::Host::ImageEffect::ClipBase* output)
+                                    const OFX::Host::ImageEffect::ClipBase* output,
+                                    bool generator)
 {
   const int sequential = effect.getProps().getIntProperty(kOfxImageEffectInstancePropSequentialRender);
   return !effect.temporalAccess() && (sequential == 0 || sequential == 2) &&
-         source && output && !source->temporalAccess() && !output->temporalAccess();
+         output && !output->temporalAccess() &&
+         (generator ? !source : source && !source->temporalAccess());
 }
 
-static bool admitsIndependentFrames(const OFX::Host::ImageEffect::Descriptor& effect)
+static bool admitsIndependentFrames(const OFX::Host::ImageEffect::Descriptor& effect, bool generator = false)
 {
   // Filter admission runs after DescribeInContext, when both required clips exist.
   // Other optional clips remain disconnected and do not supply images.
@@ -259,20 +261,21 @@ static bool admitsIndependentFrames(const OFX::Host::ImageEffect::Descriptor& ef
   const auto output = clips.find(kOfxImageEffectOutputClipName);
   return admitsIndependentFrames(effect,
       source == clips.end() ? nullptr : source->second,
-      output == clips.end() ? nullptr : output->second);
+      output == clips.end() ? nullptr : output->second, generator) &&
+      (!generator || clips.size() == 1);
 }
 
 static bool admitsIndependentFrames(const OFX::Host::ImageEffect::Instance& effect)
 {
   return admitsIndependentFrames(effect,
       effect.getClip(kOfxImageEffectSimpleSourceClipName),
-      effect.getClip(kOfxImageEffectOutputClipName));
+      effect.getClip(kOfxImageEffectOutputClipName), effect.getContext() == kOfxImageEffectContextGenerator);
 }
 
 static int loadFrame(MondrianOpenFx::FrameState& state, const void* input,
-                     size_t frameBytes, const MondrianOpenFxFrameInfo& info)
+                     size_t frameBytes, const MondrianOpenFxFrameInfo& info, bool generator = false)
 {
-  if (!input || info.source_alpha < 0 || info.source_alpha > 2 || info.width <= 0 || info.height <= 0 ||
+  if ((generator ? input != nullptr : input == nullptr) || info.source_alpha < 0 || info.source_alpha > 2 || info.width <= 0 || info.height <= 0 ||
       info.width > 8192 || info.height > 8192 ||
       !std::isfinite(info.frame) || !std::isfinite(info.frame_rate) ||
       !std::isfinite(info.first_frame) || !std::isfinite(info.last_frame) ||
@@ -285,7 +288,7 @@ static int loadFrame(MondrianOpenFx::FrameState& state, const void* input,
       frameBytes > 128u * 1024u * 1024u) { return 2; }
   if (reinterpret_cast<uintptr_t>(input) % alignof(OfxRGBAColourF) != 0) { return 2; }
   const auto* data = static_cast<const OfxRGBAColourF*>(input);
-  for (size_t index = 0; index < pixels; ++index) {
+  for (size_t index = 0; !generator && index < pixels; ++index) {
     const auto& pixel = data[index];
     if (!std::isfinite(pixel.r) || !std::isfinite(pixel.g) ||
         !std::isfinite(pixel.b) || !std::isfinite(pixel.a) || (info.source_alpha == 2 && pixel.a != 1.0f)) { return 2; }
@@ -384,6 +387,7 @@ struct MondrianOpenFxSession {
   std::unique_ptr<SelectedPluginBinary> binary;
   std::unique_ptr<OFX::Host::ImageEffect::Instance> instance;
   bool failed = false;
+  bool generator = false;
 
   MondrianOpenFxSession() : imageCache(host) {
     cache.setCacheVersion("mondrian-openfx-v1");
@@ -555,6 +559,7 @@ struct MondrianOpenFxSession {
       }
       if (accepted(status) && !frame.invalidImageLifetime && clipsChanged) {
         for (const char* name : {"Source", "Output"}) {
+          if (generator && std::strcmp(name, "Source") == 0) { continue; }
           {
             MondrianOpenFx::ImageAccess images(frame, std::strcmp(reason, kOfxChangeUserEdited) == 0);
             status = instance->clipInstanceChangedAction(name, reason, frame.info.frame, scale);
@@ -572,8 +577,10 @@ struct MondrianOpenFxSession {
   }
 
   int initialize(const char* path, const char* bundle, const char* identifier,
-                 const MondrianOpenFx::FrameState& initial,
+                 const MondrianOpenFx::FrameState& initial, int selectedContext,
                  const MondrianOpenFxParameter* parameters, int count) {
+    generator = selectedContext == 1;
+    const char* contextName = generator ? kOfxImageEffectContextGenerator : kOfxImageEffectContextFilter;
     MondrianOpenFx::FrameBorrow borrowed(frame);
     // The C admission boundary validated these borrowed frame facts before
     // acquiring a host owner. Do not rescan the complete raster during setup.
@@ -591,9 +598,9 @@ struct MondrianOpenFxSession {
     int selectionStatus;
     auto* plugin = selectFilter(imageCache.get(), *binary, identifier, selectionStatus);
     if (!plugin) { return selectionStatus; }
-    auto* descriptor = plugin->getContext(kOfxImageEffectContextFilter);
-    if (!descriptor || !admitsCpu(*descriptor) || !admitsIndependentFrames(*descriptor) || !admitsParameterDefaults(*descriptor)) { return 7; }
-    instance.reset(plugin->createInstance(kOfxImageEffectContextFilter, &frame));
+    auto* descriptor = plugin->getContext(contextName);
+    if (!descriptor || !admitsCpu(*descriptor) || !admitsIndependentFrames(*descriptor, generator) || !admitsParameterDefaults(*descriptor)) { return 7; }
+    instance.reset(plugin->createInstance(contextName, &frame));
     if (!instance) { return 4; }
     const int applied = applyParameters(parameters, count, false, kOfxChangeUserEdited, false);
     if (applied != 0) { return applied; }
@@ -617,7 +624,7 @@ struct MondrianOpenFxSession {
     }
     const auto previous = frame.info;
     MondrianOpenFx::FrameBorrow borrowed(frame);
-    const int loaded = loadFrame(frame, input, bytes, info);
+    const int loaded = loadFrame(frame, input, bytes, info, generator);
     if (loaded != 0) { failed = true; return loaded; }
     if (!frame.beginImageBinding()) { failed = true; return 2; }
     frame.output = static_cast<OfxRGBAColourF*>(output);
@@ -666,6 +673,7 @@ struct MondrianOpenFxSession {
     }
     if (!admitsCpu(*instance) || !admitsIndependentFrames(*instance)) { return 7; }
     for (const char* name : {"Source", "Output"}) {
+      if (generator && std::strcmp(name, "Source") == 0) { continue; }
       auto* clip = instance->getClip(name);
       if (!clip || clip->getPixelDepth() != kOfxBitDepthFloat ||
           clip->getComponents() != kOfxImageComponentRGBA) { return 7; }
@@ -690,7 +698,7 @@ struct MondrianOpenFxSession {
     // Only ask for an identity whose current Source can be published without
     // fetching another clip/time or converting its fixed raster representation.
     const auto currentSourceIdentityCompatible = [&]() {
-      if (representation != info.source_alpha) { return false; }
+      if (generator || representation != info.source_alpha) { return false; }
       for (const char* name : {"Source", "Output"}) {
         const auto* clip = instance->getClip(name);
         if (!clip || !clip->getConnected() || clip->getPixelDepth() != kOfxBitDepthFloat ||
@@ -811,7 +819,7 @@ struct MondrianOpenFxSession {
 };
 
 static int describe(MondrianOpenFx::Host& host, const char* binary, const char* bundle,
-                    const char* identifier,
+                    const char* identifier, int selectedContext,
                     char* label, size_t labelCapacity, size_t* labelLength,
                     MondrianOpenFxParameterCallback callback, void* context)
 {
@@ -828,15 +836,16 @@ static int describe(MondrianOpenFx::Host& host, const char* binary, const char* 
   int selectionStatus;
   auto* plugin = selectFilter(imageEffectPluginCache.get(), selectedBinary, identifier, selectionStatus);
   if (!plugin) { return selectionStatus; }
-  auto* descriptor = plugin->getContext(kOfxImageEffectContextFilter);
-  if (!descriptor || !admitsCpu(*descriptor) || !admitsIndependentFrames(*descriptor) || !admitsParameterDefaults(*descriptor)) { return 7; }
+  const bool generator = selectedContext == 1;
+  auto* descriptor = plugin->getContext(generator ? kOfxImageEffectContextGenerator : kOfxImageEffectContextFilter);
+  if (!descriptor || !admitsCpu(*descriptor) || !admitsIndependentFrames(*descriptor, generator) || !admitsParameterDefaults(*descriptor)) { return 7; }
   const std::string& displayName = descriptor->getLabel();
   if (displayName.size() > labelCapacity) { return 7; }
   std::memcpy(label, displayName.data(), displayName.size());
   *labelLength = displayName.size();
   const auto& clips = descriptor->getClips();
-  if (clips.find("Source") == clips.end() ||
-      clips.find("Output") == clips.end()) { return 7; }
+  if ((!generator && clips.find("Source") == clips.end()) ||
+      (generator && clips.size() != 1) || clips.find("Output") == clips.end()) { return 7; }
   for (const auto& entry : clips) {
     if (entry.first != "Source" && entry.first != "Output" &&
         !entry.second->isOptional()) { return 7; }
@@ -966,7 +975,7 @@ static int describe(MondrianOpenFx::Host& host, const char* binary, const char* 
 }
 
 extern "C" int mondrian_openfx_describe(
-    const char* binary, const char* bundle, const char* identifier,
+    const char* binary, const char* bundle, const char* identifier, int selectedContext,
     char* label, size_t labelCapacity, size_t* labelLength,
     MondrianOpenFxParameterCallback callback, void* context,
     MondrianOpenFxDescribeNotices* notices) noexcept
@@ -974,12 +983,12 @@ extern "C" int mondrian_openfx_describe(
   if (!notices) { return 2; }
   *notices = {};
   try {
-    if (!binary || !bundle || !identifier || !label || !labelLength ||
+    if ((selectedContext != 0 && selectedContext != 1) || !binary || !bundle || !identifier || !label || !labelLength ||
         !callback || !context) { return 2; }
     MondrianOpenFx::Host host;
     int status;
     try {
-      status = describe(host, binary, bundle, identifier, label, labelCapacity,
+      status = describe(host, binary, bundle, identifier, selectedContext, label, labelCapacity,
                         labelLength, callback, context);
     } catch (const ImageEffectHostBusy&) { status = MONDRIAN_OPENFX_HOST_BUSY; }
     catch (const std::exception& error) {
@@ -997,7 +1006,7 @@ extern "C" int mondrian_openfx_describe(
 }
 
 extern "C" int mondrian_openfx_session_create(
-    const char* binary, const char* bundle, const char* identifier,
+    const char* binary, const char* bundle, const char* identifier, int selectedContext,
     const uint8_t* image_namespace,
     const void* input, size_t bytes, const MondrianOpenFxFrameInfo* info,
     const MondrianOpenFxParameter* parameters, int count,
@@ -1010,14 +1019,14 @@ extern "C" int mondrian_openfx_session_create(
   std::copy_n(image_namespace, namespaceCopy.size(), namespaceCopy.begin());
   if (std::all_of(namespaceCopy.begin(), namespaceCopy.end(), [](uint8_t byte) { return byte == 0; })) { return 2; }
   try {
-    if (!binary || !bundle || !identifier || !info || count < 0 || count > MondrianOpenFx::Host::kMaxParameters ||
+    if ((selectedContext != 0 && selectedContext != 1) || !binary || !bundle || !identifier || !info || count < 0 || count > MondrianOpenFx::Host::kMaxParameters ||
         (count != 0 && !parameters)) { return 2; }
     MondrianOpenFx::FrameState initial;
     initial.imageNamespace = namespaceCopy;
-    const int loaded = loadFrame(initial, input, bytes, *info);
+    const int loaded = loadFrame(initial, input, bytes, *info, selectedContext == 1);
     if (loaded != 0) { return loaded; }
     auto session = std::make_unique<MondrianOpenFxSession>();
-    const int status = session->initialize(binary, bundle, identifier, initial,
+    const int status = session->initialize(binary, bundle, identifier, initial, selectedContext,
                                           parameters, count);
     if (status == 0) { *output = session.release(); }
     return status;

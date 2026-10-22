@@ -42,6 +42,12 @@ pub(super) fn temporal_scalar_required_bytes(
                     EffectTemporalExecutionError::UnsupportedGraphNode { node_id, kind: "missing" },
                 )?;
                 match &node.kind {
+                    EffectGraphNodeKind::CustomSource { .. } => {
+                        return Err(EffectTemporalExecutionError::UnsupportedGraphNode {
+                            node_id,
+                            kind: "custom_source",
+                        })
+                    }
                     EffectGraphNodeKind::Source => {
                         return Err(EffectTemporalExecutionError::InvalidGraphLiveness {
                             reason: "source node was not normalized in the time-expanded plan",

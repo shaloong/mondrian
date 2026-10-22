@@ -746,6 +746,7 @@ fn lower_point_op(
 fn node_kind_name(kind: &EffectGraphNodeKind) -> &'static str {
     match kind {
         EffectGraphNodeKind::Source => "source",
+        EffectGraphNodeKind::CustomSource { .. } => "custom_source",
         EffectGraphNodeKind::UnaryEffect { .. } => "unary",
         EffectGraphNodeKind::DomainEffect { .. } => "domain_effect",
         EffectGraphNodeKind::Blend { .. } => "blend",

@@ -85,6 +85,7 @@ namespace MondrianOpenFx
     _properties.createProperty({kOfxImageEffectPropCPURenderSupported,
                                OFX::Host::Property::eString, 1, true, "true"});
     _properties.setStringProperty(kOfxImageEffectPropSupportedContexts, kOfxImageEffectContextFilter, 0);
+    _properties.setStringProperty(kOfxImageEffectPropSupportedContexts, kOfxImageEffectContextGenerator, 1);
     _properties.setIntProperty(kOfxImageEffectPropSupportsMultipleClipDepths, 0);
     _properties.setIntProperty(kOfxImageEffectPropSupportsMultipleClipPARs, 0);
     _properties.setIntProperty(kOfxImageEffectPropSetableFrameRate, 0);

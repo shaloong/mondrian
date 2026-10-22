@@ -216,7 +216,7 @@ namespace MondrianOpenFx {
   OFX::Host::ImageEffect::Image* FilterClipInstance::getImage(OfxTime time, const OfxRectD *optionalBounds)
   {
     const auto& frame = frameState();
-    if (!getConnected() || !frame.imagesAvailable || !frame.input ||
+    if (!getConnected() || !frame.imagesAvailable || (!isOutput() && !frame.input) ||
         (isOutput() && (!frame.output || !frame.outputAvailable)) || !std::isfinite(time) || time != frame.info.frame) {
       return nullptr;
     }

@@ -471,6 +471,7 @@ mod tests {
         EffectProcessorFeedbackReceipt {
             effect_id,
             preparation: EffectFloatProcessorPreparation {
+                input_role: mondrian_effects::EffectFloatProcessorInputRole::SingleImage,
                 effect_id,
                 width: 1,
                 height: 1,

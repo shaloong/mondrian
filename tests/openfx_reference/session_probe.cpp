@@ -53,10 +53,13 @@ bool honestHostCapabilities(const OfxHost* host) {
     int dimension = -1;
     char* value = nullptr;
     if (properties->propGetDimension(host->host, names[index], &dimension) != kOfxStatOK ||
-        dimension != 1 ||
+        dimension != (index == 2 ? 2 : 1) ||
         properties->propGetString(host->host, names[index], 0, &value) != kOfxStatOK ||
         !value || std::string(value) != expected[index]) { return false; }
   }
+  char* generator = nullptr;
+  if (properties->propGetString(host->host, kOfxImageEffectPropSupportedContexts, 1, &generator) != kOfxStatOK ||
+      !generator || std::string(generator) != kOfxImageEffectContextGenerator) { return false; }
   for (const char* name : {kOfxImageEffectPropSupportsOverlays,
                            kOfxImageEffectPropSupportsMultiResolution,
                            kOfxImageEffectPropSupportsTiles,

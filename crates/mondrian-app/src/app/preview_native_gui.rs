@@ -1035,6 +1035,7 @@ pub(crate) mod question_contract_tests {
             )
             .expect("bounded current GUI service");
         let preparation = EffectFloatProcessorPreparation {
+            input_role: mondrian_effects::EffectFloatProcessorInputRole::SingleImage,
             effect_id,
             width: 1,
             height: 1,

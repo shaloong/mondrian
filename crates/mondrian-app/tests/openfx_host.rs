@@ -5451,3 +5451,6 @@ fn product_worker_preserves_fixed_canvas_subset_and_empty_outputs() {
     assert_ne!(graph_pid, direct_pid);
     assert_fixed_canvas_actions(&directory, graph_pid);
 }
+
+#[path = "openfx_host/generator.rs"]
+mod generator;

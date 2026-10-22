@@ -2684,7 +2684,7 @@ fn hash_effect_operation_shape(
         EffectGraphNodeKind::MultiInput { .. } => hasher.update([6]),
         EffectGraphNodeKind::MaskCombine { .. } => hasher.update([7]),
         EffectGraphNodeKind::MatteMix { .. } => hasher.update([8]),
-        EffectGraphNodeKind::Source => {
+        EffectGraphNodeKind::Source | EffectGraphNodeKind::CustomSource { .. } => {
             return Err(
                 PreparedHeterogeneousEffectWorkError::UnsupportedRouteShape {
                     reason: "shape_identity_contains_source_dispatch",
@@ -3671,7 +3671,7 @@ fn execute_cpu_dag_prefix(
                     output,
                 )?
             }
-            EffectGraphNodeKind::Source => {
+            EffectGraphNodeKind::Source | EffectGraphNodeKind::CustomSource { .. } => {
                 return Err(
                     PreparedHeterogeneousEffectWorkError::UnsupportedCpuOperation {
                         node: dispatch.node,
@@ -4638,7 +4638,9 @@ fn cpu_node_scratch_frames(
         | EffectGraphNodeKind::MaskCombine { .. }
         | EffectGraphNodeKind::MatteMix { .. } => Ok(0),
         EffectGraphNodeKind::MultiInput { inputs, .. } if !inputs.is_empty() => Ok(0),
-        EffectGraphNodeKind::Source | EffectGraphNodeKind::MultiInput { .. } => {
+        EffectGraphNodeKind::Source
+        | EffectGraphNodeKind::CustomSource { .. }
+        | EffectGraphNodeKind::MultiInput { .. } => {
             Err(PreparedHeterogeneousEffectWorkError::UnsupportedCpuOperation { node: node.id })
         }
     }

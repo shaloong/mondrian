@@ -21,11 +21,11 @@ pub use diagnostic::OpenFxRenderDiagnostic;
 pub use diagnostic::OpenFxRenderPhase;
 use diagnostic::{ParentProbe, ProbeEvent};
 
-/// Hidden executable mode for a resident native Filter session.
-pub const OPENFX_RESIDENT_WORKER_ARGUMENT: &str = "--internal-openfx-session-v8";
+/// Hidden executable mode for a context-bound resident native CPU session.
+pub const OPENFX_RESIDENT_WORKER_ARGUMENT: &str = "--internal-openfx-session-v9";
 const ENDPOINT_ENV: &str = "MONDRIAN_INTERNAL_OPENFX_ENDPOINT";
 const NONCE_ENV: &str = "MONDRIAN_INTERNAL_OPENFX_NONCE";
-const VERSION: u16 = 8;
+const VERSION: u16 = 9;
 const POLL: Duration = Duration::from_millis(20);
 const RETIRE: Duration = Duration::from_millis(100);
 const FRAME_TRANSFER_BYTES: usize = 1024 * 1024;
@@ -34,6 +34,7 @@ const FRAME_TRANSFER_PIXELS: usize = FRAME_TRANSFER_BYTES / std::mem::size_of::<
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Prepare {
+    context: OpenFxContext,
     version: u16,
     nonce: String,
     binary_path: PathBuf,
@@ -380,6 +381,7 @@ pub struct OpenFxFilterSession {
     frame_bytes: usize,
     sequence: u64,
     input_format: mondrian_effects::EffectValueFormat,
+    context: OpenFxContext,
     owner: mondrian_core::EffectProcessorOwnerId,
     process_id: std::num::NonZeroU32,
     native_owner: Option<u64>,
@@ -409,6 +411,22 @@ struct ActiveQuestion {
     identity: question::QuestionIdentity,
     presented: bool,
     question: mondrian_effects::EffectProcessorLiveQuestion,
+}
+
+#[derive(Clone, Copy)]
+struct FrameRequest<'a> {
+    extent: mondrian_effects::EffectFrameExtent,
+    format: mondrian_effects::EffectValueFormat,
+    input: Option<&'a EffectFloatFrame>,
+}
+impl<'a> FrameRequest<'a> {
+    fn image(frame: &'a EffectFloatFrame) -> Self {
+        Self {
+            extent: frame.extent(),
+            format: frame.format(),
+            input: Some(frame),
+        }
+    }
 }
 
 struct RenderObservation<'a, P> {
@@ -527,6 +545,14 @@ impl OpenFxFilterSession {
         width: u32,
         height: u32,
     ) -> Result<mondrian_effects::EffectFloatProcessorStorage, OpenFxHostError> {
+        Self::storage_for_context(width, height, OpenFxContext::Filter)
+    }
+
+    pub(crate) fn storage_for_context(
+        width: u32,
+        height: u32,
+        context: OpenFxContext,
+    ) -> Result<mondrian_effects::EffectFloatProcessorStorage, OpenFxHostError> {
         let count = (width as usize)
             .checked_mul(height as usize)
             .ok_or_else(|| invalid("frame dimensions overflow"))?;
@@ -538,7 +564,11 @@ impl OpenFxFilterSession {
             })
             .ok_or_else(|| invalid("native fixed storage overflows"))?;
         let retained = frame_bytes
-            .checked_mul(2)
+            .checked_mul(if context == OpenFxContext::Filter {
+                2
+            } else {
+                1
+            })
             .and_then(|bytes| bytes.checked_add(fixed))
             .ok_or_else(|| invalid("native retained storage overflows"))?;
         let active = retained
@@ -561,6 +591,51 @@ impl OpenFxFilterSession {
         input_format: mondrian_effects::EffectValueFormat,
         owner_checkpoint: &mut dyn FnMut() -> Result<(), OpenFxHostError>,
     ) -> Result<Self, OpenFxHostError> {
+        Self::prepare_in_context(
+            helper,
+            inspection,
+            identifier,
+            width,
+            height,
+            input_format,
+            OpenFxContext::Filter,
+            owner_checkpoint,
+        )
+    }
+
+    /// Prepare a true Output-only Generator with explicit output-staging format.
+    pub fn prepare_generator(
+        helper: &Path,
+        inspection: &OpenFxBinaryInspection,
+        identifier: &str,
+        width: u32,
+        height: u32,
+        output_format: mondrian_effects::EffectValueFormat,
+        owner_checkpoint: &mut dyn FnMut() -> Result<(), OpenFxHostError>,
+    ) -> Result<Self, OpenFxHostError> {
+        Self::prepare_in_context(
+            helper,
+            inspection,
+            identifier,
+            width,
+            height,
+            output_format,
+            OpenFxContext::Generator,
+            owner_checkpoint,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn prepare_in_context(
+        helper: &Path,
+        inspection: &OpenFxBinaryInspection,
+        identifier: &str,
+        width: u32,
+        height: u32,
+        input_format: mondrian_effects::EffectValueFormat,
+        context: OpenFxContext,
+        owner_checkpoint: &mut dyn FnMut() -> Result<(), OpenFxHostError>,
+    ) -> Result<Self, OpenFxHostError> {
         owner_checkpoint()?;
         if input_format.precision() != mondrian_effects::EffectWorkingPrecision::Float32 {
             return Err(invalid("native input format is not Float32"));
@@ -573,14 +648,29 @@ impl OpenFxFilterSession {
             .ok_or_else(|| invalid("frame dimensions overflow"))?;
         let frame_bytes = validate_frame(width, height, count)?;
         let bundle = verified_selection(inspection, identifier, &mut || owner_checkpoint())?;
+        if context == OpenFxContext::Generator
+            && (input_format.domain() != mondrian_effects::EffectColorDomain::SceneLinearRgb
+                || !mondrian_effects::EffectAlphaContract::SOURCE_FLOAT
+                    .admits_source_output(input_format.alpha()))
+        {
+            return Err(invalid(
+                "Generator output-staging association is not admitted",
+            ));
+        }
+        let shared_bytes = frame_bytes
+            * if context == OpenFxContext::Filter {
+                2
+            } else {
+                1
+            };
         let file = tempfile::NamedTempFile::new()
             .map_err(|error| unavailable(format!("shared frame creation failed: {error}")))?;
         file.as_file()
-            .set_len((frame_bytes * 2) as u64)
+            .set_len(shared_bytes as u64)
             .map_err(|error| unavailable(format!("shared frame allocation failed: {error}")))?;
         // SAFETY: this exact-sized file is retained by the owner until child reap.
         // Disjoint ranges are accessed exclusively under request/response ownership.
-        let shared = unsafe { MmapOptions::new().len(frame_bytes * 2).map_mut(file.as_file()) }
+        let shared = unsafe { MmapOptions::new().len(shared_bytes).map_mut(file.as_file()) }
             .map_err(|error| unavailable(format!("shared frame mapping failed: {error}")))?;
         let listener =
             TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).map_err(control_error)?;
@@ -628,6 +718,7 @@ impl OpenFxFilterSession {
         };
         configure(&control, POLL)?;
         let prepare = Prepare {
+            context,
             version: VERSION,
             nonce: nonce.clone(),
             binary_path: inspection.binary_path.clone(),
@@ -668,6 +759,7 @@ impl OpenFxFilterSession {
             frame_bytes,
             sequence: 0,
             input_format,
+            context,
             owner,
             process_id,
             native_owner: None,
@@ -738,7 +830,53 @@ impl OpenFxFilterSession {
         self.render_owned(
             timing,
             parameters,
-            frame,
+            FrameRequest::image(frame),
+            owner_deadline,
+            RenderObservation { owner_control, gui, probe: &mut () },
+            reserve_native_output,
+        )
+    }
+
+    /// Render an Output-only Generator without any incoming image storage.
+    pub fn generate(
+        &mut self,
+        timing: &OpenFxRenderTiming,
+        parameters: &BTreeMap<String, OpenFxParameterBinding>,
+        owner_checkpoint: &mut dyn FnMut() -> Result<(), OpenFxHostError>,
+    ) -> Result<EffectFloatFrame, OpenFxHostError> {
+        self.generate_observed(
+            timing,
+            parameters,
+            None,
+            mondrian_effects::EffectProcessorGuiAdmission::CLOSED,
+            &mut |_| {
+                owner_checkpoint()?;
+                Ok(mondrian_effects::EffectProcessorQuestionState::Unavailable)
+            },
+        )
+    }
+
+    pub(crate) fn generate_observed(
+        &mut self,
+        timing: &OpenFxRenderTiming,
+        parameters: &BTreeMap<String, OpenFxParameterBinding>,
+        owner_deadline: Option<Instant>,
+        gui: mondrian_effects::EffectProcessorGuiAdmission,
+        owner_control: &mut dyn FnMut(
+            OpenFxRenderObservation<'_>,
+        ) -> Result<
+            mondrian_effects::EffectProcessorQuestionState,
+            OpenFxHostError,
+        >,
+    ) -> Result<EffectFloatFrame, OpenFxHostError> {
+        self.render_owned(
+            timing,
+            parameters,
+            FrameRequest {
+                extent: mondrian_effects::EffectFrameExtent::new(self.width, self.height),
+                format: self.input_format,
+                input: None,
+            },
             owner_deadline,
             RenderObservation { owner_control, gui, probe: &mut () },
             reserve_native_output,
@@ -765,7 +903,7 @@ impl OpenFxFilterSession {
         let result = self.render_owned(
             timing,
             parameters,
-            frame,
+            FrameRequest::image(frame),
             None,
             RenderObservation {
                 owner_control: &mut |_| {
@@ -794,7 +932,7 @@ impl OpenFxFilterSession {
         self.render_owned(
             timing,
             parameters,
-            frame,
+            FrameRequest::image(frame),
             None,
             RenderObservation {
                 owner_control: &mut |_| {
@@ -812,7 +950,7 @@ impl OpenFxFilterSession {
         &mut self,
         timing: &OpenFxRenderTiming,
         parameters: &BTreeMap<String, OpenFxParameterBinding>,
-        frame: &EffectFloatFrame,
+        frame: FrameRequest<'_>,
         owner_deadline: Option<Instant>,
         observation: RenderObservation<'_, impl ParentProbe>,
         reserve: impl FnOnce(&mut Vec<[f32; 4]>, usize) -> Result<(), std::collections::TryReserveError>,
@@ -830,15 +968,30 @@ impl OpenFxFilterSession {
         let phase = probe.start();
         let admission = (|| {
             self.process.check(&mut owner_checkpoint, deadline)?;
-            if frame.width() != self.width
-                || frame.height() != self.height
-                || frame.format() != self.input_format
+            if frame.extent.width() != self.width
+                || frame.extent.height() != self.height
+                || frame.format != self.input_format
             {
                 return Err(invalid("frame extent differs from the native session"));
             }
-            validate_render_request(timing, parameters, frame, &mut || {
-                self.process.check(&mut owner_checkpoint, deadline)
-            })
+            match (self.context, frame.input) {
+                (OpenFxContext::Filter, Some(input)) => {
+                    validate_render_request(timing, parameters, input, &mut || {
+                        self.process.check(&mut owner_checkpoint, deadline)
+                    })
+                }
+                (OpenFxContext::Generator, None) => {
+                    validate_timing(timing)?;
+                    validate_parameters(parameters)?;
+                    if !(f64::from(self.width) * timing.pixel_aspect_ratio).is_finite() {
+                        return Err(invalid("Generator canonical extent is not representable"));
+                    }
+                    self.process.check(&mut owner_checkpoint, deadline)
+                }
+                _ => Err(invalid(
+                    "frame input role differs from the selected native context",
+                )),
+            }
         })();
         probe.finish(OpenFxRenderPhase::InputAdmission, phase);
         if let Err(error) = admission {
@@ -856,7 +1009,7 @@ impl OpenFxFilterSession {
         let phase = probe.start();
         let allocation = {
             let mut checkpoint = || self.process.check(&mut owner_checkpoint, deadline);
-            NativeOutputAllocation::acquire(frame.extent(), &mut checkpoint, reserve)
+            NativeOutputAllocation::acquire(frame.extent, &mut checkpoint, reserve)
         };
         probe.finish(OpenFxRenderPhase::OutputAllocation, phase);
         let output_owner = match allocation {
@@ -888,7 +1041,7 @@ impl OpenFxFilterSession {
         &mut self,
         timing: &OpenFxRenderTiming,
         parameters: &BTreeMap<String, OpenFxParameterBinding>,
-        frame: &EffectFloatFrame,
+        frame: FrameRequest<'_>,
         observation: RenderObservation<'_, impl ParentProbe>,
         budget: &mut question_budget::QuestionExecutionBudget,
         output_owner: NativeOutputAllocation,
@@ -919,14 +1072,22 @@ impl OpenFxFilterSession {
             )
         };
         let phase = probe.start();
-        let copied = copy_native_input(
-            &mut self.shared[..self.frame_bytes],
-            frame.pixels(),
-            &mut copy_checkpoint,
-        );
+        let copied = if let Some(input) = frame.input {
+            copy_native_input(
+                &mut self.shared[..self.frame_bytes],
+                input.pixels(),
+                &mut copy_checkpoint,
+            )
+        } else {
+            Ok(())
+        };
         probe.finish(OpenFxRenderPhase::InputCopy, phase);
         copied?;
-        probe.event(ProbeEvent::InputCopied(self.frame_bytes));
+        probe.event(ProbeEvent::InputCopied(if frame.input.is_some() {
+            self.frame_bytes
+        } else {
+            0
+        }));
         let phase = probe.start();
         let request = Request::Render {
             owner: self.owner,
@@ -1071,9 +1232,13 @@ impl OpenFxFilterSession {
         self.feedback = Some(feedback);
         probe.finish(OpenFxRenderPhase::FeedbackAdmission, phase);
         probe.event(ProbeEvent::OutputAlpha(alpha));
-        let format = frame.format().with_alpha(alpha);
+        let format = frame.format.with_alpha(alpha);
         let output = materialize_native_output_profiled(
-            &self.shared[self.frame_bytes..],
+            &self.shared[if self.context == OpenFxContext::Filter {
+                self.frame_bytes
+            } else {
+                0
+            }..],
             output_owner,
             format,
             &mut checkpoint,
@@ -1765,7 +1930,7 @@ fn write_packet_committed<T: Serialize>(
 
 fn map_frames(
     prepare: &Prepare,
-) -> Result<(fs::File, memmap2::Mmap, memmap2::MmapMut), OpenFxHostError> {
+) -> Result<(fs::File, Option<memmap2::Mmap>, memmap2::MmapMut), OpenFxHostError> {
     let count = (prepare.width as usize)
         .checked_mul(prepare.height as usize)
         .ok_or_else(|| invalid("frame dimensions overflow"))?;
@@ -1776,7 +1941,8 @@ fn map_frames(
         .open(&prepare.shared_path)
         .map_err(control_error)?;
     let metadata = file.metadata().map_err(control_error)?;
-    if !metadata.is_file() || metadata.len() != (bytes * 2) as u64 {
+    let has_input = prepare.context == OpenFxContext::Filter;
+    if !metadata.is_file() || metadata.len() != (bytes * if has_input { 2 } else { 1 }) as u64 {
         return Err(invalid("shared frame has an invalid size"));
     }
     // SAFETY: the parent keeps this exact file/extent and transfers exclusive
@@ -1784,11 +1950,20 @@ fn map_frames(
     // The parent's immutable published input is copied before each request.
     // Child Source pages are read-only; a violating native plugin is isolated
     // by the supervised process without a per-frame hash or extra raster.
-    let source = unsafe { MmapOptions::new().len(bytes).map(&file) }.map_err(control_error)?;
+    let source = if has_input {
+        Some(unsafe { MmapOptions::new().len(bytes).map(&file) }.map_err(control_error)?)
+    } else {
+        None
+    };
     // SAFETY: this validated disjoint Output range has the same sequenced owner
     // and fixed file lifetime as Source; no parent access occurs during render.
-    let output = unsafe { MmapOptions::new().offset(bytes as u64).len(bytes).map_mut(&file) }
-        .map_err(control_error)?;
+    let output = unsafe {
+        MmapOptions::new()
+            .offset(if has_input { bytes as u64 } else { 0 })
+            .len(bytes)
+            .map_mut(&file)
+    }
+    .map_err(control_error)?;
     Ok((file, source, output))
 }
 
@@ -1942,13 +2117,17 @@ fn run_openfx_resident_worker_inner(
                     binary: &binary,
                     bundle: &bundle,
                     identifier: &identifier,
-                    input: &input,
+                    input: input.as_deref().unwrap_or(&[]),
                     output: &mut output,
                     session: &mut session,
                     curves: &mut curves,
                 };
                 let result = if diagnostic {
-                    let mut report = OpenFxChildRenderDiagnostic::new(owner, sequence, input.len());
+                    let mut report = OpenFxChildRenderDiagnostic::new(
+                        owner,
+                        sequence,
+                        input.as_ref().map_or(0, |input| input.len()),
+                    );
                     let started = Instant::now();
                     let mut result =
                         render_worker_request(context, sequence, timing, parameters, &mut report)?;
@@ -2099,8 +2278,9 @@ fn render_worker_request(
         )
     } else {
         let phase = probe.start();
-        let created = NativeSession::create(
+        let created = NativeSession::create_in_context(
             prepare.owner,
+            prepare.context,
             binary,
             bundle,
             identifier,
@@ -2531,6 +2711,7 @@ mod tests {
             let file = tempfile::NamedTempFile::new().expect("shared file");
             file.as_file().set_len(size).expect("malformed extent");
             let prepare = Prepare {
+                context: OpenFxContext::Filter,
                 version: VERSION,
                 nonce: String::new(),
                 binary_path: PathBuf::from("never-loaded.ofx"),
@@ -2552,6 +2733,7 @@ mod tests {
     fn parent_namespace_schema_has_one_generation_and_refuses_stale_or_missing_identity() {
         // Nonexistent paths prove envelope admission is before any map/load.
         let mut prepare = Prepare {
+            context: OpenFxContext::Filter,
             version: VERSION,
             nonce: "actual nonce".to_owned(),
             binary_path: PathBuf::from("must-never-load.ofx"),
@@ -2565,7 +2747,7 @@ mod tests {
             owner: mondrian_core::EffectProcessorOwnerId::new(),
         };
         assert!(validate_prepare_envelope(&prepare, "actual nonce").is_ok());
-        for stale in [0, 1, 2, 3, 4, 5, 6, 7, u16::MAX] {
+        for stale in [0, 1, 2, 3, 4, 5, 6, 7, 8, u16::MAX] {
             prepare.version = stale;
             assert!(matches!(
                 validate_prepare_envelope(&prepare, "actual nonce"),
@@ -3658,6 +3840,7 @@ mod process_retirement_tests {
                 mondrian_effects::EffectColorDomain::SceneLinearRgb,
                 mondrian_core::ColorFrameAlpha::StraightFloat,
             ),
+            context: OpenFxContext::Filter,
             owner: mondrian_core::EffectProcessorOwnerId::new(),
             process_id: std::num::NonZeroU32::new(pid).expect("actual child PID"),
             native_owner: None,
@@ -3893,5 +4076,66 @@ mod process_retirement_tests {
         session.shutdown().expect("retiring cleanup sends no control packet");
         assert_settled_idempotent(&mut session.process);
         session.shutdown().expect("session shutdown is idempotent");
+    }
+}
+
+#[cfg(test)]
+mod generator_storage_tests {
+    use super::*;
+    #[test]
+    fn generator_has_one_output_mapping_no_source_and_exact_per_context_charge() {
+        let filter = OpenFxFilterSession::storage_for_context(3, 2, OpenFxContext::Filter).unwrap();
+        let generator =
+            OpenFxFilterSession::storage_for_context(3, 2, OpenFxContext::Generator).unwrap();
+        assert_eq!(
+            filter.retained_bytes() - generator.retained_bytes(),
+            3 * 2 * 16
+        );
+        assert_eq!(
+            filter.active_peak_bytes() - generator.active_peak_bytes(),
+            3 * 2 * 16
+        );
+        assert_eq!(
+            generator.active_peak_bytes() - generator.retained_bytes(),
+            3 * 2 * 16,
+            "returned Vec overlaps resident mapping"
+        );
+        let file = tempfile::NamedTempFile::new().unwrap();
+        file.as_file().set_len(3 * 2 * 16).unwrap();
+        let mut prepare = Prepare {
+            context: OpenFxContext::Generator,
+            version: VERSION,
+            nonce: "nonce".to_owned(),
+            binary_path: PathBuf::new(),
+            bundle_path: PathBuf::new(),
+            binary_sha256: String::new(),
+            plugin_identifier: "test.generator".to_owned(),
+            width: 3,
+            height: 2,
+            shared_path: file.path().to_path_buf(),
+            input_alpha: mondrian_core::ColorFrameAlpha::StraightFloat,
+            owner: mondrian_core::EffectProcessorOwnerId::new(),
+        };
+        {
+            let (_, source, output) = map_frames(&prepare).expect("only Output mapping");
+            assert!(source.is_none());
+            assert_eq!(output.len(), 3 * 2 * 16);
+        }
+        prepare.context = OpenFxContext::Filter;
+        assert!(
+            map_frames(&prepare).is_err(),
+            "one mapping cannot impersonate Filter input/output"
+        );
+        let mut encoded = serde_json::to_value(&prepare).unwrap();
+        encoded.as_object_mut().unwrap().remove("context");
+        assert!(
+            serde_json::from_value::<Prepare>(encoded.clone()).is_err(),
+            "no contextless fallback"
+        );
+        encoded["context"] = serde_json::json!("general");
+        assert!(
+            serde_json::from_value::<Prepare>(encoded).is_err(),
+            "unimplemented context cannot map/load"
+        );
     }
 }

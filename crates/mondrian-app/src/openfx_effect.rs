@@ -23,9 +23,10 @@ use sha2::{Digest, Sha256};
 
 use crate::openfx_adapter::OpenFxBinaryInspection;
 use crate::openfx_host::{
-    observe_openfx_filter_with_checkpoint, OpenFxDescribeNotices, OpenFxDoubleType,
-    OpenFxFilterDescription, OpenFxFilterSession, OpenFxHostError, OpenFxParameterBinding,
-    OpenFxParameterValue, OpenFxRenderTiming, OpenFxStringMode, OPENFX_MAX_STRING_BYTES,
+    observe_openfx_filter_with_checkpoint, observe_openfx_with_checkpoint, OpenFxContext,
+    OpenFxDescribeNotices, OpenFxDoubleType, OpenFxFilterDescription, OpenFxFilterSession,
+    OpenFxHostError, OpenFxParameterBinding, OpenFxParameterValue, OpenFxRenderTiming,
+    OpenFxStringMode, OPENFX_MAX_STRING_BYTES,
 };
 
 /// A selected Filter cannot be represented by the admitted visual effect contract.
@@ -62,10 +63,12 @@ struct OpenFxProcessorFactory {
     helper: PathBuf,
     inspection: OpenFxBinaryInspection,
     identifier: String,
+    context: OpenFxContext,
 }
 
 #[derive(Debug)]
 struct OpenFxProcessorInstance {
+    context: OpenFxContext,
     session: OpenFxFilterSession,
     gui_presence: Option<std::sync::Weak<dyn mondrian_effects::EffectProcessorGuiPresence>>,
 }
@@ -94,22 +97,30 @@ fn processor_host_error(
 }
 
 impl EffectFloatProcessorFactory for OpenFxProcessorFactory {
+    fn input_role(&self) -> mondrian_effects::EffectFloatProcessorInputRole {
+        match self.context {
+            OpenFxContext::Filter => mondrian_effects::EffectFloatProcessorInputRole::SingleImage,
+            OpenFxContext::Generator => mondrian_effects::EffectFloatProcessorInputRole::NoImage,
+        }
+    }
     fn feedback_budget_bytes(&self) -> usize {
         mondrian_effects::EffectProcessorFeedbackSnapshot::maximum_retained_bytes()
     }
     fn alpha_contract(&self) -> mondrian_effects::EffectAlphaContract {
-        mondrian_effects::EffectAlphaContract::NATIVE_FLOAT
+        match self.context {
+            OpenFxContext::Filter => mondrian_effects::EffectAlphaContract::NATIVE_FLOAT,
+            OpenFxContext::Generator => mondrian_effects::EffectAlphaContract::SOURCE_FLOAT,
+        }
     }
     fn storage(
         &self,
         request: mondrian_effects::EffectFloatProcessorSizing,
     ) -> mondrian_core::Result<mondrian_effects::EffectFloatProcessorStorage> {
         let storage =
-            OpenFxFilterSession::storage(request.width, request.height).map_err(|error| {
-                MondrianError::WorkflowStepFailed {
-                    step_id: "openfx_filter_frame_contract".to_owned(),
-                    reason: error.to_string(),
-                }
+            OpenFxFilterSession::storage_for_context(request.width, request.height, self.context)
+                .map_err(|error| MondrianError::WorkflowStepFailed {
+                step_id: "openfx_filter_frame_contract".to_owned(),
+                reason: error.to_string(),
             })?;
         // The only retained GUI field is this weak trait-object pointer. GUI
         // values belong to the product projection; no native owner keeps them
@@ -138,18 +149,20 @@ impl EffectFloatProcessorFactory for OpenFxProcessorFactory {
         control.check()?;
         let result = {
             let mut checkpoint = || processor_checkpoint(control);
-            OpenFxFilterSession::prepare(
+            OpenFxFilterSession::prepare_in_context(
                 &self.helper,
                 &self.inspection,
                 &self.identifier,
                 request.width,
                 request.height,
                 request.format,
+                self.context,
                 &mut checkpoint,
             )
         };
         let session = result.map_err(|error| processor_host_error(error, control))?;
         Ok(Box::new(OpenFxProcessorInstance {
+            context: self.context,
             session,
             gui_presence: None,
         }))
@@ -280,14 +293,23 @@ impl EffectFloatProcessorInstance for OpenFxProcessorInstance {
                         }
                     }
                 };
-            self.session.render_observed(
-                &parameters.timing,
-                &parameters.values,
-                frame,
-                deadline,
-                gui,
-                &mut owner_control,
-            )
+            match self.context {
+                OpenFxContext::Filter => self.session.render_observed(
+                    &parameters.timing,
+                    &parameters.values,
+                    frame,
+                    deadline,
+                    gui,
+                    &mut owner_control,
+                ),
+                OpenFxContext::Generator => self.session.generate_observed(
+                    &parameters.timing,
+                    &parameters.values,
+                    deadline,
+                    gui,
+                    &mut owner_control,
+                ),
+            }
         };
         let output = match result {
             Ok(output) => output,
@@ -335,6 +357,32 @@ pub fn register_selected_openfx_filter(
     Ok(effect_type)
 }
 
+/// Bind an explicitly selected CPU Generator to a source-free prepared graph.
+/// This does not add a Timeline content type or a Catalog insertion command.
+pub fn register_selected_openfx_generator(
+    helper_executable: &Path,
+    inspection: &OpenFxBinaryInspection,
+    plugin_identifier: &str,
+) -> Result<EffectType, OpenFxEffectRegistrationError> {
+    let observed = observe_openfx_with_checkpoint(
+        helper_executable,
+        inspection,
+        plugin_identifier,
+        OpenFxContext::Generator,
+        &mut || Ok(()),
+    )?;
+    let effect_type = effect_type_for_generator(inspection, plugin_identifier)?;
+    let definition = build_definition_in_context(
+        helper_executable,
+        inspection,
+        observed.outcome?,
+        &effect_type,
+        OpenFxContext::Generator,
+    )?;
+    register_effect_definition(definition)?;
+    Ok(effect_type)
+}
+
 /// Cold preparation facts; notices never enter a definition or its cache.
 pub(crate) struct PreparedOpenFxFilter {
     pub definition: Result<EffectDefinition, OpenFxEffectRegistrationError>,
@@ -373,6 +421,22 @@ fn build_definition(
     inspection: &OpenFxBinaryInspection,
     description: OpenFxFilterDescription,
     effect_type: &EffectType,
+) -> Result<EffectDefinition, OpenFxEffectRegistrationError> {
+    build_definition_in_context(
+        helper_executable,
+        inspection,
+        description,
+        effect_type,
+        OpenFxContext::Filter,
+    )
+}
+
+fn build_definition_in_context(
+    helper_executable: &Path,
+    inspection: &OpenFxBinaryInspection,
+    description: OpenFxFilterDescription,
+    effect_type: &EffectType,
+    context: OpenFxContext,
 ) -> Result<EffectDefinition, OpenFxEffectRegistrationError> {
     let plugin = inspection
         .plugins
@@ -758,6 +822,7 @@ fn build_definition(
         helper: helper_executable.to_path_buf(),
         inspection: inspection.clone(),
         identifier: description.identifier.clone(),
+        context,
     });
     Ok(EffectDefinition::new(
         effect_type.key(),
@@ -810,6 +875,27 @@ fn effect_type_for_filter(
     )))
 }
 
+fn effect_type_for_generator(
+    inspection: &OpenFxBinaryInspection,
+    plugin_identifier: &str,
+) -> Result<EffectType, OpenFxEffectRegistrationError> {
+    let plugin = inspection
+        .plugins
+        .iter()
+        .find(|plugin| plugin.identifier == plugin_identifier)
+        .ok_or_else(|| {
+            OpenFxEffectRegistrationError::Schema("selected plugin is missing".into())
+        })?;
+    let identity = format!(
+        "generator\0{}\0{}.{}\0{}",
+        plugin_identifier, plugin.version_major, plugin.version_minor, inspection.binary_sha256
+    );
+    Ok(EffectType::External(stable_key(
+        "openfx.generator.",
+        identity.as_bytes(),
+    )))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -821,6 +907,31 @@ mod tests {
     use mondrian_effects::{
         instantiate_effect_node, EffectFrameContext, LutPreparationCache, PreparedEffectProgram,
     };
+
+    #[test]
+    fn generator_context_identity_is_disjoint_and_filter_identity_is_unchanged() {
+        let identifier = "test.mondrian.dual.context";
+        let inspection = OpenFxBinaryInspection {
+            binary_path: PathBuf::from("never-loaded.ofx"),
+            binary_sha256: "a".repeat(64),
+            plugins: vec![OpenFxPluginDescriptor {
+                identifier: identifier.to_owned(),
+                api_version: 1,
+                version_major: 2,
+                version_minor: 3,
+            }],
+        };
+        let historical = format!("{}\0{}.{}\0{}", identifier, 2, 3, inspection.binary_sha256);
+        let filter = effect_type_for_filter(&inspection, identifier).unwrap();
+        assert_eq!(filter.key(), stable_key("openfx.", historical.as_bytes()));
+        let generator = effect_type_for_generator(&inspection, identifier).unwrap();
+        assert_ne!(generator, filter);
+        assert!(generator.key().starts_with("openfx.generator."));
+        assert_eq!(
+            generator,
+            effect_type_for_generator(&inspection, identifier).unwrap()
+        );
+    }
 
     #[test]
     fn canceled_preparation_never_registers_a_filter_definition() {
@@ -1103,8 +1214,9 @@ mod tests {
             width: 2,
             height: 3,
         };
-        let storage = OpenFxFilterSession::storage(request.width, request.height)
-            .expect("complete processor storage");
+        let storage =
+            OpenFxFilterSession::storage_for_context(request.width, request.height, self.context)
+                .expect("complete processor storage");
         let fixed = crate::openfx_host::native_thread_resident_bytes()
             .expect("native owner charge")
             + crate::openfx_host::native_auxiliary_resident_bytes()

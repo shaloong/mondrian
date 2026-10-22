@@ -3,12 +3,13 @@
 use super::*;
 use mondrian_effects::{EffectProcessorNotice, EffectProcessorNoticeKind};
 
-const DESCRIBE_SCHEMA: u32 = 2;
+const DESCRIBE_SCHEMA: u32 = 3;
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct DescribeRequest {
     pub(super) schema_version: u32,
+    pub(super) context: OpenFxContext,
     pub(super) binary_path: PathBuf,
     pub(super) bundle_path: PathBuf,
     pub(super) binary_sha256: String,
@@ -170,12 +171,45 @@ pub(crate) fn observe_openfx_filter_with_checkpoint(
     plugin_identifier: &str,
     checkpoint: &mut impl FnMut() -> Result<(), OpenFxHostError>,
 ) -> Result<OpenFxDescriptionObservation, OpenFxHostError> {
+    observe_openfx_with_checkpoint(
+        helper_executable,
+        inspection,
+        plugin_identifier,
+        OpenFxContext::Filter,
+        checkpoint,
+    )
+}
+
+/// Describe the independently selected output-only Generator context.
+pub fn describe_openfx_generator(
+    helper_executable: &Path,
+    inspection: &OpenFxBinaryInspection,
+    plugin_identifier: &str,
+) -> Result<OpenFxFilterDescription, OpenFxHostError> {
+    observe_openfx_with_checkpoint(
+        helper_executable,
+        inspection,
+        plugin_identifier,
+        OpenFxContext::Generator,
+        &mut || Ok(()),
+    )?
+    .outcome
+}
+
+pub(crate) fn observe_openfx_with_checkpoint(
+    helper_executable: &Path,
+    inspection: &OpenFxBinaryInspection,
+    plugin_identifier: &str,
+    context: OpenFxContext,
+    checkpoint: &mut impl FnMut() -> Result<(), OpenFxHostError>,
+) -> Result<OpenFxDescriptionObservation, OpenFxHostError> {
     checkpoint()?;
     let bundle = verified_selection(inspection, plugin_identifier, checkpoint)?;
     let staging = tempfile::tempdir()
         .map_err(|error| unavailable(format!("description staging failed: {error}")))?;
     let request = DescribeRequest {
         schema_version: DESCRIBE_SCHEMA,
+        context,
         binary_path: inspection.binary_path.clone(),
         bundle_path: bundle,
         binary_sha256: inspection.binary_sha256.clone(),
@@ -280,6 +314,7 @@ pub(super) fn describe_in_worker(
             binary.as_ptr(),
             bundle.as_ptr(),
             identifier.as_ptr(),
+            request.context.native(),
             label.as_mut_ptr().cast(),
             label.len(),
             &mut label_length,
@@ -372,7 +407,7 @@ mod tests {
 
     #[test]
     fn describe_schema_rejects_old_wrong_and_unknown_requests_and_responses() {
-        let mut request = serde_json::json!({"schema_version":2,"binary_path":"none","bundle_path":"none","binary_sha256":"a","plugin_identifier":"test"});
+        let mut request = serde_json::json!({"schema_version":3,"context":"filter","binary_path":"none","bundle_path":"none","binary_sha256":"a","plugin_identifier":"test"});
         assert!(serde_json::from_value::<DescribeRequest>(request.clone()).is_ok());
         request.as_object_mut().unwrap().remove("schema_version");
         assert!(serde_json::from_value::<DescribeRequest>(request.clone()).is_err());
@@ -381,7 +416,7 @@ mod tests {
         assert!(
             matches!(describe_in_worker(&wrong), Err(OpenFxHostError::Invalid(reason)) if reason.contains("schema"))
         );
-        request["schema_version"] = serde_json::json!(2);
+        request["schema_version"] = serde_json::json!(3);
         request["unexpected"] = serde_json::json!(0);
         assert!(serde_json::from_value::<DescribeRequest>(request).is_err());
         // This frozen legacy consumer shape rejects the new mandatory field.
@@ -410,10 +445,10 @@ mod tests {
             )
         );
         let mut new = old;
-        new["schema_version"] = serde_json::json!(2);
+        new["schema_version"] = serde_json::json!(3);
         assert!(serde_json::from_value::<OldRequest>(new).is_err());
         let current = DescribeResponse::Success {
-            schema_version: 2,
+            schema_version: DESCRIBE_SCHEMA,
             description: description(),
             notices: report(),
         };
@@ -448,7 +483,7 @@ mod tests {
         assert_eq!(old_description, description());
         assert!(serde_json::from_value::<DescribeResponse>(old).is_err());
         let new = serde_json::to_value(DescribeResponse::Rejected {
-            schema_version: 2,
+            schema_version: DESCRIBE_SCHEMA,
             status: 7,
             reason: Some("native".into()),
             notices: report(),
@@ -470,7 +505,7 @@ mod tests {
         notices.complete = false;
         let observed = accept_response(
             DescribeResponse::Rejected {
-                schema_version: 2,
+                schema_version: DESCRIBE_SCHEMA,
                 status: 8,
                 reason: Some("original callback failure".into()),
                 notices,
@@ -515,7 +550,7 @@ mod tests {
             notices.fatal = fatal;
             assert!(accept_response(
                 DescribeResponse::Success {
-                    schema_version: 2,
+                    schema_version: DESCRIBE_SCHEMA,
                     description: description(),
                     notices
                 },

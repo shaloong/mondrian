@@ -208,6 +208,12 @@ impl TemporalProgramBuilder<'_> {
         self.visit.insert(address, VisitState::Visiting);
         match node.kind {
             EffectGraphNodeKind::Source => unreachable!("source was normalized above"),
+            EffectGraphNodeKind::CustomSource { .. } => {
+                return Err(EffectTemporalExecutionError::UnsupportedGraphNode {
+                    node_id,
+                    kind: "custom_source",
+                })
+            }
             EffectGraphNodeKind::UnaryEffect { input, op }
             | EffectGraphNodeKind::DomainEffect { input, op, .. } => {
                 let input_address = self.visit_graph_value(context, input)?;

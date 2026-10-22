@@ -32,6 +32,10 @@ impl EffectProcessorFeedbackRequirements {
                 op: crate::EffectRenderOp::Custom { processor: Some(binding), .. },
                 ..
             }
+            | crate::EffectGraphNodeKind::CustomSource {
+                op: crate::EffectRenderOp::Custom { processor: Some(binding), .. },
+                ..
+            }
             | crate::EffectGraphNodeKind::DomainEffect {
                 op: crate::EffectRenderOp::Custom { processor: Some(binding), .. },
                 ..
@@ -539,6 +543,7 @@ mod tests {
         EffectProcessorFeedbackReceipt {
             effect_id,
             preparation: crate::EffectFloatProcessorPreparation {
+                input_role: crate::EffectFloatProcessorInputRole::SingleImage,
                 effect_id,
                 width: 1,
                 height: 1,

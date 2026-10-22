@@ -58,7 +58,7 @@ struct MondrianOpenFxParameter {
 };
 
 struct MondrianOpenFxFrameInfo {
-  int source_alpha; // 0: unassociated Float, 1: associated Float, 2: opaque
+  int source_alpha; // Filter input or Generator output staging: 0 straight Float, 1 associated Float, 2 opaque
   int width;
   int height;
   double frame;
@@ -118,6 +118,7 @@ int mondrian_openfx_describe(
     const char* binary,
     const char* bundle,
     const char* identifier,
+    int selected_context, // 0: Filter, 1: Generator; every other value refused
     char* label,
     size_t label_capacity,
     size_t* label_length,
@@ -141,6 +142,7 @@ struct MondrianOpenFxSession;
 
 int mondrian_openfx_session_create(
     const char* binary, const char* bundle, const char* identifier,
+    int selected_context, // 0: Filter with input, 1: Output-only Generator with null input
     const uint8_t* image_namespace, // exactly 16 parent-issued bytes; copied once
     const void* input, size_t frame_bytes,
     const struct MondrianOpenFxFrameInfo* frame_info,

@@ -5,9 +5,12 @@ mod description;
 #[cfg(test)]
 use description::{describe_in_worker, DescribeRequest, DescribeResponse};
 pub use description::{
-    describe_openfx_filter, describe_openfx_filter_with_checkpoint, run_openfx_describe_worker,
+    describe_openfx_filter, describe_openfx_filter_with_checkpoint, describe_openfx_generator,
+    run_openfx_describe_worker,
 };
-pub(crate) use description::{observe_openfx_filter_with_checkpoint, OpenFxDescribeNotices};
+pub(crate) use description::{
+    observe_openfx_filter_with_checkpoint, observe_openfx_with_checkpoint, OpenFxDescribeNotices,
+};
 mod resident;
 pub use resident::{
     run_openfx_resident_worker, OpenFxFilterSession, OpenFxRenderObservation,
@@ -288,6 +291,22 @@ pub struct OpenFxParameterDescription {
     pub secret: bool,
     /// Whether the plugin initially enables this parameter.
     pub enabled: bool,
+}
+
+/// Context retained by the immutable selection and both supervised protocols.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum OpenFxContext {
+    Filter,
+    Generator,
+}
+impl OpenFxContext {
+    const fn native(self) -> c_int {
+        match self {
+            Self::Filter => 0,
+            Self::Generator => 1,
+        }
+    }
 }
 
 /// Descriptor of one selected installed Filter context.
@@ -621,6 +640,7 @@ unsafe extern "C" {
         binary: *const c_char,
         bundle: *const c_char,
         identifier: *const c_char,
+        selected_context: c_int,
         label: *mut c_char,
         label_capacity: usize,
         label_length: *mut usize,
@@ -632,6 +652,7 @@ unsafe extern "C" {
         binary: *const c_char,
         bundle: *const c_char,
         identifier: *const c_char,
+        selected_context: c_int,
         image_namespace: *const u8,
         input: *const c_void,
         frame_bytes: usize,
@@ -670,6 +691,7 @@ struct NativeSession {
 }
 
 impl NativeSession {
+    #[cfg(any(test, feature = "validation"))]
     fn create(
         owner: mondrian_core::EffectProcessorOwnerId,
         binary: &CString,
@@ -679,7 +701,30 @@ impl NativeSession {
         info: &NativeFrameInfo,
         parameters: &[NativeParameter],
     ) -> Result<Self, c_int> {
-        if owner.0.is_nil() {
+        Self::create_in_context(
+            owner,
+            OpenFxContext::Filter,
+            binary,
+            bundle,
+            identifier,
+            input,
+            info,
+            parameters,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn create_in_context(
+        owner: mondrian_core::EffectProcessorOwnerId,
+        context: OpenFxContext,
+        binary: &CString,
+        bundle: &CString,
+        identifier: &CString,
+        input: &[u8],
+        info: &NativeFrameInfo,
+        parameters: &[NativeParameter],
+    ) -> Result<Self, c_int> {
+        if owner.0.is_nil() || (context == OpenFxContext::Generator && !input.is_empty()) {
             return Err(2);
         }
         // SAFETY: every field is an integer, float or fixed integer array;
@@ -694,9 +739,18 @@ impl NativeSession {
                 binary.as_ptr(),
                 bundle.as_ptr(),
                 identifier.as_ptr(),
+                context.native(),
                 owner.0.as_bytes().as_ptr(),
-                input.as_ptr().cast(),
-                input.len(),
+                if context == OpenFxContext::Generator {
+                    std::ptr::null()
+                } else {
+                    input.as_ptr().cast()
+                },
+                if context == OpenFxContext::Filter {
+                    input.len()
+                } else {
+                    (info.width as usize).saturating_mul(info.height as usize).saturating_mul(16)
+                },
                 info,
                 parameters.as_ptr(),
                 parameters.len() as c_int,
@@ -744,7 +798,7 @@ impl NativeSession {
         diagnostic: Option<&mut resident::child_diagnostic::NativeRenderDiagnostic>,
     ) -> Result<mondrian_core::ColorFrameAlpha, NativeRenderError> {
         self.feedback = None;
-        if output.len() != input.len() {
+        if !input.is_empty() && output.len() != input.len() {
             return Err(NativeRenderError::Rejected(2));
         }
         // SAFETY: The exclusive live handle serializes native actions. Disjoint
@@ -753,9 +807,13 @@ impl NativeSession {
         let status = unsafe {
             mondrian_openfx_session_render(
                 self.handle.as_ptr(),
-                input.as_ptr().cast(),
+                if input.is_empty() {
+                    std::ptr::null()
+                } else {
+                    input.as_ptr().cast()
+                },
                 output.as_mut_ptr().cast(),
-                input.len(),
+                output.len(),
                 info,
                 parameters.as_ptr(),
                 parameters.len() as c_int,
@@ -3233,6 +3291,7 @@ pub(crate) mod shared_frame_tests {
                     binary.as_ptr(),
                     bundle.as_ptr(),
                     identifier.as_ptr(),
+                    OpenFxContext::Filter.native(),
                     namespace,
                     input.as_ptr().cast(),
                     input.len(),

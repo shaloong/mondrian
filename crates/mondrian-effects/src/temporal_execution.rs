@@ -1660,6 +1660,12 @@ impl<'a> ScalarTemporalEvaluator<'a> {
                         },
                     )?;
                     match node.kind {
+                        EffectGraphNodeKind::CustomSource { .. } => {
+                            return Err(EffectTemporalExecutionError::UnsupportedGraphNode {
+                                node_id,
+                                kind: "custom_source",
+                            })
+                        }
                         EffectGraphNodeKind::Source => {
                             return Err(EffectTemporalExecutionError::InvalidGraphLiveness {
                                 reason:

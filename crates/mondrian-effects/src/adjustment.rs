@@ -320,6 +320,46 @@ pub(crate) fn apply_custom_render_op_f32(
     working: &mut crate::EffectFloatFrame,
     op: &EffectRenderOp,
     frame_seed: i64,
+    session: Option<&mut crate::EffectExecutionSession>,
+    caller_owned_bytes: usize,
+    control: &mut crate::EffectProcessorControl<'_>,
+) -> Result<usize, EffectExecutionError> {
+    apply_custom_render_op_f32_for_role(
+        working,
+        crate::EffectFloatProcessorInputRole::SingleImage,
+        op,
+        frame_seed,
+        session,
+        caller_owned_bytes,
+        control,
+    )
+}
+
+pub(crate) fn apply_custom_source_op_f32(
+    output: &mut crate::EffectFloatFrame,
+    op: &EffectRenderOp,
+    frame_seed: i64,
+    session: &mut crate::EffectExecutionSession,
+    caller_owned_bytes: usize,
+    control: &mut crate::EffectProcessorControl<'_>,
+) -> Result<usize, EffectExecutionError> {
+    apply_custom_render_op_f32_for_role(
+        output,
+        crate::EffectFloatProcessorInputRole::NoImage,
+        op,
+        frame_seed,
+        Some(session),
+        caller_owned_bytes,
+        control,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn apply_custom_render_op_f32_for_role(
+    working: &mut crate::EffectFloatFrame,
+    input_role: crate::EffectFloatProcessorInputRole,
+    op: &EffectRenderOp,
+    frame_seed: i64,
     mut session: Option<&mut crate::EffectExecutionSession>,
     caller_owned_bytes: usize,
     control: &mut crate::EffectProcessorControl<'_>,
@@ -333,12 +373,19 @@ pub(crate) fn apply_custom_render_op_f32(
     let Some(processor) = processor else {
         return Err(EffectExecutionError::CustomProcessorUnavailable { key: key.clone() });
     };
+    if processor.input_role() != input_role {
+        return Err(EffectExecutionError::CustomProcessorUnavailable { key: key.clone() });
+    }
     control.check().map_err(|_| EffectExecutionError::CustomProcessorStopped {
         reason: control.stop_reason().unwrap_or(crate::EffectProcessorStopReason::Canceled),
     })?;
     let available_working_bytes = if processor.float32_factory().is_some() {
         if let Some(owner) = session.as_deref_mut() {
-            let staging_bytes = working.len().saturating_mul(std::mem::size_of::<[f32; 4]>());
+            let staging_bytes = if input_role == crate::EffectFloatProcessorInputRole::SingleImage {
+                working.len().saturating_mul(std::mem::size_of::<[f32; 4]>())
+            } else {
+                0
+            };
             let occupied = caller_owned_bytes
                 .saturating_add(staging_bytes)
                 .saturating_add(control.feedback_retained_bytes());
@@ -360,15 +407,30 @@ pub(crate) fn apply_custom_render_op_f32(
     } else {
         usize::MAX
     };
-    let mut staged = working.clone();
+    // Unary writes stay atomic. A source owns unpublished output staging,
+    // so move that allocation rather than clone a fictitious incoming image.
+    let mut staged = if input_role == crate::EffectFloatProcessorInputRole::SingleImage {
+        working.clone()
+    } else {
+        let empty = crate::EffectFloatFrame::from_validated_parts(
+            crate::EffectFrameExtent::new(0, 0),
+            working.format(),
+            Vec::new(),
+        );
+        std::mem::replace(working, empty)
+    };
     let contract = processor.alpha_contract();
-    if !contract.inputs().contains(staged.alpha()) {
+    if input_role == crate::EffectFloatProcessorInputRole::SingleImage
+        && !contract.inputs().contains(staged.alpha())
+    {
         staged = crate::materialize_straight_coverage(
             staged,
             crate::EffectAlphaConsumer::StraightCoverageOperation,
         )?;
     }
-    if !contract.inputs().contains(staged.alpha()) {
+    if input_role == crate::EffectFloatProcessorInputRole::SingleImage
+        && !contract.inputs().contains(staged.alpha())
+    {
         return Err(crate::EffectFloatFrameError::ConsumerNotAdmitted {
             consumer: crate::EffectAlphaConsumer::StraightCoverageOperation,
             alpha: staged.alpha(),
@@ -391,6 +453,7 @@ pub(crate) fn apply_custom_render_op_f32(
             owner.processors.process(
                 factory,
                 crate::EffectFloatProcessorPreparation {
+                    input_role,
                     effect_id,
                     width: extent.width(),
                     height: extent.height(),
@@ -420,6 +483,7 @@ pub(crate) fn apply_custom_render_op_f32(
             extent,
             input_format,
             contract,
+            input_role,
             control,
         )?;
         Ok(processor_bytes)

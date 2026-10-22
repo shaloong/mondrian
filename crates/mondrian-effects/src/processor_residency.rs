@@ -295,7 +295,8 @@ impl<'a> EffectProcessorControl<'a> {
 
 /// Conservative sizing across every association admitted by the provider.
 ///
-/// Cold admission precedes negotiation; it must not invent one input format.
+/// Cold admission precedes negotiation: SingleImage covers every input
+/// association; NoImage covers every explicit output association.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EffectFloatProcessorSizing {
     /// Author-owned compiled occurrence.
@@ -304,14 +305,25 @@ pub struct EffectFloatProcessorSizing {
     pub width: u32,
     /// Raster height.
     pub height: u32,
-    /// Every admitted association whose resident resources are covered.
+    /// Input associations for SingleImage, output associations for NoImage.
     pub alpha_formats: crate::ColorFrameAlphaFormats,
+}
+
+/// Whether a provider consumes an image or produces one from explicit output staging.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum EffectFloatProcessorInputRole {
+    /// One complete incoming image.
+    SingleImage,
+    /// No incoming image; format describes the output staging allocation.
+    NoImage,
 }
 
 /// Identity and exact format for one reusable processor occurrence.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EffectFloatProcessorPreparation {
-    /// Exact immutable input format, including association and alpha numeric domain.
+    /// Immutable image role, checked against the factory before storage or prepare.
+    pub input_role: EffectFloatProcessorInputRole,
+    /// Exact input format for SingleImage, or output staging format for NoImage.
     pub format: crate::EffectValueFormat,
     /// Author-owned effect identity retained by the compiler.
     pub effect_id: EffectId,
@@ -480,6 +492,10 @@ impl EffectFloatProcessorStorage {
 /// Immutable recipe retained by a prepared program, without shared mutable
 /// native instances. Each execution session prepares its own instance.
 pub trait EffectFloatProcessorFactory: std::fmt::Debug + Send + Sync {
+    /// Immutable arity declaration; existing providers consume one image.
+    fn input_role(&self) -> EffectFloatProcessorInputRole {
+        EffectFloatProcessorInputRole::SingleImage
+    }
     /// Immutable input admission and complete output negotiation declaration.
     fn alpha_contract(&self) -> crate::EffectAlphaContract;
     /// Maximum returned feedback logical bytes, zero when this provider has none.
@@ -513,12 +529,20 @@ pub(crate) fn frame_processor_charge(
     let Some(effect_id) = binding.occurrence_id() else {
         return Err(crate::EffectExecutionError::CustomProcessorUnavailable { key: key.clone() });
     };
+    if factory.input_role() != binding.input_role()
+        || factory.alpha_contract() != binding.alpha_contract()
+    {
+        return Err(crate::EffectExecutionError::CustomProcessorUnavailable { key: key.clone() });
+    }
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         factory.storage(EffectFloatProcessorSizing {
             effect_id,
             width,
             height,
-            alpha_formats: binding.alpha_contract().inputs(),
+            alpha_formats: match binding.input_role() {
+                EffectFloatProcessorInputRole::SingleImage => binding.alpha_contract().inputs(),
+                EffectFloatProcessorInputRole::NoImage => binding.alpha_contract().source_outputs(),
+            },
         })
     }))
     .map_err(release_known_processor_panic);
@@ -564,6 +588,7 @@ pub(crate) fn validate_completed_processor_frame(
     extent: crate::EffectFrameExtent,
     format: crate::EffectValueFormat,
     contract: crate::EffectAlphaContract,
+    input_role: EffectFloatProcessorInputRole,
     control: &mut EffectProcessorControl<'_>,
 ) -> std::result::Result<(), FloatProcessorError> {
     control.check()?;
@@ -586,7 +611,13 @@ pub(crate) fn validate_completed_processor_frame(
         }
         .into());
     }
-    if !contract.admits_output(format.alpha(), pixels.alpha()) {
+    let admitted = match input_role {
+        EffectFloatProcessorInputRole::SingleImage => {
+            contract.admits_output(format.alpha(), pixels.alpha())
+        }
+        EffectFloatProcessorInputRole::NoImage => contract.admits_source_output(pixels.alpha()),
+    };
+    if !admitted {
         return Err(crate::EffectFloatFrameError::ProcessorOutputContract {
             contract,
             input: format.alpha(),
@@ -800,6 +831,22 @@ impl FloatProcessorResidency {
             }
             .into());
         }
+        let role = factory.input_role();
+        let contract = factory.alpha_contract();
+        let valid = match role {
+            EffectFloatProcessorInputRole::SingleImage => contract.is_valid(),
+            EffectFloatProcessorInputRole::NoImage => {
+                contract.is_valid_source() && contract.admits_source_output(request.format.alpha())
+            }
+        };
+        if request.input_role != role || !valid {
+            return Err(MondrianError::WorkflowStepFailed {
+                step_id: "effect_processor_role".to_owned(),
+                reason: "processor role or output declaration does not match its request"
+                    .to_owned(),
+            }
+            .into());
+        }
         self.trim(max_instances, max_bytes);
         let key = ResourceKey { request, revision };
         // Dimension/revision changes retire this occurrence's obsolete worker.
@@ -821,7 +868,10 @@ impl FloatProcessorResidency {
             effect_id: request.effect_id,
             width: request.width,
             height: request.height,
-            alpha_formats: factory.alpha_contract().inputs(),
+            alpha_formats: match role {
+                EffectFloatProcessorInputRole::SingleImage => contract.inputs(),
+                EffectFloatProcessorInputRole::NoImage => contract.source_outputs(),
+            },
         })?;
         control.check()?;
         let active = storage.active_peak_bytes();
@@ -992,13 +1042,7 @@ impl FloatProcessorResidency {
             }
             .into());
         }
-        validate_completed_processor_frame(
-            pixels,
-            extent,
-            format,
-            factory.alpha_contract(),
-            control,
-        )?;
+        validate_completed_processor_frame(pixels, extent, format, contract, role, control)?;
         let retention = self.retain_completed(key, retained, instance, retain);
         if let Some(feedback) = feedback {
             control.feedback.push(bind(feedback, retention));
@@ -1969,6 +2013,7 @@ mod tests {
             .expect("admitted process");
         };
         let first = EffectFloatProcessorPreparation {
+            input_role: crate::EffectFloatProcessorInputRole::SingleImage,
             format: crate::EffectValueFormat::new(
                 crate::EffectWorkingPrecision::Float32,
                 crate::EffectColorDomain::SceneLinearRgb,
@@ -2005,6 +2050,7 @@ mod tests {
         let factory: Arc<dyn EffectFloatProcessorFactory> = concrete.clone();
         let mut bank = FloatProcessorResidency::default();
         let first = EffectFloatProcessorPreparation {
+            input_role: crate::EffectFloatProcessorInputRole::SingleImage,
             format: crate::EffectValueFormat::new(
                 crate::EffectWorkingPrecision::Float32,
                 crate::EffectColorDomain::SceneLinearRgb,
@@ -2064,6 +2110,7 @@ mod tests {
         let factory: Arc<dyn EffectFloatProcessorFactory> = concrete.clone();
         let mut bank = FloatProcessorResidency::default();
         let request = EffectFloatProcessorPreparation {
+            input_role: crate::EffectFloatProcessorInputRole::SingleImage,
             format: crate::EffectValueFormat::new(
                 crate::EffectWorkingPrecision::Float32,
                 crate::EffectColorDomain::SceneLinearRgb,
@@ -2430,6 +2477,7 @@ mod tests {
     }
     fn resource_request(frame: &EffectFloatFrame) -> EffectFloatProcessorPreparation {
         EffectFloatProcessorPreparation {
+            input_role: crate::EffectFloatProcessorInputRole::SingleImage,
             effect_id: EffectId::new(),
             width: frame.width(),
             height: frame.height(),
@@ -3406,6 +3454,7 @@ mod feedback_contract_tests {
     }
     fn request(frame: &EffectFloatFrame) -> EffectFloatProcessorPreparation {
         EffectFloatProcessorPreparation {
+            input_role: crate::EffectFloatProcessorInputRole::SingleImage,
             effect_id: EffectId::new(),
             width: 1,
             height: 1,
@@ -4036,6 +4085,7 @@ mod completion_boundary_tests {
         )
         .expect("complete finite coverage input");
         let request = EffectFloatProcessorPreparation {
+            input_role: crate::EffectFloatProcessorInputRole::SingleImage,
             effect_id: EffectId::new(),
             width,
             height,
@@ -4371,6 +4421,7 @@ mod gui_reconciliation_contract_tests {
         let mut healthy_key = None;
         for behavior in [Behavior::Healthy, Behavior::Failure, Behavior::OpaquePanic] {
             let request = EffectFloatProcessorPreparation {
+                input_role: crate::EffectFloatProcessorInputRole::SingleImage,
                 effect_id: mondrian_core::EffectId::new(),
                 width: 1,
                 height: 1,
@@ -4417,5 +4468,274 @@ mod gui_reconciliation_contract_tests {
         drop(residency);
         assert_eq!(dropped.load(Ordering::SeqCst), 3);
         assert_eq!(payload_dropped.load(Ordering::SeqCst), 0);
+    }
+}
+
+#[cfg(test)]
+mod source_tests {
+    use super::*;
+    use crate::*;
+    use mondrian_core::{automation::PropertyBag, TimelineTime, WorkingColorSpace};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[derive(Debug)]
+    struct SourceFactory {
+        calls: Arc<AtomicUsize>,
+        prepared: Arc<AtomicUsize>,
+    }
+    struct SourceInstance(Arc<AtomicUsize>);
+    impl EffectFloatProcessorFactory for SourceFactory {
+        fn input_role(&self) -> EffectFloatProcessorInputRole {
+            EffectFloatProcessorInputRole::NoImage
+        }
+        fn alpha_contract(&self) -> EffectAlphaContract {
+            EffectAlphaContract::SOURCE_FLOAT
+        }
+        fn feedback_budget_bytes(&self) -> usize {
+            0
+        }
+        fn storage(
+            &self,
+            request: EffectFloatProcessorSizing,
+        ) -> Result<EffectFloatProcessorStorage> {
+            assert_eq!(request.alpha_formats, ColorFrameAlphaFormats::FLOAT_OUTPUT);
+            EffectFloatProcessorStorage::new(64, 16)
+        }
+        fn prepare(
+            &self,
+            request: EffectFloatProcessorPreparation,
+            _: &mut EffectProcessorControl<'_>,
+        ) -> Result<Box<dyn EffectFloatProcessorInstance>> {
+            assert_eq!(request.input_role, EffectFloatProcessorInputRole::NoImage);
+            self.prepared.fetch_add(1, Ordering::SeqCst);
+            Ok(Box::new(SourceInstance(self.calls.clone())))
+        }
+    }
+    impl EffectFloatProcessorInstance for SourceInstance {
+        fn process(
+            &mut self,
+            output: &mut EffectFloatFrame,
+            params: &serde_json::Value,
+            _: i64,
+            control: &mut EffectProcessorControl<'_>,
+        ) -> std::result::Result<Option<EffectProcessorFeedback>, EffectProcessorInvocationError>
+        {
+            control.check()?;
+            self.0.fetch_add(1, Ordering::SeqCst);
+            let time = params["time"].as_f64().expect("exact evaluated source time") as f32;
+            for pixel in output.pixels_mut() {
+                *pixel = [time, 0.25, 0.5, 0.75];
+            }
+            Ok(None)
+        }
+    }
+    fn fixture() -> (Arc<AtomicUsize>, Arc<AtomicUsize>, PreparedEffectProgram) {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let prepared = Arc::new(AtomicUsize::new(0));
+        let key = format!("test.source.{}", mondrian_core::EffectId::new());
+        register_effect_definition(
+            EffectDefinition::new(
+                &key,
+                "Source",
+                PropertyBag::default(),
+                EffectColorDomainContract::SCENE_LINEAR,
+            )
+            .with_execution_contract(EffectExecutionContract {
+                execution_modes: EffectExecutionModes::CPU_F32,
+                determinism: EffectDeterminism::Nondeterministic,
+                roi_propagation: EffectRoiPropagation::UnknownRequiresFullFrame,
+                ..EffectExecutionContract::IDENTITY
+            })
+            .with_extension_contract(EffectExtensionContract::new("1.0.0"))
+            .with_custom_float_processor_factory(
+                Arc::new(|_, context| Ok(Some(serde_json::json!({"time":context.time.to_f64()})))),
+                None,
+                EffectCachePolicy::Uncacheable,
+                Arc::new(SourceFactory { calls: calls.clone(), prepared: prepared.clone() }),
+            ),
+        )
+        .expect("source definition");
+        let effect = instantiate_effect_node(EffectType::External(key)).expect("source occurrence");
+        let program =
+            PreparedEffectProgram::prepare(&[effect], &[], WorkingColorSpace::LinearRec709)
+                .expect("prepared source");
+        (calls, prepared, program)
+    }
+    fn format() -> EffectValueFormat {
+        EffectValueFormat::new(
+            EffectWorkingPrecision::Float32,
+            EffectColorDomain::SceneLinearRgb,
+            mondrian_core::ColorFrameAlpha::StraightFloat,
+        )
+    }
+    #[test]
+    fn zero_input_prepared_graph_reuses_same_bank_without_external_source_or_pixel_cache() {
+        let (calls, prepared, program) = fixture();
+        let mut session = EffectExecutionSession::new(EffectExecutionSessionConfig {
+            max_processor_instances: 1,
+            max_processor_bytes: 128,
+            ..EffectExecutionSessionConfig::uncached(4096)
+        });
+        for time in [0, 3, 1, 3] {
+            let graph =
+                program.evaluate(TimelineTime::new(time, 1).unwrap()).expect("evaluated graph");
+            assert!(graph.schedule().ordered_nodes.iter().all(|id| !matches!(
+                graph.graph().node(*id).unwrap().kind,
+                EffectGraphNodeKind::Source
+            )));
+            assert!(crate::gpu_plan::lower_effect_graph_to_gpu_plan(&graph).is_err());
+            let output = session
+                .generate_compiled_rgba_f32(
+                    EffectFrameExtent::new(3, 2),
+                    format(),
+                    &graph,
+                    999,
+                    &mut EffectProcessorControl::uncancelled(),
+                )
+                .expect("source output");
+            assert_eq!(output.pixels(), &[[time as f32, 0.25, 0.5, 0.75]; 6]);
+        }
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            4,
+            "uncacheable repeats execute"
+        );
+        assert_eq!(
+            prepared.load(Ordering::SeqCst),
+            1,
+            "same extent/role/revision reuses original bank owner"
+        );
+        assert_eq!(session.diagnostics().processor_instances, 1);
+        assert_eq!(session.diagnostics().cache_entries, 0);
+    }
+    #[test]
+    fn zero_input_stop_after_provider_work_never_publishes_or_retains_the_owner() {
+        let (calls, _, program) = fixture();
+        let graph = program.evaluate(TimelineTime::ZERO).unwrap();
+        let mut session = EffectExecutionSession::new(EffectExecutionSessionConfig {
+            max_processor_instances: 1,
+            max_processor_bytes: 128,
+            ..EffectExecutionSessionConfig::uncached(4096)
+        });
+        let mut stop =
+            || (calls.load(Ordering::SeqCst) > 0).then_some(EffectProcessorStopReason::Canceled);
+        let result = session.generate_compiled_rgba_f32(
+            EffectFrameExtent::new(3, 2),
+            format(),
+            &graph,
+            0,
+            &mut EffectProcessorControl::new(&mut stop),
+        );
+        assert_eq!(
+            result,
+            Err(EffectFloatExecutionError::Stopped { reason: EffectProcessorStopReason::Canceled })
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(session.diagnostics().processor_instances, 0);
+        assert_eq!(session.diagnostics().cache_entries, 0);
+    }
+
+    #[test]
+    fn source_role_alpha_extent_budget_and_stop_refuse_before_provider_work() {
+        let (calls, prepared, program) = fixture();
+        let graph = program.evaluate(TimelineTime::ZERO).unwrap();
+        let mut session = EffectExecutionSession::new(EffectExecutionSessionConfig::uncached(0));
+        assert!(session
+            .generate_compiled_rgba_f32(
+                EffectFrameExtent::new(3, 2),
+                format(),
+                &graph,
+                0,
+                &mut EffectProcessorControl::uncancelled()
+            )
+            .is_err());
+        assert!(session
+            .generate_compiled_rgba_f32(
+                EffectFrameExtent::new(0, 2),
+                format(),
+                &graph,
+                0,
+                &mut EffectProcessorControl::uncancelled()
+            )
+            .is_err());
+        let mut stopped = || Some(EffectProcessorStopReason::Canceled);
+        assert!(session
+            .generate_compiled_rgba_f32(
+                EffectFrameExtent::new(3, 2),
+                format(),
+                &graph,
+                0,
+                &mut EffectProcessorControl::new(&mut stopped)
+            )
+            .is_err());
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert_eq!(prepared.load(Ordering::SeqCst), 0);
+        assert!(!EffectAlphaContract::new(
+            ColorFrameAlphaFormats::NONE,
+            EffectAlphaOutputContract::Preserve
+        )
+        .is_valid_source());
+        assert!(!EffectAlphaContract::NATIVE_FLOAT.is_valid_source());
+        assert!(!EffectAlphaContract::SOURCE_FLOAT.is_valid());
+        let identity = identity_compiled_effect_graph().unwrap();
+        assert!(session
+            .generate_compiled_rgba_f32(
+                EffectFrameExtent::new(1, 1),
+                format(),
+                &identity,
+                0,
+                &mut EffectProcessorControl::uncancelled()
+            )
+            .is_err());
+        let factory: Arc<dyn EffectFloatProcessorFactory> =
+            Arc::new(SourceFactory { calls: calls.clone(), prepared: prepared.clone() });
+        let mut output =
+            EffectFloatFrame::from_pixels(EffectFrameExtent::new(1, 1), format(), vec![[0.; 4]])
+                .unwrap();
+        let mut bank = FloatProcessorResidency::default();
+        let mut request = EffectFloatProcessorPreparation {
+            input_role: EffectFloatProcessorInputRole::SingleImage,
+            format: format(),
+            effect_id: mondrian_core::EffectId::new(),
+            width: 1,
+            height: 1,
+        };
+        assert!(bank
+            .process(
+                &factory,
+                request,
+                1,
+                1,
+                128,
+                4096,
+                &mut output,
+                &serde_json::json!({}),
+                0,
+                &mut EffectProcessorControl::uncancelled()
+            )
+            .is_err());
+        request.input_role = EffectFloatProcessorInputRole::NoImage;
+        request.format = format().with_alpha(mondrian_core::ColorFrameAlpha::StraightCoverage);
+        output = EffectFloatFrame::from_pixels(
+            EffectFrameExtent::new(1, 1),
+            request.format,
+            vec![[0.; 4]],
+        )
+        .unwrap();
+        assert!(bank
+            .process(
+                &factory,
+                request,
+                1,
+                1,
+                128,
+                4096,
+                &mut output,
+                &serde_json::json!({}),
+                0,
+                &mut EffectProcessorControl::uncancelled()
+            )
+            .is_err());
+        assert_eq!(prepared.load(Ordering::SeqCst), 0);
     }
 }

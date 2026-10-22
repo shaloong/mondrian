@@ -42,10 +42,11 @@ mod processor_question;
 pub use processor_feedback::*;
 mod processor_residency;
 pub use processor_residency::{
-    EffectFloatProcessorFactory, EffectFloatProcessorInstance, EffectFloatProcessorPreparation,
-    EffectFloatProcessorSizing, EffectFloatProcessorStorage, EffectProcessorControl,
-    EffectProcessorHostResourceRefusal, EffectProcessorHostResourceRefusalReceipt,
-    EffectProcessorInvocationError, EffectProcessorRetention, EffectProcessorStopReason,
+    EffectFloatProcessorFactory, EffectFloatProcessorInputRole, EffectFloatProcessorInstance,
+    EffectFloatProcessorPreparation, EffectFloatProcessorSizing, EffectFloatProcessorStorage,
+    EffectProcessorControl, EffectProcessorHostResourceRefusal,
+    EffectProcessorHostResourceRefusalReceipt, EffectProcessorInvocationError,
+    EffectProcessorRetention, EffectProcessorStopReason,
 };
 pub mod qualifier;
 pub mod temporal_execution;

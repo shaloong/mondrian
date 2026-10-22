@@ -352,6 +352,11 @@ fn execute_effect_graph(
                 frame.copy_from_slice(input);
                 outputs.insert(node.id, frame);
             }
+            EffectGraphNodeKind::CustomSource { .. } => {
+                return Err(EffectExecutionError::CustomProcessorUnavailable {
+                    key: "float_source".to_owned(),
+                });
+            }
             EffectGraphNodeKind::UnaryEffect { input: input_id, op }
             | EffectGraphNodeKind::DomainEffect { input: input_id, op, .. } => {
                 if let (Some(compiled), Some(input_fingerprint)) =
@@ -833,6 +838,7 @@ fn scalar_processor_reservations(
         compiled.graph().node(*id).is_some_and(|node| matches!(&node.kind,
             EffectGraphNodeKind::UnaryEffect { op: EffectRenderOp::Custom { processor: Some(binding), .. }, .. }
             | EffectGraphNodeKind::DomainEffect { op: EffectRenderOp::Custom { processor: Some(binding), .. }, .. }
+            | EffectGraphNodeKind::CustomSource { op: EffectRenderOp::Custom { processor: Some(binding), .. }, .. }
             if binding.float32_factory().is_some()))
     });
     if !has_factory && !has_resident_processors {
@@ -893,6 +899,20 @@ fn scalar_processor_reservations(
                     allocated = allocated.saturating_add(1);
                 }
                 (0, 0, "source")
+            }
+            EffectGraphNodeKind::CustomSource { op, .. } => {
+                if pooled > 0 {
+                    pooled -= 1;
+                } else {
+                    allocated = allocated.saturating_add(1);
+                }
+                let bytes = crate::processor_residency::frame_processor_charge(op, width, height)
+                    .map_err(EffectFloatExecutionError::CustomProcessor)?;
+                let key = match op {
+                    EffectRenderOp::Custom { key, .. } => key.as_str(),
+                    _ => "invalid_source",
+                };
+                (0, bytes, key)
             }
             EffectGraphNodeKind::MaskSource { .. } => {
                 allocated = allocated.saturating_add(1);
@@ -998,39 +1018,78 @@ fn finish_scalar_attempt(
     result
 }
 
+#[allow(clippy::too_many_arguments)]
 fn apply_compiled_effect_graph_rgba_f32_inner(
     session: &mut EffectExecutionSession,
-    input: crate::EffectFloatFrameView<'_>,
+    input: Option<crate::EffectFloatFrameView<'_>>,
+    extent: crate::EffectFrameExtent,
+    format: crate::EffectValueFormat,
     compiled: &CompiledEffectGraph,
     frame_seed: i64,
     domain_cache_key: Option<EffectDomainProcessorCacheKey>,
     mut processor: Option<&mut EffectDomainProcessor<'_>>,
     control: &mut crate::EffectProcessorControl<'_>,
 ) -> Result<crate::EffectFloatFrame, EffectFloatExecutionError> {
-    let width = input.extent().width();
-    let height = input.extent().height();
-    input.validate_controlled(&mut || scalar_checkpoint(control))?;
+    let width = extent.width();
+    let height = extent.height();
+    if let Some(input) = input {
+        input.validate_controlled(&mut || scalar_checkpoint(control))?;
+    }
     scalar_checkpoint(control)?;
-    let required_len = input.len();
-    if input.format().domain() != crate::EffectColorDomain::SceneLinearRgb
-        && compiled
+    if format.precision() != crate::EffectWorkingPrecision::Float32 {
+        return Err(
+            crate::EffectFloatFrameError::WrongPrecision { precision: format.precision() }.into(),
+        );
+    }
+    let required_len = (width as usize)
+        .checked_mul(height as usize)
+        .ok_or_else(|| unsupported_float_graph_node(EffectGraphNodeId(0), "extent_overflow"))?;
+    required_len
+        .checked_mul(std::mem::size_of::<[f32; 4]>())
+        .ok_or(crate::EffectFloatFrameError::ExtentOverflow)?;
+    for id in &compiled.schedule().ordered_nodes {
+        if compiled
             .graph()
-            .nodes
-            .iter()
-            .any(|node| matches!(node.kind, crate::EffectGraphNodeKind::Source))
-    {
-        return Err(EffectFloatExecutionError::FrameContract(
-            crate::EffectFloatFrameError::FormatMismatch {
-                expected: input.format().with_domain(crate::EffectColorDomain::SceneLinearRgb),
-                actual: input.format(),
-            },
-        ));
+            .node(*id)
+            .is_some_and(|node| matches!(node.kind, EffectGraphNodeKind::CustomSource { .. }))
+            && compiled
+                .node_alpha_contract(*id)
+                .is_none_or(|contract| !contract.admits_source_output(format.alpha()))
+        {
+            return Err(unsupported_float_graph_node(
+                *id,
+                "source_output_format_not_admitted",
+            ));
+        }
+    }
+    let external_source = compiled.schedule().ordered_nodes.iter().find_map(|id| {
+        compiled
+            .graph()
+            .node(*id)
+            .filter(|node| matches!(node.kind, EffectGraphNodeKind::Source))
+            .map(|node| node.id)
+    });
+    if let Some(id) = external_source {
+        let source = input
+            .ok_or_else(|| unsupported_float_graph_node(id, "external_source_requires_image"))?;
+        if source.format().domain() != crate::EffectColorDomain::SceneLinearRgb {
+            return Err(EffectFloatExecutionError::FrameContract(
+                crate::EffectFloatFrameError::FormatMismatch {
+                    expected: source.format().with_domain(crate::EffectColorDomain::SceneLinearRgb),
+                    actual: source.format(),
+                },
+            ));
+        }
     }
     validate_float_effect_graph(compiled, processor.is_some())?;
-    if input.is_empty() {
-        // There is no frame to size or execute. Native extent validation must
-        // not turn an empty request into a plugin fault or start a worker.
-        return input.to_owned().map_err(EffectFloatExecutionError::FrameContract);
+    if required_len == 0 {
+        // Empty unary behavior stays a copy; zero-input native extents reject.
+        return input
+            .ok_or_else(|| {
+                unsupported_float_graph_node(EffectGraphNodeId(0), "empty_source_extent")
+            })?
+            .to_owned()
+            .map_err(EffectFloatExecutionError::FrameContract);
     }
     let reservations = scalar_processor_reservations(
         compiled,
@@ -1051,6 +1110,9 @@ fn apply_compiled_effect_graph_rgba_f32_inner(
             .trim_working(session.max_working_bytes().saturating_sub(occupied));
     }
     if compiled.graph().is_identity() {
+        let input = input.ok_or_else(|| {
+            unsupported_float_graph_node(EffectGraphNodeId(0), "identity_requires_image")
+        })?;
         let output = crate::EffectFloatFrame::from_validated_parts(
             input.extent(),
             input.format(),
@@ -1059,9 +1121,9 @@ fn apply_compiled_effect_graph_rgba_f32_inner(
         scalar_checkpoint(control)?;
         return Ok(output);
     }
-    if let Some(cached) =
+    if let Some(cached) = input.and_then(|input| {
         get_cached_effect_output_f32(session, input, compiled, frame_seed, domain_cache_key)
-    {
+    }) {
         scalar_checkpoint(control)?;
         return Ok(cached);
     }
@@ -1086,6 +1148,9 @@ fn apply_compiled_effect_graph_rgba_f32_inner(
         };
         match &node.kind {
             EffectGraphNodeKind::Source => {
+                let input = input.ok_or_else(|| {
+                    unsupported_float_graph_node(node.id, "external_source_requires_image")
+                })?;
                 let mut frame = take_float_execution_buffer(&mut buffer_pool, required_len);
                 frame.copy_from_slice(input.pixels());
                 outputs.insert(
@@ -1096,6 +1161,49 @@ fn apply_compiled_effect_graph_rgba_f32_inner(
                         frame,
                     ),
                 );
+            }
+            EffectGraphNodeKind::CustomSource { op, domain_contract } => {
+                // Cold sizing precedes this allocation. Reuse the scalar pool,
+                // then charge its actual capacity together with all siblings
+                // before the bank can prepare or invoke the provider.
+                let mut frame = buffer_pool.pop().unwrap_or_default();
+                let required_bytes = required_len
+                    .checked_mul(std::mem::size_of::<[f32; 4]>())
+                    .ok_or(crate::EffectFloatFrameError::ExtentOverflow)?;
+                frame.try_reserve_exact(required_len.saturating_sub(frame.len())).map_err(
+                    |_| crate::EffectFloatFrameError::AllocationUnavailable { required_bytes },
+                )?;
+                frame.truncate(required_len);
+                while frame.len() < required_len {
+                    scalar_checkpoint(control)?;
+                    frame.resize(required_len.min(frame.len().saturating_add(4096)), [0.; 4]);
+                }
+                let mut output = crate::EffectFloatFrame::from_validated_parts(
+                    extent,
+                    format.with_domain(domain_contract.output),
+                    frame,
+                );
+                let caller_owned_bytes = outputs
+                    .values()
+                    .chain(std::iter::once(&output))
+                    .fold(0usize, |bytes, frame| {
+                        bytes.saturating_add(frame.retained_bytes())
+                    })
+                    .saturating_add(buffer_pool.iter().fold(0usize, |bytes, frame| {
+                        bytes.saturating_add(
+                            frame.capacity().saturating_mul(std::mem::size_of::<[f32; 4]>()),
+                        )
+                    }));
+                crate::adjustment::apply_custom_source_op_f32(
+                    &mut output,
+                    op,
+                    frame_seed,
+                    session,
+                    caller_owned_bytes,
+                    control,
+                )
+                .map_err(EffectFloatExecutionError::CustomProcessor)?;
+                outputs.insert(node.id, output);
             }
             EffectGraphNodeKind::UnaryEffect { input: input_id, op }
             | EffectGraphNodeKind::DomainEffect { input: input_id, op, .. } => {
@@ -1414,6 +1522,8 @@ fn apply_compiled_effect_graph_rgba_f32_inner(
     }
 
     let Some(output_id) = compiled.graph().output else {
+        let input = input
+            .ok_or_else(|| unsupported_float_graph_node(EffectGraphNodeId(0), "missing_output"))?;
         let output = crate::EffectFloatFrame::from_validated_parts(
             input.extent(),
             input.format(),
@@ -1428,18 +1538,36 @@ fn apply_compiled_effect_graph_rgba_f32_inner(
     output = apply_effect_domain_transition(compiled, None, output_id, output, &mut processor)?;
     output.validate().map_err(EffectFloatExecutionError::FrameContract)?;
     scalar_checkpoint(control)?;
-    put_cached_effect_output_f32(
-        session,
-        input,
-        compiled,
-        frame_seed,
-        domain_cache_key,
-        &output,
-    );
+    if let Some(input) = input {
+        put_cached_effect_output_f32(
+            session,
+            input,
+            compiled,
+            frame_seed,
+            domain_cache_key,
+            &output,
+        );
+    }
     Ok(output)
 }
 
 impl EffectExecutionSession {
+    /// Execute a zero-input current-frame graph into explicit output staging.
+    /// Reachable external Source values reject before invoking any provider.
+    pub fn generate_compiled_rgba_f32(
+        &mut self,
+        extent: crate::EffectFrameExtent,
+        format: crate::EffectValueFormat,
+        compiled: &CompiledEffectGraph,
+        frame_seed: i64,
+        control: &mut crate::EffectProcessorControl<'_>,
+    ) -> Result<crate::EffectFloatFrame, EffectFloatExecutionError> {
+        let result = apply_compiled_effect_graph_rgba_f32_inner(
+            self, None, extent, format, compiled, frame_seed, None, None, control,
+        );
+        finish_scalar_attempt(self, control, result)
+    }
+
     /// Execute one current-frame compiled graph over scene-linear Float32
     /// pixels.
     pub fn apply_compiled_rgba_f32(
@@ -1450,7 +1578,15 @@ impl EffectExecutionSession {
         control: &mut crate::EffectProcessorControl<'_>,
     ) -> Result<crate::EffectFloatFrame, EffectFloatExecutionError> {
         let result = apply_compiled_effect_graph_rgba_f32_inner(
-            self, input, compiled, frame_seed, None, None, control,
+            self,
+            Some(input),
+            input.extent(),
+            input.format(),
+            compiled,
+            frame_seed,
+            None,
+            None,
+            control,
         );
         finish_scalar_attempt(self, control, result)
     }
@@ -1471,7 +1607,9 @@ impl EffectExecutionSession {
     {
         let result = apply_compiled_effect_graph_rgba_f32_inner(
             self,
-            input,
+            Some(input),
+            input.extent(),
+            input.format(),
             compiled,
             frame_seed,
             Some(domain_cache_key),
@@ -2014,7 +2152,8 @@ fn validate_float_effect_graph_shape(
         };
         match &node.kind {
             EffectGraphNodeKind::Source => {}
-            EffectGraphNodeKind::UnaryEffect { op, .. }
+            EffectGraphNodeKind::CustomSource { op, .. }
+            | EffectGraphNodeKind::UnaryEffect { op, .. }
             | EffectGraphNodeKind::DomainEffect { op, .. } => {
                 if !effect_render_op_supports_rgba_f32(op) {
                     return Err(EffectFloatExecutionError::UnsupportedNode {

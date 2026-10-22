@@ -42,6 +42,11 @@ impl EffectAlphaContract {
         ColorFrameAlphaFormats::ALL,
         EffectAlphaOutputContract::Negotiated(ColorFrameAlphaFormats::FLOAT_OUTPUT),
     );
+    /// Zero-input Float producers explicitly negotiate their output association.
+    pub const SOURCE_FLOAT: Self = Self::new(
+        ColorFrameAlphaFormats::NONE,
+        EffectAlphaOutputContract::Negotiated(ColorFrameAlphaFormats::FLOAT_OUTPUT),
+    );
     /// Normal Over resolves the representation from both exact input values.
     pub const NORMAL_OVER: Self = Self::new(
         ColorFrameAlphaFormats::ALL,
@@ -67,6 +72,27 @@ impl EffectAlphaContract {
                 EffectAlphaOutputContract::Negotiated(formats) => !formats.is_empty(),
                 _ => true,
             }
+    }
+    /// Validate a zero-input producer without inventing an incoming alpha format.
+    pub const fn is_valid_source(self) -> bool {
+        self.inputs.is_empty()
+            && match self.output {
+                EffectAlphaOutputContract::Preserve => false,
+                EffectAlphaOutputContract::Fixed(_) => true,
+                EffectAlphaOutputContract::Negotiated(formats) => !formats.is_empty(),
+            }
+    }
+    /// Formats covered by a zero-input producer's output storage declaration.
+    pub const fn source_outputs(self) -> ColorFrameAlphaFormats {
+        match self.output {
+            EffectAlphaOutputContract::Preserve => ColorFrameAlphaFormats::NONE,
+            EffectAlphaOutputContract::Fixed(alpha) => ColorFrameAlphaFormats::only(alpha),
+            EffectAlphaOutputContract::Negotiated(formats) => formats,
+        }
+    }
+    /// Validate an exact zero-input output association.
+    pub const fn admits_source_output(self, output: ColorFrameAlpha) -> bool {
+        self.is_valid_source() && self.source_outputs().contains(output)
     }
     /// Validate the exact output against the retained declaration and input.
     pub const fn admits_output(self, input: ColorFrameAlpha, output: ColorFrameAlpha) -> bool {

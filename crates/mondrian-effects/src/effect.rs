@@ -831,6 +831,7 @@ impl std::fmt::Debug for EffectRenderOp {
 #[derive(Clone)]
 pub struct CustomEffectProcessorBinding {
     alpha_contract: crate::EffectAlphaContract,
+    input_role: crate::EffectFloatProcessorInputRole,
     revision: u64,
     processor: CustomEffectProcessor,
     runtime_owner: Option<CustomEffectRuntimeOwner>,
@@ -857,6 +858,7 @@ impl CustomEffectProcessorBinding {
     pub(crate) fn new(processor: CustomEffectRenderProcessor) -> Self {
         Self {
             alpha_contract: crate::EffectAlphaContract::COVERAGE_OPERATION,
+            input_role: crate::EffectFloatProcessorInputRole::SingleImage,
             revision: NEXT_CUSTOM_PROCESSOR_REVISION.fetch_add(1, Ordering::AcqRel),
             processor: CustomEffectProcessor::Rgba8(processor),
             runtime_owner: None,
@@ -867,6 +869,7 @@ impl CustomEffectProcessorBinding {
     pub(crate) fn new_f32(processor: CustomEffectFloatRenderProcessor) -> Self {
         Self {
             alpha_contract: crate::EffectAlphaContract::COVERAGE_OPERATION,
+            input_role: crate::EffectFloatProcessorInputRole::SingleImage,
             revision: NEXT_CUSTOM_PROCESSOR_REVISION.fetch_add(1, Ordering::AcqRel),
             processor: CustomEffectProcessor::Float32(processor),
             runtime_owner: None,
@@ -877,6 +880,11 @@ impl CustomEffectProcessorBinding {
     /// Immutable alpha declaration retained by the compiled provider binding.
     pub const fn alpha_contract(&self) -> crate::EffectAlphaContract {
         self.alpha_contract
+    }
+
+    /// Immutable image arity retained with the provider declaration.
+    pub const fn input_role(&self) -> crate::EffectFloatProcessorInputRole {
+        self.input_role
     }
 
     /// Process-local implementation revision used by graph/cache identity.
@@ -933,6 +941,7 @@ impl CustomEffectProcessorBinding {
     ) -> Self {
         Self {
             alpha_contract: self.alpha_contract,
+            input_role: self.input_role,
             revision: self.revision,
             processor: self.processor.clone(),
             occurrence_id: Some(occurrence_id),
@@ -1410,6 +1419,7 @@ impl EffectDefinition {
             CustomEffectProcessorBinding {
                 revision: NEXT_CUSTOM_PROCESSOR_REVISION.fetch_add(1, Ordering::AcqRel),
                 alpha_contract: factory.alpha_contract(),
+                input_role: factory.input_role(),
                 processor: CustomEffectProcessor::Float32Factory(factory),
                 runtime_owner: None,
                 occurrence_id: None,
@@ -1425,23 +1435,35 @@ impl EffectDefinition {
         processor: CustomEffectProcessorBinding,
     ) -> Self {
         let effect_key = self.key.clone();
+        let role = processor.input_role();
         self.evaluator_factory = Some(EffectEvaluatorFactory::Frame(Arc::new(
             move |effect, context, graph| {
                 if let Some(params) = params_builder(effect, context)? {
                     let cache_key =
                         cache_key_builder.as_ref().and_then(|builder| builder(effect, context));
-                    graph.append_unary(EffectRenderOp::Custom {
+                    let op = EffectRenderOp::Custom {
                         key: effect_key.clone(),
                         params,
                         cache_key,
                         cache_policy,
                         processor: Some(processor.clone()),
-                    });
+                    };
+                    match role {
+                        crate::EffectFloatProcessorInputRole::SingleImage => {
+                            graph.append_unary(op);
+                        }
+                        crate::EffectFloatProcessorInputRole::NoImage => {
+                            graph.append_custom_source(op);
+                        }
+                    }
                 }
                 Ok(())
             },
         )));
-        self.execution_contract.topology = EffectGraphTopology::LinearChain;
+        self.execution_contract.topology = match role {
+            crate::EffectFloatProcessorInputRole::SingleImage => EffectGraphTopology::LinearChain,
+            crate::EffectFloatProcessorInputRole::NoImage => EffectGraphTopology::GeneralDag,
+        };
         self
     }
 

@@ -22,6 +22,11 @@ pub type EffectGraphValue = EffectGraphNodeId;
 #[derive(Debug, Clone)]
 pub enum EffectGraphNodeKind {
     Source,
+    /// Zero-input image producer; its format and domain describe output staging.
+    CustomSource {
+        op: EffectRenderOp,
+        domain_contract: EffectColorDomainContract,
+    },
     UnaryEffect {
         input: EffectGraphNodeId,
         op: EffectRenderOp,
@@ -93,7 +98,7 @@ pub struct EffectGraphNode {
 impl EffectGraphNode {
     pub fn input_ids(&self) -> Vec<EffectGraphNodeId> {
         match self.kind {
-            EffectGraphNodeKind::Source => Vec::new(),
+            EffectGraphNodeKind::Source | EffectGraphNodeKind::CustomSource { .. } => Vec::new(),
             EffectGraphNodeKind::UnaryEffect { input, .. }
             | EffectGraphNodeKind::DomainEffect { input, .. } => vec![input],
             EffectGraphNodeKind::Blend { base, overlay, .. } => vec![base, overlay],
@@ -135,6 +140,11 @@ impl EffectGraphIdentity {
             match &node.kind {
                 EffectGraphNodeKind::Source => {
                     0u8.hash(&mut writer);
+                }
+                EffectGraphNodeKind::CustomSource { op, domain_contract } => {
+                    11u8.hash(&mut writer);
+                    domain_contract.hash(&mut writer);
+                    hash_render_op(op, &mut writer);
                 }
                 EffectGraphNodeKind::UnaryEffect { input, op } => {
                     1u8.hash(&mut writer);
@@ -292,7 +302,8 @@ impl EffectRenderGraph {
             .iter()
             .map(|node| match &node.kind {
                 EffectGraphNodeKind::UnaryEffect { op, .. }
-                | EffectGraphNodeKind::DomainEffect { op, .. } => {
+                | EffectGraphNodeKind::DomainEffect { op, .. }
+                | EffectGraphNodeKind::CustomSource { op, .. } => {
                     render_op_retained_bytes_estimate(op)
                 }
                 EffectGraphNodeKind::MaskSource {
@@ -631,6 +642,10 @@ struct EffectGraphShape {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum EffectGraphNodeShape {
+    CustomSource {
+        id: EffectGraphNodeId,
+        domain_contract: EffectColorDomainContract,
+    },
     Source {
         id: EffectGraphNodeId,
     },
@@ -950,6 +965,7 @@ fn derive_implementation_requirements<'a>(
     for node in nodes {
         let derived = match &node.kind {
             EffectGraphNodeKind::Source => EffectImplementationRequirements::IDENTITY,
+            EffectGraphNodeKind::CustomSource { op, .. } => render_op_requirements(op),
             EffectGraphNodeKind::UnaryEffect { input, op }
             | EffectGraphNodeKind::DomainEffect { input, op, .. } => {
                 requirement_for(*input, &requirements).compose_node(render_op_requirements(op))
@@ -1044,7 +1060,8 @@ fn raw_node_implementation_requirements(
     match &node.kind {
         EffectGraphNodeKind::Source => None,
         EffectGraphNodeKind::UnaryEffect { op, .. }
-        | EffectGraphNodeKind::DomainEffect { op, .. } => {
+        | EffectGraphNodeKind::DomainEffect { op, .. }
+        | EffectGraphNodeKind::CustomSource { op, .. } => {
             Some(raw_render_op_execution_requirements(op))
         }
         EffectGraphNodeKind::Blend { .. } => Some(gpu_blend_node_requirements()),
@@ -1191,6 +1208,10 @@ impl EffectGraphBuilderState {
                 op: EffectRenderOp::Custom { processor, .. },
                 ..
             }
+            | EffectGraphNodeKind::CustomSource {
+                op: EffectRenderOp::Custom { processor, .. },
+                ..
+            }
             | EffectGraphNodeKind::DomainEffect {
                 op: EffectRenderOp::Custom { processor, .. },
                 ..
@@ -1290,6 +1311,20 @@ impl EffectGraphBuilderState {
         domain_contract: EffectColorDomainContract,
     ) {
         self.active_domain_contract = domain_contract;
+    }
+
+    /// Append a genuine zero-input producer, retaining the active output domain.
+    pub fn append_custom_source(&mut self, op: EffectRenderOp) -> EffectGraphNodeId {
+        let id = self.alloc_id();
+        self.graph.nodes.push(EffectGraphNode {
+            id,
+            kind: EffectGraphNodeKind::CustomSource {
+                op,
+                domain_contract: self.active_domain_contract,
+            },
+        });
+        self.current_output = id;
+        id
     }
 
     pub fn append_unary(&mut self, op: EffectRenderOp) -> EffectGraphNodeId {
@@ -1737,6 +1772,7 @@ pub(crate) fn compile_effect_domain_plan(
         let node = graph.node(*node_id)?;
         let output_domain = match &node.kind {
             EffectGraphNodeKind::Source => EffectColorDomain::SceneLinearRgb,
+            EffectGraphNodeKind::CustomSource { domain_contract, .. } => domain_contract.output,
             EffectGraphNodeKind::UnaryEffect { input, .. } => {
                 let input_domain = *plan.node_output_domains.get(input)?;
                 plan_domain_edge(
@@ -1908,6 +1944,19 @@ fn compile_node_alpha_contracts(
             let node = graph.node(*id)?;
             let contract = match &node.kind {
                 EffectGraphNodeKind::Source => crate::EffectAlphaContract::IDENTITY,
+                EffectGraphNodeKind::CustomSource {
+                    op: EffectRenderOp::Custom { processor: Some(binding), .. },
+                    ..
+                } => {
+                    if binding.input_role() != crate::EffectFloatProcessorInputRole::NoImage
+                        || binding.float32_factory().is_none()
+                        || !binding.alpha_contract().is_valid_source()
+                    {
+                        return None;
+                    }
+                    return Some((*id, binding.alpha_contract()));
+                }
+                EffectGraphNodeKind::CustomSource { .. } => return None,
                 EffectGraphNodeKind::UnaryEffect {
                     op: EffectRenderOp::Custom { processor: Some(binding), .. },
                     ..
@@ -2007,10 +2056,22 @@ fn reachable_custom_processor_snapshots_are_complete(
                 op: EffectRenderOp::Custom { processor, .. },
                 ..
             }
+            | EffectGraphNodeKind::CustomSource {
+                op: EffectRenderOp::Custom { processor, .. },
+                ..
+            }
             | EffectGraphNodeKind::DomainEffect {
                 op: EffectRenderOp::Custom { processor, .. },
                 ..
-            } => processor.is_some(),
+            } => processor.as_ref().is_some_and(|binding| {
+                let source = matches!(node.kind, EffectGraphNodeKind::CustomSource { .. });
+                binding.input_role()
+                    == if source {
+                        crate::EffectFloatProcessorInputRole::NoImage
+                    } else {
+                        crate::EffectFloatProcessorInputRole::SingleImage
+                    }
+            }),
             _ => true,
         })
     })
@@ -2045,6 +2106,12 @@ fn effect_graph_shape(graph: &EffectRenderGraph) -> Option<EffectGraphShape> {
         .iter()
         .map(|node| match &node.kind {
             EffectGraphNodeKind::Source => EffectGraphNodeShape::Source { id: node.id },
+            EffectGraphNodeKind::CustomSource { domain_contract, .. } => {
+                EffectGraphNodeShape::CustomSource {
+                    id: node.id,
+                    domain_contract: *domain_contract,
+                }
+            }
             EffectGraphNodeKind::UnaryEffect { input, .. } => {
                 EffectGraphNodeShape::Unary { id: node.id, input: *input }
             }
@@ -2205,6 +2272,18 @@ pub(crate) fn compile_effect_node_profiles(
                     subtree_signature: hasher.finish(),
                     cache_policy: EffectCachePolicy::Deterministic,
                     estimated_cost: 0,
+                    output_cache_enabled: false,
+                }
+            }
+            EffectGraphNodeKind::CustomSource { op, domain_contract } => {
+                let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                11u8.hash(&mut hasher);
+                domain_contract.hash(&mut hasher);
+                op.hash_signature(&mut hasher);
+                CompiledEffectNodeProfile {
+                    subtree_signature: hasher.finish(),
+                    cache_policy: EffectCachePolicy::Uncacheable,
+                    estimated_cost: op.estimated_cost(),
                     output_cache_enabled: false,
                 }
             }
