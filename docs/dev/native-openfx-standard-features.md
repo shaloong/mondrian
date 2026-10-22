@@ -133,7 +133,12 @@ PAR/双轴采样率：Effects352、相关 Renderer207、缓存19、相关 App694
 控制通过；Export 含两个真实 FFmpeg 控制。App 保留原筛选与既有排除项，
 Unit/Any 的原始源/代理/质量分流、过渡与前瞻一致性，以及奇数源 effect/mask
 和 Export 解码均通过。共享 Any/Unit 能力与 provider 前 typed 准入也通过 strict。
-native v11 actual sampling 已集成，真实 native 与媒体 unequal-PAR 纵切仍待验收。
+native v11 actual sampling 现通过 Windows owned 采样门。2026-10-23 的真实媒体门
+验证原始 PPM3×5、Clip PAR4/3 经 Unit native 后再合成 Preview2×2/3×2；全部像素、
+双轴 sampling、同一 owner、递增 invocation、作者状态与 consuming cleanup 均通过。
+新正常 dev Product 的八个相关原生控制也通过；六个未变 OFX 组件门使用原 fa86
+稳定客户端驱动当前 Product，不代表旧客户端已按当前完整源码重建。
+此资格限固定帧/owned 插件，不授完整 Timeline 编辑/Export、其它插件或完整 Context。
 Unit+Temporal
 源物化明确拒绝；合法 Unit Title crop、作者尺寸 Nested 和 Full accumulator
 保持原语义，实际非 Unit 输入在 provider 前拒绝且不 quarantine。

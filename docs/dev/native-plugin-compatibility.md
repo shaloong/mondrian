@@ -99,7 +99,7 @@ Transition handles; they do not claim rendered transparent pixels or audio DSP.
 
 The table describes implementation boundaries. Qualification below states the tested conditions; detailed consumer obligations remain in the linked audio and OpenFX feature matrices.
 
-## Current qualification summary (2026-10-22)
+## Current qualification summary (2026-10-23)
 
 OpenFX owner project geometry now has finite Windows CPU qualification:
 SessionProbe checks project10x7/PAR2 independently of image3x5, Direct image
@@ -115,11 +115,15 @@ exclusions are unchanged. Unit requests preserve the original Full CPU source
 through transitions and lookahead while Any retains its proxy/quality policy;
 the new odd-raster effect/mask and Export decode controls pass. Shared Any/Unit
 requirements and pre-provider admission also pass strict checks. Native v11
-sampling is integrated but awaits real native and media-to-native qualification.
-Unit temporal source materialization
-is explicitly unsupported; actual non-Unit native inputs refuse before provider
-work without quarantine. This does not qualify the unequal source/project PAR
-media-to-native path. Spatial defaults,
+sampling and a finite owned media-to-native Preview bridge now pass. Original
+PPM3x5 with Clip PAR4/3 reaches Unit native processing before 2x2/3x2 CPU spatial
+composition; complete pixels/sampling, same owner, author state and cleanup pass.
+Eight related controls pass with the new normal dev Product. Six unchanged OFX
+component controls use the pinned fa86 client, separately from the current worker;
+this is not a current whole-driver rebuild or Media/cache qualification.
+Unit temporal source materialization remains explicitly unsupported; actual
+non-Unit native inputs refuse before provider work without quarantine. Full
+Timeline editing/Export and other-plugin qualification remain separate. Spatial defaults,
 Rectangle, full contexts, GPU, realtime/performance, old exit-root closure and
 other platforms remain unqualified.
 

@@ -81,6 +81,7 @@ the former lost borders and now pass with the affected Renderer controls. Cache
 identity v6 and private viewer key v4 invalidate former border, decoded-storage
 precision and YUV alpha outputs;
 the artifact layout stays v3. GPU coverage requires separate device validation.
+
 Decoded storage and source transfer are independent. Physical FLOAT reaches the
 supported planar-F32 reader or an explicit refusal before integer paths. Linear
 integer RGB uses the existing native-depth reader and float resize; one RGB
@@ -89,5 +90,11 @@ linear or encoded interpretation. YUVA12 preserves alpha; other alpha-bearing
 YUV layouts are explicitly unsupported. The optional RGBA8 decoder declines
 linear and physical-float inputs. Windows default+validation Preview 219 and
 the affected Renderer 207, cache 19, App 694, Export 4 and ordinary OpenFX 114
-controls pass with independent review. These do not qualify the native Media
-Preview chain, GPU, realtime performance or other platforms.
+controls pass with independent review. These ordinary suites do not qualify
+GPU, realtime performance or other platforms.
+
+A separate owned Windows gate passes original 3x5 PPM decode, Clip PAR4/3 and
+Unit native processing before CPU spatial composition to 2x2 and 3x2 Preview
+rasters. Every pixel and sampling value, one retained native owner, advancing
+invocations, unchanged author state and consuming cleanup pass. This fixed-frame
+bridge does not qualify full Timeline editing, Export or other plugins.
