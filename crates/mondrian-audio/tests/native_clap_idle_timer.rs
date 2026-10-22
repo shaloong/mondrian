@@ -2,17 +2,23 @@
 #![cfg(windows)]
 
 use mondrian_audio::{
-    AudioProcessingMode, AudioProcessorFactory, AudioProcessorInsertionPoint,
-    AudioProcessorOccurrence, AudioProcessorOccurrenceOwner, AudioProcessorPrepareRequest,
-    AudioRenderContract, DiscoveredClapAudioProcessorSpecResolver, IsolatedAudioProcessorFactory,
-    IsolatedAudioProcessorSpecResolver, NativeAudioObservationConsumption,
+    AudioContinuityEvidenceVisitor, AudioExecutionError, AudioMediaResolver,
+    AudioNativeProcessorAddress, AudioNativeProcessorOwnerLease, AudioProcessingMode,
+    AudioProcessorCursorEvidence, AudioProcessorCursorState, AudioProgramRuntime,
+    AudioRenderContract, AudioRuntimeResourceGrant, AudioSessionCursorEvidence,
+    DiscoveredClapAudioProcessorSpecResolver, IsolatedAudioProcessorResolver, ResolvedAudioSource,
 };
-use mondrian_core::{AudioChannelLayout, ProgramOutputId};
+use mondrian_core::{
+    AssetId, AudioChannelLayout, AudioOwnerInstallationSource, AudioSourceComponentId,
+    ExecutionCancellationToken, NativeAudioDiagnosticMessageFacts,
+};
+use mondrian_timeline::Sequence;
 use std::ffi::c_void;
 use std::fs::{File, OpenOptions};
 use std::os::windows::fs::OpenOptionsExt;
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 use std::path::PathBuf;
+use std::sync::Arc;
 use windows_sys::Win32::Foundation::{GetLastError, SetLastError, WAIT_OBJECT_0, WAIT_TIMEOUT};
 use windows_sys::Win32::System::JobObjects::IsProcessInJob;
 use windows_sys::Win32::System::Threading::{
@@ -63,6 +69,53 @@ fn input(name: &str) -> (PathBuf, File) {
     (path, lease)
 }
 
+// The public compiler constructs the request and original isolated Factory.
+// An empty media graph still owns its authored terminal processor; no PCM is run.
+struct NoMedia;
+impl AudioMediaResolver for NoMedia {
+    fn resolve(
+        &self,
+        _: AssetId,
+        _: AudioSourceComponentId,
+        _: u32,
+    ) -> Result<ResolvedAudioSource, String> {
+        Err("idle qualification must not resolve media".into())
+    }
+}
+#[derive(Default)]
+struct Cursors {
+    sessions: Vec<AudioSessionCursorEvidence>,
+    processors: Vec<AudioProcessorCursorEvidence>,
+}
+impl AudioContinuityEvidenceVisitor for Cursors {
+    fn session(&mut self, value: AudioSessionCursorEvidence) -> Result<(), AudioExecutionError> {
+        self.sessions.push(value);
+        Ok(())
+    }
+    fn processor(
+        &mut self,
+        value: AudioProcessorCursorEvidence,
+    ) -> Result<(), AudioExecutionError> {
+        self.processors.push(value);
+        Ok(())
+    }
+}
+fn owner(runtime: &AudioProgramRuntime) -> AudioNativeProcessorOwnerLease {
+    let mut cursors = Cursors::default();
+    runtime.visit_continuity_evidence(&mut cursors).unwrap();
+    assert_eq!((cursors.sessions.len(), cursors.processors.len()), (1, 1));
+    let processor = cursors.processors[0];
+    assert_eq!(processor.state, AudioProcessorCursorState::Unentered);
+    runtime
+        .native_owner_lease(AudioNativeProcessorAddress {
+            root: cursors.sessions[0].identity,
+            local: processor.identity,
+            occurrence: processor.occurrence,
+            epoch: None,
+        })
+        .expect("actual installed Unentered Runtime lease")
+}
+
 #[test]
 #[ignore = "current Product, rebuilt owned CLAP mode15, original outer native Job"]
 fn installed_clap_timer_wakes_main_without_ipc() {
@@ -82,8 +135,10 @@ fn installed_clap_timer_wakes_main_without_ipc() {
         max_block_frames: 4,
         processing_mode: AudioProcessingMode::Offline,
         processor_session_scratch_budget_bytes: 32 * 1024 * 1024,
-        public_output_lookahead_budget_frames: 0,
-        compensation_delay_scratch_budget_bytes: 0,
+        // Original timer contract's finite PDC preparation allowances admit
+        // the unchanged mode15 latency3; the test never enters or renders PCM.
+        public_output_lookahead_budget_frames: 1024,
+        compensation_delay_scratch_budget_bytes: 1024 * 1024,
     };
     let nonce = *uuid::Uuid::new_v4().as_bytes();
     let mut state = vec![15];
@@ -101,27 +156,38 @@ fn installed_clap_timer_wakes_main_without_ipc() {
         instance.opaque_state.as_ref().map(AsRef::as_ref),
         Some(state.as_slice())
     );
-    let spec = catalog
-        .resolve(AudioProcessorPrepareRequest::new(
-            AudioProcessorOccurrence {
-                instance_id: instance.id,
-                owner: AudioProcessorOccurrenceOwner::Output(ProgramOutputId::new()),
-                insertion: AudioProcessorInsertionPoint::PreFader,
-            },
-            &instance.definition,
-            &instance.parameters,
-            instance.opaque_state.as_ref().map(AsRef::as_ref),
-            render,
-        ))
-        .expect("original native Factory metadata");
-    let factory = IsolatedAudioProcessorFactory::prepare(spec).expect("original isolated Factory");
-    let mut processor = factory.create(None).expect("one retained native owner");
+    let instance_id = instance.id;
+    let mut sequence = Sequence::new("IPC-free CLAP timer");
+    sequence.settings.audio_channel_layout = AudioChannelLayout::Stereo;
+    sequence.audio_program.outputs[0].strip.pre_fader.processors.push(instance);
+    let resolver = IsolatedAudioProcessorResolver::new(Arc::new(catalog));
+    let mut runtime = AudioProgramRuntime::build_with_processor_resolver_and_resource_grant(
+        &sequence,
+        &[],
+        &NoMedia,
+        &resolver,
+        render,
+        None,
+        AudioRuntimeResourceGrant::new(1, 32 * 1024 * 1024, 16 * 1024 * 1024),
+    )
+    .expect("public Runtime constructs the real prepare request and Factory");
+    let installation = AudioOwnerInstallationSource::new();
+    let (registration, verifier) = installation.register().unwrap();
+    runtime.bind_native_owner_installation(verifier).unwrap();
+    let claim = installation
+        .reserve_install(&registration, None)
+        .and_then(|reservation| installation.begin_commit(reservation))
+        .unwrap()
+        .commit()
+        .unwrap();
+    runtime
+        .install_native_owner_bindings(&claim, &ExecutionCancellationToken::new())
+        .unwrap();
+    let lease = owner(&runtime);
+    assert_eq!(lease.editor_target().instance, instance_id);
     // This is the LAST initial parent IPC. Events do not exist yet, so neither
     // metadata probes nor a callback inside that RPC can publish a witness.
-    let object = processor
-        .native_audio_object_observation()
-        .unwrap()
-        .expect("actual native object");
+    let object = runtime.observe_native_owner_object(lease).expect("actual native object");
     let pid = object.process_id().get();
     assert_ne!(pid, std::process::id());
     assert_eq!(object.object_serial().get(), 1);
@@ -171,39 +237,59 @@ fn installed_clap_timer_wakes_main_without_ipc() {
         );
         // END of the no-IPC interval. Only now may ordinary Poll collect the
         // original worker's logs; a Poll-triggered callback cannot rescue a wait.
-        let batch = processor
-            .poll_native_observations(NativeAudioObservationConsumption::Drain)
-            .expect("original bounded post-witness Poll");
-        assert_eq!(batch.object, Some(object));
-        assert_eq!(batch.owner_process_id(), Some(object.process_id()));
-        assert!(!batch.logs.incomplete());
+        let batch = runtime
+            .poll_native_observations(&ExecutionCancellationToken::new())
+            .expect("original bounded post-witness Poll")
+            .expect("actual diagnostic source");
+        assert!(
+            batch.author.is_none(),
+            "no fabricated author acknowledgement"
+        );
+        let logs = batch.diagnostics.expect("the three real callback records");
+        let source = logs.source();
+        let target = lease.editor_target();
+        assert_eq!(source.process_id, object.process_id());
+        assert_eq!(source.instance, instance_id);
+        assert_eq!(
+            (source.root_plan, source.root_session),
+            (target.root_plan, target.root_session)
+        );
+        assert_eq!(
+            (source.local_plan, source.local_session),
+            (target.local_plan, target.local_session)
+        );
+        assert!(!logs.loss().incomplete());
         let expected = [
             "idle:registered",
             "idle:disarmed:main=true:audio=false",
             "idle:armed:main=true:audio=false:unregistered",
         ];
-        assert_eq!(batch.logs.records().len(), expected.len());
-        for (index, (record, expected)) in batch.logs.records().iter().zip(expected).enumerate() {
+        assert_eq!(logs.records().len(), expected.len());
+        for (index, (record, expected)) in logs.records().iter().zip(expected).enumerate() {
             assert_eq!(record.sequence(), index as u64);
             assert_eq!(record.raw_severity(), 1);
-            assert_eq!(record.text(), Ok(expected));
-            assert!(!record.truncated() && !record.invalid_utf8());
+            assert_eq!(record.bytes(), expected.as_bytes());
+            assert_eq!(record.facts(), NativeAudioDiagnosticMessageFacts::default());
         }
         for _ in 0..2 {
-            let after = processor
-                .poll_native_observations(NativeAudioObservationConsumption::Drain)
-                .unwrap();
-            assert_eq!(after.object, Some(object));
-            assert!(!after.logs.incomplete());
-            assert!(
-                after.logs.records().is_empty(),
-                "wrong/repeated callback must fail"
-            );
+            if let Some(after) =
+                runtime.poll_native_observations(&ExecutionCancellationToken::new()).unwrap()
+            {
+                assert!(after.author.is_none());
+                if let Some(logs) = after.diagnostics {
+                    assert!(!logs.loss().incomplete());
+                    assert!(
+                        logs.records().is_empty(),
+                        "wrong/repeated callback must fail"
+                    );
+                }
+            }
         }
+        assert_eq!(owner(&runtime), lease);
+        assert_eq!(runtime.observe_native_owner_object(lease).unwrap(), object);
     }));
     let alive = unsafe { WaitForSingleObject(handle.as_raw_handle().cast(), 0) };
-    drop(processor);
-    drop(factory);
+    drop(runtime);
     let settled = unsafe { WaitForSingleObject(handle.as_raw_handle().cast(), 0) };
     let mut exit = u32::MAX;
     let queried = unsafe { GetExitCodeProcess(handle.as_raw_handle().cast(), &mut exit) };
