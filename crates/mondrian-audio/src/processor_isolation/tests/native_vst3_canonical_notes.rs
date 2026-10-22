@@ -464,6 +464,256 @@ fn installed_vst3_canonical_notes_preserve_literal_pcm_ids_and_same_pid_audit() 
     }
 }
 
+struct ReentryExpectedAudit {
+    calls: Vec<NativeCall>,
+    tuples: Vec<[u8; 48]>,
+}
+
+fn assert_retired_note_epochs(
+    path: &std::path::Path,
+    prefix: usize,
+    pid: u32,
+    expected: &[ReentryExpectedAudit],
+) -> Vec<u8> {
+    use std::io::Read as _;
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)
+        .expect("real fixture retirement audit")
+        .take(AUDIT_BOUND as u64 + 1)
+        .read_to_end(&mut bytes)
+        .unwrap();
+    assert!(bytes.len() <= AUDIT_BOUND && bytes.len() >= prefix);
+    let bytes = &bytes[prefix..];
+    let mut offset = 0_usize;
+    for (epoch, expected) in expected.iter().enumerate() {
+        assert!(bytes.len() - offset >= 80, "complete retired epoch {epoch}");
+        let length =
+            u32::from_le_bytes(bytes[offset + 8..offset + 12].try_into().unwrap()) as usize;
+        let end = offset.checked_add(length).expect("bounded audit segment");
+        assert!(length >= 80 && end <= bytes.len());
+        let packet = &bytes[offset..end];
+        // The fixture's DLL-local instance counter may restart after a module
+        // reload; the actual SDK object serial below authenticates freshness.
+        // The original reader validates the complete header, PID, mode, lengths,
+        // capacities and every actual call/event. Each segment is a physical
+        // component's real terminate callback, which requires processing=false;
+        // it is not a Stop/Deactivate/Terminate-return ACK or DLL-unload witness.
+        let (rate, calls, tuples) = audit(packet, pid);
+        assert_eq!(rate, 48_000_f64.to_bits());
+        assert_eq!(
+            calls, expected.calls,
+            "all native calls in retired epoch {epoch}"
+        );
+        assert_eq!(
+            tuples, expected.tuples,
+            "all native tuples in retired epoch {epoch}"
+        );
+        offset = end;
+    }
+    assert_eq!(
+        offset,
+        bytes.len(),
+        "no hidden or unreviewed component lifetime"
+    );
+    bytes.to_vec()
+}
+
+#[test]
+#[ignore = "fresh normal Product, owned MNE4 and absolute audit dir; new-epoch public origin0 reentry, no nonzero seek/continuous-history claim"]
+fn installed_vst3_canonical_note_origin_reentry_rebuilds_without_reusing_ids() {
+    let materials = Materials::load();
+    let render = render(48_000);
+    let sequence = materials.authored(render, 2, 0);
+    // Reuse the existing independent literal PPQ/tuple oracle. Only the new
+    // epochs' native IDs differ: the one retained parent ledger must continue
+    // its namespace even though the actual native component is replaced.
+    let phases: [(&[(usize, usize)], &[i32]); 3] = [
+        (&[(0, 3)], &[0, 0, 1]),
+        (&[(0, 1), (1, 3)], &[2, 2, 3, 3]),
+        (&[(0, 3), (3, 1)], &[4, 4, 5, 5]),
+    ];
+    let expected: Vec<_> = phases
+        .iter()
+        .map(|(partition, ids)| {
+            let mut calls = Vec::new();
+            let mut tuples = Vec::new();
+            for &(start, frames) in *partition {
+                append_expected(&mut calls, &mut tuples, start, frames);
+            }
+            assert_eq!(tuples.len(), ids.len());
+            for (tuple, id) in tuples.iter_mut().zip(*ids) {
+                tuple[40..44].copy_from_slice(&id.to_le_bytes());
+            }
+            ReentryExpectedAudit { calls, tuples }
+        })
+        .collect();
+    let mut subject = Subject::create(&materials, &sequence, render);
+    let pid = subject.object.process_id().get();
+    let root = subject.runtime.resource_root_identity();
+    let initial_claim = subject.source.current_claim().unwrap().unwrap();
+    let mut retired_prefix = Vec::new();
+    let target = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        render_block(&mut subject.runtime, 0, 3); // On2 still awaits its original Off3.
+        for (phase, epoch) in [(1_usize, 2_u64), (2, 3)] {
+            let before = cursors(&subject.runtime);
+            let old = owner(&subject.runtime);
+            let old_object = subject.runtime.observe_native_owner_object(old).unwrap();
+            let claim = subject.source.current_claim().unwrap().unwrap();
+            let cancelled = ExecutionCancellationToken::new();
+            cancelled.cancel();
+            assert_eq!(
+                subject.runtime.enter_state_cancellable(
+                    AudioStateEntry {
+                        epoch: AudioContinuityEpoch::new(epoch),
+                        start_sample: 0,
+                    },
+                    &cancelled,
+                ),
+                Err(crate::AudioNativeOwnerError::Cancelled.into())
+            );
+            assert!(matches!(
+                subject.runtime.enter_state(AudioStateEntry {
+                    epoch: AudioContinuityEpoch::new(epoch),
+                    start_sample: 1,
+                }),
+                Err(AudioExecutionError::ProcessorHost(
+                    AudioProcessorHostError::NoteExecutionRefused(_)
+                ))
+            ));
+            assert_eq!(cursors(&subject.runtime), before);
+            assert_eq!(owner(&subject.runtime), old);
+            assert_eq!(
+                subject.runtime.observe_native_owner_object(old).unwrap(),
+                old_object
+            );
+            assert_eq!(
+                subject.source.current_claim().unwrap().unwrap().generation(),
+                claim.generation()
+            );
+            subject
+                .runtime
+                .native_owner_installation_verifier()
+                .unwrap()
+                .validate(&claim)
+                .unwrap();
+            subject.runtime.validate_native_owner(old).unwrap();
+
+            // Baseline must reach this actual public API and fail Unsupported.
+            // Success means the same prepared initial configuration was rebuilt;
+            // it is not a generic absolute-zero DSP or continuous-history promise.
+            subject
+                .runtime
+                .enter_state(AudioStateEntry {
+                    epoch: AudioContinuityEpoch::new(epoch),
+                    start_sample: 0,
+                })
+                .expect(
+                    "new-epoch canonical origin0 reentry must rebuild the actual VST3 producer",
+                );
+            let fresh = owner(&subject.runtime);
+            let object = subject.runtime.observe_native_owner_object(fresh).unwrap();
+            assert_eq!(object.process_id(), old_object.process_id());
+            assert!(object.object_serial() > old_object.object_serial());
+            assert_ne!(fresh.binding(), old.binding());
+            assert_eq!(fresh.address().root, old.address().root);
+            assert_eq!(fresh.address().local, old.address().local);
+            assert_eq!(fresh.address().occurrence, old.address().occurrence);
+            assert_eq!(
+                fresh.address().epoch,
+                Some(AudioContinuityEpoch::new(epoch))
+            );
+            assert!(subject.runtime.validate_native_owner(old).is_err());
+            assert!(subject.runtime.observe_native_owner_object(old).is_err());
+            subject.runtime.validate_native_owner(fresh).unwrap();
+            assert_eq!(subject.runtime.resource_root_identity(), root);
+            assert_eq!(
+                subject.source.current_claim().unwrap().unwrap().generation(),
+                initial_claim.generation()
+            );
+            subject
+                .runtime
+                .native_owner_installation_verifier()
+                .unwrap()
+                .validate(&initial_claim)
+                .unwrap();
+            let entered = cursors(&subject.runtime);
+            assert_eq!(entered.sessions[0].identity, before.sessions[0].identity);
+            assert_eq!(
+                entered.processors[0].identity,
+                before.processors[0].identity
+            );
+            assert!(matches!(entered.sessions[0].state,
+                AudioSessionCursorState::Active { epoch: actual, next_public_sample, .. }
+                    if actual == AudioContinuityEpoch::new(epoch) && next_public_sample.sample() == 0));
+
+            // Old component termination evidence must already be complete before
+            // the fresh component's first On/PCM. The first old lifetime has no
+            // synthetic Off3, and its old pending Off is not sent to the new producer.
+            let retired =
+                assert_retired_note_epochs(&subject.path, subject.prefix, pid, &expected[..phase]);
+            assert!(
+                retired.starts_with(&retired_prefix),
+                "retired audit prefixes are immutable"
+            );
+            retired_prefix = retired;
+            assert_eq!(
+                subject.runtime.enter_state(AudioStateEntry {
+                    epoch: AudioContinuityEpoch::new(epoch),
+                    start_sample: 0,
+                }),
+                Err(AudioExecutionError::ReusedContinuityEpoch(
+                    AudioContinuityEpoch::new(epoch)
+                ))
+            );
+            assert_eq!(cursors(&subject.runtime), entered);
+            assert_eq!(owner(&subject.runtime), fresh);
+            assert_eq!(
+                subject.runtime.observe_native_owner_object(fresh).unwrap(),
+                object
+            );
+            assert_eq!(
+                subject.source.current_claim().unwrap().unwrap().generation(),
+                initial_claim.generation()
+            );
+            for &(start, frames) in phases[phase].0 {
+                render_block(&mut subject.runtime, start, frames);
+                assert_eq!(owner(&subject.runtime), fresh);
+                assert_eq!(
+                    subject.runtime.observe_native_owner_object(fresh).unwrap(),
+                    object
+                );
+            }
+            let completed = cursors(&subject.runtime);
+            assert!(matches!(completed.sessions[0].state,
+                AudioSessionCursorState::Active { epoch: actual, next_public_sample, .. }
+                    if actual == AudioContinuityEpoch::new(epoch) && next_public_sample.sample() == 4));
+            subject
+                .runtime
+                .validate_native_author_source_closed(&ExecutionCancellationToken::new())
+                .unwrap();
+        }
+    }));
+    let Subject { runtime, source, handle, path, prefix, .. } = subject;
+    // The same original Runtime and process HANDLE settle even on baseline RED.
+    // Never ask the outer Job to make a leaked processing owner look successful.
+    let cleanup = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        drop(runtime);
+        observe_exit(&handle, true);
+        drop(source);
+    }));
+    if let Err(failure) = target {
+        std::panic::resume_unwind(failure);
+    }
+    if let Err(failure) = cleanup {
+        std::panic::resume_unwind(failure);
+    }
+    let all = assert_retired_note_epochs(&path, prefix, pid, &expected);
+    assert!(
+        all.starts_with(&retired_prefix),
+        "all retired component prefixes remain unchanged"
+    );
+}
+
 #[test]
 #[ignore = "fresh normal Product and owned MNE4; Source/owner preserving cold and repeated-entry refusal"]
 fn installed_vst3_canonical_note_entry_refusals_preserve_source_and_pending_off() {
