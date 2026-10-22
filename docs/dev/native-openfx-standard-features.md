@@ -131,10 +131,14 @@ stderr0、原180秒/190秒外层/2秒清理通过。Effects334/strict零诊断�
 独立 context1、App281、OFX113、Export2及 validation API 检查通过。
 资格仅限上述 Windows CPU/owned 子集。后续 CPU 图像值与缓存已携带独立
 PAR/双轴采样率：Effects340、相关 Renderer205、缓存19、相关 App688、Export3
-控制通过；Export 含两个真实 FFmpeg 控制。native adapter 仍从 owner timing
-填 image PAR，真实 unequal-PAR 与配套 Unit-grid 输入需求尚未闭合；Direct
-正控不关闭该缺口。proxy/Reduced 的 native renderScale、空间默认值与 Rectangle
-仍未实现或验收，GPU 与其它平台不在此资格内。
+控制通过；Export 含两个真实 FFmpeg 控制。共享 Any/Unit 能力与 provider 前
+typed 准入已有 Effects352/strict 独立验收。后续已集成 native v11 actual sampling
+及逐媒体 Clip 的原始 Full CPU 请求、完整图执行与真实合成缩放；这部分尚待
+当前 App/Export/native 运行验收，不授真实 unequal-PAR 纵切资格。Unit+Temporal
+源物化明确拒绝；合法 Unit Title crop、作者尺寸 Nested 和 Full accumulator
+保持原语义，实际非 Unit 输入在 provider 前拒绝且不 quarantine。
+proxy/Reduced 的 native renderScale、空间默认值与 Rectangle 仍未实现或验收，
+GPU 与其它平台不在此资格内。
 
 ## 1. 规范版本与证据
 

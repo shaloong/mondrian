@@ -4,8 +4,8 @@ status: accepted
 
 # Carry image sampling with CPU working values
 
-CPU value and cache propagation implemented. Native OpenFX image sampling and
-demand-driven unit-scale materialization remain pending.
+CPU value/cache propagation, native OpenFX sampling and demand-driven unit-scale
+media materialization implemented. Integrated native runtime qualification pending.
 
 ## Problem
 
@@ -64,3 +64,11 @@ Windows CPU controls pass: Effects 340, affected Renderer 205, render cache 19,
 affected App 688 and Export 3 (including two actual FFmpeg controls). These cover
 value propagation and sampling mismatch refusal; they do not qualify native
 unequal-PAR rendering, GPU interoperability or other platforms.
+
+The shared provider requirement and pre-processing scale admission now pass 352
+ordinary Effects controls and strict checks. Native v11 carries actual sampling;
+Unit media uses the original Full CPU source and complete Clip graph before the
+existing spatial compositor. Unit temporal source materialization remains an
+explicit unsupported boundary. Legal Unit title crops, authored nested canvases
+and full accumulators retain their sampling; Reduced inputs require their own
+correct producer before native execution can be admitted.
