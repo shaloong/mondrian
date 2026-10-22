@@ -15699,6 +15699,7 @@ fn current_media_grant_rejection_is_blocked_without_phantom_pending_work() {
         height: sequence.settings.resolution.height,
     };
     let request = crate::app::preview_timeline_execution::PreviewTimelineMediaRequest {
+        image_scale_requirement: mondrian_effects::EffectImageScaleRequirement::Any,
         asset_id,
         color_space_override: None,
         alpha_interpretation: AlphaInterpretation::Straight,
@@ -20013,4 +20014,162 @@ fn preview_empty_output_preserves_owner_sampling_and_separates_memory_identity()
     assert_eq!(actual.sampling, sampling);
     assert_eq!((actual.width, actual.height), (3, 5));
     assert_eq!(actual.data, vec![[0.0, 0.0, 0.0, 0.0]; 15]);
+}
+
+#[test]
+fn unit_media_requests_use_original_full_cpu_without_changing_any_clip_quality() {
+    use crate::app::preview_timeline_execution::{
+        collect_preview_timeline_media_demands, unit_scale_test_effect,
+    };
+    use mondrian_effects::EffectImageScaleRequirement;
+    let (mut state, asset, root) = state_with_invalid_video_asset_for_cpu_rgb(true);
+    let mut sequence = Sequence::new("Unit and Any media");
+    let tb = sequence.time_base();
+    let mut unit = Clip::new(asset, tt(0, tb), tt(24, tb)).unwrap();
+    unit.add_effect_node(unit_scale_test_effect());
+    let left_id = unit.id;
+    let any = Clip::new(asset, tt(24, tb), tt(24, tb)).unwrap();
+    let right_id = any.id;
+    sequence.video_tracks[0].add_clip(unit).unwrap();
+    sequence.video_tracks[0].add_clip(any).unwrap();
+    sequence
+        .video_transitions
+        .push(mondrian_timeline::VideoTransition::cross_dissolve(
+            left_id,
+            right_id,
+            mondrian_core::TimelineTimeRange::new(tt(23, tb), tt(2, tb)).unwrap(),
+        ));
+    state.test_set_sequence(Some(sequence));
+    let document = state.authoring.as_mut().unwrap().document_mut_for_test_fixture();
+    document.settings.proxy_enabled = true;
+    document.settings.cache_dir = Some(root.join("cache"));
+    document.proxy_mode_assets.insert(asset);
+    let runtime = PreviewProductionRuntime::<()>::new_without_workers_for_test();
+    let sequence = state.active_sequence().unwrap();
+    let snapshot = state.preview_execution_snapshot(Instant::now());
+    let context = sequence
+        .settings
+        .root_program_color_context(state.project_color_environment())
+        .unwrap();
+    let target = Resolution { width: 3, height: 2 };
+    let quality = mondrian_media::PreviewRepresentationQuality::Reduced {
+        divisor: std::num::NonZeroU32::new(4).unwrap(),
+    };
+    for frame in [0, 1, 23, 24, 25] {
+        let requests = collect_preview_timeline_media_demands(
+            sequence,
+            &[],
+            frame,
+            target,
+            mondrian_playback::PreviewResolutionScale::Quarter,
+            context.clone(),
+        )
+        .unwrap();
+        assert!(!requests.is_empty());
+        for request in requests {
+            let key = runtime
+                .media_preview_key_for_timeline_request(
+                    &snapshot,
+                    &state,
+                    &request,
+                    quality,
+                    false,
+                    request.image_scale_requirement == EffectImageScaleRequirement::Unit,
+                )
+                .unwrap();
+            assert_eq!(request.target_resolution, target);
+            assert_eq!(key.decode.source().path(), root.join("source.mp4"));
+            match request.image_scale_requirement {
+                EffectImageScaleRequirement::Unit => {
+                    assert_eq!(
+                        key.decode.representation(),
+                        mondrian_media::PreviewDecodeRepresentation::NativeCpu
+                    );
+                    assert!(request.cpu_working_required);
+                }
+                EffectImageScaleRequirement::Any => {
+                    assert_eq!(
+                        key.decode.representation(),
+                        mondrian_media::PreviewDecodeRepresentation::Reduced {
+                            divisor: std::num::NonZeroU32::new(4).unwrap()
+                        }
+                    );
+                }
+            }
+        }
+    }
+    // Install the same closed fresh-proxy manifest used by source-resolution
+    // tests. No decoder runs in this identity/admission regression.
+    let author = snapshot.authoring().unwrap();
+    let asset_record = author.asset_library().get_asset(asset).unwrap().unwrap();
+    let proxy_color = crate::app::proxy_generation::resolve_asset_proxy_color_contract(
+        &asset_record,
+        &context.media_input(false),
+    )
+    .unwrap();
+    let generator = mondrian_media::ProxyGenerator::new(author.proxy().config().clone());
+    let source_path = root.join("source.mp4");
+    let proxy_path = generator.proxy_path(&source_path, proxy_color).unwrap();
+    std::fs::create_dir_all(proxy_path.parent().unwrap()).unwrap();
+    std::fs::write(&proxy_path, b"closed proxy identity fixture").unwrap();
+    std::fs::write(
+        mondrian_media::ProxyGenerator::manifest_path(&proxy_path),
+        serde_json::to_vec(&generator.expected_manifest(&source_path, proxy_color).unwrap())
+            .unwrap(),
+    )
+    .unwrap();
+    for frame in [1, 25] {
+        let requests = collect_preview_timeline_media_demands(
+            sequence,
+            &[],
+            frame,
+            target,
+            mondrian_playback::PreviewResolutionScale::Quarter,
+            context.clone(),
+        )
+        .unwrap();
+        let key = runtime
+            .media_preview_key_for_timeline_request(
+                &snapshot,
+                &state,
+                &requests[0],
+                quality,
+                false,
+                true,
+            )
+            .unwrap();
+        if frame == 1 {
+            assert_eq!(key.decode.source().path(), source_path.as_path());
+            assert_eq!(
+                key.decode.representation(),
+                mondrian_media::PreviewDecodeRepresentation::NativeCpu
+            );
+        } else {
+            assert_eq!(key.decode.source().path(), proxy_path.as_path());
+            assert!(matches!(
+                key.decode.representation(),
+                mondrian_media::PreviewDecodeRepresentation::Proxy(_)
+            ));
+        }
+    }
+    // The same request resolver serves current and lookahead demand identity.
+    let future = runtime
+        .future_media_frame_keys_at_scale_for_test(
+            &snapshot,
+            &state,
+            sequence,
+            1,
+            mondrian_playback::PreviewResolutionScale::Quarter,
+            target,
+            context,
+        )
+        .unwrap();
+    assert!(!future.is_empty());
+    assert!(future
+        .iter()
+        .all(|key| key.decode.representation()
+            == mondrian_media::PreviewDecodeRepresentation::NativeCpu));
+    runtime.shutdown();
+    drop(state);
+    std::fs::remove_dir_all(root).unwrap();
 }

@@ -456,6 +456,7 @@ fn decode_sampled_frame(
     expected_center_rgba: [u8; 4],
 ) -> anyhow::Result<SampledFrameEvidence> {
     let request = crate::app::preview_timeline_execution::PreviewTimelineMediaRequest {
+        image_scale_requirement: mondrian_effects::EffectImageScaleRequirement::Any,
         asset_id: asset.id,
         color_space_override: None,
         alpha_interpretation: AlphaInterpretation::Ignore,

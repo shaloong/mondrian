@@ -130,6 +130,7 @@ fn timeline_composite_is_blocked(error: &TimelineCompositeError) -> bool {
                 | EffectExecutionError::InvalidColorDomainPlan
                 | EffectExecutionError::CustomProcessorUnavailable { .. }
                 | EffectExecutionError::ProcessorUserBlocked { .. }
+                | EffectExecutionError::ImageScaleNotAdmitted { .. }
         ),
         TimelineCompositeError::FloatEffect {
             reason: EffectFloatExecutionError::UnsupportedNode { reason, .. },
@@ -146,6 +147,7 @@ fn timeline_composite_is_blocked(error: &TimelineCompositeError) -> bool {
             error,
             EffectExecutionError::CustomProcessorUnavailable { .. }
                 | EffectExecutionError::ProcessorUserBlocked { .. }
+                | EffectExecutionError::ImageScaleNotAdmitted { .. }
         ),
         TimelineCompositeError::FloatEffect {
             reason: EffectFloatExecutionError::MaskRasterFailed { .. },
@@ -607,6 +609,37 @@ fn duration_us(duration: Duration) -> u64 {
 mod tests {
     use super::*;
     use crate::app::preview_unavailability::PreviewUnavailabilityDisposition;
+
+    #[test]
+    fn unit_scale_admission_is_a_blocked_capability_in_both_error_paths() {
+        let actual_sampling = mondrian_core::ImageSampling::from_uniform_f32(
+            mondrian_core::SampleAspectRatio::SQUARE,
+            0.5,
+        )
+        .unwrap();
+        for error in [
+            TimelineCompositeError::EncodedEffect(EffectExecutionError::ImageScaleNotAdmitted {
+                requirement: mondrian_effects::EffectImageScaleRequirement::Unit,
+                actual_sampling,
+            }),
+            TimelineCompositeError::FloatEffect {
+                reason: EffectFloatExecutionError::CustomProcessor(
+                    EffectExecutionError::ImageScaleNotAdmitted {
+                        requirement: mondrian_effects::EffectImageScaleRequirement::Unit,
+                        actual_sampling,
+                    },
+                ),
+            },
+        ] {
+            let unavailable = PreviewCpuExecutionError::TimelineComposite(error).unavailability();
+            assert_eq!(
+                unavailable.disposition(),
+                PreviewUnavailabilityDisposition::Blocked
+            );
+            assert_eq!(unavailable.stage(), PreviewOutputStage::TimelineComposite);
+            assert_eq!(unavailable.code(), "preview.blocked.timeline_composite");
+        }
+    }
 
     #[test]
     fn unmaterialized_source_is_a_blocked_timeline_capability() {

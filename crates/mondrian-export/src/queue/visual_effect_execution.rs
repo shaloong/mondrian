@@ -362,6 +362,14 @@ impl ExportVisualRenderSession {
         placement: ExportHeterogeneousPlacement,
         maximum_extent: EffectFrameExtent,
     ) -> Result<Option<PreparedHeterogeneousEffectRoute>, ExportHeterogeneousEffectError> {
+        if placement == ExportHeterogeneousPlacement::Media
+            && graph.image_scale_requirement()
+                == mondrian_effects::EffectImageScaleRequirement::Unit
+        {
+            // Full media Effects run before the node-canvas spatial join. Keep
+            // the original graph for complete CPU admission below.
+            return Ok(None);
+        }
         let cpu_exact = compiled_effect_graph_supports_rgba_f32_with_domain_processor(graph);
         if cpu_exact {
             self.visual_diagnostics.cpu_compatible_effect_checks =

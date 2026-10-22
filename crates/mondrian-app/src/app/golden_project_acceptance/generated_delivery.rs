@@ -1102,6 +1102,7 @@ fn reimport_export(
         .root_program_color_context(state.project_color_environment())?
         .media_input(false);
     let request = PreviewTimelineMediaRequest {
+        image_scale_requirement: mondrian_effects::EffectImageScaleRequirement::Any,
         asset_id: asset.id,
         color_space_override: None,
         alpha_interpretation: AlphaInterpretation::Ignore,

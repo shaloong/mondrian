@@ -66,6 +66,8 @@ use super::preview_viewer_plan::{
 /// Complete media-layer request emitted while materializing a prepared node.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct PreviewTimelineMediaRequest {
+    /// Frozen requirement of the original reachable Clip graph.
+    pub(crate) image_scale_requirement: mondrian_effects::EffectImageScaleRequirement,
     pub(crate) asset_id: AssetId,
     pub(crate) color_space_override: Option<ColorSpace>,
     pub(crate) alpha_interpretation: AlphaInterpretation,
@@ -950,6 +952,7 @@ where
                 target_resolution,
                 &color_context,
                 demand,
+                batch.graph().image_scale_requirement(),
             )? {
                 PreviewTemporalSourceResolution::Pending => {
                     batch_pending = true;
@@ -1087,6 +1090,7 @@ fn resolve_preview_temporal_source<MediaFrame, TitleFrame>(
     target_resolution: Resolution,
     color_context: &ProgramColorContext,
     demand: &TimelineTemporalSourceDemand,
+    image_scale_requirement: mondrian_effects::EffectImageScaleRequirement,
 ) -> Result<PreviewTemporalSourceResolution, PreviewTimelineAbort>
 where
     MediaFrame: FnMut(PreviewTimelineMediaRequest) -> PreviewTimelineMediaFrame,
@@ -1110,6 +1114,7 @@ where
                 *auto_tone_map,
                 target_resolution,
                 color_context,
+                image_scale_requirement,
             );
             let frame = match (execution.media_frame)(request) {
                 PreviewTimelineMediaFrame::Ready(frame) => frame,
@@ -1396,6 +1401,19 @@ fn prepare_preview_frame_closure(
     let mut scratch = graph.scratch.borrow_mut();
     let closure = closure
         .try_map_payload(|node, closure| {
+            // Temporal extraction rewrites the current Clip graph. Inspect the
+            // retained original graph before any source demand can be materialized.
+            for batch in node.evaluation().temporal_batches() {
+                if batch.graph().image_scale_requirement()
+                    == mondrian_effects::EffectImageScaleRequirement::Unit
+                {
+                    return Err(
+                        TimelinePreviewEffectRouteError::UnitScaleTemporalUnsupported {
+                            placement: batch.placement(),
+                        },
+                    );
+                }
+            }
             let node_resolution = node.execution_resolution();
             PreparedTimelinePreviewEffectRoutes::prepare(
                 node.evaluation().plan(),
@@ -1474,6 +1492,7 @@ fn collect_prepared_visual_media_demands(
                         *auto_tone_map,
                         target_resolution,
                         color_context,
+                        batch.graph().image_scale_requirement(),
                     ));
                 }
             }
@@ -2244,6 +2263,7 @@ fn preview_timeline_media_request(
         source_sample: media.source_sample,
         target_resolution,
         input_color: color_context.media_input(media.auto_tone_map),
+        image_scale_requirement: media.effect_graph.image_scale_requirement(),
         cpu_working_required: route.requires_cpu_working_frame(),
     })
 }
@@ -2278,8 +2298,10 @@ fn preview_temporal_media_request(
     auto_tone_map: bool,
     target_resolution: Resolution,
     color_context: &ProgramColorContext,
+    image_scale_requirement: mondrian_effects::EffectImageScaleRequirement,
 ) -> PreviewTimelineMediaRequest {
     PreviewTimelineMediaRequest {
+        image_scale_requirement,
         asset_id,
         color_space_override,
         alpha_interpretation,
@@ -2328,6 +2350,9 @@ enum PreviewTimelineAbort {
     },
     Unavailable(PreviewUnavailability),
 }
+
+#[cfg(test)]
+pub(crate) use tests::unit_scale_test_effect;
 
 #[cfg(test)]
 #[path = "preview_timeline_execution/tests.rs"]

@@ -8115,6 +8115,11 @@ fn prepare_export_visual_frame_closure(
                     ),
                 )
                 .map_err(|error| error.to_string())?;
+            for batch in prepared_frame.batches() {
+                if batch.graph().image_scale_requirement() == mondrian_effects::EffectImageScaleRequirement::Unit {
+                    return Err(mondrian_renderer::TimelinePreviewEffectRouteError::UnitScaleTemporalUnsupported { placement: batch.placement() }.to_string());
+                }
+            }
             if prepared_frame.execution_plan().is_empty() {
                 let (render_plan, temporal_batches) = prepared_frame.into_parts();
                 return Ok(PreparedVisualFrameEvaluation::new(
@@ -9616,6 +9621,11 @@ fn decode_export_media_plan(
     cancellation: &ExecutionCancellationToken,
     route: ExportDecodedSourceRoute,
 ) -> Result<Arc<DecodedVideoLayer>, String> {
+    let unit = media.effect_graph.image_scale_requirement()
+        == mondrian_effects::EffectImageScaleRequirement::Unit;
+    if unit && route != ExportDecodedSourceRoute::CpuWorking {
+        return Err("Unit-scale media Effects require the complete CPU source route".to_owned());
+    }
     let dependency = media_dependencies
         .get(&media.asset_id)
         .ok_or_else(|| format!("导出快照缺少素材依赖: {}", media.asset_id))?;
@@ -9661,6 +9671,11 @@ fn decode_export_media_plan(
             media.asset_id
         )
     })?;
+    let decode_resolution = if unit {
+        source_resolution
+    } else {
+        Resolution { width, height }
+    };
     let key = ExportDecodeCacheKey::new(
         media.asset_id,
         dependency,
@@ -9668,7 +9683,7 @@ fn decode_export_media_plan(
         source_contract,
         preparation_intent.clone(),
         media.alpha_interpretation,
-        Resolution { width, height },
+        decode_resolution,
         source_resolution,
         picture_geometry,
     )?;
@@ -9698,7 +9713,7 @@ fn decode_export_media_plan(
             asset_id: media.asset_id,
             dependency,
             source_sample: media.source_sample,
-            decode_resolution: Resolution { width, height },
+            decode_resolution,
             source_resolution,
             picture_geometry,
             source_color: source_contract,
@@ -14495,6 +14510,166 @@ mod tests {
 
         assert!(error.contains("data-texture export requires RGB source sampling"));
         assert!(error.contains("Yuv420p"));
+    }
+
+    #[test]
+    fn unit_media_export_decodes_original_odd_grid_before_small_canvas() {
+        use mondrian_effects::*;
+        #[derive(Debug)]
+        struct UnitFactory;
+        impl EffectFloatProcessorFactory for UnitFactory {
+            fn image_scale_requirement(&self) -> EffectImageScaleRequirement {
+                EffectImageScaleRequirement::Unit
+            }
+            fn alpha_contract(&self) -> EffectAlphaContract {
+                EffectAlphaContract::STRAIGHT_COVERAGE
+            }
+            fn feedback_budget_bytes(&self) -> usize {
+                0
+            }
+            fn storage(
+                &self,
+                _: EffectFloatProcessorSizing,
+            ) -> mondrian_core::Result<EffectFloatProcessorStorage> {
+                panic!("decode/preflight cannot size a provider")
+            }
+            fn prepare(
+                &self,
+                _: EffectFloatProcessorPreparation,
+                _: &mut EffectProcessorControl<'_>,
+            ) -> mondrian_core::Result<Box<dyn EffectFloatProcessorInstance>> {
+                panic!("decode/preflight cannot prepare a provider")
+            }
+        }
+        let key = format!("test.export.unit-original.{}", AssetId::new());
+        register_effect_definition(
+            EffectDefinition::new(
+                &key,
+                "Unit original source",
+                Default::default(),
+                EffectColorDomainContract::SCENE_LINEAR,
+            )
+            .with_execution_contract(EffectExecutionContract {
+                execution_modes: EffectExecutionModes::CPU_F32,
+                ..EffectExecutionContract::IDENTITY
+            })
+            .with_custom_float_processor_factory(
+                Arc::new(|_, _| Ok(Some(serde_json::json!({})))),
+                None,
+                EffectCachePolicy::Uncacheable,
+                Arc::new(UnitFactory),
+            ),
+        )
+        .unwrap();
+        let effect = instantiate_effect_node(EffectType::External(key)).unwrap();
+        let graph = PreparedEffectProgram::prepare(&[effect], &[], test_working_color_space())
+            .unwrap()
+            .evaluate(TimelineTime::ZERO)
+            .unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("odd-source.ppm");
+        let mut ppm = b"P6\n7 5\n255\n".to_vec();
+        ppm.extend_from_slice(&[17, 64, 255].repeat(35));
+        std::fs::write(&path, ppm).unwrap();
+        let mut dependency = test_media_dependency(
+            path.clone(),
+            Some(ColorSpace::Srgb),
+            data_texture_interpretation(),
+            None,
+        );
+        dependency.source_resolution = Some(Resolution { width: 7, height: 5 });
+        dependency.picture = Some(mondrian_core::PictureStreamMetadata {
+            sample_aspect_ratio: mondrian_core::SampleAspectRatio::new(4, 3),
+            field_order: Some(mondrian_core::timeline_data::FieldOrder::Progressive),
+            ..Default::default()
+        });
+        let asset = AssetId::new();
+        let media = TimelineMediaPlan {
+            placement: mondrian_core::timeline_data::TimelineClipExecutionRef {
+                sequence_id: mondrian_core::SequenceId::new(),
+                sequence_revision: mondrian_core::SequenceRevision::INITIAL,
+                clip_id: mondrian_core::ClipId::new(),
+                clip_time: TimelineTime::ZERO,
+                endpoint: mondrian_core::timeline_data::TimelineClipEndpointContext::Ordinary,
+            },
+            asset_id: asset,
+            color_space_override: None,
+            pixel_aspect_ratio_override: None,
+            field_order_override: None,
+            alpha_interpretation: AlphaInterpretation::Straight,
+            frame_rate_override: None,
+            source_sample: mondrian_core::SourceSampleTarget::covering(TimelineTime::ZERO),
+            opacity: 1.0,
+            blend_mode: mondrian_core::BlendMode::Normal,
+            transform: [1., 0., 0., 0., 1., 0.],
+            effect_graph: Arc::clone(&graph),
+            frame_seed: 0,
+            auto_tone_map: false,
+        };
+        let sequence = Sequence::new("small export target");
+        let context = sequence
+            .settings
+            .root_program_color_context(&mondrian_core::ProjectColorEnvironment::default())
+            .unwrap();
+        let mut session = ExportVisualRenderSession::for_reference_generation(
+            701,
+            service::ExportExecutionResourcePolicy::default(),
+        );
+        assert!(session
+            .select_heterogeneous_route(
+                &graph,
+                ExportHeterogeneousPlacement::Media,
+                EffectFrameExtent::new(3, 2)
+            )
+            .unwrap()
+            .is_none());
+        let mut cache = HashMap::new();
+        let canceled = ExecutionCancellationToken::new();
+        let dependencies = HashMap::from([(asset, dependency)]);
+        let decoded = decode_export_media_plan(
+            &dependencies,
+            &media,
+            3,
+            2,
+            &context,
+            &mut cache,
+            None,
+            None,
+            &mut session,
+            &canceled,
+            ExportDecodedSourceRoute::CpuWorking,
+        )
+        .unwrap();
+        let actual = decoded.cpu_frame().unwrap().rgba_f32();
+        assert_eq!((actual.width, actual.height), (7, 5));
+        assert_eq!(
+            actual.sampling.sample_aspect_ratio(),
+            mondrian_core::SampleAspectRatio::new(4, 3).unwrap()
+        );
+        assert!(actual.sampling.is_unit_scale());
+        assert_eq!(
+            actual.data,
+            vec![[17.0 / 255.0, 64.0 / 255.0, 1.0, 1.0]; 35]
+        );
+        assert!(cache
+            .keys()
+            .all(|key| key.decode_resolution == Resolution { width: 7, height: 5 }));
+        assert!(decode_export_media_plan(
+            &dependencies,
+            &media,
+            3,
+            2,
+            &context,
+            &mut cache,
+            None,
+            None,
+            &mut session,
+            &canceled,
+            ExportDecodedSourceRoute::GpuInput
+        )
+        .unwrap_err()
+        .contains("complete CPU source route"));
+        session.decode_context.clear();
     }
 
     #[test]

@@ -122,7 +122,11 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                 }
             })
             .flatten();
-        let admission = if request.cpu_working_required || self.viewer_cpu_fallback_active.get() {
+        let admission = if request.cpu_working_required
+            || request.image_scale_requirement
+                == mondrian_effects::EffectImageScaleRequirement::Unit
+            || self.viewer_cpu_fallback_active.get()
+        {
             self.request_cpu_working_media_preview(
                 key.clone(),
                 intent,
@@ -311,6 +315,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             self.hardware_decode_admission.get(),
             request.cpu_working_required || self.viewer_cpu_fallback_active.get(),
             representation_quality,
+            request.image_scale_requirement,
         )
     }
 
@@ -349,6 +354,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             preview_representation_quality(
                 self.raster_requirement.get().execution_scale(runtime_scale),
             ),
+            mondrian_effects::EffectImageScaleRequirement::Any,
         )
     }
 
@@ -370,6 +376,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         hardware_admission: PreviewHardwareDecodeAdmissionState,
         cpu_working_required: bool,
         representation_quality: mondrian_media::PreviewRepresentationQuality,
+        image_scale_requirement: mondrian_effects::EffectImageScaleRequirement,
     ) -> Result<MediaPreviewKey, PreviewUnavailability> {
         let authoring = snapshot.authoring().ok_or_else(|| {
             PreviewUnavailability::blocked(
@@ -401,9 +408,18 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                 ));
             }
         };
+        let unit = image_scale_requirement == mondrian_effects::EffectImageScaleRequirement::Unit;
+        let representation_quality = if unit {
+            mondrian_media::PreviewRepresentationQuality::Full
+        } else {
+            representation_quality
+        };
+        let cpu_working_required = cpu_working_required || unit;
+        let request_missing_proxy_generation = request_missing_proxy_generation && !unit;
         let proxy_config = authoring.proxy().config();
         let proxy_color = resolve_asset_proxy_color_contract(&asset, input_color).ok();
-        let prefer_proxy = self.raster_requirement.get() == PreviewRasterRequirement::Viewer
+        let prefer_proxy = !unit
+            && self.raster_requirement.get() == PreviewRasterRequirement::Viewer
             && authoring.proxy().prefers_proxy(*asset_id);
         match resolve_preview_media_source(PreviewMediaSourceRequest {
             asset: &asset,

@@ -63,6 +63,7 @@ struct PreparedTimelinePreviewEffectRouteEntry {
 /// already-composited GPU accumulator.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TimelinePreviewEffectSource {
+    MediaCpuWorkingFrame,
     NodeRasterCpuWorkingFrame,
     NestedCpuWorkingFrame,
     CompositedAccumulator,
@@ -76,7 +77,7 @@ impl TimelinePreviewEffectSource {
         nested_extent: &mut impl FnMut(TimelineClipExecutionRef) -> Option<EffectFrameExtent>,
     ) -> Result<Option<EffectFrameExtent>, TimelinePreviewEffectRouteError> {
         match self {
-            Self::NodeRasterCpuWorkingFrame => Ok(Some(node_extent)),
+            Self::MediaCpuWorkingFrame | Self::NodeRasterCpuWorkingFrame => Ok(Some(node_extent)),
             Self::NestedCpuWorkingFrame => nested_extent(placement).map(Some).ok_or(
                 TimelinePreviewEffectRouteError::MissingNestedMaterializationExtent { placement },
             ),
@@ -114,7 +115,15 @@ impl PreparedTimelinePreviewEffectRoutes {
             });
         let mut entries = Vec::new();
         visit_plan_graphs(plan, &mut |placement, graph, source| {
-            let route = if scratch.get_or_lower_effect_gpu_plan(graph).is_ok() {
+            let route = if source == TimelinePreviewEffectSource::MediaCpuWorkingFrame
+                && graph.image_scale_requirement()
+                    == mondrian_effects::EffectImageScaleRequirement::Unit
+            {
+                // A Full media raster is independent of the node canvas. The current
+                // heterogeneous ledger is sized to that canvas, so keep the complete
+                // graph on the existing source-before-composite CPU route.
+                PreparedTimelinePreviewEffectRoute::Cpu
+            } else if scratch.get_or_lower_effect_gpu_plan(graph).is_ok() {
                 PreparedTimelinePreviewEffectRoute::Gpu
             } else if let Some(extent) =
                 source.cpu_prefix_extent(placement, node_extent, &mut nested_extent)?
@@ -198,6 +207,12 @@ impl PreparedTimelinePreviewEffectRoutes {
 /// Fail-closed route-ledger validation error.
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum TimelinePreviewEffectRouteError {
+    /// Full-source temporal ROI coordinates have no producer in this slice.
+    #[error("Unit-scale temporal source materialization is unsupported for {placement:?}")]
+    UnitScaleTemporalUnsupported {
+        /// Exact original temporal graph placement, before current-frame rewriting.
+        placement: TimelineClipExecutionRef,
+    },
     /// Neither the complete CPU compositor nor the complete Viewer Effect
     /// route can execute the root plan.
     #[error(
@@ -250,7 +265,7 @@ fn visit_plan_graphs(
                 visitor(
                     layer.placement,
                     &layer.effect_graph,
-                    TimelinePreviewEffectSource::NodeRasterCpuWorkingFrame,
+                    TimelinePreviewEffectSource::MediaCpuWorkingFrame,
                 )?;
             }
             TimelineRenderPlanElement::BasicTitle(layer) => {
@@ -305,7 +320,7 @@ fn visit_transition_graph(
             visitor(
                 layer.placement,
                 &layer.effect_graph,
-                TimelinePreviewEffectSource::NodeRasterCpuWorkingFrame,
+                TimelinePreviewEffectSource::MediaCpuWorkingFrame,
             )?;
         }
         TimelineTransitionInputPlan::BasicTitle(layer) => {

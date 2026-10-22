@@ -1930,3 +1930,323 @@ fn preview_materializer_has_no_raw_sequence_relookup_seam() {
     assert!(!source.contains(".settings.preview.resolution_scale"));
     assert!(!source.contains(".settings.title_safe_margin"));
 }
+
+pub(crate) fn unit_scale_test_effect() -> mondrian_effects::EffectNode {
+    use mondrian_effects::*;
+    #[derive(Debug)]
+    struct UnitFactory;
+    #[derive(Debug)]
+    struct UnitInstance;
+    impl EffectFloatProcessorFactory for UnitFactory {
+        fn image_scale_requirement(&self) -> EffectImageScaleRequirement {
+            EffectImageScaleRequirement::Unit
+        }
+        fn alpha_contract(&self) -> EffectAlphaContract {
+            EffectAlphaContract::STRAIGHT_COVERAGE
+        }
+        fn feedback_budget_bytes(&self) -> usize {
+            0
+        }
+        fn storage(
+            &self,
+            _: EffectFloatProcessorSizing,
+        ) -> mondrian_core::Result<EffectFloatProcessorStorage> {
+            EffectFloatProcessorStorage::new(0, 0)
+        }
+        fn prepare(
+            &self,
+            _: EffectFloatProcessorPreparation,
+            _: &mut EffectProcessorControl<'_>,
+        ) -> mondrian_core::Result<Box<dyn EffectFloatProcessorInstance>> {
+            Ok(Box::new(UnitInstance))
+        }
+    }
+    impl EffectFloatProcessorInstance for UnitInstance {
+        fn process(
+            &mut self,
+            frame: &mut EffectFloatFrame,
+            _: &serde_json::Value,
+            _: i64,
+            _: &mut EffectProcessorControl<'_>,
+        ) -> Result<Option<EffectProcessorFeedback>, EffectProcessorInvocationError> {
+            assert!(
+                frame.sampling().is_unit_scale(),
+                "a Unit provider must receive the complete source density"
+            );
+            for pixel in frame.pixels_mut() {
+                pixel[0] *= 2.0;
+            }
+            Ok(None)
+        }
+    }
+    let key = format!("test.preview.unit-media.{}", AssetId::new());
+    register_effect_definition(
+        EffectDefinition::new(
+            &key,
+            "Unit source grid",
+            Default::default(),
+            EffectColorDomainContract::SCENE_LINEAR,
+        )
+        .with_execution_contract(EffectExecutionContract {
+            execution_modes: EffectExecutionModes::CPU_F32,
+            roi_propagation: EffectRoiPropagation::PixelLocal,
+            ..EffectExecutionContract::IDENTITY
+        })
+        .with_custom_float_processor_factory(
+            Arc::new(|_, _| Ok(Some(serde_json::json!({})))),
+            None,
+            EffectCachePolicy::Uncacheable,
+            Arc::new(UnitFactory),
+        ),
+    )
+    .unwrap();
+    instantiate_effect_node(EffectType::External(key)).unwrap()
+}
+
+#[test]
+fn original_unit_temporal_graph_refuses_before_media_demand() {
+    let mut sequence = Sequence::new("Unit temporal source domain");
+    let tb = sequence.time_base();
+    let mut clip = Clip::new(AssetId::new(), tt(0, tb), tt(24, tb)).unwrap();
+    clip.add_effect_node(unit_scale_test_effect());
+    clip.add_effect_node(temporal_blend_effect(TimelineTime::new(1, 24).unwrap()));
+    sequence.video_tracks[0].add_clip(clip).unwrap();
+    let demands = collect_preview_timeline_media_demands(
+        &sequence,
+        &[],
+        4,
+        Resolution { width: 3, height: 2 },
+        PreviewResolutionScale::Quarter,
+        color_context(&sequence),
+    );
+    assert!(demands
+        .unwrap_err()
+        .detail()
+        .contains("Unit-scale temporal source materialization is unsupported"));
+    let outcome = resolve_preview_timeline(
+        &sequence,
+        &[],
+        4,
+        Resolution { width: 3, height: 2 },
+        PreviewResolutionScale::Quarter,
+        color_context(&sequence),
+        &mut |_| panic!("no decode demand before temporal grid admission"),
+        &mut |_| panic!("no title"),
+    );
+    let PreviewTimelineResolution::Unavailable { reason } = outcome else {
+        panic!("Unit temporal must retain its original requirement after extraction")
+    };
+    assert!(reason
+        .detail()
+        .contains("Unit-scale temporal source materialization is unsupported"));
+}
+
+#[test]
+fn unit_and_any_clip_demands_keep_independent_source_requirements() {
+    let mut sequence = Sequence::new("independent Clip grids");
+    let tb = sequence.time_base();
+    let mut unit = Clip::new(AssetId::new(), tt(0, tb), tt(24, tb)).unwrap();
+    unit.add_effect_node(unit_scale_test_effect());
+    let any = Clip::new(AssetId::new(), tt(24, tb), tt(24, tb)).unwrap();
+    sequence.video_tracks[0].add_clip(unit).unwrap();
+    sequence.video_tracks[0].add_clip(any).unwrap();
+    let target = Resolution { width: 3, height: 2 };
+    for frame in [0, 1, 24, 25] {
+        let requests = collect_preview_timeline_media_demands(
+            &sequence,
+            &[],
+            frame,
+            target,
+            PreviewResolutionScale::Quarter,
+            color_context(&sequence),
+        )
+        .unwrap();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(
+            requests[0].target_resolution, target,
+            "source requirement must not resize canvas"
+        );
+        assert_eq!(
+            requests[0].image_scale_requirement,
+            if frame < 24 {
+                mondrian_effects::EffectImageScaleRequirement::Unit
+            } else {
+                mondrian_effects::EffectImageScaleRequirement::Any
+            }
+        );
+        if frame < 24 {
+            assert!(requests[0].cpu_working_required);
+        }
+    }
+}
+
+#[test]
+fn full_odd_media_effect_and_mask_execute_before_small_canvas_spatial_join() {
+    use mondrian_effects::{MaskComponent, MaskEvaluation, MaskShape};
+    use mondrian_media::{
+        DecodedVideoRangeContract, PreviewDecodeAccessMode, PreviewDecodeOutcome,
+        PreviewDecodeRequest, PreviewDecodeSessionContext, PreviewSourceColorContract,
+    };
+    ensure_mondrian_default_ocio_loaded().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("odd-full.ppm");
+    let mut ppm = b"P6\n7 5\n255\n".to_vec();
+    for _y in 0..5 {
+        for x in 0..7 {
+            ppm.extend_from_slice(if x == 3 { &[255, 0, 0] } else { &[0, 0, 0] });
+        }
+    }
+    std::fs::write(&path, ppm).unwrap();
+    let mut decoder = PreviewDecodeSessionContext::new();
+    let decoded = decoder
+        .decode_cancellable(
+            PreviewDecodeRequest::new(
+                &path,
+                mondrian_core::SourceSampleTarget::covering(TimelineTime::ZERO),
+                PreviewDecodeAccessMode::RandomAccessStillFrame,
+                PreviewSourceColorContract::new(
+                    ColorSpace::Rec709,
+                    DecodedVideoRangeContract::OverrideFull,
+                ),
+            )
+            .with_max_size(Some(7), Some(5)),
+            || false,
+        )
+        .unwrap();
+    let PreviewDecodeOutcome::Frame(decoded) = decoded else {
+        panic!("PPM Full decode must retain CPU RGBA samples")
+    };
+    assert_eq!(
+        (decoded.width, decoded.height),
+        (7, 5),
+        "Full must preserve odd source raster"
+    );
+    let geometry =
+        mondrian_core::ResolvedPictureGeometry::square(Resolution { width: 7, height: 5 }).unwrap();
+    let sampling = geometry
+        .image_sampling(Resolution { width: decoded.width, height: decoded.height })
+        .unwrap();
+    assert!(sampling.is_unit_scale());
+    let prepared = mondrian_renderer::prepare_decoded_cpu_source_frame(
+        decoded.into(),
+        AlphaInterpretation::Straight,
+        mondrian_renderer::RenderInputTransform::to_working(
+            mondrian_core::WorkingColorSpace::LinearRec709,
+            false,
+            mondrian_core::ColorEngine::mondrian_standard(),
+        ),
+        sampling,
+    )
+    .unwrap();
+    let mut colors = mondrian_renderer::RenderCpuColorExecutionSession::default();
+    let working = prepared.execute_cpu_with_session(&mut colors).unwrap().frame;
+    assert_eq!(working.rgba_f32().sampling, sampling);
+    let media = MediaPreviewFrame::from_working(
+        working,
+        Resolution { width: 7, height: 5 },
+        PreviewSemanticIdentity::from_complete_fingerprint([71; 32]),
+        FramePresentationQuality::Ready,
+        PreviewDecodeExecutionSummary::default(),
+    )
+    .with_picture_geometry(geometry);
+    let mut sequence = Sequence::new("Full effects before downscale");
+    sequence.settings.resolution = Resolution { width: 7, height: 5 };
+    sequence.settings.color.working_color_space = mondrian_core::WorkingColorSpace::LinearRec709;
+    let tb = sequence.time_base();
+    let mut clip = Clip::new(AssetId::new(), tt(0, tb), tt(24, tb)).unwrap();
+    clip.add_effect_node(unit_scale_test_effect());
+    clip.masks.push(MaskComponent::new(
+        "half coverage".to_owned(),
+        MaskEvaluation {
+            shape: MaskShape::Rectangle {
+                x: 0.0,
+                y: 0.0,
+                width: 1.0,
+                height: 1.0,
+                corner_radius: 0.0,
+            },
+            opacity: 0.5,
+            ..Default::default()
+        },
+    ));
+    sequence.video_tracks[0].add_clip(clip).unwrap();
+    let target = Resolution { width: 3, height: 2 };
+    let result = resolve_preview_timeline(
+        &sequence,
+        &[],
+        0,
+        target,
+        PreviewResolutionScale::Quarter,
+        color_context(&sequence),
+        &mut |request| {
+            assert_eq!(
+                request.image_scale_requirement,
+                mondrian_effects::EffectImageScaleRequirement::Unit
+            );
+            PreviewTimelineMediaFrame::Ready(media.clone())
+        },
+        &mut |_| panic!("media only"),
+    );
+    let PreviewTimelineResolution::Ready(result) = result else {
+        panic!("full source must fit existing small-canvas CPU route")
+    };
+    let output = composite_resolved_preview_working(
+        3,
+        2,
+        &result.plan.elements,
+        &result.plan.color_context,
+        result.plan.sampling,
+        &mut TimelineCompositeScratch::default(),
+        &mut mondrian_effects::EffectProcessorControl::uncancelled(),
+    )
+    .unwrap();
+    // Clip Masks are Power Windows: half coverage mixes the doubled grade
+    // with original RGB, while preserving opaque source alpha.
+    let expected = [
+        [0., 0., 0., 1.],
+        [1.5, 0., 0., 1.],
+        [0., 0., 0., 1.],
+        [0., 0., 0., 1.],
+        [1.5, 0., 0., 1.],
+        [0., 0., 0., 1.],
+    ];
+    assert_eq!(output.frame.rgba_f32().sampling, result.plan.sampling);
+    assert_eq!(output.frame.rgba_f32().data.len(), 6);
+    assert!(matches!(
+        result.plan.elements.as_slice(),
+        [ResolvedPreviewElement::Media { prepared_heterogeneous_route: None, .. }]
+    ));
+    for (actual, expected) in output.frame.rgba_f32().data.iter().zip(expected) {
+        for (actual, expected) in actual.iter().zip(expected) {
+            assert!(
+                (*actual - expected).abs() < 2.0e-5,
+                "literal source→effect→mask→spatial pixel: {actual} vs {expected}"
+            );
+        }
+    }
+    decoder.clear();
+}
+
+#[test]
+fn disabled_unit_provider_keeps_any_media_demand() {
+    let mut sequence = Sequence::new("disabled Unit");
+    let tb = sequence.time_base();
+    let mut clip = Clip::new(AssetId::new(), tt(0, tb), tt(24, tb)).unwrap();
+    let mut disabled = unit_scale_test_effect();
+    disabled.is_enabled = false;
+    clip.add_effect_node(disabled);
+    sequence.video_tracks[0].add_clip(clip).unwrap();
+    let requests = collect_preview_timeline_media_demands(
+        &sequence,
+        &[],
+        0,
+        Resolution { width: 3, height: 2 },
+        PreviewResolutionScale::Quarter,
+        color_context(&sequence),
+    )
+    .unwrap();
+    assert_eq!(
+        requests[0].image_scale_requirement,
+        mondrian_effects::EffectImageScaleRequirement::Any
+    );
+}
