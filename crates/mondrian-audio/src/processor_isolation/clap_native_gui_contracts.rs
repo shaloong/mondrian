@@ -1057,29 +1057,15 @@ impl PluginAudioProcessorParams for GuiProcessor<'_> {
                 self.0.host.request_callback();
             }
             12 => {
-                // A main-only void callback from the actual audio role records
-                // a real sticky source failure, never a fake successful Open.
-                if self.0.host.get_extension::<clack_extensions::params::HostParams>().is_some() {
-                    // SAFETY: this intentionally invalid ABI call tests the
-                    // host's role refusal; it does not construct a fake handle.
-                    let raw = self.0.host.as_raw();
-                    // SAFETY: this is the live original host and its advertised ABI callback.
-                    let ptr = unsafe {
-                        raw.get_extension.unwrap()(
-                            raw,
-                            clap_sys::ext::params::CLAP_EXT_PARAMS.as_ptr(),
-                        )
-                    };
-                    // SAFETY: the same host just advertised this exact params extension.
-                    let table = unsafe { &*ptr.cast::<clap_sys::ext::params::clap_host_params>() };
-                    // SAFETY: matching synchronous C callback; intentionally wrong role is the tested input.
-                    unsafe {
-                        table.rescan.unwrap()(
-                            raw,
-                            clack_extensions::params::ParamRescanFlags::INFO.bits(),
-                        );
-                    }
-                }
+                // Fixed main identity can also own the symbolic audio role, so
+                // a main-only rescan would be legal here. request_flush alone
+                // has the explicit !audio-thread restriction in params.h.
+                let params = self
+                    .0
+                    .host
+                    .get_extension::<clack_extensions::params::HostParams>()
+                    .expect("the same actual host must advertise HostParams");
+                params.request_flush(&self.0.host);
             }
             _ => {}
         }
@@ -1409,6 +1395,18 @@ fn clap_idle_static_values_mutation_failures_are_errors_without_fake_opened() {
                 crate::NativeAudioEditorOutcome::Refused(_)
             ));
             assert_eq!(STATIC_FLUSHES.load(AuditOrdering::SeqCst), 1);
+        }
+        if mode == 12 {
+            use super::super::clap_parameter_source::ClapParameterSourceFailure;
+            assert_eq!(
+                worker.shared.parameter_source.snapshot().incomplete,
+                1 << ClapParameterSourceFailure::WrongThread as u8,
+                "the real forbidden callback must execute and retain its WrongThread source fact"
+            );
+            assert!(
+                !worker.author_source_status().parameter_flush_pending(),
+                "the rejected audio-role callback cannot schedule a flush"
+            );
         }
         assert_eq!(PROCESSES.load(AuditOrdering::SeqCst), 0);
         drop(worker);
