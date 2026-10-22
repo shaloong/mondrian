@@ -69,9 +69,10 @@ pub use effect::{
     EffectCachePolicy, EffectCategoryNode, EffectColorDomain, EffectColorDomainContract,
     EffectDefinition, EffectDefinitionError, EffectEvalContext, EffectFrameContext,
     EffectFrameContextError, EffectGraphBuildError, EffectGraphBuilder, EffectGraphPreparer,
-    EffectInstantiationError, EffectNode, EffectNodeExt, EffectPreparationContext, EffectRenderOp,
-    EffectRenderParamsBuilder, EffectRenderPlan, EffectResourceDependency, EffectResourceRecovery,
-    EffectType, PreparedEffectEvaluator, PreparedLut3D,
+    EffectInstantiationError, EffectNode, EffectNodeExt, EffectPreparationContext,
+    EffectProjectGeometry, EffectProjectGeometryError, EffectRenderOp, EffectRenderParamsBuilder,
+    EffectRenderPlan, EffectResourceDependency, EffectResourceRecovery, EffectType,
+    PreparedEffectEvaluator, PreparedLut3D,
 };
 pub use execution::{
     apply_compiled_effect_graph, apply_compiled_effect_graph_pass,

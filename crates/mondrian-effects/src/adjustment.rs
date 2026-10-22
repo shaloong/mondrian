@@ -453,6 +453,7 @@ fn apply_custom_render_op_f32_for_role(
             owner.processors.process(
                 factory,
                 crate::EffectFloatProcessorPreparation {
+                    project_geometry: processor.project_geometry(),
                     input_role,
                     effect_id,
                     width: extent.width(),

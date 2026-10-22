@@ -543,6 +543,7 @@ mod tests {
         EffectProcessorFeedbackReceipt {
             effect_id,
             preparation: crate::EffectFloatProcessorPreparation {
+                project_geometry: None,
                 input_role: crate::EffectFloatProcessorInputRole::SingleImage,
                 effect_id,
                 width: 1,

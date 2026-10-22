@@ -321,6 +321,9 @@ pub enum EffectFloatProcessorInputRole {
 /// Identity and exact format for one reusable processor occurrence.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EffectFloatProcessorPreparation {
+    /// Owner project coordinates, independent of input/output raster dimensions.
+    /// Standalone providers may not need an owner project window.
+    pub project_geometry: Option<crate::EffectProjectGeometry>,
     /// Immutable image role, checked against the factory before storage or prepare.
     pub input_role: EffectFloatProcessorInputRole,
     /// Exact input format for SingleImage, or output staging format for NoImage.
@@ -855,7 +858,7 @@ impl FloatProcessorResidency {
             (role == EffectFloatProcessorInputRole::NoImage).then(|| pixels.retained_bytes());
         self.trim(max_instances, max_bytes);
         let key = ResourceKey { request, revision };
-        // Dimension/revision changes retire this occurrence's obsolete worker.
+        // Raster/project geometry or revision changes retire this occurrence's obsolete worker.
         let mut index = 0;
         while index < self.entries.len() {
             if self.entries[index].0.request.effect_id == request.effect_id
@@ -2029,6 +2032,7 @@ mod tests {
             .expect("admitted process");
         };
         let first = EffectFloatProcessorPreparation {
+            project_geometry: None,
             input_role: crate::EffectFloatProcessorInputRole::SingleImage,
             format: crate::EffectValueFormat::new(
                 crate::EffectWorkingPrecision::Float32,
@@ -2066,6 +2070,7 @@ mod tests {
         let factory: Arc<dyn EffectFloatProcessorFactory> = concrete.clone();
         let mut bank = FloatProcessorResidency::default();
         let first = EffectFloatProcessorPreparation {
+            project_geometry: None,
             input_role: crate::EffectFloatProcessorInputRole::SingleImage,
             format: crate::EffectValueFormat::new(
                 crate::EffectWorkingPrecision::Float32,
@@ -2121,11 +2126,67 @@ mod tests {
     }
 
     #[test]
+    fn project_geometry_change_retires_same_raster_occurrence() {
+        let concrete = Arc::new(ProbeFactory::default());
+        let factory: Arc<dyn EffectFloatProcessorFactory> = concrete.clone();
+        let mut bank = FloatProcessorResidency::default();
+        let geometry = |width| {
+            crate::EffectProjectGeometry::new(
+                width,
+                7,
+                mondrian_core::SampleAspectRatio::new(2, 1).unwrap(),
+            )
+            .unwrap()
+        };
+        let request = EffectFloatProcessorPreparation {
+            project_geometry: Some(geometry(10)),
+            input_role: EffectFloatProcessorInputRole::SingleImage,
+            format: crate::EffectValueFormat::new(
+                crate::EffectWorkingPrecision::Float32,
+                crate::EffectColorDomain::SceneLinearRgb,
+                mondrian_core::ColorFrameAlpha::StraightCoverage,
+            ),
+            effect_id: EffectId::new(),
+            width: 1,
+            height: 1,
+        };
+        let run = |bank: &mut FloatProcessorResidency, request, seed| {
+            bank.process(
+                &factory,
+                request,
+                1,
+                1,
+                64,
+                1024,
+                &mut coverage_frame(1, 1, vec![[0.25, 0.5, 0.75, 1.0]]),
+                &serde_json::json!({"gain": seed}),
+                seed,
+                &mut EffectProcessorControl::uncancelled(),
+            )
+            .expect("admitted invocation");
+        };
+        run(&mut bank, request, 0);
+        run(&mut bank, request, 1);
+        assert_eq!(concrete.created.load(Ordering::SeqCst), 1);
+        assert_eq!(concrete.dropped.load(Ordering::SeqCst), 0);
+        let changed =
+            EffectFloatProcessorPreparation { project_geometry: Some(geometry(11)), ..request };
+        run(&mut bank, changed, 2);
+        assert_eq!(concrete.created.load(Ordering::SeqCst), 2);
+        assert_eq!(concrete.dropped.load(Ordering::SeqCst), 1);
+        assert_eq!(bank.entries.len(), 1);
+        assert_eq!(bank.entries[0].0.request, changed);
+        bank.trim(0, 0);
+        assert_eq!(concrete.dropped.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
     fn residency_rejects_ungranted_allocation_and_retires_errors_and_extent_changes() {
         let concrete = Arc::new(ProbeFactory::default());
         let factory: Arc<dyn EffectFloatProcessorFactory> = concrete.clone();
         let mut bank = FloatProcessorResidency::default();
         let request = EffectFloatProcessorPreparation {
+            project_geometry: None,
             input_role: crate::EffectFloatProcessorInputRole::SingleImage,
             format: crate::EffectValueFormat::new(
                 crate::EffectWorkingPrecision::Float32,
@@ -2493,6 +2554,7 @@ mod tests {
     }
     fn resource_request(frame: &EffectFloatFrame) -> EffectFloatProcessorPreparation {
         EffectFloatProcessorPreparation {
+            project_geometry: None,
             input_role: crate::EffectFloatProcessorInputRole::SingleImage,
             effect_id: EffectId::new(),
             width: frame.width(),
@@ -3470,6 +3532,7 @@ mod feedback_contract_tests {
     }
     fn request(frame: &EffectFloatFrame) -> EffectFloatProcessorPreparation {
         EffectFloatProcessorPreparation {
+            project_geometry: None,
             input_role: crate::EffectFloatProcessorInputRole::SingleImage,
             effect_id: EffectId::new(),
             width: 1,
@@ -4101,6 +4164,7 @@ mod completion_boundary_tests {
         )
         .expect("complete finite coverage input");
         let request = EffectFloatProcessorPreparation {
+            project_geometry: None,
             input_role: crate::EffectFloatProcessorInputRole::SingleImage,
             effect_id: EffectId::new(),
             width,
@@ -4437,6 +4501,7 @@ mod gui_reconciliation_contract_tests {
         let mut healthy_key = None;
         for behavior in [Behavior::Healthy, Behavior::Failure, Behavior::OpaquePanic] {
             let request = EffectFloatProcessorPreparation {
+                project_geometry: None,
                 input_role: crate::EffectFloatProcessorInputRole::SingleImage,
                 effect_id: mondrian_core::EffectId::new(),
                 width: 1,
@@ -4865,6 +4930,7 @@ mod source_tests {
                 .unwrap();
         let mut bank = FloatProcessorResidency::default();
         let mut request = EffectFloatProcessorPreparation {
+            project_geometry: None,
             input_role: EffectFloatProcessorInputRole::SingleImage,
             format: format(),
             effect_id: mondrian_core::EffectId::new(),

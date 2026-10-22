@@ -18,7 +18,7 @@ use mondrian_core::{
 };
 use mondrian_effects::{
     effect_registry_revision, prepare_temporal_frame_execution, CompiledEffectGraph,
-    EffectExecutionEnvelope, EffectExecutionSession, EffectFrameContext,
+    EffectExecutionEnvelope, EffectExecutionSession, EffectFrameContext, EffectProjectGeometry,
     EffectTemporalExecutionRequest, EffectTemporalSpan, LutPreparationCache,
     LutPreparationCacheConfig, PreparedEffectProgram, PreparedEffectTemporalExecution,
     PreparedGradeGraph,
@@ -577,12 +577,14 @@ impl PreparedVisualProgram {
                     let context = TimelineTimeRange::new(clip.clip_time_in, clip.duration)
                         .map_err(|error| error.to_string())
                         .and_then(|range| {
-                            EffectFrameContext::new(
-                                sequence.settings.frame_rate,
+                            let geometry = EffectProjectGeometry::new(
+                                sequence.settings.resolution.width,
+                                sequence.settings.resolution.height,
                                 pixel_aspect_ratio,
-                                range,
                             )
-                            .map_err(|error| error.to_string())
+                            .map_err(|error| error.to_string())?;
+                            EffectFrameContext::new(sequence.settings.frame_rate, geometry, range)
+                                .map_err(|error| error.to_string())
                         });
                     match context {
                         Ok(context) => Some(context),
@@ -3005,6 +3007,26 @@ mod tests {
             PreparedClipEffects::Blocked { reason, .. } => panic!("blocked clip: {reason}"),
         };
         assert_eq!(aspect_context.pixel_aspect_ratio().to_f64(), 4.0 / 3.0);
+
+        sequence.settings.resolution = Resolution { width: 10, height: 7 };
+        sequence.revision = sequence.revision.checked_next().expect("project window revision");
+        let changed_window = cache.prepare(&sequence).expect("new project window program");
+        assert_eq!(changed_window.diagnostics().reused_clips, 0);
+        let window_context = match changed_window.clip_effects.get(&clip_id).expect("clip program")
+        {
+            PreparedClipEffects::Ready { program, .. } => program.frame_context().expect("context"),
+            PreparedClipEffects::Blocked { reason, .. } => panic!("blocked clip: {reason}"),
+        };
+        assert_eq!(window_context.project_geometry().width(), 10);
+        assert_eq!(window_context.project_geometry().height(), 7);
+        assert_eq!(window_context.frame_rate(), aspect_context.frame_rate());
+        assert_eq!(
+            window_context.pixel_aspect_ratio(),
+            aspect_context.pixel_aspect_ratio()
+        );
+        sequence.revision = sequence.revision.checked_next().expect("unchanged window revision");
+        let unchanged_window = cache.prepare(&sequence).expect("same project window program");
+        assert_eq!(unchanged_window.diagnostics().reused_clips, 1);
     }
 
     #[test]

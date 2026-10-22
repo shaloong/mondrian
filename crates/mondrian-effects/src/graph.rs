@@ -1202,6 +1202,7 @@ impl EffectGraphBuilderState {
         occurrence_id: mondrian_core::EffectId,
         definition_registry_revision: u64,
         contract: Option<&crate::EffectExtensionContract>,
+        project_geometry: Option<crate::EffectProjectGeometry>,
     ) {
         for node in self.graph.nodes.iter_mut().skip(checkpoint.node_count) {
             let (EffectGraphNodeKind::UnaryEffect {
@@ -1225,6 +1226,7 @@ impl EffectGraphBuilderState {
                     occurrence_id,
                     definition_registry_revision,
                     contract,
+                    project_geometry,
                 );
             }
         }
@@ -2609,6 +2611,49 @@ mod tests {
         assert_ne!(
             first.semantic_fingerprint(),
             different_topology.semantic_fingerprint()
+        );
+    }
+
+    #[test]
+    fn project_geometry_participates_in_complete_and_subtree_graph_identity() {
+        let processor = crate::CustomEffectProcessorBinding::new(Arc::new(
+            |_buffer, _width, _height, _params, _seed| Ok(()),
+        ));
+        let occurrence = mondrian_core::EffectId::new();
+        let graph = |width| {
+            let geometry = crate::EffectProjectGeometry::new(
+                width,
+                7,
+                mondrian_core::SampleAspectRatio::new(2, 1).unwrap(),
+            )
+            .unwrap();
+            compile_scheduled_effect_graph(&EffectRenderPlan {
+                ops: vec![EffectRenderOp::Custom {
+                    key: "test.project-geometry".to_owned(),
+                    params: serde_json::json!({}),
+                    cache_key: Some("same-provider".to_owned()),
+                    cache_policy: EffectCachePolicy::Deterministic,
+                    processor: Some(processor.with_runtime_owner(
+                        "test.project-geometry",
+                        occurrence,
+                        1,
+                        None,
+                        Some(geometry),
+                    )),
+                }],
+            })
+            .expect("bound graph")
+        };
+        let first = graph(10);
+        let unchanged = graph(10);
+        let changed = graph(11);
+        assert_eq!(first.identity(), unchanged.identity());
+        assert_ne!(first.identity(), changed.identity());
+        assert_ne!(first.semantic_fingerprint(), changed.semantic_fingerprint());
+        let output = first.graph().output.expect("output");
+        assert_ne!(
+            first.node_profiles()[&output].subtree_signature,
+            changed.node_profiles()[&output].subtree_signature
         );
     }
 

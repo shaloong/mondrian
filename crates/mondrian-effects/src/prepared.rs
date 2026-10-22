@@ -463,6 +463,7 @@ fn evaluate_instance_into_builder(
                 instance.effect.id,
                 instance.definition.definition_registry_revision(),
                 instance.definition.extension_contract(),
+                frame_context.map(EffectFrameContext::project_geometry),
             );
             if !staged.satisfies_topology_since(
                 checkpoint,

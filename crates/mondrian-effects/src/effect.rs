@@ -41,11 +41,94 @@ use std::{
     },
 };
 
+/// Full, zero-offset owner project window, independent of any image raster.
+///
+/// A project window describes coordinates, not an allocation. Raster capacity
+/// and native image-bound limits must be checked against the actual image.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(try_from = "EffectProjectGeometryWire")]
+pub struct EffectProjectGeometry {
+    width: u32,
+    height: u32,
+    pixel_aspect_ratio: SampleAspectRatio,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EffectProjectGeometryWire {
+    width: u32,
+    height: u32,
+    pixel_aspect_ratio: SampleAspectRatio,
+}
+
+/// Invalid owner project coordinates, rejected before provider preparation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum EffectProjectGeometryError {
+    /// A full project window must have positive pixel dimensions.
+    #[error("effect project window must have positive dimensions")]
+    EmptyExtent,
+    /// Deserialized sample ratios must satisfy the same rule as constructed ones.
+    #[error("effect project sample aspect ratio must be positive")]
+    InvalidPixelAspectRatio,
+}
+
+impl EffectProjectGeometry {
+    /// Bind the complete project window. Partial or offset windows are not admitted.
+    pub fn new(
+        width: u32,
+        height: u32,
+        pixel_aspect_ratio: SampleAspectRatio,
+    ) -> Result<Self, EffectProjectGeometryError> {
+        if width == 0 || height == 0 {
+            return Err(EffectProjectGeometryError::EmptyExtent);
+        }
+        // SampleAspectRatio itself is deserializable. Revalidate and reduce it
+        // here so malformed external state cannot enter the execution contract.
+        let pixel_aspect_ratio = SampleAspectRatio::new(
+            pixel_aspect_ratio.numerator(),
+            pixel_aspect_ratio.denominator(),
+        )
+        .ok_or(EffectProjectGeometryError::InvalidPixelAspectRatio)?;
+        Ok(Self { width, height, pixel_aspect_ratio })
+    }
+
+    /// Project width in pixels, unrelated to staging image width.
+    pub const fn width(self) -> u32 {
+        self.width
+    }
+
+    /// Project height in pixels, unrelated to staging image height.
+    pub const fn height(self) -> u32 {
+        self.height
+    }
+
+    /// Exact project sample aspect ratio.
+    pub const fn pixel_aspect_ratio(self) -> SampleAspectRatio {
+        self.pixel_aspect_ratio
+    }
+
+    /// Full canonical extent, lowered only at the spatial ABI boundary.
+    pub fn canonical_size(self) -> [f64; 2] {
+        [
+            f64::from(self.width) * self.pixel_aspect_ratio.to_f64(),
+            f64::from(self.height),
+        ]
+    }
+}
+
+impl TryFrom<EffectProjectGeometryWire> for EffectProjectGeometry {
+    type Error = EffectProjectGeometryError;
+
+    fn try_from(value: EffectProjectGeometryWire) -> Result<Self, Self::Error> {
+        Self::new(value.width, value.height, value.pixel_aspect_ratio)
+    }
+}
+
 /// Exact sequence facts needed by effects that execute in a frame-based ABI.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EffectFrameContext {
     frame_rate: Rational,
-    pixel_aspect_ratio: SampleAspectRatio,
+    project_geometry: EffectProjectGeometry,
     available_range: TimelineTimeRange,
 }
 
@@ -67,7 +150,7 @@ impl EffectFrameContext {
     /// Bind one exact half-open owner range to a validated sequence grid.
     pub fn new(
         frame_rate: Rational,
-        pixel_aspect_ratio: SampleAspectRatio,
+        project_geometry: EffectProjectGeometry,
         available_range: TimelineTimeRange,
     ) -> Result<Self, EffectFrameContextError> {
         if frame_rate.num <= 0 || frame_rate.den <= 0 {
@@ -76,7 +159,7 @@ impl EffectFrameContext {
         if available_range.is_empty() {
             return Err(EffectFrameContextError::EmptyRange);
         }
-        let value = Self { frame_rate, pixel_aspect_ratio, available_range };
+        let value = Self { frame_rate, project_geometry, available_range };
         value.available_frames()?;
         Ok(value)
     }
@@ -88,7 +171,12 @@ impl EffectFrameContext {
 
     /// Exact width-to-height ratio of a sample.
     pub const fn pixel_aspect_ratio(self) -> SampleAspectRatio {
-        self.pixel_aspect_ratio
+        self.project_geometry.pixel_aspect_ratio()
+    }
+
+    /// Immutable owner window used by project-aware providers and reuse identity.
+    pub const fn project_geometry(self) -> EffectProjectGeometry {
+        self.project_geometry
     }
 
     /// Half-open availability interval in the effect owner's time domain.
@@ -836,6 +924,7 @@ pub struct CustomEffectProcessorBinding {
     processor: CustomEffectProcessor,
     runtime_owner: Option<CustomEffectRuntimeOwner>,
     occurrence_id: Option<EffectId>,
+    project_geometry: Option<EffectProjectGeometry>,
 }
 
 #[derive(Clone)]
@@ -863,6 +952,7 @@ impl CustomEffectProcessorBinding {
             processor: CustomEffectProcessor::Rgba8(processor),
             runtime_owner: None,
             occurrence_id: None,
+            project_geometry: None,
         }
     }
 
@@ -874,6 +964,7 @@ impl CustomEffectProcessorBinding {
             processor: CustomEffectProcessor::Float32(processor),
             runtime_owner: None,
             occurrence_id: None,
+            project_geometry: None,
         }
     }
 
@@ -911,6 +1002,11 @@ impl CustomEffectProcessorBinding {
         self.occurrence_id
     }
 
+    /// Compiler-bound owner coordinates; absent for standalone literal effects.
+    pub const fn project_geometry(&self) -> Option<EffectProjectGeometry> {
+        self.project_geometry
+    }
+
     pub(crate) fn float32_factory(&self) -> Option<&Arc<dyn crate::EffectFloatProcessorFactory>> {
         if let CustomEffectProcessor::Float32Factory(factory) = &self.processor {
             Some(factory)
@@ -938,6 +1034,7 @@ impl CustomEffectProcessorBinding {
         occurrence_id: EffectId,
         definition_registry_revision: u64,
         contract: Option<&EffectExtensionContract>,
+        project_geometry: Option<EffectProjectGeometry>,
     ) -> Self {
         Self {
             alpha_contract: self.alpha_contract,
@@ -945,6 +1042,7 @@ impl CustomEffectProcessorBinding {
             revision: self.revision,
             processor: self.processor.clone(),
             occurrence_id: Some(occurrence_id),
+            project_geometry,
             runtime_owner: contract.cloned().map(|contract| CustomEffectRuntimeOwner {
                 effect_key: effect_key.to_owned(),
                 definition_registry_revision,
@@ -1137,6 +1235,10 @@ impl EffectRenderOp {
                 key.hash(state);
                 processor.as_ref().map(CustomEffectProcessorBinding::revision).hash(state);
                 processor.as_ref().map(CustomEffectProcessorBinding::alpha_contract).hash(state);
+                processor
+                    .as_ref()
+                    .and_then(CustomEffectProcessorBinding::project_geometry)
+                    .hash(state);
                 processor
                     .as_ref()
                     .and_then(CustomEffectProcessorBinding::runtime_owner_revision)
@@ -1423,6 +1525,7 @@ impl EffectDefinition {
                 processor: CustomEffectProcessor::Float32Factory(factory),
                 runtime_owner: None,
                 occurrence_id: None,
+                project_geometry: None,
             },
         )
     }
@@ -3600,20 +3703,72 @@ mod tests {
     }
 
     #[test]
+    fn project_geometry_validates_external_coordinates_without_raster_limits() {
+        assert_eq!(
+            EffectProjectGeometry::new(0, 7, SampleAspectRatio::SQUARE),
+            Err(EffectProjectGeometryError::EmptyExtent)
+        );
+        assert_eq!(
+            EffectProjectGeometry::new(10, 0, SampleAspectRatio::SQUARE),
+            Err(EffectProjectGeometryError::EmptyExtent)
+        );
+        let parse = |width, height, numerator, denominator| {
+            serde_json::from_value::<EffectProjectGeometry>(serde_json::json!({
+                "width": width, "height": height,
+                "pixel_aspect_ratio": {"numerator": numerator, "denominator": denominator}
+            }))
+        };
+        assert!(parse(10, 7, 0, 1).is_err());
+        assert!(parse(10, 7, 1, 0).is_err());
+        assert!(parse(0, 7, 1, 1).is_err());
+        let geometry = parse(10, 7, 4, 2).expect("equivalent ratios normalize");
+        assert_eq!(geometry.canonical_size(), [20.0, 7.0]);
+        assert_eq!(
+            geometry.pixel_aspect_ratio(),
+            SampleAspectRatio::new(2, 1).unwrap()
+        );
+        let mut wire = serde_json::to_value(geometry).expect("geometry wire");
+        assert_eq!(
+            serde_json::from_value::<EffectProjectGeometry>(wire.clone()).unwrap(),
+            geometry
+        );
+        wire["offset"] = serde_json::json!([1, 0]);
+        assert!(serde_json::from_value::<EffectProjectGeometry>(wire).is_err());
+        let huge = EffectProjectGeometry::new(
+            u32::MAX,
+            u32::MAX,
+            SampleAspectRatio::new(u32::MAX, 1).unwrap(),
+        )
+        .expect("coordinates are not allocation");
+        assert!(huge.canonical_size().iter().all(|v| v.is_finite()));
+        let invalid_ratio: SampleAspectRatio =
+            serde_json::from_value(serde_json::json!({"numerator": 1, "denominator": 0})).unwrap();
+        assert_eq!(
+            EffectProjectGeometry::new(10, 7, invalid_ratio),
+            Err(EffectProjectGeometryError::InvalidPixelAspectRatio)
+        );
+    }
+
+    #[test]
     fn frame_context_covers_subframe_clip_range_without_dropping_it() {
         let range = TimelineTimeRange::new(
             TimelineTime::new(1, 100).expect("start"),
             TimelineTime::new(1, 100).expect("duration"),
         )
         .expect("short range");
-        let context = EffectFrameContext::new(Rational::FPS_25, SampleAspectRatio::SQUARE, range)
-            .expect("subframe range remains renderable");
+        let context = EffectFrameContext::new(
+            Rational::FPS_25,
+            EffectProjectGeometry::new(10, 7, SampleAspectRatio::SQUARE).unwrap(),
+            range,
+        )
+        .expect("subframe range remains renderable");
         assert_eq!(context.available_frames().expect("frame bounds"), (0, 0));
         assert_eq!(context.frame_coordinate(range.start), 0.25);
 
         let ntsc = EffectFrameContext::new(
             Rational::FPS_23976,
-            SampleAspectRatio::new(4, 3).expect("sample aspect"),
+            EffectProjectGeometry::new(10, 7, SampleAspectRatio::new(4, 3).expect("sample aspect"))
+                .unwrap(),
             TimelineTimeRange::new(
                 TimelineTime::ZERO,
                 TimelineTime::new(1001, 24000).expect("one frame"),
