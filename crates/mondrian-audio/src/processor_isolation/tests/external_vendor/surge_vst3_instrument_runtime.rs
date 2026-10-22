@@ -29,6 +29,7 @@ use mondrian_timeline::{
 };
 use serde_json::json;
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
+use std::panic::{catch_unwind, resume_unwind, AssertUnwindSafe};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -215,6 +216,55 @@ fn service_author(
     result
 }
 
+// Shared author construction only; both consumers execute the public Runtime.
+fn canonical_note_sequence(
+    instance: AudioProcessorInstance,
+    reference: Option<MusicalTimeReference>,
+) -> Sequence {
+    let processor_id = instance.id;
+    let mut sequence = Sequence::new("real Surge XT VST3 Note/Main Runtime control");
+    sequence.settings.audio_channel_layout = AudioChannelLayout::Stereo;
+    sequence.audio_program.musical_time_reference = reference;
+    let track = sequence.audio_tracks[0].id;
+    sequence
+        .audio_program
+        .track_channels
+        .get_mut(&track)
+        .unwrap()
+        .strip
+        .pre_fader
+        .processors
+        .push(instance);
+    let note_id = AudioNoteId::new();
+    let time = |sample| TimelineTime::new(sample, 48_000).unwrap();
+    sequence.audio_program.note_lanes.push(AudioNoteLane {
+        schema_version: 1,
+        id: AudioNoteLaneId::new(),
+        target: AudioNoteTarget {
+            track_id: track,
+            processor_id,
+            input_port_key: "vst3.note-input.0".into(),
+        },
+        notes: AuthoringList::from(vec![AudioNote {
+            id: note_id,
+            start: time(ON),
+            end: time(OFF),
+            channel: 0,
+            key: 60,
+            on_velocity: 0.75,
+            off_velocity: 0.25,
+        }]),
+    });
+    let output = sequence.audio_program.outputs[0].id;
+    sequence.audio_program.routes.clear();
+    sequence.audio_program.routes.push(AudioRoute::new(
+        AudioRouteSource::ProcessorOutput { processor_id, port: AudioProcessorOutputPort::Main },
+        AudioRouteDestination::Output(output),
+    ));
+    assert!(sequence.audio_program.sidechain_routes.is_empty());
+    sequence
+}
+
 #[test]
 #[ignore = "requires outer native Job, current normal MONDRIAN_VST3_TEST_HELPER and real MONDRIAN_SURGE_XT_VST3_DLL"]
 fn external_surge_xt_vst3_captured_state_notes_main_runtime_without_media() {
@@ -393,48 +443,9 @@ fn external_surge_xt_vst3_captured_state_notes_main_runtime_without_media() {
     // submitted as a second parameter authority or sent as DSP overrides.
     let native_owned_parameters = instance.parameters.clone();
     let parameter_ids: Vec<_> = instance.parameters.keys().cloned().collect();
-    let processor_id = instance.id;
-    let mut sequence = Sequence::new("real Surge XT VST3 Note/Main Runtime control");
-    sequence.settings.audio_channel_layout = AudioChannelLayout::Stereo;
-    sequence.audio_program.musical_time_reference = reference;
-    let track = sequence.audio_tracks[0].id;
-    sequence
-        .audio_program
-        .track_channels
-        .get_mut(&track)
-        .unwrap()
-        .strip
-        .pre_fader
-        .processors
-        .push(instance);
-    let note_id = AudioNoteId::new();
-    let time = |sample| TimelineTime::new(sample, 48_000).unwrap();
-    sequence.audio_program.note_lanes.push(AudioNoteLane {
-        schema_version: 1,
-        id: AudioNoteLaneId::new(),
-        target: AudioNoteTarget {
-            track_id: track,
-            processor_id,
-            input_port_key: "vst3.note-input.0".into(),
-        },
-        notes: AuthoringList::from(vec![AudioNote {
-            id: note_id,
-            start: time(ON),
-            end: time(OFF),
-            channel: 0,
-            key: 60,
-            on_velocity: 0.75,
-            off_velocity: 0.25,
-        }]),
-    });
+    let mut sequence = canonical_note_sequence(instance, reference);
     let score = sequence.audio_program.note_lanes.clone();
     let output = sequence.audio_program.outputs[0].id;
-    sequence.audio_program.routes.clear();
-    sequence.audio_program.routes.push(AudioRoute::new(
-        AudioRouteSource::ProcessorOutput { processor_id, port: AudioProcessorOutputPort::Main },
-        AudioRouteDestination::Output(output),
-    ));
-    assert!(sequence.audio_program.sidechain_routes.is_empty());
     let selected = crate::compile_audio_program(&sequence, AudioCompileRequest::program(output))
         .expect("canonical selected Signal Closure retains the actual Note consumer");
     assert_eq!(selected.musical_time_reference(), reference);
@@ -728,5 +739,384 @@ fn external_surge_xt_vst3_captured_state_notes_main_runtime_without_media() {
     assert!(
         sustain_energy.is_finite() && sustain_energy > MIN_SUSTAIN_ENERGY,
         "native-owned Main must sustain sound across the predeclared middle window"
+    );
+}
+
+#[test]
+#[ignore = "requires outer native Job, current Product, real Surge XT VST3 and fixed MONDRIAN_SURGE_VST3_ORIGIN_STATE"]
+fn external_surge_xt_vst3_origin_reentry_rebuilds_and_sustains_main() {
+    const STATE_BYTES: usize = 51_928;
+    const EPOCH_ENDS: [usize; 2] = [6_144, 8_448];
+    assert!(EPOCH_ENDS[0] < OFF as usize && EPOCH_ENDS[1] > OFF as usize);
+    assert_eq!(EPOCH_ENDS.map(|end| end / BLOCK), [24, 33]);
+    let mut in_job = 0;
+    // SAFETY: call-local writable BOOL and current process pseudo handle.
+    assert_ne!(
+        unsafe { IsProcessInJob(GetCurrentProcess(), std::ptr::null_mut(), &mut in_job) },
+        0
+    );
+    assert_ne!(in_job, 0, "original outer owner Job before native creation");
+    let file = |name| {
+        let path = PathBuf::from(std::env::var_os(name).expect("explicit current material"));
+        assert!(path.is_absolute() && path.is_file(), "{name}");
+        path
+    };
+    let helper = file("MONDRIAN_VST3_TEST_HELPER");
+    let library = std::fs::canonicalize(file("MONDRIAN_SURGE_XT_VST3_DLL")).unwrap();
+    let state_path = file("MONDRIAN_SURGE_VST3_ORIGIN_STATE");
+    assert_eq!(
+        std::fs::metadata(&state_path).unwrap().len(),
+        STATE_BYTES as u64
+    );
+    let state = std::fs::read(&state_path).expect("read the retained seed; never recapture");
+    assert_eq!(state.len(), STATE_BYTES);
+    let render = AudioRenderContract {
+        sample_rate: 48_000,
+        channel_layout: AudioChannelLayout::Stereo,
+        max_block_frames: BLOCK,
+        processing_mode: AudioProcessingMode::Offline,
+        processor_session_scratch_budget_bytes: 64 * 1024 * 1024,
+        public_output_lookahead_budget_frames: 4_096,
+        compensation_delay_scratch_budget_bytes: 64 * 1024 * 1024,
+    };
+    let reference = Some(
+        MusicalTimeReference::new(TimelineTime::ZERO, TimelineTime::new(1, 2).unwrap()).unwrap(),
+    );
+    let catalog = Arc::new(
+        DiscoveredVst3AudioProcessorSpecResolver::discover(helper.clone(), [library.clone()])
+            .expect("current Product discovery"),
+    );
+    let descriptors = catalog.descriptors();
+    let matching: Vec<_> =
+        descriptors.iter().filter(|descriptor| descriptor.class_id == CLASS).collect();
+    assert_eq!(matching.len(), 1);
+    assert_eq!(matching[0].name, "Surge XT");
+    assert_eq!(matching[0].version.as_deref(), Some("1.3.4"));
+    assert_eq!(matching[0].vendor.as_deref(), Some("Surge Synth Team"));
+    let restored = probe_vst3_plugin_registration_with_state(
+        &helper,
+        &library,
+        CLASS,
+        render,
+        Some(&state),
+        false,
+    )
+    .expect("restore the fixed original seed without a new capture");
+    assert!(restored.captured_state.is_none());
+    assert_eq!(restored.registration.class_id, CLASS);
+    assert_eq!(
+        restored.registration.main_audio_input,
+        Vst3MainAudioInput::Absent
+    );
+    assert_eq!(
+        restored.registration.execution_contract.algorithmic_latency_frames(),
+        0
+    );
+    assert_eq!(restored.registration.parameters.len(), PARAMETERS);
+    assert_eq!(restored.current_values.len(), PARAMETERS);
+    let instance = catalog
+        .create_instance(CLASS, render, Some(state.clone()))
+        .expect("public author factory with fixed native-owned seed");
+    assert!(!instance.bypassed);
+    assert_eq!(
+        instance.opaque_state.as_deref().map(Vec::as_slice),
+        Some(state.as_slice())
+    );
+    check_native_owned_author(&instance, &restored.registration.parameters);
+    assert!(matches!(&instance.definition,
+        AudioProcessorDefinitionRef::Vst3 {class_id, vendor, schema_version:1, binary_sha256:Some(hash)}
+        if class_id == CLASS && vendor.as_deref() == Some("Surge Synth Team") && *hash == restored.registration.binary_sha256));
+    let native_owned_parameters = instance.parameters.clone();
+    let selected_parameter = instance.parameters.keys().next().unwrap().clone();
+    let mut sequence = canonical_note_sequence(instance, reference);
+    let score = sequence.audio_program.note_lanes.clone();
+    let media_resolves = Arc::new(AtomicUsize::new(0));
+    let processors = IsolatedAudioProcessorResolver::new(catalog);
+    let mut runtime = AudioProgramRuntime::build_with_processor_resolver_and_resource_grant(
+        &sequence,
+        &[],
+        &NoMedia(media_resolves.clone()),
+        &processors,
+        render,
+        None,
+        GRANT,
+    )
+    .expect("original public Runtime and finite grant");
+    let source = AudioOwnerInstallationSource::new();
+    let (registration, verifier) = source.register().unwrap();
+    runtime.bind_native_owner_installation(verifier).unwrap();
+    let claim = source
+        .begin_commit(source.reserve_install(&registration, None).unwrap())
+        .unwrap()
+        .commit()
+        .unwrap();
+    let cancel = ExecutionCancellationToken::new();
+    runtime.install_native_owner_bindings(&claim, &cancel).unwrap();
+    let initial_object = runtime.observe_native_owner_object(owner(&runtime)).unwrap();
+    let pid = initial_object.process_id().get();
+    assert_ne!(pid, std::process::id());
+    // SAFETY: authentic supervised child PID, query/synchronize only; one owner.
+    let raw = unsafe {
+        OpenProcess(
+            PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE,
+            0,
+            pid,
+        )
+    };
+    assert!(!raw.is_null());
+    let handle = unsafe { OwnedHandle::from_raw_handle(raw.cast()) };
+    let target = catch_unwind(AssertUnwindSafe(|| {
+        runtime
+            .validate_native_author_source_closed(&cancel)
+            .expect("initial owner has no discarded author work");
+        runtime
+            .enter_state(AudioStateEntry {
+                epoch: AudioContinuityEpoch::new(1),
+                start_sample: 0,
+            })
+            .expect("first score-origin entry");
+        let mut object = initial_object;
+        let mut handoffs = 0;
+        let mut rescans = 0;
+        let mut held_requests = 0;
+        let mut energies = [0.0_f64; 2];
+        let mut peaks = [0.0_f32; 2];
+        let mut sustain = [[0.0_f64; SUSTAIN_BLOCKS]; 2];
+        let mut measured = [0_usize; 2];
+        let mut epoch_serials = [initial_object.object_serial().get(); 2];
+        for (phase, end) in EPOCH_ENDS.into_iter().enumerate() {
+            if phase == 1 {
+                // The first component still owes Off8193. Service the real
+                // current Source, then capture current identities, never the
+                // original Plan before any genuine author publication.
+                let (accepted, scanned) = service_author(
+                    &mut runtime,
+                    &mut sequence,
+                    &source,
+                    object,
+                    reference,
+                    &native_owned_parameters,
+                );
+                handoffs += accepted;
+                rescans += scanned;
+                runtime.validate_native_author_source_closed(&cancel).unwrap();
+                let old = owner(&runtime);
+                let old_target = old.editor_target();
+                let retired_object = runtime.observe_native_owner_object(old).unwrap();
+                assert_eq!(retired_object, object);
+                let old_root = runtime.resource_root_identity();
+                let old_claim = source.current_claim().unwrap().unwrap();
+                let old_verifier = runtime.native_owner_installation_verifier().unwrap();
+                assert!(
+                    matches!(cursors(&runtime).processors[0].state, AudioProcessorCursorState::Active { epoch, next_input_signal_sample }
+                    if epoch == AudioContinuityEpoch::new(1) && next_input_signal_sample.sample() == EPOCH_ENDS[0] as i64)
+                );
+                runtime
+                    .enter_state(AudioStateEntry {
+                        epoch: AudioContinuityEpoch::new(2),
+                        start_sample: 0,
+                    })
+                    .expect("one actual origin reentry; never retry a failed initialization");
+                // These checks precede all post-Enter author Poll/install/Ack:
+                // later real publications cannot explain old-lease revocation.
+                let fresh = owner(&runtime);
+                object = runtime.observe_native_owner_object(fresh).unwrap();
+                assert_eq!(object.process_id().get(), pid);
+                assert!(object.object_serial() > retired_object.object_serial());
+                epoch_serials[phase] = object.object_serial().get();
+                assert_ne!(fresh.binding(), old.binding());
+                assert_eq!(fresh.address().root, old.address().root);
+                assert_eq!(fresh.address().local, old.address().local);
+                assert_eq!(fresh.address().occurrence, old.address().occurrence);
+                assert_eq!(fresh.address().epoch, Some(AudioContinuityEpoch::new(2)));
+                assert_eq!(runtime.resource_root_identity(), old_root);
+                assert_eq!(
+                    source.current_claim().unwrap().unwrap().generation(),
+                    old_claim.generation()
+                );
+                old_verifier.validate(&old_claim).unwrap();
+                assert!(runtime.validate_native_owner(old).is_err());
+                assert!(runtime.observe_native_owner_object(old).is_err());
+                assert!(matches!(
+                    runtime
+                        .query_native_parameter(
+                            &mondrian_core::NativeAudioParameterQuery {
+                                target: old_target,
+                                parameter: selected_parameter.clone()
+                            },
+                            &cancel
+                        )
+                        .unwrap(),
+                    mondrian_core::NativeAudioParameterQueryOutcome::Refused(
+                        mondrian_core::NativeAudioParameterQueryRefusal::Unavailable
+                    )
+                ));
+                let entered = cursors(&runtime);
+                assert!(
+                    matches!(entered.sessions[0].state, crate::AudioSessionCursorState::Active { epoch, next_public_sample, next_execution_sample, .. }
+                    if epoch == AudioContinuityEpoch::new(2) && next_public_sample.sample() == 0 && next_execution_sample.sample() == 0)
+                );
+                assert!(
+                    matches!(entered.processors[0].state, AudioProcessorCursorState::Active { epoch, next_input_signal_sample }
+                    if epoch == AudioContinuityEpoch::new(2) && next_input_signal_sample.sample() == 0)
+                );
+            }
+            let (accepted, scanned) = service_author(
+                &mut runtime,
+                &mut sequence,
+                &source,
+                object,
+                reference,
+                &native_owned_parameters,
+            );
+            handoffs += accepted;
+            rescans += scanned;
+            for start in (0..end).step_by(BLOCK) {
+                let request = AudioRenderRequest { start_sample: start as i64, frames: BLOCK };
+                let before = cursors(&runtime);
+                let old = owner(&runtime);
+                let old_claim = source.current_claim().unwrap().unwrap();
+                let mut pcm = vec![OUTPUT_SENTINEL; BLOCK * 2];
+                if let Err(error) = runtime.render_into(request, &mut pcm) {
+                    let AudioExecutionError::NativeAuthorPending(held) = error else {
+                        panic!("actual render failure: {error:?}")
+                    };
+                    assert_eq!(held.target, old.editor_target());
+                    assert_eq!(held.reason, NativeAudioAuthorHoldReason::PendingCallbacks);
+                    assert!(pcm.iter().all(|sample| sample.to_bits() == OUTPUT_SENTINEL.to_bits()));
+                    same_progress(&before, &cursors(&runtime));
+                    assert_eq!(owner(&runtime), old);
+                    assert_eq!(runtime.observe_native_owner_object(old).unwrap(), object);
+                    assert_eq!(
+                        source.current_claim().unwrap().unwrap().generation(),
+                        old_claim.generation()
+                    );
+                    let (accepted, scanned) = service_author(
+                        &mut runtime,
+                        &mut sequence,
+                        &source,
+                        object,
+                        reference,
+                        &native_owned_parameters,
+                    );
+                    assert!(
+                        accepted > 0,
+                        "only a real Source install/exact Ack permits one retry"
+                    );
+                    handoffs += accepted;
+                    rescans += scanned;
+                    held_requests += 1;
+                    same_progress(&before, &cursors(&runtime));
+                    runtime
+                        .render_into(request, &mut pcm)
+                        .expect("the same unconsumed request once after real Ack");
+                }
+                assert!(pcm.iter().all(|sample| sample.is_finite()));
+                let block_energy: f64 = pcm
+                    .iter()
+                    .map(|sample| {
+                        let value = f64::from(*sample);
+                        value * value
+                    })
+                    .sum();
+                energies[phase] += block_energy;
+                for sample in pcm {
+                    peaks[phase] = peaks[phase].max(sample.abs());
+                }
+                if (SUSTAIN_START..SUSTAIN_END).contains(&start) {
+                    assert!(start + BLOCK <= SUSTAIN_END);
+                    sustain[phase][(start - SUSTAIN_START) / BLOCK] = block_energy;
+                    measured[phase] += 1;
+                }
+                assert_eq!(media_resolves.load(Ordering::SeqCst), 0);
+                assert_eq!(
+                    runtime.observe_native_owner_object(owner(&runtime)).unwrap(),
+                    object
+                );
+                let now = cursors(&runtime);
+                assert!(
+                    matches!(now.processors[0].state, AudioProcessorCursorState::Active { epoch, next_input_signal_sample }
+                    if epoch == AudioContinuityEpoch::new(phase as u64 + 1) && next_input_signal_sample.sample() == (start + BLOCK) as i64)
+                );
+                let (accepted, scanned) = service_author(
+                    &mut runtime,
+                    &mut sequence,
+                    &source,
+                    object,
+                    reference,
+                    &native_owned_parameters,
+                );
+                handoffs += accepted;
+                rescans += scanned;
+                same_progress(&now, &cursors(&runtime));
+                assert_eq!(sequence.audio_program.note_lanes, score);
+                check_native_owned_author(
+                    &sequence.audio_program.track_channels[&sequence.audio_tracks[0].id]
+                        .strip
+                        .pre_fader
+                        .processors[0],
+                    &restored.registration.parameters,
+                );
+            }
+        }
+        runtime.validate_native_author_source_closed(&cancel).unwrap();
+        assert_eq!(
+            std::fs::read(&state_path).unwrap(),
+            state,
+            "fixed external seed was only read"
+        );
+        assert_eq!(measured, [SUSTAIN_BLOCKS; 2]);
+        for phase in 0..2 {
+            assert!(energies[phase].is_finite() && energies[phase] > 0.0 && peaks[phase] > 0.0);
+            assert!(sustain[phase].iter().all(|energy| energy.is_finite() && *energy > 0.0));
+            assert!(sustain[phase].iter().sum::<f64>() > MIN_SUSTAIN_ENERGY);
+        }
+        assert_eq!(media_resolves.load(Ordering::SeqCst), 0);
+        (
+            epoch_serials,
+            energies,
+            peaks,
+            sustain,
+            handoffs,
+            rescans,
+            held_requests,
+        )
+    }));
+    let cleanup = catch_unwind(AssertUnwindSafe(|| {
+        drop(runtime);
+        // The original consumer uses zero-wait after consuming Drop. No added
+        // stop/RPC/wait budget and no DLL-unload or whole-100ms assertion.
+        let settled = unsafe { WaitForSingleObject(handle.as_raw_handle().cast(), 0) };
+        let mut exit = u32::MAX;
+        let queried = unsafe { GetExitCodeProcess(handle.as_raw_handle().cast(), &mut exit) };
+        assert_eq!(settled, WAIT_OBJECT_0);
+        assert_ne!(queried, 0);
+        assert_eq!(exit, 0, "original Drop must settle the child cleanly");
+        drop(source);
+        (settled, queried != 0, exit)
+    }));
+    let (serials, energies, peaks, sustain, handoffs, rescans, held_requests) = match target {
+        Ok(result) => result,
+        Err(primary) => resume_unwind(primary),
+    };
+    let (settled, queried, exit) = match cleanup {
+        Ok(result) => result,
+        Err(error) => resume_unwind(error),
+    };
+    // A real retrigger/sustain witness, not cross-epoch PCM equivalence,
+    // nonzero seek, terminal-Off acoustics or third-party FFI Note-ID evidence.
+    println!(
+        "{}",
+        json!({"case":"surge-xt-vst3-origin-reentry", "stage":"completed",
+        "class":CLASS,"plugin_version":"1.3.4","state_bytes":STATE_BYTES,
+        "parameters":PARAMETERS,"native_owned_none_parameters":PARAMETERS,
+        "musical_reference":reference,"rate":48000,"block":BLOCK,"epoch_ends":EPOCH_ENDS,
+        "epoch_blocks":[24,33],"native_pid":pid,"object_serials":serials,
+        "main_energy":energies,"main_peak":peaks,"sustain_window":[SUSTAIN_START,SUSTAIN_END],
+        "sustain_block_energy":sustain,"minimum_sustain_energy_exclusive":MIN_SUSTAIN_ENERGY,
+        "author_handoffs":handoffs,"nonempty_rescan_handoffs":rescans,"nonconsuming_held_requests":held_requests,
+        "media_resolves":0,"post_drop_wait_status":settled,"exit_query_succeeded":queried,"exit_code":exit,
+        "cross_epoch_bitexact_qualified":false,"nonzero_seek_qualified":false,
+        "terminal_off_acoustics_qualified":false,"native_ffi_tuple_qualified":false})
     );
 }
