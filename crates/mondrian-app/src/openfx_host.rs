@@ -691,7 +691,7 @@ struct NativeSession {
 }
 
 impl NativeSession {
-    #[cfg(any(test, feature = "validation"))]
+    #[cfg(test)]
     fn create(
         owner: mondrian_core::EffectProcessorOwnerId,
         binary: &CString,
