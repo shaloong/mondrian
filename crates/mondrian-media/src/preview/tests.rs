@@ -3723,7 +3723,7 @@ fn scene_linear_integer_rgba64_preserves_original_codes_without_quantization() {
                 assert_eq!(frame.color_contract.applied_range, applied_range);
                 assert_eq!(
                     frame.color_contract.alpha_mode,
-                    DecodedRgbaAlphaMode::Straight
+                    super::decoded_frame::DecodedRgbaAlphaMode::Straight
                 );
                 // Reduced's one center is halfway between the original pixels.
                 // Low codes 1, 257 and 12345 cannot survive an eight-bit intermediate.
@@ -3829,7 +3829,7 @@ fn scene_linear_rgb24_preserves_odd_strided_full_and_reduced_signal() {
             assert_eq!(frame.color_contract.applied_range, applied_range);
             assert_eq!(
                 frame.color_contract.alpha_mode,
-                DecodedRgbaAlphaMode::Straight
+                super::decoded_frame::DecodedRgbaAlphaMode::Straight
             );
             // 3 -> 2 samples indices .25 and 1.75 on each axis. These are
             // independent literal bilinear code averages, before range expansion.
@@ -6580,7 +6580,7 @@ fn external_rgba8_backend_defers_linear_yuv_to_in_process_materialization() {
     );
     // Complete valid YUV metadata makes this a carrier capability test. The
     // pre-canceled callback also prevents the old helper path spawning a child.
-    let result = try_decode_with_external_ffmpeg_cpu_rgba(
+    let result = super::external_decode::try_decode_with_external_ffmpeg_cpu_rgba(
         Path::new("linear-yuv-no-external-helper.mov"),
         Some(0),
         SourceSampleTarget::covering(TimelineTime::ZERO),
