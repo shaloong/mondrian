@@ -2688,6 +2688,130 @@ fn gpu_preferred_software_frame_falls_back_with_structured_reason() {
 }
 
 #[test]
+fn full_source_grid_fit_preserves_odd_extent_at_identity_and_looser_bounds() {
+    for (width, height) in [(3, 5), (1921, 1081)] {
+        for (max_width, max_height) in [
+            (width, height),
+            (width + 17, height + 19),
+            (width, height + 19),
+            (width + 17, height),
+        ] {
+            assert_eq!(
+                super::external_decode::fit_target_size(
+                    width,
+                    height,
+                    Some(max_width),
+                    Some(max_height),
+                ),
+                (width, height),
+                "full source {width}x{height} within {max_width}x{max_height}",
+            );
+        }
+    }
+}
+
+#[test]
+fn full_source_grid_fit_preserves_extent_without_two_positive_bounds() {
+    for (width, height) in [(3, 5), (1921, 1081)] {
+        for (max_width, max_height) in [
+            (None, None),
+            (Some(1), None),
+            (None, Some(1)),
+            (Some(0), Some(1)),
+            (Some(1), Some(0)),
+        ] {
+            assert_eq!(
+                super::external_decode::fit_target_size(width, height, max_width, max_height),
+                (width, height),
+                "incomplete bounds {max_width:?}x{max_height:?}",
+            );
+        }
+    }
+}
+
+#[test]
+fn full_source_grid_fit_keeps_existing_even_downscale_policy() {
+    for (source, bounds, expected) in [
+        ((1920, 1080), (960, 540), (960, 540)),
+        ((1921, 1081), (961, 541), (960, 540)),
+        ((3, 5), (2, 3), (2, 2)),
+        ((1920, 1080), (1000, 1000), (1000, 562)),
+    ] {
+        assert_eq!(
+            super::external_decode::fit_target_size(
+                source.0,
+                source.1,
+                Some(bounds.0),
+                Some(bounds.1),
+            ),
+            expected,
+            "downscale {source:?} within {bounds:?}",
+        );
+    }
+}
+
+#[test]
+fn full_source_grid_fit_materializes_every_odd_rgba_sample_across_stride() {
+    const RGBA: [u8; 60] = [
+        7, 17, 27, 255, 37, 47, 57, 128, 67, 77, 87, 0, 11, 21, 31, 255, 41, 51, 61, 128, 71, 81,
+        91, 0, 13, 23, 33, 255, 43, 53, 63, 128, 73, 83, 93, 0, 19, 29, 39, 255, 49, 59, 69, 128,
+        79, 89, 99, 0, 101, 111, 121, 255, 131, 141, 151, 128, 161, 171, 181, 0,
+    ];
+    let mut decoded =
+        ffmpeg::util::frame::video::Video::new(ffmpeg::util::format::pixel::Pixel::RGBA, 3, 5);
+    decoded.set_color_space(ffmpeg::util::color::Space::RGB);
+    decoded.set_color_range(ffmpeg::util::color::Range::JPEG);
+    let stride = decoded.stride(0);
+    assert!(stride > 12, "fixture must exercise padded source rows");
+    assert!(decoded.data(0).len() >= stride * 5);
+    decoded.data_mut(0).fill(0xe7);
+    for (row, pixels) in RGBA.chunks_exact(12).enumerate() {
+        decoded.data_mut(0)[row * stride..row * stride + 12].copy_from_slice(pixels);
+    }
+
+    for (max_width, max_height) in [(3, 5), (8, 9)] {
+        let (width, height) = super::external_decode::fit_target_size(
+            decoded.width(),
+            decoded.height(),
+            Some(max_width),
+            Some(max_height),
+        );
+        let mut plan = PreviewHardwareDecodePlan::resolve(
+            PreviewHardwareDecodeRequest::Auto,
+            PreviewDecodeAccessMode::PlaybackCursor,
+            PreviewDecodeBackend::Software,
+            ffmpeg::codec::Id::QTRLE,
+            None,
+        );
+        let mut scaler = None;
+        let payload = materialize_decoded_frame(
+            &decoded,
+            PreviewDecodeRepresentation::NativeCpu,
+            &mut plan,
+            &mut scaler,
+            &mut None,
+            &mut None,
+            width,
+            height,
+            Path::new("full-source-grid-odd-rgba"),
+            test_source_color(),
+        )
+        .expect("full odd source materializes through the production CPU path");
+        let PreviewDecodedFramePayload::CpuRgba(frame) = payload else {
+            panic!("8-bit packed source must retain RGBA output");
+        };
+        assert!(scaler.is_some(), "exercise the production software scaler");
+        assert_eq!((frame.width, frame.height), (3, 5));
+        assert_eq!(frame.rgba().len(), RGBA.len());
+        assert_eq!(frame.rgba(), &RGBA);
+        assert_eq!(
+            frame.diagnostics.path,
+            PreviewDecodePath::InProcessFfmpegCpuRgba
+        );
+    }
+}
+
+#[test]
 fn packed_rgb_orders_preserve_straight_color_including_zero_alpha() {
     use ffmpeg::util::format::pixel::Pixel;
     for (pixel, order) in [
