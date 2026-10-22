@@ -1708,11 +1708,13 @@ impl IsolatedAudioProcessorWorker for Vst3Worker {
             // Last live check on the actual old producer. Preserve never drains
             // or acknowledges a batch arriving after the parent's preflight.
             // A closed author boundary is distinct from a closed native GUI.
-            if self.native_parent.is_some()
-                || self.native_editor_detach_stage().is_some()
-                || self.pending_reprepare().is_some()
-                || self.prepared_author_entry.is_some()
-            {
+            #[cfg(target_os = "windows")]
+            if self.native_parent.is_some() || self.native_editor_detach_stage().is_some() {
+                return Err(AudioProcessorHostError::StateEntry(
+                    "VST3 Note reentry has live editor/author/configuration work".to_owned(),
+                ));
+            }
+            if self.pending_reprepare().is_some() || self.prepared_author_entry.is_some() {
                 return Err(AudioProcessorHostError::StateEntry(
                     "VST3 Note reentry has live editor/author/configuration work".to_owned(),
                 ));
