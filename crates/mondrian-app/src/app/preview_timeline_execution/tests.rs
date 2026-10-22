@@ -2128,7 +2128,7 @@ fn full_odd_media_effect_and_mask_execute_before_small_canvas_spatial_join() {
         .unwrap();
     assert!(sampling.is_unit_scale());
     let prepared = mondrian_renderer::prepare_decoded_cpu_source_frame(
-        decoded.into(),
+        decoded,
         AlphaInterpretation::Straight,
         mondrian_renderer::RenderInputTransform::to_working(
             mondrian_core::WorkingColorSpace::LinearRec709,
