@@ -466,7 +466,10 @@ impl PreparedTemporalFrameSet {
                 return Err(PreparedTemporalFrameSetError::UnexpectedRequest { request });
             }
             validate_provider_tile(&tile, request).map_err(|error| {
-                PreparedTemporalFrameSetError::InvalidTile { request, reason: error.to_string() }
+                PreparedTemporalFrameSetError::InvalidTile {
+                    request: Box::new(request),
+                    reason: error.to_string(),
+                }
             })?;
             if frames.insert(request, tile).is_some() {
                 return Err(PreparedTemporalFrameSetError::DuplicateRequest { request });
@@ -604,7 +607,7 @@ pub enum PreparedTemporalFrameSetError {
     #[error("invalid tile for temporal request {request:?}: {reason}")]
     InvalidTile {
         /// Request the tile claimed to satisfy.
-        request: EffectTemporalFrameRequest,
+        request: Box<EffectTemporalFrameRequest>,
         /// Exact validation failure.
         reason: String,
     },
