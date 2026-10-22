@@ -186,7 +186,8 @@ pub(crate) fn viewer_preview_cache_key_for_resolved_plan(
     color_context: &ProgramColorContext,
     sampling: mondrian_core::ImageSampling,
 ) -> PreviewOutputKey {
-    let mut builder = PreviewSemanticIdentityBuilder::new(b"mondrian.preview.viewer-plan.v2");
+    // v3 includes the corrected physical coverage of CPU affine image borders.
+    let mut builder = PreviewSemanticIdentityBuilder::new(b"mondrian.preview.viewer-plan.v3");
     sampling.hash(&mut builder);
     color_context.working_color_space().hash(&mut builder);
     color_context.output_color_space().hash(&mut builder);

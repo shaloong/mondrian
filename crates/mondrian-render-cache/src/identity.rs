@@ -56,7 +56,8 @@ impl TimelineRenderCacheIdentity {
         sampling: ImageSampling,
     ) -> Self {
         let mut hasher = Sha256::new();
-        hasher.update(b"mondrian.timeline-render-cache.identity.v4");
+        // v5 invalidates composites produced with the former CPU border sampler.
+        hasher.update(b"mondrian.timeline-render-cache.identity.v5");
         field(&mut hasher, b"resolved-visual", &visual.digest());
         field(&mut hasher, b"width", &width.to_le_bytes());
         field(&mut hasher, b"height", &height.to_le_bytes());
@@ -212,7 +213,7 @@ mod tests {
         let hex = identity(b"frame-10", 3840).hex();
         assert_eq!(
             hex,
-            "cfa4caa273b08997b9a96bcb02f310abfa3fec7ff282da14b3304cfbc652bdb0"
+            "0b33e8c5e6f56d83cddaee37b3c1483a8567c490bb000a5b24abb6523dc392de"
         );
         assert_eq!(hex.len(), 64);
         assert!(hex.bytes().all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase()));
