@@ -441,10 +441,23 @@ fn heterogeneous_unit_admission_checks_only_actual_cpu_work_before_runtime_sizin
     let request = EffectGraphExecutionRequest::new(
         EffectFrameExtent::new(1, 1),
         EffectValueResidency::new(cpu, format()),
-        EffectValueResidency::new(gpu, format()),
+        // GPU uploads consume finite StraightCoverage; the actual CPU source
+        // remains StraightFloat and uses the existing explicit transfer.
+        EffectValueResidency::new(gpu, format().with_alpha(ColorFrameAlpha::StraightCoverage)),
         EffectGraphExecutionBudget::new(1024 * 1024, 1024 * 1024, 2 * 1024 * 1024, 32, 64),
     );
     let work = PreparedHeterogeneousEffectWork::prepare(graph, &environment, request).unwrap();
+    assert_eq!(work.cpu_nodes().len(), 1);
+    assert!(work.gpu_suffix().node_ids().is_empty());
+    assert!(work.plan().steps().iter().any(|step| matches!(step,
+        EffectGraphExecutionStep::Transfer {
+            alpha_admission: EffectAlphaMaterializationAdmission::FiniteStraightCoverage,
+            from, to, ..
+        } if from.format() == EffectPlannedValueFormat::negotiated(
+                EffectWorkingPrecision::Float32, EffectColorDomain::SceneLinearRgb,
+                EffectAlphaContract::IDENTITY.inputs())
+            && to.format().exact_format()
+                == Some(format().with_alpha(ColorFrameAlpha::StraightCoverage)))));
     let mut session = session();
     session.bind_generation(11);
     work.execute_cpu_prefix_uncancelled(
