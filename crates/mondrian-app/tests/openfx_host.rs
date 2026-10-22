@@ -28,6 +28,9 @@ mod choice_hold;
 #[path = "openfx_host/angle.rs"]
 mod angle;
 
+#[path = "openfx_host/invert.rs"]
+mod invert;
+
 fn constant_parameters<const N: usize>(
     values: [(String, OpenFxParameterValue); N],
 ) -> BTreeMap<String, OpenFxParameterBinding> {
