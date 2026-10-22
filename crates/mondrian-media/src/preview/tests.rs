@@ -6598,3 +6598,37 @@ fn external_rgba8_backend_defers_linear_yuv_to_in_process_materialization() {
         "RGBA8 helper must decline a linear/F32 carrier before process admission"
     );
 }
+
+#[test]
+fn external_rgba8_backend_defers_non_rgb_physical_float_without_quantization() {
+    let format = ffmpeg::util::format::pixel::Pixel::GRAYF32LE;
+    let descriptor = unsafe { &*format.descriptor().unwrap().as_ptr() };
+    assert_ne!(
+        descriptor.flags & ffmpeg::ffi::AV_PIX_FMT_FLAG_FLOAT as u64,
+        0
+    );
+    assert_eq!(
+        descriptor.flags & ffmpeg::ffi::AV_PIX_FMT_FLAG_RGB as u64,
+        0
+    );
+    // Encoded transfer and complete YUV sampling facts would otherwise admit
+    // the RGBA8 helper before the strict physical-float materializer is reached.
+    // Pre-cancellation keeps even the old route from starting a child process.
+    let result = super::external_decode::try_decode_with_external_ffmpeg_cpu_rgba(
+        Path::new("physical-float-no-external-helper.mov"),
+        Some(0),
+        SourceSampleTarget::covering(TimelineTime::ZERO),
+        ffmpeg::Rational::new(1, 25),
+        2,
+        2,
+        test_source_color(),
+        format,
+        ffmpeg::util::color::Space::BT709,
+        ffmpeg::util::color::Range::MPEG,
+        &|| true,
+    );
+    assert!(
+        result.is_none(),
+        "physical FLOAT storage cannot enter an external RGBA8 conversion"
+    );
+}
