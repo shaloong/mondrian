@@ -6571,3 +6571,30 @@ fn scene_linear_integer_rgb_rejects_invalid_signed_stride_before_plane_access() 
         assert!(scaler.is_none());
     }
 }
+
+#[test]
+fn external_rgba8_backend_defers_linear_yuv_to_in_process_materialization() {
+    let source = PreviewSourceColorContract::new(
+        ColorSpace::LinearRec709,
+        DecodedVideoRangeContract::OverrideLimited,
+    );
+    // Complete valid YUV metadata makes this a carrier capability test. The
+    // pre-canceled callback also prevents the old helper path spawning a child.
+    let result = try_decode_with_external_ffmpeg_cpu_rgba(
+        Path::new("linear-yuv-no-external-helper.mov"),
+        Some(0),
+        SourceSampleTarget::covering(TimelineTime::ZERO),
+        ffmpeg::Rational::new(1, 25),
+        2,
+        2,
+        source,
+        ffmpeg::util::format::pixel::Pixel::YUV444P,
+        ffmpeg::util::color::Space::BT709,
+        ffmpeg::util::color::Range::MPEG,
+        &|| true,
+    );
+    assert!(
+        result.is_none(),
+        "RGBA8 helper must decline a linear/F32 carrier before process admission"
+    );
+}
