@@ -60,7 +60,7 @@ project PAR, owner reuse and NoImage. Current OpenFX scale1 admission must be
 matched by demand-driven full-source decode; merely rejecting proxy/Reduced at
 the consumer would regress playback. GPU/window/temporal support remains separate.
 
-Windows CPU controls pass: Effects 340, affected Renderer 205, render cache 19,
+Windows CPU controls pass: Effects 340, affected Renderer 207, render cache 19,
 affected App 688 and Export 3 (including two actual FFmpeg controls). These cover
 value propagation and sampling mismatch refusal; they do not qualify native
 unequal-PAR rendering, GPU interoperability or other platforms.
@@ -72,3 +72,9 @@ existing spatial compositor. Unit temporal source materialization remains an
 explicit unsupported boundary. Legal Unit title crops, authored nested canvases
 and full accumulators retain their sampling; Reduced inputs require their own
 correct producer before native execution can be admitted.
+
+CPU affine composition tests physical raster coverage before converting to texel
+centers, then clamps interpolation taps independently. Two regressions reproduce
+the former lost borders and now pass with the affected Renderer controls. Cache
+identity v5 and private viewer key v3 invalidate those former composite outputs;
+the artifact layout stays v3. GPU coverage requires separate device validation.
