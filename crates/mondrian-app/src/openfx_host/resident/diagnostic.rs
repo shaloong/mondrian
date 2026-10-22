@@ -288,6 +288,7 @@ mod tests {
                 bytemuck::cast_slice(&source),
                 make_owner(),
                 frame_format(alpha),
+                mondrian_core::ImageSampling::UNIT_SQUARE,
                 &mut || {
                     measured_calls += 1;
                     Ok(())
@@ -359,6 +360,7 @@ mod tests {
                     bytemuck::cast_slice(&source),
                     make_owner(),
                     frame_format(alpha),
+                    mondrian_core::ImageSampling::UNIT_SQUARE,
                     &mut || {
                         measured_calls += 1;
                         if measured_calls == stop_at {

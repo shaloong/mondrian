@@ -185,13 +185,14 @@ impl ThumbnailColorContract {
             .transpose()?;
         Ok(Self {
             video_stream_index: primary_video.index,
-            picture_geometry: mondrian_core::ResolvedPictureGeometry::resolve_with_overrides(
+            picture_geometry: mondrian_core::ResolvedPictureGeometry::resolve(
                 mondrian_core::Resolution {
                     width: primary_video.width,
                     height: primary_video.height,
                 },
                 primary_video.picture,
-                asset.interpretation.picture_overrides(),
+                None,
+                None,
             )
             .map_err(|error| {
                 failure(
