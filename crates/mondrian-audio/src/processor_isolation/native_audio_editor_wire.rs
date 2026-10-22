@@ -16,6 +16,16 @@ pub(super) fn write_open_request(
     writer: &mut impl Write,
     request: &NativeAudioEditorOpenRequest,
 ) -> io::Result<()> {
+    if !request.controller_values().is_empty() {
+        return Err(invalid("tag 11 cannot carry controller projection values"));
+    }
+    write_open_prefix(writer, request)
+}
+
+fn write_open_prefix(
+    writer: &mut impl Write,
+    request: &NativeAudioEditorOpenRequest,
+) -> io::Result<()> {
     super::native_audio_object_wire::write_bind_request(writer, request.binding())?;
     let length =
         u32::try_from(request.title().len()).map_err(|_| invalid("native editor title extent"))?;
@@ -41,6 +51,51 @@ pub(super) fn read_open_request(
         .map_err(|_| invalid("native editor title contains NUL"))
 }
 
+/// Tag 16 alone carries constants. An old tag-11 peer must never interpret the
+/// extra bytes as a following command or acknowledge an unsynchronized Open.
+pub(super) fn write_projected_open_request(
+    writer: &mut impl Write,
+    request: &NativeAudioEditorOpenRequest,
+) -> io::Result<()> {
+    request.owned_layout().map_err(|_| invalid("native editor request storage"))?;
+    if request.controller_values().is_empty() {
+        return Err(invalid("projected editor open requires controller values"));
+    }
+    write_open_prefix(writer, request)?;
+    writer.write_all(&(request.controller_values().len() as u32).to_le_bytes())?;
+    for (id, bits) in request.controller_values() {
+        writer.write_all(&id.to_le_bytes())?;
+        writer.write_all(&bits.to_le_bytes())?;
+    }
+    writer.flush()
+}
+
+pub(super) fn read_projected_open_request(
+    reader: &mut impl Read,
+) -> io::Result<NativeAudioEditorOpenRequest> {
+    let request = read_open_request(reader)?;
+    let count = read_u32(reader)? as usize;
+    if count == 0 {
+        return Err(invalid("projected editor open requires controller values"));
+    }
+    crate::native_audio_editor::controller_value_layout(request.title().len(), count)
+        .map_err(|_| invalid("native editor controller count exceeds local frontier"))?;
+    let mut values = Vec::new();
+    values
+        .try_reserve_exact(count)
+        .map_err(|_| invalid("native editor request allocation"))?;
+    crate::native_audio_editor::controller_value_layout(request.title().len(), values.capacity())
+        .map_err(|_| invalid("native editor actual request capacity exceeds local frontier"))?;
+    for _ in 0..count {
+        let id = read_u32(reader)?;
+        let mut bits = [0_u8; 8];
+        reader.read_exact(&mut bits)?;
+        values.push((id, u64::from_le_bytes(bits)));
+    }
+    request
+        .with_controller_values(values)
+        .map_err(|_| invalid("invalid native editor controller value selection"))
+}
 fn read_u32(reader: &mut impl Read) -> io::Result<u32> {
     let mut bytes = [0_u8; 4];
     reader.read_exact(&mut bytes)?;
@@ -175,4 +230,153 @@ pub(super) fn read_reply(
         _ => return Err(invalid("native editor reply does not match command")),
     };
     Ok(EditorReply::Outcome(outcome))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::native_worker_command::{decode, NativeCommand};
+    use super::super::protocol::{CommandKind, WorkerCommand};
+    use super::*;
+    fn request() -> NativeAudioEditorOpenRequest {
+        NativeAudioEditorOpenRequest::new(
+            NativeAudioObjectBindRequest {
+                binding: mondrian_core::AudioProcessorBindingId::new(),
+                expected_object: crate::NativeAudioObjectObservation::new(
+                    std::num::NonZeroU32::new(42).unwrap(),
+                    std::num::NonZeroU64::new(7).unwrap(),
+                ),
+            },
+            mondrian_core::NativeAudioEditorTitle::new("same native owner".to_owned()).unwrap(),
+        )
+    }
+    #[test]
+    fn projected_open_tag16_preserves_full_selection_bits_and_exact_owned_layout() {
+        let values = (0..4096)
+            .map(|id| {
+                (
+                    id,
+                    if id == 0 {
+                        (-0.0_f64).to_bits()
+                    } else {
+                        0.25_f64.to_bits()
+                    },
+                )
+            })
+            .collect();
+        let expected = request().with_controller_values(values).unwrap();
+        let mut bytes = Vec::new();
+        WorkerCommand {
+            kind: CommandKind::EditorOpenWithControllerValues,
+            start_sample: 0,
+            frames: 0,
+            event_count: 0,
+            note_count: 0,
+        }
+        .write_to(&mut bytes)
+        .unwrap();
+        write_projected_open_request(&mut bytes, &expected).unwrap();
+        assert_eq!(&bytes[8..12], &16_u32.to_le_bytes());
+        let decoded = decode(&mut bytes.as_slice(), 4096).unwrap();
+        let actual_layout = decoded.owned_input_layout().unwrap();
+        let NativeCommand::EditorOpen(actual) = decoded else {
+            panic!("same full-owner dispatcher")
+        };
+        assert_eq!(actual, expected);
+        assert_eq!(actual_layout, actual.owned_layout().unwrap());
+        assert_eq!(actual_layout.alignment, align_of::<(u32, u64)>());
+        assert_eq!(
+            actual_layout.bytes,
+            4096 * size_of::<(u32, u64)>() + actual.title().len()
+        );
+        let mut legacy = Vec::new();
+        assert!(write_open_request(&mut legacy, &expected).is_err());
+        assert!(
+            legacy.is_empty(),
+            "never publish projected input as legacy tag11"
+        );
+        for offset in [12_usize, 16, 24, 28] {
+            let mut invalid = bytes.clone();
+            invalid[offset..offset + 4].copy_from_slice(&1_u32.to_le_bytes());
+            let mut reader = std::io::Cursor::new(invalid);
+            assert!(decode(&mut reader, 4096).is_err());
+            assert_eq!(reader.position(), 32);
+        }
+        for tag in [5_u32, 17, u32::MAX] {
+            let mut invalid = bytes.clone();
+            invalid[8..12].copy_from_slice(&tag.to_le_bytes());
+            assert!(decode(&mut invalid.as_slice(), 4096).is_err());
+        }
+    }
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn projected_open_actual_tuple_alignment_is_charged_by_original_child_lane() {
+        let request = request().with_controller_values(vec![(0, 0.25_f64.to_bits())]).unwrap();
+        let actual = NativeCommand::EditorOpen(request).owned_input_layout().unwrap();
+        let profile = super::super::vst3_worker::native_worker_lane_profile().unwrap().unwrap();
+        let mut overlap = profile.control_overlap();
+        overlap.decoded_input = actual;
+        profile.admit_observed_lane_owners(profile.owning_layouts(), overlap).unwrap();
+        assert_eq!(profile.control_overlap().decoded_input.bytes, 1024 * 1024);
+        let mut too_weak = profile.control_overlap();
+        too_weak.decoded_input.alignment = 1;
+        let insufficient = crate::NativeWorkerLaneResourceProfile::scoped_main_dsp(
+            profile.owning_layouts(),
+            too_weak,
+        )
+        .unwrap();
+        assert!(
+            insufficient
+                .admit_observed_lane_owners(profile.owning_layouts(), overlap)
+                .is_err(),
+            "real tuple alignment cannot be underreported as wire byte alignment"
+        );
+    }
+    #[test]
+    fn projected_open_pre_refuses_count_duplicates_nonfinite_and_truncation() {
+        let empty = request();
+        let mut prefix = Vec::new();
+        write_open_request(&mut prefix, &empty).unwrap();
+        assert_eq!(read_open_request(&mut prefix.as_slice()).unwrap(), empty);
+        for count in [0_u32, 4097, u32::MAX] {
+            let mut bytes = prefix.clone();
+            bytes.extend_from_slice(&count.to_le_bytes());
+            let mut reader = std::io::Cursor::new(bytes);
+            assert!(read_projected_open_request(&mut reader).is_err());
+            assert_eq!(
+                reader.position() as usize,
+                prefix.len() + 4,
+                "count before row allocation/read"
+            );
+        }
+        for values in [
+            vec![(0, 0.25_f64.to_bits()), (0, 0.5_f64.to_bits())],
+            vec![(0, f64::NAN.to_bits())],
+        ] {
+            assert!(request().with_controller_values(values.clone()).is_err());
+            let mut bytes = prefix.clone();
+            bytes.extend_from_slice(&(values.len() as u32).to_le_bytes());
+            for (id, bits) in values {
+                bytes.extend_from_slice(&id.to_le_bytes());
+                bytes.extend_from_slice(&bits.to_le_bytes());
+            }
+            assert!(read_projected_open_request(&mut bytes.as_slice()).is_err());
+        }
+        let value = request().with_controller_values(vec![(0, 0.25_f64.to_bits())]).unwrap();
+        let mut bytes = Vec::new();
+        write_projected_open_request(&mut bytes, &value).unwrap();
+        for end in 0..bytes.len() {
+            assert!(read_projected_open_request(&mut &bytes[..end]).is_err());
+        }
+        let mut overallocated = Vec::with_capacity(4097);
+        overallocated.push((0, 0.25_f64.to_bits()));
+        assert!(
+            request().with_controller_values(overallocated).is_err(),
+            "actual capacity, not length"
+        );
+        assert!(crate::native_audio_editor::controller_value_layout(0, usize::MAX).is_err());
+        assert_eq!(
+            request().owned_layout().unwrap(),
+            crate::NativeHostBufferLayout { bytes: empty.title().len(), alignment: 1 }
+        );
+    }
 }

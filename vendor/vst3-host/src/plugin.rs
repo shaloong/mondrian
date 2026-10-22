@@ -1125,6 +1125,19 @@ impl<'a> PluginEditorControl<'a> {
     pub fn service_controller(&mut self) -> Result<()> {
         self.internal.service_controller()
     }
+    /// Project a host-owned constant to this controller only, before opening its
+    /// view. This never queues a DSP parameter or consumes controller callbacks.
+    /// For a writable nonautomatable parameter, bracket the strict setter with
+    /// the optional IEditControllerHostEditing interface when implemented.
+    pub fn project_controller_parameter(
+        &mut self,
+        id: u32,
+        normalized: f64,
+        requires_host_editing: bool,
+    ) -> Result<()> {
+        self.internal
+            .project_controller_parameter(id, normalized, requires_host_editing)
+    }
     /// Read the controller's current normalized parameter on its control thread.
     pub fn parameter(&self, id: u32) -> Result<f64> {
         self.internal.parameter(id)
@@ -1303,6 +1316,12 @@ pub(crate) trait PluginEditorRole {
     fn pending_restart_cohort(&self) -> Result<Option<RestartCohort>>;
     fn take_restart_flags(&mut self) -> Result<RestartFlags>;
     fn service_controller(&mut self) -> Result<()>;
+    fn project_controller_parameter(
+        &mut self,
+        id: u32,
+        normalized: f64,
+        requires_host_editing: bool,
+    ) -> Result<()>;
     fn parameter(&self, id: u32) -> Result<f64>;
     fn visit_controller_parameter_presentations_bounded(
         &self,

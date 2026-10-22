@@ -13,6 +13,10 @@ struct Probe {
     plain: f64,
     format_ok: bool,
     callback: u8,
+    allow_projection: bool,
+    begin_status: tresult,
+    set_status: tresult,
+    end_status: tresult,
 }
 impl Default for Probe {
     fn default() -> Self {
@@ -23,6 +27,10 @@ impl Default for Probe {
             plain: 250.0,
             format_ok: true,
             callback: 0,
+            allow_projection: false,
+            begin_status: kResultOk,
+            set_status: kResultOk,
+            end_status: kResultOk,
         }
     }
 }
@@ -32,7 +40,7 @@ struct Controller {
     deferred: Arc<ArrayQueue<(u32, f64)>>,
 }
 impl Class for Controller {
-    type Interfaces = (IEditController,);
+    type Interfaces = (IEditController, IEditControllerHostEditing);
 }
 impl IPluginBaseTrait for Controller {
     unsafe fn initialize(&self, _: *mut FUnknown) -> tresult {
@@ -115,14 +123,42 @@ impl IEditControllerTrait for Controller {
     unsafe fn plainParamToNormalized(&self, _: u32, _: f64) -> f64 {
         panic!("query cannot author")
     }
-    unsafe fn setParamNormalized(&self, _: u32, _: f64) -> tresult {
-        panic!("query cannot drain a setter")
+    unsafe fn setParamNormalized(&self, id: u32, value: f64) -> tresult {
+        let (result, callback) = {
+            let mut p = self.probe.lock().unwrap();
+            assert!(p.allow_projection, "query cannot drain a setter");
+            p.calls.push(("set", id));
+            if p.set_status == kResultOk {
+                p.value = value;
+            }
+            (p.set_status, p.callback)
+        };
+        if callback == 1 {
+            unsafe {
+                assert_eq!(self.handler.performEdit(id, value), kResultOk);
+            }
+        }
+        result
     }
     unsafe fn setComponentHandler(&self, _: *mut IComponentHandler) -> tresult {
         panic!("query cannot rebind")
     }
     unsafe fn createView(&self, _: FIDString) -> *mut IPlugView {
         panic!("query cannot create a view")
+    }
+}
+impl IEditControllerHostEditingTrait for Controller {
+    unsafe fn beginEditFromHost(&self, id: u32) -> tresult {
+        let mut p = self.probe.lock().unwrap();
+        assert!(p.allow_projection);
+        p.calls.push(("begin", id));
+        p.begin_status
+    }
+    unsafe fn endEditFromHost(&self, id: u32) -> tresult {
+        let mut p = self.probe.lock().unwrap();
+        assert!(p.allow_projection);
+        p.calls.push(("end", id));
+        p.end_status
     }
 }
 type ObservedPresentation = (u64, Option<u64>, Option<Vec<u16>>);
@@ -421,4 +457,123 @@ pub(super) fn assert_original_value_query_sequence(plugin: &mut PluginImpl) {
     // Fixture teardown must not invoke its controller's intentionally forbidden
     // lifecycle methods through the unrelated component's PluginImpl Drop.
     plugin.controller = None;
+}
+
+#[test]
+fn controller_only_projection_uses_strict_setter_optional_bracket_and_keeps_callbacks() {
+    for bracket in [false, true] {
+        let mut f = Fixture::new();
+        f.probe.lock().unwrap().allow_projection = true;
+        let source = f.handler.as_ref().unwrap().editor_event_source_status();
+        let cohort = f.handler.as_ref().unwrap().pending_restart_cohort();
+        let owner = f.owner;
+        f.fields()
+            .project_controller_parameter(0, -0.0, bracket)
+            .unwrap();
+        assert_eq!(
+            f.probe.lock().unwrap().value.to_bits(),
+            (-0.0_f64).to_bits()
+        );
+        assert_eq!(
+            f.probe.lock().unwrap().calls,
+            if bracket {
+                vec![("begin", 0), ("set", 0), ("end", 0)]
+            } else {
+                vec![("set", 0)]
+            }
+        );
+        assert_eq!(f.fields().attachment_owner().unwrap(), owner);
+        assert_eq!(
+            f.handler.as_ref().unwrap().editor_event_source_status(),
+            source
+        );
+        assert_eq!(f.handler.as_ref().unwrap().pending_restart_cohort(), cohort);
+        assert!(
+            f.deferred.is_empty(),
+            "no deferred DSP/controller input is enqueued"
+        );
+    }
+    let mut f = Fixture::new();
+    {
+        let mut p = f.probe.lock().unwrap();
+        p.allow_projection = true;
+        p.callback = 1;
+    }
+    let before = f.handler.as_ref().unwrap().editor_event_source_status();
+    f.fields()
+        .project_controller_parameter(0, 0.75, false)
+        .unwrap();
+    let after = f.handler.as_ref().unwrap().editor_event_source_status();
+    assert_eq!(after.revision(), before.revision() + 1);
+    assert_eq!(
+        after.pending_events(),
+        1,
+        "actual reentrant callback remains for original Poll"
+    );
+    assert_eq!(after.pending_dsp_feedback_values(), 1);
+    assert_eq!(
+        f.handler
+            .as_ref()
+            .unwrap()
+            .parameter_changes
+            .lock()
+            .unwrap()
+            .as_slice(),
+        [(0, 0.75)]
+    );
+    assert!(f.deferred.is_empty());
+}
+
+#[test]
+fn controller_only_projection_refuses_invalid_pending_wrong_thread_and_pairs_failed_brackets() {
+    for value in [f64::NAN, f64::INFINITY, -0.01, 1.01] {
+        let mut f = Fixture::new();
+        assert!(f
+            .fields()
+            .project_controller_parameter(0, value, true)
+            .is_err());
+        assert!(f.probe.lock().unwrap().calls.is_empty());
+    }
+    let mut f = Fixture::new();
+    f.deferred.push((0, 0.875)).unwrap();
+    assert!(f
+        .fields()
+        .project_controller_parameter(0, 0.25, true)
+        .is_err());
+    assert!(f.probe.lock().unwrap().calls.is_empty());
+    assert_eq!(f.deferred.pop(), Some((0, 0.875)));
+    let foreign = std::thread::spawn(|| std::thread::current().id())
+        .join()
+        .unwrap();
+    let mut fields = f.fields();
+    fields.control_thread = foreign;
+    assert!(fields.project_controller_parameter(0, 0.25, true).is_err());
+    drop(fields);
+    assert!(f.probe.lock().unwrap().calls.is_empty());
+    for failed in ["begin", "set", "end"] {
+        let mut f = Fixture::new();
+        {
+            let mut p = f.probe.lock().unwrap();
+            p.allow_projection = true;
+            match failed {
+                "begin" => p.begin_status = kResultFalse,
+                "set" => p.set_status = kResultFalse,
+                "end" => p.end_status = kResultFalse,
+                _ => unreachable!(),
+            }
+        }
+        assert!(f
+            .fields()
+            .project_controller_parameter(0, 0.25, true)
+            .is_err());
+        assert_eq!(
+            f.probe.lock().unwrap().calls,
+            if failed == "begin" {
+                vec![("begin", 0)]
+            } else {
+                vec![("begin", 0), ("set", 0), ("end", 0)]
+            }
+        );
+        assert!(f.deferred.is_empty());
+    }
 }

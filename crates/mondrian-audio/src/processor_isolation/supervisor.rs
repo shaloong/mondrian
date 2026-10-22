@@ -822,6 +822,7 @@ impl SupervisedAudioWorker {
         &mut self,
         request: crate::NativeAudioEditorOpenRequest,
     ) -> Result<crate::NativeAudioEditorOutcome, AudioProcessorHostError> {
+        request.owned_layout()?;
         self.editor_control(request.binding(), Some(&request))
     }
 
@@ -858,7 +859,9 @@ impl SupervisedAudioWorker {
         }
         let result = (|| -> io::Result<_> {
             WorkerCommand {
-                kind: if open.is_some() {
+                kind: if open.is_some_and(|request| !request.controller_values().is_empty()) {
+                    super::protocol::CommandKind::EditorOpenWithControllerValues
+                } else if open.is_some() {
                     super::protocol::CommandKind::EditorOpen
                 } else {
                     super::protocol::CommandKind::EditorClose
@@ -870,7 +873,11 @@ impl SupervisedAudioWorker {
             }
             .write_to(&mut self.control)?;
             if let Some(request) = open {
-                wire::write_open_request(&mut self.control, request)?;
+                if request.controller_values().is_empty() {
+                    wire::write_open_request(&mut self.control, request)?;
+                } else {
+                    wire::write_projected_open_request(&mut self.control, request)?;
+                }
             } else {
                 super::native_audio_object_wire::write_bind_request(&mut self.control, binding)?;
             }

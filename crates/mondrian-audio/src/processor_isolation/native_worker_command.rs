@@ -38,7 +38,10 @@ impl NativeCommand {
             Self::StageSeed(DecodedStage::Owned(seed)) => {
                 (seed.configuration.capacity(), align_of::<u8>())
             }
-            Self::EditorOpen(request) => (request.title().len(), align_of::<u8>()),
+            Self::EditorOpen(request) => {
+                let layout = request.owned_layout()?;
+                (layout.bytes, layout.alignment)
+            }
             Self::AuthorStateEntry(request) => {
                 let layout = request.owned_layout();
                 (layout.bytes, layout.alignment)
@@ -81,6 +84,11 @@ pub(super) fn decode(
         CommandKind::EditorOpen => super::native_audio_editor_wire::read_open_request(stream)
             .map(NativeCommand::EditorOpen)
             .map_err(|error| failed("native editor open request", error)),
+        CommandKind::EditorOpenWithControllerValues => {
+            super::native_audio_editor_wire::read_projected_open_request(stream)
+                .map(NativeCommand::EditorOpen)
+                .map_err(|error| failed("native projected editor open request", error))
+        }
         CommandKind::EditorClose => super::native_audio_object_wire::read_bind_request(stream)
             .map(NativeCommand::EditorClose)
             .map_err(|error| failed("native editor close request", error)),

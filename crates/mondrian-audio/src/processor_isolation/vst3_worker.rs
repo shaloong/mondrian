@@ -2,6 +2,8 @@
 
 mod author_state_entry;
 mod initial_parameter_values;
+#[cfg(target_os = "windows")]
+mod controller_projection;
 #[cfg(test)]
 mod initial_parameter_values_tests;
 mod native_author;
@@ -147,7 +149,8 @@ pub(super) fn product_plugin_interfaces() -> vst3_host::PluginInterfaceSupport {
     let interfaces = interfaces
         .with(Interface::PlugView)
         .with(Interface::PlugViewContentScaleSupport)
-        .with(Interface::DataExchangeReceiver);
+        .with(Interface::DataExchangeReceiver)
+        .with(Interface::EditControllerHostEditing);
     interfaces
 }
 const MAX_PARAMETERS: usize = vst3_host::initial_parameter_input::MAX_INITIAL_PARAMETERS;
@@ -1204,6 +1207,14 @@ impl IsolatedAudioProcessorWorker for Vst3Worker {
         if !plugin.has_editor() {
             return Ok(Outcome::Refused(Refusal::NoEditor));
         }
+        if !self.project_idle_controller_values(&request)? {
+            return Ok(Outcome::Refused(Refusal::ConfigurationPending));
+        }
+        let projected = !request.controller_values().is_empty();
+        let plugin = self
+            .plugin
+            .as_mut()
+            .ok_or_else(|| unavailable("native controller owner closed"))?;
         let mut editor = plugin.borrow_editor_control().map_err(native_editor_removal_failed)?;
         if self.native_parent.is_none() {
             match vst3_host::window::WindowsPluginEditorParent::open(
@@ -1212,6 +1223,7 @@ impl IsolatedAudioProcessorWorker for Vst3Worker {
                 request.title(),
             ) {
                 Ok(parent) => self.native_parent = Some(parent),
+                Err(error) if projected => return Err(native_editor_removal_failed(error)),
                 Err(vst3_host::error::Error::EditorUnavailable) => {
                     return Ok(Outcome::Refused(Refusal::NoEditor))
                 }

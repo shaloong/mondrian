@@ -1327,7 +1327,15 @@ impl AudioRenderSession {
         if self.native_owner_lease(lease.address()) != Some(lease) {
             return Err(crate::AudioNativeOwnerError::OwnerUnavailable);
         }
-        self.processor_host.control_native_editor(lease, title)
+        let values = if title.is_some() {
+            let processor =
+                crate::schedule::processor(self.plan.program(), lease.address().occurrence)
+                    .map_err(|_| crate::AudioNativeOwnerError::OwnerUnavailable)?;
+            native_editor_constant_values(processor)?
+        } else {
+            Vec::new()
+        };
+        self.processor_host.control_native_editor(lease, title, values)
     }
 
     /// Visit actual generated cursor facts without DSP, allocation or state changes.
@@ -3099,5 +3107,125 @@ mod native_child_settlement_tests {
         assert_eq!(counts.scopes.load(Ordering::SeqCst), 1);
         drop(runtime);
         assert_eq!(counts.scopes.load(Ordering::SeqCst), 1);
+    }
+}
+
+/// Derive only time-invariant canonical ownership from the actual local Plan.
+/// A one-key curve still belongs to Timeline evaluation, even if lowering can
+/// optimize it as constant. No playhead/default projection is invented here.
+fn native_editor_constant_values(
+    processor: &crate::plan::CompiledProcessor,
+) -> Result<Vec<(u32, u64)>, crate::AudioProcessorHostError> {
+    if !matches!(
+        processor.definition,
+        mondrian_timeline::audio::AudioProcessorDefinitionRef::Vst3 { .. }
+    ) {
+        return Ok(Vec::new());
+    }
+    let count = processor
+        .parameters
+        .values()
+        .filter(|parameter| {
+            parameter.automation.as_ref().is_some_and(|curve| curve.keyframes.is_empty())
+        })
+        .count();
+    crate::native_audio_editor::controller_value_layout(0, count)?;
+    let mut values = Vec::new();
+    values.try_reserve_exact(count).map_err(|_| {
+        crate::AudioProcessorHostError::InvalidContract(
+            "native editor constant request allocation failed".to_owned(),
+        )
+    })?;
+    crate::native_audio_editor::controller_value_layout(0, values.capacity())?;
+    for (id, parameter) in &processor.parameters {
+        let Some(curve) = parameter.automation.as_ref().filter(|curve| curve.keyframes.is_empty())
+        else {
+            continue;
+        };
+        let native_id = id
+            .as_str()
+            .strip_prefix("vst3.param.")
+            .and_then(|id| id.parse::<u32>().ok())
+            .ok_or_else(|| {
+                crate::AudioProcessorHostError::InvalidContract(
+                    "native editor constant is not an admitted VST3 ID".to_owned(),
+                )
+            })?;
+        if !curve.default_value.is_finite() {
+            return Err(crate::AudioProcessorHostError::InvalidContract(
+                "native editor constant is not finite".to_owned(),
+            ));
+        }
+        values.push((native_id, curve.default_value.to_bits()));
+    }
+    Ok(values)
+}
+#[cfg(test)]
+mod native_editor_constant_tests {
+    use super::*;
+    use crate::processor_isolation::Vst3ParameterDescriptor;
+    use mondrian_core::{AudioProcessorInstanceId, ExactAutomationKeyframe};
+    use mondrian_timeline::audio::{AudioProcessorDefinitionRef, AudioProcessorParameter};
+    #[test]
+    fn native_editor_constants_use_only_actual_empty_key_some_and_preserve_none_and_signed_zero() {
+        let mut parameters = std::collections::BTreeMap::new();
+        for id in 0..4 {
+            let descriptor = Vst3ParameterDescriptor {
+                id,
+                name: format!("P{id}"),
+                default_normalized: 0.5,
+                step_count: 0,
+                can_automate: id != 3,
+                read_only: false,
+                flags: if id == 3 { 0 } else { 1 },
+            };
+            let mut parameter =
+                AudioProcessorParameter::from_schema(descriptor.authoring_schema().unwrap())
+                    .unwrap();
+            match id {
+                0 => parameter.automation.as_mut().unwrap().default_value = -0.0,
+                1 => parameter.automation = None,
+                2 => {
+                    parameter
+                        .automation
+                        .as_mut()
+                        .unwrap()
+                        .set_keyframe(ExactAutomationKeyframe::linear(TimelineTime::ZERO, 0.75))
+                        .unwrap();
+                }
+                3 => parameter.automation.as_mut().unwrap().default_value = 0.25,
+                _ => unreachable!(),
+            }
+            parameters.insert(parameter.schema.parameter_id.clone(), parameter);
+        }
+        let mut processor = crate::plan::CompiledProcessor {
+            instance_id: AudioProcessorInstanceId::new(),
+            definition: AudioProcessorDefinitionRef::Vst3 {
+                class_id: "test".to_owned(),
+                vendor: None,
+                schema_version: 1,
+                binary_sha256: None,
+            },
+            parameters,
+            opaque_state: Some(vec![1, 2, 3]),
+        };
+        let before = processor.clone();
+        assert_eq!(
+            native_editor_constant_values(&processor).unwrap(),
+            vec![(0, (-0.0_f64).to_bits()), (3, 0.25_f64.to_bits())]
+        );
+        assert_eq!(
+            processor, before,
+            "derivation cannot manufacture Some/default ownership or rewrite opaque state"
+        );
+        processor.definition = AudioProcessorDefinitionRef::Clap {
+            plugin_id: "test".to_owned(),
+            schema_version: 1,
+            binary_sha256: None,
+        };
+        assert!(
+            native_editor_constant_values(&processor).unwrap().is_empty(),
+            "CLAP does not consume a VST3 coordinate projection"
+        );
     }
 }

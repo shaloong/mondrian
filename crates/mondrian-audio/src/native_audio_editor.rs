@@ -8,6 +8,7 @@ use crate::NativeAudioObjectBindRequest;
 pub struct NativeAudioEditorOpenRequest {
     binding: NativeAudioObjectBindRequest,
     title: mondrian_core::NativeAudioEditorTitle,
+    controller_values: Vec<(u32, u64)>,
 }
 
 impl NativeAudioEditorOpenRequest {
@@ -17,7 +18,37 @@ impl NativeAudioEditorOpenRequest {
         binding: NativeAudioObjectBindRequest,
         title: mondrian_core::NativeAudioEditorTitle,
     ) -> Self {
-        Self { binding, title }
+        Self { binding, title, controller_values: Vec::new() }
+    }
+    /// One non-RT request owner, moved from the installed Plan's constant Some
+    /// lanes. The child separately owns/charges its decoded copy while this Vec
+    /// is live. This local frontier excludes Plan/native-private allocations and
+    /// allocator bookkeeping; it does not alter the processor B*L budget.
+    pub(crate) fn with_controller_values(
+        mut self,
+        values: Vec<(u32, u64)>,
+    ) -> Result<Self, crate::AudioProcessorHostError> {
+        if values.len() > NATIVE_EDITOR_CONTROLLER_VALUES
+            || values.iter().enumerate().any(|(index, (id, bits))| {
+                !f64::from_bits(*bits).is_finite()
+                    || values[..index].iter().any(|(previous, _)| previous == id)
+            })
+        {
+            return Err(crate::AudioProcessorHostError::InvalidContract(
+                "invalid native editor controller value selection".to_owned(),
+            ));
+        }
+        self.controller_values = values;
+        self.owned_layout()?;
+        Ok(self)
+    }
+    pub(crate) fn controller_values(&self) -> &[(u32, u64)] {
+        &self.controller_values
+    }
+    pub(crate) fn owned_layout(
+        &self,
+    ) -> Result<crate::NativeHostBufferLayout, crate::AudioProcessorHostError> {
+        controller_value_layout(self.title().len(), self.controller_values.capacity())
     }
     /// Exact Runtime-issued binding and observed native object.
     pub const fn binding(&self) -> NativeAudioObjectBindRequest {
@@ -83,4 +114,36 @@ pub enum NativeAudioEditorOutcome {
         /// The real failed lifecycle step.
         stage: NativeAudioEditorCloseStage,
     },
+}
+
+// An Open request has at most the already admitted full VST3 census. This is
+// unrelated to selected Fact limits and is not a second parameter directory.
+pub(crate) const NATIVE_EDITOR_CONTROLLER_VALUES: usize = 4096;
+pub(crate) fn controller_value_layout(
+    title_bytes: usize,
+    capacity: usize,
+) -> Result<crate::NativeHostBufferLayout, crate::AudioProcessorHostError> {
+    use std::alloc::Layout;
+    let invalid = || {
+        crate::AudioProcessorHostError::InvalidContract(
+            "native editor controller request exceeds its local storage frontier".to_owned(),
+        )
+    };
+    let values = Layout::array::<(u32, u64)>(capacity).map_err(|_| invalid())?;
+    let maximum = Layout::array::<(u32, u64)>(NATIVE_EDITOR_CONTROLLER_VALUES)
+        .map_err(|_| invalid())?
+        .size()
+        .checked_add(mondrian_core::NATIVE_AUDIO_EDITOR_TITLE_BYTES)
+        .ok_or_else(invalid)?;
+    let bytes = values.size().checked_add(title_bytes).ok_or_else(invalid)?;
+    if title_bytes > mondrian_core::NATIVE_AUDIO_EDITOR_TITLE_BYTES
+        || capacity > NATIVE_EDITOR_CONTROLLER_VALUES
+        || bytes > maximum
+    {
+        return Err(invalid());
+    }
+    Ok(crate::NativeHostBufferLayout {
+        bytes,
+        alignment: if capacity == 0 { 1 } else { values.align() },
+    })
 }

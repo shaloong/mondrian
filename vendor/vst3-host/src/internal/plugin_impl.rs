@@ -8355,6 +8355,59 @@ impl crate::plugin::PluginEditorRole for PluginEditorFields<'_> {
         self.host_app.service_main_thread_data_exchange();
         Ok(())
     }
+    fn project_controller_parameter(
+        &mut self,
+        id: u32,
+        normalized: f64,
+        requires_host_editing: bool,
+    ) -> Result<()> {
+        self.ensure_control_thread()?;
+        if !normalized.is_finite() || !(0.0..=1.0).contains(&normalized) {
+            return Err(Error::InvalidParameter(
+                "invalid controller projection value".to_owned(),
+            ));
+        }
+        if !self.deferred_controller_sync.is_empty() {
+            return Err(Error::Other(
+                "controller synchronization is pending".to_owned(),
+            ));
+        }
+        let controller = self
+            .controller
+            .as_ref()
+            .ok_or_else(|| Error::InterfaceError("No controller available".to_owned()))?;
+        let editing = requires_host_editing
+            .then(|| controller.cast::<IEditControllerHostEditing>())
+            .flatten();
+        // SAFETY: this same initialized controller is exclusively borrowed on
+        // its control thread. Every successful begin is paired with end even
+        // when set refuses; no DSP storage or callback source is drained here.
+        unsafe {
+            if let Some(editing) = editing.as_ref() {
+                let begin = PluginImpl::check_controller_result(
+                    editing.beginEditFromHost(id),
+                    "IEditControllerHostEditing::beginEditFromHost",
+                );
+                begin?;
+            }
+            let set = PluginImpl::check_controller_result(
+                controller.setParamNormalized(id, normalized),
+                "IEditController::setParamNormalized",
+            );
+            let end = editing
+                .as_ref()
+                .map(|editing| {
+                    PluginImpl::check_controller_result(
+                        editing.endEditFromHost(id),
+                        "IEditControllerHostEditing::endEditFromHost",
+                    )
+                })
+                .transpose();
+            set?;
+            end?;
+        }
+        Ok(())
+    }
     fn visit_controller_parameter_presentations_bounded(
         &self,
         maximum: usize,

@@ -1796,6 +1796,9 @@ impl IsolatedAudioProcessorWorker for ClapWorker {
     ) -> Result<crate::NativeAudioEditorOutcome, AudioProcessorHostError> {
         use crate::{NativeAudioEditorOutcome as Outcome, NativeAudioEditorRefusal as Refusal};
         let binding = request.binding();
+        if !request.controller_values().is_empty() {
+            return Ok(Outcome::Refused(Refusal::UnsupportedAdapter));
+        }
         if !self.native_editor_binding_matches(binding) {
             return Ok(Outcome::Refused(Refusal::OwnerChanged));
         }
