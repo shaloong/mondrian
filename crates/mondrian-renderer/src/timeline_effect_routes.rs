@@ -332,3 +332,32 @@ fn visit_transition_graph(
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod source_materialization_tests {
+    use super::*;
+    use crate::timeline_composite::source_materialization_tests::{source_graph, source_plan};
+    #[test]
+    fn preview_root_and_nested_routes_refuse_no_image_sources_before_materialization() {
+        let (graph, probe) = source_graph();
+        let plan = source_plan(graph);
+        let mut scratch = TimelineCompositeScratch::default();
+        let routes = PreparedTimelinePreviewEffectRoutes::prepare(
+            &plan,
+            EffectFrameExtent::new(3, 2),
+            EffectGraphExecutionBudget::new(1 << 20, 1 << 20, 1 << 20, 32, 64),
+            &mut scratch,
+            |_| None,
+        )
+        .unwrap();
+        assert!(
+            matches!(routes.admit_root(),Err(TimelinePreviewEffectRouteError::NoCompleteRootRoute {cpu_blocker,..})
+            if cpu_blocker.contains("Timeline source materialization is unsupported"))
+        );
+        assert!(
+            matches!(routes.admit_nested_materialization(),Err(TimelinePreviewEffectRouteError::NestedMaterializationRequiresCpu {cpu_blocker})
+            if cpu_blocker.contains("Timeline source materialization is unsupported"))
+        );
+        probe.assert_untouched();
+    }
+}
