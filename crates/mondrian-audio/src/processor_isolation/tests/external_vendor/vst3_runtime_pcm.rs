@@ -38,6 +38,38 @@ pub(super) fn observe_runtime_pcm(
         label,
         directory,
         None,
+        None,
+    )
+}
+
+// One finite stimulus uses the same canonical Runtime executor and cleanup as
+// the original constant cases. Curves remain ordinary authored domain values.
+#[derive(Clone, Copy)]
+pub(super) struct RuntimeAutomationStimulus<'a> {
+    pub(super) curves: &'a [ExactAutomationCurve],
+    pub(super) window_pattern: &'a [usize],
+}
+
+pub(super) fn observe_runtime_pcm_with_automation(
+    catalog: Arc<DiscoveredVst3AudioProcessorSpecResolver>,
+    state: &[u8],
+    period: Arc<[f32]>,
+    facts: &Facts,
+    configuration: RuntimeObservationConfiguration<'_>,
+    label: &str,
+    directory: &Path,
+    stimulus: RuntimeAutomationStimulus<'_>,
+) -> Vec<f32> {
+    observe_runtime_pcm_inner(
+        catalog,
+        state,
+        period,
+        facts,
+        configuration,
+        label,
+        directory,
+        None,
+        Some(stimulus),
     )
 }
 
@@ -68,6 +100,7 @@ pub(super) fn observe_runtime_pcm_with_host_fader_control(
         label,
         directory,
         Some(control),
+        None,
     )
 }
 
@@ -80,7 +113,14 @@ fn observe_runtime_pcm_inner(
     label: &str,
     directory: &Path,
     control: Option<HostFaderControl>,
+    automation: Option<RuntimeAutomationStimulus<'_>>,
 ) -> Vec<f32> {
+    if let Some(stimulus) = automation {
+        assert!(control.is_none());
+        assert!(!stimulus.curves.is_empty());
+        assert!(!stimulus.window_pattern.is_empty());
+        assert!(stimulus.window_pattern.iter().all(|frames| (1..=64).contains(frames)));
+    }
     let RuntimeObservationConfiguration {
         case,
         constant_parameter_values,
@@ -139,6 +179,18 @@ fn observe_runtime_pcm_inner(
         author
             .set_parameter_automation(curve)
             .expect("explicit constant native parameter intent");
+    }
+    if let Some(stimulus) = automation {
+        assert!(constant_parameter_values.is_empty());
+        assert!(
+            !native_bypass,
+            "automation target has no native Bypass intent"
+        );
+        for curve in stimulus.curves {
+            author
+                .set_parameter_automation(curve.clone())
+                .expect("explicit exact authored automation stimulus");
+        }
     }
     if native_bypass {
         let id = ParameterId::new(format!("vst3.param.{}", case.bypass_native_id)).unwrap();
@@ -261,7 +313,14 @@ fn observe_runtime_pcm_inner(
     let render_pcm = || {
         let mut output = Vec::with_capacity(FRAMES * 2);
         let mut calls = 0;
-        for start in (0..FRAMES).step_by(64) {
+        let mut public_windows = Vec::new();
+        let mut start = 0;
+        while start < FRAMES {
+            let frames = automation
+                .map_or(64, |stimulus| {
+                    stimulus.window_pattern[calls % stimulus.window_pattern.len()]
+                })
+                .min(FRAMES - start);
             if matches!(control, Some(HostFaderControl::Retained)) && start == 2_048 {
                 let mut before = Cursors::default();
                 runtime.visit_continuity_evidence(&mut before).unwrap();
@@ -369,7 +428,6 @@ fn observe_runtime_pcm_inner(
                 // Retired plan/scratch and fee owners leave scope before more DSP.
                 drop(prepared);
             }
-            let frames = 64.min(FRAMES - start);
             let mut pcm = vec![f32::NAN; frames * 2];
             let rendered = runtime.render_into(
                 AudioRenderRequest { start_sample: start as i64, frames },
@@ -395,11 +453,17 @@ fn observe_runtime_pcm_inner(
                 }
             );
             output.extend(pcm);
+            if automation.is_some() {
+                public_windows.push((start, frames));
+            }
             calls += 1;
             observe(&mut runtime, lease, &mut observations);
+            start += frames;
         }
         assert_eq!(output.len(), FRAMES * 2);
-        assert_eq!(calls, FRAMES / 64);
+        if automation.is_none() {
+            assert_eq!(calls, FRAMES / 64);
+        }
         assert!(
             reads.load(Ordering::Relaxed) > 0,
             "actual bound media source read"
@@ -418,7 +482,7 @@ fn observe_runtime_pcm_inner(
         runtime
             .validate_native_author_source_closed(&ExecutionCancellationToken::new())
             .expect("actual author Source closed after the real PCM calls");
-        if control.is_some() {
+        if control.is_some() || automation.is_some() {
             let mut terminal = Cursors::default();
             runtime.visit_continuity_evidence(&mut terminal).unwrap();
             assert_eq!((terminal.sessions.len(), terminal.processors.len()), (1, 1));
@@ -433,19 +497,19 @@ fn observe_runtime_pcm_inner(
                     if epoch == AudioContinuityEpoch::new(1)
                         && next_input_signal_sample.sample() == FRAMES as i64));
         }
-        (output, calls)
+        (output, calls, public_windows)
     };
     // New target failures must settle the exact authenticated child before they
     // escape. Existing observation selectors retain their original unwind path.
     let result = {
         let mut scoped_render_pcm = render_pcm;
-        if control.is_some() {
+        if control.is_some() || automation.is_some() {
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(&mut scoped_render_pcm))
         } else {
             Ok(scoped_render_pcm())
         }
     };
-    let (output, calls) = match result {
+    let (output, calls, public_windows) = match result {
         Ok(completed) => completed,
         Err(panic) => {
             let alive = unsafe { WaitForSingleObject(handle.as_raw_handle().cast(), 0) };
@@ -514,6 +578,19 @@ fn observe_runtime_pcm_inner(
         .unwrap()
         .clone(),
     );
+    if let Some(stimulus) = automation {
+        receipt.as_object_mut().unwrap().extend(
+            json!({
+                "authored_automation_curves": stimulus.curves,
+                "public_window_pattern": stimulus.window_pattern,
+                "completed_public_windows": public_windows,
+                "automation_oracle_pass_granted_by_executor": false,
+            })
+            .as_object()
+            .unwrap()
+            .clone(),
+        );
+    }
     if let Some(control) = control {
         receipt.as_object_mut().unwrap().extend(json!({
             "host_fader_control": if matches!(control, HostFaderControl::Retained) { "retained-at-2048-minus6db" } else { "continuous-unscaled-reference" },

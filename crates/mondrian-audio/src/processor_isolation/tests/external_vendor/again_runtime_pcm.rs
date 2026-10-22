@@ -1,9 +1,13 @@
-//! Official AGain's captured state, constant Gain, and native Bypass in Runtime.
-use super::vst3_runtime_pcm::{observe_runtime_pcm, RuntimeObservationConfiguration};
+//! Official AGain's captured state and Gain automation through the same Runtime.
+use super::vst3_runtime_pcm::{
+    observe_runtime_pcm, observe_runtime_pcm_with_automation, RuntimeAutomationStimulus,
+    RuntimeObservationConfiguration,
+};
 use super::*;
 use crate::processor_isolation::vst3_discovery::{
     probe_vst3_plugin_registration_with_state, DiscoveryResponse,
 };
+use mondrian_core::{AutomationSegmentInterpolation, ExactAutomationKeyframe, TimelineTime};
 
 const CLASS_ID: &str = "C18D3C1E719E4E29924D3ECAA5E4DA18";
 // Assertion against the real capture, never a generated state passed to native.
@@ -16,6 +20,16 @@ const CAPTURED_STATE: [u8; 56] = [
 #[test]
 #[ignore = "current official AGain Sample Accurate case, normal Product and outer native Job"]
 fn external_vst3_again_runtime_gain_and_native_bypass_pcm() {
+    run_again_runtime_case(false);
+}
+
+#[test]
+#[ignore = "official AGain Gain automation RED diagnostic, current Product and original native Job"]
+fn external_vst3_again_runtime_gain_automation_canonical_pcm() {
+    run_again_runtime_case(true);
+}
+
+fn run_again_runtime_case(automation: bool) {
     let path = PathBuf::from(std::env::var_os(CASE_ENV).expect("official reference case path"));
     let mut case_lease = Lease::open(
         &Binding {
@@ -203,6 +217,19 @@ fn external_vst3_again_runtime_gain_and_native_bypass_pcm() {
         &state,
     );
     let period: Arc<[f32]> = input.into();
+    if automation {
+        observe_gain_automation(catalog, &case, &state, period, &facts);
+        drop((
+            case_lease,
+            helper,
+            plugin,
+            state_lease,
+            list_lease,
+            probe_lease,
+            input_lease,
+        ));
+        return;
+    }
     for (label, native_bypass, expected) in [
         ("restore-a", false, &half),
         ("restore-b", false, &half),
@@ -257,4 +284,235 @@ fn external_vst3_again_runtime_gain_and_native_bypass_pcm() {
         probe_lease,
         input_lease,
     ));
+}
+
+// Gain ticks are an independent literal sample table, not host/SDK evaluation.
+// The first ramp is +2/64 per sample, the second -1/64, the third +2/64.
+// The authored tail from sample128 through4095 is exactly32/64.
+#[rustfmt::skip]
+const GAIN_Q6_PREFIX: [u8; 129] = [
+    // Samples0..15: hold1/4.
+    16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16,
+    // Samples16..31: linear1/4 at15 to3/4 at31.
+    18, 20, 22, 24, 26, 28, 30, 32, 34, 36, 38, 40, 42, 44, 46, 48,
+    // Samples32..63: hold3/4.
+    48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48,
+    48, 48, 48, 48, 48, 48, 48, 48,
+    // Samples64..80: linear1/2 at64 to1/4 at80.
+    32, 31, 30, 29, 28, 27, 26, 25, 24, 23, 22, 21, 20, 19, 18, 17, 16,
+    // Samples81..95: hold1/4.
+    16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16,
+    // Samples96..111: hold0, including the left key of the final ramp.
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    // Samples112..127: linear0 at111 to1/2 at127; sample128 stays1/2.
+    2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24, 26, 28, 30, 32, 32,
+];
+
+fn gain_at_sample(sample: usize) -> f32 {
+    f32::from(GAIN_Q6_PREFIX.get(sample).copied().unwrap_or(32)) / 64.0
+}
+
+fn gain_curve() -> ExactAutomationCurve {
+    use AutomationSegmentInterpolation::{Hold, Linear};
+    let id = ParameterId::new("vst3.param.1").unwrap();
+    let mut curve = ExactAutomationCurve::new(id, 0.25).unwrap();
+    for (sample, value, interpolation) in [
+        (0, 0.25, Hold),
+        (15, 0.25, Linear),
+        (31, 0.75, Hold),
+        (63, 0.75, Hold),
+        (64, 0.5, Linear),
+        (80, 0.25, Hold),
+        (95, 0.25, Hold),
+        (96, 0.0, Hold),
+        (111, 0.0, Linear),
+        (127, 0.5, Hold),
+        (128, 0.5, Hold),
+    ] {
+        let mut key =
+            ExactAutomationKeyframe::linear(TimelineTime::new(sample, 48_000).unwrap(), value);
+        key.interpolation_to_next = interpolation;
+        curve.set_keyframe(key).unwrap();
+    }
+    curve
+}
+
+fn observe_gain_automation(
+    catalog: Arc<DiscoveredVst3AudioProcessorSpecResolver>,
+    case: &VendorCase,
+    state: &[u8],
+    input: Arc<[f32]>,
+    facts: &Facts,
+) {
+    let curves = [gain_curve()];
+    let expected: Vec<f32> = input
+        .chunks_exact(2)
+        .enumerate()
+        .flat_map(|(frame, stereo)| {
+            stereo.iter().map(move |sample| 0.0_f32 + sample * gain_at_sample(frame))
+        })
+        .collect();
+    assert_eq!(expected.len(), FRAMES * 2);
+    assert!(expected[..30].iter().any(|sample| *sample != 0.0));
+    assert!(expected[256..].iter().any(|sample| *sample != 0.0));
+    assert!(expected[192..224].iter().all(|sample| sample.to_bits() == 0));
+    write_new(
+        &case.evidence_directory,
+        "canonical-gain-expected.f32le",
+        &pcm_bytes(&expected),
+    );
+    let mut reports = Vec::new();
+    let mut total_mismatches = 0;
+    let mut first_output: Option<Vec<f32>> = None;
+    let mut partition_differences = Vec::new();
+    for (label, pattern) in [
+        ("automation-64", &[64][..]),
+        ("automation-17-31-16", &[17, 31, 16][..]),
+    ] {
+        let output = observe_runtime_pcm_with_automation(
+            catalog.clone(),
+            state,
+            input.clone(),
+            facts,
+            RuntimeObservationConfiguration {
+                case,
+                constant_parameter_values: &[],
+                sequence_name: "Official AGain canonical Gain automation PCM diagnostic",
+                auxiliary_input_key: None,
+                musical_time_reference: None,
+                native_bypass: false,
+            },
+            label,
+            &case.evidence_directory,
+            RuntimeAutomationStimulus { curves: &curves, window_pattern: pattern },
+        );
+        assert_eq!(output.len(), expected.len());
+        if let Some(first) = &first_output {
+            partition_differences = first
+                .iter()
+                .zip(&output)
+                .enumerate()
+                .filter(|(_, (a, b))| a.to_bits() != b.to_bits())
+                .map(|(sample, (a, b))| {
+                    json!({
+                        "frame":sample / 2, "channel":sample % 2,
+                        "pattern_64_bits":a.to_bits(), "pattern_17_31_16_bits":b.to_bits(),
+                    })
+                })
+                .collect();
+        } else {
+            first_output = Some(output.clone());
+        }
+        let mismatches: Vec<_> = output
+            .iter()
+            .zip(&expected)
+            .enumerate()
+            .filter(|(_, (actual, wanted))| actual.to_bits() != wanted.to_bits())
+            .map(|(sample, (actual, wanted))| {
+                json!({
+                    "frame":sample / 2, "channel":sample % 2,
+                    "actual_bits":actual.to_bits(), "expected_bits":wanted.to_bits(),
+                })
+            })
+            .collect();
+        total_mismatches += mismatches.len();
+        // Diagnostic only: the official sample advances Gain before multiplying.
+        // Its beginChanges resets sampleCounter=0, processNextValuePoint subtracts
+        // that counter without +/-1, and advance(1) may reach the following point.
+        // This hypothesis never changes the canonical g[n] primary oracle or PASS.
+        let mut forward_step_mismatches = Vec::new();
+        let mut windows = Vec::new();
+        let mut start = 0;
+        let mut call = 0;
+        while start < FRAMES {
+            let frames = pattern[call % pattern.len()].min(FRAMES - start);
+            let end = start + frames;
+            windows.push((start, frames));
+            for frame in start..end {
+                let gain = gain_at_sample((frame + 1).min(end - 1));
+                for channel in 0..2 {
+                    let sample = frame * 2 + channel;
+                    let diagnostic = 0.0_f32 + input[sample] * gain;
+                    if output[sample].to_bits() != diagnostic.to_bits() {
+                        forward_step_mismatches.push(sample);
+                    }
+                }
+            }
+            start = end;
+            call += 1;
+        }
+        let witnesses: Vec<_> = [
+            0,
+            14,
+            15,
+            16,
+            17,
+            30,
+            31,
+            32,
+            62,
+            63,
+            64,
+            65,
+            79,
+            80,
+            81,
+            94,
+            95,
+            96,
+            97,
+            110,
+            111,
+            112,
+            126,
+            127,
+            128,
+            129,
+            FRAMES - 2,
+            FRAMES - 1,
+        ]
+        .into_iter()
+        .map(|frame| {
+            json!({
+                "frame":frame, "gain_q6":GAIN_Q6_PREFIX.get(frame).copied().unwrap_or(32),
+                "input_bits":[input[frame*2].to_bits(), input[frame*2+1].to_bits()],
+                "expected_bits":[expected[frame*2].to_bits(), expected[frame*2+1].to_bits()],
+                "actual_bits":[output[frame*2].to_bits(), output[frame*2+1].to_bits()],
+            })
+        })
+        .collect();
+        let first_end = pattern[0] * 2;
+        let last_start = windows.last().unwrap().0 * 2;
+        println!("AGAIN_GAIN_CANONICAL_DIAGNOSTIC: {label} mismatches={} forward_step_hypothesis_mismatches={}",
+            mismatches.len(), forward_step_mismatches.len());
+        reports.push(json!({
+            "label":label, "public_window_pattern":pattern, "declared_windows":windows,
+            "canonical_mismatch_count":mismatches.len(), "all_canonical_mismatches":mismatches,
+            "boundary_and_terminal_witnesses":witnesses,
+            "first_window_actual_bits":output[..first_end].iter().map(|v|v.to_bits()).collect::<Vec<_>>(),
+            "last_window_actual_bits":output[last_start..].iter().map(|v|v.to_bits()).collect::<Vec<_>>(),
+            "forward_step_hypothesis_only":{
+                "changes_primary_oracle":false,
+                "mismatch_sample_indices":forward_step_mismatches,
+            },
+        }));
+    }
+    write_json(
+        &case.evidence_directory,
+        "observations.json",
+        json!({
+            "schema":1, "class_id":CLASS_ID, "original_state_bytes":56,
+            "gain_native_id":1, "native_bypass_authored":false,
+            "frames_per_run":FRAMES, "runs":2, "gain_q6_prefix":GAIN_Q6_PREFIX.as_slice(),
+            "canonical_mismatch_count":total_mismatches, "reports":reports,
+            "cross_partition_difference_count":partition_differences.len(),
+            "all_cross_partition_differences":partition_differences,
+            "canonical_gain_pcm_pass":total_mismatches == 0,
+            "partition_invariance_qualified":false, "host_bug_attribution":false,
+            "offset_bypass_or_realtime_or_performance_qualified":false,
+            "original_shutdown_failure_closed":false,
+        }),
+    );
+    assert_eq!(total_mismatches, 0,
+        "canonical g[n] Gain PCM differs; preserve both complete diagnostics, attribute no host/plugin cause");
 }
