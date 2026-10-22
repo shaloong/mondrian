@@ -146,6 +146,7 @@ fn generate_layer(
             false,
             ColorEngine::mondrian_standard(),
         ),
+        mondrian_core::ImageSampling::UNIT_SQUARE,
         &mut color_session,
     )
     .expect("perf input transform");
@@ -223,6 +224,7 @@ fn compose_frame_layers_with_diagnostics(
         TimelineEffectColorRuntime::new(
             &ColorEngine::mondrian_standard(),
             WorkingColorSpace::LinearRec709,
+            mondrian_core::ImageSampling::UNIT_SQUARE,
         ),
         scratch,
         &mut mondrian_effects::EffectProcessorControl::uncancelled(),

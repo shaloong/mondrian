@@ -850,10 +850,11 @@ impl ExportGpuExecutionRuntime {
                 HeterogeneousGpuContinuationError::DeadlineExceeded,
             ),
         )?;
+        let sampling = completion.evidence().sampling();
         match &mut self.state {
             ExportGpuExecutionRuntimeState::Ready { backend, .. } => backend
                 .heterogeneous_runtime
-                .execute_to_cpu(request, completion, cancellation, deadline)
+                .execute_to_cpu(request, completion, cancellation, deadline, sampling)
                 .map_err(Into::into),
             ExportGpuExecutionRuntimeState::Cold
             | ExportGpuExecutionRuntimeState::Backoff { .. } => {
@@ -9025,6 +9026,7 @@ fn render_prepared_visual_node_into(
             width,
             height,
             color_context.working_color_space(),
+            materialization.image_sampling(resolution).map_err(|error| error.to_string())?,
             context.alpha_mode,
         );
         return Ok(());
@@ -9181,7 +9183,16 @@ fn render_prepared_visual_node_into(
                 }
             }
             TimelineRenderPlanElement::SolidColor(solid) => {
-                HeterogeneousCpuPrefixSource::solid_color(route.route.frame_extent(), solid.color)
+                HeterogeneousCpuPrefixSource::solid_color(
+                    route.route.frame_extent(),
+                    materialization
+                        .image_sampling(Resolution {
+                            width: route.route.frame_extent().width(),
+                            height: route.route.frame_extent().height(),
+                        })
+                        .map_err(|error| error.to_string())?,
+                    solid.color,
+                )
             }
             TimelineRenderPlanElement::Adjustment(_)
             | TimelineRenderPlanElement::TimelineGrade(_)
@@ -9387,6 +9398,7 @@ fn render_prepared_visual_node_into(
             width,
             height,
             color_context.working_color_space(),
+            materialization.image_sampling(resolution).map_err(|error| error.to_string())?,
             context.alpha_mode,
         );
         return Ok(());
@@ -9421,6 +9433,7 @@ fn render_prepared_visual_node_into(
         TimelineEffectColorRuntime::new(
             color_context.engine(),
             color_context.working_color_space(),
+            materialization.image_sampling(resolution).map_err(|error| error.to_string())?,
         ),
         &mut context.visual_session.composite_scratch,
         &mut control,
@@ -9862,6 +9875,7 @@ fn render_export_basic_title_plan(
             materialization.title_safe_margin(),
             target_resolution,
             working_color_space,
+            materialization.sample_aspect_ratio(),
         )
         .map_err(|error| format!("Basic Title generation failed closed: {error}"))?;
     let transform = project_basic_title_transform(
@@ -9949,6 +9963,7 @@ fn resolve_export_temporal_batches(
         }
         let frame = CpuColorFrame::working(WorkingRgbaF32Frame {
             alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
+            sampling: tile.sampling(),
             width: tile.frame_extent().width(),
             height: tile.frame_extent().height(),
             data: tile.pixels().to_vec(),
@@ -10070,6 +10085,12 @@ fn resolve_export_temporal_source(
             (
                 CpuColorFrame::working(WorkingRgbaF32Frame {
                     alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
+                    sampling: materialization
+                        .image_sampling(Resolution {
+                            width: extent.width(),
+                            height: extent.height(),
+                        })
+                        .map_err(|error| error.to_string())?,
                     width: extent.width(),
                     height: extent.height(),
                     data: vec![pixel; extent.width() as usize * extent.height() as usize],
@@ -10107,6 +10128,13 @@ fn export_temporal_tile(
 ) -> Result<EffectFrameTileF32, String> {
     let roi = request.input_roi().region();
     let source = frame.rgba_f32();
+    if source.sampling != request.sampling() {
+        return Err(mondrian_effects::EffectFloatFrameError::SamplingMismatch {
+            expected: request.sampling(),
+            actual: source.sampling,
+        }
+        .to_string());
+    }
     let mut pixels = Vec::with_capacity(roi.width() as usize * roi.height() as usize);
     for y in roi.y()..roi.y().saturating_add(roi.height()) {
         let start = y as usize * source.width as usize + roi.x() as usize;
@@ -10131,6 +10159,7 @@ fn export_temporal_tile(
     EffectFrameTileF32::new(
         request.time(),
         request.frame_extent(),
+        source.sampling,
         roi,
         request.time().numerator(),
         pixels,
@@ -10555,12 +10584,14 @@ fn finish_empty_sequence_target(
     width: u32,
     height: u32,
     working_color_space: WorkingColorSpace,
+    sampling: mondrian_core::ImageSampling,
     alpha_mode: ExportAlphaMode,
 ) {
     match target {
         SequenceRenderTarget::Working(output) => {
             **output = Some(CpuColorFrame::working(WorkingRgbaF32Frame {
                 alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
+                sampling,
                 width,
                 height,
                 data: vec![[0.0, 0.0, 0.0, 0.0]; width as usize * height as usize],
@@ -10723,26 +10754,44 @@ fn decode_video_layer_scaled(
     let decode_cancellation = cancellation.clone();
     let outcome =
         decode_context.decode_cancellable(media_request, move || decode_cancellation.is_canceled());
-    let (decoded, decode_diagnostics) = match outcome {
+    let (decoded, decode_diagnostics, sampling) = match outcome {
         Ok(PreviewDecodeOutcome::Frame(frame)) => {
             let diagnostics = frame.diagnostics;
+            let sampling = picture_geometry
+                .image_sampling(Resolution { width: frame.width, height: frame.height })
+                .map_err(|error| {
+                    format!("asset={asset_id} invalid decoded image sampling: {error}")
+                })?;
             (
                 mondrian_renderer::DecodedCpuSourceFrame::from(frame),
                 diagnostics,
+                sampling,
             )
         }
         Ok(PreviewDecodeOutcome::FloatFrame(frame)) => {
             let diagnostics = frame.diagnostics;
+            let sampling = picture_geometry
+                .image_sampling(Resolution { width: frame.width, height: frame.height })
+                .map_err(|error| {
+                    format!("asset={asset_id} invalid decoded image sampling: {error}")
+                })?;
             (
                 mondrian_renderer::DecodedCpuSourceFrame::from(frame),
                 diagnostics,
+                sampling,
             )
         }
         Ok(PreviewDecodeOutcome::Unorm16Frame(frame)) => {
             let diagnostics = frame.diagnostics;
+            let sampling = picture_geometry
+                .image_sampling(Resolution { width: frame.width, height: frame.height })
+                .map_err(|error| {
+                    format!("asset={asset_id} invalid decoded image sampling: {error}")
+                })?;
             (
                 mondrian_renderer::DecodedCpuSourceFrame::from(frame),
                 diagnostics,
+                sampling,
             )
         }
         Ok(PreviewDecodeOutcome::CpuYuvFrame(frame)) => {
@@ -10810,16 +10859,20 @@ fn decode_video_layer_scaled(
             ));
         }
     };
-    let source: PreparedSourceFrame =
-        prepare_decoded_cpu_source_frame(decoded, alpha_interpretation, preparation_intent)
-            .map_err(|err| {
-                format!(
-                    "asset={} path={} source frame preparation failed: {}",
-                    asset_id,
-                    path.display(),
-                    err
-                )
-            })?;
+    let source: PreparedSourceFrame = prepare_decoded_cpu_source_frame(
+        decoded,
+        alpha_interpretation,
+        preparation_intent,
+        sampling,
+    )
+    .map_err(|err| {
+        format!(
+            "asset={} path={} source frame preparation failed: {}",
+            asset_id,
+            path.display(),
+            err
+        )
+    })?;
     let (pixels, stage_diagnostics) = match route {
         ExportDecodedSourceRoute::CpuWorking => {
             let is_data_texture = source.is_data_texture();
@@ -11452,6 +11505,20 @@ mod tests {
         width: u32,
         height: u32,
     ) -> mondrian_renderer::CpuColorFrame {
+        test_working_frame_with_sampling(
+            rgba,
+            width,
+            height,
+            mondrian_core::ImageSampling::UNIT_SQUARE,
+        )
+    }
+
+    fn test_working_frame_with_sampling(
+        rgba: &[u8],
+        width: u32,
+        height: u32,
+        sampling: mondrian_core::ImageSampling,
+    ) -> mondrian_renderer::CpuColorFrame {
         let source = mondrian_renderer::CpuEncodedColorFrame::source_rgba8(
             width,
             height,
@@ -11466,6 +11533,7 @@ mod tests {
         mondrian_renderer::color::SourceColorModule::execute_cpu(
             &mondrian_renderer::CpuSourceColorFrame::from(source),
             &context.media_input(false),
+            sampling,
             &mut session,
         )
         .expect("test input transform")
@@ -11922,10 +11990,16 @@ mod tests {
         );
         session.route_contracts_sealed = true;
         session.composite_scratch.bind_effect_execution_generation(generation);
-        let input = test_working_frame(
+        let sampling = mondrian_core::ImageSampling::new(
+            mondrian_core::SampleAspectRatio::new(4, 3).unwrap(),
+            [Rational::new(1, 2), Rational::new(2, 3)],
+        )
+        .unwrap();
+        let input = test_working_frame_with_sampling(
             &[32, 96, 224, 255].repeat(12),
             extent.width(),
             extent.height(),
+            sampling,
         );
         let working_color_space = mondrian_timeline::sequence::SequenceSettings::default()
             .color
@@ -11938,6 +12012,7 @@ mod tests {
                     mondrian_effects::EffectColorDomain::SceneLinearRgb,
                     mondrian_core::ColorFrameAlpha::StraightCoverage,
                 ),
+                input.rgba_f32().sampling,
                 &input.rgba_f32().data,
             ),
             &graph,
@@ -11959,6 +12034,7 @@ mod tests {
                 &ExecutionCancellationToken::new(),
             )
             .expect("complete Export heterogeneous route");
+        assert_eq!(output.rgba_f32().sampling, sampling);
         assert_eq!(output.descriptor(), input.descriptor());
         for (actual, expected) in output.rgba_f32().data.iter().zip(expected.iter()) {
             for channel in 0..4 {
@@ -11983,6 +12059,91 @@ mod tests {
                 .working_color_space,
             working_color_space
         );
+    }
+
+    #[test]
+    fn export_temporal_roi_preserves_source_sampling_and_refuses_target_relabel() {
+        let sampling = mondrian_core::ImageSampling::new(
+            mondrian_core::SampleAspectRatio::new(3, 2).unwrap(),
+            [Rational::new(1, 2), Rational::new(2, 3)],
+        )
+        .unwrap();
+        let pixels = vec![
+            [0.0, 0.0, 0.0, 1.0],
+            [0.125, 0.0, 0.0, 1.0],
+            [0.25, 0.0, 0.0, 1.0],
+            [0.375, 0.0, 0.0, 1.0],
+            [0.0, 0.25, 0.0, 1.0],
+            [0.5, 0.25, 0.125, 0.5],
+            [0.75, 0.25, 0.25, 1.0],
+            [1.0, 0.25, 0.0, 1.0],
+            [0.0, 0.5, 0.0, 1.0],
+            [0.25, 0.5, 0.0, 1.0],
+            [0.5, 0.5, 0.0, 1.0],
+            [0.75, 0.5, 0.0, 1.0],
+        ];
+        let frame = CpuColorFrame::working(WorkingRgbaF32Frame {
+            sampling,
+            alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
+            width: 4,
+            height: 3,
+            data: pixels.clone(),
+            color_space: test_working_color_space(),
+        });
+        let graph = compile_reference_effect_graph(&EffectRenderPlan {
+            ops: vec![EffectRenderOp::TemporalFrameBlend {
+                sample_offset: TimelineTime::new(1, 2).unwrap(),
+                mix: 0.25,
+            }],
+        })
+        .unwrap();
+        let extent = EffectFrameExtent::new(4, 3);
+        let request = |grid| {
+            mondrian_effects::EffectTemporalExecutionRequest::new(
+                19,
+                mondrian_effects::EffectExecutionContinuity::Continuous,
+                TimelineTime::ZERO,
+                extent,
+                grid,
+                mondrian_effects::EffectPixelRoi::new(1, 1, 2, 1),
+                ExecutionCancellationToken::new(),
+            )
+        };
+        let demands =
+            mondrian_effects::collect_temporal_frame_demands(&graph, &request(sampling)).unwrap();
+        assert_eq!(demands.requests().len(), 2);
+        let current = demands
+            .requests()
+            .iter()
+            .find(|demand| demand.time() == TimelineTime::ZERO)
+            .copied()
+            .expect("finite blend demands the current source frame");
+        let tile = export_temporal_tile(&frame, current).unwrap();
+        assert_eq!(tile.sampling(), sampling);
+        assert_eq!(
+            tile.roi(),
+            mondrian_effects::EffectPixelRoi::new(1, 1, 2, 1)
+        );
+        assert_eq!(
+            tile.pixels(),
+            &[[0.5, 0.25, 0.125, 0.5], [0.75, 0.25, 0.25, 1.0]]
+        );
+        let incompatible = mondrian_effects::collect_temporal_frame_demands(
+            &graph,
+            &request(mondrian_core::ImageSampling::UNIT_SQUARE),
+        )
+        .unwrap();
+        let incompatible_current = incompatible
+            .requests()
+            .iter()
+            .find(|demand| demand.time() == TimelineTime::ZERO)
+            .copied()
+            .expect("finite blend demands the current source frame");
+        let error = export_temporal_tile(&frame, incompatible_current)
+            .expect_err("source pixels must not acquire the target sampling label");
+        assert!(error.contains("sampling"));
+        assert_eq!(frame.rgba_f32().sampling, sampling);
+        assert_eq!(frame.rgba_f32().data, pixels);
     }
 
     #[test]
@@ -12019,6 +12180,7 @@ mod tests {
                     mondrian_effects::EffectColorDomain::SceneLinearRgb,
                     mondrian_core::ColorFrameAlpha::StraightCoverage,
                 ),
+                mondrian_core::ImageSampling::UNIT_SQUARE,
                 &source,
             ),
             &graph,
@@ -12035,7 +12197,11 @@ mod tests {
         let output = session
             .execute_heterogeneous_element(
                 &route,
-                HeterogeneousCpuPrefixSource::solid_color(extent, color),
+                HeterogeneousCpuPrefixSource::solid_color(
+                    extent,
+                    mondrian_core::ImageSampling::UNIT_SQUARE,
+                    color,
+                ),
                 test_working_color_space(),
                 &ExecutionCancellationToken::new(),
             )
@@ -12087,6 +12253,7 @@ mod tests {
                 &route,
                 HeterogeneousCpuPrefixSource::solid_color(
                     extent,
+                    mondrian_core::ImageSampling::UNIT_SQUARE,
                     mondrian_core::Color { r: 0.2, g: 0.4, b: 0.7, a: 1.0 },
                 ),
                 test_working_color_space(),

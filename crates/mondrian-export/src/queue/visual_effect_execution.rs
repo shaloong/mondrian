@@ -397,6 +397,10 @@ impl ExportVisualRenderSession {
         cancellation: &ExecutionCancellationToken,
     ) -> Result<CpuColorFrame, ExportHeterogeneousEffectError> {
         let extent = route.route.frame_extent();
+        let sampling = match &input {
+            HeterogeneousCpuPrefixSource::WorkingFrame(frame) => frame.rgba_f32().sampling,
+            HeterogeneousCpuPrefixSource::SolidColor { sampling, .. } => *sampling,
+        };
         let descriptor = match &input {
             HeterogeneousCpuPrefixSource::WorkingFrame(input) => input.descriptor(),
             HeterogeneousCpuPrefixSource::SolidColor { .. } => {
@@ -493,18 +497,20 @@ impl ExportVisualRenderSession {
                             mondrian_effects::EffectColorDomain::SceneLinearRgb,
                             input.rgba_f32().alpha,
                         ),
+                        input.rgba_f32().sampling,
                         &input.rgba_f32().data,
                     ),
                     route.frame_seed,
                     working_color_space,
                     &mut checkpoint,
                 ),
-            HeterogeneousCpuPrefixSource::SolidColor { color, .. } => self
+            HeterogeneousCpuPrefixSource::SolidColor { color, sampling, .. } => self
                 .composite_scratch
                 .execute_prepared_heterogeneous_solid_cpu_prefix_with_checkpoint(
                     route.route.prepared_work(),
                     generation,
                     extent,
+                    sampling,
                     color,
                     route.frame_seed,
                     working_color_space,
@@ -570,12 +576,16 @@ impl ExportVisualRenderSession {
             ExportHeterogeneousEffectError::MissingReadbackEvidence
         })?;
         let output = completed.into_frame();
-        if output.descriptor() != descriptor {
+        if output.descriptor() != descriptor || output.rgba_f32().sampling != sampling {
             self.visual_diagnostics.heterogeneous_terminal_failures =
                 self.visual_diagnostics.heterogeneous_terminal_failures.saturating_add(1);
             return Err(ExportHeterogeneousEffectError::FrameContractMismatch {
-                expected: format!("{descriptor:?}"),
-                actual: format!("{:?}", output.descriptor()),
+                expected: format!("{descriptor:?} sampling={sampling:?}"),
+                actual: format!(
+                    "{:?} sampling={:?}",
+                    output.descriptor(),
+                    output.rgba_f32().sampling
+                ),
             });
         }
         self.visual_diagnostics.heterogeneous_frames_completed =
