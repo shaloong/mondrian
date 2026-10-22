@@ -545,10 +545,11 @@ fn controller_only_projection_refuses_invalid_pending_wrong_thread_and_pairs_fai
     let foreign = std::thread::spawn(|| std::thread::current().id())
         .join()
         .unwrap();
-    let mut fields = f.fields();
-    fields.control_thread = foreign;
-    assert!(fields.project_controller_parameter(0, 0.25, true).is_err());
-    drop(fields);
+    {
+        let mut fields = f.fields();
+        fields.control_thread = foreign;
+        assert!(fields.project_controller_parameter(0, 0.25, true).is_err());
+    }
     assert!(f.probe.lock().unwrap().calls.is_empty());
     for failed in ["begin", "set", "end"] {
         let mut f = Fixture::new();
