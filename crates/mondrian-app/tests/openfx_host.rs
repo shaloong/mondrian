@@ -5938,13 +5938,21 @@ fn native_clip_preferences_reply_default_nan_warm_par_preserves_actual_images_an
     qualify_native_clip_preferences_par("clip_par_default_nan", false);
 }
 
-#[test]
-#[ignore = "normal Product, rebuilt GeneratorProbe clip_par_defaults and fresh action directory"]
-fn native_generator_clip_preferences_default_uses_actual_output_par() {
+#[derive(Clone, Copy)]
+enum NativeGeneratorPreferenceFamily {
+    PixelAspect,
+    FrameRate,
+}
+
+fn qualify_native_generator_preference_defaults(family: NativeGeneratorPreferenceFamily) {
     use std::io::Read;
+    let (mode, receipt_prefix) = match family {
+        NativeGeneratorPreferenceFamily::PixelAspect => ("clip_par_defaults", "generator-par"),
+        NativeGeneratorPreferenceFamily::FrameRate => ("clip_rate_defaults", "generator-rate"),
+    };
     assert_eq!(
         std::env::var("MONDRIAN_OPENFX_GENERATOR_MODE").unwrap(),
-        "clip_par_defaults"
+        mode
     );
     let directory = PathBuf::from(
         std::env::var_os("MONDRIAN_OPENFX_DESCRIBE_ACTION_RECEIPT_DIRECTORY")
@@ -5970,10 +5978,14 @@ fn native_generator_clip_preferences_default_uses_actual_output_par() {
     let pid = session.worker_process_id();
     let owner = session.processor_owner();
     let mut results = Vec::new();
-    for (frame, par) in [(0.0, 1.0), (6.0, 1.2), (3.0, 1.0)] {
+    for (index, (frame, par)) in [(0.0, 1.0), (6.0, 1.2), (3.0, 1.0)].into_iter().enumerate() {
+        let frame_rate = match family {
+            NativeGeneratorPreferenceFamily::FrameRate if index == 1 => 30_000.0 / 1001.0,
+            _ => 24.0,
+        };
         let sampling = cpu_contract_sampling(par);
         let output = session.generate(
-            &OpenFxRenderTiming { frame, ..cpu_contract_timing() },
+            &OpenFxRenderTiming { frame, frame_rate, ..cpu_contract_timing() },
             sampling,
             &constant_parameters([("gain".to_owned(), OpenFxParameterValue::Double(0.5))]),
             &mut || Ok(()),
@@ -5991,7 +6003,7 @@ fn native_generator_clip_preferences_default_uses_actual_output_par() {
     }
     let cleanup = session.shutdown();
     let mut receipt = String::new();
-    std::fs::File::open(directory.join(format!("generator-par-{pid}.txt")))
+    std::fs::File::open(directory.join(format!("{receipt_prefix}-{pid}.txt")))
         .expect("actual native Generator preference receipt")
         .take(513)
         .read_to_string(&mut receipt)
@@ -6000,7 +6012,7 @@ fn native_generator_clip_preferences_default_uses_actual_output_par() {
     assert!(
         receipt.lines().any(|line| line == "preferences valid=1")
             && receipt.lines().all(|line| matches!(line, "preferences valid=1" | "image valid=1")),
-        "Generator initial preference PAR must equal actual Output, independently of projectPAR; cleanup={cleanup:?}: {receipt}"
+        "Generator initial preferences must equal actual Output independently of projectPAR ({mode}); cleanup={cleanup:?}: {receipt}"
     );
     assert_eq!(
         results.len(),
@@ -6046,6 +6058,18 @@ fn native_generator_clip_preferences_default_uses_actual_output_par() {
     );
     assert_eq!(session.worker_process_id(), pid);
     cleanup.expect("original Generator owner shutdown");
+}
+
+#[test]
+#[ignore = "normal Product, rebuilt GeneratorProbe clip_par_defaults and fresh action directory"]
+fn native_generator_clip_preferences_default_uses_actual_output_par() {
+    qualify_native_generator_preference_defaults(NativeGeneratorPreferenceFamily::PixelAspect);
+}
+
+#[test]
+#[ignore = "normal Product, rebuilt GeneratorProbe clip_rate_defaults and fresh action directory"]
+fn native_generator_clip_preferences_defaults_follow_actual_frame_rate() {
+    qualify_native_generator_preference_defaults(NativeGeneratorPreferenceFamily::FrameRate);
 }
 
 // The current single-depth host rejects Depth writes at the suite boundary.
@@ -6252,9 +6276,23 @@ fn native_ok_clip_preferences_reject_unknown_alpha_before_render() {
     qualify_native_default_clip_preferences("prefs_ok_alpha_invalid", true);
 }
 
-// Fixed-progressive output cannot accept OK field remapping. Default residuals
+#[derive(Clone, Copy)]
+enum NativeClipPreferenceFamily {
+    Fielding,
+    FrameRate,
+}
+
+// Fixed output fielding/rate cannot accept OK remapping. Default residuals
 // remain unhandled, independently of the existing PAR and alpha preference gates.
-fn qualify_native_clip_preferences_fielding(mode: &str, rejected: bool) {
+fn qualify_native_clip_preferences_fixed_output(
+    family: NativeClipPreferenceFamily,
+    mode: &str,
+    rejected: bool,
+) {
+    let prefix = match family {
+        NativeClipPreferenceFamily::Fielding => "prefs-fielding",
+        NativeClipPreferenceFamily::FrameRate => "prefs-rate",
+    };
     const HALF: [[f32; 4]; 15] = [
         [-0.25, 0.0625, 1.0, 0.125],
         [-0.21875, 0.078125, 0.9921875, 0.140625],
@@ -6298,10 +6336,16 @@ fn qualify_native_clip_preferences_fielding(mode: &str, rejected: bool) {
     let parameters = constant_parameters([("scale".to_owned(), OpenFxParameterValue::Double(0.5))]);
     let requests = [(0.0, 1.0), (6.0, 1.2), (3.0, 1.0)];
     let mut results = Vec::new();
-    for &(frame, par) in &requests[..if rejected { 1 } else { requests.len() }] {
+    for (index, &(frame, par)) in
+        requests[..if rejected { 1 } else { requests.len() }].iter().enumerate()
+    {
+        let frame_rate = match family {
+            NativeClipPreferenceFamily::FrameRate if index == 1 => 30_000.0 / 1001.0,
+            _ => 24.0,
+        };
         let sampled = cpu_contract_image_par(&input, par);
         let output = session.render(
-            &OpenFxRenderTiming { frame, ..cpu_contract_timing() },
+            &OpenFxRenderTiming { frame, frame_rate, ..cpu_contract_timing() },
             &parameters,
             &sampled,
             &mut || Ok(()),
@@ -6321,16 +6365,15 @@ fn qualify_native_clip_preferences_fielding(mode: &str, rejected: bool) {
     let cleanup = session.shutdown();
     let rows = property_query_action_rows(&directory, pid);
     assert!(
-        rows.iter()
-            .any(|row| row
-                == "prefs-fielding preferences attempted=1 accepted=1 status=0 complete=1"),
-        "real FieldOrder suite write/readback must complete; cleanup={cleanup:?}: {rows:?}"
+        rows.iter().any(|row| row
+            == &format!("{prefix} preferences attempted=1 accepted=1 status=0 complete=1")),
+        "real fixed-output preference suite write/readback must complete; cleanup={cleanup:?}: {rows:?}"
     );
-    let status = if mode.starts_with("fielding_default_") {
-        14
-    } else {
-        0
-    };
+    if matches!(family, NativeClipPreferenceFamily::FrameRate) {
+        assert!(rows.iter().any(|row| row == "prefs-rate shape attempted=4 accepted=1 status=0 complete=1"),
+            "fixed dimension suite refusals/no-op must preserve current rate; cleanup={cleanup:?}: {rows:?}");
+    }
+    let status = if mode.contains("_default_") { 14 } else { 0 };
     assert!(rows.iter().any(|row| row == &format!(
         "OfxImageEffectActionGetClipPreferences return attempted=0 accepted=0 status={status} complete=1"
     )), "probe must return its actual OK/Default status; cleanup={cleanup:?}: {rows:?}");
@@ -6345,12 +6388,12 @@ fn qualify_native_clip_preferences_fielding(mode: &str, rejected: bool) {
     if rejected {
         assert!(
             !rows.iter().any(|row| row.starts_with("OfxImageEffectActionRender enter ")),
-            "unsupported OK fielding reached Render; cleanup={cleanup:?}: {rows:?}"
+            "unsupported OK fixed-output preference reached Render; cleanup={cleanup:?}: {rows:?}"
         );
         assert_eq!(results.len(), 1);
         assert!(
             matches!(&results[0].1, Err(OpenFxHostError::WorkerFailed(reason)) if reason == "native status 4"),
-            "unsupported fielding must fail at preference admission; cleanup={cleanup:?}: {:?}",
+            "unsupported fixed-output preference must fail at preference admission; cleanup={cleanup:?}: {:?}",
             results[0].1
         );
     } else {
@@ -6361,7 +6404,7 @@ fn qualify_native_clip_preferences_fielding(mode: &str, rejected: bool) {
         );
         let mut native_owner = None;
         for (index, (sampled, output, feedback)) in results.into_iter().enumerate() {
-            let output = output.expect("same None or Default preserves progressive rendering");
+            let output = output.expect("same-value or Default preserves fixed-output rendering");
             assert_eq!(output.extent(), sampled.extent());
             assert_eq!(output.format(), sampled.format());
             assert_eq!(output.sampling(), sampled.sampling());
@@ -6378,14 +6421,15 @@ fn qualify_native_clip_preferences_fielding(mode: &str, rejected: bool) {
             }
             native_owner = Some(actual);
         }
+        let image_marker = format!("{prefix} images attempted=2 accepted=2 status=0 complete=1");
         for marker in [
             "prefs-default images attempted=2 accepted=2 status=0 complete=1",
-            "prefs-fielding images attempted=2 accepted=2 status=0 complete=1",
+            image_marker.as_str(),
         ] {
             assert_eq!(
                 rows.iter().filter(|row| row.as_str() == marker).count(),
                 3,
-                "all actual clip/image and Render field checks must complete: {marker}"
+                "all actual clip/image and Render preference checks must complete: {marker}"
             );
         }
         // Preference action frequency is deliberately not an oracle.
@@ -6397,35 +6441,119 @@ fn qualify_native_clip_preferences_fielding(mode: &str, rejected: bool) {
 #[test]
 #[ignore = "normal Product, SessionProbe fielding_ok_upper, fresh action directory"]
 fn native_clip_preferences_reject_upper_fielding_before_render() {
-    qualify_native_clip_preferences_fielding("fielding_ok_upper", true);
+    qualify_native_clip_preferences_fixed_output(
+        NativeClipPreferenceFamily::Fielding,
+        "fielding_ok_upper",
+        true,
+    );
 }
 
 #[test]
 #[ignore = "normal Product, SessionProbe fielding_ok_lower, fresh action directory"]
 fn native_clip_preferences_reject_lower_fielding_before_render() {
-    qualify_native_clip_preferences_fielding("fielding_ok_lower", true);
+    qualify_native_clip_preferences_fixed_output(
+        NativeClipPreferenceFamily::Fielding,
+        "fielding_ok_lower",
+        true,
+    );
 }
 
 #[test]
 #[ignore = "normal Product, SessionProbe fielding_ok_invalid, fresh action directory"]
 fn native_clip_preferences_reject_unknown_fielding_before_render() {
-    qualify_native_clip_preferences_fielding("fielding_ok_invalid", true);
+    qualify_native_clip_preferences_fixed_output(
+        NativeClipPreferenceFamily::Fielding,
+        "fielding_ok_invalid",
+        true,
+    );
 }
 
 #[test]
 #[ignore = "normal Product, SessionProbe fielding_ok_none, fresh action directory"]
 fn native_clip_preferences_same_none_fielding_preserves_warm_images_and_owner() {
-    qualify_native_clip_preferences_fielding("fielding_ok_none", false);
+    qualify_native_clip_preferences_fixed_output(
+        NativeClipPreferenceFamily::Fielding,
+        "fielding_ok_none",
+        false,
+    );
 }
 
 #[test]
 #[ignore = "normal Product, SessionProbe fielding_default_upper, fresh action directory"]
 fn native_clip_preferences_default_upper_fielding_preserves_warm_images_and_owner() {
-    qualify_native_clip_preferences_fielding("fielding_default_upper", false);
+    qualify_native_clip_preferences_fixed_output(
+        NativeClipPreferenceFamily::Fielding,
+        "fielding_default_upper",
+        false,
+    );
 }
 
 #[test]
 #[ignore = "normal Product, SessionProbe fielding_default_invalid, fresh action directory"]
 fn native_clip_preferences_default_unknown_fielding_preserves_warm_images_and_owner() {
-    qualify_native_clip_preferences_fielding("fielding_default_invalid", false);
+    qualify_native_clip_preferences_fixed_output(
+        NativeClipPreferenceFamily::Fielding,
+        "fielding_default_invalid",
+        false,
+    );
+}
+
+#[test]
+#[ignore = "normal Product, SessionProbe rate_ok_different, fresh action directory"]
+fn native_clip_preferences_reject_different_frame_rate_before_render() {
+    qualify_native_clip_preferences_fixed_output(
+        NativeClipPreferenceFamily::FrameRate,
+        "rate_ok_different",
+        true,
+    );
+}
+
+#[test]
+#[ignore = "normal Product, SessionProbe rate_ok_zero, fresh action directory"]
+fn native_clip_preferences_reject_zero_frame_rate_before_render() {
+    qualify_native_clip_preferences_fixed_output(
+        NativeClipPreferenceFamily::FrameRate,
+        "rate_ok_zero",
+        true,
+    );
+}
+
+#[test]
+#[ignore = "normal Product, SessionProbe rate_ok_nan, fresh action directory"]
+fn native_clip_preferences_reject_nan_frame_rate_before_render() {
+    qualify_native_clip_preferences_fixed_output(
+        NativeClipPreferenceFamily::FrameRate,
+        "rate_ok_nan",
+        true,
+    );
+}
+
+#[test]
+#[ignore = "normal Product, SessionProbe rate_ok_same, fresh action directory"]
+fn native_clip_preferences_same_frame_rate_preserves_warm_images_and_owner() {
+    qualify_native_clip_preferences_fixed_output(
+        NativeClipPreferenceFamily::FrameRate,
+        "rate_ok_same",
+        false,
+    );
+}
+
+#[test]
+#[ignore = "normal Product, SessionProbe rate_default_different, fresh action directory"]
+fn native_clip_preferences_default_different_frame_rate_preserves_warm_images_and_owner() {
+    qualify_native_clip_preferences_fixed_output(
+        NativeClipPreferenceFamily::FrameRate,
+        "rate_default_different",
+        false,
+    );
+}
+
+#[test]
+#[ignore = "normal Product, SessionProbe rate_default_nan, fresh action directory"]
+fn native_clip_preferences_default_nan_frame_rate_preserves_warm_images_and_owner() {
+    qualify_native_clip_preferences_fixed_output(
+        NativeClipPreferenceFamily::FrameRate,
+        "rate_default_nan",
+        false,
+    );
 }

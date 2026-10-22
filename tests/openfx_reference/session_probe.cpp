@@ -3326,6 +3326,76 @@ bool clipPreferencesFieldingImages(const void* handle, OfxPropertySetHandle in,
   return true;
 }
 
+bool clipPreferencesRateMode(const std::string& selected) {
+  for (const char* candidate : {"rate_ok_different", "rate_ok_zero", "rate_ok_nan",
+      "rate_ok_same", "rate_default_different", "rate_default_nan"}) {
+    if (selected == candidate) { return true; }
+  }
+  return false;
+}
+
+bool clipPreferencesRateFacts(const void* handle, double& rate) {
+  OfxPropertySetHandle effect = nullptr;
+  int setable = -1;
+  if (gPropHost->propGetInt(gHost->host, kOfxImageEffectPropSetableFrameRate, 0, &setable) != kOfxStatOK || setable != 0 ||
+      gEffectHost->getPropertySet((OfxImageEffectHandle)handle, &effect) != kOfxStatOK ||
+      gPropHost->propGetDouble(effect, kOfxImageEffectPropFrameRate, 0, &rate) != kOfxStatOK ||
+      !std::isfinite(rate) || rate <= 0.0) { return false; }
+  for (const char* name : {"Source", "Output"}) {
+    OfxImageClipHandle clip = nullptr;
+    OfxPropertySetHandle props = nullptr;
+    int continuous = -1;
+    if (gEffectHost->clipGetHandle((OfxImageEffectHandle)handle, name, &clip, &props) != kOfxStatOK ||
+        gPropHost->propGetInt(props, kOfxImageClipPropContinuousSamples, 0, &continuous) != kOfxStatOK || continuous != 0) { return false; }
+    for (const char* property : {kOfxImageEffectPropFrameRate, kOfxImageEffectPropUnmappedFrameRate}) {
+      double actual = 0.0;
+      if (gPropHost->propGetDouble(props, property, 0, &actual) != kOfxStatOK || actual != rate) { return false; }
+    }
+  }
+  return true;
+}
+
+OfxStatus clipPreferencesRate(const void* handle, OfxPropertySetHandle out, const std::string& selected) {
+  double actual = 0.0;
+  if (!out || !clipPreferencesRateFacts(handle, actual)) { return kOfxStatFailed; }
+  const auto unchanged = [&]() {
+    int dimension = 0;
+    double value = 0.0;
+    return gPropHost->propGetDimension(out, kOfxImageEffectPropFrameRate, &dimension) == kOfxStatOK && dimension == 1 &&
+        gPropHost->propGetDouble(out, kOfxImageEffectPropFrameRate, 0, &value) == kOfxStatOK && value == actual;
+  };
+  if (!unchanged()) { return kOfxStatFailed; }
+  const double extra[2] = {48.0, 60.0};
+  // A fixed one-element property cannot be turned into malformed dimensions.
+  // Count zero is a successful no-op; the other real suite calls must refuse.
+  if (gPropHost->propSetDouble(out, kOfxImageEffectPropFrameRate, 1, extra[0]) != kOfxStatErrBadIndex || !unchanged() ||
+      gPropHost->propSetDoubleN(out, kOfxImageEffectPropFrameRate, 2, extra) != kOfxStatErrBadIndex || !unchanged() ||
+      gPropHost->propSetDoubleN(out, kOfxImageEffectPropFrameRate, -1, extra) != kOfxStatErrBadIndex || !unchanged() ||
+      gPropHost->propSetDoubleN(out, kOfxImageEffectPropFrameRate, 0, extra) != kOfxStatOK || !unchanged()) { return kOfxStatFailed; }
+  describeActionReceipt("prefs-rate", "shape", 4, 1, kOfxStatOK);
+  double requested = 48.0;
+  if (selected == "rate_ok_same") { requested = actual; }
+  else if (selected == "rate_ok_zero") { requested = 0.0; }
+  else if (selected == "rate_ok_nan" || selected == "rate_default_nan") {
+    requested = std::numeric_limits<double>::quiet_NaN();
+  }
+  double readback = 0.0;
+  if (gPropHost->propSetDouble(out, kOfxImageEffectPropFrameRate, 0, requested) != kOfxStatOK ||
+      gPropHost->propGetDouble(out, kOfxImageEffectPropFrameRate, 0, &readback) != kOfxStatOK ||
+      (std::isnan(requested) ? !std::isnan(readback) : readback != requested)) { return kOfxStatFailed; }
+  describeActionReceipt("prefs-rate", "preferences", 1, 1, kOfxStatOK);
+  return selected.find("rate_default_") == 0 ? kOfxStatReplyDefault : kOfxStatOK;
+}
+
+bool clipPreferencesRateImages(const void* handle, OfxPropertySetHandle in, const std::string& selected) {
+  double actual = 0.0, time = 0.0;
+  if (!clipPreferencesDefaultImages(handle, in, selected) || !clipPreferencesRateFacts(handle, actual) ||
+      gPropHost->propGetDouble(in, kOfxPropTime, 0, &time) != kOfxStatOK ||
+      (time != 0.0 && time != 6.0 && time != 3.0) || actual != (time == 6.0 ? 30000.0 / 1001.0 : 24.0)) { return false; }
+  describeActionReceipt("prefs-rate", "images", 2, 2, kOfxStatOK);
+  return true;
+}
+
 OfxStatus probeAction(const char* action, const void* handle,
                 OfxPropertySetHandle in, OfxPropertySetHandle out) {
   const std::string operation(action);
@@ -3653,6 +3723,10 @@ OfxStatus probeAction(const char* action, const void* handle,
       ? fixedCanvasPartialOutput(handle, in)
       : selected == "angle" && operation == kOfxImageEffectActionRender
       ? angleOutput(handle, in) : pluginMain(action, handle, in, out);
+  if (clipPreferencesRateMode(selected) && (result == kOfxStatOK || result == kOfxStatReplyDefault)) {
+    if (operation == kOfxImageEffectActionGetClipPreferences) { return clipPreferencesRate(handle, out, selected); }
+    if (operation == kOfxImageEffectActionRender && !clipPreferencesRateImages(handle, in, selected)) { return kOfxStatFailed; }
+  }
   if (clipPreferencesFieldingMode(selected) && (result == kOfxStatOK || result == kOfxStatReplyDefault)) {
     if (operation == kOfxImageEffectActionGetClipPreferences) { return clipPreferencesFielding(out, selected); }
     if (operation == kOfxImageEffectActionRender && !clipPreferencesFieldingImages(handle, in, selected)) { return kOfxStatFailed; }
@@ -4013,7 +4087,7 @@ OfxStatus probe(const char* action, const void* handle,
       std::strcmp(action, kOfxImageEffectActionIsIdentity) == 0) {
     observed = action;
   }
-  if (clipPreferencesParMode(mode()) || clipPreferencesDefaultMode(mode()) || clipPreferencesFieldingMode(mode())) {
+  if (clipPreferencesParMode(mode()) || clipPreferencesDefaultMode(mode()) || clipPreferencesFieldingMode(mode()) || clipPreferencesRateMode(mode())) {
     // Keep these new modes bounded without altering any historical receipts.
     observed = std::strcmp(action, kOfxImageEffectActionGetClipPreferences) == 0 ||
         std::strcmp(action, kOfxImageEffectActionRender) == 0 ||
