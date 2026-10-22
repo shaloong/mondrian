@@ -14556,12 +14556,13 @@ mod tests {
             )
             .with_execution_contract(EffectExecutionContract {
                 execution_modes: EffectExecutionModes::CPU_F32,
+                roi_propagation: EffectRoiPropagation::UnknownRequiresFullFrame,
                 ..EffectExecutionContract::IDENTITY
             })
             .with_custom_float_processor_factory(
                 Arc::new(|_, _| Ok(Some(serde_json::json!({})))),
                 None,
-                EffectCachePolicy::Uncacheable,
+                EffectCachePolicy::Deterministic,
                 Arc::new(UnitFactory),
             ),
         )

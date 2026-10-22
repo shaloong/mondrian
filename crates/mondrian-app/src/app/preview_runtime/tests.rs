@@ -20236,6 +20236,10 @@ fn openfx_unit_media_original_decode_reaches_native_before_preview_downscale() {
     let asset = commit_preview_test_media(&library, source.clone(), info);
     let mut state = AppState::new();
     pin_standard_execution_resources(&mut state);
+    *state.test_project_color_environment_mut() =
+        mondrian_core::ProjectColorEnvironment::new(mondrian_core::ColorEngine::Aces {
+            preset: mondrian_core::AcesConfigPreset::StudioV4Aces2Ocio25,
+        });
     state.test_set_asset_library(Some(library));
     let mut sequence = Sequence::new("Original media through native before Preview scale");
     let owner_extent = Resolution { width: 10, height: 7 };

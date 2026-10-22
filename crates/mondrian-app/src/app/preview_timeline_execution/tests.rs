@@ -1989,13 +1989,13 @@ pub(crate) fn unit_scale_test_effect() -> mondrian_effects::EffectNode {
         )
         .with_execution_contract(EffectExecutionContract {
             execution_modes: EffectExecutionModes::CPU_F32,
-            roi_propagation: EffectRoiPropagation::PixelLocal,
+            roi_propagation: EffectRoiPropagation::UnknownRequiresFullFrame,
             ..EffectExecutionContract::IDENTITY
         })
         .with_custom_float_processor_factory(
             Arc::new(|_, _| Ok(Some(serde_json::json!({})))),
             None,
-            EffectCachePolicy::Uncacheable,
+            EffectCachePolicy::Deterministic,
             Arc::new(UnitFactory),
         ),
     )
@@ -2088,6 +2088,9 @@ fn full_odd_media_effect_and_mask_execute_before_small_canvas_spatial_join() {
         PreviewDecodeRequest, PreviewDecodeSessionContext, PreviewSourceColorContract,
     };
     ensure_mondrian_default_ocio_loaded().unwrap();
+    let engine = mondrian_core::ColorEngine::Aces {
+        preset: mondrian_core::AcesConfigPreset::StudioV4Aces2Ocio25,
+    };
     let root = tempfile::tempdir().unwrap();
     let path = root.path().join("odd-full.ppm");
     let mut ppm = b"P6\n7 5\n255\n".to_vec();
@@ -2133,7 +2136,7 @@ fn full_odd_media_effect_and_mask_execute_before_small_canvas_spatial_join() {
         mondrian_renderer::RenderInputTransform::to_working(
             mondrian_core::WorkingColorSpace::LinearRec709,
             false,
-            mondrian_core::ColorEngine::mondrian_standard(),
+            engine.clone(),
         ),
         sampling,
     )
@@ -2177,7 +2180,10 @@ fn full_odd_media_effect_and_mask_execute_before_small_canvas_spatial_join() {
         0,
         target,
         PreviewResolutionScale::Quarter,
-        color_context(&sequence),
+        sequence
+            .settings
+            .root_program_color_context(&mondrian_core::ProjectColorEnvironment::new(engine))
+            .unwrap(),
         &mut |request| {
             assert_eq!(
                 request.image_scale_requirement,
