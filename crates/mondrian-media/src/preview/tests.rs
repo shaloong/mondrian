@@ -3646,34 +3646,270 @@ fn planar_float_materialization_preserves_bits_and_interpretation_for_every_layo
 }
 
 #[test]
-fn scene_linear_integer_decode_still_refuses_implicit_quantization() {
-    let decoded =
-        ffmpeg::util::frame::video::Video::new(ffmpeg::util::format::pixel::Pixel::RGBA64LE, 2, 1);
-    let mut plan = PreviewHardwareDecodePlan::resolve(
-        PreviewHardwareDecodeRequest::Auto,
-        PreviewDecodeAccessMode::RandomAccessStillFrame,
-        PreviewDecodeBackend::Software,
-        ffmpeg::codec::Id::EXR,
-        None,
-    );
-    let mut scaler = None;
-    let error = materialize_decoded_frame(
-        &decoded,
-        PreviewDecodeRepresentation::NativeCpu,
-        &mut plan,
-        &mut scaler,
-        &mut None,
-        &mut None,
-        2,
-        1,
-        Path::new("unexpected-integer-linear.exr"),
-        test_linear_source_color(),
-    )
-    .expect_err("scene-linear source still requires an explicitly supported float layout");
-    assert!(error.to_string().contains("unsupported non-planar-f32"));
-    assert!(scaler.is_none());
+fn scene_linear_integer_rgba64_preserves_original_codes_without_quantization() {
+    use ffmpeg::util::format::pixel::Pixel;
+    let codes = [[0_u16, 1, 32769, 65535], [65535, 12345, 257, 10923]];
+    for (format, big_endian) in [(Pixel::RGBA64LE, false), (Pixel::RGBA64BE, true)] {
+        let mut decoded = ffmpeg::util::frame::video::Video::new(format, 2, 1);
+        decoded.data_mut(0).fill(0xe7);
+        for (pixel, values) in codes.iter().enumerate() {
+            for (channel, value) in values.iter().enumerate() {
+                let bytes = if big_endian {
+                    value.to_be_bytes()
+                } else {
+                    value.to_le_bytes()
+                };
+                let start = pixel * 8 + channel * 2;
+                decoded.data_mut(0)[start..start + 2].copy_from_slice(&bytes);
+            }
+        }
+        for (range, applied_range) in [
+            (
+                DecodedVideoRangeContract::OverrideFull,
+                DecodedVideoRange::Full,
+            ),
+            (
+                DecodedVideoRangeContract::OverrideLimited,
+                DecodedVideoRange::Limited,
+            ),
+        ] {
+            let source = PreviewSourceColorContract::new(ColorSpace::Aces2065_1, range);
+            for (representation, width) in [
+                (PreviewDecodeRepresentation::NativeCpu, 2),
+                (
+                    PreviewDecodeRepresentation::Reduced {
+                        divisor: std::num::NonZeroU32::new(2).unwrap(),
+                    },
+                    1,
+                ),
+            ] {
+                // Keep the old EXR + RGBA64 source: integer storage is legal
+                // linear signal, and neither codec nor transfer implies float layout.
+                let mut plan = PreviewHardwareDecodePlan::resolve(
+                    PreviewHardwareDecodeRequest::Auto,
+                    PreviewDecodeAccessMode::RandomAccessStillFrame,
+                    PreviewDecodeBackend::Software,
+                    ffmpeg::codec::Id::EXR,
+                    None,
+                );
+                let mut scaler = None;
+                let payload = materialize_decoded_frame(
+                    &decoded,
+                    representation,
+                    &mut plan,
+                    &mut scaler,
+                    &mut None,
+                    &mut None,
+                    width,
+                    1,
+                    Path::new("integer-linear.exr"),
+                    source,
+                )
+                .expect("integer linear RGB must materialize directly to Float32");
+                let PreviewDecodedFramePayload::CpuFloat(frame) = payload else {
+                    panic!("linear integer RGB must not publish UNORM storage")
+                };
+                assert!(
+                    scaler.is_none(),
+                    "integer RGB must bypass quantizing swscale"
+                );
+                assert_eq!((frame.width, frame.height), (width, 1));
+                assert_eq!(frame.color_contract.source, source);
+                assert_eq!(
+                    frame.color_contract.encoding,
+                    DecodedRgbaEncoding::SourceLinearRgb
+                );
+                assert_eq!(frame.color_contract.applied_matrix, DecodedVideoMatrix::Rgb);
+                assert_eq!(frame.color_contract.applied_range, applied_range);
+                assert_eq!(
+                    frame.color_contract.alpha_mode,
+                    DecodedRgbaAlphaMode::Straight
+                );
+                // Reduced's one center is halfway between the original pixels.
+                // Low codes 1, 257 and 12345 cannot survive an eight-bit intermediate.
+                let expected = if width == 2 {
+                    vec![[0., 1., 32769., 65535.], [65535., 12345., 257., 10923.]]
+                } else {
+                    vec![[32767.5, 6173., 16513., 38229.]]
+                };
+                assert_eq!(frame.rgba().len(), width as usize * 4);
+                for (actual, codes) in frame.rgba().chunks_exact(4).zip(expected) {
+                    for channel in 0..4 {
+                        let expected = if channel == 3 || applied_range == DecodedVideoRange::Full {
+                            codes[channel] / 65535.0_f64
+                        } else {
+                            (codes[channel] - 4096.0) / 56064.0_f64
+                        };
+                        assert!(
+                            (f64::from(actual[channel]) - expected).abs() < 2.0e-7,
+                            "{format:?} {applied_range:?} {width}: {} vs {expected}",
+                            actual[channel]
+                        );
+                    }
+                }
+            }
+        }
+    }
 }
 
+#[test]
+fn scene_linear_rgb24_preserves_odd_strided_full_and_reduced_signal() {
+    use ffmpeg::util::format::pixel::Pixel;
+    let codes: [[u8; 3]; 9] = [
+        [0, 16, 255],
+        [1, 64, 235],
+        [128, 254, 32],
+        [16, 32, 64],
+        [33, 65, 129],
+        [235, 200, 17],
+        [255, 127, 1],
+        [220, 219, 218],
+        [17, 18, 19],
+    ];
+    let mut decoded = ffmpeg::util::frame::video::Video::new(Pixel::RGB24, 3, 3);
+    let stride = decoded.stride(0);
+    assert!(stride > 9, "exercise actual padded RGB24 rows");
+    decoded.data_mut(0).fill(0xe7);
+    for (index, pixel) in codes.iter().enumerate() {
+        let start = (index / 3) * stride + (index % 3) * 3;
+        decoded.data_mut(0)[start..start + 3].copy_from_slice(pixel);
+    }
+    for (range, applied_range) in [
+        (
+            DecodedVideoRangeContract::OverrideFull,
+            DecodedVideoRange::Full,
+        ),
+        (
+            DecodedVideoRangeContract::OverrideLimited,
+            DecodedVideoRange::Limited,
+        ),
+    ] {
+        let source = PreviewSourceColorContract::new(ColorSpace::LinearRec709, range);
+        for (representation, width) in [
+            (PreviewDecodeRepresentation::NativeCpu, 3),
+            (
+                PreviewDecodeRepresentation::Reduced {
+                    divisor: std::num::NonZeroU32::new(2).unwrap(),
+                },
+                2,
+            ),
+        ] {
+            let mut plan = PreviewHardwareDecodePlan::resolve(
+                PreviewHardwareDecodeRequest::Auto,
+                PreviewDecodeAccessMode::RandomAccessStillFrame,
+                PreviewDecodeBackend::Software,
+                ffmpeg::codec::Id::PPM,
+                None,
+            );
+            let mut scaler = None;
+            let payload = materialize_decoded_frame(
+                &decoded,
+                representation,
+                &mut plan,
+                &mut scaler,
+                &mut None,
+                &mut None,
+                width,
+                width,
+                Path::new("odd-linear.ppm"),
+                source,
+            )
+            .expect("RGB24 linear interpretation must not require physical float planes");
+            let PreviewDecodedFramePayload::CpuFloat(frame) = payload else {
+                panic!("linear RGB24 must publish Float32")
+            };
+            assert!(scaler.is_none());
+            assert_eq!((frame.width, frame.height), (width, width));
+            assert_eq!(frame.color_contract.source, source);
+            assert_eq!(
+                frame.color_contract.encoding,
+                DecodedRgbaEncoding::SourceLinearRgb
+            );
+            assert_eq!(frame.color_contract.applied_matrix, DecodedVideoMatrix::Rgb);
+            assert_eq!(frame.color_contract.applied_range, applied_range);
+            assert_eq!(
+                frame.color_contract.alpha_mode,
+                DecodedRgbaAlphaMode::Straight
+            );
+            // 3 -> 2 samples indices .25 and 1.75 on each axis. These are
+            // independent literal bilinear code averages, before range expansion.
+            let expected: Vec<[f64; 3]> = if width == 3 {
+                codes.iter().map(|pixel| pixel.map(f64::from)).collect()
+            } else {
+                vec![
+                    [5.25, 31.0625, 207.5625],
+                    [118.3125, 196.4375, 73.3125],
+                    [189.75, 122.5625, 61.5],
+                    [96.9375, 92.75, 62.8125],
+                ]
+            };
+            assert_eq!(frame.rgba().len(), expected.len() * 4);
+            for (actual, expected) in frame.rgba().chunks_exact(4).zip(expected) {
+                for channel in 0..3 {
+                    let expected = if applied_range == DecodedVideoRange::Full {
+                        expected[channel] / 255.0
+                    } else {
+                        (expected[channel] - 16.0) / 219.0
+                    };
+                    assert!(
+                        (f64::from(actual[channel]) - expected).abs() < 2.0e-7,
+                        "{applied_range:?} {width}: {} vs {expected}",
+                        actual[channel]
+                    );
+                }
+                assert_eq!(actual[3], 1.0);
+            }
+        }
+    }
+}
+
+#[test]
+fn unsupported_physical_float_refuses_quantization_for_every_interpretation() {
+    use ffmpeg::util::format::pixel::Pixel;
+    let mut decoded = ffmpeg::util::frame::video::Video::new(Pixel::RGBAF32LE, 2, 1);
+    let descriptor = unsafe { &*Pixel::RGBAF32LE.descriptor().unwrap().as_ptr() };
+    assert_ne!(
+        descriptor.flags & ffmpeg::ffi::AV_PIX_FMT_FLAG_FLOAT as u64,
+        0
+    );
+    for (index, value) in
+        [-0.25_f32, 0.1234567, 65536.5, 0.5, 4., -0., 0.3, 1.].into_iter().enumerate()
+    {
+        decoded.data_mut(0)[index * 4..index * 4 + 4].copy_from_slice(&value.to_le_bytes());
+    }
+    for source in [
+        test_linear_source_color(),
+        test_source_color(),
+        PreviewSourceColorContract::data_texture(DecodedVideoRangeContract::OverrideFull),
+    ] {
+        let mut plan = PreviewHardwareDecodePlan::resolve(
+            PreviewHardwareDecodeRequest::Auto,
+            PreviewDecodeAccessMode::RandomAccessStillFrame,
+            PreviewDecodeBackend::Software,
+            ffmpeg::codec::Id::EXR,
+            None,
+        );
+        let mut scaler = None;
+        let error = materialize_decoded_frame(
+            &decoded,
+            PreviewDecodeRepresentation::NativeCpu,
+            &mut plan,
+            &mut scaler,
+            &mut None,
+            &mut None,
+            2,
+            1,
+            Path::new("unsupported-packed-float.exr"),
+            source,
+        )
+        .expect_err("unsupported physical float must never enter an integer conversion");
+        assert!(error.to_string().contains("unsupported non-planar-f32"));
+        assert!(
+            scaler.is_none(),
+            "refuse before allocating an integer scaler"
+        );
+    }
+}
 #[test]
 fn scene_linear_ffmpeg_float_frame_preserves_extended_range_rgba() {
     let pixel_format = if cfg!(target_endian = "little") {
@@ -6091,11 +6327,128 @@ fn cpu_yuva12_uses_encoded_float_without_clipping_transparent_color() {
             }
         }
     }
+    for (source, encoding) in [
+        (test_source_color(), DecodedRgbaEncoding::SourceEncodedRgb),
+        (
+            PreviewSourceColorContract::automatic(
+                ColorSpace::LinearRec709,
+                DecodedVideoRange::Limited,
+            ),
+            DecodedRgbaEncoding::SourceLinearRgb,
+        ),
+    ] {
+        let mut plan = PreviewHardwareDecodePlan::resolve(
+            PreviewHardwareDecodeRequest::Auto,
+            PreviewDecodeAccessMode::PlaybackCursor,
+            PreviewDecodeBackend::Software,
+            ffmpeg::codec::Id::PRORES,
+            None,
+        );
+        let payload = materialize_decoded_frame(
+            &decoded,
+            PreviewDecodeRepresentation::NativeCpu,
+            &mut plan,
+            &mut None,
+            &mut None,
+            &mut None,
+            3,
+            2,
+            Path::new("unbounded-yuva12.mov"),
+            source,
+        )
+        .expect("CPU consumer retains source-encoded Float32");
+        let PreviewDecodedFramePayload::CpuFloat(frame) = payload else {
+            panic!("encoded Float32")
+        };
+        assert_eq!(frame.color_contract.encoding, encoding);
+        let rgba = frame.rgba();
+        // Independent limited-range BT.709 reference for [2001,4095,0].
+        let y = (2001.0_f64 - 256.0) / 3504.0;
+        let cb = (4095.0_f64 - 2048.0) / 3584.0;
+        let cr = -2048.0_f64 / 3584.0;
+        let expected = [
+            y + 1.5748 * cr,
+            y - 0.18732427 * cb - 0.46812427 * cr,
+            y + 1.8556 * cb,
+        ];
+        for (actual, expected) in rgba[..3].iter().zip(expected) {
+            assert!((f64::from(*actual) - expected).abs() < 1.0e-6);
+        }
+        assert!(rgba[0] < 0.0 && rgba[2] > 1.0);
+        assert_eq!(rgba[3], 0.0);
+        assert_eq!(rgba[7], 2048.0 / 4095.0);
+        assert_eq!(rgba[11], 1.0);
+        assert_eq!(rgba.len(), 3 * 2 * 4);
+        for x in 0..3 {
+            assert_eq!(
+                &rgba[(3 + x) * 4..(4 + x) * 4],
+                &rgba[(2 - x) * 4..(3 - x) * 4]
+            );
+        }
+    }
+}
+
+#[test]
+fn unsupported_alpha_yuv_refuses_loss_before_scaler_for_encoded_and_linear_sources() {
+    let mut decoded =
+        ffmpeg::util::frame::video::Video::new(ffmpeg::util::format::pixel::Pixel::YUVA420P, 2, 2);
+    decoded.set_color_space(ffmpeg::util::color::Space::BT709);
+    decoded.set_color_range(ffmpeg::util::color::Range::MPEG);
+    for color in [ColorSpace::Rec709, ColorSpace::LinearRec709] {
+        let source =
+            PreviewSourceColorContract::new(color, DecodedVideoRangeContract::OverrideLimited);
+        let mut plan = PreviewHardwareDecodePlan::resolve(
+            PreviewHardwareDecodeRequest::Auto,
+            PreviewDecodeAccessMode::RandomAccessStillFrame,
+            PreviewDecodeBackend::Software,
+            ffmpeg::codec::Id::PRORES,
+            None,
+        );
+        let mut scaler = None;
+        let error = materialize_decoded_frame(
+            &decoded,
+            PreviewDecodeRepresentation::NativeCpu,
+            &mut plan,
+            &mut scaler,
+            &mut None,
+            &mut None,
+            2,
+            2,
+            Path::new("unsupported-alpha-yuv.mov"),
+            source,
+        )
+        .expect_err("unsupported YUV alpha must not silently become opaque");
+        assert!(error.to_string().contains("alpha-bearing YUV"));
+        assert!(scaler.is_none(), "alpha refusal precedes scaler allocation");
+    }
+}
+
+#[test]
+fn scene_linear_yuv_preserves_matrix_range_and_float_rgb_without_metadata_guesses() {
+    let mut decoded =
+        ffmpeg::util::frame::video::Video::new(ffmpeg::util::format::pixel::Pixel::YUV444P, 2, 2);
+    decoded.set_color_space(ffmpeg::util::color::Space::BT709);
+    decoded.set_color_range(ffmpeg::util::color::Range::MPEG);
+    for plane in 0..3 {
+        let stride = decoded.stride(plane);
+        decoded.data_mut(plane).fill(0xe7);
+        for y in 0..2 {
+            for x in 0..2 {
+                decoded.data_mut(plane)[y * stride + x] = if plane == 0 {
+                    [16, 235, 0, 255][y * 2 + x]
+                } else {
+                    128
+                };
+            }
+        }
+    }
+    let source =
+        PreviewSourceColorContract::automatic(ColorSpace::LinearRec709, DecodedVideoRange::Unknown);
     let mut plan = PreviewHardwareDecodePlan::resolve(
         PreviewHardwareDecodeRequest::Auto,
-        PreviewDecodeAccessMode::PlaybackCursor,
+        PreviewDecodeAccessMode::RandomAccessStillFrame,
         PreviewDecodeBackend::Software,
-        ffmpeg::codec::Id::PRORES,
+        ffmpeg::codec::Id::H264,
         None,
     );
     let payload = materialize_decoded_frame(
@@ -6105,41 +6458,66 @@ fn cpu_yuva12_uses_encoded_float_without_clipping_transparent_color() {
         &mut None,
         &mut None,
         &mut None,
-        3,
         2,
-        Path::new("unbounded-yuva12.mov"),
-        test_source_color(),
+        2,
+        Path::new("linear-yuv.mov"),
+        source,
     )
-    .expect("CPU consumer retains source-encoded Float32");
+    .expect("linear transfer is independent of real YCbCr matrix/range");
     let PreviewDecodedFramePayload::CpuFloat(frame) = payload else {
-        panic!("encoded Float32")
+        panic!("YUV must retain Float32")
     };
+    assert_eq!(frame.color_contract.source, source);
     assert_eq!(
         frame.color_contract.encoding,
-        DecodedRgbaEncoding::SourceEncodedRgb
+        DecodedRgbaEncoding::SourceLinearRgb
     );
-    let rgba = frame.rgba();
-    // Independent limited-range BT.709 reference for [2001,4095,0].
-    let y = (2001.0_f64 - 256.0) / 3504.0;
-    let cb = (4095.0_f64 - 2048.0) / 3584.0;
-    let cr = -2048.0_f64 / 3584.0;
-    let expected = [
-        y + 1.5748 * cr,
-        y - 0.18732427 * cb - 0.46812427 * cr,
-        y + 1.8556 * cb,
-    ];
-    for (actual, expected) in rgba[..3].iter().zip(expected) {
-        assert!((f64::from(*actual) - expected).abs() < 1.0e-6);
+    assert_eq!(
+        frame.color_contract.applied_matrix,
+        DecodedVideoMatrix::Bt709
+    );
+    assert_eq!(
+        frame.color_contract.applied_range,
+        DecodedVideoRange::Limited
+    );
+    for (actual, expected) in
+        frame.rgba().chunks_exact(4).zip([0.0_f64, 1.0, -16.0 / 219.0, 239.0 / 219.0])
+    {
+        for channel in &actual[..3] {
+            assert!((f64::from(*channel) - expected).abs() < 1.0e-6);
+        }
+        assert_eq!(actual[3], 1.0);
     }
-    assert!(rgba[0] < 0.0 && rgba[2] > 1.0);
-    assert_eq!(rgba[3], 0.0);
-    assert_eq!(rgba[7], 2048.0 / 4095.0);
-    assert_eq!(rgba[11], 1.0);
-    assert_eq!(rgba.len(), 3 * 2 * 4);
-    for x in 0..3 {
-        assert_eq!(
-            &rgba[(3 + x) * 4..(4 + x) * 4],
-            &rgba[(2 - x) * 4..(3 - x) * 4]
-        );
+    for missing_matrix in [true, false] {
+        decoded.set_color_space(if missing_matrix {
+            ffmpeg::util::color::Space::Unspecified
+        } else {
+            ffmpeg::util::color::Space::BT709
+        });
+        decoded.set_color_range(if missing_matrix {
+            ffmpeg::util::color::Range::MPEG
+        } else {
+            ffmpeg::util::color::Range::Unspecified
+        });
+        let mut scaler = None;
+        let error = materialize_decoded_frame(
+            &decoded,
+            PreviewDecodeRepresentation::NativeCpu,
+            &mut plan,
+            &mut scaler,
+            &mut None,
+            &mut None,
+            2,
+            2,
+            Path::new("linear-yuv-missing-metadata.mov"),
+            source,
+        )
+        .expect_err("linear interpretation cannot authorize missing YCbCr sampling facts");
+        assert!(error.to_string().contains(if missing_matrix {
+            "matrix is unspecified"
+        } else {
+            "range is unspecified"
+        }));
+        assert!(scaler.is_none());
     }
 }
