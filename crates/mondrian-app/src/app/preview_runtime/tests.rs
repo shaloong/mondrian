@@ -20028,7 +20028,9 @@ fn unit_media_requests_use_original_full_cpu_without_changing_any_clip_quality()
     let mut unit = Clip::new(asset, tt(0, tb), tt(24, tb)).unwrap();
     unit.add_effect_node(unit_scale_test_effect());
     let left_id = unit.id;
-    let any = Clip::new(asset, tt(24, tb), tt(24, tb)).unwrap();
+    let mut any = Clip::new(asset, tt(24, tb), tt(24, tb)).unwrap();
+    // The transition starts one frame before this Clip's visible in-edge.
+    any.set_source_origin(tt(1, tb)).unwrap();
     let right_id = any.id;
     sequence.video_tracks[0].add_clip(unit).unwrap();
     sequence.video_tracks[0].add_clip(any).unwrap();
