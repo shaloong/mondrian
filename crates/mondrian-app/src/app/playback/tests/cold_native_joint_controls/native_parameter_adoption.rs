@@ -84,10 +84,11 @@ fn observe_main_query(
     }
 }
 
-fn assert_one_host_value(
+pub(super) fn assert_one_host_value(
     state: &AppState,
     original: &mondrian_timeline::audio::AudioProcessorInstance,
-    gain: &mondrian_core::ParameterId,
+    parameter: &mondrian_core::ParameterId,
+    author_value_bits: u64,
 ) {
     let processor = &state.active_sequence().unwrap().audio_program.outputs[0]
         .strip
@@ -100,15 +101,20 @@ fn assert_one_host_value(
         processor.opaque_state, original.opaque_state,
         "Host value ownership does not rewrite the native configuration"
     );
-    assert_eq!(processor.parameters.len(), 3);
+    assert!(original.parameters.contains_key(parameter));
+    assert_eq!(processor.parameters.len(), original.parameters.len());
     for (id, before) in &original.parameters {
         let after = &processor.parameters[id];
         assert_eq!(after.schema, before.schema);
         assert_eq!(after.ui, before.ui);
-        if id == gain {
+        assert!(
+            before.automation.is_none(),
+            "independent pre-Adopt baseline is native-owned"
+        );
+        if id == parameter {
             let curve = after.automation.as_ref().expect("explicit one-row Host ownership");
-            assert_eq!(&curve.parameter_id, gain);
-            assert_eq!(curve.default_value.to_bits(), 0.5_f64.to_bits());
+            assert_eq!(&curve.parameter_id, parameter);
+            assert_eq!(curve.default_value.to_bits(), author_value_bits);
             assert!(curve.keyframes.is_empty());
         } else {
             assert!(
@@ -138,6 +144,7 @@ fn app_owned_vst3_observed_value_adoption_after_close_persists_one_host_value() 
         let sequence = state.active_sequence().unwrap();
         let native_output = &sequence.audio_program.outputs[0];
         let original = native_output.strip.pre_fader.processors[0].clone();
+        assert_eq!(original.parameters.len(), 3);
         assert!(original.parameters.values().all(|p| p.automation.is_none()));
         assert_editor_configuration(
             original.opaque_state.as_ref().unwrap().as_ref(),
@@ -380,7 +387,7 @@ fn app_owned_vst3_observed_value_adoption_after_close_persists_one_host_value() 
                     .action(),
             )
             .expect("one ordinary Host-origin author transaction after Close");
-        assert_one_host_value(&state, &original, &gain);
+        assert_one_host_value(&state, &original, &gain, 0.5_f64.to_bits());
         let adopted_history = state.authoring.as_ref().unwrap().history().diagnostics();
         assert_eq!(adopted_history.undo_entries, history.undo_entries + 1);
         assert_eq!(adopted_history.pending_entries, 0);
@@ -451,7 +458,7 @@ fn app_owned_vst3_observed_value_adoption_after_close_persists_one_host_value() 
         fresh.open_project_file(archive.clone()).expect("public new-App Project reopen");
         assert_eq!(fresh.authoring.as_ref().unwrap().project_id(), project);
         assert_ne!(fresh.authoring_session_id(), Some(old_session));
-        assert_one_host_value(fresh, &original, &gain);
+        assert_one_host_value(fresh, &original, &gain, 0.5_f64.to_bits());
         assert!(!fresh.can_undo_action() && !fresh.can_redo_action());
         assert!(fresh.native_audio_editor.is_none());
         assert!(fresh.native_audio_renderer.is_none());

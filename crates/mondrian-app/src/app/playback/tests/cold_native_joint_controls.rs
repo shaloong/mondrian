@@ -2420,16 +2420,23 @@ fn app_owned_clap_editor_undo_redo_restores_native_state() {
 #[test]
 #[ignore = "current normal Product and pinned Surge XT 1.3.4 VST3; real Realtime App Idle GUI, no edit/device/PCM"]
 fn app_surge_xt_vst3_editor_opens_and_closes_through_same_source() {
-    run_surge_xt_vst3_app_editor_control(false);
+    run_surge_xt_vst3_app_editor_control(SurgeVst3AppControl::Editor);
 }
 
 #[test]
 #[ignore = "current normal Product and pinned Surge XT 1.3.4 VST3; explicit one-ID App query in full 2855 directory, no edit/device/PCM"]
 fn app_surge_xt_vst3_explicit_parameter_query_preserves_native_owned_values() {
-    run_surge_xt_vst3_app_editor_control(true);
+    run_surge_xt_vst3_app_editor_control(SurgeVst3AppControl::Query);
 }
 
-fn run_surge_xt_vst3_app_editor_control(explicit_query: bool) {
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SurgeVst3AppControl {
+    Editor,
+    Query,
+    QueryAdopt,
+}
+
+fn run_surge_xt_vst3_app_editor_control(control: SurgeVst3AppControl) {
     use super::super::super::product_action::{
         AudioNativeEditorPayload, AudioProductAction, ProductAction,
     };
@@ -2442,6 +2449,8 @@ fn run_surge_xt_vst3_app_editor_control(explicit_query: bool) {
         AudioPcmNativeAuthorHandoffStatus as Status,
     };
     const CLASS: &str = "ABCDEF019182FAEB566D624153675854";
+    let explicit_query = control != SurgeVst3AppControl::Editor;
+    let workflow_deadline = Instant::now() + Duration::from_secs(30);
     let file = |name| {
         let path =
             std::path::PathBuf::from(std::env::var_os(name).expect("explicit native material"));
@@ -2568,6 +2577,8 @@ fn run_surge_xt_vst3_app_editor_control(explicit_query: bool) {
     let mut query_caption = None;
     let mut query_finite = false;
     let mut query_history = None;
+    let mut query_observation = None;
+    let mut adopted_author_value = None;
     // Always consume original Audio cleanup even if a new target assertion fails.
     // The expected parameter model remains the independent initial snapshot.
     let target_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -2832,6 +2843,10 @@ fn run_surge_xt_vst3_app_editor_control(explicit_query: bool) {
                                     object
                                 );
                             }
+                            if control == SurgeVst3AppControl::QueryAdopt {
+                                assert!(query_observation.is_none());
+                                query_observation = Some((**observation).clone());
+                            }
                             query_caption = fact.name.clone();
                             query_finite = true;
                             query_completed = true;
@@ -2978,6 +2993,25 @@ fn run_surge_xt_vst3_app_editor_control(explicit_query: bool) {
             state.status_hint().map(|(message, _)| message.id),
             Some("native-editor-closed")
         );
+        if control == SurgeVst3AppControl::QueryAdopt {
+            assert!(query_requested && query_completed && closed);
+            assert!(pending.is_none() && installed_awaiting.is_none());
+            assert_eq!(
+                (proposals, installations),
+                (acknowledgements, acknowledgements)
+            );
+            let observed = query_observation.as_ref().expect("actual query completion witness");
+            assert_eq!(Some(observed.target()), current_target);
+            adopted_author_value =
+                Some(surge_parameter_adoption::adopt_closed_parameter_and_reload(
+                    &mut state,
+                    &payload,
+                    &original,
+                    &query_parameter,
+                    observed,
+                    workflow_deadline,
+                ));
+        }
     }));
     let failure = target_result.err().map(|panic| {
         panic
@@ -3013,13 +3047,15 @@ fn run_surge_xt_vst3_app_editor_control(explicit_query: bool) {
     println!(
         "{}",
         serde_json::json!({
-            "case":if explicit_query { "app-surge-vst3-query" } else { "app-surge-vst3-editor" }, "plugin_version":"1.3.4", "parameters":2855,
+            "case":match control { SurgeVst3AppControl::Editor => "app-surge-vst3-editor", SurgeVst3AppControl::Query => "app-surge-vst3-query", SurgeVst3AppControl::QueryAdopt => "app-surge-vst3-query-adopt-project" }, "plugin_version":"1.3.4", "parameters":2855,
             "mode":"Realtime", "rate":config.sample_rate, "block":config.chunk_frames,
             "phase":phase, "initialization_proposals":proposals, "installations":installations,
             "exact_acknowledgements":acknowledgements, "opened":opened.is_some(), "closed":closed,
             "attachment_object_observed":native_object.is_some(), "unexpected_value_edit":unexpected_value_edit,
             "explicit_query_requested":query_requested, "explicit_query_completed":query_completed,
             "query_canonical_index":explicit_query.then_some(query_canonical_index), "query_parameter":explicit_query.then_some(&query_parameter), "query_caption":query_caption, "query_finite":query_finite,
+            "host_value_adopted_and_reloaded":adopted_author_value.is_some(), "adopted_author_value_bits":adopted_author_value,
+            "native_overlay_execution_qualified":false, "dsp_history_recovery_qualified":false,
             "target_failure":failure, "pcm_qualified":false, "device_qualified":false,
             "large_census_presentation_qualified":false, "realtime_qualified":false,
             "graceful_100ms_qualified":false
@@ -3956,3 +3992,4 @@ mod project_state_roundtrip;
 mod headless_vst3_terminal_author;
 
 mod native_parameter_adoption;
+mod surge_parameter_adoption;
