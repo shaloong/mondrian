@@ -70,9 +70,15 @@ namespace MondrianOpenFx {
                                            OFX::Host::Property::Set* inArgs,
                                            OFX::Host::Property::Set* outArgs) {
     const OfxStatus status = OFX::Host::ImageEffect::Instance::mainEntry(action, handle, inArgs, outArgs);
-    // ReplyDefault's residual PAR outArgs do not request a remap.
+    // ReplyDefault's residual outArgs do not request preference changes.
     if (status != kOfxStatOK || !outArgs || std::strcmp(action, kOfxImageEffectActionGetClipPreferences) != 0) {
       return status;
+    }
+    // SetableFielding is false: the actual clip, image and Render raster are
+    // progressive. Refuse a handled request that cannot preserve that contract.
+    if (outArgs->getDimension(kOfxImageClipPropFieldOrder) != 1 ||
+        outArgs->getStringProperty(kOfxImageClipPropFieldOrder) != kOfxImageFieldNone) {
+      return kOfxStatFailed;
     }
     // This host cannot remap a connected clip's sampling. Reject before the
     // SDK consumes the preferences and before the native Render action.
