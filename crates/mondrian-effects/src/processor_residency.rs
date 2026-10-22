@@ -4483,6 +4483,7 @@ mod source_tests {
         calls: Arc<AtomicUsize>,
         prepared: Arc<AtomicUsize>,
     }
+    #[derive(Debug)]
     struct SourceInstance(Arc<AtomicUsize>);
     impl EffectFloatProcessorFactory for SourceFactory {
         fn input_role(&self) -> EffectFloatProcessorInputRole {

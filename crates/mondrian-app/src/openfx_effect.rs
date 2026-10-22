@@ -1214,9 +1214,12 @@ mod tests {
             width: 2,
             height: 3,
         };
-        let storage =
-            OpenFxFilterSession::storage_for_context(request.width, request.height, self.context)
-                .expect("complete processor storage");
+        let storage = OpenFxFilterSession::storage_for_context(
+            request.width,
+            request.height,
+            OpenFxContext::Filter,
+        )
+        .expect("complete processor storage");
         let fixed = crate::openfx_host::native_thread_resident_bytes()
             .expect("native owner charge")
             + crate::openfx_host::native_auxiliary_resident_bytes()
