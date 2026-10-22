@@ -307,9 +307,17 @@ The first real audio Adapter should host a user-installed CLAP effect inside
 the existing isolated Processor Worker. CLAP's C ABI and MIT-licensed headers
 make it a small first proof of discovery, bus/port negotiation, processing,
 state round-trip, deadlines, crash containment, and Preview/Export parity.
-The initial supported subset is audio effects with explicitly negotiated
-Float32 buffers and channel layouts; instruments, MIDI, plugin UI, and
-unimplemented extensions remain unavailable with typed reasons.
+Audio effects use explicitly negotiated Float32 buffers and channel layouts.
+The capability matrices scope finite instrument, event and embedded-editor
+support; unimplemented extensions return typed reasons.
+
+On the Windows full-owner CLAP path, first new Idle editor Open exchanges
+strictly empty-key canonical Some values after joining DSP and before creating
+the view. The original active processor temporarily owns the exclusive audio
+role for flush; GUI work remains on the main role. Valid output and new flush
+requests stay in the existing Poll/author/Ack source. Unsupported selected
+parameters refuse before mutation; later native failures remain terminal.
+No values are sent for None/keyed curves or an already attached view.
 
 VST3 follows through the same supervised Worker transport with its own child
 entrypoint and the pinned MIT-licensed `vst3-host` crate and MIT/Apache licensed
