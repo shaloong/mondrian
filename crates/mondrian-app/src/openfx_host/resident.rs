@@ -2834,8 +2834,9 @@ mod tests {
         }
         prepare.owner = mondrian_core::EffectProcessorOwnerId(uuid::Uuid::nil());
         assert!(validate_prepare_envelope(&prepare, "actual nonce").is_err());
-        assert!(
-            OPENFX_RESIDENT_WORKER_ARGUMENT.ends_with("-v10"),
+        assert_eq!(
+            OPENFX_RESIDENT_WORKER_ARGUMENT,
+            "--internal-openfx-session-v11",
             "sole worker dispatch uses the current generation"
         );
     }
