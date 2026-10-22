@@ -76,11 +76,23 @@ and full accumulators retain their sampling; Reduced inputs require their own
 correct producer before native execution can be admitted.
 
 CPU affine composition tests physical raster coverage before converting to texel
-centers, then clamps interpolation taps independently. Two regressions reproduce
-the former lost borders and now pass with the affected Renderer controls. Cache
-identity v6 and private viewer key v4 invalidate former border, decoded-storage
-precision and YUV alpha outputs;
-the artifact layout stays v3. GPU coverage requires separate device validation.
+centers, then clamps interpolation taps independently. GPU image coverage uses
+that same physical support `[0, size)`, retaining its existing Nearest sampling.
+The recorder's damage encloses complete transformed image cells, intersected
+with conservative crop bounds whose upper closure survives reflection. Pixel
+sampling coordinates, point effects and GPU resource ownership are unchanged.
+Persistent cache identity stays v6 and artifact layout v3; private viewer key v5
+invalidates former GPU coverage. GPU outputs do not publish persistent Working
+artifacts, so this correction needs no second persistent cache invalidation.
+
+Windows RTX3050/DX12 libtest passes all twelve literal Float32 border cases,
+including both fragment paths, scaling, translation, a half-open diamond and
+Nearest two-texel control. Renderer 246, App 694, Export 4 and cache 19 affected
+ordinary controls pass, including literal reflected/rotated crop centers.
+Independent source and actual-result review retain the original execution and
+cleanup budgets. These results qualify the tested compositor paths; native OFX
+GPU interoperability, the normal Product's new shader, realtime performance and
+other platforms require their own verification.
 
 Decoded storage and source transfer are independent. Physical FLOAT reaches the
 supported planar-F32 reader or an explicit refusal before integer paths. Linear
