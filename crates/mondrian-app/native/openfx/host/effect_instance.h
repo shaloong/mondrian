@@ -35,6 +35,11 @@ namespace MondrianOpenFx {
     ////////////////////////////////////////////////////////////////////////////////
     // overridden for ImageEffect::Instance
 
+    void setCustomOutArgs(const std::string& action, OFX::Host::Property::Set& outArgs) override;
+    OfxStatus mainEntry(const char* action, const void* handle,
+                        OFX::Host::Property::Set* inArgs,
+                        OFX::Host::Property::Set* outArgs) override;
+
     /// get default output fielding. This is passed into the clip prefs action
     /// and  might be mapped (if the host allows such a thing)
     virtual const std::string &getDefaultOutputFielding() const;

@@ -4,6 +4,8 @@
 #include <iostream>
 #include <fstream>
 #include <stdexcept>
+#include <cmath>
+#include <cstring>
 
 // ofx
 #include "ofxCore.h"
@@ -50,6 +52,41 @@ namespace MondrianOpenFx {
 
   FilterEffectInstance::~FilterEffectInstance() {
     closeInterface();
+  }
+
+  void FilterEffectInstance::setCustomOutArgs(const std::string& action, OFX::Host::Property::Set& outArgs) {
+    OFX::Host::ImageEffect::Instance::setCustomOutArgs(action, outArgs);
+    if (action != kOfxImageEffectActionGetClipPreferences) { return; }
+    // The single-PAR host supplies the actual connected grid, including a
+    // Generator's output grid, rather than substituting project geometry.
+    for (const auto& entry : _clips) {
+      const auto* clip = entry.second;
+      if (!clip->getConnected()) { continue; }
+      outArgs.setDoubleProperty("OfxImageClipPropPAR_" + entry.first, clip->getAspectRatio());
+    }
+  }
+
+  OfxStatus FilterEffectInstance::mainEntry(const char* action, const void* handle,
+                                           OFX::Host::Property::Set* inArgs,
+                                           OFX::Host::Property::Set* outArgs) {
+    const OfxStatus status = OFX::Host::ImageEffect::Instance::mainEntry(action, handle, inArgs, outArgs);
+    // ReplyDefault's residual PAR outArgs do not request a remap.
+    if (status != kOfxStatOK || !outArgs || std::strcmp(action, kOfxImageEffectActionGetClipPreferences) != 0) {
+      return status;
+    }
+    // This host cannot remap a connected clip's sampling. Reject before the
+    // SDK consumes the preferences and before the native Render action.
+    for (const auto& entry : _clips) {
+      const auto* clip = entry.second;
+      if (!clip->getConnected()) { continue; }
+      const std::string property = "OfxImageClipPropPAR_" + entry.first;
+      if (outArgs->getDimension(property) != 1) { return kOfxStatFailed; }
+      const double par = outArgs->getDoubleProperty(property);
+      if (!std::isfinite(par) || par <= 0.0 || par != clip->getAspectRatio()) {
+        return kOfxStatFailed;
+      }
+    }
+    return status;
   }
 
   OfxStatus FilterEffectInstance::setInterfaceOpen(bool open) {
