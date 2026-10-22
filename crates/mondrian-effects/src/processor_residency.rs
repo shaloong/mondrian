@@ -318,6 +318,17 @@ pub enum EffectFloatProcessorInputRole {
     NoImage,
 }
 
+/// Immutable provider restriction on both canonical render-scale axes.
+///
+/// This does not constrain sample aspect ratio, crop, origin, or canvas coverage.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum EffectImageScaleRequirement {
+    /// Any validated pair of render-scale axes.
+    Any,
+    /// Both render-scale axes must equal one.
+    Unit,
+}
+
 /// Identity and exact format for one reusable processor occurrence.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EffectFloatProcessorPreparation {
@@ -503,6 +514,10 @@ pub trait EffectFloatProcessorFactory: std::fmt::Debug + Send + Sync {
     fn input_role(&self) -> EffectFloatProcessorInputRole {
         EffectFloatProcessorInputRole::SingleImage
     }
+    /// Immutable render-scale requirement retained by the compiled binding.
+    fn image_scale_requirement(&self) -> EffectImageScaleRequirement {
+        EffectImageScaleRequirement::Any
+    }
     /// Immutable input admission and complete output negotiation declaration.
     fn alpha_contract(&self) -> crate::EffectAlphaContract;
     /// Maximum returned feedback logical bytes, zero when this provider has none.
@@ -536,9 +551,7 @@ pub(crate) fn frame_processor_charge(
     let Some(effect_id) = binding.occurrence_id() else {
         return Err(crate::EffectExecutionError::CustomProcessorUnavailable { key: key.clone() });
     };
-    if factory.input_role() != binding.input_role()
-        || factory.alpha_contract() != binding.alpha_contract()
-    {
+    if !binding.factory_contract_matches() {
         return Err(crate::EffectExecutionError::CustomProcessorUnavailable { key: key.clone() });
     }
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {

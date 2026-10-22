@@ -44,7 +44,7 @@ mod processor_residency;
 pub use processor_residency::{
     EffectFloatProcessorFactory, EffectFloatProcessorInputRole, EffectFloatProcessorInstance,
     EffectFloatProcessorPreparation, EffectFloatProcessorSizing, EffectFloatProcessorStorage,
-    EffectProcessorControl, EffectProcessorHostResourceRefusal,
+    EffectImageScaleRequirement, EffectProcessorControl, EffectProcessorHostResourceRefusal,
     EffectProcessorHostResourceRefusalReceipt, EffectProcessorInvocationError,
     EffectProcessorRetention, EffectProcessorStopReason,
 };

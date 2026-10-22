@@ -373,7 +373,7 @@ fn apply_custom_render_op_f32_for_role(
     let Some(processor) = processor else {
         return Err(EffectExecutionError::CustomProcessorUnavailable { key: key.clone() });
     };
-    if processor.input_role() != input_role {
+    if processor.input_role() != input_role || !processor.factory_contract_matches() {
         return Err(EffectExecutionError::CustomProcessorUnavailable { key: key.clone() });
     }
     control.check().map_err(|_| EffectExecutionError::CustomProcessorStopped {

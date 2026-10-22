@@ -435,6 +435,8 @@ pub struct CompiledEffectGraph {
     node_execution_modes: HashMap<EffectGraphNodeId, EffectExecutionModes>,
     /// Exact implementation/provider association admission retained by the sole IR.
     node_alpha_contracts: HashMap<EffectGraphNodeId, crate::EffectAlphaContract>,
+    /// Aggregate of frozen providers in the reachable execution schedule.
+    image_scale_requirement: crate::EffectImageScaleRequirement,
 }
 
 impl CompiledEffectGraph {
@@ -476,6 +478,12 @@ impl CompiledEffectGraph {
     /// Conservative cross-call reuse contract for the complete output.
     pub const fn output_cache_policy(&self) -> EffectCachePolicy {
         self.output_cache_policy
+    }
+
+    /// Render-scale restriction of the reachable frozen providers.
+    /// Dead or disabled effects do not contribute to this requirement.
+    pub const fn image_scale_requirement(&self) -> crate::EffectImageScaleRequirement {
+        self.image_scale_requirement
     }
 
     /// Compiler-estimated relative output cost.
@@ -790,7 +798,8 @@ impl PreparedEffectGraphTopology {
         constrain_cache_profiles_by_execution_envelope(&mut node_profiles, &execution_envelope);
         let (output_cache_policy, estimated_cost, output_cache_enabled) =
             compiled_effect_graph_cache_profile(&graph, &node_profiles)?;
-        let node_alpha_contracts = compile_node_alpha_contracts(&graph, &self.schedule)?;
+        let (node_alpha_contracts, image_scale_requirement) =
+            compile_node_alpha_contracts(&graph, &self.schedule)?;
         let identity = graph.semantic_identity();
         Some(Arc::new(CompiledEffectGraph {
             signature_hash: identity.diagnostic_hash(),
@@ -807,6 +816,7 @@ impl PreparedEffectGraphTopology {
             stage_bindings,
             node_execution_modes,
             node_alpha_contracts,
+            image_scale_requirement,
         }))
     }
 }
@@ -1938,8 +1948,12 @@ pub fn compile_reference_effect_graph_in_domain(
 fn compile_node_alpha_contracts(
     graph: &EffectRenderGraph,
     schedule: &EffectExecutionSchedule,
-) -> Option<HashMap<EffectGraphNodeId, crate::EffectAlphaContract>> {
-    schedule
+) -> Option<(
+    HashMap<EffectGraphNodeId, crate::EffectAlphaContract>,
+    crate::EffectImageScaleRequirement,
+)> {
+    let mut image_scale_requirement = crate::EffectImageScaleRequirement::Any;
+    let contracts = schedule
         .ordered_nodes
         .iter()
         .map(|id| {
@@ -1956,6 +1970,10 @@ fn compile_node_alpha_contracts(
                     {
                         return None;
                     }
+                    if binding.image_scale_requirement() == crate::EffectImageScaleRequirement::Unit
+                    {
+                        image_scale_requirement = crate::EffectImageScaleRequirement::Unit;
+                    }
                     return Some((*id, binding.alpha_contract()));
                 }
                 EffectGraphNodeKind::CustomSource { .. } => return None,
@@ -1966,7 +1984,13 @@ fn compile_node_alpha_contracts(
                 | EffectGraphNodeKind::DomainEffect {
                     op: EffectRenderOp::Custom { processor: Some(binding), .. },
                     ..
-                } => binding.alpha_contract(),
+                } => {
+                    if binding.image_scale_requirement() == crate::EffectImageScaleRequirement::Unit
+                    {
+                        image_scale_requirement = crate::EffectImageScaleRequirement::Unit;
+                    }
+                    binding.alpha_contract()
+                }
                 EffectGraphNodeKind::Blend { blend_mode: BlendMode::Normal, .. }
                 | EffectGraphNodeKind::MultiInput { blend_mode: BlendMode::Normal, .. } => {
                     crate::EffectAlphaContract::NORMAL_OVER
@@ -1975,7 +1999,8 @@ fn compile_node_alpha_contracts(
             };
             contract.is_valid().then_some((*id, contract))
         })
-        .collect::<Option<HashMap<_, _>>>()
+        .collect::<Option<HashMap<_, _>>>()?;
+    Some((contracts, image_scale_requirement))
 }
 
 fn compile_scheduled_render_graph(graph: EffectRenderGraph) -> Option<CompiledEffectGraph> {
@@ -1992,7 +2017,8 @@ fn compile_scheduled_render_graph(graph: EffectRenderGraph) -> Option<CompiledEf
     constrain_cache_profiles_by_execution_envelope(&mut node_profiles, &execution_envelope);
     let (output_cache_policy, estimated_cost, output_cache_enabled) =
         compiled_effect_graph_cache_profile(&graph, &node_profiles)?;
-    let node_alpha_contracts = compile_node_alpha_contracts(&graph, &schedule)?;
+    let (node_alpha_contracts, image_scale_requirement) =
+        compile_node_alpha_contracts(&graph, &schedule)?;
     let identity = graph.semantic_identity();
     Some(CompiledEffectGraph {
         node_use_counts: effect_graph_node_use_counts(&graph),
@@ -2007,6 +2033,7 @@ fn compile_scheduled_render_graph(graph: EffectRenderGraph) -> Option<CompiledEf
         stage_bindings,
         node_execution_modes,
         node_alpha_contracts,
+        image_scale_requirement,
         graph,
         schedule,
     })
@@ -2067,12 +2094,13 @@ fn reachable_custom_processor_snapshots_are_complete(
                 ..
             } => processor.as_ref().is_some_and(|binding| {
                 let source = matches!(node.kind, EffectGraphNodeKind::CustomSource { .. });
-                binding.input_role()
-                    == if source {
-                        crate::EffectFloatProcessorInputRole::NoImage
-                    } else {
-                        crate::EffectFloatProcessorInputRole::SingleImage
-                    }
+                binding.factory_contract_matches()
+                    && binding.input_role()
+                        == if source {
+                            crate::EffectFloatProcessorInputRole::NoImage
+                        } else {
+                            crate::EffectFloatProcessorInputRole::SingleImage
+                        }
             }),
             _ => true,
         })

@@ -920,6 +920,7 @@ impl std::fmt::Debug for EffectRenderOp {
 pub struct CustomEffectProcessorBinding {
     alpha_contract: crate::EffectAlphaContract,
     input_role: crate::EffectFloatProcessorInputRole,
+    image_scale_requirement: crate::EffectImageScaleRequirement,
     revision: u64,
     processor: CustomEffectProcessor,
     runtime_owner: Option<CustomEffectRuntimeOwner>,
@@ -948,6 +949,7 @@ impl CustomEffectProcessorBinding {
         Self {
             alpha_contract: crate::EffectAlphaContract::COVERAGE_OPERATION,
             input_role: crate::EffectFloatProcessorInputRole::SingleImage,
+            image_scale_requirement: crate::EffectImageScaleRequirement::Any,
             revision: NEXT_CUSTOM_PROCESSOR_REVISION.fetch_add(1, Ordering::AcqRel),
             processor: CustomEffectProcessor::Rgba8(processor),
             runtime_owner: None,
@@ -960,6 +962,7 @@ impl CustomEffectProcessorBinding {
         Self {
             alpha_contract: crate::EffectAlphaContract::COVERAGE_OPERATION,
             input_role: crate::EffectFloatProcessorInputRole::SingleImage,
+            image_scale_requirement: crate::EffectImageScaleRequirement::Any,
             revision: NEXT_CUSTOM_PROCESSOR_REVISION.fetch_add(1, Ordering::AcqRel),
             processor: CustomEffectProcessor::Float32(processor),
             runtime_owner: None,
@@ -976,6 +979,11 @@ impl CustomEffectProcessorBinding {
     /// Immutable image arity retained with the provider declaration.
     pub const fn input_role(&self) -> crate::EffectFloatProcessorInputRole {
         self.input_role
+    }
+
+    /// Immutable render-scale restriction retained with the provider declaration.
+    pub const fn image_scale_requirement(&self) -> crate::EffectImageScaleRequirement {
+        self.image_scale_requirement
     }
 
     /// Process-local implementation revision used by graph/cache identity.
@@ -1015,6 +1023,15 @@ impl CustomEffectProcessorBinding {
         }
     }
 
+    /// A provider cannot change any declaration after its binding is frozen.
+    pub(crate) fn factory_contract_matches(&self) -> bool {
+        self.float32_factory().is_none_or(|factory| {
+            factory.input_role() == self.input_role
+                && factory.alpha_contract() == self.alpha_contract
+                && factory.image_scale_requirement() == self.image_scale_requirement
+        })
+    }
+
     pub(crate) fn supports_float32(&self) -> bool {
         !matches!(self.processor, CustomEffectProcessor::Rgba8(_))
     }
@@ -1039,6 +1056,7 @@ impl CustomEffectProcessorBinding {
         Self {
             alpha_contract: self.alpha_contract,
             input_role: self.input_role,
+            image_scale_requirement: self.image_scale_requirement,
             revision: self.revision,
             processor: self.processor.clone(),
             occurrence_id: Some(occurrence_id),
@@ -1077,6 +1095,7 @@ impl std::fmt::Debug for CustomEffectProcessorBinding {
             .debug_struct("CustomEffectProcessorBinding")
             .field("revision", &self.revision)
             .field("alpha_contract", &self.alpha_contract)
+            .field("image_scale_requirement", &self.image_scale_requirement)
             .field("runtime_owner_revision", &self.runtime_owner_revision())
             .finish_non_exhaustive()
     }
@@ -1235,6 +1254,10 @@ impl EffectRenderOp {
                 key.hash(state);
                 processor.as_ref().map(CustomEffectProcessorBinding::revision).hash(state);
                 processor.as_ref().map(CustomEffectProcessorBinding::alpha_contract).hash(state);
+                processor
+                    .as_ref()
+                    .map(CustomEffectProcessorBinding::image_scale_requirement)
+                    .hash(state);
                 processor
                     .as_ref()
                     .and_then(CustomEffectProcessorBinding::project_geometry)
@@ -1522,6 +1545,7 @@ impl EffectDefinition {
                 revision: NEXT_CUSTOM_PROCESSOR_REVISION.fetch_add(1, Ordering::AcqRel),
                 alpha_contract: factory.alpha_contract(),
                 input_role: factory.input_role(),
+                image_scale_requirement: factory.image_scale_requirement(),
                 processor: CustomEffectProcessor::Float32Factory(factory),
                 runtime_owner: None,
                 occurrence_id: None,
@@ -5434,5 +5458,291 @@ mod tests {
             Some("effect graph builder panicked")
         );
         assert!(!effect_library_types().contains(&extension_type));
+    }
+}
+
+#[cfg(test)]
+mod image_scale_requirement_tests {
+    use super::*;
+    use crate::{
+        EffectAlphaContract, EffectExecutionModes, EffectFloatProcessorFactory,
+        EffectFloatProcessorInputRole, EffectFloatProcessorInstance,
+        EffectFloatProcessorPreparation, EffectFloatProcessorSizing, EffectFloatProcessorStorage,
+        EffectImageScaleRequirement, EffectProcessorControl,
+    };
+    use std::sync::atomic::{AtomicBool, AtomicUsize};
+
+    #[derive(Debug)]
+    struct Factory {
+        role: EffectFloatProcessorInputRole,
+        unit: AtomicBool,
+        storage_calls: AtomicUsize,
+        prepare_calls: AtomicUsize,
+    }
+
+    impl Factory {
+        fn new(role: EffectFloatProcessorInputRole, unit: bool) -> Arc<Self> {
+            Arc::new(Self {
+                role,
+                unit: AtomicBool::new(unit),
+                storage_calls: AtomicUsize::new(0),
+                prepare_calls: AtomicUsize::new(0),
+            })
+        }
+    }
+
+    impl EffectFloatProcessorFactory for Factory {
+        fn input_role(&self) -> EffectFloatProcessorInputRole {
+            self.role
+        }
+        fn image_scale_requirement(&self) -> EffectImageScaleRequirement {
+            if self.unit.load(Ordering::SeqCst) {
+                EffectImageScaleRequirement::Unit
+            } else {
+                EffectImageScaleRequirement::Any
+            }
+        }
+        fn alpha_contract(&self) -> EffectAlphaContract {
+            if self.role == EffectFloatProcessorInputRole::NoImage {
+                EffectAlphaContract::SOURCE_FLOAT
+            } else {
+                EffectAlphaContract::IDENTITY
+            }
+        }
+        fn feedback_budget_bytes(&self) -> usize {
+            0
+        }
+        fn storage(
+            &self,
+            _: EffectFloatProcessorSizing,
+        ) -> mondrian_core::Result<EffectFloatProcessorStorage> {
+            self.storage_calls.fetch_add(1, Ordering::SeqCst);
+            EffectFloatProcessorStorage::new(0, 0)
+        }
+        fn prepare(
+            &self,
+            _: EffectFloatProcessorPreparation,
+            _: &mut EffectProcessorControl<'_>,
+        ) -> mondrian_core::Result<Box<dyn EffectFloatProcessorInstance>> {
+            self.prepare_calls.fetch_add(1, Ordering::SeqCst);
+            panic!("snapshot rejection must happen before prepare")
+        }
+    }
+
+    fn binding(factory: Arc<Factory>) -> CustomEffectProcessorBinding {
+        CustomEffectProcessorBinding {
+            alpha_contract: factory.alpha_contract(),
+            input_role: factory.input_role(),
+            image_scale_requirement: factory.image_scale_requirement(),
+            revision: NEXT_CUSTOM_PROCESSOR_REVISION.fetch_add(1, Ordering::AcqRel),
+            processor: CustomEffectProcessor::Float32Factory(factory),
+            runtime_owner: None,
+            occurrence_id: Some(EffectId::new()),
+            project_geometry: None,
+        }
+    }
+
+    fn op(binding: CustomEffectProcessorBinding) -> EffectRenderOp {
+        EffectRenderOp::Custom {
+            key: "test.image-scale".to_owned(),
+            params: serde_json::json!({}),
+            cache_key: Some("same-implementation".to_owned()),
+            cache_policy: EffectCachePolicy::Uncacheable,
+            processor: Some(binding),
+        }
+    }
+
+    #[test]
+    fn frozen_image_scale_changes_complete_and_subtree_identity_without_revision_change() {
+        let factory = Factory::new(EffectFloatProcessorInputRole::SingleImage, false);
+        let any = binding(factory.clone());
+        let any_graph =
+            crate::compile_reference_effect_graph(&EffectRenderPlan { ops: vec![op(any.clone())] })
+                .unwrap();
+        factory.unit.store(true, Ordering::SeqCst);
+        let mut unit = any.clone();
+        unit.image_scale_requirement = EffectImageScaleRequirement::Unit;
+        let unit_graph = crate::compile_reference_effect_graph(&EffectRenderPlan {
+            ops: vec![op(unit.clone())],
+        })
+        .unwrap();
+        assert_eq!(
+            any.revision(),
+            unit.revision(),
+            "isolate the capability identity field"
+        );
+        assert_eq!(
+            any_graph.image_scale_requirement(),
+            EffectImageScaleRequirement::Any
+        );
+        assert_eq!(
+            unit_graph.image_scale_requirement(),
+            EffectImageScaleRequirement::Unit
+        );
+        assert_ne!(
+            any_graph.semantic_fingerprint(),
+            unit_graph.semantic_fingerprint()
+        );
+        let output = any_graph.graph().output.unwrap();
+        assert_ne!(
+            any_graph.node_profiles()[&output].subtree_signature,
+            unit_graph.node_profiles()[&output].subtree_signature
+        );
+        let owned = unit.with_runtime_owner("test.image-scale", EffectId::new(), 1, None, None);
+        assert_eq!(
+            owned.image_scale_requirement(),
+            EffectImageScaleRequirement::Unit
+        );
+        assert!(owned.factory_contract_matches());
+        let literal = CustomEffectProcessorBinding::new(Arc::new(|_, _, _, _, _| Ok(())));
+        let literal_f32 = CustomEffectProcessorBinding::new_f32(Arc::new(|_, _, _, _, _| Ok(())));
+        assert_eq!(
+            literal.image_scale_requirement(),
+            EffectImageScaleRequirement::Any
+        );
+        assert_eq!(
+            literal_f32.image_scale_requirement(),
+            EffectImageScaleRequirement::Any
+        );
+    }
+
+    #[test]
+    fn image_scale_aggregation_uses_reachable_nodes_including_no_image_providers() {
+        let unit = binding(Factory::new(
+            EffectFloatProcessorInputRole::SingleImage,
+            true,
+        ));
+        let mut dead = EffectGraphBuilderState::new();
+        dead.add_unary_from(dead.source(), op(unit.clone()));
+        let dead = crate::compile_reference_render_graph(dead.finish()).unwrap();
+        assert_eq!(
+            dead.image_scale_requirement(),
+            EffectImageScaleRequirement::Any
+        );
+        let mut reachable = EffectGraphBuilderState::new();
+        reachable.append_unary(op(unit));
+        let reachable = crate::compile_reference_render_graph(reachable.finish()).unwrap();
+        assert_eq!(
+            reachable.image_scale_requirement(),
+            EffectImageScaleRequirement::Unit
+        );
+        let mut source = EffectGraphBuilderState::new();
+        source.append_custom_source(op(binding(Factory::new(
+            EffectFloatProcessorInputRole::NoImage,
+            true,
+        ))));
+        let source = crate::compile_reference_render_graph(source.finish()).unwrap();
+        assert_eq!(
+            source.image_scale_requirement(),
+            EffectImageScaleRequirement::Unit
+        );
+        assert!(source
+            .graph()
+            .nodes
+            .iter()
+            .any(|node| matches!(node.kind, crate::EffectGraphNodeKind::CustomSource { .. })));
+    }
+
+    #[test]
+    fn disabled_registered_unit_provider_does_not_constrain_compiled_graph() {
+        let key = format!("test.disabled-scale.{}", EffectId::new());
+        register_effect_definition(
+            EffectDefinition::new(
+                &key,
+                "Unit source",
+                PropertyBag::default(),
+                EffectColorDomainContract::SCENE_LINEAR,
+            )
+            .with_execution_contract(EffectExecutionContract {
+                execution_modes: EffectExecutionModes::CPU_F32,
+                determinism: crate::EffectDeterminism::Nondeterministic,
+                roi_propagation: EffectRoiPropagation::UnknownRequiresFullFrame,
+                ..EffectExecutionContract::IDENTITY
+            })
+            .with_custom_float_processor_factory(
+                Arc::new(|_, _| Ok(Some(serde_json::json!({})))),
+                None,
+                EffectCachePolicy::Uncacheable,
+                Factory::new(EffectFloatProcessorInputRole::NoImage, true),
+            ),
+        )
+        .unwrap();
+        let mut effect = instantiate_effect_node(EffectType::External(key)).unwrap();
+        let active = compile_clip_effect_graph(
+            &[effect.clone()],
+            &[],
+            TimelineTime::ZERO,
+            WorkingColorSpace::LinearRec709,
+        )
+        .unwrap();
+        assert_eq!(
+            active.image_scale_requirement(),
+            EffectImageScaleRequirement::Unit
+        );
+        effect.is_enabled = false;
+        let disabled = compile_clip_effect_graph(
+            &[effect],
+            &[],
+            TimelineTime::ZERO,
+            WorkingColorSpace::LinearRec709,
+        )
+        .unwrap();
+        assert!(disabled.graph().is_identity());
+        assert_eq!(
+            disabled.image_scale_requirement(),
+            EffectImageScaleRequirement::Any
+        );
+    }
+
+    #[test]
+    fn provider_scale_drift_is_rejected_before_sizing_prepare_or_pixel_mutation() {
+        let factory = Factory::new(EffectFloatProcessorInputRole::SingleImage, false);
+        let operation = op(binding(factory.clone()));
+        let plan = EffectRenderPlan { ops: vec![operation.clone()] };
+        let graph = crate::compile_reference_effect_graph(&plan).unwrap();
+        let topology = crate::prepare_effect_graph_topology(graph.graph()).unwrap();
+        factory.unit.store(true, Ordering::SeqCst);
+        assert_eq!(
+            graph.image_scale_requirement(),
+            EffectImageScaleRequirement::Any,
+            "a compiled requirement never reads mutable provider state"
+        );
+        assert!(crate::compile_reference_effect_graph(&plan).is_none());
+        assert!(topology.bind(graph.graph().clone()).is_none());
+        assert!(matches!(
+            crate::processor_residency::frame_processor_charge(&operation, 1, 1),
+            Err(crate::EffectExecutionError::CustomProcessorUnavailable { .. })
+        ));
+        let mut pixels = crate::EffectFloatFrame::from_pixels(
+            crate::EffectFrameExtent::new(1, 1),
+            crate::EffectValueFormat::new(
+                crate::EffectWorkingPrecision::Float32,
+                crate::EffectColorDomain::SceneLinearRgb,
+                mondrian_core::ColorFrameAlpha::StraightFloat,
+            ),
+            mondrian_core::ImageSampling::UNIT_SQUARE,
+            vec![[0.25, 0.5, 0.75, 1.0]],
+        )
+        .unwrap();
+        assert!(matches!(
+            crate::adjustment::apply_custom_render_op_f32(
+                &mut pixels,
+                &operation,
+                0,
+                None,
+                0,
+                &mut EffectProcessorControl::uncancelled()
+            ),
+            Err(crate::EffectExecutionError::CustomProcessorUnavailable { .. })
+        ));
+        assert_eq!(pixels.pixels(), &[[0.25, 0.5, 0.75, 1.0]]);
+        assert_eq!(factory.storage_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(factory.prepare_calls.load(Ordering::SeqCst), 0);
+        factory.unit.store(false, Ordering::SeqCst);
+        let restored = topology.bind(graph.graph().clone()).unwrap();
+        assert_eq!(
+            restored.semantic_fingerprint(),
+            graph.semantic_fingerprint()
+        );
     }
 }
