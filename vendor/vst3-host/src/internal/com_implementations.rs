@@ -5678,6 +5678,55 @@ mod parameter_changes_tests {
     use super::*;
 
     #[test]
+    fn parameter_queue_com_roundtrip_preserves_all_sparse_points() {
+        let owner = ComWrapper::new(ParameterChanges::default());
+        // Enqueue out of order, then read only through the generated COM
+        // vtables. No vector inspection or parameter interpolator is involved.
+        owner.enqueue(1, 7, 0.75);
+        owner.enqueue(1, 0, 0.25);
+        owner.enqueue(1, 4, 0.75);
+        let changes = owner.to_com_ptr::<IParameterChanges>().unwrap();
+        assert_eq!(unsafe { changes.getParameterCount() }, 1);
+        assert!(unsafe { changes.getParameterData(-1) }.is_null());
+        assert!(unsafe { changes.getParameterData(1) }.is_null());
+        let queue = unsafe { ComRef::<IParamValueQueue>::from_raw(changes.getParameterData(0)) }
+            .expect("the only active parameter queue");
+        assert_eq!(unsafe { queue.getParameterId() }, 1);
+        assert_eq!(unsafe { queue.getPointCount() }, 3);
+        for (index, expected_offset, expected_value) in
+            [(0, 0, 0.25_f64), (1, 4, 0.75_f64), (2, 7, 0.75_f64)]
+        {
+            let (mut offset, mut value) = (-99, -123.5_f64);
+            assert_eq!(
+                unsafe { queue.getPoint(index, &mut offset, &mut value) },
+                kResultOk,
+                "COM point index {index}"
+            );
+            assert_eq!(offset, expected_offset, "COM point index {index}");
+            assert_eq!(
+                value.to_bits(),
+                expected_value.to_bits(),
+                "COM point index {index}"
+            );
+        }
+        for index in [-1, 3] {
+            let (mut offset, mut value) = (-99, -123.5_f64);
+            assert_eq!(
+                unsafe { queue.getPoint(index, &mut offset, &mut value) },
+                kResultFalse,
+                "out-of-range COM point index {index}"
+            );
+            assert_eq!(offset, -99);
+            assert_eq!(value.to_bits(), (-123.5_f64).to_bits());
+        }
+        assert_eq!(unsafe { changes.getParameterCount() }, 1);
+        assert_eq!(unsafe { queue.getPointCount() }, 3);
+        owner.clear_all();
+        assert_eq!(unsafe { changes.getParameterCount() }, 0);
+        assert!(unsafe { changes.getParameterData(0) }.is_null());
+    }
+
+    #[test]
     fn enqueue_groups_by_id_orders_by_offset_and_clears() {
         let pc = ParameterChanges::default();
         pc.enqueue(7, 64, 0.9);
