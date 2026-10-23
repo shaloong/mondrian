@@ -323,17 +323,20 @@ fn installed_clap_public_note_refusals_preserve_owner_clock_pcm_and_original_off
         .unwrap();
     runtime.install_native_owner_bindings(&claim, &cancellation).unwrap();
     let before = frozen(&runtime);
-    assert!(matches!(
-        runtime.enter_state(AudioStateEntry {
-            epoch: AudioContinuityEpoch::new(1),
-            start_sample: 1,
-        }),
-        Err(crate::AudioExecutionError::ProcessorHost(
-            crate::AudioProcessorHostError::NoteExecutionRefused(
-                "Note score cold entry requires public origin zero; seek replay is unsupported"
-            )
-        ))
-    ));
+    // Nonzero entry is valid; an already canceled request must still refuse
+    // before entering the fresh epoch or touching the installed native object.
+    let canceled = ExecutionCancellationToken::new();
+    canceled.cancel();
+    assert_eq!(
+        runtime.enter_state_cancellable(
+            AudioStateEntry {
+                epoch: AudioContinuityEpoch::new(1),
+                start_sample: 1,
+            },
+            &canceled,
+        ),
+        Err(crate::AudioNativeOwnerError::Cancelled.into())
+    );
     assert_eq!(frozen(&runtime), before);
     assert_eq!(
         source.current_claim().unwrap().unwrap().generation(),
@@ -380,17 +383,17 @@ fn installed_clap_public_note_refusals_preserve_owner_clock_pcm_and_original_off
     let before = frozen(&runtime);
     let before_reads = reads.load(Ordering::SeqCst);
     let old_lease = lease(&runtime);
-    assert!(matches!(
+    // A new epoch may now seek, but reusing the active epoch remains invalid
+    // and must preserve the original held notes and their pending Offs.
+    assert_eq!(
         runtime.enter_state(AudioStateEntry {
-            epoch: AudioContinuityEpoch::new(2),
+            epoch: AudioContinuityEpoch::new(1),
             start_sample: 3,
         }),
-        Err(crate::AudioExecutionError::ProcessorHost(
-            crate::AudioProcessorHostError::NoteExecutionRefused(
-                "Note score cold entry requires public origin zero; seek replay is unsupported"
-            )
+        Err(crate::AudioExecutionError::ReusedContinuityEpoch(
+            AudioContinuityEpoch::new(1)
         ))
-    ));
+    );
     assert_eq!(frozen(&runtime), before);
     pcm = [91.0];
     assert!(matches!(
