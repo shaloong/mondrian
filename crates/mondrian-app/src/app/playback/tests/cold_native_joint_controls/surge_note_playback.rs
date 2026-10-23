@@ -383,7 +383,7 @@ fn assert_author(state: &AppState, original: &Sequence) {
         .strip
         .pre_fader
         .processors[0];
-    assert_eq!(actual.parameters.len(), 2855);
+    assert_eq!(actual.parameters.len(), expected.parameters.len());
     assert_eq!(
         actual.parameters, expected.parameters,
         "no native rescan may invent host overrides"
@@ -426,24 +426,10 @@ fn app_surge_xt_vst3_first_nonzero_note_playback_sustains_main() {
     assert_eq!(matching[0].name, "Surge XT");
     assert_eq!(matching[0].vendor.as_deref(), Some("Surge Synth Team"));
     assert_eq!(matching[0].version.as_deref(), Some("1.3.4"));
-    let config = mondrian_media::AudioPlaybackConfig {
-        sample_rate: 48_000,
-        channel_layout: crate::app::AUDIO_OUTPUT_LAYOUT,
-        chunk_frames: BLOCK,
-        preroll_frames: BLOCK,
-        high_watermark_frames: BLOCK,
-        max_in_flight: 1,
-        ..mondrian_media::AudioPlaybackConfig::product_default()
-    };
-    let instance = vst3.create_instance(CLASS, mondrian_audio::AudioRenderContract {
-        sample_rate: config.sample_rate,
-        channel_layout: config.channel_layout,
-        max_block_frames: BLOCK,
-        processing_mode: mondrian_audio::AudioProcessingMode::Realtime,
-        processor_session_scratch_budget_bytes: mondrian_audio::AudioRenderContract::DEFAULT_PROCESSOR_SESSION_SCRATCH_BUDGET_BYTES,
-        public_output_lookahead_budget_frames: mondrian_audio::AudioRenderContract::DEFAULT_PUBLIC_OUTPUT_LOOKAHEAD_BUDGET_FRAMES,
-        compensation_delay_scratch_budget_bytes: mondrian_audio::AudioRenderContract::DEFAULT_COMPENSATION_DELAY_SCRATCH_BUDGET_BYTES,
-    }, Some(seed.clone())).expect("real Realtime B256 instance from the retained seed");
+    let config = playback_config();
+    let instance = vst3
+        .create_instance(CLASS, render_contract(config), Some(seed.clone()))
+        .expect("real Realtime B256 instance from the retained seed");
     assert_eq!(
         instance.opaque_state.as_ref().map(AsRef::<[u8]>::as_ref),
         Some(seed.as_slice())
@@ -462,6 +448,133 @@ fn app_surge_xt_vst3_first_nonzero_note_playback_sustains_main() {
         class_id, vendor, binary_sha256: Some(_), schema_version: 1, ..
     } if class_id == CLASS && vendor.as_deref() == Some("Surge Synth Team"))
     );
+    run_app_surge_playback(
+        clap,
+        vst3,
+        note_sequence(instance, "vst3.note-input.0".into()),
+        Some((&seed_path, &seed)),
+        true,
+    );
+}
+
+#[test]
+#[ignore = "pinned Surge XT 1.3.4 CLAP; fresh in-memory capture and finite App Realtime software FIFO only"]
+fn app_surge_xt_clap_first_nonzero_note_playback_sustains_main() {
+    use sha2::{Digest, Sha256};
+    const ID: &str = "org.surge-synth-team.surge-xt";
+    let file = |name| {
+        let path =
+            std::path::PathBuf::from(std::env::var_os(name).expect("explicit current material"));
+        assert!(path.is_absolute() && path.is_file(), "{name}");
+        path
+    };
+    let helper = file("MONDRIAN_CLAP_TEST_HELPER");
+    let plugin = file("MONDRIAN_SURGE_XT_CLAP_DLL");
+    let clap = Arc::new(
+        mondrian_audio::InstalledClapAudioProcessorSpecResolver::new(helper.clone()).unwrap(),
+    );
+    let vst3 = Arc::new(
+        mondrian_audio::InstalledVst3AudioProcessorSpecResolver::new(helper.clone()).unwrap(),
+    );
+    let descriptors = clap.install_plugin(plugin.clone()).unwrap();
+    let matching: Vec<_> = descriptors.iter().filter(|item| item.plugin_id == ID).collect();
+    assert_eq!(matching.len(), 1);
+    assert_eq!(matching[0].name, "Surge XT");
+    assert_eq!(matching[0].vendor.as_deref(), Some("Surge Synth Team"));
+    assert_eq!(matching[0].version.as_deref(), Some("1.3.4"));
+    let render = render_contract(playback_config());
+    // One canonical instance: the public None path captures the actual default
+    // state. Keep it only in memory; App's original factory restores this Some.
+    let instance = clap
+        .create_instance(ID, render, None)
+        .expect("actual fresh CLAP catalog capture");
+    let seed = instance.opaque_state.as_ref().map(AsRef::<[u8]>::as_ref).unwrap().to_vec();
+    assert!(!seed.is_empty() && seed.len() <= 64 * 1024);
+    let digest: [u8; 32] = Sha256::digest(&seed).into();
+    // This bounded metadata child restores that same captured seed. It neither
+    // supplies an execution owner nor manufactures native ports/Note dialect.
+    let offer =
+        mondrian_audio::probe_clap_note_processing_offer(&helper, &plugin, ID, render, Some(&seed))
+            .expect("real same-seed NoteOffer5");
+    assert_eq!(offer.schema_version, 5);
+    assert_eq!(offer.notes.schema_version, 2); // response version, not port count
+    assert_eq!(offer.notes.plugin_id, ID);
+    assert_eq!(offer.notes.state_sha256, Some(digest));
+    assert_eq!(offer.notes.sample_rate, 48_000);
+    assert_eq!(offer.notes.channel_layout, AudioChannelLayout::Stereo);
+    assert_eq!(offer.notes.max_block_frames, BLOCK);
+    assert!(!offer.notes.offline);
+    assert_eq!(
+        offer.processing_mode(),
+        mondrian_audio::AudioProcessingMode::Realtime
+    );
+    assert_eq!(offer.latency_frames(), 0);
+    assert_eq!(
+        offer.notes.contract.completion,
+        mondrian_audio::AudioNoteCompletionPolicy::NativeEnd
+    );
+    assert!(offer.notes.contract.ports.iter().all(|port| port.channel_count == 16));
+    let note_port = offer.notes.contract.ports.first().expect("actual negotiated CLAP Note input");
+    assert_eq!(
+        offer.main_audio_input(),
+        mondrian_audio::ClapMainAudioInput::Absent
+    );
+    let auxiliary_outputs = offer.auxiliary_outputs();
+    assert_eq!(
+        auxiliary_outputs.buses.len(),
+        2,
+        "retain both native stereo auxiliary outputs"
+    );
+    assert!(auxiliary_outputs
+        .buses
+        .iter()
+        .all(|bus| bus.channel_layout == AudioChannelLayout::Stereo));
+    let auxiliary_inputs: Vec<_> = offer.auxiliary_inputs().collect();
+    assert_eq!(
+        auxiliary_inputs.len(),
+        1,
+        "retain the actual zero-filled non-Main input"
+    );
+    assert_eq!(auxiliary_inputs[0].1, AudioChannelLayout::Stereo);
+    assert!(
+        matches!(&instance.definition, mondrian_timeline::audio::AudioProcessorDefinitionRef::Clap {
+        plugin_id, schema_version: 1, binary_sha256: Some(hash),
+    } if plugin_id == ID && *hash == offer.notes.binary_sha256)
+    );
+    let mut ids = std::collections::BTreeSet::new();
+    for native in offer.parameters() {
+        let id = native.parameter_id().unwrap();
+        assert!(ids.insert(id.clone()), "complete unique native directory");
+        if native.read_only {
+            assert!(!instance.parameters.contains_key(&id));
+        } else {
+            let row = instance.parameters.get(&id).expect("every writable native parameter");
+            assert_eq!(row.schema, native.authoring_schema().unwrap());
+            assert!(row.automation.is_none(), "native state owns this value");
+        }
+    }
+    assert!(!instance.parameters.is_empty());
+    assert_eq!(
+        instance.parameters.len(),
+        offer.parameters().iter().filter(|row| !row.read_only).count()
+    );
+    assert_eq!(
+        instance.opaque_state.as_ref().map(AsRef::<[u8]>::as_ref),
+        Some(seed.as_slice())
+    );
+    run_app_surge_playback(
+        clap,
+        vst3,
+        note_sequence(instance, note_port.port_key.clone()),
+        None,
+        false,
+    );
+}
+
+fn note_sequence(
+    instance: mondrian_timeline::audio::AudioProcessorInstance,
+    input_port_key: String,
+) -> Sequence {
     let id = instance.id;
     let mut sequence = Sequence::new("real Surge first nonzero App Note playback");
     sequence.settings.frame_rate = mondrian_core::Rational::FPS_24;
@@ -494,11 +607,7 @@ fn app_surge_xt_vst3_first_nonzero_note_playback_sustains_main() {
     sequence.audio_program.note_lanes.push(AudioNoteLane {
         schema_version: 1,
         id: AudioNoteLaneId::new(),
-        target: AudioNoteTarget {
-            track_id: track,
-            processor_id: id,
-            input_port_key: "vst3.note-input.0".into(),
-        },
+        target: AudioNoteTarget { track_id: track, processor_id: id, input_port_key },
         notes: AuthoringList::from(vec![AudioNote {
             id: AudioNoteId::new(),
             start: TimelineTime::new(127, 48_000).unwrap(),
@@ -519,6 +628,46 @@ fn app_surge_xt_vst3_first_nonzero_note_playback_sustains_main() {
     ));
     assert!(sequence.audio_program.sidechain_routes.is_empty());
     assert!(sequence.audio_tracks.iter().all(|track| track.clips.is_empty()));
+    sequence
+}
+
+fn playback_config() -> mondrian_media::AudioPlaybackConfig {
+    mondrian_media::AudioPlaybackConfig {
+        sample_rate: 48_000,
+        channel_layout: crate::app::AUDIO_OUTPUT_LAYOUT,
+        chunk_frames: BLOCK,
+        preroll_frames: BLOCK,
+        high_watermark_frames: BLOCK,
+        max_in_flight: 1,
+        ..mondrian_media::AudioPlaybackConfig::product_default()
+    }
+}
+
+fn render_contract(
+    config: mondrian_media::AudioPlaybackConfig,
+) -> mondrian_audio::AudioRenderContract {
+    mondrian_audio::AudioRenderContract {
+        sample_rate: config.sample_rate,
+        channel_layout: config.channel_layout,
+        max_block_frames: BLOCK,
+        processing_mode: mondrian_audio::AudioProcessingMode::Realtime,
+        processor_session_scratch_budget_bytes:
+            mondrian_audio::AudioRenderContract::DEFAULT_PROCESSOR_SESSION_SCRATCH_BUDGET_BYTES,
+        public_output_lookahead_budget_frames:
+            mondrian_audio::AudioRenderContract::DEFAULT_PUBLIC_OUTPUT_LOOKAHEAD_BUDGET_FRAMES,
+        compensation_delay_scratch_budget_bytes:
+            mondrian_audio::AudioRenderContract::DEFAULT_COMPENSATION_DELAY_SCRATCH_BUDGET_BYTES,
+    }
+}
+
+fn run_app_surge_playback(
+    clap: Arc<mondrian_audio::InstalledClapAudioProcessorSpecResolver>,
+    vst3: Arc<mondrian_audio::InstalledVst3AudioProcessorSpecResolver>,
+    sequence: Sequence,
+    retained_seed: Option<(&std::path::Path, &[u8])>,
+    require_author_receipt: bool,
+) {
+    let config = playback_config();
     let original = sequence.clone();
     let directory = tempfile::tempdir().unwrap();
     let library = AssetLibrary::open(directory.path().join("library")).unwrap();
@@ -705,10 +854,12 @@ fn app_surge_xt_vst3_first_nonzero_note_playback_sustains_main() {
             assert_eq!(state.authoring_session_id(), Some(author_session));
             assert_author(&state, &original);
         }
-        assert!(
-            !observed.author.is_empty(),
-            "natural callbacks must complete canonical/CAS/Ack within the finite gate"
-        );
+        if require_author_receipt {
+            assert!(
+                !observed.author.is_empty(),
+                "natural callbacks must complete canonical/CAS/Ack within the finite gate"
+            );
+        }
         assert!(observed.settled(&state));
         let recorded = buffers.lock();
         assert_eq!(recorded.len(), WINDOWS);
@@ -730,8 +881,11 @@ fn app_surge_xt_vst3_first_nonzero_note_playback_sustains_main() {
         assert_eq!(state.audio_playback_snapshot().next_start_sample, 8_144);
         assert_eq!(output.lock().queued, 6_144);
         assert_eq!(library.database_revision().unwrap(), revision);
-        assert_eq!(std::fs::read(&seed_path).unwrap(), seed);
+        if let Some((path, seed)) = retained_seed {
+            assert_eq!(std::fs::read(path).unwrap(), seed);
+        }
         // This window ends before Off8193; no release, device or DSP-golden claim.
+        (observed.author.len(), sustain_energy)
     }));
     // Consume the original Media/Runtime owners before propagating target panic.
     let cleanup = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -761,10 +915,22 @@ fn app_surge_xt_vst3_first_nonzero_note_playback_sustains_main() {
             assert_eq!(exit, 0);
         }
     }));
-    if let Err(primary) = target {
-        std::panic::resume_unwind(primary);
-    }
+    let (author_prefixes, sustain_energy) = match target {
+        Ok(result) => result,
+        Err(primary) => std::panic::resume_unwind(primary),
+    };
     if let Err(error) = cleanup {
         std::panic::resume_unwind(error);
     }
+    let processor = &original.audio_program.track_channels[&original.audio_tracks[0].id]
+        .strip
+        .pre_fader
+        .processors[0];
+    let format = match &processor.definition {
+        mondrian_timeline::audio::AudioProcessorDefinitionRef::Vst3 { .. } => "VST3",
+        mondrian_timeline::audio::AudioProcessorDefinitionRef::Clap { .. } => "CLAP",
+        other => panic!("not a native Surge definition: {other:?}"),
+    };
+    println!("SURGE_APP_FIFO format={format} captured_state_bytes={} author_parameters={} author_prefixes={author_prefixes} windows={WINDOWS} sustain_energy={sustain_energy}",
+        processor.opaque_state.as_ref().unwrap().len(), processor.parameters.len());
 }
