@@ -13,6 +13,7 @@ fn main() {
 
     #[cfg(target_os = "windows")]
     {
+        emit_windows_optional_graphics_link_policy();
         if let Err(err) = embed_windows_icon() {
             println!("cargo:warning=写入 Windows 图标资源失败: {err}");
         }
@@ -20,6 +21,22 @@ fn main() {
             println!("cargo:warning=部署 Windows 媒体运行时失败: {err}");
         }
     }
+}
+
+#[cfg(target_os = "windows")]
+fn emit_windows_optional_graphics_link_policy() {
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows")
+        || std::env::var("CARGO_CFG_TARGET_ENV").as_deref() != Ok("msvc")
+    {
+        return;
+    }
+    // Native helpers dispatch before renderer initialization. WGPU's optional
+    // WGL backend checks LoadLibrary before creating a context, but its static
+    // WGL imports otherwise load OpenGL even for headless helper invocations.
+    // Keep that backend available while deferring the import until actual use.
+    // Only the Product binary receives MSVC's standard delay-import helper.
+    println!("cargo:rustc-link-arg-bin=mondrian=/DELAYLOAD:opengl32.dll");
+    println!("cargo:rustc-link-arg-bin=mondrian=delayimp.lib");
 }
 
 fn build_openfx_host() {
