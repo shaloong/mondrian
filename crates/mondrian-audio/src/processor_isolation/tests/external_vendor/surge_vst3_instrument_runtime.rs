@@ -745,10 +745,54 @@ fn external_surge_xt_vst3_captured_state_notes_main_runtime_without_media() {
 #[test]
 #[ignore = "requires outer native Job, current Product, real Surge XT VST3 and fixed MONDRIAN_SURGE_VST3_ORIGIN_STATE"]
 fn external_surge_xt_vst3_origin_reentry_rebuilds_and_sustains_main() {
+    run_surge_cold_entries(
+        [0, 0],
+        [6_144, 8_448],
+        [24, 33],
+        [[SUSTAIN_START, SUSTAIN_END]; 2],
+    );
+}
+
+#[test]
+#[ignore = "requires outer native Job, current Product, real Surge XT VST3 and fixed MONDRIAN_SURGE_VST3_ORIGIN_STATE; cold nonzero retrigger only"]
+fn external_surge_xt_vst3_nonzero_cold_entry_retriggers_and_sustains_main() {
+    // Both entries are strictly inside the unchanged authored Note127..8193.
+    // Each fixed sustain window starts 2048 samples after its fresh retrigger,
+    // remains before Off8193, and contains the original 16 complete blocks.
+    run_surge_cold_entries(
+        [1_024, 2_048],
+        [7_168, 8_448],
+        [24, 25],
+        [[3_072, 7_168], [4_096, 8_192]],
+    );
+}
+
+// One original public Runtime/Source/Ack/Drop consumer. These explicit cases
+// differ only in their cold entry coordinates and predeclared measurement spans.
+fn run_surge_cold_entries(
+    starts: [usize; 2],
+    ends: [usize; 2],
+    blocks: [usize; 2],
+    sustain_windows: [[usize; 2]; 2],
+) {
     const STATE_BYTES: usize = 51_928;
-    const EPOCH_ENDS: [usize; 2] = [6_144, 8_448];
-    assert!(EPOCH_ENDS[0] < OFF as usize && EPOCH_ENDS[1] > OFF as usize);
-    assert_eq!(EPOCH_ENDS.map(|end| end / BLOCK), [24, 33]);
+    let nonzero = starts[0] != 0;
+    assert!(ends[0] < OFF as usize && ends[1] > OFF as usize);
+    for phase in 0..2 {
+        assert!(starts[phase] < ends[phase]);
+        assert_eq!(ends[phase] - starts[phase], blocks[phase] * BLOCK);
+        assert_eq!(
+            sustain_windows[phase][1] - sustain_windows[phase][0],
+            SUSTAIN_BLOCKS * BLOCK
+        );
+        assert!(
+            starts[phase] <= sustain_windows[phase][0] && sustain_windows[phase][1] <= ends[phase]
+        );
+        assert!(sustain_windows[phase][1] <= OFF as usize);
+        if nonzero {
+            assert!(ON < starts[phase] as i64 && (starts[phase] as i64) < OFF);
+        }
+    }
     let mut in_job = 0;
     // SAFETY: call-local writable BOOL and current process pseudo handle.
     assert_ne!(
@@ -869,12 +913,69 @@ fn external_surge_xt_vst3_origin_reentry_rebuilds_and_sustains_main() {
         runtime
             .validate_native_author_source_closed(&cancel)
             .expect("initial owner has no discarded author work");
+        let first = nonzero.then(|| {
+            (
+                owner(&runtime),
+                runtime.resource_root_identity(),
+                source.current_claim().unwrap().unwrap(),
+            )
+        });
         runtime
             .enter_state(AudioStateEntry {
                 epoch: AudioContinuityEpoch::new(1),
-                start_sample: 0,
+                start_sample: starts[0] as i64,
             })
-            .expect("first score-origin entry");
+            .expect(if nonzero {
+                "first explicit cold score entry"
+            } else {
+                "first score-origin entry"
+            });
+        if let Some((old, root, claim)) = first {
+            // Before any post-Enter author service, the first nonzero entry
+            // anchors the actual prepared fresh object and revokes its old lease.
+            let fresh = owner(&runtime);
+            assert_eq!(
+                runtime.observe_native_owner_object(fresh).unwrap(),
+                initial_object
+            );
+            assert_ne!(fresh.binding(), old.binding());
+            assert_eq!(fresh.address().root, old.address().root);
+            assert_eq!(fresh.address().local, old.address().local);
+            assert_eq!(fresh.address().occurrence, old.address().occurrence);
+            assert_eq!(fresh.address().epoch, Some(AudioContinuityEpoch::new(1)));
+            assert_eq!(runtime.resource_root_identity(), root);
+            assert_eq!(
+                source.current_claim().unwrap().unwrap().generation(),
+                claim.generation()
+            );
+            runtime.native_owner_installation_verifier().unwrap().validate(&claim).unwrap();
+            assert!(runtime.validate_native_owner(old).is_err());
+            assert!(runtime.observe_native_owner_object(old).is_err());
+            assert!(matches!(
+                runtime
+                    .query_native_parameter(
+                        &mondrian_core::NativeAudioParameterQuery {
+                            target: old.editor_target(),
+                            parameter: selected_parameter.clone(),
+                        },
+                        &cancel
+                    )
+                    .unwrap(),
+                mondrian_core::NativeAudioParameterQueryOutcome::Refused(
+                    mondrian_core::NativeAudioParameterQueryRefusal::Unavailable
+                )
+            ));
+            let entered = cursors(&runtime);
+            assert!(matches!(entered.sessions[0].state,
+                crate::AudioSessionCursorState::Active { epoch, next_public_sample, next_execution_sample, .. }
+                    if epoch == AudioContinuityEpoch::new(1)
+                        && next_public_sample.sample() == starts[0] as i64
+                        && next_execution_sample.sample() == starts[0] as i64));
+            assert!(matches!(entered.processors[0].state,
+                AudioProcessorCursorState::Active { epoch, next_input_signal_sample }
+                    if epoch == AudioContinuityEpoch::new(1)
+                        && next_input_signal_sample.sample() == starts[0] as i64));
+        }
         let mut object = initial_object;
         let mut handoffs = 0;
         let mut rescans = 0;
@@ -884,7 +985,7 @@ fn external_surge_xt_vst3_origin_reentry_rebuilds_and_sustains_main() {
         let mut sustain = [[0.0_f64; SUSTAIN_BLOCKS]; 2];
         let mut measured = [0_usize; 2];
         let mut epoch_serials = [initial_object.object_serial().get(); 2];
-        for (phase, end) in EPOCH_ENDS.into_iter().enumerate() {
+        for (phase, end) in ends.into_iter().enumerate() {
             if phase == 1 {
                 // The first component still owes Off8193. Service the real
                 // current Source, then capture current identities, never the
@@ -909,14 +1010,18 @@ fn external_surge_xt_vst3_origin_reentry_rebuilds_and_sustains_main() {
                 let old_verifier = runtime.native_owner_installation_verifier().unwrap();
                 assert!(
                     matches!(cursors(&runtime).processors[0].state, AudioProcessorCursorState::Active { epoch, next_input_signal_sample }
-                    if epoch == AudioContinuityEpoch::new(1) && next_input_signal_sample.sample() == EPOCH_ENDS[0] as i64)
+                    if epoch == AudioContinuityEpoch::new(1) && next_input_signal_sample.sample() == ends[0] as i64)
                 );
                 runtime
                     .enter_state(AudioStateEntry {
                         epoch: AudioContinuityEpoch::new(2),
-                        start_sample: 0,
+                        start_sample: starts[phase] as i64,
                     })
-                    .expect("one actual origin reentry; never retry a failed initialization");
+                    .expect(if nonzero {
+                        "one actual cold reentry; never retry a failed initialization"
+                    } else {
+                        "one actual origin reentry; never retry a failed initialization"
+                    });
                 // These checks precede all post-Enter author Poll/install/Ack:
                 // later real publications cannot explain old-lease revocation.
                 let fresh = owner(&runtime);
@@ -954,11 +1059,11 @@ fn external_surge_xt_vst3_origin_reentry_rebuilds_and_sustains_main() {
                 let entered = cursors(&runtime);
                 assert!(
                     matches!(entered.sessions[0].state, crate::AudioSessionCursorState::Active { epoch, next_public_sample, next_execution_sample, .. }
-                    if epoch == AudioContinuityEpoch::new(2) && next_public_sample.sample() == 0 && next_execution_sample.sample() == 0)
+                    if epoch == AudioContinuityEpoch::new(2) && next_public_sample.sample() == starts[phase] as i64 && next_execution_sample.sample() == starts[phase] as i64)
                 );
                 assert!(
                     matches!(entered.processors[0].state, AudioProcessorCursorState::Active { epoch, next_input_signal_sample }
-                    if epoch == AudioContinuityEpoch::new(2) && next_input_signal_sample.sample() == 0)
+                    if epoch == AudioContinuityEpoch::new(2) && next_input_signal_sample.sample() == starts[phase] as i64)
                 );
             }
             let (accepted, scanned) = service_author(
@@ -971,7 +1076,7 @@ fn external_surge_xt_vst3_origin_reentry_rebuilds_and_sustains_main() {
             );
             handoffs += accepted;
             rescans += scanned;
-            for start in (0..end).step_by(BLOCK) {
+            for start in (starts[phase]..end).step_by(BLOCK) {
                 let request = AudioRenderRequest { start_sample: start as i64, frames: BLOCK };
                 let before = cursors(&runtime);
                 let old = owner(&runtime);
@@ -1023,9 +1128,10 @@ fn external_surge_xt_vst3_origin_reentry_rebuilds_and_sustains_main() {
                 for sample in pcm {
                     peaks[phase] = peaks[phase].max(sample.abs());
                 }
-                if (SUSTAIN_START..SUSTAIN_END).contains(&start) {
-                    assert!(start + BLOCK <= SUSTAIN_END);
-                    sustain[phase][(start - SUSTAIN_START) / BLOCK] = block_energy;
+                let [sustain_start, sustain_end] = sustain_windows[phase];
+                if (sustain_start..sustain_end).contains(&start) {
+                    assert!(start + BLOCK <= sustain_end);
+                    sustain[phase][(start - sustain_start) / BLOCK] = block_energy;
                     measured[phase] += 1;
                 }
                 assert_eq!(media_resolves.load(Ordering::SeqCst), 0);
@@ -1103,20 +1209,25 @@ fn external_surge_xt_vst3_origin_reentry_rebuilds_and_sustains_main() {
         Ok(result) => result,
         Err(error) => resume_unwind(error),
     };
-    // A real retrigger/sustain witness, not cross-epoch PCM equivalence,
-    // nonzero seek, terminal-Off acoustics or third-party FFI Note-ID evidence.
-    println!(
-        "{}",
-        json!({"case":"surge-xt-vst3-origin-reentry", "stage":"completed",
+    // A real cold retrigger/sustain witness, not cross-epoch PCM equivalence,
+    // continuous-history/seek equivalence, terminal-Off acoustics or FFI IDs.
+    let mut observation = json!({"case":"surge-xt-vst3-origin-reentry", "stage":"completed",
         "class":CLASS,"plugin_version":"1.3.4","state_bytes":STATE_BYTES,
         "parameters":PARAMETERS,"native_owned_none_parameters":PARAMETERS,
-        "musical_reference":reference,"rate":48000,"block":BLOCK,"epoch_ends":EPOCH_ENDS,
-        "epoch_blocks":[24,33],"native_pid":pid,"object_serials":serials,
+        "musical_reference":reference,"rate":48000,"block":BLOCK,"epoch_ends":ends,
+        "epoch_blocks":blocks,"native_pid":pid,"object_serials":serials,
         "main_energy":energies,"main_peak":peaks,"sustain_window":[SUSTAIN_START,SUSTAIN_END],
         "sustain_block_energy":sustain,"minimum_sustain_energy_exclusive":MIN_SUSTAIN_ENERGY,
         "author_handoffs":handoffs,"nonempty_rescan_handoffs":rescans,"nonconsuming_held_requests":held_requests,
         "media_resolves":0,"post_drop_wait_status":settled,"exit_query_succeeded":queried,"exit_code":exit,
         "cross_epoch_bitexact_qualified":false,"nonzero_seek_qualified":false,
-        "terminal_off_acoustics_qualified":false,"native_ffi_tuple_qualified":false})
-    );
+        "terminal_off_acoustics_qualified":false,"native_ffi_tuple_qualified":false});
+    if nonzero {
+        observation["case"] = json!("surge-xt-vst3-nonzero-cold-entry");
+        observation["epoch_starts"] = json!(starts);
+        observation["sustain_window"] = json!(sustain_windows);
+        observation["nonzero_cold_entry_qualified"] = json!(true);
+        observation["continuous_dsp_history_qualified"] = json!(false);
+    }
+    println!("{observation}");
 }
