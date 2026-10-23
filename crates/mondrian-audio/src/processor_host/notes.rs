@@ -667,7 +667,7 @@ impl PreparedProcessorHost {
         {
             return Err(AudioExecutionError::InvalidPreparedSchedule);
         }
-        let events = schedule.notes.entry_events(entry.start_sample).map_err(refusal)?;
+        let events = schedule.notes.entry_events(entry.start_sample);
         for processor in &schedule.processors {
             if processor.factory.contract().requires_state_entry()
                 && !matches!(
@@ -1288,6 +1288,7 @@ mod tests {
             }],
             events,
         )
+        .unwrap()
     }
 
     #[test]
@@ -1400,7 +1401,7 @@ mod tests {
             targets[0].limits = contract.limits;
             (
                 state,
-                PreparedNoteScore::from_test_parts(targets, old.events().to_vec()),
+                PreparedNoteScore::from_test_parts(targets, old.events().to_vec()).unwrap(),
             )
         };
         let pairs = (0..1100).map(|n| (n * 2, n * 2 + 1)).collect::<Vec<_>>();
@@ -1453,21 +1454,24 @@ mod tests {
         let first_id = events[0].note_id;
         events[2].note_id = first_id;
         events[3].note_id = first_id;
-        let duplicate = PreparedNoteScore::from_test_parts(targets.clone(), events);
         let before = state.ledger.usage().unwrap();
+        // Invalid cached IR cannot cross the same paired construction boundary
+        // as production bind. This is still before provider/ledger/input work.
         assert_eq!(
-            state.preflight(&duplicate, 0, origin, 0, 4, 3, 1),
-            Err(refusal("duplicate authored Note On"))
+            PreparedNoteScore::from_test_parts(targets.clone(), events).unwrap_err(),
+            crate::AudioCompileError::InvalidPreparedGraph("duplicate authored Note On".into())
         );
         let mut events = source.events().to_vec();
         events[3].key = 61;
-        let changed = PreparedNoteScore::from_test_parts(targets.clone(), events);
         assert_eq!(
-            state.preflight(&changed, 0, origin, 0, 4, 3, 1),
-            Err(refusal("Off changed its original input port"))
+            PreparedNoteScore::from_test_parts(targets.clone(), events).unwrap_err(),
+            crate::AudioCompileError::InvalidPreparedGraph(
+                "Off changed its original input port".into()
+            )
         );
         targets[0].channel_count = 3;
-        let narrowed = PreparedNoteScore::from_test_parts(targets, source.events().to_vec());
+        let narrowed =
+            PreparedNoteScore::from_test_parts(targets, source.events().to_vec()).unwrap();
         assert_eq!(
             state.preflight(&narrowed, 0, origin, 0, 4, 3, 1),
             Err(refusal(

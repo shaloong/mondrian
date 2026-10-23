@@ -678,7 +678,7 @@ impl PreparedNoteScore {
     pub(crate) fn from_test_parts(
         targets: Vec<PreparedNoteTarget>,
         mut events: Vec<PreparedNoteEvent>,
-    ) -> Self {
+    ) -> Result<Self, AudioCompileError> {
         events.sort_unstable_by_key(|event| {
             (event.sample, event.phase, event.lane_id, event.note_id)
         });
@@ -702,12 +702,14 @@ impl PreparedNoteScore {
             .filter_map(|(i, event)| (event.phase == PreparedNotePhase::On).then_some(i))
             .collect::<Vec<_>>();
         on_events_by_author.sort_unstable_by_key(|&i| (events[i].lane_id, events[i].note_id));
-        Self {
+        let score = Self {
             sample_rate: 48_000,
             targets,
             events,
             on_events_by_author,
-        }
+        };
+        score.validate_pairs().map_err(invalid)?;
+        Ok(score)
     }
     pub(crate) fn is_empty(&self) -> bool {
         self.events.is_empty()
@@ -723,7 +725,8 @@ impl PreparedNoteScore {
         &self.targets
     }
 
-    /// Validate the one paired IR before any window can consume an endpoint.
+    /// Validate the one paired IR once at its construction/bind boundary.
+    /// Private immutable fields then carry that invariant into every window.
     /// Orphan/ambiguous test IR remains refused; it cannot become a chase grant.
     pub(crate) fn validate_pairs(&self) -> Result<(), &'static str> {
         if !self.events.len().is_multiple_of(2)
@@ -784,7 +787,6 @@ impl PreparedNoteScore {
         end: i64,
         cutoff: i64,
     ) -> Result<PreparedNoteWindow<'_>, &'static str> {
-        self.validate_pairs()?;
         if end < start {
             return Err("Note window overflow");
         }
@@ -802,16 +804,15 @@ impl PreparedNoteScore {
 
     /// The pure cold batch is a point at S, not a guessed future window.
     /// Inclusive lookup also preserves the signed entry domain at i64::MAX.
-    pub(crate) fn entry_events(&self, cutoff: i64) -> Result<PreparedNoteWindow<'_>, &'static str> {
-        self.validate_pairs()?;
-        Ok(PreparedNoteWindow {
+    pub(crate) fn entry_events(&self, cutoff: i64) -> PreparedNoteWindow<'_> {
+        PreparedNoteWindow {
             score: self,
             cutoff,
             normal: self.events.partition_point(|event| event.sample < cutoff),
             finish: self.events.partition_point(|event| event.sample <= cutoff),
             chase: 0,
             include_chase: true,
-        })
+        }
     }
 
     pub(crate) fn effective_on_sample(&self, event: PreparedNoteEvent, cutoff: i64) -> i64 {
@@ -1465,7 +1466,7 @@ mod tests {
             ]
         );
         assert_eq!(score.window(-5, 0, -5).unwrap().count(), 0);
-        assert_eq!(score.entry_events(i64::MAX).unwrap().count(), 0);
+        assert_eq!(score.entry_events(i64::MAX).count(), 0);
         assert_eq!(
             score
                 .window(-5, 1, -5)
@@ -1478,14 +1479,14 @@ mod tests {
         let mate = score.events[0].mate_event_index;
         score.events[0].mate_event_index = usize::MAX;
         assert_eq!(
-            score.window(2, 8, 5).err(),
-            Some("Off has no retained original On")
+            score.validate_pairs(),
+            Err("Off has no retained original On")
         );
         score.events[0].mate_event_index = mate;
         score.on_events_by_author.pop();
         assert_eq!(
-            score.window(2, 8, 5).err(),
-            Some("Off has no retained original On")
+            score.validate_pairs(),
+            Err("Off has no retained original On")
         );
     }
 

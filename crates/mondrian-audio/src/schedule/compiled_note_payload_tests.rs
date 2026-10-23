@@ -274,7 +274,8 @@ fn cached_note_width_and_completion_drift_refuse_before_session_or_factory_creat
         invalid.schedule.notes = super::prepared_notes::PreparedNoteScore::from_test_parts(
             targets,
             invalid.schedule.notes.events().to_vec(),
-        );
+        )
+        .unwrap();
         assert!(matches!(
             crate::processor_host::PreparedProcessorHost::allocate_storage(
                 &invalid.schedule,
@@ -446,7 +447,7 @@ fn generic_clone_accepts_real_smaller_aggregate_and_preserves_note_identity_bits
     targets[0].input_port_key.reserve_exact(37);
     let mut events = Vec::with_capacity(17);
     events.extend_from_slice(plan.schedule.notes.events());
-    plan.schedule.notes = PreparedNoteScore::from_test_parts(targets, events);
+    plan.schedule.notes = PreparedNoteScore::from_test_parts(targets, events).unwrap();
     let upper = plan.schedule.notes.storage_bytes().unwrap();
     let original_plan = plan.preparation_id();
     let original_program = Arc::as_ptr(&plan.program);
