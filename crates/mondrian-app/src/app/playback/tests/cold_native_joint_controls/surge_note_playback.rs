@@ -476,7 +476,7 @@ fn app_surge_xt_clap_first_nonzero_note_playback_sustains_main() {
     let vst3 = Arc::new(
         mondrian_audio::InstalledVst3AudioProcessorSpecResolver::new(helper.clone()).unwrap(),
     );
-    let descriptors = clap.install_plugin(plugin.clone()).unwrap();
+    let descriptors = clap.install_library(plugin.clone()).unwrap();
     let matching: Vec<_> = descriptors.iter().filter(|item| item.plugin_id == ID).collect();
     assert_eq!(matching.len(), 1);
     assert_eq!(matching[0].name, "Surge XT");
