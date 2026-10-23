@@ -60,14 +60,16 @@ cleanup 的查询/kill/wait 记录，另记最后一个认证 Child Mapping 的�
 六项映射普通控制全部 exact PASS；既有期限/真实 OS Child 分支资格保持，
 解码器148项纯字节控制通过。原预算不变；不是插件退出时限或性能资格。
 
-下述退出观测当时配对的非 harness Product/集成测试为 test-profile opt0/debuginfo0；
+此前历史退出观测曾配对的非 harness Product/集成测试为 test-profile opt0/debuginfo0；
 它与上述当前 dev Product 是不同产物角色。
 原同 Child 事件等待已替代 Windows 轮询，仍有无 trace 的 fixed-canvas 原门和
 Choice 正向第二次 shutdown 报 DeadlineExceeded，不能用新等待方式宣布根因关闭。
-2026-10-21 一次无 debugger 的 schema5 fixed-canvas 完整原门通过：direct 与
-retained Graph 两个真实 resident 均自然 exit0，graceful 分别约90.54/74.18ms；
-inner 返回到父观察 OS exit 分别约71.23/60.82ms，cleanup 均已结算且无 kill/wait。
-这只是有仪器化的有限样本，不是性能基准、长期上界或旧 FAIL 的替代结果。
+2026-10-23 当前正常 dev Product 的一次 schema5 fixed-canvas 完整原门通过：
+direct 与 retained Graph 两个真实 resident 均 graceful exit0，观测区间分别约
+99.54/87.29ms；inner 返回到父观察 OS exit 约60.83/74.07ms，均无 cleanup kill/wait。
+原预声明判据是：若 Deadline 后首次原 cleanup 查询仍 Pending，可排除仅父观察迟到；
+本次无失败清理，未触发该判据，假设仍未决。不做 UTC 与 QPC 的跨时钟相减归因。
+这只是有限仪器化样本，不是性能基准、长期上界或旧 FAIL 的替代结果。
 另一个 debugger 样本认证同 resident 正常 CRT 到 LdrShutdownProcess 返回并自然
 exit0，但父观察已迟于原期限，整门仍 FAIL。不得拼接两样本来归因耗时。
 worker 直接返回 main，早于 UI/graphics/应用日志初始化；未发现额外 App shutdown。
