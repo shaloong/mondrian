@@ -799,7 +799,10 @@ fn assert_empty_pdc_epochs(
             (4, 7, pid, 1)
         );
         assert_ne!(u64::from_le_bytes(bytes[24..32].try_into().unwrap()), 0);
-        assert_eq!((u32_at(32), u32_at(36)), (1, 6));
+        // This MNE7 shape has a Main input (mask1), Main output (mask2) and
+        // default-active event input0 (mask4). No authored Note lane is requested
+        // upstream; that does not remove its physical default-active event bus.
+        assert_eq!((u32_at(32), u32_at(36)), (1, 7));
         assert_eq!(
             u64::from_le_bytes(bytes[40..48].try_into().unwrap()),
             48_000_f64.to_bits()
