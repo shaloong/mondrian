@@ -584,7 +584,8 @@ fn installed_vst3_canonical_note_origin_reentry_rebuilds_without_reusing_ids() {
     // Reuse the existing independent literal PPQ/tuple oracle. Only the new
     // epochs' native IDs differ: the one retained parent ledger must continue
     // its namespace even though the actual native component is replaced.
-    let phases: [(&[(usize, usize)], &[i32]); 3] = [
+    type AuditPhase<'a> = (&'a [(usize, usize)], &'a [i32]);
+    let phases: [AuditPhase<'_>; 3] = [
         (&[(0, 3)], &[0, 0, 1]),
         (&[(0, 1), (1, 3)], &[2, 2, 3, 3]),
         (&[(0, 3), (3, 1)], &[4, 4, 5, 5]),
