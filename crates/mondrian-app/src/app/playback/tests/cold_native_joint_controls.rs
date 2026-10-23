@@ -4019,3 +4019,4 @@ mod idle_clap_constant;
 mod fresh_clap_host_overlay;
 
 mod nonzero_note_playback;
+mod surge_note_playback;
