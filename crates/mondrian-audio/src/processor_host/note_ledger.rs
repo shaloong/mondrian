@@ -1702,7 +1702,8 @@ mod continuing_rebind_contracts {
     #[test]
     fn cold_capacity_uses_empty_voices_but_preserves_ids_and_only_confirmed_cutoff() {
         let first = origin();
-        let mut ledger = bound_ledger(first, 2, 1);
+        let mut ledger = NoteLedger::prepare(2, 1, AudioNoteCompletionPolicy::NativeEnd).unwrap();
+        ledger.commit_confirmed_cold_entry(first, 0).unwrap();
         ledger.commit_on(first, on()).unwrap();
         let before = ledger.usage().unwrap();
         assert_eq!(
