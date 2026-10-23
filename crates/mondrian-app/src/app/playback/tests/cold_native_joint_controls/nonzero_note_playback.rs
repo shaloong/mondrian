@@ -268,7 +268,55 @@ fn app_owned_clap_native_end_commits_author_and_continues_same_fifo() {
         sequence,
         &expected,
         4,
-        continue_clap_native_end,
+        |state, renderer, buffers, output, object, deadline| {
+            continue_clap_author_windows(
+                state,
+                renderer,
+                buffers,
+                output,
+                object,
+                deadline,
+                OLD_CLAP_AUTHOR_WINDOWS,
+            );
+        },
+    );
+}
+
+#[test]
+#[ignore = "current normal Product and pinned zero-input CLAP NoteGate DLL; active voice across two author CAS frontiers and its original later Off, software FIFO only"]
+fn app_owned_clap_active_voice_survives_author_cas_and_original_off() {
+    let (clap, vst3, mut sequence, expected) = clap_note_playback_case();
+    let mut changed = 0;
+    for lane in sequence.audio_program.note_lanes.iter_mut() {
+        for note in lane.notes.iter_mut() {
+            if lane.target.input_port_key == "clap.note-input.2147483671" && note.key == 61 {
+                assert_eq!(note.end, TimelineTime::new(2_007, 48_000).unwrap());
+                note.end = TimelineTime::new(2_015, 48_000).unwrap();
+                changed += 1;
+            }
+        }
+    }
+    assert_eq!(
+        changed, 1,
+        "only the existing second-port voice's original Off changes"
+    );
+    run_app_nonzero_note_playback_with_continuation(
+        clap,
+        vst3,
+        sequence,
+        &expected,
+        6,
+        |state, renderer, buffers, output, object, deadline| {
+            continue_clap_author_windows(
+                state,
+                renderer,
+                buffers,
+                output,
+                object,
+                deadline,
+                ACTIVE_CLAP_AUTHOR_WINDOWS,
+            );
+        },
     );
 }
 
@@ -464,7 +512,7 @@ fn run_app_nonzero_note_playback_with_continuation(
         Instant,
     ),
 ) {
-    assert!(matches!(window_limit, 2 | 4));
+    assert!(matches!(window_limit, 2 | 4 | 6));
     let program_layout = sequence.settings.audio_channel_layout;
     // Program/native layout is independent of App's fixed monitoring target.
     let channel_layout = crate::app::AUDIO_OUTPUT_LAYOUT;
@@ -811,13 +859,141 @@ fn run_app_nonzero_note_playback_with_continuation(
     }
 }
 
-fn continue_clap_native_end(
+// These are the two finite consumers of the same author/CAS receipt checks.
+// Callback sample coordinates are independent of NOTE_END's ignored header time.
+struct ClapAuthorWindow {
+    anchor: i64,
+    bits: [u32; 8],
+    callbacks: &'static [i64],
+    off_count: f64,
+    publications: usize,
+}
+const OLD_CLAP_AUTHOR_WINDOWS: &[ClapAuthorWindow] = &[
+    ClapAuthorWindow {
+        anchor: 2_008,
+        bits: [
+            0x3d50_0000,
+            0x3d50_0000,
+            0x3d00_0000,
+            0x3d00_0000,
+            0x3c80_0000,
+            0x3c80_0000,
+            0,
+            0,
+        ],
+        callbacks: &[2_008, 2_008, 2_010, 2_010],
+        off_count: 2.0,
+        publications: 1,
+    },
+    ClapAuthorWindow {
+        anchor: 2_012,
+        bits: [0; 8],
+        callbacks: &[],
+        off_count: 2.0,
+        publications: 1,
+    },
+];
+const ACTIVE_CLAP_AUTHOR_WINDOWS: &[ClapAuthorWindow] = &[
+    ClapAuthorWindow {
+        anchor: 2_008,
+        bits: [
+            0x3d88_0000,
+            0x3d88_0000,
+            0x3d80_0000,
+            0x3d80_0000,
+            0x3d80_0000,
+            0x3d80_0000,
+            0x3d80_0000,
+            0x3d80_0000,
+        ],
+        callbacks: &[2_008, 2_008],
+        off_count: 1.0,
+        publications: 1,
+    },
+    ClapAuthorWindow {
+        anchor: 2_012,
+        bits: [0x3d80_0000; 8],
+        callbacks: &[],
+        off_count: 1.0,
+        publications: 1,
+    },
+    ClapAuthorWindow {
+        anchor: 2_016,
+        bits: [
+            0x3d40_0000,
+            0x3d40_0000,
+            0x3d00_0000,
+            0x3d00_0000,
+            0x3c80_0000,
+            0x3c80_0000,
+            0,
+            0,
+        ],
+        callbacks: &[2_018, 2_018],
+        off_count: 2.0,
+        publications: 2,
+    },
+    ClapAuthorWindow {
+        anchor: 2_020,
+        bits: [0; 8],
+        callbacks: &[],
+        off_count: 2.0,
+        publications: 2,
+    },
+];
+
+// The existing typed cfgtest observation is nonmutating. Only the five
+// transient author holds continue through the original queue/deadline.
+fn clap_author_source_closed(renderer: &TimelineAudioPcmRenderer, generation: u64) -> bool {
+    use mondrian_audio::{
+        NativeAudioAuthorAdmissionError as Error, NativeAudioAuthorHoldReason as Hold,
+    };
+    match renderer.observe_native_author_source_closed_for_test(&ExecutionCancellationToken::new())
+    {
+        None => false,
+        Some(Ok(())) => true,
+        Some(Err(Error::Pending { target, reason }))
+            if matches!(
+                reason,
+                Hold::PendingCallbacks
+                    | Hold::PendingParameterObservations
+                    | Hold::DspFeedbackPending
+                    | Hold::OutstandingDelivery
+                    | Hold::OpenBoundary
+            ) =>
+        {
+            let current = owner(renderer).editor_target();
+            assert_eq!(
+                (
+                    target.instance,
+                    target.root_session,
+                    target.local_session,
+                    target.owner,
+                    target.insertion
+                ),
+                (
+                    current.instance,
+                    current.root_session,
+                    current.local_session,
+                    current.owner,
+                    current.insertion
+                )
+            );
+            assert_eq!(target.continuity_epoch, Some(generation));
+            false
+        }
+        Some(Err(error)) => panic!("actual continuation SourceClosed failed: {error:?}"),
+    }
+}
+
+fn continue_clap_author_windows(
     state: &mut AppState,
     renderer: &Arc<TimelineAudioPcmRenderer>,
     buffers: &Arc<parking_lot::Mutex<Vec<AudioBuffer>>>,
     output: &Arc<parking_lot::Mutex<NativeHoldPlatformState>>,
     object: mondrian_audio::NativeAudioObjectObservation,
     deadline: Instant,
+    windows: &[ClapAuthorWindow],
 ) {
     use mondrian_core::{
         AuthoringTimeDomain, NativeAudioAuthorCallback as Callback, NativeAudioAuthorProposal,
@@ -838,11 +1014,12 @@ fn continue_clap_native_end(
     let author_generation = author.author_generation();
     let history = author.history().diagnostics();
     let generation = state.audio_playback_snapshot().generation;
-    let entered = owner(renderer);
-    let initial_target = entered.editor_target();
+    let mut entered = owner(renderer);
+    let mut initial_target = entered.editor_target();
+    let root_target = initial_target;
     assert_eq!(initial_target.continuity_epoch, Some(generation));
-    let installed = renderer.owner_installation_verifier().unwrap();
-    let initial_claim = installed.current_claim().unwrap();
+    let mut installed = renderer.owner_installation_verifier().unwrap();
+    let mut initial_claim = installed.current_claim().unwrap();
     installed.validate(&initial_claim).unwrap();
     let weak = Arc::downgrade(renderer);
     let erased: std::sync::Weak<dyn AudioPcmRenderer> = weak.clone();
@@ -853,29 +1030,115 @@ fn continue_clap_native_end(
         .collect();
     assert_eq!(first_pcm.len(), 16);
 
+    let assert_publication = |state: &AppState,
+                              publications: usize,
+                              expected_revision,
+                              key_samples: &[i64]| {
+        let author = state.authoring.as_ref().unwrap();
+        assert!(!author.has_pending_native_authoring());
+        assert_eq!(
+            author.author_generation().get(),
+            author_generation.get() + publications as u64
+        );
+        let after = author.history().diagnostics();
+        assert_eq!(after.undo_entries, history.undo_entries + publications);
+        assert_eq!(after.redo_entries, 0);
+        assert_eq!(after.pending_entries, 0);
+        assert_eq!(after.budget_evicted_entries, history.budget_evicted_entries);
+        assert_eq!(
+            after.barrier_discarded_entries,
+            history.barrier_discarded_entries
+        );
+        assert_eq!(
+            after.retention_disabled_entries,
+            history.retention_disabled_entries
+        );
+        assert_eq!(
+            after.oversize_dropped_entries,
+            history.oversize_dropped_entries
+        );
+        let mut restored = state.active_sequence().unwrap().clone();
+        // Each real canonical publication advances the Session-owned revision once.
+        assert_eq!(restored.revision, expected_revision);
+        let processor = &mut restored
+            .audio_program
+            .track_channels
+            .get_mut(&track)
+            .unwrap()
+            .strip
+            .pre_fader
+            .processors[0];
+        assert_eq!(processor.parameters.len(), 2);
+        assert!(!processor.parameters.contains_key(&offs));
+        let curve = processor.parameters[&gain].automation.as_ref().unwrap();
+        assert_eq!(curve.default_value.to_bits(), 0.5_f64.to_bits());
+        assert_eq!(
+            curve
+                .keyframes
+                .iter()
+                .map(|key| (key.time, key.value.to_bits()))
+                .collect::<Vec<_>>(),
+            key_samples
+                .iter()
+                .map(|&sample| (
+                    TimelineTime::new(sample, 48_000).unwrap(),
+                    0.5_f64.to_bits()
+                ))
+                .collect::<Vec<_>>()
+        );
+        processor.parameters.get_mut(&gain).unwrap().automation =
+            original_processor.parameters[&gain].automation.clone();
+        assert!(restored.author_state_eq_ignoring_revision(&original),
+        "apart from the checked revision increment, only the actual timed Gain keys may change canonical author state; the complete score and IDs stay intact");
+    };
+
     let mut renderer_id = None;
     let mut pending: Option<NativeAudioAuthorProposal> = None;
     let mut prepared_key = None;
     let mut prepared = 0_usize;
     let mut acknowledged = 0_usize;
-    let expected: [[u32; 8]; 2] = [
-        [
-            0x3d50_0000,
-            0x3d50_0000,
-            0x3d00_0000,
-            0x3d00_0000,
-            0x3c80_0000,
-            0x3c80_0000,
-            0,
-            0,
-        ],
-        [0; 8],
-    ];
-    // New binding forces one post-Ack MainQuery. Unchanged2012 may deduplicate
-    // that query; retain its authenticated target and require it still current.
+    let mut expected_revision = original.revision;
+    let mut publications = 0;
+    let mut key_samples = Vec::new();
+    let mut callback_samples: &[i64] = &[];
+    // A new binding forces one post-Ack query; unchanged later windows retain
+    // its authenticated fact instead of requiring another deduplicated query.
     let mut observed_current_offs = None;
-    // Do not submit2012 until2008's real author/CAS/Ack/SourceClosed completes.
-    for (window, anchor) in [2_008, 2_012].into_iter().enumerate() {
+    for (window, spec) in windows.iter().enumerate() {
+        let anchor = spec.anchor;
+        if !spec.callbacks.is_empty() {
+            assert_eq!(spec.publications, publications + 1);
+            entered = owner(renderer);
+            initial_target = entered.editor_target();
+            assert_eq!(
+                (
+                    initial_target.instance,
+                    initial_target.root_session,
+                    initial_target.local_session,
+                    initial_target.continuity_epoch
+                ),
+                (
+                    root_target.instance,
+                    root_target.root_session,
+                    root_target.local_session,
+                    root_target.continuity_epoch
+                )
+            );
+            installed = renderer.owner_installation_verifier().unwrap();
+            initial_claim = installed.current_claim().unwrap();
+            installed.validate(&initial_claim).unwrap();
+            pending = None;
+            prepared_key = None;
+            prepared = 0;
+            acknowledged = 0;
+            callback_samples = spec.callbacks;
+            observed_current_offs = None;
+            for &sample in spec.callbacks {
+                if key_samples.last() != Some(&sample) {
+                    key_samples.push(sample);
+                }
+            }
+        }
         loop {
             assert!(
                 Instant::now() < deadline,
@@ -954,7 +1217,7 @@ fn continue_clap_native_end(
                         {
                             // Native read-only23 remains a fact, never an author lane.
                             assert!(fact.author_value_bits.is_none());
-                            if fact.value_bits == Some(2.0_f64.to_bits())
+                            if fact.value_bits == Some(spec.off_count.to_bits())
                                 && matches!(
                                     fact.origin,
                                     NativeAudioParameterObservationOrigin::MainQuery { .. }
@@ -968,15 +1231,19 @@ fn continue_clap_native_end(
                         assert_eq!(proposal.sequence(), sequence_id);
                         assert_eq!(proposal.target(), initial_target);
                         assert!(proposal.terminal());
+                        assert_eq!(
+                            proposal.completion(),
+                            mondrian_core::NativeAudioAuthorCompletion::CoherentConfiguration
+                        );
                         if let Some(previous) = &pending {
                             assert!(previous.same_retained_proposal(proposal));
                         } else {
                             assert_eq!(prepared, 0);
-                            assert_eq!(proposal.callbacks().len(), 4);
+                            assert_eq!(proposal.callbacks().len(), callback_samples.len());
                             // NOTE_END header time is ignored; only these actual
                             // parameter execution positions are author clocks.
                             for (callback, sample) in
-                                proposal.callbacks().iter().zip([2_008, 2_008, 2_010, 2_010])
+                                proposal.callbacks().iter().zip(callback_samples.iter().copied())
                             {
                                 let Callback::ParameterAtExecution {
                                     parameter,
@@ -1062,10 +1329,13 @@ fn continue_clap_native_end(
                 if prepared != 0 {
                     assert_eq!(
                         author.author_generation().get(),
-                        author_generation.get() + 1
+                        author_generation.get() + spec.publications as u64
                     );
                 } else {
-                    assert_eq!(author.author_generation(), author_generation);
+                    assert_eq!(
+                        author.author_generation().get(),
+                        author_generation.get() + publications as u64
+                    );
                 }
                 if acknowledged != 0 {
                     assert!(!author.has_pending_native_authoring());
@@ -1079,10 +1349,9 @@ fn continue_clap_native_end(
                 let current = owner(renderer);
                 if observed_current_offs == Some(current.editor_target()) {
                     assert!(renderer.observe_native_object_for_test(entered).is_err());
-                    renderer
-                        .validate_native_author_source_closed(&ExecutionCancellationToken::new())
-                        .unwrap();
-                    break;
+                    if clap_author_source_closed(renderer, generation) {
+                        break;
+                    }
                 }
             }
             std::thread::yield_now();
@@ -1099,7 +1368,7 @@ fn continue_clap_native_end(
         assert_eq!(buffer.frame_count(), 4);
         assert_eq!(
             buffer.samples.iter().map(|value| value.to_bits()).collect::<Vec<_>>(),
-            expected[window]
+            spec.bits
         );
         assert_eq!(
             recorded[..2]
@@ -1126,58 +1395,20 @@ fn continue_clap_native_end(
             AudioProcessorCursorState::Active { epoch, next_input_signal_sample }
             if epoch == mondrian_audio::AudioContinuityEpoch::new(generation)
                 && next_input_signal_sample.sample() == anchor + 4));
+        if spec.publications != publications {
+            assert_eq!(spec.publications, publications + 1);
+            expected_revision = expected_revision.checked_next().unwrap();
+            publications += 1;
+        }
+        assert_eq!(publications, spec.publications);
+        assert_publication(state, publications, expected_revision, &key_samples);
     }
     assert!(pending.is_some());
     assert_eq!((prepared, acknowledged), (1, 1));
-    assert_eq!(buffers.lock().len(), 4);
-    assert_eq!(state.audio_playback_snapshot().next_start_sample, 2_016);
-    let author = state.authoring.as_ref().unwrap();
-    assert!(!author.has_pending_native_authoring());
-    let after = author.history().diagnostics();
-    assert_eq!(after.undo_entries, history.undo_entries + 1);
-    assert_eq!(after.redo_entries, 0);
-    assert_eq!(after.pending_entries, 0);
-    assert_eq!(after.budget_evicted_entries, history.budget_evicted_entries);
+    assert_eq!(publications, windows.last().unwrap().publications);
+    assert_eq!(buffers.lock().len(), windows.len() + 2);
     assert_eq!(
-        after.barrier_discarded_entries,
-        history.barrier_discarded_entries
+        state.audio_playback_snapshot().next_start_sample,
+        windows.last().unwrap().anchor + 4
     );
-    assert_eq!(
-        after.retention_disabled_entries,
-        history.retention_disabled_entries
-    );
-    assert_eq!(
-        after.oversize_dropped_entries,
-        history.oversize_dropped_entries
-    );
-    let mut restored = state.active_sequence().unwrap().clone();
-    // The one canonical publication must advance Session-owned revision once.
-    assert_eq!(restored.revision, original.revision.checked_next().unwrap());
-    let processor = &mut restored
-        .audio_program
-        .track_channels
-        .get_mut(&track)
-        .unwrap()
-        .strip
-        .pre_fader
-        .processors[0];
-    assert_eq!(processor.parameters.len(), 2);
-    assert!(!processor.parameters.contains_key(&offs));
-    let curve = processor.parameters[&gain].automation.as_ref().unwrap();
-    assert_eq!(curve.default_value.to_bits(), 0.5_f64.to_bits());
-    assert_eq!(
-        curve
-            .keyframes
-            .iter()
-            .map(|key| (key.time, key.value.to_bits()))
-            .collect::<Vec<_>>(),
-        [
-            (TimelineTime::new(2_008, 48_000).unwrap(), 0.5_f64.to_bits()),
-            (TimelineTime::new(2_010, 48_000).unwrap(), 0.5_f64.to_bits()),
-        ]
-    );
-    processor.parameters.get_mut(&gain).unwrap().automation =
-        original_processor.parameters[&gain].automation.clone();
-    assert!(restored.author_state_eq_ignoring_revision(&original),
-        "apart from the checked revision increment, only the two actual timed Gain keys may change canonical author state; the complete score and IDs stay intact");
 }
