@@ -1151,6 +1151,8 @@ fn continue_clap_native_end(
         history.oversize_dropped_entries
     );
     let mut restored = state.active_sequence().unwrap().clone();
+    // The one canonical publication must advance Session-owned revision once.
+    assert_eq!(restored.revision, original.revision.checked_next().unwrap());
     let processor = &mut restored
         .audio_program
         .track_channels
@@ -1176,6 +1178,6 @@ fn continue_clap_native_end(
     );
     processor.parameters.get_mut(&gain).unwrap().automation =
         original_processor.parameters[&gain].automation.clone();
-    assert_eq!(serde_json::to_value(restored).unwrap(), serde_json::to_value(original).unwrap(),
-        "only the two actual timed Gain keys may change canonical author state; the complete score stays intact");
+    assert!(restored.author_state_eq_ignoring_revision(&original),
+        "apart from the checked revision increment, only the two actual timed Gain keys may change canonical author state; the complete score and IDs stay intact");
 }
