@@ -383,8 +383,16 @@ instruments, other platforms, realtime and performance remain unqualified.
   these are neither child Drop timings nor realtime/performance qualification.
   The rebuilt Product's import table confirms the change, and the original
   Surge CLAP project-reopen/CLAP playback/VST3 playback gates all pass with the
-  byte-identical prior parent harness and original budgets. Full GL rendering
-  and the original OFX failing lifecycle remain unverified for this change.
+  byte-identical prior parent harness and original budgets. The current OFX
+  harness and rebuilt normal dev Product also pass four complete gates: PAR
+  noop, DefaultOpaque, and published Invert Direct/Graph, with original pixel,
+  ownership and shutdown assertions and unchanged budgets. Historical failures
+  remain failures; these finite passes do not establish universal exit reliability.
+  Actual GL validation remains incomplete: the existing `mondrian-surface-reopen`
+  binary, built with `validation` and the same explicit delay-import flags,
+  failed its first two-cycle batch with main-thread stack overflow (0xC00000FD)
+  before publishing a report. Its PE retains delayed WGL imports. The failed
+  stage and cause are unresolved; no stack limit or timeout was increased.
   This isolates avoidable unused-image overhead, not the original F06 cause.
 - The report's `exit_loop` timer describes the whole exit
   loop plus its last existing result. It is not the timestamp/duration of the
