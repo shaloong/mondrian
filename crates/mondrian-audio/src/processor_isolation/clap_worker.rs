@@ -664,7 +664,8 @@ impl IsolatedAudioProcessorSpecResolver for DiscoveredClapAudioProcessorSpecReso
                 &registration,
                 request,
                 offer.notes.contract,
-            );
+            )?
+            .with_native_probe_input_names(offer.input_names);
         }
         let probe = probe_clap_plugin_registration_with_names(
             &self.helper_executable,

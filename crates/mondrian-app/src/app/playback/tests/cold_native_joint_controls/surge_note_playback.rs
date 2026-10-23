@@ -505,7 +505,7 @@ fn fresh_clap_surge_case() -> (
     let offer =
         mondrian_audio::probe_clap_note_processing_offer(&helper, &plugin, ID, render, Some(&seed))
             .expect("real same-seed NoteOffer5");
-    assert_eq!(offer.schema_version, 5);
+    assert_eq!(offer.schema_version, 6);
     assert_eq!(offer.notes.schema_version, 2); // response version, not port count
     assert_eq!(offer.notes.plugin_id, ID);
     assert_eq!(offer.notes.state_sha256, Some(digest));

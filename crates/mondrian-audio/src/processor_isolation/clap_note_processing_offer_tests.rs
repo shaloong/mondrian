@@ -13,6 +13,7 @@ const ID: &CStr = c"org.mondrian.owned.coherent-note-offer";
 enum Mode {
     Good,
     ZeroAudioInput,
+    NamedAuxiliary,
     LoadFailure,
     RenderFailure,
     BadParameter,
@@ -325,20 +326,31 @@ unsafe extern "C" fn audio_info(
     } else {
         2
     };
-    unsafe {
-        out.write(clap_audio_port_info {
-            id,
-            name: [0; 256],
-            flags: if index == 0 {
-                CLAP_AUDIO_PORT_IS_MAIN as u32
-            } else {
-                0
-            },
-            channel_count: 2,
-            port_type: CLAP_PORT_STEREO.as_ptr(),
-            in_place_pair: CLAP_INVALID_ID,
-        })
+    let mut info = clap_audio_port_info {
+        id,
+        name: [0; 256],
+        flags: if index == 0 {
+            CLAP_AUDIO_PORT_IS_MAIN as u32
+        } else {
+            0
+        },
+        channel_count: 2,
+        port_type: CLAP_PORT_STEREO.as_ptr(),
+        in_place_pair: CLAP_INVALID_ID,
     };
+    if input && index == 1 && owner.mode == Mode::NamedAuxiliary {
+        let name: &[u8] = if owner.changed.get() {
+            b"After deactivate"
+        } else if owner.restored.get() == 1 && owner.offline.get() {
+            b"Restored offline aux"
+        } else {
+            b"Unconfigured aux"
+        };
+        for (destination, source) in info.name.iter_mut().zip(name) {
+            *destination = *source as c_char;
+        }
+    }
+    unsafe { out.write(info) };
     true
 }
 unsafe extern "C" fn note_count(plugin: *const clap_plugin, input: bool) -> u32 {
@@ -592,12 +604,12 @@ fn configure(mode: Mode) -> (PluginEntry, Rc<Audit>) {
 fn captured(
     mode: Mode,
 ) -> (
-    Result<ClapNoteProcessingOfferV5, AudioProcessorHostError>,
+    Result<ClapNoteProcessingOfferV6, AudioProcessorHostError>,
     Rc<Audit>,
 ) {
     let (entry, audit) = configure(mode);
     (
-        probe_loaded_processing_v5(
+        probe_loaded_processing_v6(
             &entry,
             ID.to_str().unwrap(),
             [23; 32],
@@ -622,7 +634,8 @@ fn actual_abi_v2_captures_one_restored_rendered_notes_environment_and_inactive_r
     let mut offer = result.unwrap();
     cleanup(&audit, 1, 1);
     assert_eq!(audit.mask.get(), 1);
-    assert_eq!(offer.schema_version, 5);
+    assert_eq!(offer.schema_version, 6);
+    assert!(offer.input_names.is_empty());
     // Public consumers access existing domain facts without private wire access.
     assert_eq!(offer.parameters()[0].current_value, 1.5);
     assert_eq!(offer.parameters()[0].max_value, 2.0);
@@ -830,7 +843,8 @@ fn actual_abi_v3_zero_audio_inputs_keep_same_instance_notes_and_inactive_audio_r
     let (result, audit) = captured(Mode::ZeroAudioInput);
     let offer = result.unwrap();
     cleanup(&audit, 1, 1);
-    assert_eq!(offer.schema_version, 5);
+    assert_eq!(offer.schema_version, 6);
+    assert!(offer.input_names.is_empty());
     assert_eq!(
         offer.main_audio_input(),
         super::super::ClapMainAudioInput::Absent
@@ -885,4 +899,35 @@ fn actual_abi_v3_zero_audio_inputs_keep_same_instance_notes_and_inactive_audio_r
             .is_err()
         );
     }
+}
+
+#[test]
+fn actual_abi_v6_names_round_trip_from_the_same_restored_inactive_snapshot() {
+    let (result, audit) = captured(Mode::NamedAuxiliary);
+    let offer = result.unwrap();
+    cleanup(&audit, 1, 1);
+    let expected = vec![crate::AudioProcessorInputName {
+        bus_key: "clap.audio-input.33".to_owned(),
+        name: "Restored offline aux".to_owned(),
+    }];
+    assert_eq!(offer.input_names, expected);
+    assert_eq!(
+        offer.notes.state_sha256,
+        super::super::clap_note_input_metadata::state_digest(Some(&[1]))
+    );
+    assert_eq!(offer.notes.binary_sha256, [23; 32]);
+    assert_eq!(
+        offer.auxiliary_inputs().collect::<Vec<_>>(),
+        [("clap.audio-input.33", AudioChannelLayout::Stereo)]
+    );
+    // Only text changes at deactivate. Keep the initial name, like NormalProbe4;
+    // do not strengthen shape revalidation into cross-activation name identity.
+    let bytes = serde_json::to_vec(&offer).unwrap();
+    let restored: ClapNoteProcessingOfferV6 = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(restored.input_names, expected);
+    assert_eq!(restored.notes, offer.notes);
+    assert_eq!(
+        restored.auxiliary_inputs().collect::<Vec<_>>(),
+        offer.auxiliary_inputs().collect::<Vec<_>>()
+    );
 }

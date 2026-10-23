@@ -832,10 +832,10 @@ pub(super) fn revalidate_processing_metadata_for_notes(
     Ok(())
 }
 
-// Only the v5 full-processing branch uses this bounded pure serializer.
+// Only the v6 full-processing branch uses this bounded pure serializer.
 // Legacy read-only Note metadata keeps its original wire/paths. Both passes serialize owned DTOs after native destruction.
-fn encode_processing_offer_v5(
-    value: &super::clap_note_input_contract::ClapNoteProcessingOfferV5,
+fn encode_processing_offer_v6(
+    value: &super::clap_note_input_contract::ClapNoteProcessingOfferV6,
 ) -> Result<Vec<u8>, AudioProcessorHostError> {
     struct Count(usize);
     impl Write for Count {
@@ -899,7 +899,7 @@ pub fn probe_clap_note_processing_offer(
     plugin_id: &str,
     render: AudioRenderContract,
     state: Option<&[u8]>,
-) -> Result<super::clap_note_input_contract::ClapNoteProcessingOfferV5, AudioProcessorHostError> {
+) -> Result<super::clap_note_input_contract::ClapNoteProcessingOfferV6, AudioProcessorHostError> {
     probe_clap_note_processing_offer_with_native_child_settlement(
         helper_executable,
         library_path,
@@ -917,7 +917,7 @@ pub(super) fn probe_clap_note_processing_offer_with_native_child_settlement(
     render: AudioRenderContract,
     state: Option<&[u8]>,
     native_child_settlement: Option<&mondrian_core::NativeChildSettlementRegistrar>,
-) -> Result<super::clap_note_input_contract::ClapNoteProcessingOfferV5, AudioProcessorHostError> {
+) -> Result<super::clap_note_input_contract::ClapNoteProcessingOfferV6, AudioProcessorHostError> {
     super::clap_note_input_metadata::validate_request(plugin_id, state)?;
     if !helper_executable.is_absolute()
         || !library_path.is_absolute()
@@ -935,7 +935,7 @@ pub(super) fn probe_clap_note_processing_offer_with_native_child_settlement(
         helper_executable,
         &canonical,
         DiscoveryOperation::ProbeNotes {
-            schema_version: 5,
+            schema_version: 6,
             plugin_id: plugin_id.to_owned(),
             sample_rate: render.sample_rate,
             channel_layout: render.channel_layout,
@@ -950,27 +950,27 @@ pub(super) fn probe_clap_note_processing_offer_with_native_child_settlement(
             "CLAP binary changed during Note processing negotiation",
         ));
     }
-    decode_processing_offer_v5(&bytes, plugin_id, fingerprint, state, render)
+    decode_processing_offer_v6(&bytes, plugin_id, fingerprint, state, render)
 }
 
-fn decode_processing_offer_v5(
+fn decode_processing_offer_v6(
     bytes: &[u8],
     plugin_id: &str,
     fingerprint: [u8; 32],
     state: Option<&[u8]>,
     render: AudioRenderContract,
-) -> Result<super::clap_note_input_contract::ClapNoteProcessingOfferV5, AudioProcessorHostError> {
+) -> Result<super::clap_note_input_contract::ClapNoteProcessingOfferV6, AudioProcessorHostError> {
     if bytes.len() as u64 > MAX_RESPONSE_BYTES {
         return Err(invalid(
             "CLAP Note processing response exceeds metadata limit",
         ));
     }
-    let result: super::clap_note_input_contract::ClapNoteProcessingOfferV5 =
+    let result: super::clap_note_input_contract::ClapNoteProcessingOfferV6 =
         serde_json::from_slice(bytes).map_err(|error| {
             invalid(format!("CLAP Note processing response is invalid: {error}"))
         })?;
     let notes = &result.notes;
-    if result.schema_version != 5
+    if result.schema_version != 6
         || notes.schema_version != 2
         || notes.plugin_id != plugin_id
         || notes.binary_sha256 != fingerprint
@@ -993,6 +993,10 @@ fn decode_processing_offer_v5(
         }
     }
     validate_processing_result_for_notes(&result.processing, plugin_id, render)?;
+    crate::AudioProcessorInputName::validate_all(
+        &result.input_names,
+        &auxiliary_from_wire(result.processing.auxiliary_buses.clone()),
+    )?;
     Ok(result)
 }
 
@@ -1117,7 +1121,7 @@ fn validate_discovery_schema(
             Err(invalid("unsupported CLAP processing probe schema version"))
         }
         DiscoveryOperation::ProbeNotes { schema_version, .. }
-            if !matches!(*schema_version, 2 | 5) =>
+            if !matches!(*schema_version, 2 | 6) =>
         {
             Err(invalid("unsupported CLAP Note probe schema version"))
         }
@@ -1294,7 +1298,7 @@ fn run_clap_discovery_worker_inner(
             } else {
                 // The complete offer is captured from one actual Notes-enabled
                 // restored/render-configured/activated instance, then destroyed.
-                let result = super::clap_note_input_contract::probe_loaded_processing_v5(
+                let result = super::clap_note_input_contract::probe_loaded_processing_v6(
                     &entry,
                     &plugin_id,
                     fingerprint,
@@ -1308,7 +1312,7 @@ fn run_clap_discovery_worker_inner(
                     ));
                 }
                 *stage = DiscoveryErrorStage::ResponseEncoding;
-                Ok(encode_processing_offer_v5(&result)?)
+                Ok(encode_processing_offer_v6(&result)?)
             }
         }
     }
@@ -5256,7 +5260,7 @@ pub(super) mod cold_settlement_probe_controls {
             Some(&registrar),
         )
         .expect("actual observed full Note offer");
-        assert_eq!(offer.schema_version, 5);
+        assert_eq!(offer.schema_version, 6);
         assert_eq!(offer.notes.schema_version, 2);
         assert_eq!(offer.notes.plugin_id, NOTE_GATE_ID);
         assert_eq!(

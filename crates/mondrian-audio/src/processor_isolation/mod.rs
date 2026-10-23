@@ -17,7 +17,7 @@ mod clap_note_input_metadata;
 pub use clap_discovery::probe_clap_note_input_contract;
 pub use clap_discovery::probe_clap_note_processing_offer;
 pub use clap_note_input_contract::ClapNoteInputContractProbe;
-pub use clap_note_input_contract::ClapNoteProcessingOfferV5;
+pub use clap_note_input_contract::ClapNoteProcessingOfferV6;
 /// Bounded typed ownership of the actual CLAP output callbacks.
 /// These source facts do not grant an author Session or installed runtime lease.
 pub mod clap_output_events;

@@ -761,7 +761,7 @@ fn native_owned_note_gate_v2_parent_query_binds_complete_same_instance_facts() {
             path,
             "producer bytes remain accepted after query"
         );
-        assert_eq!(offer.schema_version, 5);
+        assert_eq!(offer.schema_version, 6);
         assert_eq!(offer.notes.schema_version, 2);
         assert_eq!(
             offer.notes.contract.completion,

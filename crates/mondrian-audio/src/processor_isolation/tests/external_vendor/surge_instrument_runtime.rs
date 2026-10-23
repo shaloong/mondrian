@@ -411,7 +411,7 @@ fn run_captured_state_notes_main_runtime(reference: Option<MusicalTimeReference>
     }
     let offer = probe_clap_note_processing_offer(&helper, &library, ID, render, Some(&state))
         .expect("same restored-instance NoteOffer5, no inferred Note dialect or port");
-    assert_eq!(offer.schema_version, 5);
+    assert_eq!(offer.schema_version, 6);
     assert_eq!(offer.notes.schema_version, 2);
     assert_eq!(
         offer.notes.contract.completion,

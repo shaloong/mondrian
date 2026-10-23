@@ -440,15 +440,17 @@ pub(super) fn probe_loaded(
 /// Full same-instance metadata response; it does not grant Note execution.
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct ClapNoteProcessingOfferV5 {
-    /// Exact full-processing response version; currently five.
+pub struct ClapNoteProcessingOfferV6 {
+    /// Exact full-processing response version; currently six.
     pub schema_version: u32,
     /// Same-instance identity/render/Note facts, with no execution authority.
     pub notes: ClapNoteInputContractProbe,
     pub(super) processing: super::clap_discovery::ProbeResult,
+    /// Native auxiliary names from this same restored/configured inactive scan.
+    pub(super) input_names: Vec<crate::AudioProcessorInputName>,
 }
 
-impl ClapNoteProcessingOfferV5 {
+impl ClapNoteProcessingOfferV6 {
     /// Native main-input shape from the same Notes-enabled instance.
     pub fn main_audio_input(&self) -> super::ClapMainAudioInput {
         self.processing.main_audio_input
@@ -543,13 +545,13 @@ fn check_destroyed_processing_services(
     Ok(())
 }
 
-pub(super) fn probe_loaded_processing_v5(
+pub(super) fn probe_loaded_processing_v6(
     entry: &PluginEntry,
     plugin_id: &str,
     binary_sha256: [u8; 32],
     state: Option<&[u8]>,
     render: AudioRenderContract,
-) -> Result<ClapNoteProcessingOfferV5, AudioProcessorHostError> {
+) -> Result<ClapNoteProcessingOfferV6, AudioProcessorHostError> {
     super::clap_note_input_metadata::validate_request(plugin_id, state)?;
     let max_frames = u32::try_from(render.max_block_frames)
         .ok()
@@ -726,7 +728,14 @@ pub(super) fn probe_loaded_processing_v5(
     drop(instance);
     check_destroyed_processing_services(&services)?;
     check_processing_control(&shared)?;
-    Ok(ClapNoteProcessingOfferV5 { schema_version: 5, notes, processing })
+    Ok(ClapNoteProcessingOfferV6 {
+        schema_version: 6,
+        notes,
+        processing,
+        // Preserve the initial inactive snapshot, like NormalProbe4. Names may
+        // legally change across activation; do not substitute the later scan.
+        input_names: audio.names,
+    })
 }
 
 #[cfg(test)]

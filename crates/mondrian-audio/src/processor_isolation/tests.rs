@@ -103,6 +103,7 @@ impl IsolatedAudioProcessorWorkerFactory for TestWorkerFactory {
             behavior,
             contract,
             auxiliary: request.auxiliary_inputs().clone(),
+            notes: request.note_input_contract().clone(),
             input_names,
             musical_time_reference: request.musical_time_reference(),
             entered: false,
@@ -115,6 +116,7 @@ struct TestWorker {
     behavior: TestBehavior,
     contract: AudioProcessorExecutionContract,
     auxiliary: AudioProcessorAuxiliaryInputContract,
+    notes: crate::AudioProcessorNoteInputContract,
     input_names: Vec<crate::AudioProcessorInputName>,
     musical_time_reference: Option<mondrian_core::MusicalTimeReference>,
     entered: bool,
@@ -132,6 +134,10 @@ impl IsolatedAudioProcessorWorker for TestWorker {
 
     fn auxiliary_input_names(&self) -> Vec<crate::AudioProcessorInputName> {
         self.input_names.clone()
+    }
+
+    fn note_input_contract(&self) -> crate::AudioProcessorNoteInputContract {
+        self.notes.clone()
     }
 
     fn enter_state(&mut self, _start_sample: i64) -> Result<(), AudioProcessorHostError> {
@@ -214,6 +220,19 @@ fn cold_input_names() -> Vec<crate::AudioProcessorInputName> {
         .collect()
 }
 
+fn cold_note_contract() -> crate::AudioProcessorNoteInputContract {
+    crate::AudioProcessorNoteInputContract {
+        completion: crate::AudioNoteCompletionPolicy::NativeEnd,
+        limits: clap_note_input_contract::offered_limits(),
+        ports: vec![crate::AudioProcessorNoteInputPort {
+            channel_count: 16,
+            native_id: 23,
+            native_index: 0,
+            port_key: "clap.note-input.23".to_owned(),
+        }],
+    }
+}
+
 fn cold_test_spec(
     directory: &std::path::Path,
     actual_names: Vec<crate::AudioProcessorInputName>,
@@ -258,8 +277,17 @@ fn cold_prepared_pids(directory: &std::path::Path) -> Vec<u32> {
 
 #[test]
 fn native_probe_evidence_consumes_names_once_and_keeps_static_validation() {
+    for note_input in [false, true] {
+        check_native_probe_evidence_consumption(note_input);
+    }
+}
+
+fn check_native_probe_evidence_consumption(note_input: bool) {
     let directory = tempfile::tempdir().unwrap();
-    let spec = cold_test_spec(directory.path(), cold_input_names(), false);
+    let mut spec = cold_test_spec(directory.path(), cold_input_names(), false);
+    if note_input {
+        spec = spec.with_note_input_contract(cold_note_contract()).unwrap();
+    }
     for names in [
         vec![crate::AudioProcessorInputName { bus_key: "absent".into(), name: "Valid".into() }],
         vec![cold_input_names()[0].clone(), cold_input_names()[0].clone()],
@@ -319,11 +347,15 @@ fn native_probe_evidence_consumes_names_once_and_keeps_static_validation() {
 
 #[test]
 fn native_probe_factory_starts_one_worker_and_unprobed_keeps_validation_worker() {
-    for native_probed in [false, true] {
+    for (note_input, native_probed) in [(false, false), (false, true), (true, false), (true, true)]
+    {
         let directory = tempfile::tempdir().unwrap();
         let mut actual_names = cold_input_names();
         actual_names.reverse();
         let mut spec = cold_test_spec(directory.path(), actual_names.clone(), false);
+        if note_input {
+            spec = spec.with_note_input_contract(cold_note_contract()).unwrap();
+        }
         if native_probed {
             spec = spec.with_native_probe_input_names(cold_input_names()).unwrap();
         }
@@ -361,11 +393,18 @@ fn native_probe_ready_name_drift_preserves_startup_error_and_reaps_original_chil
 
     let mut changed = cold_input_names();
     changed[0].name = "Changed detector".into();
-    for actual_names in [changed, vec![cold_input_names()[0].clone()]] {
+    for (note_input, actual_names) in [
+        (false, changed.clone()),
+        (false, vec![cold_input_names()[0].clone()]),
+        (true, changed),
+        (true, vec![cold_input_names()[0].clone()]),
+    ] {
         let directory = tempfile::tempdir().unwrap();
-        let spec = cold_test_spec(directory.path(), actual_names, true)
-            .with_native_probe_input_names(cold_input_names())
-            .unwrap();
+        let mut spec = cold_test_spec(directory.path(), actual_names, true);
+        if note_input {
+            spec = spec.with_note_input_contract(cold_note_contract()).unwrap();
+        }
+        let spec = spec.with_native_probe_input_names(cold_input_names()).unwrap();
         let factory = IsolatedAudioProcessorFactory::prepare(spec).unwrap();
         assert!(cold_prepared_pids(directory.path()).is_empty());
         std::thread::scope(|scope| {
