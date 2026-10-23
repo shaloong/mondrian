@@ -1316,6 +1316,51 @@ impl IAudioProcessorTrait for NoteProcessor {
         let channels = multi.map_or(2, |multi| multi.channels());
         let zero_input = self.zero_audio_input.load(Ordering::Relaxed);
         let active = self.active_buses.load(Ordering::Relaxed);
+        if data.numSamples == 0 {
+            // A real control Process still owns its audited ordinal, including
+            // fail_call. It carries no Note/PCM work and advances no DSP state.
+            let buses_active = if admission {
+                active & 3 == 3
+            } else if zero_input {
+                active == 6
+            } else if main_only {
+                active == 7
+            } else {
+                active == 15
+            };
+            let rate = f64::from_bits(self.sample_rate.load(Ordering::Relaxed));
+            if !self.active.load(Ordering::Acquire)
+                || !self.processing.load(Ordering::Acquire)
+                || self.max_frames.load(Ordering::Relaxed) == 0
+                || !rate.is_finite()
+                || rate <= 0.0
+                || !buses_active
+                || multi.is_some_and(|multi| {
+                    self.multi_active_outputs.load(Ordering::Relaxed) != multi.output_mask()
+                })
+                || data.symbolicSampleSize != SymbolicSampleSizes_::kSample32 as i32
+                || data.numInputs != 0
+                || data.numOutputs != 0
+                || !data.inputs.is_null()
+                || !data.outputs.is_null()
+                || ComRef::from_raw(data.inputEvents).is_some_and(|events| events.getEventCount() != 0)
+                || ComRef::from_raw(data.outputEvents).is_some_and(|events| events.getEventCount() != 0)
+                // This class declares no parameters: even one queue is invalid.
+                || ComRef::from_raw(data.inputParameterChanges)
+                    .is_some_and(|changes| changes.getParameterCount() != 0)
+                || ComRef::from_raw(data.outputParameterChanges)
+                    .is_some_and(|changes| changes.getParameterCount() != 0)
+            {
+                return kInvalidArgument;
+            }
+            let result = if self.fail_call.load(Ordering::Relaxed) == (call_index + 1) as u32 {
+                kResultFalse
+            } else {
+                kResultOk
+            };
+            audit.calls[call_index].result = result;
+            return result;
+        }
         if !self.processing.load(Ordering::Acquire)
             || if admission {
                 active & 3 != 3
@@ -1611,5 +1656,358 @@ impl IEditControllerTrait for NoteController {
     }
     unsafe fn createView(&self, _name: *const c_char) -> *mut IPlugView {
         ptr::null_mut()
+    }
+}
+
+#[cfg(test)]
+mod zero_sample_control_tests {
+    use super::*;
+
+    struct StateInput {
+        bytes: Vec<u8>,
+        offset: Cell<usize>,
+    }
+    impl Class for StateInput {
+        type Interfaces = (IBStream,);
+    }
+    impl IBStreamTrait for StateInput {
+        unsafe fn read(&self, buffer: *mut c_void, bytes: i32, read: *mut i32) -> tresult {
+            if buffer.is_null() || bytes < 0 || read.is_null() {
+                return kInvalidArgument;
+            }
+            let start = self.offset.get();
+            let count = (bytes as usize).min(self.bytes.len() - start);
+            ptr::copy_nonoverlapping(self.bytes[start..].as_ptr(), buffer.cast(), count);
+            self.offset.set(start + count);
+            *read = count as i32;
+            if count == 0 {
+                kResultFalse
+            } else {
+                kResultOk
+            }
+        }
+        unsafe fn write(&self, _: *mut c_void, _: i32, _: *mut i32) -> tresult {
+            kNotImplemented
+        }
+        unsafe fn seek(&self, _: i64, _: i32, _: *mut i64) -> tresult {
+            kNotImplemented
+        }
+        unsafe fn tell(&self, _: *mut i64) -> tresult {
+            kNotImplemented
+        }
+    }
+
+    // Real COM list owners. Nonzero/negative counts exercise refusal without
+    // manufacturing a parameter ID that this zero-parameter class can accept.
+    struct Lists {
+        count: Cell<i32>,
+        event: Option<Event>,
+    }
+    impl Class for Lists {
+        type Interfaces = (IEventList, IParameterChanges);
+    }
+    impl IEventListTrait for Lists {
+        unsafe fn getEventCount(&self) -> i32 {
+            self.count.get()
+        }
+        unsafe fn getEvent(&self, index: i32, out: *mut Event) -> tresult {
+            match self.event {
+                Some(event) if index == 0 && !out.is_null() => {
+                    *out = event;
+                    kResultOk
+                }
+                _ => kInvalidArgument,
+            }
+        }
+        unsafe fn addEvent(&self, _: *mut Event) -> tresult {
+            kNotImplemented
+        }
+    }
+    impl IParameterChangesTrait for Lists {
+        unsafe fn getParameterCount(&self) -> i32 {
+            self.count.get()
+        }
+        unsafe fn getParameterData(&self, _: i32) -> *mut IParamValueQueue {
+            ptr::null_mut()
+        }
+        unsafe fn addParameterData(&self, _: *const ParamID, _: *mut i32) -> *mut IParamValueQueue {
+            ptr::null_mut()
+        }
+    }
+
+    fn main_processor(fail_call: u32) -> ComWrapper<NoteProcessor> {
+        let owner = ComWrapper::new(NoteProcessor::new().unwrap());
+        let config = Config { main_only: true, ..Config::legacy(fail_call) };
+        let (bytes, len) = config.encode();
+        let state =
+            ComWrapper::new(StateInput { bytes: bytes[..len].to_vec(), offset: Cell::new(0) });
+        let component = owner.as_com_ref::<IComponent>().unwrap();
+        unsafe {
+            assert_eq!(component.initialize(ptr::null_mut()), kResultOk);
+            assert_eq!(
+                component.setState(state.as_com_ref::<IBStream>().unwrap().as_ptr()),
+                kResultOk
+            );
+        }
+        owner
+    }
+    fn start(owner: &ComWrapper<NoteProcessor>) {
+        let component = owner.as_com_ref::<IComponent>().unwrap();
+        let processor = owner.as_com_ref::<IAudioProcessor>().unwrap();
+        unsafe {
+            let mut setup: ProcessSetup = std::mem::zeroed();
+            setup.symbolicSampleSize = SymbolicSampleSizes_::kSample32 as i32;
+            setup.processMode = ProcessModes_::kRealtime as i32;
+            setup.sampleRate = 48_000.0;
+            setup.maxSamplesPerBlock = 4;
+            assert_eq!(processor.setupProcessing(&mut setup), kResultOk);
+            for (media, direction) in [
+                (MediaTypes_::kAudio, BusDirections_::kInput),
+                (MediaTypes_::kAudio, BusDirections_::kOutput),
+                (MediaTypes_::kEvent, BusDirections_::kInput),
+            ] {
+                assert_eq!(
+                    component.activateBus(media as MediaType, direction as BusDirection, 0, 1),
+                    kResultOk
+                );
+            }
+            assert_eq!(component.setActive(1), kResultOk);
+            assert_eq!(processor.setProcessing(1), kResultOk);
+        }
+    }
+    fn finish(owner: &ComWrapper<NoteProcessor>) {
+        unsafe {
+            assert_eq!(owner.as_com_ref::<IAudioProcessor>().unwrap().setProcessing(0), kResultOk);
+            let component = owner.as_com_ref::<IComponent>().unwrap();
+            assert_eq!(component.setActive(0), kResultOk);
+            assert_eq!(component.terminate(), kResultOk);
+        }
+    }
+    fn control() -> ProcessData {
+        let mut data: ProcessData = unsafe { std::mem::zeroed() };
+        data.symbolicSampleSize = SymbolicSampleSizes_::kSample32 as i32;
+        data
+    }
+    fn call(owner: &ComWrapper<NoteProcessor>, data: &mut ProcessData) -> tresult {
+        unsafe { owner.as_com_ref::<IAudioProcessor>().unwrap().process(data) }
+    }
+    fn event(on: bool) -> Event {
+        let mut event: Event = unsafe { std::mem::zeroed() };
+        event.r#type =
+            if on { Event_::EventTypes_::kNoteOnEvent } else { Event_::EventTypes_::kNoteOffEvent }
+                as u16;
+        if on {
+            event.__field0.noteOn = NoteOnEvent {
+                channel: 0,
+                pitch: 60,
+                tuning: 0.0,
+                velocity: 0.5,
+                length: 0,
+                noteId: 7,
+            };
+        } else {
+            event.__field0.noteOff = NoteOffEvent {
+                channel: 0,
+                pitch: 60,
+                velocity: 0.0,
+                noteId: 7,
+                tuning: 0.0,
+            };
+        }
+        event
+    }
+    fn signal(
+        owner: &ComWrapper<NoteProcessor>,
+        note: Option<Event>,
+        expected: tresult,
+    ) -> [u32; 4] {
+        let mut input = [[0.0_f32; 2]; 2];
+        let mut output = [[f32::NAN; 2]; 2];
+        let mut inputs = [input[0].as_mut_ptr(), input[1].as_mut_ptr()];
+        let mut outputs = [output[0].as_mut_ptr(), output[1].as_mut_ptr()];
+        let mut input_bus: AudioBusBuffers = unsafe { std::mem::zeroed() };
+        let mut output_bus: AudioBusBuffers = unsafe { std::mem::zeroed() };
+        input_bus.numChannels = 2;
+        input_bus.__field0.channelBuffers32 = inputs.as_mut_ptr();
+        output_bus.numChannels = 2;
+        output_bus.__field0.channelBuffers32 = outputs.as_mut_ptr();
+        let events = ComWrapper::new(Lists {
+            count: Cell::new(i32::from(note.is_some())),
+            event: note,
+        });
+        let mut data = control();
+        data.numSamples = 2;
+        data.numInputs = 1;
+        data.numOutputs = 1;
+        data.inputs = &mut input_bus;
+        data.outputs = &mut output_bus;
+        data.inputEvents = events.as_com_ref::<IEventList>().unwrap().as_ptr();
+        assert_eq!(call(owner, &mut data), expected);
+        [
+            output[0][0].to_bits(),
+            output[1][0].to_bits(),
+            output[0][1].to_bits(),
+            output[1][1].to_bits(),
+        ]
+    }
+
+    #[test]
+    fn zero_control_keeps_audit_ordinals_and_held_note_dsp_unchanged() {
+        let owner = main_processor(0);
+        start(&owner);
+        let empty = ComWrapper::new(Lists { count: Cell::new(0), event: None });
+        let mut data = control();
+        data.inputEvents = empty.as_com_ref::<IEventList>().unwrap().as_ptr();
+        data.outputEvents = data.inputEvents;
+        data.inputParameterChanges = empty.as_com_ref::<IParameterChanges>().unwrap().as_ptr();
+        data.outputParameterChanges = data.inputParameterChanges;
+        let mut context: ProcessContext = unsafe { std::mem::zeroed() };
+        context.sampleRate = 48_000.0;
+        context.projectTimeSamples = 2_000;
+        context.projectTimeMusic = 0.125;
+        data.processContext = &mut context;
+        assert_eq!(call(&owner, &mut data), kResultOk);
+        let held = [0x3e80_0000, 0xbe00_0000, 0x3e80_0000, 0xbe00_0000];
+        assert_eq!(signal(&owner, Some(event(true)), kResultOk), held);
+        assert_eq!(call(&owner, &mut data), kResultOk);
+        assert_eq!(context.projectTimeSamples, 2_000);
+        assert_eq!(context.projectTimeMusic.to_bits(), 0.125_f64.to_bits());
+        assert_eq!(signal(&owner, None, kResultOk), held);
+        assert_eq!(signal(&owner, Some(event(false)), kResultOk), [0; 4]);
+        {
+            let audit = owner.audit.lock().unwrap();
+            assert_eq!(audit.call_count, 5);
+            assert_eq!(audit.event_count, 2);
+            for (call, (frames, count)) in
+                audit.calls.iter().zip([(0, 0), (2, 1), (0, 0), (2, 0), (2, 1)])
+            {
+                assert_eq!((call.frames, call.result, call.count), (frames, kResultOk, count));
+            }
+            assert_eq!((audit.events[0].call, audit.events[1].call), (2, 5));
+            assert_eq!((audit.events[0].id, audit.events[1].id), (7, 7));
+            assert!(audit.voices.iter().all(|voice| voice.id == -1));
+            assert_eq!(audit.multi_position, 0);
+            assert!(!audit.incomplete);
+        }
+        finish(&owner);
+    }
+
+    #[test]
+    fn zero_control_refuses_malformed_lists_audio_and_unprepared_lifecycle() {
+        let owner = main_processor(0);
+        let mut data = control();
+        assert_eq!(call(&owner, &mut data), kInvalidArgument);
+        start(&owner);
+        let lists = ComWrapper::new(Lists { count: Cell::new(1), event: None });
+        let events = lists.as_com_ref::<IEventList>().unwrap().as_ptr();
+        let parameters = lists.as_com_ref::<IParameterChanges>().unwrap().as_ptr();
+        for count in [-1, 1] {
+            lists.count.set(count);
+            for output in [false, true] {
+                let mut malformed = control();
+                if output {
+                    malformed.outputEvents = events;
+                } else {
+                    malformed.inputEvents = events;
+                }
+                assert_eq!(call(&owner, &mut malformed), kInvalidArgument);
+                malformed = control();
+                if output {
+                    malformed.outputParameterChanges = parameters;
+                } else {
+                    malformed.inputParameterChanges = parameters;
+                }
+                assert_eq!(call(&owner, &mut malformed), kInvalidArgument);
+            }
+        }
+        let mut bus: AudioBusBuffers = unsafe { std::mem::zeroed() };
+        for kind in 0..6 {
+            let mut malformed = control();
+            match kind {
+                0 => malformed.numSamples = -1,
+                1 => malformed.symbolicSampleSize = SymbolicSampleSizes_::kSample64 as i32,
+                2 => malformed.numInputs = 1,
+                3 => malformed.numOutputs = 1,
+                4 => malformed.inputs = &mut bus,
+                5 => malformed.outputs = &mut bus,
+                _ => unreachable!(),
+            }
+            assert_eq!(call(&owner, &mut malformed), kInvalidArgument);
+        }
+        unsafe {
+            let component = owner.as_com_ref::<IComponent>().unwrap();
+            assert_eq!(
+                component.activateBus(
+                    MediaTypes_::kEvent as MediaType,
+                    BusDirections_::kInput as BusDirection,
+                    0,
+                    0
+                ),
+                kResultOk
+            );
+            assert_eq!(call(&owner, &mut data), kInvalidArgument);
+            assert_eq!(
+                component.activateBus(
+                    MediaTypes_::kEvent as MediaType,
+                    BusDirections_::kInput as BusDirection,
+                    0,
+                    1
+                ),
+                kResultOk
+            );
+        }
+        assert_eq!(call(&owner, &mut data), kResultOk);
+        assert_eq!(
+            signal(&owner, Some(event(true)), kResultOk),
+            [0x3e80_0000, 0xbe00_0000, 0x3e80_0000, 0xbe00_0000]
+        );
+        {
+            let audit = owner.audit.lock().unwrap();
+            assert_eq!(audit.call_count, 18);
+            assert_eq!(audit.event_count, 1);
+            assert!(audit.calls[..16].iter().all(|call| call.result == kInvalidArgument));
+            assert_eq!(
+                (audit.calls[16].frames, audit.calls[16].result, audit.calls[16].count),
+                (0, kResultOk, 0)
+            );
+            assert!(!audit.incomplete);
+        }
+        finish(&owner);
+    }
+
+    #[test]
+    fn zero_control_and_signal_failure_share_the_actual_process_ordinal() {
+        let owner = main_processor(2);
+        start(&owner);
+        assert_eq!(call(&owner, &mut control()), kResultOk);
+        signal(&owner, Some(event(true)), kResultFalse);
+        // The failed On was audited but never applied; a following real DSP
+        // call remains silent, rather than replaying the rejected event.
+        assert_eq!(signal(&owner, None, kResultOk), [0; 4]);
+        {
+            let audit = owner.audit.lock().unwrap();
+            assert_eq!((audit.call_count, audit.event_count), (3, 1));
+            assert_eq!((audit.calls[0].frames, audit.calls[0].result), (0, kResultOk));
+            assert_eq!((audit.calls[1].frames, audit.calls[1].result), (2, kResultFalse));
+            assert_eq!((audit.calls[2].frames, audit.calls[2].result), (2, kResultOk));
+            assert_eq!(audit.events[0].call, 2);
+            assert!(audit.voices.iter().all(|voice| voice.id == -1));
+        }
+        finish(&owner);
+        let owner = main_processor(1);
+        start(&owner);
+        assert_eq!(call(&owner, &mut control()), kResultFalse);
+        assert_eq!(
+            signal(&owner, Some(event(true)), kResultOk),
+            [0x3e80_0000, 0xbe00_0000, 0x3e80_0000, 0xbe00_0000]
+        );
+        {
+            let audit = owner.audit.lock().unwrap();
+            assert_eq!((audit.call_count, audit.event_count), (2, 1));
+            assert_eq!((audit.calls[0].frames, audit.calls[0].result), (0, kResultFalse));
+            assert_eq!((audit.calls[1].frames, audit.calls[1].result), (2, kResultOk));
+            assert_eq!(audit.events[0].call, 2);
+        }
+        finish(&owner);
     }
 }
