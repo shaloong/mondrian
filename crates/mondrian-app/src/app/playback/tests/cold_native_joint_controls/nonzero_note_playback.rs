@@ -384,7 +384,8 @@ fn app_owned_clap_first_nonzero_note_playback_enqueues_literal_pcm() {
             }]),
         });
     }
-    // Complete mono literals: 5/64 for2000..2005, then19/256 and9/128.
+    // App delivery uses the standard unity Mono-to-Stereo matrix: complete
+    // interleaved literals are 5/64 for2000..2005, then19/256 and9/128 on L/R.
     // The first NativeEnd is at2008, outside these two software windows.
     let expected = [
         0.078125_f32,
@@ -393,7 +394,15 @@ fn app_owned_clap_first_nonzero_note_playback_enqueues_literal_pcm() {
         0.078125,
         0.078125,
         0.078125,
+        0.078125,
+        0.078125,
+        0.078125,
+        0.078125,
+        0.078125,
+        0.078125,
         0.07421875,
+        0.07421875,
+        0.0703125,
         0.0703125,
     ];
     run_app_nonzero_note_playback(clap, vst3, sequence, &expected);
@@ -405,7 +414,9 @@ fn run_app_nonzero_note_playback(
     sequence: Sequence,
     expected: &[f32],
 ) {
-    let channel_layout = sequence.settings.audio_channel_layout;
+    let program_layout = sequence.settings.audio_channel_layout;
+    // Program/native layout is independent of App's fixed monitoring target.
+    let channel_layout = crate::app::AUDIO_OUTPUT_LAYOUT;
     assert_eq!(sequence.settings.audio_sample_rate, 48_000);
     assert_eq!(
         sequence.settings.frame_rate,
@@ -478,6 +489,9 @@ fn run_app_nonzero_note_playback(
         assert_eq!(state.audio_playback_snapshot().next_start_sample, 2_000);
         assert!(state.native_audio_renderer.is_none());
         let source = state.audio_playback_renderer("nonzero Note prepare").unwrap().unwrap();
+        let delivery = source.renderer.delivery_evidence();
+        assert_eq!(delivery.program_layout, program_layout);
+        assert_eq!(delivery.target_layout, channel_layout);
         weak = Arc::downgrade(&source.renderer);
         assert!(source.renderer.owner_installation_verifier().is_none());
         let before = cursors(&source.renderer);
