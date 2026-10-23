@@ -9,11 +9,12 @@ fn peak_includes_all_four_actual_phase_row_types_and_one_event_key_payload() {
     let requested = Layout::array::<RequestedTarget>(lanes).unwrap().size();
     let prepared = Layout::array::<PreparedNoteTarget>(lanes).unwrap().size();
     let event_bytes = Layout::array::<PreparedNoteEvent>(events).unwrap().size();
+    let index = Layout::array::<usize>(events / 2).unwrap().size();
     let expected = [
-        projected,
-        projected + requested,
-        requested + prepared,
-        prepared,
+        projected + 3 * index,
+        projected + requested + index,
+        requested + prepared + index,
+        prepared + index,
     ]
     .into_iter()
     .max()

@@ -1755,7 +1755,9 @@ impl PreparedProcessorHost {
                 if let Err(error) =
                     Self::bind_entered_instance(instance, entry_binding.as_ref(), cancellation)
                         .map_err(AudioExecutionError::from)
-                        .and_then(|()| Self::bind_note_cold_entry(instance, pending_note_entry))
+                        .and_then(|()| {
+                            Self::bind_note_cold_entry(instance, pending_note_entry, entry)
+                        })
                 {
                     // Preserve the existing note-free cancellation evidence.
                     // A Note owner cannot resume an unconfirmed ledger entry.

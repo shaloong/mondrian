@@ -732,6 +732,7 @@ impl AudioRenderSession {
         self.processor_host.validate_vst3_note_entry(self.plan.program(), entry)?;
         if !self.plan.schedule.notes.is_empty() {
             self.validate_state_entry(entry)?;
+            self.processor_host.validate_note_cold_capacity(&self.plan.schedule, entry)?;
         }
         Ok(())
     }

@@ -15,6 +15,7 @@ use mondrian_core::{
     AudioNoteId, AudioNoteLaneId, AudioSamplePosition, AudioSampleRate, AudioSampleRounding,
 };
 use mondrian_timeline::audio::{AudioNoteTarget, AudioProcessorDefinitionRef};
+use std::mem::size_of;
 
 /// Pure format admission on the actual selected target, before resolver IO.
 /// A VST Note always needs an authored musical reference; CLAP keeps None.
@@ -45,6 +46,8 @@ pub(crate) struct PreparedNoteEvent {
     pub(crate) channel: u8,
     pub(crate) key: u8,
     pub(crate) velocity: f64,
+    /// Mutual endpoint index in this one immutable, sorted score.
+    pub(crate) mate_event_index: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -59,6 +62,7 @@ pub(crate) struct ProjectedNoteScore {
     sample_rate: u32,
     lanes: Vec<ProjectedLane>,
     events: Vec<PreparedNoteEvent>,
+    on_events_by_author: Vec<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -74,6 +78,7 @@ pub(crate) struct RequestedNoteScore {
     sample_rate: u32,
     targets: Vec<RequestedTarget>,
     events: Vec<PreparedNoteEvent>,
+    on_events_by_author: Vec<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -96,6 +101,7 @@ pub(crate) struct PreparedNoteScore {
     sample_rate: u32,
     targets: Vec<PreparedNoteTarget>,
     events: Vec<PreparedNoteEvent>,
+    on_events_by_author: Vec<usize>,
 }
 
 fn invalid(detail: &str) -> AudioCompileError {
@@ -140,6 +146,20 @@ fn note_phase_payload_bytes(
     events: usize,
     key_bytes: usize,
 ) -> Result<usize, AudioCompileError> {
+    let project = matches!(&rows, NotePhaseRows::Project { .. });
+    let index_entries = events
+        .div_ceil(2)
+        .checked_mul(if project { 3 } else { 1 })
+        .ok_or(AudioCompileError::NoteEventCountOverflow)?;
+    note_phase_payload_with_index(rows, events, key_bytes, index_entries)
+}
+
+fn note_phase_payload_with_index(
+    rows: NotePhaseRows,
+    events: usize,
+    key_bytes: usize,
+    index_entries: usize,
+) -> Result<usize, AudioCompileError> {
     use std::alloc::Layout;
 
     let overflow = || AudioCompileError::NoteEventCountOverflow;
@@ -165,8 +185,10 @@ fn note_phase_payload_bytes(
         }
     };
     let event_bytes = Layout::array::<PreparedNoteEvent>(events).map_err(|_| overflow())?.size();
+    let index_bytes = Layout::array::<usize>(index_entries).map_err(|_| overflow())?.size();
     row_bytes
         .checked_add(event_bytes)
+        .and_then(|bytes| bytes.checked_add(index_bytes))
         .and_then(|bytes| bytes.checked_add(key_bytes))
         .ok_or_else(overflow)
 }
@@ -258,6 +280,7 @@ impl ProjectedNoteScore {
                 .binary_search_by_key(&lane.id, |value| value.lane_id)
                 .map_err(|_| invalid("prepared Note lane rank is absent"))?;
             for note in &lane.notes {
+                let pair = events.len() / 2;
                 let project = |time| {
                     AudioSamplePosition::from_timeline_time(time, rate, AudioSampleRounding::Ceil)
                         .map(|position| position.sample())
@@ -286,6 +309,7 @@ impl ProjectedNoteScore {
                     channel: note.channel,
                     key: note.key,
                     velocity: note.on_velocity,
+                    mate_event_index: pair,
                 });
                 events.push(PreparedNoteEvent {
                     sample: end,
@@ -296,30 +320,60 @@ impl ProjectedNoteScore {
                     channel: note.channel,
                     key: note.key,
                     velocity: note.off_velocity,
+                    mate_event_index: pair,
                 });
             }
         }
         events.sort_unstable_by_key(|event| {
             (event.sample, event.phase, event.lane_id, event.note_id)
         });
+        let mut pairs = reserve::<[usize; 2]>(event_count / 2)?;
+        pairs.resize(event_count / 2, [usize::MAX; 2]);
+        let mut on_events_by_author = reserve::<usize>(event_count / 2)?;
+        for (index, event) in events.iter().enumerate() {
+            pairs[event.mate_event_index][usize::from(event.phase == PreparedNotePhase::Off)] =
+                index;
+            if event.phase == PreparedNotePhase::On {
+                on_events_by_author.push(index);
+            }
+        }
+        for event in &mut events {
+            event.mate_event_index =
+                pairs[event.mate_event_index][usize::from(event.phase == PreparedNotePhase::On)];
+        }
+        on_events_by_author
+            .sort_unstable_by_key(|&index| (events[index].lane_id, events[index].note_id));
+        // These capacities overlap physically until pair projection finishes.
+        require_requested_capacity(pairs.capacity(), event_count / 2)?;
+        require_requested_capacity(on_events_by_author.capacity(), event_count / 2)?;
+        #[cfg(test)]
+        phase_envelope_tests::observe_pair_projection(&pairs, &on_events_by_author, &events);
+        let project_index_entries = pairs
+            .capacity()
+            .checked_mul(2)
+            .and_then(|count| count.checked_add(on_events_by_author.capacity()))
+            .ok_or(AudioCompileError::NoteEventCountOverflow)?;
+        drop(pairs);
         let requested_payload = requested_payload?;
         let key_capacity = projected_lanes.iter().try_fold(0_usize, |bytes, lane| {
             bytes
                 .checked_add(lane.target.input_port_key.capacity())
                 .ok_or(AudioCompileError::NoteEventCountOverflow)
         })?;
-        let actual_payload = note_phase_payload_bytes(
+        let actual_payload = note_phase_payload_with_index(
             NotePhaseRows::Project { lanes: projected_lanes.capacity() },
             events.capacity(),
             key_capacity,
+            project_index_entries,
         )?;
         require_phase_payload(actual_payload, requested_payload)?;
         #[cfg(test)]
-        phase_envelope_tests::observe_project(&projected_lanes, &events);
+        phase_envelope_tests::observe_project(&projected_lanes, &events, &on_events_by_author);
         Ok(Self {
             sample_rate: rate.hz(),
             lanes: projected_lanes,
             events,
+            on_events_by_author,
         })
     }
 
@@ -341,6 +395,7 @@ impl ProjectedNoteScore {
         self,
         program: &CompiledAudioProgram,
     ) -> Result<RequestedNoteScore, AudioCompileError> {
+        require_requested_capacity(self.on_events_by_author.capacity(), self.events.len() / 2)?;
         let source_capacity = self.lanes.capacity();
         let lane_count = self.lanes.len();
         let requested_payload = self
@@ -371,6 +426,7 @@ impl ProjectedNoteScore {
             source_capacity,
             &targets,
             &self.events,
+            &self.on_events_by_author,
         );
         for _ in 0..lane_count {
             let Some(lane) = source_lanes.next() else {
@@ -425,18 +481,20 @@ impl ProjectedNoteScore {
                 source_capacity,
                 &targets,
                 &self.events,
+                &self.on_events_by_author,
             );
         }
         // The emptied iterator still owns its original allocation. Count its
         // captured backing capacity, not the remaining slice length, until Drop.
         let requested_payload = requested_payload?;
-        let actual_payload = note_phase_payload_bytes(
+        let actual_payload = note_phase_payload_with_index(
             NotePhaseRows::Resolve {
                 projected: source_capacity,
                 requested: targets.capacity(),
             },
             self.events.capacity(),
             key_capacity?,
+            self.on_events_by_author.capacity(),
         )?;
         require_phase_payload(actual_payload, requested_payload)?;
         drop(source_lanes);
@@ -444,6 +502,7 @@ impl ProjectedNoteScore {
             sample_rate: self.sample_rate,
             targets,
             events: self.events,
+            on_events_by_author: self.on_events_by_author,
         })
     }
 }
@@ -465,6 +524,7 @@ impl RequestedNoteScore {
         if self.sample_rate != rate.hz() {
             return Err(AudioCompileError::InvalidRenderContract);
         }
+        require_requested_capacity(self.on_events_by_author.capacity(), self.events.len() / 2)?;
         let source_capacity = self.targets.capacity();
         let lane_count = self.targets.len();
         let event_count = self.events.len();
@@ -496,6 +556,7 @@ impl RequestedNoteScore {
             source_capacity,
             &targets,
             &self.events,
+            &self.on_events_by_author,
         );
         for _ in 0..lane_count {
             let Some(request) = source_targets.next() else {
@@ -538,6 +599,7 @@ impl RequestedNoteScore {
                 source_capacity,
                 &targets,
                 &self.events,
+                &self.on_events_by_author,
             );
         }
         for event in &self.events {
@@ -555,13 +617,14 @@ impl RequestedNoteScore {
         }
         // Existing grid/occurrence/port/rank errors win over a new phase refusal.
         let requested_payload = requested_payload?;
-        let actual_payload = note_phase_payload_bytes(
+        let actual_payload = note_phase_payload_with_index(
             NotePhaseRows::Bind {
                 requested: source_capacity,
                 prepared: targets.capacity(),
             },
             self.events.capacity(),
             key_capacity?,
+            self.on_events_by_author.capacity(),
         )?;
         require_phase_payload(actual_payload, requested_payload)?;
         drop(source_targets);
@@ -569,7 +632,9 @@ impl RequestedNoteScore {
             sample_rate: self.sample_rate,
             targets,
             events: self.events,
+            on_events_by_author: self.on_events_by_author,
         };
+        bound.validate_pairs().map_err(invalid)?;
         let retained_upper = note_phase_payload_bytes(
             NotePhaseRows::Retained { prepared: lane_count },
             event_count,
@@ -617,7 +682,32 @@ impl PreparedNoteScore {
         events.sort_unstable_by_key(|event| {
             (event.sample, event.phase, event.lane_id, event.note_id)
         });
-        Self { sample_rate: 48_000, targets, events }
+        for index in 0..events.len() {
+            let event = events[index];
+            events[index].mate_event_index = events
+                .iter()
+                .enumerate()
+                .find_map(|(mate, other)| {
+                    (other.phase != event.phase
+                        && other.lane_id == event.lane_id
+                        && other.note_id == event.note_id
+                        && other.target_slot == event.target_slot)
+                        .then_some(mate)
+                })
+                .unwrap_or(usize::MAX);
+        }
+        let mut on_events_by_author = events
+            .iter()
+            .enumerate()
+            .filter_map(|(i, event)| (event.phase == PreparedNotePhase::On).then_some(i))
+            .collect::<Vec<_>>();
+        on_events_by_author.sort_unstable_by_key(|&i| (events[i].lane_id, events[i].note_id));
+        Self {
+            sample_rate: 48_000,
+            targets,
+            events,
+            on_events_by_author,
+        }
     }
     pub(crate) fn is_empty(&self) -> bool {
         self.events.is_empty()
@@ -625,11 +715,112 @@ impl PreparedNoteScore {
     pub(crate) const fn sample_rate(&self) -> u32 {
         self.sample_rate
     }
+    #[cfg(test)]
     pub(crate) fn events(&self) -> &[PreparedNoteEvent] {
         &self.events
     }
     pub(crate) fn targets(&self) -> &[PreparedNoteTarget] {
         &self.targets
+    }
+
+    /// Validate the one paired IR before any window can consume an endpoint.
+    /// Orphan/ambiguous test IR remains refused; it cannot become a chase grant.
+    pub(crate) fn validate_pairs(&self) -> Result<(), &'static str> {
+        if !self.events.len().is_multiple_of(2)
+            || self.on_events_by_author.len() != self.events.len() / 2
+        {
+            return Err("Off has no retained original On");
+        }
+        let mut prior = None;
+        for &index in &self.on_events_by_author {
+            let on = self.events.get(index).ok_or("Off has no retained original On")?;
+            let identity = (on.lane_id, on.note_id);
+            if on.phase != PreparedNotePhase::On {
+                return Err("Off has no retained original On");
+            }
+            if prior.is_some_and(|old| old >= identity) {
+                return Err("duplicate authored Note On");
+            }
+            prior = Some(identity);
+        }
+        for (index, event) in self.events.iter().enumerate() {
+            let target = self
+                .targets
+                .get(event.target_slot)
+                .ok_or("prepared Note event target rank is absent")?;
+            if event.lane_id != target.lane_id {
+                return Err("prepared Note event target identity differs");
+            }
+            let mate = self
+                .events
+                .get(event.mate_event_index)
+                .ok_or("Off has no retained original On")?;
+            if mate.mate_event_index != index
+                || mate.phase == event.phase
+                || mate.note_id != event.note_id
+                || mate.lane_id != event.lane_id
+            {
+                return Err("Off has no retained original On");
+            }
+            if mate.target_slot != event.target_slot
+                || mate.channel != event.channel
+                || mate.key != event.key
+            {
+                return Err("Off changed its original input port");
+            }
+            if event.phase == PreparedNotePhase::On && event.sample >= mate.sample {
+                return Err("Off changed its original input port");
+            }
+            if index > 0 && event_order(self.events[index - 1]) > event_order(*event) {
+                return Err("prepared Note event order differs");
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn window(
+        &self,
+        start: i64,
+        end: i64,
+        cutoff: i64,
+    ) -> Result<PreparedNoteWindow<'_>, &'static str> {
+        self.validate_pairs()?;
+        if end < start {
+            return Err("Note window overflow");
+        }
+        let begin = self.events.partition_point(|event| event.sample < start.max(cutoff));
+        let finish = self.events.partition_point(|event| event.sample < end);
+        Ok(PreparedNoteWindow {
+            score: self,
+            cutoff,
+            normal: begin.min(finish),
+            finish,
+            chase: 0,
+            include_chase: start <= cutoff && cutoff < end,
+        })
+    }
+
+    /// The pure cold batch is a point at S, not a guessed future window.
+    /// Inclusive lookup also preserves the signed entry domain at i64::MAX.
+    pub(crate) fn entry_events(&self, cutoff: i64) -> Result<PreparedNoteWindow<'_>, &'static str> {
+        self.validate_pairs()?;
+        Ok(PreparedNoteWindow {
+            score: self,
+            cutoff,
+            normal: self.events.partition_point(|event| event.sample < cutoff),
+            finish: self.events.partition_point(|event| event.sample <= cutoff),
+            chase: 0,
+            include_chase: true,
+        })
+    }
+
+    pub(crate) fn effective_on_sample(&self, event: PreparedNoteEvent, cutoff: i64) -> i64 {
+        let on = if event.phase == PreparedNotePhase::On {
+            event
+        } else {
+            self.events[event.mate_event_index]
+        };
+        on.sample.max(cutoff)
     }
 
     /// Actual retained allocation-requested payload, not len estimates or
@@ -645,9 +836,15 @@ impl PreparedNoteScore {
             .capacity()
             .checked_mul(std::mem::size_of::<PreparedNoteTarget>())
             .ok_or(AudioResourceFootprintError::ExtentOverflow)?;
+        let index_bytes = self
+            .on_events_by_author
+            .capacity()
+            .checked_mul(size_of::<usize>())
+            .ok_or(AudioResourceFootprintError::ExtentOverflow)?;
         self.targets.iter().try_fold(
             event_bytes
-                .checked_add(target_bytes)
+                .checked_add(index_bytes)
+                .and_then(|bytes| bytes.checked_add(target_bytes))
                 .ok_or(AudioResourceFootprintError::ExtentOverflow)?,
             |bytes, target| {
                 bytes
@@ -665,12 +862,88 @@ impl PreparedNoteScore {
     ) -> Result<(), AudioProcessorFactoryStorageError> {
         visitor(AudioProcessorFactoryStorageBorrow::complete(&self.events)?)?;
         visitor(AudioProcessorFactoryStorageBorrow::complete(&self.targets)?)?;
+        visitor(AudioProcessorFactoryStorageBorrow::complete(
+            &self.on_events_by_author,
+        )?)?;
         for target in &self.targets {
             visitor(AudioProcessorFactoryStorageBorrow::complete(
                 &target.input_port_key,
             )?)?;
         }
         Ok(())
+    }
+}
+
+fn event_order(event: PreparedNoteEvent) -> (i64, PreparedNotePhase, AudioNoteLaneId, AudioNoteId) {
+    (event.sample, event.phase, event.lane_id, event.note_id)
+}
+
+/// One allocation-free merge of paired original events and deterministic cold
+/// retriggers. Both prospective preflight and admitted delivery consume it.
+/// The sole ledger owns cutoff; this view retains no epoch or delivery state.
+#[derive(Clone)]
+pub(crate) struct PreparedNoteWindow<'a> {
+    score: &'a PreparedNoteScore,
+    cutoff: i64,
+    normal: usize,
+    finish: usize,
+    chase: usize,
+    include_chase: bool,
+}
+impl PreparedNoteWindow<'_> {
+    fn normal(&mut self) -> Option<PreparedNoteEvent> {
+        while self.normal < self.finish {
+            let event = self.score.events[self.normal];
+            if event.phase == PreparedNotePhase::Off
+                && event.sample == self.cutoff
+                && self.score.events[event.mate_event_index].sample < self.cutoff
+            {
+                self.normal += 1;
+            } else {
+                return Some(event);
+            }
+        }
+        None
+    }
+    fn chased(&mut self) -> Option<PreparedNoteEvent> {
+        if !self.include_chase {
+            return None;
+        }
+        while let Some(&index) = self.score.on_events_by_author.get(self.chase) {
+            let mut on = self.score.events[index];
+            let off = self.score.events[on.mate_event_index];
+            if on.sample < self.cutoff && self.cutoff < off.sample {
+                on.sample = self.cutoff;
+                return Some(on);
+            }
+            self.chase += 1;
+        }
+        None
+    }
+}
+impl Iterator for PreparedNoteWindow<'_> {
+    type Item = PreparedNoteEvent;
+    fn next(&mut self) -> Option<Self::Item> {
+        match (self.normal(), self.chased()) {
+            (None, None) => None,
+            (Some(event), None) => {
+                self.normal += 1;
+                Some(event)
+            }
+            (None, Some(event)) => {
+                self.chase += 1;
+                Some(event)
+            }
+            (Some(normal), Some(chased)) => {
+                if event_order(normal) <= event_order(chased) {
+                    self.normal += 1;
+                    Some(normal)
+                } else {
+                    self.chase += 1;
+                    Some(chased)
+                }
+            }
+        }
     }
 }
 
@@ -1103,6 +1376,7 @@ mod tests {
         bound.targets[0].input_port_key.reserve_exact(11);
         let expected = bound.events.capacity() * std::mem::size_of::<PreparedNoteEvent>()
             + bound.targets.capacity() * std::mem::size_of::<PreparedNoteTarget>()
+            + bound.on_events_by_author.capacity() * size_of::<usize>()
             + bound.targets[0].input_port_key.capacity();
         assert_eq!(bound.storage_bytes().unwrap(), expected);
         assert!(
@@ -1118,11 +1392,15 @@ mod tests {
                 Ok(())
             })
             .unwrap();
-        assert_eq!(visited.len(), 3);
+        assert_eq!(visited.len(), 4);
         assert_eq!(visited[0].address(), bound.events.as_ptr() as usize);
         assert_eq!(visited[1].address(), bound.targets.as_ptr() as usize);
         assert_eq!(
             visited[2].address(),
+            bound.on_events_by_author.as_ptr() as usize
+        );
+        assert_eq!(
+            visited[3].address(),
             bound.targets[0].input_port_key.as_ptr() as usize
         );
         assert_eq!(
@@ -1133,6 +1411,82 @@ mod tests {
             .iter()
             .all(|storage| storage.kind()
                 == crate::AudioProcessorFactoryStorageKind::CompleteAllocation));
+    }
+
+    #[test]
+    fn public_cutoff_merges_held_and_original_ons_by_author_identity() {
+        let target = target();
+        let notes = [
+            (60_u128, 1, 8),
+            (40, 2, 8),
+            (30, 5, 7),
+            (10, 0, 5),
+            (20, 3, 4),
+        ]
+        .into_iter()
+        .map(|(id, on, off)| {
+            let mut value = note(time(on, 48000), time(off, 48000));
+            value.id = AudioNoteId(uuid::Uuid::from_u128(id));
+            value
+        })
+        .collect();
+        let program = program(
+            vec![lane(&target, notes)],
+            clap(),
+            AudioProcessorInsertionPoint::PreFader,
+        );
+        let requested = ProjectedNoteScore::project(&program.note_lanes, rate(48000))
+            .unwrap()
+            .resolve_targets(&program)
+            .unwrap();
+        let processor = prepared(
+            requested.targets[0].occurrence,
+            port_contract(),
+            Arc::new(AtomicUsize::new(0)),
+        );
+        let mut score = requested.bind(&[processor], rate(48000)).unwrap();
+        assert_eq!(
+            score.window(2, 5, 5).unwrap().count(),
+            0,
+            "PDC priming is not the public cutoff"
+        );
+        let actual: Vec<_> = score
+            .window(2, 8, 5)
+            .unwrap()
+            .map(|e| (e.sample, e.phase, e.note_id.0.as_u128()))
+            .collect();
+        assert_eq!(
+            actual,
+            [
+                (5, PreparedNotePhase::On, 30),
+                (5, PreparedNotePhase::On, 40),
+                (5, PreparedNotePhase::On, 60),
+                (7, PreparedNotePhase::Off, 30)
+            ]
+        );
+        assert_eq!(score.window(-5, 0, -5).unwrap().count(), 0);
+        assert_eq!(score.entry_events(i64::MAX).unwrap().count(), 0);
+        assert_eq!(
+            score
+                .window(-5, 1, -5)
+                .unwrap()
+                .filter(|e| e.phase == PreparedNotePhase::On)
+                .count(),
+            1
+        );
+        // Corruption never turns a missing mate/index into an executable Off.
+        let mate = score.events[0].mate_event_index;
+        score.events[0].mate_event_index = usize::MAX;
+        assert_eq!(
+            score.window(2, 8, 5).err(),
+            Some("Off has no retained original On")
+        );
+        score.events[0].mate_event_index = mate;
+        score.on_events_by_author.pop();
+        assert_eq!(
+            score.window(2, 8, 5).err(),
+            Some("Off has no retained original On")
+        );
     }
 
     #[derive(Default)]

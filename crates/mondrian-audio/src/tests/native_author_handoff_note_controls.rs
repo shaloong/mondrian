@@ -266,7 +266,7 @@ impl AudioProcessor for NoteModelProcessor {
 }
 
 #[test]
-fn owned_installed_note_nonzero_entry_keeps_old_owner_and_original_off() {
+fn owned_installed_note_same_epoch_nonzero_entry_keeps_old_owner_and_original_off() {
     use mondrian_core::automation::{ParameterSchema, PropertyValue};
     let probe = Arc::new(Mutex::new(HandoffProbe::default()));
     let calls = Arc::new(Mutex::new(NoteCalls::default()));
@@ -405,17 +405,10 @@ fn owned_installed_note_nonzero_entry_keeps_old_owner_and_original_off() {
     let before_binding = probe.lock().unwrap().binding;
     let before_cursors = cursors(&runtime);
     let before_claim = source.current_claim().unwrap().unwrap();
-    assert!(matches!(
-        runtime.enter_state(AudioStateEntry {
-            epoch: AudioContinuityEpoch::new(48),
-            start_sample: 1,
-        }),
-        Err(AudioExecutionError::ProcessorHost(
-            AudioProcessorHostError::NoteExecutionRefused(
-                "Note score cold entry requires public origin zero; seek replay is unsupported"
-            )
-        ))
-    ));
+    assert_eq!(
+        runtime.enter_state(AudioStateEntry { epoch, start_sample: 1 }),
+        Err(AudioExecutionError::ReusedContinuityEpoch(epoch))
+    );
     assert_eq!(runtime.native_owner_lease(address).unwrap(), lease);
     assert_eq!(runtime.resource_root_identity(), identity);
     assert_eq!(cursors(&runtime), before_cursors);

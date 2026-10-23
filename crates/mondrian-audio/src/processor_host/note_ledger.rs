@@ -120,6 +120,9 @@ struct Record {
 pub(crate) struct NoteLedger {
     completion: AudioNoteCompletionPolicy,
     origin: Option<LedgerOrigin>,
+    // Public score cutoff of this confirmed cold epoch, independent of PDC.
+    // Ordinary author publication/rebinding preserves it with the origin.
+    public_cutoff: i64,
     records: Box<[Option<Record>]>,
     voice_capacity: usize,
     retained_records: usize,
@@ -196,6 +199,7 @@ impl NoteLedger {
         Ok(Self {
             completion,
             origin: None,
+            public_cutoff: 0,
             records: records.into_boxed_slice(),
             voice_capacity,
             retained_records: 0,
@@ -212,6 +216,29 @@ impl NoteLedger {
             active_voices: self.active_voices,
             next_native_id: self.next_native_id,
         })
+    }
+
+    pub(crate) fn public_cutoff(&self) -> Result<i64, LedgerError> {
+        self.bound_origin()?;
+        Ok(self.public_cutoff)
+    }
+
+    /// Entry knows only the cold batch at S, never a future consumer's window.
+    /// Old voices/records will be retired only by confirmed cold commit; their
+    /// counts grant no capacity credit here, while the next ID stays monotonic.
+    pub(crate) fn preflight_cold_on_count(&self, count: usize) -> Result<(), LedgerError> {
+        if count > self.records.len() {
+            return Err(LedgerError::RecordCapacity);
+        }
+        if self.completion == AudioNoteCompletionPolicy::NativeEnd && count > self.voice_capacity {
+            return Err(LedgerError::VoiceCapacity);
+        }
+        if u64::try_from(count).map_err(|_| LedgerError::NativeIdExhausted)?
+            > NATIVE_ID_LIMIT - self.next_native_id
+        {
+            return Err(LedgerError::NativeIdExhausted);
+        }
+        Ok(())
     }
 
     /// No mutation, allocation, future Off/End credit, or reservation token.
@@ -492,12 +519,14 @@ impl NoteLedger {
     pub(crate) fn commit_confirmed_cold_entry(
         &mut self,
         next: LedgerOrigin,
+        public_cutoff: i64,
     ) -> Result<(), LedgerError> {
         if next.address.epoch.is_none() {
             return Err(LedgerError::UnenteredOrigin);
         }
         let Some(current) = self.origin else {
             self.origin = Some(next);
+            self.public_cutoff = public_cutoff;
             return Ok(());
         };
         if next.object != current.object {
@@ -516,6 +545,7 @@ impl NoteLedger {
         self.retained_records = 0;
         self.active_voices = 0;
         self.origin = Some(next);
+        self.public_cutoff = public_cutoff;
         Ok(())
     }
 
@@ -524,6 +554,7 @@ impl NoteLedger {
     pub(super) fn commit_confirmed_replacement(
         &mut self,
         proof: super::notes::ConfirmedNoteProducerReplacement,
+        public_cutoff: i64,
     ) -> Result<(), LedgerError> {
         let (prior, next) = proof.into_origins();
         self.require_origin(prior)?;
@@ -543,6 +574,7 @@ impl NoteLedger {
         self.retained_records = 0;
         self.active_voices = 0;
         self.origin = Some(next);
+        self.public_cutoff = public_cutoff;
         // Never recycle IDs, even though the old producer was retired.
         Ok(())
     }
@@ -637,7 +669,7 @@ mod tests {
             NoteLedger::prepare(records, voices, AudioNoteCompletionPolicy::NativeEnd).unwrap();
         // Pure fixture simulates the parent's already confirmed native entry;
         // it neither performs nor proves that operation.
-        ledger.commit_confirmed_cold_entry(origin).unwrap();
+        ledger.commit_confirmed_cold_entry(origin, 0).unwrap();
         ledger
     }
 
@@ -872,7 +904,7 @@ mod tests {
         let mut next = origin;
         next.address.epoch = Some(AudioContinuityEpoch::new(2));
         next.binding = AudioProcessorBindingId::new();
-        ledger.commit_confirmed_cold_entry(next).unwrap();
+        ledger.commit_confirmed_cold_entry(next, 0).unwrap();
         assert_eq!(
             ledger.commit_on(next, on()),
             Err(LedgerError::NativeIdExhausted)
@@ -1082,7 +1114,7 @@ mod tests {
         let mut next = origin;
         next.binding = AudioProcessorBindingId::new();
         assert_eq!(
-            ledger.commit_confirmed_cold_entry(next),
+            ledger.commit_confirmed_cold_entry(next, 0),
             Err(LedgerError::UnchangedEpoch)
         );
         assert_eq!(ledger.usage().unwrap(), before);
@@ -1093,14 +1125,14 @@ mod tests {
             NonZeroU64::new(12).unwrap(),
         );
         assert_eq!(
-            ledger.commit_confirmed_cold_entry(replaced),
+            ledger.commit_confirmed_cold_entry(replaced, 0),
             Err(LedgerError::DifferentProducer)
         );
         assert_eq!(ledger.usage().unwrap(), before);
         let mut different_session = next;
         different_session.address.local.session_id = AudioRenderSessionId::new();
         assert_eq!(
-            ledger.commit_confirmed_cold_entry(different_session),
+            ledger.commit_confirmed_cold_entry(different_session, 0),
             Err(LedgerError::DifferentCursorOrOccurrence)
         );
         assert_eq!(ledger.usage().unwrap(), before);
@@ -1112,7 +1144,7 @@ mod tests {
                 different_plan.address.local.prepared_plan_id = AudioPreparedPlanId::new();
             }
             assert_eq!(
-                ledger.commit_confirmed_cold_entry(different_plan),
+                ledger.commit_confirmed_cold_entry(different_plan, 0),
                 Err(LedgerError::DifferentCursorOrOccurrence)
             );
             assert_eq!(ledger.usage().unwrap(), before);
@@ -1126,7 +1158,7 @@ mod tests {
             ledger.preflight_off(origin, note.author_id, note.port),
             Ok(tuple)
         );
-        ledger.commit_confirmed_cold_entry(next).unwrap();
+        ledger.commit_confirmed_cold_entry(next, 0).unwrap();
         assert_eq!(
             ledger.usage().unwrap(),
             LedgerUsage {
@@ -1235,7 +1267,7 @@ mod tests {
         missing.address.epoch = None;
         let mut unbound = NoteLedger::prepare(1, 1, AudioNoteCompletionPolicy::NativeEnd).unwrap();
         assert!(matches!(
-            unbound.commit_confirmed_cold_entry(missing),
+            unbound.commit_confirmed_cold_entry(missing, 0),
             Err(LedgerError::UnenteredOrigin)
         ));
         let mut ledger = bound_ledger(origin, 1, 1);
@@ -1243,7 +1275,7 @@ mod tests {
         let tuple = ledger.commit_on(origin, note).unwrap();
         let before = ledger.usage().unwrap();
         assert_eq!(
-            ledger.commit_confirmed_cold_entry(missing),
+            ledger.commit_confirmed_cold_entry(missing, 0),
             Err(LedgerError::UnenteredOrigin)
         );
         assert_eq!(ledger.usage().unwrap(), before);
@@ -1259,7 +1291,7 @@ mod tests {
         let origin = origin();
         let mut ledger =
             NoteLedger::prepare(2, 0, AudioNoteCompletionPolicy::SuccessfulOffBlock).unwrap();
-        ledger.commit_confirmed_cold_entry(origin).unwrap();
+        ledger.commit_confirmed_cold_entry(origin, 0).unwrap();
         let first = on();
         let second = on();
         let a = ledger.commit_on(origin, first).unwrap();
@@ -1324,7 +1356,7 @@ mod tests {
         let origin = origin();
         let mut ledger =
             NoteLedger::prepare(1, 0, AudioNoteCompletionPolicy::SuccessfulOffBlock).unwrap();
-        ledger.commit_confirmed_cold_entry(origin).unwrap();
+        ledger.commit_confirmed_cold_entry(origin, 0).unwrap();
         let storage = ledger.records.as_ptr();
         for id in 0..1100 {
             let note = on();
@@ -1403,7 +1435,7 @@ mod tests {
         let mut missing = origin;
         missing.address.epoch = None;
         assert_eq!(
-            ledger.commit_confirmed_cold_entry(missing),
+            ledger.commit_confirmed_cold_entry(missing, 0),
             Err(LedgerError::UnenteredOrigin)
         );
         assert_eq!(ledger.origin, None);
@@ -1416,7 +1448,7 @@ mod tests {
         // The parent would call only after its real successful cold-origin
         // entry/bind. These assertions check helper state and storage identity,
         // not a measured allocator trace or native acknowledgement.
-        ledger.commit_confirmed_cold_entry(origin).unwrap();
+        ledger.commit_confirmed_cold_entry(origin, 0).unwrap();
         assert_eq!(ledger.origin, Some(origin));
         assert_eq!(ledger.records.as_ptr(), storage);
         assert_eq!(ledger.records.len(), 2);
@@ -1433,7 +1465,7 @@ mod tests {
         let mut next = origin;
         next.binding = AudioProcessorBindingId::new();
         next.address.epoch = Some(AudioContinuityEpoch::new(2));
-        ledger.commit_confirmed_cold_entry(next).unwrap();
+        ledger.commit_confirmed_cold_entry(next, 0).unwrap();
         assert_eq!(ledger.records.as_ptr(), storage);
         assert_eq!(ledger.records.len(), 2);
         assert_eq!(
@@ -1453,7 +1485,7 @@ mod tests {
         );
         replaced.address.epoch = Some(AudioContinuityEpoch::new(3));
         assert_eq!(
-            ledger.commit_confirmed_cold_entry(replaced),
+            ledger.commit_confirmed_cold_entry(replaced, 0),
             Err(LedgerError::DifferentProducer)
         );
         assert_eq!(ledger.origin, Some(next));
@@ -1537,7 +1569,7 @@ mod continuing_rebind_contracts {
         let next = next(prior);
         let mut ledger = NoteLedger::prepare(4, 3, AudioNoteCompletionPolicy::NativeEnd).unwrap();
         // Fixture assumption only: the parent completed its genuine cold entry.
-        ledger.commit_confirmed_cold_entry(prior).unwrap();
+        ledger.commit_confirmed_cold_entry(prior, 0).unwrap();
         let pressed = on();
         let releasing = on();
         let early = on();
@@ -1629,7 +1661,7 @@ mod continuing_rebind_contracts {
         let prior = origin();
         let next = next(prior);
         let mut ledger = NoteLedger::prepare(1, 1, AudioNoteCompletionPolicy::NativeEnd).unwrap();
-        ledger.commit_confirmed_cold_entry(prior).unwrap();
+        ledger.commit_confirmed_cold_entry(prior, 0).unwrap();
         // Arithmetic boundary fixture; not a claim that all preceding IDs were executed.
         ledger.next_native_id = i32::MAX as u64;
         let note = on();
@@ -1666,5 +1698,56 @@ mod continuing_rebind_contracts {
         );
         assert_eq!(ledger.usage().unwrap(), usage);
         assert_eq!(ledger.records.as_ptr(), storage);
+    }
+    #[test]
+    fn cold_capacity_uses_empty_voices_but_preserves_ids_and_only_confirmed_cutoff() {
+        let first = origin();
+        let mut ledger = bound_ledger(first, 2, 1);
+        ledger.commit_on(first, on()).unwrap();
+        let before = ledger.usage().unwrap();
+        assert_eq!(
+            ledger.preflight_cold_on_count(3),
+            Err(LedgerError::RecordCapacity)
+        );
+        assert_eq!(
+            ledger.preflight_cold_on_count(2),
+            Err(LedgerError::VoiceCapacity)
+        );
+        assert_eq!(
+            ledger.preflight_cold_on_count(1),
+            Ok(()),
+            "old voice is not a new cold voice"
+        );
+        assert_eq!(ledger.usage().unwrap(), before);
+        assert_eq!(ledger.public_cutoff().unwrap(), 0);
+        ledger.next_native_id = NATIVE_ID_LIMIT;
+        assert_eq!(
+            ledger.preflight_cold_on_count(1),
+            Err(LedgerError::NativeIdExhausted)
+        );
+        assert_eq!(ledger.public_cutoff().unwrap(), 0);
+        ledger.next_native_id = before.next_native_id;
+        let next = LedgerOrigin {
+            address: AudioNativeProcessorAddress {
+                epoch: Some(AudioContinuityEpoch::new(2)),
+                ..first.address
+            },
+            binding: AudioProcessorBindingId::new(),
+            ..first
+        };
+        ledger.commit_confirmed_cold_entry(next, -5).unwrap();
+        assert_eq!(ledger.public_cutoff().unwrap(), -5);
+        assert_eq!(
+            ledger.usage().unwrap().next_native_id,
+            before.next_native_id
+        );
+        let rebound = LedgerOrigin { binding: AudioProcessorBindingId::new(), ..next };
+        ledger.preflight_continuing_rebind(next, rebound).unwrap();
+        ledger.commit_prevalidated_continuing_rebind(rebound);
+        assert_eq!(
+            ledger.public_cutoff().unwrap(),
+            -5,
+            "ordinary author rebind preserves epoch cutoff"
+        );
     }
 }

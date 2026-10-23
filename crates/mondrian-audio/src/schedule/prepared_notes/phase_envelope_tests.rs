@@ -45,6 +45,8 @@ struct Observation {
     event_pointer: usize,
     event_length: usize,
     event_capacity: usize,
+    index_pointer: usize,
+    index_capacity: usize,
     keys: [Option<KeyOwner>; 2],
     key_count: usize,
     key_capacity: usize,
@@ -88,6 +90,7 @@ fn observation<T>(
     source_capacity: usize,
     destination: &Vec<T>,
     events: &Vec<PreparedNoteEvent>,
+    index: &Vec<usize>,
 ) -> Observation {
     Observation {
         phase,
@@ -100,15 +103,21 @@ fn observation<T>(
         event_pointer: events.as_ptr() as usize,
         event_length: events.len(),
         event_capacity: events.capacity(),
+        index_pointer: index.as_ptr() as usize,
+        index_capacity: index.capacity(),
         keys: [None; 2],
         key_count: 0,
         key_capacity: 0,
     }
 }
 
-pub(super) fn observe_project(lanes: &Vec<ProjectedLane>, events: &Vec<PreparedNoteEvent>) {
+pub(super) fn observe_project(
+    lanes: &Vec<ProjectedLane>,
+    events: &Vec<PreparedNoteEvent>,
+    index: &Vec<usize>,
+) {
     capture(
-        observation(Phase::Project, 0, 0, 0, lanes, events),
+        observation(Phase::Project, 0, 0, 0, lanes, events, index),
         lanes.iter().map(|lane| key(lane.lane_id, &lane.target.input_port_key)),
     );
 }
@@ -118,6 +127,7 @@ pub(super) fn observe_resolve(
     backing_capacity: usize,
     destination: &Vec<RequestedTarget>,
     events: &Vec<PreparedNoteEvent>,
+    index: &Vec<usize>,
 ) {
     capture(
         observation(
@@ -127,6 +137,7 @@ pub(super) fn observe_resolve(
             backing_capacity,
             destination,
             events,
+            index,
         ),
         destination
             .iter()
@@ -145,6 +156,7 @@ pub(super) fn observe_bind(
     backing_capacity: usize,
     destination: &Vec<PreparedNoteTarget>,
     events: &Vec<PreparedNoteEvent>,
+    index: &Vec<usize>,
 ) {
     capture(
         observation(
@@ -154,6 +166,7 @@ pub(super) fn observe_bind(
             backing_capacity,
             destination,
             events,
+            index,
         ),
         destination
             .iter()
@@ -169,9 +182,38 @@ pub(super) fn observe_bind(
 
 pub(super) fn observe_retained(score: &PreparedNoteScore) {
     capture(
-        observation(Phase::Retained, 0, 0, 0, &score.targets, &score.events),
+        observation(
+            Phase::Retained,
+            0,
+            0,
+            0,
+            &score.targets,
+            &score.events,
+            &score.on_events_by_author,
+        ),
         score.targets.iter().map(|target| key(target.lane_id, &target.input_port_key)),
     );
+}
+
+pub(super) fn observe_pair_projection(
+    pairs: &Vec<[usize; 2]>,
+    index: &Vec<usize>,
+    events: &[PreparedNoteEvent],
+) {
+    // Both real allocations coexist here. No allocator mock or length-only peak.
+    assert_eq!(
+        pairs.capacity().checked_mul(2).unwrap() + index.capacity(),
+        events.len() / 2 * 3
+    );
+    assert_eq!(index.len(), events.len() / 2);
+    for &on in index {
+        let mate = events[on].mate_event_index;
+        assert_eq!(events[mate].mate_event_index, on);
+        assert_eq!(
+            (events[on].phase, events[mate].phase),
+            (PreparedNotePhase::On, PreparedNotePhase::Off)
+        );
+    }
 }
 
 fn traced<R>(run: impl FnOnce() -> R) -> (R, Vec<Observation>) {
@@ -442,7 +484,13 @@ fn target_layout_model_uses_unequal_shape_and_existing_p1_a_once() {
     ] {
         assert!(size > 0);
     }
-    let expected = [p + e + 3, p + q + e + 3, q + b + e + 3, b + e + 3];
+    let i = Layout::array::<usize>(3).unwrap().size();
+    let expected = [
+        p + e + 3 + 3 * i,
+        p + q + e + 3 + i,
+        q + b + e + 3 + i,
+        b + e + 3 + i,
+    ];
     let actual = [
         note_phase_payload_bytes(NotePhaseRows::Project { lanes: 2 }, 6, 3).unwrap(),
         note_phase_payload_bytes(NotePhaseRows::Resolve { projected: 2, requested: 2 }, 6, 3)
@@ -453,7 +501,7 @@ fn target_layout_model_uses_unequal_shape_and_existing_p1_a_once() {
     assert_eq!(actual, expected);
     assert_eq!(
         a.checked_add(actual[..3].iter().copied().max().unwrap()).unwrap(),
-        independent_a + (p + e + 3).max(p + q + e + 3).max(q + b + e + 3)
+        independent_a + (p + e + 3 + 3 * i).max(p + q + e + 3 + i).max(q + b + e + 3 + i)
     );
     // The combined expression is a control observation, not a new stored grant.
     let projected = ProjectedNoteScore::project(&program.note_lanes, rate()).unwrap();
@@ -527,10 +575,12 @@ fn real_intoiter_backing_coexists_and_event_key_owners_move_once() {
             let simultaneous = source.1 * source_width
                 + record.destination_capacity * destination_width
                 + record.event_capacity * std::mem::size_of::<PreparedNoteEvent>()
+                + record.index_capacity * size_of::<usize>()
                 + record.key_capacity;
             let remaining_only = record.source_remaining * source_width
                 + record.destination_capacity * destination_width
                 + record.event_capacity * std::mem::size_of::<PreparedNoteEvent>()
+                + record.index_capacity * size_of::<usize>()
                 + record.key_capacity;
             if consumed > 0 {
                 assert!(
@@ -544,6 +594,11 @@ fn real_intoiter_backing_coexists_and_event_key_owners_move_once() {
     expected_keys.sort_by_key(|owner| owner.lane_id);
     for record in &trace {
         assert_eq!(record.event_pointer, bound.events.as_ptr() as usize);
+        assert_eq!(
+            record.index_pointer,
+            bound.on_events_by_author.as_ptr() as usize
+        );
+        assert_eq!(record.index_capacity, 3);
         assert_eq!(record.event_length, 6);
         assert_eq!(record.event_capacity, 6);
         assert_eq!(record.key_count, 2);
@@ -637,6 +692,7 @@ fn real_intoiter_backing_coexists_and_event_key_owners_move_once() {
     }
     let final_expected = 2 * std::mem::size_of::<PreparedNoteTarget>()
         + 6 * std::mem::size_of::<PreparedNoteEvent>()
+        + 3 * size_of::<usize>()
         + 3;
     assert_eq!(bound.storage_bytes().unwrap(), final_expected);
     assert_eq!(

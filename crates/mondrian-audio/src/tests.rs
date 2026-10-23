@@ -4756,6 +4756,7 @@ mod vst3_note_entry_controls {
         probe: Arc<Mutex<Probe>>,
         fail_entry: bool,
         fail_entry_at: Option<AudioProcessorInstanceId>,
+        upstream_latency: usize,
     }
     struct Factory {
         probe: Arc<Mutex<Probe>>,
@@ -4763,6 +4764,7 @@ mod vst3_note_entry_controls {
         notes: bool,
         parameters: usize,
         fail_entry: bool,
+        latency: usize,
     }
     struct Processor {
         probe: Arc<Mutex<Probe>>,
@@ -4808,6 +4810,11 @@ mod vst3_note_entry_controls {
                 probe: Arc::clone(&self.probe),
                 serial,
                 notes: request.note_input_requested(),
+                latency: if request.note_input_requested() {
+                    0
+                } else {
+                    self.upstream_latency
+                },
                 parameters: request.parameters().len(),
                 fail_entry: self.fail_entry
                     || self.fail_entry_at == Some(request.occurrence().instance_id),
@@ -4816,8 +4823,15 @@ mod vst3_note_entry_controls {
     }
     impl AudioProcessorFactory for Factory {
         fn execution_contract(&self) -> AudioProcessorExecutionContract {
-            AudioProcessorExecutionContract::new(0, AudioProcessorTail::None, true, false, true, 0)
-                .unwrap()
+            AudioProcessorExecutionContract::new(
+                self.latency,
+                AudioProcessorTail::None,
+                true,
+                false,
+                true,
+                0,
+            )
+            .unwrap()
         }
         fn note_input_contract(&self) -> AudioProcessorNoteInputContract {
             if self.notes {
@@ -4995,6 +5009,7 @@ mod vst3_note_entry_controls {
                 probe: Arc::clone(probe),
                 fail_entry,
                 fail_entry_at: None,
+                upstream_latency: 0,
             },
             contract(),
             None,
@@ -5067,6 +5082,7 @@ mod vst3_note_entry_controls {
                 probe: Arc::clone(&probe),
                 fail_entry: false,
                 fail_entry_at: None,
+                upstream_latency: 0,
             };
             let media = RecordingResolver::default();
             let result = AudioProgramRuntime::build_with_processor_resolver(
@@ -5107,6 +5123,7 @@ mod vst3_note_entry_controls {
                 probe: Arc::clone(&probe),
                 fail_entry: false,
                 fail_entry_at: None,
+                upstream_latency: 0,
             },
         )
         .err()
@@ -5168,6 +5185,107 @@ mod vst3_note_entry_controls {
     }
 
     #[test]
+    fn vst3_note_first_nonzero_entry_chases_only_the_known_cold_batch() {
+        let sequence = sequence();
+        let probe = Arc::new(Mutex::new(Probe::default()));
+        let mut runtime = build(&sequence, &probe, false).unwrap();
+        let (source, claim) = install(&mut runtime);
+        // Capacity is one retained record. Held0..2 fits; the later On3 is
+        // not prematurely charged to an entry with no render window yet.
+        runtime.enter_state(entry(1, 1)).unwrap();
+        assert!(
+            probe.lock().unwrap().events.is_empty(),
+            "no ID/delivery at entry"
+        );
+        for start in 1..5 {
+            let mut pcm = [91.0];
+            runtime
+                .render_into(
+                    AudioRenderRequest { start_sample: start, frames: 1 },
+                    &mut pcm,
+                )
+                .unwrap();
+            assert_eq!(pcm, [(start + 1) as f32]);
+        }
+        let events = probe.lock().unwrap().events.clone();
+        assert_eq!(events.len(), 4);
+        for (event, (kind, id, velocity)) in events.iter().zip([
+            (AudioNoteEventKind::On, 0, 0.5_f64),
+            (AudioNoteEventKind::Off, 0, 0.25),
+            (AudioNoteEventKind::On, 1, 0.5),
+            (AudioNoteEventKind::Off, 1, 0.25),
+        ]) {
+            assert_eq!(
+                (event.sample_offset, event.kind, event.native_note_id),
+                (0, kind, id)
+            );
+            assert_eq!((event.channel, event.key, event.port_index), (15, 60, 0));
+            assert_eq!(event.velocity.to_bits(), velocity.to_bits());
+        }
+        assert_eq!(
+            source.current_claim().unwrap().unwrap().generation(),
+            claim.generation()
+        );
+    }
+
+    #[test]
+    fn note_signed_cold_entry_and_signal_underflow_are_admitted_before_native_mutation() {
+        let mut sequence = sequence();
+        let track = sequence.audio_tracks[0].id;
+        let rack = &mut sequence
+            .audio_program
+            .track_channels
+            .get_mut(&track)
+            .unwrap()
+            .strip
+            .pre_fader
+            .processors;
+        let mut upstream = rack[0].clone();
+        upstream.id = AudioProcessorInstanceId::new();
+        rack.insert(0, upstream);
+        let probe = Arc::new(Mutex::new(Probe::default()));
+        let mut runtime = AudioProgramRuntime::build_with_processor_resolver_and_resource_grant(
+            &sequence,
+            &[],
+            &RecordingResolver::default(),
+            &Resolver {
+                probe: Arc::clone(&probe),
+                fail_entry: false,
+                fail_entry_at: None,
+                upstream_latency: 3,
+            },
+            contract(),
+            None,
+            AudioRuntimeResourceGrant::new(1, 64 * 1024 * 1024, 64 * 1024 * 1024),
+        )
+        .unwrap();
+        let (source, claim) = install(&mut runtime);
+        let before = probe.lock().unwrap().clone();
+        let before_cursors = cursors(&runtime);
+        assert_eq!(
+            runtime.enter_state(entry(1, i64::MIN)),
+            Err(AudioExecutionError::BufferTooLarge)
+        );
+        assert_eq!(
+            *probe.lock().unwrap(),
+            before,
+            "no Poll, revoke, Bind or native entry on S-D underflow"
+        );
+        assert_eq!(cursors(&runtime), before_cursors);
+        runtime.native_owner_installation_verifier().unwrap().validate(&claim).unwrap();
+        runtime.enter_state(entry(2, -2)).unwrap();
+        let state = probe.lock().unwrap();
+        assert!(state.calls.contains(&Call::Enter(-2)));
+        assert!(state.calls.contains(&Call::Enter(-5)));
+        assert!(state.events.is_empty(), "entry assigns no native Note IDs");
+        drop(state);
+        assert_eq!(
+            source.current_claim().unwrap().unwrap().generation(),
+            claim.generation()
+        );
+    }
+
+    #[test]
     fn vst3_note_first_entry_binds_without_replacement_and_repeat_keeps_owner_and_ids() {
         for with_parameter in [false, true] {
             let mut sequence = sequence();
@@ -5196,11 +5314,12 @@ mod vst3_note_entry_controls {
             let (source, claim) = install(&mut runtime);
             let before = probe.lock().unwrap().clone();
             let before_cursors = cursors(&runtime);
-            assert!(matches!(runtime.enter_state(entry(6, 3)),
-                Err(AudioExecutionError::ProcessorHost(
-                    AudioProcessorHostError::NoteExecutionRefused(
-                        "Note score cold entry requires public origin zero; seek replay is unsupported"
-                    )))));
+            let cancelled = ExecutionCancellationToken::new();
+            cancelled.cancel();
+            assert_eq!(
+                runtime.enter_state_cancellable(entry(6, 3), &cancelled),
+                Err(crate::AudioNativeOwnerError::Cancelled.into())
+            );
             assert_eq!(*probe.lock().unwrap(), before);
             assert_eq!(cursors(&runtime), before_cursors);
             runtime.enter_state(entry(7, 0)).unwrap();
@@ -5234,23 +5353,16 @@ mod vst3_note_entry_controls {
                         let before = probe.lock().unwrap().clone();
                         let before_cursors = cursors(&runtime);
                         let error = runtime.enter_state(entry(8, start)).unwrap_err();
-                        if start == 0 {
-                            // This synthetic adapter supplies no normative author
-                            // source; a same-object Bind is not fresh cold proof.
-                            assert!(matches!(error, AudioExecutionError::NativeAuthorPending(ref hold)
-                                if hold.target == lease.editor_target()
-                                    && hold.reason == NativeAudioAuthorHoldReason::UnsupportedSource));
-                            let mut expected = before.clone();
-                            expected.calls.push(Call::Poll);
-                            assert_eq!(*probe.lock().unwrap(), expected);
-                        } else {
-                            assert_eq!(error, AudioExecutionError::ProcessorHost(
-                                AudioProcessorHostError::NoteExecutionRefused(
-                                    "Note score cold entry requires public origin zero; seek replay is unsupported",
-                                ),
-                            ));
-                            assert_eq!(*probe.lock().unwrap(), before);
-                        }
+                        // This synthetic adapter supplies no normative author
+                        // source; neither zero nor nonzero may mint fresh proof.
+                        assert!(
+                            matches!(error, AudioExecutionError::NativeAuthorPending(ref hold)
+                            if hold.target == lease.editor_target()
+                                && hold.reason == NativeAudioAuthorHoldReason::UnsupportedSource)
+                        );
+                        let mut expected = before.clone();
+                        expected.calls.push(Call::Poll);
+                        assert_eq!(*probe.lock().unwrap(), expected);
                         assert_eq!(cursors(&runtime), before_cursors);
                         assert_eq!(runtime.native_owner_lease(address).unwrap(), lease);
                         assert_eq!(runtime.resource_root_identity(), identity);
@@ -5340,6 +5452,7 @@ mod vst3_note_entry_controls {
                 probe: Arc::clone(&probe),
                 fail_entry: false,
                 fail_entry_at: Some(second),
+                upstream_latency: 0,
             },
             contract(),
             None,

@@ -239,10 +239,12 @@ impl HostedNoteState {
         let end = start
             .checked_add(i64::try_from(frames).map_err(|_| refusal("Note window overflow"))?)
             .ok_or_else(|| refusal("Note window overflow"))?;
-        let events = score.events();
-        let begin = events.partition_point(|event| event.sample < start);
-        let finish = events.partition_point(|event| event.sample < end);
-        for event in &events[begin..finish] {
+        if block_frames == 0 || priming_frames > frames || frames - priming_frames > block_frames {
+            return Err(refusal("invalid prospective Note block partition"));
+        }
+        let cutoff = self.ledger.public_cutoff().map_err(ledger_refusal)?;
+        let events = score.window(start, end, cutoff).map_err(refusal)?;
+        for event in events.clone() {
             let target = &score.targets()[event.target_slot];
             if target.processor_slot == processor_slot
                 && (event.channel >= target.channel_count
@@ -253,101 +255,31 @@ impl HostedNoteState {
                 ));
             }
         }
-        if self.ledger.completion_policy() == crate::AudioNoteCompletionPolicy::SuccessfulOffBlock {
-            return self.preflight_off_blocks(
-                score,
-                processor_slot,
-                origin,
-                AudioRenderRequest { start_sample: start, frames },
-                &events[begin..finish],
-                priming_frames,
-                block_frames,
-            );
-        }
+        let successful_off =
+            self.ledger.completion_policy() == crate::AudioNoteCompletionPolicy::SuccessfulOffBlock;
         self.ons.clear();
-        // No future Off/End credit. All new Ons in the entire prospective root
-        // window must fit before any processor/source can consume its prefix.
-        for event in &events[begin..finish] {
-            let target = &score.targets()[event.target_slot];
-            if target.processor_slot != processor_slot || event.phase != PreparedNotePhase::On {
-                continue;
+        if !successful_off {
+            // Native Ends give no prospective credit; every new On in the
+            // complete known root window must fit before any provider runs.
+            for event in events.clone() {
+                let target = &score.targets()[event.target_slot];
+                if target.processor_slot != processor_slot || event.phase != PreparedNotePhase::On {
+                    continue;
+                }
+                if self.ons.len() == self.ons.capacity() {
+                    return Err(refusal("retained Note record capacity"));
+                }
+                self.ons.push(NoteOn {
+                    author_id: event.note_id,
+                    port: InputPortBinding {
+                        stable_id: target.native_port_id,
+                        index: target.native_port_index as i16,
+                    },
+                    channel: i16::from(event.channel),
+                    key: i16::from(event.key),
+                });
             }
-            if self.ons.len() == self.ons.capacity() {
-                return Err(refusal("retained Note record capacity"));
-            }
-            self.ons.push(NoteOn {
-                author_id: event.note_id,
-                port: InputPortBinding {
-                    stable_id: target.native_port_id,
-                    index: target.native_port_index as i16,
-                },
-                channel: i16::from(event.channel),
-                key: i16::from(event.key),
-            });
-        }
-        self.ledger.preflight_ons(origin, &self.ons).map_err(ledger_refusal)?;
-        for event in &events[begin..finish] {
-            let target = &score.targets()[event.target_slot];
-            if target.processor_slot != processor_slot || event.phase != PreparedNotePhase::Off {
-                continue;
-            }
-            let port = InputPortBinding {
-                stable_id: target.native_port_id,
-                index: target.native_port_index as i16,
-            };
-            // A same-window On/Off pair is proved from immutable positive-duration
-            // score and staged On facts; no ID or record is committed here.
-            if !self.ons.iter().any(|on| on.author_id == event.note_id && on.port == port) {
-                self.ledger.preflight_off(origin, event.note_id, port).map_err(ledger_refusal)?;
-            }
-        }
-        if block_frames == 0 || priming_frames > frames {
-            return Err(refusal("invalid prospective Note block partition"));
-        }
-        // Priming has its own possibly partial final block. The public request
-        // begins a new native call, rather than continuing that partial block.
-        // Iterate only actual score events, never empty lookahead chunks.
-        let main_call = priming_frames.div_ceil(block_frames);
-        let mut prior_call = None;
-        let mut count = 0usize;
-        for event in &events[begin..finish] {
-            if score.targets()[event.target_slot].processor_slot != processor_slot {
-                continue;
-            }
-            let relative = usize::try_from(event.sample - start)
-                .map_err(|_| refusal("Note window overflow"))?;
-            let call = if relative < priming_frames {
-                relative / block_frames
-            } else {
-                main_call
-            };
-            if prior_call != Some(call) {
-                prior_call = Some(call);
-                count = 0;
-            }
-            count += 1;
-            if count > self.input_limit {
-                return Err(refusal("Note input event capacity"));
-            }
-        }
-        Ok(())
-    }
-
-    fn preflight_off_blocks(
-        &self,
-        score: &PreparedNoteScore,
-        processor_slot: usize,
-        origin: LedgerOrigin,
-        request: AudioRenderRequest,
-        events: &[crate::schedule::PreparedNoteEvent],
-        priming_frames: usize,
-        block_frames: usize,
-    ) -> Result<(), AudioProcessorHostError> {
-        if block_frames == 0
-            || priming_frames > request.frames
-            || request.frames - priming_frames > block_frames
-        {
-            return Err(refusal("invalid prospective Note block partition"));
+            self.ledger.preflight_ons(origin, &self.ons).map_err(ledger_refusal)?;
         }
         let public_call = priming_frames.div_ceil(block_frames);
         let mut records = self.ledger.retained_record_count();
@@ -355,15 +287,19 @@ impl HostedNoteState {
         let mut total_ons = 0usize;
         let mut call = None;
         let (mut ons, mut offs, mut inputs) = (0usize, 0usize, 0usize);
-        // Cached IR is not an author-identity proof. Preserve the prior-event
-        // checks without another index/ledger; worst-case work is quadratic in
-        // this window's events. This foundation grants no RT/performance claim.
-        for (index, event) in events.iter().enumerate() {
+        for event in events {
             let target = &score.targets()[event.target_slot];
             if target.processor_slot != processor_slot {
                 continue;
             }
-            let relative = usize::try_from(event.sample - request.start_sample)
+            if event.channel >= target.channel_count
+                || target.completion != self.ledger.completion_policy()
+            {
+                return Err(refusal(
+                    "Note channel or completion differs from admitted contract",
+                ));
+            }
+            let relative = usize::try_from(event.sample - start)
                 .map_err(|_| refusal("Note window overflow"))?;
             let next_call = if relative < priming_frames {
                 relative / block_frames
@@ -371,12 +307,14 @@ impl HostedNoteState {
                 public_call
             };
             if call != Some(next_call) {
-                let pending =
-                    records.checked_add(ons).ok_or_else(|| refusal("Note window overflow"))?;
-                peak = peak.max(pending);
-                records = pending
-                    .checked_sub(offs)
-                    .ok_or_else(|| refusal("Off has no retained original On"))?;
+                if successful_off {
+                    let pending =
+                        records.checked_add(ons).ok_or_else(|| refusal("Note window overflow"))?;
+                    peak = peak.max(pending);
+                    records = pending
+                        .checked_sub(offs)
+                        .ok_or_else(|| refusal("Off has no retained original On"))?;
+                }
                 call = Some(next_call);
                 (ons, offs, inputs) = (0, 0, 0);
             }
@@ -388,54 +326,30 @@ impl HostedNoteState {
                 stable_id: target.native_port_id,
                 index: target.native_port_index as i16,
             };
-            let prior = &events[..index];
             match event.phase {
                 PreparedNotePhase::On => {
-                    self.ledger
-                        .preflight_on_identity(
-                            origin,
-                            NoteOn {
-                                author_id: event.note_id,
-                                port,
-                                channel: i16::from(event.channel),
-                                key: i16::from(event.key),
-                            },
-                        )
-                        .map_err(ledger_refusal)?;
-                    if prior.iter().any(|old| {
-                        old.note_id == event.note_id
-                            && old.phase == PreparedNotePhase::On
-                            && score.targets()[old.target_slot].processor_slot == processor_slot
-                    }) {
-                        return Err(refusal("duplicate authored Note On"));
+                    if successful_off {
+                        self.ledger
+                            .preflight_on_identity(
+                                origin,
+                                NoteOn {
+                                    author_id: event.note_id,
+                                    port,
+                                    channel: i16::from(event.channel),
+                                    key: i16::from(event.key),
+                                },
+                            )
+                            .map_err(ledger_refusal)?;
+                        ons = ons.checked_add(1).ok_or_else(|| refusal("Note window overflow"))?;
+                        total_ons = total_ons
+                            .checked_add(1)
+                            .ok_or_else(|| refusal("Note window overflow"))?;
                     }
-                    ons = ons.checked_add(1).ok_or_else(|| refusal("Note window overflow"))?;
-                    total_ons =
-                        total_ons.checked_add(1).ok_or_else(|| refusal("Note window overflow"))?;
                 }
                 PreparedNotePhase::Off => {
-                    if prior.iter().any(|old| {
-                        old.note_id == event.note_id
-                            && old.phase == PreparedNotePhase::Off
-                            && score.targets()[old.target_slot].processor_slot == processor_slot
-                    }) {
-                        return Err(refusal("Off was already delivered"));
-                    }
-                    if let Some(on) = prior.iter().find(|old| {
-                        old.note_id == event.note_id
-                            && old.phase == PreparedNotePhase::On
-                            && score.targets()[old.target_slot].processor_slot == processor_slot
-                    }) {
-                        let original = &score.targets()[on.target_slot];
-                        if on.sample >= event.sample
-                            || on.channel != event.channel
-                            || on.key != event.key
-                            || original.native_port_id != port.stable_id
-                            || original.native_port_index as i16 != port.index
-                        {
-                            return Err(refusal("Off changed its original input port"));
-                        }
-                    } else {
+                    // Mutual paired IR proves a same-window On's original tuple.
+                    // An older effective On must still exist in the sole ledger.
+                    if score.effective_on_sample(event, cutoff) < start {
                         let original = self
                             .ledger
                             .preflight_off(origin, event.note_id, port)
@@ -450,10 +364,14 @@ impl HostedNoteState {
                 }
             }
         }
-        peak = peak.max(records.checked_add(ons).ok_or_else(|| refusal("Note window overflow"))?);
-        self.ledger
-            .preflight_off_block_peak(origin, peak, total_ons)
-            .map_err(ledger_refusal)
+        if successful_off {
+            peak =
+                peak.max(records.checked_add(ons).ok_or_else(|| refusal("Note window overflow"))?);
+            self.ledger
+                .preflight_off_block_peak(origin, peak, total_ons)
+                .map_err(ledger_refusal)?;
+        }
+        Ok(())
     }
 
     pub(super) fn prepare_admitted_block(
@@ -470,10 +388,8 @@ impl HostedNoteState {
             .start_sample
             .checked_add(request.frames as i64)
             .ok_or_else(|| refusal("Note window overflow"))?;
-        let events = score.events();
-        let a = events.partition_point(|event| event.sample < request.start_sample);
-        let b = events.partition_point(|event| event.sample < end);
-        for event in &events[a..b] {
+        let cutoff = self.ledger.public_cutoff().map_err(ledger_refusal)?;
+        for event in score.window(request.start_sample, end, cutoff).map_err(refusal)? {
             let target = &score.targets()[event.target_slot];
             if target.processor_slot != processor_slot {
                 continue;
@@ -577,12 +493,10 @@ fn validate_note_reentry_arm(
     local: crate::AudioSessionCursorIdentity,
 ) -> Result<(), AudioProcessorHostError> {
     let notes = instance.notes.as_ref().expect("selected Note reentry");
-    if entry.start_sample != 0
-        || !matches!(
-            instance.occurrence.owner,
-            AudioProcessorOccurrenceOwner::Track(_)
-        )
-        || !matches!(instance.continuity, HostedProcessorContinuity::Active { epoch, .. } if epoch != entry.epoch)
+    if !matches!(
+        instance.occurrence.owner,
+        AudioProcessorOccurrenceOwner::Track(_)
+    ) || !matches!(instance.continuity, HostedProcessorContinuity::Active { epoch, .. } if epoch != entry.epoch)
         || instance.native_editor_attachment.is_some()
         || instance.native_editor_detached.is_some()
     {
@@ -663,7 +577,7 @@ impl PreparedProcessorHost {
     pub(crate) fn validate_vst3_note_entry(
         &self,
         program: &crate::CompiledAudioProgram,
-        entry: AudioStateEntry,
+        _entry: AudioStateEntry,
     ) -> Result<(), AudioExecutionError> {
         let mut deferred_refusal = None;
         for instance in &self.instances {
@@ -697,17 +611,8 @@ impl PreparedProcessorHost {
                     deferred_refusal
                         .get_or_insert("Note producer replacement requires an eager Track owner");
                 }
-                if entry.start_sample != 0 {
-                    deferred_refusal.get_or_insert(
-                        "Note score cold entry requires public origin zero; seek replay is unsupported",
-                    );
-                }
             } else if !matches!(instance.continuity, HostedProcessorContinuity::Unentered) {
                 return Err(AudioProcessorHostError::PoisonedInstance.into());
-            } else if entry.start_sample != 0 {
-                deferred_refusal.get_or_insert(
-                    "Note score cold entry requires public origin zero; seek replay is unsupported",
-                );
             }
         }
         // Any failed target dominates a repeat/seek refusal, even when a
@@ -727,7 +632,7 @@ impl PreparedProcessorHost {
 
     pub(crate) fn validate_note_entry_context(
         &self,
-        entry: AudioStateEntry,
+        _entry: AudioStateEntry,
         installed_root: bool,
     ) -> Result<(), AudioExecutionError> {
         if self.instances.iter().any(|instance| instance.notes.is_some()) {
@@ -740,17 +645,67 @@ impl PreparedProcessorHost {
             }) {
                 return Err(refusal("Note entry requires an eager Track owner").into());
             }
-            if entry.start_sample != 0 {
-                return Err(refusal(
-                    "Note score cold entry requires public origin zero; seek replay is unsupported",
-                )
-                .into());
-            }
             if !installed_root {
                 return Err(
                     refusal("Note score execution requires the installed root owner").into(),
                 );
             }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn validate_note_cold_capacity(
+        &self,
+        schedule: &PreparedAudioSchedule,
+        entry: AudioStateEntry,
+    ) -> Result<(), AudioExecutionError> {
+        if schedule.notes.is_empty() {
+            return Ok(());
+        }
+        if schedule.processors.len() != self.instances.len()
+            || !schedule.notes.matches_factory_contracts(&schedule.processors)
+        {
+            return Err(AudioExecutionError::InvalidPreparedSchedule);
+        }
+        let events = schedule.notes.entry_events(entry.start_sample).map_err(refusal)?;
+        for processor in &schedule.processors {
+            if processor.factory.contract().requires_state_entry()
+                && !matches!(
+                    processor.occurrence.owner,
+                    AudioProcessorOccurrenceOwner::Contribution { .. }
+                )
+            {
+                subtract_signal_delay(entry.start_sample, processor.input_signal_delay_frames)?;
+            }
+        }
+        for (slot, instance) in self.instances.iter().enumerate() {
+            let Some(notes) = &instance.notes else {
+                continue;
+            };
+            // All eager coordinates and paired/capacity admission finish before
+            // revoke, Preserve observation or native state changes.
+            let mut count = 0usize;
+            for event in events.clone() {
+                let target = &schedule.notes.targets()[event.target_slot];
+                if target.processor_slot != slot {
+                    continue;
+                }
+                if event.channel >= target.channel_count
+                    || target.completion != notes.ledger.completion_policy()
+                {
+                    return Err(refusal(
+                        "Note channel or completion differs from admitted contract",
+                    )
+                    .into());
+                }
+                if event.phase == PreparedNotePhase::On {
+                    count = count.checked_add(1).ok_or_else(|| refusal("Note window overflow"))?;
+                }
+            }
+            if count > notes.input_limit {
+                return Err(refusal("Note input event capacity").into());
+            }
+            notes.ledger.preflight_cold_on_count(count).map_err(ledger_refusal)?;
         }
         Ok(())
     }
@@ -879,6 +834,7 @@ impl PreparedProcessorHost {
     pub(super) fn bind_note_cold_entry(
         instance: &mut HostedProcessorInstance,
         pending: Option<PendingNoteEntry>,
+        entry: AudioStateEntry,
     ) -> Result<(), AudioExecutionError> {
         if instance.notes.is_none() {
             return Ok(());
@@ -896,9 +852,9 @@ impl PreparedProcessorHost {
         };
         let ledger = &mut instance.notes.as_mut().expect("observed Note owner").ledger;
         if let Some(proof) = replacement {
-            ledger.commit_confirmed_replacement(proof)
+            ledger.commit_confirmed_replacement(proof, entry.start_sample)
         } else {
-            ledger.commit_confirmed_cold_entry(next)
+            ledger.commit_confirmed_cold_entry(next, entry.start_sample)
         }
         .map_err(ledger_refusal)?;
         Ok(())
@@ -1182,7 +1138,7 @@ mod tests {
         };
         instance.continuity =
             HostedProcessorContinuity::Active { epoch: next_entry().epoch, next_sample: 0 };
-        PreparedProcessorHost::bind_note_cold_entry(&mut instance, pending).unwrap();
+        PreparedProcessorHost::bind_note_cold_entry(&mut instance, pending, next_entry()).unwrap();
         let usage = instance.notes.as_ref().unwrap().ledger.usage().unwrap();
         assert_eq!(
             (
@@ -1292,7 +1248,7 @@ mod tests {
     }
     fn state(origin: LedgerOrigin, input_events: usize) -> Box<HostedNoteState> {
         let mut state = HostedNoteState::prepare(&contract(input_events)).unwrap().unwrap();
-        state.ledger.commit_confirmed_cold_entry(origin).unwrap();
+        state.ledger.commit_confirmed_cold_entry(origin, 0).unwrap();
         state
     }
     fn score(origin: LedgerOrigin, pairs: &[(i64, i64)]) -> PreparedNoteScore {
@@ -1314,6 +1270,7 @@ mod tests {
                     channel: 3,
                     key: 60,
                     velocity,
+                    mate_event_index: usize::MAX,
                 });
             }
         }
@@ -1436,7 +1393,7 @@ mod tests {
             contract.limits.live_voices = 0;
             contract.limits.retained_records = 1;
             let mut state = HostedNoteState::prepare(&contract).unwrap().unwrap();
-            state.ledger.commit_confirmed_cold_entry(origin).unwrap();
+            state.ledger.commit_confirmed_cold_entry(origin, 0).unwrap();
             let old = score(origin, pairs);
             let mut targets = old.targets().to_vec();
             targets[0].completion = contract.completion;
@@ -1487,7 +1444,7 @@ mod tests {
         contract.limits.output_ends = 0;
         contract.limits.live_voices = 0;
         let mut state = HostedNoteState::prepare(&contract).unwrap().unwrap();
-        state.ledger.commit_confirmed_cold_entry(origin).unwrap();
+        state.ledger.commit_confirmed_cold_entry(origin, 0).unwrap();
         let source = score(origin, &[(0, 1), (2, 3)]);
         let mut targets = source.targets().to_vec();
         targets[0].completion = contract.completion;

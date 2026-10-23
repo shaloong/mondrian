@@ -628,15 +628,15 @@ fn installed_vst3_canonical_note_origin_reentry_rebuilds_without_reusing_ids() {
                 ),
                 Err(crate::AudioNativeOwnerError::Cancelled.into())
             );
-            assert!(matches!(
+            assert_eq!(
                 subject.runtime.enter_state(AudioStateEntry {
-                    epoch: AudioContinuityEpoch::new(epoch),
+                    epoch: AudioContinuityEpoch::new(epoch - 1),
                     start_sample: 1,
                 }),
-                Err(AudioExecutionError::ProcessorHost(
-                    AudioProcessorHostError::NoteExecutionRefused(_)
+                Err(AudioExecutionError::ReusedContinuityEpoch(
+                    AudioContinuityEpoch::new(epoch - 1)
                 ))
-            ));
+            );
             assert_eq!(cursors(&subject.runtime), before);
             assert_eq!(owner(&subject.runtime), old);
             assert_eq!(
@@ -1181,7 +1181,7 @@ fn installed_vst3_canonical_note_nonzero_entry_chases_only_public_cutoff_notes()
 }
 
 #[test]
-#[ignore = "fresh normal Product and owned MNE4; Source/owner preserving cold, seek and reused-epoch refusal"]
+#[ignore = "fresh normal Product and owned MNE4; Source/owner preserving cold reference and reused-epoch refusal"]
 fn installed_vst3_canonical_note_entry_refusals_preserve_source_and_pending_off() {
     let materials = Materials::load();
     let render = render(48_000);
@@ -1221,21 +1221,15 @@ fn installed_vst3_canonical_note_entry_refusals_preserve_source_and_pending_off(
     let before = cursors(&subject.runtime);
     let lease = owner(&subject.runtime);
     let generation = subject.source.current_claim().unwrap().unwrap().generation();
-    for (epoch, start) in [(1, 0), (2, 3), (3, 9)] {
+    for start in [0, 3, 9] {
         let error = subject
             .runtime
             .enter_state(AudioStateEntry {
-                epoch: AudioContinuityEpoch::new(epoch),
+                epoch: AudioContinuityEpoch::new(1),
                 start_sample: start,
             })
             .unwrap_err();
-        let expected = if epoch == 1 {
-            AudioExecutionError::ReusedContinuityEpoch(AudioContinuityEpoch::new(1))
-        } else {
-            AudioExecutionError::ProcessorHost(AudioProcessorHostError::NoteExecutionRefused(
-                "Note score cold entry requires public origin zero; seek replay is unsupported",
-            ))
-        };
+        let expected = AudioExecutionError::ReusedContinuityEpoch(AudioContinuityEpoch::new(1));
         assert_eq!(error, expected);
         assert_eq!(cursors(&subject.runtime), before);
         assert_eq!(
