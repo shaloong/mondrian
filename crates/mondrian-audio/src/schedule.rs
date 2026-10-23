@@ -3,8 +3,8 @@
 mod host_output_fader;
 mod native_author;
 #[cfg(test)]
-pub(crate) use prepared_notes::PreparedNoteTarget;
-pub(crate) use prepared_notes::{PreparedNoteEvent, PreparedNotePhase, PreparedNoteScore};
+pub(crate) use prepared_notes::{PreparedNoteEvent, PreparedNoteTarget};
+pub(crate) use prepared_notes::{PreparedNotePhase, PreparedNoteScore};
 mod prepared_notes;
 pub(crate) use native_author::processor;
 pub(crate) use prepared_notes::requested_note_lowering_peak_bytes;
