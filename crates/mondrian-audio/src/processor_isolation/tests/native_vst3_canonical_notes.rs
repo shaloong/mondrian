@@ -1022,10 +1022,7 @@ fn installed_vst3_canonical_note_nonzero_entry_chases_only_public_cutoff_notes()
                 let mut pcm = [f32::NAN; 6];
                 subject
                     .runtime
-                    .render_into(
-                        AudioRenderRequest { start_sample: 0, frame_count: 3 },
-                        &mut pcm,
-                    )
+                    .render_into(AudioRenderRequest { start_sample: 0, frames: 3 }, &mut pcm)
                     .unwrap();
                 assert_eq!(
                     pcm.map(f32::to_bits),
@@ -1130,7 +1127,7 @@ fn installed_vst3_canonical_note_nonzero_entry_chases_only_public_cutoff_notes()
                 subject
                     .runtime
                     .render_into(
-                        AudioRenderRequest { start_sample: start as i64, frame_count: frames },
+                        AudioRenderRequest { start_sample: start as i64, frames },
                         &mut pcm,
                     )
                     .unwrap();
