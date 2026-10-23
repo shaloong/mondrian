@@ -185,7 +185,10 @@ fn app_owned_vst3_first_nonzero_note_playback_enqueues_literal_pcm() {
     };
     let seed = state_bytes();
     let instance = vst3.create_instance(CLASS, render, Some(seed.clone())).unwrap();
-    assert_eq!(instance.opaque_state.as_ref(), Some(&seed));
+    assert_eq!(
+        instance.opaque_state.as_ref().map(AsRef::<[u8]>::as_ref),
+        Some(seed.as_slice())
+    );
     assert!(instance.parameters.is_empty());
     let id = instance.id;
     let mut sequence = Sequence::new("first nonzero native Note playback");
