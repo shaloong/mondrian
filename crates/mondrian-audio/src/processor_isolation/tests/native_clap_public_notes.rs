@@ -643,3 +643,295 @@ fn installed_clap_zero_input_public_notes_produce_literal_pcm_without_media() {
         }
     }
 }
+
+#[test]
+#[ignore = "requires existing pinned zero-input NoteGate DLL and fresh normal Product helper"]
+fn installed_clap_nonzero_public_notes_chase_and_reset_same_object() {
+    use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
+    use windows_sys::Win32::System::Threading::{
+        GetExitCodeProcess, OpenProcess, WaitForSingleObject,
+    };
+
+    let helper = PathBuf::from(
+        std::env::var_os("MONDRIAN_CLAP_TEST_HELPER").expect("fresh normal Product helper"),
+    );
+    assert!(helper.is_absolute() && helper.is_file());
+    let dll = zero_input_fixture();
+    let catalog = Arc::new(
+        DiscoveredClapAudioProcessorSpecResolver::discover(helper, [dll.clone()]).unwrap(),
+    );
+    let processors = IsolatedAudioProcessorResolver::new(catalog.clone());
+    let render = AudioRenderContract {
+        sample_rate: 48_000,
+        channel_layout: AudioChannelLayout::Mono,
+        max_block_frames: 11,
+        processing_mode: AudioProcessingMode::Offline,
+        processor_session_scratch_budget_bytes: 16 * 1024 * 1024,
+        ..test_render_contract()
+    };
+    let mut state = vec![0_u8; 16];
+    state[..4].copy_from_slice(b"MNG1");
+    state[4..12].copy_from_slice(&0.5_f64.to_le_bytes());
+    let mut instance = catalog
+        .create_instance(
+            "org.mondrian.fixture.note-gate.zero-input",
+            render,
+            Some(state),
+        )
+        .unwrap();
+    // Native End emits the same constant Gain value. Start with that canonical
+    // curve so accepting real callbacks does not change the authored meaning.
+    instance
+        .set_parameter_automation(
+            ExactAutomationCurve::new(ParameterId::new_static("clap.param.17"), 0.5).unwrap(),
+        )
+        .unwrap();
+    let id = instance.id;
+    let mut sequence = Sequence::new("CLAP public cutoff and retained reset");
+    sequence.settings.audio_channel_layout = AudioChannelLayout::Mono;
+    sequence.settings.audio_sample_rate = render.sample_rate;
+    let track = sequence.audio_tracks[0].id;
+    sequence
+        .audio_program
+        .track_channels
+        .get_mut(&track)
+        .unwrap()
+        .strip
+        .pre_fader
+        .processors
+        .push(instance);
+    // Public cutoff S=5: held, On==S, Off==S, and completely past. The last
+    // two must not create release tails or unmatched Offs in this fresh epoch.
+    for (port, key, on, off, velocity) in [
+        (0_u32, 60, 2, 9, 0.0),
+        (0x8000_0017, 61, 5, 11, 1.0),
+        (0, 62, 1, 5, 1.0),
+        (0x8000_0017, 63, 3, 4, 0.0),
+    ] {
+        sequence.audio_program.note_lanes.push(AudioNoteLane {
+            schema_version: 1,
+            id: AudioNoteLaneId::new(),
+            target: AudioNoteTarget {
+                track_id: track,
+                processor_id: id,
+                input_port_key: format!("clap.note-input.{port}"),
+            },
+            notes: AuthoringList::from(vec![AudioNote {
+                id: AudioNoteId::new(),
+                start: time(on, render.sample_rate),
+                end: time(off, render.sample_rate),
+                channel: 0,
+                key,
+                on_velocity: velocity,
+                off_velocity: 0.25,
+            }]),
+        });
+    }
+    let authored = serde_json::to_value(&sequence).unwrap();
+    let resolves = Arc::new(AtomicUsize::new(0));
+    let mut runtime = AudioProgramRuntime::build_with_processor_resolver_and_resource_grant(
+        &sequence,
+        &[],
+        &ZeroInputNoMedia(resolves.clone()),
+        &processors,
+        render,
+        None,
+        AudioRuntimeResourceGrant::new(usize::MAX, usize::MAX, usize::MAX),
+    )
+    .unwrap();
+    let source = AudioOwnerInstallationSource::new();
+    let (registration, verifier) = source.register().unwrap();
+    runtime.bind_native_owner_installation(verifier).unwrap();
+    let claim = source.reserve_install(&registration, None).unwrap();
+    let claim = source.begin_commit(claim).unwrap().commit().unwrap();
+    runtime
+        .install_native_owner_bindings(&claim, &ExecutionCancellationToken::new())
+        .unwrap();
+    let cold = zero_input_owner(&runtime);
+    let object = runtime.observe_native_owner_object(cold).unwrap();
+    assert_eq!(cold.editor_target().instance, id);
+    assert!(cold.editor_target().continuity_epoch.is_none());
+    let pid = object.process_id().get();
+    assert_ne!(pid, std::process::id());
+    // SAFETY: the authenticated installed object supplies this PID. This handle
+    // observes that exact process and never becomes another native lifetime owner.
+    let raw = unsafe { OpenProcess(0x0010_0000 | 0x1000, 0, pid) };
+    assert!(!raw.is_null());
+    let handle = unsafe { OwnedHandle::from_raw_handle(raw.cast()) };
+    let cursors = |runtime: &AudioProgramRuntime| {
+        let mut result = ZeroInputCursors::default();
+        runtime.visit_continuity_evidence(&mut result).unwrap();
+        assert_eq!((result.sessions.len(), result.processors.len()), (1, 1));
+        assert_eq!(result.sessions[0].public_output_lookahead_frames, 0);
+        result
+    };
+    // Independent Main literals at samples5..16: native held weights1/32 and
+    // 1/8, Gain1/2, Off9/11, four-sample releases. No Gate/host expected helper.
+    let expected = [
+        5.0_f32 / 64.0,
+        5.0 / 64.0,
+        5.0 / 64.0,
+        5.0 / 64.0,
+        5.0 / 64.0,
+        19.0 / 256.0,
+        9.0 / 128.0,
+        13.0 / 256.0,
+        1.0 / 32.0,
+        1.0 / 64.0,
+        0.0,
+    ];
+    let target = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        // Complete first nonzero entry, then leave both voices active before
+        // another reset. The final window detects uncancelled old voices/Ends.
+        for (epoch, partition) in [
+            (1_u64, &[3_usize, 4, 4][..]),
+            (2, &[2][..]),
+            (3, &[1, 3, 2, 5][..]),
+        ] {
+            runtime
+                .validate_native_author_source_closed(&ExecutionCancellationToken::new())
+                .unwrap();
+            let before = cursors(&runtime);
+            let root = runtime.resource_root_identity();
+            let old = zero_input_owner(&runtime);
+            let claim = source.current_claim().unwrap().unwrap();
+            let canceled = ExecutionCancellationToken::new();
+            canceled.cancel();
+            assert_eq!(
+                runtime.enter_state_cancellable(
+                    AudioStateEntry {
+                        epoch: AudioContinuityEpoch::new(epoch),
+                        start_sample: 5,
+                    },
+                    &canceled
+                ),
+                Err(crate::AudioNativeOwnerError::Cancelled.into())
+            );
+            let unchanged = cursors(&runtime);
+            assert_eq!(unchanged.sessions, before.sessions);
+            assert_eq!(unchanged.processors, before.processors);
+            assert_eq!(zero_input_owner(&runtime), old);
+            runtime
+                .enter_state(AudioStateEntry {
+                    epoch: AudioContinuityEpoch::new(epoch),
+                    start_sample: 5,
+                })
+                .expect("public nonzero Note entry must chase at S and reset this CLAP object");
+            let current = zero_input_owner(&runtime);
+            assert_eq!(
+                runtime.observe_native_owner_object(current).unwrap(),
+                object
+            );
+            assert_eq!(current.address().root, old.address().root);
+            assert_eq!(current.address().local, old.address().local);
+            assert_eq!(current.address().occurrence, old.address().occurrence);
+            assert_eq!(current.editor_target().continuity_epoch, Some(epoch));
+            assert!(runtime.validate_native_owner(old).is_err());
+            assert!(runtime.observe_native_owner_object(old).is_err());
+            assert!(runtime.native_editor_target(old.address()).is_err());
+            runtime.validate_native_owner(current).unwrap();
+            assert_eq!(runtime.resource_root_identity(), root);
+            assert_eq!(
+                source.current_claim().unwrap().unwrap().generation(),
+                claim.generation()
+            );
+            runtime.native_owner_installation_verifier().unwrap().validate(&claim).unwrap();
+            let entered = cursors(&runtime);
+            assert_eq!(entered.sessions[0].identity, before.sessions[0].identity);
+            assert_eq!(
+                entered.processors[0].identity,
+                before.processors[0].identity
+            );
+            assert!(matches!(entered.sessions[0].state,
+                crate::AudioSessionCursorState::Active { epoch: actual, next_public_sample,
+                    next_execution_sample, alignment_primed: true }
+                if actual == AudioContinuityEpoch::new(epoch)
+                    && next_public_sample.sample() == 5 && next_execution_sample.sample() == 5));
+            assert_eq!(
+                runtime.enter_state(AudioStateEntry {
+                    epoch: AudioContinuityEpoch::new(epoch),
+                    start_sample: 5,
+                }),
+                Err(crate::AudioExecutionError::ReusedContinuityEpoch(
+                    AudioContinuityEpoch::new(epoch)
+                ))
+            );
+            let refused = cursors(&runtime);
+            assert_eq!(refused.sessions, entered.sessions);
+            assert_eq!(refused.processors, entered.processors);
+            let mut rendered = Vec::new();
+            let mut callbacks = 0;
+            for &frames in partition {
+                let mut pcm = vec![99.0; frames];
+                runtime
+                    .render_into(
+                        AudioRenderRequest { start_sample: 5 + rendered.len() as i64, frames },
+                        &mut pcm,
+                    )
+                    .unwrap();
+                rendered.extend(pcm);
+                callbacks += accept_actual_gain_outputs(&mut runtime, &mut sequence, &source);
+                let current = zero_input_owner(&runtime);
+                assert_eq!(
+                    runtime.observe_native_owner_object(current).unwrap(),
+                    object
+                );
+                assert_eq!(current.editor_target().continuity_epoch, Some(epoch));
+                let after = cursors(&runtime);
+                let end = 5 + rendered.len() as i64;
+                assert!(matches!(after.sessions[0].state,
+                    crate::AudioSessionCursorState::Active { epoch: actual, next_public_sample,
+                        next_execution_sample, alignment_primed: true }
+                    if actual == AudioContinuityEpoch::new(epoch)
+                        && next_public_sample.sample() == end && next_execution_sample.sample() == end));
+                assert!(matches!(after.processors[0].state,
+                    crate::AudioProcessorCursorState::Active { epoch: actual, next_input_signal_sample }
+                    if actual == AudioContinuityEpoch::new(epoch) && next_input_signal_sample.sample() == end));
+            }
+            assert_eq!(
+                rendered.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                expected[..rendered.len()].iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                "epoch={epoch}, partition={partition:?}"
+            );
+            assert_eq!(
+                callbacks,
+                if epoch == 2 { 0 } else { 4 },
+                "two real Gain callbacks per actual native End; reset cancels old pending Ends"
+            );
+            assert_eq!(serde_json::to_value(&sequence).unwrap(), authored);
+            assert_eq!(resolves.load(Ordering::SeqCst), 0);
+            assert_eq!(runtime.resource_footprint().media_window_bytes, 0);
+            runtime
+                .validate_native_author_source_closed(&ExecutionCancellationToken::new())
+                .unwrap();
+        }
+    }));
+    // Consume the original Runtime before resuming any target panic, including
+    // baseline unsupported. The same HANDLE must already be settled after Drop.
+    let cleanup = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let alive = unsafe { WaitForSingleObject(handle.as_raw_handle().cast(), 0) };
+        drop(runtime);
+        assert_eq!(alive, 258);
+        assert_eq!(
+            unsafe { WaitForSingleObject(handle.as_raw_handle().cast(), 0) },
+            0
+        );
+        let mut exit = u32::MAX;
+        assert_ne!(
+            unsafe { GetExitCodeProcess(handle.as_raw_handle().cast(), &mut exit) },
+            0
+        );
+        assert_eq!(exit, 0);
+        drop(source);
+    }));
+    if let Err(failure) = target {
+        std::panic::resume_unwind(failure);
+    }
+    if let Err(failure) = cleanup {
+        std::panic::resume_unwind(failure);
+    }
+    assert_eq!(
+        std::fs::canonicalize(zero_input_fixture()).unwrap(),
+        std::fs::canonicalize(dll).unwrap()
+    );
+}
