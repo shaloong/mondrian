@@ -22,7 +22,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 const PORT: &str = " exact.é.port ";
 
 #[test]
-fn runtime_fresh_entry_origin_is_read_from_the_prepared_score_and_grid() {
+fn runtime_note_state_requires_cold_entry_without_a_fixed_origin() {
     for rate in [48_000, 96_000] {
         let (mut sequence, locator) = sequence();
         sequence.settings.audio_sample_rate = rate;
@@ -50,20 +50,24 @@ fn runtime_fresh_entry_origin_is_read_from_the_prepared_score_and_grid() {
             .prepare_owned_note_model_for_test(Arc::new(compiled(&sequence)))
             .unwrap();
         let footprint = runtime.resource_footprint();
+        let resolves = calls.resolves.load(Ordering::Relaxed);
         let queries = calls.note_queries.load(Ordering::Relaxed);
         let creates = calls.creates.load(Ordering::Relaxed);
+        let seed_queries = calls.seed_queries.load(Ordering::Relaxed);
+        // Pure metadata only: no Enter, process, native object or consumer output
+        // is exercised or granted by removing the obsolete fixed-zero declaration.
         for _ in 0..3 {
-            assert_eq!(
-                runtime.state_entry_origin().unwrap(),
-                Some(mondrian_core::AudioSamplePosition::new(
-                    0,
-                    mondrian_core::AudioSampleRate::new(rate).unwrap(),
-                ))
+            assert!(
+                runtime.requires_state_entry(),
+                "Notes still require an explicit cold epoch"
             );
+            assert_eq!(runtime.state_entry_origin().unwrap(), None);
         }
         assert_eq!(runtime.resource_footprint(), footprint);
+        assert_eq!(calls.resolves.load(Ordering::Relaxed), resolves);
         assert_eq!(calls.note_queries.load(Ordering::Relaxed), queries);
         assert_eq!(calls.creates.load(Ordering::Relaxed), creates);
+        assert_eq!(calls.seed_queries.load(Ordering::Relaxed), seed_queries);
     }
 }
 

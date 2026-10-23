@@ -1945,16 +1945,12 @@ impl AudioProgramRuntime {
         self.session.requires_state_entry()
     }
 
-    /// Required fresh-entry origin of this actual prepared root Session.
-    /// This is immutable score metadata, never permission to enter or process.
+    /// Fixed fresh-entry origin, if required by this prepared Runtime contract.
+    /// Current contracts permit cold entry at an admitted caller-selected sample,
+    /// including score Notes. None does not remove explicit state entry or native
+    /// owner, author, resource, PDC and downstream output admission requirements.
     pub fn state_entry_origin(&self) -> Result<Option<AudioSamplePosition>, AudioExecutionError> {
-        if !self.session.has_notes() {
-            return Ok(None);
-        }
-        Ok(Some(AudioSamplePosition::new(
-            0,
-            AudioSampleRate::new(self.session.contract().sample_rate)?,
-        )))
+        Ok(None)
     }
 
     #[cfg(test)]
