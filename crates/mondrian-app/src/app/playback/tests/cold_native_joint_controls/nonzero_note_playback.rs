@@ -305,10 +305,15 @@ fn app_owned_clap_first_nonzero_note_playback_enqueues_literal_pcm() {
         instance.opaque_state.as_ref().map(AsRef::<[u8]>::as_ref),
         Some(seed.as_slice())
     );
-    assert_eq!(instance.parameters.len(), 3);
-    for id in ["clap.param.17", "clap.param.19", "clap.param.23"] {
+    // The native catalog also has read-only Exact Offs23; it is telemetry,
+    // not an author parameter lane. Only editable Gain17 and Scenario19 persist.
+    assert_eq!(instance.parameters.len(), 2);
+    for id in ["clap.param.17", "clap.param.19"] {
         assert!(instance.parameters.contains_key(&mondrian_core::ParameterId::new_static(id)));
     }
+    assert!(!instance
+        .parameters
+        .contains_key(&mondrian_core::ParameterId::new_static("clap.param.23")));
     let gain = mondrian_core::ParameterId::new_static("clap.param.17");
     instance
         .set_parameter_automation(
