@@ -249,6 +249,32 @@ fn owner(runtime: &AudioProgramRuntime) -> AudioNativeProcessorOwnerLease {
         })
         .expect("lease from this actual installed Runtime")
 }
+fn note_owner(
+    runtime: &AudioProgramRuntime,
+    instance: mondrian_core::AudioProcessorInstanceId,
+) -> AudioNativeProcessorOwnerLease {
+    let mut evidence = Cursors::default();
+    runtime.visit_continuity_evidence(&mut evidence).unwrap();
+    assert_eq!(evidence.sessions.len(), 1);
+    let processor = evidence
+        .processors
+        .iter()
+        .find(|p| p.occurrence.instance_id == instance)
+        .unwrap();
+    let epoch = match processor.state {
+        AudioProcessorCursorState::Unentered => None,
+        AudioProcessorCursorState::Active { epoch, .. } => Some(epoch),
+        state => panic!("no actual current owner: {state:?}"),
+    };
+    runtime
+        .native_owner_lease(AudioNativeProcessorAddress {
+            root: evidence.sessions[0].identity,
+            local: processor.identity,
+            occurrence: processor.occurrence,
+            epoch,
+        })
+        .unwrap()
+}
 struct Subject {
     runtime: AudioProgramRuntime,
     source: AudioOwnerInstallationSource,
@@ -256,12 +282,17 @@ struct Subject {
     handle: OwnedHandle,
     path: PathBuf,
     prefix: usize,
+    resolves: Arc<AtomicUsize>,
 }
 impl Subject {
-    fn create(materials: &Materials, sequence: &Sequence, render: AudioRenderContract) -> Self {
+    fn create_unentered(
+        materials: &Materials,
+        sequence: &Sequence,
+        render: AudioRenderContract,
+    ) -> Self {
         let resolves = Arc::new(AtomicUsize::new(0));
         let prepares = Arc::new(AtomicUsize::new(0));
-        let mut runtime = build(
+        let runtime = build(
             materials,
             sequence,
             render,
@@ -271,6 +302,19 @@ impl Subject {
         .expect("canonical VST3 Note score must reach the real prepared Runtime");
         assert_eq!(resolves.load(Ordering::SeqCst), 0);
         assert_eq!(prepares.load(Ordering::SeqCst), 1);
+        Self::install(
+            materials,
+            runtime,
+            sequence.audio_program.note_lanes[0].target.processor_id,
+            resolves,
+        )
+    }
+    fn install(
+        materials: &Materials,
+        mut runtime: AudioProgramRuntime,
+        target: mondrian_core::AudioProcessorInstanceId,
+        resolves: Arc<AtomicUsize>,
+    ) -> Self {
         let source = AudioOwnerInstallationSource::new();
         let (registration, verifier) = source.register().unwrap();
         runtime.bind_native_owner_installation(verifier).unwrap();
@@ -286,7 +330,7 @@ impl Subject {
         runtime
             .validate_native_author_source_closed(&ExecutionCancellationToken::new())
             .expect("no author batch is discarded or falsely acknowledged");
-        let object = runtime.observe_native_owner_object(owner(&runtime)).unwrap();
+        let object = runtime.observe_native_owner_object(note_owner(&runtime, target)).unwrap();
         let pid = object.process_id().get();
         assert_ne!(pid, std::process::id());
         // SAFETY: this authenticated, live Runtime object supplies the PID.
@@ -305,19 +349,32 @@ impl Subject {
             Err(error) => panic!("audit prefix: {error}"),
         };
         assert!(prefix <= AUDIT_BOUND);
+        Self {
+            runtime,
+            source,
+            object,
+            handle,
+            path,
+            prefix,
+            resolves,
+        }
+    }
+    fn create(materials: &Materials, sequence: &Sequence, render: AudioRenderContract) -> Self {
+        let mut subject = Self::create_unentered(materials, sequence, render);
         // Capture both object and audit boundary before the very first Enter;
         // a hidden initial rebuild must not borrow another instance's evidence.
-        runtime
+        subject
+            .runtime
             .enter_state(AudioStateEntry {
                 epoch: AudioContinuityEpoch::new(1),
                 start_sample: 0,
             })
             .expect("installed initial public origin zero");
         assert_eq!(
-            runtime.observe_native_owner_object(owner(&runtime)).unwrap(),
-            object
+            subject.runtime.observe_native_owner_object(owner(&subject.runtime)).unwrap(),
+            subject.object
         );
-        Self { runtime, source, object, handle, path, prefix }
+        subject
     }
     fn same_object(&mut self) {
         assert_eq!(
@@ -326,7 +383,7 @@ impl Subject {
         );
     }
     fn finish(self, calls: &[NativeCall], tuples: &[[u8; 48]], rate: u32) {
-        let Self { runtime, source, object, handle, path, prefix } = self;
+        let Self { runtime, source, object, handle, path, prefix, .. } = self;
         drop(runtime);
         observe_exit(&handle, true);
         let length =
@@ -712,6 +769,418 @@ fn installed_vst3_canonical_note_origin_reentry_rebuilds_without_reusing_ids() {
         all.starts_with(&retired_prefix),
         "all retired component prefixes remain unchanged"
     );
+}
+
+// The upstream MNE7 has no authored Note lane. Validate every actual native
+// call and the complete mode7 packet instead of treating its audit as MNE4.
+fn assert_empty_pdc_epochs(
+    path: &std::path::Path,
+    prefix: usize,
+    pid: u32,
+    expected: &[ReentryExpectedAudit],
+) {
+    use std::io::Read as _;
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)
+        .unwrap()
+        .take(AUDIT_BOUND as u64 + 1)
+        .read_to_end(&mut bytes)
+        .unwrap();
+    assert!(prefix <= bytes.len() && bytes.len() <= AUDIT_BOUND);
+    let mut bytes = &bytes[prefix..];
+    for epoch in expected {
+        assert!(bytes.len() >= 80);
+        let u32_at = |i| u32::from_le_bytes(bytes[i..i + 4].try_into().unwrap());
+        let length = u32_at(8) as usize;
+        assert!(length >= 80 && length <= bytes.len());
+        assert_eq!(&bytes[..4], b"MNA4");
+        assert_eq!(
+            (u32_at(4), u32_at(12), u32_at(16), u32_at(20)),
+            (4, 7, pid, 1)
+        );
+        assert_ne!(u64::from_le_bytes(bytes[24..32].try_into().unwrap()), 0);
+        assert_eq!((u32_at(32), u32_at(36)), (1, 6));
+        assert_eq!(
+            u64::from_le_bytes(bytes[40..48].try_into().unwrap()),
+            48_000_f64.to_bits()
+        );
+        assert_eq!(
+            (u32_at(48), u32_at(52), u32_at(56)),
+            (4, epoch.calls.len() as u32, 0)
+        );
+        assert_eq!((u32_at(60), u32_at(64), u32_at(76)), (1024, 8192, 0));
+        assert!(u32_at(68) >= 16 && u32_at(72) >= 48);
+        assert_eq!(length, 80 + epoch.calls.len() * 16);
+        for (row, call) in bytes[80..length].chunks_exact(16).zip(&epoch.calls) {
+            assert_eq!(i32::from_le_bytes(row[..4].try_into().unwrap()), call.0);
+            assert_eq!(&row[4..], &[0_u8; 12]);
+        }
+        bytes = &bytes[length..];
+    }
+    assert!(
+        bytes.is_empty(),
+        "all upstream component lifetimes reviewed"
+    );
+}
+
+// Literal raw VST3 Event bytes, independent of the adapter and score evaluator.
+// Rows name (actual call, offset, absolute PPQ bits, phase, velocity bits, ID).
+fn cutoff_audit(
+    calls: &[NativeCall],
+    rows: &[(u32, i32, u64, u16, u32, i32)],
+) -> ReentryExpectedAudit {
+    let tuples = rows
+        .iter()
+        .map(|&(call, offset, ppq, phase, velocity, id)| {
+            let mut row = [0_u8; 48];
+            row[..4].copy_from_slice(&call.to_le_bytes());
+            row[8..12].copy_from_slice(&offset.to_le_bytes());
+            row[12..20].copy_from_slice(&ppq.to_le_bytes());
+            row[22..24].copy_from_slice(&phase.to_le_bytes());
+            row[24..26].copy_from_slice(&3_i16.to_le_bytes());
+            row[26..28].copy_from_slice(&61_i16.to_le_bytes());
+            row[32..36].copy_from_slice(&velocity.to_le_bytes());
+            row[40..44].copy_from_slice(&id.to_le_bytes());
+            row
+        })
+        .collect();
+    ReentryExpectedAudit { calls: calls.to_vec(), tuples }
+}
+
+#[test]
+#[ignore = "fresh normal Product, owned MNE4/MNE7 and absolute audit dir; public nonzero cutoff cold retrigger with D0/D3, not continuous DSP history"]
+fn installed_vst3_canonical_note_nonzero_entry_chases_only_public_cutoff_notes() {
+    let materials = Materials::load();
+    let render = render(48_000);
+    let mut sequence = materials.authored(render, 0, 0);
+    // Fixed author identities deliberately oppose the two held notes' original
+    // On-time order. At S=5 the original On ID30 precedes chased IDs40,60.
+    sequence.audio_program.note_lanes[0].notes = AuthoringList::from(
+        [
+            (10_u128, 0, 5, 0.25), // Off==S: never an orphan Off in the fresh producer.
+            (20, 3, 4, 0.125),     // Inside PDC priming [2,5), yet entirely historical.
+            (60, 1, 8, 0.125),     // Earlier On, later author ID.
+            (40, 2, 8, 0.5),       // Later On, earlier author ID.
+            (30, 5, 7, 0.25),      // On==S: exactly once, merged with held notes.
+            (50, 6, 9, 0.125),
+        ]
+        .into_iter()
+        .map(|(id, start, end, velocity)| AudioNote {
+            id: AudioNoteId(uuid::Uuid::from_u128(id)),
+            start: time(start, render.sample_rate),
+            end: time(end, render.sample_rate),
+            channel: 3,
+            key: 61,
+            on_velocity: velocity,
+            off_velocity: 0.125,
+        })
+        .collect::<Vec<_>>(),
+    );
+    let authored = serde_json::to_value(&sequence).unwrap();
+    let initial = cutoff_audit(
+        &[(3, 0, 0, 3)],
+        &[
+            (1, 0, 0x3f68000000000000, 0, 0x3e800000, 0),
+            (1, 1, 0x3f70000000000000, 0, 0x3e000000, 1),
+            (1, 2, 0x3f74000000000000, 0, 0x3f000000, 2),
+        ],
+    );
+    for (retained, pdc) in [(false, false), (true, false), (false, true), (true, true)] {
+        let first_id = if retained { 3 } else { 0 };
+        let mut authored_case = sequence.clone();
+        let target_id = authored_case.audio_program.note_lanes[0].target.processor_id;
+        let resolves = Arc::new(AtomicUsize::new(0));
+        let mut subject = if pdc {
+            // Existing MNE7 has a real three-slot delay, not just metadata.
+            // Before MNE4 it produces D3 at the Note stage and root L3.
+            let mut component = b"MNE7".to_vec();
+            for value in [7_u32, 0, 1 | (2 << 8) | (1 << 16), 0] {
+                component.extend_from_slice(&value.to_le_bytes());
+            }
+            let mut state = b"VST3HOST_STATE\0\0".to_vec();
+            for value in [1_u32, 20, 20] {
+                state.extend_from_slice(&value.to_le_bytes());
+            }
+            state.extend_from_slice(&component);
+            state.extend_from_slice(&component);
+            let upstream = materials.catalog.create_instance(CLASS, render, Some(state)).unwrap();
+            let track = authored_case.audio_tracks[0].id;
+            authored_case
+                .audio_program
+                .track_channels
+                .get_mut(&track)
+                .unwrap()
+                .strip
+                .pre_fader
+                .processors
+                .insert(0, upstream);
+            let resolver = IsolatedAudioProcessorResolver::new(materials.catalog.clone());
+            let runtime = AudioProgramRuntime::build_with_processor_resolver_and_resource_grant(
+                &authored_case,
+                &[],
+                &NoMedia(resolves.clone()),
+                &resolver,
+                render,
+                None,
+                AudioRuntimeResourceGrant::new(usize::MAX, usize::MAX, usize::MAX),
+            )
+            .unwrap();
+            assert_eq!(runtime.public_output_lookahead_frames(), 3);
+            Subject::install(&materials, runtime, target_id, resolves.clone())
+        } else {
+            Subject::create_unentered(&materials, &authored_case, render)
+        };
+        let upstream = if pdc {
+            let track = authored_case.audio_tracks[0].id;
+            let id =
+                authored_case.audio_program.track_channels[&track].strip.pre_fader.processors[0].id;
+            let object = subject
+                .runtime
+                .observe_native_owner_object(note_owner(&subject.runtime, id))
+                .unwrap();
+            assert_ne!(object.process_id(), subject.object.process_id());
+            // SAFETY: actual live upstream object; query/synchronize only.
+            let raw = unsafe { OpenProcess(0x0010_0000 | 0x1000, 0, object.process_id().get()) };
+            assert!(!raw.is_null());
+            let handle = unsafe { OwnedHandle::from_raw_handle(raw.cast()) };
+            assert_eq!(
+                unsafe { WaitForSingleObject(handle.as_raw_handle().cast(), 0) },
+                258
+            );
+            let path =
+                materials.directory.join(format!("mne7-{}.audit", object.process_id().get()));
+            let prefix = std::fs::metadata(&path)
+                .map(|m| usize::try_from(m.len()).unwrap())
+                .unwrap_or_else(|e| {
+                    assert_eq!(e.kind(), std::io::ErrorKind::NotFound);
+                    0
+                });
+            Some((id, object, handle, path, prefix))
+        } else {
+            None
+        };
+        let pid = subject.object.process_id().get();
+        let root = subject.runtime.resource_root_identity();
+        let claim = subject.source.current_claim().unwrap().unwrap();
+        let mut expected = Vec::new();
+        if retained {
+            expected.push(ReentryExpectedAudit {
+                calls: initial.calls.clone(),
+                tuples: initial.tuples.clone(),
+            });
+        }
+        // Reference zero=-3 samples and quarter=1024 samples: PPQ at S5 is
+        // exactly 8/1024, never the held note's original On or epoch-relative0.
+        let mut rows = vec![
+            (1, 0, 0x3f80000000000000, 0, 0x3e800000, first_id),
+            (1, 0, 0x3f80000000000000, 0, 0x3f000000, first_id + 1),
+            (1, 0, 0x3f80000000000000, 0, 0x3e000000, first_id + 2),
+        ];
+        let partition: &[(usize, usize)] = if retained {
+            &[(5, 3), (8, 1), (9, 1)]
+        } else {
+            &[(5, 1), (6, 2), (8, 2)]
+        };
+        let calls = if retained {
+            rows.extend_from_slice(&[
+                (1, 1, 0x3f82000000000000, 0, 0x3e000000, first_id + 3),
+                (1, 2, 0x3f84000000000000, 1, 0x3e000000, first_id),
+                (2, 0, 0x3f86000000000000, 1, 0x3e000000, first_id + 1),
+                (2, 0, 0x3f86000000000000, 1, 0x3e000000, first_id + 2),
+                (3, 0, 0x3f88000000000000, 1, 0x3e000000, first_id + 3),
+            ]);
+            vec![(3, 0, 0, 5), (1, 0, 5, 2), (1, 0, 7, 1)]
+        } else {
+            rows.extend_from_slice(&[
+                (2, 0, 0x3f82000000000000, 0, 0x3e000000, first_id + 3),
+                (2, 1, 0x3f84000000000000, 1, 0x3e000000, first_id),
+                (3, 0, 0x3f86000000000000, 1, 0x3e000000, first_id + 1),
+                (3, 0, 0x3f86000000000000, 1, 0x3e000000, first_id + 2),
+                (3, 1, 0x3f88000000000000, 1, 0x3e000000, first_id + 3),
+            ]);
+            vec![(1, 0, 0, 3), (2, 0, 3, 2), (2, 0, 5, 3)]
+        };
+        expected.push(cutoff_audit(&calls, &rows));
+        if pdc {
+            for audit in &mut expected {
+                audit.calls.insert(0, (3, 0, 0, 0));
+                for row in &mut audit.tuples {
+                    let call = u32::from_le_bytes(row[..4].try_into().unwrap()) + 1;
+                    row[..4].copy_from_slice(&call.to_le_bytes());
+                }
+            }
+        }
+        let target = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            if retained {
+                subject
+                    .runtime
+                    .enter_state(AudioStateEntry {
+                        epoch: AudioContinuityEpoch::new(1),
+                        start_sample: 0,
+                    })
+                    .unwrap();
+                let mut pcm = [f32::NAN; 6];
+                subject
+                    .runtime
+                    .render_into(
+                        AudioRenderRequest { start_sample: 0, frame_count: 3 },
+                        &mut pcm,
+                    )
+                    .unwrap();
+                assert_eq!(
+                    pcm.map(f32::to_bits),
+                    [0.125_f32, -0.0625, 0.1875, -0.09375, 0.4375, -0.21875].map(f32::to_bits)
+                );
+            }
+            let before = {
+                let mut evidence = Cursors::default();
+                subject.runtime.visit_continuity_evidence(&mut evidence).unwrap();
+                assert_eq!(
+                    (evidence.sessions.len(), evidence.processors.len()),
+                    (1, if pdc { 2 } else { 1 })
+                );
+                evidence
+            };
+            let old = note_owner(&subject.runtime, target_id);
+            let old_object = subject.runtime.observe_native_owner_object(old).unwrap();
+            let epoch = AudioContinuityEpoch::new(if retained { 2 } else { 1 });
+            subject
+                .runtime
+                .enter_state(AudioStateEntry { epoch, start_sample: 5 })
+                .expect("public nonzero entry must cold-retrigger only notes strictly spanning S");
+            let fresh = note_owner(&subject.runtime, target_id);
+            let object = subject.runtime.observe_native_owner_object(fresh).unwrap();
+            assert_eq!(object.process_id(), old_object.process_id());
+            if retained {
+                assert!(object.object_serial() > old_object.object_serial());
+                assert_retired_note_epochs(&subject.path, subject.prefix, pid, &expected[..1]);
+            } else {
+                assert_eq!(
+                    object, old_object,
+                    "first cold entry anchors the actual fresh producer"
+                );
+            }
+            assert_ne!(fresh.binding(), old.binding());
+            assert_eq!(fresh.address().root, old.address().root);
+            assert_eq!(fresh.address().local, old.address().local);
+            assert_eq!(fresh.address().occurrence, old.address().occurrence);
+            assert_eq!(fresh.address().epoch, Some(epoch));
+            assert!(subject.runtime.validate_native_owner(old).is_err());
+            assert!(subject.runtime.observe_native_owner_object(old).is_err());
+            subject.runtime.validate_native_owner(fresh).unwrap();
+            assert_eq!(subject.runtime.resource_root_identity(), root);
+            assert_eq!(
+                subject.source.current_claim().unwrap().unwrap().generation(),
+                claim.generation()
+            );
+            subject
+                .runtime
+                .native_owner_installation_verifier()
+                .unwrap()
+                .validate(&claim)
+                .unwrap();
+            let entered = {
+                let mut evidence = Cursors::default();
+                subject.runtime.visit_continuity_evidence(&mut evidence).unwrap();
+                assert_eq!(
+                    (evidence.sessions.len(), evidence.processors.len()),
+                    (1, if pdc { 2 } else { 1 })
+                );
+                evidence
+            };
+            assert_eq!(entered.sessions[0].identity, before.sessions[0].identity);
+            assert_eq!(
+                entered.processors.iter().map(|p| p.identity).collect::<Vec<_>>(),
+                before.processors.iter().map(|p| p.identity).collect::<Vec<_>>()
+            );
+            if let Some((id, previous, ..)) = &upstream {
+                let current = subject
+                    .runtime
+                    .observe_native_owner_object(note_owner(&subject.runtime, *id))
+                    .unwrap();
+                assert_eq!(current.process_id(), previous.process_id());
+                if retained {
+                    assert!(current.object_serial() > previous.object_serial());
+                } else {
+                    assert_eq!(current, *previous);
+                }
+            }
+            assert!(matches!(entered.sessions[0].state,
+                AudioSessionCursorState::Active { epoch: actual, next_public_sample, .. }
+                    if actual == epoch && next_public_sample.sample() == 5));
+            let note_cursor = entered
+                .processors
+                .iter()
+                .find(|p| p.occurrence.instance_id == target_id)
+                .unwrap();
+            assert!(matches!(note_cursor.state,
+                AudioProcessorCursorState::Active { epoch: actual, next_input_signal_sample }
+                    if actual == epoch && next_input_signal_sample.sample() == if pdc { 2 } else { 5 }));
+            // D3's real priming window is [2,5): no historical On3/Off4,
+            // no Off==S5 and no premature held-note event may enter that call.
+            // The first full event batch is all at absolute S5, PPQ=8/1024.
+            // Voice value is velocity/2; right=-left/2. All sums are dyadic.
+            // Complete literal public samples S5..9 include every original Off.
+            let literal = [
+                0.4375_f32, -0.21875, 0.5, -0.25, 0.375, -0.1875, 0.0625, -0.03125, 0.0, 0.0,
+            ]
+            .map(f32::to_bits);
+            for &(start, frames) in partition {
+                let mut pcm = vec![f32::NAN; frames * 2];
+                subject
+                    .runtime
+                    .render_into(
+                        AudioRenderRequest { start_sample: start as i64, frame_count: frames },
+                        &mut pcm,
+                    )
+                    .unwrap();
+                assert_eq!(
+                    pcm.iter().map(|sample| sample.to_bits()).collect::<Vec<_>>(),
+                    literal[(start - 5) * 2..(start - 5 + frames) * 2]
+                );
+                assert_eq!(note_owner(&subject.runtime, target_id), fresh);
+                assert_eq!(
+                    subject.runtime.observe_native_owner_object(fresh).unwrap(),
+                    object
+                );
+            }
+            subject
+                .runtime
+                .validate_native_author_source_closed(&ExecutionCancellationToken::new())
+                .unwrap();
+            assert_eq!(subject.resolves.load(Ordering::SeqCst), 0);
+            assert_eq!(serde_json::to_value(&sequence).unwrap(), authored);
+        }));
+        let Subject { runtime, source, handle, path, prefix, .. } = subject;
+        let cleanup = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            drop(runtime);
+            let note_exit = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                observe_exit(&handle, true)
+            }));
+            let upstream_exit = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                if let Some((_, _, handle, ..)) = &upstream {
+                    observe_exit(handle, true);
+                }
+            }));
+            drop(source);
+            if let Err(failure) = note_exit {
+                std::panic::resume_unwind(failure);
+            }
+            if let Err(failure) = upstream_exit {
+                std::panic::resume_unwind(failure);
+            }
+        }));
+        if let Err(failure) = target {
+            std::panic::resume_unwind(failure);
+        }
+        if let Err(failure) = cleanup {
+            std::panic::resume_unwind(failure);
+        }
+        assert_retired_note_epochs(&path, prefix, pid, &expected);
+        if let Some((_, object, _, path, prefix)) = upstream {
+            assert_empty_pdc_epochs(&path, prefix, object.process_id().get(), &expected);
+        }
+    }
 }
 
 #[test]
