@@ -164,13 +164,6 @@ fn app_owned_vst3_first_nonzero_note_playback_enqueues_literal_pcm() {
         .unwrap()
         .iter()
         .any(|p| { p.class_id == CLASS && p.name == "Mondrian VST3 Note Event Oracle" }));
-    let config = mondrian_media::AudioPlaybackConfig {
-        chunk_frames: 4,
-        preroll_frames: 4,
-        high_watermark_frames: 4,
-        max_in_flight: 1,
-        ..mondrian_media::AudioPlaybackConfig::product_default()
-    };
     let render = mondrian_audio::AudioRenderContract {
         sample_rate: 48_000,
         channel_layout: AudioChannelLayout::Stereo,
@@ -248,12 +241,195 @@ fn app_owned_vst3_first_nonzero_note_playback_enqueues_literal_pcm() {
             }]),
         });
     }
+    // Independent complete interleaved Main literals: held .25 plus OnS
+    // .125 through2002, then held alone2003/4, exact Off2005 and silence.
+    let expected = [
+        0.375_f32, -0.1875, 0.375, -0.1875, 0.375, -0.1875, 0.25, -0.125, 0.25, -0.125, 0.0, 0.0,
+        0.0, 0.0, 0.0, 0.0,
+    ];
+    run_app_nonzero_note_playback(clap, vst3, sequence, &expected);
+}
+
+#[test]
+#[ignore = "current normal Product and pinned zero-input CLAP NoteGate DLL; App first-entry software FIFO only, no NativeEnd or recovery qualification"]
+fn app_owned_clap_first_nonzero_note_playback_enqueues_literal_pcm() {
+    const PLUGIN: &str = "org.mondrian.fixture.note-gate.zero-input";
+    let material = |name| {
+        let path = std::path::PathBuf::from(
+            std::env::var_os(name).expect("explicit current native material"),
+        );
+        assert!(path.is_absolute() && path.is_file(), "{name}");
+        path
+    };
+    let helper = material("MONDRIAN_CLAP_TEST_HELPER");
+    let plugin = material("MONDRIAN_ZERO_INPUT_NOTE_GATE_DLL");
+    let expected_hash = std::env::var("MONDRIAN_ZERO_INPUT_NOTE_GATE_DLL_SHA256")
+        .expect("explicit existing zero-input fixture SHA256");
+    assert!(expected_hash.len() == 64 && expected_hash.bytes().all(|b| b.is_ascii_hexdigit()));
+    let clap = Arc::new(
+        mondrian_audio::InstalledClapAudioProcessorSpecResolver::new(helper.clone()).unwrap(),
+    );
+    let vst3 =
+        Arc::new(mondrian_audio::InstalledVst3AudioProcessorSpecResolver::new(helper).unwrap());
+    assert!(clap.install_library(plugin).unwrap().iter().any(|p| {
+        p.plugin_id == PLUGIN && p.name == "Mondrian owned zero-input NoteGate oracle"
+    }));
+    let render = mondrian_audio::AudioRenderContract {
+        sample_rate: 48_000,
+        channel_layout: AudioChannelLayout::Mono,
+        max_block_frames: 4,
+        processing_mode: mondrian_audio::AudioProcessingMode::Realtime,
+        processor_session_scratch_budget_bytes:
+            mondrian_audio::AudioRenderContract::DEFAULT_PROCESSOR_SESSION_SCRATCH_BUDGET_BYTES,
+        public_output_lookahead_budget_frames:
+            mondrian_audio::AudioRenderContract::DEFAULT_PUBLIC_OUTPUT_LOOKAHEAD_BUDGET_FRAMES,
+        compensation_delay_scratch_budget_bytes:
+            mondrian_audio::AudioRenderContract::DEFAULT_COMPENSATION_DELAY_SCRATCH_BUDGET_BYTES,
+    };
+    let mut seed = b"MNG1".to_vec();
+    seed.extend_from_slice(&0.5_f64.to_le_bytes());
+    seed.extend_from_slice(&0_u32.to_le_bytes());
+    let mut instance = clap.create_instance(PLUGIN, render, Some(seed.clone())).unwrap();
+    let mondrian_timeline::audio::AudioProcessorDefinitionRef::Clap {
+        plugin_id,
+        binary_sha256: Some(hash),
+        ..
+    } = &instance.definition
+    else {
+        panic!("the selected real CLAP definition must retain its binary identity");
+    };
+    assert_eq!(plugin_id, PLUGIN);
+    let actual_hash: String = hash.iter().map(|byte| format!("{byte:02x}")).collect();
+    assert_eq!(actual_hash, expected_hash.to_ascii_lowercase());
+    assert_eq!(
+        instance.opaque_state.as_ref().map(AsRef::<[u8]>::as_ref),
+        Some(seed.as_slice())
+    );
+    assert_eq!(instance.parameters.len(), 3);
+    for id in ["clap.param.17", "clap.param.19", "clap.param.23"] {
+        assert!(instance.parameters.contains_key(&mondrian_core::ParameterId::new_static(id)));
+    }
+    let gain = mondrian_core::ParameterId::new_static("clap.param.17");
+    instance
+        .set_parameter_automation(
+            mondrian_core::ExactAutomationCurve::new(gain.clone(), 0.5).unwrap(),
+        )
+        .unwrap();
+    let curve = instance.parameters[&gain].automation.as_ref().unwrap();
+    assert_eq!(curve.default_value.to_bits(), 0.5_f64.to_bits());
+    assert!(curve.keyframes.is_empty());
+    assert!(instance
+        .parameters
+        .iter()
+        .all(|(id, row)| id == &gain || row.automation.is_none()));
+    let id = instance.id;
+    let mut sequence = Sequence::new("first nonzero zero-input CLAP Note playback");
+    sequence.settings.frame_rate = mondrian_core::Rational::FPS_24;
+    sequence.settings.audio_sample_rate = 48_000;
+    sequence.settings.audio_channel_layout = AudioChannelLayout::Mono;
+    sequence.video_tracks[0]
+        .add_clip(
+            Clip::new_solid_color(
+                AssetId::new(),
+                Color::from_rgba8(0, 0, 0, 255),
+                TimelineTime::ZERO,
+                TimelineTime::new(1, 1).unwrap(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    let track = sequence.audio_tracks[0].id;
+    sequence
+        .audio_program
+        .track_channels
+        .get_mut(&track)
+        .unwrap()
+        .strip
+        .pre_fader
+        .processors
+        .push(instance);
+    sequence.audio_program.musical_time_reference = Some(
+        MusicalTimeReference::new(TimelineTime::ZERO, TimelineTime::new(1, 2).unwrap()).unwrap(),
+    );
+    // The second CLAP port's native ID is 0x80000017, not ordinal1's ID1.
+    // With S2000: held, On==S, Off==S and completely past. Zero velocity is
+    // a real held voice in this fixed independent native oracle.
+    for (port, key, on, off, velocity) in [
+        (0_u32, 60, 1_997, 2_005, 0.0),
+        (0x8000_0017, 61, 2_000, 2_007, 1.0),
+        (0, 62, 1_996, 2_000, 1.0),
+        (0x8000_0017, 63, 1_998, 1_999, 0.0),
+    ] {
+        sequence.audio_program.note_lanes.push(AudioNoteLane {
+            schema_version: 1,
+            id: AudioNoteLaneId::new(),
+            target: AudioNoteTarget {
+                track_id: track,
+                processor_id: id,
+                input_port_key: format!("clap.note-input.{port}"),
+            },
+            notes: AuthoringList::from(vec![AudioNote {
+                id: AudioNoteId::new(),
+                start: TimelineTime::new(on, 48_000).unwrap(),
+                end: TimelineTime::new(off, 48_000).unwrap(),
+                channel: 0,
+                key,
+                on_velocity: velocity,
+                off_velocity: 0.25,
+            }]),
+        });
+    }
+    // Complete mono literals: 5/64 for2000..2005, then19/256 and9/128.
+    // The first NativeEnd is at2008, outside these two software windows.
+    let expected = [
+        0.078125_f32,
+        0.078125,
+        0.078125,
+        0.078125,
+        0.078125,
+        0.078125,
+        0.07421875,
+        0.0703125,
+    ];
+    run_app_nonzero_note_playback(clap, vst3, sequence, &expected);
+}
+
+fn run_app_nonzero_note_playback(
+    clap: Arc<mondrian_audio::InstalledClapAudioProcessorSpecResolver>,
+    vst3: Arc<mondrian_audio::InstalledVst3AudioProcessorSpecResolver>,
+    sequence: Sequence,
+    expected: &[f32],
+) {
+    let channel_layout = sequence.settings.audio_channel_layout;
+    assert_eq!(sequence.settings.audio_sample_rate, 48_000);
+    assert_eq!(
+        sequence.settings.frame_rate,
+        mondrian_core::Rational::FPS_24
+    );
+    assert_eq!(expected.len(), 8 * channel_layout.channel_count());
+    let config = mondrian_media::AudioPlaybackConfig {
+        sample_rate: 48_000,
+        channel_layout,
+        chunk_frames: 4,
+        preroll_frames: 4,
+        high_watermark_frames: 4,
+        max_in_flight: 1,
+        ..mondrian_media::AudioPlaybackConfig::product_default()
+    };
     assert!(sequence.audio_tracks.iter().all(|track| track.clips.is_empty()));
     let directory = tempfile::tempdir().unwrap();
     let library = AssetLibrary::open(directory.path().join("library")).unwrap();
     let mut state = AppState::with_native_audio_catalogs(clap, vst3);
     assert!(state.shutdown_audio_playback_and_wait().all_workers_terminated());
     let mut snapshot = audio_snapshot();
+    snapshot.contract.channel_layout = channel_layout;
+    snapshot.contract.channel_semantics = match channel_layout {
+        AudioChannelLayout::Mono => mondrian_media::RealtimeAudioChannelSemantics::MonoConvention,
+        AudioChannelLayout::Stereo => {
+            mondrian_media::RealtimeAudioChannelSemantics::StereoConvention
+        }
+        other => panic!("undeclared software Note layout: {other:?}"),
+    };
     snapshot.active = false;
     snapshot.buffered_frames = 0;
     snapshot.callback_consumed_frames = 0;
@@ -313,7 +489,7 @@ fn app_owned_vst3_first_nonzero_note_playback_enqueues_literal_pcm() {
                     start_sample: 2_000,
                     frame_count: 4,
                     sample_rate: 48_000,
-                    channel_layout: AudioChannelLayout::Stereo,
+                    channel_layout,
                     continuity: AudioPcmContinuity::Enter(AudioPcmRenderGeneration::new(1)),
                 },
                 &ExecutionCancellationToken::new(),
@@ -469,7 +645,7 @@ fn app_owned_vst3_first_nonzero_note_playback_enqueues_literal_pcm() {
                     start_sample: 2_008,
                     frame_count: 4,
                     sample_rate: 48_000,
-                    channel_layout: AudioChannelLayout::Stereo,
+                    channel_layout,
                     continuity: AudioPcmContinuity::Continue(AudioPcmRenderGeneration::new(
                         generation + 1,
                     )),
@@ -502,22 +678,16 @@ fn app_owned_vst3_first_nonzero_note_playback_enqueues_literal_pcm() {
         assert_eq!(recorded.len(), 2);
         for buffer in recorded.iter() {
             assert_eq!(buffer.sample_rate, 48_000);
-            assert_eq!(buffer.channel_layout, AudioChannelLayout::Stereo);
+            assert_eq!(buffer.channel_layout, channel_layout);
             assert!(buffer.samples.iter().all(|value| value.is_finite()));
         }
-        // Independent complete interleaved Main literals: held .25 plus OnS
-        // .125 through2002, then held alone2003/4, exact Off2005 and silence.
-        let expected = [
-            0.375_f32, -0.1875, 0.375, -0.1875, 0.375, -0.1875, 0.25, -0.125, 0.25, -0.125, 0.0,
-            0.0, 0.0, 0.0, 0.0, 0.0,
-        ];
         assert_eq!(
             recorded
                 .iter()
                 .flat_map(|buffer| buffer.samples.iter())
                 .map(|v| v.to_bits())
                 .collect::<Vec<_>>(),
-            expected.map(f32::to_bits)
+            expected.iter().copied().map(f32::to_bits).collect::<Vec<_>>()
         );
         assert_eq!(state.audio_playback_snapshot().next_start_sample, 2_008);
         assert_eq!(library.database_revision().unwrap(), revision);
