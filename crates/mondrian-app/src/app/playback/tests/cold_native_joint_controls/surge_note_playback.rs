@@ -317,17 +317,57 @@ impl Observations {
     }
 }
 
-// Only the exact try_lock refusal occurs before native validation. All other
-// failures, including native Pending/refusal, remain failures of this gate.
-fn source_closed(renderer: &TimelineAudioPcmRenderer) -> bool {
-    match renderer.validate_native_author_source_closed(&ExecutionCancellationToken::new()) {
-        Ok(()) => true,
-        Err(mondrian_core::MondrianError::WorkflowStepFailed { step_id, reason })
-            if step_id == "project_audio_handoff" && reason == "Timeline audio Runtime is busy" =>
+// An observation can find callbacks/flush/Ack or a real Begin/End still pending.
+// Drive only the original dispatcher until its original deadline, never synthesize
+// a close. Permanent faults fail immediately; only the original validator's Ok
+// proves closure. Retain the last typed cause for a useful deadline failure.
+fn source_closed(
+    renderer: &TimelineAudioPcmRenderer,
+    epoch: Option<u64>,
+    last_hold: &mut Option<mondrian_audio::NativeAudioAuthorHoldReason>,
+) -> bool {
+    use mondrian_audio::{
+        NativeAudioAuthorAdmissionError as Error, NativeAudioAuthorHoldReason as Hold,
+    };
+    match renderer.observe_native_author_source_closed_for_test(&ExecutionCancellationToken::new())
+    {
+        None => false,
+        Some(Ok(())) => {
+            *last_hold = None;
+            true
+        }
+        Some(Err(Error::Pending { target, reason }))
+            if matches!(
+                reason,
+                Hold::PendingCallbacks
+                    | Hold::PendingParameterObservations
+                    | Hold::DspFeedbackPending
+                    | Hold::OutstandingDelivery
+                    | Hold::OpenBoundary
+            ) =>
         {
+            let current = owner(renderer).editor_target();
+            assert_eq!(
+                (
+                    target.instance,
+                    target.root_session,
+                    target.local_session,
+                    target.owner,
+                    target.insertion
+                ),
+                (
+                    current.instance,
+                    current.root_session,
+                    current.local_session,
+                    current.owner,
+                    current.insertion
+                )
+            );
+            assert_eq!(target.continuity_epoch, epoch);
+            *last_hold = Some(reason);
             false
         }
-        Err(error) => panic!("actual SourceClosed validation failed: {error:?}"),
+        Some(Err(error)) => panic!("actual SourceClosed validation failed: {error:?}"),
     }
 }
 
@@ -551,6 +591,7 @@ fn app_surge_xt_vst3_first_nonzero_note_playback_sustains_main() {
         let generation = state.audio_playback_snapshot().generation;
         let deadline = Instant::now() + Duration::from_secs(30);
         let mut observed = Observations::default();
+        let mut last_source_hold = None;
         // Initialization control callbacks close through the same canonical
         // dispatcher before the first positive signal window may enter.
         loop {
@@ -565,13 +606,13 @@ fn app_surge_xt_vst3_first_nonzero_note_playback_sustains_main() {
             }
             if observed.settled(&state)
                 && state.audio_playback_snapshot().in_flight == 0
-                && source_closed(&renderer)
+                && source_closed(&renderer, None, &mut last_source_hold)
             {
                 break;
             }
             assert!(
                 Instant::now() < deadline,
-                "initial real Source did not close"
+                "initial real Source did not close: {last_source_hold:?}"
             );
             std::thread::yield_now();
         }
@@ -601,7 +642,7 @@ fn app_surge_xt_vst3_first_nonzero_note_playback_sustains_main() {
             loop {
                 assert!(
                     Instant::now() < deadline,
-                    "finite Surge software windows did not settle"
+                    "finite Surge software windows did not settle: {last_source_hold:?}"
                 );
                 let renderer = weak.upgrade().unwrap();
                 let erased: std::sync::Weak<dyn AudioPcmRenderer> = weak.clone();
@@ -626,7 +667,7 @@ fn app_surge_xt_vst3_first_nonzero_note_playback_sustains_main() {
                 if buffers.lock().len() == window + 1
                     && state.audio_playback_snapshot().in_flight == 0
                     && observed.settled(&state)
-                    && source_closed(&renderer)
+                    && source_closed(&renderer, Some(generation), &mut last_source_hold)
                 {
                     let current = owner(&renderer);
                     let target = current.editor_target();

@@ -203,6 +203,17 @@ impl TimelineAudioPcmRenderer {
         observe(&state.delivery)
     }
 
+    /// Preserve the original close check's typed pending cause for bounded tests.
+    /// `None` is only a busy observation; no close proof or author permission.
+    #[cfg(all(test, windows))]
+    pub(super) fn observe_native_author_source_closed_for_test(
+        &self,
+        cancel: &ExecutionCancellationToken,
+    ) -> Option<Result<(), mondrian_audio::NativeAudioAuthorAdmissionError>> {
+        let mut state = self.state.try_lock()?;
+        Some(state.delivery.validate_native_author_source_closed(cancel))
+    }
+
     /// Fixed observational IPC only; the original Delivery validates this lease.
     #[cfg(all(test, windows))]
     pub(in crate::app) fn observe_native_object_for_test(
