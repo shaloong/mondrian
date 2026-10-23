@@ -207,7 +207,23 @@ impl Observations {
                 assert!(!batch.loss().incomplete());
             }
             AudioPlaybackEvent::NativeParameterObservationsObserved { observation, .. } => {
-                assert_eq!(observation.target(), owner(renderer).editor_target());
+                // This is a historical completion, not a current capability:
+                // an earlier event may already have published a new binding.
+                let historical = observation.target();
+                let current = owner(renderer).editor_target();
+                assert_eq!(
+                    (
+                        historical.instance,
+                        historical.root_session,
+                        historical.local_session
+                    ),
+                    (
+                        current.instance,
+                        current.root_session,
+                        current.local_session
+                    )
+                );
+                assert!(historical.continuity_epoch.is_none_or(|epoch| epoch == generation));
             }
             AudioPlaybackEvent::NativeAuthorProposalObserved { proposal, .. } => {
                 assert_eq!(proposal.sequence(), state.active_sequence().unwrap().id);
@@ -298,6 +314,20 @@ impl Observations {
             _ => unreachable!(),
         }
         state.handle_audio_playback_event(event, Instant::now()).unwrap();
+    }
+}
+
+// Only the exact try_lock refusal occurs before native validation. All other
+// failures, including native Pending/refusal, remain failures of this gate.
+fn source_closed(renderer: &TimelineAudioPcmRenderer) -> bool {
+    match renderer.validate_native_author_source_closed(&ExecutionCancellationToken::new()) {
+        Ok(()) => true,
+        Err(mondrian_core::MondrianError::WorkflowStepFailed { step_id, reason })
+            if step_id == "project_audio_handoff" && reason == "Timeline audio Runtime is busy" =>
+        {
+            false
+        }
+        Err(error) => panic!("actual SourceClosed validation failed: {error:?}"),
     }
 }
 
@@ -533,13 +563,10 @@ fn app_surge_xt_vst3_first_nonzero_note_playback_sustains_main() {
             for event in poll.events {
                 observed.dispatch(&mut state, &renderer, event, generation, START);
             }
-            if !observed.author.is_empty()
-                && observed.settled(&state)
+            if observed.settled(&state)
                 && state.audio_playback_snapshot().in_flight == 0
+                && source_closed(&renderer)
             {
-                renderer
-                    .validate_native_author_source_closed(&ExecutionCancellationToken::new())
-                    .unwrap();
                 break;
             }
             assert!(
@@ -548,10 +575,6 @@ fn app_surge_xt_vst3_first_nonzero_note_playback_sustains_main() {
             );
             std::thread::yield_now();
         }
-        assert!(
-            !observed.author.is_empty(),
-            "actual startup callbacks must take canonical/CAS/Ack"
-        );
         assert_author(&state, &original);
         let renderer = weak.upgrade().unwrap();
         let cold = owner(&renderer);
@@ -603,10 +626,8 @@ fn app_surge_xt_vst3_first_nonzero_note_playback_sustains_main() {
                 if buffers.lock().len() == window + 1
                     && state.audio_playback_snapshot().in_flight == 0
                     && observed.settled(&state)
+                    && source_closed(&renderer)
                 {
-                    renderer
-                        .validate_native_author_source_closed(&ExecutionCancellationToken::new())
-                        .unwrap();
                     let current = owner(&renderer);
                     let target = current.editor_target();
                     assert_eq!(
@@ -643,6 +664,11 @@ fn app_surge_xt_vst3_first_nonzero_note_playback_sustains_main() {
             assert_eq!(state.authoring_session_id(), Some(author_session));
             assert_author(&state, &original);
         }
+        assert!(
+            !observed.author.is_empty(),
+            "natural callbacks must complete canonical/CAS/Ack within the finite gate"
+        );
+        assert!(observed.settled(&state));
         let recorded = buffers.lock();
         assert_eq!(recorded.len(), WINDOWS);
         let mut sustain_energy = 0.0_f64;
