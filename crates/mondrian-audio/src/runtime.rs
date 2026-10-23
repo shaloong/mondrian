@@ -19,9 +19,8 @@ use crate::{
     CompiledAudioSource, PreparedAudioPlan,
 };
 use mondrian_core::{
-    AssetId, AudioChannelLayout, AudioComponentEditId, AudioSamplePosition, AudioSampleRate,
-    AudioSourceComponentId, ExecutionCancellationToken, ProgramOutputId, SequenceId,
-    TimelineTimeRange,
+    AssetId, AudioChannelLayout, AudioComponentEditId, AudioSamplePosition, AudioSourceComponentId,
+    ExecutionCancellationToken, ProgramOutputId, SequenceId, TimelineTimeRange,
 };
 use mondrian_timeline::{sequence::MAX_NESTED_SEQUENCE_RENDER_DEPTH, Sequence};
 use std::collections::{BTreeMap, BTreeSet};
