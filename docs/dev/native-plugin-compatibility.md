@@ -376,6 +376,16 @@ instruments, other platforms, realtime and performance remain unqualified.
   root cause; neither Gain nor Surge has been attributed to plugin destruction.
   Later successful runs do not establish a fix. No timeout widening or retry
   workaround has been applied.
+- Windows/MSVC Product now delay-imports optional OpenGL (`bd3c8e83`), preserving
+  the WGPU GL backend. Same-source controls verify both deferred loading and
+  actual WGL getter resolution. In 20 matched early-error controls per Product,
+  parent-observed error-line-to-exit intervals change from about 57–71 ms to 9–13 ms;
+  these are neither child Drop timings nor realtime/performance qualification.
+  The rebuilt Product's import table confirms the change, and the original
+  Surge CLAP project-reopen/CLAP playback/VST3 playback gates all pass with the
+  byte-identical prior parent harness and original budgets. Full GL rendering
+  and the original OFX failing lifecycle remain unverified for this change.
+  This isolates avoidable unused-image overhead, not the original F06 cause.
 - The report's `exit_loop` timer describes the whole exit
   loop plus its last existing result. It is not the timestamp/duration of the
   final `try_wait`, nor a native Drop duration.
