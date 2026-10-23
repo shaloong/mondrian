@@ -1147,9 +1147,11 @@ fn app_surge_xt_clap_reopened_project_first_nonzero_note_playback_sustains_main(
         );
         assert!(Instant::now() < deadline);
     }));
-    let cleanup = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        // Also consumes owners on a Save/Close/Open assertion failure.
+    // Always attempt both consuming cleanups, even if the first one panics.
+    let old_cleanup = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         shutdown_surge(&mut state, &weak, verifier.as_ref(), handle.as_ref());
+    }));
+    let fresh_cleanup = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         if let Some(fresh) = &mut reopened {
             let fresh_weak = fresh.native_audio_renderer.clone().unwrap_or_default();
             shutdown_surge(fresh, &fresh_weak, None, None);
@@ -1158,7 +1160,10 @@ fn app_surge_xt_clap_reopened_project_first_nonzero_note_playback_sustains_main(
     if let Err(primary) = target {
         std::panic::resume_unwind(primary);
     }
-    if let Err(error) = cleanup {
+    if let Err(error) = old_cleanup {
+        std::panic::resume_unwind(error);
+    }
+    if let Err(error) = fresh_cleanup {
         std::panic::resume_unwind(error);
     }
 }
