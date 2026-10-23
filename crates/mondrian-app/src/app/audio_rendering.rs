@@ -193,6 +193,26 @@ impl TimelineAudioPcmRenderer {
         state.delivery.visit_continuity_evidence(visitor)
     }
 
+    /// Test-only observations of the existing delivery owner; no mutable callback.
+    #[cfg(all(test, windows))]
+    pub(in crate::app) fn with_delivery_observation_for_test<R>(
+        &self,
+        observe: impl FnOnce(&AudioProgramDeliveryRuntime) -> R,
+    ) -> R {
+        let state = self.state.lock();
+        observe(&state.delivery)
+    }
+
+    /// Fixed observational IPC only; the original Delivery validates this lease.
+    #[cfg(all(test, windows))]
+    pub(in crate::app) fn observe_native_object_for_test(
+        &self,
+        lease: mondrian_audio::AudioNativeProcessorOwnerLease,
+    ) -> Result<mondrian_audio::NativeAudioObjectObservation, mondrian_audio::AudioNativeOwnerError>
+    {
+        self.state.lock().delivery.observe_native_owner_object(lease)
+    }
+
     pub(super) fn bind_author_snapshot(
         &mut self,
         snapshot: mondrian_editor_state::AuthorExecutionSnapshot,
@@ -1479,10 +1499,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             renderer.continuity_model(),
-            AudioPcmContinuityModel::GenerationStateFromOrigin(AudioSamplePosition::new(
-                0,
-                mondrian_core::AudioSampleRate::new(48_000).unwrap()
-            ))
+            AudioPcmContinuityModel::GenerationState
         );
         assert_eq!(
             renderer.state.lock().delivery.program_render_contract().max_block_frames,
