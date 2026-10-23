@@ -460,6 +460,15 @@ fn app_surge_xt_vst3_first_nonzero_note_playback_sustains_main() {
 #[test]
 #[ignore = "pinned Surge XT 1.3.4 CLAP; fresh in-memory capture and finite App Realtime software FIFO only"]
 fn app_surge_xt_clap_first_nonzero_note_playback_sustains_main() {
+    let (clap, vst3, sequence) = fresh_clap_surge_case();
+    run_app_surge_playback(clap, vst3, sequence, None, false);
+}
+
+fn fresh_clap_surge_case() -> (
+    Arc<mondrian_audio::InstalledClapAudioProcessorSpecResolver>,
+    Arc<mondrian_audio::InstalledVst3AudioProcessorSpecResolver>,
+    Sequence,
+) {
     use sha2::{Digest, Sha256};
     const ID: &str = "org.surge-synth-team.surge-xt";
     let file = |name| {
@@ -562,13 +571,11 @@ fn app_surge_xt_clap_first_nonzero_note_playback_sustains_main() {
         instance.opaque_state.as_ref().map(AsRef::<[u8]>::as_ref),
         Some(seed.as_slice())
     );
-    run_app_surge_playback(
+    (
         clap,
         vst3,
         note_sequence(instance, note_port.port_key.clone()),
-        None,
-        false,
-    );
+    )
 }
 
 fn note_sequence(
@@ -660,20 +667,12 @@ fn render_contract(
     }
 }
 
-fn run_app_surge_playback(
-    clap: Arc<mondrian_audio::InstalledClapAudioProcessorSpecResolver>,
-    vst3: Arc<mondrian_audio::InstalledVst3AudioProcessorSpecResolver>,
-    sequence: Sequence,
-    retained_seed: Option<(&std::path::Path, &[u8])>,
-    require_author_receipt: bool,
-) {
-    let config = playback_config();
-    let original = sequence.clone();
-    let directory = tempfile::tempdir().unwrap();
-    let library = AssetLibrary::open(directory.path().join("library")).unwrap();
-    let revision = library.database_revision().unwrap();
-    let mut state = AppState::with_native_audio_catalogs(clap, vst3);
+fn install_surge_output(
+    state: &mut AppState,
+    buffers: Arc<parking_lot::Mutex<Vec<AudioBuffer>>>,
+) -> Arc<parking_lot::Mutex<NativeHoldPlatformState>> {
     assert!(state.shutdown_audio_playback_and_wait().all_workers_terminated());
+    let config = playback_config();
     let mut snapshot = audio_snapshot();
     snapshot.active = false;
     snapshot.buffered_frames = 0;
@@ -692,7 +691,6 @@ fn run_app_surge_playback(
         auto_acknowledge: true,
         queued: 0,
     }));
-    let buffers = Arc::new(parking_lot::Mutex::new(Vec::with_capacity(WINDOWS)));
     state.audio_playback = AppAudioPlayback::Available(Box::new(
         AudioPlayback::with_output(
             config,
@@ -703,69 +701,158 @@ fn run_app_surge_playback(
         )
         .unwrap(),
     ));
+    output
+}
+
+fn prepare_idle_surge(
+    state: &mut AppState,
+    buffers: &Arc<parking_lot::Mutex<Vec<AudioBuffer>>>,
+    weak: &mut std::sync::Weak<TimelineAudioPcmRenderer>,
+    observed: &mut Observations,
+    deadline: Option<Instant>,
+) -> (u64, Instant) {
+    state.seek(1).expect("public frame1 seek at24fps");
+    assert_eq!(state.current_frame(), 1);
+    assert_eq!(state.audio_playback_snapshot().next_start_sample, START);
+    assert!(state.native_audio_renderer.is_none());
+    let source = state.audio_playback_renderer("Surge first S2000 prepare").unwrap().unwrap();
+    assert_eq!(
+        source.renderer.delivery_evidence().program_layout,
+        AudioChannelLayout::Stereo
+    );
+    assert_eq!(
+        source.renderer.delivery_evidence().target_layout,
+        crate::app::AUDIO_OUTPUT_LAYOUT
+    );
+    assert!(source.renderer.owner_installation_verifier().is_none());
+    *weak = Arc::downgrade(&source.renderer);
+    assert!(matches!(
+        cursors(&source.renderer).processors[0].state,
+        AudioProcessorCursorState::Unentered
+    ));
+    state
+        .commit_audio_playback(
+            "Surge first S2000 prepare",
+            audio_anchor(START),
+            Some(source),
+        )
+        .unwrap();
+    let generation = state.audio_playback_snapshot().generation;
+    let deadline = deadline.unwrap_or_else(|| Instant::now() + Duration::from_secs(30));
+    let mut last_source_hold = None;
+    // Initialization control callbacks close through the same canonical
+    // dispatcher before the first positive signal window may enter.
+    loop {
+        let renderer = weak.upgrade().unwrap();
+        let poll = state.audio_playback.poll(AudioPlaybackMode::Idle, audio_anchor(START)).unwrap();
+        assert_eq!(poll.snapshot.generation, generation);
+        assert_eq!(poll.snapshot.next_start_sample, START);
+        assert!(buffers.lock().is_empty());
+        for event in poll.events {
+            observed.dispatch(state, &renderer, event, generation, START);
+        }
+        if observed.settled(state)
+            && state.audio_playback_snapshot().in_flight == 0
+            && source_closed(&renderer, None, &mut last_source_hold)
+        {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "initial real Source did not close: {last_source_hold:?}"
+        );
+        std::thread::yield_now();
+    }
+    (generation, deadline)
+}
+
+fn shutdown_surge(
+    state: &mut AppState,
+    weak: &std::sync::Weak<TimelineAudioPcmRenderer>,
+    verifier: Option<&mondrian_core::AudioOwnerInstallationVerifier>,
+    handle: Option<&OwnedHandle>,
+) {
+    let evidence = state.shutdown_audio_playback_and_wait();
+    assert!(evidence.all_workers_terminated(), "{evidence:?}");
+    assert!(evidence.shutdown_resource_facts_complete_at_deadline);
+    assert!(!evidence.shutdown_owner_lifetime_unresolved_at_deadline);
+    assert_eq!(evidence.foreign_owner_panics, 0);
+    assert_eq!(evidence.foreign_owner_abandonments, 0);
+    assert!(weak.upgrade().is_none());
+    if let Some(verifier) = verifier {
+        assert!(matches!(
+            verifier.current_claim(),
+            Err(mondrian_core::AudioOwnerInstallationError::NotInstalled)
+        ));
+    }
+    if let Some(handle) = handle {
+        assert_eq!(
+            unsafe { WaitForSingleObject(handle.as_raw_handle().cast(), 0) },
+            0
+        );
+        let mut exit = u32::MAX;
+        assert_ne!(
+            unsafe { GetExitCodeProcess(handle.as_raw_handle().cast(), &mut exit) },
+            0
+        );
+        assert_eq!(exit, 0);
+    }
+}
+
+fn run_app_surge_playback(
+    clap: Arc<mondrian_audio::InstalledClapAudioProcessorSpecResolver>,
+    vst3: Arc<mondrian_audio::InstalledVst3AudioProcessorSpecResolver>,
+    sequence: Sequence,
+    retained_seed: Option<(&std::path::Path, &[u8])>,
+    require_author_receipt: bool,
+) {
+    let original = sequence.clone();
+    let directory = tempfile::tempdir().unwrap();
+    let library = AssetLibrary::open(directory.path().join("library")).unwrap();
+    let revision = library.database_revision().unwrap();
+    let mut state = AppState::with_native_audio_catalogs(clap, vst3);
+    let buffers = Arc::new(parking_lot::Mutex::new(Vec::with_capacity(WINDOWS)));
+    let output = install_surge_output(&mut state, buffers.clone());
     state.test_set_sequence(Some(sequence));
     state.test_set_asset_library(Some(library.clone()));
     state.synchronize_playback_authoring_binding().unwrap();
+    assert!(state.active_sequence().unwrap().author_state_eq_ignoring_revision(&original));
+    assert_eq!(library.database_revision().unwrap(), revision);
+    run_loaded_surge_playback(
+        &mut state,
+        output,
+        buffers,
+        retained_seed,
+        require_author_receipt,
+        |_| {},
+        None,
+    );
+}
+
+fn run_loaded_surge_playback(
+    state: &mut AppState,
+    output: Arc<parking_lot::Mutex<NativeHoldPlatformState>>,
+    buffers: Arc<parking_lot::Mutex<Vec<AudioBuffer>>>,
+    retained_seed: Option<(&std::path::Path, &[u8])>,
+    require_author_receipt: bool,
+    before_entry: impl FnOnce(&TimelineAudioPcmRenderer),
+    deadline: Option<Instant>,
+) {
+    let original = state.active_sequence().unwrap().clone();
+    let library = state
+        .asset_library_handle()
+        .expect("the actual installed Authoring Session library");
+    let revision = library.database_revision().unwrap();
     let author_session = state.authoring_session_id().unwrap();
     let mut weak = std::sync::Weak::<TimelineAudioPcmRenderer>::new();
     let mut verifier = None;
     let mut handle: Option<OwnedHandle> = None;
     let target = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        state.seek(1).expect("public frame1 seek at24fps");
-        assert_eq!(state.current_frame(), 1);
-        assert_eq!(state.audio_playback_snapshot().next_start_sample, START);
-        assert!(state.native_audio_renderer.is_none());
-        let source = state.audio_playback_renderer("Surge first S2000 prepare").unwrap().unwrap();
-        assert_eq!(
-            source.renderer.delivery_evidence().program_layout,
-            AudioChannelLayout::Stereo
-        );
-        assert_eq!(
-            source.renderer.delivery_evidence().target_layout,
-            crate::app::AUDIO_OUTPUT_LAYOUT
-        );
-        assert!(source.renderer.owner_installation_verifier().is_none());
-        weak = Arc::downgrade(&source.renderer);
-        assert!(matches!(
-            cursors(&source.renderer).processors[0].state,
-            AudioProcessorCursorState::Unentered
-        ));
-        state
-            .commit_audio_playback(
-                "Surge first S2000 prepare",
-                audio_anchor(START),
-                Some(source),
-            )
-            .unwrap();
-        let generation = state.audio_playback_snapshot().generation;
-        let deadline = Instant::now() + Duration::from_secs(30);
         let mut observed = Observations::default();
+        let (generation, deadline) =
+            prepare_idle_surge(state, &buffers, &mut weak, &mut observed, deadline);
         let mut last_source_hold = None;
-        // Initialization control callbacks close through the same canonical
-        // dispatcher before the first positive signal window may enter.
-        loop {
-            let renderer = weak.upgrade().unwrap();
-            let poll =
-                state.audio_playback.poll(AudioPlaybackMode::Idle, audio_anchor(START)).unwrap();
-            assert_eq!(poll.snapshot.generation, generation);
-            assert_eq!(poll.snapshot.next_start_sample, START);
-            assert!(buffers.lock().is_empty());
-            for event in poll.events {
-                observed.dispatch(&mut state, &renderer, event, generation, START);
-            }
-            if observed.settled(&state)
-                && state.audio_playback_snapshot().in_flight == 0
-                && source_closed(&renderer, None, &mut last_source_hold)
-            {
-                break;
-            }
-            assert!(
-                Instant::now() < deadline,
-                "initial real Source did not close: {last_source_hold:?}"
-            );
-            std::thread::yield_now();
-        }
-        assert_author(&state, &original);
+        assert_author(state, &original);
         let renderer = weak.upgrade().unwrap();
         let cold = owner(&renderer);
         let anchor = cold.editor_target();
@@ -784,6 +871,8 @@ fn run_app_surge_playback(
             unsafe { WaitForSingleObject(handle.as_ref().unwrap().as_raw_handle().cast(), 0) },
             258
         );
+        verifier = Some(renderer.owner_installation_verifier().unwrap());
+        before_entry(&renderer);
         drop(renderer);
         for window in 0..WINDOWS {
             let start = START + (window * BLOCK) as i64;
@@ -808,14 +897,14 @@ fn run_app_surge_playback(
                 assert!(poll.snapshot.next_start_sample <= end);
                 assert!(!poll.snapshot.output.unwrap().active);
                 for event in poll.events {
-                    observed.dispatch(&mut state, &renderer, event, generation, start);
+                    observed.dispatch(state, &renderer, event, generation, start);
                 }
                 // A real NativeAuthorPending leaves this same frontier parked.
                 // Natural dispatcher completion, never a manual reset/Enter,
                 // permits the original request to enqueue on the next poll.
                 if buffers.lock().len() == window + 1
                     && state.audio_playback_snapshot().in_flight == 0
-                    && observed.settled(&state)
+                    && observed.settled(state)
                     && source_closed(&renderer, Some(generation), &mut last_source_hold)
                 {
                     let current = owner(&renderer);
@@ -852,7 +941,7 @@ fn run_app_surge_playback(
             assert_eq!(output.lock().queued, (window + 1) * BLOCK);
             assert_eq!(state.audio_playback_snapshot().next_start_sample, end);
             assert_eq!(state.authoring_session_id(), Some(author_session));
-            assert_author(&state, &original);
+            assert_author(state, &original);
         }
         if require_author_receipt {
             assert!(
@@ -860,7 +949,7 @@ fn run_app_surge_playback(
                 "natural callbacks must complete canonical/CAS/Ack within the finite gate"
             );
         }
-        assert!(observed.settled(&state));
+        assert!(observed.settled(state));
         let recorded = buffers.lock();
         assert_eq!(recorded.len(), WINDOWS);
         let mut sustain_energy = 0.0_f64;
@@ -889,31 +978,7 @@ fn run_app_surge_playback(
     }));
     // Consume the original Media/Runtime owners before propagating target panic.
     let cleanup = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let evidence = state.shutdown_audio_playback_and_wait();
-        assert!(evidence.all_workers_terminated(), "{evidence:?}");
-        assert!(evidence.shutdown_resource_facts_complete_at_deadline);
-        assert!(!evidence.shutdown_owner_lifetime_unresolved_at_deadline);
-        assert_eq!(evidence.foreign_owner_panics, 0);
-        assert_eq!(evidence.foreign_owner_abandonments, 0);
-        assert!(weak.upgrade().is_none());
-        if let Some(verifier) = verifier {
-            assert!(matches!(
-                verifier.current_claim(),
-                Err(mondrian_core::AudioOwnerInstallationError::NotInstalled)
-            ));
-        }
-        if let Some(handle) = handle {
-            assert_eq!(
-                unsafe { WaitForSingleObject(handle.as_raw_handle().cast(), 0) },
-                0
-            );
-            let mut exit = u32::MAX;
-            assert_ne!(
-                unsafe { GetExitCodeProcess(handle.as_raw_handle().cast(), &mut exit) },
-                0
-            );
-            assert_eq!(exit, 0);
-        }
+        shutdown_surge(state, &weak, verifier.as_ref(), handle.as_ref());
     }));
     let (author_prefixes, sustain_energy) = match target {
         Ok(result) => result,
@@ -933,4 +998,167 @@ fn run_app_surge_playback(
     };
     println!("SURGE_APP_FIFO format={format} captured_state_bytes={} author_parameters={} author_prefixes={author_prefixes} windows={WINDOWS} sustain_energy={sustain_energy}",
         processor.opaque_state.as_ref().unwrap().len(), processor.parameters.len());
+}
+
+#[test]
+#[ignore = "pinned Surge XT 1.3.4 CLAP; public Save As/Close/new App Open then first nonzero software FIFO, no cross-instance DSP equivalence"]
+fn app_surge_xt_clap_reopened_project_first_nonzero_note_playback_sustains_main() {
+    let (clap, vst3, sequence) = fresh_clap_surge_case();
+    let captured = sequence.clone();
+    let files = tempfile::tempdir().unwrap();
+    let archive = files.path().join("surge-closed-author.mdp");
+    let library = AssetLibrary::open(files.path().join("library")).unwrap();
+    let mut state = AppState::with_native_audio_catalogs(clap.clone(), vst3.clone());
+    let buffers = Arc::new(parking_lot::Mutex::new(Vec::with_capacity(WINDOWS)));
+    let output = install_surge_output(&mut state, buffers.clone());
+    state.test_set_sequence(Some(sequence));
+    state.test_set_asset_library(Some(library));
+    state.synchronize_playback_authoring_binding().unwrap();
+    let mut weak = std::sync::Weak::<TimelineAudioPcmRenderer>::new();
+    let mut verifier = None;
+    let mut handle: Option<OwnedHandle> = None;
+    let mut reopened: Option<AppState> = None;
+    let target = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let mut observed = Observations::default();
+        // One original30s deadline starts at this Source commit and is retained
+        // through durable Save/Close, the new App's Open, and all fresh PCM.
+        let (_, deadline) =
+            prepare_idle_surge(&mut state, &buffers, &mut weak, &mut observed, None);
+        assert_author(&state, &captured);
+        let renderer = weak.upgrade().unwrap();
+        let old_owner = owner(&renderer);
+        assert!(old_owner.editor_target().continuity_epoch.is_none());
+        assert!(matches!(
+            cursors(&renderer).sessions[0].state,
+            AudioSessionCursorState::Unentered
+        ));
+        let old_object = renderer.observe_native_object_for_test(old_owner).unwrap();
+        assert_ne!(old_object.process_id().get(), std::process::id());
+        // SAFETY: query/synchronize only for this observed actual native PID.
+        let raw = unsafe { OpenProcess(0x0010_0000 | 0x1000, 0, old_object.process_id().get()) };
+        assert!(!raw.is_null());
+        handle = Some(unsafe { OwnedHandle::from_raw_handle(raw.cast()) });
+        assert_eq!(
+            unsafe { WaitForSingleObject(handle.as_ref().unwrap().as_raw_handle().cast(), 0) },
+            258
+        );
+        verifier = Some(renderer.owner_installation_verifier().unwrap());
+        drop(renderer);
+        assert_eq!(output.lock().queued, 0);
+        assert!(buffers.lock().is_empty());
+        assert!(Instant::now() < deadline);
+        state
+            .save_project_file_as(archive.clone())
+            .expect("public durable Save As after real SourceClosed");
+        assert!(Instant::now() < deadline);
+        assert!(archive.is_file());
+        assert_author(&state, &captured);
+        // Snapshot the actual successfully saved canonical state. Initialization
+        // may have legitimately captured a different coherent opaque state.
+        let saved = state.active_sequence().unwrap().clone();
+        let author = state.authoring.as_ref().unwrap();
+        let project = author.project_id();
+        let old_session = author.session_id();
+        assert!(!author.has_pending_native_authoring());
+        let renderer = weak.upgrade().unwrap();
+        let old_owner = owner(&renderer);
+        let old_target = old_owner.editor_target();
+        let old_verifier = renderer.owner_installation_verifier().unwrap();
+        let old_claim = old_verifier.current_claim().unwrap();
+        old_verifier.validate(&old_claim).unwrap();
+        assert_eq!(
+            renderer.observe_native_object_for_test(old_owner).unwrap(),
+            old_object
+        );
+        assert!(matches!(
+            cursors(&renderer).processors[0].state,
+            AudioProcessorCursorState::Unentered
+        ));
+        verifier = Some(old_verifier.clone());
+        drop(renderer);
+        state
+            .close_project()
+            .expect("public Close consumes the original no-signal Source");
+        assert!(Instant::now() < deadline);
+        shutdown_surge(&mut state, &weak, verifier.as_ref(), handle.as_ref());
+        assert!(state.authoring.is_none() && state.native_audio_renderer.is_none());
+        assert!(!state.audio_playback.native_editor_source_available());
+        assert_eq!(output.lock().queued, 0);
+        assert!(buffers.lock().is_empty());
+
+        let mut fresh = AppState::with_native_audio_catalogs(clap, vst3);
+        let fresh_buffers = Arc::new(parking_lot::Mutex::new(Vec::with_capacity(WINDOWS)));
+        let fresh_output = install_surge_output(&mut fresh, fresh_buffers.clone());
+        reopened = Some(fresh);
+        let fresh = reopened.as_mut().unwrap();
+        assert!(Instant::now() < deadline);
+        fresh
+            .open_project_file(archive.clone())
+            .expect("public new App Open of the durable Project");
+        assert!(Instant::now() < deadline);
+        let author = fresh.authoring.as_ref().unwrap();
+        assert_eq!(author.project_id(), project);
+        assert_ne!(author.session_id(), old_session);
+        // Sequence.revision is serialized author state (not an AuthorSession
+        // identity or disk Document revision); public Open preserves it too.
+        assert_eq!(
+            fresh.active_sequence().unwrap(),
+            &saved,
+            "complete saved author/opaque/schema/None/Score and revision"
+        );
+        assert_eq!(author.history().diagnostics().undo_entries, 0);
+        assert_eq!(author.history().diagnostics().redo_entries, 0);
+        assert_eq!(author.history().diagnostics().pending_entries, 0);
+        assert!(!fresh.can_undo_action() && !fresh.can_redo_action());
+        assert!(fresh.native_audio_renderer.is_none());
+        assert!(fresh.asset_library_handle().is_some());
+        fresh.synchronize_playback_authoring_binding().unwrap();
+        // This driver consumes the real loaded Session/library. No test setter
+        // or cloned Sequence replaces public Open's canonical state.
+        run_loaded_surge_playback(
+            fresh,
+            fresh_output,
+            fresh_buffers,
+            None,
+            false,
+            |renderer| {
+                assert!(Instant::now() < deadline);
+                assert!(!std::ptr::eq(weak.as_ptr(), renderer));
+                let current = owner(renderer);
+                let current_target = current.editor_target();
+                assert_ne!(current_target.root_session, old_target.root_session);
+                assert_ne!(current_target.local_session, old_target.local_session);
+                assert_ne!(current_target.binding, old_target.binding);
+                assert_eq!(current_target.instance, old_target.instance);
+                assert!(current_target.continuity_epoch.is_none());
+                let current_verifier = renderer.owner_installation_verifier().unwrap();
+                let claim = current_verifier.current_claim().unwrap();
+                assert!(!current_verifier.same_source(&old_verifier));
+                assert!(!current_verifier.same_registration(&old_verifier));
+                current_verifier.validate(&claim).unwrap();
+                assert!(current_verifier.validate(&old_claim).is_err());
+                assert!(old_verifier.validate(&claim).is_err());
+                assert!(renderer.observe_native_object_for_test(old_owner).is_err());
+                assert!(weak.upgrade().is_none());
+                // Native PIDs can be reused and serials are process-local.
+                // Fresh Session/Source/claim and the refused old lease are proof.
+            },
+            Some(deadline),
+        );
+        assert!(Instant::now() < deadline);
+    }));
+    let cleanup = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        // Also consumes owners on a Save/Close/Open assertion failure.
+        shutdown_surge(&mut state, &weak, verifier.as_ref(), handle.as_ref());
+        if let Some(fresh) = &mut reopened {
+            let fresh_weak = fresh.native_audio_renderer.clone().unwrap_or_default();
+            shutdown_surge(fresh, &fresh_weak, None, None);
+        }
+    }));
+    if let Err(primary) = target {
+        std::panic::resume_unwind(primary);
+    }
+    if let Err(error) = cleanup {
+        std::panic::resume_unwind(error);
+    }
 }
