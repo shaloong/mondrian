@@ -249,20 +249,25 @@ static bool admitsIndependentFrames(const OFX::Host::ImageEffect::Base& effect,
   const int sequential = effect.getProps().getIntProperty(kOfxImageEffectInstancePropSequentialRender);
   return !effect.temporalAccess() && (sequential == 0 || sequential == 2) &&
          output && !output->temporalAccess() &&
-         (generator ? !source : source && !source->temporalAccess());
+          (generator ? (!source || source->isOptional()) : source && !source->temporalAccess());
 }
 
 static bool admitsIndependentFrames(const OFX::Host::ImageEffect::Descriptor& effect, bool generator = false)
 {
-  // Filter admission runs after DescribeInContext, when both required clips exist.
-  // Other optional clips remain disconnected and do not supply images.
+  // Admission runs after DescribeInContext. A Generator may declare optional
+  // inputs; only Filter Source and Output acquire image bindings in this host.
   const auto& clips = effect.getClips();
   const auto source = clips.find(kOfxImageEffectSimpleSourceClipName);
   const auto output = clips.find(kOfxImageEffectOutputClipName);
-  return admitsIndependentFrames(effect,
+  if (!admitsIndependentFrames(effect,
       source == clips.end() ? nullptr : source->second,
-      output == clips.end() ? nullptr : output->second, generator) &&
-      (!generator || clips.size() == 1);
+      output == clips.end() ? nullptr : output->second, generator)) { return false; }
+  for (const auto& entry : clips) {
+    if (entry.first != kOfxImageEffectOutputClipName &&
+        (generator || entry.first != kOfxImageEffectSimpleSourceClipName) &&
+        !entry.second->isOptional()) { return false; }
+  }
+  return true;
 }
 
 static bool admitsIndependentFrames(const OFX::Host::ImageEffect::Instance& effect)
@@ -852,14 +857,6 @@ static int describe(MondrianOpenFx::Host& host, const char* binary, const char* 
   if (displayName.size() > labelCapacity) { return 7; }
   std::memcpy(label, displayName.data(), displayName.size());
   *labelLength = displayName.size();
-  const auto& clips = descriptor->getClips();
-  if ((!generator && clips.find("Source") == clips.end()) ||
-      (generator && clips.size() != 1) || clips.find("Output") == clips.end()) { return 7; }
-  for (const auto& entry : clips) {
-    if (entry.first != "Source" && entry.first != "Output" &&
-        !entry.second->isOptional()) { return 7; }
-  }
-
   int count = 0;
   for (const auto* parameter : descriptor->getParamList()) {
     const std::string& type = parameter->getType();

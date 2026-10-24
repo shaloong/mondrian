@@ -166,7 +166,11 @@ namespace MondrianOpenFx {
   //  Says whether the clip is actually connected at the moment.
   bool FilterClipInstance::getConnected() const
   {
-    return _name == "Source" || _name == "Output";
+    // Connection belongs to the selected owner context, not a transient frame
+    // borrow. Generator inputs remain disconnected even when named Source.
+    return _name == kOfxImageEffectOutputClipName ||
+        (_name == kOfxImageEffectSimpleSourceClipName &&
+         _effect->getContext() == kOfxImageEffectContextFilter);
   }
 
   // Unmapped Frame Rate -
