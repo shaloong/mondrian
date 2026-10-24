@@ -48,6 +48,17 @@ This Windows multi-config example must produce two passing JSON rows and exit 0.
 Each row requires ErrMemory/null, one allocated and released owner, and no live
 owner after refusal. The test does not measure whole-host leaks or performance.
 
+Property read bounds use the actual tracked Property Suite in a small native
+target, covering four scalar types with raw fixed/variable/empty, hooked and
+chained storage. Invalid indices/counts must return BadIndex without writing;
+valid prefixes retain the untouched suffix. Run `cmake --build /path/to/build
+--config Release --target PropertyReadBounds`, then
+`/path/to/build/Release/PropertyReadBounds.exe` on Windows multi-config builds
+(use the generator's executable path elsewhere). Success is zero failures and
+exit0. CatalogProbe additionally checks real Image/Clip/Effect/action properties
+in the existing four-version Catalog-to-Graph pixel gate. These owned controls
+do not establish full Property V1, whole-host memory or platform compatibility.
+
 Native reuse is qualified separately in a supervised test child:
 
 ```sh
