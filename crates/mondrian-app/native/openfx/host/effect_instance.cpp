@@ -30,6 +30,7 @@
 #include "effect_instance.h"
 #include "image_clip.h"
 #include "parameter_instance.h"
+#include "image_domain.h"
 
 // Filter instance implementation
 namespace MondrianOpenFx {
@@ -56,6 +57,13 @@ namespace MondrianOpenFx {
 
   void FilterEffectInstance::setCustomOutArgs(const std::string& action, OFX::Host::Property::Set& outArgs) {
     OFX::Host::ImageEffect::Instance::setCustomOutArgs(action, outArgs);
+    if (action == kOfxImageEffectActionGetRegionOfDefinition) {
+      // HostSupport initializes this to zero; the specification requires the
+      // context default even when a handled action writes only some components.
+      const auto rod = calcDefaultRegionOfDefinition(_frameState.info.frame, OfxPointD{1, 1});
+      outArgs.setDoublePropertyN(kOfxImageEffectPropRegionOfDefinition, &rod.x1, 4);
+      return;
+    }
     if (action != kOfxImageEffectActionGetClipPreferences) { return; }
     // The single-PAR host supplies the actual connected grid, including a
     // Generator's output grid, rather than substituting project geometry.
@@ -64,6 +72,32 @@ namespace MondrianOpenFx {
       if (!clip->getConnected()) { continue; }
       outArgs.setDoubleProperty("OfxImageClipPropPAR_" + entry.first, clip->getAspectRatio());
     }
+  }
+
+  OfxRectD FilterEffectInstance::outputRegionOfDefinition(OfxTime time) {
+    if (!std::isfinite(time) || time != _frameState.info.frame) {
+      throw OFX::Host::Property::Exception(kOfxStatErrUnsupported);
+    }
+    if (_frameState.outputRodReady) { return _frameState.outputCanonicalRod; }
+    // Never block a plugin callback thread waiting on another plugin action.
+    // Recursive Output queries from the RoD action cannot define their own RoD.
+    if (_frameState.queryingOutputRod.exchange(true)) {
+      throw OFX::Host::Property::Exception(kOfxStatErrUnsupported);
+    }
+    struct QueryScope {
+      std::atomic<bool>& flag;
+      ~QueryScope() { flag.store(false); }
+    } scope{_frameState.queryingOutputRod};
+    OfxRectD rod{};
+    const auto status = getRegionOfDefinitionAction(time, OfxPointD{1, 1}, rod);
+    if (status != kOfxStatOK && status != kOfxStatReplyDefault) {
+      throw OFX::Host::Property::Exception(status);
+    }
+    OfxRectI pixels{}; size_t count = 0;
+    if (!pixelRegionOfDefinition(rod, _frameState.info.pixel_aspect_ratio, pixels, count)) {
+      throw OFX::Host::Property::Exception(kOfxStatErrUnsupported);
+    }
+    return rod;
   }
 
   OfxStatus FilterEffectInstance::mainEntry(const char* action, const void* handle,

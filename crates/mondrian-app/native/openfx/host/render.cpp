@@ -40,6 +40,7 @@
 #include "effect_instance.h"
 #include "image_clip.h"
 #include "parameter_instance.h"
+#include "image_domain.h"
 
 // Keep the module loaded between the optional early host callback and the
 // HostSupport enumeration. Each selected worker owns exactly one native host.
@@ -326,6 +327,8 @@ static int loadFrame(MondrianOpenFx::FrameState& state, const void* input,
   state.input = data;
   state.pixelCount = pixels;
   state.info = info;
+  state.outputRodReady = false;
+  state.outputPixelCount = 0;
   return 0;
 }
 
@@ -736,9 +739,33 @@ struct MondrianOpenFxSession {
     // Change/preference callbacks cannot make an old output appear completed.
     outputClip->beginFrame();
     const OfxPointD scale{1.0, 1.0};
-    const OfxRectI window{0, 0, info.width, info.height};
-    const OfxRectD region{0.0, 0.0, info.width * info.pixel_aspect_ratio,
-                         static_cast<double>(info.height)};
+    const OfxRectI viewport{0, 0, info.width, info.height};
+    const OfxRectD viewportCanonical{0.0, 0.0, info.width * info.pixel_aspect_ratio,
+                                    static_cast<double>(info.height)};
+    const auto region = outputClip->getRegionOfDefinition(info.frame);
+    OfxRectI window{};
+    size_t domainPixels = 0;
+    if (!MondrianOpenFx::pixelRegionOfDefinition(region, info.pixel_aspect_ratio, window, domainPixels)) { return 7; }
+    if (!instance->supportsMultiResolution() && domainPixels != 0 && !MondrianOpenFx::sameRegion(window, viewport)) { return 7; }
+    frame.outputCanonicalRod = region;
+    frame.outputPixelRod = window;
+    frame.outputPixelCount = domainPixels;
+    frame.outputRodReady = true;
+    if (frame.invalidImageLifetime) { failed = true; return 5; }
+    if (host.auxiliary().fatal()) { failed = true; return 6; }
+    if (host.auxiliary().blocked(instance->getHandle())) {
+      failed = false; report.completion = MONDRIAN_OPENFX_RENDER_USER_BLOCKED; return 0;
+    }
+    // Empty support has no Render action or Output fetch. In particular, do not
+    // begin a render sequence whose mandatory Render action would be omitted.
+    if (domainPixels == 0) {
+      std::fill(frame.output, frame.output + frame.pixelCount, OfxRGBAColourF{0, 0, 0, 0});
+      failed = false;
+      report.output_alpha = representation == MONDRIAN_OPENFX_ALPHA_OPAQUE ? MONDRIAN_OPENFX_ALPHA_STRAIGHT : representation;
+      report.completion = MONDRIAN_OPENFX_RENDER_FRAME;
+      probe.finish(MONDRIAN_OPENFX_FRAME_SETUP, phase);
+      return 0;
+    }
     const bool guiOpen = host.auxiliary().hasInteractiveControl();
     const bool userEdited = host.auxiliary().hasUserEditedControl();
     // Only ask for an identity whose current Source can be published without
@@ -752,8 +779,8 @@ struct MondrianOpenFxSession {
             clip->getPremult() != premultiplication || clip->getAspectRatio() != info.pixel_aspect_ratio ||
             clip->getFieldOrder() != kOfxImageFieldNone) { return false; }
         const auto rod = clip->getRegionOfDefinition(info.frame);
-        if (rod.x1 != region.x1 || rod.y1 != region.y1 ||
-            rod.x2 != region.x2 || rod.y2 != region.y2) { return false; }
+        if (rod.x1 != viewportCanonical.x1 || rod.y1 != viewportCanonical.y1 ||
+            rod.x2 != viewportCanonical.x2 || rod.y2 != viewportCanonical.y2) { return false; }
       }
       return true;
     };
@@ -809,6 +836,15 @@ struct MondrianOpenFxSession {
     } else {
       probe.finish(MONDRIAN_OPENFX_FRAME_SETUP, phase);
     }
+    // Hosts without tiles must provide complete RoD images, including negative
+    // origins and pixels outside the publication viewport. Keep the ordinary
+    // full-viewport path allocation/copy free; scratch is action-local and its
+    // maximum payload is charged in the processor's active storage contract.
+    std::unique_ptr<OfxRGBAColourF[]> domainStorage;
+    if (!MondrianOpenFx::sameRegion(window, viewport)) {
+      domainStorage.reset(new OfxRGBAColourF[domainPixels]);
+      frame.output = domainStorage.get();
+    }
     phase = probe.start();
     OfxStatus status = instance->beginRenderAction(info.frame, info.frame, 1.0,
                                                   guiOpen, scale, false, userEdited);
@@ -831,7 +867,7 @@ struct MondrianOpenFxSession {
     phase = probe.start();
     bool written = status == kOfxStatOK && !frame.invalidImageLifetime && outputClip->outputFetched();
     if (written) {
-      for (size_t index = 0; index < frame.pixelCount; ++index) {
+      for (size_t index = 0; index < frame.outputPixelCount; ++index) {
         const auto& pixel = frame.output[index];
         if (!std::isfinite(pixel.r) || !std::isfinite(pixel.g) ||
             !std::isfinite(pixel.b) || !std::isfinite(pixel.a)) { written = false; break; }
@@ -858,7 +894,29 @@ struct MondrianOpenFxSession {
       failed = false;
       return 0;
     }
-    if (completed) { failed = false; report.output_alpha = representation; report.completion = MONDRIAN_OPENFX_RENDER_FRAME; }
+    if (completed) {
+      if (domainStorage) {
+        auto* published = static_cast<OfxRGBAColourF*>(output);
+        const size_t domainWidth = size_t(int64_t(window.x2) - window.x1);
+        for (int y = 0; y < info.height; ++y) {
+          for (int x = 0; x < info.width; ++x) {
+            auto& target = published[size_t(info.height - 1 - y) * info.width + x];
+            target = {0, 0, 0, 0};
+            if (x >= window.x1 && x < window.x2 && y >= window.y1 && y < window.y2) {
+              target = frame.output[size_t(int64_t(window.y2) - 1 - y) * domainWidth + size_t(int64_t(x) - window.x1)];
+              if (representation == MONDRIAN_OPENFX_ALPHA_OPAQUE) { target.a = 1.0f; }
+            }
+          }
+        }
+        if (representation == MONDRIAN_OPENFX_ALPHA_OPAQUE &&
+            (window.x1 > 0 || window.y1 > 0 || window.x2 < info.width || window.y2 < info.height)) {
+          // Opaque describes the native image's own support, not the transparent
+          // area introduced when placing that image in the requested viewport.
+          representation = MONDRIAN_OPENFX_ALPHA_STRAIGHT;
+        }
+      }
+      failed = false; report.output_alpha = representation; report.completion = MONDRIAN_OPENFX_RENDER_FRAME;
+    }
     probe.finish(MONDRIAN_OPENFX_DISPOSITION, phase);
     return completed ? 0 : 5;
   }

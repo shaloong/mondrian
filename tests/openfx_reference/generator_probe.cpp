@@ -40,6 +40,7 @@ bool declaresInputs() {
 }
 
 bool spatialDefaultsMode() { return modeIs("spatial_defaults"); }
+bool imageDomainMode() { return modeIs("image_domain"); }
 
 bool spatialValues(OfxImageEffectHandle effect, double time, double values[3][2]) {
   OfxParamSetHandle params = nullptr;
@@ -132,7 +133,7 @@ OfxStatus describe(OfxImageEffectHandle effect) {
       properties->propSetString(props, kOfxImageEffectPluginRenderThreadSafety, 0,
                                 kOfxImageEffectRenderUnsafe) == kOfxStatOK &&
       properties->propSetInt(props, kOfxImageEffectPluginPropHostFrameThreading, 0, 0) == kOfxStatOK &&
-      properties->propSetInt(props, kOfxImageEffectPropSupportsMultiResolution, 0, 0) == kOfxStatOK &&
+      properties->propSetInt(props, kOfxImageEffectPropSupportsMultiResolution, 0, (spatialDefaultsMode() || imageDomainMode()) ? 1 : 0) == kOfxStatOK &&
       properties->propSetInt(props, kOfxImageEffectPropSupportsTiles, 0, 0) == kOfxStatOK &&
       properties->propSetInt(props, kOfxImageEffectPropTemporalClipAccess, 0, 0) == kOfxStatOK;
   return valid ? kOfxStatOK : kOfxStatFailed;
@@ -196,7 +197,7 @@ OfxStatus describeInContext(OfxImageEffectHandle effect, OfxPropertySetHandle in
 OfxStatus clipPreferences(OfxPropertySetHandle out) {
   if (!out) { return kOfxStatFailed; }
   return properties->propSetString(out, kOfxImageEffectPropPreMultiplication, 0,
-                                   kOfxImageUnPreMultiplied) == kOfxStatOK &&
+                                   imageDomainMode() ? kOfxImageOpaque : kOfxImageUnPreMultiplied) == kOfxStatOK &&
       properties->propSetInt(out, kOfxImageEffectFrameVarying, 0, 1) == kOfxStatOK
       ? kOfxStatOK : kOfxStatFailed;
 }
@@ -399,10 +400,69 @@ OfxStatus render(OfxImageEffectHandle effect, OfxPropertySetHandle in) {
   return lease.release() == kOfxStatOK ? kOfxStatOK : kOfxStatFailed;
 }
 
+OfxStatus domainDefinition(OfxPropertySetHandle in, OfxPropertySetHandle out) {
+  double time = -1, initial[4]{};
+  if (!in || !out || properties->propGetDouble(in, kOfxPropTime, 0, &time) != kOfxStatOK ||
+      properties->propGetDoubleN(out, kOfxImageEffectPropRegionOfDefinition, 4, initial) != kOfxStatOK ||
+      initial[0] != 0 || initial[1] != 0 || initial[2] != 6 || initial[3] != 2) { return kOfxStatFailed; }
+  double rod[4] = {2, 0.25, 5.5, 1.75};
+  if (time == 1) { rod[0] = -2; rod[1] = -1; rod[2] = 8; rod[3] = 3; }
+  if (time == 2) { rod[0] = rod[2] = 1.25; }
+  if (time == 3) { return kOfxStatReplyDefault; }
+  if (time == 4) {
+    return properties->propSetDouble(out, kOfxImageEffectPropRegionOfDefinition, 0, 2);
+  }
+  if (time == 5 || time == 6) { rod[0] = std::numeric_limits<double>::quiet_NaN(); }
+  if (time == 7) { rod[0] = 8; }
+  if (time == 8) { rod[2] = 40000; }
+  if (time == 9) { return kOfxStatFailed; }
+  if (time == 10) { rod[0] = -std::numeric_limits<double>::infinity(); }
+  if (properties->propSetDoubleN(out, kOfxImageEffectPropRegionOfDefinition, 4, rod) != kOfxStatOK) { return kOfxStatFailed; }
+  return time == 5 ? kOfxStatReplyDefault : kOfxStatOK;
+}
+
+OfxStatus domainRender(OfxImageEffectHandle effect, OfxPropertySetHandle in) {
+  double time = -1;
+  OfxRectD canonicalRod{};
+  int window[4]{}, bounds[4]{}, pixelRod[4]{}, rowBytes = 0;
+  OfxImageClipHandle clip = nullptr;
+  OfxPropertySetHandle image = nullptr;
+  void* data = nullptr;
+  if (!in || properties->propGetDouble(in, kOfxPropTime, 0, &time) != kOfxStatOK ||
+      properties->propGetIntN(in, kOfxImageEffectPropRenderWindow, 4, window) != kOfxStatOK ||
+      images->clipGetHandle(effect, kOfxImageEffectOutputClipName, &clip, nullptr) != kOfxStatOK ||
+      images->clipGetRegionOfDefinition(clip, time, &canonicalRod) != kOfxStatOK ||
+      images->clipGetImage(clip, time, nullptr, &image) != kOfxStatOK || !image) { return kOfxStatFailed; }
+  // All exits release the independent action-scoped image handle.
+  struct Lease { OfxPropertySetHandle image; ~Lease() { images->clipReleaseImage(image); } } lease{image};
+  if (properties->propGetIntN(image, kOfxImagePropBounds, 4, bounds) != kOfxStatOK ||
+      properties->propGetIntN(image, kOfxImagePropRegionOfDefinition, 4, pixelRod) != kOfxStatOK ||
+      properties->propGetInt(image, kOfxImagePropRowBytes, 0, &rowBytes) != kOfxStatOK ||
+      properties->propGetPointer(image, kOfxImagePropData, 0, &data) != kOfxStatOK || !data ||
+      !stringIs(image, kOfxImageEffectPropPreMultiplication, kOfxImageOpaque)) { return kOfxStatFailed; }
+  const int partial[] = {1,0,3,2}, expanded[] = {-1,-1,4,3}, full[] = {0,0,3,2};
+  const int* expected = time == 1 ? expanded : ((time == 0 || time == 4) ? partial : full);
+  const double partialRod[] = {2,0.25,5.5,1.75}, expandedRod[] = {-2,-1,8,3}, fullRod[] = {0,0,6,2}, handledRod[] = {2,0,6,2};
+  const double* expectedRod = time == 0 ? partialRod : (time == 1 ? expandedRod : (time == 4 ? handledRod : fullRod));
+  const double rod[] = {canonicalRod.x1, canonicalRod.y1, canonicalRod.x2, canonicalRod.y2};
+  for (int index=0; index<4; ++index) {
+    if (window[index] != expected[index] || bounds[index] != expected[index] || pixelRod[index] != expected[index] || rod[index] != expectedRod[index]) { return kOfxStatFailed; }
+  }
+  if (rowBytes != -(bounds[2]-bounds[0])*int(sizeof(OfxRGBAColourF))) { return kOfxStatFailed; }
+  for (int y=bounds[1]; y<bounds[3]; ++y) {
+    auto* row = static_cast<char*>(data) + ptrdiff_t(y-bounds[1])*rowBytes;
+    for (int x=bounds[0]; x<bounds[2]; ++x) {
+      const OfxRGBAColourF value{float(x+4)/16, float(y+3)/8, float(time)/16, 0.25f};
+      std::memcpy(row + ptrdiff_t(x-bounds[0])*sizeof(value), &value, sizeof(value));
+    }
+  }
+  return kOfxStatOK;
+}
+
 OfxStatus dispatch(const char* action, const void* handle,
                     OfxPropertySetHandle in, OfxPropertySetHandle out) {
   if (!action) { return kOfxStatErrValue; }
-  if (modeIs("required_source") || modeIs("required_aux") || spatialDefaultsMode()) {
+  if (modeIs("required_source") || modeIs("required_aux") || spatialDefaultsMode() || imageDomainMode()) {
     const char* path = std::getenv("MONDRIAN_OPENFX_GENERATOR_ACTION_LOG");
     if (!path || !*path) { return kOfxStatErrValue; }
     std::ofstream file(std::filesystem::u8path(path), std::ios::binary | std::ios::app);
@@ -423,7 +483,8 @@ OfxStatus dispatch(const char* action, const void* handle,
   if (std::strcmp(action, kOfxImageEffectActionGetClipPreferences) == 0) {
     return clipParDefaultsMode() || clipRateDefaultsMode() ? clipDefaults(effect, out) : clipPreferences(out);
   }
-  if (std::strcmp(action, kOfxImageEffectActionRender) == 0) { return render(effect, in); }
+  if (imageDomainMode() && std::strcmp(action, kOfxImageEffectActionGetRegionOfDefinition) == 0) { return domainDefinition(in, out); }
+  if (std::strcmp(action, kOfxImageEffectActionRender) == 0) { return imageDomainMode() ? domainRender(effect, in) : render(effect, in); }
   if (std::strcmp(action, kOfxActionDestroyInstance) == 0) { return kOfxStatOK; }
   if (std::strcmp(action, kOfxActionUnload) == 0) {
     properties = nullptr;

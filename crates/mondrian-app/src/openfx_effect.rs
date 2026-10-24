@@ -1324,7 +1324,10 @@ mod tests {
             + crate::openfx_host::native_auxiliary_resident_bytes()
                 .expect("bounded auxiliary owner")
             + 3 * std::mem::size_of::<mondrian_core::EffectProcessorOwnerId>();
-        assert_eq!(storage.active_peak_bytes(), 3 * 2 * 3 * 16 + fixed);
+        assert_eq!(
+            storage.active_peak_bytes(),
+            3 * 2 * 3 * 16 + fixed + 128 * 1024 * 1024
+        );
         assert_eq!(storage.retained_bytes(), 2 * 2 * 3 * 16 + fixed);
         assert!(OpenFxFilterSession::storage(0, 1).is_err());
         assert!(OpenFxFilterSession::storage(u32::MAX, u32::MAX).is_err());

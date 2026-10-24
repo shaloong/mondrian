@@ -74,6 +74,13 @@ namespace MondrianOpenFx {
     }
     const OfxRGBAColourF* input = nullptr;
     OfxRGBAColourF* output = nullptr;
+    // Output image support is independent of the caller's fixed viewport.
+    // Only Render borrows output storage; no backing survives FrameBorrow.
+    OfxRectD outputCanonicalRod{};
+    OfxRectI outputPixelRod{};
+    size_t outputPixelCount = 0;
+    bool outputRodReady = false;
+    std::atomic<bool> queryingOutputRod{false};
     size_t pixelCount = 0;
     bool imagesAvailable = false;
     bool outputAvailable = false;
@@ -125,6 +132,8 @@ namespace MondrianOpenFx {
       state.input = nullptr;
       state.output = nullptr;
       state.pixelCount = 0;
+      state.outputPixelCount = 0;
+      state.outputRodReady = false;
       state.imagesAvailable = false;
       state.outputAvailable = false;
     }

@@ -36,8 +36,9 @@ namespace MondrianOpenFx {
     , _data(NULL)
   {
     const auto& state = clip.frameState();
-    const int width = state.info.width;
-    const int height = state.info.height;
+    const OfxRectI bounds = clip.isOutput() ? state.outputPixelRod : OfxRectI{0, 0, state.info.width, state.info.height};
+    const int width = bounds.x2 - bounds.x1;
+    const int height = bounds.y2 - bounds.y1;
     // Each fetch owns an independent property handle; both clips borrow the
     // active frame mapping, which outlives every legal action-scoped handle.
     _data = clip.isOutput() ? state.output : const_cast<OfxRGBAColourF*>(state.input);
@@ -54,15 +55,8 @@ namespace MondrianOpenFx {
     setPointerProperty(kOfxImagePropData, _data + (height - 1) * width);
 
     // bounds and rod
-    setIntProperty(kOfxImagePropBounds, 0, 0);
-    setIntProperty(kOfxImagePropBounds, 0, 1);
-    setIntProperty(kOfxImagePropBounds, width, 2);
-    setIntProperty(kOfxImagePropBounds, height, 3);
-
-    setIntProperty(kOfxImagePropRegionOfDefinition, 0, 0);
-    setIntProperty(kOfxImagePropRegionOfDefinition, 0, 1);
-    setIntProperty(kOfxImagePropRegionOfDefinition, width, 2);
-    setIntProperty(kOfxImagePropRegionOfDefinition, height, 3);
+    setIntPropertyN(kOfxImagePropBounds, &bounds.x1, 4);
+    setIntPropertyN(kOfxImagePropRegionOfDefinition, &bounds.x1, 4);
 
     // row bytes
     setIntProperty(kOfxImagePropRowBytes, -width * sizeof(OfxRGBAColourF));
@@ -204,6 +198,7 @@ namespace MondrianOpenFx {
   /// override this to return the rod on the clip canonical coords!
   OfxRectD FilterClipInstance::getRegionOfDefinition(OfxTime time) const
   {
+    if (isOutput()) { return _effect->outputRegionOfDefinition(time); }
     OfxRectD v;
     v.x1 = v.y1 = 0;
     v.x2 = frameState().info.width * frameState().info.pixel_aspect_ratio;
@@ -221,7 +216,7 @@ namespace MondrianOpenFx {
   {
     const auto& frame = frameState();
     if (!getConnected() || !frame.imagesAvailable || (!isOutput() && !frame.input) ||
-        (isOutput() && (!frame.output || !frame.outputAvailable)) || !std::isfinite(time) || time != frame.info.frame) {
+        (isOutput() && (!frame.output || !frame.outputAvailable || !frame.outputRodReady || frame.outputPixelCount == 0)) || !std::isfinite(time) || time != frame.info.frame) {
       return nullptr;
     }
     if (isOutput()) {
@@ -232,10 +227,10 @@ namespace MondrianOpenFx {
       if (!_outputFetched) {
         auto* diagnostic = frame.renderDiagnostic;
         const auto started = diagnostic ? DiagnosticClock::now() : DiagnosticClock::time_point{};
-        std::fill(frame.output, frame.output + frame.pixelCount, OfxRGBAColourF{0, 0, 0, 0});
+        std::fill(frame.output, frame.output + frame.outputPixelCount, OfxRGBAColourF{0, 0, 0, 0});
         if (diagnostic) {
           diagnostic->output_clear_calls = 1;
-          diagnostic->output_clear_bytes = frame.pixelCount * sizeof(OfxRGBAColourF);
+          diagnostic->output_clear_bytes = frame.outputPixelCount * sizeof(OfxRGBAColourF);
           if (!diagnosticNanoseconds(started, diagnostic->output_clear_ns)) { diagnostic->counter_overflowed = 1; }
         }
         _outputFetched = true;

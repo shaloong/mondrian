@@ -77,7 +77,7 @@ namespace MondrianOpenFx
     _properties.setStringProperty(kOfxPropVersionLabel, "1.0");
     _properties.setIntProperty(kOfxImageEffectHostPropIsBackground, 0);
     _properties.setIntProperty(kOfxImageEffectPropSupportsOverlays, 0);
-    _properties.setIntProperty(kOfxImageEffectPropSupportsMultiResolution, 0);
+    _properties.setIntProperty(kOfxImageEffectPropSupportsMultiResolution, 1);
     _properties.setIntProperty(kOfxImageEffectPropSupportsTiles, false);
     _properties.setIntProperty(kOfxImageEffectPropTemporalClipAccess, false);
     _properties.setStringProperty(kOfxImageEffectPropSupportedComponents, kOfxImageComponentRGBA, 0);

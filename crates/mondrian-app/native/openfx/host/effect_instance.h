@@ -36,6 +36,7 @@ namespace MondrianOpenFx {
     // overridden for ImageEffect::Instance
 
     void setCustomOutArgs(const std::string& action, OFX::Host::Property::Set& outArgs) override;
+    OfxRectD outputRegionOfDefinition(OfxTime time);
     OfxStatus mainEntry(const char* action, const void* handle,
                         OFX::Host::Property::Set* inArgs,
                         OFX::Host::Property::Set* outArgs) override;

@@ -118,7 +118,7 @@ pub(crate) struct NativeRenderDiagnostic {
     phase_ns: [u64; 12],
 }
 impl NativeRenderDiagnostic {
-    fn validate(&self, frame_bytes: usize) -> Result<(), OpenFxHostError> {
+    fn validate(&self, _frame_bytes: usize) -> Result<(), OpenFxHostError> {
         let all = (1_u32 << 12) - 1;
         if self.present_mask & !all != 0
             || self.counter_overflowed > 1
@@ -126,10 +126,12 @@ impl NativeRenderDiagnostic {
             || (self.output_clear_calls == 0
                 && (self.output_clear_bytes != 0 || self.output_clear_ns != 0))
             || (self.output_clear_calls == 1
-                && usize::try_from(self.output_clear_bytes).ok() != Some(frame_bytes))
+                && (self.output_clear_bytes == 0
+                    || self.output_clear_bytes % 16 != 0
+                    || self.output_clear_bytes > super::super::MAX_FRAME_BYTES as u64))
         {
             return Err(unavailable(
-                "native diagnostic violated fixed storage contract",
+                "native diagnostic violated bounded image storage contract",
             ));
         }
         if self.counter_overflowed == 0 {
@@ -447,13 +449,18 @@ mod tests {
                 0 => native.present_mask |= 1 << 12,
                 1 => native.total_ns = 9,
                 2 => native.output_clear_ns = 11,
-                3 => native.output_clear_bytes = 32,
+                3 => native.output_clear_bytes = super::super::super::MAX_FRAME_BYTES as u64 + 16,
                 4 => native.output_clear_calls = 2,
                 5 => native.counter_overflowed = 2,
                 _ => unreachable!(),
             }
             assert!(bad.validate(value.owner, 7, &feedback, value.output_alpha, 16).is_err());
         }
+        let mut expanded_domain = value;
+        expanded_domain.native.as_mut().unwrap().output_clear_bytes = 32;
+        expanded_domain
+            .validate(value.owner, 7, &feedback, value.output_alpha, 16)
+            .expect("native full RoD can exceed the publication viewport within its active grant");
         let mut overflow = value;
         overflow.counter_overflowed = true;
         overflow.dispatch_elapsed_ns = None;

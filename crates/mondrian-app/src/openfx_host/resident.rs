@@ -27,7 +27,9 @@ use diagnostic::{ParentProbe, ProbeEvent};
 pub const OPENFX_RESIDENT_WORKER_ARGUMENT: &str = "--internal-openfx-session-v12";
 const ENDPOINT_ENV: &str = "MONDRIAN_INTERNAL_OPENFX_ENDPOINT";
 const NONCE_ENV: &str = "MONDRIAN_INTERNAL_OPENFX_NONCE";
-const VERSION: u16 = 12;
+// v13: native full-RoD backing and viewport publication, including transparent
+// placement of an Opaque native image. Older workers have fixed-image semantics.
+const VERSION: u16 = 13;
 const POLL: Duration = Duration::from_millis(20);
 const RETIRE: Duration = Duration::from_millis(100);
 const FRAME_TRANSFER_BYTES: usize = 1024 * 1024;
@@ -537,7 +539,8 @@ impl OpenFxFilterSession {
     /// Both phases own two shared rasters, one reserved callback stack/guard,
     /// fixed thread/mutex and bounded auxiliary/transport state, and three typed
     /// namespace POD values. Active
-    /// admission additionally covers the single pre-DSP output Vec. Success
+    /// admission additionally covers the single pre-DSP output Vec and up to
+    /// MAX_FRAME_BYTES of action-local full-RoD backing. Success
     /// moves that Vec to the caller; the session retains no output raster owner.
     /// Effects owns and separately charges its source/staging/cache rasters.
     /// Shared physical mapping pages are charged once.
@@ -579,6 +582,11 @@ impl OpenFxFilterSession {
             .ok_or_else(|| invalid("native retained storage overflows"))?;
         let active = retained
             .checked_add(frame_bytes)
+            // A non-tiled native image must cover its complete finite RoD,
+            // independently of the requested fixed viewport. Scratch is local
+            // to DSP and bounded by the native 128 MiB image limit; charge the
+            // bound before DSP because parameters may change RoD each frame.
+            .and_then(|bytes| bytes.checked_add(MAX_FRAME_BYTES))
             .ok_or_else(|| invalid("native active storage overflows"))?;
         mondrian_effects::EffectFloatProcessorStorage::new(active, retained)
             .map_err(|error| invalid(error.to_string()))
@@ -4191,8 +4199,8 @@ mod generator_storage_tests {
         );
         assert_eq!(
             generator.active_peak_bytes() - generator.retained_bytes(),
-            3 * 2 * 16,
-            "returned Vec overlaps resident mapping"
+            3 * 2 * 16 + MAX_FRAME_BYTES,
+            "returned Vec and bounded full-RoD scratch overlap resident mapping"
         );
         let file = tempfile::NamedTempFile::new().unwrap();
         file.as_file().set_len(3 * 2 * 16).unwrap();
