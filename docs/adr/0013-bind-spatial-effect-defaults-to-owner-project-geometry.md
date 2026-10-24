@@ -50,6 +50,20 @@ separates modern canonical spatial values from default-coordinate interpretation
 Project size, extent and offset are separate properties, not synonyms for an
 image buffer's bounds.
 
+The implementation keeps a validated literal base plus a pure Effects-owned
+project-property initializer. Its complete result is validated before author
+publication and preparation; an initializer cannot replace the literal base.
+A typed, versioned geometry binding uses the existing persisted `EffectNode.params`
+instance metadata. It carries no parameter values or unresolved recipes, and
+participates in the existing instance serialization/identity/Undo footprint.
+The PropertyBag remains the only parameter/default authority. Legacy literal
+construction stays unchanged; contextual definitions require the fallible
+owner-aware constructor. Missing, malformed or changed bindings fail explicitly.
+This adds no Core schema or archive format: older readers preserve the opaque
+metadata, and the earlier OpenFX adapter cannot admit these Normalised definitions.
+Changing an already supported literal definition to contextual semantics still
+requires its own definition/version migration; it is not an implicit conversion.
+
 ## Migration and validation
 
 First connect owner geometry to actual native project-property consumers. Test

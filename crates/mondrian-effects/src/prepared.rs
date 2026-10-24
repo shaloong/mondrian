@@ -150,7 +150,7 @@ impl PreparedEffectStack {
                 });
             }
 
-            validate_effect_schema(effect, &definition)?;
+            validate_effect_schema(effect, &definition, frame_context)?;
             let contract = definition.execution_contract();
             contract.validate().map_err(|error| {
                 EffectGraphBuildError::InvalidExecutionContract {
@@ -354,6 +354,7 @@ impl PreparedEffectStack {
 fn validate_effect_schema(
     effect: &EffectNode,
     definition: &EffectDefinition,
+    frame_context: Option<EffectFrameContext>,
 ) -> Result<(), EffectGraphBuildError> {
     effect
         .validate_author_state()
@@ -363,8 +364,24 @@ fn validate_effect_schema(
             reason: error.to_string(),
         })?;
 
-    let expected = definition
-        .default_properties()
+    let geometry = definition
+        .project_geometry_for_instance(
+            effect,
+            frame_context.map(|context| context.project_geometry()),
+        )
+        .map_err(|reason| EffectGraphBuildError::InvalidAuthorState {
+            effect_key: effect.effect_type.key(),
+            effect_id: effect.id,
+            reason,
+        })?;
+    let resolved = definition.resolved_properties(geometry).map_err(|error| {
+        EffectGraphBuildError::InvalidAuthorState {
+            effect_key: effect.effect_type.key(),
+            effect_id: effect.id,
+            reason: error.to_string(),
+        }
+    })?;
+    let expected = resolved
         .iter()
         .map(|(_, property)| {
             (

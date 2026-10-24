@@ -1370,6 +1370,8 @@ pub struct EffectDefinition {
     display_name: String,
     category_path: Vec<String>,
     default_properties: PropertyBag,
+    project_property_initializer: Option<crate::EffectProjectPropertyInitializer>,
+    project_property_initializer_retained_bytes: usize,
     evaluator_factory: Option<EffectEvaluatorFactory>,
     execution_contract: EffectExecutionContract,
     extension_contract: Option<EffectExtensionContract>,
@@ -1406,6 +1408,12 @@ pub enum EffectDefinitionError {
     /// Process-local registry generation can no longer advance safely.
     #[error("effect definition registry revision exhausted")]
     RegistryRevisionExhausted,
+    /// A contextual definition cannot materialize schemas without its owner.
+    #[error("effect `{effect_key}` requires owner project geometry")]
+    ProjectGeometryRequired { effect_key: String },
+    /// A project-dependent template did not produce a valid concrete schema.
+    #[error("effect `{effect_key}` project properties are invalid: {reason}")]
+    InvalidProjectProperties { effect_key: String, reason: String },
 }
 
 /// Failure to instantiate one author-visible Effect from the live registry.
@@ -1417,6 +1425,8 @@ pub enum EffectInstantiationError {
     /// The definition exists but cannot currently provide visual execution.
     #[error("effect definition is not currently authorable: {effect_key}")]
     DefinitionNotAuthorable { effect_key: String },
+    #[error(transparent)]
+    Properties(#[from] EffectDefinitionError),
 }
 
 impl EffectDefinition {
@@ -1435,6 +1445,8 @@ impl EffectDefinition {
             display_name: display_name.into(),
             category_path: Vec::new(),
             default_properties,
+            project_property_initializer: None,
+            project_property_initializer_retained_bytes: 0,
             evaluator_factory: None,
             execution_contract: EffectExecutionContract::default(),
             extension_contract: None,
@@ -1458,6 +1470,65 @@ impl EffectDefinition {
             self.default_properties.upsert(property.clone());
         }
         self
+    }
+
+    /// Add contextual properties before author instantiation and exact schema
+    /// admission. Literal base properties must remain unchanged. The byte charge
+    /// covers immutable data captured by the initializer, excluding its Arc.
+    pub fn with_project_properties(
+        mut self,
+        initializer: crate::EffectProjectPropertyInitializer,
+        retained_bytes: usize,
+    ) -> Self {
+        self.project_property_initializer = Some(initializer);
+        self.project_property_initializer_retained_bytes = retained_bytes;
+        self
+    }
+
+    pub(crate) fn resolved_properties(
+        &self,
+        geometry: Option<EffectProjectGeometry>,
+    ) -> Result<std::borrow::Cow<'_, PropertyBag>, EffectDefinitionError> {
+        let Some(initializer) = &self.project_property_initializer else {
+            return Ok(std::borrow::Cow::Borrowed(&self.default_properties));
+        };
+        let geometry = geometry.ok_or_else(|| EffectDefinitionError::ProjectGeometryRequired {
+            effect_key: self.key.clone(),
+        })?;
+        let invalid = |reason: String| EffectDefinitionError::InvalidProjectProperties {
+            effect_key: self.key.clone(),
+            reason,
+        };
+        let mut properties = self.default_properties.clone();
+        catch_unwind(AssertUnwindSafe(|| initializer(geometry, &mut properties)))
+            .map_err(|_| invalid("initializer panicked".into()))??;
+        for (path, property) in self.default_properties.iter() {
+            if properties.property(path) != Some(property) {
+                return Err(invalid(format!(
+                    "initializer changed literal property `{path}`"
+                )));
+            }
+        }
+        self.validate_properties(&properties)?;
+        Ok(std::borrow::Cow::Owned(properties))
+    }
+
+    pub(crate) fn project_geometry_for_instance(
+        &self,
+        effect: &EffectNode,
+        current: Option<EffectProjectGeometry>,
+    ) -> Result<Option<EffectProjectGeometry>, String> {
+        if self.project_property_initializer.is_none() {
+            if crate::project_properties::has_binding(&effect.params) {
+                return Err("definition no longer declares project-dependent defaults".into());
+            }
+            return Ok(None);
+        }
+        let bound = crate::project_properties::decode_binding(&effect.params)?;
+        if current != Some(bound) {
+            return Err("effect defaults require the original owner project geometry".into());
+        }
+        Ok(Some(bound))
     }
 
     pub fn with_graph_builder(mut self, graph_builder: EffectGraphBuilder) -> Self {
@@ -1671,6 +1742,12 @@ impl EffectDefinition {
             )
             .saturating_add(category_bytes)
             .saturating_add(property_bytes)
+            .saturating_add(self.project_property_initializer_retained_bytes)
+            .saturating_add(if self.project_property_initializer.is_some() {
+                OPAQUE_EFFECT_EVALUATOR_BASE_CHARGE_BYTES
+            } else {
+                0
+            })
             .saturating_add(extension_bytes)
             .saturating_add(OPAQUE_EFFECT_EVALUATOR_BASE_CHARGE_BYTES)
     }
@@ -1686,8 +1763,12 @@ impl EffectDefinition {
                 reason: error.to_string(),
             }
         })?;
+        self.validate_properties(&self.default_properties)
+    }
+
+    fn validate_properties(&self, properties: &PropertyBag) -> Result<(), EffectDefinitionError> {
         let mut parameter_addresses = HashMap::<ParameterId, String>::new();
-        for (address, property) in self.default_properties.iter() {
+        for (address, property) in properties.iter() {
             let schema = &property.descriptor.schema;
             property
                 .validate()
@@ -1848,6 +1929,22 @@ pub fn effect_definition(effect_type: &EffectType) -> Option<Arc<EffectDefinitio
 pub fn instantiate_effect_node(
     effect_type: EffectType,
 ) -> Result<EffectNode, EffectInstantiationError> {
+    instantiate_effect_node_in_project(effect_type, None)
+}
+
+/// Instantiate concrete defaults against the immutable owner project window.
+/// Literal definitions keep their original schema and do not capture a binding.
+pub fn instantiate_effect_node_with_project_geometry(
+    effect_type: EffectType,
+    project_geometry: EffectProjectGeometry,
+) -> Result<EffectNode, EffectInstantiationError> {
+    instantiate_effect_node_in_project(effect_type, Some(project_geometry))
+}
+
+fn instantiate_effect_node_in_project(
+    effect_type: EffectType,
+    project_geometry: Option<EffectProjectGeometry>,
+) -> Result<EffectNode, EffectInstantiationError> {
     let effect_key = effect_type.key();
     let definition = effect_definition(&effect_type).ok_or_else(|| {
         EffectInstantiationError::DefinitionUnavailable { effect_key: effect_key.clone() }
@@ -1855,13 +1952,24 @@ pub fn instantiate_effect_node(
     if !definition.supports_visual_evaluation() {
         return Err(EffectInstantiationError::DefinitionNotAuthorable { effect_key });
     }
-    let mut properties = definition.default_properties().clone();
+    let mut properties = definition.resolved_properties(project_geometry)?.into_owned();
+    let params = if definition.project_property_initializer.is_some() {
+        crate::project_properties::encode_binding(project_geometry.ok_or_else(|| {
+            EffectDefinitionError::ProjectGeometryRequired { effect_key: effect_key.clone() }
+        })?)
+        .map_err(|reason| EffectDefinitionError::InvalidProjectProperties {
+            effect_key: effect_key.clone(),
+            reason,
+        })?
+    } else {
+        serde_json::json!({})
+    };
     properties.fork_author_identities();
     Ok(EffectNode {
         id: EffectId::new(),
         effect_type,
         properties,
-        params: serde_json::json!({}),
+        params,
         is_enabled: true,
     })
 }
@@ -1990,7 +2098,13 @@ pub trait EffectNodeExt {
 impl EffectNodeExt for EffectNode {
     fn with_defaults(effect_type: EffectType) -> Self {
         let mut default_properties = effect_definition(&effect_type)
-            .map(|definition| definition.default_properties.clone())
+            .map(|definition| {
+                assert!(
+                    definition.project_property_initializer.is_none(),
+                    "contextual definitions require instantiate_effect_node_with_project_geometry"
+                );
+                definition.default_properties.clone()
+            })
             .unwrap_or_default();
         default_properties.fork_author_identities();
         Self {

@@ -20,6 +20,8 @@ pub mod chroma_key;
 pub mod color_curves;
 pub mod coverage;
 pub mod effect;
+mod project_properties;
+pub use project_properties::EffectProjectPropertyInitializer;
 pub mod execution;
 pub mod execution_contract;
 pub mod execution_planning;
@@ -65,14 +67,14 @@ pub use coverage::{has_positive_coverage, mix_straight_rgba, straight_rgba_from_
 pub use effect::{
     build_effect_render_graph, compile_clip_effect_graph, effect_category_tree, effect_definition,
     effect_display_name, effect_library_types, effect_registry_revision, instantiate_effect_node,
-    register_effect_definition, CustomEffectProcessorBinding, EffectCacheKeyBuilder,
-    EffectCachePolicy, EffectCategoryNode, EffectColorDomain, EffectColorDomainContract,
-    EffectDefinition, EffectDefinitionError, EffectEvalContext, EffectFrameContext,
-    EffectFrameContextError, EffectGraphBuildError, EffectGraphBuilder, EffectGraphPreparer,
-    EffectInstantiationError, EffectNode, EffectNodeExt, EffectPreparationContext,
-    EffectProjectGeometry, EffectProjectGeometryError, EffectRenderOp, EffectRenderParamsBuilder,
-    EffectRenderPlan, EffectResourceDependency, EffectResourceRecovery, EffectType,
-    PreparedEffectEvaluator, PreparedLut3D,
+    instantiate_effect_node_with_project_geometry, register_effect_definition,
+    CustomEffectProcessorBinding, EffectCacheKeyBuilder, EffectCachePolicy, EffectCategoryNode,
+    EffectColorDomain, EffectColorDomainContract, EffectDefinition, EffectDefinitionError,
+    EffectEvalContext, EffectFrameContext, EffectFrameContextError, EffectGraphBuildError,
+    EffectGraphBuilder, EffectGraphPreparer, EffectInstantiationError, EffectNode, EffectNodeExt,
+    EffectPreparationContext, EffectProjectGeometry, EffectProjectGeometryError, EffectRenderOp,
+    EffectRenderParamsBuilder, EffectRenderPlan, EffectResourceDependency, EffectResourceRecovery,
+    EffectType, PreparedEffectEvaluator, PreparedLut3D,
 };
 pub use execution::{
     apply_compiled_effect_graph, apply_compiled_effect_graph_pass,
