@@ -496,6 +496,19 @@ not a matched before/after comparison. No phase attribution, mature-host,
 full-NLE, GPU, realtime or other-platform performance qualification is implied.
 Reuse the existing phase diagnostic before choosing a production optimization.
 
+The existing release phase carrier at `2cef842a` now completes paired ordinary/
+instrumented1080p and UHD controls, each32 warmup/600 samples, with the unchanged
+default-feature Worker above. All pixel, fixed parent/child/native correlation,
+shutdown and process-settlement assertions pass. Ordinary p50 is62.98/233.13ms;
+instrumented p50 is63.07/232.75ms. Mean native session admission is15.95/63.52ms
+and output validation15.12/59.17ms, together about49%/52% of whole invocation.
+Mean PluginRender is10.82/42.94ms and includes SDK callbacks and output clear;
+parent identity before+after is about0.97/1.00ms. Native time nests inside child
+dispatch and parent await, so these levels are not additive. The local MSVC/UCRT
+float classifier calls `_fdtest`; preserving finite-value admission while avoiding
+per-component CRT calls is the next falsifiable optimization. This diagnostic
+does not qualify that optimization or change the original performance FAIL.
+
 Keep concise current conclusions, useful reproduction inputs and actionable open
 issues. Do not accumulate historical executable copies, source-hash inventories,
 raw receipts or repeated audit packets. Rerun the complete affected suite when
