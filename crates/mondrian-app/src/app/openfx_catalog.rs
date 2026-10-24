@@ -957,8 +957,31 @@ mod tests {
         use crate::app_ui::preferences_store::{
             load_app_ui_preferences_from, persist_app_ui_preferences_to, AppUiPreferences,
         };
+        use sha2::{Digest, Sha256};
         let helper = PathBuf::from(std::env::var_os("MONDRIAN_OPENFX_PRODUCT_BINARY").unwrap());
         let binary = PathBuf::from(std::env::var_os("MONDRIAN_OPENFX_INVERT_BINARY").unwrap());
+        let pinned = crate::openfx_adapter::inspect_openfx_binary(&helper, &binary).unwrap();
+        assert_eq!(
+            pinned
+                .plugins
+                .iter()
+                .filter(|p| p.identifier == "net.sf.openfx.ConstantPlugin"
+                    && p.version_major == 1
+                    && p.version_minor == 0)
+                .count(),
+            1
+        );
+        // Frozen persistent key contract: locate the exact installed class,
+        // never a display label that differs between vendor builds/locales.
+        // This does not register or replace any Catalog-produced definition.
+        let identity = format!(
+            "generator\0{}\0{}.{}\0{}",
+            "net.sf.openfx.ConstantPlugin", 1, 0, pinned.binary_sha256
+        );
+        let kind = mondrian_effects::EffectType::External(format!(
+            "openfx.generator.{:x}",
+            Sha256::digest(identity.as_bytes())
+        ));
         let bundle = binary.parent().unwrap().parent().unwrap().parent().unwrap().to_path_buf();
         assert!(bundle.file_name().unwrap().to_string_lossy().ends_with(".ofx.bundle"));
         let selection = OpenFxBundleSelection {
@@ -1001,10 +1024,11 @@ mod tests {
             "selected-context installation must complete"
         );
         assert_eq!(state.project_author_generation(), generation);
-        let kind = mondrian_effects::effect_library_types().into_iter().find(|kind| {
-            kind.key().starts_with("openfx.generator.") &&
-                mondrian_effects::effect_definition(kind).unwrap().display_name() == "Constant (Generator)"
-        }).expect("real Catalog publication must expose Constant Generator in the ordinary effect library");
+        assert!(
+            mondrian_effects::effect_library_types().contains(&kind),
+            "real Catalog publication must expose the exact Constant1.0 Generator key; status={:?}",
+            state.status_hint
+        );
         let installed = mondrian_effects::effect_definition(&kind).unwrap();
         let temp = tempfile::tempdir().unwrap();
         let preferences_path = temp.path().join("preferences.json");
