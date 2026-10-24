@@ -371,6 +371,36 @@ mod tests {
     use super::*;
     use crate::openfx_adapter::OpenFxPluginDescriptor;
 
+    #[test]
+    #[ignore = "diagnostic in-process metadata phases; requires current Product and real Misc"]
+    fn native_catalog_in_process_cost_breakdown() {
+        let helper = PathBuf::from(std::env::var_os("MONDRIAN_OPENFX_PRODUCT_BINARY").unwrap());
+        let binary = PathBuf::from(std::env::var_os("MONDRIAN_OPENFX_INVERT_BINARY").unwrap());
+        let inspection = crate::openfx_adapter::inspect_openfx_binary(&helper, &binary).unwrap();
+        let identifier = "net.sf.openfx.ConstantPlugin";
+        let started = Instant::now();
+        assert_eq!(sha256_file(&inspection.binary_path).unwrap(), inspection.binary_sha256);
+        println!("CATALOG_PHASE plain_hash_ms={}", started.elapsed().as_millis());
+        let started = Instant::now();
+        let bundle = verified_selection(&inspection, identifier, &mut || Ok(())).unwrap();
+        println!("CATALOG_PHASE verified_selection_ms={}", started.elapsed().as_millis());
+        let started = Instant::now();
+        verify_worker_binary(&inspection.binary_path, &bundle, &inspection.binary_sha256).unwrap();
+        println!("CATALOG_PHASE worker_verify_ms={}", started.elapsed().as_millis());
+        let request = DescribeRequest {
+            schema_version: DESCRIBE_SCHEMA,
+            context: OpenFxContext::Generator,
+            binary_path: inspection.binary_path,
+            bundle_path: bundle,
+            binary_sha256: inspection.binary_sha256,
+            plugin_identifier: identifier.into(),
+        };
+        let started = Instant::now();
+        let result = describe_in_worker(&request).unwrap();
+        println!("CATALOG_PHASE in_process_describe_ms={}", started.elapsed().as_millis());
+        assert!(matches!(result, DescribeResponse::Success { .. }));
+    }
+
     fn inspection() -> OpenFxBinaryInspection {
         OpenFxBinaryInspection {
             binary_path: PathBuf::from("request-context.ofx"),
