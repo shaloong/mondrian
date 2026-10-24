@@ -539,6 +539,45 @@ mod tests {
     use std::time::{Duration, Instant};
 
     #[test]
+    fn public_generator_install_dispatch_reaches_the_original_catalog_queue() {
+        use crate::app::product_action::{
+            ProductAction, VisualEffectInstallOpenFxBundlePayload, VisualEffectProductAction,
+        };
+        let (requests, receiver) = mpsc::sync_channel(1);
+        let (_sender, results) = mpsc::sync_channel(1);
+        let mut state = AppState::new();
+        state.openfx_catalog = Some(OpenFxCatalog {
+            requests: Some(requests),
+            results,
+            worker: None,
+            canceled: Arc::new(AtomicBool::new(false)),
+            restores_remaining: 0,
+            restored: 0,
+            restore_failures: 0,
+        });
+        let path = std::env::temp_dir().join("selected-generator.ofx.bundle");
+        let generation = state.project_author_generation();
+        state
+            .dispatch_action(
+                ProductAction::VisualEffect(VisualEffectProductAction::InstallOpenFxBundle(
+                    VisualEffectInstallOpenFxBundlePayload {
+                        path: path.clone(),
+                        context: OpenFxContext::Generator,
+                    },
+                ))
+                .into_external_action(),
+            )
+            .unwrap();
+        let queued = receiver.try_recv().expect("public dispatch must enqueue actual Catalog work");
+        assert_eq!(
+            queued.selection,
+            OpenFxBundleSelection { path, context: OpenFxContext::Generator }
+        );
+        assert_eq!(state.project_author_generation(), generation);
+        assert!(state.take_completed_openfx_installs().is_empty());
+    }
+
+    #[test]
     #[ignore = "requires current Product and GeneratorProbe under native supervision"]
     fn native_wrong_context_never_falls_back_and_catalog_accepts_next_selection() {
         let helper = PathBuf::from(std::env::var_os("MONDRIAN_OPENFX_PRODUCT_BINARY").unwrap());
@@ -566,8 +605,15 @@ mod tests {
         state.install_openfx_bundle(selection.clone()).unwrap();
         let mut completed = Vec::new();
         while completed.is_empty() && Instant::now() < deadline {
-            state.poll_openfx_catalog();
+            let changed = state.poll_openfx_catalog();
             completed.extend(state.take_completed_openfx_installs());
+            assert!(
+                !(changed
+                    && completed.is_empty()
+                    && state.status_hint.as_ref().is_some_and(|(_, failed)| *failed)),
+                "Catalog reached failure before successful installation: {:?}",
+                state.status_hint
+            );
             if completed.is_empty() {
                 thread::sleep(Duration::from_millis(5));
             }
@@ -614,8 +660,15 @@ mod tests {
             .unwrap();
         let mut completed = Vec::new();
         while completed.is_empty() && Instant::now() < deadline {
-            state.poll_openfx_catalog();
+            let changed = state.poll_openfx_catalog();
             completed.extend(state.take_completed_openfx_installs());
+            assert!(
+                !(changed
+                    && completed.is_empty()
+                    && state.status_hint.as_ref().is_some_and(|(_, failed)| *failed)),
+                "Catalog reached failure before successful installation: {:?}",
+                state.status_hint
+            );
             if completed.is_empty() {
                 thread::sleep(Duration::from_millis(5));
             }
