@@ -74,6 +74,15 @@ target_link_libraries(SessionProbe PRIVATE Threads::Threads)
 # Small native ownership control: actual tracked HostSupport and product Host,
 # with test-only global allocator failure injection in the executable.
 set(MONDRIAN_OPENFX_HOST "${CMAKE_CURRENT_LIST_DIR}/../../crates/mondrian-app/native/openfx")
+add_executable(PropertyReadBounds EXCLUDE_FROM_ALL property_read_bounds.cpp
+  "${MONDRIAN_OPENFX_HOST}/vendor/host/src/ofxhPropertySuite.cpp")
+target_compile_features(PropertyReadBounds PRIVATE cxx_std_17)
+target_include_directories(PropertyReadBounds PRIVATE
+  "${MONDRIAN_OPENFX_HOST}/vendor/include"
+  "${MONDRIAN_OPENFX_HOST}/vendor/host/include")
+if(MSVC)
+  target_compile_options(PropertyReadBounds PRIVATE /EHsc /utf-8)
+endif()
 add_executable(ImageDomain EXCLUDE_FROM_ALL image_domain.cpp)
 target_compile_features(ImageDomain PRIVATE cxx_std_17)
 target_include_directories(ImageDomain PRIVATE

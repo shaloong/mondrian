@@ -10,6 +10,7 @@
 #include <thread>
 #include <chrono>
 #include <exception>
+#include <initializer_list>
 #ifdef _WIN32
 #include <process.h>
 #else
@@ -24,6 +25,37 @@ bool mode(const char* expected) {
   return actual && std::strcmp(actual, expected) == 0;
 }
 bool versionedMode() { return mode("versions") || mode("swap_version") || mode("throw_set_host"); }
+template<class T, class Get, class GetN>
+bool readBounds(OfxPropertySetHandle set, const char* name, int dimension,
+                Get get, GetN getN, T sentinel) {
+  for (int index : {-1,dimension}) {
+    T value = sentinel;
+    if (get(set,name,index,&value)!=kOfxStatErrBadIndex || value!=sentinel) return false;
+  }
+  for (int count : {-1,dimension+1,0}) {
+    T values[6]{sentinel,sentinel,sentinel,sentinel,sentinel,sentinel};
+    const auto expected = count==0 ? kOfxStatOK : kOfxStatErrBadIndex;
+    if (getN(set,name,count,values)!=expected) return false;
+    for (auto value : values) if (value!=sentinel) return false;
+  }
+  return true;
+}
+bool propertyReadBounds(OfxImageEffectHandle effect, OfxImageClipHandle clip,
+                        OfxPropertySetHandle image, OfxPropertySetHandle in) {
+  OfxPropertySetHandle effectProps=nullptr, clipProps=nullptr;
+  if (images->getPropertySet(effect,&effectProps)!=kOfxStatOK ||
+      images->clipGetPropertySet(clip,&clipProps)!=kOfxStatOK) return false;
+  char text[]="untouched";
+  int marker=0;
+  return readBounds(image,kOfxImagePropBounds,4,properties->propGetInt,properties->propGetIntN,-73) &&
+      readBounds(image,kOfxImagePropData,1,properties->propGetPointer,properties->propGetPointerN,static_cast<void*>(&marker)) &&
+      readBounds(image,kOfxImageEffectPropRenderScale,2,properties->propGetDouble,properties->propGetDoubleN,-73.0) &&
+      readBounds(image,kOfxImageEffectPropPixelDepth,1,properties->propGetString,properties->propGetStringN,text) &&
+      readBounds(clipProps,kOfxImageClipPropConnected,1,properties->propGetInt,properties->propGetIntN,-73) &&
+      readBounds(clipProps,kOfxImageEffectPropPixelDepth,1,properties->propGetString,properties->propGetStringN,text) &&
+      readBounds(effectProps,kOfxImageEffectPropProjectSize,2,properties->propGetDouble,properties->propGetDoubleN,-73.0) &&
+      readBounds(in,kOfxImageEffectPropRenderWindow,4,properties->propGetInt,properties->propGetIntN,-73);
+}
 OfxStatus dispatch(int index, const char* action, const void* handle, OfxPropertySetHandle in, OfxPropertySetHandle out) {
   auto* path = std::getenv("MONDRIAN_OPENFX_CATALOG_PROBE_LOG");
   if (!action || !path || !*path) return kOfxStatErrValue;
@@ -89,6 +121,11 @@ OfxStatus dispatch(int index, const char* action, const void* handle, OfxPropert
     if (properties->propGetPointer(image, kOfxImagePropData, 0, &data) != kOfxStatOK || !data ||
         properties->propGetIntN(image, kOfxImagePropBounds, 4, bounds) != kOfxStatOK ||
         properties->propGetInt(image, kOfxImagePropRowBytes, 0, &rowBytes) != kOfxStatOK) return kOfxStatFailed;
+    if (!propertyReadBounds(effect,clip,image,in)) {
+      std::ofstream log(std::filesystem::u8path(path),std::ios::binary|std::ios::app);
+      log << "property_read_bounds_failed\n";
+      return kOfxStatFailed;
+    }
     const float version = float(index + 1);
     const OfxRGBAColourF pixel{version/16, version/32, 0.25f, 1.0f};
     for (int y=bounds[1]; y<bounds[3]; ++y) {
