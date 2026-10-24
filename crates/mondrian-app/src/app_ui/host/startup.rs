@@ -458,7 +458,7 @@ impl AppUiHostStartupOwner {
         self.checkpoint(AppUiHostStartupStage::WaveformConfigured);
 
         let preview = self.start_preview()?;
-        self.preview = Some(PreviewStartupHostOwner::Complete(Box::new(preview)));
+        self.preview = Some(PreviewStartupHostOwner::Complete(preview));
         self.checkpoint(AppUiHostStartupStage::PreviewStarted);
         let preview_transport_intent =
             self.app_state.as_ref().expect("App installed").preview_transport_intent();
@@ -555,7 +555,7 @@ impl AppUiHostStartupOwner {
             WaveformStartupOwner::Partial(_) => unreachable!("partial Waveform cannot publish"),
         };
         let preview_service = match self.preview.take().expect("Preview installed") {
-            PreviewStartupHostOwner::Complete(preview) => *preview,
+            PreviewStartupHostOwner::Complete(preview) => preview,
             PreviewStartupHostOwner::Partial(_) => unreachable!("partial Preview cannot publish"),
         };
         let audio_device_catalog = self.catalog.take().expect("catalog installed");
@@ -627,10 +627,10 @@ impl AppUiHostStartupOwner {
         }
     }
 
-    fn start_preview(&mut self) -> Result<WindowPreviewAdapter, AppUiHostStartupDiagnostic> {
+    fn start_preview(&mut self) -> Result<Box<WindowPreviewAdapter>, AppUiHostStartupDiagnostic> {
         #[cfg(any(test, feature = "validation"))]
         let result = self.fault.and_then(preview_fault_checkpoint).map_or_else(
-            WindowPreviewAdapter::try_new,
+            WindowPreviewAdapter::try_new_boxed,
             |target| {
                 WindowPreviewAdapter::try_start_with_checkpoint_for_host(move |actual| {
                     if actual == target {
@@ -640,7 +640,7 @@ impl AppUiHostStartupOwner {
             },
         );
         #[cfg(not(any(test, feature = "validation")))]
-        let result = WindowPreviewAdapter::try_new();
+        let result = WindowPreviewAdapter::try_new_boxed();
         match result {
             Ok(preview) => Ok(preview),
             Err(failure) => {

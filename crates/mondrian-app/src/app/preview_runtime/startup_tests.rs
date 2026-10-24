@@ -61,7 +61,7 @@ fn preview_startup_preparation_starts_no_native_owner() {
     assert!(!runtime.visual_dependencies.is_healthy());
     assert!(!runtime.timeline_render_cache.borrow().worker_started());
     let owner = PreviewStartupOwner {
-        runtime: Box::new(runtime),
+        runtime,
         inventory: PreviewStartupInventory::new(2, false),
         opaque_panic_payload_abandoned: false,
     };

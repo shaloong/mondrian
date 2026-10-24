@@ -177,7 +177,9 @@ pub struct AppUiHost {
     audio_device_catalog: AudioOutputDeviceCatalogAdapter,
     resource_inspector: Option<crate::resource_inspection::PathInspectionService>,
     waveform_service: Arc<AudioWaveformService>,
-    preview_service: WindowPreviewAdapter,
+    // Retain the same heap owner used during partial startup; publishing Host
+    // must not move the large Preview composition root back onto the UI stack.
+    preview_service: Box<WindowPreviewAdapter>,
     // Declaration order is destruction order. The unique App must outlive all
     // Window execution-service owners even on an ordinary unwind.
     app_state: RefCell<AppState>,
@@ -1075,7 +1077,10 @@ impl AppUiHost {
 
     fn observe_playback_video_preroll(&self) -> bool {
         self.synchronize_preview_raster_requirement();
-        observe_preview_preroll(&mut self.app_state.borrow_mut(), &self.preview_service)
+        observe_preview_preroll(
+            &mut self.app_state.borrow_mut(),
+            self.preview_service.as_ref(),
+        )
     }
 
     /// Re-observe exact media lookahead after the Window Adapter installed the
@@ -1084,7 +1089,7 @@ impl AppUiHost {
         self.synchronize_preview_raster_requirement();
         observe_playback_video_preroll_with_presentation_readiness(
             &mut self.app_state.borrow_mut(),
-            &self.preview_service,
+            self.preview_service.as_ref(),
             true,
         )
     }
@@ -1275,7 +1280,7 @@ impl AppUiHost {
         }
         let window_preview_state = self.window_preview_state.borrow().clone();
         let window_preview_snapshot =
-            WindowPreviewSnapshot::new(&window_preview_state, &self.preview_service);
+            WindowPreviewSnapshot::new(&window_preview_state, self.preview_service.as_ref());
         self.root.refresh_from_app_state_with_preferences_thumbnails_and_preview(
             &self.app_state.borrow(),
             &self.preferences,
@@ -1293,7 +1298,7 @@ impl AppUiHost {
         self.refresh_window_preview_state();
         let window_preview_state = self.window_preview_state.borrow().clone();
         let window_preview_snapshot =
-            WindowPreviewSnapshot::new(&window_preview_state, &self.preview_service);
+            WindowPreviewSnapshot::new(&window_preview_state, self.preview_service.as_ref());
         let state = self.app_state.borrow();
         self.root
             .refresh_playback_frame_from_app_state(&state, Some(&window_preview_snapshot));
@@ -1350,7 +1355,7 @@ impl AppUiHost {
             &self.app_state.borrow(),
             &self.asset_thumbnails,
             &self.waveform_service,
-            &self.preview_service,
+            self.preview_service.as_ref(),
         );
         let project_path_before_persistence =
             self.app_state.borrow().current_project_path().map(std::path::Path::to_path_buf);
@@ -1417,8 +1422,10 @@ impl AppUiHost {
                 .set_audio_output_device_catalog(self.audio_device_catalog.state().clone());
         }
         self.synchronize_preview_raster_requirement();
-        let preview_outcome =
-            pump_playback_preview(&mut self.app_state.borrow_mut(), &self.preview_service);
+        let preview_outcome = pump_playback_preview(
+            &mut self.app_state.borrow_mut(),
+            self.preview_service.as_ref(),
+        );
         let native_question_changed = self.poll_native_visual_questions();
         let waveform_changed = self.waveform_service.poll_finished();
         let transport_model_changed = preview_outcome.transport_change;
@@ -1688,7 +1695,7 @@ impl AppUiHost {
             self.refresh_window_preview_state();
             let window_preview_state = self.window_preview_state.borrow().clone();
             let window_preview_snapshot =
-                WindowPreviewSnapshot::new(&window_preview_state, &self.preview_service);
+                WindowPreviewSnapshot::new(&window_preview_state, self.preview_service.as_ref());
             let state = self.app_state.borrow();
             self.root
                 .refresh_playback_frame_from_app_state(&state, Some(&window_preview_snapshot));
@@ -3529,7 +3536,7 @@ mod tests {
             temp_preferences_path(name),
         );
         host.preview_service.shutdown();
-        host.preview_service = WindowPreviewAdapter::new_without_workers_for_test();
+        host.preview_service = Box::new(WindowPreviewAdapter::new_without_workers_for_test());
         let transport_intent = host.app_state.borrow().preview_transport_intent();
         host.preview_service.synchronize_transport_intent(transport_intent);
         host
@@ -5439,10 +5446,11 @@ mod tests {
             temp_preferences_path("buffering-stall-release"),
         );
         host.preview_service.shutdown();
-        host.preview_service =
+        host.preview_service = Box::new(
             WindowPreviewAdapter::new_without_workers_with_scheduler_clock_for_test(
                 scheduler_clock.clone(),
-            );
+            ),
+        );
         host.preview_service
             .synchronize_transport_intent(host.app_state.borrow().preview_transport_intent());
         let bounds = Rect::new(0.0, 0.0, 1280.0, 720.0);
@@ -11151,7 +11159,7 @@ mod tests {
             temp_preferences_path(name),
         );
         host.preview_service.shutdown();
-        host.preview_service = WindowPreviewAdapter::new_without_workers_for_test();
+        host.preview_service = Box::new(WindowPreviewAdapter::new_without_workers_for_test());
         (host, scope_id, processor_id)
     }
 
@@ -11487,7 +11495,7 @@ mod tests {
             temp_preferences_path(name),
         ));
         host.preview_service.shutdown();
-        host.preview_service = WindowPreviewAdapter::new_without_workers_for_test();
+        host.preview_service = Box::new(WindowPreviewAdapter::new_without_workers_for_test());
         (host, query, calls, started, release)
     }
 
@@ -15645,7 +15653,7 @@ mod tests {
                 temp_preferences_path("audio-scalar-mixer-drag"),
             ));
             host.preview_service.shutdown();
-            host.preview_service = WindowPreviewAdapter::new_without_workers_for_test();
+            host.preview_service = Box::new(WindowPreviewAdapter::new_without_workers_for_test());
             Self {
                 host,
                 track_id,
@@ -16156,7 +16164,7 @@ mod tests {
             temp_preferences_path("numeric-keyboard-wide-integer"),
         );
         host.preview_service.shutdown();
-        host.preview_service = WindowPreviewAdapter::new_without_workers_for_test();
+        host.preview_service = Box::new(WindowPreviewAdapter::new_without_workers_for_test());
         (host, clip_id, path)
     }
 

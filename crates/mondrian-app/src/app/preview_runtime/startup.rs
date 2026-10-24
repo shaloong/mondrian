@@ -67,6 +67,13 @@ impl<O: Clone> PreviewStartupOwner<O> {
 impl<O: Clone> PreviewProductionRuntime<O> {
     /// Start production Preview while retaining all returned owners on unwind.
     pub(crate) fn try_new() -> Result<Self, PreviewStartupFailure<O>> {
+        Self::try_new_boxed().map(|runtime| *runtime)
+    }
+
+    /// Keep the composition root on its heap owner through Window publication.
+    /// Moving the complete Runtime through nested Host startup return slots can
+    /// exhaust the native main stack before a GPU has even been initialized.
+    pub(crate) fn try_new_boxed() -> Result<Box<Self>, PreviewStartupFailure<O>> {
         let budget = preview_decode_cpu_budget();
         let workers = media_preview_worker_count().min(budget.preview_worker_count);
         Self::try_start_with(
@@ -94,12 +101,13 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             PreviewWorkerIsolation::RequiredPackaged,
             |_| {},
         )
+        .map(|runtime| *runtime)
     }
 
     #[cfg(any(test, feature = "validation"))]
     pub(crate) fn try_start_with_checkpoint_for_host(
         checkpoint: impl FnMut(PreviewStartupCheckpoint),
-    ) -> Result<Self, PreviewStartupFailure<O>> {
+    ) -> Result<Box<Self>, PreviewStartupFailure<O>> {
         let budget = preview_decode_cpu_budget();
         let workers = media_preview_worker_count().min(budget.preview_worker_count);
         Self::try_start_with(
@@ -117,7 +125,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         scheduler: MediaPreviewScheduler,
         isolation: PreviewWorkerIsolation,
         checkpoint: impl FnMut(PreviewStartupCheckpoint),
-    ) -> Result<Self, PreviewStartupFailure<O>> {
+    ) -> Result<Box<Self>, PreviewStartupFailure<O>> {
         Self::try_start_prepared(
             Self::prepare_unpublished(budget, scheduler),
             workers,
@@ -127,14 +135,14 @@ impl<O: Clone> PreviewProductionRuntime<O> {
     }
 
     fn try_start_prepared(
-        runtime: Self,
+        runtime: Box<Self>,
         workers: usize,
         isolation: PreviewWorkerIsolation,
         checkpoint: impl FnMut(PreviewStartupCheckpoint),
-    ) -> Result<Self, PreviewStartupFailure<O>> {
+    ) -> Result<Box<Self>, PreviewStartupFailure<O>> {
         let cache_required = runtime.timeline_render_cache.borrow().required();
         let mut owner = PreviewStartupOwner {
-            runtime: Box::new(runtime),
+            runtime,
             inventory: PreviewStartupInventory::new(workers, cache_required),
             opaque_panic_payload_abandoned: false,
         };
@@ -143,7 +151,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                 .runtime
                 .start_in_place(workers, isolation, &mut owner.inventory, checkpoint);
         })) {
-            Ok(()) => Ok(*owner.runtime),
+            Ok(()) => Ok(owner.runtime),
             Err(payload) => {
                 let diagnostic = crate::app::execution_panic_diagnostic::execution_panic_diagnostic(
                     payload,
@@ -170,6 +178,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             PreviewWorkerIsolation::DirectTestAdapter,
             checkpoint,
         )
+        .map(|runtime| *runtime)
     }
 
     pub(super) fn with_worker_count_and_scheduler(
@@ -184,13 +193,13 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             runtime.timeline_render_cache.borrow().required(),
         );
         runtime.start_in_place(worker_count, worker_isolation, &mut inventory, |_| {});
-        runtime
+        *runtime
     }
 
     fn prepare_unpublished(
         decode_cpu_budget: PreviewDecodeCpuBudget,
         scheduler: MediaPreviewScheduler,
-    ) -> Self {
+    ) -> Box<Self> {
         let (work_notifier, work_watch) = preview_work_notification_channel();
         let timeline_render_cache =
             crate::app::preview_render_cache::PreviewTimelineRenderCache::prepare();
@@ -203,7 +212,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         ));
         let decode_worker_resources = mondrian_media::PreviewDecodeWorkerResources::default()
             .with_native_output_release_waker(job_tx.lifecycle_waker());
-        Self {
+        Box::new(Self {
             work_notifier: work_notifier.clone(),
             work_watch,
             jobs: job_tx,
@@ -289,7 +298,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                 Vec::new(),
             ),
             metrics: PreviewMetrics::default(),
-        }
+        })
     }
 
     fn start_in_place(
