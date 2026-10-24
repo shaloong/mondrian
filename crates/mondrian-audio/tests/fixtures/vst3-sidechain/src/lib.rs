@@ -165,11 +165,10 @@ fn musical_context_tag(data: &ProcessData, prepared_rate: u64) -> Option<f32> {
         ],
     ];
     let tag = (1 + row + rate * 4) as f32 / 16.0;
-    let validity = context.state & !(ProcessContext_::StatesAndFlags_::kPlaying as u32);
-    if validity == 0 && context.projectTimeMusic.to_bits() == 0 && context.tempo.to_bits() == 0
+    if context.state == 0 && context.projectTimeMusic.to_bits() == 0 && context.tempo.to_bits() == 0
     {
         Some(-tag)
-    } else if validity
+    } else if context.state
         == (ProcessContext_::StatesAndFlags_::kProjectTimeMusicValid
             | ProcessContext_::StatesAndFlags_::kTempoValid) as u32
         && context.projectTimeMusic.to_bits() == QUARTER_NOTES[rate][row]
@@ -271,10 +270,11 @@ fn canonical_musical_context(data: &ProcessData, prepared_rate: u64) -> Option<(
             0x400c_f4e3_f216_2ba0,
         ],
     ];
-    if context.state == 0 && context.projectTimeMusic.to_bits() == 0 && context.tempo.to_bits() == 0
+    let validity = context.state & !(ProcessContext_::StatesAndFlags_::kPlaying as u32);
+    if validity == 0 && context.projectTimeMusic.to_bits() == 0 && context.tempo.to_bits() == 0
     {
         Some((context.projectTimeSamples, 0.0))
-    } else if context.state
+    } else if validity
         == (ProcessContext_::StatesAndFlags_::kProjectTimeMusicValid
             | ProcessContext_::StatesAndFlags_::kTempoValid) as u32
         && context.projectTimeMusic.to_bits() == QUARTER_NOTES[rate][row]
@@ -1316,6 +1316,59 @@ extern "system" fn ModuleExit() -> bool {
 #[no_mangle]
 extern "system" fn GetPluginFactory() -> *mut IPluginFactory {
     ComWrapper::new(Factory {}).to_com_ptr::<IPluginFactory>().unwrap().into_raw()
+}
+
+#[cfg(test)]
+mod transport_oracle_contracts {
+    use super::*;
+
+    #[test]
+    fn scope_oracle_checks_musical_validity_independently_of_playing() {
+        use ProcessContext_::StatesAndFlags_ as S;
+        // SAFETY: SDK POD fields are initialized before the oracle reads them;
+        // the stack context is borrowed only during each synchronous call.
+        let mut context: ProcessContext = unsafe { std::mem::zeroed() };
+        let mut data: ProcessData = unsafe { std::mem::zeroed() };
+        context.sampleRate = 44_100.0;
+        data.numSamples = 4;
+        for music in [false, true] {
+            for playing in [false, true] {
+                let validity = if music { (S::kProjectTimeMusicValid | S::kTempoValid) as u32 } else { 0 };
+                context.state = validity | if playing { S::kPlaying as u32 } else { 0 };
+                context.projectTimeMusic = if music { f64::from_bits(0x400c_f3cf_3cf3_cf3d) } else { 0.0 };
+                context.tempo = if music { 80.0 } else { 0.0 };
+                data.processContext = &mut context;
+                assert_eq!(canonical_musical_context(&data, 44_100_f64.to_bits()),
+                    Some((0, if music { 80.0 / 1024.0 } else { 0.0 })));
+                for unavailable in [S::kRecording as u32, S::kTimeSigValid as u32] {
+                    let valid_state = context.state;
+                    context.state |= unavailable;
+                    data.processContext = &mut context;
+                    assert_eq!(canonical_musical_context(&data, 44_100_f64.to_bits()), None);
+                    context.state = valid_state;
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn legacy_anchored_oracle_still_refuses_unsupplied_playing() {
+        use ProcessContext_::StatesAndFlags_ as S;
+        // SAFETY: both PODs remain live and initialized for this synchronous oracle.
+        let mut context: ProcessContext = unsafe { std::mem::zeroed() };
+        let mut data: ProcessData = unsafe { std::mem::zeroed() };
+        context.sampleRate = 44_100.0;
+        context.projectTimeSamples = -17;
+        context.projectTimeMusic = f64::from_bits(0x3eff_b3f6_5f17_ec9e);
+        context.tempo = 80.0;
+        context.state = (S::kProjectTimeMusicValid | S::kTempoValid) as u32;
+        data.numSamples = 4;
+        data.processContext = &mut context;
+        assert_eq!(musical_context_tag(&data, 44_100_f64.to_bits()), Some(1.0 / 16.0));
+        context.state |= S::kPlaying as u32;
+        data.processContext = &mut context;
+        assert_eq!(musical_context_tag(&data, 44_100_f64.to_bits()), None);
+    }
 }
 
 #[cfg(test)]
