@@ -323,6 +323,15 @@ OfxStatus render(OfxImageEffectHandle effect, OfxPropertySetHandle in) {
   if (declaresInputs() && !disconnectedInputs(effect, true, time)) { return kOfxStatFailed; }
   double spatial[3][2]{};
   if (spatialDefaultsMode() && !spatialValues(effect, time, spatial)) { return kOfxStatFailed; }
+  if (spatialDefaultsMode() && time == 6.0) {
+    // A canonical instance default remains a literal property. Changing that
+    // property does not change the current value until the next omitted binding.
+    OfxParamHandle parameter = nullptr;
+    OfxPropertySetHandle props = nullptr;
+    const double changed[2] = {8.0, 9.0};
+    if (parameters->paramGetHandle(params, "canonical", &parameter, &props) != kOfxStatOK ||
+        properties->propSetDoubleN(props, kOfxParamPropDefault, 2, changed) != kOfxStatOK) { return kOfxStatFailed; }
+  }
 
   OfxPropertySetHandle image = nullptr;
   if (images->clipGetImage(output, time, nullptr, &image) != kOfxStatOK || !image) {

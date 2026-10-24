@@ -105,11 +105,14 @@ fn spatial_defaults_resolve_once_before_create_and_range_admission() {
                     )
                     .expect("actual spatial Generate");
                 let size = if explicit_seed { [1.0, 1.0] } else { project };
+                let canonical = if frame == 3.0 { [8.0, 9.0] } else { [4.0, 5.0] };
                 let expected = [
                     size[0] as f32,
                     size[1] as f32,
-                    (project[0] * 0.5 + project[1] * 0.25 / 16.0 + 4.0 / 128.0 + 5.0 / 1024.0)
-                        as f32,
+                    (project[0] * 0.5
+                        + project[1] * 0.25 / 16.0
+                        + canonical[0] / 128.0
+                        + canonical[1] / 1024.0) as f32,
                     0.75,
                 ];
                 assert_eq!(output.format(), format(ColorFrameAlpha::StraightFloat));

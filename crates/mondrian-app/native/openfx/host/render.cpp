@@ -488,7 +488,11 @@ struct MondrianOpenFxSession {
         const auto layout = numericLayout(type);
         std::array<double, 4> target{}, current{};
         std::array<double, 2> defaults{};
-        if (!value && layout.kind == 7) {
+        const bool projectDefault = !value && layout.kind == 7 &&
+            properties.getStringProperty(kOfxParamPropDefaultCoordinateSystem) == kOfxParamCoordinatesNormalised &&
+            (properties.getStringProperty(kOfxParamPropDoubleType) == kOfxParamDoubleTypeXY ||
+             properties.getStringProperty(kOfxParamPropDoubleType) == kOfxParamDoubleTypeXYAbsolute);
+        if (projectDefault) {
           const auto* tuple = dynamic_cast<MondrianOpenFx::NumericTupleParameter<OFX::Host::Param::Double2DInstance, double, 2>*>(parameter);
           if (!tuple) { return 4; }
           defaults = tuple->defaults();
@@ -499,7 +503,7 @@ struct MondrianOpenFxSession {
                                                 : properties.getDoubleProperty(kOfxParamPropMin, index);
           const double maximum = layout.integer ? properties.getIntProperty(kOfxParamPropMax, index)
                                                 : properties.getDoubleProperty(kOfxParamPropMax, index);
-          target[index] = value ? value->value[index] : layout.kind == 7 ? defaults[index] : layout.integer
+          target[index] = value ? value->value[index] : projectDefault ? defaults[index] : layout.integer
               ? properties.getIntProperty(kOfxParamPropDefault, index)
               : properties.getDoubleProperty(kOfxParamPropDefault, index);
           if (!std::isfinite(target[index]) || target[index] < minimum || target[index] > maximum ||
