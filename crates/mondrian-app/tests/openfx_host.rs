@@ -37,6 +37,9 @@ mod spatial;
 #[path = "openfx_host/contextual.rs"]
 mod contextual;
 
+#[path = "openfx_host/checkerboard.rs"]
+mod checkerboard;
+
 fn constant_parameters<const N: usize>(
     values: [(String, OpenFxParameterValue); N],
 ) -> BTreeMap<String, OpenFxParameterBinding> {
