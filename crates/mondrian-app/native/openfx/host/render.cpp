@@ -655,7 +655,8 @@ struct MondrianOpenFxSession {
   template<class Probe>
   int render(const void* input, void* output, size_t bytes,
              const MondrianOpenFxFrameInfo& info,
-             const MondrianOpenFxParameter* parameters, int count, MondrianOpenFxRenderReport& report, Probe& probe) {
+             const MondrianOpenFxParameter* parameters, int count, MondrianOpenFxRenderReport& report,
+             const MondrianOpenFxInvocationControl* control, Probe& probe) {
     auto phase = probe.start();
     if (failed) { return 2; }
     // Project geometry is an immutable owner binding, independent of image
@@ -839,9 +840,26 @@ struct MondrianOpenFxSession {
     // Hosts without tiles must provide complete RoD images, including negative
     // origins and pixels outside the publication viewport. Keep the ordinary
     // full-viewport path allocation/copy free; scratch is action-local and its
-    // maximum payload is charged in the processor's active storage contract.
+    // exact payload is admitted by the original parent bank before allocation.
     std::unique_ptr<OfxRGBAColourF[]> domainStorage;
     if (!MondrianOpenFx::sameRegion(window, viewport)) {
+      const size_t transientBytes = domainPixels * sizeof(OfxRGBAColourF);
+      const int granted = control && control->acquire_memory ?
+          control->acquire_memory(control->context, transientBytes) : 0;
+      if (granted != 0 && granted != 1) { return 6; }
+      if (control && control->abort && control->abort(control->context)) { return 6; }
+      if (host.auxiliary().fatal()) { failed = true; return 6; }
+      if (host.auxiliary().blocked(instance->getHandle())) {
+        failed = false; report.completion = MONDRIAN_OPENFX_RENDER_USER_BLOCKED; return 0;
+      }
+      if (!granted) {
+        // Parameter/RoD preflight ran, but no allocation, Begin or Render did.
+        // Preserve this valid instance; only the parent resource bank retains it.
+        failed = false;
+        report.required_transient_bytes = transientBytes;
+        report.completion = MONDRIAN_OPENFX_RENDER_MEMORY_REFUSED;
+        return 0;
+      }
       domainStorage.reset(new OfxRGBAColourF[domainPixels]);
       frame.output = domainStorage.get();
     }
@@ -1141,7 +1159,7 @@ static int renderSessionEntry(
     const MondrianOpenFxInvocationControl* control,
     MondrianOpenFxNativeDiagnostic* diagnostic, Probe& probe) noexcept
 {
-  if (report) { report->completion = MONDRIAN_OPENFX_RENDER_UNSET; report->output_alpha = MONDRIAN_OPENFX_ALPHA_INVALID; }
+  if (report) { report->completion = MONDRIAN_OPENFX_RENDER_UNSET; report->output_alpha = MONDRIAN_OPENFX_ALPHA_INVALID; report->required_transient_bytes = 0; }
   if (!session) { return 2; }
   try {
     if (!report) { session->failed = true; return 2; }
@@ -1161,7 +1179,7 @@ static int renderSessionEntry(
       }
       ~DiagnosticBorrow() { frame.renderDiagnostic = nullptr; }
     } diagnosticBorrow(session->frame, diagnostic);
-    int status = session->render(input, output, bytes, *info, parameters, count, *report, probe);
+    int status = session->render(input, output, bytes, *info, parameters, count, *report, control, probe);
     // This single publication boundary also covers Identity/UserBlocked and
     // EndSequenceRender. A plugin cannot publish by ignoring a query error.
     if (session->frame.invalidChoiceDomain.load(std::memory_order_relaxed)) {

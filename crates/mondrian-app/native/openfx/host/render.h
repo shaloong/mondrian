@@ -188,6 +188,9 @@ struct MondrianOpenFxInvocationControl {
   int interactive_render;
   int question_work;
   int (*question)(const void*, const struct MondrianOpenFxLiveQuestion*);
+  // Host-owned, pre-DSP allocation only: 1 grants the exact simultaneous
+  // payload, 0 refuses without allocating, -1 aborts the current work.
+  int (*acquire_memory)(const void*, size_t);
 };
 
 // Output is caller-owned staging storage, valid only when status is zero.

@@ -135,6 +135,7 @@ fn native_generic_gui_pairs_failed_begin_end_and_honest_question_replies() {
             interactive_render: 0,
             question_work: 1,
             question: Some(answer),
+            acquire_memory: None,
         };
         let mut output = vec![0_u8; input.len()];
         assert_eq!(
@@ -623,6 +624,7 @@ fn run_parameter_permission_session(gui_open: bool) {
         interactive_render: 0,
         question_work: 0,
         question: Some(answer),
+        acquire_memory: None,
     };
     let mut output_a = vec![0_u8; input.len()];
     let mut output_b = vec![0_u8; input.len()];

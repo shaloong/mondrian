@@ -27,9 +27,9 @@ use diagnostic::{ParentProbe, ProbeEvent};
 pub const OPENFX_RESIDENT_WORKER_ARGUMENT: &str = "--internal-openfx-session-v12";
 const ENDPOINT_ENV: &str = "MONDRIAN_INTERNAL_OPENFX_ENDPOINT";
 const NONCE_ENV: &str = "MONDRIAN_INTERNAL_OPENFX_NONCE";
-// v13: native full-RoD backing and viewport publication, including transparent
-// placement of an Opaque native image. Older workers have fixed-image semantics.
-const VERSION: u16 = 13;
+// v14: actual pre-DSP transient allocation admission through the parent's
+// existing resource bank. A refused native preflight is not a DSP/plugin fault.
+const VERSION: u16 = 14;
 const POLL: Duration = Duration::from_millis(20);
 const RETIRE: Duration = Duration::from_millis(100);
 const FRAME_TRANSFER_BYTES: usize = 1024 * 1024;
@@ -77,6 +77,12 @@ enum Request {
         identity: question::QuestionIdentity,
         reply: question::QuestionReply,
     },
+    MemoryReply {
+        owner: mondrian_core::EffectProcessorOwnerId,
+        sequence: u64,
+        required_bytes: usize,
+        granted: bool,
+    },
     CloseGui {
         owner: mondrian_core::EffectProcessorOwnerId,
         sequence: u64,
@@ -111,6 +117,18 @@ enum Response {
         feedback: mondrian_effects::EffectProcessorFeedbackSnapshot,
         #[serde(deserialize_with = "child_diagnostic::required_optional")]
         diagnostic: Option<OpenFxChildRenderDiagnostic>,
+    },
+    PreflightBudgetRefused {
+        sequence: u64,
+        required_bytes: usize,
+        feedback: mondrian_effects::EffectProcessorFeedbackSnapshot,
+        #[serde(deserialize_with = "child_diagnostic::required_optional")]
+        diagnostic: Option<OpenFxChildRenderDiagnostic>,
+    },
+    MemoryNeeded {
+        owner: mondrian_core::EffectProcessorOwnerId,
+        sequence: u64,
+        required_bytes: usize,
     },
     Rejected {
         sequence: u64,
@@ -446,6 +464,13 @@ struct RenderObservation<'a, P> {
     >,
     gui: mondrian_effects::EffectProcessorGuiAdmission,
     probe: &'a mut P,
+    memory: &'a mut dyn FnMut(usize) -> Result<bool, OpenFxHostError>,
+}
+
+#[derive(Clone, Copy)]
+struct MemoryAdmission {
+    required_bytes: usize,
+    granted: bool,
 }
 
 impl OpenFxFilterSession {
@@ -539,8 +564,9 @@ impl OpenFxFilterSession {
     /// Both phases own two shared rasters, one reserved callback stack/guard,
     /// fixed thread/mutex and bounded auxiliary/transport state, and three typed
     /// namespace POD values. Active
-    /// admission additionally covers the single pre-DSP output Vec and up to
-    /// MAX_FRAME_BYTES of action-local full-RoD backing. Success
+    /// admission additionally covers the single pre-DSP output Vec. Native RoD
+    /// scratch is separately admitted by the same execution bank on demand.
+    /// Success
     /// moves that Vec to the caller; the session retains no output raster owner.
     /// Effects owns and separately charges its source/staging/cache rasters.
     /// Shared physical mapping pages are charged once.
@@ -582,11 +608,6 @@ impl OpenFxFilterSession {
             .ok_or_else(|| invalid("native retained storage overflows"))?;
         let active = retained
             .checked_add(frame_bytes)
-            // A non-tiled native image must cover its complete finite RoD,
-            // independently of the requested fixed viewport. Scratch is local
-            // to DSP and bounded by the native 128 MiB image limit; charge the
-            // bound before DSP because parameters may change RoD each frame.
-            .and_then(|bytes| bytes.checked_add(MAX_FRAME_BYTES))
             .ok_or_else(|| invalid("native active storage overflows"))?;
         mondrian_effects::EffectFloatProcessorStorage::new(active, retained)
             .map_err(|error| invalid(error.to_string()))
@@ -847,12 +868,40 @@ impl OpenFxFilterSession {
             OpenFxHostError,
         >,
     ) -> Result<EffectFloatFrame, OpenFxHostError> {
+        self.render_observed_with_memory(
+            timing,
+            parameters,
+            frame,
+            owner_deadline,
+            gui,
+            &mut |_| Ok(true),
+            owner_control,
+        )
+    }
+
+    /// Native transient admission is called only on this original owner thread,
+    /// before child allocation/DSP, under the same non-renewable deadline.
+    pub(crate) fn render_observed_with_memory(
+        &mut self,
+        timing: &OpenFxRenderTiming,
+        parameters: &BTreeMap<String, OpenFxParameterBinding>,
+        frame: &EffectFloatFrame,
+        owner_deadline: Option<Instant>,
+        gui: mondrian_effects::EffectProcessorGuiAdmission,
+        memory: &mut dyn FnMut(usize) -> Result<bool, OpenFxHostError>,
+        owner_control: &mut dyn FnMut(
+            OpenFxRenderObservation<'_>,
+        ) -> Result<
+            mondrian_effects::EffectProcessorQuestionState,
+            OpenFxHostError,
+        >,
+    ) -> Result<EffectFloatFrame, OpenFxHostError> {
         self.render_owned(
             timing,
             parameters,
             FrameRequest::image(frame),
             owner_deadline,
-            RenderObservation { owner_control, gui, probe: &mut () },
+            RenderObservation { owner_control, gui, probe: &mut (), memory },
             reserve_native_output,
         )
     }
@@ -894,6 +943,32 @@ impl OpenFxFilterSession {
             OpenFxHostError,
         >,
     ) -> Result<EffectFloatFrame, OpenFxHostError> {
+        self.generate_observed_with_memory(
+            timing,
+            sampling,
+            parameters,
+            owner_deadline,
+            gui,
+            &mut |_| Ok(true),
+            owner_control,
+        )
+    }
+
+    pub(crate) fn generate_observed_with_memory(
+        &mut self,
+        timing: &OpenFxRenderTiming,
+        sampling: mondrian_core::ImageSampling,
+        parameters: &BTreeMap<String, OpenFxParameterBinding>,
+        owner_deadline: Option<Instant>,
+        gui: mondrian_effects::EffectProcessorGuiAdmission,
+        memory: &mut dyn FnMut(usize) -> Result<bool, OpenFxHostError>,
+        owner_control: &mut dyn FnMut(
+            OpenFxRenderObservation<'_>,
+        ) -> Result<
+            mondrian_effects::EffectProcessorQuestionState,
+            OpenFxHostError,
+        >,
+    ) -> Result<EffectFloatFrame, OpenFxHostError> {
         self.render_owned(
             timing,
             parameters,
@@ -904,7 +979,7 @@ impl OpenFxFilterSession {
                 input: None,
             },
             owner_deadline,
-            RenderObservation { owner_control, gui, probe: &mut () },
+            RenderObservation { owner_control, gui, probe: &mut (), memory },
             reserve_native_output,
         )
     }
@@ -938,6 +1013,7 @@ impl OpenFxFilterSession {
                 },
                 gui: mondrian_effects::EffectProcessorGuiAdmission::CLOSED,
                 probe: &mut *report,
+                memory: &mut |_| Ok(true),
             },
             reserve_native_output,
         );
@@ -967,6 +1043,7 @@ impl OpenFxFilterSession {
                 },
                 gui: mondrian_effects::EffectProcessorGuiAdmission::CLOSED,
                 probe: &mut (),
+                memory: &mut |_| Ok(true),
             },
             reserve,
         )
@@ -981,7 +1058,7 @@ impl OpenFxFilterSession {
         observation: RenderObservation<'_, impl ParentProbe>,
         reserve: impl FnOnce(&mut Vec<[f32; 4]>, usize) -> Result<(), std::collections::TryReserveError>,
     ) -> Result<EffectFloatFrame, OpenFxHostError> {
-        let RenderObservation { owner_control, gui, probe } = observation;
+        let RenderObservation { owner_control, gui, probe, memory } = observation;
         self.feedback = None;
         let native_deadline = Instant::now() + DEADLINE;
         let mut budget =
@@ -1048,14 +1125,16 @@ impl OpenFxFilterSession {
             timing,
             parameters,
             frame,
-            RenderObservation { owner_control, gui, probe },
+            RenderObservation { owner_control, gui, probe, memory },
             &mut budget,
             output_owner,
         );
-        if result
-            .as_ref()
-            .is_err_and(|error| !matches!(error, OpenFxHostError::UserBlocked(_)))
-        {
+        if result.as_ref().is_err_and(|error| {
+            !matches!(
+                error,
+                OpenFxHostError::UserBlocked(_) | OpenFxHostError::PreflightBudgetRefused { .. }
+            )
+        }) {
             self.process.terminate_reported("render");
         }
         result
@@ -1070,7 +1149,7 @@ impl OpenFxFilterSession {
         budget: &mut question_budget::QuestionExecutionBudget,
         output_owner: NativeOutputAllocation,
     ) -> Result<EffectFloatFrame, OpenFxHostError> {
-        let RenderObservation { owner_control, gui, probe } = observation;
+        let RenderObservation { owner_control, gui, probe, memory } = observation;
         let deadline = budget
             .deadline()
             .ok_or_else(|| unavailable("unsubmitted native work has no active budget"))?;
@@ -1147,7 +1226,16 @@ impl OpenFxFilterSession {
             Err(error) => return Err(error), // Partial packet can only be retired.
         };
         let phase = probe.start();
-        let response = self.await_render(owner_control, budget, gui, initial_stop, probe);
+        let mut memory_admission = None;
+        let response = self.await_render(
+            owner_control,
+            budget,
+            gui,
+            initial_stop,
+            probe,
+            memory,
+            &mut memory_admission,
+        );
         probe.finish(OpenFxRenderPhase::AwaitCompletion, phase);
         let response = response?;
         let deadline = budget
@@ -1160,6 +1248,7 @@ impl OpenFxFilterSession {
                 deadline,
             )
         };
+        let mut memory_refused = None;
         let (alpha, snapshot) = match response {
             Response::Rendered { sequence, alpha, feedback, diagnostic }
                 if sequence == self.sequence
@@ -1169,7 +1258,8 @@ impl OpenFxFilterSession {
                             | mondrian_core::ColorFrameAlpha::PremultipliedFloat
                             | mondrian_core::ColorFrameAlpha::Opaque
                     )
-                    && !feedback.is_blocked() =>
+                    && !feedback.is_blocked()
+                    && !memory_admission.is_some_and(|value: MemoryAdmission| !value.granted) =>
             {
                 admit_child_diagnostic(
                     diagnostic,
@@ -1194,6 +1284,25 @@ impl OpenFxFilterSession {
                     self.frame_bytes,
                     probe,
                 )?;
+                (None, feedback)
+            }
+            Response::PreflightBudgetRefused { sequence, required_bytes, feedback, diagnostic }
+                if sequence == self.sequence
+                    && !feedback.is_blocked()
+                    && memory_admission.is_some_and(|value| {
+                        !value.granted && value.required_bytes == required_bytes
+                    }) =>
+            {
+                admit_child_diagnostic(
+                    diagnostic,
+                    self.owner,
+                    self.sequence,
+                    &feedback,
+                    None,
+                    self.frame_bytes,
+                    probe,
+                )?;
+                memory_refused = Some(required_bytes);
                 (None, feedback)
             }
             Response::Rejected { sequence, status } if sequence == self.sequence => {
@@ -1250,6 +1359,13 @@ impl OpenFxFilterSession {
             },
             snapshot,
         };
+        if let Some(required_bytes) = memory_refused {
+            probe.finish(OpenFxRenderPhase::FeedbackAdmission, phase);
+            return Err(OpenFxHostError::PreflightBudgetRefused {
+                required_bytes,
+                feedback: Box::new(feedback),
+            });
+        }
         let Some(alpha) = alpha else {
             probe.finish(OpenFxRenderPhase::FeedbackAdmission, phase);
             return Err(OpenFxHostError::UserBlocked(Box::new(feedback)));
@@ -1289,6 +1405,8 @@ impl OpenFxFilterSession {
         gui: mondrian_effects::EffectProcessorGuiAdmission,
         mut stopped: Option<OpenFxHostError>,
         probe: &mut impl ParentProbe,
+        memory: &mut dyn FnMut(usize) -> Result<bool, OpenFxHostError>,
+        memory_admission: &mut Option<MemoryAdmission>,
     ) -> Result<Response, OpenFxHostError> {
         use mondrian_effects::{
             EffectProcessorQuestionReply as Reply, EffectProcessorQuestionState as State,
@@ -1444,6 +1562,54 @@ impl OpenFxFilterSession {
                 }
                 Err(error) => return Err(stopped.take().unwrap_or(error)),
             };
+            if let Response::MemoryNeeded { owner, sequence, required_bytes } = response {
+                if owner != self.owner
+                    || sequence != self.sequence
+                    || required_bytes == 0
+                    || required_bytes > MAX_FRAME_BYTES
+                    || required_bytes % 16 != 0
+                    || memory_admission.is_some()
+                    || active.is_some()
+                {
+                    return Err(unavailable(
+                        "transient allocation lost its current bounded work identity",
+                    ));
+                }
+                if stopped.is_some() {
+                    continue;
+                }
+                let granted = memory(required_bytes)?;
+                *memory_admission = Some(MemoryAdmission { required_bytes, granted });
+                match owner_control(OpenFxRenderObservation::Checkpoint) {
+                    Ok(_) => {}
+                    Err(error @ OpenFxHostError::Canceled) => {
+                        stopped = Some(error);
+                        continue;
+                    }
+                    Err(error) => return Err(error),
+                }
+                let deadline = budget
+                    .deadline()
+                    .ok_or_else(|| unavailable("memory admission lost its original deadline"))?;
+                self.request_writer.write(
+                    &mut self.control,
+                    &Request::MemoryReply {
+                        owner: self.owner,
+                        sequence: self.sequence,
+                        required_bytes,
+                        granted,
+                    },
+                    deadline,
+                    &mut || {
+                        check_owner(
+                            &mut || owner_control(OpenFxRenderObservation::Checkpoint).map(|_| ()),
+                            deadline,
+                        )
+                    },
+                    &mut false,
+                )?;
+                continue;
+            }
             if let Response::Question { owner, sequence, identity, text } = response {
                 if owner != self.owner
                     || sequence != self.sequence
@@ -1536,6 +1702,7 @@ impl OpenFxFilterSession {
                     Response::Rendered { sequence, .. }
                     | Response::Rejected { sequence, .. }
                     | Response::UserBlocked { sequence, .. }
+                    | Response::PreflightBudgetRefused { sequence, .. }
                         if sequence == self.sequence => {}
                     _ => return Err(unavailable("cancel completion lost its current work")),
                 }
@@ -2102,7 +2269,9 @@ fn run_openfx_resident_worker_inner(
                 close_trace.record(close_observation::Stage::PumpStopJoinEnd, 0);
                 return Ok(());
             }
-            Request::Cancel { .. } | Request::QuestionReply { .. } => {
+            Request::Cancel { .. }
+            | Request::QuestionReply { .. }
+            | Request::MemoryReply { .. } => {
                 return Err(invalid("control service reached native dispatch"))
             }
             Request::CloseGui { owner, sequence: received } => {
@@ -2381,6 +2550,19 @@ fn render_worker_request(
             probe.finish(OpenFxChildRenderPhase::TerminalPreparation, phase);
             return Ok(WorkerRenderResult {
                 response: Response::UserBlocked { sequence, feedback: *feedback, diagnostic: None },
+                stop: false,
+            });
+        }
+        Err(NativeRenderError::PreflightBudgetRefused { required_bytes, feedback }) => {
+            *curves = candidate_curves;
+            probe.finish(OpenFxChildRenderPhase::TerminalPreparation, phase);
+            return Ok(WorkerRenderResult {
+                response: Response::PreflightBudgetRefused {
+                    sequence,
+                    required_bytes,
+                    feedback: *feedback,
+                    diagnostic: None,
+                },
                 stop: false,
             });
         }
@@ -4199,8 +4381,8 @@ mod generator_storage_tests {
         );
         assert_eq!(
             generator.active_peak_bytes() - generator.retained_bytes(),
-            3 * 2 * 16 + MAX_FRAME_BYTES,
-            "returned Vec and bounded full-RoD scratch overlap resident mapping"
+            3 * 2 * 16,
+            "returned Vec overlaps resident mapping; dynamic native scratch needs a separate bank grant"
         );
         let file = tempfile::NamedTempFile::new().unwrap();
         file.as_file().set_len(3 * 2 * 16).unwrap();
@@ -4246,5 +4428,163 @@ mod generator_storage_tests {
             serde_json::from_value::<Prepare>(encoded).is_err(),
             "unimplemented context cannot map/load"
         );
+    }
+}
+
+#[cfg(test)]
+mod transient_memory_tests {
+    use super::*;
+
+    #[test]
+    #[ignore = "requires current Product and GeneratorProbe image_domain mode under the native supervisor"]
+    fn native_domain_allocation_is_authorized_before_dsp_and_refusal_preserves_owner() {
+        assert_eq!(
+            std::env::var("MONDRIAN_OPENFX_GENERATOR_MODE").unwrap(),
+            "image_domain"
+        );
+        let product = PathBuf::from(std::env::var_os("MONDRIAN_OPENFX_PRODUCT_BINARY").unwrap());
+        let binary = PathBuf::from(std::env::var_os("MONDRIAN_OPENFX_GENERATOR_BINARY").unwrap());
+        let inspection = crate::openfx_adapter::inspect_openfx_binary(&product, &binary).unwrap();
+        let format = mondrian_effects::EffectValueFormat::new(
+            mondrian_effects::EffectWorkingPrecision::Float32,
+            mondrian_effects::EffectColorDomain::SceneLinearRgb,
+            mondrian_core::ColorFrameAlpha::PremultipliedFloat,
+        );
+        let geometry = mondrian_effects::EffectProjectGeometry::new(
+            3,
+            2,
+            mondrian_core::SampleAspectRatio::new(2, 1).unwrap(),
+        )
+        .unwrap();
+        let mut session = OpenFxFilterSession::prepare_generator(
+            &product,
+            &inspection,
+            "org.mondrian.fixture.ofx-generator",
+            3,
+            2,
+            format,
+            geometry,
+            &mut || Ok(()),
+        )
+        .unwrap();
+        let timing = |frame| OpenFxRenderTiming {
+            frame,
+            frame_rate: 24.0,
+            first_frame: 0.0,
+            last_frame: 12.0,
+        };
+        let sampling = mondrian_core::ImageSampling::new(
+            mondrian_core::SampleAspectRatio::new(2, 1).unwrap(),
+            [mondrian_core::Rational::new(1, 1); 2],
+        )
+        .unwrap();
+        let action_path =
+            PathBuf::from(std::env::var_os("MONDRIAN_OPENFX_GENERATOR_ACTION_LOG").unwrap());
+        let renders = || {
+            std::fs::read_to_string(&action_path)
+                .unwrap()
+                .lines()
+                .filter(|line| *line == "OfxImageEffectActionRender")
+                .count()
+        };
+        let pid = session.worker_process_id();
+        let owner = session.processor_owner();
+        let target = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            session
+                .generate_observed_with_memory(
+                    &timing(3.0),
+                    sampling,
+                    &BTreeMap::new(),
+                    None,
+                    mondrian_effects::EffectProcessorGuiAdmission::CLOSED,
+                    &mut |_| panic!("full viewport needs no additional memory"),
+                    &mut |_| Ok(mondrian_effects::EffectProcessorQuestionState::Unavailable),
+                )
+                .unwrap();
+            let initial = session.take_feedback().unwrap().snapshot;
+            let before = session.shared[..session.frame_bytes].to_vec();
+            let before_renders = renders();
+            let thread = std::thread::current().id();
+            let mut requests = Vec::new();
+            let denied = session.generate_observed_with_memory(
+                &timing(1.0),
+                sampling,
+                &BTreeMap::new(),
+                None,
+                mondrian_effects::EffectProcessorGuiAdmission::CLOSED,
+                &mut |bytes| {
+                    assert_eq!(std::thread::current().id(), thread);
+                    requests.push(bytes);
+                    Ok(bytes <= 319)
+                },
+                &mut |_| Ok(mondrian_effects::EffectProcessorQuestionState::Unavailable),
+            );
+            let Err(OpenFxHostError::PreflightBudgetRefused { required_bytes, feedback }) = denied
+            else {
+                panic!("typed preflight budget refusal required")
+            };
+            assert_eq!(required_bytes, 320, "complete5x4 FloatRGBA image");
+            assert_eq!(feedback.snapshot.native_owner(), initial.native_owner());
+            assert_eq!(feedback.snapshot.invocation(), initial.invocation() + 1);
+            assert_eq!(&session.shared[..session.frame_bytes], &before);
+            assert_eq!(
+                renders(),
+                before_renders,
+                "refused allocation cannot begin DSP"
+            );
+            let accepted = session
+                .generate_observed_with_memory(
+                    &timing(1.0),
+                    sampling,
+                    &BTreeMap::new(),
+                    None,
+                    mondrian_effects::EffectProcessorGuiAdmission::CLOSED,
+                    &mut |bytes| {
+                        requests.push(bytes);
+                        Ok(bytes <= 320)
+                    },
+                    &mut |_| Ok(mondrian_effects::EffectProcessorQuestionState::Unavailable),
+                )
+                .unwrap();
+            assert_eq!(requests, vec![320, 320]);
+            assert_eq!(
+                accepted.format().alpha(),
+                mondrian_core::ColorFrameAlpha::Opaque
+            );
+            for (index, pixel) in accepted.pixels().iter().enumerate() {
+                let expected = [
+                    (index % 3 + 4) as f32 / 16.0,
+                    (1 - index / 3 + 3) as f32 / 8.0,
+                    1.0 / 16.0,
+                    1.0,
+                ];
+                assert_eq!(pixel.map(f32::to_bits), expected.map(f32::to_bits));
+            }
+            let final_feedback = session.take_feedback().unwrap().snapshot;
+            assert_eq!(final_feedback.native_owner(), initial.native_owner());
+            assert_eq!(final_feedback.invocation(), initial.invocation() + 2);
+            assert_eq!(renders(), before_renders + 1);
+            assert_eq!(session.worker_process_id(), pid);
+            assert_eq!(session.processor_owner(), owner);
+            let empty = session
+                .generate_observed_with_memory(
+                    &timing(2.0),
+                    sampling,
+                    &BTreeMap::new(),
+                    None,
+                    mondrian_effects::EffectProcessorGuiAdmission::CLOSED,
+                    &mut |_| panic!("empty support needs no additional memory"),
+                    &mut |_| Ok(mondrian_effects::EffectProcessorQuestionState::Unavailable),
+                )
+                .unwrap();
+            assert!(empty.pixels().iter().all(|pixel| *pixel == [0.0; 4]));
+            assert_eq!(renders(), before_renders + 1);
+        }));
+        let shutdown = session.shutdown();
+        drop(session);
+        if let Err(panic) = target {
+            std::panic::resume_unwind(panic);
+        }
+        shutdown.unwrap();
     }
 }

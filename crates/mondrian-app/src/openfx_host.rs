@@ -364,6 +364,15 @@ pub enum OpenFxHostError {
     /// The same live instance can be retained only by the Effects resource bank.
     #[error(transparent)]
     HostResourceRefused(mondrian_effects::EffectProcessorHostResourceRefusal),
+    /// Parameter/RoD preflight completed, but the exact extra allocation was
+    /// refused before allocation or DSP. This is not a plugin fault.
+    #[error("OpenFX preflight requires {required_bytes} transient bytes")]
+    PreflightBudgetRefused {
+        /// Exact native simultaneous extra allocation requirement.
+        required_bytes: usize,
+        /// Actual current native owner/invocation feedback.
+        feedback: Box<mondrian_effects::EffectProcessorFeedback>,
+    },
     /// The complete Float image cannot satisfy its declared representation.
     #[error(transparent)]
     Frame(#[from] mondrian_effects::EffectFloatFrameError),
@@ -526,6 +535,7 @@ struct NativeInvocationControl {
     interactive_render: c_int,
     question_work: c_int,
     question: Option<unsafe extern "C" fn(*const c_void, *const NativeLiveQuestion) -> c_int>,
+    acquire_memory: Option<unsafe extern "C" fn(*const c_void, usize) -> c_int>,
 }
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -577,6 +587,7 @@ struct NativeFeedback {
 struct NativeRenderReport {
     completion: c_int,
     output_alpha: c_int,
+    required_transient_bytes: usize,
     feedback: NativeFeedback,
 }
 
@@ -584,6 +595,10 @@ struct NativeRenderReport {
 enum NativeRenderError {
     Rejected(c_int),
     UserBlocked(Box<mondrian_effects::EffectProcessorFeedbackSnapshot>),
+    PreflightBudgetRefused {
+        required_bytes: usize,
+        feedback: Box<mondrian_effects::EffectProcessorFeedbackSnapshot>,
+    },
 }
 
 impl NativeNotice {
@@ -851,6 +866,21 @@ impl NativeSession {
             return Err(NativeRenderError::Rejected(status));
         }
         let feedback = self.report.feedback.decode().map_err(NativeRenderError::Rejected)?;
+        if self.report.completion == 3
+            && !feedback.is_blocked()
+            && self.report.output_alpha == -1
+            && self.report.required_transient_bytes > 0
+            && self.report.required_transient_bytes <= MAX_FRAME_BYTES
+            && self.report.required_transient_bytes % 16 == 0
+        {
+            return Err(NativeRenderError::PreflightBudgetRefused {
+                required_bytes: self.report.required_transient_bytes,
+                feedback: Box::new(feedback),
+            });
+        }
+        if self.report.required_transient_bytes != 0 {
+            return Err(NativeRenderError::Rejected(6));
+        }
         match self.report.completion {
             2 if feedback.is_blocked() => {
                 return Err(NativeRenderError::UserBlocked(Box::new(feedback)))
@@ -3491,7 +3521,6 @@ pub(crate) mod shared_frame_tests {
                 + auxiliary
                 + 3 * std::mem::size_of::<mondrian_core::EffectProcessorOwnerId>()
                 + 3 * 16
-                + MAX_FRAME_BYTES
         );
         assert_eq!(
             large - small,

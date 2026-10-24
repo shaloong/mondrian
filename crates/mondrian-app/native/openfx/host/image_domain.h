@@ -10,7 +10,8 @@
 
 namespace MondrianOpenFx {
 // Full RoD backing is bounded by the same 128 MiB/8192-axis contract as an
-// ordinary mapped frame. The Rust processor active grant includes this bound.
+// ordinary mapped frame. The original parent bank grants the actual extra
+// payload before allocation; this absolute cap is not an upfront reservation.
 constexpr size_t kMaximumDomainBytes = 128u * 1024u * 1024u;
 inline bool pixelRegionOfDefinition(const OfxRectD& canonical, double par,
                                     OfxRectI& pixels, size_t& count) {

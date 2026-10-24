@@ -51,6 +51,15 @@ struct Slot {
     acknowledged_generation: u64,
 
     questions: question::QuestionSlot,
+    memory: Option<MemoryRequest>,
+    memory_requested: bool,
+}
+
+#[derive(Clone, Copy)]
+struct MemoryRequest {
+    bytes: usize,
+    sent: bool,
+    reply: Option<bool>,
 }
 
 pub(super) struct Shared {
@@ -86,6 +95,8 @@ impl Shared {
                 acknowledged_generation: 0,
 
                 questions: question::QuestionSlot::default(),
+                memory: None,
+                memory_requested: false,
             }),
             ready: Condvar::new(),
             canceled: AtomicBool::new(false),
@@ -108,6 +119,7 @@ impl Shared {
             interactive_render: c_int::from(self.interactive_render.load(Ordering::Acquire)),
             question_work: c_int::from(self.question_work.load(Ordering::Acquire)),
             question: Some(native_question),
+            acquire_memory: Some(native_acquire_memory),
         }
     }
 
@@ -138,6 +150,21 @@ impl Shared {
             {
                 return Err(invalid("Question reply lost its published current service"));
             }
+            self.ready.notify_all();
+            return Ok(());
+        }
+        if let Request::MemoryReply { owner, sequence, required_bytes, granted } = request {
+            if owner != self.owner
+                || sequence == 0
+                || sequence != slot.serial
+                || slot.phase != Phase::Executing
+                || slot.memory.is_none_or(|value| {
+                    !value.sent || value.bytes != required_bytes || value.reply.is_some()
+                })
+            {
+                return Err(invalid("memory reply lost its current allocation request"));
+            }
+            slot.memory.as_mut().expect("checked memory request").reply = Some(granted);
             self.ready.notify_all();
             return Ok(());
         }
@@ -192,6 +219,8 @@ impl Shared {
             self.question_work.store(false, Ordering::Release);
         }
         self.canceled.store(false, Ordering::Release);
+        slot.memory = None;
+        slot.memory_requested = false;
         slot.progress = None;
         slot.sent_revision = slot.progress_revision;
         slot.phase = Phase::Queued;
@@ -227,7 +256,11 @@ impl Shared {
 
     pub(super) fn complete(&self, response: Response) -> Result<u64, OpenFxHostError> {
         let mut slot = self.gate.lock().map_err(|_| unavailable("native pump gate poisoned"))?;
-        if slot.phase != Phase::Executing || slot.response.is_some() || slot.questions.is_active() {
+        if slot.phase != Phase::Executing
+            || slot.response.is_some()
+            || slot.questions.is_active()
+            || slot.memory.is_some()
+        {
             return Err(unavailable("native completion lost its executing owner"));
         }
         let response = if self.is_canceled() && !matches!(response, Response::Closed {}) {
@@ -304,6 +337,49 @@ unsafe extern "C" fn native_abort(context: *const c_void) -> c_int {
     // legal spawned callbacks complete before the action returns.
     let shared = unsafe { &*context.cast::<Shared>() };
     c_int::from(shared.is_canceled() || shared.stopping.load(Ordering::Acquire))
+}
+
+unsafe extern "C" fn native_acquire_memory(context: *const c_void, bytes: usize) -> c_int {
+    if context.is_null() || bytes == 0 || bytes > MAX_FRAME_BYTES || bytes % 16 != 0 {
+        return -1;
+    }
+    // SAFETY: the same action-scoped Shared borrow as native_abort. This is a
+    // host allocation barrier before Render, never a plugin/UI thread closure.
+    let shared = unsafe { &*context.cast::<Shared>() };
+    let Ok(mut slot) = shared.gate.lock() else {
+        return -1;
+    };
+    if slot.phase != Phase::Executing
+        || slot.render_invocation == 0
+        || slot.memory_requested
+        || slot.questions.is_active()
+    {
+        return -1;
+    }
+    slot.memory_requested = true;
+    slot.memory = Some(MemoryRequest { bytes, sent: false, reply: None });
+    shared.ready.notify_all();
+    loop {
+        if shared.is_canceled()
+            || shared.stopping.load(Ordering::Acquire)
+            || slot.fault.is_some()
+            || slot.phase != Phase::Executing
+        {
+            slot.memory = None;
+            return -1;
+        }
+        if let Some(granted) = slot.memory.and_then(|value| value.reply) {
+            slot.memory = None;
+            return c_int::from(granted);
+        }
+        slot = match shared.ready.wait(slot) {
+            Ok(slot) => slot,
+            Err(poison) => {
+                poison.into_inner().memory = None;
+                return -1;
+            }
+        };
+    }
 }
 
 unsafe extern "C" fn native_progress(
@@ -723,6 +799,20 @@ fn pump_loop(
                     shared.gate.lock().map_err(|_| unavailable("native pump gate poisoned"))?;
                 if let Some(response) = slot.response.take() {
                     (Some(response), true)
+                } else if slot.phase == Phase::Executing
+                    && slot.memory.is_some_and(|value| !value.sent)
+                {
+                    let sequence = slot.serial;
+                    let memory = slot.memory.as_mut().expect("pending memory request");
+                    memory.sent = true;
+                    (
+                        Some(Response::MemoryNeeded {
+                            owner: shared.owner,
+                            sequence,
+                            required_bytes: memory.bytes,
+                        }),
+                        false,
+                    )
                 } else if slot.phase == Phase::Executing && slot.questions.unpublished().is_some() {
                     let pending = slot
                         .questions
@@ -830,6 +920,91 @@ fn pump_loop(
 mod tests {
     use super::*;
 
+    fn wait_memory_request(shared: &Shared) -> bool {
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while Instant::now() < deadline {
+            if shared.gate.lock().unwrap().memory.is_some() {
+                return true;
+            }
+            thread::yield_now();
+        }
+        false
+    }
+
+    #[test]
+    fn native_memory_barrier_binds_one_exact_reply_and_rejects_stale_or_duplicate_grants() {
+        for granted in [false, true] {
+            let owner = mondrian_core::EffectProcessorOwnerId::new();
+            let shared = Arc::new(Shared::new(owner));
+            shared.admit(render(owner, 1)).unwrap();
+            shared.take_request().unwrap();
+            let foreign = Arc::clone(&shared);
+            let callback = thread::spawn(move || unsafe {
+                native_acquire_memory(std::ptr::from_ref(&*foreign).cast(), 320)
+            });
+            let waiting = wait_memory_request(&shared);
+            if !waiting {
+                shared.admit(Request::Cancel { owner, sequence: 1 }).unwrap();
+                let _ = callback.join();
+                panic!("memory callback did not reach its fixed slot");
+            }
+            shared.gate.lock().unwrap().memory.as_mut().unwrap().sent = true;
+            let wrong = [
+                Request::MemoryReply {
+                    owner: mondrian_core::EffectProcessorOwnerId::new(),
+                    sequence: 1,
+                    required_bytes: 320,
+                    granted,
+                },
+                Request::MemoryReply { owner, sequence: 2, required_bytes: 320, granted },
+                Request::MemoryReply { owner, sequence: 1, required_bytes: 304, granted },
+            ]
+            .into_iter()
+            .all(|request| shared.admit(request).is_err());
+            let reply = shared.admit(Request::MemoryReply {
+                owner,
+                sequence: 1,
+                required_bytes: 320,
+                granted,
+            });
+            if reply.is_err() {
+                shared.admit(Request::Cancel { owner, sequence: 1 }).unwrap();
+            }
+            let result = callback.join().unwrap();
+            assert!(wrong);
+            assert!(reply.is_ok());
+            assert_eq!(result, c_int::from(granted));
+            assert!(shared
+                .admit(Request::MemoryReply { owner, sequence: 1, required_bytes: 320, granted })
+                .is_err());
+            assert_eq!(
+                unsafe { native_acquire_memory(std::ptr::from_ref(&*shared).cast(), 320) },
+                -1,
+                "one host allocation request per invocation"
+            );
+            assert!(shared.gate.lock().unwrap().memory.is_none());
+        }
+    }
+
+    #[test]
+    fn current_cancel_releases_the_waiting_memory_barrier_without_a_grant() {
+        let owner = mondrian_core::EffectProcessorOwnerId::new();
+        let shared = Arc::new(Shared::new(owner));
+        shared.admit(render(owner, 1)).unwrap();
+        shared.take_request().unwrap();
+        let foreign = Arc::clone(&shared);
+        let callback = thread::spawn(move || unsafe {
+            native_acquire_memory(std::ptr::from_ref(&*foreign).cast(), 16)
+        });
+        let waiting = wait_memory_request(&shared);
+        shared.admit(Request::Cancel { owner, sequence: 1 }).unwrap();
+        let result = callback.join().unwrap();
+        assert!(waiting);
+        assert_eq!(result, -1);
+        assert!(shared.gate.lock().unwrap().memory.is_none());
+        assert!(shared.is_canceled());
+    }
+
     fn render(owner: mondrian_core::EffectProcessorOwnerId, sequence: u64) -> Request {
         Request::Render {
             owner,
@@ -875,7 +1050,7 @@ mod tests {
             serde_json::from_value::<Response>(null),
             Ok(Response::GuiClosed { feedback: None, .. })
         ));
-        assert_eq!(VERSION, 13);
+        assert_eq!(VERSION, 14);
     }
 
     #[test]

@@ -41,11 +41,13 @@ struct MondrianOpenFxFeedback {
 enum MondrianOpenFxRenderCompletion {
   MONDRIAN_OPENFX_RENDER_UNSET = 0,
   MONDRIAN_OPENFX_RENDER_FRAME = 1,
-  MONDRIAN_OPENFX_RENDER_USER_BLOCKED = 2
+  MONDRIAN_OPENFX_RENDER_USER_BLOCKED = 2,
+  MONDRIAN_OPENFX_RENDER_MEMORY_REFUSED = 3
 };
 struct MondrianOpenFxRenderReport {
   int completion;
   int output_alpha;
+  size_t required_transient_bytes;
   struct MondrianOpenFxFeedback feedback;
 };
 #endif

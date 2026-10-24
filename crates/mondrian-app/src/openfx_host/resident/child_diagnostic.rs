@@ -288,6 +288,17 @@ impl OpenFxChildRenderDiagnostic {
                 self.invocation = feedback.invocation();
                 Response::UserBlocked { sequence, feedback, diagnostic: Some(self) }
             }
+            Response::PreflightBudgetRefused { sequence, required_bytes, feedback, .. } => {
+                self.native_owner = feedback.native_owner();
+                self.invocation = feedback.invocation();
+                self.output_alpha = None;
+                Response::PreflightBudgetRefused {
+                    sequence,
+                    required_bytes,
+                    feedback,
+                    diagnostic: Some(self),
+                }
+            }
             other => other,
         }
     }
@@ -563,6 +574,7 @@ mod tests {
             interactive_render: 0,
             question_work: 0,
             question: None,
+            acquire_memory: None,
         };
         let mut ordinary = vec![[0_f32; 4]; samples.len()];
         let mut measured = ordinary.clone();

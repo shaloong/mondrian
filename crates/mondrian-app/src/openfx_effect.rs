@@ -230,7 +230,7 @@ impl EffectFloatProcessorInstance for OpenFxProcessorInstance {
         params: &serde_json::Value,
         _frame_seed: i64,
         control: &mut EffectProcessorControl<'_>,
-        _resources: &mut mondrian_effects::EffectProcessorResources<'_>,
+        resources: &mut mondrian_effects::EffectProcessorResources<'_>,
     ) -> Result<
         Option<mondrian_effects::EffectProcessorFeedback>,
         mondrian_effects::EffectProcessorInvocationError,
@@ -245,6 +245,7 @@ impl EffectFloatProcessorInstance for OpenFxProcessorInstance {
             })?;
         // The executor already owns an atomic typed staging frame. Native IPC
         // borrows it directly, with no extra input raster or alpha sidecar.
+        let mut memory_refusal = None;
         let result = {
             let deadline = control.deadline();
             // Capture the weak real-view lifetime before its current admission.
@@ -259,6 +260,13 @@ impl EffectFloatProcessorInstance for OpenFxProcessorInstance {
                 mondrian_effects::EffectProcessorGuiAdmission::CLOSED
             };
             self.gui_presence = if gui.is_open() { presence } else { None };
+            let mut admit_memory = |bytes| match resources.acquire_transient(bytes) {
+                Ok(()) => Ok(true),
+                Err(refusal) => {
+                    memory_refusal = Some(refusal);
+                    Ok(false)
+                }
+            };
             let mut owner_control =
                 |observation: crate::openfx_host::OpenFxRenderObservation<'_>| {
                     use crate::openfx_host::OpenFxRenderObservation;
@@ -305,20 +313,22 @@ impl EffectFloatProcessorInstance for OpenFxProcessorInstance {
                     }
                 };
             match self.context {
-                OpenFxContext::Filter => self.session.render_observed(
+                OpenFxContext::Filter => self.session.render_observed_with_memory(
                     &parameters.timing,
                     &parameters.values,
                     frame,
                     deadline,
                     gui,
+                    &mut admit_memory,
                     &mut owner_control,
                 ),
-                OpenFxContext::Generator => self.session.generate_observed(
+                OpenFxContext::Generator => self.session.generate_observed_with_memory(
                     &parameters.timing,
                     frame.sampling(),
                     &parameters.values,
                     deadline,
                     gui,
+                    &mut admit_memory,
                     &mut owner_control,
                 ),
             }
@@ -337,6 +347,22 @@ impl EffectFloatProcessorInstance for OpenFxProcessorInstance {
                 control.check()?;
                 return Err(
                     mondrian_effects::EffectProcessorInvocationError::HostResourceRefused(refusal),
+                );
+            }
+            Err(OpenFxHostError::PreflightBudgetRefused { required_bytes, feedback }) => {
+                control.check()?;
+                let refusal = memory_refusal
+                    .filter(|refusal| refusal.required_bytes == required_bytes)
+                    .ok_or_else(|| MondrianError::WorkflowStepFailed {
+                        step_id: "openfx_preflight_memory".to_owned(),
+                        reason: "native preflight refusal did not match the original bank decision"
+                            .to_owned(),
+                    })?;
+                return Err(
+                    mondrian_effects::EffectProcessorInvocationError::PreflightBudgetRefused {
+                        refusal,
+                        feedback: Some(feedback),
+                    },
                 );
             }
             Err(error) => return Err(processor_host_error(error, control).into()),
@@ -1325,10 +1351,7 @@ mod tests {
             + crate::openfx_host::native_auxiliary_resident_bytes()
                 .expect("bounded auxiliary owner")
             + 3 * std::mem::size_of::<mondrian_core::EffectProcessorOwnerId>();
-        assert_eq!(
-            storage.active_peak_bytes(),
-            3 * 2 * 3 * 16 + fixed + 128 * 1024 * 1024
-        );
+        assert_eq!(storage.active_peak_bytes(), 3 * 2 * 3 * 16 + fixed);
         assert_eq!(storage.retained_bytes(), 2 * 2 * 3 * 16 + fixed);
         assert!(OpenFxFilterSession::storage(0, 1).is_err());
         assert!(OpenFxFilterSession::storage(u32::MAX, u32::MAX).is_err());
