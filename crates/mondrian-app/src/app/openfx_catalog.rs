@@ -552,8 +552,11 @@ mod tests {
             started.elapsed().as_millis()
         );
         let started = Instant::now();
-        let actual =
-            crate::openfx_adapter::sha256_file_with_checkpoint(&binary, &mut || Ok(())).unwrap();
+        let actual = crate::openfx_adapter::sha256_file_with_checkpoint(
+            &binary,
+            &mut || Ok::<(), crate::openfx_adapter::OpenFxDiscoveryError>(()),
+        )
+        .unwrap();
         assert_eq!(actual, inspection.binary_sha256);
         println!(
             "CATALOG_COST parent_hash_ms={}",
