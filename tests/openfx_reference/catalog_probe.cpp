@@ -22,6 +22,7 @@ bool mode(const char* expected) {
   auto* actual = std::getenv("MONDRIAN_OPENFX_CATALOG_PROBE_MODE");
   return actual && std::strcmp(actual, expected) == 0;
 }
+bool versionedMode() { return mode("versions") || mode("swap_version"); }
 OfxStatus dispatch(int index, const char* action, const void* handle, OfxPropertySetHandle in, OfxPropertySetHandle out) {
   auto* path = std::getenv("MONDRIAN_OPENFX_CATALOG_PROBE_LOG");
   if (!action || !path || !*path) return kOfxStatErrValue;
@@ -56,7 +57,7 @@ OfxStatus dispatch(int index, const char* action, const void* handle, OfxPropert
         properties->propSetInt(props, kOfxImageEffectPropSupportsTiles, 0, 0) != kOfxStatOK ||
         properties->propSetInt(props, kOfxImageEffectPropSupportsMultiResolution, 0, 0) != kOfxStatOK ||
         properties->propSetInt(props, kOfxImageEffectPropTemporalClipAccess, 0, 0) != kOfxStatOK) return kOfxStatFailed;
-    if (mode("versions")) {
+    if (versionedMode()) {
       const char* labels[] = {"Catalog Probe v1.0", "Catalog Probe v2.0", "Catalog Probe v2.1", "Catalog Probe v3.0"};
       if (properties->propSetString(props, kOfxPropLabel, 0, labels[index]) != kOfxStatOK) return kOfxStatFailed;
     }
@@ -73,11 +74,11 @@ OfxStatus dispatch(int index, const char* action, const void* handle, OfxPropert
   if (std::strcmp(action, kOfxActionUnload) == 0) {
     properties = nullptr; images = nullptr; return kOfxStatOK;
   }
-  if (mode("versions") && std::strcmp(action, kOfxImageEffectActionGetClipPreferences) == 0) {
+  if (versionedMode() && std::strcmp(action, kOfxImageEffectActionGetClipPreferences) == 0) {
     return out && properties->propSetString(out, kOfxImageEffectPropPreMultiplication, 0,
         kOfxImageUnPreMultiplied) == kOfxStatOK ? kOfxStatOK : kOfxStatFailed;
   }
-  if (mode("versions") && std::strcmp(action, kOfxImageEffectActionRender) == 0) {
+  if (versionedMode() && std::strcmp(action, kOfxImageEffectActionRender) == 0) {
     OfxImageClipHandle clip = nullptr; OfxPropertySetHandle image = nullptr;
     double time = 0; void* data = nullptr; int bounds[4]{}, rowBytes = 0;
     if (!in || properties->propGetDouble(in, kOfxPropTime, 0, &time) != kOfxStatOK ||
@@ -113,8 +114,23 @@ OfxPlugin versions[] = {
   {kOfxImageEffectPluginApi, 1, "org.mondrian.fixture.catalog-version", 1, 0, setHost, entry<0>},
   {kOfxImageEffectPluginApi, 1, "org.mondrian.fixture.catalog-version", 2, 0, setHost, entry<1>},
 };
+void unexpectedSetHost(OfxHost*) {
+  auto* path = std::getenv("MONDRIAN_OPENFX_CATALOG_PROBE_LOG");
+  if (path && *path) {
+    std::ofstream log(std::filesystem::u8path(path), std::ios::binary | std::ios::app);
+    log << "0|9|unexpected_set_host\n"; log.flush();
+  }
+  std::_Exit(24);
+}
+OfxPlugin changed = {kOfxImageEffectPluginApi, 1, "org.mondrian.fixture.catalog-version",
+    2, 2, unexpectedSetHost, entry<2>};
+unsigned queries[4]{};
 }
 extern "C" {
-OfxExport int OfxGetNumberOfPlugins() { return mode("versions") ? 4 : 3; }
-OfxExport OfxPlugin* OfxGetPlugin(int index) { return index >= 0 && index < OfxGetNumberOfPlugins() ? &(mode("versions") ? versions : plugins)[index] : nullptr; }
+OfxExport int OfxGetNumberOfPlugins() { return versionedMode() ? 4 : 3; }
+OfxExport OfxPlugin* OfxGetPlugin(int index) {
+  if (index < 0 || index >= OfxGetNumberOfPlugins()) return nullptr;
+  if (mode("swap_version") && index == 0 && ++queries[0] > 1) return &changed;
+  return &(versionedMode() ? versions : plugins)[index];
+}
 }

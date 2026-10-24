@@ -34,3 +34,7 @@ The product filter host is maintained separately in `../host`.
 
 - `host/src/ofxhImageEffect.cpp` preserves the installed host clip defaults
   when GetClipPreferences returns ReplyDefault, ignoring action-output residuals.
+
+- `host/src/ofxhPluginCache.cpp` checks the live export's full API/identifier/
+  major/minor identity and entry pointers before SetHost, and releases its binary
+  reference when a PluginHandle constructor unwinds.

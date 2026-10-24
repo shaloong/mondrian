@@ -9,6 +9,7 @@
 #include <fstream>
 #include <sstream>
 #include <stdexcept>
+#include <cstring>
 
 #include <string.h>
 #include <stdlib.h>
@@ -144,11 +145,32 @@ PluginHandle::PluginHandle(Plugin *p, OFX::Host::Host *host)
   _b->_binary.ref();
   _op = 0;
   OfxPlugin* (*getPlug)(int) = (OfxPlugin*(*)(int)) _b->_binary.findSymbol("OfxGetPlugin");
-  if (getPlug) {
-    _op = getPlug(p->getIndex());
-    if (_op) {
-      _op->setHost(host->getHandle());
+  try {
+    if (getPlug) {
+      _op = getPlug(p->getIndex());
+      if (_op) {
+        // An exported slot is queried again when acquiring its live handle.
+        // Match the admitted immutable identity before calling any returned
+        // pointer. A changed slot must not initialize a different version.
+        const auto& id = p->getRawIdentifier();
+        const auto& api = p->getPluginApi();
+        if (id.empty() || id.size() >= 256 || api.empty() || api.size() >= 256 ||
+            !_op->pluginIdentifier || !_op->pluginApi || !_op->setHost || !_op->mainEntry ||
+            std::strncmp(_op->pluginIdentifier, id.c_str(), id.size() + 1) != 0 ||
+            std::strncmp(_op->pluginApi, api.c_str(), api.size() + 1) != 0 ||
+            _op->apiVersion != p->getApiVersion() ||
+            _op->pluginVersionMajor != static_cast<unsigned int>(p->getVersionMajor()) ||
+            _op->pluginVersionMinor != static_cast<unsigned int>(p->getVersionMinor())) {
+          _op = nullptr;
+          return;
+        }
+        _op->setHost(host->getHandle());
+      }
     }
+  } catch (...) {
+    // Constructor failure has no PluginHandle destructor to release this ref.
+    _b->_binary.unref();
+    throw;
   }
 }
 

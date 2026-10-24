@@ -195,3 +195,9 @@ candidate fails1.54s at manifest admission, with clean process settlement. The
 diagnostic-only timing tests were removed after measurements were compacted.
 The corrected implementation, stale-protocol controls, actual per-version pixels
 and all real-bundle acceptance remain pending qualification.
+
+The native handle's second export query also revalidates API, identifier,
+major/minor and entry pointers before SetHost; constructor unwinding releases its
+module reference. The current owned fixture extends the original major-version
+RED to order2.1/3.0/1.0/2.0 for minor selection too. A changed export has a trapping
+SetHost pointer: rejection must precede that call and preserve other versions.

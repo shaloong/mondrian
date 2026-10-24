@@ -679,6 +679,38 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "owned changed-export version guard before any returned SetHost pointer"]
+    fn native_catalog_changed_export_identity_refuses_before_set_host() {
+        let (helper, selection, log) = native_catalog_probe();
+        assert_eq!(
+            std::env::var("MONDRIAN_OPENFX_CATALOG_PROBE_MODE").unwrap(),
+            "swap_version"
+        );
+        let preparation = install_bundle(&helper, &selection, &AtomicBool::new(false));
+        let (definitions, rejected) = preparation.result.unwrap();
+        let labels: Vec<_> = definitions.iter().map(|d| d.display_name()).collect();
+        assert_eq!(
+            labels,
+            vec![
+                "Catalog Probe v1.0 (Generator)",
+                "Catalog Probe v2.0 (Generator)",
+                "Catalog Probe v3.0 (Generator)"
+            ]
+        );
+        assert_eq!(rejected.len(), 1);
+        assert!(rejected[0].contains("catalog-version 2.1"), "{rejected:?}");
+        let text = std::fs::read_to_string(log).unwrap();
+        assert!(
+            !text.contains("unexpected_set_host"),
+            "changed export must be refused before its function pointers are called"
+        );
+        assert!(
+            !text.lines().any(|l| l.contains("|2|")),
+            "the changed version cannot enter any native action"
+        );
+    }
+
+    #[test]
     #[ignore = "owned three-class Catalog probe; healthy and crash_middle are separate native gates"]
     fn native_catalog_reuses_process_and_preserves_class_fault_isolation() {
         let (helper, selection, log) = native_catalog_probe();
