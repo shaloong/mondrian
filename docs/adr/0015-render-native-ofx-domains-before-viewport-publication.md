@@ -115,92 +115,60 @@ CPU working-frame qualification, not encoded export, physical GUI/device,
 animation/Loop/resize/nested-native, other platforms, RT or performance evidence.
 GL/F06 remain open and the protected integration branch remains held.
 
-## Explicit machine-local Catalog context (candidate)
+## Explicit machine-local Catalog context and exact version identity
 
-The Graphics menu selects Filter or Generator effects explicitly. Catalog work
-prepares only that context; a Filter failure never triggers a Generator retry.
-Existing Filter keys stay unchanged and Generator keys remain disjoint. The
-Generator display suffix distinguishes two contexts of one class in the library.
-The original worker, bounded result channel, notice budget and live App-owner
-publication are retained; canceled/unpublished work cannot enter preferences.
+Qualified finite Windows x64 CPU slice, 2026-10-24. The Graphics menu selects
+Filter or Generator explicitly; failure never triggers another context. Existing
+Filter keys stay unchanged and Generator keys stay disjoint. Machine-local
+preference v4 records path plus context, reads legacy v3 Filter paths, preserves
+unrelated preferences and refuses unknown contexts/fields. Projects, author time
+and parameter authority stay unchanged. The original worker, result channel,
+notice budget and live App-owner publication remain; cancellation cannot publish.
 
-One machine-local selection records path plus context. Preference v4 reads v3
-Filter paths, preserves unrelated preferences and writes canonical typed entries.
-Deduplication includes context; unknown contexts/fields refuse rather than default.
-Projects, author time, parameters and native wire14 remain unchanged. Ordinary
-controls and native install/restore/Timeline qualification are pending.
+The real Misc inventory has123 headers/119 identifiers. LensDistortion exports
+major2/3/4 and ShufflePlugin major2/3/1. Previously discovery sorted complete
+identities but parent/native lookup selected the first matching identifier; the
+sorted parent could describe major1 while executing major2. Identifier uniqueness
+in the first batching candidate also wrongly rejected this legal inventory.
 
-Catalog cold-process reuse is a candidate optimization. The real 123-class Misc
-install/restore exceeded its original shared120s gate. Current ordinary Product
-still costs about1.24s per cold class; the measured parent boundary spends1201ms
-waiting, versus23ms spawning, 3/4ms staging/cleanup and1ms reading. Actual native
-archive calls take about80ms; an instrumented Product call takes109ms. These are
-diagnostic conditions, not reference-host or realtime performance qualification.
+Carry the existing complete descriptor through Catalog schema2, Describe schema5
+(`describe-v2`), immutable factory and resident wire15 (`session-v13`). Explicit
+selection retains all legal versions; identifier-only entry points refuse
+ambiguity. Native selection matches identifier/major/minor before Load. The SDK's
+second export query validates API, complete identity and entry pointers before
+SetHost. Constructor failure balances its module reference; foreign exceptions
+become host-owned errors while their defining module remains alive. Notices are
+version-bound. Effect keys retain their existing formula; the OFX execution tag
+advances to reject cached results from the former selection semantics. No Project
+migration or automatic repair of formerly wrong-version output is inferred.
 
-Reuse only the metadata process for one bundle/context, never the native Host.
-Every class still runs the original complete Host/cache/module lifetime. One
-atomically published, size-bounded class packet waits for acknowledgement; only
-its exact schema/context/index/identifier can advance the original30s class
-deadline. Keep binary verification before and after each class. Native faults,
-fatal or incomplete observations retire the process; later classes resume in a
-fresh process without replaying completed actions. A crash/hang rejects the
-in-flight class through the original child settlement guard. A failed final
-process settlement refuses the preparation. Definitions remain unregistered
-until the original live App owner publishes the complete result. No Render,
-resource-bank or author-state contract changes. Candidate e3989a35 passes138
-ordinary checks (78 remain ignored), four overlapping protocol controls and four
-clean native gates: three-class reuse with exact independent lifetimes, middle
-process crash followed by a fresh process for the remaining class, cancellation
-discarding the prefix and reaping the blocked class, and explicit context refusal.
-The original real-bundle gate still fails; this is not Catalog qualification.
+The original123-class install/restore exceeded its shared120s gate. Cold native
+processes cost about1.24s per class in that diagnostic workload. Reuse only the
+metadata process for one bundle/context, never the native Host: every class still
+runs a complete Host/cache/module lifetime. One bounded atomic packet waits for
+acknowledgement; exact schema/context/index/descriptor validation alone advances
+the original30s class deadline. Binary checks remain before/after each class.
+Faults retire and reap the current process before later classes resume in a fresh
+one, without replaying completed actions. Failed final settlement or cancellation
+discards unpublished definitions. Render and resource-bank ownership are unchanged.
 
-### Exact plugin-version identity: required contract correction
+Ordinary Product cf3325ab (dev opt1/debug2/default features) and App test parent
+5ab5cdac (opt0/debug0/default features; test-only locator change) pass9 exact native
+gates: four out-of-order versions2.1/3.0/1.0/2.0 with Catalog metadata and actual
+Graph RGBA at0/6/3/6; changed export refused before a trapping SetHost; foreign
+exception destruction plus fresh later worker; healthy reuse, middle-class crash,
+cancel/discard/reap, explicit context refusal and existing-bank refusal/reuse.
+The ninth gate is the real Misc Catalog install/preference restore/public Timeline
+roundtrip, passing42.62s. Its preceding test-label failure (ConstantOFX versus
+Constant) was corrected using independently pinned persistent class identity,
+without direct registration, reduced assertions or increased deadlines.
 
-The real Misc inventory contains123 headers/119 identifiers: LensDistortion has
-major2/3/4 and ShufflePlugin has major2/3/1 in export order. Discovery correctly
-retains `(identifier, major, minor)` and sorts it; the legacy native selection
-and parent description lookup choose the first matching identifier. For Shuffle,
-the sorted parent metadata can therefore name major1 while native export lookup
-chooses major2. The new identifier-only manifest rejects this legal inventory.
-Do not remove that control, skip these classes or silently select one version.
-
-Carry the existing descriptor's full identity through Catalog packets, native
-Describe, the immutable processor factory and resident Prepare/SDK selection.
-Validate the exact tuple before native actions and bind completion to it. Preserve
-unique-class Effect keys and the existing versioned key formula; retain all legal
-versions rather than creating another identity authority. Legacy identifier-only
-entry points may operate only when unambiguous; explicit selection must remain
-available for versioned classes. The native selector must never choose by order.
-
-This is an OpenFX adapter contract change, not a Timeline/Project migration.
-Describe schema4 and resident wire14 need explicit versioned replacements;
-stale helpers must refuse, never reinterpret a missing version. No project file,
-parameter authority, Audio DAG or Render Graph rewrite is required. Validate an
-owned out-of-order same-identifier/multiple-major fixture through metadata and
-actual pixels, then rerun the original real Misc install/restore/Timeline gate,
-the new crash/cancel controls and affected single-version native regressions.
-The implementation candidate now uses the existing full descriptor in Catalog
-schema2, Describe schema5 (`describe-v2`) and resident wire15 (`session-v13`).
-The native selector matches identifier/major/minor before Load, rejects missing
-or duplicate exact headers, and returns that selected plugin directly. Factories
-retain the same descriptor; identifier-only APIs refuse ambiguity and explicit
-descriptor APIs cover all versions. Notices are version-bound too. Effect keys
-keep their existing formula; only the OFX execution-contract identity advances
-to prevent old selection semantics from retaining stale compiled/cache results.
-Project fields are preserved; fidelity of projects authored under the former
-wrong-version behavior is not silently inferred or repaired.
-
-Owned export order2/3/1 now has a Catalog→Graph pixel regression: the uncorrected
-candidate fails1.54s at manifest admission, with clean process settlement. The
-diagnostic-only timing tests were removed after measurements were compacted.
-The corrected implementation, stale-protocol controls, actual per-version pixels
-and all real-bundle acceptance remain pending qualification.
-
-The native handle's second export query also revalidates API, identifier,
-major/minor and entry pointers before SetHost; constructor unwinding releases its
-module reference. The current owned fixture extends the original major-version
-RED to order2.1/3.0/1.0/2.0 for minor selection too. A changed export has a trapping
-SetHost pointer: rejection must precede that call and preserve other versions.
-Foreign constructor exceptions become host-owned errors while their defining
-module remains alive. An owned throwing-SetHost fixture records its exception
-destructor and requires a fresh worker before the later class; verification is pending.
+All9 gates have exit0, empty stderr and clean child settlement under original
+180s/2s supervision; shared120s install/restore and resident100ms remain unchanged.
+The affected ordinary OpenFX group passes141, with79 ignored. Ordinary preference,
+menu, localization, codec and picker controls retain their separately stated
+qualification. Original failures remain failures, superseded by these scoped runs.
+No reference-host performance, statistical stability, whole-heap, realtime,
+physical GUI, encoded export or other-platform qualification follows. Dedicated
+Generator Clip, other contexts, RoI/temporal/tiles/GPU and broader plugin coverage
+remain separate. GL/F06 stay open; protected integration1109d99f remains held.
