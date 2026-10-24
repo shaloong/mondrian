@@ -625,6 +625,10 @@ fn require_float32(format: EffectValueFormat) -> Result<(), EffectFloatFrameErro
     }
     Ok(())
 }
+// Generic frame scans are instantiated in consumers. Make this small numeric
+// predicate available there instead of relying on ThinLTO to import it into
+// each pixel iteration across the crate boundary.
+#[inline]
 fn validate_sample(
     sample: [f32; 4],
     alpha: ColorFrameAlpha,
