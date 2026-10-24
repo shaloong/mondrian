@@ -4879,6 +4879,7 @@ fn audio_bounded_source_external_render_smoke() -> anyhow::Result<()> {
         {
             let rendered = renderer.render(
                 AudioPcmRenderRequest {
+                    transport_activity: None,
                     start_sample,
                     frame_count: 2_048,
                     sample_rate: 48_000,

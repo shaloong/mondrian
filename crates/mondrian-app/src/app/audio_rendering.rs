@@ -1329,6 +1329,7 @@ mod tests {
         let generation = AudioPcmRenderGeneration::new(19);
         let cancellation = ExecutionCancellationToken::new();
         let request = |continuity, start_sample, frame_count| AudioPcmRenderRequest {
+            transport_activity: None,
             continuity,
             start_sample,
             frame_count,
@@ -1541,6 +1542,7 @@ mod tests {
         let cancellation = ExecutionCancellationToken::new();
         let generation = AudioPcmRenderGeneration::new(7);
         let request = |continuity, start_sample| AudioPcmRenderRequest {
+            transport_activity: None,
             start_sample,
             frame_count: 4,
             sample_rate: 48_000,
@@ -1611,6 +1613,7 @@ mod tests {
         let cancellation = ExecutionCancellationToken::new();
         let generation = AudioPcmRenderGeneration::new(7);
         let request = |continuity, start_sample| AudioPcmRenderRequest {
+            transport_activity: None,
             start_sample,
             frame_count: 4,
             sample_rate: 48_000,
@@ -1677,6 +1680,7 @@ mod tests {
         let output = renderer
             .render(
                 AudioPcmRenderRequest {
+                    transport_activity: None,
                     start_sample: 0,
                     frame_count: 4,
                     sample_rate: 48_000,
@@ -1822,6 +1826,7 @@ mod tests {
         let output = renderer
             .render(
                 AudioPcmRenderRequest {
+                    transport_activity: None,
                     start_sample: 0,
                     frame_count: 64,
                     sample_rate: 48_000,

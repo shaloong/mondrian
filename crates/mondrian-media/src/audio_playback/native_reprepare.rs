@@ -1623,6 +1623,7 @@ mod tests {
                     renderer_id: current.materialization_id,
                     renderer: actual.clone(),
                     request: AudioPcmRenderRequest {
+                        transport_activity: None,
                         start_sample: start,
                         frame_count: 4,
                         sample_rate: playback.config.sample_rate,
@@ -1730,6 +1731,7 @@ mod tests {
                 generation: 1,
                 renderer_id: mondrian_core::AudioPcmRendererMaterializationId::new(),
                 request: AudioPcmRenderRequest {
+                    transport_activity: None,
                     start_sample: 0,
                     frame_count: 4,
                     sample_rate: 48_000,

@@ -552,6 +552,7 @@ fn app_owned_clap_saved_host_some_overlays_opaque_in_fresh_native_owner() {
                 let AudioPcmRenderOutcome::Rendered(buffer) = renderer
                     .render(
                         AudioPcmRenderRequest {
+                            transport_activity: None,
                             start_sample,
                             frame_count: 4,
                             sample_rate: 48_000,

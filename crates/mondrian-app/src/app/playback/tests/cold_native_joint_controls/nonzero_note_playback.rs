@@ -605,6 +605,7 @@ fn run_app_nonzero_note_playback_with_continuation(
             .renderer
             .render(
                 AudioPcmRenderRequest {
+                    transport_activity: None,
                     start_sample: 2_000,
                     frame_count: 4,
                     sample_rate: 48_000,
@@ -761,6 +762,7 @@ fn run_app_nonzero_note_playback_with_continuation(
         let error = renderer
             .render(
                 AudioPcmRenderRequest {
+                    transport_activity: None,
                     start_sample: 2_008,
                     frame_count: 4,
                     sample_rate: 48_000,

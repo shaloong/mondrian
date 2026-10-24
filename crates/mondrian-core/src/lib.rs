@@ -84,7 +84,9 @@ pub use gallery::*;
 pub use grade_graph::*;
 pub use hdr_metadata::*;
 pub use media_contract::*;
-pub use musical_time::{MusicalTimeReference, MusicalTimeReferenceError};
+pub use musical_time::{
+    MusicalTimeReference, MusicalTimeReferenceError, TimelineTransportActivity,
+};
 pub use native_audio::*;
 pub use native_audio_author::*;
 pub use native_audio_editor::*;

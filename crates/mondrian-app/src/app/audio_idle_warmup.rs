@@ -319,6 +319,7 @@ impl AudioIdleWarmupExecutor for ProductionAudioIdleWarmupExecutor {
             };
             let render = renderer.render(
                 AudioPcmRenderRequest {
+                    transport_activity: None,
                     start_sample,
                     frame_count: key.chunk_frames,
                     sample_rate: key.sample_rate,

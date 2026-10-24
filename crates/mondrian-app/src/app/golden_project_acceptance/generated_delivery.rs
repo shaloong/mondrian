@@ -916,6 +916,7 @@ pub(super) fn render_program_audio_reference(
     )?;
     let buffer = renderer.render(
         AudioPcmRenderRequest {
+            transport_activity: None,
             start_sample,
             frame_count,
             sample_rate,

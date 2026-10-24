@@ -45,6 +45,21 @@ through the narrow `AudioMediaResolver`/`AudioDecodedSource` Adapter Seam.
 FFmpeg paths, asset databases, CPAL devices, export files, and UI state do not
 enter the compiler or DSP core.
 
+Timeline transport activity is an explicit consumer-declared fact for a rendered
+window, independent of sample coordinates, realtime/offline scheduling, and
+whether a device has started consuming PCM. `TimelineTransportActivity` has
+explicit Playing/Stopped values; absence remains None. Playback preroll requests
+carry Playing because their PCM is rendered for future advancing playback and
+must remain valid when the same generation starts consuming. Idle/control callers
+must not infer Stopped merely from a disabled device. This adds no clock, author
+parameter, routing graph or project-file field.
+
+The initial implementation carries this fact at the PCM request seam only.
+Runtime/epoch/cache propagation, native-wire admission, export supply and the
+VST3/CLAP projections must be completed together before granting plugin Transport
+support. In particular, a changed transport fact cannot reuse incompatible
+prefetched PCM, and processing mode alone never supplies transport state.
+
 Compilation derives every generated contribution's Track ID, Sequence range,
 source mapping, and nested placement from the real `Track -> Clip` hierarchy.
 It combines those facts with the attached `AudioComponentEdit` and referenced

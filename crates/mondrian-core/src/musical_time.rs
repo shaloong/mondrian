@@ -1,9 +1,23 @@
-//! Exact Sequence-owned musical reference, expressed only in seconds.
+//! Exact Sequence musical reference and consumer-declared timeline activity.
 
 use crate::{
     AuthoringFootprint, AuthoringFootprintCollector, AuthoringFootprintError, TimelineTime,
 };
 use serde::{de::Error as _, Deserialize, Deserializer, Serialize};
+
+/// Logical timeline activity declared by the consumer of a rendered window.
+///
+/// This is not an audio-device state, scheduling mode, or another clock. A
+/// prerendered playback/export window can be Playing while device consumption
+/// is disabled. An absent observation must remain `None`, not become Stopped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TimelineTransportActivity {
+    /// The consumer explicitly declares a stopped timeline transport.
+    Stopped,
+    /// The window is rendered for an advancing timeline transport.
+    Playing,
+}
 
 /// One constant quarter-note reference in the owning Sequence's time domain.
 ///
@@ -77,6 +91,27 @@ impl AuthoringFootprint for MusicalTimeReference {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn transport_activity_keeps_explicit_values_distinct_from_absence() {
+        for (activity, spelling) in [
+            (TimelineTransportActivity::Playing, "playing"),
+            (TimelineTransportActivity::Stopped, "stopped"),
+        ] {
+            let value = serde_json::to_value(activity).unwrap();
+            assert_eq!(value, spelling);
+            assert_eq!(
+                serde_json::from_value::<TimelineTransportActivity>(value).unwrap(),
+                activity
+            );
+        }
+        assert_eq!(
+            serde_json::from_str::<Option<TimelineTransportActivity>>("null").unwrap(),
+            None
+        );
+        assert!(serde_json::from_str::<TimelineTransportActivity>("null").is_err());
+        assert!(serde_json::from_str::<TimelineTransportActivity>("\"realtime\"").is_err());
+    }
 
     #[test]
     fn musical_time_reference_requires_positive_duration_and_preserves_exact_origin() {

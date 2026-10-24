@@ -331,6 +331,7 @@ fn app_owned_clap_idle_open_exposes_static_some_independently_of_opaque_state() 
             let AudioPcmRenderOutcome::Rendered(buffer) = timeline
                 .render(
                     AudioPcmRenderRequest {
+                        transport_activity: None,
                         start_sample,
                         frame_count: 4,
                         sample_rate: 48_000,

@@ -303,6 +303,7 @@ impl PersistentReferenceOutputPump {
             .audio
             .render(
                 AudioPcmRenderRequest {
+                    transport_activity: None,
                     start_sample,
                     frame_count,
                     sample_rate: 48_000,

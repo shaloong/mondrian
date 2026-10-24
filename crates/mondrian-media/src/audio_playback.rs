@@ -453,6 +453,9 @@ pub fn validate_audio_playback_anchor(
 /// Exact PCM window requested at the render Adapter Seam.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AudioPcmRenderRequest {
+    /// Consumer-declared logical activity for this window, independent of device
+    /// consumption or realtime/offline scheduling. None means not supplied.
+    pub transport_activity: Option<mondrian_core::TimelineTransportActivity>,
     /// First timeline-media sample frame in the window.
     pub start_sample: i64,
     /// Exact number of output frames required.
@@ -4834,6 +4837,7 @@ impl AudioPlayback {
                 // pre-poll cursor or any reprime anchor.
                 let next_start_sample = self.next_start_sample + preflight.chunk_frames;
                 let request = AudioPcmRenderRequest {
+                    transport_activity: Some(mondrian_core::TimelineTransportActivity::Playing),
                     start_sample: self.next_start_sample,
                     frame_count: self.config.chunk_frames,
                     sample_rate: self.config.sample_rate,
@@ -6983,6 +6987,7 @@ mod tests {
     #[test]
     fn rendered_buffer_requires_the_exact_requested_semantic_layout() {
         let request = AudioPcmRenderRequest {
+            transport_activity: None,
             start_sample: 0,
             frame_count: 10,
             sample_rate: 1_000,
@@ -7006,6 +7011,7 @@ mod tests {
     #[test]
     fn rendered_buffer_rejects_a_partial_interleaved_frame() {
         let request = AudioPcmRenderRequest {
+            transport_activity: None,
             start_sample: 0,
             frame_count: 10,
             sample_rate: 1_000,
@@ -7131,6 +7137,9 @@ mod tests {
             AudioPlaybackEvent::DeviceOpened { stream_generation: 4, .. }
         )));
         let requests = requests.lock();
+        assert!(requests.iter().all(|request| {
+            request.transport_activity == Some(mondrian_core::TimelineTransportActivity::Playing)
+        }));
         assert_eq!(
             requests.iter().map(|request| request.start_sample).collect::<Vec<_>>(),
             vec![40, 50, 60]
@@ -7154,11 +7163,12 @@ mod tests {
         let (output, state) = fake_output();
         let mut playback =
             AudioPlayback::with_output(test_config(), output).expect("spawn test render worker");
+        let requests = Arc::new(Mutex::new(Vec::new()));
         playback
             .prepare(
                 sample_position(0),
                 Arc::new(RecordingRenderer {
-                    requests: Arc::new(Mutex::new(Vec::new())),
+                    requests: Arc::clone(&requests),
                     wrong_frame_count: false,
                 }),
                 AudioPcmContinuityModel::IndependentWindows,
@@ -7182,6 +7192,11 @@ mod tests {
         assert!(primed.activation_preroll_satisfied);
         assert!(primed.output.is_some_and(|output| !output.active));
         assert_eq!(primed_frames, 30);
+        let prepared_requests = requests.lock().clone();
+        assert_eq!(prepared_requests.len(), 3);
+        assert!(prepared_requests.iter().all(|request| {
+            request.transport_activity == Some(mondrian_core::TimelineTransportActivity::Playing)
+        }));
 
         let activated = playback
             .poll(AudioPlaybackMode::Consume, sample_position(0))
@@ -7192,6 +7207,10 @@ mod tests {
         assert_eq!(activated.state, AudioPlaybackState::Active);
         assert!(activated.output.is_some_and(|output| output.active));
         assert_eq!(state.lock().queued_frames, primed_frames);
+        assert_eq!(
+            *requests.lock(), prepared_requests,
+            "activation reuses PCM rendered for Playing"
+        );
     }
 
     #[test]
@@ -7564,6 +7583,7 @@ mod tests {
                     generation: 1,
                     renderer_id: mondrian_core::AudioPcmRendererMaterializationId::new(),
                     request: AudioPcmRenderRequest {
+                        transport_activity: None,
                         start_sample: 0,
                         frame_count: 1,
                         sample_rate: 1_000,

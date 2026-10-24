@@ -463,6 +463,7 @@ fn app_owned_clap_author_state_project_roundtrip_restores_before_first_dsp() {
             let AudioPcmRenderOutcome::Rendered(buffer) = renderer
                 .render(
                     AudioPcmRenderRequest {
+                        transport_activity: None,
                         start_sample,
                         frame_count: 4,
                         sample_rate: 48_000,

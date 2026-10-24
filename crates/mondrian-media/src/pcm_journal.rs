@@ -411,6 +411,7 @@ mod tests {
 
     fn request(start: i64, frames: usize) -> AudioPcmRenderRequest {
         AudioPcmRenderRequest {
+            transport_activity: None,
             start_sample: start,
             frame_count: frames,
             sample_rate: 100,
