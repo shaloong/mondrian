@@ -561,6 +561,111 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "owned out-of-order same-ID multi-version Catalog and actual Graph pixel gate"]
+    fn native_catalog_versions_bind_metadata_and_graph_pixels_to_exact_major() {
+        use mondrian_core::{
+            Rational, SampleAspectRatio, TimelineTime, TimelineTimeRange, WorkingColorSpace,
+        };
+        use mondrian_effects::*;
+        let (helper, selection, _) = native_catalog_probe();
+        assert_eq!(
+            std::env::var("MONDRIAN_OPENFX_CATALOG_PROBE_MODE").unwrap(),
+            "versions"
+        );
+        let mut state = AppState::new();
+        state.openfx_catalog = Some(OpenFxCatalog::start(helper).unwrap());
+        state.install_openfx_bundle(selection.clone()).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let mut completed = Vec::new();
+        while completed.is_empty() && Instant::now() < deadline {
+            let changed = state.poll_openfx_catalog();
+            completed.extend(state.take_completed_openfx_installs());
+            assert!(
+                !(changed
+                    && completed.is_empty()
+                    && state.status_hint.as_ref().is_some_and(|(_, failed)| *failed)),
+                "{:?}",
+                state.status_hint
+            );
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(completed, vec![selection]);
+        let mut keys = std::collections::BTreeSet::new();
+        for version in 1..=3 {
+            let label = format!("Catalog Probe v{version} (Generator)");
+            let kind = effect_library_types()
+                .into_iter()
+                .find(|kind| effect_definition(kind).is_some_and(|d| d.display_name() == label))
+                .unwrap_or_else(|| panic!("exact metadata for major {version} must exist"));
+            assert!(
+                keys.insert(kind.key().to_owned()),
+                "versions must retain distinct existing Effect keys"
+            );
+            let effect = instantiate_effect_node(kind).unwrap();
+            let geometry = EffectProjectGeometry::new(4, 2, SampleAspectRatio::SQUARE).unwrap();
+            let context = EffectFrameContext::new(
+                Rational::FPS_24,
+                geometry,
+                TimelineTimeRange::new(TimelineTime::ZERO, TimelineTime::new(13, 24).unwrap())
+                    .unwrap(),
+            )
+            .unwrap();
+            let program = PreparedEffectProgram::prepare_hierarchical_with_frame_context(
+                &[effect],
+                &[],
+                &[],
+                &[],
+                WorkingColorSpace::LinearRec709,
+                context,
+                &LutPreparationCache::uncached(),
+            )
+            .unwrap();
+            let format = EffectValueFormat::new(
+                EffectWorkingPrecision::Float32,
+                EffectColorDomain::SceneLinearRgb,
+                mondrian_core::ColorFrameAlpha::StraightFloat,
+            );
+            let sampling = mondrian_core::ImageSampling::new(
+                SampleAspectRatio::SQUARE,
+                [Rational::new(1, 1); 2],
+            )
+            .unwrap();
+            let mut session = EffectExecutionSession::new(EffectExecutionSessionConfig {
+                max_processor_instances: 1,
+                max_processor_bytes: 128 * 1024 * 1024,
+                ..EffectExecutionSessionConfig::uncached(128 * 1024 * 1024)
+            });
+            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                for frame in [0, 6, 3, 6] {
+                    let graph = program.evaluate(TimelineTime::new(frame, 24).unwrap()).unwrap();
+                    let output = session
+                        .generate_compiled_rgba_f32(
+                            EffectFrameExtent::new(4, 2),
+                            format,
+                            sampling,
+                            &graph,
+                            -999,
+                            &mut EffectProcessorControl::uncancelled(),
+                        )
+                        .unwrap();
+                    let expected = [version as f32 / 16.0, version as f32 / 32.0, 0.25, 1.0];
+                    assert!(
+                        output.pixels().iter().all(|pixel| *pixel == expected),
+                        "actual pixels for major {version}"
+                    );
+                }
+            }));
+            session.retire_processor_resources();
+            assert_eq!(session.diagnostics().processor_instances, 0);
+            drop(session);
+            if let Err(panic) = outcome {
+                std::panic::resume_unwind(panic);
+            }
+        }
+        drop(state);
+    }
+
+    #[test]
     #[ignore = "owned three-class Catalog probe; healthy and crash_middle are separate native gates"]
     fn native_catalog_reuses_process_and_preserves_class_fault_isolation() {
         let (helper, selection, log) = native_catalog_probe();
