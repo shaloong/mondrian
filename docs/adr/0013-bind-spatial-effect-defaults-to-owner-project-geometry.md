@@ -19,8 +19,9 @@ raster and the owner project window need not have the same extent.
 
 ## Decision
 
-This freezes the domain contract, not an implemented capability or a Core
-parameter-schema rewrite. Existing literal definitions keep their current path.
+The implementation follows this domain contract without a Core parameter-schema
+rewrite. Existing literal definitions keep their current path; finite verification
+and remaining boundaries are recorded in the compatibility matrix.
 
 - Owner project geometry is independent from Source/Output raster geometry.
   Carry it through the existing effect preparation and native instance binding;
