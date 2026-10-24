@@ -16,6 +16,16 @@ use mondrian_effects::{
 #[test]
 #[ignore = "requires native-v12 Product and published Misc Constant Generator"]
 fn contextual_generator_public_reset_history_save_and_reopen_preserve_output() {
+    qualify_public_generator_history(false);
+}
+
+#[test]
+#[ignore = "requires native-v12 Product and published Misc Constant Generator"]
+fn contextual_generator_public_resize_rebind_reset_history_and_reopen_preserve_output() {
+    qualify_public_generator_history(true);
+}
+
+fn qualify_public_generator_history(resize: bool) {
     let _guard = crate::app_ui::test_utils::theme_test_guard();
     let helper =
         PathBuf::from(std::env::var_os("MONDRIAN_OPENFX_PRODUCT_BINARY").expect("product"));
@@ -81,7 +91,7 @@ fn contextual_generator_public_reset_history_save_and_reopen_preserve_output() {
             .unwrap()
             .clone()
     };
-    let initial = snapshot(&state);
+    let mut initial = snapshot(&state);
     let color = initial
         .properties
         .iter()
@@ -161,16 +171,20 @@ fn contextual_generator_public_reset_history_save_and_reopen_preserve_output() {
             let mut control = EffectProcessorControl::uncancelled();
             let output = session
                 .generate_compiled_rgba_f32(
-                    EffectFrameExtent::new(16, 16),
+                    EffectFrameExtent::new(geometry.width(), geometry.height()),
                     format,
-                    ImageSampling::UNIT_SQUARE,
+                    ImageSampling::new(geometry.pixel_aspect_ratio(), [Rational::new(1, 1); 2])
+                        .unwrap(),
                     &graph,
                     0,
                     &mut control,
                 )
                 .expect("actual native pixels");
             assert_eq!(output.format(), format);
-            assert_eq!(output.pixels().len(), 256);
+            assert_eq!(
+                output.pixels().len(),
+                geometry.width() as usize * geometry.height() as usize
+            );
             for pixel in output.pixels() {
                 assert_eq!(pixel.map(f32::to_bits), expected.map(f32::to_bits));
             }
@@ -232,7 +246,60 @@ fn contextual_generator_public_reset_history_save_and_reopen_preserve_output() {
         assert_eq!(snapshot(&state), explicit_seed);
         assert!(state.redo_timeline().unwrap());
         assert_eq!(snapshot(&state), initial);
+        let previous_owner = if resize {
+            Some(execute(&state, &mut session, [0.0; 4]))
+        } else {
+            None
+        };
+        if resize {
+            let previous_settings = state.active_sequence().unwrap().settings.clone();
+            let mut settings = previous_settings.clone();
+            settings.resolution = Resolution { width: 32, height: 16 };
+            settings.pixel_aspect_ratio =
+                mondrian_timeline::sequence::PixelAspectRatio::Anamorphic2x;
+            let generation = state.project_author_generation();
+            state
+                .update_active_sequence_settings(settings.clone())
+                .expect("public geometry transaction");
+            assert_eq!(state.project_author_generation(), generation + 1);
+            let migrated = snapshot(&state);
+            let mut expected = initial.clone();
+            let mut property =
+                expected.properties.property_by_address(&size_address).unwrap().1.clone();
+            property.descriptor.schema.default_value = PropertyValue::DoubleVec2([64.0, 16.0]);
+            expected.properties.upsert(property);
+            expected.params = migrated.params.clone();
+            assert_ne!(initial.params, migrated.params);
+            assert_eq!(
+                migrated, expected,
+                "current canonical values and every identity are preserved"
+            );
+            assert!(state.undo_timeline().unwrap());
+            assert_eq!(state.active_sequence().unwrap().settings, previous_settings);
+            assert_eq!(snapshot(&state), initial);
+            assert!(state.redo_timeline().unwrap());
+            assert_eq!(state.active_sequence().unwrap().settings, settings);
+            assert_eq!(snapshot(&state), migrated);
+            // Retire this test-owned old-window bank before admitting a fresh
+            // native owner. This is not Preview lifecycle qualification.
+            session.retire_processor_resources();
+            assert_eq!(session.diagnostics().processor_instances, 0);
+            // Keep this qualification inside the existing full-window Generator
+            // boundary. Partial/expanded RoD needs its separate scheduling work.
+            write(
+                &mut state,
+                ParameterValueWrite::ResetToDefault { parameter: size_address.clone() },
+            );
+            initial = snapshot(&state);
+            assert_eq!(
+                initial.properties.property_by_address(&size_address).unwrap().1.static_value(),
+                &PropertyValue::DoubleVec2([64.0, 16.0])
+            );
+        }
         let owner = execute(&state, &mut session, [0.0; 4]);
+        if let Some(previous) = previous_owner {
+            assert_ne!(owner, previous, "new window requires a new native owner");
+        }
         let edited = [0.25, 0.5, 0.75, 1.0];
         write(
             &mut state,
@@ -264,10 +331,12 @@ fn contextual_generator_public_reset_history_save_and_reopen_preserve_output() {
     assert_eq!(session.diagnostics().processor_instances, 0);
     drop(session);
     let (path, saved) = result.unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+    let saved_settings = state.active_sequence().unwrap().settings.clone();
     state.close_project().expect("Close Project");
     drop(state);
     let mut reopened = AppState::new();
     reopened.open_project_file(path).expect("fresh public Open Project");
+    assert_eq!(reopened.active_sequence().unwrap().settings, saved_settings);
     assert_eq!(snapshot(&reopened), saved);
     assert!(!reopened.can_undo_action());
     assert!(!reopened.can_redo_action());

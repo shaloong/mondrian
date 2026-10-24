@@ -67,6 +67,60 @@ fn sequence_is_nested_reference(sequences: &[Sequence], sequence_id: SequenceId)
             .any(|clip| clip.nested_sequence_id() == Some(sequence_id))
     })
 }
+/// Mutate only an unpublished Sequence candidate. The existing authoring
+/// transaction discards all changes if any owned instance cannot migrate.
+fn apply_sequence_settings_with_effect_defaults(
+    sequence: &mut Sequence,
+    settings: SequenceSettings,
+) -> mondrian_core::Result<()> {
+    let step = "update_sequence_effect_project_defaults";
+    let previous = super::animation_state::effect_project_geometry(&sequence.settings, step)?;
+    let next = super::animation_state::effect_project_geometry(&settings, step)?;
+    if previous != next {
+        let revision = mondrian_effects::effect_registry_revision();
+        let invalid = |reason: String| mondrian_core::MondrianError::WorkflowStepFailed {
+            step_id: step.into(),
+            reason,
+        };
+        let rebind = |effect: &mut mondrian_effects::EffectNode| {
+            mondrian_effects::rebind_effect_project_geometry(effect, previous, next)
+                .map(|_| ())
+                .map_err(|error| invalid(error.to_string()))
+        };
+        // Placement effects, including those on nested Clips, belong here.
+        // Referenced child Sequences have independent settings and are not visited.
+        for track in sequence.video_tracks.iter_mut().chain(sequence.audio_tracks.iter_mut()) {
+            for clip in &mut track.clips {
+                for effect in &mut clip.effects {
+                    rebind(effect)?;
+                }
+            }
+        }
+        // Inactive versions and disabled effects retain valid future author state.
+        for definition in &mut sequence.grade_definitions {
+            for version in &mut definition.versions {
+                for node in &mut version.graph.nodes {
+                    if let mondrian_core::GradeGraphNodeKind::Effect { effect, .. } = &mut node.kind
+                    {
+                        rebind(effect)?;
+                    }
+                }
+            }
+        }
+        let after = mondrian_effects::effect_registry_revision();
+        if revision != after {
+            return Err(invalid(
+                mondrian_effects::EffectGraphBuildError::DefinitionRegistryChanged {
+                    before: revision,
+                    after,
+                }
+                .to_string(),
+            ));
+        }
+    }
+    sequence.apply_settings(settings)
+}
+
 impl AppState {
     pub fn sequence_by_id(&self, id: SequenceId) -> Option<&Sequence> {
         self.authoring.as_ref().and_then(|session| session.sequence(id))
@@ -336,7 +390,7 @@ impl AppState {
         })?;
         self.stop()?;
         self.commit_sequence_edit(sequence_id, "修改序列设置", move |sequence| {
-            sequence.apply_settings(settings)
+            apply_sequence_settings_with_effect_defaults(sequence, settings)
         })?;
         Ok(())
     }
@@ -364,7 +418,7 @@ impl AppState {
         }
         self.commit_sequence_edit(sequence_id, "修改序列设置", move |sequence| {
             sequence.name = name;
-            sequence.apply_settings(settings)
+            apply_sequence_settings_with_effect_defaults(sequence, settings)
         })?;
         if active {
             self.settle_preview_access_source();

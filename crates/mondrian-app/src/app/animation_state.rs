@@ -1,5 +1,26 @@
 use super::*;
 
+pub(super) fn effect_project_geometry(
+    settings: &SequenceSettings,
+    step: &str,
+) -> mondrian_core::Result<mondrian_effects::EffectProjectGeometry> {
+    let par = settings.pixel_aspect_ratio.exact_ratio().ok_or_else(|| {
+        mondrian_core::MondrianError::WorkflowStepFailed {
+            step_id: step.to_owned(),
+            reason: "owner Sequence has no exact pixel aspect ratio".into(),
+        }
+    })?;
+    mondrian_effects::EffectProjectGeometry::new(
+        settings.resolution.width,
+        settings.resolution.height,
+        par,
+    )
+    .map_err(|error| mondrian_core::MondrianError::WorkflowStepFailed {
+        step_id: step.to_owned(),
+        reason: error.to_string(),
+    })
+}
+
 impl AppState {
     pub(super) fn instantiate_effect_for_active_sequence(
         &self,
@@ -7,21 +28,7 @@ impl AppState {
         step: &str,
     ) -> mondrian_core::Result<mondrian_effects::EffectNode> {
         let sequence = active_sequence_for_visual_effect(self, step)?;
-        let par = sequence.settings.pixel_aspect_ratio.exact_ratio().ok_or_else(|| {
-            mondrian_core::MondrianError::WorkflowStepFailed {
-                step_id: step.to_owned(),
-                reason: "owner Sequence has no exact pixel aspect ratio".into(),
-            }
-        })?;
-        let geometry = mondrian_effects::EffectProjectGeometry::new(
-            sequence.settings.resolution.width,
-            sequence.settings.resolution.height,
-            par,
-        )
-        .map_err(|error| mondrian_core::MondrianError::WorkflowStepFailed {
-            step_id: step.to_owned(),
-            reason: error.to_string(),
-        })?;
+        let geometry = effect_project_geometry(&sequence.settings, step)?;
         mondrian_effects::instantiate_effect_node_with_project_geometry(effect_type, geometry)
             .map_err(|error| mondrian_core::MondrianError::WorkflowStepFailed {
                 step_id: step.to_owned(),
