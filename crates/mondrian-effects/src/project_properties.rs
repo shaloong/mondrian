@@ -5,7 +5,77 @@ use std::sync::Arc;
 use mondrian_core::automation::PropertyBag;
 use serde::{Deserialize, Serialize};
 
-use crate::{EffectDefinitionError, EffectProjectGeometry};
+use crate::{EffectDefinitionError, EffectGraphBuildError, EffectNode, EffectProjectGeometry};
+
+/// Rebind project defaults during an explicit owner geometry edit.
+///
+/// This cold authoring operation changes only concrete schema defaults and the
+/// construction binding. Values, curves and every author identity are preserved,
+/// even when a value equals the old default. Only otherwise identical schemas
+/// can migrate. The node is replaced only after complete old/new admission.
+/// Unavailable literal definitions remain editable; an unavailable contextual
+/// definition cannot safely supply new defaults and refuses.
+pub fn rebind_effect_project_geometry(
+    effect: &mut EffectNode,
+    previous: EffectProjectGeometry,
+    next: EffectProjectGeometry,
+) -> Result<bool, EffectGraphBuildError> {
+    let invalid = |reason: String| EffectGraphBuildError::InvalidAuthorState {
+        effect_key: effect.effect_type.key(),
+        effect_id: effect.id,
+        reason,
+    };
+    let Some(definition) = crate::effect_definition(&effect.effect_type) else {
+        return if has_binding(&effect.params) {
+            Err(EffectGraphBuildError::DefinitionUnavailable {
+                effect_key: effect.effect_type.key(),
+                effect_id: effect.id,
+            })
+        } else {
+            Ok(false)
+        };
+    };
+    if definition
+        .project_geometry_for_instance(effect, Some(previous))
+        .map_err(&invalid)?
+        .is_none()
+    {
+        return Ok(false);
+    }
+    crate::prepared::validate_effect_schema_in_project(effect, &definition, Some(previous))?;
+    if previous == next {
+        return Ok(false);
+    }
+    let defaults =
+        definition.resolved_properties(Some(next)).map_err(|e| invalid(e.to_string()))?;
+    let expected = defaults
+        .iter()
+        .map(|(_, p)| (p.descriptor.parameter_id(), &p.descriptor.schema))
+        .collect::<std::collections::HashMap<_, _>>();
+    if expected.len() != effect.properties.iter().count() {
+        return Err(invalid(
+            "project rebind cannot change parameter inventory".into(),
+        ));
+    }
+    let mut candidate = effect.clone();
+    for (_, property) in effect.properties.iter() {
+        let schema = expected
+            .get(property.descriptor.parameter_id())
+            .ok_or_else(|| invalid("project rebind cannot change parameter identity".into()))?;
+        let mut property = property.clone();
+        property.descriptor.schema.default_value = schema.default_value.clone();
+        if &property.descriptor.schema != *schema {
+            return Err(invalid(
+                "project rebind can change defaults only; schema migration is required".into(),
+            ));
+        }
+        candidate.properties.upsert(property);
+    }
+    candidate.params = encode_binding(next).map_err(&invalid)?;
+    crate::prepared::validate_effect_schema_in_project(&candidate, &definition, Some(next))?;
+    *effect = candidate;
+    Ok(true)
+}
 
 /// Add project-dependent properties to a clone of the definition's literal base.
 /// The initializer must be pure, retain no instance state and preserve that base.
@@ -234,6 +304,125 @@ mod tests {
         .with_execution_contract(contract());
         register_effect_definition(literal).unwrap();
         assert!(prepare(&first, geometry(3, 2)).is_err());
+    }
+
+    #[test]
+    fn project_rebind_changes_only_defaults_and_binding_and_preserves_explicit_author_state() {
+        let key = "test.contextual.rebind.preserve";
+        let kind = EffectType::External(key.into());
+        register_effect_definition(definition(key, false)).unwrap();
+        for explicit in [false, true] {
+            let mut effect =
+                instantiate_effect_node_with_project_geometry(kind.clone(), geometry(3, 2))
+                    .unwrap();
+            if explicit {
+                let mut p = effect.properties.property("spatial").unwrap().clone();
+                p.set_static_value(PropertyValue::DoubleVec2([1.0, 1.0])).unwrap();
+                p.set_animation_enabled(true);
+                p.write_channels(
+                    TimelineTime::ZERO,
+                    &[(0, 1.0), (1, 1.0)],
+                    mondrian_core::InterpolationType::Linear,
+                )
+                .unwrap();
+                p.write_channels(
+                    TimelineTime::ONE,
+                    &[(0, 2.0), (1, 3.0)],
+                    mondrian_core::InterpolationType::Linear,
+                )
+                .unwrap();
+                effect.properties.upsert(p);
+            }
+            let before = effect.clone();
+            assert!(
+                rebind_effect_project_geometry(&mut effect, geometry(3, 2), geometry(5, 4))
+                    .unwrap()
+            );
+            let mut expected = before.clone();
+            let mut property = expected.properties.property("spatial").unwrap().clone();
+            property.descriptor.schema.default_value = PropertyValue::DoubleVec2([10.0, 4.0]);
+            expected.properties.upsert(property);
+            expected.params = encode_binding(geometry(5, 4)).unwrap();
+            assert_eq!(
+                effect, expected,
+                "all values, paths, identities, animation and metadata survive"
+            );
+            assert!(
+                !rebind_effect_project_geometry(&mut effect, geometry(5, 4), geometry(5, 4))
+                    .unwrap()
+            );
+            prepare(&effect, geometry(5, 4)).unwrap();
+            assert!(prepare(&effect, geometry(3, 2)).is_err());
+            let restored: EffectNode =
+                serde_json::from_slice(&serde_json::to_vec(&effect).unwrap()).unwrap();
+            assert_eq!(restored, effect);
+            let p = effect.properties.property("spatial").unwrap();
+            let reset = effect
+                .properties
+                .prepare_parameter_write(
+                    &mondrian_core::automation::ParameterValueWrite::ResetToDefault {
+                        parameter: p.address(),
+                    },
+                    TimelineTime::ZERO,
+                )
+                .unwrap()
+                .unwrap();
+            mondrian_core::automation::PropertyHost::apply_property_mutation(&mut effect, reset)
+                .unwrap();
+            assert_eq!(
+                effect.properties.property("spatial").unwrap().static_value(),
+                &PropertyValue::DoubleVec2([10.0, 4.0])
+            );
+            assert!(!effect.properties.property("spatial").unwrap().is_animated());
+        }
+    }
+
+    #[test]
+    fn project_rebind_refuses_unavailable_or_structural_migrations_without_mutation() {
+        let key = "test.contextual.rebind.refuse";
+        let kind = EffectType::External(key.into());
+        let definition = definition(key, false).with_project_properties(
+            Arc::new(|geometry, properties| {
+                let mut descriptor = PropertyDescriptor::new(
+                    "spatial",
+                    "Spatial",
+                    PropertyValue::DoubleVec2(geometry.canonical_size()),
+                )
+                .with_parameter_id(ParameterId::new("test.context.spatial").unwrap());
+                if geometry.width() > 3 {
+                    descriptor.schema.unit = mondrian_core::ParameterUnit::Degrees;
+                }
+                properties.define(descriptor);
+                Ok(())
+            }),
+            0,
+        );
+        register_effect_definition(definition).unwrap();
+        let mut effect =
+            instantiate_effect_node_with_project_geometry(kind, geometry(3, 2)).unwrap();
+        let before = effect.clone();
+        assert!(
+            rebind_effect_project_geometry(&mut effect, geometry(3, 2), geometry(5, 4)).is_err()
+        );
+        assert_eq!(effect, before);
+        assert!(
+            rebind_effect_project_geometry(&mut effect, geometry(5, 4), geometry(6, 4)).is_err()
+        );
+        assert_eq!(effect, before);
+        effect.effect_type = EffectType::External("test.contextual.rebind.missing".into());
+        let missing = effect.clone();
+        assert!(matches!(
+            rebind_effect_project_geometry(&mut effect, geometry(3, 2), geometry(5, 4)),
+            Err(EffectGraphBuildError::DefinitionUnavailable { .. })
+        ));
+        assert_eq!(effect, missing);
+        let mut unknown =
+            EffectNode::new(EffectType::External("test.literal.rebind.missing".into()));
+        let before = unknown.clone();
+        assert!(
+            !rebind_effect_project_geometry(&mut unknown, geometry(3, 2), geometry(5, 4)).unwrap()
+        );
+        assert_eq!(unknown, before);
     }
 
     #[test]

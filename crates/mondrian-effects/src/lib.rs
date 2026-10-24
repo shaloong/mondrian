@@ -21,7 +21,7 @@ pub mod color_curves;
 pub mod coverage;
 pub mod effect;
 mod project_properties;
-pub use project_properties::EffectProjectPropertyInitializer;
+pub use project_properties::{rebind_effect_project_geometry, EffectProjectPropertyInitializer};
 pub mod execution;
 pub mod execution_contract;
 pub mod execution_planning;

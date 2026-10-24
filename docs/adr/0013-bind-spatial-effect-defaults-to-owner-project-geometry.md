@@ -65,6 +65,18 @@ metadata, and the earlier OpenFX adapter cannot admit these Normalised definitio
 Changing an already supported literal definition to contextual semantics still
 requires its own definition/version migration; it is not an implicit conversion.
 
+An explicit Sequence geometry edit may rebind contextual defaults in its existing
+author transaction. Resolve both windows from the same immutable definition and
+use the original complete schema admission before and after. Change only schema
+defaults and construction geometry; keep current values (including former
+defaults), curves, paths, UI metadata and all identities. A parameter inventory or
+other schema change requires a separate migration and refuses. Unavailable
+contextual definitions also refuse; literal definitions retain their behavior.
+The owning Sequence migrates every Clip effect and every Grade version, including
+disabled/inactive author state. A nested Clip's placement effects belong to its
+containing Sequence; referenced child Sequences keep their own windows. A failed
+candidate must not publish settings, partial property changes or history.
+
 ## Migration and validation
 
 First connect owner geometry to actual native project-property consumers. Test
