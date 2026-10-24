@@ -8,9 +8,7 @@ pub use description::{
     describe_openfx_filter, describe_openfx_filter_with_checkpoint, describe_openfx_generator,
     run_openfx_describe_worker,
 };
-pub(crate) use description::{
-    observe_openfx_filter_with_checkpoint, observe_openfx_with_checkpoint, OpenFxDescribeNotices,
-};
+pub(crate) use description::{observe_openfx_with_checkpoint, OpenFxDescribeNotices};
 mod resident;
 pub use resident::{
     run_openfx_resident_worker, OpenFxFilterSession, OpenFxRenderObservation,

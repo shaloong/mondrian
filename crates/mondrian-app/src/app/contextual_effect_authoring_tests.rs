@@ -28,6 +28,12 @@ fn contextual_generator_public_resize_rebind_reset_history_and_reopen_preserve_o
 #[test]
 #[ignore = "requires wire14 Product and published Misc Constant under native supervision"]
 fn native_generator_timeline_preview_export_history_and_reopen_share_pixels() {
+    qualify_native_generator_timeline(None);
+}
+
+pub(super) fn qualify_native_generator_timeline(
+    catalog_kind: Option<mondrian_effects::EffectType>,
+) {
     use super::preview_cpu_execution::composite_resolved_preview_working;
     use super::preview_timeline_execution::{
         resolve_preview_timeline_with_programs, PreviewTimelineResolution,
@@ -40,12 +46,14 @@ fn native_generator_timeline_preview_export_history_and_reopen_share_pixels() {
     let helper = PathBuf::from(std::env::var_os("MONDRIAN_OPENFX_PRODUCT_BINARY").unwrap());
     let binary = PathBuf::from(std::env::var_os("MONDRIAN_OPENFX_INVERT_BINARY").unwrap());
     let inspection = crate::openfx_adapter::inspect_openfx_binary(&helper, &binary).unwrap();
-    let kind = crate::openfx_effect::register_selected_openfx_generator(
-        &helper,
-        &inspection,
-        "net.sf.openfx.ConstantPlugin",
-    )
-    .unwrap();
+    let kind = catalog_kind.unwrap_or_else(|| {
+        crate::openfx_effect::register_selected_openfx_generator(
+            &helper,
+            &inspection,
+            "net.sf.openfx.ConstantPlugin",
+        )
+        .unwrap()
+    });
     let directory = tempfile::tempdir().unwrap();
     let mut state = AppState::new();
     state

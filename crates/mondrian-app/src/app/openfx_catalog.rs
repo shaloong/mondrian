@@ -539,6 +539,145 @@ mod tests {
     use std::time::{Duration, Instant};
 
     #[test]
+    #[ignore = "requires current Product and GeneratorProbe under native supervision"]
+    fn native_wrong_context_never_falls_back_and_catalog_accepts_next_selection() {
+        let helper = PathBuf::from(std::env::var_os("MONDRIAN_OPENFX_PRODUCT_BINARY").unwrap());
+        let binary = PathBuf::from(std::env::var_os("MONDRIAN_OPENFX_GENERATOR_BINARY").unwrap());
+        let mut state = AppState::new();
+        state.openfx_catalog = Some(OpenFxCatalog::start(helper).unwrap());
+        let generation = state.project_author_generation();
+        state.install_openfx_bundle(binary.clone().into()).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while !state.status_hint.as_ref().is_some_and(|(_, failed)| *failed)
+            && Instant::now() < deadline
+        {
+            state.poll_openfx_catalog();
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert!(state.status_hint.as_ref().is_some_and(|(_, failed)| *failed));
+        assert!(state.take_completed_openfx_installs().is_empty());
+        assert!(
+            !mondrian_effects::effect_library_types()
+                .iter()
+                .any(|kind| kind.key().starts_with("openfx.generator.")),
+            "a failed Filter request cannot publish a Generator"
+        );
+        let selection = OpenFxBundleSelection { path: binary, context: OpenFxContext::Generator };
+        state.install_openfx_bundle(selection.clone()).unwrap();
+        let mut completed = Vec::new();
+        while completed.is_empty() && Instant::now() < deadline {
+            state.poll_openfx_catalog();
+            completed.extend(state.take_completed_openfx_installs());
+            if completed.is_empty() {
+                thread::sleep(Duration::from_millis(5));
+            }
+        }
+        assert_eq!(completed, vec![selection]);
+        assert!(mondrian_effects::effect_library_types()
+            .iter()
+            .any(|kind| kind.key().starts_with("openfx.generator.")));
+        assert_eq!(state.project_author_generation(), generation);
+        drop(state);
+    }
+
+    #[test]
+    #[ignore = "requires current Product and real Misc bundle under native supervision"]
+    fn native_generator_catalog_install_restore_and_public_timeline_roundtrip() {
+        use crate::app::product_action::{
+            ProductAction, VisualEffectInstallOpenFxBundlePayload, VisualEffectProductAction,
+        };
+        use crate::app_ui::preferences_store::{
+            load_app_ui_preferences_from, persist_app_ui_preferences_to, AppUiPreferences,
+        };
+        let helper = PathBuf::from(std::env::var_os("MONDRIAN_OPENFX_PRODUCT_BINARY").unwrap());
+        let binary = PathBuf::from(std::env::var_os("MONDRIAN_OPENFX_INVERT_BINARY").unwrap());
+        let bundle = binary.parent().unwrap().parent().unwrap().parent().unwrap().to_path_buf();
+        assert!(bundle.file_name().unwrap().to_string_lossy().ends_with(".ofx.bundle"));
+        let selection = OpenFxBundleSelection {
+            path: bundle.clone(),
+            context: OpenFxContext::Generator,
+        };
+        let mut state = AppState::new();
+        state.openfx_catalog = Some(OpenFxCatalog::start(helper.clone()).unwrap());
+        let generation = state.project_author_generation();
+        let deadline = Instant::now() + Duration::from_secs(120);
+        state
+            .dispatch_action(
+                ProductAction::VisualEffect(VisualEffectProductAction::InstallOpenFxBundle(
+                    VisualEffectInstallOpenFxBundlePayload {
+                        path: bundle,
+                        context: OpenFxContext::Generator,
+                    },
+                ))
+                .into_external_action(),
+            )
+            .unwrap();
+        let mut completed = Vec::new();
+        while completed.is_empty() && Instant::now() < deadline {
+            state.poll_openfx_catalog();
+            completed.extend(state.take_completed_openfx_installs());
+            if completed.is_empty() {
+                thread::sleep(Duration::from_millis(5));
+            }
+        }
+        assert_eq!(
+            completed,
+            vec![selection.clone()],
+            "selected-context installation must complete"
+        );
+        assert_eq!(state.project_author_generation(), generation);
+        let kind = mondrian_effects::effect_library_types().into_iter().find(|kind| {
+            kind.key().starts_with("openfx.generator.") &&
+                mondrian_effects::effect_definition(kind).unwrap().display_name() == "Constant (Generator)"
+        }).expect("real Catalog publication must expose Constant Generator in the ordinary effect library");
+        let installed = mondrian_effects::effect_definition(&kind).unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let preferences_path = temp.path().join("preferences.json");
+        let mut preferences = AppUiPreferences::default();
+        for selected in completed {
+            preferences.record_openfx_bundle(selected);
+        }
+        persist_app_ui_preferences_to(&preferences_path, &preferences).unwrap();
+        let loaded = load_app_ui_preferences_from(&preferences_path);
+        assert_eq!(loaded.installed_openfx_bundles, vec![selection]);
+        drop(state);
+
+        let mut restored = AppState::new();
+        restored.openfx_catalog = Some(OpenFxCatalog::start(helper).unwrap());
+        let generation = restored.project_author_generation();
+        restored.schedule_openfx_catalog_restore(loaded.installed_openfx_bundles);
+        while restored.openfx_catalog.as_ref().unwrap().restores_remaining > 0
+            && Instant::now() < deadline
+        {
+            restored.poll_openfx_catalog();
+            if restored.openfx_catalog.as_ref().unwrap().restores_remaining > 0 {
+                thread::sleep(Duration::from_millis(5));
+            }
+        }
+        assert_eq!(
+            restored.openfx_catalog.as_ref().unwrap().restores_remaining,
+            0
+        );
+        assert!(
+            restored.take_completed_openfx_installs().is_empty(),
+            "restore does not manufacture a new user installation"
+        );
+        assert_eq!(restored.project_author_generation(), generation);
+        let current = mondrian_effects::effect_definition(&kind).unwrap();
+        assert!(
+            !Arc::ptr_eq(&installed, &current),
+            "startup restore must publish a fresh definition, not reuse the prior registry entry"
+        );
+        assert_eq!(current.key(), installed.key());
+        drop(restored);
+        // Reuse the actual public author/Preview/Export/history/durable Project
+        // gate with this Catalog-produced definition. No direct registration.
+        super::super::contextual_effect_authoring_tests::qualify_native_generator_timeline(Some(
+            kind,
+        ));
+    }
+
+    #[test]
     fn missing_install_and_restore_finish_without_authoring_or_persistence() {
         let mut state = AppState::new();
         // Missing selections are rejected before spawning a helper. This test

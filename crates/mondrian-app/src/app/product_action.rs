@@ -5118,6 +5118,33 @@ mod tests {
     }
 
     #[test]
+    fn openfx_install_codec_keeps_generator_selection_and_legacy_filter_default() {
+        use crate::openfx_host::OpenFxContext;
+        let path = std::env::temp_dir().join("selected.ofx.bundle");
+        let legacy: VisualEffectInstallOpenFxBundlePayload =
+            serde_json::from_value(serde_json::json!({"path":path})).unwrap();
+        assert_eq!(legacy.context, OpenFxContext::Filter);
+        let action = ProductAction::VisualEffect(VisualEffectProductAction::InstallOpenFxBundle(
+            VisualEffectInstallOpenFxBundlePayload {
+                path: path.clone(),
+                context: OpenFxContext::Generator,
+            },
+        ));
+        assert_eq!(
+            ProductAction::decode_external(&action.clone().into_external_action()).unwrap(),
+            Some(action)
+        );
+        for value in [
+            serde_json::json!({"path":path,"context":"retimer"}),
+            serde_json::json!({"path":path,"context":null}),
+        ] {
+            assert!(
+                serde_json::from_value::<VisualEffectInstallOpenFxBundlePayload>(value).is_err()
+            );
+        }
+    }
+
+    #[test]
     fn product_availability_uses_authoritative_project_and_sequence_targets() {
         let mut state = AppState::new();
         let first = Sequence::new("First");
