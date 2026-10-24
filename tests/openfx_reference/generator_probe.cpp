@@ -340,6 +340,14 @@ OfxStatus render(OfxImageEffectHandle effect, OfxPropertySetHandle in) {
 OfxStatus dispatch(const char* action, const void* handle,
                     OfxPropertySetHandle in, OfxPropertySetHandle out) {
   if (!action) { return kOfxStatErrValue; }
+  if (modeIs("required_source") || modeIs("required_aux")) {
+    const char* path = std::getenv("MONDRIAN_OPENFX_GENERATOR_ACTION_LOG");
+    if (!path || !*path) { return kOfxStatErrValue; }
+    std::ofstream file(std::filesystem::u8path(path), std::ios::binary | std::ios::app);
+    file << action << '\n';
+    file.flush();
+    if (!file.good()) { return kOfxStatFailed; }
+  }
   if (std::strcmp(action, kOfxActionLoad) == 0) { return load(); }
   if (!properties || !images || !parameters) { return kOfxStatErrMissingHostFeature; }
   const auto effect = static_cast<OfxImageEffectHandle>(const_cast<void*>(handle));

@@ -268,10 +268,14 @@ fn generator_direct_and_prepared_graph_preserve_time_extent_and_owner() {
 fn generator_with_required_input_is_rejected_before_processing() {
     let mode = std::env::var("MONDRIAN_OPENFX_GENERATOR_MODE").expect("mode");
     assert!(matches!(mode.as_str(), "required_source" | "required_aux"));
+    let actions = PathBuf::from(
+        std::env::var_os("MONDRIAN_OPENFX_GENERATOR_ACTION_LOG").expect("fresh action log"),
+    );
+    assert!(!actions.exists(), "action log must start absent");
     let inspection = inspection();
     let description = describe_openfx_generator(product_executable(), &inspection, IDENTIFIER);
     let token = ExecutionCancellationToken::new();
-    let preparation = OpenFxFilterSession::prepare_generator(
+    let mut session = OpenFxFilterSession::prepare_generator(
         product_executable(),
         &inspection,
         IDENTIFIER,
@@ -281,23 +285,43 @@ fn generator_with_required_input_is_rejected_before_processing() {
         mondrian_effects::EffectProjectGeometry::new(3, 2, SampleAspectRatio::new(2, 1).unwrap())
             .expect("explicit owner project geometry"),
         &mut checkpoint(&token),
+    )
+    .expect("transport owner; native instance admission is lazy");
+    let result = session.generate(
+        &timing(0.0),
+        cpu_contract_sampling(2.0),
+        &BTreeMap::new(),
+        &mut checkpoint(&token),
     );
-    // Always retire a wrongly admitted owner before reporting the failure.
-    let rejected = match preparation {
-        Err(OpenFxHostError::WorkerFailed(_)) => true,
-        Err(error) => panic!("unexpected preparation rejection: {error:?}"),
-        Ok(mut session) => {
-            let shutdown = session.shutdown();
-            drop(session);
-            shutdown.expect("retire wrongly admitted Generator owner");
-            false
-        }
-    };
+    let shutdown = session.shutdown();
+    drop(session);
     assert!(
-        matches!(description, Err(OpenFxHostError::WorkerFailed(_))),
+        matches!(&description, Err(OpenFxHostError::WorkerFailed(detail)) if detail == "native status 7: "),
         "required input must fail Describe: {description:?}"
     );
-    assert!(rejected, "required input must also fail native preparation");
+    assert!(
+        matches!(&result, Err(OpenFxHostError::WorkerFailed(detail)) if detail == "native status 7"),
+        "required input must fail the first native request: {result:?}"
+    );
+    shutdown.expect("original bounded refused-owner shutdown");
+    let actions = std::fs::read_to_string(actions).expect("actual plugin actions");
+    for expected in [
+        "OfxActionLoad",
+        "OfxImageEffectActionDescribeInContext",
+        "OfxActionUnload",
+    ] {
+        assert!(
+            actions.lines().filter(|line| *line == expected).count() >= 2,
+            "Describe and native request must both reach {expected}: {actions}"
+        );
+    }
+    assert!(
+        !actions.lines().any(|line| matches!(
+            line,
+            "OfxActionCreateInstance" | "OfxImageEffectActionRender"
+        )),
+        "required input must be refused before instance creation or rendering: {actions}"
+    );
 }
 
 #[test]
