@@ -12,8 +12,12 @@ use mondrian_core::{MondrianError, Result};
 use mondrian_effects::{register_effect_definition, EffectDefinition};
 
 use crate::openfx_adapter::{inspect_openfx_binary_with_checkpoint, OpenFxDiscoveryError};
-use crate::openfx_effect::{prepare_selected_openfx_effect, PreparedOpenFxEffect};
-use crate::openfx_host::{OpenFxContext, OpenFxDescribeNotices, OpenFxHostError};
+#[cfg(test)]
+use crate::openfx_effect::prepare_selected_openfx_effect;
+use crate::openfx_effect::{prepare_observed_openfx_effect, PreparedOpenFxEffect};
+use crate::openfx_host::{
+    observe_openfx_catalog_with_checkpoint, OpenFxContext, OpenFxDescribeNotices, OpenFxHostError,
+};
 use mondrian_effects::EffectProcessorNoticeKind;
 use serde::{Deserialize, Serialize};
 
@@ -457,31 +461,37 @@ fn install_bundle(
                 }
             })
             .map_err(|error| error.to_string())?;
-        for plugin in &inspection.plugins {
-            let mut checkpoint = || {
-                if canceled.load(Ordering::Acquire) {
-                    Err(OpenFxHostError::Canceled)
-                } else {
-                    Ok(())
-                }
-            };
-            checkpoint().map_err(|error| error.to_string())?;
-            let prepared = prepare_selected_openfx_effect(
-                helper,
-                &inspection,
-                &plugin.identifier,
-                selection.context,
-                &mut checkpoint,
-            );
-            preparation.record(
-                &format!("{} ({:?})", plugin.identifier, selection.context),
-                prepared,
-            );
-            if preparation.result.is_err() {
-                return Ok(());
+        let mut checkpoint = || {
+            if canceled.load(Ordering::Acquire) {
+                Err(OpenFxHostError::Canceled)
+            } else {
+                Ok(())
             }
-            checkpoint().map_err(|error| error.to_string())?;
-        }
+        };
+        observe_openfx_catalog_with_checkpoint(
+            helper,
+            &inspection,
+            selection.context,
+            &mut checkpoint,
+            &mut |identifier, observed| {
+                let prepared = prepare_observed_openfx_effect(
+                    helper,
+                    &inspection,
+                    identifier,
+                    selection.context,
+                    observed,
+                );
+                preparation.record(
+                    &format!("{} ({:?})", identifier, selection.context),
+                    prepared,
+                );
+                if let Err(error) = &preparation.result {
+                    return Err(OpenFxHostError::Invalid(error.clone()));
+                }
+                Ok(())
+            },
+        )
+        .map_err(|error| error.to_string())?;
         Ok(())
     })();
     if let Err(error) = result {
@@ -538,6 +548,130 @@ mod tests {
     use super::*;
     use std::time::{Duration, Instant};
 
+    fn native_catalog_probe() -> (PathBuf, OpenFxBundleSelection, PathBuf) {
+        let helper = PathBuf::from(std::env::var_os("MONDRIAN_OPENFX_PRODUCT_BINARY").unwrap());
+        let binary =
+            PathBuf::from(std::env::var_os("MONDRIAN_OPENFX_CATALOG_PROBE_BINARY").unwrap());
+        let log = PathBuf::from(std::env::var_os("MONDRIAN_OPENFX_CATALOG_PROBE_LOG").unwrap());
+        (
+            helper,
+            OpenFxBundleSelection { path: binary, context: OpenFxContext::Generator },
+            log,
+        )
+    }
+
+    #[test]
+    #[ignore = "owned three-class Catalog probe; healthy and crash_middle are separate native gates"]
+    fn native_catalog_reuses_process_and_preserves_class_fault_isolation() {
+        let (helper, selection, log) = native_catalog_probe();
+        let mode = std::env::var("MONDRIAN_OPENFX_CATALOG_PROBE_MODE").unwrap();
+        assert!(matches!(mode.as_str(), "healthy" | "crash_middle"));
+        let crashed = mode == "crash_middle";
+        let preparation = install_bundle(&helper, &selection, &AtomicBool::new(false));
+        let (definitions, rejected) = preparation.result.unwrap();
+        assert_eq!(definitions.len(), if crashed { 2 } else { 3 });
+        assert_eq!(rejected.len(), usize::from(crashed));
+        if crashed {
+            assert!(
+                rejected[0].contains("catalog-b") && rejected[0].contains("23"),
+                "{rejected:?}"
+            );
+        }
+        let text = std::fs::read_to_string(log).unwrap();
+        let rows: Vec<Vec<&str>> = text.lines().map(|line| line.split('|').collect()).collect();
+        assert!(rows.iter().all(|row| row.len() == 3));
+        let load_pids: Vec<_> =
+            rows.iter().filter(|r| r[2] == "OfxActionLoad").map(|r| r[0]).collect();
+        assert_eq!(load_pids.len(), 3);
+        assert_eq!(
+            load_pids[0], load_pids[1],
+            "healthy classes share only their cold process"
+        );
+        assert_eq!(
+            load_pids[1] == load_pids[2],
+            !crashed,
+            "a fault retires the worker before the remaining class"
+        );
+        for index in 0..3 {
+            let index_text = index.to_string();
+            let actions: Vec<_> =
+                rows.iter().filter(|r| r[1] == index_text).map(|r| r[2]).collect();
+            let expected = if crashed && index == 1 {
+                vec!["OfxActionLoad"]
+            } else {
+                vec![
+                    "OfxActionLoad",
+                    "OfxActionDescribe",
+                    "OfxImageEffectActionDescribeInContext",
+                    "OfxActionUnload",
+                ]
+            };
+            assert_eq!(actions, expected, "exact lifecycle for class {index}");
+        }
+        assert!(
+            !mondrian_effects::effect_library_types().iter().any(|kind| {
+                mondrian_effects::effect_definition(kind)
+                    .is_some_and(|d| d.display_name() == "Catalog Probe (Generator)")
+            }),
+            "preparation cannot register definitions before live App publication"
+        );
+    }
+
+    #[test]
+    #[ignore = "owned block_middle Catalog probe under process supervision"]
+    fn native_catalog_cancel_discards_prefix_and_reaps_blocked_class() {
+        let (helper, selection, log) = native_catalog_probe();
+        assert_eq!(
+            std::env::var("MONDRIAN_OPENFX_CATALOG_PROBE_MODE").unwrap(),
+            "block_middle"
+        );
+        let catalog = OpenFxCatalog::start(helper).unwrap();
+        catalog
+            .requests
+            .as_ref()
+            .unwrap()
+            .try_send(CatalogRequest { selection, purpose: CatalogPurpose::Install })
+            .unwrap_or_else(|_| panic!("idle catalog queue"));
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            if std::fs::read_to_string(&log)
+                .unwrap_or_default()
+                .lines()
+                .any(|line| line.ends_with("|1|OfxActionLoad"))
+            {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "middle class must enter before cancellation"
+            );
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert!(matches!(
+            catalog.results.try_recv(),
+            Err(TryRecvError::Empty)
+        ));
+        let started = Instant::now();
+        drop(catalog);
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "cancel must settle the original child before returning"
+        );
+        let text = std::fs::read_to_string(log).unwrap();
+        assert!(text.lines().any(|l| l.ends_with("|0|OfxActionUnload")));
+        assert!(
+            !text.lines().any(|l| l.contains("|2|")),
+            "later class must not start after cancellation"
+        );
+        assert!(
+            !mondrian_effects::effect_library_types().iter().any(|kind| {
+                mondrian_effects::effect_definition(kind)
+                    .is_some_and(|d| d.display_name() == "Catalog Probe (Generator)")
+            }),
+            "a completed prefix cannot escape a dropped Catalog"
+        );
+    }
+
     #[test]
     #[ignore = "diagnostic cold Catalog cost breakdown; requires current Product and real Misc"]
     fn native_catalog_cold_cost_breakdown() {
@@ -552,10 +686,9 @@ mod tests {
             started.elapsed().as_millis()
         );
         let started = Instant::now();
-        let actual = crate::openfx_adapter::sha256_file_with_checkpoint(
-            &binary,
-            &mut || Ok::<(), crate::openfx_adapter::OpenFxDiscoveryError>(()),
-        )
+        let actual = crate::openfx_adapter::sha256_file_with_checkpoint(&binary, &mut || {
+            Ok::<(), crate::openfx_adapter::OpenFxDiscoveryError>(())
+        })
         .unwrap();
         assert_eq!(actual, inspection.binary_sha256);
         println!(

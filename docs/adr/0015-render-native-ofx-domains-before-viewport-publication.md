@@ -129,3 +129,23 @@ Filter paths, preserves unrelated preferences and writes canonical typed entries
 Deduplication includes context; unknown contexts/fields refuse rather than default.
 Projects, author time, parameters and native wire14 remain unchanged. Ordinary
 controls and native install/restore/Timeline qualification are pending.
+
+Catalog cold-process reuse is a candidate optimization. The real 123-class Misc
+install/restore exceeded its original shared120s gate. Current ordinary Product
+still costs about1.24s per cold class; the measured parent boundary spends1201ms
+waiting, versus23ms spawning, 3/4ms staging/cleanup and1ms reading. Actual native
+archive calls take about80ms; an instrumented Product call takes109ms. These are
+diagnostic conditions, not reference-host or realtime performance qualification.
+
+Reuse only the metadata process for one bundle/context, never the native Host.
+Every class still runs the original complete Host/cache/module lifetime. One
+atomically published, size-bounded class packet waits for acknowledgement; only
+its exact schema/context/index/identifier can advance the original30s class
+deadline. Keep binary verification before and after each class. Native faults,
+fatal or incomplete observations retire the process; later classes resume in a
+fresh process without replaying completed actions. A crash/hang rejects the
+in-flight class through the original child settlement guard. A failed final
+process settlement refuses the preparation. Definitions remain unregistered
+until the original live App owner publishes the complete result. No Render,
+resource-bank, author-state or native render-wire contract changes. Native crash,
+cancellation, original real-bundle gate and regression qualification remain pending.

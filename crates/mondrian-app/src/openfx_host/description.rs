@@ -3,6 +3,10 @@
 use super::*;
 use mondrian_effects::{EffectProcessorNotice, EffectProcessorNoticeKind};
 
+mod catalog;
+pub(crate) use catalog::observe_openfx_catalog_with_checkpoint;
+pub use catalog::{run_openfx_catalog_describe_worker, OPENFX_CATALOG_DESCRIBE_WORKER_ARGUMENT};
+
 const DESCRIBE_SCHEMA: u32 = 4;
 
 #[derive(Serialize, Deserialize)]
@@ -379,14 +383,26 @@ mod tests {
         let inspection = crate::openfx_adapter::inspect_openfx_binary(&helper, &binary).unwrap();
         let identifier = "net.sf.openfx.ConstantPlugin";
         let started = Instant::now();
-        assert_eq!(sha256_file(&inspection.binary_path).unwrap(), inspection.binary_sha256);
-        println!("CATALOG_PHASE plain_hash_ms={}", started.elapsed().as_millis());
+        assert_eq!(
+            sha256_file(&inspection.binary_path).unwrap(),
+            inspection.binary_sha256
+        );
+        println!(
+            "CATALOG_PHASE plain_hash_ms={}",
+            started.elapsed().as_millis()
+        );
         let started = Instant::now();
         let bundle = verified_selection(&inspection, identifier, &mut || Ok(())).unwrap();
-        println!("CATALOG_PHASE verified_selection_ms={}", started.elapsed().as_millis());
+        println!(
+            "CATALOG_PHASE verified_selection_ms={}",
+            started.elapsed().as_millis()
+        );
         let started = Instant::now();
         verify_worker_binary(&inspection.binary_path, &bundle, &inspection.binary_sha256).unwrap();
-        println!("CATALOG_PHASE worker_verify_ms={}", started.elapsed().as_millis());
+        println!(
+            "CATALOG_PHASE worker_verify_ms={}",
+            started.elapsed().as_millis()
+        );
         let request = DescribeRequest {
             schema_version: DESCRIBE_SCHEMA,
             context: OpenFxContext::Generator,
@@ -397,7 +413,10 @@ mod tests {
         };
         let started = Instant::now();
         let result = describe_in_worker(&request).unwrap();
-        println!("CATALOG_PHASE in_process_describe_ms={}", started.elapsed().as_millis());
+        println!(
+            "CATALOG_PHASE in_process_describe_ms={}",
+            started.elapsed().as_millis()
+        );
         assert!(matches!(result, DescribeResponse::Success { .. }));
 
         // Diagnostic decomposition of the same cold child boundary. No result
@@ -432,10 +451,16 @@ mod tests {
         let response: DescribeResponse =
             serde_json::from_slice(&fs::read(response_path).unwrap()).unwrap();
         assert!(matches!(response, DescribeResponse::Success { .. }));
-        println!("CATALOG_PHASE response_read_ms={}", started.elapsed().as_millis());
+        println!(
+            "CATALOG_PHASE response_read_ms={}",
+            started.elapsed().as_millis()
+        );
         let started = Instant::now();
         drop(staging);
-        println!("CATALOG_PHASE staging_drop_ms={}", started.elapsed().as_millis());
+        println!(
+            "CATALOG_PHASE staging_drop_ms={}",
+            started.elapsed().as_millis()
+        );
     }
 
     fn inspection() -> OpenFxBinaryInspection {

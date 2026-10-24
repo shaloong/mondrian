@@ -6,9 +6,13 @@ mod description;
 use description::{describe_in_worker, DescribeRequest, DescribeResponse};
 pub use description::{
     describe_openfx_filter, describe_openfx_filter_with_checkpoint, describe_openfx_generator,
-    run_openfx_describe_worker,
+    run_openfx_catalog_describe_worker, run_openfx_describe_worker,
+    OPENFX_CATALOG_DESCRIBE_WORKER_ARGUMENT,
 };
-pub(crate) use description::{observe_openfx_with_checkpoint, OpenFxDescribeNotices};
+pub(crate) use description::{
+    observe_openfx_catalog_with_checkpoint, observe_openfx_with_checkpoint, OpenFxDescribeNotices,
+    OpenFxDescriptionObservation,
+};
 mod resident;
 pub use resident::{
     run_openfx_resident_worker, OpenFxFilterSession, OpenFxRenderObservation,
@@ -971,6 +975,24 @@ fn invoke_worker<T: Serialize, R: DeserializeOwned>(
     request: &T,
     checkpoint: &mut impl FnMut() -> Result<(), OpenFxHostError>,
 ) -> Result<R, OpenFxHostError> {
+    invoke_worker_with_budget(
+        helper_executable,
+        argument,
+        staging,
+        request,
+        DEADLINE,
+        checkpoint,
+    )
+}
+
+fn invoke_worker_with_budget<T: Serialize, R: DeserializeOwned>(
+    helper_executable: &Path,
+    argument: &str,
+    staging: &Path,
+    request: &T,
+    budget: Duration,
+    checkpoint: &mut impl FnMut() -> Result<(), OpenFxHostError>,
+) -> Result<R, OpenFxHostError> {
     use crate::openfx_adapter::child_supervision::{wait_for_child, ChildWaitError};
     checkpoint()?;
     if !helper_executable.is_absolute() || !helper_executable.is_file() {
@@ -995,7 +1017,7 @@ fn invoke_worker<T: Serialize, R: DeserializeOwned>(
         .stderr(Stdio::null())
         .spawn()
         .map_err(|error| unavailable(format!("OpenFX worker start failed: {error}")))?;
-    let deadline = Instant::now() + DEADLINE;
+    let deadline = Instant::now() + budget;
     let status = wait_for_child(&mut child, deadline, checkpoint).map_err(|error| match error {
         ChildWaitError::Checkpoint(error) => error,
         ChildWaitError::Deadline => OpenFxHostError::DeadlineExceeded,

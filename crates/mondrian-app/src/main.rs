@@ -19,6 +19,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     if mode.as_deref()
         == Some(std::ffi::OsStr::new(
+            mondrian_app::openfx_host::OPENFX_CATALOG_DESCRIBE_WORKER_ARGUMENT,
+        ))
+    {
+        return mondrian_app::openfx_host::run_openfx_catalog_describe_worker().map_err(Into::into);
+    }
+    if mode.as_deref()
+        == Some(std::ffi::OsStr::new(
             mondrian_app::openfx_host::OPENFX_DESCRIBE_WORKER_ARGUMENT,
         ))
     {

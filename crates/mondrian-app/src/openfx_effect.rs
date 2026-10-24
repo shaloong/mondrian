@@ -23,9 +23,10 @@ use sha2::{Digest, Sha256};
 
 use crate::openfx_adapter::OpenFxBinaryInspection;
 use crate::openfx_host::{
-    observe_openfx_with_checkpoint, OpenFxContext, OpenFxDescribeNotices, OpenFxDoubleType,
-    OpenFxFilterDescription, OpenFxFilterSession, OpenFxHostError, OpenFxParameterBinding,
-    OpenFxParameterValue, OpenFxRenderTiming, OpenFxStringMode, OPENFX_MAX_STRING_BYTES,
+    observe_openfx_with_checkpoint, OpenFxContext, OpenFxDescribeNotices,
+    OpenFxDescriptionObservation, OpenFxDoubleType, OpenFxFilterDescription, OpenFxFilterSession,
+    OpenFxHostError, OpenFxParameterBinding, OpenFxParameterValue, OpenFxRenderTiming,
+    OpenFxStringMode, OPENFX_MAX_STRING_BYTES,
 };
 
 /// A selected context cannot be represented by the admitted visual effect contract.
@@ -443,13 +444,38 @@ pub(crate) fn prepare_selected_openfx_effect(
     context: OpenFxContext,
     checkpoint: &mut impl FnMut() -> Result<(), OpenFxHostError>,
 ) -> PreparedOpenFxEffect {
-    let observed = match observe_openfx_with_checkpoint(
+    let observed = observe_openfx_with_checkpoint(
         helper_executable,
         inspection,
         plugin_identifier,
         context,
         checkpoint,
-    ) {
+    );
+    let mut prepared = prepare_observed_openfx_effect(
+        helper_executable,
+        inspection,
+        plugin_identifier,
+        context,
+        observed,
+    );
+    if prepared.definition.is_ok()
+        && let Err(error) = checkpoint()
+    {
+        prepared.definition = Err(error.into());
+    }
+    prepared
+}
+
+/// Lower already observed metadata through the same schema/definition builder.
+/// This never loads native code or publishes an Effect definition.
+pub(crate) fn prepare_observed_openfx_effect(
+    helper_executable: &Path,
+    inspection: &OpenFxBinaryInspection,
+    plugin_identifier: &str,
+    context: OpenFxContext,
+    observed: Result<OpenFxDescriptionObservation, OpenFxHostError>,
+) -> PreparedOpenFxEffect {
+    let observed = match observed {
         Ok(observed) => observed,
         Err(error) => return PreparedOpenFxEffect { definition: Err(error.into()), notices: None },
     };
@@ -466,7 +492,6 @@ pub(crate) fn prepare_selected_openfx_effect(
             &effect_type,
             context,
         )?;
-        checkpoint()?;
         Ok(definition)
     })();
     PreparedOpenFxEffect { definition, notices: Some(observed.notices) }
