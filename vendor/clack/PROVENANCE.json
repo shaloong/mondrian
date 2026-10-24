@@ -137,9 +137,9 @@
     {
       "path": "MONDRIAN.md",
       "upstream_sha256": null,
-      "shipped_sha256": "637495f8922be3fa144403256fe793b69fa2223d95818a0f640f5c04428424b3",
+      "shipped_sha256": "ad7a9b3c142f040b1b7288a22fedaec2578552fe90bf0ef9ef771ba048ac971d",
       "reason": "local packaging note + bounded Host Log callback contract/oracle; no upstream byte-identity or unapplied ABI migration claim; thread-safe GUI false-reply documentation matches sealed clap-gui-refusal-v1 iteration-1 manifest; repaired stale metadata only; document same-call diagnostic API and opt-in startup consumer, MSRV expression and Box owner lint proof; preserve historical formatting/note-port and runtime qualification boundaries",
-      "shipped_bytes": 6376
+      "shipped_bytes": 7522
     },
     {
       "path": "host/tests/log_observation.rs",
@@ -288,9 +288,9 @@
     {
       "path": "extensions/src/params/host.rs",
       "upstream_sha256": "eec403506a0068459dc5941538a538064b62ea809c2db88dcdad8c1c25695fa8",
-      "shipped_sha256": "e23819de1d4e33b53ff8c2eafcefcb9f00b9130ff8c58eb86d8635043376a8b3",
-      "reason": "retain original parameter rescan/clear/info flag bits for bounded typed native-source admission; unknown flags are not silently truncated; additive same-call diagnostic observer shares the original single native query and Option conversion; missing/false raw output unavailable; no extra query or admission change; formal Safety documentation for the four new unsafe helpers/callbacks and owned test module moved after production items without body changes",
-      "shipped_bytes": 29391
+      "shipped_sha256": "df69abbb598e85f1f210f96f05749adc7066cca94126a9b834192c5b16df4e81",
+      "reason": "retain original parameter rescan/clear/info flag bits for bounded typed native-source admission; unknown flags are not silently truncated; additive same-call diagnostic observer shares the original single native query and Option conversion; missing/false raw output unavailable; no extra query or admission change; formal Safety documentation for the four new unsafe helpers/callbacks and owned test module moved after production items without body changes; read-only same-instance supports_flush capability from committed101343c0; existing active/inactive exchange APIs unchanged",
+      "shipped_bytes": 29779
     },
     {
       "path": "extensions/src/note_ports/host.rs",
@@ -325,7 +325,7 @@
     {
       "path": "MONDRIAN.md",
       "sha256": "ad7a9b3c142f040b1b7288a22fedaec2578552fe90bf0ef9ef771ba048ac971d",
-      "bytes": 6376
+      "bytes": 7522
     },
     {
       "path": "README.md",
@@ -785,12 +785,12 @@
     {
       "path": "extensions/src/note_ports.rs",
       "sha256": "cdd07c575e52829e89e9968270174181a0a6203ce3081c3d825dad8068ab7bde",
-      "bytes": 6622
+      "bytes": 7332
     },
     {
       "path": "extensions/src/note_ports/host.rs",
       "sha256": "2889bc6ef21cd8e12884ed7434b4325c8f4c8a8e0e9a8669d0fac63872756d16",
-      "bytes": 5172
+      "bytes": 7154
     },
     {
       "path": "extensions/src/note_ports/plugin.rs",
@@ -809,8 +809,8 @@
     },
     {
       "path": "extensions/src/params/host.rs",
-      "sha256": "e23819de1d4e33b53ff8c2eafcefcb9f00b9130ff8c58eb86d8635043376a8b3",
-      "bytes": 29391
+      "sha256": "df69abbb598e85f1f210f96f05749adc7066cca94126a9b834192c5b16df4e81",
+      "bytes": 29779
     },
     {
       "path": "extensions/src/params/plugin.rs",
