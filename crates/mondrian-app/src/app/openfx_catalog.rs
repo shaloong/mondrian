@@ -539,6 +539,48 @@ mod tests {
     use std::time::{Duration, Instant};
 
     #[test]
+    #[ignore = "diagnostic cold Catalog cost breakdown; requires current Product and real Misc"]
+    fn native_catalog_cold_cost_breakdown() {
+        let helper = PathBuf::from(std::env::var_os("MONDRIAN_OPENFX_PRODUCT_BINARY").unwrap());
+        let binary = PathBuf::from(std::env::var_os("MONDRIAN_OPENFX_INVERT_BINARY").unwrap());
+        let started = Instant::now();
+        let inspection = crate::openfx_adapter::inspect_openfx_binary(&helper, &binary).unwrap();
+        println!(
+            "CATALOG_COST plugins={} binary_bytes={} inspect_ms={}",
+            inspection.plugins.len(),
+            std::fs::metadata(&binary).unwrap().len(),
+            started.elapsed().as_millis()
+        );
+        let started = Instant::now();
+        let actual =
+            crate::openfx_adapter::sha256_file_with_checkpoint(&binary, &mut || Ok(())).unwrap();
+        assert_eq!(actual, inspection.binary_sha256);
+        println!(
+            "CATALOG_COST parent_hash_ms={}",
+            started.elapsed().as_millis()
+        );
+        for identifier in ["net.sf.openfx.ConstantPlugin", "net.sf.openfx.LabToRGB709"] {
+            assert!(inspection.plugins.iter().any(|p| p.identifier == identifier));
+            let started = Instant::now();
+            let result = prepare_selected_openfx_effect(
+                &helper,
+                &inspection,
+                identifier,
+                OpenFxContext::Generator,
+                &mut || Ok(()),
+            );
+            println!(
+                "CATALOG_COST class={identifier} prepare_ms={} accepted={}",
+                started.elapsed().as_millis(),
+                result.definition.is_ok()
+            );
+            if identifier == "net.sf.openfx.ConstantPlugin" {
+                result.definition.unwrap();
+            }
+        }
+    }
+
+    #[test]
     fn public_generator_install_dispatch_reaches_the_original_catalog_queue() {
         use crate::app::product_action::{
             ProductAction, VisualEffectInstallOpenFxBundlePayload, VisualEffectProductAction,
