@@ -34,6 +34,9 @@ mod invert;
 #[path = "openfx_host/spatial.rs"]
 mod spatial;
 
+#[path = "openfx_host/contextual.rs"]
+mod contextual;
+
 fn constant_parameters<const N: usize>(
     values: [(String, OpenFxParameterValue); N],
 ) -> BTreeMap<String, OpenFxParameterBinding> {

@@ -48,6 +48,7 @@ struct BoundParameter {
     name: String,
     parameter_id: Option<ParameterId>,
     default_value: OpenFxParameterValue,
+    native_project_default: bool,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -457,16 +458,9 @@ fn build_definition_in_context(
         })?;
     let mut properties = PropertyBag::default();
     let mut bound = Vec::with_capacity(description.parameters.len());
+    let mut templates = Vec::new();
+    let mut has_project_defaults = false;
     for (index, parameter) in description.parameters.iter().enumerate() {
-        // A registry definition cannot bake one project's resolved defaults
-        // into a global PropertyBag. ADR0013 requires contextual instantiation.
-        if parameter.spatial_defaults == Some(crate::openfx_host::OpenFxSpatialDefaults::Normalised)
-        {
-            return Err(OpenFxEffectRegistrationError::Schema(format!(
-                "parameter `{}` needs owner project geometry for contextual defaults",
-                parameter.name
-            )));
-        }
         if matches!(parameter.default_value, OpenFxParameterValue::String(_))
             && !matches!(
                 parameter.string_mode,
@@ -480,174 +474,40 @@ fn build_definition_in_context(
         {
             return Err(OpenFxEffectRegistrationError::Schema(format!(
                 "parameter `{}` requires a read-only label or rich-text authoring contract",
-                parameter.name,
+                parameter.name
             )));
         }
+        let project_default = parameter.spatial_defaults
+            == Some(crate::openfx_host::OpenFxSpatialDefaults::Normalised);
+        if project_default
+            && (!matches!(
+                parameter.double_type,
+                Some(OpenFxDoubleType::Xy | OpenFxDoubleType::XyAbsolute)
+            ) || !matches!(parameter.default_value, OpenFxParameterValue::Double2(_)))
+        {
+            return Err(OpenFxEffectRegistrationError::Schema(
+                "Normalised default requires XY/XYAbsolute Double2D".into(),
+            ));
+        }
+        has_project_defaults |= project_default;
         let editable = !parameter.secret && parameter.enabled;
         let parameter_id = if editable {
             let mut identity = description.identifier.as_bytes().to_vec();
             identity.push(0);
             identity.extend_from_slice(parameter.name.as_bytes());
-            let parameter_id = ParameterId::new(stable_key("openfx.param.", &identity))
-                .map_err(|error| OpenFxEffectRegistrationError::Schema(error.to_string()))?;
-            let path = stable_key("openfx.control.", parameter.name.as_bytes());
-            let default_value = match parameter.default_value.clone() {
-                OpenFxParameterValue::Double(value) => PropertyValue::Double(value),
-                OpenFxParameterValue::Double2(value) => PropertyValue::DoubleVec2(value),
-                OpenFxParameterValue::Double3(value) => PropertyValue::DoubleVec3(value),
-                OpenFxParameterValue::Rgb(value) => PropertyValue::DoubleRgb(value),
-                OpenFxParameterValue::Rgba(value) => PropertyValue::DoubleColor(value),
-                OpenFxParameterValue::Integer2(value) => PropertyValue::IntVec2(value),
-                OpenFxParameterValue::Integer3(value) => PropertyValue::IntVec3(value),
-
-                OpenFxParameterValue::Boolean(value) => PropertyValue::Bool(value),
-                OpenFxParameterValue::Integer(value) => PropertyValue::Int(i64::from(value)),
-                OpenFxParameterValue::Choice(value) => PropertyValue::Enum(value.to_string()),
-                OpenFxParameterValue::StrChoice(key) => PropertyValue::Enum(key),
-                OpenFxParameterValue::String(text) => match parameter.string_mode {
-                    Some(
-                        OpenFxStringMode::FilePath { .. } | OpenFxStringMode::DirectoryPath { .. },
-                    ) => PropertyValue::Resource(if text.is_empty() {
-                        ParameterResourceReference::Unbound
-                    } else {
-                        ParameterResourceReference::ExternalFile {
-                            path: PathBuf::from(text).into(),
-                        }
-                    }),
-                    _ => PropertyValue::Text(text),
-                },
-            };
-            let mut descriptor = PropertyDescriptor::try_new(path, &parameter.label, default_value)
-                .map_err(|error| OpenFxEffectRegistrationError::Schema(error.to_string()))?
-                .with_parameter_id(parameter_id.clone())
-                .with_animatable(parameter.can_animate);
-            if let Some(mode) = parameter.string_mode {
-                descriptor = match mode {
-                    OpenFxStringMode::SingleLine => {
-                        descriptor.with_text_mode(mondrian_core::ParameterTextMode::SingleLine)
-                    }
-                    OpenFxStringMode::MultiLine => {
-                        descriptor.with_text_mode(mondrian_core::ParameterTextMode::MultiLine)
-                    }
-                    OpenFxStringMode::FilePath { must_exist }
-                    | OpenFxStringMode::DirectoryPath { must_exist } => {
-                        let kind = if matches!(mode, OpenFxStringMode::FilePath { .. }) {
-                            ResourcePathKind::File
-                        } else {
-                            ResourcePathKind::Directory
-                        };
-                        let selection = if must_exist {
-                            ResourcePathSelection::Existing
-                        } else {
-                            ResourcePathSelection::ExistingOrNew
-                        };
-                        descriptor.with_resource_contract(
-                            ParameterResourceContract::external_utf8_path(
-                                kind,
-                                selection,
-                                OPENFX_MAX_STRING_BYTES,
-                            ),
-                        )
-                    }
-                    _ => {
-                        return Err(OpenFxEffectRegistrationError::Schema(
-                            "unsupported String authoring contract".to_owned(),
-                        ))
-                    }
-                };
+            let id = ParameterId::new(stable_key("openfx.param.", &identity))
+                .map_err(|e| OpenFxEffectRegistrationError::Schema(e.to_string()))?;
+            if project_default {
+                templates.push((index, parameter.clone(), id.clone()));
+            } else {
+                properties.define(author_parameter_descriptor(
+                    parameter,
+                    index,
+                    id.clone(),
+                    parameter.default_value.clone(),
+                )?);
             }
-            if matches!(
-                parameter.default_value,
-                OpenFxParameterValue::Choice(_) | OpenFxParameterValue::StrChoice(_)
-            ) {
-                descriptor = descriptor.with_enum_options(
-                    parameter
-                        .choices
-                        .iter()
-                        .enumerate()
-                        .map(|(index, option)| {
-                            let mut choice = mondrian_core::automation::ParameterEnumOption::new(
-                                &option.key,
-                                &option.label,
-                                format!("{parameter_id}.choice.{index}"),
-                            );
-                            if let Some(rank) = option.display_rank {
-                                choice = choice.with_display_rank(rank);
-                            }
-                            choice
-                        })
-                        .collect(),
-                );
-            }
-            if matches!(
-                parameter.default_value,
-                OpenFxParameterValue::Integer(_)
-                    | OpenFxParameterValue::Integer2(_)
-                    | OpenFxParameterValue::Integer3(_)
-            ) {
-                descriptor.schema.allowed_interpolations = vec![
-                    mondrian_core::automation::ParameterInterpolation::Hold,
-                    mondrian_core::automation::ParameterInterpolation::Linear,
-                    mondrian_core::automation::ParameterInterpolation::Bezier,
-                ];
-            }
-            let preferred = parameter.preferred_interpolation;
-            if !descriptor.schema.allowed_interpolations.contains(&preferred) {
-                return Err(OpenFxEffectRegistrationError::Schema(format!(
-                    "parameter `{}` declares unsupported default interpolation",
-                    parameter.name
-                )));
-            }
-            descriptor.schema.allowed_interpolations.retain(|mode| *mode != preferred);
-            descriptor.schema.allowed_interpolations.insert(0, preferred);
-            descriptor.ui_metadata.display_order = Some(index as u32);
-            descriptor.ui_metadata.group_name = Some("OpenFX".to_owned());
-            if let Some((arity, integer)) = parameter.default_value.numeric_layout() {
-                if parameter.numeric_channels.len() != arity {
-                    return Err(OpenFxEffectRegistrationError::Schema(format!(
-                        "parameter `{}` has incomplete numeric component bounds",
-                        parameter.name
-                    )));
-                }
-                let numeric = parameter
-                    .numeric_channels
-                    .iter()
-                    .map(|channel| {
-                        let hard_range =
-                            ParameterNumericRange::new(channel.minimum, channel.maximum)?;
-                        let soft_range = ParameterNumericRange::new(
-                            channel.display_minimum.max(channel.minimum),
-                            channel.display_maximum.min(channel.maximum),
-                        )?;
-                        ParameterNumericContract::new(
-                            hard_range,
-                            soft_range,
-                            integer.then_some(1.0),
-                            ParameterInvalidValuePolicy::Reject,
-                        )
-                    })
-                    .collect::<Result<Vec<_>, _>>()
-                    .map_err(|error| OpenFxEffectRegistrationError::Schema(error.to_string()))?;
-                let unit = if parameter.double_type == Some(OpenFxDoubleType::Angle) {
-                    if !matches!(parameter.default_value, OpenFxParameterValue::Double(_)) {
-                        return Err(OpenFxEffectRegistrationError::Schema(
-                            "only scalar OpenFX Angle parameters are supported".to_owned(),
-                        ));
-                    }
-                    ParameterUnit::Degrees
-                } else {
-                    ParameterUnit::Unitless
-                };
-                descriptor = descriptor.with_channel_numeric_contracts(unit, numeric);
-            }
-            descriptor.validate().map_err(|error| {
-                OpenFxEffectRegistrationError::Schema(format!(
-                    "parameter `{}`: {error}",
-                    parameter.name
-                ))
-            })?;
-            properties.define(descriptor);
-            Some(parameter_id)
+            Some(id)
         } else {
             None
         };
@@ -655,6 +515,7 @@ fn build_definition_in_context(
             name: parameter.name.clone(),
             parameter_id,
             default_value: parameter.default_value.clone(),
+            native_project_default: project_default && !editable,
         });
     }
 
@@ -681,6 +542,12 @@ fn build_definition_in_context(
             };
             let mut values = BTreeMap::new();
             for parameter in parameters.iter() {
+                // Hidden/disabled spatial defaults are execution defaults, not
+                // author values. The existing native owner resolves them once.
+                if parameter.native_project_default {
+                    continue;
+                }
+
                 let value = match &parameter.parameter_id {
                     Some(parameter_id) => {
                         match effect.evaluate_parameter(parameter_id, context.time) {
@@ -842,7 +709,7 @@ fn build_definition_in_context(
         identifier: description.identifier.clone(),
         context,
     });
-    Ok(EffectDefinition::new(
+    let mut definition = EffectDefinition::new(
         effect_type.key(),
         description.label,
         properties,
@@ -864,7 +731,219 @@ fn build_definition_in_context(
         EffectCachePolicy::Uncacheable,
         processor,
     )
-    .with_extension_contract(EffectExtensionContract::new(version)))
+    .with_extension_contract(EffectExtensionContract::new(version));
+    if has_project_defaults {
+        let retained_bytes = serde_json::to_vec(&templates)
+            .map_err(|e| OpenFxEffectRegistrationError::Schema(e.to_string()))?
+            .len()
+            .max(templates.len().saturating_mul(512));
+        let key = effect_type.key();
+        definition = definition.with_project_properties(
+            Arc::new(move |geometry, properties| {
+                for (index, parameter, id) in &templates {
+                    let invalid = |error: OpenFxEffectRegistrationError| {
+                        EffectDefinitionError::InvalidProjectProperties {
+                            effect_key: key.clone(),
+                            reason: error.to_string(),
+                        }
+                    };
+                    let value = project_parameter_default(parameter, geometry).map_err(invalid)?;
+                    let descriptor =
+                        author_parameter_descriptor(parameter, *index, id.clone(), value)
+                            .map_err(invalid)?;
+                    if properties.property(&descriptor.path).is_some() {
+                        return Err(EffectDefinitionError::InvalidProjectProperties {
+                            effect_key: key.clone(),
+                            reason: format!(
+                                "contextual property `{}` collides with the literal base",
+                                descriptor.path
+                            ),
+                        });
+                    }
+                    properties.define(descriptor);
+                }
+                Ok(())
+            }),
+            retained_bytes,
+        );
+    }
+    Ok(definition)
+}
+
+fn author_parameter_descriptor(
+    parameter: &crate::openfx_host::OpenFxParameterDescription,
+    index: usize,
+    parameter_id: ParameterId,
+    default_value: OpenFxParameterValue,
+) -> Result<PropertyDescriptor, OpenFxEffectRegistrationError> {
+    let path = stable_key("openfx.control.", parameter.name.as_bytes());
+    let default_value = match default_value {
+        OpenFxParameterValue::Double(value) => PropertyValue::Double(value),
+        OpenFxParameterValue::Double2(value) => PropertyValue::DoubleVec2(value),
+        OpenFxParameterValue::Double3(value) => PropertyValue::DoubleVec3(value),
+        OpenFxParameterValue::Rgb(value) => PropertyValue::DoubleRgb(value),
+        OpenFxParameterValue::Rgba(value) => PropertyValue::DoubleColor(value),
+        OpenFxParameterValue::Integer2(value) => PropertyValue::IntVec2(value),
+        OpenFxParameterValue::Integer3(value) => PropertyValue::IntVec3(value),
+
+        OpenFxParameterValue::Boolean(value) => PropertyValue::Bool(value),
+        OpenFxParameterValue::Integer(value) => PropertyValue::Int(i64::from(value)),
+        OpenFxParameterValue::Choice(value) => PropertyValue::Enum(value.to_string()),
+        OpenFxParameterValue::StrChoice(key) => PropertyValue::Enum(key),
+        OpenFxParameterValue::String(text) => match parameter.string_mode {
+            Some(OpenFxStringMode::FilePath { .. } | OpenFxStringMode::DirectoryPath { .. }) => {
+                PropertyValue::Resource(if text.is_empty() {
+                    ParameterResourceReference::Unbound
+                } else {
+                    ParameterResourceReference::ExternalFile { path: PathBuf::from(text).into() }
+                })
+            }
+            _ => PropertyValue::Text(text),
+        },
+    };
+    let mut descriptor = PropertyDescriptor::try_new(path, &parameter.label, default_value)
+        .map_err(|error| OpenFxEffectRegistrationError::Schema(error.to_string()))?
+        .with_parameter_id(parameter_id.clone())
+        .with_animatable(parameter.can_animate);
+    if let Some(mode) = parameter.string_mode {
+        descriptor = match mode {
+            OpenFxStringMode::SingleLine => {
+                descriptor.with_text_mode(mondrian_core::ParameterTextMode::SingleLine)
+            }
+            OpenFxStringMode::MultiLine => {
+                descriptor.with_text_mode(mondrian_core::ParameterTextMode::MultiLine)
+            }
+            OpenFxStringMode::FilePath { must_exist }
+            | OpenFxStringMode::DirectoryPath { must_exist } => {
+                let kind = if matches!(mode, OpenFxStringMode::FilePath { .. }) {
+                    ResourcePathKind::File
+                } else {
+                    ResourcePathKind::Directory
+                };
+                let selection = if must_exist {
+                    ResourcePathSelection::Existing
+                } else {
+                    ResourcePathSelection::ExistingOrNew
+                };
+                descriptor.with_resource_contract(ParameterResourceContract::external_utf8_path(
+                    kind,
+                    selection,
+                    OPENFX_MAX_STRING_BYTES,
+                ))
+            }
+            _ => {
+                return Err(OpenFxEffectRegistrationError::Schema(
+                    "unsupported String authoring contract".to_owned(),
+                ))
+            }
+        };
+    }
+    if matches!(
+        parameter.default_value,
+        OpenFxParameterValue::Choice(_) | OpenFxParameterValue::StrChoice(_)
+    ) {
+        descriptor = descriptor.with_enum_options(
+            parameter
+                .choices
+                .iter()
+                .enumerate()
+                .map(|(index, option)| {
+                    let mut choice = mondrian_core::automation::ParameterEnumOption::new(
+                        &option.key,
+                        &option.label,
+                        format!("{parameter_id}.choice.{index}"),
+                    );
+                    if let Some(rank) = option.display_rank {
+                        choice = choice.with_display_rank(rank);
+                    }
+                    choice
+                })
+                .collect(),
+        );
+    }
+    if matches!(
+        parameter.default_value,
+        OpenFxParameterValue::Integer(_)
+            | OpenFxParameterValue::Integer2(_)
+            | OpenFxParameterValue::Integer3(_)
+    ) {
+        descriptor.schema.allowed_interpolations = vec![
+            mondrian_core::automation::ParameterInterpolation::Hold,
+            mondrian_core::automation::ParameterInterpolation::Linear,
+            mondrian_core::automation::ParameterInterpolation::Bezier,
+        ];
+    }
+    let preferred = parameter.preferred_interpolation;
+    if !descriptor.schema.allowed_interpolations.contains(&preferred) {
+        return Err(OpenFxEffectRegistrationError::Schema(format!(
+            "parameter `{}` declares unsupported default interpolation",
+            parameter.name
+        )));
+    }
+    descriptor.schema.allowed_interpolations.retain(|mode| *mode != preferred);
+    descriptor.schema.allowed_interpolations.insert(0, preferred);
+    descriptor.ui_metadata.display_order = Some(index as u32);
+    descriptor.ui_metadata.group_name = Some("OpenFX".to_owned());
+    if let Some((arity, integer)) = parameter.default_value.numeric_layout() {
+        if parameter.numeric_channels.len() != arity {
+            return Err(OpenFxEffectRegistrationError::Schema(format!(
+                "parameter `{}` has incomplete numeric component bounds",
+                parameter.name
+            )));
+        }
+        let numeric = parameter
+            .numeric_channels
+            .iter()
+            .map(|channel| {
+                let hard_range = ParameterNumericRange::new(channel.minimum, channel.maximum)?;
+                let soft_range = ParameterNumericRange::new(
+                    channel.display_minimum.max(channel.minimum),
+                    channel.display_maximum.min(channel.maximum),
+                )?;
+                ParameterNumericContract::new(
+                    hard_range,
+                    soft_range,
+                    integer.then_some(1.0),
+                    ParameterInvalidValuePolicy::Reject,
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| OpenFxEffectRegistrationError::Schema(error.to_string()))?;
+        let unit = if parameter.double_type == Some(OpenFxDoubleType::Angle) {
+            if !matches!(parameter.default_value, OpenFxParameterValue::Double(_)) {
+                return Err(OpenFxEffectRegistrationError::Schema(
+                    "only scalar OpenFX Angle parameters are supported".to_owned(),
+                ));
+            }
+            ParameterUnit::Degrees
+        } else {
+            ParameterUnit::Unitless
+        };
+        descriptor = descriptor.with_channel_numeric_contracts(unit, numeric);
+    }
+    descriptor.validate().map_err(|error| {
+        OpenFxEffectRegistrationError::Schema(format!("parameter `{}`: {error}", parameter.name))
+    })?;
+    Ok(descriptor)
+}
+
+fn project_parameter_default(
+    parameter: &crate::openfx_host::OpenFxParameterDescription,
+    geometry: mondrian_effects::EffectProjectGeometry,
+) -> Result<OpenFxParameterValue, OpenFxEffectRegistrationError> {
+    let OpenFxParameterValue::Double2(seed) = parameter.default_value else {
+        return Err(OpenFxEffectRegistrationError::Schema(
+            "spatial default requires Double2D".into(),
+        ));
+    };
+    let size = geometry.canonical_size();
+    let value = [seed[0] * size[0], seed[1] * size[1]];
+    if value.iter().any(|v| !v.is_finite()) {
+        return Err(OpenFxEffectRegistrationError::Schema(
+            "resolved spatial default is non-finite".into(),
+        ));
+    }
+    Ok(OpenFxParameterValue::Double2(value))
 }
 
 fn stable_key(prefix: &str, bytes: &[u8]) -> String {
@@ -1530,6 +1609,136 @@ mod tests {
             status
         );
         compile(&effect); // Same Definition still admits a valid bound context.
+    }
+
+    #[test]
+    fn contextual_defaults_keep_native_hidden_values_and_resolve_only_author_defaults() {
+        use crate::openfx_host::{
+            OpenFxNumericChannel, OpenFxParameterDescription, OpenFxSpatialDefaults,
+        };
+        let identifier = "test.mondrian.openfx.contextual.bridge";
+        let inspection = OpenFxBinaryInspection {
+            binary_path: PathBuf::from("C:/selected/Spatial.ofx"),
+            binary_sha256: "d".repeat(64),
+            plugins: vec![OpenFxPluginDescriptor {
+                identifier: identifier.into(),
+                api_version: 1,
+                version_major: 1,
+                version_minor: 0,
+            }],
+        };
+        let parameter = OpenFxParameterDescription {
+            name: "size".into(),
+            label: "Size".into(),
+            hint: String::new(),
+            default_value: OpenFxParameterValue::Double2([1.0, 0.5]),
+            choices: vec![],
+            preferred_interpolation: mondrian_core::automation::ParameterInterpolation::Linear,
+            double_type: Some(OpenFxDoubleType::Xy),
+            spatial_defaults: Some(OpenFxSpatialDefaults::Normalised),
+            string_mode: None,
+            numeric_channels: vec![
+                OpenFxNumericChannel {
+                    minimum: 0.0,
+                    maximum: 100.0,
+                    display_minimum: 0.0,
+                    display_maximum: 100.0
+                };
+                2
+            ],
+            can_animate: true,
+            secret: false,
+            enabled: true,
+        };
+        let mut hidden = parameter.clone();
+        hidden.name = "hidden".into();
+        hidden.secret = true;
+        let mut disabled = parameter.clone();
+        disabled.name = "disabled".into();
+        disabled.enabled = false;
+        let mut literal = parameter.clone();
+        literal.name = "literal".into();
+        literal.spatial_defaults = Some(OpenFxSpatialDefaults::Canonical);
+        let description = OpenFxFilterDescription {
+            identifier: identifier.into(),
+            label: "Spatial".into(),
+            parameters: vec![parameter, hidden, disabled, literal],
+        };
+        let kind = effect_type_for_filter(&inspection, identifier).unwrap();
+        register_effect_definition(
+            build_definition(
+                Path::new("C:/selected/mondrian.exe"),
+                &inspection,
+                description,
+                &kind,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert!(instantiate_effect_node(kind.clone()).is_err());
+        for width in [3, 5] {
+            let geometry = mondrian_effects::EffectProjectGeometry::new(
+                width,
+                2,
+                SampleAspectRatio::new(2, 1).unwrap(),
+            )
+            .unwrap();
+            let effect = mondrian_effects::instantiate_effect_node_with_project_geometry(
+                kind.clone(),
+                geometry,
+            )
+            .unwrap();
+            assert_eq!(effect.properties.iter().count(), 2);
+            let context = EffectFrameContext::new(
+                Rational::FPS_24,
+                geometry,
+                TimelineTimeRange::new(TimelineTime::ZERO, TimelineTime::ONE).unwrap(),
+            )
+            .unwrap();
+            let graph = PreparedEffectProgram::prepare_hierarchical_with_frame_context(
+                &[effect],
+                &[],
+                &[],
+                &[],
+                WorkingColorSpace::LinearRec709,
+                context,
+                &LutPreparationCache::uncached(),
+            )
+            .unwrap()
+            .evaluate(TimelineTime::ZERO)
+            .unwrap();
+            let bindings = graph
+                .graph()
+                .nodes
+                .iter()
+                .find_map(|node| match &node.kind {
+                    mondrian_effects::EffectGraphNodeKind::DomainEffect {
+                        op: mondrian_effects::EffectRenderOp::Custom { params, .. },
+                        ..
+                    }
+                    | mondrian_effects::EffectGraphNodeKind::UnaryEffect {
+                        op: mondrian_effects::EffectRenderOp::Custom { params, .. },
+                        ..
+                    } => Some(
+                        serde_json::from_value::<OpenFxGraphParameters>(params.clone()).unwrap(),
+                    ),
+                    _ => None,
+                })
+                .unwrap();
+            assert_eq!(
+                bindings.values.len(),
+                2,
+                "hidden/disabled Normalised values remain native defaults"
+            );
+            assert_eq!(
+                bindings.values["size"].value,
+                OpenFxParameterValue::Double2([f64::from(width) * 2.0, 1.0])
+            );
+            assert_eq!(
+                bindings.values["literal"].value,
+                OpenFxParameterValue::Double2([1.0, 0.5])
+            );
+        }
     }
 
     #[test]

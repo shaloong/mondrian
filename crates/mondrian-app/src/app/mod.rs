@@ -114,6 +114,8 @@ mod audio_curve_clipboard;
 mod audio_idle_warmup;
 mod audio_monitoring;
 mod clip_authoring;
+#[cfg(test)]
+mod contextual_effect_authoring_tests;
 mod native_audio_editor;
 mod resource_authoring;
 #[cfg(test)]

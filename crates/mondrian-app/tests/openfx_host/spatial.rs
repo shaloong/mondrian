@@ -57,12 +57,14 @@ fn spatial_defaults_resolve_once_before_create_and_range_admission() {
         canonical.spatial_defaults,
         Some(OpenFxSpatialDefaults::Canonical)
     );
-    let error = mondrian_app::openfx_effect::register_selected_openfx_generator(
+    let kind = mondrian_app::openfx_effect::register_selected_openfx_generator(
         product_executable(),
         &inspection,
         identifier,
     )
-    .expect_err("no unresolved defaults in global author registry");
+    .expect("immutable project-dependent definition");
+    let error = mondrian_effects::instantiate_effect_node(kind)
+        .expect_err("no unresolved defaults without an owner");
     assert!(error.to_string().contains("owner project geometry"));
     let token = ExecutionCancellationToken::new();
     for (width, height) in [(3, 2), (5, 4)] {

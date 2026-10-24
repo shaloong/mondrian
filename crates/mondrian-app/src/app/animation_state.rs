@@ -1,6 +1,34 @@
 use super::*;
 
 impl AppState {
+    pub(super) fn instantiate_effect_for_active_sequence(
+        &self,
+        effect_type: EffectType,
+        step: &str,
+    ) -> mondrian_core::Result<mondrian_effects::EffectNode> {
+        let sequence = active_sequence_for_visual_effect(self, step)?;
+        let par = sequence.settings.pixel_aspect_ratio.exact_ratio().ok_or_else(|| {
+            mondrian_core::MondrianError::WorkflowStepFailed {
+                step_id: step.to_owned(),
+                reason: "owner Sequence has no exact pixel aspect ratio".into(),
+            }
+        })?;
+        let geometry = mondrian_effects::EffectProjectGeometry::new(
+            sequence.settings.resolution.width,
+            sequence.settings.resolution.height,
+            par,
+        )
+        .map_err(|error| mondrian_core::MondrianError::WorkflowStepFailed {
+            step_id: step.to_owned(),
+            reason: error.to_string(),
+        })?;
+        mondrian_effects::instantiate_effect_node_with_project_geometry(effect_type, geometry)
+            .map_err(|error| mondrian_core::MondrianError::WorkflowStepFailed {
+                step_id: step.to_owned(),
+                reason: error.to_string(),
+            })
+    }
+
     pub fn active_animation_property_address(
         &self,
         clip_id: ClipId,
@@ -499,12 +527,7 @@ impl AppState {
         let sequence = active_sequence_for_visual_effect(self, "add_effect_to_clip")?;
         authorable_visual_effect_clip(sequence, clip_id, "add_effect_to_clip")?;
         let mut effect =
-            mondrian_effects::instantiate_effect_node(effect_type.clone()).map_err(|error| {
-                mondrian_core::MondrianError::WorkflowStepFailed {
-                    step_id: "add_effect_to_clip".to_owned(),
-                    reason: error.to_string(),
-                }
-            })?;
+            self.instantiate_effect_for_active_sequence(effect_type.clone(), "add_effect_to_clip")?;
         self.resolve_effect_resources(&mut effect)?;
         let description = format!("添加{}", effect_type.display_name());
         let (_sequence_id, effect_id) =
