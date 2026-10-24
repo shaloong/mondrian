@@ -68,8 +68,11 @@ IPC20 distinguishes None/Stopped/Playing with fixed 32-byte Process tags; old
 helpers refuse. The VST3 borrowed processing role updates only its ProcessContext,
 after canonical time installation, honoring requested/available validity. CLAP
 sets IS_PLAYING only for explicit Playing. Ordinary Audio/SDK tests and App/Export
-test-target compilation pass; matching native execution remains pending. Dynamic
-activity events, signatures, loops and realtime behavior are separate work.
+test-target compilation pass. Four Windows owned native gates verify actual flags,
+PCM and Scope/retime/PDC for all three activities; each format has twelve canonical
+rate/music/activity conditions and two epochs per condition. Actual App/Export
+consumer output, third-party plugins, dynamic activity events, signatures, loops
+and realtime behavior remain separate work.
 
 Compilation derives every generated contribution's Track ID, Sequence range,
 source mapping, and nested placement from the real `Track -> Clip` hierarchy.
