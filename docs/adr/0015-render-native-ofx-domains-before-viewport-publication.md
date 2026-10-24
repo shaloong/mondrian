@@ -114,3 +114,18 @@ passes with exit0/empty stderr/clean process trees. This is Full16x16/24fps Wind
 CPU working-frame qualification, not encoded export, physical GUI/device,
 animation/Loop/resize/nested-native, other platforms, RT or performance evidence.
 GL/F06 remain open and the protected integration branch remains held.
+
+## Explicit machine-local Catalog context (candidate)
+
+The Graphics menu selects Filter or Generator effects explicitly. Catalog work
+prepares only that context; a Filter failure never triggers a Generator retry.
+Existing Filter keys stay unchanged and Generator keys remain disjoint. The
+Generator display suffix distinguishes two contexts of one class in the library.
+The original worker, bounded result channel, notice budget and live App-owner
+publication are retained; canceled/unpublished work cannot enter preferences.
+
+One machine-local selection records path plus context. Preference v4 reads v3
+Filter paths, preserves unrelated preferences and writes canonical typed entries.
+Deduplication includes context; unknown contexts/fields refuse rather than default.
+Projects, author time, parameters and native wire14 remain unchanged. Ordinary
+controls and native install/restore/Timeline qualification are pending.

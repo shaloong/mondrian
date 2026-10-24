@@ -1480,7 +1480,10 @@ impl AppState {
     ) -> Result<()> {
         match action {
             VisualEffectProductAction::InstallOpenFxBundle(payload) => {
-                self.install_openfx_bundle(payload.path)
+                self.install_openfx_bundle(super::openfx_catalog::OpenFxBundleSelection {
+                    path: payload.path,
+                    context: payload.context,
+                })
             }
             VisualEffectProductAction::AddToClip(payload) => {
                 let effect_id = self.add_effect_to_clip(payload.clip_id, payload.effect_type)?;

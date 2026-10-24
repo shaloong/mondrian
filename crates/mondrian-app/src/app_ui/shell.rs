@@ -820,17 +820,23 @@ pub fn try_resolve_app_shell_action(
                 .into_external_action()
             }))
         }
-        Action::Custom { namespace, name, .. }
+        Action::Custom { namespace, name, payload }
             if namespace == APP_SHELL_NAMESPACE
                 && name == APP_SHELL_INSTALL_OPENFX_BUNDLE_DIALOG =>
         {
+            let selection = if payload.is_null() {
+                crate::app::ui_actions::OpenFxInstallDialogPayload::default()
+            } else {
+                serde_json::from_value(payload)
+                    .map_err(|error| app_shell_action_error(&name, error))?
+            };
             let selected = platform
                 .open_folder_dialog(&localizer.text("file-dialog-install-openfx-bundle"))
                 .map_err(|error| native_shell_error(&name, error))?
                 .into_selection();
             Ok(selected.map(|path| {
                 ProductAction::VisualEffect(VisualEffectProductAction::InstallOpenFxBundle(
-                    VisualEffectInstallOpenFxBundlePayload { path },
+                    VisualEffectInstallOpenFxBundlePayload { path, context: selection.context },
                 ))
                 .into_external_action()
             }))
@@ -8226,10 +8232,53 @@ mod tests {
             ProductAction::decode_external(&action).expect("decode"),
             Some(ProductAction::VisualEffect(
                 VisualEffectProductAction::InstallOpenFxBundle(
-                    VisualEffectInstallOpenFxBundlePayload { path },
+                    VisualEffectInstallOpenFxBundlePayload {
+                        path,
+                        context: crate::openfx_host::OpenFxContext::Filter
+                    },
                 ),
             ))
         );
+    }
+
+    #[test]
+    fn openfx_generator_picker_preserves_explicit_context_and_refuses_unknown_requests() {
+        let request = crate::app::ui_actions::app_shell_install_openfx_generator_dialog_action();
+        assert!(
+            resolve_app_shell_action(request.clone(), &FakePlatform::default(), None).is_none()
+        );
+        let path = PathBuf::from("E:/plugins/Generator.ofx.bundle");
+        let platform = FakePlatform {
+            open_folder: Some(path.clone()),
+            ..FakePlatform::default()
+        };
+        let action = resolve_app_shell_action(request, &platform, None).unwrap();
+        assert_eq!(
+            ProductAction::decode_external(&action).unwrap(),
+            Some(ProductAction::VisualEffect(
+                VisualEffectProductAction::InstallOpenFxBundle(
+                    VisualEffectInstallOpenFxBundlePayload {
+                        path,
+                        context: crate::openfx_host::OpenFxContext::Generator
+                    },
+                )
+            ))
+        );
+        for payload in [
+            serde_json::json!({"context":"retimer"}),
+            serde_json::json!({"context":"generator","unknown":true}),
+        ] {
+            assert!(resolve_app_shell_action(
+                Action::Custom {
+                    namespace: APP_SHELL_NAMESPACE.to_owned(),
+                    name: APP_SHELL_INSTALL_OPENFX_BUNDLE_DIALOG.to_owned(),
+                    payload,
+                },
+                &platform,
+                None
+            )
+            .is_none());
+        }
     }
 
     #[test]

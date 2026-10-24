@@ -2947,7 +2947,10 @@ pub fn run_app_ui_native_question_validation_file(
         );
         app.dispatch_action(
             ProductAction::VisualEffect(VisualEffectProductAction::InstallOpenFxBundle(
-                VisualEffectInstallOpenFxBundlePayload { path: request.bundle.clone() },
+                VisualEffectInstallOpenFxBundlePayload {
+                    path: request.bundle.clone(),
+                    context: crate::openfx_host::OpenFxContext::Filter,
+                },
             ))
             .into_external_action(),
         )?;

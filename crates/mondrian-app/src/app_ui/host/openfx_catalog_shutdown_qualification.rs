@@ -183,7 +183,10 @@ fn qualify_active_catalog_drop(mode: &str) {
     host.dispatch_editor_action(
         ProductAction::VisualEffect(
             crate::app::product_action::VisualEffectProductAction::InstallOpenFxBundle(
-                crate::app::product_action::VisualEffectInstallOpenFxBundlePayload { path: probe },
+                crate::app::product_action::VisualEffectInstallOpenFxBundlePayload {
+                    path: probe,
+                    context: crate::openfx_host::OpenFxContext::Filter,
+                },
             ),
         )
         .into_external_action(),

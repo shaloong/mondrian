@@ -14,12 +14,13 @@ use serde::{Deserialize, Serialize};
 
 use crate::app::app_data_dir;
 use crate::app::native_audio_plugin::{NativeAudioPluginFormat, NativeAudioPluginSelection};
+use crate::app::openfx_catalog::OpenFxBundleSelection;
 use crate::app_ui::localization::AppUiLocalePreference;
 use crate::app_ui::shortcuts::{is_known_shortcut_id, AppUiShortcutOverride};
 use crate::app_ui::workspace_layout::AppUiWorkspaceLayout;
 
 const APP_UI_PREFERENCES_FILE: &str = "app_ui_preferences.json";
-const APP_UI_PREFERENCES_VERSION: u32 = 3;
+const APP_UI_PREFERENCES_VERSION: u32 = 4;
 /// Maximum number of recent projects kept by the app UI startup surface.
 pub const MAX_RECENT_PROJECTS: usize = 12;
 /// Bound the number of machine-local native libraries retried on startup.
@@ -31,7 +32,7 @@ pub const MAX_NATIVE_OPENFX_BUNDLES: usize = 64;
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AppUiPreferences {
-    /// Identifier of the current machine preference schema; other versions are rejected.
+    /// Current machine schema; v3 Filter paths are migrated, other versions rejected.
     pub version: u32,
     /// Active product theme preference. `System` resolves to a concrete preset
     /// at runtime and is not persisted as a third theme token set.
@@ -45,7 +46,7 @@ pub struct AppUiPreferences {
     /// Explicitly selected native audio binaries; project files store plugin identities only.
     pub installed_audio_plugins: Vec<NativeAudioPluginSelection>,
     /// Explicitly selected native OpenFX bundles; project files retain effect identities.
-    pub installed_openfx_bundles: Vec<PathBuf>,
+    pub installed_openfx_bundles: Vec<OpenFxBundleSelection>,
     /// User overrides for app UI shell shortcut descriptors.
     pub shortcut_overrides: Vec<AppUiShortcutOverride>,
     /// Persisted custom dock layout for the app UI workspace.
@@ -107,15 +108,18 @@ impl AppUiPreferences {
     }
 
     /// Remember one successfully admitted OpenFX bundle without duplicates.
-    pub fn record_openfx_bundle(&mut self, path: PathBuf) {
-        self.installed_openfx_bundles.retain(|existing| existing != &path);
-        self.installed_openfx_bundles.push(path);
+    pub fn record_openfx_bundle(&mut self, selection: OpenFxBundleSelection) {
+        self.installed_openfx_bundles.retain(|existing| existing != &selection);
+        self.installed_openfx_bundles.push(selection);
         if self.installed_openfx_bundles.len() > MAX_NATIVE_OPENFX_BUNDLES {
             self.installed_openfx_bundles.remove(0);
         }
     }
 
     fn sanitize_loaded(mut self) -> Self {
+        if self.version == 3 {
+            self.version = APP_UI_PREFERENCES_VERSION;
+        }
         if self.version != APP_UI_PREFERENCES_VERSION {
             return Self::default();
         }
@@ -145,11 +149,11 @@ impl AppUiPreferences {
         self.installed_audio_plugins = plugins;
 
         let mut bundles = Vec::new();
-        for path in self.installed_openfx_bundles {
-            if !path.is_absolute() || bundles.contains(&path) {
+        for selection in self.installed_openfx_bundles {
+            if !selection.path.is_absolute() || bundles.contains(&selection) {
                 continue;
             }
-            bundles.push(path);
+            bundles.push(selection);
             if bundles.len() == MAX_NATIVE_OPENFX_BUNDLES {
                 break;
             }
@@ -405,27 +409,27 @@ mod tests {
         assert!(!preferences.installed_audio_plugins.contains(&expected));
 
         let missing_bundle = temp_preferences_path("missing-openfx").with_extension("ofx.bundle");
-        preferences.record_openfx_bundle(missing_bundle.clone());
-        preferences.record_openfx_bundle(missing_bundle.clone());
+        preferences.record_openfx_bundle(missing_bundle.clone().into());
+        preferences.record_openfx_bundle(missing_bundle.clone().into());
         assert_eq!(
             preferences.installed_openfx_bundles,
-            vec![missing_bundle.clone()]
+            vec![missing_bundle.clone().into()]
         );
         persist_app_ui_preferences_to(&path, &preferences).expect("persist bundle selection");
         assert_eq!(
             load_app_ui_preferences_from(&path).installed_openfx_bundles,
-            vec![missing_bundle.clone()]
+            vec![missing_bundle.clone().into()]
         );
         for index in 0..=MAX_NATIVE_OPENFX_BUNDLES {
             preferences.record_openfx_bundle(
-                std::env::temp_dir().join(format!("mondrian-filter-{index}.ofx.bundle")),
+                std::env::temp_dir().join(format!("mondrian-filter-{index}.ofx.bundle")).into(),
             );
         }
         assert_eq!(
             preferences.installed_openfx_bundles.len(),
             MAX_NATIVE_OPENFX_BUNDLES
         );
-        assert!(!preferences.installed_openfx_bundles.contains(&missing_bundle));
+        assert!(!preferences.installed_openfx_bundles.contains(&missing_bundle.into()));
         fs::remove_file(path).ok();
     }
 
@@ -440,6 +444,60 @@ mod tests {
         );
         assert_eq!(fs::read(&path).expect("read untouched preferences"), bytes);
         fs::remove_file(path).expect("remove fixture");
+    }
+
+    #[test]
+    fn legacy_filter_paths_migrate_without_losing_preferences_or_generator_selections() {
+        use crate::openfx_host::OpenFxContext;
+        let path = temp_preferences_path("openfx-context-migration");
+        let bundle = path.with_extension("missing.ofx.bundle");
+        let filter = OpenFxBundleSelection::from(bundle.clone());
+        let generator = OpenFxBundleSelection {
+            path: bundle.clone(),
+            context: OpenFxContext::Generator,
+        };
+        let mut expected = AppUiPreferences::default();
+        expected.recent_projects = vec![path.clone()];
+        expected.installed_openfx_bundles = vec![filter.clone()];
+        let mut old = serde_json::to_value(&expected).unwrap();
+        old["version"] = serde_json::json!(3);
+        old["installed_openfx_bundles"] = serde_json::json!([bundle]);
+        fs::write(&path, serde_json::to_vec(&old).unwrap()).unwrap();
+        let mut loaded = load_app_ui_preferences_from(&path);
+        assert_eq!(
+            loaded, expected,
+            "migration keeps the complete unrelated preference state"
+        );
+        loaded.record_openfx_bundle(generator.clone());
+        loaded.record_openfx_bundle(filter.clone());
+        assert_eq!(loaded.installed_openfx_bundles, vec![generator, filter]);
+        persist_app_ui_preferences_to(&path, &loaded).unwrap();
+        assert_eq!(load_app_ui_preferences_from(&path), loaded);
+        let canonical: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(canonical["version"], 4);
+        assert_eq!(
+            canonical["installed_openfx_bundles"][0]["context"],
+            "generator"
+        );
+        assert_eq!(
+            canonical["installed_openfx_bundles"][1]["context"],
+            "filter"
+        );
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn malformed_openfx_contexts_never_fall_back_to_filter() {
+        let mut value = serde_json::to_value(AppUiPreferences::default()).unwrap();
+        for selection in [
+            serde_json::json!({"path": std::env::temp_dir().join("plugin.ofx.bundle"), "context":"retimer"}),
+            serde_json::json!({"path": std::env::temp_dir().join("plugin.ofx.bundle"), "context":"generator", "unknown":true}),
+            serde_json::json!({"path": std::env::temp_dir().join("plugin.ofx.bundle")}),
+        ] {
+            value["installed_openfx_bundles"] = serde_json::json!([selection]);
+            assert_rejected_preferences_preserve_file(value.clone());
+        }
     }
 
     #[test]

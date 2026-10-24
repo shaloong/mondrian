@@ -23,20 +23,19 @@ use sha2::{Digest, Sha256};
 
 use crate::openfx_adapter::OpenFxBinaryInspection;
 use crate::openfx_host::{
-    observe_openfx_filter_with_checkpoint, observe_openfx_with_checkpoint, OpenFxContext,
-    OpenFxDescribeNotices, OpenFxDoubleType, OpenFxFilterDescription, OpenFxFilterSession,
-    OpenFxHostError, OpenFxParameterBinding, OpenFxParameterValue, OpenFxRenderTiming,
-    OpenFxStringMode, OPENFX_MAX_STRING_BYTES,
+    observe_openfx_with_checkpoint, OpenFxContext, OpenFxDescribeNotices, OpenFxDoubleType,
+    OpenFxFilterDescription, OpenFxFilterSession, OpenFxHostError, OpenFxParameterBinding,
+    OpenFxParameterValue, OpenFxRenderTiming, OpenFxStringMode, OPENFX_MAX_STRING_BYTES,
 };
 
-/// A selected Filter cannot be represented by the admitted visual effect contract.
+/// A selected context cannot be represented by the admitted visual effect contract.
 #[derive(Debug, thiserror::Error)]
 pub enum OpenFxEffectRegistrationError {
-    /// The supervised description child failed or rejected the Filter.
+    /// The supervised description child failed or rejected the selected context.
     #[error(transparent)]
     Host(#[from] OpenFxHostError),
-    /// The Filter describes a schema that cannot be authored exactly.
-    #[error("OpenFX filter schema is unsupported: {0}")]
+    /// The effect describes a schema that cannot be authored exactly.
+    #[error("OpenFX effect schema is unsupported: {0}")]
     Schema(String),
     /// The definition registry rejected the admitted schema.
     #[error(transparent)]
@@ -395,34 +394,27 @@ pub fn register_selected_openfx_filter(
     Ok(effect_type)
 }
 
-/// Bind an explicitly selected CPU Generator to a source-free prepared graph.
-/// This does not add a Timeline content type or a Catalog insertion command.
+/// Register an explicitly selected CPU Generator for the existing Effects graph.
 pub fn register_selected_openfx_generator(
     helper_executable: &Path,
     inspection: &OpenFxBinaryInspection,
     plugin_identifier: &str,
 ) -> Result<EffectType, OpenFxEffectRegistrationError> {
-    let observed = observe_openfx_with_checkpoint(
+    let definition = prepare_selected_openfx_effect(
         helper_executable,
         inspection,
         plugin_identifier,
         OpenFxContext::Generator,
         &mut || Ok(()),
-    )?;
+    )
+    .definition?;
     let effect_type = effect_type_for_generator(inspection, plugin_identifier)?;
-    let definition = build_definition_in_context(
-        helper_executable,
-        inspection,
-        observed.outcome?,
-        &effect_type,
-        OpenFxContext::Generator,
-    )?;
     register_effect_definition(definition)?;
     Ok(effect_type)
 }
 
 /// Cold preparation facts; notices never enter a definition or its cache.
-pub(crate) struct PreparedOpenFxFilter {
+pub(crate) struct PreparedOpenFxEffect {
     pub definition: Result<EffectDefinition, OpenFxEffectRegistrationError>,
     pub notices: Option<OpenFxDescribeNotices>,
 }
@@ -433,27 +425,54 @@ pub(crate) fn prepare_selected_openfx_filter(
     inspection: &OpenFxBinaryInspection,
     plugin_identifier: &str,
     checkpoint: &mut impl FnMut() -> Result<(), OpenFxHostError>,
-) -> PreparedOpenFxFilter {
-    let observed = match observe_openfx_filter_with_checkpoint(
+) -> PreparedOpenFxEffect {
+    prepare_selected_openfx_effect(
         helper_executable,
         inspection,
         plugin_identifier,
+        OpenFxContext::Filter,
+        checkpoint,
+    )
+}
+
+/// Prepare exactly the selected context. A failure never switches contexts.
+pub(crate) fn prepare_selected_openfx_effect(
+    helper_executable: &Path,
+    inspection: &OpenFxBinaryInspection,
+    plugin_identifier: &str,
+    context: OpenFxContext,
+    checkpoint: &mut impl FnMut() -> Result<(), OpenFxHostError>,
+) -> PreparedOpenFxEffect {
+    let observed = match observe_openfx_with_checkpoint(
+        helper_executable,
+        inspection,
+        plugin_identifier,
+        context,
         checkpoint,
     ) {
         Ok(observed) => observed,
-        Err(error) => return PreparedOpenFxFilter { definition: Err(error.into()), notices: None },
+        Err(error) => return PreparedOpenFxEffect { definition: Err(error.into()), notices: None },
     };
     let definition = (|| {
         let description = observed.outcome?;
-        let effect_type = effect_type_for_filter(inspection, plugin_identifier)?;
-        let definition =
-            build_definition(helper_executable, inspection, description, &effect_type)?;
+        let effect_type = match context {
+            OpenFxContext::Filter => effect_type_for_filter(inspection, plugin_identifier)?,
+            OpenFxContext::Generator => effect_type_for_generator(inspection, plugin_identifier)?,
+        };
+        let definition = build_definition_in_context(
+            helper_executable,
+            inspection,
+            description,
+            &effect_type,
+            context,
+        )?;
         checkpoint()?;
         Ok(definition)
     })();
-    PreparedOpenFxFilter { definition, notices: Some(observed.notices) }
+    PreparedOpenFxEffect { definition, notices: Some(observed.notices) }
 }
 
+#[cfg(test)]
 fn build_definition(
     helper_executable: &Path,
     inspection: &OpenFxBinaryInspection,
@@ -738,7 +757,10 @@ fn build_definition_in_context(
     });
     let mut definition = EffectDefinition::new(
         effect_type.key(),
-        description.label,
+        match context {
+            OpenFxContext::Filter => description.label,
+            OpenFxContext::Generator => format!("{} (Generator)", description.label),
+        },
         properties,
         EffectColorDomainContract::SCENE_LINEAR,
     )

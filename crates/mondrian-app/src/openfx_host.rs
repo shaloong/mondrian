@@ -311,10 +311,13 @@ pub struct OpenFxParameterDescription {
 }
 
 /// Context retained by the immutable selection and both supervised protocols.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum OpenFxContext {
+pub enum OpenFxContext {
+    /// One current image is supplied as Source.
+    #[default]
     Filter,
+    /// No Source image is supplied; Output uses the explicit execution canvas.
     Generator,
 }
 impl OpenFxContext {

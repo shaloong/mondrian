@@ -1407,6 +1407,24 @@ pub fn app_shell_install_openfx_bundle_dialog_action() -> Action {
     custom_app_shell_action(APP_SHELL_INSTALL_OPENFX_BUNDLE_DIALOG)
 }
 
+/// Context chosen by the Graphics menu before opening the native picker.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OpenFxInstallDialogPayload {
+    #[serde(default)]
+    pub context: crate::openfx_host::OpenFxContext,
+}
+
+/// Install Generator effects into the existing visual Effect catalog.
+pub fn app_shell_install_openfx_generator_dialog_action() -> Action {
+    custom_app_shell_action_with_payload(
+        APP_SHELL_INSTALL_OPENFX_BUNDLE_DIALOG,
+        OpenFxInstallDialogPayload {
+            context: crate::openfx_host::OpenFxContext::Generator,
+        },
+    )
+}
+
 /// Build an app-shell request for importing media files into a target folder.
 pub fn app_shell_import_media_dialog_action_with_target(
     payload: ImportMediaDialogPayload,

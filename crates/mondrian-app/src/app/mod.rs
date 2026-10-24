@@ -164,7 +164,7 @@ pub mod endurance_reference_output;
 pub mod endurance_run_request;
 pub(crate) mod endurance_shutdown;
 mod native_audio_catalog_restore;
-mod openfx_catalog;
+pub(crate) mod openfx_catalog;
 pub use endurance_shutdown::AppEnduranceShutdownEvidence;
 #[cfg(feature = "validation")]
 pub use endurance_shutdown::{AppEnduranceShutdownReceipt, AppEnduranceShutdownReceiptError};
@@ -618,7 +618,7 @@ pub struct AppState {
     native_audio_restore: Option<native_audio_catalog_restore::NativeAudioCatalogRestore>,
     audio_input_observations: audio_input_observation::AudioInputObservationService,
     openfx_catalog: Option<openfx_catalog::OpenFxCatalog>,
-    completed_openfx_installs: Vec<PathBuf>,
+    completed_openfx_installs: Vec<openfx_catalog::OpenFxBundleSelection>,
     vst3_catalog: Option<Arc<InstalledVst3AudioProcessorSpecResolver>>,
     pub audio_source_cache: Arc<AudioSourceCache>,
     audio_idle_warmup: AudioIdleWarmupService,

@@ -402,7 +402,7 @@ pub enum ExportProductAction {
 /// Closed visual Effect installation, authoring, and selection operations.
 #[derive(Debug, Clone, PartialEq)]
 pub enum VisualEffectProductAction {
-    /// Discover and register supported Filters from one selected bundle.
+    /// Discover and register exactly the selected context from one bundle.
     InstallOpenFxBundle(VisualEffectInstallOpenFxBundlePayload),
     /// Instantiate one currently registered definition and append it to a Clip.
     AddToClip(VisualEffectAddToClipPayload),
@@ -2384,12 +2384,15 @@ struct ExportCancelWirePayload {
     job_id: JobId,
 }
 
-/// Machine-local OpenFX bundle explicitly selected for Filter installation.
+/// Machine-local OpenFX bundle and context explicitly selected for installation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct VisualEffectInstallOpenFxBundlePayload {
     /// Absolute `.ofx.bundle` directory chosen through the native picker.
     pub path: PathBuf,
+    /// Missing legacy command fields retain the original Filter selection.
+    #[serde(default)]
+    pub context: crate::openfx_host::OpenFxContext,
 }
 
 /// Clip and registered definition selected for one visual Effect insertion.
@@ -4306,6 +4309,7 @@ mod tests {
             ProductAction::VisualEffect(VisualEffectProductAction::InstallOpenFxBundle(
                 VisualEffectInstallOpenFxBundlePayload {
                     path: PathBuf::from("E:/plugins/Basic.ofx.bundle"),
+                    context: crate::openfx_host::OpenFxContext::Filter,
                 },
             )),
             ProductAction::VisualEffect(VisualEffectProductAction::AddToClip(
@@ -5100,10 +5104,14 @@ mod tests {
         let absolute = ProductAction::VisualEffect(VisualEffectProductAction::InstallOpenFxBundle(
             VisualEffectInstallOpenFxBundlePayload {
                 path: std::env::temp_dir().join("Basic.ofx.bundle"),
+                context: crate::openfx_host::OpenFxContext::Filter,
             },
         ));
         let relative = ProductAction::VisualEffect(VisualEffectProductAction::InstallOpenFxBundle(
-            VisualEffectInstallOpenFxBundlePayload { path: PathBuf::from("Basic.ofx.bundle") },
+            VisualEffectInstallOpenFxBundlePayload {
+                path: PathBuf::from("Basic.ofx.bundle"),
+                context: crate::openfx_host::OpenFxContext::Filter,
+            },
         ));
         assert!(availability.allows(&absolute));
         assert!(!availability.allows(&relative));

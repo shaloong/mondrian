@@ -1,4 +1,4 @@
-//! Machine-local OpenFX Filter installation and startup restoration.
+//! Machine-local OpenFX context selection, installation and startup restoration.
 
 use crate::app::AppMessage;
 use std::path::{Path, PathBuf};
@@ -12,13 +12,51 @@ use mondrian_core::{MondrianError, Result};
 use mondrian_effects::{register_effect_definition, EffectDefinition};
 
 use crate::openfx_adapter::{inspect_openfx_binary_with_checkpoint, OpenFxDiscoveryError};
-use crate::openfx_effect::{prepare_selected_openfx_filter, PreparedOpenFxFilter};
-use crate::openfx_host::{OpenFxDescribeNotices, OpenFxHostError};
+use crate::openfx_effect::{prepare_selected_openfx_effect, PreparedOpenFxEffect};
+use crate::openfx_host::{OpenFxContext, OpenFxDescribeNotices, OpenFxHostError};
 use mondrian_effects::EffectProcessorNoticeKind;
+use serde::{Deserialize, Serialize};
 
 use super::notifications::AppNotificationSeverity;
 
 use super::AppState;
+
+/// One machine-local selection, independent of Project authoring identities.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct OpenFxBundleSelection {
+    pub path: PathBuf,
+    pub context: OpenFxContext,
+}
+
+impl From<PathBuf> for OpenFxBundleSelection {
+    fn from(path: PathBuf) -> Self {
+        Self { path, context: OpenFxContext::Filter }
+    }
+}
+
+impl<'de> Deserialize<'de> for OpenFxBundleSelection {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Current {
+            path: PathBuf,
+            context: OpenFxContext,
+        }
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Wire {
+            Current(Current),
+            // Previous preferences recorded paths for Filter installation only.
+            LegacyFilter(PathBuf),
+        }
+        Ok(match Wire::deserialize(deserializer)? {
+            Wire::Current(value) => Self { path: value.path, context: value.context },
+            Wire::LegacyFilter(path) => path.into(),
+        })
+    }
+}
 
 #[derive(Clone, Copy)]
 enum CatalogPurpose {
@@ -27,12 +65,12 @@ enum CatalogPurpose {
 }
 
 struct CatalogRequest {
-    path: PathBuf,
+    selection: OpenFxBundleSelection,
     purpose: CatalogPurpose,
 }
 
 struct CatalogResult {
-    path: PathBuf,
+    selection: OpenFxBundleSelection,
     purpose: CatalogPurpose,
     preparation: BundlePreparation,
 }
@@ -76,7 +114,7 @@ struct BundlePreparation {
 }
 
 impl BundlePreparation {
-    fn record(&mut self, identifier: &str, prepared: PreparedOpenFxFilter) {
+    fn record(&mut self, identifier: &str, prepared: PreparedOpenFxEffect) {
         if self.result.is_err() {
             return;
         }
@@ -154,14 +192,14 @@ impl OpenFxCatalog {
                     if worker_canceled.load(Ordering::Acquire) {
                         break;
                     }
-                    let preparation = install_bundle(&helper, &request.path, &worker_canceled);
+                    let preparation = install_bundle(&helper, &request.selection, &worker_canceled);
                     if worker_canceled.load(Ordering::Acquire) {
                         break;
                     }
                     if !send_catalog_result(
                         &result_sender,
                         CatalogResult {
-                            path: request.path,
+                            selection: request.selection,
                             purpose: request.purpose,
                             preparation,
                         },
@@ -185,8 +223,8 @@ impl OpenFxCatalog {
 }
 
 impl AppState {
-    /// Queue one selected Filter bundle without blocking the UI thread.
-    pub(super) fn install_openfx_bundle(&mut self, path: PathBuf) -> Result<()> {
+    /// Queue exactly the selected context without blocking the UI thread.
+    pub(super) fn install_openfx_bundle(&mut self, selection: OpenFxBundleSelection) -> Result<()> {
         self.start_openfx_catalog()?;
         self.openfx_catalog
             .as_ref()
@@ -194,14 +232,14 @@ impl AppState {
             .requests
             .as_ref()
             .ok_or_else(|| catalog_error("OpenFX catalog is closed"))?
-            .try_send(CatalogRequest { path, purpose: CatalogPurpose::Install })
+            .try_send(CatalogRequest { selection, purpose: CatalogPurpose::Install })
             .map_err(|error| catalog_error(error.to_string()))?;
         self.set_status_hint(AppMessage::new("status-openfx-scanning"), false);
         Ok(())
     }
 
     /// Retry saved machine-local bundles without delaying window startup.
-    pub(crate) fn schedule_openfx_catalog_restore(&mut self, bundles: Vec<PathBuf>) {
+    pub(crate) fn schedule_openfx_catalog_restore(&mut self, bundles: Vec<OpenFxBundleSelection>) {
         if bundles.is_empty() {
             return;
         }
@@ -216,12 +254,12 @@ impl AppState {
         let Some(catalog) = self.openfx_catalog.as_mut() else {
             return;
         };
-        for path in bundles {
+        for selection in bundles {
             if catalog
                 .requests
                 .as_ref()
                 .expect("live catalog request sender")
-                .try_send(CatalogRequest { path, purpose: CatalogPurpose::Restore })
+                .try_send(CatalogRequest { selection, purpose: CatalogPurpose::Restore })
                 .is_ok()
             {
                 catalog.restores_remaining += 1;
@@ -257,7 +295,10 @@ impl AppState {
                     if catalog.canceled.load(Ordering::Acquire) {
                         break;
                     }
-                    self.publish_openfx_metadata_notices(result.preparation.notices);
+                    self.publish_openfx_metadata_notices(
+                        result.preparation.notices,
+                        result.selection.context,
+                    );
                     // Registry mutation occurs only on this live App owner.
                     // A dropped catalog consumes/discards prepared definitions.
                     let outcome = publish_bundle(result.preparation.result);
@@ -265,7 +306,7 @@ impl AppState {
                     match result.purpose {
                         CatalogPurpose::Install => match outcome {
                             Ok((installed, rejected)) => {
-                                self.completed_openfx_installs.push(result.path);
+                                self.completed_openfx_installs.push(result.selection);
                                 if rejected.is_empty() {
                                     self.set_status_hint(
                                         AppMessage::new("status-openfx-installed")
@@ -295,12 +336,12 @@ impl AppState {
                                     catalog.restored += installed;
                                     catalog.restore_failures += rejected.len();
                                     for reason in rejected {
-                                        tracing::warn!(path = %result.path.display(), %reason, "OpenFX Filter was not restored");
+                                        tracing::warn!(path = %result.selection.path.display(), context = ?result.selection.context, %reason, "OpenFX effect was not restored");
                                     }
                                 }
                                 Err(reason) => {
                                     catalog.restore_failures += 1;
-                                    tracing::warn!(path = %result.path.display(), %reason, "OpenFX bundle was not restored");
+                                    tracing::warn!(path = %result.selection.path.display(), context = ?result.selection.context, %reason, "OpenFX bundle was not restored");
                                 }
                             }
                             if catalog.restores_remaining == 0 {
@@ -349,7 +390,7 @@ impl AppState {
         changed
     }
 
-    fn publish_openfx_metadata_notices(&mut self, notices: CatalogNotices) {
+    fn publish_openfx_metadata_notices(&mut self, notices: CatalogNotices, context: OpenFxContext) {
         for batch in notices.batches {
             // This is the verified request context, not an observed emitter
             // class/action, native instance, Render invocation, or generation.
@@ -377,7 +418,7 @@ impl AppState {
                 };
                 self.notifications.publish(
                     format!(
-                        "openfx-metadata:{}:{}:{:?}:{}",
+                        "openfx-metadata:{}:{}:{context:?}:{:?}:{}",
                         batch.binary_sha256,
                         batch.requested_plugin_identifier,
                         notice.kind(),
@@ -392,25 +433,30 @@ impl AppState {
     }
 
     /// Completed user selections to persist after successful admission.
-    pub(crate) fn take_completed_openfx_installs(&mut self) -> Vec<PathBuf> {
+    pub(crate) fn take_completed_openfx_installs(&mut self) -> Vec<OpenFxBundleSelection> {
         std::mem::take(&mut self.completed_openfx_installs)
     }
 }
 
-fn install_bundle(helper: &Path, path: &Path, canceled: &AtomicBool) -> BundlePreparation {
+fn install_bundle(
+    helper: &Path,
+    selection: &OpenFxBundleSelection,
+    canceled: &AtomicBool,
+) -> BundlePreparation {
     let mut preparation = BundlePreparation {
         result: Ok((Vec::new(), Vec::new())),
         notices: CatalogNotices::default(),
     };
     let result = (|| {
-        let inspection = inspect_openfx_binary_with_checkpoint(helper, path, &mut || {
-            if canceled.load(Ordering::Acquire) {
-                Err(OpenFxDiscoveryError::Canceled)
-            } else {
-                Ok(())
-            }
-        })
-        .map_err(|error| error.to_string())?;
+        let inspection =
+            inspect_openfx_binary_with_checkpoint(helper, &selection.path, &mut || {
+                if canceled.load(Ordering::Acquire) {
+                    Err(OpenFxDiscoveryError::Canceled)
+                } else {
+                    Ok(())
+                }
+            })
+            .map_err(|error| error.to_string())?;
         for plugin in &inspection.plugins {
             let mut checkpoint = || {
                 if canceled.load(Ordering::Acquire) {
@@ -420,13 +466,17 @@ fn install_bundle(helper: &Path, path: &Path, canceled: &AtomicBool) -> BundlePr
                 }
             };
             checkpoint().map_err(|error| error.to_string())?;
-            let prepared = prepare_selected_openfx_filter(
+            let prepared = prepare_selected_openfx_effect(
                 helper,
                 &inspection,
                 &plugin.identifier,
+                selection.context,
                 &mut checkpoint,
             );
-            preparation.record(&plugin.identifier, prepared);
+            preparation.record(
+                &format!("{} ({:?})", plugin.identifier, selection.context),
+                prepared,
+            );
             if preparation.result.is_err() {
                 return Ok(());
             }
@@ -453,7 +503,7 @@ fn publish_bundle(
     }
     if installed == 0 {
         return Err(format!(
-            "selected bundle contains no supported OpenFX Filter: {}",
+            "selected bundle contains no supported OpenFX effect: {}",
             rejected.join("; ")
         ));
     }
@@ -502,8 +552,8 @@ mod tests {
             "mondrian-missing-openfx-{}.ofx.bundle",
             mondrian_core::ProjectId::new()
         ));
-        state.install_openfx_bundle(missing.clone()).expect("queue install");
-        state.schedule_openfx_catalog_restore(vec![missing]);
+        state.install_openfx_bundle(missing.clone().into()).expect("queue install");
+        state.schedule_openfx_catalog_restore(vec![missing.into()]);
         let deadline = Instant::now() + Duration::from_secs(5);
         while state
             .openfx_catalog
@@ -551,7 +601,7 @@ mod tests {
         let (sender, results) = mpsc::sync_channel(1);
         sender
             .send(CatalogResult {
-                path: PathBuf::from("prepared-catalog-control.ofx"),
+                selection: PathBuf::from("prepared-catalog-control.ofx").into(),
                 purpose: CatalogPurpose::Install,
                 preparation: BundlePreparation {
                     result: Ok((vec![definition], Vec::new())),
@@ -593,7 +643,7 @@ mod tests {
         assert_eq!(state.project_author_generation(), generation);
         assert_eq!(
             state.take_completed_openfx_installs(),
-            vec![PathBuf::from("prepared-catalog-control.ofx")]
+            vec![PathBuf::from("prepared-catalog-control.ofx").into()]
         );
     }
     fn notice_batch(count: usize, text: &str, id: &str) -> OpenFxDescribeNotices {
@@ -664,7 +714,7 @@ mod tests {
         };
         preparation.record(
             "supported",
-            PreparedOpenFxFilter {
+            PreparedOpenFxEffect {
                 definition: Ok(EffectDefinition::new(
                     key,
                     "Budget control",
@@ -677,7 +727,7 @@ mod tests {
         // An ordinary unsupported class retains the prior supported definition.
         preparation.record(
             "unsupported",
-            PreparedOpenFxFilter {
+            PreparedOpenFxEffect {
                 definition: Err(crate::openfx_effect::OpenFxEffectRegistrationError::Schema(
                     "owned refusal".into(),
                 )),
@@ -691,7 +741,7 @@ mod tests {
         for _ in 0..7 {
             preparation.record(
                 "unsupported",
-                PreparedOpenFxFilter {
+                PreparedOpenFxEffect {
                     definition: Err(crate::openfx_effect::OpenFxEffectRegistrationError::Schema(
                         "owned refusal".into(),
                     )),
@@ -701,7 +751,7 @@ mod tests {
         }
         preparation.record(
             "overflow",
-            PreparedOpenFxFilter {
+            PreparedOpenFxEffect {
                 definition: Err(crate::openfx_effect::OpenFxEffectRegistrationError::Schema(
                     "owned refusal".into(),
                 )),
@@ -719,7 +769,7 @@ mod tests {
 
     fn failed_result(path: &str) -> CatalogResult {
         CatalogResult {
-            path: PathBuf::from(path),
+            selection: PathBuf::from(path).into(),
             purpose: CatalogPurpose::Install,
             preparation: BundlePreparation {
                 result: Err(path.into()),
@@ -734,8 +784,9 @@ mod tests {
         assert!(sender.try_send(failed_result("first")).is_ok());
         let canceled = Arc::new(AtomicBool::new(false));
         let worker_canceled = Arc::clone(&canceled);
-        let retained = failed_result("second-result-must-not-be-cloned");
-        let allocation = retained.path.as_os_str().as_encoded_bytes().as_ptr() as usize;
+        let mut retained = failed_result("second-result-must-not-be-cloned");
+        retained.selection.context = OpenFxContext::Generator;
+        let allocation = retained.selection.path.as_os_str().as_encoded_bytes().as_ptr() as usize;
         let (started, running) = mpsc::sync_channel(1);
         let (completed, completion) = mpsc::sync_channel(1);
         let worker = thread::spawn(move || {
@@ -749,17 +800,21 @@ mod tests {
             completion.recv_timeout(Duration::from_millis(30)),
             Err(mpsc::RecvTimeoutError::Timeout)
         ));
-        assert_eq!(receiver.recv().unwrap().path, PathBuf::from("first"));
+        assert_eq!(
+            receiver.recv().unwrap().selection.path,
+            PathBuf::from("first")
+        );
         assert!(completion.recv_timeout(Duration::from_secs(2)).unwrap());
         let second = receiver.recv().unwrap();
         assert_eq!(
-            second.path,
+            second.selection.path,
             PathBuf::from("second-result-must-not-be-cloned")
         );
         assert_eq!(
-            second.path.as_os_str().as_encoded_bytes().as_ptr() as usize,
+            second.selection.path.as_os_str().as_encoded_bytes().as_ptr() as usize,
             allocation
         );
+        assert_eq!(second.selection.context, OpenFxContext::Generator);
         worker.join().unwrap();
     }
 
@@ -856,7 +911,9 @@ mod tests {
         let mut state = AppState::new();
         state.openfx_catalog = Some(OpenFxCatalog::start(helper).expect("catalog"));
         let generation = state.project_author_generation();
-        state.install_openfx_bundle(binary.clone()).expect("queue actual Describe");
+        state
+            .install_openfx_bundle(binary.clone().into())
+            .expect("queue actual Describe");
         let deadline = Instant::now() + Duration::from_secs(30);
         let mut completed = Vec::new();
         while Instant::now() < deadline {
@@ -871,7 +928,7 @@ mod tests {
             );
             thread::sleep(Duration::from_millis(5));
         }
-        assert_eq!(completed, vec![binary]);
+        assert_eq!(completed, vec![binary.into()]);
         let notices = state.notifications.iter().collect::<Vec<_>>();
         assert_eq!(
             notices.len(),

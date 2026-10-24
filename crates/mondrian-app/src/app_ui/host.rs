@@ -1368,9 +1368,9 @@ impl AppUiHost {
         let openfx_catalog_changed = self.app_state.borrow_mut().poll_openfx_catalog();
         let installed_openfx_bundles = self.app_state.borrow_mut().take_completed_openfx_installs();
         if !installed_openfx_bundles.is_empty() {
-            for path in installed_openfx_bundles {
-                let canonical_path = std::fs::canonicalize(&path).unwrap_or(path);
-                self.preferences.record_openfx_bundle(canonical_path);
+            for mut selection in installed_openfx_bundles {
+                selection.path = std::fs::canonicalize(&selection.path).unwrap_or(selection.path);
+                self.preferences.record_openfx_bundle(selection);
             }
             if let Err(error) =
                 persist_app_ui_preferences_to(&self.preferences_path, &self.preferences)
@@ -3474,6 +3474,7 @@ mod tests {
                 crate::app::product_action::VisualEffectProductAction::InstallOpenFxBundle(
                     crate::app::product_action::VisualEffectInstallOpenFxBundlePayload {
                         path: missing,
+                        context: crate::openfx_host::OpenFxContext::Filter,
                     },
                 ),
             )
