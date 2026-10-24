@@ -1,6 +1,6 @@
 # Render native OpenFX domains before viewport publication
 
-Status: candidate, integration held by a resource-admission regression.
+Status: finite Windows x64 CPU slice qualified; broader spatial scheduling remains partial.
 
 The existing Effects CPU value is a fixed, zero-origin viewport. An OFX effect's
 canonical RoD, its enclosing pixel RoD and that viewport are different facts.
@@ -23,52 +23,56 @@ values are preserved. Empty support produces transparent output without starting
 a sequence requiring a nonexistent Render action.
 
 The matching full-viewport path uses existing storage. Other domains use one
-action-local allocation, bounded by 8192 per axis and 128 MiB (the existing image
-limits). Charge that maximum in processor active storage before native execution;
-retain no scratch/cache across frames. This conservative grant can limit concurrent
-processors despite small actual images. Allocator administration and plugin-owned
-memory remain outside logical payload accounting. Reject malformed, unbounded,
-oversized or unsupported non-multiresolution domains before Render. Native protocol
-13 prevents reuse of workers with the former fixed-image semantics.
+action-local allocation, bounded by 8192 per axis and 128 MiB payload. Retain no
+scratch/cache across frames. Reject malformed, unbounded, oversized or unsupported
+non-multiresolution domains before Render. Native wire 14 distinguishes the
+current callback/report contract from older workers. Allocator administration and
+plugin-owned memory remain outside logical payload accounting.
 
 This is viewport publication, not a variable-domain Effects value or full RoI
 scheduler. Pixels outside the viewport are not propagated downstream. Full-frame
 native work can exceed requested viewport work and needs later measurement. GPU,
 temporal fetch, tiled execution and multiresolution render scales remain separate.
 
-## Resource admission must be revised before integration
+## Authorize actual transient storage through the existing bank
 
-Native finite-domain pixels, empty/default/error handling, source-free Graph
-alpha transitions, published Constant Size mode and current image ownership have
-passed Windows checks. The existing Invert Graph at its original 128 MiB working
-budget fails before DSP: the new fixed scratch reservation alone is 128 MiB,
-although its full-viewport image requires no scratch. Raising that test budget
-would conceal a regression in an already supported path. Do not integrate this
-candidate until that original gate passes unchanged.
+The initial fixed 128 MiB reservation broke the original Invert Graph at its
+unchanged 128 MiB working budget, even though that viewport requires no scratch.
+The reservation was removed rather than increasing the test budget.
 
-The immutable provider storage declaration cannot know a parameter/time-dependent
-native RoD. A local allocator cap cannot authorize memory beyond the Effects bank's
-grant. The next contract therefore needs invocation-local transient headroom from
-the existing bank, after static active storage, resident siblings, frame staging
-and feedback are charged. The native request must carry that bounded grant and
-refuse excess before allocating or calling BeginSequenceRender/Render. Report the
-actual transient peak to the same bank; clear the borrow on every outcome/panic.
-No second budget owner, retained scratch cache, author parameter or executor.
+`EffectProcessorResources` is an invocation's borrowed view of the existing bank.
+The provider requests its complete simultaneous transient requirement before
+allocation. After static active storage and feedback are charged, the bank evicts
+optional sibling residents when that can make the request fit and charges the
+granted peak. Intrinsically over-budget requests preserve valid residents. The
+borrow ends on every outcome and panic. No second budget owner, executor, author
+state or retained scratch is added.
 
-`EffectProcessorResources` is the processing invocation's borrowed view of the
-same bank. A provider requests its complete simultaneous transient requirement
-before allocation. The bank first evicts optional sibling residents when needed,
-then charges the granted peak alongside static active storage and feedback.
-Intrinsic over-budget requests preserve valid residents. The borrow cannot
-escape processing or panic unwinding. The OFX bridge must service this request
-on the original parent execution thread through the existing worker control
-channel; an unqualified maximum-size reservation is not the resource contract.
+One bounded callback request uses the existing worker pump. The original parent
+execution thread authorizes it through the borrowed bank; owner, invocation and
+byte count must match exactly. Cancellation wakes the callback and the original
+deadline continues running. Allocation and BeginSequenceRender/Render require
+authorization. Post-preflight refusal is a distinct disposition: parameter/RoD
+metadata actions may have run, while DSP and output publication have not. It
+does not claim HostResourceRefused's no-native-action guarantee. Actual feedback
+returns to the same bank, which decides retention; valid plugins are not
+quarantined as processing faults merely because resource admission failed.
 
-Budget refusal after native parameter/RoD preflight is a distinct disposition:
-preflight callbacks may already have run. It must not claim the existing
-HostResourceRefused guarantee that no native action occurred, nor quarantine a
-valid plugin as a DSP fault. The bank alone decides retention. Native wire and
-report validation, exact/one-byte-short grants, prior-frame publication safety,
-cancellation/panic cleanup, sibling accounting and original small-budget Filter
-regressions must all be verified. Until then the fixed reservation remains an
-explicit unresolved candidate defect, not an accepted production policy.
+## Qualification
+
+Ordinary Product465b552e (dev opt1/debug2/default features) passes twelve actual
+native gates, including the original unchanged128MiB Invert Graph, finite-domain
+Direct/Graph, published Constant Size and CheckerBoard, prior Generator/contextual/
+Invert paths and two public author/history/save/reopen flows. Exact319/320-byte
+authorization proves refusal before DSP, unchanged mapped output and same-owner
+reuse. Final Graph test parent e53b7ae1 proves retained feedback/owner, no definition
+quarantine, no Begin/Render/End on denial and a successful subsequent frame.
+All have exit0, empty stderr and clean original180s execution/2s cleanup supervision.
+
+Effects360, App host99/provider10, ordinary Renderer672 and current native image-
+ownership20 checks pass. Host62/Renderer39 ignored tests remain unverified. Native
+conversion checks include the exact128MiB limit and failure-preserving errors.
+These finite Windows CPU results do not qualify whole-heap accounting, realtime,
+comparative performance, other platforms or the spatial/temporal/GPU/Timeline
+capabilities excluded above. GL and intermittent F06 exit failures remain open;
+the protected integration branch is not advanced by this slice.
