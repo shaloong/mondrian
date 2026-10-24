@@ -472,76 +472,62 @@ size or image format, quality and build profile. Measure warmup, processing and
 host overhead, percentiles/deadlines and resource costs as needed; a crash timeout
 is not an audio deadline, and a wall-clock gate duration is not DSP cost.
 
-Current Windows release measurement (2026-10-25, compiled source `70aaf7cd`): the
-original public resident Basic gate completes all four cases, excluding32 warmup
-frames and measuring600 frames per case. Release opt3/default features and the
-MSVC official Basic fixture use unchanged80% frame-stage budgets. The timed public
-call includes admission, identity verification, transport, native processing and
-output materialization; its independent every-pixel HDR/negative/alpha oracle is
-outside the timer. Same-Worker, explicit shutdown and process settlement checks
-pass with no functional errors. **All four performance gates fail.**
+Current Windows release measurement (2026-10-25, compiled source `4f3ffda2`):
+the original public resident Basic gate completes all four cases, excluding32
+warmup frames and measuring600 frames per case. Release opt3/default features,
+MSVC official Basic and unchanged80% frame-stage budgets are used. The timed
+public call includes admission, identity, transport, native processing and output
+materialization; the independent every-pixel HDR/negative/alpha oracle is outside
+the timer. Same-Worker, shutdown and process settlement checks pass without
+functional errors. **All four performance gates still fail.**
 
 | Case | Stage budget ms | Before p50 ms | Current p50 ms | p95 ms | p99 ms | Max ms | Stage misses |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 1080p30 | 26.67 | 63.05 | 44.15 | 60.03 | 68.33 | 76.10 | 600/600 |
-| UHD30 | 26.67 | 233.88 | 143.56 | 286.16 | 314.17 | 360.00 | 600/600 |
-| 1080p60 | 13.33 | 67.37 | 46.05 | 63.53 | 71.67 | 80.89 | 600/600 |
-| UHD60 | 13.33 | 233.45 | 145.60 | 182.24 | 222.28 | 1248.47 | 600/600 |
+| 1080p30 | 26.67 | 63.05 | 35.48 | 37.34 | 38.44 | 41.59 | 600/600 |
+| UHD30 | 26.67 | 233.88 | 121.18 | 125.47 | 127.64 | 163.83 | 600/600 |
+| 1080p60 | 13.33 | 67.37 | 35.17 | 37.94 | 43.41 | 45.93 | 600/600 |
+| UHD60 | 13.33 | 233.45 | 121.17 | 124.36 | 126.28 | 161.39 | 600/600 |
 
-The declared whole-test ceiling600s and owner cleanup2s do not change per-frame
-budgets or the original shared100ms plugin shutdown. Before p50 uses `3fd7463c`
-with the same MSVC Basic, hardware, profile, features and sampling conditions;
-the observed median reduction is about30-39%, without a deadline PASS. UHD60's
-single maximum is worse than the former481.50ms; its1248.47ms outlier has no
-established cause or latency-bound qualification. The original collector passes.
-Historical r30 used MinGW Basic/validation features, so it is
-not a matched before/after comparison. No phase attribution, mature-host,
-full-NLE, GPU, realtime or other-platform performance qualification is implied.
-Further optimization and tail investigation require attribution, not a budget
-increase or repetition of the same failed matrix.
+Before p50 uses `3fd7463c` with the same hardware, MSVC Basic, release/default
+features and sampling conditions. The observed combined median reduction is
+about44-48%; the latest inline slice reduces medians about16-24% relative to the
+preceding `70aaf7cd` normal build. These are whole-call observations, not pure DSP
+or a mature-host comparison. Historical r30 used MinGW/validation features and
+is not a matched baseline. Whole-test600s and owner cleanup2s do not change the
+frame budgets or original shared100ms plugin shutdown. The earlier UHD60
+1248.47ms maximum is not reproduced or explained; no long-run latency bound,
+realtime, full-NLE, GPU or other-platform performance qualification is granted.
 
-Before this optimization, the existing release phase carrier at `2cef842a`
-completes paired ordinary/
-instrumented1080p and UHD controls, each32 warmup/600 samples, with the
-pre-optimization default-feature Worker at `3fd7463c`. All pixel, fixed parent/child/native correlation,
-shutdown and process-settlement assertions pass. Ordinary p50 is62.98/233.13ms;
-instrumented p50 is63.07/232.75ms. Mean native session admission is15.95/63.52ms
-and output validation15.12/59.17ms, together about49%/52% of whole invocation.
-Mean PluginRender is10.82/42.94ms and includes SDK callbacks and output clear;
-parent identity before+after is about0.97/1.00ms. Native time nests inside child
-dispatch and parent await, so these levels are not additive. The local MSVC/UCRT
-float classifier calls `_fdtest`; preserving finite-value admission while avoiding
-per-component CRT calls was the resulting optimization hypothesis. At `70aaf7cd`,
-one IEEE binary32 representation classifier replaces those calls in the complete
-native input/output scans, preserving finite/NaN/Infinity and original alpha
-rules, with no protocol, allocation, resource or cache-authority change. The
-MSVC Release FramePixels target passes75,776 standard-predicate/unchanged-bit
-controls. The fresh default release Product and original integration parent pass
-six exact native gates: authored Basic pixels, repeated resident isolation,
-partial-block/changed-raster transfer, Direct/Graph alpha negotiation, invalid/
-nonfinite refusal with retirement, and HDR disk-cache/nested/opaque/OCIO output.
-All six have exit0, empty stderr and original180s/2s ownership settlement; shared
-100ms shutdown remains. The default integration invocation executes0 tests with
-123 ignored, so it adds no ordinary-test coverage. Default release also prints11
-existing diagnostic-only unused-item warnings; no new strict warning-free result
-is claimed. This finite behavior and median improvement are verified; the four
-deadline gates still fail. Broad third-party, realtime, long-run stability and
-other-platform qualification remain separate.
+Two measured causes were addressed without removing admission. The native MSVC
+float classifier called `_fdtest` per component; `70aaf7cd` replaces it with an
+IEEE binary32 representation check. Its unchanged-bit/standard-predicate
+FramePixels control previously passed75,776 cases; that C++ source is unchanged
+in this slice. Parent output admission exposed a second issue: final machine
+code of the ordinary materializer called the shared Rust `validate_sample` once
+per pixel with a result buffer, while diagnostic call-site optimization differed.
+Actual UHD owner/process checkpoints average about0.17ms for128 calls, insufficient
+to explain that gap. `4f3ffda2` adds only an inline hint and rationale to the
+existing predicate, making its body available to generic cross-crate consumers.
+The separate named predicate and direct calls disappear from the fresh normal
+parent, and paired ordinary/instrumented timing converges. All numeric/alpha
+rules, checkpoint positions, errors, allocations, transport and ownership remain
+intact. Both typed APIs scan once. Native output validation precedes
+EndSequenceRender; parent admission remains the independent publication boundary,
+not a redundant scan to remove. No identity cache or GPU-interoperability claim
+is introduced.
 
-Post-classifier paired ordinary/instrumented release controls at60fps complete
-32 warmup/600 samples for1080p and UHD with unchanged pixel, correlation and
-lifecycle assertions. Instrumented UHD mean parent output copy/admission is
-24.84/21.13ms; native input/output validation is14.19/16.72ms and PluginRender
-42.49ms. Native phases nest inside await and must not be added twice. The earlier
-1248.47ms maximum is not reproduced or resolved. The validation-only
-`frame_admission_diagnostic` calls the actual materializer with counter-only
-checkpoints and owned seed bytes: UHD output admission p50 is6.68ms versus6.38ms
-for a borrowed recheck of the same output. Neither API/error-type, callback-form,
-order nor1MiB-copy controls reproduce the full-session difference. These are
-attribution controls, not production frame-budget passes; actual process/owner
-checkpoints and full-session context remain to be isolated. Both typed APIs scan
-once, and native validation precedes EndSequenceRender; parent validation remains
-the independent publication boundary. No scan, ownership or cache rule is removed.
+Current verification includes361 Effects release library tests with0 failed and
+0 ignored, the materializer cancellation/frontier control, and six exact native
+gates on the freshly built default release Product and original integration
+parent: authored Basic pixels, repeated resident isolation, partial-block/raster
+transfer, Direct/Graph alpha negotiation, invalid/nonfinite refusal with
+retirement, and HDR disk-cache/nested/opaque/stock-OCIO output. All six have exit0,
+empty stderr and original180s/2s ownership settlement; shared100ms shutdown remains.
+The ignored integration arena adds no ordinary-test coverage. No new workspace-wide
+or strict-Clippy qualification is claimed. Finite behavior and measured median
+improvement are verified; deadlines, the earlier tail, broad third-party/GUI/RT
+and other-platform qualification remain open. Further optimization requires a new
+measured cause, not repetition of the unchanged failed matrix or a budget increase.
 
 Keep concise current conclusions, useful reproduction inputs and actionable open
 issues. Do not accumulate historical executable copies, source-hash inventories,
