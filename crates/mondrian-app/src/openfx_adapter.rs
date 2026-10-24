@@ -32,6 +32,7 @@ const IMAGE_EFFECT_API: &str = "OfxImageEffectPluginAPI";
 
 /// One exact image-effect plugin header exported from an installed OFX binary.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct OpenFxPluginDescriptor {
     /// Globally unique plugin identifier supplied by the native binary.
     pub identifier: String,
@@ -52,6 +53,48 @@ pub struct OpenFxBinaryInspection {
     pub binary_sha256: String,
     /// Image-effect API v1 descriptors; no render contract is implied.
     pub plugins: Vec<OpenFxPluginDescriptor>,
+}
+
+impl OpenFxPluginDescriptor {
+    pub(crate) fn validate(&self) -> Result<(), OpenFxDiscoveryError> {
+        if self.api_version != 1 || !valid_identifier(&self.identifier) {
+            return Err(invalid("invalid OpenFX image-effect descriptor"));
+        }
+        Ok(())
+    }
+}
+
+impl OpenFxBinaryInspection {
+    /// Identifier-only callers must never silently choose a major/minor version.
+    pub(crate) fn unique_plugin(
+        &self,
+        identifier: &str,
+    ) -> Result<&OpenFxPluginDescriptor, OpenFxDiscoveryError> {
+        let mut matches = self.plugins.iter().filter(|p| p.identifier == identifier);
+        let plugin = matches
+            .next()
+            .ok_or_else(|| invalid("selected plugin is absent from the pinned binary"))?;
+        if matches.next().is_some() {
+            return Err(invalid(
+                "plugin identifier has multiple versions; an exact descriptor is required",
+            ));
+        }
+        plugin.validate()?;
+        Ok(plugin)
+    }
+
+    pub(crate) fn require_plugin(
+        &self,
+        plugin: &OpenFxPluginDescriptor,
+    ) -> Result<(), OpenFxDiscoveryError> {
+        plugin.validate()?;
+        if self.plugins.iter().filter(|p| *p == plugin).count() != 1 {
+            return Err(invalid(
+                "exact plugin descriptor is absent or duplicated in the pinned binary",
+            ));
+        }
+        Ok(())
+    }
 }
 
 /// Failure to inspect a native OFX binary without trusting its process.
@@ -518,6 +561,34 @@ fn unavailable(reason: impl Into<String>) -> OpenFxDiscoveryError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn exact_versions_are_independent_of_export_order_and_id_only_refuses_ambiguity() {
+        let plugin = |major, minor| OpenFxPluginDescriptor {
+            identifier: "test.versioned".into(),
+            api_version: 1,
+            version_major: major,
+            version_minor: minor,
+        };
+        let mut inspection = OpenFxBinaryInspection {
+            binary_path: PathBuf::from("must-not-load.ofx"),
+            binary_sha256: "a".repeat(64),
+            plugins: vec![plugin(2, 0), plugin(3, 0), plugin(1, 0)],
+        };
+        assert!(inspection.unique_plugin("test.versioned").is_err());
+        for major in [1, 2, 3] {
+            inspection.require_plugin(&plugin(major, 0)).unwrap();
+        }
+        assert!(inspection.require_plugin(&plugin(4, 0)).is_err());
+        assert!(inspection.require_plugin(&plugin(1, 1)).is_err());
+        inspection.plugins.push(plugin(1, 0));
+        assert!(inspection.require_plugin(&plugin(1, 0)).is_err());
+        inspection.plugins = vec![plugin(u32::MAX, u32::MAX)];
+        assert_eq!(
+            inspection.unique_plugin("test.versioned").unwrap(),
+            &plugin(u32::MAX, u32::MAX)
+        );
+    }
 
     #[test]
     fn canceled_discovery_never_resolves_or_spawns_an_invalid_selection() {

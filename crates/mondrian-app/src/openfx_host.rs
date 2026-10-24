@@ -6,12 +6,12 @@ mod description;
 use description::{describe_in_worker, DescribeRequest, DescribeResponse};
 pub use description::{
     describe_openfx_filter, describe_openfx_filter_with_checkpoint, describe_openfx_generator,
-    run_openfx_catalog_describe_worker, run_openfx_describe_worker,
+    describe_openfx_selected, run_openfx_catalog_describe_worker, run_openfx_describe_worker,
     OPENFX_CATALOG_DESCRIBE_WORKER_ARGUMENT,
 };
 pub(crate) use description::{
-    observe_openfx_catalog_with_checkpoint, observe_openfx_with_checkpoint, OpenFxDescribeNotices,
-    OpenFxDescriptionObservation,
+    observe_openfx_catalog_with_checkpoint, observe_openfx_with_checkpoint,
+    observe_selected_openfx_with_checkpoint, OpenFxDescribeNotices, OpenFxDescriptionObservation,
 };
 mod resident;
 pub use resident::{
@@ -40,11 +40,11 @@ use serde::{de::DeserializeOwned, Deserialize, Serialize};
 
 use crate::openfx_adapter::{
     resolve_openfx_binary, sha256_file, sha256_file_with_checkpoint, OpenFxBinaryInspection,
-    OpenFxDiscoveryError,
+    OpenFxDiscoveryError, OpenFxPluginDescriptor,
 };
 
 /// Hidden product executable mode for selected filter description.
-pub const OPENFX_DESCRIBE_WORKER_ARGUMENT: &str = "--internal-openfx-describe-v1";
+pub const OPENFX_DESCRIBE_WORKER_ARGUMENT: &str = "--internal-openfx-describe-v2";
 const REQUEST_ENV: &str = "MONDRIAN_INTERNAL_OPENFX_DESCRIBE_REQUEST";
 const RESPONSE_ENV: &str = "MONDRIAN_INTERNAL_OPENFX_DESCRIBE_RESPONSE";
 const MAX_FRAME_BYTES: usize = 128 * 1024 * 1024;
@@ -685,6 +685,8 @@ unsafe extern "C" {
         binary: *const c_char,
         bundle: *const c_char,
         identifier: *const c_char,
+        version_major: u32,
+        version_minor: u32,
         selected_context: c_int,
         label: *mut c_char,
         label_capacity: usize,
@@ -697,6 +699,8 @@ unsafe extern "C" {
         binary: *const c_char,
         bundle: *const c_char,
         identifier: *const c_char,
+        version_major: u32,
+        version_minor: u32,
         selected_context: c_int,
         image_namespace: *const u8,
         input: *const c_void,
@@ -752,6 +756,7 @@ impl NativeSession {
             binary,
             bundle,
             identifier,
+            (1, 0), // This test helper serves the pinned v1.0 BasicGain/geometry fixtures.
             input,
             info,
             parameters,
@@ -765,6 +770,7 @@ impl NativeSession {
         binary: &CString,
         bundle: &CString,
         identifier: &CString,
+        version: (u32, u32),
         input: &[u8],
         info: &NativeFrameInfo,
         parameters: &[NativeParameter],
@@ -784,6 +790,8 @@ impl NativeSession {
                 binary.as_ptr(),
                 bundle.as_ptr(),
                 identifier.as_ptr(),
+                version.0,
+                version.1,
                 context.native(),
                 owner.0.as_bytes().as_ptr(),
                 if context == OpenFxContext::Generator {
@@ -1425,14 +1433,12 @@ fn validate_parameter_values<'a>(
     Ok(())
 }
 
-fn verified_selection(
+fn verified_plugin_selection(
     inspection: &OpenFxBinaryInspection,
-    plugin_identifier: &str,
+    plugin: &OpenFxPluginDescriptor,
     checkpoint: &mut impl FnMut() -> Result<(), OpenFxHostError>,
 ) -> Result<PathBuf, OpenFxHostError> {
-    if !inspection.plugins.iter().any(|plugin| plugin.identifier == plugin_identifier) {
-        return Err(invalid("selected plugin is absent from the pinned binary"));
-    }
+    inspection.require_plugin(plugin)?;
     let bundle = bundle_for_binary(&inspection.binary_path)?;
     if resolve_openfx_binary(&bundle)? != inspection.binary_path
         || sha256_file_with_checkpoint(&inspection.binary_path, checkpoint)?
@@ -2497,7 +2503,12 @@ pub(crate) mod shared_frame_tests {
             binary_path: path.clone(),
             bundle_path: bundle.to_path_buf(),
             binary_sha256: sha256_file(&path).expect("fixture identity"),
-            plugin_identifier: "uk.co.thefoundry.BasicGainPlugin".into(),
+            plugin: OpenFxPluginDescriptor {
+                identifier: "uk.co.thefoundry.BasicGainPlugin".into(),
+                api_version: 1,
+                version_major: 1,
+                version_minor: 0,
+            },
         })
         .expect("actual SDK compound description");
         let DescribeResponse::Success { description, .. } = described else {
@@ -2690,7 +2701,12 @@ pub(crate) mod shared_frame_tests {
                 binary_path: path.clone(),
                 bundle_path: bundle_path.to_path_buf(),
                 binary_sha256: sha256_file(&path).expect("probe fingerprint"),
-                plugin_identifier: identifier.to_owned(),
+                plugin: OpenFxPluginDescriptor {
+                    identifier: identifier.to_owned(),
+                    api_version: 1,
+                    version_major: 1,
+                    version_minor: 0,
+                },
             })
             .expect("probe description");
             let descriptor_rejected = matches!(mode.as_str(), "required" | "temporal");

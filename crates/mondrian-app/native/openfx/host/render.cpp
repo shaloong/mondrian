@@ -239,24 +239,30 @@ static bool admitsParameterDefaults(const OFX::Host::ImageEffect::Descriptor& de
 static OFX::Host::ImageEffect::ImageEffectPlugin* selectFilter(
     OFX::Host::ImageEffect::PluginCache& cache,
     OFX::Host::PluginBinary& binary,
-    const char* identifier, int& selectionStatus)
+    const char* identifier, uint32_t versionMajor, uint32_t versionMinor, int& selectionStatus)
 {
   selectionStatus = 3;
+  OFX::Host::ImageEffect::ImageEffectPlugin* selected = nullptr;
   for (int index = 0; index < binary.getNPlugins(); ++index) {
     OFX::Host::Plugin& candidate = binary.getPlugin(index);
-    if (candidate.getIdentifier() != identifier) { continue; }
-    auto* selected = dynamic_cast<OFX::Host::ImageEffect::ImageEffectPlugin*>(&candidate);
+    if (candidate.getIdentifier() != identifier ||
+        static_cast<uint32_t>(candidate.getVersionMajor()) != versionMajor ||
+        static_cast<uint32_t>(candidate.getVersionMinor()) != versionMinor) { continue; }
+    // Exact duplicate headers are invalid. Selection never falls back to a
+    // different version, and no foreign action precedes this decision.
+    if (selected) { return nullptr; }
+    selected = dynamic_cast<OFX::Host::ImageEffect::ImageEffectPlugin*>(&candidate);
     if (!selected) { return nullptr; }
-    if (!selected->getPluginHandle()) { selectionStatus = 7; return nullptr; }
-    std::string reason;
-    if (!cache.pluginSupported(&candidate, reason)) {
-      std::cerr << reason << std::endl;
-      return nullptr;
-    }
-    cache.confirmPlugin(&candidate);
-    return cache.getPluginById(candidate.getIdentifier());
   }
-  return nullptr;
+  if (!selected) { return nullptr; }
+  if (!selected->getPluginHandle()) { selectionStatus = 7; return nullptr; }
+  std::string reason;
+  if (!cache.pluginSupported(selected, reason)) {
+    std::cerr << reason << std::endl;
+    return nullptr;
+  }
+  cache.confirmPlugin(selected);
+  return selected;
 }
 
 static bool accepted(OfxStatus status)
@@ -620,6 +626,7 @@ struct MondrianOpenFxSession {
   }
 
   int initialize(const char* path, const char* bundle, const char* identifier,
+                 uint32_t versionMajor, uint32_t versionMinor,
                  const MondrianOpenFx::FrameState& initial, int selectedContext,
                  const MondrianOpenFxParameter* parameters, int count) {
     generator = selectedContext == 1;
@@ -639,7 +646,7 @@ struct MondrianOpenFxSession {
     const int enumerated = binary->initialize(cache);
     if (enumerated != 0) { return enumerated; }
     int selectionStatus;
-    auto* plugin = selectFilter(imageCache.get(), *binary, identifier, selectionStatus);
+    auto* plugin = selectFilter(imageCache.get(), *binary, identifier, versionMajor, versionMinor, selectionStatus);
     if (!plugin) { return selectionStatus; }
     auto* descriptor = plugin->getContext(contextName);
     if (!descriptor || !admitsCpu(*descriptor) || !admitsIndependentFrames(*descriptor, generator) || !admitsParameterDefaults(*descriptor)) { return 7; }
@@ -941,7 +948,7 @@ struct MondrianOpenFxSession {
 };
 
 static int describe(MondrianOpenFx::Host& host, const char* binary, const char* bundle,
-                    const char* identifier, int selectedContext,
+                    const char* identifier, uint32_t versionMajor, uint32_t versionMinor, int selectedContext,
                     char* label, size_t labelCapacity, size_t* labelLength,
                     MondrianOpenFxParameterCallback callback, void* context)
 {
@@ -956,7 +963,7 @@ static int describe(MondrianOpenFx::Host& host, const char* binary, const char* 
   const int enumerated = selectedBinary.initialize(cache);
   if (enumerated != 0) { return enumerated; }
   int selectionStatus;
-  auto* plugin = selectFilter(imageEffectPluginCache.get(), selectedBinary, identifier, selectionStatus);
+  auto* plugin = selectFilter(imageEffectPluginCache.get(), selectedBinary, identifier, versionMajor, versionMinor, selectionStatus);
   if (!plugin) { return selectionStatus; }
   const bool generator = selectedContext == 1;
   auto* descriptor = plugin->getContext(generator ? kOfxImageEffectContextGenerator : kOfxImageEffectContextFilter);
@@ -1089,7 +1096,8 @@ static int describe(MondrianOpenFx::Host& host, const char* binary, const char* 
 }
 
 extern "C" int mondrian_openfx_describe(
-    const char* binary, const char* bundle, const char* identifier, int selectedContext,
+    const char* binary, const char* bundle, const char* identifier,
+    uint32_t versionMajor, uint32_t versionMinor, int selectedContext,
     char* label, size_t labelCapacity, size_t* labelLength,
     MondrianOpenFxParameterCallback callback, void* context,
     MondrianOpenFxDescribeNotices* notices) noexcept
@@ -1102,7 +1110,7 @@ extern "C" int mondrian_openfx_describe(
     MondrianOpenFx::Host host;
     int status;
     try {
-      status = describe(host, binary, bundle, identifier, selectedContext, label, labelCapacity,
+      status = describe(host, binary, bundle, identifier, versionMajor, versionMinor, selectedContext, label, labelCapacity,
                         labelLength, callback, context);
     } catch (const ImageEffectHostBusy&) { status = MONDRIAN_OPENFX_HOST_BUSY; }
     catch (const std::exception& error) {
@@ -1120,7 +1128,8 @@ extern "C" int mondrian_openfx_describe(
 }
 
 extern "C" int mondrian_openfx_session_create(
-    const char* binary, const char* bundle, const char* identifier, int selectedContext,
+    const char* binary, const char* bundle, const char* identifier,
+    uint32_t versionMajor, uint32_t versionMinor, int selectedContext,
     const uint8_t* image_namespace,
     const void* input, size_t bytes, const MondrianOpenFxFrameInfo* info,
     const MondrianOpenFxParameter* parameters, int count,
@@ -1140,7 +1149,7 @@ extern "C" int mondrian_openfx_session_create(
     const int loaded = loadFrame(initial, input, bytes, *info, selectedContext == 1);
     if (loaded != 0) { return loaded; }
     auto session = std::make_unique<MondrianOpenFxSession>();
-    const int status = session->initialize(binary, bundle, identifier, initial, selectedContext,
+    const int status = session->initialize(binary, bundle, identifier, versionMajor, versionMinor, initial, selectedContext,
                                           parameters, count);
     if (status == 0) { *output = session.release(); }
     return status;

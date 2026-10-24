@@ -179,4 +179,19 @@ parameter authority, Audio DAG or Render Graph rewrite is required. Validate an
 owned out-of-order same-identifier/multiple-major fixture through metadata and
 actual pixels, then rerun the original real Misc install/restore/Timeline gate,
 the new crash/cancel controls and affected single-version native regressions.
-This contract correction and all real-bundle acceptance remain pending.
+The implementation candidate now uses the existing full descriptor in Catalog
+schema2, Describe schema5 (`describe-v2`) and resident wire15 (`session-v13`).
+The native selector matches identifier/major/minor before Load, rejects missing
+or duplicate exact headers, and returns that selected plugin directly. Factories
+retain the same descriptor; identifier-only APIs refuse ambiguity and explicit
+descriptor APIs cover all versions. Notices are version-bound too. Effect keys
+keep their existing formula; only the OFX execution-contract identity advances
+to prevent old selection semantics from retaining stale compiled/cache results.
+Project fields are preserved; fidelity of projects authored under the former
+wrong-version behavior is not silently inferred or repaired.
+
+Owned export order2/3/1 now has a Catalog→Graph pixel regression: the uncorrected
+candidate fails1.54s at manifest admission, with clean process settlement. The
+diagnostic-only timing tests were removed after measurements were compacted.
+The corrected implementation, stale-protocol controls, actual per-version pixels
+and all real-bundle acceptance remain pending qualification.

@@ -21,12 +21,12 @@ use mondrian_effects::{
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::openfx_adapter::OpenFxBinaryInspection;
+use crate::openfx_adapter::{OpenFxBinaryInspection, OpenFxPluginDescriptor};
 use crate::openfx_host::{
-    observe_openfx_with_checkpoint, OpenFxContext, OpenFxDescribeNotices,
-    OpenFxDescriptionObservation, OpenFxDoubleType, OpenFxFilterDescription, OpenFxFilterSession,
-    OpenFxHostError, OpenFxParameterBinding, OpenFxParameterValue, OpenFxRenderTiming,
-    OpenFxStringMode, OPENFX_MAX_STRING_BYTES,
+    observe_openfx_with_checkpoint, observe_selected_openfx_with_checkpoint, OpenFxContext,
+    OpenFxDescribeNotices, OpenFxDescriptionObservation, OpenFxDoubleType, OpenFxFilterDescription,
+    OpenFxFilterSession, OpenFxHostError, OpenFxParameterBinding, OpenFxParameterValue,
+    OpenFxRenderTiming, OpenFxStringMode, OPENFX_MAX_STRING_BYTES,
 };
 
 /// A selected context cannot be represented by the admitted visual effect contract.
@@ -63,7 +63,7 @@ struct OpenFxGraphParameters {
 struct OpenFxProcessorFactory {
     helper: PathBuf,
     inspection: OpenFxBinaryInspection,
-    identifier: String,
+    plugin: OpenFxPluginDescriptor,
     context: OpenFxContext,
 }
 
@@ -158,10 +158,10 @@ impl EffectFloatProcessorFactory for OpenFxProcessorFactory {
             })?;
         let result = {
             let mut checkpoint = || processor_checkpoint(control);
-            OpenFxFilterSession::prepare_in_context(
+            OpenFxFilterSession::prepare_selected_in_context(
                 &self.helper,
                 &self.inspection,
-                &self.identifier,
+                &self.plugin,
                 request.width,
                 request.height,
                 request.format,
@@ -414,6 +414,28 @@ pub fn register_selected_openfx_generator(
     Ok(effect_type)
 }
 
+/// Register an explicitly selected exported version in the existing registry.
+pub fn register_selected_openfx_version(
+    helper: &Path,
+    inspection: &OpenFxBinaryInspection,
+    plugin: &OpenFxPluginDescriptor,
+    context: OpenFxContext,
+) -> Result<EffectType, OpenFxEffectRegistrationError> {
+    let observed = observe_selected_openfx_with_checkpoint(
+        helper,
+        inspection,
+        plugin,
+        context,
+        &mut || Ok(()),
+    );
+    let definition =
+        prepare_observed_openfx_effect(helper, inspection, &plugin.identifier, context, observed)
+            .definition?;
+    let kind = effect_type_for_plugin(inspection, plugin, context)?;
+    register_effect_definition(definition)?;
+    Ok(kind)
+}
+
 /// Cold preparation facts; notices never enter a definition or its cache.
 pub(crate) struct PreparedOpenFxEffect {
     pub definition: Result<EffectDefinition, OpenFxEffectRegistrationError>,
@@ -480,19 +502,22 @@ pub(crate) fn prepare_observed_openfx_effect(
         Err(error) => return PreparedOpenFxEffect { definition: Err(error.into()), notices: None },
     };
     let definition = (|| {
+        let plugin = &observed.notices.requested_plugin;
+        if plugin.identifier != plugin_identifier {
+            return Err(OpenFxEffectRegistrationError::Schema(
+                "observed plugin identity differs from selection".into(),
+            ));
+        }
         let description = observed.outcome?;
-        let effect_type = match context {
-            OpenFxContext::Filter => effect_type_for_filter(inspection, plugin_identifier)?,
-            OpenFxContext::Generator => effect_type_for_generator(inspection, plugin_identifier)?,
-        };
-        let definition = build_definition_in_context(
+        let effect_type = effect_type_for_plugin(inspection, plugin, context)?;
+        build_definition_in_context(
             helper_executable,
             inspection,
+            plugin,
             description,
             &effect_type,
             context,
-        )?;
-        Ok(definition)
+        )
     })();
     PreparedOpenFxEffect { definition, notices: Some(observed.notices) }
 }
@@ -504,9 +529,13 @@ fn build_definition(
     description: OpenFxFilterDescription,
     effect_type: &EffectType,
 ) -> Result<EffectDefinition, OpenFxEffectRegistrationError> {
+    let plugin = inspection
+        .unique_plugin(&description.identifier)
+        .map_err(OpenFxHostError::from)?;
     build_definition_in_context(
         helper_executable,
         inspection,
+        plugin,
         description,
         effect_type,
         OpenFxContext::Filter,
@@ -516,17 +545,17 @@ fn build_definition(
 fn build_definition_in_context(
     helper_executable: &Path,
     inspection: &OpenFxBinaryInspection,
+    plugin: &OpenFxPluginDescriptor,
     description: OpenFxFilterDescription,
     effect_type: &EffectType,
     context: OpenFxContext,
 ) -> Result<EffectDefinition, OpenFxEffectRegistrationError> {
-    let plugin = inspection
-        .plugins
-        .iter()
-        .find(|plugin| plugin.identifier == description.identifier)
-        .ok_or_else(|| {
-            OpenFxEffectRegistrationError::Schema("selected plugin is missing".into())
-        })?;
+    inspection.require_plugin(plugin).map_err(OpenFxHostError::from)?;
+    if plugin.identifier != description.identifier {
+        return Err(OpenFxEffectRegistrationError::Schema(
+            "description identity differs from selection".into(),
+        ));
+    }
     let mut properties = PropertyBag::default();
     let mut bound = Vec::with_capacity(description.parameters.len());
     let mut templates = Vec::new();
@@ -770,14 +799,16 @@ fn build_definition_in_context(
         },
     );
 
+    // Native selection semantics changed; invalidate old execution identities
+    // without changing authored Effect keys or any unrelated graph identity.
     let version = format!(
-        "{}.{}:{}",
+        "ofx-exact-version-v1:{}.{}:{}",
         plugin.version_major, plugin.version_minor, inspection.binary_sha256
     );
     let processor = Arc::new(OpenFxProcessorFactory {
         helper: helper_executable.to_path_buf(),
         inspection: inspection.clone(),
-        identifier: description.identifier.clone(),
+        plugin: plugin.clone(),
         context,
     });
     let mut definition = EffectDefinition::new(
@@ -1027,42 +1058,50 @@ fn stable_key(prefix: &str, bytes: &[u8]) -> String {
 
 fn effect_type_for_filter(
     inspection: &OpenFxBinaryInspection,
-    plugin_identifier: &str,
+    identifier: &str,
 ) -> Result<EffectType, OpenFxEffectRegistrationError> {
-    let plugin = inspection
-        .plugins
-        .iter()
-        .find(|plugin| plugin.identifier == plugin_identifier)
-        .ok_or_else(|| {
-            OpenFxEffectRegistrationError::Schema("selected plugin is missing".into())
-        })?;
-    let identity = format!(
-        "{}\0{}.{}\0{}",
-        plugin_identifier, plugin.version_major, plugin.version_minor, inspection.binary_sha256
-    );
-    Ok(EffectType::External(stable_key(
-        "openfx.",
-        identity.as_bytes(),
-    )))
+    let plugin = inspection.unique_plugin(identifier).map_err(OpenFxHostError::from)?;
+    effect_type_for_plugin(inspection, plugin, OpenFxContext::Filter)
 }
 
 fn effect_type_for_generator(
     inspection: &OpenFxBinaryInspection,
-    plugin_identifier: &str,
+    identifier: &str,
 ) -> Result<EffectType, OpenFxEffectRegistrationError> {
-    let plugin = inspection
-        .plugins
-        .iter()
-        .find(|plugin| plugin.identifier == plugin_identifier)
-        .ok_or_else(|| {
-            OpenFxEffectRegistrationError::Schema("selected plugin is missing".into())
-        })?;
-    let identity = format!(
-        "generator\0{}\0{}.{}\0{}",
-        plugin_identifier, plugin.version_major, plugin.version_minor, inspection.binary_sha256
-    );
+    let plugin = inspection.unique_plugin(identifier).map_err(OpenFxHostError::from)?;
+    effect_type_for_plugin(inspection, plugin, OpenFxContext::Generator)
+}
+
+fn effect_type_for_plugin(
+    inspection: &OpenFxBinaryInspection,
+    plugin: &OpenFxPluginDescriptor,
+    context: OpenFxContext,
+) -> Result<EffectType, OpenFxEffectRegistrationError> {
+    inspection.require_plugin(plugin).map_err(OpenFxHostError::from)?;
+    let (prefix, identity) = match context {
+        OpenFxContext::Filter => (
+            "openfx.",
+            format!(
+                "{}\0{}.{}\0{}",
+                plugin.identifier,
+                plugin.version_major,
+                plugin.version_minor,
+                inspection.binary_sha256
+            ),
+        ),
+        OpenFxContext::Generator => (
+            "openfx.generator.",
+            format!(
+                "generator\0{}\0{}.{}\0{}",
+                plugin.identifier,
+                plugin.version_major,
+                plugin.version_minor,
+                inspection.binary_sha256
+            ),
+        ),
+    };
     Ok(EffectType::External(stable_key(
-        "openfx.generator.",
+        prefix,
         identity.as_bytes(),
     )))
 }
@@ -1078,6 +1117,35 @@ mod tests {
     use mondrian_effects::{
         instantiate_effect_node, EffectFrameContext, LutPreparationCache, PreparedEffectProgram,
     };
+
+    #[test]
+    fn every_exported_version_keeps_a_distinct_key_without_an_order_fallback() {
+        let plugins: Vec<_> = [(2, 0), (3, 0), (1, 0), (1, 1)]
+            .into_iter()
+            .map(|(major, minor)| OpenFxPluginDescriptor {
+                identifier: "test.versioned".into(),
+                api_version: 1,
+                version_major: major,
+                version_minor: minor,
+            })
+            .collect();
+        let inspection = OpenFxBinaryInspection {
+            binary_path: PathBuf::from("must-not-load.ofx"),
+            binary_sha256: "a".repeat(64),
+            plugins,
+        };
+        assert!(effect_type_for_filter(&inspection, "test.versioned").is_err());
+        assert!(effect_type_for_generator(&inspection, "test.versioned").is_err());
+        let mut keys = std::collections::BTreeSet::new();
+        for plugin in &inspection.plugins {
+            for context in [OpenFxContext::Filter, OpenFxContext::Generator] {
+                assert!(keys.insert(
+                    effect_type_for_plugin(&inspection, plugin, context).unwrap().key().to_owned()
+                ));
+            }
+        }
+        assert_eq!(keys.len(), 8);
+    }
 
     #[test]
     fn generator_context_identity_is_disjoint_and_filter_identity_is_unchanged() {
@@ -1413,7 +1481,12 @@ mod tests {
                 binary_sha256: "a".repeat(64),
                 plugins: Vec::new(),
             },
-            identifier: "test.geometry".to_owned(),
+            plugin: OpenFxPluginDescriptor {
+                identifier: "test.geometry".to_owned(),
+                api_version: 1,
+                version_major: 1,
+                version_minor: 0,
+            },
             context: OpenFxContext::Filter,
         };
         let request = EffectFloatProcessorPreparation {

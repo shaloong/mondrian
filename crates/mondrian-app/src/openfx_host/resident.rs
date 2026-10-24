@@ -24,12 +24,12 @@ pub use diagnostic::OpenFxRenderPhase;
 use diagnostic::{ParentProbe, ProbeEvent};
 
 /// Hidden executable mode for a context-bound resident native CPU session.
-pub const OPENFX_RESIDENT_WORKER_ARGUMENT: &str = "--internal-openfx-session-v12";
+pub const OPENFX_RESIDENT_WORKER_ARGUMENT: &str = "--internal-openfx-session-v13";
 const ENDPOINT_ENV: &str = "MONDRIAN_INTERNAL_OPENFX_ENDPOINT";
 const NONCE_ENV: &str = "MONDRIAN_INTERNAL_OPENFX_NONCE";
-// v14: actual pre-DSP transient allocation admission through the parent's
-// existing resource bank. A refused native preflight is not a DSP/plugin fault.
-const VERSION: u16 = 14;
+// v15: bind exact exported identifier/major/minor through native selection.
+// Keeps v14's actual pre-DSP transient admission in the existing resource bank.
+const VERSION: u16 = 15;
 const POLL: Duration = Duration::from_millis(20);
 const RETIRE: Duration = Duration::from_millis(100);
 const FRAME_TRANSFER_BYTES: usize = 1024 * 1024;
@@ -44,7 +44,7 @@ struct Prepare {
     binary_path: PathBuf,
     bundle_path: PathBuf,
     binary_sha256: String,
-    plugin_identifier: String,
+    plugin: OpenFxPluginDescriptor,
     project_geometry: EffectProjectGeometry,
     width: u32,
     height: u32,
@@ -677,6 +677,34 @@ impl OpenFxFilterSession {
         owner_checkpoint: &mut dyn FnMut() -> Result<(), OpenFxHostError>,
     ) -> Result<Self, OpenFxHostError> {
         owner_checkpoint()?;
+        let plugin = inspection.unique_plugin(identifier)?;
+        Self::prepare_selected_in_context(
+            helper,
+            inspection,
+            plugin,
+            width,
+            height,
+            input_format,
+            project_geometry,
+            context,
+            owner_checkpoint,
+        )
+    }
+
+    /// Prepare one exact exported version, without identifier-order fallback.
+    #[allow(clippy::too_many_arguments)]
+    pub fn prepare_selected_in_context(
+        helper: &Path,
+        inspection: &OpenFxBinaryInspection,
+        plugin: &OpenFxPluginDescriptor,
+        width: u32,
+        height: u32,
+        input_format: mondrian_effects::EffectValueFormat,
+        project_geometry: EffectProjectGeometry,
+        context: OpenFxContext,
+        owner_checkpoint: &mut dyn FnMut() -> Result<(), OpenFxHostError>,
+    ) -> Result<Self, OpenFxHostError> {
+        owner_checkpoint()?;
         if input_format.precision() != mondrian_effects::EffectWorkingPrecision::Float32 {
             return Err(invalid("native input format is not Float32"));
         }
@@ -687,7 +715,7 @@ impl OpenFxFilterSession {
             .checked_mul(height as usize)
             .ok_or_else(|| invalid("frame dimensions overflow"))?;
         let frame_bytes = validate_frame(width, height, count)?;
-        let bundle = verified_selection(inspection, identifier, &mut || owner_checkpoint())?;
+        let bundle = verified_plugin_selection(inspection, plugin, &mut || owner_checkpoint())?;
         if context == OpenFxContext::Generator
             && (input_format.domain() != mondrian_effects::EffectColorDomain::SceneLinearRgb
                 || !mondrian_effects::EffectAlphaContract::SOURCE_FLOAT
@@ -764,7 +792,7 @@ impl OpenFxFilterSession {
             binary_path: inspection.binary_path.clone(),
             bundle_path: bundle,
             binary_sha256: inspection.binary_sha256.clone(),
-            plugin_identifier: identifier.to_owned(),
+            plugin: plugin.clone(),
             project_geometry,
             width,
             height,
@@ -2178,6 +2206,7 @@ fn validate_prepare_envelope(prepare: &Prepare, nonce: &str) -> Result<(), OpenF
             "native session preparation envelope does not match",
         ));
     }
+    prepare.plugin.validate()?;
     Ok(())
 }
 
@@ -2239,7 +2268,7 @@ fn run_openfx_resident_worker_inner(
     )?;
     let binary = native_string(&prepare.binary_path)?;
     let bundle = native_string(&prepare.bundle_path)?;
-    let identifier = CString::new(prepare.plugin_identifier.as_str())
+    let identifier = CString::new(prepare.plugin.identifier.as_str())
         .map_err(|_| invalid("plugin identifier contains a null byte"))?;
     let mut pump = pump::WorkerPump::start_observed(
         control,
@@ -2501,6 +2530,7 @@ fn render_worker_request(
             binary,
             bundle,
             identifier,
+            (prepare.plugin.version_major, prepare.plugin.version_minor),
             input,
             &info,
             &native,
@@ -2947,7 +2977,12 @@ mod tests {
                 binary_path: PathBuf::from("never-loaded.ofx"),
                 bundle_path: PathBuf::from("never-loaded.ofx.bundle"),
                 binary_sha256: String::new(),
-                plugin_identifier: "test".to_owned(),
+                plugin: OpenFxPluginDescriptor {
+                    identifier: "test".to_owned(),
+                    api_version: 1,
+                    version_major: 1,
+                    version_minor: 0,
+                },
                 width: 1,
                 height: 1,
                 shared_path: file.path().to_path_buf(),
@@ -2976,7 +3011,12 @@ mod tests {
             binary_path: PathBuf::from("must-never-load.ofx"),
             bundle_path: PathBuf::from("must-never-load.ofx.bundle"),
             binary_sha256: String::new(),
-            plugin_identifier: "must-never-execute".to_owned(),
+            plugin: OpenFxPluginDescriptor {
+                identifier: "must-never-execute".to_owned(),
+                api_version: 1,
+                version_major: 1,
+                version_minor: 0,
+            },
             width: 1,
             height: 1,
             shared_path: PathBuf::from("must-never-map"),
@@ -2991,7 +3031,7 @@ mod tests {
             .expect("explicit owner project geometry"),
         };
         assert!(validate_prepare_envelope(&prepare, "actual nonce").is_ok());
-        for stale in [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, u16::MAX] {
+        for stale in [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, u16::MAX] {
             prepare.version = stale;
             assert!(matches!(
                 validate_prepare_envelope(&prepare, "actual nonce"),
@@ -3000,7 +3040,7 @@ mod tests {
         }
         prepare.version = VERSION;
         assert!(validate_prepare_envelope(&prepare, "wrong nonce").is_err());
-        for field in ["owner", "context", "project_geometry"] {
+        for field in ["owner", "context", "project_geometry", "plugin"] {
             let mut missing = serde_json::to_value(&prepare).expect("canonical Prepare schema");
             missing.as_object_mut().expect("schema object").remove(field);
             assert!(
@@ -3008,6 +3048,22 @@ mod tests {
                 "no schema fallback without {field}"
             );
         }
+        for field in [
+            "version_major",
+            "version_minor",
+            "api_version",
+            "identifier",
+        ] {
+            let mut missing = serde_json::to_value(&prepare).unwrap();
+            missing["plugin"].as_object_mut().unwrap().remove(field);
+            assert!(
+                serde_json::from_value::<Prepare>(missing).is_err(),
+                "exact plugin identity requires {field}"
+            );
+        }
+        prepare.plugin.api_version = 2;
+        assert!(validate_prepare_envelope(&prepare, "actual nonce").is_err());
+        prepare.plugin.api_version = 1;
         for geometry in [
             serde_json::json!({"width":0,"height":7,"pixel_aspect_ratio":{"numerator":2,"denominator":1}}),
             serde_json::json!({"width":10,"height":0,"pixel_aspect_ratio":{"numerator":2,"denominator":1}}),
@@ -3025,7 +3081,7 @@ mod tests {
         prepare.owner = mondrian_core::EffectProcessorOwnerId(uuid::Uuid::nil());
         assert!(validate_prepare_envelope(&prepare, "actual nonce").is_err());
         assert_eq!(
-            OPENFX_RESIDENT_WORKER_ARGUMENT, "--internal-openfx-session-v12",
+            OPENFX_RESIDENT_WORKER_ARGUMENT, "--internal-openfx-session-v13",
             "sole worker dispatch uses the current generation"
         );
     }
@@ -4393,7 +4449,12 @@ mod generator_storage_tests {
             binary_path: PathBuf::new(),
             bundle_path: PathBuf::new(),
             binary_sha256: String::new(),
-            plugin_identifier: "test.generator".to_owned(),
+            plugin: OpenFxPluginDescriptor {
+                identifier: "test.generator".to_owned(),
+                api_version: 1,
+                version_major: 1,
+                version_minor: 0,
+            },
             width: 3,
             height: 2,
             shared_path: file.path().to_path_buf(),

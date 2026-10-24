@@ -122,6 +122,7 @@ int mondrian_openfx_describe(
     const char* binary,
     const char* bundle,
     const char* identifier,
+    uint32_t version_major, uint32_t version_minor,
     int selected_context, // 0: Filter, 1: Generator; every other value refused
     char* label,
     size_t label_capacity,
@@ -146,6 +147,7 @@ struct MondrianOpenFxSession;
 
 int mondrian_openfx_session_create(
     const char* binary, const char* bundle, const char* identifier,
+    uint32_t version_major, uint32_t version_minor,
     int selected_context, // 0: Filter with input, 1: Output-only Generator with null input
     const uint8_t* image_namespace, // exactly 16 parent-issued bytes; copied once
     const void* input, size_t frame_bytes,

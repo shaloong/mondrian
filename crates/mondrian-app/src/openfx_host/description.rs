@@ -7,7 +7,7 @@ mod catalog;
 pub(crate) use catalog::observe_openfx_catalog_with_checkpoint;
 pub use catalog::{run_openfx_catalog_describe_worker, OPENFX_CATALOG_DESCRIBE_WORKER_ARGUMENT};
 
-const DESCRIBE_SCHEMA: u32 = 4;
+const DESCRIBE_SCHEMA: u32 = 5;
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -17,7 +17,7 @@ pub(super) struct DescribeRequest {
     pub(super) binary_path: PathBuf,
     pub(super) bundle_path: PathBuf,
     pub(super) binary_sha256: String,
-    pub(super) plugin_identifier: String,
+    pub(super) plugin: OpenFxPluginDescriptor,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -74,7 +74,7 @@ pub(super) enum DescribeResponse {
 pub(crate) struct OpenFxDescribeNotices {
     pub binary_path: PathBuf,
     pub binary_sha256: String,
-    pub requested_plugin_identifier: String,
+    pub requested_plugin: OpenFxPluginDescriptor,
     pub complete: bool,
     pub fatal: bool,
     pub notices: Vec<EffectProcessorNotice>,
@@ -208,7 +208,36 @@ pub(crate) fn observe_openfx_with_checkpoint(
     checkpoint: &mut impl FnMut() -> Result<(), OpenFxHostError>,
 ) -> Result<OpenFxDescriptionObservation, OpenFxHostError> {
     checkpoint()?;
-    let bundle = verified_selection(inspection, plugin_identifier, checkpoint)?;
+    let plugin = inspection.unique_plugin(plugin_identifier)?;
+    observe_selected_openfx_with_checkpoint(
+        helper_executable,
+        inspection,
+        plugin,
+        context,
+        checkpoint,
+    )
+}
+
+/// Describe an exact exported version; identifier-only ambiguity is never resolved by order.
+pub fn describe_openfx_selected(
+    helper: &Path,
+    inspection: &OpenFxBinaryInspection,
+    plugin: &OpenFxPluginDescriptor,
+    context: OpenFxContext,
+) -> Result<OpenFxFilterDescription, OpenFxHostError> {
+    observe_selected_openfx_with_checkpoint(helper, inspection, plugin, context, &mut || Ok(()))?
+        .outcome
+}
+
+pub(crate) fn observe_selected_openfx_with_checkpoint(
+    helper_executable: &Path,
+    inspection: &OpenFxBinaryInspection,
+    plugin: &OpenFxPluginDescriptor,
+    context: OpenFxContext,
+    checkpoint: &mut impl FnMut() -> Result<(), OpenFxHostError>,
+) -> Result<OpenFxDescriptionObservation, OpenFxHostError> {
+    checkpoint()?;
+    let bundle = verified_plugin_selection(inspection, plugin, checkpoint)?;
     let staging = tempfile::tempdir()
         .map_err(|error| unavailable(format!("description staging failed: {error}")))?;
     let request = DescribeRequest {
@@ -217,7 +246,7 @@ pub(crate) fn observe_openfx_with_checkpoint(
         binary_path: inspection.binary_path.clone(),
         bundle_path: bundle,
         binary_sha256: inspection.binary_sha256.clone(),
-        plugin_identifier: plugin_identifier.to_owned(),
+        plugin: plugin.clone(),
     };
     let response: DescribeResponse = invoke_worker(
         helper_executable,
@@ -230,16 +259,31 @@ pub(crate) fn observe_openfx_with_checkpoint(
     {
         return Err(invalid("OpenFX binary changed during description"));
     }
-    let observed = accept_response(response, inspection, plugin_identifier)?;
+    let observed = accept_response_for_plugin(response, inspection, plugin)?;
     checkpoint()?;
     Ok(observed)
 }
 
+#[cfg(test)]
 fn accept_response(
     response: DescribeResponse,
     inspection: &OpenFxBinaryInspection,
     plugin_identifier: &str,
 ) -> Result<OpenFxDescriptionObservation, OpenFxHostError> {
+    accept_response_for_plugin(
+        response,
+        inspection,
+        inspection.unique_plugin(plugin_identifier)?,
+    )
+}
+
+fn accept_response_for_plugin(
+    response: DescribeResponse,
+    inspection: &OpenFxBinaryInspection,
+    plugin: &OpenFxPluginDescriptor,
+) -> Result<OpenFxDescriptionObservation, OpenFxHostError> {
+    inspection.require_plugin(plugin)?;
+    let plugin_identifier = plugin.identifier.as_str();
     let (outcome, report) = match response {
         DescribeResponse::Success { schema_version, description, notices } => {
             if schema_version != DESCRIBE_SCHEMA {
@@ -276,7 +320,7 @@ fn accept_response(
         notices: OpenFxDescribeNotices {
             binary_path: inspection.binary_path.clone(),
             binary_sha256: inspection.binary_sha256.clone(),
-            requested_plugin_identifier: plugin_identifier.to_owned(),
+            requested_plugin: plugin.clone(),
             complete: report.complete,
             fatal: report.fatal,
             notices: report.notices,
@@ -298,6 +342,7 @@ pub(super) fn describe_in_worker(
     if request.schema_version != DESCRIBE_SCHEMA {
         return Err(invalid("unsupported OpenFX Describe request schema"));
     }
+    request.plugin.validate()?;
     verify_worker_binary(
         &request.binary_path,
         &request.bundle_path,
@@ -305,7 +350,7 @@ pub(super) fn describe_in_worker(
     )?;
     let binary = native_string(&request.binary_path)?;
     let bundle = native_string(&request.bundle_path)?;
-    let identifier = CString::new(request.plugin_identifier.as_str())
+    let identifier = CString::new(request.plugin.identifier.as_str())
         .map_err(|_| invalid("plugin identifier contains a null byte"))?;
     let mut sink = ParameterSink::default();
     let mut label = [0_u8; 256];
@@ -318,6 +363,8 @@ pub(super) fn describe_in_worker(
             binary.as_ptr(),
             bundle.as_ptr(),
             identifier.as_ptr(),
+            request.plugin.version_major,
+            request.plugin.version_minor,
             request.context.native(),
             label.as_mut_ptr().cast(),
             label.len(),
@@ -344,15 +391,15 @@ pub(super) fn describe_in_worker(
         let label =
             std::str::from_utf8(label).map_err(|_| invalid("OpenFX display name is not UTF-8"))?;
         let description = OpenFxFilterDescription {
-            identifier: request.plugin_identifier.clone(),
+            identifier: request.plugin.identifier.clone(),
             label: if label.is_empty() {
-                request.plugin_identifier.clone()
+                request.plugin.identifier.clone()
             } else {
                 label.to_owned()
             },
             parameters: sink.parameters,
         };
-        validate_description(&description, &request.plugin_identifier)?;
+        validate_description(&description, &request.plugin.identifier)?;
         Ok(description)
     })();
     Ok(match description {
@@ -374,94 +421,6 @@ pub(super) fn describe_in_worker(
 mod tests {
     use super::*;
     use crate::openfx_adapter::OpenFxPluginDescriptor;
-
-    #[test]
-    #[ignore = "diagnostic in-process metadata phases; requires current Product and real Misc"]
-    fn native_catalog_in_process_cost_breakdown() {
-        let helper = PathBuf::from(std::env::var_os("MONDRIAN_OPENFX_PRODUCT_BINARY").unwrap());
-        let binary = PathBuf::from(std::env::var_os("MONDRIAN_OPENFX_INVERT_BINARY").unwrap());
-        let inspection = crate::openfx_adapter::inspect_openfx_binary(&helper, &binary).unwrap();
-        let identifier = "net.sf.openfx.ConstantPlugin";
-        let started = Instant::now();
-        assert_eq!(
-            sha256_file(&inspection.binary_path).unwrap(),
-            inspection.binary_sha256
-        );
-        println!(
-            "CATALOG_PHASE plain_hash_ms={}",
-            started.elapsed().as_millis()
-        );
-        let started = Instant::now();
-        let bundle = verified_selection(&inspection, identifier, &mut || Ok(())).unwrap();
-        println!(
-            "CATALOG_PHASE verified_selection_ms={}",
-            started.elapsed().as_millis()
-        );
-        let started = Instant::now();
-        verify_worker_binary(&inspection.binary_path, &bundle, &inspection.binary_sha256).unwrap();
-        println!(
-            "CATALOG_PHASE worker_verify_ms={}",
-            started.elapsed().as_millis()
-        );
-        let request = DescribeRequest {
-            schema_version: DESCRIBE_SCHEMA,
-            context: OpenFxContext::Generator,
-            binary_path: inspection.binary_path,
-            bundle_path: bundle,
-            binary_sha256: inspection.binary_sha256,
-            plugin_identifier: identifier.into(),
-        };
-        let started = Instant::now();
-        let result = describe_in_worker(&request).unwrap();
-        println!(
-            "CATALOG_PHASE in_process_describe_ms={}",
-            started.elapsed().as_millis()
-        );
-        assert!(matches!(result, DescribeResponse::Success { .. }));
-
-        // Diagnostic decomposition of the same cold child boundary. No result
-        // is registered and no renderer, owner or lifecycle budget is changed.
-        let started = Instant::now();
-        let staging = tempfile::tempdir().unwrap();
-        let request_path = staging.path().join("request.json");
-        let response_path = staging.path().join("response.json");
-        fs::write(&request_path, serde_json::to_vec(&request).unwrap()).unwrap();
-        println!("CATALOG_PHASE staging_ms={}", started.elapsed().as_millis());
-        let started = Instant::now();
-        let mut child = Command::new(&helper)
-            .arg(OPENFX_DESCRIBE_WORKER_ARGUMENT)
-            .env(REQUEST_ENV, request_path)
-            .env(RESPONSE_ENV, &response_path)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .unwrap();
-        println!("CATALOG_PHASE spawn_ms={}", started.elapsed().as_millis());
-        let started = Instant::now();
-        let status = crate::openfx_adapter::child_supervision::wait_for_child(
-            &mut child,
-            Instant::now() + DEADLINE,
-            &mut || Ok::<(), OpenFxHostError>(()),
-        )
-        .unwrap();
-        println!("CATALOG_PHASE wait_ms={}", started.elapsed().as_millis());
-        assert!(status.success());
-        let started = Instant::now();
-        let response: DescribeResponse =
-            serde_json::from_slice(&fs::read(response_path).unwrap()).unwrap();
-        assert!(matches!(response, DescribeResponse::Success { .. }));
-        println!(
-            "CATALOG_PHASE response_read_ms={}",
-            started.elapsed().as_millis()
-        );
-        let started = Instant::now();
-        drop(staging);
-        println!(
-            "CATALOG_PHASE staging_drop_ms={}",
-            started.elapsed().as_millis()
-        );
-    }
 
     fn inspection() -> OpenFxBinaryInspection {
         OpenFxBinaryInspection {
@@ -499,11 +458,24 @@ mod tests {
 
     #[test]
     fn describe_schema_rejects_old_wrong_and_unknown_requests_and_responses() {
-        let mut request = serde_json::json!({"schema_version":DESCRIBE_SCHEMA,"context":"filter","binary_path":"none","bundle_path":"none","binary_sha256":"a","plugin_identifier":"test"});
+        let mut request = serde_json::json!({"schema_version":DESCRIBE_SCHEMA,"context":"filter","binary_path":"none","bundle_path":"none","binary_sha256":"a","plugin":{"identifier":"test","api_version":1,"version_major":1,"version_minor":0}});
         assert!(serde_json::from_value::<DescribeRequest>(request.clone()).is_ok());
+        for field in [
+            "version_major",
+            "version_minor",
+            "api_version",
+            "identifier",
+        ] {
+            let mut missing = request.clone();
+            missing["plugin"].as_object_mut().unwrap().remove(field);
+            assert!(
+                serde_json::from_value::<DescribeRequest>(missing).is_err(),
+                "exact Describe identity requires {field}"
+            );
+        }
         request.as_object_mut().unwrap().remove("schema_version");
         assert!(serde_json::from_value::<DescribeRequest>(request.clone()).is_err());
-        for stale in [1, 2, 3] {
+        for stale in [1, 2, 3, 4] {
             request["schema_version"] = serde_json::json!(stale);
             let wrong = serde_json::from_value::<DescribeRequest>(request.clone()).unwrap();
             assert!(
@@ -617,7 +589,7 @@ mod tests {
         assert_eq!(observed.notices.binary_path, inspection().binary_path);
         assert_eq!(observed.notices.binary_sha256, inspection().binary_sha256);
         assert_eq!(
-            observed.notices.requested_plugin_identifier,
+            observed.notices.requested_plugin.identifier,
             "test.requested.class"
         );
     }

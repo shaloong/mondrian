@@ -12,8 +12,6 @@ use mondrian_core::{MondrianError, Result};
 use mondrian_effects::{register_effect_definition, EffectDefinition};
 
 use crate::openfx_adapter::{inspect_openfx_binary_with_checkpoint, OpenFxDiscoveryError};
-#[cfg(test)]
-use crate::openfx_effect::prepare_selected_openfx_effect;
 use crate::openfx_effect::{prepare_observed_openfx_effect, PreparedOpenFxEffect};
 use crate::openfx_host::{
     observe_openfx_catalog_with_checkpoint, OpenFxContext, OpenFxDescribeNotices, OpenFxHostError,
@@ -400,14 +398,16 @@ impl AppState {
             // class/action, native instance, Render invocation, or generation.
             if !batch.complete || batch.fatal {
                 tracing::warn!(binary = %batch.binary_path.display(), sha256 = %batch.binary_sha256,
-                    requested_class = %batch.requested_plugin_identifier,
+                    requested_class = %batch.requested_plugin.identifier,
+                    requested_major = batch.requested_plugin.version_major, requested_minor = batch.requested_plugin.version_minor,
                     phase = "whole_metadata_request", complete = batch.complete, fatal = batch.fatal,
                     "OpenFX metadata notices accompany a refused definition");
             }
             for notice in batch.notices {
                 if notice.kind() == EffectProcessorNoticeKind::Log {
                     tracing::info!(binary = %batch.binary_path.display(), sha256 = %batch.binary_sha256,
-                        requested_class = %batch.requested_plugin_identifier,
+                        requested_class = %batch.requested_plugin.identifier,
+                        requested_major = batch.requested_plugin.version_major, requested_minor = batch.requested_plugin.version_minor,
                         phase = "whole_metadata_request", id = notice.id(), message = notice.text(),
                         "OpenFX metadata log");
                     continue;
@@ -422,9 +422,11 @@ impl AppState {
                 };
                 self.notifications.publish(
                     format!(
-                        "openfx-metadata:{}:{}:{context:?}:{:?}:{}",
+                        "openfx-metadata:{}:{}:{}.{}:{context:?}:{:?}:{}",
                         batch.binary_sha256,
-                        batch.requested_plugin_identifier,
+                        batch.requested_plugin.identifier,
+                        batch.requested_plugin.version_major,
+                        batch.requested_plugin.version_minor,
                         notice.kind(),
                         notice.id()
                     ),
@@ -473,16 +475,22 @@ fn install_bundle(
             &inspection,
             selection.context,
             &mut checkpoint,
-            &mut |identifier, observed| {
+            &mut |plugin, observed| {
                 let prepared = prepare_observed_openfx_effect(
                     helper,
                     &inspection,
-                    identifier,
+                    &plugin.identifier,
                     selection.context,
                     observed,
                 );
                 preparation.record(
-                    &format!("{} ({:?})", identifier, selection.context),
+                    &format!(
+                        "{} {}.{} ({:?})",
+                        plugin.identifier,
+                        plugin.version_major,
+                        plugin.version_minor,
+                        selection.context
+                    ),
                     prepared,
                 );
                 if let Err(error) = &preparation.result {
@@ -775,50 +783,6 @@ mod tests {
             }),
             "a completed prefix cannot escape a dropped Catalog"
         );
-    }
-
-    #[test]
-    #[ignore = "diagnostic cold Catalog cost breakdown; requires current Product and real Misc"]
-    fn native_catalog_cold_cost_breakdown() {
-        let helper = PathBuf::from(std::env::var_os("MONDRIAN_OPENFX_PRODUCT_BINARY").unwrap());
-        let binary = PathBuf::from(std::env::var_os("MONDRIAN_OPENFX_INVERT_BINARY").unwrap());
-        let started = Instant::now();
-        let inspection = crate::openfx_adapter::inspect_openfx_binary(&helper, &binary).unwrap();
-        println!(
-            "CATALOG_COST plugins={} binary_bytes={} inspect_ms={}",
-            inspection.plugins.len(),
-            std::fs::metadata(&binary).unwrap().len(),
-            started.elapsed().as_millis()
-        );
-        let started = Instant::now();
-        let actual = crate::openfx_adapter::sha256_file_with_checkpoint(&binary, &mut || {
-            Ok::<(), crate::openfx_adapter::OpenFxDiscoveryError>(())
-        })
-        .unwrap();
-        assert_eq!(actual, inspection.binary_sha256);
-        println!(
-            "CATALOG_COST parent_hash_ms={}",
-            started.elapsed().as_millis()
-        );
-        for identifier in ["net.sf.openfx.ConstantPlugin", "net.sf.openfx.LabToRGB709"] {
-            assert!(inspection.plugins.iter().any(|p| p.identifier == identifier));
-            let started = Instant::now();
-            let result = prepare_selected_openfx_effect(
-                &helper,
-                &inspection,
-                identifier,
-                OpenFxContext::Generator,
-                &mut || Ok(()),
-            );
-            println!(
-                "CATALOG_COST class={identifier} prepare_ms={} accepted={}",
-                started.elapsed().as_millis(),
-                result.definition.is_ok()
-            );
-            if identifier == "net.sf.openfx.ConstantPlugin" {
-                result.definition.unwrap();
-            }
-        }
     }
 
     #[test]
@@ -1125,7 +1089,12 @@ mod tests {
         OpenFxDescribeNotices {
             binary_path: PathBuf::from("verified-request.ofx"),
             binary_sha256: "a".repeat(64),
-            requested_plugin_identifier: "requested.class".into(),
+            requested_plugin: crate::openfx_adapter::OpenFxPluginDescriptor {
+                identifier: "requested.class".into(),
+                api_version: 1,
+                version_major: 1,
+                version_minor: 0,
+            },
             complete: true,
             fatal: false,
             notices: (0..count)
@@ -1139,6 +1108,22 @@ mod tests {
                 })
                 .collect(),
         }
+    }
+
+    #[test]
+    fn metadata_notices_from_distinct_versions_do_not_overwrite_each_other() {
+        let mut state = AppState::new();
+        let generation = state.project_author_generation();
+        let mut notices = CatalogNotices::default();
+        for (major, minor) in [(1, 0), (2, 0), (1, 1)] {
+            let mut batch = notice_batch(1, "same notice id, distinct version", "shared");
+            batch.requested_plugin.version_major = major;
+            batch.requested_plugin.version_minor = minor;
+            notices.push(batch).unwrap();
+        }
+        state.publish_openfx_metadata_notices(notices, OpenFxContext::Generator);
+        assert_eq!(state.notifications.iter().count(), 3);
+        assert_eq!(state.project_author_generation(), generation);
     }
 
     #[test]
