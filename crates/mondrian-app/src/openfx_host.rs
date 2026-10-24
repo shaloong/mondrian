@@ -3491,6 +3491,7 @@ pub(crate) mod shared_frame_tests {
                 + auxiliary
                 + 3 * std::mem::size_of::<mondrian_core::EffectProcessorOwnerId>()
                 + 3 * 16
+                + MAX_FRAME_BYTES
         );
         assert_eq!(
             large - small,

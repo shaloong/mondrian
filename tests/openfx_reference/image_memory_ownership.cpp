@@ -418,6 +418,12 @@ int exercise(MondrianOpenFx::Host& host, const char* binaryPath, const char* bun
   frame.input = &inputPixel;
   frame.output = &outputPixel;
   frame.pixelCount = 1;
+  // This test manually binds the complete 1x1 Render image instead of entering
+  // render.cpp, so provide the same resolved Output-domain facts explicitly.
+  frame.outputCanonicalRod = {0,0,1,1};
+  frame.outputPixelRod = {0,0,1,1};
+  frame.outputPixelCount = 1;
+  frame.outputRodReady = true;
   const MondrianOpenFx::FrameBorrow borrowed(frame);
   const MondrianOpenFx::ImageAccess imagesAvailable(frame, true, true);
   const bool sourcePassed = imageFetchFailureAndRecovery(*suite, *source, frame, "source-image");
