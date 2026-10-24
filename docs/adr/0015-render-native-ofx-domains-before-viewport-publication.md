@@ -147,5 +147,36 @@ fresh process without replaying completed actions. A crash/hang rejects the
 in-flight class through the original child settlement guard. A failed final
 process settlement refuses the preparation. Definitions remain unregistered
 until the original live App owner publishes the complete result. No Render,
-resource-bank, author-state or native render-wire contract changes. Native crash,
-cancellation, original real-bundle gate and regression qualification remain pending.
+resource-bank or author-state contract changes. Candidate e3989a35 passes138
+ordinary checks (78 remain ignored), four overlapping protocol controls and four
+clean native gates: three-class reuse with exact independent lifetimes, middle
+process crash followed by a fresh process for the remaining class, cancellation
+discarding the prefix and reaping the blocked class, and explicit context refusal.
+The original real-bundle gate still fails; this is not Catalog qualification.
+
+### Exact plugin-version identity: required contract correction
+
+The real Misc inventory contains123 headers/119 identifiers: LensDistortion has
+major2/3/4 and ShufflePlugin has major2/3/1 in export order. Discovery correctly
+retains `(identifier, major, minor)` and sorts it; the legacy native selection
+and parent description lookup choose the first matching identifier. For Shuffle,
+the sorted parent metadata can therefore name major1 while native export lookup
+chooses major2. The new identifier-only manifest rejects this legal inventory.
+Do not remove that control, skip these classes or silently select one version.
+
+Carry the existing descriptor's full identity through Catalog packets, native
+Describe, the immutable processor factory and resident Prepare/SDK selection.
+Validate the exact tuple before native actions and bind completion to it. Preserve
+unique-class Effect keys and the existing versioned key formula; retain all legal
+versions rather than creating another identity authority. Legacy identifier-only
+entry points may operate only when unambiguous; explicit selection must remain
+available for versioned classes. The native selector must never choose by order.
+
+This is an OpenFX adapter contract change, not a Timeline/Project migration.
+Describe schema4 and resident wire14 need explicit versioned replacements;
+stale helpers must refuse, never reinterpret a missing version. No project file,
+parameter authority, Audio DAG or Render Graph rewrite is required. Validate an
+owned out-of-order same-identifier/multiple-major fixture through metadata and
+actual pixels, then rerun the original real Misc install/restore/Timeline gate,
+the new crash/cancel controls and affected single-version native regressions.
+This contract correction and all real-bundle acceptance remain pending.
