@@ -38,13 +38,13 @@ and remaining boundaries are recorded in the compatibility matrix.
   author instantiation and schema admission, using the same owner context for
   both. Keep concrete author PropertyBags, the original transaction/Reset path
   and complete schema equality; never mutate the global registry per canvas.
-  A contextual definition without geometry must fail explicitly. The concrete
-  template API is a subsequent implementation decision; no generic Core recipe
-  or unresolved placeholder value is approved here.
-- Initially, a contextual instance is bound to its project window. A changed
-  window needs an explicit author migration/rebind or a typed refusal; it must
-  not silently rescale existing values, keys or defaults. Arbitrary resize/Reset
-  migration is not qualified by the fixed-window implementation.
+  A contextual definition without geometry must fail explicitly. The initializer
+  remains Effects-owned; Core carries no generic recipe or unresolved placeholder.
+- A contextual instance is bound to its project window. An explicit Sequence
+  geometry edit rebinds defaults through the existing author transaction as
+  described below; other raw geometry changes refuse. This migration never
+  silently rescales existing values or keys and does not admit arbitrary schema
+  changes or expanded image-domain scheduling.
 
 The [pinned OpenFX parameter contract](https://github.com/AcademySoftwareFoundation/openfx/blob/e40728885390ec16276d11e00025de9b4282060c/include/ofxParam.h#L516-L599)
 separates modern canonical spatial values from default-coordinate interpretation.
