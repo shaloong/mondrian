@@ -76,6 +76,18 @@ worker 直接返回 main，早于 UI/graphics/应用日志初始化；未发现�
 Rust/CRT/导入模块的退出职责尚未定位到具体耗时原因，不授共同根因修复、全关闭
 时限、第三方、性能或跨平台资格。原 shared100ms 与180秒/2秒 Job 预算保持。
 
+2026-10-24 补充限定诊断，未修改生产代码：同一最小程序的普通返回、线程、
+本地监听/TCP四组共16次退出尾段均约2.7–4.4ms；单纯网络初始化不解释旧长尾。
+同程序五组各4次：Misc模块释放后尾段3.18–3.50ms，故意保留到进程退出时
+54.57–72.02ms且OpenGL驻留；owned Catalog模块保留/释放均约2.5–3.1ms。
+这是模块驻留的条件对照，不证明旧Worker为何驻留或共同根因已修复。
+当前97595db8正常Product/App的Direct临时授权/拒绝/恢复原门通过；沿用schema5，
+sealed后解码：graceful16.47ms/native析构3.65ms/inner到退出观察9.23ms，无kill/wait。
+一次owned Generator调试观测显示子进程退出时GL0、测试入口GL1；真实Misc调试
+运行则在原120s安装断言失败（120.29s、exit101、进程树回收），只采到metadata
+Product的GL0，未到resident退出，不作正常性能/兼容资格或生产回归判断。
+不拼接这些不同条件的时序来归因，也不重跑相同调试路径。F06/GL仍开放。
+
 2026-10-18 Windows x64：`bed1d101` 在提交既有参数来源后、插件回调前更新实例
 `IsAnimating`，与常量/CurrentFrame/Curve 查询共用来源权威。修复前真实 CreateInstance
 查询成功却返回0（预期1）；修复后九轮同当前值来源切换的查询、通知、像素及同PID
