@@ -472,7 +472,7 @@ size or image format, quality and build profile. Measure warmup, processing and
 host overhead, percentiles/deadlines and resource costs as needed; a crash timeout
 is not an audio deadline, and a wall-clock gate duration is not DSP cost.
 
-Current Windows release baseline (2026-10-24, compiled source `3fd7463c`): the
+Current Windows release measurement (2026-10-25, compiled source `70aaf7cd`): the
 original public resident Basic gate completes all four cases, excluding32 warmup
 frames and measuring600 frames per case. Release opt3/default features and the
 MSVC official Basic fixture use unchanged80% frame-stage budgets. The timed public
@@ -481,24 +481,29 @@ output materialization; its independent every-pixel HDR/negative/alpha oracle is
 outside the timer. Same-Worker, explicit shutdown and process settlement checks
 pass with no functional errors. **All four performance gates fail.**
 
-| Case | Stage budget ms | p50 ms | p95 ms | p99 ms | Max ms | Stage misses |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| 1080p30 | 26.67 | 63.05 | 68.95 | 74.30 | 82.58 | 600/600 |
-| UHD30 | 26.67 | 233.88 | 498.98 | 531.25 | 555.08 | 600/600 |
-| 1080p60 | 13.33 | 67.37 | 88.97 | 96.97 | 109.97 | 600/600 |
-| UHD60 | 13.33 | 233.45 | 258.26 | 312.08 | 481.50 | 600/600 |
+| Case | Stage budget ms | Before p50 ms | Current p50 ms | p95 ms | p99 ms | Max ms | Stage misses |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1080p30 | 26.67 | 63.05 | 44.15 | 60.03 | 68.33 | 76.10 | 600/600 |
+| UHD30 | 26.67 | 233.88 | 143.56 | 286.16 | 314.17 | 360.00 | 600/600 |
+| 1080p60 | 13.33 | 67.37 | 46.05 | 63.53 | 71.67 | 80.89 | 600/600 |
+| UHD60 | 13.33 | 233.45 | 145.60 | 182.24 | 222.28 | 1248.47 | 600/600 |
 
 The declared whole-test ceiling600s and owner cleanup2s do not change per-frame
-budgets or the original shared100ms plugin shutdown. An audited Clack manifest
-correction after compilation (`44cb2830`) changes no compiled source; the original
-collector passes. Historical r30 used MinGW Basic/validation features, so it is
+budgets or the original shared100ms plugin shutdown. Before p50 uses `3fd7463c`
+with the same MSVC Basic, hardware, profile, features and sampling conditions;
+the observed median reduction is about30-39%, without a deadline PASS. UHD60's
+single maximum is worse than the former481.50ms; its1248.47ms outlier has no
+established cause or latency-bound qualification. The original collector passes.
+Historical r30 used MinGW Basic/validation features, so it is
 not a matched before/after comparison. No phase attribution, mature-host,
 full-NLE, GPU, realtime or other-platform performance qualification is implied.
-Reuse the existing phase diagnostic before choosing a production optimization.
+Further optimization and tail investigation require attribution, not a budget
+increase or repetition of the same failed matrix.
 
-The existing release phase carrier at `2cef842a` now completes paired ordinary/
-instrumented1080p and UHD controls, each32 warmup/600 samples, with the unchanged
-default-feature Worker above. All pixel, fixed parent/child/native correlation,
+Before this optimization, the existing release phase carrier at `2cef842a`
+completes paired ordinary/
+instrumented1080p and UHD controls, each32 warmup/600 samples, with the
+pre-optimization default-feature Worker at `3fd7463c`. All pixel, fixed parent/child/native correlation,
 shutdown and process-settlement assertions pass. Ordinary p50 is62.98/233.13ms;
 instrumented p50 is63.07/232.75ms. Mean native session admission is15.95/63.52ms
 and output validation15.12/59.17ms, together about49%/52% of whole invocation.
@@ -506,8 +511,22 @@ Mean PluginRender is10.82/42.94ms and includes SDK callbacks and output clear;
 parent identity before+after is about0.97/1.00ms. Native time nests inside child
 dispatch and parent await, so these levels are not additive. The local MSVC/UCRT
 float classifier calls `_fdtest`; preserving finite-value admission while avoiding
-per-component CRT calls is the next falsifiable optimization. This diagnostic
-does not qualify that optimization or change the original performance FAIL.
+per-component CRT calls was the resulting optimization hypothesis. At `70aaf7cd`,
+one IEEE binary32 representation classifier replaces those calls in the complete
+native input/output scans, preserving finite/NaN/Infinity and original alpha
+rules, with no protocol, allocation, resource or cache-authority change. The
+MSVC Release FramePixels target passes75,776 standard-predicate/unchanged-bit
+controls. The fresh default release Product and original integration parent pass
+six exact native gates: authored Basic pixels, repeated resident isolation,
+partial-block/changed-raster transfer, Direct/Graph alpha negotiation, invalid/
+nonfinite refusal with retirement, and HDR disk-cache/nested/opaque/OCIO output.
+All six have exit0, empty stderr and original180s/2s ownership settlement; shared
+100ms shutdown remains. The default integration invocation executes0 tests with
+123 ignored, so it adds no ordinary-test coverage. Default release also prints11
+existing diagnostic-only unused-item warnings; no new strict warning-free result
+is claimed. This finite behavior and median improvement are verified; the four
+deadline gates still fail. New phase attribution, broad third-party, realtime,
+long-run stability and other-platform qualification remain separate.
 
 Keep concise current conclusions, useful reproduction inputs and actionable open
 issues. Do not accumulate historical executable copies, source-hash inventories,
