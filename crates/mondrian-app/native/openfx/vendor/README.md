@@ -37,4 +37,5 @@ The product filter host is maintained separately in `../host`.
 
 - `host/src/ofxhPluginCache.cpp` checks the live export's full API/identifier/
   major/minor identity and entry pointers before SetHost, and releases its binary
-  reference when a PluginHandle constructor unwinds.
+  reference when a PluginHandle constructor unwinds. Foreign constructor
+  exceptions become host-owned errors before enclosing module owners retire.

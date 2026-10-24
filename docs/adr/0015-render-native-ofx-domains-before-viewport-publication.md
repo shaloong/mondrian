@@ -201,3 +201,6 @@ major/minor and entry pointers before SetHost; constructor unwinding releases it
 module reference. The current owned fixture extends the original major-version
 RED to order2.1/3.0/1.0/2.0 for minor selection too. A changed export has a trapping
 SetHost pointer: rejection must precede that call and preserve other versions.
+Foreign constructor exceptions become host-owned errors while their defining
+module remains alive. An owned throwing-SetHost fixture records its exception
+destructor and requires a fresh worker before the later class; verification is pending.

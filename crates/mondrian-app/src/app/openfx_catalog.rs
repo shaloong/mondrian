@@ -711,6 +711,44 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "owned foreign SetHost exception lifetime and cooperative worker retirement"]
+    fn native_catalog_foreign_constructor_exception_retires_before_later_class() {
+        let (helper, selection, log) = native_catalog_probe();
+        assert_eq!(
+            std::env::var("MONDRIAN_OPENFX_CATALOG_PROBE_MODE").unwrap(),
+            "throw_set_host"
+        );
+        let preparation = install_bundle(&helper, &selection, &AtomicBool::new(false));
+        let (definitions, rejected) = preparation.result.unwrap();
+        assert_eq!(definitions.len(), 3);
+        assert_eq!(rejected.len(), 1);
+        assert!(
+            rejected[0].contains("catalog-version 2.1") && rejected[0].contains("native status 6"),
+            "{rejected:?}"
+        );
+        let text = std::fs::read_to_string(log).unwrap();
+        assert!(
+            text.contains("throwing_set_host") && text.contains("foreign_exception_destroyed"),
+            "foreign exception must be destroyed while its module is alive"
+        );
+        assert!(
+            !text.lines().any(|l| l.contains("|2|")),
+            "failed SetHost cannot enter Load"
+        );
+        let load_pids: Vec<_> = text
+            .lines()
+            .filter(|l| l.ends_with("|OfxActionLoad"))
+            .map(|l| l.split('|').next().unwrap())
+            .collect();
+        assert_eq!(load_pids.len(), 3);
+        assert_eq!(load_pids[0], load_pids[1]);
+        assert_ne!(
+            load_pids[1], load_pids[2],
+            "native constructor fault retires the process before the remaining class"
+        );
+    }
+
+    #[test]
     #[ignore = "owned three-class Catalog probe; healthy and crash_middle are separate native gates"]
     fn native_catalog_reuses_process_and_preserves_class_fault_isolation() {
         let (helper, selection, log) = native_catalog_probe();

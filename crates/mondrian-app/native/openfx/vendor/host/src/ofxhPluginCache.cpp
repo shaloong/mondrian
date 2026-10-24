@@ -170,7 +170,9 @@ PluginHandle::PluginHandle(Plugin *p, OFX::Host::Host *host)
   } catch (...) {
     // Constructor failure has no PluginHandle destructor to release this ref.
     _b->_binary.unref();
-    throw;
+    // Destroy a foreign exception while enclosing binary owners are still
+    // alive. Its destructor/RTTI must not outlive module retirement.
+    throw std::runtime_error("OFX plugin handle initialization failed");
   }
 }
 

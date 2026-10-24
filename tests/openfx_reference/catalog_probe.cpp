@@ -9,6 +9,7 @@
 #include <filesystem>
 #include <thread>
 #include <chrono>
+#include <exception>
 #ifdef _WIN32
 #include <process.h>
 #else
@@ -22,7 +23,7 @@ bool mode(const char* expected) {
   auto* actual = std::getenv("MONDRIAN_OPENFX_CATALOG_PROBE_MODE");
   return actual && std::strcmp(actual, expected) == 0;
 }
-bool versionedMode() { return mode("versions") || mode("swap_version"); }
+bool versionedMode() { return mode("versions") || mode("swap_version") || mode("throw_set_host"); }
 OfxStatus dispatch(int index, const char* action, const void* handle, OfxPropertySetHandle in, OfxPropertySetHandle out) {
   auto* path = std::getenv("MONDRIAN_OPENFX_CATALOG_PROBE_LOG");
   if (!action || !path || !*path) return kOfxStatErrValue;
@@ -114,23 +115,35 @@ OfxPlugin versions[] = {
   {kOfxImageEffectPluginApi, 1, "org.mondrian.fixture.catalog-version", 1, 0, setHost, entry<0>},
   {kOfxImageEffectPluginApi, 1, "org.mondrian.fixture.catalog-version", 2, 0, setHost, entry<1>},
 };
-void unexpectedSetHost(OfxHost*) {
+void marker(const char* name) {
   auto* path = std::getenv("MONDRIAN_OPENFX_CATALOG_PROBE_LOG");
   if (path && *path) {
     std::ofstream log(std::filesystem::u8path(path), std::ios::binary | std::ios::app);
-    log << "0|9|unexpected_set_host\n"; log.flush();
+    log << "0|9|" << name << '\n'; log.flush();
   }
+}
+void unexpectedSetHost(OfxHost*) {
+  marker("unexpected_set_host");
   std::_Exit(24);
 }
+// Deliberately nonconforming foreign exception to verify the Host boundary.
+struct ForeignFailure : std::exception {
+  ~ForeignFailure() override { marker("foreign_exception_destroyed"); }
+  const char* what() const noexcept override { return "owned foreign constructor fault"; }
+};
+void throwingSetHost(OfxHost*) { marker("throwing_set_host"); throw ForeignFailure{}; }
 OfxPlugin changed = {kOfxImageEffectPluginApi, 1, "org.mondrian.fixture.catalog-version",
     2, 2, unexpectedSetHost, entry<2>};
+OfxPlugin throwing = {kOfxImageEffectPluginApi, 1, "org.mondrian.fixture.catalog-version",
+    2, 1, throwingSetHost, entry<2>};
 unsigned queries[4]{};
 }
 extern "C" {
 OfxExport int OfxGetNumberOfPlugins() { return versionedMode() ? 4 : 3; }
 OfxExport OfxPlugin* OfxGetPlugin(int index) {
   if (index < 0 || index >= OfxGetNumberOfPlugins()) return nullptr;
-  if (mode("swap_version") && index == 0 && ++queries[0] > 1) return &changed;
+  if (index == 0 && (mode("swap_version") || mode("throw_set_host")) && ++queries[0] > 1)
+    return mode("swap_version") ? &changed : &throwing;
   return &(versionedMode() ? versions : plugins)[index];
 }
 }
