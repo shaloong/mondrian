@@ -472,6 +472,30 @@ size or image format, quality and build profile. Measure warmup, processing and
 host overhead, percentiles/deadlines and resource costs as needed; a crash timeout
 is not an audio deadline, and a wall-clock gate duration is not DSP cost.
 
+Current Windows release baseline (2026-10-24, compiled source `3fd7463c`): the
+original public resident Basic gate completes all four cases, excluding32 warmup
+frames and measuring600 frames per case. Release opt3/default features and the
+MSVC official Basic fixture use unchanged80% frame-stage budgets. The timed public
+call includes admission, identity verification, transport, native processing and
+output materialization; its independent every-pixel HDR/negative/alpha oracle is
+outside the timer. Same-Worker, explicit shutdown and process settlement checks
+pass with no functional errors. **All four performance gates fail.**
+
+| Case | Stage budget ms | p50 ms | p95 ms | p99 ms | Max ms | Stage misses |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1080p30 | 26.67 | 63.05 | 68.95 | 74.30 | 82.58 | 600/600 |
+| UHD30 | 26.67 | 233.88 | 498.98 | 531.25 | 555.08 | 600/600 |
+| 1080p60 | 13.33 | 67.37 | 88.97 | 96.97 | 109.97 | 600/600 |
+| UHD60 | 13.33 | 233.45 | 258.26 | 312.08 | 481.50 | 600/600 |
+
+The declared whole-test ceiling600s and owner cleanup2s do not change per-frame
+budgets or the original shared100ms plugin shutdown. An audited Clack manifest
+correction after compilation (`44cb2830`) changes no compiled source; the original
+collector passes. Historical r30 used MinGW Basic/validation features, so it is
+not a matched before/after comparison. No phase attribution, mature-host,
+full-NLE, GPU, realtime or other-platform performance qualification is implied.
+Reuse the existing phase diagnostic before choosing a production optimization.
+
 Keep concise current conclusions, useful reproduction inputs and actionable open
 issues. Do not accumulate historical executable copies, source-hash inventories,
 raw receipts or repeated audit packets. Rerun the complete affected suite when
