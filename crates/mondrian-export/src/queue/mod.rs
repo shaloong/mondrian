@@ -10985,6 +10985,8 @@ pub(crate) use helpers::*;
 
 #[cfg(test)]
 mod tests {
+    mod native_transport_output;
+
     #[test]
     fn smart_render_unclosed_probe_cannot_request_pixel_fallback() {
         for canceled in [false, true] {
