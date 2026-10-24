@@ -1,4 +1,4 @@
-//! Independent Output-only CPU Generator through the actual product child.
+//! Independent source-free CPU Generator through the actual product child.
 use super::*;
 use mondrian_app::openfx_effect::register_selected_openfx_generator;
 use mondrian_app::openfx_host::describe_openfx_generator;
@@ -56,6 +56,20 @@ fn literal(output: &EffectFloatFrame, frame: f32, gain: f32) {
 #[ignore = "requires rebuilt normal product and MONDRIAN_OPENFX_GENERATOR_BINARY=GeneratorProbe; no fault mode"]
 fn output_only_generator_direct_and_prepared_graph_preserve_time_extent_and_owner() {
     assert!(std::env::var_os("MONDRIAN_OPENFX_GENERATOR_MODE").is_none());
+    generator_direct_and_prepared_graph_preserve_time_extent_and_owner();
+}
+
+#[test]
+#[ignore = "requires rebuilt product and GeneratorProbe with MONDRIAN_OPENFX_GENERATOR_MODE=optional_inputs"]
+fn optional_inputs_generator_direct_and_prepared_graph_keep_inputs_disconnected() {
+    assert_eq!(
+        std::env::var("MONDRIAN_OPENFX_GENERATOR_MODE").expect("mode"),
+        "optional_inputs"
+    );
+    generator_direct_and_prepared_graph_preserve_time_extent_and_owner();
+}
+
+fn generator_direct_and_prepared_graph_preserve_time_extent_and_owner() {
     let inspection = inspection();
     let description = describe_openfx_generator(product_executable(), &inspection, IDENTIFIER)
         .expect("Generator descriptor");
@@ -247,6 +261,43 @@ fn output_only_generator_direct_and_prepared_graph_preserve_time_extent_and_owne
     if let Err(panic) = target {
         std::panic::resume_unwind(panic);
     }
+}
+
+#[test]
+#[ignore = "requires rebuilt product and GeneratorProbe with MONDRIAN_OPENFX_GENERATOR_MODE=required_source or required_aux; run each separately"]
+fn generator_with_required_input_is_rejected_before_processing() {
+    let mode = std::env::var("MONDRIAN_OPENFX_GENERATOR_MODE").expect("mode");
+    assert!(matches!(mode.as_str(), "required_source" | "required_aux"));
+    let inspection = inspection();
+    let description = describe_openfx_generator(product_executable(), &inspection, IDENTIFIER);
+    let token = ExecutionCancellationToken::new();
+    let preparation = OpenFxFilterSession::prepare_generator(
+        product_executable(),
+        &inspection,
+        IDENTIFIER,
+        3,
+        2,
+        format(),
+        mondrian_effects::EffectProjectGeometry::new(3, 2, SampleAspectRatio::new(2, 1).unwrap())
+            .expect("explicit owner project geometry"),
+        &mut checkpoint(&token),
+    );
+    // Always retire a wrongly admitted owner before reporting the failure.
+    let rejected = match preparation {
+        Err(OpenFxHostError::WorkerFailed(_)) => true,
+        Err(error) => panic!("unexpected preparation rejection: {error:?}"),
+        Ok(mut session) => {
+            let shutdown = session.shutdown();
+            drop(session);
+            shutdown.expect("retire wrongly admitted Generator owner");
+            false
+        }
+    };
+    assert!(
+        matches!(description, Err(OpenFxHostError::WorkerFailed(_))),
+        "required input must fail Describe: {description:?}"
+    );
+    assert!(rejected, "required input must also fail native preparation");
 }
 
 #[test]

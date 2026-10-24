@@ -14,6 +14,7 @@
 #include <limits>
 #include <fstream>
 #include <filesystem>
+#include <initializer_list>
 #include <string>
 #ifdef _WIN32
 #include <process.h>
@@ -26,6 +27,34 @@ OfxHost* host = nullptr;
 const OfxPropertySuiteV1* properties = nullptr;
 const OfxImageEffectSuiteV1* images = nullptr;
 const OfxParameterSuiteV1* parameters = nullptr;
+
+bool stringIs(OfxPropertySetHandle props, const char* name, const char* expected);
+
+bool modeIs(const char* expected) {
+  const char* mode = std::getenv("MONDRIAN_OPENFX_GENERATOR_MODE");
+  return mode && std::strcmp(mode, expected) == 0;
+}
+
+bool declaresInputs() {
+  return modeIs("optional_inputs") || modeIs("required_source") || modeIs("required_aux");
+}
+
+bool disconnectedInputs(OfxImageEffectHandle effect, bool fetch, double time) {
+  for (const char* name : {kOfxImageEffectSimpleSourceClipName, "Aux"}) {
+    OfxImageClipHandle clip = nullptr;
+    OfxPropertySetHandle props = nullptr;
+    int connected = -1;
+    if (images->clipGetHandle(effect, name, &clip, &props) != kOfxStatOK || !clip || !props ||
+        properties->propGetInt(props, kOfxImageClipPropConnected, 0, &connected) != kOfxStatOK || connected != 0 ||
+        !stringIs(props, kOfxImageClipPropUnmappedPixelDepth, kOfxBitDepthNone) ||
+        !stringIs(props, kOfxImageClipPropUnmappedComponents, kOfxImageComponentNone)) { return false; }
+    if (fetch) {
+      OfxPropertySetHandle image = nullptr;
+      if (images->clipGetImage(clip, time, nullptr, &image) != kOfxStatFailed || image) { return false; }
+    }
+  }
+  return true;
+}
 
 bool stringIs(OfxPropertySetHandle props, const char* name, const char* expected) {
   char* value = nullptr;
@@ -45,8 +74,9 @@ bool generatorInstance(OfxImageEffectHandle effect) {
       properties->propGetDouble(props, kOfxImageEffectPropProjectPixelAspectRatio, 0, &par) == kOfxStatOK &&
       size[0] == 6.0 && size[1] == 2.0 && extent[0] == 6.0 && extent[1] == 2.0 &&
       offset[0] == 0.0 && offset[1] == 0.0 && par == 2.0 &&
-      images->clipGetHandle(effect, kOfxImageEffectSimpleSourceClipName,
-                            &source, nullptr) != kOfxStatOK && !source;
+      (declaresInputs() ? disconnectedInputs(effect, false, 0.0) :
+        images->clipGetHandle(effect, kOfxImageEffectSimpleSourceClipName,
+                              &source, nullptr) != kOfxStatOK && !source);
 }
 
 OfxStatus load() {
@@ -81,6 +111,18 @@ OfxStatus describe(OfxImageEffectHandle effect) {
 OfxStatus describeInContext(OfxImageEffectHandle effect, OfxPropertySetHandle in) {
   if (!in || !stringIs(in, kOfxImageEffectPropContext, kOfxImageEffectContextGenerator)) {
     return kOfxStatErrUnsupported;
+  }
+  if (declaresInputs()) {
+    for (const char* name : {kOfxImageEffectSimpleSourceClipName, "Aux"}) {
+      OfxPropertySetHandle clip = nullptr;
+      const bool required = (modeIs("required_source") && std::strcmp(name, "Source") == 0) ||
+          (modeIs("required_aux") && std::strcmp(name, "Aux") == 0);
+      if (images->clipDefine(effect, name, &clip) != kOfxStatOK || !clip ||
+          properties->propSetString(clip, kOfxImageEffectPropSupportedComponents, 0,
+                                    kOfxImageComponentRGBA) != kOfxStatOK ||
+          properties->propSetInt(clip, kOfxImageClipPropOptional, 0, required ? 0 : 1) != kOfxStatOK ||
+          properties->propSetInt(clip, kOfxImageEffectPropTemporalClipAccess, 0, 0) != kOfxStatOK) { return kOfxStatFailed; }
+    }
   }
   OfxPropertySetHandle output = nullptr;
   OfxParamSetHandle params = nullptr;
@@ -228,7 +270,8 @@ OfxStatus render(OfxImageEffectHandle effect, OfxPropertySetHandle in) {
   // This environment is test infrastructure, not a parameter or product policy.
   const char* mode = std::getenv("MONDRIAN_OPENFX_GENERATOR_MODE");
   if (mode && std::strcmp(mode, "no_output_fetch") == 0) { return kOfxStatOK; }
-  if (mode && *mode && !(clipParDefaultsMode() || clipRateDefaultsMode())) { return kOfxStatErrValue; }
+  if (mode && *mode && !(clipParDefaultsMode() || clipRateDefaultsMode() || declaresInputs())) { return kOfxStatErrValue; }
+  if (declaresInputs() && !disconnectedInputs(effect, true, time)) { return kOfxStatFailed; }
 
   OfxPropertySetHandle image = nullptr;
   if (images->clipGetImage(output, time, nullptr, &image) != kOfxStatOK || !image) {
