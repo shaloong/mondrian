@@ -4528,11 +4528,10 @@ fn execute_timeline_export(
             }
         }
         let resolved_video_encoder = match &delivery.artifact {
-            ResolvedExportArtifactEncoding::MediaFile { video, .. } => {
+            ResolvedExportArtifactEncoding::MediaFile { .. } => {
                 let adapter = visual_session.active_adapter_identity();
                 match crate::hardware_encoding::resolve_video_encoder(
-                    video,
-                    delivery.pixel_format,
+                    &delivery,
                     adapter.as_ref(),
                     timeline
                         .sequence
