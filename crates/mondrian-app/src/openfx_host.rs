@@ -3715,6 +3715,8 @@ pub(crate) mod shared_frame_tests {
                     binary.as_ptr(),
                     bundle.as_ptr(),
                     identifier.as_ptr(),
+                    1,
+                    0,
                     OpenFxContext::Filter.native(),
                     namespace,
                     input.as_ptr().cast(),

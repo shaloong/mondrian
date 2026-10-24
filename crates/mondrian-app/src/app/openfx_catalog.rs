@@ -570,7 +570,7 @@ mod tests {
 
     #[test]
     #[ignore = "owned out-of-order same-ID multi-version Catalog and actual Graph pixel gate"]
-    fn native_catalog_versions_bind_metadata_and_graph_pixels_to_exact_major() {
+    fn native_catalog_versions_bind_metadata_and_graph_pixels_to_exact_version() {
         use mondrian_core::{
             Rational, SampleAspectRatio, TimelineTime, TimelineTimeRange, WorkingColorSpace,
         };
@@ -599,12 +599,12 @@ mod tests {
         }
         assert_eq!(completed, vec![selection]);
         let mut keys = std::collections::BTreeSet::new();
-        for version in 1..=3 {
-            let label = format!("Catalog Probe v{version} (Generator)");
+        for (major, minor, pixel_code) in [(1, 0, 1), (2, 0, 2), (2, 1, 3), (3, 0, 4)] {
+            let label = format!("Catalog Probe v{major}.{minor} (Generator)");
             let kind = effect_library_types()
                 .into_iter()
                 .find(|kind| effect_definition(kind).is_some_and(|d| d.display_name() == label))
-                .unwrap_or_else(|| panic!("exact metadata for major {version} must exist"));
+                .unwrap_or_else(|| panic!("exact metadata for version {major}.{minor} must exist"));
             assert!(
                 keys.insert(kind.key().to_owned()),
                 "versions must retain distinct existing Effect keys"
@@ -656,10 +656,15 @@ mod tests {
                             &mut EffectProcessorControl::uncancelled(),
                         )
                         .unwrap();
-                    let expected = [version as f32 / 16.0, version as f32 / 32.0, 0.25, 1.0];
+                    let expected = [
+                        pixel_code as f32 / 16.0,
+                        pixel_code as f32 / 32.0,
+                        0.25,
+                        1.0,
+                    ];
                     assert!(
                         output.pixels().iter().all(|pixel| *pixel == expected),
-                        "actual pixels for major {version}"
+                        "actual pixels for version {major}.{minor}"
                     );
                 }
             }));

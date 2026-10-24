@@ -375,6 +375,12 @@ mod tests {
             plugins: vec![plugin(2, 0), plugin(3, 0), plugin(1, 0)],
         };
         assert!(request.validate().is_ok());
+        request.schema_version = 1;
+        assert!(
+            request.validate().is_err(),
+            "stale identifier-only Catalog schema is refused"
+        );
+        request.schema_version = SCHEMA;
         let mut long = plugin(1, 0);
         long.identifier = "a".repeat(256);
         let mut bad = plugin(1, 0);

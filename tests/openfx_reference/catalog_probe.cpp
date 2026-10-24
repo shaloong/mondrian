@@ -57,7 +57,7 @@ OfxStatus dispatch(int index, const char* action, const void* handle, OfxPropert
         properties->propSetInt(props, kOfxImageEffectPropSupportsMultiResolution, 0, 0) != kOfxStatOK ||
         properties->propSetInt(props, kOfxImageEffectPropTemporalClipAccess, 0, 0) != kOfxStatOK) return kOfxStatFailed;
     if (mode("versions")) {
-      const char* labels[] = {"Catalog Probe v1", "Catalog Probe v2", "Catalog Probe v3"};
+      const char* labels[] = {"Catalog Probe v1.0", "Catalog Probe v2.0", "Catalog Probe v2.1", "Catalog Probe v3.0"};
       if (properties->propSetString(props, kOfxPropLabel, 0, labels[index]) != kOfxStatOK) return kOfxStatFailed;
     }
     return kOfxStatOK;
@@ -106,14 +106,15 @@ OfxPlugin plugins[] = {
   {kOfxImageEffectPluginApi, 1, "org.mondrian.fixture.catalog-b", 1, 0, setHost, entry<1>},
   {kOfxImageEffectPluginApi, 1, "org.mondrian.fixture.catalog-c", 1, 0, setHost, entry<2>},
 };
-// Same identifier, deliberately different from the parent's sorted version order.
+// Same identifier, including two minors of one major, in deliberately unsorted order.
 OfxPlugin versions[] = {
-  {kOfxImageEffectPluginApi, 1, "org.mondrian.fixture.catalog-version", 2, 0, setHost, entry<1>},
-  {kOfxImageEffectPluginApi, 1, "org.mondrian.fixture.catalog-version", 3, 0, setHost, entry<2>},
+  {kOfxImageEffectPluginApi, 1, "org.mondrian.fixture.catalog-version", 2, 1, setHost, entry<2>},
+  {kOfxImageEffectPluginApi, 1, "org.mondrian.fixture.catalog-version", 3, 0, setHost, entry<3>},
   {kOfxImageEffectPluginApi, 1, "org.mondrian.fixture.catalog-version", 1, 0, setHost, entry<0>},
+  {kOfxImageEffectPluginApi, 1, "org.mondrian.fixture.catalog-version", 2, 0, setHost, entry<1>},
 };
 }
 extern "C" {
-OfxExport int OfxGetNumberOfPlugins() { return 3; }
-OfxExport OfxPlugin* OfxGetPlugin(int index) { return index >= 0 && index < 3 ? &(mode("versions") ? versions : plugins)[index] : nullptr; }
+OfxExport int OfxGetNumberOfPlugins() { return mode("versions") ? 4 : 3; }
+OfxExport OfxPlugin* OfxGetPlugin(int index) { return index >= 0 && index < OfxGetNumberOfPlugins() ? &(mode("versions") ? versions : plugins)[index] : nullptr; }
 }
