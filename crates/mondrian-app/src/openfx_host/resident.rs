@@ -1998,6 +1998,28 @@ fn materialize_native_output(
     )
 }
 
+/// Measure the actual output allocation/materializer without executing a plugin.
+///
+/// This validation-only seam owns no native invocation, publication, cache or
+/// resource-bank authority. Owner/sequence/child/publication fields in the report
+/// remain absent; only the completed memory phases and byte counters are real.
+/// The production helper below retains every storage and numeric admission rule.
+#[cfg(any(test, feature = "validation"))]
+pub fn diagnose_openfx_output_materialization(
+    extent: mondrian_effects::EffectFrameExtent,
+    format: mondrian_effects::EffectValueFormat,
+    sampling: mondrian_core::ImageSampling,
+    source: &[u8],
+    checkpoint: &mut dyn FnMut() -> Result<(), OpenFxHostError>,
+    report: &mut OpenFxRenderDiagnostic,
+) -> Result<EffectFloatFrame, OpenFxHostError> {
+    *report = OpenFxRenderDiagnostic::default();
+    let phase = report.start();
+    let owner = NativeOutputAllocation::acquire(extent, checkpoint, reserve_native_output);
+    report.finish(OpenFxRenderPhase::OutputAllocation, phase);
+    materialize_native_output_profiled(source, owner?, format, sampling, checkpoint, report)
+}
+
 fn materialize_native_output_profiled(
     source: &[u8],
     owner: NativeOutputAllocation,

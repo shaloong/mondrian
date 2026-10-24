@@ -14,14 +14,14 @@ pub(crate) use description::{
     observe_selected_openfx_with_checkpoint, OpenFxDescribeNotices, OpenFxDescriptionObservation,
 };
 mod resident;
+#[cfg(any(test, feature = "validation"))]
+pub use resident::{
+    diagnose_openfx_output_materialization, OpenFxChildRenderDiagnostic, OpenFxChildRenderPhase,
+    OpenFxNativeRenderPhase, OpenFxRenderDiagnostic, OpenFxRenderPhase,
+};
 pub use resident::{
     run_openfx_resident_worker, OpenFxFilterSession, OpenFxRenderObservation,
     OPENFX_RESIDENT_WORKER_ARGUMENT,
-};
-#[cfg(any(test, feature = "validation"))]
-pub use resident::{
-    OpenFxChildRenderDiagnostic, OpenFxChildRenderPhase, OpenFxNativeRenderPhase,
-    OpenFxRenderDiagnostic, OpenFxRenderPhase,
 };
 
 use mondrian_effects::EffectProjectGeometry;

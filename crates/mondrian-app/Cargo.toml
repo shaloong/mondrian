@@ -125,6 +125,13 @@ test = true
 harness = true
 bench = false
 
+[[example]]
+name = "frame_admission_diagnostic"
+path = "examples/frame_admission_diagnostic.rs"
+required-features = ["validation"]
+test = false
+bench = false
+
 [dependencies]
 tiff = { version = "0.11.3", optional = true }
 mondrian-validation-launcher = { workspace = true, optional = true }

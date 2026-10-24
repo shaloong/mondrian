@@ -525,8 +525,23 @@ All six have exit0, empty stderr and original180s/2s ownership settlement; share
 123 ignored, so it adds no ordinary-test coverage. Default release also prints11
 existing diagnostic-only unused-item warnings; no new strict warning-free result
 is claimed. This finite behavior and median improvement are verified; the four
-deadline gates still fail. New phase attribution, broad third-party, realtime,
-long-run stability and other-platform qualification remain separate.
+deadline gates still fail. Broad third-party, realtime, long-run stability and
+other-platform qualification remain separate.
+
+Post-classifier paired ordinary/instrumented release controls at60fps complete
+32 warmup/600 samples for1080p and UHD with unchanged pixel, correlation and
+lifecycle assertions. Instrumented UHD mean parent output copy/admission is
+24.84/21.13ms; native input/output validation is14.19/16.72ms and PluginRender
+42.49ms. Native phases nest inside await and must not be added twice. The earlier
+1248.47ms maximum is not reproduced or resolved. The validation-only
+`frame_admission_diagnostic` calls the actual materializer with counter-only
+checkpoints and owned seed bytes: UHD output admission p50 is6.68ms versus6.38ms
+for a borrowed recheck of the same output. Neither API/error-type, callback-form,
+order nor1MiB-copy controls reproduce the full-session difference. These are
+attribution controls, not production frame-budget passes; actual process/owner
+checkpoints and full-session context remain to be isolated. Both typed APIs scan
+once, and native validation precedes EndSequenceRender; parent validation remains
+the independent publication boundary. No scan, ownership or cache rule is removed.
 
 Keep concise current conclusions, useful reproduction inputs and actionable open
 issues. Do not accumulate historical executable copies, source-hash inventories,
