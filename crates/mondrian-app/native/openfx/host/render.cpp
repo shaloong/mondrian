@@ -327,8 +327,7 @@ static int loadFrame(MondrianOpenFx::FrameState& state, const void* input,
   const auto* data = static_cast<const OfxRGBAColourF*>(input);
   for (size_t index = 0; !generator && index < pixels; ++index) {
     const auto& pixel = data[index];
-    if (!std::isfinite(pixel.r) || !std::isfinite(pixel.g) ||
-        !std::isfinite(pixel.b) || !std::isfinite(pixel.a) || (info.source_alpha == 2 && pixel.a != 1.0f)) { return 2; }
+    if (!MondrianOpenFx::finiteFloatRgba(pixel) || (info.source_alpha == 2 && pixel.a != 1.0f)) { return 2; }
   }
   state.input = data;
   state.pixelCount = pixels;
@@ -894,8 +893,7 @@ struct MondrianOpenFxSession {
     if (written) {
       for (size_t index = 0; index < frame.outputPixelCount; ++index) {
         const auto& pixel = frame.output[index];
-        if (!std::isfinite(pixel.r) || !std::isfinite(pixel.g) ||
-            !std::isfinite(pixel.b) || !std::isfinite(pixel.a)) { written = false; break; }
+        if (!MondrianOpenFx::finiteFloatRgba(pixel)) { written = false; break; }
       }
     }
     probe.finish(MONDRIAN_OPENFX_OUTPUT_VALIDATION, phase);

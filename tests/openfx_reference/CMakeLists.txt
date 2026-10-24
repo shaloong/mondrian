@@ -87,6 +87,10 @@ add_executable(ImageDomain EXCLUDE_FROM_ALL image_domain.cpp)
 target_compile_features(ImageDomain PRIVATE cxx_std_17)
 target_include_directories(ImageDomain PRIVATE
   "${MONDRIAN_OPENFX_HOST}/vendor/include" "${MONDRIAN_OPENFX_HOST}/host")
+add_executable(FramePixels EXCLUDE_FROM_ALL frame_pixels.cpp)
+target_compile_features(FramePixels PRIVATE cxx_std_17)
+target_include_directories(FramePixels PRIVATE
+  "${MONDRIAN_OPENFX_HOST}/vendor/include" "${MONDRIAN_OPENFX_HOST}/host")
 add_executable(ImageMemoryOwnership EXCLUDE_FROM_ALL image_memory_ownership.cpp)
 target_compile_features(ImageMemoryOwnership PRIVATE cxx_std_17)
 target_compile_definitions(ImageMemoryOwnership PRIVATE NOMINMAX OFX_SUPPORTS_MULTITHREAD)

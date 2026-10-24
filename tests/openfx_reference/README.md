@@ -59,6 +59,14 @@ exit0. CatalogProbe additionally checks real Image/Clip/Effect/action properties
 in the existing four-version Catalog-to-Graph pixel gate. These owned controls
 do not establish full Property V1, whole-host memory or platform compatibility.
 
+`FramePixels` tests the actual native Float32 RGBA classifier against the standard
+finite predicate for75,776 representations: all exponent classes and both signs
+in every channel, NaN payload boundaries and deterministic mixed lanes. It also
+requires unchanged input bits. Build `--config Release --target FramePixels` and
+run `Release/FramePixels.exe` (adjust for the generator). Zero failures/exit0
+qualifies classification equivalence only; actual Product behavior and performance
+still require the separate native/public gates.
+
 Native reuse is qualified separately in a supervised test child:
 
 ```sh

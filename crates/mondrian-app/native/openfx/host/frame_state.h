@@ -2,6 +2,7 @@
 #ifndef MONDRIAN_OPENFX_FRAME_STATE_H
 #define MONDRIAN_OPENFX_FRAME_STATE_H
 #include "render.h"
+#include "ofxCore.h"
 #include "ofxPixels.h"
 #include <cstddef>
 #include <atomic>
@@ -10,7 +11,24 @@
 #include <limits>
 #include <array>
 #include <algorithm>
+#include <cstdint>
+#include <cstring>
 namespace MondrianOpenFx {
+  // The OFX Float32 ABI uses IEEE binary32. Classify its representation without
+  // arithmetic or aliasing: every exponent-255 lane is nonfinite, including
+  // both signs and all quiet/signaling NaN payloads. Other bits are untouched.
+  // In particular MSVC's std::isfinite(float) otherwise calls CRT _fdtest for
+  // every channel in both complete-raster admission scans.
+  inline bool finiteFloatRgba(const OfxRGBAColourF& pixel) noexcept {
+    static_assert(std::numeric_limits<float>::is_iec559 && sizeof(float) == sizeof(std::uint32_t),
+                  "OFX Float32 requires IEEE binary32");
+    std::uint32_t bits[4];
+    static_assert(sizeof(bits) == sizeof(pixel), "OFX RGBA has four packed float lanes");
+    std::memcpy(bits, &pixel, sizeof(bits));
+    constexpr std::uint32_t exponent = 0x7f800000u;
+    return (bits[0] & exponent) != exponent && (bits[1] & exponent) != exponent &&
+           (bits[2] & exponent) != exponent && (bits[3] & exponent) != exponent;
+  }
   // Private canonical ordinal-domain query, not animation key count (3).
   constexpr int kChoiceOrdinalDomainSizeQuery = 6;
   struct ParameterSource {
