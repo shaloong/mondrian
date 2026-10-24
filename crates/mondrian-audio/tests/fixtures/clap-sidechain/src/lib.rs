@@ -811,7 +811,7 @@ impl<'a> PluginAudioProcessor<'a, Shared<'a>, Main<'a>> for Processor<'a> {
         // original PCM, ports and mode-specific lifecycle requirements.
         let timeline_start = if (6..=9).contains(&self.mode) || self.mode == 13 {
             let transport = process.transport.ok_or(PluginError::Message("missing timeline transport"))?;
-            if transport.flags != TransportFlags::HAS_SECONDS_TIMELINE
+            if transport.flags & !TransportFlags::IS_PLAYING != TransportFlags::HAS_SECONDS_TIMELINE
                 || transport.header.time() != 0 || process.steady_time.is_some()
                 || transport.song_pos_beats.to_bits() != 0
                 || transport.tempo != 0.0 || transport.tempo_inc != 0.0
@@ -854,7 +854,7 @@ impl<'a> PluginAudioProcessor<'a, Shared<'a>, Main<'a>> for Processor<'a> {
             } else {
                 0
             };
-            if transport.flags != expected_flags
+            if transport.flags & !TransportFlags::IS_PLAYING != expected_flags
                 || transport.header.time() != 0
                 || process.steady_time.is_some()
                 || transport.song_pos_beats.to_bits() != expected_beats
@@ -909,6 +909,11 @@ impl<'a> PluginAudioProcessor<'a, Shared<'a>, Main<'a>> for Processor<'a> {
                 let tempo = process.transport.ok_or(PluginError::Message("missing tempo"))?.tempo as f32;
                 self.gain + (sample % 251) as f32 / 1024.0 + tempo / 1024.0
             } else if timeline_start.is_some() { self.gain + tag } else { self.gain };
+            // Native Playing must affect PCM, so merely accepting the flag cannot pass the oracle.
+            let gain = gain + if matches!(self.mode, 6 | 11)
+                && process.transport.is_some_and(|t| t.flags.contains(TransportFlags::IS_PLAYING)) {
+                0.125
+            } else { 0.0 };
             if let Some(echo) = self.echo.as_mut() {
                 *frame = echo.process_frame([frame[0] * gain, frame[1] * gain]);
             } else {

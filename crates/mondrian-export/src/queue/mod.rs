@@ -6097,7 +6097,7 @@ fn render_audio_stems_to_pcm_f32(
         for stem in &mut active {
             stem.delivery
                 .render_into_cancellable(
-                    AudioRenderRequest { start_sample: chunk_start, frames: chunk_frames },
+                    AudioRenderRequest { transport_activity: Some(mondrian_core::TimelineTransportActivity::Playing), start_sample: chunk_start, frames: chunk_frames },
                     &mut pcm[..chunk_samples],
                     cancel,
                 )
@@ -6247,7 +6247,7 @@ fn render_timeline_audio_to_pcm_f32(
             };
             let chunk_samples = chunk_frames * channels;
             if let Err(error) = delivery.render_into_cancellable(
-                AudioRenderRequest { start_sample: chunk_start, frames: chunk_frames },
+                AudioRenderRequest { transport_activity: Some(mondrian_core::TimelineTransportActivity::Playing), start_sample: chunk_start, frames: chunk_frames },
                 &mut pcm[..chunk_samples],
                 cancel,
             ) {
@@ -18744,7 +18744,7 @@ mod tests {
         let mut output = [0.0_f32; 128];
         delivery
             .render_into_cancellable(
-                AudioRenderRequest { start_sample: 0, frames: 64 },
+                AudioRenderRequest { transport_activity: None, start_sample: 0, frames: 64 },
                 &mut output,
                 &ExecutionCancellationToken::new(),
             )

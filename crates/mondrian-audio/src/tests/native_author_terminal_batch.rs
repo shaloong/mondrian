@@ -374,7 +374,7 @@ fn terminal_batch_final_recheck_guard_and_partial_ack_keep_original_custody() {
         f.owned
             .inner
             .runtime
-            .render_into(AudioRenderRequest { start_sample: 1, frames: 1 }, &mut pcm),
+            .render_into(AudioRenderRequest { transport_activity: None, start_sample: 1, frames: 1 }, &mut pcm),
         Err(AudioExecutionError::NativeAuthorPending(_))
     ));
     assert_eq!(pcm, [91.0]);

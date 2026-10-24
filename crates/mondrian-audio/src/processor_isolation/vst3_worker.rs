@@ -1794,6 +1794,7 @@ trait VstNativeSignal {
         &mut self,
         context: vst3_host::audio::ProcessTimelineContext,
         reference: Option<vst3_host::audio::ProcessMusicalReference>,
+        activity: Option<mondrian_core::TimelineTransportActivity>,
     ) -> vst3_host::error::Result<()>;
     fn process_buses(&mut self, buffers: &mut BusAudioBuffers) -> vst3_host::error::Result<()>;
     fn process_note_buses(
@@ -1816,11 +1817,16 @@ impl VstNativeSignal for Plugin {
         &mut self,
         context: vst3_host::audio::ProcessTimelineContext,
         reference: Option<vst3_host::audio::ProcessMusicalReference>,
+        activity: Option<mondrian_core::TimelineTransportActivity>,
     ) -> vst3_host::error::Result<()> {
         match reference {
             Some(reference) => self.set_process_musical_timeline_context(context, reference),
             None => self.set_process_timeline_context(context),
+        }?;
+        if let Some(activity) = activity {
+            self.set_playing(activity == mondrian_core::TimelineTransportActivity::Playing)?;
         }
+        Ok(())
     }
     fn process_buses(&mut self, buffers: &mut BusAudioBuffers) -> vst3_host::error::Result<()> {
         self.process_bus_audio(buffers)
@@ -1847,11 +1853,16 @@ impl VstNativeSignal for vst3_host::plugin::PluginAudioProcessing<'_> {
         &mut self,
         context: vst3_host::audio::ProcessTimelineContext,
         reference: Option<vst3_host::audio::ProcessMusicalReference>,
+        activity: Option<mondrian_core::TimelineTransportActivity>,
     ) -> vst3_host::error::Result<()> {
         match reference {
             Some(reference) => self.set_process_musical_timeline_context(context, reference),
             None => self.set_process_timeline_context(context),
+        }?;
+        if let Some(activity) = activity {
+            self.set_process_playing(activity == mondrian_core::TimelineTransportActivity::Playing)?;
         }
+        Ok(())
     }
     fn process_buses(&mut self, buffers: &mut BusAudioBuffers) -> vst3_host::error::Result<()> {
         self.process_bus_audio(buffers)
@@ -1951,6 +1962,7 @@ impl VstSignalFields<'_> {
                     sample_rate: block.sample_rate(),
                 },
                 reference,
+                block.transport_activity(),
             )
             .map_err(|error| {
                 AudioProcessorHostError::Process(format!("VST3 timeline delivery failed: {error}"))
@@ -4632,6 +4644,7 @@ mod musical_effect_tests {
         calls: Vec<&'static str>,
         parameters: Vec<(u32, f64, i32)>,
         timeline: Option<(ProcessTimelineContext, Option<ProcessMusicalReference>)>,
+        transport_activity: Option<mondrian_core::TimelineTransportActivity>,
         reject_timeline: bool,
         reject_notes: bool,
         zero_input: bool,
@@ -4656,6 +4669,7 @@ mod musical_effect_tests {
             &mut self,
             context: ProcessTimelineContext,
             reference: Option<ProcessMusicalReference>,
+            activity: Option<mondrian_core::TimelineTransportActivity>,
         ) -> vst3_host::error::Result<()> {
             self.calls.push("timeline");
             if self.reject_timeline {
@@ -4664,6 +4678,7 @@ mod musical_effect_tests {
                 ));
             }
             self.timeline = Some((context, reference));
+            self.transport_activity = activity;
             Ok(())
         }
         fn process_buses(&mut self, buffers: &mut BusAudioBuffers) -> vst3_host::error::Result<()> {
@@ -5934,7 +5949,11 @@ mod musical_effect_tests {
         let auxiliary = AudioProcessorAuxiliaryInputContract::default();
         for rate in [44_100, 48_000] {
             for start in [-17, i64::MAX - 32] {
-                for with_music in [true, false] {
+                for (with_music, activity) in [true, false].into_iter().flat_map(|music| {
+                    [Some(mondrian_core::TimelineTransportActivity::Playing),
+                     Some(mondrian_core::TimelineTransportActivity::Stopped), None]
+                        .into_iter().map(move |activity| (music, activity))
+                }) {
                     let reference = with_music.then(|| {
                         MusicalTimeReference::new(
                             TimelineTime::new(start - 1, i64::from(rate)).unwrap(),
@@ -5972,10 +5991,12 @@ mod musical_effect_tests {
                             &ids,
                             &events,
                         )
-                        .with_musical_time_reference(reference),
+                        .with_musical_time_reference(reference)
+                        .with_transport_activity(activity),
                     )
                     .unwrap();
                     assert_eq!(native.calls, ["timeline", "parameter", "process"]);
+                    assert_eq!(native.transport_activity, activity);
                     let (timeline, musical) = native.timeline.unwrap();
                     assert_eq!(
                         timeline,

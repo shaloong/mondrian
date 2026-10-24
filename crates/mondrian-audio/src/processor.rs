@@ -784,6 +784,11 @@ impl AudioProcessorProcessContext {
         self.request
     }
 
+    /// Exact consumer fact propagated with this original signal window.
+    pub const fn transport_activity(self) -> Option<mondrian_core::TimelineTransportActivity> {
+        self.request.transport_activity
+    }
+
     /// Prepared sample grid.
     pub const fn sample_rate(self) -> AudioSampleRate {
         self.sample_rate

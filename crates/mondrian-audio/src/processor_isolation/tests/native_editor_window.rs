@@ -166,7 +166,7 @@ impl NativeEditorProductFixture {
     fn block(&mut self, start: i64) -> Result<Vec<f32>, AudioProcessorHostError> {
         let mut audio = TestAudioIo { main: vec![1.0; 8], auxiliary: Vec::new() };
         let context = AudioProcessorProcessContext::new(
-            AudioRenderRequest { start_sample: start, frames: 4 },
+            AudioRenderRequest { transport_activity: None, start_sample: start, frames: 4 },
             AudioSampleRate::new(48_000).expect("exact rate"),
             AudioChannelLayout::Stereo,
             AudioProcessingMode::Offline,

@@ -1090,7 +1090,7 @@ mod tests {
                 &score,
                 0,
                 prior,
-                AudioRenderRequest { start_sample: 0, frames: 1 },
+                AudioRenderRequest { transport_activity: None, start_sample: 0, frames: 1 },
             )
             .unwrap();
         assert_eq!(
@@ -1156,7 +1156,7 @@ mod tests {
                 &score,
                 0,
                 next,
-                AudioRenderRequest { start_sample: 0, frames: 1 },
+                AudioRenderRequest { transport_activity: None, start_sample: 0, frames: 1 },
             )
             .unwrap();
         assert_eq!(instance.notes.as_ref().unwrap().inputs[0].native_note_id, 1);
@@ -1334,7 +1334,7 @@ mod tests {
                 &score,
                 0,
                 origin,
-                AudioRenderRequest { start_sample: 0, frames: 1 },
+                AudioRenderRequest { transport_activity: None, start_sample: 0, frames: 1 },
             )
             .unwrap();
         let on = state.inputs[0];
@@ -1348,7 +1348,7 @@ mod tests {
                 &score,
                 0,
                 origin,
-                AudioRenderRequest { start_sample: 1, frames: 1 },
+                AudioRenderRequest { transport_activity: None, start_sample: 1, frames: 1 },
             )
             .unwrap();
         let off = state.inputs[0];
@@ -1373,7 +1373,7 @@ mod tests {
                 &score,
                 0,
                 origin,
-                AudioRenderRequest { start_sample: 0, frames: 2 },
+                AudioRenderRequest { transport_activity: None, start_sample: 0, frames: 2 },
             )
             .unwrap();
         assert_eq!(state.inputs.len(), 2);
@@ -1425,7 +1425,7 @@ mod tests {
                 &score,
                 0,
                 origin,
-                AudioRenderRequest { start_sample: 0, frames: 1 },
+                AudioRenderRequest { transport_activity: None, start_sample: 0, frames: 1 },
             )
             .unwrap();
         state.accept_native_return(origin).unwrap();

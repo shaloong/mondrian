@@ -448,7 +448,7 @@ fn external_clap_effect_runtime_renders_finite_nonzero_pcm() {
         let mut output = Vec::with_capacity(FRAMES * 2);
         for start in (0..FRAMES).step_by(BLOCK) {
             let mut block = [f32::NAN; BLOCK * 2];
-            runtime.render_into(AudioRenderRequest { start_sample: start as i64, frames: BLOCK },
+            runtime.render_into(AudioRenderRequest { transport_activity: None, start_sample: start as i64, frames: BLOCK },
                 &mut block).unwrap_or_else(|error| panic!(
                     "actual CLAP Runtime PCM failure at start={start}; original typed failure retained: {error:?}"));
             assert!(

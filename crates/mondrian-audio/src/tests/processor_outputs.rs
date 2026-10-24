@@ -349,7 +349,7 @@ fn render(runtime: &mut AudioProgramRuntime, partitions: &[usize]) -> Vec<f32> {
     for &frames in partitions {
         let mut pcm = vec![0.0; frames * channels];
         runtime
-            .render_into(AudioRenderRequest { start_sample, frames }, &mut pcm)
+            .render_into(AudioRenderRequest { transport_activity: None, start_sample, frames }, &mut pcm)
             .unwrap();
         result.extend(pcm);
         start_sample += frames as i64;
@@ -552,7 +552,7 @@ fn processor_output_partial_failure_does_not_publish_or_reexecute_a_poisoned_win
         assert_eq!(render(&mut runtime, &[2]), [2.0, 4.0]);
         let mut pcm = [99.0; 2];
         assert!(runtime
-            .render_into(AudioRenderRequest { start_sample: 2, frames: 2 }, &mut pcm)
+            .render_into(AudioRenderRequest { transport_activity: None, start_sample: 2, frames: 2 }, &mut pcm)
             .is_err());
         assert_eq!(resolver.calls.load(Ordering::SeqCst), 2);
         assert_eq!(
@@ -560,7 +560,7 @@ fn processor_output_partial_failure_does_not_publish_or_reexecute_a_poisoned_win
             "failed window cannot expose an older or partial tap"
         );
         assert!(matches!(
-            runtime.render_into(AudioRenderRequest { start_sample: 2, frames: 2 }, &mut pcm),
+            runtime.render_into(AudioRenderRequest { transport_activity: None, start_sample: 2, frames: 2 }, &mut pcm),
             Err(AudioExecutionError::ProcessorHost(
                 AudioProcessorHostError::PoisonedInstance
             ))

@@ -322,7 +322,7 @@ fn native_author_nested_repeated_preserved_charge_matches_materialized_locals() 
             .inner
             .runtime
             .render_into(
-                AudioRenderRequest { start_sample: start, frames: 1 },
+                AudioRenderRequest { transport_activity: None, start_sample: start, frames: 1 },
                 &mut pcm,
             )
             .unwrap();

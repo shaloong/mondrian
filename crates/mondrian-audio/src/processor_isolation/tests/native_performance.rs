@@ -574,7 +574,7 @@ fn process_context(
     frames: usize,
 ) -> AudioProcessorProcessContext {
     AudioProcessorProcessContext::new(
-        AudioRenderRequest { start_sample, frames },
+        AudioRenderRequest { transport_activity: None, start_sample, frames },
         AudioSampleRate::new(SAMPLE_RATE).expect("fixed valid sample rate"),
         AudioChannelLayout::Stereo,
         mode,

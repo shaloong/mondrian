@@ -9,7 +9,7 @@ use mondrian_core::{AudioChannelLayout, ParameterId};
 use serde::{Deserialize, Serialize};
 use std::io::{self, Read, Write};
 
-pub(super) const PROTOCOL_VERSION: u32 = 19;
+pub(super) const PROTOCOL_VERSION: u32 = 20;
 pub(super) const MAX_CONTROL_FRAME_BYTES: usize = 1024 * 1024;
 pub(super) const MAX_PREPARATION_PAYLOAD_BYTES: usize = MAX_CONTROL_FRAME_BYTES / 2;
 
@@ -257,6 +257,7 @@ pub(super) enum CommandKind {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct WorkerCommand {
+    pub transport_activity: Option<mondrian_core::TimelineTransportActivity>,
     pub kind: CommandKind,
     pub start_sample: i64,
     pub frames: u32,
@@ -267,9 +268,20 @@ pub(super) struct WorkerCommand {
 impl WorkerCommand {
     pub(super) fn write_to(self, writer: &mut impl Write) -> io::Result<()> {
         validate_note_count(self.kind, self.note_count)?;
+        if self.kind != CommandKind::Process && self.transport_activity.is_some() {
+            return Err(io::Error::new(io::ErrorKind::InvalidData,
+                "transport activity belongs only to a signal Process command"));
+        }
         let kind = match self.kind {
             CommandKind::EnterState => 1_u32,
-            CommandKind::Process => 2,
+            // Distinct v20 Process tags retain the same bounded 32-byte frame,
+            // Note count and shared PCM/event offsets. They all dispatch through
+            // the original Process path, never a second execution mechanism.
+            CommandKind::Process => match self.transport_activity {
+                None => 2,
+                Some(mondrian_core::TimelineTransportActivity::Stopped) => 17,
+                Some(mondrian_core::TimelineTransportActivity::Playing) => 18,
+            },
             CommandKind::Shutdown => 3,
             CommandKind::PollPending => 4,
             // Tag 5 was the dense all-constant body and must not decode as Option lanes.
@@ -311,7 +323,7 @@ impl WorkerCommand {
         }
         let kind = match u32::from_le_bytes(bytes[8..12].try_into().map_err(invalid_slice)?) {
             1 => CommandKind::EnterState,
-            2 => CommandKind::Process,
+            2 | 17 | 18 => CommandKind::Process,
             3 => CommandKind::Shutdown,
             4 => CommandKind::PollPending,
             14 => CommandKind::ServiceConfiguration,
@@ -333,6 +345,11 @@ impl WorkerCommand {
             }
         };
         let command = Self {
+            transport_activity: match u32::from_le_bytes(bytes[8..12].try_into().map_err(invalid_slice)?) {
+                17 => Some(mondrian_core::TimelineTransportActivity::Stopped),
+                18 => Some(mondrian_core::TimelineTransportActivity::Playing),
+                _ => None,
+            },
             kind,
             frames: u32::from_le_bytes(bytes[12..16].try_into().map_err(invalid_slice)?),
             start_sample: i64::from_le_bytes(bytes[16..24].try_into().map_err(invalid_slice)?),
@@ -887,15 +904,15 @@ mod response_write_qualification {
         }
     }
 
-    // Independent protocol-v19 wire bytes: MAPR, version=19, success=0, detail=0.
-    const COMPLETED_WIRE: [u8; 16] = [77, 65, 80, 82, 19, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+    // Independent protocol-v20 wire bytes: MAPR, version=20, success=0, detail=0.
+    const COMPLETED_WIRE: [u8; 16] = [77, 65, 80, 82, 20, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
 
     #[test]
     fn native_response_wire_completed_has_one_nonempty_header_write() -> io::Result<()> {
         let mut writer = RecordedWriter::new(usize::MAX);
         WorkerResponse::Completed.write_to(&mut writer)?;
         assert_eq!(writer.written(), COMPLETED_WIRE);
-        for version in [8_u32, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 20] {
+        for version in [8_u32, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 21] {
             let mut old = COMPLETED_WIRE;
             old[4..8].copy_from_slice(&version.to_le_bytes());
             assert!(WorkerResponse::read_from(&mut old.as_slice()).is_err());
@@ -914,7 +931,7 @@ mod response_write_qualification {
         let mut writer = RecordedWriter::new(usize::MAX);
         WorkerResponse::Failed("bad-λ".to_owned()).write_to(&mut writer)?;
         let expected = [
-            77, 65, 80, 82, 19, 0, 0, 0, 1, 0, 0, 0, 6, 0, 0, 0, 98, 97, 100, 45, 206, 187,
+            77, 65, 80, 82, 20, 0, 0, 0, 1, 0, 0, 0, 6, 0, 0, 0, 98, 97, 100, 45, 206, 187,
         ];
         assert_eq!(writer.written(), expected);
         assert_eq!(writer.nonempty_writes, 2);
@@ -931,7 +948,7 @@ mod response_write_qualification {
         let mut writer = RecordedWriter::new(3);
         WorkerResponse::Failed("bad-λ".to_owned()).write_to(&mut writer)?;
         let expected = [
-            77, 65, 80, 82, 19, 0, 0, 0, 1, 0, 0, 0, 6, 0, 0, 0, 98, 97, 100, 45, 206, 187,
+            77, 65, 80, 82, 20, 0, 0, 0, 1, 0, 0, 0, 6, 0, 0, 0, 98, 97, 100, 45, 206, 187,
         ];
         assert_eq!(writer.written(), expected);
         assert_eq!(writer.nonempty_writes, 8);
@@ -1043,7 +1060,7 @@ mod pending_tests {
                     32,
                     "fixed header plus exact sixteen-byte carrier"
                 );
-                assert_eq!(&encoded[..8], &[77, 65, 80, 82, 19, 0, 0, 0]);
+                assert_eq!(&encoded[..8], &[77, 65, 80, 82, 20, 0, 0, 0]);
                 let status = if matches!(response, WorkerResponse::DeferredForConfiguration(_)) {
                     3_u32
                 } else {
@@ -1065,6 +1082,7 @@ mod pending_tests {
         }
         let mut encoded = Vec::new();
         let query = WorkerCommand {
+            transport_activity: None,
             kind: CommandKind::PollPending,
             start_sample: 0,
             frames: 0,
@@ -1098,7 +1116,8 @@ mod pending_tests {
             (28, 1),
             (4, 17),
             (4, 18),
-            (4, 20),
+            (4, 19),
+            (4, 21),
         ] {
             let mut invalid = canonical.clone();
             invalid[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
@@ -1203,6 +1222,7 @@ mod note_protocol_tests {
     #[test]
     fn command_uses_last_four_bytes_and_refuses_old_version_or_nonprocess_notes() {
         let command = WorkerCommand {
+            transport_activity: None,
             kind: CommandKind::Process,
             start_sample: -9,
             frames: 2,
@@ -1217,7 +1237,7 @@ mod note_protocol_tests {
             WorkerCommand::read_from(&mut bytes.as_slice()).unwrap(),
             command
         );
-        for version in [8_u32, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 20] {
+        for version in [8_u32, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 21] {
             let mut old = bytes.clone();
             old[4..8].copy_from_slice(&version.to_le_bytes());
             assert!(WorkerCommand::read_from(&mut old.as_slice()).is_err());
@@ -1235,6 +1255,43 @@ mod note_protocol_tests {
         }
         bytes[8..12].copy_from_slice(&1_u32.to_le_bytes());
         assert!(WorkerCommand::read_from(&mut bytes.as_slice()).is_err());
+    }
+
+    #[test]
+    fn transport_process_tags_preserve_fixed_frame_and_refuse_control_activity() {
+        use mondrian_core::TimelineTransportActivity::{Playing, Stopped};
+        for (transport_activity, tag) in [(None, 2_u32), (Some(Stopped), 17), (Some(Playing), 18)] {
+            let command = WorkerCommand {
+                transport_activity,
+                kind: CommandKind::Process,
+                start_sample: -12,
+                frames: 63,
+                event_count: 7,
+                note_count: 9,
+            };
+            let mut bytes = Vec::new();
+            command.write_to(&mut bytes).unwrap();
+            assert_eq!(bytes.len(), 32);
+            assert_eq!(&bytes[8..12], &tag.to_le_bytes());
+            assert_eq!(&bytes[12..16], &63_u32.to_le_bytes());
+            assert_eq!(&bytes[16..24], &(-12_i64).to_le_bytes());
+            assert_eq!(&bytes[24..28], &7_u32.to_le_bytes());
+            assert_eq!(&bytes[28..32], &9_u32.to_le_bytes());
+            assert_eq!(WorkerCommand::read_from(&mut bytes.as_slice()).unwrap(), command);
+            for unknown in [5_u32, 19, u32::MAX] {
+                let mut invalid = bytes.clone();
+                invalid[8..12].copy_from_slice(&unknown.to_le_bytes());
+                assert!(WorkerCommand::read_from(&mut invalid.as_slice()).is_err());
+            }
+            if transport_activity.is_some() {
+                for kind in [CommandKind::EnterState, CommandKind::PollPending, CommandKind::Shutdown,
+                             CommandKind::EditorOpen, CommandKind::ServiceConfiguration] {
+                    let mut output = Vec::new();
+                    assert!(WorkerCommand { kind, note_count: 0, ..command }.write_to(&mut output).is_err());
+                    assert!(output.is_empty(), "invalid activity must be refused before the first write");
+                }
+            }
+        }
     }
 
     #[test]
@@ -1278,7 +1335,7 @@ mod note_protocol_tests {
             assert_eq!(bytes.len(), 36);
             assert_eq!(
                 &bytes[..16],
-                &[77, 65, 80, 82, 19, 0, 0, 0, 4, 0, 0, 0, 20, 0, 0, 0]
+                &[77, 65, 80, 82, 20, 0, 0, 0, 4, 0, 0, 0, 20, 0, 0, 0]
             );
             assert_eq!(&bytes[16..20], &4096_u32.to_le_bytes());
             for (index, word) in words.into_iter().enumerate() {
@@ -1312,7 +1369,8 @@ mod note_protocol_tests {
             (4, 11),
             (4, 17),
             (4, 18),
-            (4, 20),
+            (4, 19),
+            (4, 21),
             (12, 12),
             (16, 4097),
             (20, 3),
@@ -1411,7 +1469,7 @@ mod note_protocol_tests {
     #[test]
     fn current_protocol_note_contract_is_mandatory_in_prepare_and_ready_json() {
         let ready = ReadyWire {
-            schema_version: 19,
+            schema_version: 20,
             result: ReadyResultWire::Ready {
                 musical_time_reference: None,
                 auxiliary_outputs: Vec::new(),
@@ -1445,7 +1503,7 @@ mod note_protocol_tests {
         let prepare = PrepareWire {
             musical_time_reference: None,
             auxiliary_outputs: Vec::new(),
-            schema_version: 19,
+            schema_version: 20,
             native_lane: super::super::native_worker_lane_wire::NativeWorkerLaneWire::capture(None)
                 .unwrap(),
             nonce: "typed-only-test".to_owned(),

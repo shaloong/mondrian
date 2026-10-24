@@ -464,7 +464,7 @@ fn assert_prepared_audio_source_time(
     let _pcm = render_audio(
         Arc::new(prepared),
         &mut source,
-        AudioRenderRequest { start_sample, frames: 1 },
+        AudioRenderRequest { transport_activity: None, start_sample, frames: 1 },
     )?;
     ensure!(
         source.frames == [expected_source_frame],

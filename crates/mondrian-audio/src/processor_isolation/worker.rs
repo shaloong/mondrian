@@ -381,6 +381,7 @@ impl WorkerProcessContext<'_> {
             events,
         )
         .with_musical_time_reference(self.musical_time_reference)
+        .with_transport_activity(command.transport_activity)
         .with_auxiliary_outputs(self.auxiliary_outputs, output)
         .with_note_regions(
             self.note_input_contract,
@@ -1219,6 +1220,7 @@ mod inline_dispatch_contracts {
             (CommandKind::PollPending, 0, 0),
         ] {
             WorkerCommand {
+                transport_activity: None,
                 kind,
                 start_sample,
                 frames,
@@ -1248,6 +1250,7 @@ mod inline_dispatch_contracts {
             &[0.375, 0.375]
         );
         WorkerCommand {
+            transport_activity: None,
             kind: CommandKind::PollConfigurationCohort,
             start_sample: 0,
             frames: 0,
@@ -1288,6 +1291,7 @@ mod inline_dispatch_contracts {
             control_buffer_grant_bytes: 64,
         };
         WorkerCommand {
+            transport_activity: None,
             kind: CommandKind::ServiceConfiguration,
             start_sample: 0,
             frames: 0,
@@ -1313,6 +1317,7 @@ mod inline_dispatch_contracts {
             )
         ));
         WorkerCommand {
+            transport_activity: None,
             kind: CommandKind::StageConfigurationSeed,
             start_sample: 0,
             frames: 0,
@@ -1346,6 +1351,7 @@ mod inline_dispatch_contracts {
             "decoder refusal cannot dispatch a phantom native stage"
         );
         WorkerCommand {
+            transport_activity: None,
             kind: CommandKind::CommitConfigurationSeed,
             start_sample: 0,
             frames: 0,
@@ -1369,6 +1375,7 @@ mod inline_dispatch_contracts {
         ));
         assert_eq!(worker.committed, 1);
         WorkerCommand {
+            transport_activity: None,
             kind: CommandKind::Shutdown,
             start_sample: 0,
             frames: 0,
@@ -1434,6 +1441,7 @@ mod note_process_contracts {
 
     fn command(count: u32) -> WorkerCommand {
         WorkerCommand {
+            transport_activity: None,
             kind: CommandKind::Process,
             start_sample: -3,
             frames: 2,

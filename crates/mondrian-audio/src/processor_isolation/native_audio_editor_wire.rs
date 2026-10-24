@@ -274,6 +274,7 @@ mod tests {
         let expected = request().with_static_parameter_values(values).unwrap();
         let mut bytes = Vec::new();
         WorkerCommand {
+            transport_activity: None,
             kind: CommandKind::EditorOpenWithStaticParameters,
             start_sample: 0,
             frames: 0,
@@ -309,7 +310,7 @@ mod tests {
             assert!(decode(&mut reader, 4096).is_err());
             assert_eq!(reader.position(), 32);
         }
-        for tag in [5_u32, 17, u32::MAX] {
+        for tag in [5_u32, 19, u32::MAX] {
             let mut invalid = bytes.clone();
             invalid[8..12].copy_from_slice(&tag.to_le_bytes());
             assert!(decode(&mut invalid.as_slice(), 4096).is_err());

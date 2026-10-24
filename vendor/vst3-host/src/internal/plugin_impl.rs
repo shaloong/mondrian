@@ -8532,6 +8532,18 @@ impl crate::plugin::PluginProcessingRole for PluginProcessFields<'_> {
     ) -> Result<()> {
         self.install_musical_timeline_context(context, reference)
     }
+    fn set_process_playing(&mut self, playing: bool) -> Result<()> {
+        if !self.is_processing {
+            return Err(Error::NotProcessing);
+        }
+        let data = self.process_data.as_mut().ok_or(Error::NotProcessing)?;
+        // Only borrowed processing storage is mutated. No second saved playing
+        // state or full-owner/controller borrow is required by this role.
+        data.process_context.state = process_context_state(
+            data.process_context_requirements, playing, data.process_context.state,
+        );
+        Ok(())
+    }
     fn queue_parameter_at(&mut self, id: u32, value: f64, sample_offset: i32) -> Result<()> {
         if !value.is_finite() || !(0.0..=1.0).contains(&value) || sample_offset < 0 {
             return Err(Error::InvalidParameter(
@@ -9918,6 +9930,46 @@ mod checked_native_note_tests {
         Flat,
         Buses,
         ScopedNotes,
+    }
+
+    #[test]
+    #[allow(clippy::unnecessary_cast)]
+    fn processing_role_activity_preserves_only_supplied_context_and_honors_requirements() {
+        use crate::plugin::PluginProcessingRole;
+        use IProcessContextRequirements_::Flags_ as R;
+        use ProcessContext_::StatesAndFlags_ as S;
+        let mut fixture = Fixture::new();
+        for requirements in [None, Some(R::kNeedTransportState as u32 | R::kNeedTempo as u32
+                                      | R::kNeedProjectTimeMusic as u32), Some(R::kNeedTempo as u32)] {
+            fixture.data.as_mut().unwrap().process_context_requirements = requirements;
+            fixture.fields().set_process_musical_timeline_context(
+                crate::audio::ProcessTimelineContext { sample_position: -17, sample_rate: 48_000 },
+                crate::audio::ProcessMusicalReference::new(0, 1, 1, 2).unwrap(),
+            ).unwrap();
+            let baseline = context_facts(&fixture.data.as_ref().unwrap().process_context);
+            for playing in [true, false, true] {
+                fixture.fields().set_process_playing(playing).unwrap();
+                let actual = context_facts(&fixture.data.as_ref().unwrap().process_context);
+                assert_eq!(&actual[1..], &baseline[1..]);
+                let requested = requirements.is_none_or(|r| r & R::kNeedTransportState as u32 != 0);
+                assert_eq!(actual[0] & S::kPlaying as u64 != 0, playing && requested);
+                assert_eq!(actual[0] & !(S::kPlaying as u64), baseline[0]);
+                assert_eq!(actual[0] & S::kTimeSigValid as u64, 0);
+            }
+            fixture.fields().set_process_timeline_context(
+                crate::audio::ProcessTimelineContext { sample_position: 91, sample_rate: 48_000 },
+            ).unwrap();
+            assert_eq!(fixture.data.as_ref().unwrap().process_context.state, 0);
+        }
+        let before = context_facts(&fixture.data.as_ref().unwrap().process_context);
+        {
+            let mut fields = fixture.fields();
+            fields.is_processing = false;
+            assert!(matches!(fields.set_process_playing(true), Err(Error::NotProcessing)));
+        }
+        assert_eq!(context_facts(&fixture.data.as_ref().unwrap().process_context), before);
+        fixture.data = None;
+        assert!(matches!(fixture.fields().set_process_playing(true), Err(Error::NotProcessing)));
     }
 
     fn run_sample_window(

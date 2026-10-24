@@ -1789,6 +1789,7 @@ impl AudioProgramRuntime {
                 sources: RuntimeSources {
                     entries,
                     cancellation: ExecutionCancellationToken::new(),
+                    transport_activity: None,
                 },
                 execution_demand,
                 resource_footprint: ledger.footprint.difference(footprint_before),
@@ -2127,6 +2128,7 @@ impl AudioProgramRuntime {
                 "audio render generation was canceled before execution".to_owned(),
             ));
         }
+        self.session.preflight_transport_activity(request)?;
         self.session.reject_empty_note_request(request)?;
         self.reject_nested_note_execution()?;
         self.preflight_native_control(false)?;
@@ -2175,6 +2177,15 @@ impl AudioProgramRuntime {
         }
         self.reject_nested_note_execution()?;
         self.session.preflight_note_window(request)?;
+        self.session.preflight_transport_activity(request)?;
+        self.session.preflight_output_shape(request, destination.len())?;
+        if self.sources.transport_activity != request.transport_activity {
+            // Only unentered stateless requests may change activity without
+            // an explicit new epoch. Their nested PCM is context-dependent.
+            // Entered history has already been refused by the pure check.
+            self.sources.begin_continuity();
+        }
+        self.sources.transport_activity = request.transport_activity;
         self.sources.cancellation = cancellation.clone();
         let result = self.session.render_into_admitted(
             &mut self.sources,
@@ -2192,6 +2203,8 @@ impl AudioProgramRuntime {
 struct RuntimeSources {
     entries: BTreeMap<AudioComponentEditId, RuntimeSource>,
     cancellation: ExecutionCancellationToken,
+    // Last supplied call context is also the identity of nested prefetched PCM.
+    transport_activity: Option<mondrian_core::TimelineTransportActivity>,
 }
 
 impl RuntimeSources {
@@ -2260,6 +2273,7 @@ impl AudioPcmSource for RuntimeSources {
                 channel_layout,
                 destination,
                 &cancellation,
+                self.transport_activity,
             ),
         }
     }
@@ -2336,6 +2350,7 @@ impl NestedRuntimeSource {
         channel_layout: AudioChannelLayout,
         destination: &mut [f32],
         cancellation: &ExecutionCancellationToken,
+        transport_activity: Option<mondrian_core::TimelineTransportActivity>,
     ) -> Result<(), AudioExecutionError> {
         if channel_layout != self.channel_layout {
             return Err(AudioExecutionError::SourceUnavailable(format!(
@@ -2358,7 +2373,7 @@ impl NestedRuntimeSource {
         for order_index in 0..self.ordered_output_frames.len() {
             let output_frame = self.ordered_output_frames[order_index];
             let source_frame = source_frames[output_frame];
-            self.ensure_cached(source_frame, cancellation)?;
+            self.ensure_cached(source_frame, cancellation, transport_activity)?;
             copy_interleaved_frame(
                 &self.cache,
                 usize::try_from(source_frame - self.cache_start)
@@ -2398,6 +2413,7 @@ impl NestedRuntimeSource {
         &mut self,
         source_frame: i64,
         cancellation: &ExecutionCancellationToken,
+        transport_activity: Option<mondrian_core::TimelineTransportActivity>,
     ) -> Result<(), AudioExecutionError> {
         let cache_frames_i64 =
             i64::try_from(self.cache_frames).map_err(|_| AudioExecutionError::BufferTooLarge)?;
@@ -2407,7 +2423,7 @@ impl NestedRuntimeSource {
         }
 
         if !self.runtime.requires_state_entry() {
-            return self.render_cache(source_frame, cancellation);
+            return self.render_cache(source_frame, cancellation, transport_activity);
         }
 
         match self.next_sample {
@@ -2417,7 +2433,7 @@ impl NestedRuntimeSource {
         while self.next_sample.is_some_and(|next_sample| source_frame >= next_sample) {
             let start_sample =
                 self.next_sample.ok_or(AudioExecutionError::InvalidPreparedSchedule)?;
-            self.render_cache(start_sample, cancellation)?;
+            self.render_cache(start_sample, cancellation, transport_activity)?;
         }
         Ok(())
     }
@@ -2444,11 +2460,12 @@ impl NestedRuntimeSource {
         &mut self,
         start_sample: i64,
         cancellation: &ExecutionCancellationToken,
+        transport_activity: Option<mondrian_core::TimelineTransportActivity>,
     ) -> Result<(), AudioExecutionError> {
         self.cache_start = i64::MIN;
         self.cache.fill(0.0);
         let result = self.runtime.render_into_admitted_cancellable(
-            AudioRenderRequest { start_sample, frames: self.cache_frames },
+            AudioRenderRequest { transport_activity, start_sample, frames: self.cache_frames },
             &mut self.cache,
             cancellation,
         );

@@ -1260,6 +1260,13 @@ impl PluginAudioProcessing<'_> {
         self.internal
             .set_process_musical_timeline_context(context, reference)
     }
+    /// Set only the next ProcessContext's Playing fact through the processing
+    /// role. This calls no controller/editor/lifecycle API and installs no clock.
+    /// Apply after the canonical timeline setter, which clears unavailable facts.
+    /// The next reconfigure/timeline installation must supply the fact again.
+    pub fn set_process_playing(&mut self, playing: bool) -> Result<()> {
+        self.internal.set_process_playing(playing)
+    }
     /// Queue one finite normalized parameter at a valid nonnegative sample offset.
     /// Controller presentation is deferred to the main role; this never calls it.
     pub fn queue_parameter_at(&mut self, id: u32, value: f64, sample_offset: i32) -> Result<()> {
@@ -1354,6 +1361,9 @@ pub(crate) trait PluginProcessingRole: Send {
         Err(Error::MusicalTime(
             crate::error::MusicalTimeError::UnsupportedBackend,
         ))
+    }
+    fn set_process_playing(&mut self, _playing: bool) -> Result<()> {
+        Err(Error::Other("processing-role transport activity is unsupported".to_owned()))
     }
     fn queue_parameter_at(&mut self, id: u32, value: f64, sample_offset: i32) -> Result<()>;
     fn flush_pending_parameter_changes(&mut self) -> Result<PendingParameterFlushOutcome> {

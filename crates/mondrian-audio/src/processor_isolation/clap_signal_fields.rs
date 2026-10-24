@@ -197,6 +197,7 @@ impl ClapSignalFields<'_> {
             block.start_sample(),
             block.sample_rate(),
             block.musical_time_reference(),
+            block.transport_activity(),
         )?;
         let output_origin = ClapOutputOrigin::Process {
             start_sample: block.start_sample(),

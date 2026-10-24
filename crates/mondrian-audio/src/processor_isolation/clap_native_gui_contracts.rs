@@ -581,6 +581,7 @@ fn clap_native_gui_idle_timer_and_callback_after_real_dsp_old_api() {
         context,
         |main, dsp| {
             dsp.submit(super::super::protocol::WorkerCommand {
+                transport_activity: None,
                 kind: super::super::protocol::CommandKind::Process,
                 start_sample: 0,
                 frames: 8,
@@ -812,6 +813,7 @@ fn native_entry_binding_clap_first_signal_keeps_real_idle_gui_without_reset_old_
         context,
         |main, dsp| {
             dsp.submit(super::super::protocol::WorkerCommand {
+                transport_activity: None,
                 kind: super::super::protocol::CommandKind::Process,
                 start_sample: -19,
                 frames: 8,

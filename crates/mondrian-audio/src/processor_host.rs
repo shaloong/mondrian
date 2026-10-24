@@ -1821,6 +1821,7 @@ impl PreparedProcessorHost {
             }
             Self::refuse_pending_note_entry_pcm(instance)?;
             let signal_request = AudioRenderRequest {
+                transport_activity: request.transport_activity,
                 start_sample: subtract_signal_delay(
                     request.start_sample,
                     processor.input_signal_delay_frames,
@@ -2004,6 +2005,7 @@ impl PreparedProcessorHost {
             .get(processor_index)
             .ok_or(AudioExecutionError::InvalidPreparedSchedule)?;
         let signal_request = AudioRenderRequest {
+            transport_activity: request.transport_activity,
             start_sample: subtract_signal_delay(
                 request.start_sample,
                 processor.input_signal_delay_frames,

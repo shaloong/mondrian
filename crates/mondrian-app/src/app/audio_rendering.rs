@@ -550,6 +550,7 @@ impl AudioPcmRenderer for TimelineAudioPcmRenderer {
         // A queued later window must retain the typed native hold.
         if let Err(error) = state.delivery.render_into_cancellable(
             AudioRenderRequest {
+                transport_activity: request.transport_activity,
                 start_sample: request.start_sample,
                 frames: request.frame_count,
             },
@@ -2684,7 +2685,7 @@ mod tests {
                 let mut samples = vec![0.0; frames * 2];
                 delivery
                     .render_into_cancellable(
-                        AudioRenderRequest { start_sample, frames },
+                        AudioRenderRequest { transport_activity: None, start_sample, frames },
                         &mut samples,
                         &cancellation,
                     )
@@ -2713,7 +2714,7 @@ mod tests {
             let mut seek_samples = [0.0; 62];
             delivery
                 .render_into_cancellable(
-                    AudioRenderRequest { start_sample: 93, frames: 31 },
+                    AudioRenderRequest { transport_activity: None, start_sample: 93, frames: 31 },
                     &mut seek_samples,
                     &cancellation,
                 )
@@ -3443,7 +3444,7 @@ mod tests {
             for frames in partitions {
                 let mut samples = vec![0.0; frames * 2];
                 runtime
-                    .render_into(AudioRenderRequest { start_sample, frames }, &mut samples)
+                    .render_into(AudioRenderRequest { transport_activity: None, start_sample, frames }, &mut samples)
                     .expect("native signal block");
                 output.extend(samples);
                 start_sample += i64::try_from(frames).expect("short block");

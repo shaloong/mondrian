@@ -609,6 +609,7 @@ fn clap_paused_gui_requests_actual_audio_flush_without_process_old_api() {
             // After the paused-exchange assertions, independently observe the
             // real private DSP gain. Desired GUI state alone cannot satisfy it.
             dsp.submit(super::super::protocol::WorkerCommand {
+                transport_activity: None,
                 kind: super::super::protocol::CommandKind::Process,
                 start_sample: 0,
                 frames: 8,

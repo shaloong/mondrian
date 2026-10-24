@@ -587,7 +587,7 @@ fn installed_vst3_mne7_outputs_canonical_routes_ports_fanout_and_native_pdc_with
                         let mut pcm = vec![99.0; frames * render.channel_count()];
                         runtime
                             .render_into(
-                                AudioRenderRequest { start_sample: start as i64, frames },
+                                AudioRenderRequest { transport_activity: None, start_sample: start as i64, frames },
                                 &mut pcm,
                             )
                             .unwrap();
@@ -842,7 +842,7 @@ fn process_io(
 ) -> Result<(), AudioProcessorHostError> {
     let frames = io.frames();
     let context = crate::AudioProcessorProcessContext::new(
-        AudioRenderRequest { start_sample: start as i64, frames },
+        AudioRenderRequest { transport_activity: None, start_sample: start as i64, frames },
         AudioSampleRate::new(render.sample_rate).unwrap(),
         render.channel_layout,
         render.processing_mode,
@@ -1013,7 +1013,7 @@ fn installed_vst3_mne7_outputs_unrouted_aux_nan_never_publishes_a_partial_window
         .unwrap();
     let mut pcm = [99.0; 8];
     let error = runtime
-        .render_into(AudioRenderRequest { start_sample: 0, frames: 4 }, &mut pcm)
+        .render_into(AudioRenderRequest { transport_activity: None, start_sample: 0, frames: 4 }, &mut pcm)
         .unwrap_err();
     assert!(
         matches!(error,AudioExecutionError::ProcessorHost(AudioProcessorHostError::WorkerFailed {
@@ -1035,7 +1035,7 @@ fn installed_vst3_mne7_outputs_unrouted_aux_nan_never_publishes_a_partial_window
         pcm.fill(99.0);
         let before = pcm;
         assert!(matches!(
-            runtime.render_into(AudioRenderRequest { start_sample: 0, frames: 4 }, &mut pcm),
+            runtime.render_into(AudioRenderRequest { transport_activity: None, start_sample: 0, frames: 4 }, &mut pcm),
             Err(AudioExecutionError::ProcessorHost(
                 AudioProcessorHostError::PoisonedInstance
             ))
@@ -1355,7 +1355,7 @@ fn installed_vst3_mne8_roles_canonical_preserves_aux_routing_and_native_pdc() {
                 let mut pcm = vec![99.0; frames * 2];
                 runtime
                     .render_into(
-                        AudioRenderRequest { start_sample: start as i64, frames },
+                        AudioRenderRequest { transport_activity: None, start_sample: start as i64, frames },
                         &mut pcm,
                     )
                     .unwrap();

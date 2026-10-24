@@ -349,7 +349,7 @@ fn run_runtime(
             let mut pcm = vec![f32::NAN; frames * 2];
             runtime
                 .render_into(
-                    AudioRenderRequest { start_sample: start as i64, frames },
+                    AudioRenderRequest { transport_activity: None, start_sample: start as i64, frames },
                     &mut pcm,
                 )
                 .expect(

@@ -864,7 +864,7 @@ fn native_editor_runtime_cleanup_refuses_before_any_root_dsp_and_exact_close_kee
     state.editor_cleanup.store(true, Ordering::Release);
     assert_eq!(
         runtime.render_into(
-            AudioRenderRequest { start_sample: 0, frames: 1 },
+            AudioRenderRequest { transport_activity: None, start_sample: 0, frames: 1 },
             &mut [991.0]
         ),
         Err(AudioExecutionError::EditorCleanupRequired(Box::new(target))),
@@ -879,7 +879,7 @@ fn native_editor_runtime_cleanup_refuses_before_any_root_dsp_and_exact_close_kee
     );
     assert_eq!(
         runtime.render_into(
-            AudioRenderRequest { start_sample: 0, frames: 1 },
+            AudioRenderRequest { transport_activity: None, start_sample: 0, frames: 1 },
             &mut [991.0]
         ),
         Err(AudioExecutionError::StateEntryRequired),
@@ -903,7 +903,7 @@ fn native_preflight_snapshot_root_installed_owner_uses_one_snapshot_without_seco
     state.pending_queries.store(0, Ordering::Release);
     let mut pcm = [991.0];
     assert_eq!(
-        runtime.render_into(AudioRenderRequest { start_sample: 0, frames: 1 }, &mut pcm),
+        runtime.render_into(AudioRenderRequest { transport_activity: None, start_sample: 0, frames: 1 }, &mut pcm),
         Err(AudioExecutionError::StateEntryRequired)
     );
     assert_eq!(state.snapshot_calls.load(Ordering::Acquire), 1);
@@ -930,7 +930,7 @@ fn native_preflight_snapshot_root_pending_flag_is_nonconsuming_and_session_stick
     state.snapshot_calls.store(0, Ordering::Release);
     state.pending_queries.store(0, Ordering::Release);
     let mut pcm = [771.0];
-    let request = AudioRenderRequest { start_sample: 0, frames: 1 };
+    let request = AudioRenderRequest { transport_activity: None, start_sample: 0, frames: 1 };
     let ticket = match runtime.render_into(request, &mut pcm) {
         Err(AudioExecutionError::ReprepareRequired(ticket)) => ticket,
         other => panic!("exact pending refusal: {other:?}"),
@@ -969,7 +969,7 @@ fn native_preflight_snapshot_root_cleanup_precedes_pending_and_exact_close_keeps
     state.editor_cleanup.store(true, Ordering::Release);
     state.pending_restart.store(true, Ordering::Release);
     let mut pcm = [333.0];
-    let request = AudioRenderRequest { start_sample: 0, frames: 1 };
+    let request = AudioRenderRequest { transport_activity: None, start_sample: 0, frames: 1 };
     assert_eq!(
         runtime.render_into(request, &mut pcm),
         Err(AudioExecutionError::EditorCleanupRequired(Box::new(
@@ -1240,7 +1240,7 @@ fn native_entry_binding_root_actual_pcm_then_author_proposal_uses_entered_epoch(
         .expect("actual signed-domain entry");
     let mut pcm = [991.0; 2];
     runtime
-        .render_into(AudioRenderRequest { start_sample: 1, frames: 2 }, &mut pcm)
+        .render_into(AudioRenderRequest { transport_activity: None, start_sample: 1, frames: 2 }, &mut pcm)
         .expect("real processor receives signal");
     assert_eq!(
         pcm,
@@ -1315,7 +1315,7 @@ fn native_entry_binding_contribution_is_lazy_and_binds_only_actual_first_signal(
     let mut silence = [99.0; 2];
     runtime
         .render_into(
-            AudioRenderRequest { start_sample: -2, frames: 2 },
+            AudioRenderRequest { transport_activity: None, start_sample: -2, frames: 2 },
             &mut silence,
         )
         .expect("before authored extent");
@@ -1323,7 +1323,7 @@ fn native_entry_binding_contribution_is_lazy_and_binds_only_actual_first_signal(
     assert_eq!(state.entries.load(Ordering::Acquire), 0);
     let mut pcm = [99.0; 2];
     runtime
-        .render_into(AudioRenderRequest { start_sample: 0, frames: 2 }, &mut pcm)
+        .render_into(AudioRenderRequest { transport_activity: None, start_sample: 0, frames: 2 }, &mut pcm)
         .expect("actual first local signal");
     assert_eq!(pcm, [1.0, 2.0]);
     assert_eq!(state.entries.load(Ordering::Acquire), 1);
@@ -1336,7 +1336,7 @@ fn native_entry_binding_contribution_is_lazy_and_binds_only_actual_first_signal(
     let lease = runtime.native_owner_lease(address).expect("current Contribution epoch");
     assert_eq!(lease.address().epoch, Some(AudioContinuityEpoch::new(41)));
     runtime
-        .render_into(AudioRenderRequest { start_sample: 2, frames: 2 }, &mut pcm)
+        .render_into(AudioRenderRequest { transport_activity: None, start_sample: 2, frames: 2 }, &mut pcm)
         .expect("steady continuation");
     assert_eq!(
         state.binds.load(Ordering::Acquire),
@@ -1382,7 +1382,7 @@ fn native_entry_binding_nested_actual_local_epochs_survive_forward_and_backward_
         let mut pcm = [99.0; 2];
         runtime
             .render_into(
-                AudioRenderRequest { start_sample: start, frames: 2 },
+                AudioRenderRequest { transport_activity: None, start_sample: start, frames: 2 },
                 &mut pcm,
             )
             .expect("actual child demand");
@@ -1578,7 +1578,7 @@ fn native_entry_binding_standalone_has_actual_dsp_but_no_source_authority_or_bin
         .expect("standalone DSP has no UI Source requirement");
     let mut pcm = [99.0; 2];
     runtime
-        .render_into(AudioRenderRequest { start_sample: 0, frames: 2 }, &mut pcm)
+        .render_into(AudioRenderRequest { transport_activity: None, start_sample: 0, frames: 2 }, &mut pcm)
         .expect("actual standalone PCM");
     assert_eq!(pcm, [2.0, 4.0]);
     assert_eq!(state.processes.load(Ordering::Acquire), 1);
@@ -1620,7 +1620,7 @@ fn native_entry_binding_track_and_master_rebind_actual_same_occurrence_before_pr
             .expect("actual root strip entry");
         let mut pcm = [99.0; 2];
         runtime
-            .render_into(AudioRenderRequest { start_sample: 0, frames: 2 }, &mut pcm)
+            .render_into(AudioRenderRequest { transport_activity: None, start_sample: 0, frames: 2 }, &mut pcm)
             .expect("actual processor signal");
         assert_eq!(
             pcm,
@@ -1655,7 +1655,7 @@ fn native_entry_binding_outstanding_real_prefix_holds_before_actual_reentry() {
         .expect("first current signal");
     runtime
         .render_into(
-            AudioRenderRequest { start_sample: 0, frames: 2 },
+            AudioRenderRequest { transport_activity: None, start_sample: 0, frames: 2 },
             &mut [99.0; 2],
         )
         .expect("native accepted raw output");
@@ -1761,7 +1761,7 @@ fn native_observation_entry_gap_contribution_has_current_ui_binding_without_sign
     );
     let mut pcm = [887.0; 2];
     assert!(matches!(
-        runtime.render_into(AudioRenderRequest { start_sample: -2, frames: 2 }, &mut pcm),
+        runtime.render_into(AudioRenderRequest { transport_activity: None, start_sample: -2, frames: 2 }, &mut pcm),
         Err(AudioExecutionError::NativeAuthorPending(_))
     ));
     assert_eq!(pcm, [887.0; 2]);
@@ -1793,7 +1793,7 @@ fn native_observation_entry_gap_nested_after_seek_keeps_actual_old_local_epoch_w
         .expect("root first entry");
     let mut pcm = [997.0; 2];
     runtime
-        .render_into(AudioRenderRequest { start_sample: 4, frames: 2 }, &mut pcm)
+        .render_into(AudioRenderRequest { transport_activity: None, start_sample: 4, frames: 2 }, &mut pcm)
         .expect("actual old local Process");
     assert_eq!(pcm, [2.0, 4.0]);
     let old = runtime
@@ -1822,7 +1822,7 @@ fn native_observation_entry_gap_nested_after_seek_keeps_actual_old_local_epoch_w
     assert_eq!(state.next_load.load(Ordering::Acquire), object_serial);
     let binds = state.binds.load(Ordering::Acquire);
     runtime
-        .render_into(AudioRenderRequest { start_sample: -2, frames: 2 }, &mut pcm)
+        .render_into(AudioRenderRequest { transport_activity: None, start_sample: -2, frames: 2 }, &mut pcm)
         .expect("silent gap");
     assert_eq!(pcm, [0.0; 2]);
     assert_eq!(
@@ -2041,7 +2041,7 @@ fn delivery_submitted_windows_canceled_before_preflight_keeps_exact_next_window(
         cancellation.cancel();
         let mut pcm = [73.0; 2];
         let result = delivery.render_into_cancellable(
-            AudioRenderRequest { start_sample: 9, frames: 2 },
+            AudioRenderRequest { transport_activity: None, start_sample: 9, frames: 2 },
             &mut pcm,
             &cancellation,
         );
@@ -2054,7 +2054,7 @@ fn delivery_submitted_windows_canceled_before_preflight_keeps_exact_next_window(
         assert_eq!(pcm, [73.0; 2]);
         delivery
             .render_into_cancellable(
-                AudioRenderRequest { start_sample: 0, frames: 2 },
+                AudioRenderRequest { transport_activity: None, start_sample: 0, frames: 2 },
                 &mut pcm,
                 &ExecutionCancellationToken::new(),
             )
@@ -2083,7 +2083,7 @@ fn delivery_submitted_windows_cleanup_hold_precedes_gap_and_exact_close_resumes(
         let mut pcm = [73.0; 2];
         assert!(matches!(
             delivery.render_into_cancellable(
-                AudioRenderRequest { start_sample: 9, frames: 2 },
+                AudioRenderRequest { transport_activity: None, start_sample: 9, frames: 2 },
                 &mut pcm,
                 &cancellation,
             ),
@@ -2103,7 +2103,7 @@ fn delivery_submitted_windows_cleanup_hold_precedes_gap_and_exact_close_resumes(
         );
         delivery
             .render_into_cancellable(
-                AudioRenderRequest { start_sample: 0, frames: 2 },
+                AudioRenderRequest { transport_activity: None, start_sample: 0, frames: 2 },
                 &mut pcm,
                 &cancellation,
             )
@@ -2123,7 +2123,7 @@ fn delivery_submitted_windows_author_hold_precedes_gap_and_preserves_source() {
         let mut pcm = [73.0; 2];
         assert!(matches!(
             delivery.render_into_cancellable(
-                AudioRenderRequest { start_sample: 9, frames: 2 },
+                AudioRenderRequest { transport_activity: None, start_sample: 9, frames: 2 },
                 &mut pcm,
                 &cancellation,
             ),
@@ -2140,7 +2140,7 @@ fn delivery_submitted_windows_author_hold_precedes_gap_and_preserves_source() {
             Some(native_author_probe_source());
         delivery
             .render_into_cancellable(
-                AudioRenderRequest { start_sample: 0, frames: 2 },
+                AudioRenderRequest { transport_activity: None, start_sample: 0, frames: 2 },
                 &mut pcm,
                 &cancellation,
             )

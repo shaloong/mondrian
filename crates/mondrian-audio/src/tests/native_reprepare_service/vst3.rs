@@ -183,7 +183,7 @@ fn installed_vst3_runtime_latency_restart_enters_fresh_component_with_canonical_
         for start in [0, 4, 8] {
             let mut pcm = [99.0; 8];
             match runtime.render_into(
-                AudioRenderRequest { start_sample: start, frames: 4 },
+                AudioRenderRequest { transport_activity: None, start_sample: start, frames: 4 },
                 &mut pcm,
             ) {
                 Ok(()) => {
@@ -222,7 +222,7 @@ fn installed_vst3_runtime_latency_restart_enters_fresh_component_with_canonical_
         let mut untouched = [99.0; 8];
         assert_eq!(
             runtime.render_into(
-                AudioRenderRequest { start_sample: held_start, frames: 4 },
+                AudioRenderRequest { transport_activity: None, start_sample: held_start, frames: 4 },
                 &mut untouched
             ),
             Err(AudioExecutionError::ReprepareRequired(ticket))
@@ -355,7 +355,7 @@ fn installed_vst3_runtime_latency_restart_enters_fresh_component_with_canonical_
         untouched.fill(99.0);
         assert_eq!(
             runtime.render_into(
-                AudioRenderRequest { start_sample: 20, frames: 4 },
+                AudioRenderRequest { transport_activity: None, start_sample: 20, frames: 4 },
                 &mut untouched
             ),
             Err(AudioExecutionError::StateEntryRequired)
@@ -434,7 +434,7 @@ fn installed_vst3_runtime_latency_restart_enters_fresh_component_with_canonical_
             let mut pcm = [99.0; 8];
             runtime
                 .render_into(
-                    AudioRenderRequest { start_sample: start, frames: 4 },
+                    AudioRenderRequest { transport_activity: None, start_sample: start, frames: 4 },
                     &mut pcm,
                 )
                 .expect("complete public canonical PDC7 window without seven leading zeros");

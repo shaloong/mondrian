@@ -142,7 +142,7 @@ fn restart_spec(
 
 fn restart_context(start: i64, mode: AudioProcessingMode) -> AudioProcessorProcessContext {
     AudioProcessorProcessContext::new(
-        AudioRenderRequest { start_sample: start, frames: 4 },
+        AudioRenderRequest { transport_activity: None, start_sample: start, frames: 4 },
         AudioSampleRate::new(48_000).expect("reference sample rate"),
         AudioChannelLayout::Stereo,
         mode,

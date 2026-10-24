@@ -2377,6 +2377,7 @@ pub(super) fn clap_transport(
     start_sample: i64,
     sample_rate: u32,
     reference: Option<mondrian_core::MusicalTimeReference>,
+    activity: Option<mondrian_core::TimelineTransportActivity>,
 ) -> Result<TransportEvent, AudioProcessorHostError> {
     let tempo = crate::processor::musical_tempo(reference)?;
     let seconds = clap_seconds_position(start_sample, sample_rate)?;
@@ -2394,6 +2395,11 @@ pub(super) fn clap_transport(
     Ok(TransportEvent {
         header: EventHeader::new_core(0, EventFlags::empty()),
         flags: TransportFlags::HAS_SECONDS_TIMELINE
+            | if activity == Some(mondrian_core::TimelineTransportActivity::Playing) {
+                TransportFlags::IS_PLAYING
+            } else {
+                TransportFlags::empty()
+            }
             | if tempo.is_some() {
                 TransportFlags::HAS_TEMPO | TransportFlags::HAS_BEATS_TIMELINE
             } else {
@@ -2737,7 +2743,7 @@ mod tests {
         use mondrian_core::{MusicalTimeReference, TimelineTime};
         for rate in [44_100, 48_000] {
             for sample in [-120_007, -1, 0, 99_317] {
-                let old = clap_transport(sample, rate, None).unwrap();
+                let old = clap_transport(sample, rate, None, None).unwrap();
                 assert_eq!(old.flags, TransportFlags::HAS_SECONDS_TIMELINE);
                 assert_eq!(old.tempo, 0.0);
                 for zero in [-91, 713] {
@@ -2746,7 +2752,7 @@ mod tests {
                         TimelineTime::new(3, 4).unwrap(),
                     )
                     .unwrap();
-                    let actual = clap_transport(sample, rate, Some(music)).unwrap();
+                    let actual = clap_transport(sample, rate, Some(music), None).unwrap();
                     assert_eq!(
                         actual.flags,
                         TransportFlags::HAS_SECONDS_TIMELINE
@@ -2770,6 +2776,29 @@ mod tests {
     }
 
     #[test]
+    fn clap_transport_activity_is_independent_of_music_and_never_invents_validity() {
+        use mondrian_core::{MusicalTimeReference, TimelineTime, TimelineTransportActivity};
+        let music = MusicalTimeReference::new(TimelineTime::ZERO, TimelineTime::new(1, 2).unwrap()).unwrap();
+        for reference in [None, Some(music)] {
+            let baseline = clap_transport(-17, 48_000, reference, None).unwrap();
+            for activity in [Some(TimelineTransportActivity::Playing), Some(TimelineTransportActivity::Stopped), None] {
+                let actual = clap_transport(-17, 48_000, reference, activity).unwrap();
+                let playing = if activity == Some(TimelineTransportActivity::Playing) {
+                    TransportFlags::IS_PLAYING
+                } else {
+                    TransportFlags::empty()
+                };
+                assert_eq!(actual.flags, baseline.flags | playing);
+                assert_eq!(actual.song_pos_seconds, baseline.song_pos_seconds);
+                assert_eq!(actual.song_pos_beats, baseline.song_pos_beats);
+                assert_eq!(actual.tempo, baseline.tempo);
+                assert_eq!(actual.time_signature_numerator, 0);
+                assert_eq!(actual.time_signature_denominator, 0);
+            }
+        }
+    }
+
+    #[test]
     fn clap_transport_reports_beat_range_error_with_representable_seconds() {
         let music = mondrian_core::MusicalTimeReference::new(
             mondrian_core::TimelineTime::new(i64::MIN, 1).unwrap(),
@@ -2777,11 +2806,11 @@ mod tests {
         )
         .unwrap();
         assert!(matches!(
-            clap_transport(0, 48_000, Some(music)),
+            clap_transport(0, 48_000, Some(music), None),
             Err(AudioProcessorHostError::Process(detail))
                 if detail == "CLAP signed musical position exceeds the beats representation"
         ));
-        let seconds_only = clap_transport(0, 48_000, None).unwrap();
+        let seconds_only = clap_transport(0, 48_000, None, None).unwrap();
         assert_eq!(seconds_only.flags, TransportFlags::HAS_SECONDS_TIMELINE);
         assert_eq!(seconds_only.song_pos_seconds.to_bits(), 0);
         assert_eq!(seconds_only.song_pos_beats.to_bits(), 0);

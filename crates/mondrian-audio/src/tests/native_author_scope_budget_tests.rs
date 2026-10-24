@@ -212,7 +212,7 @@ fn run_scope_budget_case(
     let mut positive = [91.0; 8];
     runtime
         .render_into(
-            AudioRenderRequest { start_sample: 0, frames: 4 },
+            AudioRenderRequest { transport_activity: None, start_sample: 0, frames: 4 },
             &mut positive,
         )
         .expect("both real native peers processed positive PCM");
@@ -362,7 +362,7 @@ fn run_scope_budget_case(
     let mut blocked = [91.0; 8];
     assert!(matches!(
         runtime.render_into(
-            AudioRenderRequest { start_sample: 4, frames: 4 },
+            AudioRenderRequest { transport_activity: None, start_sample: 4, frames: 4 },
             &mut blocked
         ),
         Err(AudioExecutionError::NativeAuthorPending(_))
@@ -552,7 +552,7 @@ fn run_scope_budget_case(
         let mut blocked_after = [92.0; 8];
         assert!(matches!(
             runtime.render_into(
-                AudioRenderRequest { start_sample: 4, frames: 4 },
+                AudioRenderRequest { transport_activity: None, start_sample: 4, frames: 4 },
                 &mut blocked_after,
             ),
             Err(AudioExecutionError::NativeAuthorPending(_))

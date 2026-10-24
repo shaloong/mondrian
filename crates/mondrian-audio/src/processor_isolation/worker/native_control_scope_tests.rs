@@ -48,6 +48,7 @@ impl super::super::IsolatedAudioProcessorMainRole for Main {
 
 fn command(kind: CommandKind, frames: u32) -> WorkerCommand {
     WorkerCommand {
+        transport_activity: None,
         kind,
         start_sample: 0,
         frames,

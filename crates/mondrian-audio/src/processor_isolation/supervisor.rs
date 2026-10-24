@@ -661,6 +661,7 @@ impl SupervisedAudioWorker {
         }
         let result = (|| -> io::Result<_> {
             WorkerCommand {
+                transport_activity: None,
                 kind: super::protocol::CommandKind::PollNativeObservations,
                 start_sample: 0,
                 frames: 0,
@@ -731,6 +732,7 @@ impl SupervisedAudioWorker {
         }
         let result = (|| -> io::Result<_> {
             WorkerCommand {
+                transport_activity: None,
                 kind: super::protocol::CommandKind::BindNativeObject,
                 start_sample: 0,
                 frames: 0,
@@ -779,6 +781,7 @@ impl SupervisedAudioWorker {
         }
         let result = (|| -> io::Result<_> {
             WorkerCommand {
+                transport_activity: None,
                 kind: super::protocol::CommandKind::PrepareAuthorStateEntry,
                 start_sample: 0,
                 frames: 0,
@@ -859,6 +862,7 @@ impl SupervisedAudioWorker {
         }
         let result = (|| -> io::Result<_> {
             WorkerCommand {
+                transport_activity: None,
                 kind: if open.is_some_and(|request| !request.static_parameter_values().is_empty()) {
                     super::protocol::CommandKind::EditorOpenWithStaticParameters
                 } else if open.is_some() {
@@ -922,6 +926,7 @@ impl SupervisedAudioWorker {
         }
         let result = (|| -> io::Result<_> {
             WorkerCommand {
+                transport_activity: None,
                 kind: super::protocol::CommandKind::QueryParameter,
                 start_sample: 0,
                 frames: 0,
@@ -964,6 +969,7 @@ impl SupervisedAudioWorker {
         }
         let result = (|| -> io::Result<_> {
             WorkerCommand {
+                transport_activity: None,
                 kind: super::protocol::CommandKind::PollConfigurationCohort,
                 start_sample: 0,
                 frames: 0,
@@ -1000,6 +1006,7 @@ impl SupervisedAudioWorker {
         }
         let result = (|| -> io::Result<_> {
             WorkerCommand {
+                transport_activity: None,
                 kind: super::protocol::CommandKind::ServiceConfiguration,
                 start_sample: 0,
                 frames: 0,
@@ -1078,6 +1085,7 @@ impl SupervisedAudioWorker {
         }
         let result = (|| -> io::Result<_> {
             WorkerCommand {
+                transport_activity: None,
                 kind,
                 start_sample: 0,
                 frames: 0,
@@ -1161,6 +1169,7 @@ impl SupervisedAudioWorker {
         }
         let started = Instant::now();
         let written = WorkerCommand {
+            transport_activity: None,
             kind: super::protocol::CommandKind::Shutdown,
             start_sample: 0,
             frames: 0,
@@ -1659,6 +1668,7 @@ mod control_timeout_worker_lifecycle {
 
     fn command(kind: super::super::protocol::CommandKind, sample: i64) -> WorkerCommand {
         WorkerCommand {
+            transport_activity: None,
             kind,
             start_sample: sample,
             frames: if kind == super::super::protocol::CommandKind::Process {

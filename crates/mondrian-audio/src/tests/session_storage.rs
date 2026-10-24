@@ -122,7 +122,7 @@ fn session_storage_population_preserves_exact_delay_pcm_and_meter_envelope() {
     session
         .render_into(
             &mut RampSource::default(),
-            AudioRenderRequest { start_sample: 0, frames: 5 },
+            AudioRenderRequest { transport_activity: None, start_sample: 0, frames: 5 },
             &mut pcm,
         )
         .expect("actual canonical delay processing");

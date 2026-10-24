@@ -228,7 +228,7 @@ fn context(
     reference: Option<MusicalTimeReference>,
 ) -> AudioProcessorProcessContext {
     AudioProcessorProcessContext::new(
-        AudioRenderRequest { start_sample: start, frames },
+        AudioRenderRequest { transport_activity: None, start_sample: start, frames },
         AudioSampleRate::new(rate).unwrap(),
         AudioChannelLayout::Stereo,
         AudioProcessingMode::Offline,

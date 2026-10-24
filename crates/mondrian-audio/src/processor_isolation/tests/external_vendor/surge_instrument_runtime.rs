@@ -616,7 +616,7 @@ fn run_captured_state_notes_main_runtime(reference: Option<MusicalTimeReference>
     for (completed_blocks, start) in (0..TOTAL).step_by(BLOCK).enumerate() {
         let mut pcm = vec![f32::NAN; BLOCK * render.channel_count()];
         if let Err(error) = runtime.render_into(
-            AudioRenderRequest { start_sample: start as i64, frames: BLOCK },
+            AudioRenderRequest { transport_activity: None, start_sample: start as i64, frames: BLOCK },
             &mut pcm,
         ) {
             println!(

@@ -399,7 +399,7 @@ fn installed_vst3_event_metadata_admission_revalidates_restored_default_and_acti
         for start_sample in [0, BLOCK as i64] {
             let mut pcm = vec![f32::NAN; BLOCK * 2];
             runtime
-                .render_into(AudioRenderRequest { start_sample, frames: BLOCK }, &mut pcm)
+                .render_into(AudioRenderRequest { transport_activity: None, start_sample, frames: BLOCK }, &mut pcm)
                 .expect("normal worker ordinary Main effect with no Note input");
             assert!(pcm.iter().all(|value| value.is_finite()));
             for frame in pcm.chunks_exact(2) {
@@ -425,7 +425,7 @@ fn installed_vst3_event_metadata_admission_revalidates_restored_default_and_acti
         let mut pcm = vec![f32::NAN; BLOCK * 2];
         runtime
             .render_into(
-                AudioRenderRequest { start_sample: 128, frames: BLOCK },
+                AudioRenderRequest { transport_activity: None, start_sample: 128, frames: BLOCK },
                 &mut pcm,
             )
             .expect("actual fresh component after cold reload");
@@ -819,7 +819,7 @@ fn installed_vst3_retained_event_metadata_refuses_unannounced_default_drift() {
             let mut pcm = vec![f32::NAN; BLOCK * 2];
             runtime
                 .render_into(
-                    AudioRenderRequest { start_sample: 0, frames: BLOCK },
+                    AudioRenderRequest { transport_activity: None, start_sample: 0, frames: BLOCK },
                     &mut pcm,
                 )
                 .expect("ordinary canonical Main PCM from the nonarming captured configuration");

@@ -575,6 +575,7 @@ mod installed {
         shared[layout.note_events_offset..layout.note_events_offset + input_bytes.len()]
             .copy_from_slice(input_bytes);
         let command = WorkerCommand {
+            transport_activity: None,
             kind: CommandKind::Process,
             start_sample: start,
             frames: frames.try_into().unwrap(),
@@ -896,7 +897,7 @@ mod installed {
                             let mut pcm = vec![99.0; frames];
                             runtime
                                 .render_into(
-                                    AudioRenderRequest { start_sample: start as i64, frames },
+                                    AudioRenderRequest { transport_activity: None, start_sample: start as i64, frames },
                                     &mut pcm,
                                 )
                                 .unwrap();

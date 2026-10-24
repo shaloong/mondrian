@@ -102,7 +102,7 @@ fn native_author_ack_pre_cancel_retains_installed_receipt_without_backend_ack() 
     let mut untouched = [93.0];
     assert!(matches!(
         fixture.runtime.render_into(
-            AudioRenderRequest { start_sample: 1, frames: 1 },
+            AudioRenderRequest { transport_activity: None, start_sample: 1, frames: 1 },
             &mut untouched
         ),
         Err(AudioExecutionError::NativeAuthorPending(_))

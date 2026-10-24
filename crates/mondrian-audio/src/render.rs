@@ -40,6 +40,9 @@ pub trait AudioPcmSource {
 /// One exact block requested from a prepared Session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AudioRenderRequest {
+    /// Consumer-declared activity. None preserves an explicitly unspecified
+    /// transport; it is never inferred from sample coordinates or DSP mode.
+    pub transport_activity: Option<mondrian_core::TimelineTransportActivity>,
     /// First Sequence-domain sample frame on the plan's Evaluation Grid.
     pub start_sample: i64,
     /// Exact number of sample frames.
@@ -343,6 +346,9 @@ enum SessionContinuity {
     Unentered,
     Active {
         epoch: AudioContinuityEpoch,
+        // None is unbound until the first accepted window; Some(None) binds
+        // an explicitly unspecified transport for this continuity epoch.
+        transport_activity: Option<Option<mondrian_core::TimelineTransportActivity>>,
         next_public_sample: i64,
         next_execution_sample: i64,
         alignment_primed: bool,
@@ -703,6 +709,7 @@ impl AudioRenderSession {
             self.processor_host.ensure_note_entry_permits_consumed()?;
             self.continuity = SessionContinuity::Active {
                 epoch: entry.epoch,
+                transport_activity: None,
                 next_public_sample: entry.start_sample,
                 next_execution_sample: entry.start_sample,
                 alignment_primed: self.public_output_lookahead_frames() == 0,
@@ -896,7 +903,7 @@ impl AudioRenderSession {
             return Err(crate::AudioExecutionError::InvalidPreparedSchedule);
         }
         let SessionContinuity::Active {
-            epoch, next_public_sample, next_execution_sample, alignment_primed: true,
+            epoch, next_public_sample, next_execution_sample, alignment_primed: true, ..
         } = self.continuity else {
             return Err(crate::AudioExecutionError::InvalidPreparedSchedule);
         };
@@ -1423,6 +1430,7 @@ impl AudioRenderSession {
                     next_public_sample,
                     next_execution_sample,
                     alignment_primed,
+                    ..
                 } => crate::AudioSessionCursorState::Active {
                     epoch,
                     next_public_sample: mondrian_core::AudioSamplePosition::new(
@@ -1475,9 +1483,44 @@ impl AudioRenderSession {
         request: AudioRenderRequest,
         destination: &mut [f32],
     ) -> Result<(), AudioExecutionError> {
+        self.preflight_transport_activity(request)?;
         self.reject_empty_note_request(request)?;
         self.preflight_native_control(false)?;
         self.render_into_admitted(source, request, destination, None)
+    }
+
+    /// A changed context cannot reuse cached or prefetched epoch-owned history.
+    /// Refusal is pure: no foreign callback, PCM write or continuity mutation.
+    pub(crate) fn preflight_transport_activity(
+        &self,
+        request: AudioRenderRequest,
+    ) -> Result<(), AudioExecutionError> {
+        if let SessionContinuity::Active {
+            transport_activity: Some(expected), ..
+        } = self.continuity
+        {
+            if expected != request.transport_activity {
+                return Err(AudioExecutionError::TransportActivityChanged);
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn preflight_output_shape(
+        &self,
+        request: AudioRenderRequest,
+        destination_len: usize,
+    ) -> Result<(), AudioExecutionError> {
+        if request.frames > self.plan.contract().max_block_frames {
+            return Err(AudioExecutionError::BlockTooLarge);
+        }
+        let samples = request.frames.checked_mul(self.plan.contract().channel_count())
+            .ok_or(AudioExecutionError::BufferTooLarge)?;
+        if destination_len != samples {
+            return Err(AudioExecutionError::OutputSizeMismatch);
+        }
+        checked_advance_sample(request.start_sample, request.frames)?;
+        Ok(())
     }
 
     pub(crate) fn preflight_native_control(
@@ -1650,17 +1693,10 @@ impl AudioRenderSession {
         destination: &mut [f32],
         cancellation: Option<&ExecutionCancellationToken>,
     ) -> Result<(), AudioExecutionError> {
+        self.preflight_transport_activity(request)?;
+        self.preflight_output_shape(request, destination.len())?;
         let contract = self.plan.contract();
-        if request.frames > contract.max_block_frames {
-            return Err(AudioExecutionError::BlockTooLarge);
-        }
-        let samples = request
-            .frames
-            .checked_mul(contract.channel_count())
-            .ok_or(AudioExecutionError::BufferTooLarge)?;
-        if destination.len() != samples {
-            return Err(AudioExecutionError::OutputSizeMismatch);
-        }
+        let samples = destination.len();
         self.preflight_note_window(request)?;
         destination.fill(0.0);
 
@@ -1712,7 +1748,7 @@ impl AudioRenderSession {
                 let frames = remaining.min(contract.max_block_frames);
                 self.render_internal(
                     source,
-                    AudioRenderRequest { start_sample: execution_start_sample, frames },
+                    AudioRenderRequest { transport_activity: request.transport_activity, start_sample: execution_start_sample, frames },
                     None,
                     cancellation,
                 )?;
@@ -1730,6 +1766,7 @@ impl AudioRenderSession {
         self.render_internal(
             source,
             AudioRenderRequest {
+                transport_activity: request.transport_activity,
                 start_sample: execution_start_sample,
                 frames: request.frames,
             },
@@ -1751,6 +1788,7 @@ impl AudioRenderSession {
         if let Some((epoch, _, _)) = active {
             self.continuity = SessionContinuity::Active {
                 epoch,
+                transport_activity: Some(request.transport_activity),
                 next_public_sample,
                 next_execution_sample: checked_advance_sample(
                     execution_start_sample,
@@ -1758,6 +1796,10 @@ impl AudioRenderSession {
                 )?,
                 alignment_primed,
             };
+        } else if let SessionContinuity::Active { transport_activity, .. } = &mut self.continuity {
+            // Explicitly entered stateless Sessions also retain the supplied
+            // context. Unentered stateless evaluation remains random-access.
+            *transport_activity = Some(request.transport_activity);
         }
         Ok(())
     }
@@ -2045,6 +2087,7 @@ fn render_track_contributions(
             processor_output_buffers,
             &schedule.sidechain_bindings,
             AudioRenderRequest {
+                transport_activity: request.transport_activity,
                 start_sample: execution_start_sample,
                 frames: execution_frame_count,
             },
@@ -2565,6 +2608,9 @@ fn stereo_balance_gain(layout: AudioChannelLayout, channel: usize, pan: f64) -> 
 /// Deterministic DSP execution failure.
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
 pub enum AudioExecutionError {
+    /// An entered generation must not reuse history for a different transport.
+    #[error("audio transport activity changed within an entered continuity epoch")]
+    TransportActivityChanged,
     /// Requested allocation or index cannot be represented.
     #[error("audio render buffer is too large")]
     BufferTooLarge,

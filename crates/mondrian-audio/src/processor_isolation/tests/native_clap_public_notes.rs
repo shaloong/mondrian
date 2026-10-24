@@ -300,7 +300,7 @@ fn installed_clap_canonical_public_notes_produce_literal_pcm_across_partitions()
                 let mut pcm = vec![99.0; frames];
                 runtime
                     .render_into(
-                        AudioRenderRequest { start_sample: start as i64, frames },
+                        AudioRenderRequest { transport_activity: None, start_sample: start as i64, frames },
                         &mut pcm,
                     )
                     .expect("public Runtime DAG through normal Product DSP IPC");
@@ -570,7 +570,7 @@ fn installed_clap_zero_input_public_notes_produce_literal_pcm_without_media() {
             let mut parameter_outputs = 0;
             for &frames in partition {
                 let mut pcm = vec![99.0; frames];
-                runtime.render_into(AudioRenderRequest {start_sample:start as i64,frames},&mut pcm)
+                runtime.render_into(AudioRenderRequest { transport_activity: None,start_sample:start as i64,frames},&mut pcm)
                     .expect("real NoteOn/Off/End through normal Product DSP IPC with zero native audio inputs");
                 assert!(pcm.iter().all(|value| value.is_finite()));
                 rendered.extend(pcm);
@@ -865,7 +865,7 @@ fn installed_clap_nonzero_public_notes_chase_and_reset_same_object() {
                 let mut pcm = vec![99.0; frames];
                 runtime
                     .render_into(
-                        AudioRenderRequest { start_sample: 5 + rendered.len() as i64, frames },
+                        AudioRenderRequest { transport_activity: None, start_sample: 5 + rendered.len() as i64, frames },
                         &mut pcm,
                     )
                     .unwrap();

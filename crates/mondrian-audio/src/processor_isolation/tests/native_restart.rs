@@ -148,7 +148,7 @@ fn restart_paths() -> (PathBuf, PathBuf) {
 
 fn restart_context(start_sample: i64, mode: AudioProcessingMode) -> AudioProcessorProcessContext {
     AudioProcessorProcessContext::new(
-        AudioRenderRequest { start_sample, frames: 4 },
+        AudioRenderRequest { transport_activity: None, start_sample, frames: 4 },
         AudioSampleRate::new(48_000).expect("reference sample grid"),
         AudioChannelLayout::Stereo,
         mode,
@@ -371,7 +371,7 @@ fn installed_vst3_latency_restart_finishes_nested_root_window_before_reprepare()
         let mut admitted = [99.0; 16];
         runtime
             .render_into(
-                AudioRenderRequest { start_sample: 0, frames: 8 },
+                AudioRenderRequest { transport_activity: None, start_sample: 0, frames: 8 },
                 &mut admitted,
             )
             .expect("complete trigger root window, including later child fills, remains valid");
@@ -397,7 +397,7 @@ fn installed_vst3_latency_restart_finishes_nested_root_window_before_reprepare()
         for _ in 0..2 {
             let mut unpublished = [42.0; 16];
             let outcome = runtime.render_into(
-                AudioRenderRequest { start_sample: 8, frames: 8 },
+                AudioRenderRequest { transport_activity: None, start_sample: 8, frames: 8 },
                 &mut unpublished,
             );
             let Err(crate::AudioExecutionError::ReprepareRequired(ticket)) = outcome else {

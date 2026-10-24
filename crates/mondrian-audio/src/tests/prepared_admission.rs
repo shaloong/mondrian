@@ -95,7 +95,7 @@ fn root_logical_refusal_precedes_media_and_factory_but_exact_grant_keeps_output(
     let mut expected = baseline;
     let mut actual_pcm = [0.0; 4];
     let mut expected_pcm = [0.0; 4];
-    let request = AudioRenderRequest { start_sample: 0, frames: 4 };
+    let request = AudioRenderRequest { transport_activity: None, start_sample: 0, frames: 4 };
     expected.render_into(request, &mut expected_pcm).unwrap();
     exact.render_into(request, &mut actual_pcm).unwrap();
     assert_eq!(actual_pcm, expected_pcm);

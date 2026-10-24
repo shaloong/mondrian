@@ -165,10 +165,11 @@ fn musical_context_tag(data: &ProcessData, prepared_rate: u64) -> Option<f32> {
         ],
     ];
     let tag = (1 + row + rate * 4) as f32 / 16.0;
-    if context.state == 0 && context.projectTimeMusic.to_bits() == 0 && context.tempo.to_bits() == 0
+    let validity = context.state & !(ProcessContext_::StatesAndFlags_::kPlaying as u32);
+    if validity == 0 && context.projectTimeMusic.to_bits() == 0 && context.tempo.to_bits() == 0
     {
         Some(-tag)
-    } else if context.state
+    } else if validity
         == (ProcessContext_::StatesAndFlags_::kProjectTimeMusicValid
             | ProcessContext_::StatesAndFlags_::kTempoValid) as u32
         && context.projectTimeMusic.to_bits() == QUARTER_NOTES[rate][row]
@@ -781,7 +782,8 @@ impl IAudioProcessorTrait for GainProcessor {
             if data.processContext.is_null() { return kInvalidArgument; }
             let context = &*data.processContext;
             if context.sampleRate != f64::from_bits(self.sample_rate.load(Ordering::Relaxed))
-                || context.state != 0 || context.systemTime != 0 || context.continousTimeSamples != 0
+                || context.state & !(ProcessContext_::StatesAndFlags_::kPlaying as u32) != 0
+                || context.systemTime != 0 || context.continousTimeSamples != 0
                 || context.projectTimeMusic != 0.0 || context.barPositionMusic != 0.0
                 || context.cycleStartMusic != 0.0 || context.cycleEndMusic != 0.0
                 || context.tempo != 0.0 || context.timeSigNumerator != 0 || context.timeSigDenominator != 0
@@ -839,6 +841,11 @@ impl IAudioProcessorTrait for GainProcessor {
                     let tag = timeline_start.map_or(0.0, |start| ((start + frame as i64) % 251) as f32 / 1024.0);
                     let gain = if timeline_start.is_some() { gain as f32 + tag } else { gain as f32 };
                     let gain = if let Some((_, tempo)) = canonical_music { gain + tempo } else { gain };
+                    // Preserve old None/Stopped PCM; Playing has an independently expected audible tag.
+                    let gain = gain + if timeline_start.is_some()
+                        && (*data.processContext).state & ProcessContext_::StatesAndFlags_::kPlaying as u32 != 0 {
+                        0.125
+                    } else { 0.0 };
                     (gain * value).to_bits()
                 }, Ordering::Relaxed),
                 );

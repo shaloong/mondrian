@@ -1323,6 +1323,7 @@ impl AudioProcessor for IsolatedAudioProcessor {
         match self.worker.invoke(
             "pending query",
             WorkerCommand {
+                transport_activity: None,
                 kind: CommandKind::PollPending,
                 start_sample: 0,
                 frames: 0,
@@ -1348,6 +1349,7 @@ impl AudioProcessor for IsolatedAudioProcessor {
         let result = self.worker.invoke(
             "state entry",
             WorkerCommand {
+                transport_activity: None,
                 kind: CommandKind::EnterState,
                 start_sample,
                 frames: 0,
@@ -1583,6 +1585,7 @@ impl AudioProcessor for IsolatedAudioProcessor {
         let result = self.worker.invoke_process(
             "block processing",
             WorkerCommand {
+                transport_activity: context.transport_activity(),
                 kind: CommandKind::Process,
                 start_sample: request.start_sample,
                 frames: u32::try_from(request.frames)
@@ -2087,6 +2090,7 @@ impl Iterator for IsolatedAudioParameterEvents<'_> {
 
 /// Borrowed fixed-capacity audio and parameter views inside one Worker callback.
 pub struct IsolatedAudioProcessorWorkerBlock<'a> {
+    transport_activity: Option<mondrian_core::TimelineTransportActivity>,
     musical_time_reference: Option<mondrian_core::MusicalTimeReference>,
     start_sample: i64,
     frames: usize,
@@ -2117,6 +2121,7 @@ impl<'a> IsolatedAudioProcessorWorkerBlock<'a> {
     ) -> Self {
         Self {
             start_sample,
+            transport_activity: None,
             musical_time_reference: None,
             frames,
             render_contract,
@@ -2149,6 +2154,16 @@ impl<'a> IsolatedAudioProcessorWorkerBlock<'a> {
     ) -> Self {
         self.musical_time_reference = reference;
         self
+    }
+
+    fn with_transport_activity(mut self, activity: Option<mondrian_core::TimelineTransportActivity>) -> Self {
+        self.transport_activity = activity;
+        self
+    }
+
+    /// Consumer fact from this exact Process command, never a prepared clock.
+    pub const fn transport_activity(&self) -> Option<mondrian_core::TimelineTransportActivity> {
+        self.transport_activity
     }
 
     /// Prepared Sequence reference; no beat or bar facts are implied.

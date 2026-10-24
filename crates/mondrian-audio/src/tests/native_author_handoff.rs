@@ -569,7 +569,7 @@ impl HandoffFixture {
         let mut pcm = [91.0];
         self.runtime
             .render_into(
-                AudioRenderRequest { start_sample: start, frames: 1 },
+                AudioRenderRequest { transport_activity: None, start_sample: start, frames: 1 },
                 &mut pcm,
             )
             .expect("same Session exact continued sample");
@@ -595,7 +595,7 @@ fn native_author_handoff_nonterminal_values_ack_and_continue_same_session_withou
         let mut destination = [91.0];
         assert!(matches!(
             fixture.runtime.render_into(
-                AudioRenderRequest { start_sample: start, frames: 1 },
+                AudioRenderRequest { transport_activity: None, start_sample: start, frames: 1 },
                 &mut destination
             ),
             Err(AudioExecutionError::NativeAuthorPending(_))
@@ -665,7 +665,7 @@ fn native_author_handoff_ack_retry_does_not_reinstall_plan_or_erase_newer_suffix
     let mut destination = [91.0];
     assert!(matches!(
         fixture.runtime.render_into(
-            AudioRenderRequest { start_sample: 1, frames: 1 },
+            AudioRenderRequest { transport_activity: None, start_sample: 1, frames: 1 },
             &mut destination
         ),
         Err(AudioExecutionError::NativeAuthorPending(_))
@@ -699,7 +699,7 @@ fn native_author_handoff_ack_retry_does_not_reinstall_plan_or_erase_newer_suffix
     );
     assert!(matches!(
         fixture.runtime.render_into(
-            AudioRenderRequest { start_sample: 1, frames: 1 },
+            AudioRenderRequest { transport_activity: None, start_sample: 1, frames: 1 },
             &mut destination
         ),
         Err(AudioExecutionError::NativeAuthorPending(_))
@@ -789,7 +789,7 @@ fn native_author_handoff_ack_preserves_newer_callback_suffix_until_its_own_plan(
     let mut destination = [91.0];
     assert!(matches!(
         fixture.runtime.render_into(
-            AudioRenderRequest { start_sample: 1, frames: 1 },
+            AudioRenderRequest { transport_activity: None, start_sample: 1, frames: 1 },
             &mut destination
         ),
         Err(AudioExecutionError::NativeAuthorPending(_))
@@ -847,7 +847,7 @@ fn native_author_terminal_single_strip_installs_coherent_seed_and_continues_with
     let mut sentinel = [91.0];
     assert!(matches!(
         fixture.runtime.render_into(
-            AudioRenderRequest { start_sample: 2, frames: 1 },
+            AudioRenderRequest { transport_activity: None, start_sample: 2, frames: 1 },
             &mut sentinel,
         ),
         Err(AudioExecutionError::NativeAuthorPending(_))
@@ -905,7 +905,7 @@ fn native_author_terminal_single_strip_ack_retry_preserves_a_new_open_suffix() {
     let mut sentinel = [91.0];
     assert!(matches!(
         fixture.runtime.render_into(
-            AudioRenderRequest { start_sample: 2, frames: 1 },
+            AudioRenderRequest { transport_activity: None, start_sample: 2, frames: 1 },
             &mut sentinel,
         ),
         Err(AudioExecutionError::NativeAuthorPending(_))
@@ -924,7 +924,7 @@ fn native_author_terminal_single_strip_ack_retry_preserves_a_new_open_suffix() {
     assert_eq!(fixture.probe.lock().expect("fixture owner").open, 1);
     assert!(matches!(
         fixture.runtime.render_into(
-            AudioRenderRequest { start_sample: 2, frames: 1 },
+            AudioRenderRequest { transport_activity: None, start_sample: 2, frames: 1 },
             &mut sentinel,
         ),
         Err(AudioExecutionError::NativeAuthorPending(_))
@@ -1178,7 +1178,7 @@ mod scope_native {
         let mut positive = [91.0; 8];
         runtime
             .render_into(
-                AudioRenderRequest { start_sample: 0, frames: 4 },
+                AudioRenderRequest { transport_activity: None, start_sample: 0, frames: 4 },
                 &mut positive,
             )
             .expect("both real native peers processed positive PCM");
@@ -1328,7 +1328,7 @@ mod scope_native {
         let mut blocked = [91.0; 8];
         assert!(matches!(
             runtime.render_into(
-                AudioRenderRequest { start_sample: 4, frames: 4 },
+                AudioRenderRequest { transport_activity: None, start_sample: 4, frames: 4 },
                 &mut blocked
             ),
             Err(AudioExecutionError::NativeAuthorPending(_))
@@ -1391,7 +1391,7 @@ mod scope_native {
                 let mut untouched = [93.0; 8];
                 assert!(runtime
                     .render_into(
-                        AudioRenderRequest { start_sample: 4, frames: 4 },
+                        AudioRenderRequest { transport_activity: None, start_sample: 4, frames: 4 },
                         &mut untouched
                     )
                     .is_err());
@@ -1472,7 +1472,7 @@ mod scope_native {
         let mut retained = [93.0; 8];
         assert!(runtime
             .render_into(
-                AudioRenderRequest { start_sample: 4, frames: 4 },
+                AudioRenderRequest { transport_activity: None, start_sample: 4, frames: 4 },
                 &mut retained
             )
             .is_err());
@@ -1518,7 +1518,7 @@ mod scope_native {
         assert!(
             runtime
                 .render_into(
-                    AudioRenderRequest { start_sample: 4, frames: 4 },
+                    AudioRenderRequest { transport_activity: None, start_sample: 4, frames: 4 },
                     &mut refused
                 )
                 .is_err(),
@@ -1557,7 +1557,7 @@ mod scope_native {
         let mut accepted = [94.0; 8];
         runtime
             .render_into(
-                AudioRenderRequest { start_sample: 4, frames: 4 },
+                AudioRenderRequest { transport_activity: None, start_sample: 4, frames: 4 },
                 &mut accepted,
             )
             .expect("every actual peer processes accepted state");
@@ -1737,7 +1737,7 @@ fn native_author_transient_dsp_feedback_retains_exact_source_then_handoff_and_pc
     let mut untouched = [91.0];
     assert!(matches!(
         fixture.runtime.render_into(
-            AudioRenderRequest { start_sample: 1, frames: 1 },
+            AudioRenderRequest { transport_activity: None, start_sample: 1, frames: 1 },
             &mut untouched
         ),
         Err(AudioExecutionError::NativeAuthorPending(_))
@@ -2030,7 +2030,7 @@ fn native_scope_foreign_source_refused_before_native_binding_or_plan_mutation() 
     let mut untouched = [93.0];
     assert!(matches!(
         fixture.runtime.render_into(
-            AudioRenderRequest { start_sample: 1, frames: 1 },
+            AudioRenderRequest { transport_activity: None, start_sample: 1, frames: 1 },
             &mut untouched
         ),
         Err(AudioExecutionError::NativeAuthorPending(_))
@@ -2209,7 +2209,7 @@ mod continuing_rescan_controls {
         let mut pcm = [93.0];
         let result = fixture
             .runtime
-            .render_into(AudioRenderRequest { start_sample: 1, frames: 1 }, &mut pcm);
+            .render_into(AudioRenderRequest { transport_activity: None, start_sample: 1, frames: 1 }, &mut pcm);
         let Err(AudioExecutionError::ReprepareRequired(ticket)) = result else {
             panic!("expected the real Session ticket, actual={result:?}");
         };

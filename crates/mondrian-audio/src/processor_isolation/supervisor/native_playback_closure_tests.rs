@@ -282,6 +282,7 @@ impl AudioPcmRenderer for RuntimeRenderer {
             .unwrap()
             .render_into_cancellable(
                 crate::AudioRenderRequest {
+                    transport_activity: None,
                     start_sample: request.start_sample,
                     frames: request.frame_count,
                 },

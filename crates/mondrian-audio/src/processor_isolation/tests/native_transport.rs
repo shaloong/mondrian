@@ -44,7 +44,9 @@ fn transport_reference(clap: bool) {
         )
     };
     for rate in [44_100, 48_000] {
-        for mode in [AudioProcessingMode::Realtime, AudioProcessingMode::Offline] {
+        for (mode, activity) in [AudioProcessingMode::Realtime, AudioProcessingMode::Offline]
+            .into_iter().flat_map(|mode| [Some(mondrian_core::TimelineTransportActivity::Playing),
+                    Some(mondrian_core::TimelineTransportActivity::Stopped), None].into_iter().map(move |activity| (mode, activity))) {
             let render = AudioRenderContract {
                 sample_rate: rate,
                 processing_mode: mode,
@@ -125,7 +127,7 @@ fn transport_reference(clap: bool) {
                         };
                         let start = signal_origin + offset as i64;
                         let context = AudioProcessorProcessContext::new(
-                            AudioRenderRequest { start_sample: start, frames },
+                            AudioRenderRequest { transport_activity: activity, start_sample: start, frames },
                             AudioSampleRate::new(rate).expect("grid"),
                             AudioChannelLayout::Stereo,
                             mode,
@@ -152,7 +154,7 @@ fn transport_reference(clap: bool) {
                             let signed_tag = ((signal_origin + source as i64) % 251) as i32;
                             // Native time modulates gain, preserving silence
                             // and the declared finite delay/tail contract.
-                            (affine * (512 + signed_tag)) as f32 / 1_048_576.0
+                            (affine * (512 + signed_tag + if activity == Some(mondrian_core::TimelineTransportActivity::Playing) { 128 } else { 0 })) as f32 / 1_048_576.0
                         };
                         assert_eq!(pair,[expected,-expected*0.5],
                             "{} rate{rate}, {mode:?}, sequence{sequence_origin}, PDC{input_delay}, signal{signal_origin}, partitions{partitions:?}, frame{frame}",if clap {"CLAP"}else{"VST3"});
@@ -294,7 +296,9 @@ fn installed_clap_canonical_tempo_scope_retime_keeps_sequence_clock() {
     let processors = IsolatedAudioProcessorResolver::new(catalog.clone());
     for rate in [44_100, 48_000] {
         let time = |sample| TimelineTime::new(sample, i64::from(rate)).unwrap();
-        for with_music in [false, true] {
+        for (with_music, activity) in [false, true].into_iter().flat_map(|music|
+            [Some(mondrian_core::TimelineTransportActivity::Playing),
+                    Some(mondrian_core::TimelineTransportActivity::Stopped), None].into_iter().map(move |activity| (music, activity))) {
             let render = AudioRenderContract {
                 sample_rate: rate,
                 processing_mode: AudioProcessingMode::Offline,
@@ -409,7 +413,7 @@ fn installed_clap_canonical_tempo_scope_retime_keeps_sequence_clock() {
                     let mut pcm = vec![99.0; frames * 2];
                     runtime
                         .render_into(
-                            AudioRenderRequest { start_sample: position, frames },
+                            AudioRenderRequest { transport_activity: activity, start_sample: position, frames },
                             &mut pcm,
                         )
                         .unwrap();
@@ -421,7 +425,8 @@ fn installed_clap_canonical_tempo_scope_retime_keeps_sequence_clock() {
                         let scope_input = source * 10.0_f64.powf(db / 20.0) as f32;
                         let native_gain = 0.5_f32
                             + (sample % 251) as f32 / 1024.0
-                            + if with_music { 80.0 / 1024.0 } else { 0.0 };
+                            + if with_music { 80.0 / 1024.0 } else { 0.0 }
+                            + if activity == Some(mondrian_core::TimelineTransportActivity::Playing) { 0.125 } else { 0.0 };
                         let expected = (scope_input * 2.0) * native_gain;
                         assert!((pair[0] - expected).abs() <= 2.0e-6, "rate={rate} music={with_music} epoch={epoch} sample={sample} actual={} expected={expected}", pair[0]);
                         assert!((pair[1] + expected * 0.5).abs() <= 1.0e-6);
@@ -457,7 +462,7 @@ fn installed_clap_canonical_tempo_scope_retime_keeps_sequence_clock() {
             }
             println!(
                 "{}",
-                serde_json::json!({"case":"canonical-clap-musical-scope-retime", "rate":rate,"music":with_music,"bpm":if with_music {80}else{0},"source_speed":"3/2","scope_in_seconds":5,"native_pdc_frames":3,"total_lookahead_frames":6,"epochs":2,"actual_native_pids":cold.iter().map(|o|o.process_id().get()).collect::<Vec<_>>(),"beat_ticks_validated_in_actual_dsp":with_music,"note_or_rt_qualified":false})
+                serde_json::json!({"case":"canonical-clap-musical-scope-retime", "rate":rate,"music":with_music,"activity":activity,"bpm":if with_music {80}else{0},"source_speed":"3/2","scope_in_seconds":5,"native_pdc_frames":3,"total_lookahead_frames":6,"epochs":2,"actual_native_pids":cold.iter().map(|o|o.process_id().get()).collect::<Vec<_>>(),"beat_ticks_validated_in_actual_dsp":with_music,"note_or_rt_qualified":false})
             );
         }
     }
@@ -543,7 +548,7 @@ fn installed_clap_canonical_tempo_scope_retime_keeps_sequence_clock() {
                             .collect(),
                     };
                     let context = AudioProcessorProcessContext::new(
-                        AudioRenderRequest { start_sample: signal, frames },
+                        AudioRenderRequest { transport_activity: None, start_sample: signal, frames },
                         AudioSampleRate::new(rate).unwrap(),
                         AudioChannelLayout::Stereo,
                         AudioProcessingMode::Offline,
@@ -722,7 +727,7 @@ fn installed_vst3_product_musical_reference_reaches_bounded_effect_worker() {
                     let mut rejected = make_io(4);
                     let unchanged = rejected.main.clone();
                     let wrong_context = AudioProcessorProcessContext::new(
-                        AudioRenderRequest { start_sample: start, frames: 4 },
+                        AudioRenderRequest { transport_activity: None, start_sample: start, frames: 4 },
                         AudioSampleRate::new(rate).unwrap(),
                         AudioChannelLayout::Stereo,
                         AudioProcessingMode::Offline,
@@ -747,7 +752,7 @@ fn installed_vst3_product_musical_reference_reaches_bounded_effect_worker() {
                         let signal = start + offset as i64;
                         let mut io = make_io(frames);
                         let context = AudioProcessorProcessContext::new(
-                            AudioRenderRequest { start_sample: signal, frames },
+                            AudioRenderRequest { transport_activity: None, start_sample: signal, frames },
                             AudioSampleRate::new(rate).unwrap(),
                             AudioChannelLayout::Stereo,
                             AudioProcessingMode::Offline,
@@ -922,7 +927,9 @@ fn installed_vst3_canonical_musical_scope_retime_keeps_sequence_clock() {
     let processors = IsolatedAudioProcessorResolver::new(catalog.clone());
     for rate in [44_100, 48_000] {
         let time = |sample| TimelineTime::new(sample, i64::from(rate)).unwrap();
-        for with_music in [true, false] {
+        for (with_music, activity) in [true, false].into_iter().flat_map(|music|
+            [Some(mondrian_core::TimelineTransportActivity::Playing),
+                    Some(mondrian_core::TimelineTransportActivity::Stopped), None].into_iter().map(move |activity| (music, activity))) {
             let render = AudioRenderContract {
                 sample_rate: rate,
                 processing_mode: AudioProcessingMode::Offline,
@@ -1051,7 +1058,7 @@ fn installed_vst3_canonical_musical_scope_retime_keeps_sequence_clock() {
                     let mut pcm = vec![99.0; frames * 2];
                     runtime
                         .render_into(
-                            AudioRenderRequest { start_sample: position, frames },
+                            AudioRenderRequest { transport_activity: activity, start_sample: position, frames },
                             &mut pcm,
                         )
                         .unwrap();
@@ -1063,7 +1070,8 @@ fn installed_vst3_canonical_musical_scope_retime_keeps_sequence_clock() {
                         let scope_input = source * 10.0_f64.powf(db / 20.0) as f32;
                         let native_gain = 0.5_f32
                             + (sample % 251) as f32 / 1024.0
-                            + if with_music { 80.0 / 1024.0 } else { 0.0 };
+                            + if with_music { 80.0 / 1024.0 } else { 0.0 }
+                            + if activity == Some(mondrian_core::TimelineTransportActivity::Playing) { 0.125 } else { 0.0 };
                         // Preserve the fixture's two f32 DSP stages. Both
                         // modulations occur before their original delay ring;
                         // public lookahead aligns the two processed samples.
@@ -1120,7 +1128,7 @@ fn installed_vst3_canonical_musical_scope_retime_keeps_sequence_clock() {
             }
             println!(
                 "{}",
-                serde_json::json!({"case":"canonical-vst3-musical-scope-retime", "rate":rate,"music":with_music,"bpm":if with_music {80}else{0},"source_speed":"3/2","scope_in_seconds":5,"native_pdc_frames":3,"total_lookahead_frames":6,"epochs":2,"actual_native_pids":cold.iter().map(|o|o.process_id().get()).collect::<Vec<_>>(),"sdk_q_and_tempo_validated_in_actual_dsp":with_music,"note_or_rt_qualified":false})
+                serde_json::json!({"case":"canonical-vst3-musical-scope-retime", "rate":rate,"music":with_music,"activity":activity,"bpm":if with_music {80}else{0},"source_speed":"3/2","scope_in_seconds":5,"native_pdc_frames":3,"total_lookahead_frames":6,"epochs":2,"actual_native_pids":cold.iter().map(|o|o.process_id().get()).collect::<Vec<_>>(),"sdk_q_and_tempo_validated_in_actual_dsp":with_music,"note_or_rt_qualified":false})
             );
         }
     }

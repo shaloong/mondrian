@@ -180,7 +180,7 @@ fn run_scope_fee_contract(nested: bool, drop_pending_runtime: bool) {
     let mut positive = [91.0; 8];
     runtime
         .render_into(
-            AudioRenderRequest { start_sample: 0, frames: 4 },
+            AudioRenderRequest { transport_activity: None, start_sample: 0, frames: 4 },
             &mut positive,
         )
         .expect("both real native peers processed positive PCM");
@@ -330,7 +330,7 @@ fn run_scope_fee_contract(nested: bool, drop_pending_runtime: bool) {
     let mut blocked = [91.0; 8];
     assert!(matches!(
         runtime.render_into(
-            AudioRenderRequest { start_sample: 4, frames: 4 },
+            AudioRenderRequest { transport_activity: None, start_sample: 4, frames: 4 },
             &mut blocked
         ),
         Err(AudioExecutionError::NativeAuthorPending(_))
@@ -483,7 +483,7 @@ fn run_scope_fee_contract(nested: bool, drop_pending_runtime: bool) {
     let mut untouched = [93.0; 8];
     assert!(runtime
         .render_into(
-            AudioRenderRequest { start_sample: 4, frames: 4 },
+            AudioRenderRequest { transport_activity: None, start_sample: 4, frames: 4 },
             &mut untouched
         )
         .is_err());
@@ -758,7 +758,7 @@ fn run_scope_fee_contract(nested: bool, drop_pending_runtime: bool) {
     let mut pre_ack = [93.0; 8];
     assert!(runtime
         .render_into(
-            AudioRenderRequest { start_sample: 4, frames: 4 },
+            AudioRenderRequest { transport_activity: None, start_sample: 4, frames: 4 },
             &mut pre_ack
         )
         .is_err());
@@ -814,7 +814,7 @@ fn run_scope_fee_contract(nested: bool, drop_pending_runtime: bool) {
     let mut accepted = [94.0; 8];
     runtime
         .render_into(
-            AudioRenderRequest { start_sample: 4, frames: 4 },
+            AudioRenderRequest { transport_activity: None, start_sample: 4, frames: 4 },
             &mut accepted,
         )
         .expect("every actual peer processes accepted state");

@@ -432,6 +432,7 @@ mod tests {
                 exited.send(()).expect("reader exit signal");
             });
             WorkerCommand {
+                transport_activity: None,
                 kind: CommandKind::Shutdown,
                 start_sample: 0,
                 frames: 0,
@@ -475,6 +476,7 @@ mod tests {
                 socket.set_read_timeout(Some(Duration::from_secs(2))).expect("parent deadline");
                 for start_sample in [17, 31] {
                     WorkerCommand {
+                        transport_activity: None,
                         kind: CommandKind::EnterState,
                         start_sample,
                         frames: 0,
@@ -618,6 +620,7 @@ mod tests {
     fn native_reader_partial_header_survives_multiple_cancel_polls() {
         let mut wire = Vec::new();
         WorkerCommand {
+            transport_activity: None,
             kind: CommandKind::EnterState,
             start_sample: 17,
             frames: 0,
@@ -652,6 +655,7 @@ mod tests {
         let values = [None, Some(0.75)];
         let mut wire = Vec::new();
         WorkerCommand {
+            transport_activity: None,
             kind: CommandKind::ServiceConfiguration,
             start_sample: 0,
             frames: 0,

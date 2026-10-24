@@ -54,11 +54,22 @@ must remain valid when the same generation starts consuming. Idle/control caller
 must not infer Stopped merely from a disabled device. This adds no clock, author
 parameter, routing graph or project-file field.
 
-The initial implementation carries this fact at the PCM request seam only.
-Runtime/epoch/cache propagation, native-wire admission, export supply and the
-VST3/CLAP projections must be completed together before granting plugin Transport
-support. In particular, a changed transport fact cannot reuse incompatible
-prefetched PCM, and processing mode alone never supplies transport state.
+The same optional fact now travels through the existing Render Request, PDC and
+Scope windows, nested Runtime, isolated Process command, and format adapters.
+Export supplies Playing; the App forwards the PCM consumer's fact. Independent
+paused warmup owns a separate Runtime and supplies None, with no DSP/PCM promotion
+to Playback. No device or processing-mode inference supplies transport state.
+
+An entered epoch binds its exact optional activity on the first successful
+render. A change refuses before native callbacks, PCM publication or history
+consumption and requires a fresh epoch. Unentered stateless evaluation can change
+activity, invalidating nested prefetched PCM through the existing cache owner.
+IPC20 distinguishes None/Stopped/Playing with fixed 32-byte Process tags; old
+helpers refuse. The VST3 borrowed processing role updates only its ProcessContext,
+after canonical time installation, honoring requested/available validity. CLAP
+sets IS_PLAYING only for explicit Playing. Ordinary Audio/SDK tests and App/Export
+test-target compilation pass; matching native execution remains pending. Dynamic
+activity events, signatures, loops and realtime behavior are separate work.
 
 Compilation derives every generated contribution's Track ID, Sequence range,
 source mapping, and nested placement from the real `Track -> Clip` hierarchy.

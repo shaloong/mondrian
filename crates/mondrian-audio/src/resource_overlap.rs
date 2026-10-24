@@ -477,7 +477,7 @@ mod qualification {
         assert_eq!(runtime.resource_footprint(), initial);
         let mut pcm = [123.0; 8];
         runtime
-            .render_into(AudioRenderRequest { start_sample: 0, frames: 8 }, &mut pcm)
+            .render_into(AudioRenderRequest { transport_activity: None, start_sample: 0, frames: 8 }, &mut pcm)
             .expect("current graph is executable");
         assert_eq!(pcm, [0.0; 8]);
     }
