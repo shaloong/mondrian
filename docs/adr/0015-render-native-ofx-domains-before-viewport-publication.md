@@ -77,7 +77,7 @@ comparative performance, other platforms or the spatial/temporal/GPU/Timeline
 capabilities excluded above. GL and intermittent F06 exit failures remain open;
 the protected integration branch is not advanced by this slice.
 
-## Existing Timeline Effect placements (candidate)
+## Existing Timeline Effect placements (finite qualification)
 
 A Generator used as an Effect is not a new Clip-content kind. Its output target
 is the existing execution canvas: source raster before Clip Transform, generated
@@ -101,6 +101,16 @@ CustomSource refusal can therefore be removed without bypassing other admission.
 This does not add a dedicated Generator Clip or Catalog insertion, upstream RoI,
 temporal/GPU support, or permission to skip real external dependencies. Ordinary
 canvas materialization is initially retained; no allocation/performance claim.
-Core361 and Renderer673 ordinary checks pass (Renderer39 remain ignored), including
-root/nested admission, Solid/Media/Adjustment/Transition and real Source blending.
-Current App and actual native Preview/Export qualification remain pending.
+Core361, Renderer673 (39 remain ignored) and App Preview38 ordinary checks pass.
+Renderer covers root/nested admission, Solid/Media/Adjustment/Transition and
+reachable Source blending; its qualified code precedes only the source cache-tag
+update, which current Core and native App checks include. Current ordinary
+Product/App df20a931 passes the real Constant1.0 root Solid flow: public add/color,
+same Preview owner, Undo/Redo, working-frame/semantic-trace parity with actual
+Export, SaveAs/Close/fresh AppState Open and a fresh native owner. Five phases each
+render0/6/3/6; associated RGBA, actual PremultipliedFloat and sampling are exact,
+separately from the StraightFloat preparation request. Original180s/2s supervision
+passes with exit0/empty stderr/clean process trees. This is Full16x16/24fps Windows
+CPU working-frame qualification, not encoded export, physical GUI/device,
+animation/Loop/resize/nested-native, other platforms, RT or performance evidence.
+GL/F06 remain open and the protected integration branch remains held.
