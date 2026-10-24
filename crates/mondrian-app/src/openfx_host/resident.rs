@@ -4682,7 +4682,7 @@ mod transient_memory_tests {
                         before,
                         "oversized transient demand cannot Begin/Render/End"
                     );
-                    let status = effect_extension_runtime_status(&kind).unwrap();
+                    let status = effect_extension_runtime_status(&kind.key()).unwrap();
                     assert!(!status.disabled);
                     assert_eq!(status.last_error, None);
                 } else {
