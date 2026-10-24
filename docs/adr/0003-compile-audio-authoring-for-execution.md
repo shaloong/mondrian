@@ -70,9 +70,12 @@ after canonical time installation, honoring requested/available validity. CLAP
 sets IS_PLAYING only for explicit Playing. Ordinary Audio/SDK tests and App/Export
 test-target compilation pass. Four Windows owned native gates verify actual flags,
 PCM and Scope/retime/PDC for all three activities; each format has twelve canonical
-rate/music/activity conditions and two epochs per condition. Actual App/Export
-consumer output, third-party plugins, dynamic activity events, signatures, loops
-and realtime behavior remain separate work.
+rate/music/activity conditions and two epochs per condition. Separate bounded
+Windows owned gates now verify actual App Media software-preroll PCM and public
+Export Main/stem artifacts, including Source/child closure. App Note/author CAS
+regressions also pass; see the compatibility matrix for exact conditions.
+Complete product/device workflows, third-party Playing response, dynamic activity
+events, signatures, loops and realtime behavior remain separate work.
 
 Compilation derives every generated contribution's Track ID, Sequence range,
 source mapping, and nested placement from the real `Track -> Clip` hierarchy.

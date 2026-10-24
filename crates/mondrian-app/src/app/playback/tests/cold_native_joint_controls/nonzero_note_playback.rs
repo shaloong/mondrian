@@ -1,6 +1,7 @@
 //! First nonzero authored Note window through App preparation and Media enqueue.
 //! Software queue PCM only: no physical device, reprime, loop or Export claim.
 use super::*;
+mod media_transport_playback;
 use mondrian_audio::{
     AudioContinuityEvidenceVisitor, AudioExecutionError, AudioNativeProcessorAddress,
     AudioNativeProcessorOwnerLease, AudioProcessorCursorEvidence, AudioProcessorCursorState,
