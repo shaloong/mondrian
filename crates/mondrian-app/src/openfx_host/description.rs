@@ -399,6 +399,43 @@ mod tests {
         let result = describe_in_worker(&request).unwrap();
         println!("CATALOG_PHASE in_process_describe_ms={}", started.elapsed().as_millis());
         assert!(matches!(result, DescribeResponse::Success { .. }));
+
+        // Diagnostic decomposition of the same cold child boundary. No result
+        // is registered and no renderer, owner or lifecycle budget is changed.
+        let started = Instant::now();
+        let staging = tempfile::tempdir().unwrap();
+        let request_path = staging.path().join("request.json");
+        let response_path = staging.path().join("response.json");
+        fs::write(&request_path, serde_json::to_vec(&request).unwrap()).unwrap();
+        println!("CATALOG_PHASE staging_ms={}", started.elapsed().as_millis());
+        let started = Instant::now();
+        let mut child = Command::new(&helper)
+            .arg(OPENFX_DESCRIBE_WORKER_ARGUMENT)
+            .env(REQUEST_ENV, request_path)
+            .env(RESPONSE_ENV, &response_path)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        println!("CATALOG_PHASE spawn_ms={}", started.elapsed().as_millis());
+        let started = Instant::now();
+        let status = crate::openfx_adapter::child_supervision::wait_for_child(
+            &mut child,
+            Instant::now() + DEADLINE,
+            &mut || Ok::<(), OpenFxHostError>(()),
+        )
+        .unwrap();
+        println!("CATALOG_PHASE wait_ms={}", started.elapsed().as_millis());
+        assert!(status.success());
+        let started = Instant::now();
+        let response: DescribeResponse =
+            serde_json::from_slice(&fs::read(response_path).unwrap()).unwrap();
+        assert!(matches!(response, DescribeResponse::Success { .. }));
+        println!("CATALOG_PHASE response_read_ms={}", started.elapsed().as_millis());
+        let started = Instant::now();
+        drop(staging);
+        println!("CATALOG_PHASE staging_drop_ms={}", started.elapsed().as_millis());
     }
 
     fn inspection() -> OpenFxBinaryInspection {
