@@ -397,8 +397,15 @@ instruments, other platforms, realtime and performance remain unqualified.
   the default 1 MiB main stack. Candidate `796ab244` retains the existing Preview
   heap owner through Host publication. Startup regressions pass 52 tests (9
   originally ignored), including all five Preview partial-owner tests. The
-  original GL batch still needs after-fix validation; no stack limit or timeout
-  was increased.
+  production-linked Host qualification passes 26 faults, two success routes and
+  opaque-payload handling. The same Windows dev/validation image passes both
+  original Surface/Device reopen cycles with explicit DX12 and actual presents.
+  GL after the fix reaches GPU initialization but fails its original first-cycle
+  60s deadline after the progress worker panics on the HAL WGL context lock;
+  its failure report does not qualify cleanup. The process tree exits cleanly.
+  No stack or timeout increase was applied. Physical native Window termination,
+  pixel readback, native OFX GPU interop and performance remain unqualified;
+  the ordinary Product configuration still needs its updated build.
   This isolates avoidable unused-image overhead, not the original F06 cause.
 - The report's `exit_loop` timer describes the whole exit
   loop plus its last existing result. It is not the timestamp/duration of the
