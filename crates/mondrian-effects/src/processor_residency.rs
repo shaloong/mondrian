@@ -5163,6 +5163,72 @@ mod source_tests {
     }
 
     #[test]
+    fn embedded_source_staging_is_independent_of_external_alpha_and_keeps_generate_strict() {
+        use mondrian_core::ColorFrameAlpha;
+        let (calls, prepared, _, program) = fixture(SourceCapacityCase::Same);
+        let graph = program.evaluate(TimelineTime::new(3, 1).unwrap()).unwrap();
+        let mut session = EffectExecutionSession::new(EffectExecutionSessionConfig {
+            max_processor_instances: 1,
+            max_processor_bytes: 128,
+            ..EffectExecutionSessionConfig::uncached(4096)
+        });
+        for alpha in [
+            ColorFrameAlpha::StraightCoverage,
+            ColorFrameAlpha::PremultipliedCoverage,
+            ColorFrameAlpha::Opaque,
+            ColorFrameAlpha::PremultipliedFloat,
+            ColorFrameAlpha::StraightCoverage,
+        ] {
+            let pixels = [[0.125, 0.25, 0.5, 1.0]; 6];
+            let input = EffectFloatFrameView::new(
+                EffectFrameExtent::new(3, 2),
+                format().with_alpha(alpha),
+                mondrian_core::ImageSampling::UNIT_SQUARE,
+                &pixels,
+            );
+            let output = session
+                .apply_compiled_rgba_f32(
+                    input,
+                    &graph,
+                    0,
+                    &mut EffectProcessorControl::uncancelled(),
+                )
+                .unwrap();
+            assert_eq!(input.format().alpha(), alpha);
+            assert_eq!(pixels, [[0.125, 0.25, 0.5, 1.0]; 6]);
+            assert_eq!(output.format(), format());
+            assert_eq!(output.pixels(), &[[3.0, 0.25, 0.5, 0.75]; 6]);
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 5);
+        assert_eq!(
+            prepared.load(Ordering::SeqCst),
+            1,
+            "unrelated input alpha cannot rekey source ownership"
+        );
+        let error = session
+            .generate_compiled_rgba_f32(
+                EffectFrameExtent::new(3, 2),
+                format().with_alpha(ColorFrameAlpha::StraightCoverage),
+                mondrian_core::ImageSampling::UNIT_SQUARE,
+                &graph,
+                0,
+                &mut EffectProcessorControl::uncancelled(),
+            )
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            EffectFloatExecutionError::UnsupportedNode { .. }
+        ));
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            5,
+            "explicit unsupported target refused before DSP"
+        );
+        assert_eq!(prepared.load(Ordering::SeqCst), 1);
+        assert_eq!(session.diagnostics().processor_instances, 1);
+    }
+
+    #[test]
     fn zero_input_stop_after_provider_work_never_publishes_or_retains_the_owner() {
         let (calls, _, _, program) = fixture(SourceCapacityCase::Same);
         let graph = program.evaluate(TimelineTime::ZERO).unwrap();

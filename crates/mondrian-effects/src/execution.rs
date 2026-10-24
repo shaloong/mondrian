@@ -1049,6 +1049,39 @@ fn finish_scalar_attempt(
     result
 }
 
+// A zero-input node has no incoming alpha association. In an image-processing
+// graph its staging request comes from its own retained declaration, not the
+// unrelated external Source. Prefer the native Float associations without
+// converting any pixels; the provider must still report a valid actual output.
+// The explicit source-free generate entry instead keeps the caller's exact
+// requested representation and rejects it before provider work if unsupported.
+fn source_staging_format(
+    compiled: &CompiledEffectGraph,
+    node_id: EffectGraphNodeId,
+    target: crate::EffectValueFormat,
+    has_external_input: bool,
+) -> Result<crate::EffectValueFormat, EffectFloatExecutionError> {
+    use mondrian_core::ColorFrameAlpha;
+    let contract = compiled.node_alpha_contract(node_id);
+    let requested = if has_external_input {
+        [
+            ColorFrameAlpha::StraightFloat,
+            ColorFrameAlpha::PremultipliedFloat,
+            ColorFrameAlpha::Opaque,
+            ColorFrameAlpha::StraightCoverage,
+            ColorFrameAlpha::PremultipliedCoverage,
+        ]
+        .into_iter()
+        .find(|alpha| contract.is_some_and(|contract| contract.admits_source_output(*alpha)))
+    } else {
+        Some(target.alpha())
+            .filter(|alpha| contract.is_some_and(|contract| contract.admits_source_output(*alpha)))
+    };
+    requested
+        .map(|alpha| target.with_alpha(alpha))
+        .ok_or_else(|| unsupported_float_graph_node(node_id, "source_output_format_not_admitted"))
+}
+
 #[allow(clippy::too_many_arguments)]
 fn apply_compiled_effect_graph_rgba_f32_inner(
     session: &mut EffectExecutionSession,
@@ -1084,14 +1117,8 @@ fn apply_compiled_effect_graph_rgba_f32_inner(
             .graph()
             .node(*id)
             .is_some_and(|node| matches!(node.kind, EffectGraphNodeKind::CustomSource { .. }))
-            && compiled
-                .node_alpha_contract(*id)
-                .is_none_or(|contract| !contract.admits_source_output(format.alpha()))
         {
-            return Err(unsupported_float_graph_node(
-                *id,
-                "source_output_format_not_admitted",
-            ));
+            source_staging_format(compiled, *id, format, input.is_some())?;
         }
     }
     let external_source = compiled.schedule().ordered_nodes.iter().find_map(|id| {
@@ -1216,7 +1243,8 @@ fn apply_compiled_effect_graph_rgba_f32_inner(
                 }
                 let mut output = crate::EffectFloatFrame::from_validated_parts(
                     extent,
-                    format.with_domain(domain_contract.output),
+                    source_staging_format(compiled, node.id, format, input.is_some())?
+                        .with_domain(domain_contract.output),
                     sampling,
                     frame,
                 );
