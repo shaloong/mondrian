@@ -391,8 +391,14 @@ instruments, other platforms, realtime and performance remain unqualified.
   Actual GL validation remains incomplete: the existing `mondrian-surface-reopen`
   binary, built with `validation` and the same explicit delay-import flags,
   failed its first two-cycle batch with main-thread stack overflow (0xC00000FD)
-  before publishing a report. Its PE retains delayed WGL imports. The failed
-  stage and cause are unresolved; no stack limit or timeout was increased.
+  before publishing a report. Its PE retains delayed WGL imports. Native
+  exception-stack capture localizes the overflow to Preview construction before
+  Window GPU initialization: large by-value Host/Preview startup frames exhaust
+  the default 1 MiB main stack. Candidate `796ab244` retains the existing Preview
+  heap owner through Host publication. Startup regressions pass 52 tests (9
+  originally ignored), including all five Preview partial-owner tests. The
+  original GL batch still needs after-fix validation; no stack limit or timeout
+  was increased.
   This isolates avoidable unused-image overhead, not the original F06 cause.
 - The report's `exit_loop` timer describes the whole exit
   loop plus its last existing result. It is not the timestamp/duration of the
