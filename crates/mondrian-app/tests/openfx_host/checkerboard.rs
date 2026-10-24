@@ -31,7 +31,17 @@ fn assert_board(output: &EffectFloatFrame, par: u32, phase: usize) {
         _ => panic!("unsupported literal"),
     };
     assert_eq!(output.extent(), EffectFrameExtent::new(8, 4));
-    assert_eq!(output.format(), format());
+    // This published Generator uses the base Generator ClipPreferences and
+    // negotiates Opaque for this case. Keep the PM request below and require
+    // the actual negotiated signal, including through the source-free graph.
+    assert_eq!(
+        output.format(),
+        EffectValueFormat::new(
+            EffectWorkingPrecision::Float32,
+            EffectColorDomain::SceneLinearRgb,
+            ColorFrameAlpha::Opaque,
+        )
+    );
     assert_eq!(output.pixels().len(), 32);
     for (index, pixel) in output.pixels().iter().enumerate() {
         let row = if index / 8 < 2 { top } else { bottom };
