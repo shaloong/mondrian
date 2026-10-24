@@ -41,6 +41,79 @@ mod qualification {
     }
 
     #[test]
+    fn materializer_checkpoint_attribution_preserves_original_stop_frontiers() {
+        use mondrian_app::openfx_host::{
+            diagnose_openfx_output_materialization, OpenFxHostError, OpenFxRenderDiagnostic,
+            OpenFxRenderPhase,
+        };
+        use mondrian_core::{ColorFrameAlpha, ImageSampling};
+        use mondrian_effects::{
+            EffectColorDomain, EffectFrameExtent, EffectValueFormat, EffectWorkingPrecision,
+        };
+
+        let extent = EffectFrameExtent::new(256, 257); // A complete block and a partial tail.
+        let pixels = vec![[f32::MAX, -2.0, f32::from_bits(1), -0.5]; 256 * 257];
+        for alpha in [ColorFrameAlpha::StraightFloat, ColorFrameAlpha::Opaque] {
+            let format = EffectValueFormat::new(
+                EffectWorkingPrecision::Float32,
+                EffectColorDomain::SceneLinearRgb,
+                alpha,
+            );
+            // Two original allocation checks, four copy checks, optional two
+            // opaque sweeps, then two admission blocks plus the final check.
+            let total = if alpha == ColorFrameAlpha::Opaque {
+                11
+            } else {
+                9
+            };
+            for stop in 1..=total + 1 {
+                let mut calls = 0;
+                let mut report = OpenFxRenderDiagnostic::default();
+                let result = diagnose_openfx_output_materialization(
+                    extent,
+                    format,
+                    ImageSampling::UNIT_SQUARE,
+                    bytemuck::cast_slice(&pixels),
+                    &mut || {
+                        calls += 1;
+                        if calls == stop {
+                            Err(OpenFxHostError::Canceled)
+                        } else {
+                            Ok(())
+                        }
+                    },
+                    &mut report,
+                );
+                assert_eq!(calls, stop.min(total), "no added or removed checks");
+                assert!(!report.counter_overflowed && !report.accepted_output);
+                assert!(report.owner.is_none() && report.child.is_none());
+                if stop <= total {
+                    assert!(matches!(result, Err(OpenFxHostError::Canceled)));
+                } else {
+                    let frame = result.expect("complete original materialization");
+                    assert_eq!(report.output_admission_checkpoint_calls, 3);
+                    assert!(
+                        report.output_admission_checkpoint_elapsed
+                            <= report.elapsed(OpenFxRenderPhase::OutputAdmission).unwrap()
+                    );
+                    assert!(frame.pixels().iter().zip(&pixels).all(|(actual, source)| {
+                        actual[..3]
+                            .iter()
+                            .zip(&source[..3])
+                            .all(|(a, b)| a.to_bits() == b.to_bits())
+                            && actual[3]
+                                == if alpha == ColorFrameAlpha::Opaque {
+                                    1.0
+                                } else {
+                                    source[3]
+                                }
+                    }));
+                }
+            }
+        }
+    }
+
+    #[test]
     #[ignore = "requires release product, official Basic bundle and explicit OpenFX perf receipt/budget"]
     fn official_basic_production_resident_steady_frame_performance_gate() {
         use sha2::Digest;
@@ -533,6 +606,19 @@ mod qualification {
                     "diagnostic counters were representable"
                 );
                 if result.is_ok() {
+                    assert_eq!(
+                        report.output_admission_checkpoint_calls,
+                        (width as usize * height as usize).div_ceil(65_536) + 1,
+                        "same original bounded admission checkpoints"
+                    );
+                    assert!(
+                        report.output_admission_checkpoint_elapsed
+                            <= report
+                                .elapsed(
+                                    mondrian_app::openfx_host::OpenFxRenderPhase::OutputAdmission
+                                )
+                                .expect("completed output admission")
+                    );
                     let child = report.child.expect("actual correlated child probe was requested");
                     assert_eq!(child.owner(), processor_owner);
                     assert_eq!(
@@ -652,6 +738,8 @@ mod qualification {
                     "native_body_elapsed_ns":child.and_then(|v|v.native_total_ns()),
                     "native_unassigned_body_ns":child.and_then(|v|v.native_total_ns()).zip(native_sum).map(|(v,sum)|v.checked_sub(sum).expect("disjoint native spans")),
                     "output_clear_nested_ns":child.and_then(|v|v.output_clear_ns()),
+                    "output_admission_checkpoint_nested_ns":u64::try_from(report.output_admission_checkpoint_elapsed.as_nanos())
+                        .expect("bounded checkpoint duration"),
                     "nesting":"native body/clear are inside child NativeDispatch, which overlaps parent Await; do not add levels or subtract across process start coordinates",
                     "unmeasured_completion_frontier":"Shared completion/serde encoding/socket full commit/dispatch ack are not retrospectively measured by this packet",
                     "owned_invocation_ns": whole,

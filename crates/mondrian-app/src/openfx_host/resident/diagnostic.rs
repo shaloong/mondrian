@@ -97,6 +97,10 @@ pub(super) trait ParentProbe {
     fn finish(&mut self, phase: OpenFxRenderPhase, start: Self::Stamp);
     fn event(&mut self, event: ProbeEvent);
     fn slept(&mut self, requested: Duration, start: Self::Stamp);
+    fn output_admission_checkpoint(
+        &mut self,
+        checkpoint: &mut dyn FnMut() -> Result<(), super::OpenFxHostError>,
+    ) -> Result<(), super::OpenFxHostError>;
 }
 
 impl ParentProbe for () {
@@ -115,6 +119,13 @@ impl ParentProbe for () {
     fn event(&mut self, _event: ProbeEvent) {}
     #[inline(always)]
     fn slept(&mut self, _requested: Duration, _start: ()) {}
+    #[inline(always)]
+    fn output_admission_checkpoint(
+        &mut self,
+        checkpoint: &mut dyn FnMut() -> Result<(), super::OpenFxHostError>,
+    ) -> Result<(), super::OpenFxHostError> {
+        checkpoint()
+    }
 }
 
 /// Fixed caller-owned parent measurement for one actual public render attempt.
@@ -146,6 +157,11 @@ pub struct OpenFxRenderDiagnostic {
     pub input_copy_bytes: usize,
     /// Bytes actually copied to this output owner, including a stopped partial copy.
     pub output_copy_bytes: usize,
+    /// Original checkpoint calls inside OutputAdmission, including a refused call.
+    pub output_admission_checkpoint_calls: usize,
+    /// Time inside those callbacks, nested in OutputAdmission, never additive.
+    /// Includes diagnostic clock overhead; normal rendering performs no clocks.
+    pub output_admission_checkpoint_elapsed: Duration,
     /// Opaque output pixels whose A lane was canonicalized to one.
     pub opaque_pixels: usize,
     /// Calls to the sole parent's packet-reader step while awaiting this response.
@@ -234,6 +250,22 @@ impl ParentProbe for OpenFxRenderDiagnostic {
             self.counter_overflowed = true;
         }
     }
+    #[inline]
+    fn output_admission_checkpoint(
+        &mut self,
+        checkpoint: &mut dyn FnMut() -> Result<(), super::OpenFxHostError>,
+    ) -> Result<(), super::OpenFxHostError> {
+        let start = Instant::now();
+        let result = checkpoint();
+        let elapsed = start.elapsed();
+        self.add_count(|p| &mut p.output_admission_checkpoint_calls, 1);
+        if let Some(value) = self.output_admission_checkpoint_elapsed.checked_add(elapsed) {
+            self.output_admission_checkpoint_elapsed = value;
+        } else {
+            self.counter_overflowed = true;
+        }
+        result
+    }
 }
 
 #[cfg(test)]
@@ -321,6 +353,11 @@ mod tests {
             );
             assert!(report.elapsed(OpenFxRenderPhase::OutputCopy).is_some());
             assert!(report.elapsed(OpenFxRenderPhase::OutputAdmission).is_some());
+            assert_eq!(report.output_admission_checkpoint_calls, 3);
+            assert!(
+                report.output_admission_checkpoint_elapsed
+                    <= report.elapsed(OpenFxRenderPhase::OutputAdmission).unwrap()
+            );
             assert_eq!(
                 report.elapsed(OpenFxRenderPhase::OpaqueCanonicalization).is_some(),
                 alpha == ColorFrameAlpha::Opaque

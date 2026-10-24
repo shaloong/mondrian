@@ -2076,7 +2076,7 @@ fn materialize_native_output_profiled(
     let phase = probe.start();
     let admitted =
         EffectFloatFrame::from_pixels_controlled(extent, format, sampling, pixels, &mut || {
-            checkpoint()
+            probe.output_admission_checkpoint(checkpoint)
         });
     probe.finish(OpenFxRenderPhase::OutputAdmission, phase);
     admitted
