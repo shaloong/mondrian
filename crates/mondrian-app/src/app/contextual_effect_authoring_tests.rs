@@ -41,8 +41,8 @@ fn contextual_generator_public_reset_history_save_and_reopen_preserve_output() {
         .create_new_project_at(
             directory.path().join("owner.mdp"),
             "Spatial",
-            6,
-            2,
+            16,
+            16,
             Rational::FPS_24,
         )
         .expect("Project");
@@ -95,7 +95,11 @@ fn contextual_generator_public_reset_history_save_and_reopen_preserve_output() {
         .find(|(_, p)| &p.descriptor.display_name == size_label)
         .expect("Size")
         .1;
-    assert_eq!(size.static_value(), &PropertyValue::DoubleVec2([6.0, 2.0]));
+    assert_eq!(
+        size.static_value(),
+        &PropertyValue::DoubleVec2([16.0, 16.0])
+    );
+    let size_address = size.address();
     assert_ne!(
         initial.params,
         serde_json::json!({}),
@@ -157,7 +161,7 @@ fn contextual_generator_public_reset_history_save_and_reopen_preserve_output() {
             let mut control = EffectProcessorControl::uncancelled();
             let output = session
                 .generate_compiled_rgba_f32(
-                    EffectFrameExtent::new(6, 2),
+                    EffectFrameExtent::new(16, 16),
                     format,
                     ImageSampling::UNIT_SQUARE,
                     &graph,
@@ -166,7 +170,7 @@ fn contextual_generator_public_reset_history_save_and_reopen_preserve_output() {
                 )
                 .expect("actual native pixels");
             assert_eq!(output.format(), format);
-            assert_eq!(output.pixels().len(), 12);
+            assert_eq!(output.pixels().len(), 256);
             for pixel in output.pixels() {
                 assert_eq!(pixel.map(f32::to_bits), expected.map(f32::to_bits));
             }
@@ -198,6 +202,36 @@ fn contextual_generator_public_reset_history_save_and_reopen_preserve_output() {
     };
     let mut session = make_session();
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        write(
+            &mut state,
+            ParameterValueWrite::Value {
+                parameter: size_address.clone(),
+                value: PropertyValue::DoubleVec2([1.0, 1.0]),
+            },
+        );
+        let explicit_seed = snapshot(&state);
+        assert_eq!(
+            explicit_seed
+                .properties
+                .property_by_address(&size_address)
+                .unwrap()
+                .1
+                .static_value(),
+            &PropertyValue::DoubleVec2([1.0, 1.0])
+        );
+        write(
+            &mut state,
+            ParameterValueWrite::ResetToDefault { parameter: size_address.clone() },
+        );
+        assert_eq!(
+            snapshot(&state),
+            initial,
+            "public Reset restores the resolved schema default"
+        );
+        assert!(state.undo_timeline().unwrap());
+        assert_eq!(snapshot(&state), explicit_seed);
+        assert!(state.redo_timeline().unwrap());
+        assert_eq!(snapshot(&state), initial);
         let owner = execute(&state, &mut session, [0.0; 4]);
         let edited = [0.25, 0.5, 0.75, 1.0];
         write(
