@@ -406,6 +406,59 @@ pub enum EffectProcessorInvocationError {
     /// No native/DSP action or staged pixel change occurred.
     #[error(transparent)]
     HostResourceRefused(EffectProcessorHostResourceRefusal),
+    /// Preflight may have changed native parameters/metadata, but DSP and pixel
+    /// mutation have not run. The bank decides retention of the valid instance.
+    #[error("preflight transient allocation refused: {refusal}")]
+    PreflightBudgetRefused {
+        /// The exact refusal returned by this invocation's resource bank.
+        refusal: EffectProcessorTransientMemoryRefusal,
+        /// Actual preflight feedback, when the provider has a feedback service.
+        feedback: Option<Box<crate::EffectProcessorFeedback>>,
+    },
+}
+
+/// Exact additional memory refused by the existing invocation ledger.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("requires {required_bytes} transient bytes; available grant is {available_bytes}")]
+pub struct EffectProcessorTransientMemoryRefusal {
+    /// Complete simultaneously live additional backing, not an increment.
+    pub required_bytes: usize,
+    /// Remaining budget after static active storage, excluding evictable owners.
+    pub available_bytes: usize,
+}
+
+/// Invocation-local borrowed access to the existing resource bank. This has no
+/// independent budget, cache or retention policy. Providers must obtain a grant
+/// before allocating extra backing, including inside a supervised native child,
+/// and release that backing before returning. The bank charges the granted peak.
+pub struct EffectProcessorResources<'a> {
+    bank: &'a mut FloatProcessorResidency,
+    active_bytes: usize,
+    available_bytes: usize,
+    peak_bytes: usize,
+    refused: Option<EffectProcessorTransientMemoryRefusal>,
+}
+
+impl EffectProcessorResources<'_> {
+    /// Admit the complete additional simultaneous peak. Optional sibling
+    /// residents cannot reject an otherwise legal invocation: evict them first.
+    /// An intrinsically oversized request leaves existing residents untouched.
+    pub fn acquire_transient(
+        &mut self,
+        required_bytes: usize,
+    ) -> std::result::Result<(), EffectProcessorTransientMemoryRefusal> {
+        let available_bytes = self.available_bytes - self.active_bytes;
+        if required_bytes > available_bytes {
+            let refusal = EffectProcessorTransientMemoryRefusal { required_bytes, available_bytes };
+            self.refused = Some(refusal);
+            return Err(refusal);
+        }
+        while self.bank.bytes > available_bytes - required_bytes {
+            self.bank.evict_oldest();
+        }
+        self.peak_bytes = self.peak_bytes.max(self.bank.bytes + self.active_bytes + required_bytes);
+        Ok(())
+    }
 }
 
 /// Exact occurrence and actual optional-residency decision for a host refusal.
@@ -465,6 +518,7 @@ pub trait EffectFloatProcessorInstance: std::fmt::Debug + Send {
         params: &serde_json::Value,
         frame_seed: i64,
         control: &mut EffectProcessorControl<'_>,
+        resources: &mut EffectProcessorResources<'_>,
     ) -> std::result::Result<Option<crate::EffectProcessorFeedback>, EffectProcessorInvocationError>;
 }
 
@@ -472,7 +526,9 @@ pub trait EffectFloatProcessorInstance: std::fmt::Debug + Send {
 ///
 /// The caller's input, Effects staging/cache rasters and resident sibling
 /// processors are charged separately by the sole execution ledger. Active peak
-/// includes this instance's retained backing and its temporary/returned owners.
+/// includes this instance's retained backing and its statically declared
+/// temporary/returned owners. Additional invocation-local backing requires the
+/// same bank's explicit transient grant before allocation.
 /// Retained bytes cover only what the instance still owns between invocations.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EffectFloatProcessorStorage {
@@ -496,7 +552,8 @@ impl EffectFloatProcessorStorage {
         Ok(Self { active_peak_bytes, retained_bytes })
     }
 
-    /// Maximum logical bytes owned during prepare or one invocation.
+    /// Static logical peak during prepare or one invocation. Extra processing
+    /// backing requires an invocation-local EffectProcessorResources grant.
     pub const fn active_peak_bytes(self) -> usize {
         self.active_peak_bytes
     }
@@ -1013,9 +1070,20 @@ impl FloatProcessorResidency {
         // Cleanup is local; the original panic is resumed to the existing
         // outer processor-isolation authority without another classification,
         // replay or retained owner. No stale borrowed occurrence survives it.
-        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            instance.process(pixels, params, frame_seed, control)
-        }));
+        let static_active = active + feedback_growth;
+        let (outcome, peak_bytes, refused) = {
+            let mut resources = EffectProcessorResources {
+                bank: self,
+                active_bytes: static_active,
+                available_bytes: available_working_bytes,
+                peak_bytes,
+                refused: None,
+            };
+            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                instance.process(pixels, params, frame_seed, control, &mut resources)
+            }));
+            (outcome, resources.peak_bytes, resources.refused)
+        };
         control.current_occurrence = None;
         let outcome = match outcome {
             Ok(outcome) => outcome,
@@ -1046,6 +1114,29 @@ impl FloatProcessorResidency {
         let feedback = match outcome {
             Ok(feedback) => feedback,
             Err(EffectProcessorInvocationError::Failed(error)) => return Err(error.into()),
+            Err(EffectProcessorInvocationError::PreflightBudgetRefused { refusal, feedback }) => {
+                if refused != Some(refusal)
+                    || feedback.as_ref().is_some_and(|value| {
+                        value.snapshot.is_blocked()
+                            || value.snapshot.retained_bytes() > feedback_bound
+                    })
+                {
+                    return Err(MondrianError::WorkflowStepFailed {
+                        step_id: "effect_processor_preflight_budget".to_owned(),
+                        reason: "preflight refusal does not match its resource-bank decision"
+                            .to_owned(),
+                    }
+                    .into());
+                }
+                let retention = self.retain_completed(key, retained, instance, retain);
+                if let Some(feedback) = feedback {
+                    control.feedback.push(bind(*feedback, retention));
+                }
+                return Err(FloatProcessorError::Budget {
+                    required_bytes: static_active.saturating_add(refusal.required_bytes),
+                    budget_bytes: available_working_bytes,
+                });
+            }
             Err(EffectProcessorInvocationError::HostResourceRefused(refusal)) => {
                 let retention = self.retain_completed(key, retained, instance, retain);
                 return Err(FloatProcessorError::HostResourceRefused(
@@ -1175,11 +1266,29 @@ mod tests {
             params: &serde_json::Value,
             _: i64,
             control: &mut EffectProcessorControl<'_>,
+            resources: &mut crate::EffectProcessorResources<'_>,
         ) -> std::result::Result<
             Option<crate::EffectProcessorFeedback>,
             crate::EffectProcessorInvocationError,
         > {
             control.check()?;
+            if let Some(bytes) = params["transient_bytes"].as_u64() {
+                if let Err(refusal) = resources.acquire_transient(usize::try_from(bytes).unwrap()) {
+                    return Err(EffectProcessorInvocationError::PreflightBudgetRefused {
+                        refusal,
+                        feedback: None,
+                    });
+                }
+            }
+            if params["forge_transient_refusal"].as_bool() == Some(true) {
+                return Err(EffectProcessorInvocationError::PreflightBudgetRefused {
+                    refusal: EffectProcessorTransientMemoryRefusal {
+                        required_bytes: usize::MAX,
+                        available_bytes: 0,
+                    },
+                    feedback: None,
+                });
+            }
             if params["panic"].as_bool() == Some(true) {
                 panic!("intentional processor panic");
             }
@@ -2378,6 +2487,7 @@ mod tests {
             _: &serde_json::Value,
             _: i64,
             control: &mut EffectProcessorControl<'_>,
+            _resources: &mut crate::EffectProcessorResources<'_>,
         ) -> std::result::Result<
             Option<crate::EffectProcessorFeedback>,
             crate::EffectProcessorInvocationError,
@@ -2575,6 +2685,7 @@ mod tests {
             _: &serde_json::Value,
             _: i64,
             control: &mut EffectProcessorControl<'_>,
+            _resources: &mut crate::EffectProcessorResources<'_>,
         ) -> std::result::Result<
             Option<crate::EffectProcessorFeedback>,
             crate::EffectProcessorInvocationError,
@@ -2603,6 +2714,183 @@ mod tests {
             height: frame.height(),
             format: frame.format(),
         }
+    }
+
+    #[test]
+    fn transient_admission_evicts_optional_siblings_and_counts_exact_granted_peak() {
+        let provider = Arc::new(ProbeFactory::default());
+        let factory: Arc<dyn EffectFloatProcessorFactory> = provider.clone();
+        let mut bank = FloatProcessorResidency::default();
+        let mut frame = coverage_frame(1, 1, vec![[0.25, 0.5, 0.75, 1.0]]);
+        let mut control = EffectProcessorControl::uncancelled();
+        let first = resource_request(&frame);
+        let second = resource_request(&frame);
+        assert_eq!(
+            bank.process(
+                &factory,
+                first,
+                1,
+                2,
+                128,
+                200,
+                &mut frame,
+                &serde_json::json!({}),
+                0,
+                &mut control
+            )
+            .unwrap(),
+            64
+        );
+        // Active64 + optional sibling64 leave72 immediately, but the complete
+        // 136-byte request fits by evicting that optional sibling first.
+        assert_eq!(
+            bank.process(
+                &factory,
+                second,
+                1,
+                2,
+                128,
+                200,
+                &mut frame,
+                &serde_json::json!({"transient_bytes":136}),
+                0,
+                &mut control
+            )
+            .unwrap(),
+            200
+        );
+        assert_eq!(bank.counts(), (1, 64));
+        assert_eq!(provider.dropped.load(Ordering::SeqCst), 1);
+        assert_eq!(provider.created.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            bank.process(
+                &factory,
+                second,
+                1,
+                2,
+                128,
+                200,
+                &mut frame,
+                &serde_json::json!({"transient_bytes":32}),
+                0,
+                &mut control
+            )
+            .unwrap(),
+            96
+        );
+        assert_eq!(
+            provider.created.load(Ordering::SeqCst),
+            2,
+            "same owner remains reusable"
+        );
+    }
+
+    #[test]
+    fn transient_one_byte_short_refusal_retains_owner_without_processing_pixels() {
+        let provider = Arc::new(ProbeFactory::default());
+        let factory: Arc<dyn EffectFloatProcessorFactory> = provider.clone();
+        let mut bank = FloatProcessorResidency::default();
+        let original = coverage_frame(1, 1, vec![[0.25, 0.5, 0.75, 1.0]]);
+        let request = resource_request(&original);
+        let mut frame = original.clone();
+        let mut control = EffectProcessorControl::uncancelled();
+        let result = bank.process(
+            &factory,
+            request,
+            1,
+            1,
+            64,
+            200,
+            &mut frame,
+            &serde_json::json!({"transient_bytes":137}),
+            0,
+            &mut control,
+        );
+        assert!(matches!(
+            result,
+            Err(FloatProcessorError::Budget { required_bytes: 201, budget_bytes: 200 })
+        ));
+        assert_eq!(frame, original);
+        assert_eq!(bank.counts(), (1, 64));
+        assert_eq!(provider.created.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            bank.process(
+                &factory,
+                request,
+                1,
+                1,
+                64,
+                200,
+                &mut frame,
+                &serde_json::json!({"transient_bytes":136}),
+                0,
+                &mut control
+            )
+            .unwrap(),
+            200
+        );
+        assert_eq!(
+            provider.created.load(Ordering::SeqCst),
+            1,
+            "preflight refusal did not quarantine/reprepare"
+        );
+    }
+
+    #[test]
+    fn transient_grants_do_not_escape_panics_or_forged_refusals() {
+        let factory: Arc<dyn EffectFloatProcessorFactory> = Arc::new(ProbeFactory::default());
+        let mut bank = FloatProcessorResidency::default();
+        let mut frame = coverage_frame(1, 1, vec![[0.25, 0.5, 0.75, 1.0]]);
+        let request = resource_request(&frame);
+        let mut control = EffectProcessorControl::uncancelled();
+        assert!(bank
+            .process(
+                &factory,
+                request,
+                1,
+                1,
+                64,
+                100,
+                &mut frame,
+                &serde_json::json!({"forge_transient_refusal":true}),
+                0,
+                &mut control
+            )
+            .is_err());
+        assert_eq!(bank.counts(), (0, 0));
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            bank.process(
+                &factory,
+                request,
+                1,
+                1,
+                64,
+                100,
+                &mut frame,
+                &serde_json::json!({"transient_bytes":36,"panic":true}),
+                0,
+                &mut control,
+            )
+        }));
+        assert!(panic.is_err());
+        assert!(control.current_occurrence.is_none());
+        assert_eq!(bank.counts(), (0, 0));
+        assert_eq!(
+            bank.process(
+                &factory,
+                request,
+                1,
+                1,
+                64,
+                100,
+                &mut frame,
+                &serde_json::json!({"transient_bytes":36}),
+                0,
+                &mut control
+            )
+            .unwrap(),
+            100
+        );
     }
 
     #[test]
@@ -3496,6 +3784,7 @@ mod feedback_contract_tests {
             params: &serde_json::Value,
             _: i64,
             control: &mut EffectProcessorControl<'_>,
+            _resources: &mut crate::EffectProcessorResources<'_>,
         ) -> std::result::Result<Option<EffectProcessorFeedback>, EffectProcessorInvocationError>
         {
             control.check()?;
@@ -4146,6 +4435,7 @@ mod completion_boundary_tests {
             _: &serde_json::Value,
             _: i64,
             control: &mut EffectProcessorControl<'_>,
+            _resources: &mut crate::EffectProcessorResources<'_>,
         ) -> std::result::Result<Option<EffectProcessorFeedback>, EffectProcessorInvocationError>
         {
             control.check()?;
@@ -4528,6 +4818,7 @@ mod gui_reconciliation_contract_tests {
             _: &serde_json::Value,
             _: i64,
             _: &mut EffectProcessorControl<'_>,
+            _resources: &mut crate::EffectProcessorResources<'_>,
         ) -> std::result::Result<
             Option<crate::EffectProcessorFeedback>,
             EffectProcessorInvocationError,
@@ -4675,6 +4966,7 @@ mod source_tests {
             params: &serde_json::Value,
             _: i64,
             control: &mut EffectProcessorControl<'_>,
+            _resources: &mut crate::EffectProcessorResources<'_>,
         ) -> std::result::Result<Option<EffectProcessorFeedback>, EffectProcessorInvocationError>
         {
             control.check()?;

@@ -48,7 +48,8 @@ pub use processor_residency::{
     EffectFloatProcessorPreparation, EffectFloatProcessorSizing, EffectFloatProcessorStorage,
     EffectImageScaleRequirement, EffectProcessorControl, EffectProcessorHostResourceRefusal,
     EffectProcessorHostResourceRefusalReceipt, EffectProcessorInvocationError,
-    EffectProcessorRetention, EffectProcessorStopReason,
+    EffectProcessorResources, EffectProcessorRetention, EffectProcessorStopReason,
+    EffectProcessorTransientMemoryRefusal,
 };
 pub mod qualifier;
 pub mod temporal_execution;

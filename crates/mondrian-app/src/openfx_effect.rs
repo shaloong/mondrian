@@ -230,6 +230,7 @@ impl EffectFloatProcessorInstance for OpenFxProcessorInstance {
         params: &serde_json::Value,
         _frame_seed: i64,
         control: &mut EffectProcessorControl<'_>,
+        _resources: &mut mondrian_effects::EffectProcessorResources<'_>,
     ) -> Result<
         Option<mondrian_effects::EffectProcessorFeedback>,
         mondrian_effects::EffectProcessorInvocationError,

@@ -55,6 +55,15 @@ refuse excess before allocating or calling BeginSequenceRender/Render. Report th
 actual transient peak to the same bank; clear the borrow on every outcome/panic.
 No second budget owner, retained scratch cache, author parameter or executor.
 
+`EffectProcessorResources` is the processing invocation's borrowed view of the
+same bank. A provider requests its complete simultaneous transient requirement
+before allocation. The bank first evicts optional sibling residents when needed,
+then charges the granted peak alongside static active storage and feedback.
+Intrinsic over-budget requests preserve valid residents. The borrow cannot
+escape processing or panic unwinding. The OFX bridge must service this request
+on the original parent execution thread through the existing worker control
+channel; an unqualified maximum-size reservation is not the resource contract.
+
 Budget refusal after native parameter/RoD preflight is a distinct disposition:
 preflight callbacks may already have run. It must not claim the existing
 HostResourceRefused guarantee that no native action occurred, nor quarantine a

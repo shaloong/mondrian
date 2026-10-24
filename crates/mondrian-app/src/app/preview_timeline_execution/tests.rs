@@ -1968,6 +1968,7 @@ pub(crate) fn unit_scale_test_effect() -> mondrian_effects::EffectNode {
             _: &serde_json::Value,
             _: i64,
             _: &mut EffectProcessorControl<'_>,
+            _resources: &mut mondrian_effects::EffectProcessorResources<'_>,
         ) -> Result<Option<EffectProcessorFeedback>, EffectProcessorInvocationError> {
             assert!(
                 frame.sampling().is_unit_scale(),

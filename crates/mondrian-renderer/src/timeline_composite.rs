@@ -5850,6 +5850,7 @@ pub(crate) mod source_materialization_tests {
             _: &serde_json::Value,
             _: i64,
             _: &mut EffectProcessorControl<'_>,
+            _resources: &mut mondrian_effects::EffectProcessorResources<'_>,
         ) -> Result<Option<EffectProcessorFeedback>, EffectProcessorInvocationError> {
             self.0.process.fetch_add(1, Ordering::SeqCst);
             output.pixels_mut().fill([0.25, 0.5, 0.75, 1.0]);

@@ -3232,6 +3232,7 @@ mod panic_payload_contract_tests {
             _: &serde_json::Value,
             _: i64,
             _: &mut crate::EffectProcessorControl<'_>,
+            _resources: &mut crate::EffectProcessorResources<'_>,
         ) -> Result<Option<crate::EffectProcessorFeedback>, crate::EffectProcessorInvocationError>
         {
             self.0.calls.fetch_add(1, Ordering::SeqCst);

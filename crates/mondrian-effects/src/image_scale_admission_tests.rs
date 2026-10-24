@@ -81,6 +81,7 @@ impl EffectFloatProcessorInstance for Instance {
         _: &serde_json::Value,
         _: i64,
         control: &mut EffectProcessorControl<'_>,
+        _resources: &mut crate::EffectProcessorResources<'_>,
     ) -> Result<Option<EffectProcessorFeedback>, EffectProcessorInvocationError> {
         control.check()?;
         self.counts.processed.fetch_add(1, Ordering::SeqCst);
