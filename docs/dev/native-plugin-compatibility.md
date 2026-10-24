@@ -405,7 +405,10 @@ instruments, other platforms, realtime and performance remain unqualified.
   its failure report does not qualify cleanup. The process tree exits cleanly.
   No stack or timeout increase was applied. Physical native Window termination,
   pixel readback, native OFX GPU interop and performance remain unqualified;
-  the ordinary Product configuration still needs its updated build.
+  the ordinary Product (`09e649c5`, dev, no optional features) is now rebuilt,
+  retains the delayed WGL imports and passes the FFmpeg/OCIO runtime CLI check.
+  One instrumented follow-up did not reproduce the GL panic; it does not close
+  the original failed gate or identify the context-lock holder.
   This isolates avoidable unused-image overhead, not the original F06 cause.
 - The report's `exit_loop` timer describes the whole exit
   loop plus its last existing result. It is not the timestamp/duration of the
