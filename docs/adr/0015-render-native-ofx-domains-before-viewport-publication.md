@@ -1,6 +1,6 @@
 # Render native OpenFX domains before viewport publication
 
-Status: accepted; implementation requires native qualification.
+Status: candidate, integration held by a resource-admission regression.
 
 The existing Effects CPU value is a fixed, zero-origin viewport. An OFX effect's
 canonical RoD, its enclosing pixel RoD and that viewport are different facts.
@@ -35,3 +35,31 @@ This is viewport publication, not a variable-domain Effects value or full RoI
 scheduler. Pixels outside the viewport are not propagated downstream. Full-frame
 native work can exceed requested viewport work and needs later measurement. GPU,
 temporal fetch, tiled execution and multiresolution render scales remain separate.
+
+## Resource admission must be revised before integration
+
+Native finite-domain pixels, empty/default/error handling, source-free Graph
+alpha transitions, published Constant Size mode and current image ownership have
+passed Windows checks. The existing Invert Graph at its original 128 MiB working
+budget fails before DSP: the new fixed scratch reservation alone is 128 MiB,
+although its full-viewport image requires no scratch. Raising that test budget
+would conceal a regression in an already supported path. Do not integrate this
+candidate until that original gate passes unchanged.
+
+The immutable provider storage declaration cannot know a parameter/time-dependent
+native RoD. A local allocator cap cannot authorize memory beyond the Effects bank's
+grant. The next contract therefore needs invocation-local transient headroom from
+the existing bank, after static active storage, resident siblings, frame staging
+and feedback are charged. The native request must carry that bounded grant and
+refuse excess before allocating or calling BeginSequenceRender/Render. Report the
+actual transient peak to the same bank; clear the borrow on every outcome/panic.
+No second budget owner, retained scratch cache, author parameter or executor.
+
+Budget refusal after native parameter/RoD preflight is a distinct disposition:
+preflight callbacks may already have run. It must not claim the existing
+HostResourceRefused guarantee that no native action occurred, nor quarantine a
+valid plugin as a DSP fault. The bank alone decides retention. Native wire and
+report validation, exact/one-byte-short grants, prior-frame publication safety,
+cancellation/panic cleanup, sibling accounting and original small-budget Filter
+regressions must all be verified. Until then the fixed reservation remains an
+explicit unresolved candidate defect, not an accepted production policy.
