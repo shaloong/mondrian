@@ -252,6 +252,19 @@ pub enum OpenFxDoubleType {
     Scale,
     /// An unwrapped scalar angle; native values are always degrees.
     Angle,
+    /// A two-dimensional size in canonical coordinates.
+    Xy,
+    /// A two-dimensional absolute position in canonical coordinates.
+    XyAbsolute,
+}
+
+/// Coordinate system of a spatial parameter's declared default only.
+/// Explicit values, keys, bounds and derivatives always remain canonical.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OpenFxSpatialDefaults {
+    Canonical,
+    Normalised,
 }
 
 /// One declared choice key, caption and optional rank in native option order.
@@ -274,7 +287,8 @@ pub struct OpenFxParameterDescription {
     pub label: String,
     /// Plugin-provided usage hint.
     pub hint: String,
-    /// Value assigned when an effect instance is first created.
+    /// Provider-declared default. Normalised spatial seeds require owner
+    /// project geometry before becoming an instance default or author schema.
     pub default_value: OpenFxParameterValue,
     /// Choice options in original native index order; empty for other kinds.
     pub choices: Vec<OpenFxChoiceOption>,
@@ -282,6 +296,8 @@ pub struct OpenFxParameterDescription {
     pub preferred_interpolation: mondrian_core::automation::ParameterInterpolation,
     /// Semantic kind of a Double control.
     pub double_type: Option<OpenFxDoubleType>,
+    /// Present only for XY/XYAbsolute Double2D parameters.
+    pub spatial_defaults: Option<OpenFxSpatialDefaults>,
     /// Required for String parameters and absent for every other kind.
     pub string_mode: Option<OpenFxStringMode>,
     /// Complete ordered numeric component bounds; empty for discrete controls.
@@ -433,6 +449,7 @@ struct NativeParameterInfo {
     kind: c_int,
     preferred_interpolation: c_int,
     double_type: c_int,
+    spatial_default_coordinates: c_int,
     default_value: [f64; 4],
     minimum: [f64; 4],
     maximum: [f64; 4],
@@ -1047,10 +1064,27 @@ unsafe fn decode_native_parameter(
             0 => OpenFxDoubleType::Plain,
             1 => OpenFxDoubleType::Scale,
             2 if raw.kind == 1 => OpenFxDoubleType::Angle,
+            3 if raw.kind == 7 => OpenFxDoubleType::Xy,
+            4 if raw.kind == 7 => OpenFxDoubleType::XyAbsolute,
             _ => return Err("unsupported OpenFX Double interpretation".to_owned()),
         }),
         _ if raw.double_type == -1 => None,
         _ => return Err("non-Double parameter has Double metadata".to_owned()),
+    };
+    let spatial_defaults = if matches!(
+        double_type,
+        Some(OpenFxDoubleType::Xy | OpenFxDoubleType::XyAbsolute)
+    ) {
+        Some(match raw.spatial_default_coordinates {
+            0 => OpenFxSpatialDefaults::Canonical,
+            1 => OpenFxSpatialDefaults::Normalised,
+            _ => return Err("unsupported OpenFX spatial default coordinates".to_owned()),
+        })
+    } else {
+        if raw.spatial_default_coordinates != -1 {
+            return Err("non-spatial parameter has spatial default metadata".to_owned());
+        }
+        None
     };
     let integer = |index: usize| {
         checked_openfx_integer(raw.default_value[index])
@@ -1140,6 +1174,7 @@ unsafe fn decode_native_parameter(
         hint,
         default_value,
         choices,
+        spatial_defaults,
         preferred_interpolation: match raw.preferred_interpolation {
             0 => mondrian_core::automation::ParameterInterpolation::Hold,
             1 => mondrian_core::automation::ParameterInterpolation::Linear,
@@ -1391,6 +1426,16 @@ fn validate_description(
             .map(|parameter| (&parameter.name, &parameter.default_value)),
     )?;
     for parameter in &description.parameters {
+        if parameter.spatial_defaults.is_some()
+            != matches!(
+                parameter.double_type,
+                Some(OpenFxDoubleType::Xy | OpenFxDoubleType::XyAbsolute)
+            )
+        {
+            return Err(invalid(
+                "OpenFX spatial metadata does not match its interpretation",
+            ));
+        }
         let name = &parameter.name;
         if name.is_empty()
             || name.len() > 256
@@ -1482,6 +1527,15 @@ fn validate_description(
                 if parameter.double_type.is_some() != needs_semantic
                     || (parameter.double_type == Some(OpenFxDoubleType::Angle)
                         && !matches!(value, OpenFxParameterValue::Double(_)))
+                    || (matches!(
+                        parameter.double_type,
+                        Some(OpenFxDoubleType::Xy | OpenFxDoubleType::XyAbsolute)
+                    ) && !matches!(value, OpenFxParameterValue::Double2(_)))
+                    || parameter.spatial_defaults.is_some()
+                        != matches!(
+                            parameter.double_type,
+                            Some(OpenFxDoubleType::Xy | OpenFxDoubleType::XyAbsolute)
+                        )
                     || parameter.numeric_channels.len() != arity
                 {
                     return Err(invalid(
@@ -1502,8 +1556,9 @@ fn validate_description(
                         || channel.display_minimum > channel.display_maximum
                         || channel.display_minimum.max(channel.minimum)
                             > channel.display_maximum.min(channel.maximum)
-                        || defaults[index] < channel.minimum
-                        || defaults[index] > channel.maximum
+                        || (parameter.spatial_defaults != Some(OpenFxSpatialDefaults::Normalised)
+                            && (defaults[index] < channel.minimum
+                                || defaults[index] > channel.maximum))
                     {
                         return Err(invalid(
                             "OpenFX numeric component default or range is invalid",
@@ -1802,6 +1857,7 @@ pub(crate) mod shared_frame_tests {
             kind: 1,
             preferred_interpolation: 1,
             double_type: 2,
+            spatial_default_coordinates: -1,
             default_value: [350.0; 4],
             minimum: [-1440.0; 4],
             maximum: [1440.0; 4],
@@ -1863,7 +1919,7 @@ pub(crate) mod shared_frame_tests {
             raw.double_type = code;
             assert!(decode(&raw).is_err());
         }
-        for tag in ["time", "absolute_time", "x", "y", "xy", "unknown"] {
+        for tag in ["time", "absolute_time", "x", "y", "unknown"] {
             assert!(serde_json::from_value::<OpenFxDoubleType>(serde_json::json!(tag)).is_err());
         }
         for value in [
@@ -1889,6 +1945,73 @@ pub(crate) mod shared_frame_tests {
             assert_eq!(
                 unwrapped.parameters[0].default_value,
                 OpenFxParameterValue::Double(value)
+            );
+        }
+    }
+
+    #[test]
+    fn spatial_descriptor_defaults_require_paired_semantics_and_defer_only_normalised_seed_bounds()
+    {
+        let mut description = OpenFxFilterDescription {
+            identifier: "test.spatial".into(),
+            label: "Spatial".into(),
+            parameters: vec![OpenFxParameterDescription {
+                name: "position".into(),
+                label: "Position".into(),
+                hint: String::new(),
+                default_value: OpenFxParameterValue::Double2([0.5, 0.25]),
+                choices: Vec::new(),
+                preferred_interpolation: mondrian_core::automation::ParameterInterpolation::Linear,
+                double_type: Some(OpenFxDoubleType::XyAbsolute),
+                spatial_defaults: Some(OpenFxSpatialDefaults::Normalised),
+                string_mode: None,
+                numeric_channels: vec![
+                    OpenFxNumericChannel {
+                        minimum: 1.0,
+                        maximum: 100.0,
+                        display_minimum: 1.0,
+                        display_maximum: 100.0,
+                    },
+                    OpenFxNumericChannel {
+                        minimum: 0.0,
+                        maximum: 100.0,
+                        display_minimum: 0.0,
+                        display_maximum: 100.0,
+                    },
+                ],
+                can_animate: true,
+                secret: false,
+                enabled: true,
+            }],
+        };
+        validate_description(&description, "test.spatial")
+            .expect("raw Normalised seed is not a canonical default");
+        description.parameters[0].spatial_defaults = Some(OpenFxSpatialDefaults::Canonical);
+        assert!(
+            validate_description(&description, "test.spatial").is_err(),
+            "canonical default still obeys hard bounds"
+        );
+        description.parameters[0].spatial_defaults = None;
+        assert!(
+            validate_description(&description, "test.spatial").is_err(),
+            "spatial meaning needs explicit default coordinates"
+        );
+        description.parameters[0].spatial_defaults = Some(OpenFxSpatialDefaults::Normalised);
+        description.parameters[0].double_type = Some(OpenFxDoubleType::Plain);
+        assert!(
+            validate_description(&description, "test.spatial").is_err(),
+            "Plain cannot smuggle Normalised defaults"
+        );
+        description.parameters[0].double_type = Some(OpenFxDoubleType::XyAbsolute);
+        for value in [
+            OpenFxParameterValue::Double(0.5),
+            OpenFxParameterValue::Double3([0.5; 3]),
+            OpenFxParameterValue::Double2([f64::INFINITY, 0.25]),
+        ] {
+            description.parameters[0].default_value = value;
+            assert!(
+                validate_description(&description, "test.spatial").is_err(),
+                "shape/finiteness remain strict"
             );
         }
     }
@@ -1925,6 +2048,7 @@ pub(crate) mod shared_frame_tests {
                         OpenFxParameterValue::Double2(_) | OpenFxParameterValue::Double3(_)
                     )
                     .then_some(OpenFxDoubleType::Plain),
+                    spatial_defaults: None,
                     default_value: value,
                     choices: Vec::new(),
                     preferred_interpolation:
@@ -1998,6 +2122,7 @@ pub(crate) mod shared_frame_tests {
                 choices: Vec::new(),
                 preferred_interpolation: mondrian_core::automation::ParameterInterpolation::Linear,
                 double_type: None,
+                spatial_defaults: None,
                 string_mode: None,
                 numeric_channels: vec![OpenFxNumericChannel {
                     minimum: 0.0,
@@ -2054,6 +2179,7 @@ pub(crate) mod shared_frame_tests {
                 ],
                 preferred_interpolation: mondrian_core::automation::ParameterInterpolation::Hold,
                 double_type: None,
+                spatial_defaults: None,
                 string_mode: None,
                 numeric_channels: Vec::new(),
                 can_animate: false,

@@ -422,7 +422,24 @@ namespace MondrianOpenFx {
   NumericTupleState<T, N>::NumericTupleState(FilterEffectInstance* effect, OFX::Host::Param::Descriptor& descriptor)
       : _effect(effect), _descriptor(descriptor) {
     for (size_t index = 0; index < N; ++index) { _values[index] = property(kOfxParamPropDefault, index); }
+    if constexpr (std::is_same_v<T, double> && N == 2) {
+      if (descriptor.getType() == kOfxParamTypeDouble2D &&
+          (descriptor.getDoubleType() == kOfxParamDoubleTypeXY ||
+           descriptor.getDoubleType() == kOfxParamDoubleTypeXYAbsolute)) {
+        const auto& coordinates = descriptor.getProperties().getStringProperty(kOfxParamPropDefaultCoordinateSystem);
+        if (coordinates == kOfxParamCoordinatesNormalised) {
+          // Only the provider seed is projected, once, before range admission
+          // and CreateInstance. The owner has an immutable zero-offset window.
+          const auto& info = effect->frameState().info;
+          _values[0] *= info.project_width * info.project_pixel_aspect_ratio;
+          _values[1] *= info.project_height;
+        } else if (coordinates != kOfxParamCoordinatesCanonical) {
+          throw std::runtime_error("unsupported OpenFX spatial default coordinates");
+        }
+      }
+    }
     if (!admits(_values)) { throw std::runtime_error("invalid OpenFX compound default"); }
+    _defaultValues = _values;
   }
 
   template<class T, size_t N>

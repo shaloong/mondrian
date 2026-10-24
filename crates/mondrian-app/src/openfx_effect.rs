@@ -458,6 +458,15 @@ fn build_definition_in_context(
     let mut properties = PropertyBag::default();
     let mut bound = Vec::with_capacity(description.parameters.len());
     for (index, parameter) in description.parameters.iter().enumerate() {
+        // A registry definition cannot bake one project's resolved defaults
+        // into a global PropertyBag. ADR0013 requires contextual instantiation.
+        if parameter.spatial_defaults == Some(crate::openfx_host::OpenFxSpatialDefaults::Normalised)
+        {
+            return Err(OpenFxEffectRegistrationError::Schema(format!(
+                "parameter `{}` needs owner project geometry for contextual defaults",
+                parameter.name
+            )));
+        }
         if matches!(parameter.default_value, OpenFxParameterValue::String(_))
             && !matches!(
                 parameter.string_mode,
@@ -997,6 +1006,7 @@ mod tests {
                 choices: Vec::new(),
                 preferred_interpolation: mondrian_core::automation::ParameterInterpolation::Linear,
                 double_type: Some(OpenFxDoubleType::Angle),
+                spatial_defaults: None,
                 string_mode: None,
                 numeric_channels: vec![OpenFxNumericChannel {
                     minimum: -1440.0,
@@ -1142,6 +1152,7 @@ mod tests {
                         preferred_interpolation:
                             mondrian_core::automation::ParameterInterpolation::Linear,
                         double_type: (index < 2).then_some(OpenFxDoubleType::Plain),
+                        spatial_defaults: None,
                         string_mode: None,
                         numeric_channels: (0..arity)
                             .map(|channel| OpenFxNumericChannel {
@@ -1317,6 +1328,7 @@ mod tests {
                     preferred_interpolation:
                         mondrian_core::automation::ParameterInterpolation::Linear,
                     double_type: Some(OpenFxDoubleType::Scale),
+                    spatial_defaults: None,
                     string_mode: None,
                     numeric_channels: vec![crate::openfx_host::OpenFxNumericChannel {
                         minimum: 0.0,
@@ -1337,6 +1349,7 @@ mod tests {
                     preferred_interpolation:
                         mondrian_core::automation::ParameterInterpolation::Hold,
                     double_type: None,
+                    spatial_defaults: None,
                     string_mode: None,
                     numeric_channels: Vec::new(),
                     can_animate: false,

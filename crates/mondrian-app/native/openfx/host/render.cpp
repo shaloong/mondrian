@@ -39,6 +39,7 @@
 #include "host_descriptor.h"
 #include "effect_instance.h"
 #include "image_clip.h"
+#include "parameter_instance.h"
 
 // Keep the module loaded between the optional early host callback and the
 // HostSupport enumeration. Each selected worker owns exactly one native host.
@@ -191,10 +192,31 @@ static int stringMode(const OFX::Host::Property::Set& properties) {
   return 0;
 }
 
+static int doubleInterpretation(const OFX::Host::Param::Descriptor& parameter) {
+  const auto& type = parameter.getType();
+  if (type != kOfxParamTypeDouble && type != kOfxParamTypeDouble2D && type != kOfxParamTypeDouble3D) { return -1; }
+  const auto& meaning = parameter.getDoubleType();
+  if (meaning == kOfxParamDoubleTypePlain) { return 0; }
+  if (meaning == kOfxParamDoubleTypeScale) { return 1; }
+  if (type == kOfxParamTypeDouble && meaning == kOfxParamDoubleTypeAngle) { return 2; }
+  if (type == kOfxParamTypeDouble2D && meaning == kOfxParamDoubleTypeXY) { return 3; }
+  if (type == kOfxParamTypeDouble2D && meaning == kOfxParamDoubleTypeXYAbsolute) { return 4; }
+  return -2;
+}
+
+static int spatialDefaultCoordinates(const OFX::Host::Param::Descriptor& parameter) {
+  if (doubleInterpretation(parameter) < 3) { return -1; }
+  const auto& coordinates = parameter.getProperties().getStringProperty(kOfxParamPropDefaultCoordinateSystem);
+  if (coordinates == kOfxParamCoordinatesCanonical) { return 0; }
+  if (coordinates == kOfxParamCoordinatesNormalised) { return 1; }
+  return -2;
+}
+
 static bool admitsParameterDefaults(const OFX::Host::ImageEffect::Descriptor& descriptor) {
   size_t bytes = 0;
   if (descriptor.getParamList().size() > static_cast<size_t>(MondrianOpenFx::Host::kMaxParameters)) { return false; }
   for (const auto* parameter : descriptor.getParamList()) {
+    if (doubleInterpretation(*parameter) == -2 || spatialDefaultCoordinates(*parameter) == -2) { return false; }
     if (parameter->getType() != kOfxParamTypeString && parameter->getType() != kOfxParamTypeStrChoice) { continue; }
     const auto& props = parameter->getProperties();
     if (parameter->getType() == kOfxParamTypeString) {
@@ -465,13 +487,19 @@ struct MondrianOpenFxSession {
       } else if (numericLayout(type).kind >= 7) {
         const auto layout = numericLayout(type);
         std::array<double, 4> target{}, current{};
+        std::array<double, 2> defaults{};
+        if (!value && layout.kind == 7) {
+          const auto* tuple = dynamic_cast<MondrianOpenFx::NumericTupleParameter<OFX::Host::Param::Double2DInstance, double, 2>*>(parameter);
+          if (!tuple) { return 4; }
+          defaults = tuple->defaults();
+        }
         if ((value && value->kind != layout.kind) || readCompound(parameter, layout.kind, current) != kOfxStatOK) { return 4; }
         for (int index = 0; index < layout.dimensions; ++index) {
           const double minimum = layout.integer ? properties.getIntProperty(kOfxParamPropMin, index)
                                                 : properties.getDoubleProperty(kOfxParamPropMin, index);
           const double maximum = layout.integer ? properties.getIntProperty(kOfxParamPropMax, index)
                                                 : properties.getDoubleProperty(kOfxParamPropMax, index);
-          target[index] = value ? value->value[index] : layout.integer
+          target[index] = value ? value->value[index] : layout.kind == 7 ? defaults[index] : layout.integer
               ? properties.getIntProperty(kOfxParamPropDefault, index)
               : properties.getDoubleProperty(kOfxParamPropDefault, index);
           if (!std::isfinite(target[index]) || target[index] < minimum || target[index] > maximum ||
@@ -865,6 +893,7 @@ static int describe(MondrianOpenFx::Host& host, const char* binary, const char* 
     if (++count > MondrianOpenFx::Host::kMaxParameters) { return 7; }
     MondrianOpenFxParameterInfo info{};
     info.string_file_path_exists = -1;
+    info.spatial_default_coordinates = -1;
     std::vector<MondrianOpenFxChoiceOption> choices;
     // All borrowed description storage must outlive the callback below.
     std::string stringDefault;
@@ -886,11 +915,9 @@ static int describe(MondrianOpenFx::Host& host, const char* binary, const char* 
       info.kind = layout.kind;
       info.double_type = -1;
       if (layout.kind == 1 || layout.kind == 7 || layout.kind == 8) {
-        const auto& doubleType = parameter->getDoubleType();
-        if (doubleType == kOfxParamDoubleTypePlain) { info.double_type = 0; }
-        else if (doubleType == kOfxParamDoubleTypeScale) { info.double_type = 1; }
-        else if (layout.kind == 1 && doubleType == kOfxParamDoubleTypeAngle) { info.double_type = 2; }
-        else { return 7; }
+        info.double_type = doubleInterpretation(*parameter);
+        info.spatial_default_coordinates = spatialDefaultCoordinates(*parameter);
+        if (info.double_type < 0 || info.spatial_default_coordinates == -2) { return 7; }
       }
       const char* names[] = {kOfxParamPropDefault, kOfxParamPropMin, kOfxParamPropMax,
                              kOfxParamPropDisplayMin, kOfxParamPropDisplayMax};
@@ -902,7 +929,8 @@ static int describe(MondrianOpenFx::Host& host, const char* binary, const char* 
           if (!std::isfinite(values[field][index])) { return 7; }
         }
         if (info.minimum[index] > info.maximum[index] || info.display_minimum[index] > info.display_maximum[index] ||
-            info.default_value[index] < info.minimum[index] || info.default_value[index] > info.maximum[index]) { return 7; }
+            (info.spatial_default_coordinates != 1 &&
+             (info.default_value[index] < info.minimum[index] || info.default_value[index] > info.maximum[index]))) { return 7; }
       }
     } else if (type == kOfxParamTypeBoolean) {
       info.kind = 2;

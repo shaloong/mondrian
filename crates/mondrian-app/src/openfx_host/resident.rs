@@ -24,10 +24,10 @@ pub use diagnostic::OpenFxRenderPhase;
 use diagnostic::{ParentProbe, ProbeEvent};
 
 /// Hidden executable mode for a context-bound resident native CPU session.
-pub const OPENFX_RESIDENT_WORKER_ARGUMENT: &str = "--internal-openfx-session-v11";
+pub const OPENFX_RESIDENT_WORKER_ARGUMENT: &str = "--internal-openfx-session-v12";
 const ENDPOINT_ENV: &str = "MONDRIAN_INTERNAL_OPENFX_ENDPOINT";
 const NONCE_ENV: &str = "MONDRIAN_INTERNAL_OPENFX_NONCE";
-const VERSION: u16 = 11;
+const VERSION: u16 = 12;
 const POLL: Duration = Duration::from_millis(20);
 const RETIRE: Duration = Duration::from_millis(100);
 const FRAME_TRANSFER_BYTES: usize = 1024 * 1024;
@@ -2801,7 +2801,7 @@ mod tests {
             .expect("explicit owner project geometry"),
         };
         assert!(validate_prepare_envelope(&prepare, "actual nonce").is_ok());
-        for stale in [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, u16::MAX] {
+        for stale in [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, u16::MAX] {
             prepare.version = stale;
             assert!(matches!(
                 validate_prepare_envelope(&prepare, "actual nonce"),
@@ -2835,8 +2835,7 @@ mod tests {
         prepare.owner = mondrian_core::EffectProcessorOwnerId(uuid::Uuid::nil());
         assert!(validate_prepare_envelope(&prepare, "actual nonce").is_err());
         assert_eq!(
-            OPENFX_RESIDENT_WORKER_ARGUMENT,
-            "--internal-openfx-session-v11",
+            OPENFX_RESIDENT_WORKER_ARGUMENT, "--internal-openfx-session-v12",
             "sole worker dispatch uses the current generation"
         );
     }

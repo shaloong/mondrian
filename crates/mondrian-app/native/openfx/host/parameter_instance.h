@@ -116,10 +116,12 @@ namespace MondrianOpenFx {
     FilterEffectInstance* _effect;
     OFX::Host::Param::Descriptor& _descriptor;
     std::array<T, N> _values;
+    std::array<T, N> _defaultValues;
     T property(const char* name, size_t index) const;
     bool admits(const std::array<T, N>& values) const;
   public:
     NumericTupleState(FilterEffectInstance* effect, OFX::Host::Param::Descriptor& descriptor);
+    const std::array<T, N>& defaults() const { return _defaultValues; }
     OfxStatus read(const std::array<T*, N>& outputs) const;
     OfxStatus read(OfxTime time, const std::array<T*, N>& outputs) const;
     OfxStatus write(const std::array<T, N>& values);
@@ -136,6 +138,7 @@ namespace MondrianOpenFx {
   public:
     NumericTupleParameter(FilterEffectInstance* effect, OFX::Host::Param::Descriptor& descriptor)
         : ParameterQueryInstance<SdkInstance>(descriptor, effect), _value(effect, descriptor) {}
+    const std::array<T, 2>& defaults() const { return _value.defaults(); }
     OfxStatus get(T& x, T& y) override { return _value.read({&x, &y}); }
     OfxStatus get(OfxTime time, T& x, T& y) override { return _value.read(time, {&x, &y}); }
     OfxStatus set(T x, T y) override { return _value.write({x, y}); }

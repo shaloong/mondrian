@@ -3,7 +3,7 @@
 use super::*;
 use mondrian_effects::{EffectProcessorNotice, EffectProcessorNoticeKind};
 
-const DESCRIBE_SCHEMA: u32 = 3;
+const DESCRIBE_SCHEMA: u32 = 4;
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -407,16 +407,18 @@ mod tests {
 
     #[test]
     fn describe_schema_rejects_old_wrong_and_unknown_requests_and_responses() {
-        let mut request = serde_json::json!({"schema_version":3,"context":"filter","binary_path":"none","bundle_path":"none","binary_sha256":"a","plugin_identifier":"test"});
+        let mut request = serde_json::json!({"schema_version":DESCRIBE_SCHEMA,"context":"filter","binary_path":"none","bundle_path":"none","binary_sha256":"a","plugin_identifier":"test"});
         assert!(serde_json::from_value::<DescribeRequest>(request.clone()).is_ok());
         request.as_object_mut().unwrap().remove("schema_version");
         assert!(serde_json::from_value::<DescribeRequest>(request.clone()).is_err());
-        request["schema_version"] = serde_json::json!(1);
-        let wrong = serde_json::from_value::<DescribeRequest>(request.clone()).unwrap();
-        assert!(
-            matches!(describe_in_worker(&wrong), Err(OpenFxHostError::Invalid(reason)) if reason.contains("schema"))
-        );
-        request["schema_version"] = serde_json::json!(3);
+        for stale in [1, 2, 3] {
+            request["schema_version"] = serde_json::json!(stale);
+            let wrong = serde_json::from_value::<DescribeRequest>(request.clone()).unwrap();
+            assert!(
+                matches!(describe_in_worker(&wrong), Err(OpenFxHostError::Invalid(reason)) if reason.contains("schema"))
+            );
+        }
+        request["schema_version"] = serde_json::json!(DESCRIBE_SCHEMA);
         request["unexpected"] = serde_json::json!(0);
         assert!(serde_json::from_value::<DescribeRequest>(request).is_err());
         // This frozen legacy consumer shape rejects the new mandatory field.
@@ -445,7 +447,7 @@ mod tests {
             )
         );
         let mut new = old;
-        new["schema_version"] = serde_json::json!(3);
+        new["schema_version"] = serde_json::json!(DESCRIBE_SCHEMA);
         assert!(serde_json::from_value::<OldRequest>(new).is_err());
         let current = DescribeResponse::Success {
             schema_version: DESCRIBE_SCHEMA,

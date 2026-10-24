@@ -39,6 +39,34 @@ bool declaresInputs() {
   return modeIs("optional_inputs") || modeIs("required_source") || modeIs("required_aux");
 }
 
+bool spatialDefaultsMode() { return modeIs("spatial_defaults"); }
+
+bool spatialValues(OfxImageEffectHandle effect, double time, double values[3][2]) {
+  OfxParamSetHandle params = nullptr;
+  if (images->getParamSet(effect, &params) != kOfxStatOK) { return false; }
+  const char* names[] = {"position", "size", "canonical"};
+  for (int index=0; index<3; ++index) {
+    OfxParamHandle handle = nullptr;
+    double atTime[2]{};
+    if (parameters->paramGetHandle(params, names[index], &handle, nullptr) != kOfxStatOK || !handle ||
+        parameters->paramGetValue(handle, &values[index][0], &values[index][1]) != kOfxStatOK ||
+        parameters->paramGetValueAtTime(handle, time, &atTime[0], &atTime[1]) != kOfxStatOK ||
+        atTime[0] != values[index][0] || atTime[1] != values[index][1]) { return false; }
+  }
+  return true;
+}
+
+bool spatialInitialDefaults(OfxImageEffectHandle effect) {
+  OfxPropertySetHandle props = nullptr;
+  double size[2]{}, values[3][2]{};
+  return images->getPropertySet(effect, &props) == kOfxStatOK &&
+      properties->propGetDoubleN(props, kOfxImageEffectPropProjectSize, 2, size) == kOfxStatOK &&
+      spatialValues(effect, 0.0, values) &&
+      values[0][0] == size[0]*0.5 && values[0][1] == size[1]*0.25 &&
+      values[1][0] == size[0] && values[1][1] == size[1] &&
+      values[2][0] == 4.0 && values[2][1] == 5.0;
+}
+
 bool disconnectedInputs(OfxImageEffectHandle effect, bool fetch, double time) {
   for (const char* name : {kOfxImageEffectSimpleSourceClipName, "Aux"}) {
     OfxImageClipHandle clip = nullptr;
@@ -72,7 +100,9 @@ bool generatorInstance(OfxImageEffectHandle effect) {
       properties->propGetDoubleN(props, kOfxImageEffectPropProjectExtent, 2, extent) == kOfxStatOK &&
       properties->propGetDoubleN(props, kOfxImageEffectPropProjectOffset, 2, offset) == kOfxStatOK &&
       properties->propGetDouble(props, kOfxImageEffectPropProjectPixelAspectRatio, 0, &par) == kOfxStatOK &&
-      size[0] == 6.0 && size[1] == 2.0 && extent[0] == 6.0 && extent[1] == 2.0 &&
+      ((size[0] == 6.0 && size[1] == 2.0) ||
+       (spatialDefaultsMode() && size[0] == 10.0 && size[1] == 4.0)) &&
+      extent[0] == size[0] && extent[1] == size[1] &&
       offset[0] == 0.0 && offset[1] == 0.0 && par == 2.0 &&
       (declaresInputs() ? disconnectedInputs(effect, false, 0.0) :
         images->clipGetHandle(effect, kOfxImageEffectSimpleSourceClipName,
@@ -141,7 +171,26 @@ OfxStatus describeInContext(OfxImageEffectHandle effect, OfxPropertySetHandle in
       properties->propSetDouble(gain, kOfxParamPropMax, 0, 1.0) == kOfxStatOK &&
       properties->propSetDouble(gain, kOfxParamPropDisplayMin, 0, 0.0) == kOfxStatOK &&
       properties->propSetDouble(gain, kOfxParamPropDisplayMax, 0, 1.0) == kOfxStatOK;
-  return valid ? kOfxStatOK : kOfxStatFailed;
+  if (!valid) { return kOfxStatFailed; }
+  if (spatialDefaultsMode()) {
+    const char* names[] = {"position", "size", "canonical"};
+    const double defaults[][2] = {{0.5,0.25},{1.0,1.0},{4.0,5.0}};
+    for (int index=0; index<3; ++index) {
+      OfxPropertySetHandle p = nullptr;
+      const double minimum[2] = {index==0 ? 1.0 : 0.0, 0.0};
+      const double maximum[2] = {100.0,100.0};
+      if (parameters->paramDefine(params,kOfxParamTypeDouble2D,names[index],&p) != kOfxStatOK ||
+          properties->propSetString(p,kOfxPropLabel,0,names[index]) != kOfxStatOK ||
+          properties->propSetString(p,kOfxParamPropDoubleType,0,index==0 ? kOfxParamDoubleTypeXYAbsolute : kOfxParamDoubleTypeXY) != kOfxStatOK ||
+          properties->propSetString(p,kOfxParamPropDefaultCoordinateSystem,0,index==2 ? kOfxParamCoordinatesCanonical : kOfxParamCoordinatesNormalised) != kOfxStatOK ||
+          properties->propSetDoubleN(p,kOfxParamPropDefault,2,defaults[index]) != kOfxStatOK ||
+          properties->propSetDoubleN(p,kOfxParamPropMin,2,minimum) != kOfxStatOK ||
+          properties->propSetDoubleN(p,kOfxParamPropDisplayMin,2,minimum) != kOfxStatOK ||
+          properties->propSetDoubleN(p,kOfxParamPropMax,2,maximum) != kOfxStatOK ||
+          properties->propSetDoubleN(p,kOfxParamPropDisplayMax,2,maximum) != kOfxStatOK) { return kOfxStatFailed; }
+    }
+  }
+  return kOfxStatOK;
 }
 
 OfxStatus clipPreferences(OfxPropertySetHandle out) {
@@ -253,8 +302,8 @@ OfxStatus render(OfxImageEffectHandle effect, OfxPropertySetHandle in) {
       !std::isfinite(projectPar) || projectPar <= 0.0 ||
       // Project coordinates are canonical: 3x2 pixels at PAR=2 means 6x2,
       // with a 3x2 render window. No input image supplies this geometry.
-      projectSize[0] != static_cast<double>(window[2]) * projectPar ||
-      projectSize[1] != static_cast<double>(window[3]) ||
+      (!spatialDefaultsMode() && (projectSize[0] != static_cast<double>(window[2]) * projectPar ||
+                                  projectSize[1] != static_cast<double>(window[3]))) ||
       projectOffset[0] != 0.0 || projectOffset[1] != 0.0 ||
       projectExtent[0] != projectSize[0] || projectExtent[1] != projectSize[1] ||
       images->getParamSet(effect, &params) != kOfxStatOK || !params ||
@@ -270,8 +319,10 @@ OfxStatus render(OfxImageEffectHandle effect, OfxPropertySetHandle in) {
   // This environment is test infrastructure, not a parameter or product policy.
   const char* mode = std::getenv("MONDRIAN_OPENFX_GENERATOR_MODE");
   if (mode && std::strcmp(mode, "no_output_fetch") == 0) { return kOfxStatOK; }
-  if (mode && *mode && !(clipParDefaultsMode() || clipRateDefaultsMode() || declaresInputs())) { return kOfxStatErrValue; }
+  if (mode && *mode && !(clipParDefaultsMode() || clipRateDefaultsMode() || declaresInputs() || spatialDefaultsMode())) { return kOfxStatErrValue; }
   if (declaresInputs() && !disconnectedInputs(effect, true, time)) { return kOfxStatFailed; }
+  double spatial[3][2]{};
+  if (spatialDefaultsMode() && !spatialValues(effect, time, spatial)) { return kOfxStatFailed; }
 
   OfxPropertySetHandle image = nullptr;
   if (images->clipGetImage(output, time, nullptr, &image) != kOfxStatOK || !image) {
@@ -324,7 +375,9 @@ OfxStatus render(OfxImageEffectHandle effect, OfxPropertySetHandle in) {
     auto* row = static_cast<char*>(data) +
         static_cast<std::ptrdiff_t>((static_cast<std::int64_t>(y) - bounds[1]) * stride);
     for (int x = bounds[0]; x < bounds[2]; ++x) {
-      const OfxRGBAColourF pixel = {
+      const OfxRGBAColourF pixel = spatialDefaultsMode() ? OfxRGBAColourF{
+          static_cast<float>(spatial[1][0]), static_cast<float>(spatial[1][1]),
+          static_cast<float>(spatial[0][0]+spatial[0][1]/16.0+spatial[2][0]/128.0+spatial[2][1]/1024.0), 0.75f} : OfxRGBAColourF{
           static_cast<float>(gain),
           static_cast<float>(static_cast<std::int64_t>(x) + 1) / 16.0f,
           static_cast<float>(static_cast<std::int64_t>(y) + 1) / 8.0f + frame / 64.0f,
@@ -340,7 +393,7 @@ OfxStatus render(OfxImageEffectHandle effect, OfxPropertySetHandle in) {
 OfxStatus dispatch(const char* action, const void* handle,
                     OfxPropertySetHandle in, OfxPropertySetHandle out) {
   if (!action) { return kOfxStatErrValue; }
-  if (modeIs("required_source") || modeIs("required_aux")) {
+  if (modeIs("required_source") || modeIs("required_aux") || spatialDefaultsMode()) {
     const char* path = std::getenv("MONDRIAN_OPENFX_GENERATOR_ACTION_LOG");
     if (!path || !*path) { return kOfxStatErrValue; }
     std::ofstream file(std::filesystem::u8path(path), std::ios::binary | std::ios::app);
@@ -356,7 +409,7 @@ OfxStatus dispatch(const char* action, const void* handle,
     return describeInContext(effect, in);
   }
   if (std::strcmp(action, kOfxActionCreateInstance) == 0) {
-    return generatorInstance(effect) ? kOfxStatOK : kOfxStatFailed;
+    return generatorInstance(effect) && (!spatialDefaultsMode() || spatialInitialDefaults(effect)) ? kOfxStatOK : kOfxStatFailed;
   }
   if (std::strcmp(action, kOfxImageEffectActionGetClipPreferences) == 0) {
     return clipParDefaultsMode() || clipRateDefaultsMode() ? clipDefaults(effect, out) : clipPreferences(out);
