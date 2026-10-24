@@ -142,7 +142,10 @@ impl EffectGraphIdentity {
                     0u8.hash(&mut writer);
                 }
                 EffectGraphNodeKind::CustomSource { op, domain_contract } => {
-                    11u8.hash(&mut writer);
+                    // Version source-containing identities for staging selected
+                    // from the source declaration rather than external alpha.
+                    // Ordinary image-processing graph identities stay unchanged.
+                    12u8.hash(&mut writer);
                     domain_contract.hash(&mut writer);
                     hash_render_op(op, &mut writer);
                 }

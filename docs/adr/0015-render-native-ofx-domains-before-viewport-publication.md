@@ -92,6 +92,8 @@ Selection is stable across unrelated incoming-alpha changes; actual provider
 output is still negotiated and validated. The explicit source-free `generate`
 entry keeps the caller's exact format requirement and refuses unsupported
 requests before provider work. No existing input pixels are reinterpreted.
+The CustomSource semantic tag advances so old source-containing cache identities
+cannot reuse results from the former staging rule; ordinary Filter tags remain.
 
 Timeline uses the same Effects session, feedback route, memory admission, color
 conversion and downstream alpha/Transform/blend/Transition operations. The blanket
@@ -99,5 +101,6 @@ CustomSource refusal can therefore be removed without bypassing other admission.
 This does not add a dedicated Generator Clip or Catalog insertion, upstream RoI,
 temporal/GPU support, or permission to skip real external dependencies. Ordinary
 canvas materialization is initially retained; no allocation/performance claim.
-Core361 checks pass; Renderer/Preview/Export and actual native qualification of
-this new consumer remain pending.
+Core361 and Renderer673 ordinary checks pass (Renderer39 remain ignored), including
+root/nested admission, Solid/Media/Adjustment/Transition and real Source blending.
+Current App and actual native Preview/Export qualification remain pending.
