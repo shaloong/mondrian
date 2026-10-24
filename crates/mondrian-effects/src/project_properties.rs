@@ -66,6 +66,17 @@ mod tests {
     fn geometry(width: u32, height: u32) -> EffectProjectGeometry {
         EffectProjectGeometry::new(width, height, SampleAspectRatio::new(2, 1).unwrap()).unwrap()
     }
+    fn contract() -> crate::EffectExecutionContract {
+        crate::EffectExecutionContract {
+            execution_modes: crate::EffectExecutionModes::CPU_F32,
+            determinism: crate::EffectDeterminism::Deterministic,
+            state_model: crate::EffectStateModel::Stateless,
+            temporal_input: crate::EffectTemporalInputExtent::CURRENT_FRAME,
+            roi_propagation: crate::EffectRoiPropagation::UnknownRequiresFullFrame,
+            resource_lifetime: crate::EffectResourceLifetime::Frame,
+            topology: crate::EffectGraphTopology::LinearChain,
+        }
+    }
     fn definition(key: &str, zero: bool) -> EffectDefinition {
         let mut base = PropertyBag::default();
         base.define(PropertyDescriptor::new(
@@ -75,6 +86,7 @@ mod tests {
         ));
         EffectDefinition::new(key, key, base, EffectColorDomainContract::SCENE_LINEAR)
             .with_graph_builder(Arc::new(|_, _, _| Ok(())))
+            .with_execution_contract(contract())
             .with_project_properties(
                 Arc::new(move |geometry, properties| {
                     let value = if zero {
@@ -218,7 +230,8 @@ mod tests {
             first.properties.clone(),
             EffectColorDomainContract::SCENE_LINEAR,
         )
-        .with_graph_builder(Arc::new(|_, _, _| Ok(())));
+        .with_graph_builder(Arc::new(|_, _, _| Ok(())))
+        .with_execution_contract(contract());
         register_effect_definition(literal).unwrap();
         assert!(prepare(&first, geometry(3, 2)).is_err());
     }

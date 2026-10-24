@@ -1683,6 +1683,7 @@ impl EffectDefinition {
         &self.category_path
     }
 
+    #[cfg(test)]
     pub(crate) fn default_properties(&self) -> &PropertyBag {
         &self.default_properties
     }
