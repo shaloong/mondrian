@@ -231,6 +231,9 @@ namespace OFX {
       template<class T>
       const typename T::ReturnType PropertyTemplate<T>::getValue(int index) const
       {
+        // Raw storage and hooks must obey the same effective property extent.
+        // Validate before invoking a hook or touching the caller's output.
+        if (index < 0 || index >= getDimension()) throw Exception(kOfxStatErrBadIndex);
         if (_getHook) {
           return _getHook->getProperty<T>(_name, index);
         }
@@ -244,8 +247,8 @@ namespace OFX {
       // get multiple values
       template<class T>
       void PropertyTemplate<T>::getValueN(typename T::APIType *values, int count) const {
-        // Admit the signed count before hook dispatch or raw size conversion.
-        if (count < 0) throw Exception(kOfxStatErrBadIndex);
+        // Reject the entire request before a hook or raw prefix copy can write.
+        if (count < 0 || count > getDimension()) throw Exception(kOfxStatErrBadIndex);
         if (_getHook) {
           _getHook->getPropertyN<T>(_name, values, count);
         }

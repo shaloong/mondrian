@@ -31,6 +31,9 @@ The product filter host is maintained separately in `../host`.
   array and reset operations at the plugin suite boundary.
   Its typed property constructor also forwards the declared `pluginReadOnly`
   flag to the base property; host-internal property writes remain available.
+  Scalar and array reads validate their complete effective dimension before
+  hook dispatch or raw copying, returning BadIndex without partial output for
+  invalid requests. Fixed, variable and chained properties share this boundary.
 
 - `host/src/ofxhImageEffect.cpp` preserves the installed host clip defaults
   when GetClipPreferences returns ReplyDefault, ignoring action-output residuals.
