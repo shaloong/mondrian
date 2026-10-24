@@ -353,7 +353,7 @@ mod source_materialization_tests {
     use super::*;
     use crate::timeline_composite::source_materialization_tests::{source_graph, source_plan};
     #[test]
-    fn preview_root_and_nested_routes_refuse_no_image_sources_before_materialization() {
+    fn preview_root_and_nested_routes_admit_no_image_sources_without_advancing_them() {
         let (graph, probe) = source_graph();
         let plan = source_plan(graph);
         let mut scratch = TimelineCompositeScratch::default();
@@ -365,14 +365,15 @@ mod source_materialization_tests {
             |_| None,
         )
         .unwrap();
-        assert!(
-            matches!(routes.admit_root(),Err(TimelinePreviewEffectRouteError::NoCompleteRootRoute {cpu_blocker,..})
-            if cpu_blocker.contains("Timeline source materialization is unsupported"))
-        );
-        assert!(
-            matches!(routes.admit_nested_materialization(),Err(TimelinePreviewEffectRouteError::NestedMaterializationRequiresCpu {cpu_blocker})
-            if cpu_blocker.contains("Timeline source materialization is unsupported"))
-        );
+        routes.admit_root().unwrap();
+        routes.admit_nested_materialization().unwrap();
+        let crate::TimelineRenderPlanElement::SolidColor(layer) = &plan.elements[0] else {
+            panic!("solid source plan")
+        };
+        assert!(matches!(
+            routes.route_for(layer.placement, &layer.effect_graph).unwrap(),
+            PreparedTimelinePreviewEffectRoute::Cpu
+        ));
         probe.assert_untouched();
     }
 }

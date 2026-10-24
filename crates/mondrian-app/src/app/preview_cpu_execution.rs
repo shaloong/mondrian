@@ -120,7 +120,6 @@ impl PreviewCpuExecutionError {
 
 fn timeline_composite_is_blocked(error: &TimelineCompositeError) -> bool {
     match error {
-        TimelineCompositeError::SourceMaterializationUnsupported { .. } => true,
         TimelineCompositeError::EffectDomainBlocked { .. } => true,
         TimelineCompositeError::LegacyRgba8WorkingCompositeForbidden { .. } => true,
         TimelineCompositeError::EncodedEffect(error) => matches!(
@@ -642,12 +641,16 @@ mod tests {
     }
 
     #[test]
-    fn unmaterialized_source_is_a_blocked_timeline_capability() {
-        let error = PreviewCpuExecutionError::TimelineComposite(
-            TimelineCompositeError::SourceMaterializationUnsupported {
-                node_id: mondrian_effects::EffectGraphNodeId(9),
-            },
-        );
+    fn unsupported_source_output_is_a_blocked_timeline_capability() {
+        let error =
+            PreviewCpuExecutionError::TimelineComposite(TimelineCompositeError::FloatEffect {
+                reason: EffectFloatExecutionError::UnsupportedNode {
+                    node_id: mondrian_effects::EffectGraphNodeId(9),
+                    reason: EffectFloatUnsupportedReason::UnsupportedGraphNode {
+                        kind: "source_output_format_not_admitted",
+                    },
+                },
+            });
         let unavailable = error.unavailability();
         assert_eq!(
             unavailable.disposition(),
@@ -655,7 +658,7 @@ mod tests {
         );
         assert_eq!(unavailable.stage(), PreviewOutputStage::TimelineComposite);
         assert_eq!(unavailable.code(), "preview.blocked.timeline_composite");
-        assert!(unavailable.detail().contains("source materialization is unsupported"));
+        assert!(unavailable.detail().contains("source_output_format_not_admitted"));
     }
 
     #[test]

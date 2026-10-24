@@ -688,15 +688,6 @@ pub struct TimelineCompositeDomainBlockerBreakdown {
 /// Failure to composite a timeline frame without changing authored semantics.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum TimelineCompositeError {
-    /// This placement has no authored zero-input source/materialization contract.
-    /// The Effects scalar Generator entry remains available outside Timeline.
-    #[error(
-        "Timeline source materialization is unsupported for zero-input effect node {node_id:?}"
-    )]
-    SourceMaterializationUnsupported {
-        /// Reachable zero-input producer in this exact compiled graph.
-        node_id: mondrian_effects::EffectGraphNodeId,
-    },
     /// A media layer does not carry the exact typed working-frame contract
     /// required by this Sequence composite.
     #[error("timeline media frame contract mismatch: expected {expected:?}, got {actual:?}")]
@@ -1098,18 +1089,12 @@ pub struct TimelineCpuCompositeAdmission {
 /// transfer-free CPU compositor cannot execute. Preview and Export both remain
 /// Float32 until an explicit output boundary and fail closed when a graph would
 /// require the legacy NormalizedU8 route.
+/// Zero-input Effect nodes use this placement's actual execution canvas and the
+/// same processor bank. They do not create a new Clip-content variant or change
+/// source-time mapping; reachable external Source branches remain required.
 pub fn admit_timeline_render_plan_for_cpu_compositor(
     plan: &crate::TimelineRenderPlan,
 ) -> Result<TimelineCpuCompositeAdmission, TimelineCompositeError> {
-    let mut source_blocker = None;
-    visit_render_plan_effect_graphs(plan, |graph| {
-        if source_blocker.is_none() {
-            source_blocker = timeline_source_materialization_error(graph.graph);
-        }
-    });
-    if let Some(error) = source_blocker {
-        return Err(error);
-    }
     let scan = scan_render_plan_effect_graphs(plan);
     let float_domain_blockers =
         render_plan_domain_blockers(plan, TimelineCpuCompositePrecision::Float32);
@@ -1402,15 +1387,6 @@ fn composite_color_frame_inner(
     control: &mut mondrian_effects::EffectProcessorControl<'_>,
 ) -> Result<TimelineCompositeFrame, TimelineCompositeError> {
     timeline_processor_checkpoint(control)?;
-    let mut source_blocker = None;
-    visit_composite_element_effect_graphs(elements, |graph| {
-        if source_blocker.is_none() {
-            source_blocker = timeline_source_materialization_error(graph.graph);
-        }
-    });
-    if let Some(error) = source_blocker {
-        return Err(error);
-    }
     validate_timeline_media_frame_contracts(elements, runtime.working_color_space, control)?;
     // Count the whole immutable operation before any effect advances state.
     let mut feedback = mondrian_effects::EffectProcessorFeedbackRequirements::default();
@@ -2425,20 +2401,6 @@ fn visit_composite_transition_graph<'elements, 'frame>(
             });
         }
     }
-}
-
-// Node profiles are compiled only for reachable values. Dead source nodes must
-// not change admission when a later SingleImage path owns the actual output.
-fn timeline_source_materialization_error(
-    graph: &CompiledEffectGraph,
-) -> Option<TimelineCompositeError> {
-    graph.graph().nodes.iter().find_map(|node| {
-        (matches!(
-            node.kind,
-            mondrian_effects::EffectGraphNodeKind::CustomSource { .. }
-        ) && graph.node_profiles().contains_key(&node.id))
-        .then_some(TimelineCompositeError::SourceMaterializationUnsupported { node_id: node.id })
-    })
 }
 
 #[derive(Default)]
@@ -5930,79 +5892,171 @@ pub(crate) mod source_materialization_tests {
         }
     }
     #[test]
-    fn no_image_sources_refuse_plan_and_composition_before_provider_or_raster_work() {
+    fn embedded_sources_use_the_existing_timeline_canvas_and_processor_bank() {
         let (graph, probe) = source_graph();
         let plan = source_plan(graph.clone());
-        assert!(matches!(
-            admit_timeline_render_plan_for_cpu_compositor(&plan),
-            Err(TimelineCompositeError::SourceMaterializationUnsupported { .. })
-        ));
-        let mut transition_plan = plan.clone();
-        let crate::TimelineRenderPlanElement::SolidColor(source) = plan.elements[0].clone() else {
-            panic!("solid")
-        };
-        transition_plan.elements = vec![crate::TimelineRenderPlanElement::CrossDissolve(Box::new(
-            crate::TimelineCrossDissolvePlan {
-                transition_id: mondrian_core::VideoTransitionId::new(),
-                left: crate::TimelineTransitionInputPlan::SolidColor(source),
-                right: crate::TimelineTransitionInputPlan::Transparent,
-                progress: 0.5,
-            },
-        ))];
-        assert!(matches!(
-            admit_timeline_render_plan_for_cpu_compositor(&transition_plan),
-            Err(TimelineCompositeError::SourceMaterializationUnsupported { .. })
-        ));
+        let admission = admit_timeline_render_plan_for_cpu_compositor(&plan).unwrap();
+        assert_eq!(admission.precision, TimelineCpuCompositePrecision::Float32);
+        let mut export_plan = plan.clone();
+        export_plan.intent = crate::TimelineRenderIntent::Export;
+        assert_eq!(
+            admit_timeline_render_plan_for_cpu_compositor(&export_plan).unwrap(),
+            admission
+        );
+        probe.assert_untouched();
         let engine = ColorEngine::mondrian_standard();
-        for element in [
-            TimelineCompositeElement::SolidColor(solid(graph.clone())),
-            TimelineCompositeElement::CrossDissolve(TimelineCrossDissolveLayer {
-                left: TimelineTransitionInput::SolidColor(solid(graph.clone())),
-                right: TimelineTransitionInput::Transparent,
-                progress: 0.5,
-            }),
-        ] {
-            let mut scratch = TimelineCompositeScratch::default();
+        let runtime = TimelineEffectColorRuntime::new(
+            &engine,
+            WorkingColorSpace::LinearRec709,
+            mondrian_core::ImageSampling::UNIT_SQUARE,
+        );
+        let media_pixels = vec![[8.0, -2.0, 0.125, 0.5]; 6];
+        let media = CpuColorFrame::working(WorkingRgbaF32Frame {
+            sampling: runtime.sampling,
+            width: 3,
+            height: 2,
+            alpha: ColorFrameAlpha::StraightCoverage,
+            data: media_pixels.clone(),
+            color_space: WorkingColorSpace::LinearRec709,
+        });
+        let media_layer = TimelineMediaLayer {
+            frame: &media,
+            opacity: 1.0,
+            blend_mode: BlendMode::Normal,
+            transform: [1., 0., 0., 0., 1., 0.],
+            effect_graph: graph.clone(),
+            frame_seed: 0,
+        };
+        let identity = mondrian_effects::compile_reference_effect_graph(
+            &mondrian_effects::EffectRenderPlan::default(),
+        )
+        .unwrap();
+        let mut scratch = TimelineCompositeScratch::default();
+        let cases = [
+            (
+                vec![TimelineCompositeElement::SolidColor(solid(graph.clone()))],
+                [0.25, 0.5, 0.75, 1.0],
+            ),
+            (
+                vec![TimelineCompositeElement::Media(media_layer.clone())],
+                [0.25, 0.5, 0.75, 1.0],
+            ),
+            (
+                vec![
+                    TimelineCompositeElement::SolidColor(solid(identity)),
+                    TimelineCompositeElement::Adjustment(TimelineAdjustmentLayer {
+                        effect_graph: graph.clone(),
+                        opacity: 1.0,
+                        blend_policy: mondrian_core::EffectPassBlendPolicy::Mix,
+                        frame_seed: 0,
+                    }),
+                ],
+                [0.25, 0.5, 0.75, 1.0],
+            ),
+            (
+                vec![TimelineCompositeElement::CrossDissolve(
+                    TimelineCrossDissolveLayer {
+                        left: TimelineTransitionInput::SolidColor(solid(graph.clone())),
+                        right: TimelineTransitionInput::Transparent,
+                        progress: 0.5,
+                    },
+                )],
+                [0.25, 0.5, 0.75, 0.5],
+            ),
+            (
+                vec![TimelineCompositeElement::CrossDissolve(
+                    TimelineCrossDissolveLayer {
+                        left: TimelineTransitionInput::Media(media_layer),
+                        right: TimelineTransitionInput::Transparent,
+                        progress: 0.5,
+                    },
+                )],
+                [0.25, 0.5, 0.75, 0.5],
+            ),
+        ];
+        for (index, (elements, expected)) in cases.into_iter().enumerate() {
             let mut control = EffectProcessorControl::uncancelled();
-            let result = composite_timeline_elements_color_frame(
+            let output = composite_timeline_elements_color_frame(
                 3,
                 2,
-                &[element],
+                &elements,
                 TimelineCompositeOptions::default(),
-                TimelineEffectColorRuntime::new(
-                    &engine,
-                    WorkingColorSpace::LinearRec709,
-                    mondrian_core::ImageSampling::UNIT_SQUARE,
-                ),
+                runtime,
                 &mut scratch,
                 &mut control,
-            );
-            assert!(matches!(
-                result,
-                Err(TimelineCompositeError::SourceMaterializationUnsupported { .. })
-            ));
-            assert!(scratch.solid_fill_f32.is_empty(), "no placeholder raster");
-            assert!(control.take_feedback().unwrap().is_empty());
-            probe.assert_untouched();
-        }
-        // Renderer-local refusal must not remove the Effects source consumer.
-        let mut execution =
-            EffectExecutionSession::new(EffectExecutionSessionConfig::uncached(4096));
-        let output = execution
-            .generate_compiled_rgba_f32(
-                mondrian_effects::EffectFrameExtent::new(3, 2),
-                mondrian_effects::EffectValueFormat::new(
-                    EffectWorkingPrecision::Float32,
-                    EffectColorDomain::SceneLinearRgb,
-                    ColorFrameAlpha::StraightFloat,
-                ),
-                mondrian_core::ImageSampling::UNIT_SQUARE,
-                &graph,
-                0,
-                &mut EffectProcessorControl::uncancelled(),
             )
             .unwrap();
-        assert_eq!(output.pixels(), &[[0.25, 0.5, 0.75, 1.0]; 6]);
+            assert_eq!(output.frame.rgba_f32().data, vec![expected; 6]);
+            assert_eq!(
+                probe.process.load(Ordering::SeqCst),
+                index + 1,
+                "no DSP replay"
+            );
+            assert_eq!(
+                probe.prepare.load(Ordering::SeqCst),
+                1,
+                "all placements reuse the same graph occurrence"
+            );
+            assert_eq!(
+                scratch.effect_execution.diagnostics().processor_instances,
+                1
+            );
+            assert!(control.take_feedback().unwrap().is_empty());
+            assert_eq!(media.rgba_f32().data, media_pixels);
+        }
+        scratch.effect_execution.retire_processor_resources();
+        assert_eq!(
+            scratch.effect_execution.diagnostics().processor_instances,
+            0
+        );
+    }
+
+    #[test]
+    fn embedded_source_keeps_reachable_external_input_for_partial_blending() {
+        let (source, probe) = source_graph();
+        let mut raw = source.graph().clone();
+        let external = raw
+            .nodes
+            .iter()
+            .find(|n| matches!(n.kind, mondrian_effects::EffectGraphNodeKind::Source))
+            .unwrap()
+            .id;
+        let generated = raw.output.unwrap();
+        let blend = mondrian_effects::EffectGraphNodeId(
+            raw.nodes.iter().map(|n| n.id.0).max().unwrap() + 1,
+        );
+        raw.nodes.push(mondrian_effects::EffectGraphNode {
+            id: blend,
+            kind: mondrian_effects::EffectGraphNodeKind::Blend {
+                base: external,
+                overlay: generated,
+                blend_mode: BlendMode::Normal,
+                opacity: 0.5,
+            },
+        });
+        raw.output = Some(blend);
+        let graph = mondrian_effects::compile_reference_render_graph(raw).unwrap();
+        let mut layer = solid(graph);
+        layer.color = Color { r: 0.0, g: 0.0, b: 0.0, a: 1.0 };
+        let engine = ColorEngine::mondrian_standard();
+        let output = composite_timeline_elements_color_frame(
+            3,
+            2,
+            &[TimelineCompositeElement::SolidColor(layer)],
+            TimelineCompositeOptions::default(),
+            TimelineEffectColorRuntime::new(
+                &engine,
+                WorkingColorSpace::LinearRec709,
+                mondrian_core::ImageSampling::UNIT_SQUARE,
+            ),
+            &mut TimelineCompositeScratch::default(),
+            &mut EffectProcessorControl::uncancelled(),
+        )
+        .unwrap();
+        assert_eq!(
+            output.frame.rgba_f32().data,
+            vec![[0.125, 0.25, 0.375, 1.0]; 6]
+        );
         assert_eq!(probe.prepare.load(Ordering::SeqCst), 1);
         assert_eq!(probe.process.load(Ordering::SeqCst), 1);
     }

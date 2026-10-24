@@ -76,3 +76,28 @@ These finite Windows CPU results do not qualify whole-heap accounting, realtime,
 comparative performance, other platforms or the spatial/temporal/GPU/Timeline
 capabilities excluded above. GL and intermittent F06 exit failures remain open;
 the protected integration branch is not advanced by this slice.
+
+## Existing Timeline Effect placements (candidate)
+
+A Generator used as an Effect is not a new Clip-content kind. Its output target
+is the existing execution canvas: source raster before Clip Transform, generated
+Solid/Title raster, nested child output, or Adjustment accumulator. The compiled
+graph still owns exact author time, project geometry and dependency reachability.
+Reachable external Source branches remain required for partial blending/mattes.
+No new media identity, parameter authority or source scheduler is introduced.
+
+For image-processing entry points, a zero-input node selects its staging alpha
+from its retained output declaration, independently of external image alpha.
+Selection is stable across unrelated incoming-alpha changes; actual provider
+output is still negotiated and validated. The explicit source-free `generate`
+entry keeps the caller's exact format requirement and refuses unsupported
+requests before provider work. No existing input pixels are reinterpreted.
+
+Timeline uses the same Effects session, feedback route, memory admission, color
+conversion and downstream alpha/Transform/blend/Transition operations. The blanket
+CustomSource refusal can therefore be removed without bypassing other admission.
+This does not add a dedicated Generator Clip or Catalog insertion, upstream RoI,
+temporal/GPU support, or permission to skip real external dependencies. Ordinary
+canvas materialization is initially retained; no allocation/performance claim.
+Core361 checks pass; Renderer/Preview/Export and actual native qualification of
+this new consumer remain pending.
