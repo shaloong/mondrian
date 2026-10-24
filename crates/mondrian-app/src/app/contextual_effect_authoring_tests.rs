@@ -157,6 +157,11 @@ fn native_generator_timeline_preview_export_history_and_reopen_share_pixels() {
             )
             .unwrap();
             assert_eq!(output.frame.rgba_f32().data.len(), 256);
+            assert_eq!(
+                output.frame.rgba_f32().alpha,
+                ColorFrameAlpha::PremultipliedFloat
+            );
+            assert_eq!(output.frame.rgba_f32().sampling, sampling);
             for pixel in &output.frame.rgba_f32().data {
                 assert_eq!(pixel.map(f32::to_bits), expected.map(f32::to_bits));
             }
@@ -167,6 +172,10 @@ fn native_generator_timeline_preview_export_history_and_reopen_share_pixels() {
             assert_eq!(
                 receipt.preparation.input_role,
                 mondrian_effects::EffectFloatProcessorInputRole::NoImage
+            );
+            assert_eq!(
+                receipt.preparation.format.alpha(),
+                ColorFrameAlpha::StraightFloat
             );
             assert_eq!(
                 receipt.retention,
@@ -203,6 +212,9 @@ fn native_generator_timeline_preview_export_history_and_reopen_share_pixels() {
         }
         owner.unwrap()
     };
+    // This Constant writes literal RGBA and declares PremultipliedFloat.
+    // Compare associated working samples and metadata, without reinterpreting
+    // its color parameter as an unassociated display swatch.
     let edited = [0.5, 0.25, 0.75, 0.5];
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let initial = execute(&state, [0.0; 4], &scratch, &programs);
