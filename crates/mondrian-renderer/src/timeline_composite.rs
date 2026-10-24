@@ -5986,7 +5986,7 @@ pub(crate) mod source_materialization_tests {
                 &mut control,
             )
             .unwrap();
-            assert_eq!(output.frame.rgba_f32().data, vec![expected; 6]);
+            assert_eq!(output.rgba_f32().data, vec![expected; 6]);
             assert_eq!(
                 probe.process.load(Ordering::SeqCst),
                 index + 1,
@@ -6053,10 +6053,7 @@ pub(crate) mod source_materialization_tests {
             &mut EffectProcessorControl::uncancelled(),
         )
         .unwrap();
-        assert_eq!(
-            output.frame.rgba_f32().data,
-            vec![[0.125, 0.25, 0.375, 1.0]; 6]
-        );
+        assert_eq!(output.rgba_f32().data, vec![[0.125, 0.25, 0.375, 1.0]; 6]);
         assert_eq!(probe.prepare.load(Ordering::SeqCst), 1);
         assert_eq!(probe.process.load(Ordering::SeqCst), 1);
     }
