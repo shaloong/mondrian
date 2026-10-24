@@ -4587,4 +4587,145 @@ mod transient_memory_tests {
         }
         shutdown.unwrap();
     }
+
+    #[test]
+    #[ignore = "requires current Product and GeneratorProbe image_domain mode under the native supervisor"]
+    fn native_graph_budget_refusal_retains_bank_owner_and_definition() {
+        use mondrian_effects::*;
+        assert_eq!(
+            std::env::var("MONDRIAN_OPENFX_GENERATOR_MODE").unwrap(),
+            "image_domain"
+        );
+        let product = PathBuf::from(std::env::var_os("MONDRIAN_OPENFX_PRODUCT_BINARY").unwrap());
+        let binary = PathBuf::from(std::env::var_os("MONDRIAN_OPENFX_GENERATOR_BINARY").unwrap());
+        let inspection = crate::openfx_adapter::inspect_openfx_binary(&product, &binary).unwrap();
+        let kind = crate::openfx_effect::register_selected_openfx_generator(
+            &product,
+            &inspection,
+            "org.mondrian.fixture.ofx-generator",
+        )
+        .unwrap();
+        let effect = instantiate_effect_node(kind.clone()).unwrap();
+        let geometry =
+            EffectProjectGeometry::new(3, 2, mondrian_core::SampleAspectRatio::new(2, 1).unwrap())
+                .unwrap();
+        let sampling = mondrian_core::ImageSampling::new(
+            mondrian_core::SampleAspectRatio::new(2, 1).unwrap(),
+            [mondrian_core::Rational::new(1, 1); 2],
+        )
+        .unwrap();
+        let context = EffectFrameContext::new(
+            mondrian_core::Rational::FPS_24,
+            geometry,
+            mondrian_core::TimelineTimeRange::new(
+                mondrian_core::TimelineTime::ZERO,
+                mondrian_core::TimelineTime::new(13, 24).unwrap(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let program = PreparedEffectProgram::prepare_hierarchical_with_frame_context(
+            &[effect],
+            &[],
+            &[],
+            &[],
+            mondrian_core::WorkingColorSpace::LinearRec709,
+            context,
+            &LutPreparationCache::uncached(),
+        )
+        .unwrap();
+        let format = EffectValueFormat::new(
+            EffectWorkingPrecision::Float32,
+            EffectColorDomain::SceneLinearRgb,
+            mondrian_core::ColorFrameAlpha::PremultipliedFloat,
+        );
+        let mut session = EffectExecutionSession::new(EffectExecutionSessionConfig {
+            max_processor_instances: 1,
+            max_processor_bytes: 128 * 1024 * 1024,
+            ..EffectExecutionSessionConfig::uncached(128 * 1024 * 1024)
+        });
+        let action_path =
+            PathBuf::from(std::env::var_os("MONDRIAN_OPENFX_GENERATOR_ACTION_LOG").unwrap());
+        let counts = || {
+            let text = std::fs::read_to_string(&action_path).unwrap_or_default();
+            [
+                "OfxImageEffectActionBeginSequenceRender",
+                "OfxImageEffectActionRender",
+                "OfxImageEffectActionEndSequenceRender",
+            ]
+            .map(|name| text.lines().filter(|line| *line == name).count())
+        };
+        let mut owner = None;
+        let mut invocation = 0;
+        let target = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            for frame in [3, 11, 1] {
+                let graph =
+                    program.evaluate(mondrian_core::TimelineTime::new(frame, 24).unwrap()).unwrap();
+                let before = counts();
+                let mut control = EffectProcessorControl::uncancelled();
+                let result = session.generate_compiled_rgba_f32(
+                    EffectFrameExtent::new(3, 2),
+                    format,
+                    sampling,
+                    &graph,
+                    -999,
+                    &mut control,
+                );
+                if frame == 11 {
+                    assert!(
+                        matches!(result,Err(EffectFloatExecutionError::CustomProcessor(
+                        EffectExecutionError::CustomProcessorBudgetExceeded {required_bytes,budget_bytes,..}
+                    )) if required_bytes>budget_bytes && budget_bytes<=128*1024*1024)
+                    );
+                    assert_eq!(
+                        counts(),
+                        before,
+                        "oversized transient demand cannot Begin/Render/End"
+                    );
+                    let status = effect_extension_runtime_status(&kind).unwrap();
+                    assert!(!status.disabled);
+                    assert_eq!(status.last_error, None);
+                } else {
+                    let output = result.unwrap();
+                    assert_eq!(
+                        output.format().alpha(),
+                        mondrian_core::ColorFrameAlpha::Opaque
+                    );
+                    for (index, pixel) in output.pixels().iter().enumerate() {
+                        let expected = [
+                            (index % 3 + 4) as f32 / 16.0,
+                            (1 - index / 3 + 3) as f32 / 8.0,
+                            frame as f32 / 16.0,
+                            1.0,
+                        ];
+                        assert_eq!(pixel.map(f32::to_bits), expected.map(f32::to_bits));
+                    }
+                    assert_eq!(counts(), before.map(|count| count + 1));
+                }
+                let feedback =
+                    control.take_feedback().expect("actual feedback survives preflight refusal");
+                assert_eq!(feedback.len(), 1);
+                let receipt = feedback.iter().next().unwrap();
+                assert_eq!(receipt.retention, EffectProcessorRetention::Retained);
+                let actual = (
+                    receipt.feedback.owner,
+                    receipt.feedback.origin,
+                    receipt.feedback.snapshot.native_owner(),
+                );
+                if let Some(expected) = owner {
+                    assert_eq!(actual, expected);
+                } else {
+                    owner = Some(actual);
+                }
+                assert!(receipt.feedback.snapshot.invocation() > invocation);
+                invocation = receipt.feedback.snapshot.invocation();
+                assert_eq!(session.diagnostics().processor_instances, 1);
+            }
+        }));
+        session.retire_processor_resources();
+        assert_eq!(session.diagnostics().processor_instances, 0);
+        if let Err(panic) = target {
+            std::panic::resume_unwind(panic);
+        }
+    }
 }

@@ -417,6 +417,9 @@ OfxStatus domainDefinition(OfxPropertySetHandle in, OfxPropertySetHandle out) {
   if (time == 8) { rod[2] = 40000; }
   if (time == 9) { return kOfxStatFailed; }
   if (time == 10) { rod[0] = -std::numeric_limits<double>::infinity(); }
+  // A valid exact128MiB image, larger than the Graph's remaining128MiB
+  // working grant after its static owners. Preflight must refuse before DSP.
+  if (time == 11) { rod[0] = rod[1] = 0; rod[2] = 16384; rod[3] = 1024; }
   if (properties->propSetDoubleN(out, kOfxImageEffectPropRegionOfDefinition, 4, rod) != kOfxStatOK) { return kOfxStatFailed; }
   return time == 5 ? kOfxStatReplyDefault : kOfxStatOK;
 }
