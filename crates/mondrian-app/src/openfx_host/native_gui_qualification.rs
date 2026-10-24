@@ -26,8 +26,12 @@ fn native_gui_control_has_exact_cabi_field_alignment() {
         callback
     );
     assert_eq!(
-        std::mem::size_of::<NativeInvocationControl>(),
+        std::mem::offset_of!(NativeInvocationControl, acquire_memory),
         callback + pointer
+    );
+    assert_eq!(
+        std::mem::size_of::<NativeInvocationControl>(),
+        callback + 2 * pointer
     );
     assert_eq!(std::mem::align_of::<NativeInvocationControl>(), alignment);
 }
