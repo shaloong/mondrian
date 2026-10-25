@@ -533,7 +533,15 @@ impl EffectGpuPlanCacheKey {
         Self {
             graph_identity: compiled.identity().clone(),
             execution_envelope: compiled.execution_envelope().clone(),
-            stage_bindings: Arc::from(compiled.stage_bindings()),
+            // Snapshot/author placement authorizes upstream input selection,
+            // not GPU lowering. Keep execution evidence in this semantic key
+            // without splitting equivalent plans by their author positions.
+            stage_bindings: compiled
+                .stage_bindings()
+                .iter()
+                .cloned()
+                .map(|binding| binding.with_origin(None))
+                .collect(),
         }
     }
 
@@ -555,12 +563,7 @@ impl EffectGpuPlanCacheKey {
             .saturating_add(
                 self.stage_bindings
                     .iter()
-                    .map(|binding| {
-                        binding
-                            .emitted_nodes()
-                            .len()
-                            .saturating_mul(std::mem::size_of::<EffectGraphNodeId>())
-                    })
+                    .map(CompiledEffectStageBinding::heap_bytes_estimate)
                     .fold(0_usize, usize::saturating_add),
             )
             .saturating_add(std::mem::size_of::<usize>().saturating_mul(3))

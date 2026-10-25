@@ -22,7 +22,8 @@ use crate::{
     CompiledEffectGraph, EffectExecutionDemand, EffectExecutionDemandError, EffectExecutionSession,
     EffectFrameExtent, EffectGraphNodeId, EffectGraphNodeKind, EffectInputRoi, EffectPixelRoi,
     EffectProcessingBackend, EffectResourceLifetime, EffectRoiHalo, EffectStateModel,
-    EffectTemporalBoundary, EffectTemporalSpan, EffectWorkingPrecision, PreparedEffectProgram,
+    EffectTemporalBoundary, EffectTemporalSpan, EffectWorkingPrecision, PreparedEffectInput,
+    PreparedEffectProgram,
 };
 use mondrian_core::{ExecutionCancellationToken, TimelineTime};
 use sha2::{Digest, Sha256};
@@ -886,6 +887,35 @@ pub fn prepare_temporal_frame_execution(
 
 fn prepare_temporal_frame_execution_with_evaluator(
     request: &EffectTemporalExecutionRequest,
+    evaluate_graph: impl FnMut(TimelineTime) -> Result<Arc<CompiledEffectGraph>, String>,
+    sample_frame_seed: &mut impl FnMut(TimelineTime) -> Result<i64, String>,
+) -> Result<PreparedEffectTemporalExecution, EffectTemporalExecutionError> {
+    let prepared =
+        prepare_exact_frame_execution_with_evaluator(request, evaluate_graph, sample_frame_seed)?;
+    ensure_temporal_program(&prepared.program)?;
+    Ok(prepared)
+}
+
+impl PreparedEffectInput {
+    /// Prepare the exact entering value using the existing bounded executor.
+    /// Ordinary as well as temporal upstream programs are valid here. This
+    /// capability selects the original program's upstream value; it does not
+    /// relax the separate temporal-only entry points or enable host features.
+    pub fn prepare_execution(
+        &self,
+        request: &EffectTemporalExecutionRequest,
+        mut sample_frame_seed: impl FnMut(TimelineTime) -> Result<i64, String>,
+    ) -> Result<PreparedEffectTemporalExecution, EffectTemporalExecutionError> {
+        prepare_exact_frame_execution_with_evaluator(
+            request,
+            |time| self.evaluate(time).map_err(|error| error.to_string()),
+            &mut sample_frame_seed,
+        )
+    }
+}
+
+fn prepare_exact_frame_execution_with_evaluator(
+    request: &EffectTemporalExecutionRequest,
     mut evaluate_graph: impl FnMut(TimelineTime) -> Result<Arc<CompiledEffectGraph>, String>,
     sample_frame_seed: &mut impl FnMut(TimelineTime) -> Result<i64, String>,
 ) -> Result<PreparedEffectTemporalExecution, EffectTemporalExecutionError> {
@@ -897,9 +927,7 @@ fn prepare_temporal_frame_execution_with_evaluator(
         let frame_seed = sample_frame_seed(time)?;
         Ok((graph, frame_seed))
     };
-    let prepared = prepare_temporal_execution_inner(compiled, request, Some(&mut evaluate_sample))?;
-    ensure_temporal_program(&prepared.program)?;
-    Ok(prepared)
+    prepare_temporal_execution_inner(compiled, request, Some(&mut evaluate_sample))
 }
 
 fn prepare_temporal_execution_inner(

@@ -55,7 +55,7 @@ count/byte ceilings after nested owners were added. The original bank now restor
 the previous binding on normal/error/unwind paths and reapplies ceilings at the
 actual retention boundary. Two regression tests cover success/reuse, refusal,
 panic, cancellation, five optional grants and actual progress receipts; the
-complete Windows Effects library passed 363 tests with zero ignored. These are
+complete Windows Effects library passed 371 tests with zero ignored. These are
 in-process fixtures with explicit held-byte/peak accounting, not a native staged
 resolver, full heap accounting or real temporal-plugin qualification.
 
@@ -110,16 +110,44 @@ shorten it but never renew it. Explicit cancellation still reaches the entire
 execution generation. Consuming a uniquely owned graph tile transfers its pixels;
 shared tiles refuse transfer rather than silently copying unadmitted backing.
 
-Current Windows CPU qualification: OpenFX host 113 passed/66 ignored, Effect
-adapter 11 passed/0 ignored, Effects library 365 passed/0 ignored and Core
-cancellation 3 passed/0 ignored. Four actual supervised resident gates and 13
-rebuilt C++ HostSupport/Host groups passed, including official Basic and published
-Misc Invert 2.0. The normal worker is test-profile opt0/debug0 with default features
-and no libtest harness; this does not qualify a new release build or whole desktop.
+`PreparedEffectInput` selects one Definition entering value from the original
+immutable program. Compiler provenance includes the legacy stack slot, or the
+before/after Grade assignment and Grade node; a reused Grade or a dense compiled
+stage index is insufficient. A program-owned proof rejects bindings from another
+snapshot. Synthetic composition/mask stages and emitted zero-input producers do
+not grant this input. A consumer inside a multi-node Definition must additionally
+verify its selected Custom node directly consumes that Definition entering value.
+
+At the requested exact author time, only that input's ancestors are evaluated.
+The waiting Definition, unrelated Grade branches and downstream metadata builders
+are excluded, as well as their DSP. Grade ordering and Clip mask placement stay
+with the existing compiler. Ordinary and temporal upstream values use the same
+bounded frame executor; the older temporal-only entry points retain their guard.
+The capability owns no execution session, processor bank, cache or decoder.
+
+Position provenance is not GPU lowering identity. GPU plan keys retain graph
+semantics and stage execution contracts while stripping this selection metadata;
+equal plans still share, changed parameter values remain isolated, and snapshot
+capabilities remain nontransferable. One proof allocation is shared per prepared
+program. Controlled metadata estimates include binding storage and the Grade's
+zero evaluation; these remain conservative logical charges, not allocator/RSS.
+
+Current Windows qualification: Effects 371 passed/0 ignored, Renderer 673
+passed/39 ignored, Export 298 passed/18 ignored and App 3122 passed/211 ignored.
+The App validation build includes OpenFX host 113 passed/66 ignored and Effect
+adapter 11 passed/0 ignored. Four actual supervised resident gates passed with
+the current ordinary worker; every gate settled with empty stderr. The unchanged
+C++ HostSupport/Host retains its earlier 13-group qualification, including official
+Basic and published Misc Invert 2.0; those groups were not rerun for this Rust slice.
+The worker is test-profile opt0/debug0 with default features and no libtest harness;
+App is validation opt0/debug0 and the other libraries are default opt1/debug0.
+This is affected-module regression, not a new whole-workspace or release qualification.
 The native late-request gate repeats four full-RGBA renders on one native owner,
 with eight readers coalescing two exact dependencies while Output/current leases
 remain live. Its original owner executes the existing bounded time-expanded graph
-with animated exposure and a real finite 1/48-second temporal blend. Native output
+with animated exposure and a real finite 1/48-second temporal blend. It selects
+the entering value from a full original program whose waiting/downstream metadata
+would fail at the requested time, rather than a caller-trimmed stack. Native output
 matches the original graph values bit for bit. A separate mathematical DSP oracle
 allows the documented Float32 pivot/luma rounding. Graph-budget, dependency,
 cancellation and copy-refusal cases all settle without publishing output. Shared
@@ -146,8 +174,9 @@ fixture and actual HostSupport/Host. Action logs confirm one Create/Destroy per
 group, no Render, and no dispatch for invalid time/non-temporal declarations.
 These are action qualifications, not third-party temporal-renderer evidence.
 
-Next bind the internal service to the production Custom processor's original
-upstream program, shared resource bank and exact Clip retime/source admission.
+Next bind this compiler-selected entering-value capability and the internal service
+to the production Custom processor's shared resource bank and exact Clip
+retime/source admission.
 Connect the dependency action to that same execution; verify all legal
 action/thread image requests before enabling capabilities. Distinguish declared media absence from an
 unprepared dependency; missing planned input cannot silently become a black frame.

@@ -155,8 +155,8 @@ pub use mask::{
 };
 pub use mask_raster::{rasterize_mask_shape, MaskRasterError, PreparedMaskRaster};
 pub use prepared::{
-    EffectDependencyCheckError, EffectProgramDependencyIdentity, PreparedEffectProgram,
-    PreparedEffectStack, PreparedGradeGraph,
+    EffectDependencyCheckError, EffectProgramDependencyIdentity, PreparedEffectInput,
+    PreparedEffectProgram, PreparedEffectStack, PreparedGradeGraph,
 };
 pub use primary_grade::{AscCdlGrade, PrimariesGrade, PrimaryGradeError, WhiteBalanceGrade};
 pub use qualifier::{

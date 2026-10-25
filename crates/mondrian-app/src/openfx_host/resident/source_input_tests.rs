@@ -38,7 +38,7 @@ struct GraphOwner {
     thread: thread::ThreadId,
     cancellation: ExecutionCancellationToken,
     graph: EffectExecutionSession,
-    program: PreparedEffectProgram,
+    input: PreparedEffectInput,
     generation: u64,
     seed: f32,
     requests: Vec<(f64, usize)>,
@@ -109,16 +109,53 @@ impl GraphOwner {
             })),
         )
         .unwrap();
+        let waiting_type = EffectType::External(format!(
+            "fixture.waiting-input.{}",
+            mondrian_core::EffectId::new()
+        ));
+        register_effect_definition(
+            EffectDefinition::new(
+                waiting_type.key(),
+                "Waiting/downstream boundary",
+                Default::default(),
+                EffectColorDomainContract::SCENE_LINEAR,
+            )
+            .with_execution_contract(EffectExecutionContract {
+                execution_modes: EffectExecutionModes::CPU_F32,
+                determinism: EffectDeterminism::Deterministic,
+                state_model: EffectStateModel::Stateless,
+                temporal_input: EffectTemporalInputExtent::CURRENT_FRAME,
+                roi_propagation: EffectRoiPropagation::PixelLocal,
+                resource_lifetime: EffectResourceLifetime::Frame,
+                topology: EffectGraphTopology::LinearChain,
+            })
+            .with_graph_builder(std::sync::Arc::new(|_, context, graph| {
+                if context.time != TimelineTime::ZERO {
+                    return Err(EffectGraphBuildError::InvalidGraph);
+                }
+                graph.append_unary(EffectRenderOp::Vignette { intensity: 0.25, feather: 0.75 });
+                Ok(())
+            })),
+        )
+        .unwrap();
+        let program = PreparedEffectProgram::prepare(
+            &[
+                effect,
+                EffectNode::new(temporal_type),
+                EffectNode::new(waiting_type.clone()),
+                EffectNode::new(waiting_type),
+            ],
+            &[],
+            WorkingColorSpace::LinearRec709,
+        )
+        .unwrap();
+        let graph = program.evaluate(TimelineTime::ZERO).unwrap();
+        let input = program.input_for_stage(&graph.stage_bindings()[2]).unwrap();
         Self {
             thread: thread::current().id(),
             cancellation: ExecutionCancellationToken::new(),
             graph: EffectExecutionSession::new(EffectExecutionSessionConfig::uncached(64 * 1024)),
-            program: PreparedEffectProgram::prepare(
-                &[effect, EffectNode::new(temporal_type)],
-                &[],
-                WorkingColorSpace::LinearRec709,
-            )
-            .unwrap(),
+            input,
             generation: pass + 1,
             seed: 1.0 + pass as f32,
             requests: Vec::new(),
@@ -204,10 +241,7 @@ impl RenderOwner for GraphOwner {
             extent.full_frame_roi(),
             self.cancellation.with_deadline(request.deadline),
         );
-        let prepared = self
-            .graph
-            .prepare_temporal_frame_execution(&self.program, &temporal, |_| Ok(0))
-            .map_err(graph_error)?;
+        let prepared = self.input.prepare_execution(&temporal, |_| Ok(0)).map_err(graph_error)?;
         let batch = prepared.demands().clone();
         assert_eq!(batch.requests().len(), 2);
         let previous = time.checked_sub(TimelineTime::new(1, 48).unwrap()).unwrap();

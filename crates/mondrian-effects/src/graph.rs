@@ -368,6 +368,28 @@ pub struct CompiledEffectStageBinding {
     input_value: EffectGraphValue,
     output_value: EffectGraphValue,
     emitted_nodes: Arc<[EffectGraphNodeId]>,
+    origin: Option<EffectStageOrigin>,
+    origin_proof: Option<Arc<()>>,
+}
+
+/// Compiler provenance, not another instance or author identity. A shared grade
+/// may appear more than once in one program, so its assignment is significant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum EffectStageOrigin {
+    Stack {
+        index: usize,
+    },
+    GradeLocal {
+        node: mondrian_core::GradeGraphNodeId,
+    },
+    BeforeGrade {
+        assignment: usize,
+        node: mondrian_core::GradeGraphNodeId,
+    },
+    AfterGrade {
+        assignment: usize,
+        node: mondrian_core::GradeGraphNodeId,
+    },
 }
 
 impl CompiledEffectStageBinding {
@@ -384,7 +406,47 @@ impl CompiledEffectStageBinding {
             input_value,
             output_value,
             emitted_nodes: emitted_nodes.into(),
+            origin: None,
+            origin_proof: None,
         }
+    }
+
+    pub(crate) fn with_origin(mut self, origin: Option<EffectStageOrigin>) -> Self {
+        self.origin = origin;
+        self.origin_proof = None;
+        self
+    }
+
+    pub(crate) fn origin(&self) -> Option<EffectStageOrigin> {
+        self.origin
+    }
+
+    pub(crate) fn seal_origin(&mut self, proof: &Arc<()>) {
+        self.origin_proof = self.origin.map(|_| Arc::clone(proof));
+    }
+
+    pub(crate) fn reuse_origin(&mut self, original: &Self) {
+        debug_assert_eq!(self.origin(), original.origin());
+        self.origin_proof = original.origin_proof.clone();
+    }
+
+    pub(crate) fn shares_origin(&self, other: &Self) -> bool {
+        self.origin.is_some()
+            && self.origin == other.origin
+            && matches!((&self.origin_proof, &other.origin_proof), (Some(a), Some(b)) if Arc::ptr_eq(a, b))
+    }
+
+    /// Conservative controlled immutable metadata. Origin is inline; the one
+    /// shared program proof is charged even when shared. Not allocator/RSS.
+    pub(crate) fn heap_bytes_estimate(&self) -> usize {
+        self.emitted_nodes
+            .len()
+            .saturating_mul(std::mem::size_of::<EffectGraphNodeId>())
+            .saturating_add(if self.origin_proof.is_some() {
+                2 * std::mem::size_of::<usize>()
+            } else {
+                0
+            })
     }
 
     /// Definition-stage index in [`EffectExecutionEnvelope::stages`].
@@ -539,12 +601,7 @@ impl CompiledEffectGraph {
         let binding_nodes = self
             .stage_bindings
             .iter()
-            .map(|binding| {
-                binding
-                    .emitted_nodes
-                    .len()
-                    .saturating_mul(std::mem::size_of::<EffectGraphNodeId>())
-            })
+            .map(CompiledEffectStageBinding::heap_bytes_estimate)
             .fold(0_usize, usize::saturating_add);
         std::mem::size_of::<Self>()
             .saturating_add(self.graph.retained_bytes_estimate())
