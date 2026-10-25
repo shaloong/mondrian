@@ -2594,6 +2594,53 @@ impl AppUiAppRoot {
                 }
                 Ok(None)
             }
+            Action::Custom { namespace, name, .. }
+                if namespace == APP_SHELL_NAMESPACE
+                    && name == crate::app::ui_actions::APP_SHELL_MUSICAL_TIME =>
+            {
+                if let Some(sequence) = self.active_sequence.as_ref() {
+                    let draft = crate::app_ui::musical_time_dialog::MusicalTimeDraft::from_sequence(
+                        sequence,
+                    );
+                    self.show_modal(ShellModal::MusicalTime(Box::new(
+                        crate::app_ui::musical_time_dialog::MusicalTimeDialog::new(
+                            draft,
+                            self.preferences_model.locale,
+                        ),
+                    )));
+                    if self.bounds.width > 0.0 && self.bounds.height > 0.0 {
+                        self.layout(self.bounds);
+                    }
+                }
+                Ok(None)
+            }
+            Action::Custom { namespace, name, payload }
+                if namespace == APP_SHELL_NAMESPACE
+                    && name == crate::app::ui_actions::APP_SHELL_MUSICAL_TIME_DRAFT_CHANGED =>
+            {
+                let update = serde_json::from_value(payload)
+                    .map_err(|err| app_shell_action_error(&name, err))?;
+                if let Some(dialog) = self.modal.as_mut().and_then(ShellModal::as_musical_time_mut)
+                {
+                    dialog.apply_update(update);
+                }
+                Ok(None)
+            }
+            Action::Custom { namespace, name, .. }
+                if namespace == APP_SHELL_NAMESPACE
+                    && name == crate::app::ui_actions::APP_SHELL_CONFIRM_MUSICAL_TIME =>
+            {
+                let Some(dialog) = self.modal.as_ref().and_then(ShellModal::as_musical_time) else {
+                    return Ok(None);
+                };
+                let Some(payload) = dialog.payload() else {
+                    return Ok(None);
+                };
+                self.modal = None;
+                Ok(Some(
+                    crate::app::ui_actions::sequence_set_musical_time_reference_action(payload),
+                ))
+            }
             Action::Custom { namespace, name, payload }
                 if namespace == APP_SHELL_NAMESPACE
                     && name == APP_SHELL_SEQUENCE_SETTINGS_DRAFT_CHANGED =>
@@ -5016,6 +5063,185 @@ mod tests {
         );
         assert_eq!(payload.settings.preview.resolution_scale, 0.25);
         assert!(!payload.settings.preview.cache_enabled);
+    }
+
+    #[test]
+    fn musical_time_dialog_drafts_then_dispatches_one_undoable_sequence_transaction() {
+        use crate::app::ui_actions::{
+            app_shell_confirm_musical_time_action, app_shell_musical_time_action,
+            app_shell_musical_time_draft_changed_action, MusicalTimeDraftUpdate,
+        };
+        let platform = FakePlatform::default();
+        let mut state = AppState::new();
+        state.test_set_sequence(Some(Sequence::new("Music UI")));
+        let generation = state.project_author_generation();
+        let before = serde_json::to_value(state.active_sequence().unwrap()).unwrap();
+        let mut root = AppUiAppRoot::from_app_state(&state);
+        root.layout(Rect::new(0.0, 0.0, 1280.0, 720.0));
+        assert!(
+            crate::app_ui::action_availability::app_state_action_enabled(
+                &app_shell_musical_time_action(),
+                &state
+            )
+        );
+        assert_eq!(
+            root.handle_shell_action(app_shell_musical_time_action(), &platform, None),
+            None
+        );
+        for update in [
+            MusicalTimeDraftUpdate::Enabled(true),
+            MusicalTimeDraftUpdate::Tempo("80/".into()),
+            MusicalTimeDraftUpdate::Origin("-1/3".into()),
+            MusicalTimeDraftUpdate::Signature("7/8".into()),
+        ] {
+            assert_eq!(
+                root.handle_shell_action(
+                    app_shell_musical_time_draft_changed_action(update),
+                    &platform,
+                    None
+                ),
+                None
+            );
+        }
+        assert_eq!(
+            root.handle_shell_action(app_shell_confirm_musical_time_action(), &platform, None),
+            None
+        );
+        assert!(root.modal.as_ref().and_then(ShellModal::as_musical_time).is_some());
+        assert_eq!(state.project_author_generation(), generation);
+        assert_eq!(
+            serde_json::to_value(state.active_sequence().unwrap()).unwrap(),
+            before
+        );
+        root.handle_shell_action(
+            app_shell_musical_time_draft_changed_action(MusicalTimeDraftUpdate::Tempo(
+                "80.1".into(),
+            )),
+            &platform,
+            None,
+        );
+        let action = root
+            .handle_shell_action(app_shell_confirm_musical_time_action(), &platform, None)
+            .expect("one forwarded public Action");
+        assert!(root.modal.is_none());
+        state.dispatch_action(action).unwrap();
+        assert_eq!(state.project_author_generation(), generation + 1);
+        let reference =
+            state.active_sequence().unwrap().audio_program.musical_time_reference.unwrap();
+        assert_eq!(
+            reference.quarter_note_duration(),
+            mondrian_core::TimelineTime::new(200, 267).unwrap()
+        );
+        assert_eq!(
+            reference.quarter_note_zero(),
+            mondrian_core::TimelineTime::new(-1, 3).unwrap()
+        );
+        assert_eq!(
+            reference.time_signature(),
+            Some(mondrian_core::MusicalTimeSignature::new(7, 8).unwrap())
+        );
+        assert!(state.undo_timeline().unwrap());
+        assert_eq!(
+            state.active_sequence().unwrap().audio_program.musical_time_reference,
+            None
+        );
+        assert!(state.redo_timeline().unwrap());
+        assert_eq!(
+            state.active_sequence().unwrap().audio_program.musical_time_reference,
+            Some(reference)
+        );
+    }
+
+    #[test]
+    fn musical_time_menu_cancel_and_disabled_state_do_not_author_defaults() {
+        use crate::app::ui_actions::{
+            app_shell_musical_time_action, app_shell_musical_time_draft_changed_action,
+            MusicalTimeDraftUpdate,
+        };
+        let platform = FakePlatform::default();
+        let mut state = AppState::new();
+        assert!(
+            !crate::app_ui::action_availability::app_state_action_enabled(
+                &app_shell_musical_time_action(),
+                &state
+            )
+        );
+        state.test_set_sequence(Some(Sequence::new("Cancel music")));
+        let generation = state.project_author_generation();
+        let mut root = AppUiAppRoot::from_app_state(&state);
+        root.layout(Rect::new(0.0, 0.0, 1280.0, 720.0));
+        let command = crate::app_ui::commands::command_by_id("file.musical_time").unwrap();
+        root.handle_shell_action(command.action(), &platform, None);
+        assert_eq!(
+            root.modal
+                .as_ref()
+                .unwrap()
+                .as_musical_time()
+                .unwrap()
+                .payload()
+                .unwrap()
+                .reference,
+            None
+        );
+        root.handle_shell_action(
+            app_shell_musical_time_draft_changed_action(MusicalTimeDraftUpdate::Enabled(true)),
+            &platform,
+            None,
+        );
+        root.handle_shell_action(
+            crate::app::ui_actions::app_shell_close_modal_action(),
+            &platform,
+            None,
+        );
+        assert!(root.modal.is_none());
+        assert_eq!(state.project_author_generation(), generation);
+        assert_eq!(
+            state.active_sequence().unwrap().audio_program.musical_time_reference,
+            None
+        );
+    }
+
+    #[test]
+    fn musical_time_modal_paints_localized_real_controls_and_keeps_exact_reopen_values() {
+        use crate::app::ui_actions::app_shell_musical_time_action;
+        let platform = FakePlatform::default();
+        let mut sequence = Sequence::new("Paint music");
+        let reference = mondrian_core::MusicalTimeReference::new(
+            mondrian_core::TimelineTime::new(-13, 8).unwrap(),
+            mondrian_core::TimelineTime::new(1, i64::MAX).unwrap(),
+        )
+        .unwrap();
+        sequence.audio_program.musical_time_reference = Some(reference);
+        let mut state = AppState::new();
+        state.test_set_sequence(Some(sequence));
+        for locale in [AppUiLocale::ZhCn, AppUiLocale::EnUs, AppUiLocale::Pseudo] {
+            let mut root = AppUiAppRoot::from_app_state(&state);
+            root.preferences_model.locale = locale;
+            let bounds = Rect::new(0.0, 0.0, 960.0, 640.0);
+            root.layout(bounds);
+            root.handle_shell_action(app_shell_musical_time_action(), &platform, None);
+            let mut encoder = PaintOrderRecorder::default();
+            root.modal.as_ref().unwrap().paint(&mut PaintContext {
+                pixels_per_point: 1.0,
+                encoder: &mut encoder,
+                theme: &ThemePreset::Dark.build(),
+                clip_rect: bounds,
+            });
+            let localizer = Localizer::new(locale).unwrap();
+            assert!(encoder.texts.iter().any(|text| text == &localizer.text("music-title")));
+            assert!(encoder.texts.iter().any(|text| text == "-13/8"));
+            assert_eq!(
+                root.modal
+                    .as_ref()
+                    .unwrap()
+                    .as_musical_time()
+                    .unwrap()
+                    .payload()
+                    .unwrap()
+                    .reference,
+                Some(reference)
+            );
+        }
     }
 
     #[test]

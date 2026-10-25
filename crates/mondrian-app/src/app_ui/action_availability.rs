@@ -95,7 +95,9 @@ pub fn app_state_action_enabled(action: &Action, state: &AppState) -> bool {
             state.asset_library().is_some()
         }
         Action::Custom { namespace, name, .. }
-            if namespace == APP_SHELL_NAMESPACE && name == APP_SHELL_SEQUENCE_SETTINGS =>
+            if namespace == APP_SHELL_NAMESPACE
+                && (name == APP_SHELL_SEQUENCE_SETTINGS
+                    || name == crate::app::ui_actions::APP_SHELL_MUSICAL_TIME) =>
         {
             state.active_sequence().is_some()
         }

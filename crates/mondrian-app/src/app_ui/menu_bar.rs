@@ -70,6 +70,7 @@ pub fn default_menu_items() -> Vec<(&'static str, Vec<MenuItem>)> {
                 MenuItem::separator(),
                 command_menu_item("file.project_settings"),
                 command_menu_item("file.sequence_settings"),
+                command_menu_item("file.musical_time"),
                 MenuItem::separator(),
                 command_menu_item("file.close_project"),
             ],

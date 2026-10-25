@@ -26,6 +26,22 @@ fn app_owned_vst3_media_preroll_enqueues_meter_pcm() {
 }
 
 fn qualify(clap_format: bool, meter: bool) {
+    qualify_with_author_surface(clap_format, meter, false);
+}
+
+#[test]
+#[ignore = "current Product and owned CLAP meter fixture; actual musical dialog to software PCM"]
+fn app_owned_clap_musical_dialog_enqueues_meter_pcm() {
+    qualify_with_author_surface(true, true, true);
+}
+
+#[test]
+#[ignore = "current Product and owned VST3 meter fixture; actual musical dialog to software PCM"]
+fn app_owned_vst3_musical_dialog_enqueues_meter_pcm() {
+    qualify_with_author_surface(false, true, true);
+}
+
+fn qualify_with_author_surface(clap_format: bool, meter: bool, musical_dialog: bool) {
     let seek_frame = if meter { 63 } else { 1 };
     let start_sample = seek_frame * 2_000;
     let material = |name| {
@@ -148,16 +164,46 @@ fn qualify(clap_format: bool, meter: bool) {
     state.synchronize_playback_authoring_binding().unwrap();
     if meter {
         let generation = state.project_author_generation();
-        state
-            .dispatch_action(
-                crate::app::ui_actions::sequence_set_musical_time_reference_action(
-                    crate::app::product_action::SequenceSetMusicalTimeReferencePayload {
-                        sequence_id: state.active_sequence_id().unwrap(),
-                        reference,
-                    },
-                ),
-            )
-            .expect("author meter through the public transaction, not fixture seeding");
+        if musical_dialog {
+            use crate::app::ui_actions::{
+                app_shell_confirm_musical_time_action, app_shell_musical_time_action,
+                app_shell_musical_time_draft_changed_action, MusicalTimeDraftUpdate,
+            };
+            let platform = mondrian_platform::NoopPlatformService;
+            let mut root = crate::app_ui::shell::AppUiAppRoot::from_app_state(&state);
+            assert!(root
+                .handle_shell_action(app_shell_musical_time_action(), &platform, None)
+                .is_none());
+            for update in [
+                MusicalTimeDraftUpdate::Enabled(true),
+                MusicalTimeDraftUpdate::Tempo("80".into()),
+                MusicalTimeDraftUpdate::Origin("2/48000".into()),
+                MusicalTimeDraftUpdate::Signature("7/8".into()),
+            ] {
+                assert!(root
+                    .handle_shell_action(
+                        app_shell_musical_time_draft_changed_action(update),
+                        &platform,
+                        None
+                    )
+                    .is_none());
+            }
+            let action = root
+                .handle_shell_action(app_shell_confirm_musical_time_action(), &platform, None)
+                .expect("actual modal emits the sole public author transaction");
+            state.dispatch_action(action).unwrap();
+        } else {
+            state
+                .dispatch_action(
+                    crate::app::ui_actions::sequence_set_musical_time_reference_action(
+                        crate::app::product_action::SequenceSetMusicalTimeReferencePayload {
+                            sequence_id: state.active_sequence_id().unwrap(),
+                            reference,
+                        },
+                    ),
+                )
+                .expect("author meter through the public transaction, not fixture seeding");
+        }
         assert_eq!(state.project_author_generation(), generation + 1);
         assert_eq!(
             state.active_sequence().unwrap().audio_program.musical_time_reference,

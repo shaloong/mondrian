@@ -36,9 +36,27 @@ pub enum ShellModal {
     ProjectSettings(Box<ProjectSettingsDialog>),
     Recovery(Box<RecoveryConfirmationDialog>),
     SequenceSettings(Box<SequenceSettingsDialog>),
+    MusicalTime(Box<crate::app_ui::musical_time_dialog::MusicalTimeDialog>),
 }
 
 impl ShellModal {
+    pub(crate) fn as_musical_time(
+        &self,
+    ) -> Option<&crate::app_ui::musical_time_dialog::MusicalTimeDialog> {
+        match self {
+            Self::MusicalTime(dialog) => Some(dialog),
+            _ => None,
+        }
+    }
+    pub(crate) fn as_musical_time_mut(
+        &mut self,
+    ) -> Option<&mut crate::app_ui::musical_time_dialog::MusicalTimeDialog> {
+        match self {
+            Self::MusicalTime(dialog) => Some(dialog),
+            _ => None,
+        }
+    }
+
     pub(crate) fn native_visual_question(
         presentation: crate::app::preview_native_gui::NativeVisualQuestionPresentation,
         locale: AppUiLocale,
@@ -256,6 +274,7 @@ impl Widget for ShellModal {
             Self::ProjectSettings(dialog) => dialog.id(),
             Self::Recovery(dialog) => dialog.id(),
             Self::SequenceSettings(dialog) => dialog.id(),
+            Self::MusicalTime(dialog) => dialog.id(),
         }
     }
 
@@ -271,6 +290,7 @@ impl Widget for ShellModal {
             Self::ProjectSettings(dialog) => dialog.measure(constraint),
             Self::Recovery(dialog) => dialog.measure(constraint),
             Self::SequenceSettings(dialog) => dialog.measure(constraint),
+            Self::MusicalTime(dialog) => dialog.measure(constraint),
         }
     }
 
@@ -286,6 +306,7 @@ impl Widget for ShellModal {
             Self::ProjectSettings(dialog) => dialog.layout(bounds),
             Self::Recovery(dialog) => dialog.layout(bounds),
             Self::SequenceSettings(dialog) => dialog.layout(bounds),
+            Self::MusicalTime(dialog) => dialog.layout(bounds),
         }
     }
 
@@ -301,6 +322,7 @@ impl Widget for ShellModal {
             Self::ProjectSettings(dialog) => dialog.event(event, ctx),
             Self::Recovery(dialog) => dialog.event(event, ctx),
             Self::SequenceSettings(dialog) => dialog.event(event, ctx),
+            Self::MusicalTime(dialog) => dialog.event(event, ctx),
         }
     }
 
@@ -316,6 +338,7 @@ impl Widget for ShellModal {
             Self::ProjectSettings(dialog) => dialog.paint(ctx),
             Self::Recovery(dialog) => dialog.paint(ctx),
             Self::SequenceSettings(dialog) => dialog.paint(ctx),
+            Self::MusicalTime(dialog) => dialog.paint(ctx),
         }
     }
 
@@ -331,6 +354,7 @@ impl Widget for ShellModal {
             Self::ProjectSettings(dialog) => dialog.hit_test(point),
             Self::Recovery(dialog) => dialog.hit_test(point),
             Self::SequenceSettings(dialog) => dialog.hit_test(point),
+            Self::MusicalTime(dialog) => dialog.hit_test(point),
         }
     }
 
@@ -350,6 +374,7 @@ impl Widget for ShellModal {
             Self::ProjectSettings(dialog) => dialog.can_focus(),
             Self::Recovery(dialog) => dialog.can_focus(),
             Self::SequenceSettings(dialog) => dialog.can_focus(),
+            Self::MusicalTime(dialog) => dialog.can_focus(),
         }
     }
 
@@ -365,6 +390,7 @@ impl Widget for ShellModal {
             Self::ProjectSettings(dialog) => dialog.accepts_text_input(),
             Self::Recovery(dialog) => dialog.accepts_text_input(),
             Self::SequenceSettings(dialog) => dialog.accepts_text_input(),
+            Self::MusicalTime(dialog) => dialog.accepts_text_input(),
         }
     }
 
@@ -380,6 +406,7 @@ impl Widget for ShellModal {
             Self::ProjectSettings(dialog) => dialog.child_count(),
             Self::Recovery(dialog) => dialog.child_count(),
             Self::SequenceSettings(dialog) => dialog.child_count(),
+            Self::MusicalTime(dialog) => dialog.child_count(),
         }
     }
 
@@ -395,6 +422,7 @@ impl Widget for ShellModal {
             Self::ProjectSettings(dialog) => dialog.child(index),
             Self::Recovery(dialog) => dialog.child(index),
             Self::SequenceSettings(dialog) => dialog.child(index),
+            Self::MusicalTime(dialog) => dialog.child(index),
         }
     }
 
@@ -410,6 +438,7 @@ impl Widget for ShellModal {
             Self::ProjectSettings(dialog) => dialog.child_mut(index),
             Self::Recovery(dialog) => dialog.child_mut(index),
             Self::SequenceSettings(dialog) => dialog.child_mut(index),
+            Self::MusicalTime(dialog) => dialog.child_mut(index),
         }
     }
 }

@@ -30,6 +30,7 @@ pub mod interpret_asset_dialog;
 pub mod localization;
 pub mod menu_bar;
 pub mod modal;
+pub(crate) mod musical_time_dialog;
 #[cfg(feature = "validation")]
 pub mod native_question_fixture;
 #[cfg(feature = "validation")]

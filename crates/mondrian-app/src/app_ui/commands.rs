@@ -13,9 +13,9 @@ use mondrian_ui_core::types::{KeyCode, Modifiers};
 use crate::app::ui_actions::{
     app_shell_about_action, app_shell_cancel_portable_package_export_action,
     app_shell_export_portable_package_dialog_action, app_shell_gallery_capture_current_action,
-    app_shell_import_media_dialog_action, app_shell_new_project_dialog_action,
-    app_shell_open_project_dialog_action, app_shell_preferences_action,
-    app_shell_project_settings_action, app_shell_quit_action,
+    app_shell_import_media_dialog_action, app_shell_musical_time_action,
+    app_shell_new_project_dialog_action, app_shell_open_project_dialog_action,
+    app_shell_preferences_action, app_shell_project_settings_action, app_shell_quit_action,
     app_shell_save_project_as_dialog_action, app_shell_sequence_settings_action,
     timeline_create_basic_title_action,
 };
@@ -138,6 +138,14 @@ pub fn default_commands() -> Vec<AppUiCommandDescriptor> {
             AppUiCommandCategory::File,
             None,
             app_shell_sequence_settings_action,
+        ),
+        command(
+            "file.musical_time",
+            "音乐时间",
+            "音乐时间...",
+            AppUiCommandCategory::File,
+            None,
+            app_shell_musical_time_action,
         ),
         command(
             "file.close_project",

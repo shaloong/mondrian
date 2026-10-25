@@ -165,6 +165,19 @@ pub const APP_SHELL_ABOUT: &str = "about";
 pub const APP_SHELL_PREFERENCES: &str = "preferences";
 /// App-shell request to show the active sequence settings dialog.
 pub const APP_SHELL_SEQUENCE_SETTINGS: &str = "sequence_settings";
+/// Open a local musical-time draft for the active Sequence.
+pub const APP_SHELL_MUSICAL_TIME: &str = "musical_time";
+pub const APP_SHELL_MUSICAL_TIME_DRAFT_CHANGED: &str = "musical_time_draft_changed";
+pub const APP_SHELL_CONFIRM_MUSICAL_TIME: &str = "confirm_musical_time";
+
+/// Shell text updates never mutate the canonical Sequence until Apply.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum MusicalTimeDraftUpdate {
+    Enabled(bool),
+    Tempo(String),
+    Origin(String),
+    Signature(String),
+}
 /// App-shell request to update one app UI sequence-settings draft field.
 pub const APP_SHELL_SEQUENCE_SETTINGS_DRAFT_CHANGED: &str = "sequence_settings_draft_changed";
 /// App-shell request to apply the active sequence settings dialog.
@@ -1520,6 +1533,18 @@ pub fn app_shell_preferences_action() -> Action {
 /// Build an app-shell request for editing the active sequence settings.
 pub fn app_shell_sequence_settings_action() -> Action {
     custom_app_shell_action(APP_SHELL_SEQUENCE_SETTINGS)
+}
+
+pub fn app_shell_musical_time_action() -> Action {
+    custom_app_shell_action(APP_SHELL_MUSICAL_TIME)
+}
+
+pub fn app_shell_musical_time_draft_changed_action(payload: MusicalTimeDraftUpdate) -> Action {
+    custom_app_shell_action_with_payload(APP_SHELL_MUSICAL_TIME_DRAFT_CHANGED, payload)
+}
+
+pub fn app_shell_confirm_musical_time_action() -> Action {
+    custom_app_shell_action(APP_SHELL_CONFIRM_MUSICAL_TIME)
 }
 
 /// Build an app-shell request for changing one sequence-settings draft field.
