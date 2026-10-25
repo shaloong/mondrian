@@ -92,13 +92,15 @@ fn qualify(clap_format: bool, meter: bool) {
     sequence.settings.frame_rate = mondrian_core::Rational::FPS_24;
     sequence.settings.audio_sample_rate = 48_000;
     sequence.settings.audio_channel_layout = layout;
-    sequence.audio_program.musical_time_reference = meter.then(|| {
+    let reference = meter.then(|| {
         mondrian_core::MusicalTimeReference::new(
             TimelineTime::new(2, 48_000).unwrap(),
             TimelineTime::new(3, 4).unwrap(),
         )
         .unwrap()
-        .with_time_signature(Some(mondrian_core::MusicalTimeSignature::new(7, 8).unwrap()))
+        .with_time_signature(Some(
+            mondrian_core::MusicalTimeSignature::new(7, 8).unwrap(),
+        ))
     });
     super::super::project_state_roundtrip::initialize_nonzero_audio(
         &mut sequence,
@@ -144,6 +146,24 @@ fn qualify(clap_format: bool, meter: bool) {
     state.test_set_sequence(Some(sequence));
     state.test_set_asset_library(Some(library.clone()));
     state.synchronize_playback_authoring_binding().unwrap();
+    if meter {
+        let generation = state.project_author_generation();
+        state
+            .dispatch_action(
+                crate::app::ui_actions::sequence_set_musical_time_reference_action(
+                    crate::app::product_action::SequenceSetMusicalTimeReferencePayload {
+                        sequence_id: state.active_sequence_id().unwrap(),
+                        reference,
+                    },
+                ),
+            )
+            .expect("author meter through the public transaction, not fixture seeding");
+        assert_eq!(state.project_author_generation(), generation + 1);
+        assert_eq!(
+            state.active_sequence().unwrap().audio_program.musical_time_reference,
+            reference
+        );
+    }
     let document = serde_json::to_value(state.authoring.as_ref().unwrap().document()).unwrap();
     let revision = library.database_revision().unwrap();
     let mut weak = std::sync::Weak::<TimelineAudioPcmRenderer>::new();
@@ -152,7 +172,10 @@ fn qualify(clap_format: bool, meter: bool) {
     let target = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         state.seek(seek_frame).unwrap();
         assert_eq!(state.current_frame(), seek_frame);
-        assert_eq!(state.audio_playback_snapshot().next_start_sample, start_sample);
+        assert_eq!(
+            state.audio_playback_snapshot().next_start_sample,
+            start_sample
+        );
         assert!(state.native_audio_renderer.is_none());
         let source = state.audio_playback_renderer("Media transport PCM").unwrap().unwrap();
         weak = Arc::downgrade(&source.renderer);
@@ -164,14 +187,20 @@ fn qualify(clap_format: bool, meter: bool) {
             AudioProcessorCursorState::Unentered
         );
         state
-            .commit_audio_playback("Media transport PCM", audio_anchor(start_sample), Some(source))
+            .commit_audio_playback(
+                "Media transport PCM",
+                audio_anchor(start_sample),
+                Some(source),
+            )
             .unwrap();
         let generation = state.audio_playback_snapshot().generation;
         let deadline = Instant::now() + Duration::from_secs(10);
         let mut ready = false;
         while !ready {
-            let poll =
-                state.audio_playback.poll(AudioPlaybackMode::Idle, audio_anchor(start_sample)).unwrap();
+            let poll = state
+                .audio_playback
+                .poll(AudioPlaybackMode::Idle, audio_anchor(start_sample))
+                .unwrap();
             assert_eq!(poll.snapshot.generation, generation);
             assert_eq!(poll.snapshot.in_flight, 0);
             assert_eq!(poll.snapshot.next_start_sample, start_sample);
@@ -281,13 +310,23 @@ fn qualify(clap_format: bool, meter: bool) {
                 let sample = start_sample as usize + window * 4 + offset;
                 // Independent public-sample oracle; no DLL/adapter helper.
                 let meter_gain = if meter {
-                    80.0 / 1024.0 + if sample < 126_002 { 1.0 / 16.0 } else { 1.0 / 8.0 }
-                } else { 0.0 };
+                    80.0 / 1024.0
+                        + if sample < 126_002 {
+                            1.0 / 16.0
+                        } else {
+                            1.0 / 8.0
+                        }
+                } else {
+                    0.0
+                };
                 let expected = 0.5 * (0.625 + (sample % 251) as f32 / 1024.0 + meter_gain);
                 assert_eq!(frame, [expected, -expected], "public sample {sample}");
             }
         }
-        assert_eq!(state.audio_playback_snapshot().next_start_sample, start_sample + 8);
+        assert_eq!(
+            state.audio_playback_snapshot().next_start_sample,
+            start_sample + 8
+        );
         assert_eq!(library.database_revision().unwrap(), revision);
         assert_eq!(
             serde_json::to_value(state.authoring.as_ref().unwrap().document()).unwrap(),

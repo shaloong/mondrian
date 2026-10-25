@@ -8,6 +8,8 @@ use super::*;
 enum PendingEdit {
     ChangedFader,
     SameValueFader,
+    ChangedMusicalReference,
+    SameMusicalReference,
     Rename,
 }
 
@@ -73,6 +75,27 @@ fn assert_pending_edit_admission(edit: PendingEdit) {
         );
 
         let outcome = match edit {
+            PendingEdit::ChangedMusicalReference | PendingEdit::SameMusicalReference => {
+                let reference = if matches!(edit, PendingEdit::ChangedMusicalReference) {
+                    Some(
+                        mondrian_core::MusicalTimeReference::new(
+                            TimelineTime::ZERO,
+                            TimelineTime::new(3, 4).unwrap(),
+                        )
+                        .unwrap(),
+                    )
+                } else {
+                    state.active_sequence().unwrap().audio_program.musical_time_reference
+                };
+                state.dispatch_action(
+                    crate::app::ui_actions::sequence_set_musical_time_reference_action(
+                        crate::app::product_action::SequenceSetMusicalTimeReferencePayload {
+                            sequence_id: sequence,
+                            reference,
+                        },
+                    ),
+                )
+            }
             PendingEdit::ChangedFader | PendingEdit::SameValueFader => {
                 let value = if matches!(edit, PendingEdit::ChangedFader) {
                     -6.0
@@ -98,7 +121,10 @@ fn assert_pending_edit_admission(edit: PendingEdit) {
                 })
             }
         };
-        if matches!(edit, PendingEdit::ChangedFader) {
+        if matches!(
+            edit,
+            PendingEdit::ChangedFader | PendingEdit::ChangedMusicalReference
+        ) {
             let error =
                 outcome.expect_err("audible product edit must refuse before author publication");
             assert!(
@@ -208,4 +234,14 @@ fn pending_native_hold_allows_same_value_product_fader_without_author_publicatio
 #[test]
 fn pending_native_hold_allows_metadata_commit_without_changing_audible_execution() {
     assert_pending_edit_admission(PendingEdit::Rename);
+}
+
+#[test]
+fn pending_native_hold_refuses_musical_reference_before_author_publication() {
+    assert_pending_edit_admission(PendingEdit::ChangedMusicalReference);
+}
+
+#[test]
+fn pending_native_hold_allows_same_musical_reference_without_author_publication() {
+    assert_pending_edit_admission(PendingEdit::SameMusicalReference);
 }

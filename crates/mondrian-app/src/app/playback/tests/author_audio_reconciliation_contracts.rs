@@ -6,6 +6,15 @@ use super::*;
 
 #[test]
 fn idle_audible_author_edit_retires_installed_source_without_moving_transport() {
+    assert_idle_audible_author_edit(false);
+}
+
+#[test]
+fn idle_musical_reference_edit_retires_installed_source_without_moving_transport() {
+    assert_idle_audible_author_edit(true);
+}
+
+fn assert_idle_audible_author_edit(musical_reference: bool) {
     let (mut state, output) = available_state();
     let mut installed = None;
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -37,17 +46,36 @@ fn idle_audible_author_edit_retires_installed_source_without_moving_transport() 
         assert_eq!(playback.next_start_sample, 0);
         assert_eq!(output.lock().queued, 0);
 
-        state
-            .commit_active_sequence_edit("append audible BuiltIn gain", |sequence| {
-                sequence.audio_program.outputs[0].strip.pre_fader.processors.push(
-                    mondrian_timeline::audio::AudioProcessorInstance::built_in(
-                        mondrian_timeline::audio::BUILTIN_GAIN_DEFINITION_ID,
-                        1,
+        if musical_reference {
+            state
+                .dispatch_action(
+                    crate::app::ui_actions::sequence_set_musical_time_reference_action(
+                        crate::app::product_action::SequenceSetMusicalTimeReferencePayload {
+                            sequence_id: sequence,
+                            reference: Some(
+                                mondrian_core::MusicalTimeReference::new(
+                                    TimelineTime::ZERO,
+                                    TimelineTime::new(3, 4).unwrap(),
+                                )
+                                .unwrap(),
+                            ),
+                        },
                     ),
-                );
-                Ok(())
-            })
-            .expect("one original author transaction");
+                )
+                .expect("public musical reference author transaction");
+        } else {
+            state
+                .commit_active_sequence_edit("append audible BuiltIn gain", |sequence| {
+                    sequence.audio_program.outputs[0].strip.pre_fader.processors.push(
+                        mondrian_timeline::audio::AudioProcessorInstance::built_in(
+                            mondrian_timeline::audio::BUILTIN_GAIN_DEFINITION_ID,
+                            1,
+                        ),
+                    );
+                    Ok(())
+                })
+                .expect("one original author transaction");
+        }
 
         let author = state.authoring.as_ref().unwrap();
         let committed_history = author.history().diagnostics();
@@ -66,7 +94,7 @@ fn idle_audible_author_edit_retires_installed_source_without_moving_transport() 
                 .pre_fader
                 .processors
                 .len(),
-            processor_count + 1
+            processor_count + usize::from(!musical_reference)
         );
         assert_ne!(
             state.current_audio_playback_author_binding().unwrap().as_ref(),

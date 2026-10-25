@@ -149,6 +149,8 @@ pub const SEQUENCE_DUPLICATE: &str = "duplicate";
 pub const SEQUENCE_DELETE: &str = "delete";
 /// External action name for updating Sequence identity and settings.
 pub const SEQUENCE_UPDATE_SETTINGS: &str = "update_settings";
+/// Replace or explicitly clear the Sequence's sole constant musical reference.
+pub const SEQUENCE_SET_MUSICAL_TIME_REFERENCE: &str = "set_musical_time_reference";
 
 /// External custom-action namespace for Export product operations.
 pub const EXPORT_NAMESPACE: &str = "ui.export";
@@ -382,6 +384,8 @@ pub enum SequenceProductAction {
     Delete(SequenceTargetPayload),
     /// Replace one Sequence's name and complete settings atomically.
     UpdateSettings(Box<SequenceUpdateSettingsPayload>),
+    /// Edit musical time without replacing unrelated Sequence settings or audio state.
+    SetMusicalTimeReference(SequenceSetMusicalTimeReferencePayload),
 }
 
 /// Closed Export draft and execution operations.
@@ -981,6 +985,11 @@ impl ProductAction {
                         Box::new(decode_payload(namespace, name, payload)?),
                     ))))
                 }
+                SEQUENCE_SET_MUSICAL_TIME_REFERENCE => Ok(Some(Self::Sequence(
+                    SequenceProductAction::SetMusicalTimeReference(decode_payload(
+                        namespace, name, payload,
+                    )?),
+                ))),
                 _ => Ok(None),
             },
             EXPORT_NAMESPACE => match name.as_str() {
@@ -1522,6 +1531,11 @@ impl ProductAction {
             Self::Sequence(SequenceProductAction::UpdateSettings(payload)) => (
                 SEQUENCE_NAMESPACE,
                 SEQUENCE_UPDATE_SETTINGS,
+                serde_json::json!(payload),
+            ),
+            Self::Sequence(SequenceProductAction::SetMusicalTimeReference(payload)) => (
+                SEQUENCE_NAMESPACE,
+                SEQUENCE_SET_MUSICAL_TIME_REFERENCE,
                 serde_json::json!(payload),
             ),
             Self::Export(ExportProductAction::EditDraft(edit)) => {
@@ -2352,6 +2366,17 @@ pub struct SequenceUpdateSettingsPayload {
     pub name: String,
     /// Complete Sequence settings after applying shell-local edits.
     pub settings: SequenceSettings,
+}
+
+/// Replace the complete constant reference owned by one stable Sequence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SequenceSetMusicalTimeReferencePayload {
+    /// Explicit owner; switching the active Sequence cannot redirect a retained action.
+    pub sequence_id: SequenceId,
+    /// `null` explicitly clears musical time. Omission must not accidentally clear it.
+    #[serde(deserialize_with = "Deserialize::deserialize")]
+    pub reference: Option<mondrian_core::MusicalTimeReference>,
 }
 
 /// One exact edit to the app-session Export draft.
@@ -3243,6 +3268,11 @@ impl<'a> ProductActionAvailability<'a> {
                     let name = payload.name.trim();
                     !name.is_empty()
                         && (sequence.name != name || sequence.settings != payload.settings)
+                })
+            }
+            SequenceProductAction::SetMusicalTimeReference(payload) => {
+                document.sequences.sequence(payload.sequence_id).is_some_and(|sequence| {
+                    sequence.audio_program.musical_time_reference != payload.reference
                 })
             }
         }

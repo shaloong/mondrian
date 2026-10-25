@@ -3,6 +3,9 @@
 //! UI Adapters submit the closed product action; Timeline Modules own Channel
 //! Strip/Rack mutation and validation; App owns transaction and execution refresh.
 
+#[cfg(test)]
+mod musical_reference_tests;
+
 use crate::app::AppMessage;
 use mondrian_audio::{
     AudioProcessingMode, AudioRenderContract, ClapPluginDescriptor, Vst3PluginDescriptor,

@@ -39,15 +39,16 @@ pub use super::product_action::{
     GalleryCaptureStillPayload, GalleryRenameStillPayload, GallerySetComparisonPayload,
     GalleryStillTargetPayload, ParameterValueWrite, ProjectCreateWithSettingsPayload,
     ProjectRecoverFromAutosavePayload, ProjectUpdateColorEnvironmentPayload,
-    ProjectUpdateNewSequenceDefaultsPayload, SequenceTargetPayload, SequenceUpdateSettingsPayload,
-    TimelineClipSelectionModePayload, TimelineDropAssetPayload, TimelineDropFilePayload,
-    TimelineInOutPointKind, TimelineInsertAssetPayload, TimelineMoveClipPayload,
-    TimelinePrecomposeSelectionPayload, TimelineSeekPayload, TimelineSeekSource,
-    TimelineSelectClipPayload, TimelineSelectionEdit, TimelineSetInOutPointPayload,
-    TimelineTrimClipsPayload, TimelineTrimPayloadEdge, TrackAddKind, TrackAddPayload,
-    TrackAuthorControl, TrackEditPolicyControl, TrackMovePayload, TrackSetAuthorControlPayload,
-    TrackSetEditPolicyPayload, VideoTransitionCreateCrossDissolvePayload,
-    VideoTransitionHandlePolicy, VideoTransitionSetRangePayload, VideoTransitionTargetPayload,
+    ProjectUpdateNewSequenceDefaultsPayload, SequenceSetMusicalTimeReferencePayload,
+    SequenceTargetPayload, SequenceUpdateSettingsPayload, TimelineClipSelectionModePayload,
+    TimelineDropAssetPayload, TimelineDropFilePayload, TimelineInOutPointKind,
+    TimelineInsertAssetPayload, TimelineMoveClipPayload, TimelinePrecomposeSelectionPayload,
+    TimelineSeekPayload, TimelineSeekSource, TimelineSelectClipPayload, TimelineSelectionEdit,
+    TimelineSetInOutPointPayload, TimelineTrimClipsPayload, TimelineTrimPayloadEdge, TrackAddKind,
+    TrackAddPayload, TrackAuthorControl, TrackEditPolicyControl, TrackMovePayload,
+    TrackSetAuthorControlPayload, TrackSetEditPolicyPayload,
+    VideoTransitionCreateCrossDissolvePayload, VideoTransitionHandlePolicy,
+    VideoTransitionSetRangePayload, VideoTransitionTargetPayload,
     ViewerSetPreviewResolutionScalePayload, VisualEffectAddToClipPayload,
     VisualEffectEditNumericCurvePayload, VisualEffectParameterTargetPayload,
     VisualEffectReorderPayload, VisualEffectSetEnabledPayload,
@@ -1300,6 +1301,14 @@ pub fn sequence_delete_action(payload: SequenceTargetPayload) -> Action {
 /// Build an action that applies edited settings to one sequence.
 pub fn sequence_update_settings_action(payload: SequenceUpdateSettingsPayload) -> Action {
     ProductAction::Sequence(SequenceProductAction::UpdateSettings(Box::new(payload)))
+        .into_external_action()
+}
+
+/// Build an exact musical-reference edit for one stable Sequence owner.
+pub fn sequence_set_musical_time_reference_action(
+    payload: SequenceSetMusicalTimeReferencePayload,
+) -> Action {
+    ProductAction::Sequence(SequenceProductAction::SetMusicalTimeReference(payload))
         .into_external_action()
 }
 

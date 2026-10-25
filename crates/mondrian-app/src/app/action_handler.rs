@@ -1821,6 +1821,14 @@ impl AppState {
                 let SequenceUpdateSettingsPayload { sequence_id, name, settings } = *payload;
                 self.update_sequence_identity_and_settings(sequence_id, name, settings)
             }
+            SequenceProductAction::SetMusicalTimeReference(payload) => self.commit_sequence_edit(
+                payload.sequence_id,
+                "编辑音乐时间参考",
+                |sequence| {
+                    sequence.audio_program.musical_time_reference = payload.reference;
+                    Ok(())
+                },
+            ),
         }
     }
 
