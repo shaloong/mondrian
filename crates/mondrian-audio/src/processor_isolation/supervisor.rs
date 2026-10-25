@@ -21,6 +21,10 @@ use shutdown_observation::{
     response_tag, ChildObservation, CleanupObservation, ShutdownFailure, ShutdownReport, Timed,
 };
 
+// Force termination is asynchronous on Windows. This is a separate resource
+// settlement wait, not an extension of the original graceful shutdown deadline.
+const TERMINATED_CHILD_WAIT_BUDGET: Duration = Duration::from_secs(2);
+
 // Background audio and discovery workers run independently of a caller console.
 // Their private launch sites use NUL stdio and IPC, with no competing explicit flags.
 #[cfg(windows)]
@@ -144,7 +148,19 @@ impl ProcessOwner {
         if let Some((observe, kill, wait)) = self.cleanup_hooks {
             return self.terminate_with_observation(observe, kill, wait, observation);
         }
-        self.terminate_with_observation(Child::try_wait, Child::kill, Child::wait, observation)
+        self.terminate_with_observation(
+            Child::try_wait,
+            Child::kill,
+            Self::wait_after_kill,
+            observation,
+        )
+    }
+
+    fn wait_after_kill(child: &mut Child) -> io::Result<std::process::ExitStatus> {
+        let deadline = Instant::now() + TERMINATED_CHILD_WAIT_BUDGET;
+        // Preserve Child::wait's stdin release before observing termination.
+        drop(child.stdin.take());
+        exit_wait::wait_for_termination(child, deadline)
     }
 
     #[cfg(test)]
@@ -1895,6 +1911,60 @@ mod control_timeout_worker_lifecycle {
             #[cfg(test)]
             discard_seed_commit_reply: None,
         })
+    }
+
+    #[test]
+    fn native_termination_wait_deadline_retains_live_child_owner_and_staging(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut worker = launch_shutdown_observation_child("no_response", Duration::from_secs(1))?;
+        let pid = worker.process.child.id();
+        let staging = tempfile::tempdir()?;
+        let path = staging.path().to_path_buf();
+        std::fs::write(path.join("retained-input"), b"owned until confirmed exit")?;
+        worker.process.staging = Some(staging);
+        let mut report =
+            ShutdownReport::new(pid, ProcessState::Retiring, Duration::from_millis(100));
+        report.primary_failure = Some(ShutdownFailure::ExitObservationDeadline);
+
+        // Emulate a successful asynchronous kill whose completion is not yet
+        // observable. The same real Child remains blocked on its original TCP
+        // command; no new process, fake exit status, or detached waiter exists.
+        let result = worker.process.terminate_with_observation(
+            Child::try_wait,
+            |_| Ok(()),
+            ProcessOwner::wait_after_kill,
+            Some(&mut report.cleanup),
+        );
+        assert!(
+            result.is_err(),
+            "an accepted kill request is not an exit observation"
+        );
+        assert_eq!(worker.process.state, ProcessState::Retiring);
+        assert_eq!(worker.process.child.id(), pid);
+        assert!(worker.process.child.try_wait()?.is_none());
+        assert!(path.join("retained-input").is_file());
+        assert_eq!(report.cleanup.kill.as_ref().unwrap().outcome, Ok(()));
+        assert_eq!(
+            report.cleanup.wait.as_ref().unwrap().outcome.unwrap_err().kind,
+            io::ErrorKind::TimedOut
+        );
+        assert!(report.exit_loop.is_none());
+        let report = report.finish(false, worker.process.state);
+        assert!(!report.successful());
+        assert_eq!(
+            report.primary_failure,
+            Some(ShutdownFailure::ExitObservationDeadline)
+        );
+
+        // Recover through the actual production kill and bounded wait, using
+        // this exact owner. Only confirmed settlement permits staging removal.
+        worker.process.terminate()?;
+        assert_eq!(worker.process.state, ProcessState::Settled);
+        assert_eq!(worker.process.child.id(), pid);
+        assert!(worker.process.child.try_wait()?.is_some());
+        drop(worker);
+        assert!(!path.exists());
+        Ok(())
     }
 
     #[test]

@@ -1,7 +1,7 @@
-//! Wait on the existing Child without changing process ownership or shutdown policy.
-//! The OS wait can round up; only a try_wait result observed before the original
-//! absolute deadline is accepted. This is deliberately stricter than checking
-//! the clock only before a nonblocking query.
+//! Wait on the existing Child without transferring process ownership.
+//! Graceful validation only accepts a try_wait result observed before the
+//! original absolute deadline. Resource settlement after a kill is separate:
+//! a verified late exit still proves that the Child is no longer live.
 
 use super::shutdown_observation::{ChildObservation, IoFailure};
 use std::io;
@@ -24,6 +24,28 @@ pub(super) fn wait_for_exit(child: &mut Child, deadline: Instant) -> ExitWaitOut
     wait_until(deadline, Instant::now, |remaining| {
         platform_wait(child, remaining)
     })
+}
+
+/// Bounded resource settlement after a successful kill request. A real exit
+/// status remains proof of settlement even if OS scheduling made its observation
+/// late; it cannot retroactively satisfy the separate graceful-exit deadline.
+pub(super) fn wait_for_termination(child: &mut Child, deadline: Instant) -> io::Result<ExitStatus> {
+    wait_for_exit(child, deadline).termination_result()
+}
+
+impl ExitWaitOutcome {
+    fn termination_result(self) -> io::Result<ExitStatus> {
+        match self {
+            Self::Exited(status) | Self::Deadline(Some(ChildObservation::Exited(status))) => {
+                Ok(status)
+            }
+            Self::Deadline(_) => Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "native child termination was not confirmed within the cleanup wait budget",
+            )),
+            Self::Io(error) => Err(error.into_io_error()),
+        }
+    }
 }
 
 // The two closures are a private clock/result test seam, not another waiter or
@@ -198,6 +220,36 @@ mod tests {
         {
             use std::os::unix::process::ExitStatusExt;
             ExitStatus::from_raw((code as i32) << 8)
+        }
+    }
+
+    #[test]
+    fn native_termination_wait_keeps_live_deadline_distinct_from_verified_late_exit() {
+        for pending in [None, Some(ChildObservation::Running)] {
+            let error = ExitWaitOutcome::Deadline(pending).termination_result().unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        }
+        for code in [0, 7] {
+            let original = status(code);
+            for observed in [
+                ExitWaitOutcome::Exited(original),
+                ExitWaitOutcome::Deadline(Some(ChildObservation::Exited(original))),
+            ] {
+                assert_eq!(observed.termination_result().unwrap(), original);
+            }
+        }
+    }
+
+    #[test]
+    fn native_termination_wait_preserves_original_io_kind_and_os_error() {
+        for original in [
+            io::Error::from_raw_os_error(6),
+            io::ErrorKind::InvalidData.into(),
+        ] {
+            let restored =
+                ExitWaitOutcome::Io((&original).into()).termination_result().unwrap_err();
+            assert_eq!(restored.kind(), original.kind());
+            assert_eq!(restored.raw_os_error(), original.raw_os_error());
         }
     }
 

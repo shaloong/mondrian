@@ -20,6 +20,15 @@ impl From<&io::Error> for IoFailure {
     }
 }
 
+impl IoFailure {
+    pub(super) fn into_io_error(self) -> io::Error {
+        match self.raw_os {
+            Some(code) => io::Error::from_raw_os_error(code),
+            None => io::Error::new(self.kind, "native child exit observation failed"),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct Timed<T> {
     pub(super) after: Duration,

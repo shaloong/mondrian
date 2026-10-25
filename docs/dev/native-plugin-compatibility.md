@@ -439,10 +439,23 @@ instruments, other platforms, realtime and performance remain unqualified.
   39.01ms, while OS exit remains unobserved at the 100.47ms deadline. This narrows
   that sample to the tail after inner return; it identifies neither main/CRT/TLS
   nor the old build's failed phase. The original unobserved failure is retained.
-- Process operation, shutdown control and graceful exit currently share budget
-  policy. The final kill/reap wait has no separate timeout, so the existing
-  100ms values do not describe a strict total shutdown limit. Budget changes
-  require a separate contract review and are not a fix for the observed failure.
+- Audio forced termination uses an independent two-second exit-observation
+  deadline on the original Child, replacing its unbounded post-kill wait.
+  Successful kill alone does not settle ownership: a timeout retains Retiring
+  and the existing Unconfirmed/staging-retention policy. A verified late exit
+  settles resources without replacing the original graceful failure; the
+  100ms graceful budget is unchanged. Windows Audio ordinary tests pass
+  871/0 failed/189 originally ignored, including three new controls. Six native
+  ownership/error/unwind controls and real Surge XT 1.3.4 CLAP/VST3 Main Runtime
+  regressions pass under the original Job owner, with expected caught-panic
+  stderr reviewed. Each Surge case processes 16,384 frames at 48k/stereo/B256
+  Offline and confirms post-Drop exit0; graceful ACK and terminal-Off acoustics
+  remain unqualified. The parent is the current opt1 Audio libtest; its normal
+  `bd0e9be4` worker supplies reviewed unchanged SDK/worker paths. This does not
+  qualify the current desktop parent, real kernel-I/O stalls, other platforms,
+  or a strict total shutdown/RT bound: kill, OS scheduling and logging remain
+  separate costs. OpenFX resident post-kill waiting remains unbounded and is a
+  separate pending correction. The original F06 failures remain open.
 - A safe conservative resource-overlap bound may reject a tight grant. It is
   not a minimum-peak or whole-plugin-heap measurement; physical realtime safety
   requires actual instrumentation.
