@@ -85,7 +85,7 @@ pub use grade_graph::*;
 pub use hdr_metadata::*;
 pub use media_contract::*;
 pub use musical_time::{
-    MusicalTimeReference, MusicalTimeReferenceError, TimelineTransportActivity,
+    MusicalTimeReference, MusicalTimeReferenceError, MusicalTimeSignature, TimelineTransportActivity,
 };
 pub use native_audio::*;
 pub use native_audio_author::*;

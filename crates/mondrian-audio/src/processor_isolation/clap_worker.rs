@@ -2392,6 +2392,19 @@ pub(super) fn clap_transport(
                 "CLAP signed musical position exceeds the beats representation".to_owned(),
             ),
         })?;
+    let bar = reference
+        .map(|reference| beat_position::bar_position(start_sample, sample_rate, reference))
+        .transpose()
+        .map_err(|error| match error {
+            beat_position::BeatPositionError::ZeroSampleRate => {
+                invalid("CLAP transport sample rate is zero")
+            }
+            beat_position::BeatPositionError::OutOfRange => AudioProcessorHostError::Process(
+                "CLAP musical bar exceeds the bar-number or beat representation".to_owned(),
+            ),
+        })?
+        .flatten();
+    let signature = reference.and_then(|reference| reference.time_signature());
     Ok(TransportEvent {
         header: EventHeader::new_core(0, EventFlags::empty()),
         flags: TransportFlags::HAS_SECONDS_TIMELINE
@@ -2404,6 +2417,11 @@ pub(super) fn clap_transport(
                 TransportFlags::HAS_TEMPO | TransportFlags::HAS_BEATS_TIMELINE
             } else {
                 TransportFlags::empty()
+            }
+            | if signature.is_some() {
+                TransportFlags::HAS_TIME_SIGNATURE
+            } else {
+                TransportFlags::empty()
             },
         song_pos_seconds: seconds,
         song_pos_beats: beats.unwrap_or(BeatTime::from_bits(0)),
@@ -2413,10 +2431,10 @@ pub(super) fn clap_transport(
         loop_end_beats: BeatTime::from_bits(0),
         loop_start_seconds: SecondsTime::from_bits(0),
         loop_end_seconds: SecondsTime::from_bits(0),
-        bar_start: BeatTime::from_bits(0),
-        bar_number: 0,
-        time_signature_numerator: 0,
-        time_signature_denominator: 0,
+        bar_start: bar.map_or(BeatTime::from_bits(0), |(_, start)| start),
+        bar_number: bar.map_or(0, |(number, _)| number),
+        time_signature_numerator: signature.map_or(0, |signature| signature.numerator()),
+        time_signature_denominator: signature.map_or(0, |signature| signature.denominator()),
     })
 }
 
@@ -2735,6 +2753,38 @@ mod tests {
 
         fn deactivate(self, _main_thread: &GainMain) {
             DEACTIVATIONS.fetch_add(1, TestOrdering::SeqCst);
+        }
+    }
+
+    #[test]
+    fn clap_transport_delivers_only_authored_meter_and_exact_negative_bar() {
+        use mondrian_core::{MusicalTimeReference, MusicalTimeSignature, TimelineTime};
+        let plain = MusicalTimeReference::new(TimelineTime::ZERO, TimelineTime::new(1, 2).unwrap())
+            .unwrap();
+        let authored = plain.with_time_signature(Some(MusicalTimeSignature::new(7, 8).unwrap()));
+        for activity in [
+            None,
+            Some(mondrian_core::TimelineTransportActivity::Playing),
+            Some(mondrian_core::TimelineTransportActivity::Stopped),
+        ] {
+            let unknown = clap_transport(-1, 48_000, Some(plain), activity).unwrap();
+            let actual = clap_transport(-1, 48_000, Some(authored), activity).unwrap();
+            assert_eq!(
+                actual.flags,
+                unknown.flags | TransportFlags::HAS_TIME_SIGNATURE
+            );
+            assert_eq!(
+                (
+                    actual.time_signature_numerator,
+                    actual.time_signature_denominator
+                ),
+                (7, 8)
+            );
+            assert_eq!(actual.bar_number, -1);
+            assert_eq!(actual.bar_start.to_bits(), -(7_i64 << 30));
+            assert_eq!(actual.song_pos_beats, unknown.song_pos_beats);
+            assert_eq!(actual.song_pos_seconds, unknown.song_pos_seconds);
+            assert_eq!(actual.tempo, unknown.tempo);
         }
     }
 

@@ -21,8 +21,9 @@ pub struct ProcessTimelineContext {
 
 /// Immutable exact seconds reference supplied by the embedding host.
 ///
-/// This SDK copy contains no playhead, transport state, tempo curve or time
-/// signature. It projects absolute signal samples to quarter notes with one
+/// This SDK copy contains no playhead, transport state or tempo curve. An
+/// optional constant meter anchors bar zero at quarter note zero. It projects
+/// absolute signal samples to quarter notes with one
 /// correctly rounded binary64 conversion, including signed PDC positions.
 /// Checked Note batches project Event.ppqPosition from this same reference and
 /// immutable call start plus each original event offset. Legacy queued/staged
@@ -34,6 +35,7 @@ pub struct ProcessMusicalReference {
     zero_denominator: i64,
     duration_numerator: i64,
     duration_denominator: i64,
+    time_signature: Option<(u16, u16)>,
 }
 
 impl ProcessMusicalReference {
@@ -53,7 +55,50 @@ impl ProcessMusicalReference {
             zero_denominator,
             duration_numerator,
             duration_denominator,
+            time_signature: None,
         })
+    }
+
+    /// Supply an explicit constant meter; zero scalars refuse before publication.
+    pub fn with_time_signature(
+        mut self,
+        numerator: u16,
+        denominator: u16,
+    ) -> std::result::Result<Self, crate::error::MusicalTimeError> {
+        if numerator == 0 || denominator == 0 {
+            return Err(crate::error::MusicalTimeError::InvalidReference);
+        }
+        self.time_signature = Some((numerator, denominator));
+        Ok(self)
+    }
+
+    /// The caller's explicit meter, without an inferred default.
+    pub fn time_signature(self) -> Option<(u16, u16)> {
+        self.time_signature
+    }
+
+    /// Last bar start in quarter notes. Floor precedes binary64 conversion,
+    /// including negative positions and sub-ULP distances from a bar boundary.
+    pub fn bar_start_at(
+        self,
+        sample: i64,
+        rate: u32,
+    ) -> std::result::Result<Option<f64>, crate::error::MusicalTimeError> {
+        let Some((numerator, denominator)) = self.time_signature else {
+            return Ok(None);
+        };
+        musical_time::bar_start(
+            sample,
+            rate,
+            self.zero_numerator,
+            self.zero_denominator,
+            self.duration_numerator,
+            self.duration_denominator,
+            numerator,
+            denominator,
+        )
+        .map(Some)
+        .ok_or(crate::error::MusicalTimeError::SampleRate)
     }
 
     /// Project one absolute signal sample with round-to-nearest, ties-to-even.

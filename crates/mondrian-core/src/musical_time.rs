@@ -21,12 +21,15 @@ pub enum TimelineTransportActivity {
 
 /// One constant quarter-note reference in the owning Sequence's time domain.
 ///
-/// This value stores a seconds coordinate and a positive seconds duration. It
-/// does not define a playback clock, time signature, or format-specific position.
+/// This value stores a seconds coordinate, a positive seconds duration and an
+/// optional constant time signature. When supplied, bar zero starts at quarter
+/// note zero. Absence never implies 4/4. This is not another playback clock.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct MusicalTimeReference {
     quarter_note_zero: TimelineTime,
     quarter_note_duration: TimelineTime,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    time_signature: Option<MusicalTimeSignature>,
 }
 
 impl MusicalTimeReference {
@@ -38,7 +41,11 @@ impl MusicalTimeReference {
         if quarter_note_duration <= TimelineTime::ZERO {
             return Err(MusicalTimeReferenceError::NonPositiveQuarterNoteDuration);
         }
-        Ok(Self { quarter_note_zero, quarter_note_duration })
+        Ok(Self {
+            quarter_note_zero,
+            quarter_note_duration,
+            time_signature: None,
+        })
     }
 
     /// Sequence-local seconds coordinate of quarter note zero.
@@ -50,6 +57,72 @@ impl MusicalTimeReference {
     pub const fn quarter_note_duration(self) -> TimelineTime {
         self.quarter_note_duration
     }
+
+    /// Author or remove a constant meter, anchored at this reference's zero.
+    pub const fn with_time_signature(mut self, signature: Option<MusicalTimeSignature>) -> Self {
+        self.time_signature = signature;
+        self
+    }
+
+    /// Explicit authored meter; unknown remains absent.
+    pub const fn time_signature(self) -> Option<MusicalTimeSignature> {
+        self.time_signature
+    }
+}
+
+/// Constant meter: `numerator` notes of length `1 / denominator` per bar.
+///
+/// Both scalars must be positive. Non-power-of-two denominators are retained,
+/// not rounded into another meter. One bar occupies `4 * numerator / denominator`
+/// quarter notes. Bar indices are zero-based and extend backwards using floor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct MusicalTimeSignature {
+    numerator: u16,
+    denominator: u16,
+}
+
+impl MusicalTimeSignature {
+    /// Validate the two authored meter scalars.
+    pub fn new(numerator: u16, denominator: u16) -> Result<Self, MusicalTimeReferenceError> {
+        if numerator == 0 || denominator == 0 {
+            return Err(MusicalTimeReferenceError::NonPositiveTimeSignature);
+        }
+        Ok(Self { numerator, denominator })
+    }
+
+    /// Number of denominator-sized notes per bar.
+    pub const fn numerator(self) -> u16 {
+        self.numerator
+    }
+
+    /// Note length denominator, in whole notes.
+    pub const fn denominator(self) -> u16 {
+        self.denominator
+    }
+}
+
+impl<'de> Deserialize<'de> for MusicalTimeSignature {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Repr {
+            numerator: u16,
+            denominator: u16,
+        }
+        let value = Repr::deserialize(deserializer)?;
+        Self::new(value.numerator, value.denominator).map_err(D::Error::custom)
+    }
+}
+
+impl AuthoringFootprint for MusicalTimeSignature {
+    fn collect_authoring_footprint(
+        &self,
+        collector: &mut AuthoringFootprintCollector,
+    ) -> Result<(), AuthoringFootprintError> {
+        let Self { numerator, denominator } = self;
+        collector.collect(numerator)?;
+        collector.collect(denominator)
+    }
 }
 
 /// Invalid authored musical reference.
@@ -58,6 +131,9 @@ pub enum MusicalTimeReferenceError {
     /// A quarter note must occupy a strictly positive seconds duration.
     #[error("quarter-note duration must be strictly positive")]
     NonPositiveQuarterNoteDuration,
+    /// A meter cannot contain zero notes or a zero note-length denominator.
+    #[error("time-signature numerator and denominator must be strictly positive")]
+    NonPositiveTimeSignature,
 }
 
 impl<'de> Deserialize<'de> for MusicalTimeReference {
@@ -70,9 +146,13 @@ impl<'de> Deserialize<'de> for MusicalTimeReference {
         struct Repr {
             quarter_note_zero: TimelineTime,
             quarter_note_duration: TimelineTime,
+            #[serde(default)]
+            time_signature: Option<MusicalTimeSignature>,
         }
         let value = Repr::deserialize(deserializer)?;
-        Self::new(value.quarter_note_zero, value.quarter_note_duration).map_err(D::Error::custom)
+        Self::new(value.quarter_note_zero, value.quarter_note_duration)
+            .map(|reference| reference.with_time_signature(value.time_signature))
+            .map_err(D::Error::custom)
     }
 }
 
@@ -82,15 +162,63 @@ impl AuthoringFootprint for MusicalTimeReference {
         collector: &mut AuthoringFootprintCollector,
     ) -> Result<(), AuthoringFootprintError> {
         // The owning author allocation already charges these inline values.
-        let Self { quarter_note_zero, quarter_note_duration } = self;
+        let Self {
+            quarter_note_zero,
+            quarter_note_duration,
+            time_signature,
+        } = self;
         collector.collect(quarter_note_zero)?;
-        collector.collect(quarter_note_duration)
+        collector.collect(quarter_note_duration)?;
+        collector.collect(time_signature)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn constant_meter_is_explicit_validated_and_preserved_in_reference_identity() {
+        let original =
+            MusicalTimeReference::new(TimelineTime::ZERO, TimelineTime::new(1, 2).unwrap())
+                .unwrap();
+        assert_eq!(original.time_signature(), None);
+        assert!(serde_json::to_value(original).unwrap().get("time_signature").is_none());
+        for (n, d) in [(7, 8), (5, 7), (u16::MAX, u16::MAX)] {
+            let signature = MusicalTimeSignature::new(n, d).unwrap();
+            let authored = original.with_time_signature(Some(signature));
+            assert_ne!(authored, original);
+            assert_eq!(authored.time_signature(), Some(signature));
+            let json = serde_json::to_value(authored).unwrap();
+            assert_eq!(
+                json["time_signature"],
+                serde_json::json!({"numerator":n,"denominator":d})
+            );
+            assert_eq!(
+                serde_json::from_value::<MusicalTimeReference>(json).unwrap(),
+                authored
+            );
+            assert_eq!(authored.with_time_signature(None), original);
+        }
+        for invalid in [
+            serde_json::json!({"numerator":0,"denominator":4}),
+            serde_json::json!({"numerator":4,"denominator":0}),
+            serde_json::json!({"numerator":4,"denominator":65536}),
+            serde_json::json!({"numerator":-1,"denominator":4}),
+            serde_json::json!({"numerator":3}),
+            serde_json::json!({"numerator":3,"denominator":4,"bar_zero":1}),
+        ] {
+            let mut value = serde_json::to_value(original).unwrap();
+            value["time_signature"] = invalid;
+            assert!(serde_json::from_value::<MusicalTimeReference>(value).is_err());
+        }
+        for (n, d) in [(0, 1), (1, 0), (0, 0)] {
+            assert_eq!(
+                MusicalTimeSignature::new(n, d),
+                Err(MusicalTimeReferenceError::NonPositiveTimeSignature)
+            );
+        }
+    }
 
     #[test]
     fn transport_activity_keeps_explicit_values_distinct_from_absence() {

@@ -64,7 +64,7 @@ An entered epoch binds its exact optional activity on the first successful
 render. A change refuses before native callbacks, PCM publication or history
 consumption and requires a fresh epoch. Unentered stateless evaluation can change
 activity, invalidating nested prefetched PCM through the existing cache owner.
-IPC20 distinguishes None/Stopped/Playing with fixed 32-byte Process tags; old
+IPC21 retains None/Stopped/Playing in fixed 32-byte Process tags; old
 helpers refuse. The VST3 borrowed processing role updates only its ProcessContext,
 after canonical time installation, honoring requested/available validity. CLAP
 sets IS_PLAYING only for explicit Playing. Ordinary Audio/SDK tests and App/Export
@@ -152,28 +152,34 @@ IPC15, full CLAP offer 5 and independent Note probe 2 reject older shapes;
 CLAP remains explicitly NativeEnd/16 channels. VST3/canonical Note admission
 is unchanged.
 
-The first musical-time slice is implemented and qualified by owned Windows
-CLAP constant-tempo controls.
-Sample coordinates alone cannot supply authored musical time, and SDK defaults
-are not a Sequence authority. `AudioProgram` owns one optional validated
-`MusicalTimeReference`: the Sequence-second position of quarter-note zero and a
-strictly positive quarter-note duration in seconds. Existing author/sample time
-and Note coordinates remain unchanged. The same immutable value participates in
-compiled/closure identity, preparation, Ready and callback binding; parameter
-handoffs and configuration seeds cannot substitute another reference.
-Document schema34 migrates old schema33 absent/null to None and rejects a
-legacy-tagged non-null reference; archive/library versions stay unchanged.
-IPC15 carries a required nullable value, without another clock registry.
-The first CLAP consumer supplies only seconds and constant tempo. Beats, bars,
-meter, playback state and VST3 musical time remain unqualified. Scope parameters
-retain local time while DSP transport retains Sequence signal time after PDC;
-source retiming occurs before Scope DSP and does not multiply project tempo.
-Selected nested execution involving a reference is refused before source or
-native preparation until its actual cache-window semantics are qualified.
-Selected VST3 execution with a reference is also refused before source or factory
-creation until its SDK/adapter consumes that reference. Native controls cover
-44.1/48 kHz, None/Some, two entries, partitions, Scope-local automation, source
-retiming and PDC. They do not qualify realtime, third-party or other-platform use.
+`AudioProgram` owns one optional validated `MusicalTimeReference`: the
+Sequence-second position of quarter-note zero, a positive quarter-note duration,
+and an optional constant `MusicalTimeSignature`. Positive u16 meter scalars are
+an explicit product range, not VST3's entire int32 range. Bar zero starts at
+quarter-note zero; negative bar selection uses exact floor. Unknown meter never
+implies 4/4. Maps and an independent pickup/bar origin remain unavailable.
+
+Existing author/sample time and Note coordinates remain unchanged. The entire
+reference participates in compiled/closure identity, preparation, Ready and
+callback binding; parameter handoffs/configuration seeds cannot replace it.
+Document schema35 preserves unknown meter when migrating schema34 and refuses
+nonnull meter mislabeled as legacy. The prior reference migration remains
+chained; container/library versions are unchanged. IPC21 carries a required
+nullable reference without a second clock registry.
+
+Both adapters floor bars before format rounding. CLAP independently checks its
+i32 bar number and i64 beat ticks. VST3 rounds the full rational bar start to
+binary64 without CLAP's integer limit and advances it at each native chunk.
+An anchored SDK meter refuses an independent signature setter. Optional validity
+follows supplied facts and each format's contract. Scope parameters retain local
+time; DSP transport retains Sequence signal time after PDC, without multiplying
+Tempo by source retiming. Selected nested musical execution remains refused.
+
+Meter implementation has Windows ordinary and owned-DLL SDK lifecycle/setter
+qualification; matching current-worker/native meter DSP/PCM and third-party
+workflows remain pending. Prior Tempo/PPQ/activity qualifications retain their
+separate sources and conditions in the compatibility report. They do not qualify
+the new meter workflow or realtime/performance/other-platform execution.
 
 Note-enabled CLAP probes/workers now offer the actual shared NotePorts callback
 table and validate the restored, render-bound port cohort. Raw rescan flags and

@@ -2896,6 +2896,15 @@ impl PluginInternal for PluginImpl {
     }
 
     fn set_time_signature(&mut self, numerator: i32, denominator: i32) -> Result<()> {
+        if self
+            .process_data
+            .as_ref()
+            .and_then(|data| data.musical_reference)
+            .and_then(|reference| reference.time_signature())
+            .is_some()
+        {
+            return Err(Error::MusicalTime(MusicalTimeError::AnchoredTimeSignature));
+        }
         self.update_time_signature(numerator, denominator);
         Ok(())
     }
@@ -6160,6 +6169,11 @@ fn advance_process_context(
     } else {
         None
     };
+    let bar_position = anchored
+        .map(|(reference, rate)| reference.bar_start_at(project, rate))
+        .transpose()
+        .map_err(Error::MusicalTime)?
+        .flatten();
     ctx.projectTimeSamples = project;
     if let Some(continuous) = continuous {
         ctx.continousTimeSamples = continuous;
@@ -6174,6 +6188,9 @@ fn advance_process_context(
         // Quarter notes elapsed = seconds * (BPM / 60).
         let secs = ctx.projectTimeSamples as f64 / ctx.sampleRate;
         ctx.projectTimeMusic = secs * (transport_tempo / 60.0);
+    }
+    if let Some(start) = bar_position {
+        ctx.barPositionMusic = start;
     }
     Ok(())
 }
@@ -7894,6 +7911,9 @@ impl PluginProcessFields<'_> {
             .quarter_notes_at(context.sample_position, context.sample_rate)
             .map_err(Error::MusicalTime)?;
         let tempo = reference.tempo_bpm();
+        let bar_start = reference
+            .bar_start_at(context.sample_position, context.sample_rate)
+            .map_err(Error::MusicalTime)?;
         let data = self.process_data.as_mut().ok_or(Error::NotProcessing)?;
         // All validation/projection precedes publication. The assignment keeps
         // the ProcessData pointer to this same retained field stable.
@@ -7902,11 +7922,25 @@ impl PluginProcessFields<'_> {
         next.projectTimeSamples = context.sample_position;
         next.projectTimeMusic = position;
         next.tempo = tempo;
+        if let (Some(start), Some((numerator, denominator))) =
+            (bar_start, reference.time_signature())
+        {
+            next.barPositionMusic = start;
+            next.timeSigNumerator = i32::from(numerator);
+            next.timeSigDenominator = i32::from(denominator);
+        }
         next.state = process_context_state(
             data.process_context_requirements,
             false,
             (ProcessContext_::StatesAndFlags_::kProjectTimeMusicValid
-                | ProcessContext_::StatesAndFlags_::kTempoValid) as u32,
+                | ProcessContext_::StatesAndFlags_::kTempoValid) as u32
+                | if bar_start.is_some() {
+                    (ProcessContext_::StatesAndFlags_::kBarPositionValid
+                        | ProcessContext_::StatesAndFlags_::kTimeSigValid)
+                        as u32
+                } else {
+                    0
+                },
         );
         data.process_context = next;
         data.musical_reference = Some(reference);
@@ -8540,7 +8574,9 @@ impl crate::plugin::PluginProcessingRole for PluginProcessFields<'_> {
         // Only borrowed processing storage is mutated. No second saved playing
         // state or full-owner/controller borrow is required by this role.
         data.process_context.state = process_context_state(
-            data.process_context_requirements, playing, data.process_context.state,
+            data.process_context_requirements,
+            playing,
+            data.process_context.state,
         );
         Ok(())
     }
@@ -9025,10 +9061,7 @@ fn native_anchored_musical_context_rejects_independent_tempo_and_keeps_explicit_
     let reference = ProcessMusicalReference::new(-1, 7, 3, 4).unwrap();
     native
         .set_process_musical_timeline_context(
-            ProcessTimelineContext {
-                sample_position: -17,
-                sample_rate: 48_000,
-            },
+            ProcessTimelineContext { sample_position: -17, sample_rate: 48_000 },
             reference,
         )
         .unwrap();
@@ -9095,6 +9128,37 @@ fn native_anchored_musical_context_rejects_independent_tempo_and_keeps_explicit_
     );
     assert_eq!(data.process_context.barPositionMusic, 0.0);
     assert_eq!(data.process_context.state & S::kBarPositionValid as u32, 0);
+    let metered = ProcessMusicalReference::new(0, 1, 1, 2)
+        .unwrap()
+        .with_time_signature(7, 8)
+        .unwrap();
+    native
+        .set_process_musical_timeline_context(
+            ProcessTimelineContext { sample_position: -48_000, sample_rate: 48_000 },
+            metered,
+        )
+        .unwrap();
+    let snapshot = |native: &PluginImpl| {
+        let data = native.process_data.as_ref().unwrap();
+        (
+            native.time_sig_numerator,
+            native.time_sig_denominator,
+            data.musical_reference,
+            data.process_context.projectTimeSamples,
+            data.process_context.projectTimeMusic.to_bits(),
+            data.process_context.barPositionMusic.to_bits(),
+            data.process_context.timeSigNumerator,
+            data.process_context.timeSigDenominator,
+            data.process_context.state,
+        )
+    };
+    let before_meter = snapshot(&native);
+    assert_eq!(before_meter.5, (-3.5_f64).to_bits());
+    assert!(matches!(
+        native.set_time_signature(3, 4),
+        Err(Error::MusicalTime(MusicalTimeError::AnchoredTimeSignature))
+    ));
+    assert_eq!(snapshot(&native), before_meter);
     native
         .set_process_timeline_context(ProcessTimelineContext {
             sample_position: -5,
@@ -9939,13 +10003,26 @@ mod checked_native_note_tests {
         use IProcessContextRequirements_::Flags_ as R;
         use ProcessContext_::StatesAndFlags_ as S;
         let mut fixture = Fixture::new();
-        for requirements in [None, Some(R::kNeedTransportState as u32 | R::kNeedTempo as u32
-                                      | R::kNeedProjectTimeMusic as u32), Some(R::kNeedTempo as u32)] {
+        for requirements in [
+            None,
+            Some(
+                R::kNeedTransportState as u32
+                    | R::kNeedTempo as u32
+                    | R::kNeedProjectTimeMusic as u32,
+            ),
+            Some(R::kNeedTempo as u32),
+        ] {
             fixture.data.as_mut().unwrap().process_context_requirements = requirements;
-            fixture.fields().set_process_musical_timeline_context(
-                crate::audio::ProcessTimelineContext { sample_position: -17, sample_rate: 48_000 },
-                crate::audio::ProcessMusicalReference::new(0, 1, 1, 2).unwrap(),
-            ).unwrap();
+            fixture
+                .fields()
+                .set_process_musical_timeline_context(
+                    crate::audio::ProcessTimelineContext {
+                        sample_position: -17,
+                        sample_rate: 48_000,
+                    },
+                    crate::audio::ProcessMusicalReference::new(0, 1, 1, 2).unwrap(),
+                )
+                .unwrap();
             let baseline = context_facts(&fixture.data.as_ref().unwrap().process_context);
             for playing in [true, false, true] {
                 fixture.fields().set_process_playing(playing).unwrap();
@@ -9956,20 +10033,33 @@ mod checked_native_note_tests {
                 assert_eq!(actual[0] & !(S::kPlaying as u64), baseline[0]);
                 assert_eq!(actual[0] & S::kTimeSigValid as u64, 0);
             }
-            fixture.fields().set_process_timeline_context(
-                crate::audio::ProcessTimelineContext { sample_position: 91, sample_rate: 48_000 },
-            ).unwrap();
+            fixture
+                .fields()
+                .set_process_timeline_context(crate::audio::ProcessTimelineContext {
+                    sample_position: 91,
+                    sample_rate: 48_000,
+                })
+                .unwrap();
             assert_eq!(fixture.data.as_ref().unwrap().process_context.state, 0);
         }
         let before = context_facts(&fixture.data.as_ref().unwrap().process_context);
         {
             let mut fields = fixture.fields();
             fields.is_processing = false;
-            assert!(matches!(fields.set_process_playing(true), Err(Error::NotProcessing)));
+            assert!(matches!(
+                fields.set_process_playing(true),
+                Err(Error::NotProcessing)
+            ));
         }
-        assert_eq!(context_facts(&fixture.data.as_ref().unwrap().process_context), before);
+        assert_eq!(
+            context_facts(&fixture.data.as_ref().unwrap().process_context),
+            before
+        );
         fixture.data = None;
-        assert!(matches!(fixture.fields().set_process_playing(true), Err(Error::NotProcessing)));
+        assert!(matches!(
+            fixture.fields().set_process_playing(true),
+            Err(Error::NotProcessing)
+        ));
     }
 
     fn run_sample_window(
@@ -10970,6 +11060,75 @@ mod checked_native_note_tests {
                     0x3f32_3456_789a_bcdf
                 ); // 10/36000
             }
+        }
+    }
+
+    #[test]
+    fn anchored_meter_reaches_borrowed_com_context_and_advances_across_bar_boundary() {
+        use crate::audio::{ProcessMusicalReference, ProcessTimelineContext};
+        use ProcessContext_::StatesAndFlags_ as S;
+        for path in [WindowPath::Flat, WindowPath::Buses, WindowPath::ScopedNotes] {
+            let mut fixture = Fixture::new();
+            let reference = ProcessMusicalReference::new(0, 1, 1, 2)
+                .unwrap()
+                .with_time_signature(7, 8)
+                .unwrap();
+            fixture
+                .fields()
+                .set_process_musical_timeline_context(
+                    ProcessTimelineContext {
+                        sample_position: 83_998,
+                        sample_rate: 48_000,
+                    },
+                    reference,
+                )
+                .unwrap();
+            let pointer = &fixture.data.as_ref().unwrap().process_context as *const _;
+            {
+                let ctx = &fixture.data.as_ref().unwrap().process_context;
+                assert_eq!((ctx.timeSigNumerator, ctx.timeSigDenominator), (7, 8));
+                assert_eq!(ctx.barPositionMusic.to_bits(), 0);
+                assert_eq!(
+                    ctx.state & ((S::kBarPositionValid | S::kTimeSigValid) as u32),
+                    (S::kBarPositionValid | S::kTimeSigValid) as u32
+                );
+            }
+            // The existing in-process IAudioProcessor fixture consumes actual
+            // ProcessData; this is not a third-party/native DLL qualification.
+            let result = if matches!(path, WindowPath::ScopedNotes) {
+                fixture.run(&mut buffers(9), &[])
+            } else {
+                run_sample_window(&mut fixture, path, 9).0
+            };
+            result.unwrap();
+            {
+                let observed = fixture.observed.lock().unwrap();
+                assert_eq!(observed.frames, [4, 4, 1]);
+                for (row, start) in observed.musical.iter().zip([0.0_f64, 3.5, 3.5]) {
+                    assert_eq!(&row[2..], &[start.to_bits(), 7, 8]);
+                }
+            }
+            let data = fixture.data.as_ref().unwrap();
+            assert_eq!(&data.process_context as *const _, pointer);
+            assert_eq!(data.process_context.projectTimeSamples, 84_007);
+            assert_eq!(
+                data.process_context.barPositionMusic.to_bits(),
+                3.5_f64.to_bits()
+            );
+            fixture
+                .fields()
+                .set_process_timeline_context(ProcessTimelineContext {
+                    sample_position: 0,
+                    sample_rate: 48_000,
+                })
+                .unwrap();
+            let ctx = &fixture.data.as_ref().unwrap().process_context;
+            assert_eq!(
+                ctx.state & ((S::kBarPositionValid | S::kTimeSigValid) as u32),
+                0
+            );
+            assert_eq!((ctx.timeSigNumerator, ctx.timeSigDenominator), (0, 0));
+            assert_eq!(ctx.barPositionMusic.to_bits(), 0);
         }
     }
 

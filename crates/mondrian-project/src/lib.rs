@@ -35,7 +35,7 @@ use migration::{JsonMigrationRegistry, JsonMigrationStep};
 /// Current `.mdp` container format version.
 pub const PROJECT_FORMAT_VERSION: u32 = 1;
 /// Current canonical project document schema version.
-pub const PROJECT_DOCUMENT_SCHEMA_VERSION: u32 = 34;
+pub const PROJECT_DOCUMENT_SCHEMA_VERSION: u32 = 35;
 /// Current embedded asset-library SQLite schema version.
 pub const PROJECT_LIBRARY_SCHEMA_VERSION: u32 = 6;
 
@@ -348,6 +348,11 @@ const DOCUMENT_MIGRATIONS: JsonMigrationRegistry = JsonMigrationRegistry::new(
             to: 34,
             migrate: migrate_document_v33_to_v34,
         },
+        JsonMigrationStep {
+            from: 34,
+            to: 35,
+            migrate: migrate_document_v34_to_v35,
+        },
     ],
 );
 
@@ -428,6 +433,28 @@ fn migrate_document_v33_to_v34(mut value: serde_json::Value) -> anyhow::Result<s
         }
     }
     value["schema_version"] = serde_json::json!(34);
+    Ok(value)
+}
+
+// Old documents have no authored meter. Preserve absence, never infer 4/4,
+// and do not admit a new authored meter mislabeled as schema 34.
+fn migrate_document_v34_to_v35(mut value: serde_json::Value) -> anyhow::Result<serde_json::Value> {
+    let sequences = value
+        .get("sequences")
+        .and_then(|collection| collection.get("sequences"))
+        .and_then(serde_json::Value::as_array)
+        .context("schema-34 document has no Sequence collection")?;
+    for sequence in sequences {
+        if sequence
+            .get("audio_program")
+            .and_then(|program| program.get("musical_time_reference"))
+            .and_then(|reference| reference.get("time_signature"))
+            .is_some_and(|signature| !signature.is_null())
+        {
+            anyhow::bail!("schema-34 document cannot contain an authored time signature");
+        }
+    }
+    value["schema_version"] = serde_json::json!(35);
     Ok(value)
 }
 
@@ -3900,7 +3927,7 @@ mod tests {
         );
     }
     #[test]
-    fn musical_time_reference_schema34_archive_roundtrip_preserves_some_and_none() {
+    fn musical_time_reference_current_archive_roundtrip_preserves_meter_some_and_none() {
         let reference = mondrian_core::MusicalTimeReference::new(
             mondrian_core::TimelineTime::new(-1001, 30000).unwrap(),
             mondrian_core::TimelineTime::new(1001, 2000).unwrap(),
@@ -3909,7 +3936,16 @@ mod tests {
         let root = unique_temp_dir("musical-reference-schema34");
         let database = root.join("index.db");
         fs::write(&database, b"sqlite fixture").unwrap();
-        for (name, reference) in [("none", None), ("some", Some(reference))] {
+        for (name, reference) in [
+            ("none", None),
+            ("some", Some(reference)),
+            (
+                "meter",
+                Some(reference.with_time_signature(Some(
+                    mondrian_core::MusicalTimeSignature::new(7, 8).unwrap(),
+                ))),
+            ),
+        ] {
             let mut document = test_document();
             insert_note_archive_fixture(&mut document);
             document.sequences.active_mut().unwrap().audio_program.musical_time_reference =
@@ -3917,7 +3953,7 @@ mod tests {
             let archive = root.join(format!("{name}.mdp"));
             save_project_archive(&document, &database, &archive).unwrap();
             let reopened = read_project_document_from_archive(&archive).unwrap();
-            assert_eq!(reopened.schema_version, 34);
+            assert_eq!(reopened.schema_version, PROJECT_DOCUMENT_SCHEMA_VERSION);
             assert_eq!(
                 reopened.sequences.active().unwrap().audio_program.musical_time_reference,
                 reference
@@ -3942,7 +3978,53 @@ mod tests {
                 ProjectArchiveReadBudget::default(),
             )
             .expect_err("old reader must refuse the new authored value schema");
-            assert!(error.to_string().contains("unsupported project document version: 34"));
+            assert!(error.to_string().contains("unsupported project document version: 35"));
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn constant_meter_schema34_migration_preserves_unknown_and_rejects_mislabeled_meter() {
+        let reference = mondrian_core::MusicalTimeReference::new(
+            mondrian_core::TimelineTime::new(-19, 7).unwrap(),
+            mondrian_core::TimelineTime::new(3, 4).unwrap(),
+        )
+        .unwrap();
+        let mut document = test_document();
+        document.sequences.active_mut().unwrap().audio_program.musical_time_reference =
+            Some(reference);
+        let mut legacy = serde_json::to_value(&document).unwrap();
+        legacy["schema_version"] = serde_json::json!(34);
+        let current = DOCUMENT_MIGRATIONS.migrate(legacy.clone()).unwrap();
+        assert_eq!(current, serde_json::to_value(&document).unwrap());
+        assert_eq!(
+            serde_json::from_value::<ProjectDocument>(current).unwrap(),
+            document
+        );
+        let root = unique_temp_dir("meter-schema34");
+        let manifest = serde_json::to_vec(&ProjectManifest::default()).unwrap();
+        let archive = root.join("legacy.mdp");
+        write_raw_stored_archive(
+            &archive,
+            &[
+                (MANIFEST_ENTRY, &manifest),
+                (PROJECT_ENTRY, &serde_json::to_vec(&legacy).unwrap()),
+                (LIBRARY_ENTRY, b"sqlite fixture"),
+            ],
+        );
+        assert_eq!(
+            read_project_document_from_archive(&archive).unwrap(),
+            document
+        );
+        for signature in [
+            serde_json::json!({"numerator":7,"denominator":8}),
+            serde_json::json!({"numerator":0,"denominator":0}),
+            serde_json::json!("invalid"),
+        ] {
+            let mut mislabeled = legacy.clone();
+            mislabeled["sequences"]["sequences"][0]["audio_program"]["musical_time_reference"]
+                ["time_signature"] = signature;
+            assert!(DOCUMENT_MIGRATIONS.migrate(mislabeled).is_err());
         }
         fs::remove_dir_all(root).unwrap();
     }
@@ -3960,7 +4042,7 @@ mod tests {
                         ["musical_time_reference"] = serde_json::Value::Null;
                 }
                 let mut expected = legacy.clone();
-                expected["schema_version"] = serde_json::json!(34);
+                expected["schema_version"] = serde_json::json!(PROJECT_DOCUMENT_SCHEMA_VERSION);
                 let migrated = DOCUMENT_MIGRATIONS.migrate(legacy.clone()).unwrap();
                 assert_eq!(migrated, expected);
                 assert_eq!(
@@ -3978,7 +4060,7 @@ mod tests {
                     ],
                 );
                 let reopened = read_project_document_from_archive(&archive).unwrap();
-                assert_eq!(reopened.schema_version, 34);
+                assert_eq!(reopened.schema_version, PROJECT_DOCUMENT_SCHEMA_VERSION);
                 assert!(reopened
                     .sequences
                     .sequences

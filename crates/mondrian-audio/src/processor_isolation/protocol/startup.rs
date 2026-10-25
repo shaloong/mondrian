@@ -204,7 +204,7 @@ mod tests {
     fn metadata(raw_bytes: usize) -> PrepareWire {
         PrepareWire {
             musical_time_reference: None,
-            schema_version: 20,
+            schema_version: 21,
             native_lane: NativeWorkerLaneWire::Inline {},
             nonce: "same-startup-nonce".into(),
             payload_bytes: raw_bytes as u64,
@@ -266,7 +266,7 @@ mod tests {
             assert_eq!(body_length, serde_json::to_vec(&metadata).unwrap().len());
             assert_eq!(&stream[4 + body_length..], payload);
             let ready = ReadyWire {
-                schema_version: 20,
+                schema_version: 21,
                 result: ReadyResultWire::Rejected { detail: "alignment-only".into() },
             };
             write_json_frame(&mut stream, &ready).unwrap();
@@ -347,7 +347,7 @@ mod tests {
     #[test]
     fn startup_raw_validates_current_version_nonce_and_mandatory_shape_before_payload_phase() {
         let good = metadata(256);
-        for version in [8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 21] {
+        for version in [8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 22] {
             let mut old = good.clone();
             old.schema_version = version;
             assert!(EncodedPrepare::new(&old, &[0; 256]).is_err());
@@ -423,7 +423,14 @@ mod tests {
             )
             .unwrap()
         };
-        for music in [None, Some(reference(-19)), Some(reference(23))] {
+        for music in [
+            None,
+            Some(reference(-19)),
+            Some(reference(23)),
+            Some(reference(23).with_time_signature(Some(
+                mondrian_core::MusicalTimeSignature::new(7, 8).unwrap(),
+            ))),
+        ] {
             let mut prepare = metadata(3);
             prepare.musical_time_reference = music;
             let mut bytes = Vec::new();
@@ -436,7 +443,7 @@ mod tests {
             assert_eq!(actual.musical_time_reference, music);
             assert_eq!(payload, [0, 128, 255]);
             let ready = ReadyWire {
-                schema_version: 20,
+                schema_version: super::PROTOCOL_VERSION,
                 result: ReadyResultWire::Ready {
                     musical_time_reference: music,
                     execution_contract: prepare.execution_contract,

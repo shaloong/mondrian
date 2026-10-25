@@ -47,6 +47,48 @@ pub(super) fn position(
         .ok_or(BeatPositionError::OutOfRange)
 }
 
+/// Bar zero begins at quarter note zero. Determine the bar from the exact
+/// sample/reference ratio, before CLAP beat-tick rounding can cross a boundary.
+pub(super) fn bar_position(
+    sample: i64,
+    rate: u32,
+    reference: MusicalTimeReference,
+) -> Result<Option<(i32, BeatTime)>, BeatPositionError> {
+    let Some(signature) = reference.time_signature() else {
+        return Ok(None);
+    };
+    if rate == 0 {
+        return Err(BeatPositionError::ZeroSampleRate);
+    }
+    let zero = reference.quarter_note_zero();
+    let duration = reference.quarter_note_duration();
+    let difference = i128::from(sample) * i128::from(zero.denominator())
+        - i128::from(zero.numerator()) * i128::from(rate);
+    let numerator = BeatMagnitude::from_u128(difference.unsigned_abs())
+        .checked_mul(duration.denominator() as u64)
+        .and_then(|value| value.checked_mul(u64::from(signature.denominator())))
+        .ok_or(BeatPositionError::OutOfRange)?;
+    let denominator = BeatMagnitude::from_u128(u128::from(rate))
+        .checked_mul(zero.denominator() as u64)
+        .and_then(|value| value.checked_mul(duration.numerator() as u64))
+        .and_then(|value| value.checked_mul(4 * u64::from(signature.numerator())))
+        .ok_or(BeatPositionError::OutOfRange)?;
+    let number = numerator
+        .signed_ratio(denominator, difference < 0, true)
+        .and_then(|value| i32::try_from(value).ok())
+        .ok_or(BeatPositionError::OutOfRange)?;
+    // The i32 bar and u16 signature need at most 80 bits after tick scaling.
+    let start =
+        i128::from(number) * 4 * i128::from(signature.numerator()) * i128::from(BeatTime::FACTOR);
+    let ticks = BeatMagnitude::from_u128(start.unsigned_abs())
+        .rounded_signed_ratio(
+            BeatMagnitude::from_u128(u128::from(signature.denominator())),
+            start < 0,
+        )
+        .ok_or(BeatPositionError::OutOfRange)?;
+    Ok(Some((number, BeatTime::from_bits(ticks))))
+}
+
 /// Fixed scratch for this one ratio. No arbitrary-width storage or allocator.
 #[derive(Clone, Copy)]
 struct BeatMagnitude([u64; 4]);
@@ -102,12 +144,16 @@ impl BeatMagnitude {
             *limb = (*limb << 1) | carry;
             carry = next_carry;
         }
-        // A division remainder is below the at-most-158-bit denominator;
+        // A division remainder is below the at-most-176-bit denominator;
         // doubling it cannot reach the end of this 256-bit scratch.
         debug_assert_eq!(carry, 0);
     }
 
     fn rounded_signed_ratio(self, denominator: Self, negative: bool) -> Option<i64> {
+        self.signed_ratio(denominator, negative, false)
+    }
+
+    fn signed_ratio(self, denominator: Self, negative: bool, floor: bool) -> Option<i64> {
         let limit = if negative {
             1_u64 << 63
         } else {
@@ -142,9 +188,14 @@ impl BeatMagnitude {
                 }
                 (quotient, remainder)
             };
-        let mut distance_to_next = denominator;
-        distance_to_next.subtract(remainder);
-        if remainder.compare(distance_to_next) != Ordering::Less {
+        let increment = if floor {
+            negative && remainder.compare(Self::ZERO) != Ordering::Equal
+        } else {
+            let mut distance_to_next = denominator;
+            distance_to_next.subtract(remainder);
+            remainder.compare(distance_to_next) != Ordering::Less
+        };
+        if increment {
             quotient = quotient.checked_add(1)?;
             if quotient > limit {
                 return None;
@@ -166,6 +217,65 @@ impl BeatMagnitude {
 mod tests {
     use super::*;
     use mondrian_core::TimelineTime;
+
+    #[test]
+    fn bar_floor_precedes_fixed_point_rounding_and_checks_clap_specific_limits() {
+        let meter = mondrian_core::MusicalTimeSignature::new(7, 8).unwrap();
+        let music = reference((0, 1), (1, 2)).with_time_signature(Some(meter));
+        for (sample, number, bits) in [
+            (0, 0, 0),
+            (-1, -1, -(7_i64 << 30)),
+            (83_999, 0, 0),
+            (84_000, 1, 7_i64 << 30),
+            (-84_000, -1, -(7_i64 << 30)),
+            (-84_001, -2, -(7_i64 << 31)),
+        ] {
+            let (bar, start) = bar_position(sample, 48_000, music).unwrap().unwrap();
+            assert_eq!((bar, start.to_bits()), (number, bits));
+        }
+        // Both exact positions round onto the following CLAP beat boundary.
+        // Bar selection must still use the original rational position.
+        let near = reference((-8_070_450_532_247_928_831, 1_i64 << 61), (1, 1))
+            .with_time_signature(Some(meter));
+        assert_eq!(position(0, 48_000, near).unwrap().to_bits(), 7_i64 << 30);
+        assert_eq!(bar_position(0, 48_000, near).unwrap().unwrap().0, 0);
+        let tiny_negative = reference((1, 1_i64 << 62), (1, 1)).with_time_signature(Some(meter));
+        assert_eq!(position(0, 48_000, tiny_negative).unwrap().to_bits(), 0);
+        let (bar, start) = bar_position(0, 48_000, tiny_negative).unwrap().unwrap();
+        assert_eq!((bar, start.to_bits()), (-1, -(7_i64 << 30)));
+        let odd = reference((713, 7), (3, 4)).with_time_signature(Some(
+            mondrian_core::MusicalTimeSignature::new(5, 7).unwrap(),
+        ));
+        let (bar, start) = bar_position(99_317, 44_100, odd).unwrap().unwrap();
+        assert_eq!((bar, start.to_bits()), (-47, -288_376_375_589));
+        let unit_bar = reference((0, 1), (1, 1)).with_time_signature(Some(
+            mondrian_core::MusicalTimeSignature::new(1, 4).unwrap(),
+        ));
+        for number in [i32::MIN, i32::MAX] {
+            let (bar, start) = bar_position(i64::from(number), 1, unit_bar).unwrap().unwrap();
+            assert_eq!((bar, start.to_bits()), (number, i64::from(number) << 31));
+        }
+        for sample in [i64::from(i32::MIN) - 1, i64::from(i32::MAX) + 1] {
+            assert!(position(sample, 1, unit_bar).is_ok());
+            assert_eq!(bar_position(sample, 1, unit_bar), Err(BeatPositionError::OutOfRange));
+        }
+        let narrow = reference((0, 1), (1, 1)).with_time_signature(Some(
+            mondrian_core::MusicalTimeSignature::new(1, u16::MAX).unwrap(),
+        ));
+        assert!(position(1_000_000, 1, narrow).is_ok());
+        assert_eq!(
+            bar_position(1_000_000, 1, narrow),
+            Err(BeatPositionError::OutOfRange)
+        );
+        assert_eq!(
+            bar_position(0, 0, music),
+            Err(BeatPositionError::ZeroSampleRate)
+        );
+        assert_eq!(
+            bar_position(0, 48_000, reference((0, 1), (1, 2))).unwrap(),
+            None
+        );
+    }
 
     fn reference(zero: (i64, i64), duration: (i64, i64)) -> MusicalTimeReference {
         MusicalTimeReference::new(

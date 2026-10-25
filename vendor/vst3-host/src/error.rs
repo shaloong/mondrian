@@ -120,6 +120,8 @@ pub enum MusicalTimeError {
     UnsupportedBackend,
     /// An explicit musical reference owns tempo until a position-only install clears it.
     AnchoredTempo,
+    /// A constant meter in the musical reference owns signature and bar origin.
+    AnchoredTimeSignature,
     /// Compatibility refusal retained from the initial pure-audio anchored API.
     /// Explicit checked Note batches now project PPQ; legacy event ingress does not.
     EventInputUnsupported,

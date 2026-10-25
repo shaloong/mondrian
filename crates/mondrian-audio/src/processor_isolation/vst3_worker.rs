@@ -1941,12 +1941,18 @@ impl VstSignalFields<'_> {
             .map(|reference| {
                 let zero = reference.quarter_note_zero();
                 let duration = reference.quarter_note_duration();
-                vst3_host::audio::ProcessMusicalReference::new(
+                let native = vst3_host::audio::ProcessMusicalReference::new(
                     zero.numerator(),
                     zero.denominator(),
                     duration.numerator(),
                     duration.denominator(),
-                )
+                )?;
+                match reference.time_signature() {
+                    Some(signature) => {
+                        native.with_time_signature(signature.numerator(), signature.denominator())
+                    }
+                    None => Ok(native),
+                }
             })
             .transpose()
             .map_err(|error| {
