@@ -9,6 +9,66 @@ fn tt(n: i64, d: i64) -> TimelineTime {
     TimelineTime::new(n, d).unwrap()
 }
 
+#[test]
+fn processor_input_requires_the_exact_direct_definition_input() {
+    let kind = EffectType::External(format!("fixture.input-nodes.{}", EffectId::new()));
+    let processor =
+        crate::effect::CustomEffectProcessorBinding::new_f32(Arc::new(|_, _, _| Ok(())));
+    register_effect_definition(
+        EffectDefinition::new(
+            kind.key(),
+            "Two processor nodes",
+            Default::default(),
+            EffectColorDomainContract::SCENE_LINEAR,
+        )
+        .with_execution_contract(EffectExecutionContract {
+            execution_modes: EffectExecutionModes::CPU_F32,
+            roi_propagation: EffectRoiPropagation::UnknownRequiresFullFrame,
+            ..EffectExecutionContract::IDENTITY
+        })
+        .with_graph_builder(Arc::new(move |_, _, graph| {
+            let op = EffectRenderOp::Custom {
+                key: "fixture.node-boundary".into(),
+                params: serde_json::json!({}),
+                cache_key: None,
+                cache_policy: EffectCachePolicy::Deterministic,
+                processor: Some(processor.clone()),
+            };
+            graph.append_unary(op.clone());
+            graph.append_unary(op);
+            Ok(())
+        })),
+    )
+    .unwrap();
+    let effects = [exposure(1.0), EffectNode::new(kind)];
+    let program =
+        PreparedEffectProgram::prepare(&effects, &[], WorkingColorSpace::LinearRec709).unwrap();
+    let other =
+        PreparedEffectProgram::prepare(&effects, &[], WorkingColorSpace::LinearRec709).unwrap();
+    let graph = program.evaluate(TimelineTime::ZERO).unwrap();
+    let stage = &graph.stage_bindings()[1];
+    assert_eq!(stage.emitted_nodes().len(), 2);
+    let direct = stage.emitted_nodes()[0];
+    let internal = stage.emitted_nodes()[1];
+    let cap = program.input_for_processor(&graph, direct).expect("direct Custom input");
+    assert_eq!(cap.evaluate(tt(1, 2)).unwrap().stage_bindings().len(), 1);
+    assert!(
+        program.input_for_processor(&graph, internal).is_none(),
+        "internal input must not resolve to Definition entry"
+    );
+    assert!(
+        other.input_for_processor(&graph, direct).is_none(),
+        "same IDs do not prove same immutable snapshot"
+    );
+    assert!(
+        program
+            .input_for_processor(&graph, graph.stage_bindings()[0].emitted_nodes()[0])
+            .is_none(),
+        "builtin node is not a processor"
+    );
+    assert!(program.input_for_processor(&graph, EffectGraphNodeId(u32::MAX)).is_none());
+}
+
 fn exposure(stops: f32) -> EffectNode {
     let mut effect = EffectNode::with_defaults(EffectType::BasicCorrection);
     let id = EffectType::BasicCorrection.parameter_id("exposure").unwrap();

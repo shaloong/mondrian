@@ -100,8 +100,9 @@ fn hierarchical_clip_author_fingerprint(
     Ok(hasher.finalize().into())
 }
 
-fn visual_frame_seed(sequence_time: TimelineTime, rate: Rational) -> i64 {
-    if let Ok(position) = sequence_time.to_frame_position(rate, FrameRounding::Nearest)
+fn visual_frame_seed(sequence_time: TimelineTime, time_base: Rational) -> i64 {
+    let frame_rate = Rational::new(time_base.den, time_base.num);
+    if let Ok(position) = sequence_time.to_frame_position(frame_rate, FrameRounding::Nearest)
         && TimelineTime::from_frame_position(position).ok() == Some(sequence_time)
     {
         return position.frame;
@@ -110,8 +111,10 @@ fn visual_frame_seed(sequence_time: TimelineTime, rate: Rational) -> i64 {
     hasher.update(b"mondrian.visual-off-grid-frame-seed.v1");
     hasher.update(sequence_time.numerator().to_le_bytes());
     hasher.update(sequence_time.denominator().to_le_bytes());
-    hasher.update(rate.num.to_le_bytes());
-    hasher.update(rate.den.to_le_bytes());
+    // Preserve the existing off-grid identity; only frame-grid conversion
+    // needs the reciprocal rate rather than seconds-per-frame.
+    hasher.update(time_base.num.to_le_bytes());
+    hasher.update(time_base.den.to_le_bytes());
     let digest = hasher.finalize();
     i64::from_le_bytes([
         digest[0], digest[1], digest[2], digest[3], digest[4], digest[5], digest[6], digest[7],
@@ -833,6 +836,37 @@ impl PreparedVisualProgram {
             .map_err(|error| self.temporal_preparation_error(placement.clip_id, error))
     }
 
+    pub(crate) fn prepare_clip_processor_input_execution(
+        &self,
+        placement: TimelineClipExecutionRef,
+        graph: &CompiledEffectGraph,
+        node: mondrian_effects::EffectGraphNodeId,
+        request: &EffectTemporalExecutionRequest,
+    ) -> Result<PreparedEffectTemporalExecution> {
+        // This lookup also validates revision and Transition endpoint before
+        // any upstream evaluator can run. Hidden handles remain legal.
+        self.schedule.clip_content(placement)?;
+        let program = self.clip_effect_program(placement)?;
+        let input = program.input_for_processor(graph, node).ok_or_else(|| {
+            MondrianError::EffectGraphEvaluationFailed {
+                reason: format!(
+                    "Clip {} processor {:?} has no direct input in this prepared program",
+                    placement.clip_id, node
+                ),
+            }
+        })?;
+        // The original source admission supplies actual input extent/sampling.
+        // A Clip processor runs before placement compositing: neither density
+        // nor Source PAR can be inferred from the Sequence/project canvas.
+        let request = request.clone().with_output_frame_seed(
+            self.temporal_frame_seed(placement, request.output_time())
+                .map_err(|reason| MondrianError::EffectGraphEvaluationFailed { reason })?,
+        );
+        input
+            .prepare_execution(&request, |time| self.temporal_frame_seed(placement, time))
+            .map_err(|error| self.temporal_preparation_error(placement.clip_id, error))
+    }
+
     fn temporal_effect_program(
         &self,
         placement: TimelineClipExecutionRef,
@@ -848,6 +882,13 @@ impl PreparedVisualProgram {
                 ),
             });
         }
+        self.clip_effect_program(placement)
+    }
+
+    fn clip_effect_program(
+        &self,
+        placement: TimelineClipExecutionRef,
+    ) -> Result<&PreparedEffectProgram> {
         let effect_program = match self.clip_effects.get(&placement.clip_id) {
             Some(PreparedClipEffects::Ready { program, .. }) => program,
             Some(PreparedClipEffects::Blocked { reason, .. }) => {

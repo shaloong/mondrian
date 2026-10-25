@@ -11,7 +11,8 @@ use crate::{
     TimelineTransitionInputPlan,
 };
 use mondrian_core::timeline_data::{
-    AlphaInterpretation, NestedColorProcessing, TimelineClipExecutionRef,
+    AlphaInterpretation, ClipContent, NestedColorProcessing, RenderPlanSource,
+    TimelineClipExecutionRef,
 };
 use mondrian_core::{
     AssetId, Color, ColorSpace, ExecutionCancellationToken, MondrianError, SequenceId,
@@ -206,6 +207,21 @@ impl PreparedTimelineFrameExecution {
 }
 
 impl TimelineTemporalDemandBatch {
+    /// Execute a processor's upstream input on the waiting invocation's bank,
+    /// Control and remaining grant. Source work must already have been resolved
+    /// by the original Preview/Export scheduler into `prepared`; no decode or
+    /// cache publication occurs here. `held_bytes` covers all parent backing
+    /// still live beyond the prepared source coverage.
+    pub fn execute_processor_input(
+        &self,
+        resources: &mut mondrian_effects::EffectProcessorResources<'_>,
+        prepared: &mut PreparedTemporalFrameSet,
+        held_bytes: usize,
+        control: &mut mondrian_effects::EffectProcessorControl<'_>,
+    ) -> Result<EffectTemporalExecutionOutput, EffectTemporalExecutionError> {
+        resources.execute_prepared_input_f32(&self.execution, prepared, held_bytes, control)
+    }
+
     /// Placement whose source value enters the graph.
     pub const fn placement(&self) -> TimelineClipExecutionRef {
         self.placement
@@ -229,6 +245,139 @@ impl TimelineTemporalDemandBatch {
     /// Concrete source work that Preview or Export must resolve.
     pub fn source_demands(&self) -> &[TimelineTemporalSourceDemand] {
         &self.source_demands
+    }
+}
+
+impl PreparedVisualProgram {
+    /// Prepare a concrete processor's entering value at exact Clip author time.
+    /// Uses the original immutable program, placement and source interpretation;
+    /// the waiting processor and downstream stages are not evaluated. The batch
+    /// uses the same source algebra as ordinary finite-temporal execution and
+    /// must be resolved through the consumer's existing scheduler before
+    /// [`TimelineTemporalDemandBatch::execute_processor_input`]. This pure
+    /// planning entry does not enable native temporal capabilities.
+    pub fn prepare_clip_processor_input(
+        &self,
+        placement: TimelineClipExecutionRef,
+        graph: &CompiledEffectGraph,
+        node: mondrian_effects::EffectGraphNodeId,
+        request: &EffectTemporalExecutionRequest,
+    ) -> Result<TimelineTemporalDemandBatch, TimelineTemporalPreparationError> {
+        match self.schedule().clip_content(placement).map_err(|error| {
+            TimelineTemporalPreparationError::SourceSampling {
+                clip_id: placement.clip_id,
+                reason: error.to_string(),
+            }
+        })? {
+            ClipContent::BasicTitle { .. } => {
+                return Err(TimelineTemporalPreparationError::BasicTitleUnsupported {
+                    clip_id: placement.clip_id,
+                })
+            }
+            ClipContent::AdjustmentLayer { .. } => {
+                return Err(TimelineTemporalPreparationError::AdjustmentUnsupported {
+                    clip_id: placement.clip_id,
+                })
+            }
+            _ => {}
+        }
+        let execution = self
+            .prepare_clip_processor_input_execution(placement, graph, node, request)
+            .map_err(|error| TimelineTemporalPreparationError::EffectDemand {
+                clip_id: placement.clip_id,
+                reason: error.to_string(),
+            })?;
+        self.bind_temporal_sources(placement, execution)
+    }
+
+    fn bind_temporal_sources(
+        &self,
+        placement: TimelineClipExecutionRef,
+        execution: PreparedEffectTemporalExecution,
+    ) -> Result<TimelineTemporalDemandBatch, TimelineTemporalPreparationError> {
+        let source_demands = execution
+            .demands()
+            .requests()
+            .iter()
+            .copied()
+            .map(|effect_request| {
+                Ok(TimelineTemporalSourceDemand {
+                    effect_request,
+                    placement,
+                    source: self.temporal_source_at(placement, effect_request.time())?,
+                })
+            })
+            .collect::<Result<Vec<_>, TimelineTemporalPreparationError>>()?;
+        Ok(TimelineTemporalDemandBatch {
+            placement,
+            execution,
+            source_demands: source_demands.into(),
+        })
+    }
+
+    fn temporal_source_at(
+        &self,
+        placement: TimelineClipExecutionRef,
+        time: TimelineTime,
+    ) -> Result<TimelineTemporalSource, TimelineTemporalPreparationError> {
+        fn sampling_error(
+            clip_id: mondrian_core::ClipId,
+            error: impl std::fmt::Display,
+        ) -> TimelineTemporalPreparationError {
+            TimelineTemporalPreparationError::SourceSampling { clip_id, reason: error.to_string() }
+        }
+        let content = self
+            .schedule()
+            .clip_content(placement)
+            .map_err(|e| sampling_error(placement.clip_id, e))?;
+        Ok(match content {
+            ClipContent::Media { asset_id, interpretation } => {
+                let sample = self
+                    .sample_clip_source(placement, time)
+                    .map_err(|e| sampling_error(placement.clip_id, e))?;
+                let source_sample = if let Some(rate) = interpretation.frame_rate_override {
+                    let position = sample
+                        .to_frame_position(rate)
+                        .map_err(|e| sampling_error(placement.clip_id, e))?;
+                    SourceSampleTarget::covering(
+                        TimelineTime::from_frame_position(position)
+                            .map_err(|e| sampling_error(placement.clip_id, e))?,
+                    )
+                } else {
+                    sample
+                };
+                TimelineTemporalSource::Media {
+                    asset_id: *asset_id,
+                    source_sample,
+                    color_space_override: interpretation.color_space_override,
+                    alpha_interpretation: interpretation.alpha,
+                    picture_overrides: interpretation.picture_overrides(),
+                    auto_tone_map: self.schedule().auto_tone_map_media(),
+                }
+            }
+            ClipContent::NestedSequence { sequence_id, color_processing } => {
+                TimelineTemporalSource::NestedSequence {
+                    sequence_id: *sequence_id,
+                    source_sample: self
+                        .sample_clip_source(placement, time)
+                        .map_err(|e| sampling_error(placement.clip_id, e))?,
+                    color_processing: *color_processing,
+                }
+            }
+            ClipContent::SolidColor { color, .. } => {
+                TimelineTemporalSource::SolidColor { color: *color }
+            }
+            ClipContent::BasicTitle { .. } => {
+                return Err(TimelineTemporalPreparationError::BasicTitleUnsupported {
+                    clip_id: placement.clip_id,
+                })
+            }
+            ClipContent::AdjustmentLayer { .. } => {
+                return Err(TimelineTemporalPreparationError::AdjustmentUnsupported {
+                    clip_id: placement.clip_id,
+                })
+            }
+        })
     }
 }
 
@@ -569,41 +718,6 @@ fn collect_media_batch(
         media.frame_seed,
         cancellation,
         session,
-        |request| {
-            let source_sample = program
-                .sample_clip_source(media.placement, request.time())
-                .map_err(|error| TimelineTemporalPreparationError::SourceSampling {
-                    clip_id: media.placement.clip_id,
-                    reason: error.to_string(),
-                })?;
-            let source_sample = if let Some(rate) = media.frame_rate_override {
-                let position = source_sample.to_frame_position(rate).map_err(|error| {
-                    TimelineTemporalPreparationError::SourceSampling {
-                        clip_id: media.placement.clip_id,
-                        reason: error.to_string(),
-                    }
-                })?;
-                SourceSampleTarget::covering(TimelineTime::from_frame_position(position).map_err(
-                    |error| TimelineTemporalPreparationError::SourceSampling {
-                        clip_id: media.placement.clip_id,
-                        reason: error.to_string(),
-                    },
-                )?)
-            } else {
-                source_sample
-            };
-            Ok(TimelineTemporalSource::Media {
-                asset_id: media.asset_id,
-                source_sample,
-                color_space_override: media.color_space_override,
-                alpha_interpretation: media.alpha_interpretation,
-                picture_overrides: mondrian_core::PictureInterpretationOverrides {
-                    pixel_aspect_ratio: media.pixel_aspect_ratio_override,
-                    field_order: media.field_order_override,
-                },
-                auto_tone_map: media.auto_tone_map,
-            })
-        },
     )
 }
 
@@ -633,19 +747,6 @@ fn collect_nested_batch(
         nested.frame_seed,
         cancellation,
         session,
-        |request| {
-            let source_sample = program
-                .sample_clip_source(nested.placement, request.time())
-                .map_err(|error| TimelineTemporalPreparationError::SourceSampling {
-                    clip_id: nested.placement.clip_id,
-                    reason: error.to_string(),
-                })?;
-            Ok(TimelineTemporalSource::NestedSequence {
-                sequence_id: nested.sequence_id,
-                source_sample,
-                color_processing: nested.color_processing,
-            })
-        },
     )
 }
 
@@ -675,7 +776,6 @@ fn collect_solid_batch(
         solid.frame_seed,
         cancellation,
         session,
-        |_request| Ok(TimelineTemporalSource::SolidColor { color: solid.color }),
     )
 }
 
@@ -691,10 +791,6 @@ fn collect_batch(
     output_frame_seed: i64,
     cancellation: ExecutionCancellationToken,
     session: Option<&mut EffectExecutionSession>,
-    mut resolve_source: impl FnMut(
-        EffectTemporalFrameRequest,
-    )
-        -> Result<TimelineTemporalSource, TimelineTemporalPreparationError>,
 ) -> Result<(), TimelineTemporalPreparationError> {
     let execution = EffectTemporalExecutionRequest::new(
         generation,
@@ -719,24 +815,7 @@ fn collect_batch(
         clip_id: placement.clip_id,
         reason: error.to_string(),
     })?;
-    let source_demands = prepared
-        .demands()
-        .requests()
-        .iter()
-        .copied()
-        .map(|effect_request| {
-            Ok(TimelineTemporalSourceDemand {
-                effect_request,
-                placement,
-                source: resolve_source(effect_request)?,
-            })
-        })
-        .collect::<Result<Vec<_>, TimelineTemporalPreparationError>>()?;
-    batches.push(TimelineTemporalDemandBatch {
-        placement,
-        execution: prepared,
-        source_demands: source_demands.into(),
-    });
+    batches.push(program.bind_temporal_sources(placement, prepared)?);
     Ok(())
 }
 
@@ -842,6 +921,10 @@ fn replace_effect_graph(
 }
 
 #[cfg(test)]
+#[path = "timeline_processor_input_tests.rs"]
+mod processor_input_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::evaluate_prepared_visual_program;
@@ -862,7 +945,7 @@ mod tests {
         temporal_sample_effect(TimelineTime::ZERO.checked_sub(offset).expect("past offset"))
     }
 
-    fn temporal_sample_effect(sample_offset: TimelineTime) -> EffectNode {
+    pub(super) fn temporal_sample_effect(sample_offset: TimelineTime) -> EffectNode {
         static NEXT: AtomicU64 = AtomicU64::new(1);
         let id = NEXT.fetch_add(1, Ordering::Relaxed);
         let effect_type = EffectType::External(format!("test.timeline.temporal.{id}"));

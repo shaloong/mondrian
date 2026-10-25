@@ -115,8 +115,10 @@ immutable program. Compiler provenance includes the legacy stack slot, or the
 before/after Grade assignment and Grade node; a reused Grade or a dense compiled
 stage index is insufficient. A program-owned proof rejects bindings from another
 snapshot. Synthetic composition/mask stages and emitted zero-input producers do
-not grant this input. A consumer inside a multi-node Definition must additionally
-verify its selected Custom node directly consumes that Definition entering value.
+not grant this input. The concrete node selector
+`PreparedEffectProgram::input_for_processor` verifies the actual Custom node
+directly consumes that entering value; an internal multi-node Definition value
+is not silently substituted.
 
 At the requested exact author time, only that input's ancestors are evaluated.
 The waiting Definition, unrelated Grade branches and downstream metadata builders
@@ -149,26 +151,42 @@ is the nested baseline, so only new nested feedback reduces the remaining grant.
 Input capabilities must be borrowed by the invocation. A strong capability retained
 inside a factory would make a program/factory/program ownership cycle. The native
 calibration uses weak test bootstrap only; that is not a production binding scheme.
-The production resolver still needs the original immutable source/Clip admission.
+`PreparedVisualProgram::prepare_clip_processor_input` now prepares that input
+from the original Clip/Transition-endpoint snapshot. Complete-frame temporal
+work and processor input use one source mapper: media retime plus interpretation
+grid, nested Sequence color semantics, or solid color. It emits the existing
+demand batch for the original Preview/Export scheduler and bank; it owns no
+Session, decoder or cache. Basic Title and Adjustment history remain refused.
+Input extent, PAR and sampling belong to the actual source value, not the
+Sequence/project canvas. The invocation must supply and preserve that contract.
+
+Historical frame seeds use the Sequence grid: seconds-per-frame must be
+inverted before frame-rate conversion. The former reciprocal error produced
+hashed seeds at on-grid historical instants. The existing off-grid hash rule
+is unchanged. A regression executes the original temporal path with current
+frame72 and historical frame69 and verifies their exact mixed pixel.
 The bank retains one configuration per occurrence: changed raster/project geometry,
 format or recipe revision retires the obsolete idle worker. The native calibration
 therefore checks exact configuration retirement, rather than assuming a variant
 cache. Optional native retention must use the recipe's declared bytes, not a guessed
 constant; a legal active render may intentionally run without optional retention.
 
-Current Windows qualification: Effects 376 passed/0 ignored, Renderer 673
-passed/39 ignored, Export 300 passed/18 ignored and App 3122 passed/212 ignored.
-The App validation build includes OpenFX host 113 passed/67 ignored and Effect
-adapter 11 passed/0 ignored. Five actual supervised resident gates passed with
-the current ordinary worker; every gate settled with empty stderr. The unchanged
-C++ HostSupport/Host retains its earlier 13-group qualification, including official
-Basic and published Misc Invert 2.0; those groups were not rerun for this Rust slice.
-The worker is test-profile opt0/debug0 with default features and no libtest harness;
+Current Windows affected-module qualification: Effects 377 passed/0 ignored,
+Renderer 678 passed/39 ignored, Export 300 passed/18 ignored and App 3122
+passed/212 ignored. Five new Renderer tests cover source mapping, temporal
+pixels, foreign provenance refusal, independent source sampling and the
+original historical-seed path; one Effects test rejects internal node inputs.
 The four libraries were built together: App validation opt0/debug0, Effects
 opt1/debug0 without extra features, Renderer/Export validation opt1/debug0.
-Export validation adds two tests to the earlier default298; these counts are not
-a new default whole-workspace census.
-This is affected-module regression, not a new whole-workspace or release qualification.
+All original complete gates settled with empty stderr. Builds and Export/App
+full gates required execution outside the Windows sandbox: sandbox builds
+failed writing rmeta (OS650), and sandbox Export refused atomic publication
+and same-length replacement (OS5); no source, assertion or budget workaround.
+The unchanged native bank/transport remains qualified by the earlier five
+gates at2c56df00; the worker and C++13 groups were not rebuilt or rerun for
+this Clip mapping slice. No new whole-workspace, release, third-party, RT or
+performance qualification follows.
+
 The native late-request gate repeats four full-RGBA renders on one native owner,
 with eight readers coalescing two exact dependencies while Output/current leases
 remain live. Its original owner executes the existing bounded time-expanded graph
@@ -196,9 +214,10 @@ sticky deadline, pixel-chunk polling and no duplicate charge of prior feedback.
 
 SourceDeliveryProbe deliberately does not declare temporal access: this is finite
 transport/graph calibration, not conforming third-party temporal compatibility.
-The normal product factory has no upstream resolver binding yet. The full Clip
-retime/source admission, dependency-action scheduling, legal action/thread image
-coverage, Preview/Export, real temporal plugins and cache invalidation remain open.
+The normal product factory has no upstream resolver binding yet. Production invocation borrowing and actual source admission, native frame
+format/alpha handling, dependency-action scheduling, legal action/thread image
+coverage, field-grid seed parity, Preview/Export, real temporal plugins and cache
+invalidation remain open.
 Temporal capability flags stay false. No RT, performance, complete heap, GPU or
 other-platform qualification follows from these gates.
 
@@ -215,9 +234,10 @@ fixture and actual HostSupport/Host. Action logs confirm one Create/Destroy per
 group, no Render, and no dispatch for invalid time/non-temporal declarations.
 These are action qualifications, not third-party temporal-renderer evidence.
 
-Next bind this compiler-selected entering-value capability and the internal service
-to the production Custom processor's shared resource bank and exact Clip
-retime/source admission.
+Next borrow the original program and prepared source service in the production
+Custom invocation, then resolve these existing demand batches through its
+original scheduler/decoder and shared bank. Do not retain a capability in the
+factory or reintroduce another Session.
 Connect the dependency action to that same execution; verify all legal
 action/thread image requests before enabling capabilities. Distinguish declared media absence from an
 unprepared dependency; missing planned input cannot silently become a black frame.

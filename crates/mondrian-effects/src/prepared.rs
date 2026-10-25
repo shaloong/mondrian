@@ -11,8 +11,8 @@ use crate::{
     },
     mask::MaskComponent,
     EffectDeterminism, EffectExecutionContract, EffectExecutionEnvelope, EffectExecutionModes,
-    EffectExecutionSession, EffectGraphTopology, EffectResourceLifetime, EffectRoiPropagation,
-    EffectStateModel, EffectTemporalInputExtent, LutPreparationCache,
+    EffectExecutionSession, EffectGraphTopology, EffectRenderOp, EffectResourceLifetime,
+    EffectRoiPropagation, EffectStateModel, EffectTemporalInputExtent, LutPreparationCache,
 };
 use mondrian_core::{
     effect_data::EffectNode, EffectId, GradeGraph, GradeGraphNodeId, GradeGraphNodeKind,
@@ -910,6 +910,28 @@ impl PreparedEffectInput {
 }
 
 impl PreparedEffectProgram {
+    /// Bind the input of a concrete Custom processor in this program's actual
+    /// compiled graph. An internal node fed by another node of its Definition
+    /// is deliberately refused: that value is not the Definition entering value.
+    pub fn input_for_processor(
+        &self,
+        graph: &CompiledEffectGraph,
+        node: EffectGraphNodeId,
+    ) -> Option<PreparedEffectInput> {
+        let input = match &graph.graph().node(node)?.kind {
+            EffectGraphNodeKind::UnaryEffect { input, op: EffectRenderOp::Custom { .. } }
+            | EffectGraphNodeKind::DomainEffect {
+                input, op: EffectRenderOp::Custom { .. }, ..
+            } => *input,
+            _ => return None,
+        };
+        let stage = graph
+            .stage_bindings()
+            .iter()
+            .find(|stage| stage.emitted_nodes().contains(&node) && stage.input_value() == input)?;
+        self.input_for_stage(stage)
+    }
+
     /// Bind an entering-value capability from this program's actual compiler
     /// binding. This is not an authored stack index or an EffectId lookup.
     /// Synthetic composite/mask stages and zero-input producers have no such

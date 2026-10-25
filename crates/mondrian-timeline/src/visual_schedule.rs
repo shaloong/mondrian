@@ -241,6 +241,14 @@ impl PreparedVisualSchedule {
         self.tracks[track_index].track.clips[clip_index].timeline_to_source_sample(sequence_time)
     }
 
+    /// Read source semantics from this exact prepared placement, including a
+    /// validated Transition endpoint. Temporal consumers must not reopen the
+    /// mutable author Clip or accept source facts from an unrelated render plan.
+    pub fn clip_content(&self, placement: TimelineClipExecutionRef) -> Result<&ClipContent> {
+        let (track_index, clip_index) = self.clip_location(placement)?;
+        Ok(&self.tracks[track_index].track.clips[clip_index].content)
+    }
+
     /// Map one exact Clip-local Effect instant back into the owning Sequence
     /// author-time domain without applying source retime.
     ///
