@@ -439,7 +439,7 @@ instruments, other platforms, realtime and performance remain unqualified.
   39.01ms, while OS exit remains unobserved at the 100.47ms deadline. This narrows
   that sample to the tail after inner return; it identifies neither main/CRT/TLS
   nor the old build's failed phase. The original unobserved failure is retained.
-- Audio forced termination uses an independent two-second exit-observation
+- Audio and resident OpenFX forced termination use independent two-second exit-observation
   deadline on the original Child, replacing its unbounded post-kill wait.
   Successful kill alone does not settle ownership: a timeout retains Retiring
   and the existing Unconfirmed/staging-retention policy. A verified late exit
@@ -454,8 +454,15 @@ instruments, other platforms, realtime and performance remain unqualified.
   `bd0e9be4` worker supplies reviewed unchanged SDK/worker paths. This does not
   qualify the current desktop parent, real kernel-I/O stalls, other platforms,
   or a strict total shutdown/RT bound: kill, OS scheduling and logging remain
-  separate costs. OpenFX resident post-kill waiting remains unbounded and is a
-  separate pending correction. The original F06 failures remain open.
+  separate costs. OpenFX Host/Effect/Adapter ordinary module scopes additionally
+  pass 127 tests with 69 original ignores, including three new deadline/status/I/O
+  controls. Nine original-Job native gates pass with empty stderr and settled
+  descendants: the new real-Child pending-kill timeout, ownership/primary-error
+  controls, and official Basic processing/close. The App parent is opt0/validation
+  with the same reviewed unchanged normal worker. Cleanup uses the existing
+  CleanupProbe without entering graceful-exit query statistics; no new owner,
+  thread, state slot or wire schema is introduced. Current normal desktop release
+  alignment remains pending. The original F06 failures remain open.
 - A safe conservative resource-overlap bound may reject a tight grant. It is
   not a minimum-peak or whole-plugin-heap measurement; physical realtime safety
   requires actual instrumentation.

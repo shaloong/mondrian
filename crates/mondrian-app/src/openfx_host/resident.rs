@@ -32,6 +32,8 @@ const NONCE_ENV: &str = "MONDRIAN_INTERNAL_OPENFX_NONCE";
 const VERSION: u16 = 15;
 const POLL: Duration = Duration::from_millis(20);
 const RETIRE: Duration = Duration::from_millis(100);
+// Resource settlement after an asynchronous kill is separate from graceful exit.
+const TERMINATED_CHILD_WAIT_BUDGET: Duration = Duration::from_secs(2);
 const FRAME_TRANSFER_BYTES: usize = 1024 * 1024;
 const FRAME_TRANSFER_PIXELS: usize = FRAME_TRANSFER_BYTES / std::mem::size_of::<[f32; 4]>();
 
@@ -212,6 +214,27 @@ fn observe_retirement_exit(
     }
 }
 
+// A cleanup-only wait on the retained Child. Early OS timeouts consume the
+// remaining absolute budget; an actual late exit still establishes settlement.
+fn wait_for_termination_until(
+    deadline: Instant,
+    mut now: impl FnMut() -> Instant,
+    mut wait: impl FnMut(Duration) -> io::Result<Option<std::process::ExitStatus>>,
+) -> io::Result<std::process::ExitStatus> {
+    loop {
+        let Some(remaining) = deadline.checked_duration_since(now()).filter(|time| !time.is_zero())
+        else {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "native session termination was not confirmed within the cleanup wait budget",
+            ));
+        };
+        if let Some(status) = wait(remaining)? {
+            return Ok(status);
+        }
+    }
+}
+
 #[derive(Debug)]
 struct ProcessOwner {
     child: Child,
@@ -293,7 +316,29 @@ impl ProcessOwner {
             self.cleanup_hooks = Some(hooks);
             return result;
         }
-        self.terminate_with(Child::try_wait, Child::kill, Child::wait)
+        self.terminate_with(Child::try_wait, Child::kill, Self::wait_after_kill)
+    }
+
+    fn wait_after_kill(child: &mut Child) -> io::Result<std::process::ExitStatus> {
+        let deadline = Instant::now() + TERMINATED_CHILD_WAIT_BUDGET;
+        // Match Child::wait's stdin release while retaining the original owner.
+        drop(child.stdin.take());
+        wait_for_termination_until(deadline, Instant::now, |remaining| {
+            #[cfg(windows)]
+            {
+                // CleanupProbe already observes this operation. These queries
+                // must not be published as graceful-exit query evidence.
+                retirement_wait::wait_for_exit(child, remaining, None)
+            }
+            #[cfg(not(windows))]
+            {
+                let status = child.try_wait()?;
+                if status.is_none() {
+                    thread::sleep(remaining.min(Duration::from_millis(1)));
+                }
+                Ok(status)
+            }
+        })
     }
 
     // The original operation already failed. Cleanup remains mandatory, but
@@ -1815,7 +1860,7 @@ impl OpenFxFilterSession {
                         retirement_wait::wait_for_exit(
                             &mut self.process.child,
                             deadline.saturating_duration_since(Instant::now()),
-                            &mut exit_queries,
+                            Some(&mut exit_queries),
                         )
                     }
                     #[cfg(not(windows))]
@@ -2761,6 +2806,80 @@ mod tests {
             use std::os::unix::process::ExitStatusExt;
             std::process::ExitStatus::from_raw((code as i32) << 8)
         }
+    }
+
+    #[test]
+    fn termination_wait_expiration_and_early_timeouts_never_renew_the_budget() {
+        let start = Instant::now();
+        let error = wait_for_termination_until(
+            start,
+            || start,
+            |_| panic!("expired cleanup budget must not wait"),
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+
+        let deadline = start + Duration::from_millis(10);
+        let mut clocks = [0, 1, 3, 10].into_iter();
+        let mut remaining = Vec::new();
+        let error = wait_for_termination_until(
+            deadline,
+            || start + Duration::from_millis(clocks.next().expect("no renewed deadline")),
+            |budget| {
+                remaining.push(budget);
+                Ok(None)
+            },
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        assert_eq!(remaining, [10, 9, 7].map(Duration::from_millis));
+        assert!(clocks.next().is_none());
+    }
+
+    #[cfg(any(windows, unix))]
+    #[test]
+    fn termination_wait_late_status_settles_resources_without_graceful_success() {
+        let start = Instant::now();
+        let deadline = start + RETIRE;
+        for code in [0, 7] {
+            let clock = std::cell::Cell::new(start);
+            let status = wait_for_termination_until(
+                deadline,
+                || clock.get(),
+                |_| {
+                    clock.set(deadline + Duration::from_nanos(1));
+                    Ok(Some(retirement_status(code)))
+                },
+            )
+            .expect("actual late exit confirms resources can be retired");
+            assert_eq!(status.code(), Some(code as i32));
+            let mut clocks = [start, clock.get()].into_iter();
+            let observed = observe_retirement_exit(
+                deadline,
+                || clocks.next().expect("original pre/post exit query clock reads"),
+                || Ok(Some(status)),
+            )
+            .unwrap()
+            .unwrap();
+            assert!(matches!(
+                observed.graceful,
+                Err(OpenFxHostError::DeadlineExceeded)
+            ));
+        }
+    }
+
+    #[test]
+    fn termination_wait_io_error_is_immediate_and_preserves_os_error() {
+        let start = Instant::now();
+        let mut clocks = [start].into_iter();
+        let error = wait_for_termination_until(
+            start + RETIRE,
+            || clocks.next().expect("failed OS wait must not retry"),
+            |_| Err(io::Error::from_raw_os_error(6)),
+        )
+        .unwrap_err();
+        assert_eq!(error.raw_os_error(), Some(6));
+        assert!(clocks.next().is_none());
     }
 
     #[test]
@@ -3881,11 +4000,13 @@ mod process_retirement_tests {
         let (mut owner, directory) = sleeping_owner();
         let pid = owner.child.id();
         let mut queries = close_observation::ExitQueryProbe::default();
-        assert!(
-            retirement_wait::wait_for_exit(&mut owner.child, Duration::ZERO, &mut queries)
-                .expect("finite held-child timeout")
-                .is_none()
-        );
+        assert!(retirement_wait::wait_for_exit(
+            &mut owner.child,
+            Duration::ZERO,
+            Some(&mut queries)
+        )
+        .expect("finite held-child timeout")
+        .is_none());
         assert_eq!(owner.state, ProcessState::Running);
         assert_eq!(owner.child.id(), pid);
         assert!(owner.child.try_wait().expect("timeout did not kill the child").is_none());
@@ -3898,7 +4019,7 @@ mod process_retirement_tests {
                 retirement_wait::wait_for_exit(
                     &mut owner.child,
                     deadline.saturating_duration_since(Instant::now()),
-                    &mut queries,
+                    Some(&mut queries),
                 )
             })
             .expect("same borrowed handle waits only until the original fixture deadline")
@@ -4107,6 +4228,45 @@ mod process_retirement_tests {
                 |_| panic!("exit retry must not wait"),
             )
             .expect("actual exit observation settles failed reap");
+        assert_settled_idempotent(&mut owner);
+    }
+
+    #[test]
+    #[ignore = "requires actual outer owner Job; accepted-but-pending kill with real retained Child"]
+    fn resident_termination_wait_deadline_retains_child_and_records_cleanup_failure() {
+        let (mut owner, directory) = sleeping_owner();
+        let pid = owner.child.id();
+        let mut probe = close_observation::CleanupProbe::new(true);
+        // Accepted kill is injected; the real Child remains held on its original
+        // marker. The production cleanup wait must return without claiming exit.
+        let result = owner.terminate_with_probe(
+            Child::try_wait,
+            |_| Ok(()),
+            ProcessOwner::wait_after_kill,
+            &mut probe,
+        );
+        let text = refusal_text(result, pid);
+        assert!(
+            text.contains("reap failed") && text.contains("TimedOut"),
+            "{text}"
+        );
+        assert_eq!(owner.state, ProcessState::Retiring);
+        assert_eq!(owner.child.id(), pid);
+        assert!(owner.child.try_wait().expect("same Child remains live").is_none());
+        assert!(directory.path().is_dir());
+        assert!(matches!(
+            owner.check_liveness(),
+            Err(OpenFxHostError::Unavailable(_))
+        ));
+        let (result, flags, value) = probe.operation(close_observation::CleanupStep::Wait);
+        assert_eq!((result, flags & !1, value), (4, 0, 0));
+        assert_eq!(probe.operation(close_observation::CleanupStep::Kill).0, 3);
+        assert_eq!(
+            probe.operation(close_observation::CleanupStep::FinalObservation),
+            (0, 0, 0)
+        );
+        owner.terminate().expect("actual kill and bounded reap on the original owner");
+        assert_eq!(owner.child.id(), pid);
         assert_settled_idempotent(&mut owner);
     }
 

@@ -60,12 +60,15 @@ fn wait_then_query(
 pub(super) fn wait_for_exit(
     child: &mut Child,
     remaining: Duration,
-    queries: &mut ExitQueryProbe,
+    queries: Option<&mut ExitQueryProbe>,
 ) -> io::Result<Option<ExitStatus>> {
     let handle = child.as_raw_handle();
     wait_then_query(
         || wait_for_handle(handle, finite_millis(remaining)),
-        || queries.observe(|| child.try_wait()),
+        || match queries {
+            Some(queries) => queries.observe(|| child.try_wait()),
+            None => child.try_wait(),
+        },
     )
 }
 
