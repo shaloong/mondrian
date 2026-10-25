@@ -51,6 +51,14 @@ must retain the child, reprepare the sole canonical audio plan/PDC and resume;
 returning a fatal error alone is insufficient acceptance.
 
 
+## Constant meter DSP oracle (mode 9)
+
+Mode9 keeps the existing state envelope, ports and latency3. Actual IAudioProcessor
+callbacks independently check anchored PPQ, Tempo80, explicit7/8, bar start and
+validity flags; native bar/signature values contribute to PCM across boundaries.
+Quarter zero is2/rate, and the finite oracle supports44.1/48k. Older modes retain
+their contracts. This owned oracle does not qualify third-party or RT behavior.
+
 ## Constant component configuration service controls (modes 5/6)
 
 Mode 5 initially activates with a three-frame delay. Actual DSP records desired

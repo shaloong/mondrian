@@ -78,7 +78,7 @@ unsafe fn read_gain_state(stream: *mut IBStream) -> Option<(f64, u32)> {
     }
     let gain = f64::from_le_bytes(bytes[8..16].try_into().ok()?);
     let mode = u32::from_le_bytes(bytes[16..20].try_into().ok()?);
-    (gain.is_finite() && (0.0..=1.0).contains(&gain) && mode <= 8).then_some((gain, mode))
+    (gain.is_finite() && (0.0..=1.0).contains(&gain) && mode <= 9).then_some((gain, mode))
 }
 
 unsafe fn write_gain_state(stream: *mut IBStream, gain: f64, mode: u32) -> tresult {
@@ -284,6 +284,61 @@ fn canonical_musical_context(data: &ProcessData, prepared_rate: u64) -> Option<(
     } else {
         None
     }
+}
+
+#[path = "../../native-meter-oracle.rs"]
+mod meter_oracle;
+
+fn meter_context(data: &ProcessData, prepared_rate: u64) -> Option<(i64, i32, f32)> {
+    if data.processContext.is_null() || !(1..=4).contains(&data.numSamples) {
+        return None;
+    }
+    // SAFETY: this function borrows the live process context for this callback.
+    let context = unsafe { &*data.processContext };
+    let rate = match f64::from_bits(prepared_rate) {
+        44_100.0 => 44_100,
+        48_000.0 => 48_000,
+        _ => return None,
+    };
+    let expected = meter_oracle::expected(context.projectTimeSamples, rate)?;
+    let last = context.projectTimeSamples.checked_add(i64::from(data.numSamples) - 1)?;
+    meter_oracle::expected(last, rate)?;
+    use ProcessContext_::StatesAndFlags_ as S;
+    let flags =
+        (S::kProjectTimeMusicValid | S::kTempoValid | S::kBarPositionValid | S::kTimeSigValid)
+            as u32;
+    if context.sampleRate.to_bits() != prepared_rate
+        || context.state & !(S::kPlaying as u32) != flags
+        || context.projectTimeMusic.to_bits() != (expected.quarter_numerator as f64 / expected.quarter_denominator as f64).to_bits()
+        || context.barPositionMusic.to_bits() != (f64::from(expected.bar) * 3.5).to_bits()
+        || context.tempo.to_bits() != 80_f64.to_bits()
+        || (context.timeSigNumerator, context.timeSigDenominator) != (7, 8)
+        || context.systemTime != 0
+        || context.continousTimeSamples != 0
+        || context.cycleStartMusic != 0.0
+        || context.cycleEndMusic != 0.0
+        || context.chord.keyNote != 0
+        || context.chord.rootNote != 0
+        || context.chord.chordMask != 0
+        || context.smpteOffsetSubframes != 0
+        || context.frameRate.framesPerSecond != 0
+        || context.frameRate.flags != 0
+        || context.samplesToNextClock != 0
+    {
+        return None;
+    }
+    // Consume the native field, not the expected bar, in the audible tag.
+    let bar = match context.barPositionMusic.to_bits() {
+        bits if bits == (-3.5_f64).to_bits() => -1,
+        0 => 0,
+        bits if bits == 3.5_f64.to_bits() => 1,
+        _ => return None,
+    };
+    Some((
+        context.projectTimeSamples,
+        bar,
+        context.timeSigNumerator as f32 / 128.0 + context.timeSigDenominator as f32 / 1024.0,
+    ))
 }
 
 struct GainProcessor {
@@ -749,7 +804,24 @@ impl IAudioProcessorTrait for GainProcessor {
             self.gain.store(gain.to_bits(), Ordering::Relaxed);
             return kResultOk;
         }
-        let canonical_music = if mode == 8 {
+        let mut meter_tags = [0.0_f32; 4];
+        let meter = if mode == 9 {
+            let prepared_rate = self.sample_rate.load(Ordering::Relaxed);
+            let Some(value) = meter_context(data, prepared_rate)
+            else { return kInvalidArgument; };
+            let rate = f64::from_bits(prepared_rate) as u32;
+            // Validate all four-or-fewer tags before touching foreign PCM.
+            // No panic/expect may turn malformed transport into an FFI unwind.
+            for (frame, tag) in meter_tags.iter_mut().enumerate().take(data.numSamples as usize) {
+                let Some(value_tag) = meter_oracle::pcm_tag(value.0, value.0 + frame as i64, rate, value.1, value.2)
+                else { return kInvalidArgument; };
+                *tag = value_tag;
+            }
+            Some(value)
+        } else { None };
+        let canonical_music = if let Some((sample, _, _)) = meter {
+            Some((sample, 80.0_f32 / 1024.0))
+        } else if mode == 8 {
             if self.configured_latency.load(Ordering::Relaxed) != 3 {
                 return kInvalidArgument;
             }
@@ -841,6 +913,7 @@ impl IAudioProcessorTrait for GainProcessor {
                     let tag = timeline_start.map_or(0.0, |start| ((start + frame as i64) % 251) as f32 / 1024.0);
                     let gain = if timeline_start.is_some() { gain as f32 + tag } else { gain as f32 };
                     let gain = if let Some((_, tempo)) = canonical_music { gain + tempo } else { gain };
+                    let gain = if meter.is_some() { gain + meter_tags[frame] } else { gain };
                     // Preserve old None/Stopped PCM; Playing has an independently expected audible tag.
                     let gain = gain + if timeline_start.is_some()
                         && (*data.processContext).state & ProcessContext_::StatesAndFlags_::kPlaying as u32 != 0 {
@@ -1323,6 +1396,57 @@ mod transport_oracle_contracts {
     use super::*;
 
     #[test]
+    fn meter_native_oracle_checks_each_requested_field_before_pcm() {
+        use ProcessContext_::StatesAndFlags_ as S;
+        // SAFETY: ProcessContext/ProcessData are initialized POD test carriers.
+        let mut context: ProcessContext = unsafe { std::mem::zeroed() };
+        context.sampleRate = 48_000.0;
+        context.state =
+            (S::kProjectTimeMusicValid | S::kTempoValid | S::kBarPositionValid | S::kTimeSigValid)
+                as u32;
+        context.projectTimeMusic = f64::from_bits(0xbf0d_208a_5a91_2e32);
+        context.tempo = 80.0;
+        context.barPositionMusic = -3.5;
+        context.timeSigNumerator = 7;
+        context.timeSigDenominator = 8;
+        let baseline = context;
+        let mut data: ProcessData = unsafe { std::mem::zeroed() };
+        data.numSamples = 4;
+        data.processContext = &mut context;
+        for playing in [false, true] {
+            context = baseline;
+            if playing {
+                context.state |= S::kPlaying as u32;
+            }
+            assert_eq!(
+                meter_context(&data, 48_000_f64.to_bits()),
+                Some((0, -1, 0.0625))
+            );
+        }
+        for case in 0..8 {
+            context = baseline;
+            match case {
+                0 => context.state &= !(S::kTimeSigValid as u32),
+                1 => context.barPositionMusic = 0.0,
+                2 => context.timeSigNumerator = 4,
+                3 => context.timeSigDenominator = 4,
+                4 => context.projectTimeMusic = 0.0,
+                5 => context.tempo = 120.0,
+                6 => context.state |= S::kSystemTimeValid as u32,
+                _ => context.systemTime = 1,
+            }
+            assert_eq!(
+                meter_context(&data, 48_000_f64.to_bits()),
+                None,
+                "case={case}"
+            );
+        }
+        context = baseline;
+        data.numSamples = 5;
+        assert_eq!(meter_context(&data, 48_000_f64.to_bits()), None);
+    }
+
+    #[test]
     fn scope_oracle_checks_musical_validity_independently_of_playing() {
         use ProcessContext_::StatesAndFlags_ as S;
         // SAFETY: SDK POD fields are initialized before the oracle reads them;
@@ -1491,7 +1615,7 @@ mod zero_sample_contracts {
         let output_parameters = output.to_com_ptr::<IParameterChanges>().unwrap();
         let events = ComWrapper::new(Events(Cell::new(0)));
         let output_events = events.to_com_ptr::<IEventList>().unwrap();
-        for mode in 0..=8 {
+        for mode in 0..=9 {
             wrapper.mode.store(mode, Ordering::Relaxed);
             let before = dsp_state(&wrapper);
             let gain = wrapper.gain.load(Ordering::Relaxed);

@@ -87,6 +87,16 @@ These are legal log callbacks; separate defensive controls for invalid UTF-8,
 null strings and unknown signed severities are not conforming-vendor evidence.
 
 
+## Constant meter DSP oracle (state mode 16)
+
+Mode16 keeps the five-byte state, ports and latency3. Its actual process callback
+checks seconds, exact beats, Tempo80, explicit7/8, bar number/start and unavailable
+flags against an independent finite reference (quarter zero at2/rate). Native
+bar/signature values contribute to PCM across negative, zero and positive bars.
+The shared test-only arithmetic is not used by the host or canonical PCM oracle.
+Modes0–15 retain their prior contracts; this is an owned fixture, not third-party
+compatibility or realtime/performance evidence.
+
 ## Finite echo history (state mode 12)
 
 Modes 0–11 retain their existing PCM, state and extension contracts. Mode12

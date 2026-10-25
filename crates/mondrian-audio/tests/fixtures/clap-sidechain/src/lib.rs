@@ -16,6 +16,127 @@ use std::cell::Cell;
 use std::io::{Read, Write};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
 
+#[path = "../../native-meter-oracle.rs"]
+mod meter_oracle;
+
+fn meter_transport(
+    transport: &clack_plugin::events::event_types::TransportEvent,
+    rate: u32,
+    frames: usize,
+) -> Result<(i64, i32, f32), PluginError> {
+    let fail = || PluginError::Message("invalid mode16 meter transport");
+    let scaled = i128::from(transport.song_pos_seconds.to_bits()) * i128::from(rate);
+    let factor = 1_i128 << 31;
+    let sample = i64::try_from(
+        scaled / factor
+            + if (scaled % factor).abs() * 2 >= factor {
+                scaled.signum()
+            } else {
+                0
+            },
+    )
+    .map_err(|_| fail())?;
+    let expected = meter_oracle::expected(sample, rate).ok_or_else(fail)?;
+    let beat_scaled = i128::from(expected.quarter_numerator) * (1_i128 << 31);
+    let beat_denominator = i128::from(expected.quarter_denominator);
+    let beat_ticks = ((beat_scaled.abs() + beat_denominator / 2) / beat_denominator * beat_scaled.signum()) as i64;
+    if !(1..=4).contains(&frames)
+        || sample
+            .checked_add(frames as i64 - 1)
+            .and_then(|last| meter_oracle::expected(last, rate))
+            .is_none()
+    {
+        return Err(fail());
+    }
+    let flags = TransportFlags::HAS_SECONDS_TIMELINE
+        | TransportFlags::HAS_BEATS_TIMELINE
+        | TransportFlags::HAS_TEMPO
+        | TransportFlags::HAS_TIME_SIGNATURE;
+    if transport.flags & !TransportFlags::IS_PLAYING != flags
+        || transport.header.time() != 0
+        || transport.song_pos_beats.to_bits() != beat_ticks
+        || transport.tempo.to_bits() != 80_f64.to_bits()
+        || transport.tempo_inc != 0.0
+        || transport.bar_number != expected.bar
+        || transport.bar_start.to_bits() != i64::from(expected.bar) * (7_i64 << 30)
+        || (
+            transport.time_signature_numerator,
+            transport.time_signature_denominator,
+        ) != (7, 8)
+        || transport.loop_start_beats.to_bits() != 0
+        || transport.loop_end_beats.to_bits() != 0
+        || transport.loop_start_seconds.to_bits() != 0
+        || transport.loop_end_seconds.to_bits() != 0
+    {
+        return Err(fail());
+    }
+    let signature = f32::from(transport.time_signature_numerator) / 128.0
+        + f32::from(transport.time_signature_denominator) / 1024.0;
+    Ok((sample, transport.bar_number, signature))
+}
+
+#[cfg(test)]
+mod meter_transport_contracts {
+    use super::*;
+    use clack_plugin::events::event_types::TransportEvent;
+    use clack_plugin::events::{EventFlags, EventHeader};
+    use clack_plugin::utils::{BeatTime, SecondsTime};
+
+    fn transport() -> TransportEvent {
+        TransportEvent {
+            header: EventHeader::new_core(0, EventFlags::empty()),
+            flags: TransportFlags::HAS_SECONDS_TIMELINE
+                | TransportFlags::HAS_BEATS_TIMELINE
+                | TransportFlags::HAS_TEMPO
+                | TransportFlags::HAS_TIME_SIGNATURE,
+            song_pos_beats: BeatTime::from_bits(-119_305),
+            song_pos_seconds: SecondsTime::from_bits(0),
+            tempo: 80.0,
+            tempo_inc: 0.0,
+            loop_start_beats: BeatTime::from_bits(0),
+            loop_end_beats: BeatTime::from_bits(0),
+            loop_start_seconds: SecondsTime::from_bits(0),
+            loop_end_seconds: SecondsTime::from_bits(0),
+            bar_start: BeatTime::from_bits(-(7_i64 << 30)),
+            bar_number: -1,
+            time_signature_numerator: 7,
+            time_signature_denominator: 8,
+        }
+    }
+
+    #[test]
+    fn meter_native_oracle_refuses_wrong_or_missing_facts_before_pcm() {
+        for playing in [false, true] {
+            let mut valid = transport();
+            if playing {
+                valid.flags |= TransportFlags::IS_PLAYING;
+            }
+            assert_eq!(meter_transport(&valid, 48_000, 4).unwrap(), (0, -1, 0.0625));
+        }
+        for case in 0..8 {
+            let mut invalid = transport();
+            match case {
+                0 => invalid.flags.remove(TransportFlags::HAS_TIME_SIGNATURE),
+                1 => invalid.bar_start = BeatTime::from_bits(0),
+                2 => invalid.bar_number = 0,
+                3 => invalid.time_signature_numerator = 4,
+                4 => invalid.time_signature_denominator = 4,
+                5 => invalid.song_pos_beats = BeatTime::from_bits(-119_304),
+                6 => invalid.tempo = 120.0,
+                _ => invalid.flags |= TransportFlags::IS_LOOP_ACTIVE,
+            }
+            assert!(meter_transport(&invalid, 48_000, 4).is_err(), "case={case}");
+        }
+        assert!(meter_transport(&transport(), 48_000, 5).is_err());
+        assert!(meter_transport(&transport(), 96_000, 4).is_err());
+        assert_eq!(
+            meter_oracle::pcm_tag(0, 2, 48_000, -1, 0.0625),
+            Some(0.0625)
+        );
+        assert_eq!(meter_oracle::pcm_tag(0, 2, 48_000, 0, 0.0625), Some(0.125));
+    }
+}
+
 // Only mode15's Windows witness crosses this narrow test-fixture ABI boundary.
 // Every successful OpenEvent creates one OwnedHandle; its Drop closes exactly
 // once. Each NUL-terminated UTF16 name outlives its synchronous OpenEvent call.
@@ -656,7 +777,7 @@ const ECHO_FRAMES: usize = 256;
 // Mode15 appends a fixed 16-byte Windows event nonce; no live timer state is saved.
 fn configuration_gain(bytes: [u8; 5]) -> Result<f32, PluginError> {
     let gain = f32::from_le_bytes([bytes[1], bytes[2], bytes[3], bytes[4]]);
-    if bytes[0] > 15 || !gain.is_finite() || !(0.0..=1.0).contains(&gain) {
+    if bytes[0] > 16 || !gain.is_finite() || !(0.0..=1.0).contains(&gain) {
         return Err(PluginError::Message("invalid fixture state"));
     }
     Ok(gain)
@@ -809,7 +930,12 @@ impl<'a> PluginAudioProcessor<'a, Shared<'a>, Main<'a>> for Processor<'a> {
         let frames = audio.frames_count() as usize;
         // New state 6 is an independent ABI oracle. Other states retain their
         // original PCM, ports and mode-specific lifecycle requirements.
-        let timeline_start = if (6..=9).contains(&self.mode) || self.mode == 13 {
+        let meter = if self.mode == 16 {
+            if process.steady_time.is_some() { return Err(PluginError::Message("mode16 steady time unavailable")); }
+            Some(meter_transport(process.transport.ok_or(PluginError::Message("missing mode16 transport"))?, self.sample_rate, frames)?)
+        } else { None };
+        let timeline_start = if let Some((sample, _, _)) = meter { Some(sample)
+        } else if (6..=9).contains(&self.mode) || self.mode == 13 {
             let transport = process.transport.ok_or(PluginError::Message("missing timeline transport"))?;
             if transport.flags & !TransportFlags::IS_PLAYING != TransportFlags::HAS_SECONDS_TIMELINE
                 || transport.header.time() != 0 || process.steady_time.is_some()
@@ -903,14 +1029,18 @@ impl<'a> PluginAudioProcessor<'a, Shared<'a>, Main<'a>> for Processor<'a> {
                 let sample = start.checked_add(index as i64).ok_or(PluginError::Message("transport sample overflow"))?;
                 (sample % 251) as f32 / 1024.0
             } else { 0.0 };
-            let gain = if self.mode == 11 {
+            let gain = if matches!(self.mode, 11 | 16) {
                 let start = timeline_start.ok_or(PluginError::Message("missing tempo timeline"))?;
                 let sample = start.checked_add(index as i64).ok_or(PluginError::Message("tempo sample overflow"))?;
                 let tempo = process.transport.ok_or(PluginError::Message("missing tempo"))?.tempo as f32;
-                self.gain + (sample % 251) as f32 / 1024.0 + tempo / 1024.0
+                let meter_tag = if let Some((start, bar, signature)) = meter {
+                    meter_oracle::pcm_tag(start, sample, self.sample_rate, bar, signature)
+                        .ok_or(PluginError::Message("mode16 meter PCM extent"))?
+                } else { 0.0 };
+                self.gain + (sample % 251) as f32 / 1024.0 + tempo / 1024.0 + meter_tag
             } else if timeline_start.is_some() { self.gain + tag } else { self.gain };
             // Native Playing must affect PCM, so merely accepting the flag cannot pass the oracle.
-            let gain = gain + if matches!(self.mode, 6 | 11)
+            let gain = gain + if matches!(self.mode, 6 | 11 | 16)
                 && process.transport.is_some_and(|t| t.flags.contains(TransportFlags::IS_PLAYING)) {
                 0.125
             } else { 0.0 };
@@ -1039,6 +1169,8 @@ mod finite_echo_tests {
             assert_eq!(live.process_frame([0.0; 2]), [0.0; 2]);
         }
         bytes[0] = 16;
+        assert_eq!(configuration_gain(bytes).unwrap(), 0.5);
+        bytes[0] = 17;
         assert!(configuration_gain(bytes).is_err());
     }
 }
@@ -1062,6 +1194,8 @@ mod repeat_restart_tests {
         assert!(read_repeat_restart_count(&mut &[][..]).is_err());
         assert!(read_repeat_restart_count(&mut &[3][..]).is_err());
         header[0] = 16;
+        assert_eq!(configuration_gain(header).unwrap(), 0.5);
+        header[0] = 17;
         assert!(configuration_gain(header).is_err());
     }
 

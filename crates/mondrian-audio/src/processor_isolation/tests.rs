@@ -1781,6 +1781,8 @@ mod native_performance;
 
 mod native_clap_note_metadata;
 mod native_transport;
+#[cfg(windows)]
+mod native_meter;
 #[cfg(target_os = "windows")]
 mod native_vst3_canonical_notes;
 #[cfg(target_os = "windows")]
