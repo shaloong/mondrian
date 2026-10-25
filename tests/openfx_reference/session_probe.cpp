@@ -60,8 +60,12 @@ bool honestHostCapabilities(const OfxHost* host) {
   char* generator = nullptr;
   if (properties->propGetString(host->host, kOfxImageEffectPropSupportedContexts, 1, &generator) != kOfxStatOK ||
       !generator || std::string(generator) != kOfxImageEffectContextGenerator) { return false; }
+  // Native full-RoD images may differ in size/origin (ADR0015). This flag
+  // does not grant tiles, upstream RoI scheduling or non-unit render scales.
+  int multiResolution = -1;
+  if (properties->propGetInt(host->host, kOfxImageEffectPropSupportsMultiResolution,
+          0, &multiResolution) != kOfxStatOK || multiResolution != 1) { return false; }
   for (const char* name : {kOfxImageEffectPropSupportsOverlays,
-                           kOfxImageEffectPropSupportsMultiResolution,
                            kOfxImageEffectPropSupportsTiles,
                            kOfxImageEffectPropTemporalClipAccess,
                            kOfxImageEffectPropSupportsMultipleClipDepths,
