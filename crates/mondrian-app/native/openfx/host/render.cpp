@@ -414,6 +414,15 @@ struct ParameterUpdate {
   std::string stringValue{};
 };
 
+// Invocation-local metadata, not another image/resource owner. It becomes valid
+// only after the same instance's parameter, preference and RoD actions succeed.
+struct PreparedFrameDomain {
+  int outputAlpha = MONDRIAN_OPENFX_ALPHA_INVALID;
+  OfxRectD canonicalRod{};
+  OfxRectI pixelRod{};
+  size_t pixelCount = 0;
+};
+
 // Declared in lifetime order: the instance dies before its plugin binary,
 // API handler, cache, host and frame facts. No global cache keeps raw handlers.
 struct MondrianOpenFxSession {
@@ -658,35 +667,19 @@ struct MondrianOpenFxSession {
     return admitsCpu(*instance) && admitsIndependentFrames(*instance) ? 0 : 7;
   }
 
-  template<class Probe>
-  int render(const void* input, void* output, size_t bytes,
-             const MondrianOpenFxFrameInfo& info,
-             const MondrianOpenFxParameter* parameters, int count, MondrianOpenFxRenderReport& report,
-             const MondrianOpenFxInvocationControl* control, Probe& probe) {
-    auto phase = probe.start();
-    if (failed) { return 2; }
-    // Project geometry is an immutable owner binding, independent of image
-    // PAR and raster extent. Refuse a changed binding before loadFrame or any
-    // native callback; the original instance and output remain usable.
-    if (info.project_width != frame.info.project_width ||
-        info.project_height != frame.info.project_height ||
-        info.project_pixel_aspect_ratio != frame.info.project_pixel_aspect_ratio) { return 2; }
-    // A prepared session has a fixed image-storage contract. Violating it is
-    // a transport fault, unlike an author snapshot rejected before assignment.
-    if (!output || info.width != frame.info.width || info.height != frame.info.height || info.source_alpha != frame.info.source_alpha ||
-        reinterpret_cast<uintptr_t>(output) % alignof(OfxRGBAColourF) != 0 || output == input) {
-      failed = true;
-      return 2;
-    }
-    const auto previous = frame.info;
-    MondrianOpenFx::FrameBorrow borrowed(frame);
-    const int loaded = loadFrame(frame, input, bytes, info, generator);
-    if (loaded != 0) { failed = true; return loaded; }
-    if (!frame.beginImageBinding()) { failed = true; return 2; }
-    frame.output = static_cast<OfxRGBAColourF*>(output);
-    auto* outputClip = dynamic_cast<MondrianOpenFx::FilterClipInstance*>(instance->getClip("Output"));
-    if (!outputClip) { failed = true; return 5; }
-    probe.finish(MONDRIAN_OPENFX_SESSION_ADMISSION, phase);
+  // The pre-DSP actions share this exact instance and invocation borrow. UserEdited
+  // notifications may read the supplied current image: this is not a promise of
+  // metadata-only execution. A dependency planner must stage that current input
+  // through the original graph before asking this owner for additional times.
+  // Keep the diagnostic stamp borrowed so moving this boundary changes neither
+  // action ordering nor the existing phase accounting.
+  template<class Probe, class Stamp>
+  int prepareFrame(const MondrianOpenFxFrameInfo& info,
+                   const MondrianOpenFxFrameInfo& previous,
+                   const MondrianOpenFxParameter* parameters, int count,
+                   MondrianOpenFxRenderReport& report,
+                   MondrianOpenFx::FilterClipInstance* outputClip,
+                   PreparedFrameDomain& plan, Probe& probe, Stamp& phase) {
     phase = probe.start();
     if (host.auxiliary().beginInvocation(instance->getHandle(), info.frame, info.first_frame, info.last_frame) != kOfxStatOK) { failed = true; return 6; }
     auto* filter = dynamic_cast<MondrianOpenFx::FilterEffectInstance*>(instance.get());
@@ -745,10 +738,7 @@ struct MondrianOpenFxSession {
     // Clear the retained allocation and require a new fetch for this render.
     // Change/preference callbacks cannot make an old output appear completed.
     outputClip->beginFrame();
-    const OfxPointD scale{1.0, 1.0};
     const OfxRectI viewport{0, 0, info.width, info.height};
-    const OfxRectD viewportCanonical{0.0, 0.0, info.width * info.pixel_aspect_ratio,
-                                    static_cast<double>(info.height)};
     const auto region = outputClip->getRegionOfDefinition(info.frame);
     OfxRectI window{};
     size_t domainPixels = 0;
@@ -763,6 +753,54 @@ struct MondrianOpenFxSession {
     if (host.auxiliary().blocked(instance->getHandle())) {
       failed = false; report.completion = MONDRIAN_OPENFX_RENDER_USER_BLOCKED; return 0;
     }
+    plan = PreparedFrameDomain{representation, region, window, domainPixels};
+    return 0;
+  }
+
+  template<class Probe>
+  int render(const void* input, void* output, size_t bytes,
+             const MondrianOpenFxFrameInfo& info,
+             const MondrianOpenFxParameter* parameters, int count, MondrianOpenFxRenderReport& report,
+             const MondrianOpenFxInvocationControl* control, Probe& probe) {
+    auto phase = probe.start();
+    if (failed) { return 2; }
+    // Project geometry is an immutable owner binding, independent of image
+    // PAR and raster extent. Refuse a changed binding before loadFrame or any
+    // native callback; the original instance and output remain usable.
+    if (info.project_width != frame.info.project_width ||
+        info.project_height != frame.info.project_height ||
+        info.project_pixel_aspect_ratio != frame.info.project_pixel_aspect_ratio) { return 2; }
+    // A prepared session has a fixed image-storage contract. Violating it is
+    // a transport fault, unlike an author snapshot rejected before assignment.
+    if (!output || info.width != frame.info.width || info.height != frame.info.height || info.source_alpha != frame.info.source_alpha ||
+        reinterpret_cast<uintptr_t>(output) % alignof(OfxRGBAColourF) != 0 || output == input) {
+      failed = true;
+      return 2;
+    }
+    const auto previous = frame.info;
+    MondrianOpenFx::FrameBorrow borrowed(frame);
+    const int loaded = loadFrame(frame, input, bytes, info, generator);
+    if (loaded != 0) { failed = true; return loaded; }
+    if (!frame.beginImageBinding()) { failed = true; return 2; }
+    frame.output = static_cast<OfxRGBAColourF*>(output);
+    auto* outputClip = dynamic_cast<MondrianOpenFx::FilterClipInstance*>(instance->getClip("Output"));
+    if (!outputClip) { failed = true; return 5; }
+    probe.finish(MONDRIAN_OPENFX_SESSION_ADMISSION, phase);
+    PreparedFrameDomain plan{};
+    const int prepared = prepareFrame(info, previous, parameters, count, report,
+                                      outputClip, plan, probe, phase);
+    if (prepared != 0 || report.completion == MONDRIAN_OPENFX_RENDER_USER_BLOCKED) {
+      return prepared;
+    }
+    int representation = plan.outputAlpha;
+    const auto& region = plan.canonicalRod;
+    const auto& window = plan.pixelRod;
+    const size_t domainPixels = plan.pixelCount;
+    const auto& premultiplication = instance->getOutputPreMultiplication();
+    const OfxPointD scale{1.0, 1.0};
+    const OfxRectI viewport{0, 0, info.width, info.height};
+    const OfxRectD viewportCanonical{0.0, 0.0, info.width * info.pixel_aspect_ratio,
+                                    static_cast<double>(info.height)};
     // Empty support has no Render action or Output fetch. In particular, do not
     // begin a render sequence whose mandatory Render action would be omitted.
     if (domainPixels == 0) {

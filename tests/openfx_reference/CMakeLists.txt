@@ -99,14 +99,16 @@ target_include_directories(ImageMemoryOwnership PRIVATE
   "${MONDRIAN_OPENFX_HOST}/vendor/include"
   "${MONDRIAN_OPENFX_HOST}/vendor/host/include"
   "${MONDRIAN_OPENFX_HOST}/host")
+set(MONDRIAN_OPENFX_TEST_HOST_SOURCES)
 foreach(source ofxhBinary ofxhClip ofxhHost ofxhImageEffect ofxhImageEffectAPI
     ofxhInteract ofxhMemory ofxhParam ofxhPluginAPICache ofxhPluginCache
     ofxhPropertySuite ofxhUtilities)
-  target_sources(ImageMemoryOwnership PRIVATE "${MONDRIAN_OPENFX_HOST}/vendor/host/src/${source}.cpp")
+  list(APPEND MONDRIAN_OPENFX_TEST_HOST_SOURCES "${MONDRIAN_OPENFX_HOST}/vendor/host/src/${source}.cpp")
 endforeach()
 foreach(source image_clip effect_instance host_descriptor parameter_instance thread_suite aux_suite)
-  target_sources(ImageMemoryOwnership PRIVATE "${MONDRIAN_OPENFX_HOST}/host/${source}.cpp")
+  list(APPEND MONDRIAN_OPENFX_TEST_HOST_SOURCES "${MONDRIAN_OPENFX_HOST}/host/${source}.cpp")
 endforeach()
+target_sources(ImageMemoryOwnership PRIVATE ${MONDRIAN_OPENFX_TEST_HOST_SOURCES})
 if(MSVC)
   target_compile_options(ImageMemoryOwnership PRIVATE /EHsc /utf-8)
 endif()
@@ -114,6 +116,24 @@ if(WIN32)
   target_link_libraries(ImageMemoryOwnership PRIVATE shell32)
 endif()
 target_link_libraries(ImageMemoryOwnership PRIVATE Threads::Threads ${CMAKE_DL_LIBS})
+
+# Exercise the real product C ABI and the same native owners/actions. Do not
+# substitute a second host or include the ownership harness's allocator/main.
+add_executable(FramePreparation EXCLUDE_FROM_ALL frame_preparation.cpp
+  ${MONDRIAN_OPENFX_TEST_HOST_SOURCES} "${MONDRIAN_OPENFX_HOST}/host/render.cpp")
+target_compile_features(FramePreparation PRIVATE cxx_std_17)
+target_compile_definitions(FramePreparation PRIVATE NOMINMAX OFX_SUPPORTS_MULTITHREAD)
+target_include_directories(FramePreparation PRIVATE
+  "${MONDRIAN_OPENFX_HOST}/vendor/include"
+  "${MONDRIAN_OPENFX_HOST}/vendor/host/include"
+  "${MONDRIAN_OPENFX_HOST}/host")
+if(MSVC)
+  target_compile_options(FramePreparation PRIVATE /EHsc /utf-8)
+endif()
+if(WIN32)
+  target_link_libraries(FramePreparation PRIVATE shell32)
+endif()
+target_link_libraries(FramePreparation PRIVATE Threads::Threads ${CMAKE_DL_LIBS})
 
 # Independent output-only Generator fixture; existing reference targets stay intact.
 set(OPENFX_GENERATOR_BUNDLE_DIR "${CMAKE_BINARY_DIR}/GeneratorProbe.ofx.bundle")
