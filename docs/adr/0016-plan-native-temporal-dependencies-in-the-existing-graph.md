@@ -54,8 +54,23 @@ image access, same-session retry after memory refusal, empty output and actual
 Generator action counts/lifecycle. These tests do not qualify a rebuilt desktop,
 Rust IPC, Timeline, Preview/Export, temporal access, performance or other platforms.
 
-Next implement native dependency negotiation and the shared Custom planning/value
-connection, then verify Preview/Export with real temporal plugins. Qualification
+The HostSupport dependency action now atomically replaces its complete input map
+on OK/ReplyDefault; an error leaves the caller's map unchanged. It preserves
+disjoint, fractional and explicit empty OK ranges, ignores ReplyDefault residuals
+and refuses invalid time, malformed/nonfinite/reversed pairs. A product limit of
+256 returned range pairs across inputs bounds negotiation metadata. Per-input
+property writes are bounded before resize/copy; a refused write remains visible
+even after reset. This does not bound the number of frames inside a range, SDK
+heap/RSS, or raster payload: the shared planner must admit those separately.
+Five protocol groups (27 queries) passed against an independently compiled owned
+OFX fixture and the actual HostSupport/Host. Actual action logs confirm one
+Create/Destroy per group, no Render, and no foreign call for invalid time or a
+non-temporal descriptor. Six affected native regression gates also passed,
+including published Misc Invert. These are dependency-action qualifications,
+not evidence that a third-party temporal renderer or the full product works.
+
+Next connect native dependency negotiation to the shared Custom planning/value
+and same-owner admission contract, then verify Preview/Export with real temporal plugins. Qualification
 must cover discontinuous ranges, negative/fractional time under the clip sampling
 contract, changed parameters, upstream Effects, cancellation, exact image leases,
 bounded storage, cache invalidation and repeated same-owner use. Keep the current

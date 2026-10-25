@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
 #include <math.h>
+#include <cmath>
 
 // ofx
 #include "ofxCore.h"
@@ -1290,6 +1291,7 @@ namespace OFX {
       OfxStatus Instance::getFrameNeededAction(OfxTime time,
                                                RangeMap &rangeMap)
       {
+        if (!std::isfinite(time)) { return kOfxStatErrValue; }
         OfxStatus stat = kOfxStatReplyDefault;
         Property::Set outArgs;
 
@@ -1315,6 +1317,9 @@ namespace OFX {
               s.readonly = false;
               s.defaultValue = "";
               outArgs.createProperty(s);
+              // Keep this OFX variable property variable, but refuse excessive
+              // setter indices/counts before storage grows or input is copied.
+              outArgs.fetchProperty(name)->setMaximumDimension(2 * kMaximumFrameNeededRanges);
               /// initialise it to the current frame
               outArgs.setDoubleProperty(name, time, 0);
               outArgs.setDoubleProperty(name, time, 1);
@@ -1330,38 +1335,17 @@ namespace OFX {
                            &outArgs);
 #         ifdef OFX_DEBUG_ACTIONS
             std::cout << "OFX: "<<(void*)this<<"->"<<kOfxImageEffectActionGetFramesNeeded<<"("<<time<<")->"<<StatStr(stat);
-            if (stat == kOfxStatOK) {
-                std::cout << ": ";
-                for(std::map<std::string, ClipInstance*>::iterator it=_clips.begin();
-                    it!=_clips.end();
-                    ++it) {
-                    ClipInstance *clip = it->second;
-
-                    if(!clip->isOutput()) {
-                        std::string name = "OfxImageClipPropFrameRange_"+it->first;
-                        std::cout << it->first << "->[";
-
-                        int nRanges = outArgs.getDimension(name);
-                        for(int r=0;r<nRanges;){
-                            double min = outArgs.getDoubleProperty(name,r);
-                            double max = outArgs.getDoubleProperty(name,r+1);
-                            r += 2;
-                            std::cout <<"("<<min<<","<<max<<")";
-                            if (r < nRanges-1) {
-                                std::cout << ",";
-                            }
-                        }
-                        std::cout << "]";
-                    }
-                }
-            }
+            // Returned dimensions/endpoints are untrusted until validated below.
             std::cout << std::endl;
 #         endif
         }
 
-        OfxRangeD defaultRange;
-        defaultRange.min =
-          defaultRange.max = time;
+        // A failed action has no usable request, even if it wrote plausible
+        // ranges. Never append defaults/partial values to the caller's map.
+        if (stat != kOfxStatOK && stat != kOfxStatReplyDefault) { return stat; }
+        RangeMap prepared;
+        const OfxRangeD defaultRange{time, time};
+        size_t totalRanges = 0;
 
         for(std::map<std::string, ClipInstance*>::iterator it=_clips.begin();
             it!=_clips.end();
@@ -1369,35 +1353,40 @@ namespace OFX {
           ClipInstance *clip = it->second;
 
           if(!clip->isOutput()) {
-            if(stat != kOfxStatOK) {
-              rangeMap[clip].push_back(defaultRange);
+            if(stat == kOfxStatReplyDefault) {
+              // Residual outArgs, including malformed or refused writes, are
+              // irrelevant when the action requests the normative defaults.
+              if (++totalRanges > kMaximumFrameNeededRanges) { return kOfxStatErrUnsupported; }
+              prepared[clip].push_back(defaultRange);
             }
             else {
               std::string name = "OfxImageClipPropFrameRange_"+it->first;
-
+              if (outArgs.fetchProperty(name)->writeLimitExceeded()) { return kOfxStatErrUnsupported; }
               int nRanges = outArgs.getDimension(name);
-              if(nRanges%2 != 0)
+              if(nRanges < 0 || nRanges%2 != 0)
                 return kOfxStatFailed; // bad! needs to be divisible by 2
-
-              if(nRanges == 0) {
-                rangeMap[clip].push_back(defaultRange);
-              }
-              else {
-                for(int r=0;r<nRanges;){
+              const size_t pairs = static_cast<size_t>(nRanges / 2);
+              if (pairs > kMaximumFrameNeededRanges - totalRanges) { return kOfxStatErrUnsupported; }
+              totalRanges += pairs;
+              // Zero dimensions on OK explicitly request no frames. Preserve
+              // that empty input entry; do not invent a current-frame read.
+              auto& ranges = prepared[clip];
+              ranges.reserve(pairs);
+              for(int r=0;r<nRanges;){
                   double min = outArgs.getDoubleProperty(name,r);
                   double max = outArgs.getDoubleProperty(name,r+1);
                   r += 2;
-
+                  if (!std::isfinite(min) || !std::isfinite(max) || min > max) { return kOfxStatFailed; }
                   OfxRangeD range;
                   range.min = min;
                   range.max = max;
-                  rangeMap[clip].push_back(range);
-                }
+                  ranges.push_back(range);
               }
             }
           }
         }
 
+        rangeMap.swap(prepared);
         return stat;
       }
 

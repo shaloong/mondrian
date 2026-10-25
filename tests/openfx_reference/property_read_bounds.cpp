@@ -5,6 +5,7 @@
 #include "ofxProperty.h"
 #include "ofxhPropertySuite.h"
 #include <array>
+#include <climits>
 #include <cstdio>
 #include <cstring>
 #include <type_traits>
@@ -103,6 +104,33 @@ int main() {
     check(suite,set,"string",suite.propGetString,suite.propGetStringN,marker,expected,dimension,hooked?&hook:nullptr);
     void* pointer=&failures;
     check(suite,set,"pointer",suite.propGetPointer,suite.propGetPointerN,pointer,static_cast<void*>(nullptr),dimension,hooked?&hook:nullptr);
+  }
+  {
+    P::Set owner;
+    owner.addProperty(new P::Double("bounded", 0, false, 0));
+    auto* bounded = owner.fetchProperty("bounded");
+    bounded->setMaximumDimension(2);
+    const double values[]{.25, .5, .75};
+    const auto set = owner.getHandle();
+    require(suite.propSetDoubleN(set, "bounded", 2, values) == kOfxStatOK &&
+        bounded->getDimension() == 2 && !bounded->isFixedSize(), "bounded", "limit keeps a variable property variable");
+    require(suite.propSetDoubleN(set, "bounded", -1, values) == kOfxStatErrBadIndex &&
+        suite.propSetDouble(set, "bounded", -1, .75) == kOfxStatErrBadIndex && !bounded->writeLimitExceeded(),
+        "bounded", "ordinary invalid indices do not claim a capacity refusal");
+    require(suite.propSetDoubleN(set, "bounded", INT_MAX, values) == kOfxStatErrBadIndex &&
+        bounded->writeLimitExceeded() && bounded->getDimension() == 2 &&
+        owner.getDoubleProperty("bounded", 0) == .25 && owner.getDoubleProperty("bounded", 1) == .5,
+        "bounded", "excessive array count refuses before resize/copy or partial mutation");
+    P::Set copied(owner);
+    auto* copy = copied.fetchProperty("bounded");
+    require(copy->writeLimitExceeded() && suite.propSetDouble(copied.getHandle(), "bounded", 2, .75) == kOfxStatErrBadIndex &&
+        copy->getDimension() == 2, "bounded", "cloning preserves bound and refusal");
+    require(suite.propReset(set, "bounded") == kOfxStatOK && bounded->getDimension() == 0 && bounded->writeLimitExceeded(),
+        "bounded", "reset does not erase the action's refused-write evidence");
+    require(suite.propSetDoubleN(set, "bounded", 0, nullptr) == kOfxStatOK && bounded->getDimension() == 0,
+        "bounded", "explicit zero-count write remains empty");
+    require(suite.propSetDouble(set, "bounded", INT_MAX, .75) == kOfxStatErrBadIndex && bounded->getDimension() == 0,
+        "bounded", "scalar index refuses before index-plus-one overflow");
   }
   std::printf("property read bounds: %d failures\n",failures);
   return failures ? 1 : 0;

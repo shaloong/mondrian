@@ -587,7 +587,10 @@ namespace OFX {
                                                     const OfxRectD &roi,
                                                     std::map<ClipInstance *, OfxRectD> &rois);
 
-        // get frames needed to render the given frame
+        // Product admission bound, not a limit imposed by the OFX standard.
+        enum { kMaximumFrameNeededRanges = 256 };
+        // Replace the complete input dependency map on OK/ReplyDefault only.
+        // Errors leave it unchanged. Empty OK ranges mean no dependency.
         virtual OfxStatus getFrameNeededAction(OfxTime time,
                                                RangeMap &rangeMap);
 

@@ -180,6 +180,8 @@ namespace OFX {
         , _dimension(other._dimension)
         , _pluginReadOnly(other._pluginReadOnly)
         , _getHook(0)
+        , _maximumDimension(other._maximumDimension)
+        , _writeLimitExceeded(other._writeLimitExceeded)
       {
       }
 
@@ -289,6 +291,10 @@ namespace OFX {
       /// set one value
       template<class T> void PropertyTemplate<T>::setValue(const typename T::Type &value, int index)
       {
+        if (_maximumDimension && index >= _maximumDimension) {
+          _writeLimitExceeded = true;
+          throw Exception(kOfxStatErrBadIndex);
+        }
         if (index < 0 || (_dimension && index >= _dimension)) {
           throw Exception(kOfxStatErrBadIndex);
         }
@@ -304,6 +310,10 @@ namespace OFX {
       /// set multiple values
       template<class T> void PropertyTemplate<T>::setValueN(const typename T::APIType *value, int count)
       {
+        if (_maximumDimension && count > _maximumDimension) {
+          _writeLimitExceeded = true;
+          throw Exception(kOfxStatErrBadIndex);
+        }
         if (count < 0 || (_dimension && count > _dimension)) {
           throw Exception(kOfxStatErrBadIndex);
         }

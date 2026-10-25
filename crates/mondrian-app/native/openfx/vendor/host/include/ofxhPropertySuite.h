@@ -184,6 +184,8 @@ namespace OFX {
         bool         _pluginReadOnly;           ///< set is forbidden through suite: value may still change between get() calls
         std::vector<NotifyHook *> _notifyHooks; ///< hooks to call whenever the property is set
         GetHook                  *_getHook;     ///< if we are not storing props locally, they are stored via fetching from here
+        int _maximumDimension = 0;             ///< optional host-owned write bound, zero means unchanged/unbounded
+        bool _writeLimitExceeded = false;      ///< sticky for this property/action, including after reset
 
         friend class Set;
       public :
@@ -206,6 +208,14 @@ namespace OFX {
 
         /// change the state of readonlyness
         void setPluginReadOnly(bool v) {_pluginReadOnly = v;}
+
+        /// Bound variable action output before a foreign setter can grow it.
+        /// This does not change its visible dimension or make it fixed-size.
+        void setMaximumDimension(int maximum) {
+          if (maximum <= 0 || getDimension() > maximum) { throw Exception(kOfxStatErrValue); }
+          _maximumDimension = maximum;
+        }
+        bool writeLimitExceeded() const { return _writeLimitExceeded; }
 
         /// override this to return a clone of the property
         virtual Property *deepCopy() = 0;

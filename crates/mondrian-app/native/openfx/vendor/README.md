@@ -42,3 +42,12 @@ The product filter host is maintained separately in `../host`.
   major/minor identity and entry pointers before SetHost, and releases its binary
   reference when a PluginHandle constructor unwinds. Foreign constructor
   exceptions become host-owned errors before enclosing module owners retire.
+
+- `getFrameNeededAction` replaces its complete input range map atomically on
+  OK/ReplyDefault; errors preserve the caller's map without publishing defaults.
+  It validates finite ordered pairs, preserves disjoint/fractional/empty requests
+  and limits returned metadata to 256 pairs across inputs (a product limit).
+  An opt-in property write bound rejects excessive indices/counts before growth;
+  its sticky refusal survives reset/copy. Other properties retain their existing
+  write policy. This is not a native heap/RSS or requested-frame-count limit.
+  Dependency action tests do not enable temporal rendering in the product.

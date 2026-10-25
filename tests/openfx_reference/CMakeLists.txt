@@ -135,6 +135,39 @@ if(WIN32)
 endif()
 target_link_libraries(FramePreparation PRIVATE Threads::Threads ${CMAKE_DL_LIBS})
 
+# Actual HostSupport dependency action with an independent protocol fixture.
+add_executable(FrameDependencies EXCLUDE_FROM_ALL frame_dependencies.cpp
+  ${MONDRIAN_OPENFX_TEST_HOST_SOURCES})
+target_compile_features(FrameDependencies PRIVATE cxx_std_17)
+target_compile_definitions(FrameDependencies PRIVATE NOMINMAX OFX_SUPPORTS_MULTITHREAD)
+target_include_directories(FrameDependencies PRIVATE
+  "${MONDRIAN_OPENFX_HOST}/vendor/include"
+  "${MONDRIAN_OPENFX_HOST}/vendor/host/include"
+  "${MONDRIAN_OPENFX_HOST}/host")
+if(MSVC)
+  target_compile_options(FrameDependencies PRIVATE /EHsc /utf-8)
+endif()
+if(WIN32)
+  target_link_libraries(FrameDependencies PRIVATE shell32)
+endif()
+target_link_libraries(FrameDependencies PRIVATE Threads::Threads ${CMAKE_DL_LIBS})
+set(OPENFX_DEPENDENCIES_BUNDLE_DIR "${CMAKE_BINARY_DIR}/FrameDependenciesProbe.ofx.bundle")
+set(OPENFX_DEPENDENCIES_BINARY_DIR "${OPENFX_DEPENDENCIES_BUNDLE_DIR}/Contents/${OPENFX_ARCH_DIR}")
+add_library(FrameDependenciesProbe MODULE frame_dependencies_probe.cpp)
+target_compile_features(FrameDependenciesProbe PRIVATE cxx_std_17)
+target_include_directories(FrameDependenciesProbe PRIVATE "${MONDRIAN_OPENFX_HOST}/vendor/include")
+if(MSVC)
+  target_compile_options(FrameDependenciesProbe PRIVATE /EHsc /utf-8)
+endif()
+set_target_properties(FrameDependenciesProbe PROPERTIES PREFIX "" SUFFIX ".ofx"
+  LIBRARY_OUTPUT_DIRECTORY "${OPENFX_DEPENDENCIES_BINARY_DIR}"
+  LIBRARY_OUTPUT_DIRECTORY_RELEASE "${OPENFX_DEPENDENCIES_BINARY_DIR}"
+  RUNTIME_OUTPUT_DIRECTORY "${OPENFX_DEPENDENCIES_BINARY_DIR}"
+  RUNTIME_OUTPUT_DIRECTORY_RELEASE "${OPENFX_DEPENDENCIES_BINARY_DIR}")
+file(MAKE_DIRECTORY "${OPENFX_DEPENDENCIES_BUNDLE_DIR}/Contents")
+configure_file("${OPENFX_SOURCE_DIR}/Examples/Basic/Info.plist"
+  "${OPENFX_DEPENDENCIES_BUNDLE_DIR}/Contents/Info.plist" COPYONLY)
+
 # Independent output-only Generator fixture; existing reference targets stay intact.
 set(OPENFX_GENERATOR_BUNDLE_DIR "${CMAKE_BINARY_DIR}/GeneratorProbe.ofx.bundle")
 set(OPENFX_GENERATOR_BINARY_DIR "${OPENFX_GENERATOR_BUNDLE_DIR}/Contents/${OPENFX_ARCH_DIR}")
