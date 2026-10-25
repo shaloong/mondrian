@@ -6,6 +6,10 @@ use super::*;
 #[path = "source_input_tests.rs"]
 mod tests;
 
+#[cfg(test)]
+#[path = "source_bank_tests.rs"]
+mod bank_tests;
+
 pub(super) fn delivery_error(reason: impl Into<String>) -> OpenFxHostError {
     OpenFxHostError::InputFailed(Box::new(
         mondrian_effects::EffectExecutionError::InputUnavailable { reason: reason.into() },

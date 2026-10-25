@@ -55,7 +55,7 @@ count/byte ceilings after nested owners were added. The original bank now restor
 the previous binding on normal/error/unwind paths and reapplies ceilings at the
 actual retention boundary. Two regression tests cover success/reuse, refusal,
 panic, cancellation, five optional grants and actual progress receipts; the
-complete Windows Effects library passed 371 tests with zero ignored. These are
+complete Windows Effects library passed 376 tests with zero ignored. These are
 in-process fixtures with explicit held-byte/peak accounting, not a native staged
 resolver, full heap accounting or real temporal-plugin qualification.
 
@@ -132,15 +132,42 @@ capabilities remain nontransferable. One proof allocation is shared per prepared
 program. Controlled metadata estimates include binding storage and the Grade's
 zero evaluation; these remain conservative logical charges, not allocator/RSS.
 
-Current Windows qualification: Effects 371 passed/0 ignored, Renderer 673
-passed/39 ignored, Export 298 passed/18 ignored and App 3122 passed/211 ignored.
-The App validation build includes OpenFX host 113 passed/66 ignored and Effect
-adapter 11 passed/0 ignored. Four actual supervised resident gates passed with
+The scalar/adaptive frame engine now borrows the existing processor bank,
+working grant and retention limits instead of requiring the entire Session.
+That exclusive borrow is necessary inside an active native processor: constructing
+another Session to satisfy it would create a second instance/budget authority.
+Session wrappers keep generation changes and complete output-cache publication;
+invocation input resolution performs neither cache access nor generation rebinding.
+The original Control crosses nested processor calls and bounded pixel checkpoints,
+so progress, GUI/feedback provenance and sticky stop reasons remain with the owner.
+The legacy standalone entry remains unobserved; borrowing an owner Control does
+not implicitly enable another product observation route.
+Parent active storage and still-held native backing are deducted before upstream
+work; its peak is then composed in the same ledger. Already charged parent feedback
+is the nested baseline, so only new nested feedback reduces the remaining grant.
+
+Input capabilities must be borrowed by the invocation. A strong capability retained
+inside a factory would make a program/factory/program ownership cycle. The native
+calibration uses weak test bootstrap only; that is not a production binding scheme.
+The production resolver still needs the original immutable source/Clip admission.
+The bank retains one configuration per occurrence: changed raster/project geometry,
+format or recipe revision retires the obsolete idle worker. The native calibration
+therefore checks exact configuration retirement, rather than assuming a variant
+cache. Optional native retention must use the recipe's declared bytes, not a guessed
+constant; a legal active render may intentionally run without optional retention.
+
+Current Windows qualification: Effects 376 passed/0 ignored, Renderer 673
+passed/39 ignored, Export 300 passed/18 ignored and App 3122 passed/212 ignored.
+The App validation build includes OpenFX host 113 passed/67 ignored and Effect
+adapter 11 passed/0 ignored. Five actual supervised resident gates passed with
 the current ordinary worker; every gate settled with empty stderr. The unchanged
 C++ HostSupport/Host retains its earlier 13-group qualification, including official
 Basic and published Misc Invert 2.0; those groups were not rerun for this Rust slice.
 The worker is test-profile opt0/debug0 with default features and no libtest harness;
-App is validation opt0/debug0 and the other libraries are default opt1/debug0.
+The four libraries were built together: App validation opt0/debug0, Effects
+opt1/debug0 without extra features, Renderer/Export validation opt1/debug0.
+Export validation adds two tests to the earlier default298; these counts are not
+a new default whole-workspace census.
 This is affected-module regression, not a new whole-workspace or release qualification.
 The native late-request gate repeats four full-RGBA renders on one native owner,
 with eight readers coalescing two exact dependencies while Output/current leases
@@ -152,6 +179,20 @@ matches the original graph values bit for bit. A separate mathematical DSP oracl
 allows the documented Float32 pivot/luma rounding. Graph-budget, dependency,
 cancellation and copy-refusal cases all settle without publishing output. Shared
 Effects tests cover 12 failure/owner-stop combinations and fresh-owner recovery.
+
+The additional native bank gate executes the actual Filter inside an Effects
+processor invocation. Its Source resolver borrows that invocation's resources and
+Control, consumes the full original program's input capability, and never creates
+an execution Session. Four renders keep one native parent and eight exact Source
+services. One upstream occurrence switches current/historical size and format;
+the original bank correctly creates and retires twelve configurations, with one
+current configuration retained alongside the parent. Exact creation/drop counts
+would fail if upstream used a separate bank. Complete RGBA, original terminal
+feedback/generation, no output cache, unique pixel transfer and strict native
+shutdown pass. The grant derives from the native recipe's declared storage.
+Five Effects regression groups also cover same-owner progress/feedback, inherited
+retention ceilings, one-byte-short refusal, panic attribution, cancellation,
+sticky deadline, pixel-chunk polling and no duplicate charge of prior feedback.
 
 SourceDeliveryProbe deliberately does not declare temporal access: this is finite
 transport/graph calibration, not conforming third-party temporal compatibility.

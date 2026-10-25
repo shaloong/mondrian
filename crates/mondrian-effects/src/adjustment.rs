@@ -324,12 +324,13 @@ pub(crate) fn apply_custom_render_op_f32(
     caller_owned_bytes: usize,
     control: &mut crate::EffectProcessorControl<'_>,
 ) -> Result<usize, EffectExecutionError> {
+    let mut scope = session.map(crate::EffectExecutionSession::processor_execution);
     apply_custom_render_op_f32_for_role(
         working,
         crate::EffectFloatProcessorInputRole::SingleImage,
         op,
         frame_seed,
-        session,
+        scope.as_mut(),
         caller_owned_bytes,
         control,
     )
@@ -343,12 +344,32 @@ pub(crate) fn apply_custom_source_op_f32(
     caller_owned_bytes: usize,
     control: &mut crate::EffectProcessorControl<'_>,
 ) -> Result<usize, EffectExecutionError> {
+    let mut scope = session.processor_execution();
     apply_custom_render_op_f32_for_role(
         output,
         crate::EffectFloatProcessorInputRole::NoImage,
         op,
         frame_seed,
-        Some(session),
+        Some(&mut scope),
+        caller_owned_bytes,
+        control,
+    )
+}
+
+pub(crate) fn apply_custom_render_op_f32_on_bank(
+    working: &mut crate::EffectFloatFrame,
+    op: &EffectRenderOp,
+    frame_seed: i64,
+    scope: &mut crate::processor_residency::FloatProcessorExecution<'_>,
+    caller_owned_bytes: usize,
+    control: &mut crate::EffectProcessorControl<'_>,
+) -> Result<usize, EffectExecutionError> {
+    apply_custom_render_op_f32_for_role(
+        working,
+        crate::EffectFloatProcessorInputRole::SingleImage,
+        op,
+        frame_seed,
+        Some(scope),
         caller_owned_bytes,
         control,
     )
@@ -360,7 +381,7 @@ fn apply_custom_render_op_f32_for_role(
     input_role: crate::EffectFloatProcessorInputRole,
     op: &EffectRenderOp,
     frame_seed: i64,
-    mut session: Option<&mut crate::EffectExecutionSession>,
+    mut execution: Option<&mut crate::processor_residency::FloatProcessorExecution<'_>>,
     caller_owned_bytes: usize,
     control: &mut crate::EffectProcessorControl<'_>,
 ) -> Result<usize, EffectExecutionError> {
@@ -381,7 +402,7 @@ fn apply_custom_render_op_f32_for_role(
     })?;
     crate::execution::admit_image_scale(processor.image_scale_requirement(), working.sampling())?;
     let available_working_bytes = if processor.float32_factory().is_some() {
-        if let Some(owner) = session.as_deref_mut() {
+        if let Some(owner) = execution.as_deref_mut() {
             let staging_bytes = if input_role == crate::EffectFloatProcessorInputRole::SingleImage {
                 working.len().saturating_mul(std::mem::size_of::<[f32; 4]>())
             } else {
@@ -389,8 +410,8 @@ fn apply_custom_render_op_f32_for_role(
             };
             let occupied = caller_owned_bytes
                 .saturating_add(staging_bytes)
-                .saturating_add(control.feedback_retained_bytes());
-            let limit = owner.max_working_bytes();
+                .saturating_add(owner.feedback_bytes(control));
+            let limit = owner.working_bytes;
             let available = limit.checked_sub(occupied).ok_or_else(|| {
                 EffectExecutionError::CustomProcessorBudgetExceeded {
                     key: key.clone(),
@@ -400,7 +421,7 @@ fn apply_custom_render_op_f32_for_role(
             })?;
             // Make room before allocating atomic frame staging. The caller
             // supplies every still-owned pixel/coverage allocation in its DAG.
-            owner.processors.trim_working(available);
+            owner.bank.trim_working(available);
             available
         } else {
             0
@@ -449,11 +470,11 @@ fn apply_custom_render_op_f32_for_role(
                 .map_err(crate::processor_residency::FloatProcessorError::from)
         } else if let (Some(factory), Some(owner), Some(effect_id)) = (
             processor.float32_factory(),
-            session.as_deref_mut(),
+            execution.as_deref_mut(),
             processor.occurrence_id(),
         ) {
-            let (instances, bytes) = owner.processor_grant();
-            owner.processors.process(
+            let (instances, bytes) = owner.retention_limits;
+            owner.bank.process(
                 factory,
                 crate::EffectFloatProcessorPreparation {
                     project_geometry: processor.project_geometry(),
@@ -495,8 +516,8 @@ fn apply_custom_render_op_f32_for_role(
     }))
     .map_err(crate::processor_residency::release_known_processor_panic);
     if control.check().is_err() {
-        if let (Some(owner), Some(effect_id)) = (session, processor.occurrence_id()) {
-            owner.processors.retire_occurrence(effect_id);
+        if let (Some(owner), Some(effect_id)) = (execution, processor.occurrence_id()) {
+            owner.bank.retire_occurrence(effect_id);
         }
         return Err(EffectExecutionError::CustomProcessorStopped {
             reason: control.stop_reason().unwrap_or(crate::EffectProcessorStopReason::Canceled),

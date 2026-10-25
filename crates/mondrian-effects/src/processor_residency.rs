@@ -444,13 +444,67 @@ pub struct EffectProcessorTransientMemoryRefusal {
 /// and release that backing before returning. The bank charges the granted peak.
 pub struct EffectProcessorResources<'a> {
     bank: &'a mut FloatProcessorResidency,
+    retention_limits: (usize, usize),
     active_bytes: usize,
     available_bytes: usize,
     peak_bytes: usize,
     refused: Option<EffectProcessorTransientMemoryRefusal>,
 }
 
+/// Exclusive borrowed execution grant. The Session (or active invocation)
+/// still owns the bank, limits and lifetime; this owns no state or cache.
+pub(crate) struct FloatProcessorExecution<'a> {
+    pub(crate) bank: &'a mut FloatProcessorResidency,
+    pub(crate) working_bytes: usize,
+    pub(crate) retention_limits: (usize, usize),
+    /// Feedback already charged by an enclosing active invocation.
+    pub(crate) feedback_base_bytes: usize,
+}
+
+impl FloatProcessorExecution<'_> {
+    pub(crate) fn feedback_bytes(&self, control: &EffectProcessorControl<'_>) -> usize {
+        control.feedback_retained_bytes().saturating_sub(self.feedback_base_bytes)
+    }
+}
+
 impl EffectProcessorResources<'_> {
+    /// Resolve a prepared upstream value through this invocation's original
+    /// bank and Control. `held_bytes` is all additional parent backing still
+    /// live (native domains/maps/metadata), excluding provider coverage charged
+    /// by the prepared execution. No generation change or output cache occurs.
+    pub fn execute_prepared_input_f32(
+        &mut self,
+        execution: &crate::PreparedEffectTemporalExecution,
+        provider: &mut dyn crate::EffectTemporalFrameProvider,
+        held_bytes: usize,
+        control: &mut EffectProcessorControl<'_>,
+    ) -> std::result::Result<
+        crate::EffectTemporalExecutionOutput,
+        crate::EffectTemporalExecutionError,
+    > {
+        crate::temporal_execution::processor_input_checkpoint(execution.request(), control)?;
+        self.acquire_transient(held_bytes).map_err(|refusal| {
+            crate::EffectTemporalExecutionError::WorkingSetBudgetExceeded {
+                required_bytes: refusal.required_bytes,
+                budget_bytes: refusal.available_bytes,
+            }
+        })?;
+        let held = self.active_bytes + held_bytes;
+        let mut scope = FloatProcessorExecution {
+            bank: self.bank,
+            working_bytes: self.available_bytes - held,
+            retention_limits: self.retention_limits,
+            feedback_base_bytes: control.feedback_retained_bytes(),
+        };
+        let output = crate::temporal_execution::execute_prepared_input_on_bank(
+            execution, provider, &mut scope, control,
+        );
+        crate::temporal_execution::processor_input_checkpoint(execution.request(), control)?;
+        let output = output?;
+        self.peak_bytes = self.peak_bytes.max(held + output.peak_working_bytes());
+        Ok(output)
+    }
+
     /// Admit the complete additional simultaneous peak. Optional sibling
     /// residents cannot reject an otherwise legal invocation: evict them first.
     /// An intrinsically oversized request leaves existing residents untouched.
@@ -1095,6 +1149,7 @@ impl FloatProcessorResidency {
         let (outcome, peak_bytes, refused) = {
             let mut resources = EffectProcessorResources {
                 bank: self,
+                retention_limits: (max_instances, max_bytes),
                 active_bytes: static_active,
                 available_bytes: available_working_bytes,
                 peak_bytes,
@@ -1214,6 +1269,10 @@ impl FloatProcessorResidency {
         Ok(peak_bytes)
     }
 }
+
+#[cfg(test)]
+#[path = "processor_input_tests.rs"]
+mod input_tests;
 
 #[cfg(test)]
 mod tests {

@@ -330,6 +330,17 @@ impl EffectExecutionSession {
         )
     }
 
+    pub(crate) fn processor_execution(
+        &mut self,
+    ) -> crate::processor_residency::FloatProcessorExecution<'_> {
+        crate::processor_residency::FloatProcessorExecution {
+            working_bytes: self.config.max_working_bytes,
+            retention_limits: self.processor_grant(),
+            feedback_base_bytes: 0,
+            bank: &mut self.processors,
+        }
+    }
+
     pub(crate) const fn max_working_bytes(&self) -> usize {
         self.config.max_working_bytes
     }
