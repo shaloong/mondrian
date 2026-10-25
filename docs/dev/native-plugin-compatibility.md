@@ -449,16 +449,21 @@ instruments, other platforms, realtime and performance remain unqualified.
 
 ## Qualification and record policy
 
-The default Windows workspace regression passed on 2026-10-20: all 30 members
-and 120 executable test targets completed, with 9,115 passed and 507 originally
-ignored tests. All 30 library doctest groups completed, including two passing
-audio-thread compile-fail tests. This combines complete target runs from the
-same source and executable build: the complete App and Widgets runs replace
-earlier truncated attempts, without adding their partial results. The original
-failed attempt and partial-run scope remain unchanged. This qualifies the
-ordinary default-build regression; ignored native gates, other feature sets,
-actual GPU execution, third-party compatibility, performance and other platforms
-retain their separate acceptance requirements.
+The default Windows workspace regression closed on 2026-10-25: all 30 members
+and 127 executable test targets completed at `df8ddd49`, with 9,417 passed,
+one failed and 641 originally ignored tests. The sole failure was a stale
+scaled-image golden after the image-coverage correction. Fixture-only commit
+`98864c26` adds an independent f64 border/continuous Rec.709 toe oracle and
+corrects exactly 55 edge pixels, preserving 713 interior pixels and the original
+channel tolerance. The complete affected ten-test target then passed under the
+same Job/census checks; combined ordinary results are 9,418 passed and 641
+ignored, without counting repeated tests twice or calling the initial attempt
+all-green. All 30 library doctest groups completed at `98864c26`, including two
+passing audio-thread compile-fail tests. Expected negative-control stderr in
+the endurance verifier and native-bootstrap tests was reviewed. This qualifies
+the ordinary default-build regression; ignored native gates, other feature
+sets, actual GPU execution, third-party compatibility, performance and other
+platforms retain their separate acceptance requirements.
 
 A result records the tested feature, plugin/version, platform, relevant input and
 render settings, suite/result, and remaining limits. A mock, SDK validator,
