@@ -431,7 +431,8 @@ fn golden_multilayer_float_linear_blend() {
 fn golden_non_identity_transform_float_path() {
     let w = 32;
     let h = 24;
-    let media = working_frame(w, h, gradient_rgba(w, h, 55));
+    let source = gradient_rgba(w, h, 55);
+    let media = working_frame(w, h, source.clone());
     let elements = vec![TimelineCompositeElement::Media(TimelineMediaLayer {
         frame: &media,
         opacity: 1.0,
@@ -451,6 +452,51 @@ fn golden_non_identity_transform_float_path() {
         &mut mondrian_effects::EffectProcessorControl::uncancelled(),
     )
     .expect("composite transformed frame");
+
+    // The scaled source covers [0,48) x [0,36), including every canvas
+    // pixel center. The half-texel border is covered even when one tap lies
+    // outside the source; clamping that axis must preserve the other axis.
+    // Derive its linear-light values independently in f64: for scale 3/2,
+    // the varying source texel coordinate is (4*d - 1)/6.
+    // Camera Rec.709 in mondrian_default_ocio_v2.ocio declares an
+    // ExponentWithLinearTransform, whose toe is tangent to the power curve
+    // (rather than the rounded 1/4.5 approximation).
+    let gamma = 1.0_f64 / 0.45;
+    let join = 0.099 / (gamma - 1.0);
+    let slope = ((join + 0.099) / 1.099).powf(gamma) / join;
+    let decode = |code: u8| {
+        let value = f64::from(code) / 255.0;
+        if value < join {
+            value * slope
+        } else {
+            ((value + 0.099) / 1.099).powf(gamma)
+        }
+    };
+    for y in 0..h {
+        for x in 0..w {
+            let actual = frame.rgba_f32().data[(y * w + x) as usize];
+            assert_eq!(actual[3], 1.0, "covered pixel ({x},{y}) lost alpha");
+            if x != 0 && y != 0 {
+                continue;
+            }
+            let coordinate = (4.0 * f64::from(x + y) - 1.0) / 6.0;
+            let lower = coordinate.floor();
+            let weight = coordinate - lower;
+            let stride = if y == 0 { 1 } else { w };
+            let a = (lower.max(0.0) as u32 * stride) as usize * 4;
+            let b = ((lower + 1.0).max(0.0) as u32 * stride) as usize * 4;
+            for channel in 0..3 {
+                let expected = decode(source[a + channel]) * (1.0 - weight)
+                    + decode(source[b + channel]) * weight;
+                // Allow only f32 affine-coordinate/interpolation roundoff.
+                assert!(
+                    (f64::from(actual[channel]) - expected).abs() <= 2.0e-6,
+                    "border ({x},{y}) channel {channel}: {} != {expected}",
+                    actual[channel]
+                );
+            }
+        }
+    }
     let result = encode_rec709(&frame);
     check_golden("scaled_transform_float_32x24.png", w, h, &result);
 }
