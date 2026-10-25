@@ -40,7 +40,7 @@ fn meter_transport(
     let beat_scaled = i128::from(expected.quarter_numerator) * (1_i128 << 31);
     let beat_denominator = i128::from(expected.quarter_denominator);
     let beat_ticks = ((beat_scaled.abs() + beat_denominator / 2) / beat_denominator * beat_scaled.signum()) as i64;
-    if !(1..=4).contains(&frames)
+    if !(1..=meter_oracle::MAX_BLOCK_FRAMES).contains(&frames)
         || sample
             .checked_add(frames as i64 - 1)
             .and_then(|last| meter_oracle::expected(last, rate))
@@ -127,7 +127,9 @@ mod meter_transport_contracts {
             }
             assert!(meter_transport(&invalid, 48_000, 4).is_err(), "case={case}");
         }
-        assert!(meter_transport(&transport(), 48_000, 5).is_err());
+        assert!(meter_transport(&transport(), 48_000, 5).is_ok());
+        assert!(meter_transport(&transport(), 48_000, 16_384).is_ok());
+        assert!(meter_transport(&transport(), 48_000, 16_385).is_err());
         assert!(meter_transport(&transport(), 96_000, 4).is_err());
         assert_eq!(
             meter_oracle::pcm_tag(0, 2, 48_000, -1, 0.0625),

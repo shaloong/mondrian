@@ -10,18 +10,30 @@ use mondrian_timeline::audio::{
 };
 
 #[test]
-#[ignore = "normal IPC20 Product, owned CLAP sidechain fixture, FFmpeg with libx264/PCM24"]
+#[ignore = "current Product, owned CLAP sidechain fixture, FFmpeg with libx264/PCM24"]
 fn production_queue_clap_transport_reaches_main_and_stem_artifacts() {
-    qualify(true);
+    qualify(true, false);
 }
 
 #[test]
-#[ignore = "normal IPC20 Product, corrected owned VST3 sidechain fixture, FFmpeg with libx264/PCM24"]
+#[ignore = "current Product, corrected owned VST3 sidechain fixture, FFmpeg with libx264/PCM24"]
 fn production_queue_vst3_transport_reaches_main_and_stem_artifacts() {
-    qualify(false);
+    qualify(false, false);
 }
 
-fn qualify(clap: bool) {
+#[test]
+#[ignore = "current Product, owned CLAP meter fixture, FFmpeg with libx264/PCM24"]
+fn production_queue_clap_meter_reaches_main_and_stem_artifacts() {
+    qualify(true, true);
+}
+
+#[test]
+#[ignore = "current Product, owned VST3 meter fixture, FFmpeg with libx264/PCM24"]
+fn production_queue_vst3_meter_reaches_main_and_stem_artifacts() {
+    qualify(false, true);
+}
+
+fn qualify(clap: bool, meter: bool) {
     assert!(
         ffmpeg_is_available_for_test(),
         "real output qualification requires FFmpeg"
@@ -44,7 +56,7 @@ fn qualify(clap: bool) {
                     )
                     .unwrap(),
                 );
-                let mut state = vec![6];
+                let mut state = vec![if meter { 16 } else { 6 }];
                 state.extend_from_slice(&0.5_f32.to_le_bytes());
                 let instances = (0..2)
                     .map(|_| {
@@ -74,7 +86,7 @@ fn qualify(clap: bool) {
                 let mut component = b"MSS1".to_vec();
                 component.extend_from_slice(&1_u32.to_le_bytes());
                 component.extend_from_slice(&0.5_f64.to_le_bytes());
-                component.extend_from_slice(&3_u32.to_le_bytes());
+                component.extend_from_slice(&(if meter { 9_u32 } else { 3 }).to_le_bytes());
                 let instances = (0..2)
                     .map(|_| {
                         catalog
@@ -99,7 +111,7 @@ fn qualify(clap: bool) {
             })
             .collect();
         let source = directory.path().join(format!("source-{rate}.wav"));
-        write_source(&source, rate);
+        write_source(&source, rate, if meter { 3 } else { 1 });
         let queue = RenderQueue::new_with_audio_processor_resolver(resolver);
         for stems in [false, true] {
             let output = directory.path().join(format!(
@@ -110,9 +122,20 @@ fn qualify(clap: bool) {
             config.timeline.sequence.settings.frame_rate = Rational::FPS_25;
             config.timeline.sequence.settings.audio_sample_rate = rate;
             config.timeline.sequence.settings.audio_channel_layout = AudioChannelLayout::Stereo;
-            config.timeline.sequence.audio_program.musical_time_reference = None;
-            config.timeline.range =
-                TimelineExportRange::WorkArea { start_frame: 0, end_frame_exclusive: 1 };
+            config.timeline.sequence.audio_program.musical_time_reference = meter.then(|| {
+                mondrian_core::MusicalTimeReference::new(
+                    TimelineTime::new(2, i64::from(rate)).unwrap(),
+                    TimelineTime::new(3, 4).unwrap(),
+                )
+                .unwrap()
+                .with_time_signature(Some(mondrian_core::MusicalTimeSignature::new(7, 8).unwrap()))
+            });
+            // 2.60..2.64 seconds spans bar1 at2.625+2/rate for both rates.
+            let start_frame = if meter { 65 } else { 0 };
+            config.timeline.range = TimelineExportRange::WorkArea {
+                start_frame,
+                end_frame_exclusive: start_frame + 1,
+            };
             let asset = AssetId::new();
             let component = AudioSourceComponentId::primary();
             let track = config.timeline.sequence.audio_tracks[0].id;
@@ -121,7 +144,11 @@ fn qualify(clap: bool) {
                 .sequence
                 .add_media_audio_clip(
                     track,
-                    Clip::new(asset, TimelineTime::ZERO, TimelineTime::ONE).unwrap(),
+                    Clip::new(
+                        asset,
+                        TimelineTime::ZERO,
+                        if meter { TimelineTime::new(3, 1).unwrap() } else { TimelineTime::ONE },
+                    ).unwrap(),
                     component,
                 )
                 .unwrap();
@@ -199,16 +226,18 @@ fn qualify(clap: bool) {
                     assert_output(
                         &output.join(crate::audio_stems::stem_file_name(index, id)),
                         rate,
+                        meter,
                     );
                 }
             } else {
-                assert_output(&output, rate);
+                assert_output(&output, rate, meter);
             }
             println!(
                 "{}",
                 serde_json::json!({
                     "case": "native-transport-production-queue",
                     "format": if clap { "clap" } else { "vst3" },
+                    "authored_meter": meter,
                     "rate": rate, "stems": stems,
                     "artifacts": if stems { 2 } else { 1 },
                     "pcm_frames_per_artifact": rate / 25,
@@ -223,8 +252,8 @@ fn qualify(clap: bool) {
     }
 }
 
-fn write_source(path: &Path, rate: u32) {
-    let data_bytes = rate * 2 * 4;
+fn write_source(path: &Path, rate: u32, seconds: u32) {
+    let data_bytes = rate * seconds * 2 * 4;
     let mut wave = BufWriter::new(std::fs::File::create(path).unwrap());
     wave.write_all(b"RIFF").unwrap();
     wave.write_all(&(36 + data_bytes).to_le_bytes()).unwrap();
@@ -238,14 +267,14 @@ fn write_source(path: &Path, rate: u32) {
     wave.write_all(&32_u16.to_le_bytes()).unwrap();
     wave.write_all(b"data").unwrap();
     wave.write_all(&data_bytes.to_le_bytes()).unwrap();
-    for _ in 0..rate {
+    for _ in 0..rate * seconds {
         wave.write_all(&0.25_f32.to_le_bytes()).unwrap();
         wave.write_all(&(-0.25_f32).to_le_bytes()).unwrap();
     }
     wave.flush().unwrap();
 }
 
-fn assert_output(path: &Path, rate: u32) {
+fn assert_output(path: &Path, rate: u32, meter: bool) {
     let probe = crate::validator::probe_export_output(path).unwrap();
     assert_eq!(
         probe.audio.and_then(|a| a.codec_name).as_deref(),
@@ -268,7 +297,12 @@ fn assert_output(path: &Path, rate: u32) {
     for (frame, pair) in decoded.stdout.chunks_exact(8).enumerate() {
         // Independent dyadic PCM oracle: Main weight2, restored Gain.5,
         // explicit Playing+.125, canonical sample tag, and native PDC3 alignment.
-        let expected = 0.5 * (0.625 + (frame % 251) as f32 / 1024.0);
+        let sample = if meter { rate as usize * 65 / 25 + frame } else { frame };
+        let meter_gain = if meter {
+            80.0 / 1024.0
+                + if 8 * (sample as i64 - 2) < 21 * i64::from(rate) { 1.0 / 16.0 } else { 1.0 / 8.0 }
+        } else { 0.0 };
+        let expected = 0.5 * (0.625 + (sample % 251) as f32 / 1024.0 + meter_gain);
         let left = f32::from_le_bytes(pair[..4].try_into().unwrap());
         let right = f32::from_le_bytes(pair[4..].try_into().unwrap());
         assert_eq!(

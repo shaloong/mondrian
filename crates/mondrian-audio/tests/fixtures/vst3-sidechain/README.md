@@ -56,7 +56,9 @@ returning a fatal error alone is insufficient acceptance.
 Mode9 keeps the existing state envelope, ports and latency3. Actual IAudioProcessor
 callbacks independently check anchored PPQ, Tempo80, explicit7/8, bar start and
 validity flags; native bar/signature values contribute to PCM across boundaries.
-Quarter zero is2/rate, and the finite oracle supports44.1/48k. Older modes retain
+Quarter zero is2/rate; samples−8 through3*rate at44.1/48k and1..16384 callback
+frames cover Runtime, App preroll and Export. Endpoint checks precede PCM;
+per-frame tags use no block-sized scratch and no FFI panic. Older modes retain
 their contracts. This owned oracle does not qualify third-party or RT behavior.
 
 ## Constant component configuration service controls (modes 5/6)

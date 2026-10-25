@@ -10,12 +10,16 @@ pub struct Expected {
     pub bar: i32,
 }
 
+pub const MAX_BLOCK_FRAMES: usize = 16_384;
+
 pub fn expected(sample: i64, rate: u32) -> Option<Expected> {
     if !matches!(rate, 44_100 | 48_000) {
         return None;
     }
-    let boundary = 2 + 21 * i64::from(rate) / 8;
-    if !(-8..=40).contains(&sample) && !(boundary - 16..=boundary + 40).contains(&sample) {
+    // Covers Runtime boundaries, App preroll and production Export blocks.
+    // Keep a finite contiguous domain so a validated block's endpoints also
+    // establish that every interior frame belongs to this oracle.
+    if !(-8..=3 * i64::from(rate)).contains(&sample) {
         return None;
     }
     Some(Expected {
@@ -59,5 +63,9 @@ mod tests {
         }
         assert!(expected(0, 96_000).is_none());
         assert!(expected(i64::MAX, 48_000).is_none());
+        assert!(expected(-8, 48_000).is_some());
+        assert!(expected(-9, 48_000).is_none());
+        assert!(expected(144_000, 48_000).is_some());
+        assert!(expected(144_001, 48_000).is_none());
     }
 }

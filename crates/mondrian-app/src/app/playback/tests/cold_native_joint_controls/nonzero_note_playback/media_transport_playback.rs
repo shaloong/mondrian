@@ -2,18 +2,32 @@
 use super::*;
 
 #[test]
-#[ignore = "normal IPC20 Product, owned CLAP sidechain fixture and FFmpeg; software preroll only"]
+#[ignore = "current Product, owned CLAP sidechain fixture and FFmpeg; software preroll only"]
 fn app_owned_clap_media_preroll_enqueues_transport_pcm() {
-    qualify(true);
+    qualify(true, false);
 }
 
 #[test]
-#[ignore = "normal IPC20 Product, owned VST3 sidechain fixture and FFmpeg; software preroll only"]
+#[ignore = "current Product, owned VST3 sidechain fixture and FFmpeg; software preroll only"]
 fn app_owned_vst3_media_preroll_enqueues_transport_pcm() {
-    qualify(false);
+    qualify(false, false);
 }
 
-fn qualify(clap_format: bool) {
+#[test]
+#[ignore = "current Product, owned CLAP meter fixture and FFmpeg; software preroll crosses 7/8 bar"]
+fn app_owned_clap_media_preroll_enqueues_meter_pcm() {
+    qualify(true, true);
+}
+
+#[test]
+#[ignore = "current Product, owned VST3 meter fixture and FFmpeg; software preroll crosses 7/8 bar"]
+fn app_owned_vst3_media_preroll_enqueues_meter_pcm() {
+    qualify(false, true);
+}
+
+fn qualify(clap_format: bool, meter: bool) {
+    let seek_frame = if meter { 63 } else { 1 };
+    let start_sample = seek_frame * 2_000;
     let material = |name| {
         let path = std::path::PathBuf::from(std::env::var_os(name).expect("native input"));
         assert!(path.is_absolute() && path.is_file(), "{name}");
@@ -57,7 +71,7 @@ fn qualify(clap_format: bool) {
             clap.install_library(material("MONDRIAN_CLAP_SIDECHAIN_TEST_PLUGIN")).unwrap();
         assert_eq!(descriptors.len(), 1);
         assert_eq!(descriptors[0].plugin_id, "org.mondrian.fixture.sidechain");
-        let mut seed = vec![6];
+        let mut seed = vec![if meter { 16 } else { 6 }];
         seed.extend_from_slice(&0.5_f32.to_le_bytes());
         clap.create_instance(&descriptors[0].plugin_id, render, Some(seed)).unwrap()
     } else {
@@ -68,7 +82,7 @@ fn qualify(clap_format: bool) {
         let mut seed = b"MSS1".to_vec();
         seed.extend_from_slice(&1_u32.to_le_bytes());
         seed.extend_from_slice(&0.5_f64.to_le_bytes());
-        seed.extend_from_slice(&3_u32.to_le_bytes());
+        seed.extend_from_slice(&(if meter { 9_u32 } else { 3 }).to_le_bytes());
         vst3.create_instance(&descriptors[0].class_id, render, Some(seed)).unwrap()
     };
     instance.parameters.clear();
@@ -78,14 +92,22 @@ fn qualify(clap_format: bool) {
     sequence.settings.frame_rate = mondrian_core::Rational::FPS_24;
     sequence.settings.audio_sample_rate = 48_000;
     sequence.settings.audio_channel_layout = layout;
-    sequence.audio_program.musical_time_reference = None;
+    sequence.audio_program.musical_time_reference = meter.then(|| {
+        mondrian_core::MusicalTimeReference::new(
+            TimelineTime::new(2, 48_000).unwrap(),
+            TimelineTime::new(3, 4).unwrap(),
+        )
+        .unwrap()
+        .with_time_signature(Some(mondrian_core::MusicalTimeSignature::new(7, 8).unwrap()))
+    });
     super::super::project_state_roundtrip::initialize_nonzero_audio(
         &mut sequence,
         &library,
         directory.path(),
     );
-    // The existing 32-frame constant WAV starts at public S2000; source time is 0.
-    sequence.audio_tracks[0].clips[0].position = TimelineTime::new(1, 24).unwrap();
+    // Reuse the original32-frame WAV. Meter enters at S126000 and crosses the
+    // bar at126002 inside the first actual four-frame Media request.
+    sequence.audio_tracks[0].clips[0].position = TimelineTime::new(seek_frame, 24).unwrap();
     sequence.audio_program.outputs[0].strip.pre_fader.processors.push(instance);
     let mut state = AppState::with_native_audio_catalogs(clap, vst3);
     assert!(state.shutdown_audio_playback_and_wait().all_workers_terminated());
@@ -128,9 +150,9 @@ fn qualify(clap_format: bool) {
     let mut verifier = None;
     let mut handle: Option<OwnedHandle> = None;
     let target = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        state.seek(1).unwrap();
-        assert_eq!(state.current_frame(), 1);
-        assert_eq!(state.audio_playback_snapshot().next_start_sample, 2_000);
+        state.seek(seek_frame).unwrap();
+        assert_eq!(state.current_frame(), seek_frame);
+        assert_eq!(state.audio_playback_snapshot().next_start_sample, start_sample);
         assert!(state.native_audio_renderer.is_none());
         let source = state.audio_playback_renderer("Media transport PCM").unwrap().unwrap();
         weak = Arc::downgrade(&source.renderer);
@@ -142,17 +164,17 @@ fn qualify(clap_format: bool) {
             AudioProcessorCursorState::Unentered
         );
         state
-            .commit_audio_playback("Media transport PCM", audio_anchor(2_000), Some(source))
+            .commit_audio_playback("Media transport PCM", audio_anchor(start_sample), Some(source))
             .unwrap();
         let generation = state.audio_playback_snapshot().generation;
         let deadline = Instant::now() + Duration::from_secs(10);
         let mut ready = false;
         while !ready {
             let poll =
-                state.audio_playback.poll(AudioPlaybackMode::Idle, audio_anchor(2_000)).unwrap();
+                state.audio_playback.poll(AudioPlaybackMode::Idle, audio_anchor(start_sample)).unwrap();
             assert_eq!(poll.snapshot.generation, generation);
             assert_eq!(poll.snapshot.in_flight, 0);
-            assert_eq!(poll.snapshot.next_start_sample, 2_000);
+            assert_eq!(poll.snapshot.next_start_sample, start_sample);
             for event in poll.events {
                 if let AudioPlaybackEvent::NativeOwnerBindingsObserved { status, .. } = &event {
                     assert_eq!(
@@ -190,7 +212,7 @@ fn qualify(clap_format: bool) {
         );
         drop(renderer);
         let mut entered_object = None;
-        for (window, anchor) in [2_000_i64, 2_004].into_iter().enumerate() {
+        for (window, anchor) in [start_sample, start_sample + 4].into_iter().enumerate() {
             // Actual Media requests supply Playing. No direct positive render,
             // second Enter, physical callback or output-clock advance is injected.
             while buffers.lock().len() < window + 1
@@ -256,12 +278,16 @@ fn qualify(clap_format: bool) {
             assert_eq!(buffer.sample_rate, 48_000);
             assert_eq!(buffer.channel_layout, layout);
             for (offset, frame) in buffer.samples.chunks_exact(2).enumerate() {
-                let sample = 2_000 + window * 4 + offset;
-                let expected = 0.5 * (0.625 + (sample % 251) as f32 / 1024.0);
+                let sample = start_sample as usize + window * 4 + offset;
+                // Independent public-sample oracle; no DLL/adapter helper.
+                let meter_gain = if meter {
+                    80.0 / 1024.0 + if sample < 126_002 { 1.0 / 16.0 } else { 1.0 / 8.0 }
+                } else { 0.0 };
+                let expected = 0.5 * (0.625 + (sample % 251) as f32 / 1024.0 + meter_gain);
                 assert_eq!(frame, [expected, -expected], "public sample {sample}");
             }
         }
-        assert_eq!(state.audio_playback_snapshot().next_start_sample, 2_008);
+        assert_eq!(state.audio_playback_snapshot().next_start_sample, start_sample + 8);
         assert_eq!(library.database_revision().unwrap(), revision);
         assert_eq!(
             serde_json::to_value(state.authoring.as_ref().unwrap().document()).unwrap(),

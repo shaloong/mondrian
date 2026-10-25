@@ -94,6 +94,9 @@ checks seconds, exact beats, Tempo80, explicit7/8, bar number/start and unavaila
 flags against an independent finite reference (quarter zero at2/rate). Native
 bar/signature values contribute to PCM across negative, zero and positive bars.
 The shared test-only arithmetic is not used by the host or canonical PCM oracle.
+The finite domain is samples−8 through3*rate at44.1/48k, with1..16384 frames per
+callback, covering Runtime, App preroll and production Export without changing
+the fixed musical reference. Original short boundary controls remain.
 Modes0–15 retain their prior contracts; this is an owned fixture, not third-party
 compatibility or realtime/performance evidence.
 

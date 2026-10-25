@@ -290,7 +290,9 @@ fn canonical_musical_context(data: &ProcessData, prepared_rate: u64) -> Option<(
 mod meter_oracle;
 
 fn meter_context(data: &ProcessData, prepared_rate: u64) -> Option<(i64, i32, f32)> {
-    if data.processContext.is_null() || !(1..=4).contains(&data.numSamples) {
+    if data.processContext.is_null()
+        || !(1..=meter_oracle::MAX_BLOCK_FRAMES as i32).contains(&data.numSamples)
+    {
         return None;
     }
     // SAFETY: this function borrows the live process context for this callback.
@@ -804,22 +806,16 @@ impl IAudioProcessorTrait for GainProcessor {
             self.gain.store(gain.to_bits(), Ordering::Relaxed);
             return kResultOk;
         }
-        let mut meter_tags = [0.0_f32; 4];
         let meter = if mode == 9 {
             let prepared_rate = self.sample_rate.load(Ordering::Relaxed);
             let Some(value) = meter_context(data, prepared_rate)
             else { return kInvalidArgument; };
-            let rate = f64::from_bits(prepared_rate) as u32;
-            // Validate all four-or-fewer tags before touching foreign PCM.
-            // No panic/expect may turn malformed transport into an FFI unwind.
-            for (frame, tag) in meter_tags.iter_mut().enumerate().take(data.numSamples as usize) {
-                let Some(value_tag) = meter_oracle::pcm_tag(value.0, value.0 + frame as i64, rate, value.1, value.2)
-                else { return kInvalidArgument; };
-                *tag = value_tag;
-            }
-            Some(value)
+            // meter_context validates both endpoints in the contiguous oracle
+            // domain. Keep its rate snapshot with the native facts; calculate
+            // tags per frame without a block-sized stack/heap scratch buffer.
+            Some((value, f64::from_bits(prepared_rate) as u32))
         } else { None };
-        let canonical_music = if let Some((sample, _, _)) = meter {
+        let canonical_music = if let Some(((sample, _, _), _)) = meter {
             Some((sample, 80.0_f32 / 1024.0))
         } else if mode == 8 {
             if self.configured_latency.load(Ordering::Relaxed) != 3 {
@@ -892,7 +888,10 @@ impl IAudioProcessorTrait for GainProcessor {
         }
         let mut gain = f64::from_bits(self.gain.load(Ordering::Relaxed));
         let mut position = self.position.load(Ordering::Relaxed);
-        let mut write_frame = |frame: usize, gain: f64| {
+        let mut write_frame = |frame: usize, gain: f64| -> Result<(), ()> {
+            let meter_tag = if let Some(((start, bar, signature), rate)) = meter {
+                meter_oracle::pcm_tag(start, start + frame as i64, rate, bar, signature).ok_or(())?
+            } else { 0.0 };
             for channel in 0..2 {
                 let mut value = 0.0;
                 for (index, bus) in inputs.iter().enumerate() {
@@ -913,7 +912,7 @@ impl IAudioProcessorTrait for GainProcessor {
                     let tag = timeline_start.map_or(0.0, |start| ((start + frame as i64) % 251) as f32 / 1024.0);
                     let gain = if timeline_start.is_some() { gain as f32 + tag } else { gain as f32 };
                     let gain = if let Some((_, tempo)) = canonical_music { gain + tempo } else { gain };
-                    let gain = if meter.is_some() { gain + meter_tags[frame] } else { gain };
+                    let gain = if meter.is_some() { gain + meter_tag } else { gain };
                     // Preserve old None/Stopped PCM; Playing has an independently expected audible tag.
                     let gain = gain + if timeline_start.is_some()
                         && (*data.processContext).state & ProcessContext_::StatesAndFlags_::kPlaying as u32 != 0 {
@@ -929,6 +928,7 @@ impl IAudioProcessorTrait for GainProcessor {
                 }
             }
             position = (position + 1) % self.configured_latency.load(Ordering::Relaxed);
+            Ok(())
         };
         let mut previous_offset = -1_i32;
         if let Some(changes) = ComRef::from_raw(data.inputParameterChanges) {
@@ -954,7 +954,9 @@ impl IAudioProcessorTrait for GainProcessor {
                     for sample in (previous_offset + 1)..=offset {
                         let ratio = f64::from(sample - previous_offset)
                             / f64::from(offset - previous_offset);
-                        write_frame(sample as usize, gain + (value - gain) * ratio);
+                        if write_frame(sample as usize, gain + (value - gain) * ratio).is_err() {
+                            return kInvalidArgument;
+                        }
                     }
                     previous_offset = offset;
                     gain = value;
@@ -963,7 +965,9 @@ impl IAudioProcessorTrait for GainProcessor {
             }
         }
         for frame in (previous_offset + 1) as usize..data.numSamples as usize {
-            write_frame(frame, gain);
+            if write_frame(frame, gain).is_err() {
+                return kInvalidArgument;
+            }
         }
         self.gain.store(gain.to_bits(), Ordering::Relaxed);
         self.position.store(position, Ordering::Relaxed);
@@ -1443,6 +1447,10 @@ mod transport_oracle_contracts {
         }
         context = baseline;
         data.numSamples = 5;
+        assert!(meter_context(&data, 48_000_f64.to_bits()).is_some());
+        data.numSamples = 16_384;
+        assert!(meter_context(&data, 48_000_f64.to_bits()).is_some());
+        data.numSamples = 16_385;
         assert_eq!(meter_context(&data, 48_000_f64.to_bits()), None);
     }
 
