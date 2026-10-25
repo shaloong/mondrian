@@ -36,15 +36,24 @@ namespace MondrianOpenFx {
     , _data(NULL)
   {
     const auto& state = clip.frameState();
-    const OfxRectI bounds = clip.isOutput() ? state.outputPixelRod : OfxRectI{0, 0, state.info.width, state.info.height};
+    SourceFrameView source{};
+    size_t sourceIndex = 0;
+    if (!clip.isOutput() && (!state.sourceFrame(time, source, sourceIndex) || !source.pixels)) {
+      throw OFX::Host::Property::Exception(kOfxStatErrUnsupported);
+    }
+    const OfxRectI bounds = clip.isOutput() ? state.outputPixelRod :
+        OfxRectI{source.x, source.y, source.x + source.width, source.y + source.height};
     const int width = bounds.x2 - bounds.x1;
     const int height = bounds.y2 - bounds.y1;
     // Each fetch owns an independent property handle; both clips borrow the
     // active frame mapping, which outlives every legal action-scoped handle.
-    _data = clip.isOutput() ? state.output : const_cast<OfxRGBAColourF*>(state.input);
+    _data = clip.isOutput() ? state.output : const_cast<OfxRGBAColourF*>(source.pixels);
 
     // Image-owned metadata identifies this binding, not its reusable address.
-    setStringProperty(kOfxImagePropUniqueIdentifier, clip.isOutput() ? state.outputIdentifier : state.sourceIdentifier);
+    if (clip.isOutput()) { setStringProperty(kOfxImagePropUniqueIdentifier, state.outputIdentifier); }
+    else if (sourceIndex == 0) { setStringProperty(kOfxImagePropUniqueIdentifier, state.sourceIdentifier); }
+    else { setStringProperty(kOfxImagePropUniqueIdentifier, state.sourceIdentifier + ":set:" +
+        std::to_string(state.sourceBindingRevision) + ":sample:" + std::to_string(sourceIndex)); }
     setStringProperty(kOfxImagePropField, kOfxImageFieldNone);
 
     // render scale x and y of 1.0
@@ -199,11 +208,13 @@ namespace MondrianOpenFx {
   OfxRectD FilterClipInstance::getRegionOfDefinition(OfxTime time) const
   {
     if (isOutput()) { return _effect->outputRegionOfDefinition(time); }
-    OfxRectD v;
-    v.x1 = v.y1 = 0;
-    v.x2 = frameState().info.width * frameState().info.pixel_aspect_ratio;
-    v.y2 = frameState().info.height;
-    return v;
+    SourceFrameView source{};
+    size_t index = 0;
+    if (!getConnected() || !frameState().sourceFrame(time, source, index)) {
+      throw OFX::Host::Property::Exception(kOfxStatFailed);
+    }
+    return OfxRectD{source.x * source.pixelAspectRatio, static_cast<double>(source.y),
+        (source.x + source.width) * source.pixelAspectRatio, static_cast<double>(source.y + source.height)};
   }
 
   /// override this to fill in the image at the given time.
@@ -216,8 +227,13 @@ namespace MondrianOpenFx {
   {
     const auto& frame = frameState();
     if (!getConnected() || !frame.imagesAvailable || (!isOutput() && !frame.input) ||
-        (isOutput() && (!frame.output || !frame.outputAvailable || !frame.outputRodReady || frame.outputPixelCount == 0)) || !std::isfinite(time) || time != frame.info.frame) {
+        (isOutput() && (!frame.output || !frame.outputAvailable || !frame.outputRodReady || frame.outputPixelCount == 0 || time != frame.info.frame)) || !std::isfinite(time)) {
       return nullptr;
+    }
+    if (!isOutput()) {
+      SourceFrameView source{};
+      size_t index = 0;
+      if (!frame.sourceFrame(time, source, index) || !source.pixels) { return nullptr; }
     }
     if (isOutput()) {
       std::lock_guard<std::mutex> lock(_outputFetchMutex);

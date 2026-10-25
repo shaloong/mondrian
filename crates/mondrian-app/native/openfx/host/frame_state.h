@@ -13,6 +13,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstring>
+#include <cmath>
 namespace MondrianOpenFx {
   // The OFX Float32 ABI uses IEEE binary32. Classify its representation without
   // arithmetic or aliasing: every exponent-255 lane is nonfinite, including
@@ -36,6 +37,17 @@ namespace MondrianOpenFx {
     MondrianOpenFxQuery query;
     const void* context;
     uint64_t revision;
+  };
+  // Immutable host-owned upstream values, never plugin-owned pointers. The
+  // caller keeps the complete array and pixel backing alive through FrameBorrow.
+  // Binding is serialized between foreign actions; readers may run concurrently.
+  struct SourceFrameView {
+    double time;
+    const OfxRGBAColourF* pixels;
+    size_t bytes;
+    int x, y, width, height;
+    int alpha;
+    double pixelAspectRatio;
   };
   struct FrameState {
     MondrianOpenFxFrameInfo info{};
@@ -92,6 +104,74 @@ namespace MondrianOpenFx {
     }
     const OfxRGBAColourF* input = nullptr;
     OfxRGBAColourF* output = nullptr;
+    static constexpr size_t kMaximumAdditionalSourceFrames = 256;
+    const SourceFrameView* sourceFrames = nullptr;
+    size_t sourceFrameCount = 0;
+    uint64_t sourceBindingRevision = 0;
+    // Validate the complete set before replacing the current borrowed view.
+    // No allocation, coercion, default-frame substitution or pixel conversion.
+    // Cancellation remains the original owner's authority: false may mean a
+    // stopped owner, which callers must check before classifying invalid data.
+    // The optional host abort callback must not throw or run plugin code.
+    bool bindSourceFrames(const SourceFrameView* frames, size_t count,
+                          const MondrianOpenFxInvocationControl* control = nullptr) noexcept {
+      const auto stopped = [control]() noexcept {
+        return control && control->abort && control->abort(control->context);
+      };
+      if (stopped()) { return false; }
+      if ((!frames && count) || count > kMaximumAdditionalSourceFrames ||
+          imageHandles.load() != 0 || (count && !input) ||
+          sourceBindingRevision == std::numeric_limits<uint64_t>::max()) { return false; }
+      for (size_t i = 0; i < count; ++i) {
+        const auto& value = frames[i];
+        if (!std::isfinite(value.time) || value.time == info.frame ||
+            value.time < info.first_frame || value.time > info.last_frame ||
+            !value.pixels || reinterpret_cast<uintptr_t>(value.pixels) % alignof(OfxRGBAColourF) ||
+            value.width <= 0 || value.height <= 0 || value.width > 8192 || value.height > 8192 ||
+            value.alpha < 0 || value.alpha > 2 || value.alpha != info.source_alpha ||
+            value.pixelAspectRatio != info.pixel_aspect_ratio ||
+            !std::isfinite(value.pixelAspectRatio) || value.pixelAspectRatio <= 0.0) { return false; }
+        const int64_t right = int64_t(value.x) + value.width;
+        const int64_t top = int64_t(value.y) + value.height;
+        if (right > std::numeric_limits<int>::max() || top > std::numeric_limits<int>::max() ||
+            !std::isfinite(value.x * value.pixelAspectRatio) ||
+            !std::isfinite(right * value.pixelAspectRatio)) { return false; }
+        const size_t bytes = size_t(value.width) * size_t(value.height) * sizeof(OfxRGBAColourF);
+        if (bytes != value.bytes || bytes > 128u * 1024u * 1024u) { return false; }
+        for (size_t previous = 0; previous < i; ++previous) {
+          if (frames[previous].time == value.time) { return false; }
+        }
+        constexpr size_t chunk = 64 * 1024 / sizeof(OfxRGBAColourF);
+        const size_t pixels = bytes / sizeof(OfxRGBAColourF);
+        for (size_t start = 0; start < pixels; start += chunk) {
+          if (stopped()) { return false; }
+          for (size_t pixel = start; pixel < std::min(start + chunk, pixels); ++pixel) {
+            if (!finiteFloatRgba(value.pixels[pixel]) ||
+                (value.alpha == 2 && value.pixels[pixel].a != 1.0f)) { return false; }
+          }
+        }
+      }
+      if (stopped()) { return false; }
+      sourceFrames = frames;
+      sourceFrameCount = count;
+      ++sourceBindingRevision;
+      return true;
+    }
+    // Zero identifies the original current binding; other indices identify one
+    // immutable additional value for this invocation's image namespace.
+    bool sourceFrame(OfxTime time, SourceFrameView& view, size_t& index) const noexcept {
+      if (!std::isfinite(time)) { return false; }
+      if (time == info.frame) {
+        view = SourceFrameView{time, input, pixelCount * sizeof(OfxRGBAColourF),
+            0, 0, info.width, info.height, info.source_alpha, info.pixel_aspect_ratio};
+        index = 0;
+        return true;
+      }
+      for (size_t i = 0; i < sourceFrameCount; ++i) {
+        if (sourceFrames[i].time == time) { view = sourceFrames[i]; index = i + 1; return true; }
+      }
+      return false;
+    }
     // Output image support is independent of the caller's fixed viewport.
     // Only Render borrows output storage; no backing survives FrameBorrow.
     OfxRectD outputCanonicalRod{};
@@ -147,6 +227,9 @@ namespace MondrianOpenFx {
     FrameState& state;
     explicit FrameBorrow(FrameState& frame) : state(frame) {}
     ~FrameBorrow() {
+      state.sourceFrames = nullptr;
+      state.sourceFrameCount = 0;
+      state.sourceBindingRevision = 0;
       state.input = nullptr;
       state.output = nullptr;
       state.pixelCount = 0;

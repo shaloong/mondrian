@@ -151,6 +151,21 @@ if(WIN32)
   target_link_libraries(FrameDependencies PRIVATE shell32)
 endif()
 target_link_libraries(FrameDependencies PRIVATE Threads::Threads ${CMAKE_DL_LIBS})
+add_executable(SourceFrameBindings EXCLUDE_FROM_ALL source_frame_bindings.cpp
+  ${MONDRIAN_OPENFX_TEST_HOST_SOURCES})
+target_compile_features(SourceFrameBindings PRIVATE cxx_std_17)
+target_compile_definitions(SourceFrameBindings PRIVATE NOMINMAX OFX_SUPPORTS_MULTITHREAD)
+target_include_directories(SourceFrameBindings PRIVATE
+  "${MONDRIAN_OPENFX_HOST}/vendor/include"
+  "${MONDRIAN_OPENFX_HOST}/vendor/host/include"
+  "${MONDRIAN_OPENFX_HOST}/host")
+if(MSVC)
+  target_compile_options(SourceFrameBindings PRIVATE /EHsc /utf-8)
+endif()
+if(WIN32)
+  target_link_libraries(SourceFrameBindings PRIVATE shell32)
+endif()
+target_link_libraries(SourceFrameBindings PRIVATE Threads::Threads ${CMAKE_DL_LIBS})
 set(OPENFX_DEPENDENCIES_BUNDLE_DIR "${CMAKE_BINARY_DIR}/FrameDependenciesProbe.ofx.bundle")
 set(OPENFX_DEPENDENCIES_BINARY_DIR "${OPENFX_DEPENDENCIES_BUNDLE_DIR}/Contents/${OPENFX_ARCH_DIR}")
 add_library(FrameDependenciesProbe MODULE frame_dependencies_probe.cpp)

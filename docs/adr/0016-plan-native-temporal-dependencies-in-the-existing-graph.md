@@ -66,13 +66,31 @@ authorization and normal processing. Invalid-input checks, action order, legal
 current-image access, failure precedence and diagnostic phases remain unchanged.
 This is preparation for dependency negotiation, not temporal execution support.
 
-The initial boundary passed five supervised Windows native Release gates linked
-to the actual product C ABI: SessionProbe Filter, GeneratorProbe, published Misc
-Invert 2.0 (Natron 2.3.16-beta3), the existing 20 image-memory ownership cases and
-image-domain conversion. Checks include complete RGBA, legal parameter-action
-image access, same-session retry after memory refusal, empty output and actual
-Generator action counts/lifecycle. These tests do not qualify a rebuilt desktop,
-Rust IPC, Timeline, Preview/Export, temporal access, performance or other platforms.
+The native image adapter now reads immutable, caller-owned Source frame views.
+Views carry exact native time, pixel origin/extent, Float32 RGBA and the same
+clip alpha/PAR contract. Binding validates the complete set before replacing it,
+with at most 256 additional views and the existing 128 MiB per-image limit.
+Backing belongs to the caller's original ledger; no raster copy/cache is added.
+Bind only between foreign actions with no image handles leased. Each wrapper
+owns its property handle, not the pixels. FrameBorrow retires source image addresses;
+rebinding changes historical image identities even at the same time/array slot.
+Validation polls the original abort control in 64 KiB chunks and before commit;
+callers preserve the original stop reason before classifying a refused bind.
+Unknown times do not borrow the current image or fabricate its RoD. The RoD
+suite now distinguishes query failure from allocation failure on a valid clip,
+rather than misreporting BadHandle, and clears rejected/nonfinite bounds.
+
+The current 13 supervised Windows native Release groups passed: source-view
+binding (including negative/fractional exact times, origins, stride, concurrent
+handles, rebinding and canceled admission), five dependency-action groups,
+SessionProbe Filter, GeneratorProbe, published Misc Invert 2.0 (Natron
+2.3.16-beta3), 21 image-memory/handle controls, image-domain conversion, property
+bounds and float classification. Source-view injection uses the actual native
+HostSupport/Host adapter with the official Basic instance; it does not enter
+the product through Rust IPC or execute a temporal plugin. That delivery path,
+on-demand additions while images are leased, shared graph resolution and
+Preview/Export remain unimplemented. No fresh whole desktop, complete native
+temporal rendering, physical heap/RT, performance or other-platform qualification.
 
 The HostSupport dependency action now atomically replaces its complete input map
 on OK/ReplyDefault; an error leaves the caller's map unchanged. It preserves
@@ -82,17 +100,17 @@ and refuses invalid time, malformed/nonfinite/reversed pairs. A product limit of
 property writes are bounded before resize/copy; a refused write remains visible
 even after reset. This does not bound the number of frames inside a range, SDK
 heap/RSS, or raster payload: the shared planner must admit those separately.
-Five protocol groups (27 queries) passed against an independently compiled owned
-OFX fixture and the actual HostSupport/Host. Actual action logs confirm one
-Create/Destroy per group, no Render, and no foreign call for invalid time or a
-non-temporal descriptor. Six affected native regression gates also passed,
-including published Misc Invert. These are dependency-action qualifications,
-not evidence that a third-party temporal renderer or the full product works.
+The five protocol groups (27 queries) use an independently compiled owned OFX
+fixture and actual HostSupport/Host. Action logs confirm one Create/Destroy per
+group, no Render, and no dispatch for invalid time/non-temporal declarations.
+These are action qualifications, not third-party temporal-renderer evidence.
 
 Next connect native dependency messages, shared Custom staged graph resolution
 and leased historical images. Preserve upstream fault provenance without
 quarantining the waiting parent; verify all legal action/thread image requests
-before enabling capabilities. Then verify Preview/Export with real temporal plugins. Qualification
+before enabling capabilities. Distinguish declared media absence from an
+unprepared dependency; missing planned input cannot silently become a black frame.
+Then verify Preview/Export with real temporal plugins. Qualification
 must cover discontinuous ranges, negative/fractional time under the clip sampling
 contract, changed parameters, upstream Effects, cancellation, exact image leases,
 bounded storage, cache invalidation and repeated same-owner use. Keep the current

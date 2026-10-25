@@ -2154,15 +2154,24 @@ namespace OFX {
         }
 
         *bounds = clipInstance->getRegionOfDefinition(time);
-        if (bounds->x2 < bounds->x1 || bounds->y2 < bounds->y1) {
+        if (!std::isfinite(bounds->x1) || !std::isfinite(bounds->y1) ||
+            !std::isfinite(bounds->x2) || !std::isfinite(bounds->y2) ||
+            bounds->x2 < bounds->x1 || bounds->y2 < bounds->y1) {
           // the RoD is invalid (empty is OK)
-
+          *bounds = {};
           return kOfxStatFailed;
         }
 
         return kOfxStatOK;
+        } catch (const Property::Exception& error) {
+          if (bounds) { *bounds = {}; }
+          return error.getStatus() == kOfxStatErrMemory ? kOfxStatErrMemory : kOfxStatFailed;
+        } catch (const std::bad_alloc&) {
+          if (bounds) { *bounds = {}; }
+          return kOfxStatErrMemory;
         } catch (...) {
-          return kOfxStatErrBadHandle;
+          if (bounds) { *bounds = {}; }
+          return kOfxStatFailed;
         }
       }
 

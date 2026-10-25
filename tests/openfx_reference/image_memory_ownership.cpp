@@ -18,7 +18,7 @@
 
 namespace {
 struct AllocationProbe {
-  bool armed = false, fail_array = false, unexpected = false, fail_image_owner = false;
+  bool armed = false, fail_array = false, unexpected = false, fail_image_owner = false, fail_rod = false;
   void* owner = nullptr;
   unsigned scalar_allocations = 0, scalar_deletions = 0, array_calls = 0, array_failures = 0;
   unsigned scalar_failures = 0;
@@ -44,6 +44,11 @@ void releaseBytes(void* storage) noexcept {
 // the original oracle. The separate image-fetch window fails only the first
 // real FrameImage allocation, before a wrapper or property handle exists.
 void* operator new(std::size_t bytes) {
+  if (probe.armed && probe.fail_rod) {
+    probe.fail_rod = false;
+    ++probe.scalar_failures;
+    throw std::bad_alloc();
+  }
   if (probe.armed && probe.fail_image_owner) {
     probe.fail_image_owner = false;
     ++probe.scalar_failures;
@@ -479,12 +484,33 @@ int exercise(MondrianOpenFx::Host& host, const char* binaryPath, const char* bun
       *sourceDescriptor, *source, frame, "Source", "source-handle-recovery");
   const bool outputHandleRecovered = clipInstanceRecovery(*suite, instance->getHandle(),
       *outputDescriptor, *output, frame, "Output", "output-handle-recovery");
+  // Fail only the first real RoD action-argument allocation, before any plugin
+  // action. The valid Output handle must not be mislabeled as BadHandle.
+  const auto sourceBefore = inputPixel, outputBefore = outputPixel;
+  const bool rodReady = frame.outputRodReady;
+  frame.outputRodReady = false;
+  OfxRectD refusedBounds{11, 13, 17, 19};
+  probe = {};
+  probe.fail_rod = probe.armed = true;
+  const auto rodStatus = suite->clipGetRegionOfDefinition(output->getHandle(), frame.info.frame, &refusedBounds);
+  probe.armed = false;
+  const bool cleared = refusedBounds.x1 == 0 && refusedBounds.y1 == 0 && refusedBounds.x2 == 0 && refusedBounds.y2 == 0;
+  OfxRectD recoveredBounds{};
+  const auto recoveredRod = suite->clipGetRegionOfDefinition(output->getHandle(), frame.info.frame, &recoveredBounds);
+  frame.outputRodReady = rodReady;
+  const bool rodMemoryPassed = rodStatus == kOfxStatErrMemory && cleared && probe.scalar_failures == 1 &&
+      probe.scalar_allocations == 0 && !probe.unexpected && frame.imageHandles == 0 &&
+      !frame.queryingOutputRod && recoveredRod == kOfxStatOK &&
+      recoveredBounds.x1 == 0 && recoveredBounds.y1 == 0 && recoveredBounds.x2 == 1 && recoveredBounds.y2 == 1 &&
+      !std::memcmp(&sourceBefore, &inputPixel, sizeof(inputPixel)) && !std::memcmp(&outputBefore, &outputPixel, sizeof(outputPixel));
+  std::printf("{\"path\":\"output-rod-memory\",\"status\":%d,\"allocation_failures\":%u,\"bounds_zero\":%s,\"recovered\":%s,\"passed\":%s}\n",
+      rodStatus, probe.scalar_failures, cleared ? "true" : "false", recoveredRod == kOfxStatOK ? "true" : "false", rodMemoryPassed ? "true" : "false");
   return hostPassed && instancePassed && sourcePassed && outputPassed &&
       rootRefused && contextRefused && hostRecovered && instanceRecovered && sourceImageRefused &&
       outputImageRefused && sourceRodRefused && outputRodRefused && sourceClipRecovered &&
       outputClipRecovered && rootSourceHandleRefused && rootOutputHandleRefused &&
       contextSourceHandleRefused && contextOutputHandleRefused && sourceHandleRecovered &&
-      outputHandleRecovered ? 0 : 1;
+      outputHandleRecovered && rodMemoryPassed ? 0 : 1;
 }
 }
 

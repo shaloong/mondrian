@@ -51,3 +51,7 @@ The product filter host is maintained separately in `../host`.
   its sticky refusal survives reset/copy. Other properties retain their existing
   write policy. This is not a native heap/RSS or requested-frame-count limit.
   Dependency action tests do not enable temporal rendering in the product.
+
+- `clipGetRegionOfDefinition` reports a valid clip's query failure as Failed,
+  preserves allocation failures as ErrMemory and clears rejected bounds. Invalid
+  handles still report BadHandle; nonfinite/inverted regions cannot return OK.
