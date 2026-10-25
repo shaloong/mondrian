@@ -268,6 +268,30 @@ fn canonical_note_sequence(
 #[test]
 #[ignore = "requires outer native Job, current normal MONDRIAN_VST3_TEST_HELPER and real MONDRIAN_SURGE_XT_VST3_DLL"]
 fn external_surge_xt_vst3_captured_state_notes_main_runtime_without_media() {
+    // The existing VST3 adapter requires a reference for Note/PPQ projection.
+    // This preserves the original fixed120 BPM, unspecified-meter control.
+    run_captured_state_notes_main_runtime(
+        MusicalTimeReference::new(TimelineTime::ZERO, TimelineTime::new(1, 2).unwrap()).unwrap(),
+    );
+}
+
+#[test]
+#[ignore = "requires outer native Job, current IPC21 Product and real Surge XT VST3; authored 7/8 crosses a bar during the held Note"]
+fn external_surge_xt_vst3_captured_state_notes_constant_meter_runtime_without_media() {
+    // Quarter3.25 at sample0 reaches bar1 at sample6000 (48k/120 BPM),
+    // inside Note127..8193 and the original measured sustain2048..6144.
+    run_captured_state_notes_main_runtime(
+        MusicalTimeReference::new(
+            TimelineTime::new(-13, 8).unwrap(),
+            TimelineTime::new(1, 2).unwrap(),
+        )
+        .unwrap()
+        .with_time_signature(Some(mondrian_core::MusicalTimeSignature::new(7, 8).unwrap())),
+    );
+}
+
+fn run_captured_state_notes_main_runtime(reference: MusicalTimeReference) {
+    let reference = Some(reference);
     let mut in_job = 0;
     // SAFETY: valid pseudo handle and call-local writable BOOL. Membership is
     // a guard; Root's caller still owns/qualifies the complete outer Job tree.
@@ -292,11 +316,6 @@ fn external_surge_xt_vst3_captured_state_notes_main_runtime_without_media() {
         public_output_lookahead_budget_frames: 4_096,
         compensation_delay_scratch_budget_bytes: 64 * 1024 * 1024,
     };
-    // The existing VST3 adapter requires a reference for Note/PPQ projection.
-    // A fixed 120 BPM reference is not a tempo-response or playing-state test.
-    let reference = Some(
-        MusicalTimeReference::new(TimelineTime::ZERO, TimelineTime::new(1, 2).unwrap()).unwrap(),
-    );
     let catalog = Arc::new(
         DiscoveredVst3AudioProcessorSpecResolver::discover(helper.clone(), [library.clone()])
             .expect("current Product typed descriptor discovery"),

@@ -1,7 +1,7 @@
 //! One real Surge XT CLAP state/Note/Main-output Runtime consumer.
 //! Other outputs are prepared, never used as a sound or algorithm oracle.
-//! Some supplies constant tempo only; no plugin tempo response, beats or playing
-//! state is inferred from successful Note/PCM processing.
+//! Some supplies a constant musical reference, optionally with meter. Successful
+//! Note/PCM processing does not establish a musical-response algorithm oracle.
 
 use super::{owner, Cursors};
 use crate::processor_isolation::clap_discovery::probe_clap_plugin_registration_with_state;
@@ -352,6 +352,21 @@ fn external_surge_xt_clap_captured_state_notes_musical_runtime_without_media() {
             TimelineTime::new(3, 4).unwrap(),
         )
         .unwrap(),
+    ));
+}
+
+#[test]
+#[ignore = "requires outer native Job, current IPC21 Product and real Surge XT CLAP; authored 7/8 crosses a bar during the held Note"]
+fn external_surge_xt_clap_captured_state_notes_constant_meter_runtime_without_media() {
+    // At 48k/120 BPM, quarter3.25 at sample0 reaches bar1 at sample6000,
+    // inside the original held Note127..8193 and complete16384-frame gate.
+    run_captured_state_notes_main_runtime(Some(
+        MusicalTimeReference::new(
+            TimelineTime::new(-13, 8).unwrap(),
+            TimelineTime::new(1, 2).unwrap(),
+        )
+        .unwrap()
+        .with_time_signature(Some(mondrian_core::MusicalTimeSignature::new(7, 8).unwrap())),
     ));
 }
 
