@@ -85,12 +85,35 @@ binding (including negative/fractional exact times, origins, stride, concurrent
 handles, rebinding and canceled admission), five dependency-action groups,
 SessionProbe Filter, GeneratorProbe, published Misc Invert 2.0 (Natron
 2.3.16-beta3), 21 image-memory/handle controls, image-domain conversion, property
-bounds and float classification. Source-view injection uses the actual native
-HostSupport/Host adapter with the official Basic instance; it does not enter
-the product through Rust IPC or execute a temporal plugin. That delivery path,
-on-demand additions while images are leased, shared graph resolution and
-Preview/Export remain unimplemented. No fresh whole desktop, complete native
-temporal rendering, physical heap/RT, performance or other-platform qualification.
+bounds and float classification. The source-view group uses the actual native
+HostSupport/Host adapter with the official Basic instance. Separately,
+already-resolved Source values now travel through resident IPC16 to the same
+native Render call. The strict optional field is mandatory even when null;
+at most 256 descriptors and 128 MiB of aggregate Float32 RGBA payload are
+accepted. One immutable temporary file carries pixels, never JSON or process
+addresses. Bounds, exact times, representation, disjoint byte ranges and actual
+file length are checked; the child rejects invalid samples before constructing
+the plugin. The C ABI lends the same source-view structure through FrameBorrow,
+without changing temporal/context admission.
+
+The existing bank admits the extra input payload before its copy; a later native
+output-domain request includes the still-held input payload in the same grant.
+Bounded descriptor capacities are charged in resident storage. During invocation
+failure the parent retains backing through retirement; the child's read-only
+mapping outlives native access and error teardown. No second decoder, scheduler,
+parameter authority, cache or cross-call plan registry is introduced.
+
+A normal default-feature Windows test-profile worker passed four complete RGBA
+renders on one native owner with negative/fractional times, different origins and
+strides, four input refusals, four composed output-domain refusals, duplicate-time
+rejection and cancellation with four image handles held. SourceDeliveryProbe is
+deliberately an ABI calibration fixture whose descriptor does not claim temporal
+access; it is not conforming third-party temporal-plugin evidence. Official Basic
+resident reuse, output-refusal and the 13 native regression groups also passed.
+Native dependency requests, on-demand additions while images are leased, shared
+graph resolution and Preview/Export temporal execution remain unimplemented.
+No fresh whole desktop, complete native temporal rendering, physical heap/RT,
+performance or other-platform qualification.
 
 The HostSupport dependency action now atomically replaces its complete input map
 on OK/ReplyDefault; an error leaves the caller's map unchanged. It preserves

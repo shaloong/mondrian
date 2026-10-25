@@ -353,6 +353,12 @@ pub struct EffectFloatProcessorPreparation {
 /// native/DSP actions and before changing the supplied complete frame.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum EffectProcessorHostResourceRefusal {
+    /// Immutable upstream delivery storage was refused before native actions.
+    #[error("host could not admit {required_bytes} bytes for input delivery")]
+    InputDelivery {
+        /// Complete simultaneous controlled payload and descriptor storage.
+        required_bytes: usize,
+    },
     /// The actual caller could not pre-admit bounded receipt slots before DSP.
     #[error("host could not allocate {required_bytes} bytes for processor feedback")]
     FeedbackAllocation {

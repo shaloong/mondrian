@@ -513,6 +513,7 @@ pub(crate) fn native_auxiliary_resident_bytes() -> Result<usize, OpenFxHostError
         .and_then(|value| value.checked_add(MAX_WORKER_REQUEST_BYTES * 4))
         .and_then(|value| value.checked_add(resident::pump::storage_bytes()?))
         .and_then(|value| value.checked_add(resident::child_diagnostic::storage_bytes()?))
+        .and_then(|value| value.checked_add(resident::source_frames::storage_bytes()))
         .ok_or_else(|| unavailable("OpenFX auxiliary storage charge overflows"))
 }
 
@@ -541,6 +542,21 @@ struct NativeInvocationControl {
     question_work: c_int,
     question: Option<unsafe extern "C" fn(*const c_void, *const NativeLiveQuestion) -> c_int>,
     acquire_memory: Option<unsafe extern "C" fn(*const c_void, usize) -> c_int>,
+}
+
+/// Mirrors the borrowed C ABI span; never sent as pointers through IPC.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct NativeSourceFrame {
+    time: f64,
+    pixels: *const [f32; 4],
+    bytes: usize,
+    x: c_int,
+    y: c_int,
+    width: c_int,
+    height: c_int,
+    alpha: c_int,
+    pixel_aspect_ratio: f64,
 }
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -710,7 +726,7 @@ unsafe extern "C" {
         parameter_count: c_int,
         session: *mut *mut c_void,
     ) -> c_int;
-    fn mondrian_openfx_session_render(
+    fn mondrian_openfx_session_render_sources(
         session: *mut c_void,
         input: *const c_void,
         output: *mut c_void,
@@ -721,6 +737,8 @@ unsafe extern "C" {
         report: *mut NativeRenderReport,
         control: *const NativeInvocationControl,
         diagnostic: *mut resident::child_diagnostic::NativeRenderDiagnostic,
+        sources: *const NativeSourceFrame,
+        source_count: usize,
     ) -> c_int;
     fn mondrian_openfx_session_close_gui(
         session: *mut c_void,
@@ -841,6 +859,7 @@ impl NativeSession {
         self.render_with_native_diagnostic(input, output, info, parameters, control, None)
     }
 
+    #[cfg(test)]
     fn render_with_native_diagnostic(
         &mut self,
         input: &[u8],
@@ -850,6 +869,20 @@ impl NativeSession {
         control: Option<&NativeInvocationControl>,
         diagnostic: Option<&mut resident::child_diagnostic::NativeRenderDiagnostic>,
     ) -> Result<mondrian_core::ColorFrameAlpha, NativeRenderError> {
+        self.render_with_sources(input, output, info, parameters, control, diagnostic, &[])
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn render_with_sources(
+        &mut self,
+        input: &[u8],
+        output: &mut [u8],
+        info: &NativeFrameInfo,
+        parameters: &[NativeParameter],
+        control: Option<&NativeInvocationControl>,
+        diagnostic: Option<&mut resident::child_diagnostic::NativeRenderDiagnostic>,
+        sources: &[NativeSourceFrame],
+    ) -> Result<mondrian_core::ColorFrameAlpha, NativeRenderError> {
         self.feedback = None;
         if !input.is_empty() && output.len() != input.len() {
             return Err(NativeRenderError::Rejected(2));
@@ -858,7 +891,7 @@ impl NativeSession {
         // input/output slices and output metadata remain live for this call.
         // Native validation checks exact extents before reading or writing.
         let status = unsafe {
-            mondrian_openfx_session_render(
+            mondrian_openfx_session_render_sources(
                 self.handle.as_ptr(),
                 if input.is_empty() {
                     std::ptr::null()
@@ -873,6 +906,8 @@ impl NativeSession {
                 self.report.as_mut(),
                 control.map_or(std::ptr::null(), std::ptr::from_ref),
                 diagnostic.map_or(std::ptr::null_mut(), std::ptr::from_mut),
+                sources.as_ptr(),
+                sources.len(),
             )
         };
         if status != 0 {

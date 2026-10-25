@@ -71,6 +71,19 @@ configure_file("${OPENFX_SOURCE_DIR}/Examples/Basic/Info.plist"
 find_package(Threads REQUIRED)
 target_link_libraries(SessionProbe PRIVATE Threads::Threads)
 
+# Actual resident IPC delivery calibration, kept separate from real temporal
+# compatibility claims and from the untouched official SDK example.
+set(SOURCE_DELIVERY_BINARY_DIR "${CMAKE_BINARY_DIR}/SourceDeliveryProbe.ofx.bundle/Contents/${OPENFX_ARCH_DIR}")
+add_library(SourceDeliveryProbe MODULE source_delivery_probe.cpp)
+target_compile_features(SourceDeliveryProbe PRIVATE cxx_std_17)
+target_include_directories(SourceDeliveryProbe PRIVATE "${OPENFX_SOURCE_DIR}/include")
+target_link_libraries(SourceDeliveryProbe PRIVATE Threads::Threads)
+set_target_properties(SourceDeliveryProbe PROPERTIES PREFIX "" SUFFIX ".ofx"
+  LIBRARY_OUTPUT_DIRECTORY "${SOURCE_DELIVERY_BINARY_DIR}"
+  LIBRARY_OUTPUT_DIRECTORY_RELEASE "${SOURCE_DELIVERY_BINARY_DIR}"
+  RUNTIME_OUTPUT_DIRECTORY "${SOURCE_DELIVERY_BINARY_DIR}"
+  RUNTIME_OUTPUT_DIRECTORY_RELEASE "${SOURCE_DELIVERY_BINARY_DIR}")
+
 # Small native ownership control: actual tracked HostSupport and product Host,
 # with test-only global allocator failure injection in the executable.
 set(MONDRIAN_OPENFX_HOST "${CMAKE_CURRENT_LIST_DIR}/../../crates/mondrian-app/native/openfx")

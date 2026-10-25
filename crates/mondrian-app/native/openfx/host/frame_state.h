@@ -41,14 +41,7 @@ namespace MondrianOpenFx {
   // Immutable host-owned upstream values, never plugin-owned pointers. The
   // caller keeps the complete array and pixel backing alive through FrameBorrow.
   // Binding is serialized between foreign actions; readers may run concurrently.
-  struct SourceFrameView {
-    double time;
-    const OfxRGBAColourF* pixels;
-    size_t bytes;
-    int x, y, width, height;
-    int alpha;
-    double pixelAspectRatio;
-  };
+  using SourceFrameView = MondrianOpenFxSourceFrame;
   struct FrameState {
     MondrianOpenFxFrameInfo info{};
     // Borrowed only for an explicitly measured action. Legal callback threads

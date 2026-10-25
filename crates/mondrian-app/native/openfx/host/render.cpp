@@ -761,7 +761,8 @@ struct MondrianOpenFxSession {
   int render(const void* input, void* output, size_t bytes,
              const MondrianOpenFxFrameInfo& info,
              const MondrianOpenFxParameter* parameters, int count, MondrianOpenFxRenderReport& report,
-             const MondrianOpenFxInvocationControl* control, Probe& probe) {
+             const MondrianOpenFxInvocationControl* control, Probe& probe,
+             const MondrianOpenFxSourceFrame* sources, size_t sourceCount) {
     auto phase = probe.start();
     if (failed) { return 2; }
     // Project geometry is an immutable owner binding, independent of image
@@ -782,6 +783,7 @@ struct MondrianOpenFxSession {
     const int loaded = loadFrame(frame, input, bytes, info, generator);
     if (loaded != 0) { failed = true; return loaded; }
     if (!frame.beginImageBinding()) { failed = true; return 2; }
+    if (sourceCount && !frame.bindSourceFrames(sources, sourceCount, control)) { failed = true; return 2; }
     frame.output = static_cast<OfxRGBAColourF*>(output);
     auto* outputClip = dynamic_cast<MondrianOpenFx::FilterClipInstance*>(instance->getClip("Output"));
     if (!outputClip) { failed = true; return 5; }
@@ -1202,7 +1204,8 @@ static int renderSessionEntry(
     const MondrianOpenFxFrameInfo* info, const MondrianOpenFxParameter* parameters,
     int count, MondrianOpenFxRenderReport* report,
     const MondrianOpenFxInvocationControl* control,
-    MondrianOpenFxNativeDiagnostic* diagnostic, Probe& probe) noexcept
+    MondrianOpenFxNativeDiagnostic* diagnostic, Probe& probe,
+    const MondrianOpenFxSourceFrame* sources, size_t sourceCount) noexcept
 {
   if (report) { report->completion = MONDRIAN_OPENFX_RENDER_UNSET; report->output_alpha = MONDRIAN_OPENFX_ALPHA_INVALID; report->required_transient_bytes = 0; }
   if (!session) { return 2; }
@@ -1224,7 +1227,7 @@ static int renderSessionEntry(
       }
       ~DiagnosticBorrow() { frame.renderDiagnostic = nullptr; }
     } diagnosticBorrow(session->frame, diagnostic);
-    int status = session->render(input, output, bytes, *info, parameters, count, *report, control, probe);
+    int status = session->render(input, output, bytes, *info, parameters, count, *report, control, probe, sources, sourceCount);
     // This single publication boundary also covers Identity/UserBlocked and
     // EndSequenceRender. A plugin cannot publish by ignoring a query error.
     if (session->frame.invalidChoiceDomain.load(std::memory_order_relaxed)) {
@@ -1253,12 +1256,24 @@ extern "C" int mondrian_openfx_session_render(
     const MondrianOpenFxInvocationControl* control,
     MondrianOpenFxNativeDiagnostic* diagnostic) noexcept
 {
+  return mondrian_openfx_session_render_sources(session, input, output, bytes, info,
+      parameters, count, report, control, diagnostic, nullptr, 0);
+}
+
+extern "C" int mondrian_openfx_session_render_sources(
+    MondrianOpenFxSession* session, const void* input, void* output, size_t bytes,
+    const MondrianOpenFxFrameInfo* info, const MondrianOpenFxParameter* parameters,
+    int count, MondrianOpenFxRenderReport* report,
+    const MondrianOpenFxInvocationControl* control,
+    MondrianOpenFxNativeDiagnostic* diagnostic,
+    const MondrianOpenFxSourceFrame* sources, size_t sourceCount) noexcept
+{
   if (diagnostic) {
     MondrianOpenFx::TimedRenderProbe probe(*diagnostic);
-    return renderSessionEntry(session, input, output, bytes, info, parameters, count, report, control, diagnostic, probe);
+    return renderSessionEntry(session, input, output, bytes, info, parameters, count, report, control, diagnostic, probe, sources, sourceCount);
   }
   MondrianOpenFx::NoRenderProbe probe;
-  return renderSessionEntry(session, input, output, bytes, info, parameters, count, report, control, nullptr, probe);
+  return renderSessionEntry(session, input, output, bytes, info, parameters, count, report, control, nullptr, probe, sources, sourceCount);
 }
 
 extern "C" int mondrian_openfx_session_close_gui(MondrianOpenFxSession* session,

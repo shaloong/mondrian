@@ -18,6 +18,7 @@ pub(super) mod question;
 pub(super) mod question_budget;
 #[cfg(windows)]
 mod retirement_wait;
+pub(super) mod source_frames;
 #[cfg(any(test, feature = "validation"))]
 pub use diagnostic::OpenFxRenderDiagnostic;
 pub use diagnostic::OpenFxRenderPhase;
@@ -27,9 +28,8 @@ use diagnostic::{ParentProbe, ProbeEvent};
 pub const OPENFX_RESIDENT_WORKER_ARGUMENT: &str = "--internal-openfx-session-v13";
 const ENDPOINT_ENV: &str = "MONDRIAN_INTERNAL_OPENFX_ENDPOINT";
 const NONCE_ENV: &str = "MONDRIAN_INTERNAL_OPENFX_NONCE";
-// v15: bind exact exported identifier/major/minor through native selection.
-// Keeps v14's actual pre-DSP transient admission in the existing resource bank.
-const VERSION: u16 = 15;
+// v16: mandatory bounded, immutable per-invocation Source delivery envelope.
+const VERSION: u16 = 16;
 const POLL: Duration = Duration::from_millis(20);
 const RETIRE: Duration = Duration::from_millis(100);
 // Resource settlement after an asynchronous kill is separate from graceful exit.
@@ -68,6 +68,8 @@ enum Request {
         sampling: mondrian_core::ImageSampling,
         parameters: BTreeMap<String, OpenFxParameterBinding>,
         diagnostic: bool,
+        #[serde(deserialize_with = "source_frames::required_optional")]
+        sources: Option<source_frames::Manifest>,
     },
     Cancel {
         owner: mondrian_core::EffectProcessorOwnerId,
@@ -441,6 +443,8 @@ impl Drop for ProcessOwner {
 #[derive(Debug)]
 pub struct OpenFxFilterSession {
     process: ProcessOwner,
+    // Keep backing on incomplete submission/retirement until child settlement.
+    pending_inputs: Option<tempfile::NamedTempFile>,
     control: TcpStream,
     shared: memmap2::MmapMut,
     _file: tempfile::NamedTempFile,
@@ -488,6 +492,7 @@ struct FrameRequest<'a> {
     format: mondrian_effects::EffectValueFormat,
     sampling: mondrian_core::ImageSampling,
     input: Option<&'a EffectFloatFrame>,
+    sources: &'a [source_frames::SourceFrame<'a>],
 }
 impl<'a> FrameRequest<'a> {
     fn image(frame: &'a EffectFloatFrame) -> Self {
@@ -496,6 +501,7 @@ impl<'a> FrameRequest<'a> {
             format: frame.format(),
             sampling: frame.sampling(),
             input: Some(frame),
+            sources: &[],
         }
     }
 }
@@ -864,6 +870,7 @@ impl OpenFxFilterSession {
             .ok_or_else(|| unavailable("native process identity is zero"))?;
         Ok(Self {
             process,
+            pending_inputs: None,
             control,
             shared,
             _file: file,
@@ -969,10 +976,41 @@ impl OpenFxFilterSession {
             OpenFxHostError,
         >,
     ) -> Result<EffectFloatFrame, OpenFxHostError> {
+        self.render_observed_with_sources(
+            timing,
+            parameters,
+            frame,
+            &[],
+            owner_deadline,
+            gui,
+            memory,
+            owner_control,
+        )
+    }
+
+    /// Deliver values already resolved by the graph; this does not enable
+    /// temporal descriptor admission or choose an upstream sampling policy.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn render_observed_with_sources(
+        &mut self,
+        timing: &OpenFxRenderTiming,
+        parameters: &BTreeMap<String, OpenFxParameterBinding>,
+        frame: &EffectFloatFrame,
+        sources: &[source_frames::SourceFrame<'_>],
+        owner_deadline: Option<Instant>,
+        gui: mondrian_effects::EffectProcessorGuiAdmission,
+        memory: &mut dyn FnMut(usize) -> Result<bool, OpenFxHostError>,
+        owner_control: &mut dyn FnMut(
+            OpenFxRenderObservation<'_>,
+        ) -> Result<
+            mondrian_effects::EffectProcessorQuestionState,
+            OpenFxHostError,
+        >,
+    ) -> Result<EffectFloatFrame, OpenFxHostError> {
         self.render_owned(
             timing,
             parameters,
-            FrameRequest::image(frame),
+            FrameRequest { sources, ..FrameRequest::image(frame) },
             owner_deadline,
             RenderObservation { owner_control, gui, probe: &mut (), memory },
             reserve_native_output,
@@ -1050,6 +1088,7 @@ impl OpenFxFilterSession {
                 format: self.input_format,
                 sampling,
                 input: None,
+                sources: &[],
             },
             owner_deadline,
             RenderObservation { owner_control, gui, probe: &mut (), memory },
@@ -1194,6 +1233,30 @@ impl OpenFxFilterSession {
                 return Err(error);
             }
         };
+        let delivery = source_frames::Delivery::acquire(
+            frame.sources,
+            timing,
+            frame.sampling,
+            frame.format,
+            memory,
+            &mut || self.process.check(&mut owner_checkpoint, deadline),
+        );
+        let delivery = match delivery {
+            Ok(delivery) => delivery,
+            Err(error) => {
+                if matches!(
+                    error,
+                    OpenFxHostError::Canceled | OpenFxHostError::DeadlineExceeded
+                ) {
+                    self.process.terminate_reported("Source admission");
+                }
+                return Err(error);
+            }
+        };
+        let sources = delivery.map(|source_frames::Delivery { manifest, _file }| {
+            self.pending_inputs = Some(_file);
+            manifest
+        });
         let result = self.render_inner(
             timing,
             parameters,
@@ -1201,6 +1264,7 @@ impl OpenFxFilterSession {
             RenderObservation { owner_control, gui, probe, memory },
             &mut budget,
             output_owner,
+            sources,
         );
         if result.as_ref().is_err_and(|error| {
             !matches!(
@@ -1210,9 +1274,13 @@ impl OpenFxFilterSession {
         }) {
             self.process.terminate_reported("render");
         }
+        if self.process.state == ProcessState::Settled {
+            self.pending_inputs = None;
+        }
         result
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn render_inner(
         &mut self,
         timing: &OpenFxRenderTiming,
@@ -1221,6 +1289,7 @@ impl OpenFxFilterSession {
         observation: RenderObservation<'_, impl ParentProbe>,
         budget: &mut question_budget::QuestionExecutionBudget,
         output_owner: NativeOutputAllocation,
+        sources: Option<source_frames::Manifest>,
     ) -> Result<EffectFloatFrame, OpenFxHostError> {
         let RenderObservation { owner_control, gui, probe, memory } = observation;
         let deadline = budget
@@ -1265,6 +1334,7 @@ impl OpenFxFilterSession {
             0
         }));
         let phase = probe.start();
+        let source_bytes = sources.as_ref().map_or(0, source_frames::Manifest::bytes);
         let request = Request::Render {
             owner: self.owner,
             sequence: self.sequence,
@@ -1275,6 +1345,7 @@ impl OpenFxFilterSession {
             sampling: frame.sampling,
             parameters: parameters.clone(),
             diagnostic: probe.measure_child(),
+            sources,
         };
         let mut submitted = false;
         let submission = self.request_writer.write(
@@ -1306,11 +1377,25 @@ impl OpenFxFilterSession {
             gui,
             initial_stop,
             probe,
-            memory,
+            &mut |required| {
+                let combined = source_bytes
+                    .checked_add(required)
+                    .ok_or_else(|| invalid("simultaneous Source and output storage overflows"))?;
+                memory(combined)
+            },
             &mut memory_admission,
         );
         probe.finish(OpenFxRenderPhase::AwaitCompletion, phase);
         let response = response?;
+        // Only a matching terminal response proves FrameBorrow/native reads
+        // have ended. Fault/timeout paths retain backing through retirement.
+        if matches!(&response,
+            Response::Rendered { sequence, .. } | Response::UserBlocked { sequence, .. }
+            | Response::PreflightBudgetRefused { sequence, .. } | Response::Rejected { sequence, .. }
+            if *sequence == self.sequence)
+        {
+            self.pending_inputs = None;
+        }
         let deadline = budget
             .deadline()
             .ok_or_else(|| unavailable("native completed with an unreleased human wait"))?;
@@ -1435,7 +1520,9 @@ impl OpenFxFilterSession {
         if let Some(required_bytes) = memory_refused {
             probe.finish(OpenFxRenderPhase::FeedbackAdmission, phase);
             return Err(OpenFxHostError::PreflightBudgetRefused {
-                required_bytes,
+                required_bytes: source_bytes
+                    .checked_add(required_bytes)
+                    .ok_or_else(|| invalid("simultaneous preflight storage overflows"))?,
                 feedback: Box::new(feedback),
             });
         }
@@ -2396,6 +2483,7 @@ fn run_openfx_resident_worker_inner(
                 sampling,
                 parameters,
                 diagnostic,
+                sources,
                 ..
             } => {
                 if owner != prepare.owner {
@@ -2423,6 +2511,7 @@ fn run_openfx_resident_worker_inner(
                     output: &mut output,
                     session: &mut session,
                     curves: &mut curves,
+                    sources: sources.as_ref(),
                 };
                 let result = if diagnostic {
                     let mut report = OpenFxChildRenderDiagnostic::new(
@@ -2464,6 +2553,7 @@ struct WorkerRenderContext<'a> {
     output: &'a mut [u8],
     session: &'a mut Option<NativeSession>,
     curves: &'a mut BTreeMap<String, std::sync::Arc<curves::CurveContext>>,
+    sources: Option<&'a source_frames::Manifest>,
 }
 struct WorkerRenderResult {
     response: Response,
@@ -2488,11 +2578,20 @@ fn render_worker_request(
         output,
         session,
         curves,
+        sources,
     } = context;
     let phase = probe.start();
     validate_timing(&timing)?;
     validate_native_sampling(prepare.width, sampling)?;
     validate_parameters(&parameters)?;
+    let mapped_sources =
+        source_frames::MappedSources::open(sources, prepare, &timing, sampling, &mut || {
+            if shared.is_canceled() {
+                Err(OpenFxHostError::Canceled)
+            } else {
+                Ok(())
+            }
+        })?;
     let mut candidate_curves = BTreeMap::new();
     for (name, binding) in &mut parameters {
         if let OpenFxParameterQueryMode::Curve { time_scale, .. } = &binding.query_mode {
@@ -2587,7 +2686,14 @@ fn render_worker_request(
     probe.finish(OpenFxChildRenderPhase::ParameterArena, phase);
     let dispatched = if let Some(instance) = session.as_mut() {
         dispatch_prepared_native_render_profiled(
-            shared, instance, input, output, &info, &native, probe,
+            shared,
+            instance,
+            input,
+            output,
+            &info,
+            &native,
+            probe,
+            &mapped_sources.frames,
         )
     } else {
         let phase = probe.start();
@@ -2613,6 +2719,7 @@ fn render_worker_request(
                     &info,
                     &native,
                     probe,
+                    &mapped_sources.frames,
                 );
                 *session = Some(instance);
                 dispatched
@@ -2736,9 +2843,11 @@ fn dispatch_prepared_native_render(
         info,
         parameters,
         &mut (),
+        &[],
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn dispatch_prepared_native_render_profiled(
     shared: &pump::Shared,
     instance: &mut NativeSession,
@@ -2747,6 +2856,7 @@ fn dispatch_prepared_native_render_profiled(
     info: &NativeFrameInfo,
     parameters: &[NativeParameter],
     probe: &mut impl ChildProbe,
+    sources: &[NativeSourceFrame],
 ) -> NativeRenderDispatch {
     // Construction remains externally supervised; it has no invented SDK
     // abort authority. A stop accepted during it wins before entering Render.
@@ -2755,13 +2865,14 @@ fn dispatch_prepared_native_render_profiled(
     }
     let native_control = shared.native_control();
     let phase = probe.start();
-    let result = instance.render_with_native_diagnostic(
+    let result = instance.render_with_sources(
         input,
         output,
         info,
         parameters,
         Some(&native_control),
         probe.native_target(),
+        sources,
     );
     probe.finish(OpenFxChildRenderPhase::NativeDispatch, phase);
     NativeRenderDispatch::Invoked(result)
@@ -4333,6 +4444,7 @@ mod process_retirement_tests {
         shared.fill(0xa5);
         let mut session = OpenFxFilterSession {
             process,
+            pending_inputs: None,
             control,
             shared,
             _file: file,

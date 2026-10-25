@@ -71,6 +71,18 @@ struct MondrianOpenFxFrameInfo {
   double pixel_aspect_ratio;
 };
 
+// Borrowed immutable upstream pixels, valid through this one serialized call.
+// Coordinates and time are native OFX pixel/frame coordinates, not seconds.
+struct OfxRGBAColourF;
+struct MondrianOpenFxSourceFrame {
+  double time;
+  const struct OfxRGBAColourF* pixels;
+  size_t bytes;
+  int x, y, width, height;
+  int alpha;
+  double pixelAspectRatio;
+};
+
 struct MondrianOpenFxChoiceOption {
   const char* label;
   size_t label_length;
@@ -204,6 +216,21 @@ int mondrian_openfx_session_render(
     struct MondrianOpenFxRenderReport* report,
     const struct MondrianOpenFxInvocationControl* control,
     struct MondrianOpenFxNativeDiagnostic* diagnostic) // null: no timing clocks
+#ifdef __cplusplus
+    noexcept
+#endif
+    ;
+
+// Same execution/owner as session_render; no capability or temporal admission
+// change. The complete array and every pixel backing outlive the native call.
+int mondrian_openfx_session_render_sources(
+    struct MondrianOpenFxSession* session, const void* input, void* output,
+    size_t frame_bytes, const struct MondrianOpenFxFrameInfo* frame_info,
+    const struct MondrianOpenFxParameter* parameters, int parameter_count,
+    struct MondrianOpenFxRenderReport* report,
+    const struct MondrianOpenFxInvocationControl* control,
+    struct MondrianOpenFxNativeDiagnostic* diagnostic,
+    const struct MondrianOpenFxSourceFrame* sources, size_t source_count)
 #ifdef __cplusplus
     noexcept
 #endif

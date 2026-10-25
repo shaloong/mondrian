@@ -484,7 +484,7 @@ mod tests {
     #[test]
     fn current_wire_requires_explicit_probe_selection_and_terminal_optional_field() {
         let base = serde_json::json!({"kind":"render","owner":mondrian_core::EffectProcessorOwnerId::new(),"sequence":1,
-            "gui_open":false,"interactive_render":false,"question_work":false,"timing":{"frame":0.0,"frame_rate":24.0,"first_frame":0.0,"last_frame":9.0},"sampling":mondrian_core::ImageSampling::UNIT_SQUARE,"parameters":{}});
+            "gui_open":false,"interactive_render":false,"question_work":false,"timing":{"frame":0.0,"frame_rate":24.0,"first_frame":0.0,"last_frame":9.0},"sampling":mondrian_core::ImageSampling::UNIT_SQUARE,"parameters":{},"sources":null});
         assert!(serde_json::from_value::<Request>(base.clone()).is_err());
         let mut current = base;
         current["diagnostic"] = serde_json::json!(false);

@@ -1021,6 +1021,7 @@ mod tests {
             sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
             parameters: BTreeMap::new(),
             diagnostic: false,
+            sources: None,
         }
     }
 
@@ -1034,6 +1035,7 @@ mod tests {
             "question_work",
             "diagnostic",
             "sampling",
+            "sources",
         ] {
             let mut missing = canonical.clone();
             missing.as_object_mut().expect("request object").remove(field);
@@ -1050,7 +1052,7 @@ mod tests {
             serde_json::from_value::<Response>(null),
             Ok(Response::GuiClosed { feedback: None, .. })
         ));
-        assert_eq!(VERSION, 15);
+        assert_eq!(VERSION, 16);
     }
 
     #[test]
