@@ -33,11 +33,31 @@ parameter callbacks and resource bank. `UserEdited` change actions may legally
 read the current Source image. Thus a universally pixel-free metadata preflight
 is not the contract: prepare that prerequisite through the original graph before
 expanding native historical/future demand. Do not supply dummy pixels or create a
-second instance to query dependencies. A later same-owner plan must pin exact
-author time, parameters, geometry/sampling and dependency identity through its
-consumption or cancellation. Shared pinning/admission interfaces remain to be
-implemented and reviewed against the actual bank; this document does not claim
-that existing optional residency already provides them.
+second instance to query dependencies. Exact author time, parameters,
+geometry/sampling and dependency identity must survive through consumption or
+cancellation.
+
+Keep the staged dependency exchange inside the original active processor call.
+The existing child pump can carry dependency messages while the native call keeps
+its FrameBorrow and parameter callback borrows alive; do not introduce a
+cross-call plan handle or a second instance registry first. This is the chosen
+transport direction, not an implemented dependency RPC. The current bank already
+holds the active instance outside evictable optional entries. Upstream work must
+exclude the waiting parent's active peak, held rasters and transient grant from
+its remaining budget, then compose the nested peak in the same ledger. Each
+dependency wave must use the original immutable graph/source admission; an SDK
+callback cannot open a new decoder. Missing prerequisites stop the invocation,
+without replaying partially executed DSP or substituting the current frame.
+
+Same-bank staged probes exposed and fixed two scope defects: nested work cleared
+the parent's observation binding, and final retention did not reapply the outer
+count/byte ceilings after nested owners were added. The original bank now restores
+the previous binding on normal/error/unwind paths and reapplies ceilings at the
+actual retention boundary. Two regression tests cover success/reuse, refusal,
+panic, cancellation, five optional grants and actual progress receipts; the
+complete Windows Effects library passed 363 tests with zero ignored. These are
+in-process fixtures with explicit held-byte/peak accounting, not a native staged
+resolver, full heap accounting or real temporal-plugin qualification.
 
 The first native boundary produces an invocation-local output-domain value after
 parameter changes, ClipPreferences and RoD admission. It owns no image or plugin.
@@ -69,8 +89,10 @@ non-temporal descriptor. Six affected native regression gates also passed,
 including published Misc Invert. These are dependency-action qualifications,
 not evidence that a third-party temporal renderer or the full product works.
 
-Next connect native dependency negotiation to the shared Custom planning/value
-and same-owner admission contract, then verify Preview/Export with real temporal plugins. Qualification
+Next connect native dependency messages, shared Custom staged graph resolution
+and leased historical images. Preserve upstream fault provenance without
+quarantining the waiting parent; verify all legal action/thread image requests
+before enabling capabilities. Then verify Preview/Export with real temporal plugins. Qualification
 must cover discontinuous ranges, negative/fractional time under the clip sampling
 contract, changed parameters, upstream Effects, cancellation, exact image leases,
 bounded storage, cache invalidation and repeated same-owner use. Keep the current

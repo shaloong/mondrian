@@ -873,13 +873,19 @@ impl FloatProcessorResidency {
         key: ResourceKey,
         retained: usize,
         instance: Box<dyn EffectFloatProcessorInstance>,
-        retain: bool,
+        max_instances: usize,
+        max_bytes: usize,
     ) -> EffectProcessorRetention {
-        if retain {
+        // Nested dependency work can add optional owners after initial
+        // admission. Reapply this invocation's ceiling at its actual commit,
+        // while the active instance is still held outside optional entries.
+        if max_instances > 0 && retained <= max_bytes {
+            self.trim(max_instances - 1, max_bytes - retained);
             self.bytes += retained;
             self.entries.push_back((key, retained, instance));
             EffectProcessorRetention::Retained
         } else {
+            self.trim(max_instances, max_bytes);
             drop(instance);
             EffectProcessorRetention::Evicted
         }
@@ -1024,7 +1030,9 @@ impl FloatProcessorResidency {
             control.check()?; // Scheduler stop wins over a resource refusal.
             if let Err(refusal) = reserved {
                 let retention = match cached_instance {
-                    Some(instance) => self.retain_completed(key, retained, instance, retain),
+                    Some(instance) => {
+                        self.retain_completed(key, retained, instance, max_instances, max_bytes)
+                    }
                     None => EffectProcessorRetention::Evicted,
                 };
                 return Err(FloatProcessorError::HostResourceRefused(
@@ -1066,7 +1074,7 @@ impl FloatProcessorResidency {
         let format = pixels.format();
         let sampling = pixels.sampling();
         control.check()?;
-        control.current_occurrence = Some((request, revision));
+        let previous_occurrence = control.current_occurrence.replace((request, revision));
         // Cleanup is local; the original panic is resumed to the existing
         // outer processor-isolation authority without another classification,
         // replay or retained owner. No stale borrowed occurrence survives it.
@@ -1084,7 +1092,7 @@ impl FloatProcessorResidency {
             }));
             (outcome, resources.peak_bytes, resources.refused)
         };
-        control.current_occurrence = None;
+        control.current_occurrence = previous_occurrence;
         let outcome = match outcome {
             Ok(outcome) => outcome,
             Err(payload) => std::panic::resume_unwind(payload),
@@ -1128,7 +1136,8 @@ impl FloatProcessorResidency {
                     }
                     .into());
                 }
-                let retention = self.retain_completed(key, retained, instance, retain);
+                let retention =
+                    self.retain_completed(key, retained, instance, max_instances, max_bytes);
                 if let Some(feedback) = feedback {
                     control.feedback.push(bind(*feedback, retention));
                 }
@@ -1138,7 +1147,8 @@ impl FloatProcessorResidency {
                 });
             }
             Err(EffectProcessorInvocationError::HostResourceRefused(refusal)) => {
-                let retention = self.retain_completed(key, retained, instance, retain);
+                let retention =
+                    self.retain_completed(key, retained, instance, max_instances, max_bytes);
                 return Err(FloatProcessorError::HostResourceRefused(
                     EffectProcessorHostResourceRefusalReceipt {
                         preparation: request,
@@ -1158,7 +1168,8 @@ impl FloatProcessorResidency {
                     }
                     .into());
                 }
-                let retention = self.retain_completed(key, retained, instance, retain);
+                let retention =
+                    self.retain_completed(key, retained, instance, max_instances, max_bytes);
                 return Err(FloatProcessorError::UserBlocked(std::sync::Arc::new(bind(
                     *feedback, retention,
                 ))));
@@ -1177,7 +1188,7 @@ impl FloatProcessorResidency {
         validate_completed_processor_frame(
             pixels, extent, format, sampling, contract, role, control,
         )?;
-        let retention = self.retain_completed(key, retained, instance, retain);
+        let retention = self.retain_completed(key, retained, instance, max_instances, max_bytes);
         if let Some(feedback) = feedback {
             control.feedback.push(bind(feedback, retention));
         }
@@ -1204,6 +1215,208 @@ mod tests {
             pixels,
         )
         .expect("complete normalized fixture")
+    }
+
+    #[test]
+    fn staged_bank_scope_restores_parent_on_nested_success_refusal_panic_and_cancel() {
+        #[derive(Debug)]
+        struct StagedProgress {
+            thread: std::thread::ThreadId,
+            receipts: std::sync::Mutex<Vec<crate::EffectProcessorProgressReceipt>>,
+        }
+        impl crate::EffectProcessorObserver for StagedProgress {
+            fn maximum_storage_bytes(&self) -> usize {
+                2 * crate::EffectProcessorProgressReceipt::maximum_retained_bytes()
+            }
+            fn question_service(&self) -> Option<&dyn crate::EffectProcessorQuestionService> {
+                None
+            }
+            fn observe(&self, receipt: &crate::EffectProcessorProgressReceipt) {
+                assert_eq!(std::thread::current().id(), self.thread);
+                let mut receipts = self.receipts.lock().unwrap();
+                assert!(receipts.len() < 2);
+                receipts.push(receipt.clone());
+            }
+        }
+        for mode in ["success", "refusal", "panic", "cancel"] {
+            let token = mondrian_core::ExecutionCancellationToken::new();
+            let factory = Arc::new(ProbeFactory {
+                cancellation: (mode == "cancel").then(|| token.clone()),
+                ..ProbeFactory::default()
+            });
+            let recipe: Arc<dyn EffectFloatProcessorFactory> = factory.clone();
+            let mut pixels = coverage_frame(1, 1, vec![[0.125, 0.25, 0.5, 1.0]]);
+            let original = pixels.clone();
+            let request = EffectFloatProcessorPreparation {
+                effect_id: EffectId::new(),
+                width: 1,
+                height: 1,
+                format: pixels.format(),
+                project_geometry: None,
+                input_role: EffectFloatProcessorInputRole::SingleImage,
+            };
+            let mut checkpoint =
+                || token.is_canceled().then_some(EffectProcessorStopReason::Canceled);
+            let mut control = EffectProcessorControl::new(&mut checkpoint);
+            let sink = Arc::new(StagedProgress {
+                thread: std::thread::current().id(),
+                receipts: std::sync::Mutex::new(Vec::with_capacity(2)),
+            });
+            // The observer is caller-owned, outside the bank's remaining224B.
+            control.bind_observation(crate::EffectProcessorObservation {
+                sink: Some(sink.clone()),
+                deadline: None,
+            });
+            let mut bank = FloatProcessorResidency::default();
+            let outcome = bank.process(
+                &recipe, request, 17, 1, 64, if mode == "refusal" { 223 } else { 224 },
+                &mut pixels, &serde_json::json!({"nested":true,"transient_bytes":64,
+                    "check_parent_binding":true,"nested_panic":mode=="panic","nested_cancel":mode=="cancel"}),
+                0, &mut control,
+            );
+            assert_eq!(
+                control.current_occurrence, None,
+                "no stale binding after {mode}"
+            );
+            assert_eq!(
+                factory.created.load(Ordering::SeqCst),
+                1,
+                "one original parent {mode}"
+            );
+            match mode {
+                "success" => {
+                    outcome.unwrap();
+                    assert_eq!(pixels.pixels(), &[[0.25, 0.25, 0.5, 1.0]]);
+                    assert_eq!(
+                        factory.dropped.load(Ordering::SeqCst),
+                        0,
+                        "same parent remains valid"
+                    );
+                    assert_eq!(bank.counts(), (1, 64));
+                    pixels = original.clone();
+                    assert_eq!(bank.process(
+                        &recipe, request, 17, 1, 64, 224, &mut pixels,
+                        &serde_json::json!({"nested":true,"transient_bytes":64,"check_parent_binding":true}),
+                        0, &mut control,
+                    ).unwrap(), 224);
+                    assert_eq!(control.current_occurrence, None);
+                    assert_eq!(pixels.pixels(), &[[0.25, 0.25, 0.5, 1.0]]);
+                    assert_eq!(
+                        factory.created.load(Ordering::SeqCst),
+                        1,
+                        "same retained parent reused"
+                    );
+                    assert_eq!(factory.dropped.load(Ordering::SeqCst), 0);
+                    let observed = sink.receipts.lock().unwrap();
+                    assert_eq!(
+                        observed.len(),
+                        2,
+                        "actual outer progress after each nested call"
+                    );
+                    for receipt in observed.iter() {
+                        assert_eq!(receipt.preparation, request);
+                        assert_eq!(receipt.provider_revision, 17);
+                    }
+                    let stale = observed[1].progress.clone();
+                    drop(observed);
+                    assert!(
+                        control.observe_progress(stale).is_err(),
+                        "no progress after root completion"
+                    );
+                    assert_eq!(sink.receipts.lock().unwrap().len(), 2);
+                    bank.clear();
+                    assert_eq!(factory.dropped.load(Ordering::SeqCst), 1);
+                }
+                "refusal" => {
+                    assert!(matches!(
+                        outcome,
+                        Err(FloatProcessorError::Budget { required_bytes: 224, budget_bytes: 223 })
+                    ));
+                    assert_eq!(pixels, original, "no outer DSP on missing dependency");
+                    assert!(!factory.reached.load(Ordering::SeqCst));
+                    assert_eq!(factory.dropped.load(Ordering::SeqCst), 0);
+                    assert_eq!(bank.counts(), (1, 64));
+                    bank.clear();
+                    assert_eq!(factory.dropped.load(Ordering::SeqCst), 1);
+                }
+                "panic" => {
+                    assert!(matches!(
+                        outcome,
+                        Err(FloatProcessorError::Processor(
+                            MondrianError::WorkflowStepFailed { .. }
+                        ))
+                    ));
+                    assert_eq!(pixels, original);
+                    assert_eq!(factory.dropped.load(Ordering::SeqCst), 1);
+                    assert_eq!(bank.counts(), (0, 0));
+                }
+                "cancel" => {
+                    assert!(matches!(
+                        outcome,
+                        Err(FloatProcessorError::Processor(MondrianError::Cancelled))
+                    ));
+                    assert_eq!(
+                        control.stop_reason(),
+                        Some(EffectProcessorStopReason::Canceled)
+                    );
+                    assert_eq!(pixels, original);
+                    assert_eq!(factory.dropped.load(Ordering::SeqCst), 1);
+                    assert_eq!(bank.counts(), (0, 0));
+                }
+                _ => unreachable!(),
+            }
+        }
+    }
+
+    #[test]
+    fn staged_bank_scope_reapplies_outer_optional_count_and_byte_limits() {
+        for (instances, bytes) in [(0, 0), (1, 0), (1, 64), (2, 64), (2, 128)] {
+            let factory = Arc::new(ProbeFactory::default());
+            let recipe: Arc<dyn EffectFloatProcessorFactory> = factory.clone();
+            let mut pixels = coverage_frame(1, 1, vec![[0.125, 0.25, 0.5, 1.0]]);
+            let request = EffectFloatProcessorPreparation {
+                effect_id: EffectId::new(),
+                width: 1,
+                height: 1,
+                format: pixels.format(),
+                project_geometry: None,
+                input_role: EffectFloatProcessorInputRole::SingleImage,
+            };
+            let mut bank = FloatProcessorResidency::default();
+            let peak = bank
+                .process(
+                    &recipe,
+                    request,
+                    17,
+                    instances,
+                    bytes,
+                    224,
+                    &mut pixels,
+                    &serde_json::json!({"nested":true,"transient_bytes":64}),
+                    0,
+                    &mut EffectProcessorControl::uncancelled(),
+                )
+                .unwrap();
+            assert_eq!(peak, 224, "64 parent +64 held staging +96 nested peak");
+            let retained = if instances == 0 || bytes < 64 {
+                0
+            } else if instances == 2 && bytes == 128 {
+                2
+            } else {
+                1
+            };
+            assert_eq!(
+                bank.counts(),
+                (retained, retained * 64),
+                "outer ceiling {instances}/{bytes}"
+            );
+            assert_eq!(
+                factory.dropped.load(Ordering::SeqCst),
+                usize::from(instances == 0 || bytes < 64)
+            );
+            bank.clear();
+            assert_eq!(factory.dropped.load(Ordering::SeqCst), 1);
+        }
     }
 
     #[derive(Debug, Default)]
@@ -1278,6 +1491,122 @@ mod tests {
                         refusal,
                         feedback: None,
                     });
+                }
+            }
+            if params["nested"].as_bool() == Some(true) {
+                // A staged native invocation will stay on this original call
+                // stack while the existing bank evaluates an upstream value.
+                // This probe exercises that bank contract, not temporal DSP.
+                let parent = control.current_occurrence.expect("bound parent");
+                let parent_drops = self.dropped.load(Ordering::SeqCst);
+                let child_canceled = params["nested_cancel"].as_bool() == Some(true);
+                let child = Arc::new(ProbeFactory {
+                    cancellation: child_canceled.then(|| self.cancellation.clone().unwrap()),
+                    ..ProbeFactory::default()
+                });
+                let factory: Arc<dyn EffectFloatProcessorFactory> = child.clone();
+                let request =
+                    EffectFloatProcessorPreparation { effect_id: EffectId::new(), ..parent.0 };
+                let mut input = pixels.clone();
+                let held = resources.active_bytes + 64;
+                let available = resources.available_bytes.checked_sub(held).unwrap();
+                let nested_params = serde_json::json!({
+                    "transient_bytes": 32,
+                    "panic": params["nested_panic"].as_bool() == Some(true),
+                });
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    resources.bank.process(
+                        &factory,
+                        request,
+                        43,
+                        1,
+                        64,
+                        available,
+                        &mut input,
+                        &nested_params,
+                        0,
+                        control,
+                    )
+                }));
+                assert_eq!(
+                    self.dropped.load(Ordering::SeqCst),
+                    parent_drops,
+                    "nested optional eviction cannot drop the active parent"
+                );
+                if params["check_parent_binding"].as_bool() == Some(true) {
+                    assert_eq!(
+                        control.current_occurrence,
+                        Some(parent),
+                        "nested success/refusal/unwind must restore the original binding"
+                    );
+                }
+                match result {
+                    Ok(Ok(peak)) => {
+                        assert_eq!(child.created.load(Ordering::SeqCst), 1);
+                        assert_eq!(input.pixels()[0][0], pixels.pixels()[0][0] * 2.0);
+                        // The future upstream evaluator must supply its still-
+                        // held rasters and compose the existing bank's peak.
+                        // No new resource authority is needed for that scope.
+                        resources.peak_bytes = resources.peak_bytes.max(held + peak);
+                        if params["check_parent_binding"].as_bool() == Some(true) {
+                            control.observe_progress(crate::EffectProcessorLiveProgress {
+                                owner: mondrian_core::EffectProcessorOwnerId::new(),
+                                origin: EffectProcessorExecutionOrigin::InProcess,
+                                native_owner: 1,
+                                invocation: 1,
+                                revision: 1,
+                                progress: crate::EffectProcessorProgress::new(
+                                    1,
+                                    true,
+                                    0.5,
+                                    EffectProcessorNotice::new(
+                                        EffectProcessorNoticeKind::Information,
+                                        "Parent after dependency".to_owned(),
+                                        "staged-bank".to_owned(),
+                                    )
+                                    .unwrap(),
+                                )
+                                .unwrap(),
+                            })?;
+                        }
+                    }
+                    Ok(Err(FloatProcessorError::Budget { required_bytes, budget_bytes })) => {
+                        assert_eq!((required_bytes, budget_bytes), (96, 95));
+                        assert!(
+                            !child.reached.load(Ordering::SeqCst),
+                            "refuse before child DSP"
+                        );
+                        assert_eq!(
+                            input.pixels(),
+                            pixels.pixels(),
+                            "child staging is unchanged"
+                        );
+                        // Propagate the exact whole-chain deficit through the
+                        // same bank, never render a current-frame substitute.
+                        let refusal = resources.acquire_transient(64 + required_bytes).unwrap_err();
+                        return Err(EffectProcessorInvocationError::PreflightBudgetRefused {
+                            refusal,
+                            feedback: None,
+                        });
+                    }
+                    Ok(Err(error)) if child_canceled => {
+                        assert!(matches!(
+                            error,
+                            FloatProcessorError::Processor(MondrianError::Cancelled)
+                        ));
+                        assert_eq!(child.dropped.load(Ordering::SeqCst), 1);
+                        return Err(MondrianError::Cancelled.into());
+                    }
+                    Err(payload) => {
+                        assert_eq!(child.dropped.load(Ordering::SeqCst), 1);
+                        release_known_processor_panic(payload);
+                        return Err(MondrianError::WorkflowStepFailed {
+                            step_id: "nested_probe".to_owned(),
+                            reason: "expected nested panic retired its original owner".to_owned(),
+                        }
+                        .into());
+                    }
+                    other => panic!("unexpected nested result: {other:?}"),
                 }
             }
             if params["forge_transient_refusal"].as_bool() == Some(true) {
