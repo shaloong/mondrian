@@ -210,8 +210,9 @@ namespace MondrianOpenFx {
     if (isOutput()) { return _effect->outputRegionOfDefinition(time); }
     SourceFrameView source{};
     size_t index = 0;
-    if (!getConnected() || !frameState().sourceFrame(time, source, index)) {
-      throw OFX::Host::Property::Exception(kOfxStatFailed);
+    int failure = kOfxStatFailed;
+    if (!getConnected() || !frameState().sourceFrame(time, source, index, &failure)) {
+      throw OFX::Host::Property::Exception(failure);
     }
     return OfxRectD{source.x * source.pixelAspectRatio, static_cast<double>(source.y),
         (source.x + source.width) * source.pixelAspectRatio, static_cast<double>(source.y + source.height)};
@@ -233,7 +234,11 @@ namespace MondrianOpenFx {
     if (!isOutput()) {
       SourceFrameView source{};
       size_t index = 0;
-      if (!frame.sourceFrame(time, source, index) || !source.pixels) { return nullptr; }
+      int failure = kOfxStatFailed;
+      if (!frame.sourceFrame(time, source, index, &failure) || !source.pixels) {
+        if (failure == kOfxStatErrMemory) { throw OFX::Host::Property::Exception(failure); }
+        return nullptr;
+      }
     }
     if (isOutput()) {
       std::lock_guard<std::mutex> lock(_outputFetchMutex);

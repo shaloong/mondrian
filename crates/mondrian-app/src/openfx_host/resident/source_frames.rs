@@ -78,9 +78,10 @@ fn descriptors<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<Descriptor>
 // vectors and the child's native span, each at its explicit maximum capacity.
 pub(crate) const fn storage_bytes() -> usize {
     LIMIT * (2 * std::mem::size_of::<Descriptor>() + std::mem::size_of::<NativeSourceFrame>())
+        + std::mem::size_of::<tempfile::NamedTempFile>()
 }
 
-fn refusal(bytes: usize) -> OpenFxHostError {
+pub(super) fn refusal(bytes: usize) -> OpenFxHostError {
     OpenFxHostError::HostResourceRefused(
         mondrian_effects::EffectProcessorHostResourceRefusal::InputDelivery {
             required_bytes: bytes,
@@ -149,9 +150,17 @@ pub(super) struct Delivery {
 }
 
 impl Manifest {
+    pub fn count(&self) -> usize {
+        self.frames.len()
+    }
     pub fn bytes(&self) -> usize {
         self.bytes
     }
+}
+
+pub(super) enum DeliveryService {
+    Checkpoint,
+    Memory(usize),
 }
 
 impl Delivery {
@@ -163,7 +172,26 @@ impl Delivery {
         memory: &mut dyn FnMut(usize) -> Result<bool, OpenFxHostError>,
         checkpoint: &mut dyn FnMut() -> Result<(), OpenFxHostError>,
     ) -> Result<Option<Self>, OpenFxHostError> {
-        checkpoint()?;
+        Self::acquire_serviced(
+            sources,
+            timing,
+            sampling,
+            format,
+            &mut |request| match request {
+                DeliveryService::Checkpoint => checkpoint().map(|()| true),
+                DeliveryService::Memory(bytes) => memory(bytes),
+            },
+        )
+    }
+
+    pub fn acquire_serviced(
+        sources: &[SourceFrame<'_>],
+        timing: &OpenFxRenderTiming,
+        sampling: mondrian_core::ImageSampling,
+        format: mondrian_effects::EffectValueFormat,
+        service: &mut dyn FnMut(DeliveryService) -> Result<bool, OpenFxHostError>,
+    ) -> Result<Option<Self>, OpenFxHostError> {
+        service(DeliveryService::Checkpoint)?;
         if sources.is_empty() {
             return Ok(None);
         }
@@ -174,7 +202,7 @@ impl Delivery {
         // Validate the complete set before allocation/admission. No partial file
         // or native invocation can escape a bad authored descriptor.
         for (i, source) in sources.iter().enumerate() {
-            checkpoint()?;
+            service(DeliveryService::Checkpoint)?;
             let d = descriptor(*source, bytes, timing, sampling, format)?;
             if sources[..i].iter().any(|previous| previous.time == d.time) {
                 return Err(invalid("duplicate Source delivery time"));
@@ -184,17 +212,20 @@ impl Delivery {
                 .filter(|n| *n <= MAX_FRAME_BYTES)
                 .ok_or_else(|| invalid("Source delivery exceeds the bounded payload"))?;
         }
-        if !memory(bytes)? {
-            checkpoint()?;
+        if !service(DeliveryService::Memory(bytes))? {
+            service(DeliveryService::Checkpoint)?;
             return Err(refusal(bytes));
         }
-        checkpoint()?;
+        service(DeliveryService::Checkpoint)?;
         let mut frames = Vec::new();
         frames.try_reserve_exact(LIMIT).map_err(|_| refusal(bytes))?;
         if frames.capacity() > LIMIT {
             return Err(refusal(bytes));
         }
         let file = tempfile::NamedTempFile::new().map_err(|_| refusal(bytes))?;
+        if file.path().as_os_str().as_encoded_bytes().len() > 4096 {
+            return Err(refusal(bytes));
+        }
         file.as_file().set_len(bytes as u64).map_err(|_| refusal(bytes))?;
         // SAFETY: exclusive new file; no packet or path has been published.
         let mut mapping = unsafe { memmap2::MmapOptions::new().len(bytes).map_mut(file.as_file()) }
@@ -205,12 +236,12 @@ impl Delivery {
             copy_native_input(
                 &mut mapping[offset..offset + d.bytes],
                 source.frame.pixels(),
-                checkpoint,
+                &mut || service(DeliveryService::Checkpoint).map(|_| ()),
             )?;
             offset += d.bytes;
             frames.push(d);
         }
-        checkpoint()?;
+        service(DeliveryService::Checkpoint)?;
         drop(mapping);
         Ok(Some(Self {
             manifest: Manifest { path: file.path().to_owned(), bytes, frames },
@@ -226,6 +257,27 @@ pub(super) struct MappedSources {
 }
 
 impl MappedSources {
+    pub(super) fn into_single(mut self) -> Result<MappedInput, OpenFxHostError> {
+        if self.frames.len() != 1 {
+            return Err(invalid("Source reply must contain exactly one image"));
+        }
+        let native = self.frames.pop().expect("one checked source image");
+        let mapping =
+            self._mapping.take().ok_or_else(|| invalid("Source reply lost its mapping"))?;
+        if native.bytes != mapping.len() || native.pixels.cast::<u8>() != mapping.as_ptr() {
+            return Err(invalid("Source reply is not one complete mapped value"));
+        }
+        Ok(MappedInput {
+            time: native.time,
+            x: native.x,
+            y: native.y,
+            width: native.width,
+            height: native.height,
+            alpha: native.alpha,
+            pixel_aspect_ratio: native.pixel_aspect_ratio,
+            mapping,
+        })
+    }
     pub fn open(
         manifest: Option<&Manifest>,
         prepare: &Prepare,
@@ -243,6 +295,7 @@ impl MappedSources {
             || manifest.bytes == 0
             || manifest.bytes > MAX_FRAME_BYTES
             || !manifest.path.is_absolute()
+            || manifest.path.as_os_str().as_encoded_bytes().len() > 4096
         {
             return Err(invalid("invalid Source delivery envelope"));
         }
@@ -311,5 +364,36 @@ impl MappedSources {
         }
         checkpoint()?;
         Ok(Self { frames, _mapping: Some(mapping) })
+    }
+}
+
+// No raw pointers are stored in the cross-callback cache. Mmap and these scalar
+// facts are Send+Sync; borrowed native pointers are formed only during fetch.
+pub(super) struct MappedInput {
+    pub time: f64,
+    x: c_int,
+    y: c_int,
+    width: c_int,
+    height: c_int,
+    alpha: c_int,
+    pixel_aspect_ratio: f64,
+    mapping: memmap2::Mmap,
+}
+impl MappedInput {
+    pub fn bytes(&self) -> usize {
+        self.mapping.len()
+    }
+    pub fn view(&self) -> NativeSourceFrame {
+        NativeSourceFrame {
+            time: self.time,
+            pixels: self.mapping.as_ptr().cast(),
+            bytes: self.mapping.len(),
+            x: self.x,
+            y: self.y,
+            width: self.width,
+            height: self.height,
+            alpha: self.alpha,
+            pixel_aspect_ratio: self.pixel_aspect_ratio,
+        }
     }
 }

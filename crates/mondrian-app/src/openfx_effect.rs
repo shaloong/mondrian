@@ -335,6 +335,10 @@ impl EffectFloatProcessorInstance for OpenFxProcessorInstance {
         };
         let output = match result {
             Ok(output) => output,
+            Err(OpenFxHostError::InputFailed(error)) => {
+                control.check()?;
+                return Err(mondrian_effects::EffectProcessorInvocationError::InputFailed(error));
+            }
             Err(OpenFxHostError::UserBlocked(feedback)) => {
                 control.check()?;
                 return Err(

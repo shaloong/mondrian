@@ -101,6 +101,23 @@ namespace MondrianOpenFx {
     const SourceFrameView* sourceFrames = nullptr;
     size_t sourceFrameCount = 0;
     uint64_t sourceBindingRevision = 0;
+    const MondrianOpenFxSourceProvider* sourceProvider = nullptr;
+    bool admitsSourceFrame(const SourceFrameView& value) const noexcept {
+      if (!std::isfinite(value.time) || value.time == info.frame ||
+          value.time < info.first_frame || value.time > info.last_frame ||
+          !value.pixels || reinterpret_cast<uintptr_t>(value.pixels) % alignof(OfxRGBAColourF) ||
+          value.width <= 0 || value.height <= 0 || value.width > 8192 || value.height > 8192 ||
+          value.alpha < 0 || value.alpha > 2 || value.alpha != info.source_alpha ||
+          value.pixelAspectRatio != info.pixel_aspect_ratio ||
+          !std::isfinite(value.pixelAspectRatio) || value.pixelAspectRatio <= 0.0) { return false; }
+      const int64_t right = int64_t(value.x) + value.width;
+      const int64_t top = int64_t(value.y) + value.height;
+      if (right > std::numeric_limits<int>::max() || top > std::numeric_limits<int>::max() ||
+          !std::isfinite(value.x * value.pixelAspectRatio) ||
+          !std::isfinite(right * value.pixelAspectRatio)) { return false; }
+      const size_t bytes = size_t(value.width) * size_t(value.height) * sizeof(OfxRGBAColourF);
+      return bytes == value.bytes && bytes <= 128u * 1024u * 1024u;
+    }
     // Validate the complete set before replacing the current borrowed view.
     // No allocation, coercion, default-frame substitution or pixel conversion.
     // Cancellation remains the original owner's authority: false may mean a
@@ -117,20 +134,8 @@ namespace MondrianOpenFx {
           sourceBindingRevision == std::numeric_limits<uint64_t>::max()) { return false; }
       for (size_t i = 0; i < count; ++i) {
         const auto& value = frames[i];
-        if (!std::isfinite(value.time) || value.time == info.frame ||
-            value.time < info.first_frame || value.time > info.last_frame ||
-            !value.pixels || reinterpret_cast<uintptr_t>(value.pixels) % alignof(OfxRGBAColourF) ||
-            value.width <= 0 || value.height <= 0 || value.width > 8192 || value.height > 8192 ||
-            value.alpha < 0 || value.alpha > 2 || value.alpha != info.source_alpha ||
-            value.pixelAspectRatio != info.pixel_aspect_ratio ||
-            !std::isfinite(value.pixelAspectRatio) || value.pixelAspectRatio <= 0.0) { return false; }
-        const int64_t right = int64_t(value.x) + value.width;
-        const int64_t top = int64_t(value.y) + value.height;
-        if (right > std::numeric_limits<int>::max() || top > std::numeric_limits<int>::max() ||
-            !std::isfinite(value.x * value.pixelAspectRatio) ||
-            !std::isfinite(right * value.pixelAspectRatio)) { return false; }
+        if (!admitsSourceFrame(value)) { return false; }
         const size_t bytes = size_t(value.width) * size_t(value.height) * sizeof(OfxRGBAColourF);
-        if (bytes != value.bytes || bytes > 128u * 1024u * 1024u) { return false; }
         for (size_t previous = 0; previous < i; ++previous) {
           if (frames[previous].time == value.time) { return false; }
         }
@@ -152,7 +157,9 @@ namespace MondrianOpenFx {
     }
     // Zero identifies the original current binding; other indices identify one
     // immutable additional value for this invocation's image namespace.
-    bool sourceFrame(OfxTime time, SourceFrameView& view, size_t& index) const noexcept {
+    bool sourceFrame(OfxTime time, SourceFrameView& view, size_t& index,
+                     int* failure = nullptr) const noexcept {
+      if (failure) { *failure = kOfxStatFailed; }
       if (!std::isfinite(time)) { return false; }
       if (time == info.frame) {
         view = SourceFrameView{time, input, pixelCount * sizeof(OfxRGBAColourF),
@@ -162,6 +169,24 @@ namespace MondrianOpenFx {
       }
       for (size_t i = 0; i < sourceFrameCount; ++i) {
         if (sourceFrames[i].time == time) { view = sourceFrames[i]; index = i + 1; return true; }
+      }
+      if (input && sourceProvider && sourceProvider->fetch &&
+          time >= info.first_frame && time <= info.last_frame) {
+        SourceFrameView candidate{};
+        size_t ordinal = 0;
+        const int status = sourceProvider->fetch(sourceProvider->context, time, &candidate, &ordinal);
+        if (status != kOfxStatOK) {
+          if (failure && status == kOfxStatErrMemory) { *failure = status; }
+          return false;
+        }
+        // The trusted service validates immutable pixel contents once, before
+        // publication. Repeated fetches validate only POD geometry, not a full
+        // raster rescan for every concurrent handle.
+        if (candidate.time != time || !admitsSourceFrame(candidate) ||
+            ordinal <= sourceFrameCount || ordinal > kMaximumAdditionalSourceFrames) { return false; }
+        view = candidate;
+        index = ordinal;
+        return true;
       }
       return false;
     }
@@ -220,6 +245,7 @@ namespace MondrianOpenFx {
     FrameState& state;
     explicit FrameBorrow(FrameState& frame) : state(frame) {}
     ~FrameBorrow() {
+      state.sourceProvider = nullptr;
       state.sourceFrames = nullptr;
       state.sourceFrameCount = 0;
       state.sourceBindingRevision = 0;

@@ -83,6 +83,15 @@ struct MondrianOpenFxSourceFrame {
   double pixelAspectRatio;
 };
 
+// Invocation-owned service, callable concurrently from legal image actions.
+// It returns an immutable validated view and stable index in 1..256, disjoint
+// from the initial span. Backing outlives every image lease and error teardown.
+// It must not throw, execute a decoder/graph on this thread or retain arguments.
+struct MondrianOpenFxSourceProvider {
+  const void* context;
+  int (*fetch)(const void*, double, struct MondrianOpenFxSourceFrame*, size_t*);
+};
+
 struct MondrianOpenFxChoiceOption {
   const char* label;
   size_t label_length;
@@ -231,6 +240,20 @@ int mondrian_openfx_session_render_sources(
     const struct MondrianOpenFxInvocationControl* control,
     struct MondrianOpenFxNativeDiagnostic* diagnostic,
     const struct MondrianOpenFxSourceFrame* sources, size_t source_count)
+#ifdef __cplusplus
+    noexcept
+#endif
+    ;
+
+int mondrian_openfx_session_render_resolved(
+    struct MondrianOpenFxSession* session, const void* input, void* output,
+    size_t frame_bytes, const struct MondrianOpenFxFrameInfo* frame_info,
+    const struct MondrianOpenFxParameter* parameters, int parameter_count,
+    struct MondrianOpenFxRenderReport* report,
+    const struct MondrianOpenFxInvocationControl* control,
+    struct MondrianOpenFxNativeDiagnostic* diagnostic,
+    const struct MondrianOpenFxSourceFrame* sources, size_t source_count,
+    const struct MondrianOpenFxSourceProvider* provider)
 #ifdef __cplusplus
     noexcept
 #endif

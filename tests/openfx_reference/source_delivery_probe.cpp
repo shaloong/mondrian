@@ -7,6 +7,7 @@
 #include "ofxProperty.h"
 #include "ofxPixels.h"
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -98,9 +99,24 @@ OfxStatus entry(const char* action, const void* raw, OfxPropertySetHandle in, Of
         image->clipGetHandle(handle, "Output", &output, nullptr) != kOfxStatOK) { return kOfxStatFailed; }
     Image current, past, future, result;
     if (!current.fetch(source, time, {0, 0, 3, 2}) ||
-        !past.fetch(source, -1.5, {-2, 3, 0, 6}) ||
-        !future.fetch(source, 2.25, {4, -3, 8, -2}) ||
         !result.fetch(output, time, {-1, -1, 4, 3})) { return kOfxStatFailed; }
+    // Exercise late Source requests with both current and Output leases alive.
+    // Fixture-only concurrent readers must share the same immutable image set.
+    if (std::getenv("MONDRIAN_OPENFX_SOURCE_DELIVERY_THREADS")) {
+      std::atomic<bool> valid{true};
+      std::array<std::thread, 8> readers;
+      for (auto& reader : readers) {
+        reader = std::thread([&] {
+          Image a, b;
+          if (!a.fetch(source, -1.5, {-2, 3, 0, 6}) ||
+              !b.fetch(source, 2.25, {4, -3, 8, -2})) { valid.store(false); }
+        });
+      }
+      for (auto& reader : readers) { reader.join(); }
+      if (!valid.load()) { return kOfxStatFailed; }
+    }
+    if (!past.fetch(source, -1.5, {-2, 3, 0, 6}) ||
+        !future.fetch(source, 2.25, {4, -3, 8, -2})) { return kOfxStatFailed; }
     if (!log("sources-held")) { return kOfxStatFailed; }
     if (std::getenv("MONDRIAN_OPENFX_SOURCE_DELIVERY_WAIT")) {
       while (!image->abort(handle)) { std::this_thread::sleep_for(std::chrono::milliseconds(1)); }

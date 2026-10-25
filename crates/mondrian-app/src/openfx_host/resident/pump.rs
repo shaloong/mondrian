@@ -53,6 +53,14 @@ struct Slot {
     questions: question::QuestionSlot,
     memory: Option<MemoryRequest>,
     memory_requested: bool,
+    input: Option<InputPending>,
+    input_service: u64,
+}
+
+struct InputPending {
+    identity: source_input::InputIdentity,
+    sent: bool,
+    reply: Option<source_frames::Manifest>,
 }
 
 #[derive(Clone, Copy)]
@@ -97,6 +105,8 @@ impl Shared {
                 questions: question::QuestionSlot::default(),
                 memory: None,
                 memory_requested: false,
+                input: None,
+                input_service: 0,
             }),
             ready: Condvar::new(),
             canceled: AtomicBool::new(false),
@@ -150,6 +160,21 @@ impl Shared {
             {
                 return Err(invalid("Question reply lost its published current service"));
             }
+            self.ready.notify_all();
+            return Ok(());
+        }
+        if let Request::InputReply { owner, sequence, identity, source } = request {
+            if owner != self.owner
+                || sequence == 0
+                || sequence != slot.serial
+                || slot.phase != Phase::Executing
+                || slot.input.as_ref().is_none_or(|input| {
+                    !input.sent || input.identity != identity || input.reply.is_some()
+                })
+            {
+                return Err(invalid("input reply lost its exact outstanding request"));
+            }
+            slot.input.as_mut().expect("checked input request").reply = Some(source);
             self.ready.notify_all();
             return Ok(());
         }
@@ -221,6 +246,8 @@ impl Shared {
         self.canceled.store(false, Ordering::Release);
         slot.memory = None;
         slot.memory_requested = false;
+        slot.input = None;
+        slot.input_service = 0;
         slot.progress = None;
         slot.sent_revision = slot.progress_revision;
         slot.phase = Phase::Queued;
@@ -254,12 +281,46 @@ impl Shared {
         self.canceled.load(Ordering::Acquire)
     }
 
+    pub(super) fn request_input(
+        &self,
+        time: f64,
+    ) -> Result<source_frames::Manifest, OpenFxHostError> {
+        let mut slot = self.gate.lock().map_err(|_| unavailable("native input gate poisoned"))?;
+        if !time.is_finite()
+            || slot.phase != Phase::Executing
+            || slot.input.is_some()
+            || slot.input_service >= 257
+        {
+            return Err(invalid("source callback lost its bounded executing owner"));
+        }
+        slot.input_service += 1;
+        let identity = source_input::InputIdentity { service: slot.input_service, time };
+        slot.input = Some(InputPending { identity, sent: false, reply: None });
+        self.ready.notify_all();
+        loop {
+            if self.is_canceled()
+                || self.stopping.load(Ordering::Acquire)
+                || slot.fault.is_some()
+                || slot.phase != Phase::Executing
+            {
+                slot.input = None;
+                return Err(unavailable("upstream image wait was interrupted"));
+            }
+            if let Some(reply) = slot.input.as_mut().and_then(|input| input.reply.take()) {
+                slot.input = None;
+                return Ok(reply);
+            }
+            slot = self.ready.wait(slot).map_err(|_| unavailable("native input wait poisoned"))?;
+        }
+    }
+
     pub(super) fn complete(&self, response: Response) -> Result<u64, OpenFxHostError> {
         let mut slot = self.gate.lock().map_err(|_| unavailable("native pump gate poisoned"))?;
         if slot.phase != Phase::Executing
             || slot.response.is_some()
             || slot.questions.is_active()
             || slot.memory.is_some()
+            || slot.input.is_some()
         {
             return Err(unavailable("native completion lost its executing owner"));
         }
@@ -317,7 +378,7 @@ impl Shared {
         }
     }
 
-    fn fail(&self, error: &OpenFxHostError) {
+    pub(super) fn fail(&self, error: &OpenFxHostError) {
         self.canceled.store(true, Ordering::Release);
         self.stopping.store(true, Ordering::Release);
         if let Ok(mut slot) = self.gate.lock() {
@@ -813,6 +874,20 @@ fn pump_loop(
                         }),
                         false,
                     )
+                } else if slot.phase == Phase::Executing
+                    && slot.input.as_ref().is_some_and(|input| !input.sent)
+                {
+                    let sequence = slot.serial;
+                    let input = slot.input.as_mut().expect("pending input request");
+                    input.sent = true;
+                    (
+                        Some(Response::InputNeeded {
+                            owner: shared.owner,
+                            sequence,
+                            identity: input.identity,
+                        }),
+                        false,
+                    )
                 } else if slot.phase == Phase::Executing && slot.questions.unpublished().is_some() {
                     let pending = slot
                         .questions
@@ -920,6 +995,100 @@ fn pump_loop(
 mod tests {
     use super::*;
 
+    fn input_manifest() -> source_frames::Manifest {
+        serde_json::from_value(serde_json::json!({"path":"not-opened", "bytes":16,
+            "frames":[{"time":-1.5,"x":0,"y":0,"width":1,"height":1,"offset":0,"bytes":16}]}))
+        .unwrap()
+    }
+
+    #[test]
+    fn upstream_reply_binds_exact_owner_serial_time_and_service_then_cannot_repeat() {
+        let owner = mondrian_core::EffectProcessorOwnerId::new();
+        let shared = Arc::new(Shared::new(owner));
+        shared.admit(render(owner, 1)).unwrap();
+        shared.take_request().unwrap();
+        let foreign = Arc::clone(&shared);
+        let callback = thread::spawn(move || foreign.request_input(-1.5));
+        let deadline = Instant::now() + Duration::from_secs(1);
+        let identity = loop {
+            if let Some(input) = shared.gate.lock().unwrap().input.as_mut() {
+                input.sent = true;
+                break input.identity;
+            }
+            if Instant::now() >= deadline {
+                shared.admit(Request::Cancel { owner, sequence: 1 }).unwrap();
+                let _ = callback.join();
+                panic!("source callback did not reach its fixed slot");
+            }
+            thread::yield_now();
+        };
+        for (owner, sequence, identity) in [
+            (mondrian_core::EffectProcessorOwnerId::new(), 1, identity),
+            (owner, 2, identity),
+            (
+                owner,
+                1,
+                source_input::InputIdentity { time: 2.25, ..identity },
+            ),
+            (
+                owner,
+                1,
+                source_input::InputIdentity { service: 2, ..identity },
+            ),
+        ] {
+            assert!(shared
+                .admit(Request::InputReply {
+                    owner,
+                    sequence,
+                    identity,
+                    source: input_manifest()
+                })
+                .is_err());
+        }
+        shared
+            .admit(Request::InputReply {
+                owner,
+                sequence: 1,
+                identity,
+                source: input_manifest(),
+            })
+            .unwrap();
+        assert_eq!(callback.join().unwrap().unwrap().bytes(), 16);
+        assert!(shared
+            .admit(Request::InputReply {
+                owner,
+                sequence: 1,
+                identity,
+                source: input_manifest()
+            })
+            .is_err());
+        assert!(shared.gate.lock().unwrap().input.is_none());
+    }
+
+    #[test]
+    fn cancellation_wakes_upstream_wait_and_completion_cannot_publish_with_input_pending() {
+        let owner = mondrian_core::EffectProcessorOwnerId::new();
+        let shared = Arc::new(Shared::new(owner));
+        shared.admit(render(owner, 1)).unwrap();
+        shared.take_request().unwrap();
+        let foreign = Arc::clone(&shared);
+        let callback = thread::spawn(move || foreign.request_input(-1.5));
+        let deadline = Instant::now() + Duration::from_secs(1);
+        let mut waiting = false;
+        while Instant::now() < deadline {
+            if shared.gate.lock().unwrap().input.is_some() {
+                waiting = true;
+                break;
+            }
+            thread::yield_now();
+        }
+        let rejected = shared.complete(Response::Canceled { owner, sequence: 1 }).is_err();
+        shared.admit(Request::Cancel { owner, sequence: 1 }).unwrap();
+        assert!(callback.join().unwrap().is_err());
+        assert!(waiting && rejected);
+        assert!(shared.gate.lock().unwrap().input.is_none());
+    }
+
     fn wait_memory_request(shared: &Shared) -> bool {
         let deadline = Instant::now() + Duration::from_secs(1);
         while Instant::now() < deadline {
@@ -1022,6 +1191,7 @@ mod tests {
             parameters: BTreeMap::new(),
             diagnostic: false,
             sources: None,
+            resolve_input: false,
         }
     }
 
@@ -1036,6 +1206,7 @@ mod tests {
             "diagnostic",
             "sampling",
             "sources",
+            "resolve_input",
         ] {
             let mut missing = canonical.clone();
             missing.as_object_mut().expect("request object").remove(field);
@@ -1052,7 +1223,7 @@ mod tests {
             serde_json::from_value::<Response>(null),
             Ok(Response::GuiClosed { feedback: None, .. })
         ));
-        assert_eq!(VERSION, 16);
+        assert_eq!(VERSION, 17);
     }
 
     #[test]

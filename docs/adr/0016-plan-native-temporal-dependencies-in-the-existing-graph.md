@@ -41,7 +41,7 @@ Keep the staged dependency exchange inside the original active processor call.
 The existing child pump can carry dependency messages while the native call keeps
 its FrameBorrow and parameter callback borrows alive; do not introduce a
 cross-call plan handle or a second instance registry first. This is the chosen
-transport direction, not an implemented dependency RPC. The current bank already
+transport direction; the internal IPC17 service below now implements the exchange. The current bank already
 holds the active instance outside evictable optional entries. Upstream work must
 exclude the waiting parent's active peak, held rasters and transient grant from
 its remaining budget, then compose the nested peak in the same ledger. Each
@@ -80,40 +80,58 @@ Unknown times do not borrow the current image or fabricate its RoD. The RoD
 suite now distinguishes query failure from allocation failure on a valid clip,
 rather than misreporting BadHandle, and clears rejected/nonfinite bounds.
 
-The current 13 supervised Windows native Release groups passed: source-view
-binding (including negative/fractional exact times, origins, stride, concurrent
-handles, rebinding and canceled admission), five dependency-action groups,
-SessionProbe Filter, GeneratorProbe, published Misc Invert 2.0 (Natron
-2.3.16-beta3), 21 image-memory/handle controls, image-domain conversion, property
-bounds and float classification. The source-view group uses the actual native
-HostSupport/Host adapter with the official Basic instance. Separately,
-already-resolved Source values now travel through resident IPC16 to the same
-native Render call. The strict optional field is mandatory even when null;
-at most 256 descriptors and 128 MiB of aggregate Float32 RGBA payload are
-accepted. One immutable temporary file carries pixels, never JSON or process
-addresses. Bounds, exact times, representation, disjoint byte ranges and actual
-file length are checked; the child rejects invalid samples before constructing
-the plugin. The C ABI lends the same source-view structure through FrameBorrow,
-without changing temporal/context admission.
+Already-resolved sources and late Source requests now travel through resident
+IPC17 inside the same native call. Source resolution is explicitly admitted per
+invocation. Foreign callbacks send bounded POD identities through the original
+pump; only the original mutable RenderOwner may evaluate an upstream graph,
+observe cancellation and grant memory. There is no decoder or graph closure on
+plugin threads. Owner/serial/service/time replies must match the one outstanding
+request. Concurrent readers coalesce exact-time misses in one invocation-owned
+arena. Existing mappings remain immutable while images are leased; new mappings
+append without rebinding their addresses or identities. The arena and backing
+outlive native actions and error teardown, with no cross-call temporal cache.
 
-The existing bank admits the extra input payload before its copy; a later native
-output-domain request includes the still-held input payload in the same grant.
-Bounded descriptor capacities are charged in resident storage. During invocation
-failure the parent retains backing through retirement; the child's read-only
-mapping outlives native access and error teardown. No second decoder, scheduler,
-parameter authority, cache or cross-call plan registry is introduced.
+At most 256 additional images and 128 MiB aggregate payload are accepted. Files
+are read-only in the child, never pixels in JSON or process addresses. Exact time,
+geometry, alpha/PAR, representation, disjoint byte ranges, actual file length and
+finite samples are checked before publication. Known descriptor/map/path storage
+is charged when resolution is enabled. Each grant composes held inputs, the native
+output domain and the returned graph frame while copying it. The upstream owner
+must also deduct its waiting parent's already-admitted active backing before
+using its remaining original grant. This is logical controlled storage, not SDK
+heap/RSS accounting. Pre-submit refusal releases reserved file slots; invocation
+errors retain backing through retirement and never publish staged output.
 
-A normal default-feature Windows test-profile worker passed four complete RGBA
-renders on one native owner with negative/fractional times, different origins and
-strides, four input refusals, four composed output-domain refusals, duplicate-time
-rejection and cancellation with four image handles held. SourceDeliveryProbe is
-deliberately an ABI calibration fixture whose descriptor does not claim temporal
-access; it is not conforming third-party temporal-plugin evidence. Official Basic
-resident reuse, output-refusal and the 13 native regression groups also passed.
-Native dependency requests, on-demand additions while images are leased, shared
-graph resolution and Preview/Export temporal execution remain unimplemented.
-No fresh whole desktop, complete native temporal rendering, physical heap/RT,
-performance or other-platform qualification.
+A typed dependency failure keeps its upstream provenance, retires the waiting
+native owner without replay, and does not quarantine that parent's definition.
+Declared media absence and unprepared input remain distinct. An upstream graph
+inherits the same absolute invocation deadline; derived cancellation scopes can
+shorten it but never renew it. Explicit cancellation still reaches the entire
+execution generation. Consuming a uniquely owned graph tile transfers its pixels;
+shared tiles refuse transfer rather than silently copying unadmitted backing.
+
+Current Windows CPU qualification: OpenFX host 113 passed/66 ignored, Effect
+adapter 11 passed/0 ignored, Effects library 365 passed/0 ignored and Core
+cancellation 3 passed/0 ignored. Four actual supervised resident gates and 13
+rebuilt C++ HostSupport/Host groups passed, including official Basic and published
+Misc Invert 2.0. The normal worker is test-profile opt0/debug0 with default features
+and no libtest harness; this does not qualify a new release build or whole desktop.
+The native late-request gate repeats four full-RGBA renders on one native owner,
+with eight readers coalescing two exact dependencies while Output/current leases
+remain live. Its original owner executes the existing bounded time-expanded graph
+with animated exposure and a real finite 1/48-second temporal blend. Native output
+matches the original graph values bit for bit. A separate mathematical DSP oracle
+allows the documented Float32 pivot/luma rounding. Graph-budget, dependency,
+cancellation and copy-refusal cases all settle without publishing output. Shared
+Effects tests cover 12 failure/owner-stop combinations and fresh-owner recovery.
+
+SourceDeliveryProbe deliberately does not declare temporal access: this is finite
+transport/graph calibration, not conforming third-party temporal compatibility.
+The normal product factory has no upstream resolver binding yet. The full Clip
+retime/source admission, dependency-action scheduling, legal action/thread image
+coverage, Preview/Export, real temporal plugins and cache invalidation remain open.
+Temporal capability flags stay false. No RT, performance, complete heap, GPU or
+other-platform qualification follows from these gates.
 
 The HostSupport dependency action now atomically replaces its complete input map
 on OK/ReplyDefault; an error leaves the caller's map unchanged. It preserves
@@ -128,10 +146,10 @@ fixture and actual HostSupport/Host. Action logs confirm one Create/Destroy per
 group, no Render, and no dispatch for invalid time/non-temporal declarations.
 These are action qualifications, not third-party temporal-renderer evidence.
 
-Next connect native dependency messages, shared Custom staged graph resolution
-and leased historical images. Preserve upstream fault provenance without
-quarantining the waiting parent; verify all legal action/thread image requests
-before enabling capabilities. Distinguish declared media absence from an
+Next bind the internal service to the production Custom processor's original
+upstream program, shared resource bank and exact Clip retime/source admission.
+Connect the dependency action to that same execution; verify all legal
+action/thread image requests before enabling capabilities. Distinguish declared media absence from an
 unprepared dependency; missing planned input cannot silently become a black frame.
 Then verify Preview/Export with real temporal plugins. Qualification
 must cover discontinuous ranges, negative/fractional time under the clip sampling

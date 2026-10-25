@@ -507,6 +507,7 @@ fn apply_custom_render_op_f32_for_role(
             *working = staged;
             Ok(processor_bytes)
         }
+        Ok(Err(crate::processor_residency::FloatProcessorError::InputFailed(error))) => Err(*error),
         Ok(Err(crate::processor_residency::FloatProcessorError::FeedbackCapacity { limit })) => {
             Err(EffectExecutionError::ProcessorFeedbackCapacityExceeded { limit })
         }
@@ -3242,6 +3243,193 @@ mod panic_payload_contract_tests {
                 std::panic::panic_any(OpaquePanicPayload(Arc::clone(&self.0)));
             }
             Ok(None)
+        }
+    }
+
+    #[derive(Debug, Default)]
+    struct InputFailureState {
+        calls: AtomicUsize,
+        prepares: AtomicUsize,
+        drops: AtomicUsize,
+        failing: AtomicBool,
+        entered: AtomicBool,
+    }
+
+    #[derive(Debug)]
+    struct InputFailureFactory(Arc<InputFailureState>, usize);
+    #[derive(Debug)]
+    struct InputFailureInstance(Arc<InputFailureState>, usize);
+
+    impl Drop for InputFailureInstance {
+        fn drop(&mut self) {
+            self.0.drops.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+    impl crate::EffectFloatProcessorFactory for InputFailureFactory {
+        fn feedback_budget_bytes(&self) -> usize {
+            0
+        }
+        fn alpha_contract(&self) -> crate::EffectAlphaContract {
+            crate::EffectAlphaContract::COVERAGE_OPERATION
+        }
+        fn storage(
+            &self,
+            _: crate::EffectFloatProcessorSizing,
+        ) -> mondrian_core::Result<crate::EffectFloatProcessorStorage> {
+            crate::EffectFloatProcessorStorage::new(16, 16)
+        }
+        fn prepare(
+            &self,
+            _: crate::EffectFloatProcessorPreparation,
+            _: &mut crate::EffectProcessorControl<'_>,
+        ) -> mondrian_core::Result<Box<dyn crate::EffectFloatProcessorInstance>> {
+            self.0.prepares.fetch_add(1, Ordering::SeqCst);
+            Ok(Box::new(InputFailureInstance(Arc::clone(&self.0), self.1)))
+        }
+    }
+    impl crate::EffectFloatProcessorInstance for InputFailureInstance {
+        fn process(
+            &mut self,
+            staged: &mut crate::EffectFloatFrame,
+            _: &serde_json::Value,
+            _: i64,
+            _: &mut crate::EffectProcessorControl<'_>,
+            _: &mut crate::EffectProcessorResources<'_>,
+        ) -> Result<Option<crate::EffectProcessorFeedback>, crate::EffectProcessorInvocationError>
+        {
+            self.0.calls.fetch_add(1, Ordering::SeqCst);
+            if !self.0.failing.load(Ordering::SeqCst) {
+                return Ok(None);
+            }
+            staged.pixels_mut()[0][0] = -99.0;
+            self.0.entered.store(true, Ordering::SeqCst);
+            let error = match self.1 {
+                0 => EffectExecutionError::CustomProcessorFailed {
+                    key: "actual.upstream".into(),
+                    reason: "upstream native failure".into(),
+                },
+                1 => EffectExecutionError::CustomProcessorBudgetExceeded {
+                    key: "actual.upstream".into(),
+                    required_bytes: 512,
+                    budget_bytes: 64,
+                },
+                2 => EffectExecutionError::CustomProcessorUnavailable {
+                    key: "actual.upstream".into(),
+                },
+                _ => EffectExecutionError::InputUnavailable {
+                    reason: "upstream delivery refused".into(),
+                },
+            };
+            Err(crate::EffectProcessorInvocationError::InputFailed(
+                Box::new(error),
+            ))
+        }
+    }
+
+    #[test]
+    fn upstream_failure_retires_waiting_owner_without_quarantine_or_publication() {
+        for kind in 0..4 {
+            for stop in [
+                None,
+                Some(crate::EffectProcessorStopReason::Canceled),
+                Some(crate::EffectProcessorStopReason::DeadlineExpired),
+            ] {
+                let key = format!("test.input-failure.{}", mondrian_core::EffectId::new());
+                let state = Arc::new(InputFailureState::default());
+                let op = compiled_operation(
+                    definition(&key, crate::EffectExecutionModes::CPU_F32)
+                        .with_custom_float_processor_factory(
+                            Arc::new(|_, _| Ok(Some(serde_json::json!({})))),
+                            None,
+                            crate::EffectCachePolicy::Uncacheable,
+                            Arc::new(InputFailureFactory(Arc::clone(&state), kind)),
+                        ),
+                    &key,
+                );
+                let mut session =
+                    crate::EffectExecutionSession::new(crate::EffectExecutionSessionConfig {
+                        max_processor_instances: 1,
+                        max_processor_bytes: 16,
+                        ..crate::EffectExecutionSessionConfig::uncached(1024)
+                    });
+                let original = float_frame();
+                let mut frame = original.clone();
+                apply_custom_render_op_f32(
+                    &mut frame,
+                    &op,
+                    0,
+                    Some(&mut session),
+                    16,
+                    &mut crate::EffectProcessorControl::uncancelled(),
+                )
+                .unwrap();
+                assert_eq!(session.diagnostics().processor_instances, 1);
+                state.failing.store(true, Ordering::SeqCst);
+                let mut checkpoint =
+                    || state.entered.load(Ordering::SeqCst).then_some(stop).flatten();
+                let error = apply_custom_render_op_f32(
+                    &mut frame,
+                    &op,
+                    1,
+                    Some(&mut session),
+                    16,
+                    &mut crate::EffectProcessorControl::new(&mut checkpoint),
+                )
+                .unwrap_err();
+                if let Some(reason) = stop {
+                    assert!(
+                        matches!(error, EffectExecutionError::CustomProcessorStopped { reason: actual } if reason == actual)
+                    );
+                } else {
+                    match (kind, error) {
+                        (0, EffectExecutionError::CustomProcessorFailed { key, reason }) => {
+                            assert_eq!(key, "actual.upstream");
+                            assert_eq!(reason, "upstream native failure");
+                        }
+                        (
+                            1,
+                            EffectExecutionError::CustomProcessorBudgetExceeded {
+                                key,
+                                required_bytes: 512,
+                                budget_bytes: 64,
+                            },
+                        ) => assert_eq!(key, "actual.upstream"),
+                        (2, EffectExecutionError::CustomProcessorUnavailable { key }) => {
+                            assert_eq!(key, "actual.upstream")
+                        }
+                        (3, EffectExecutionError::InputUnavailable { reason }) => {
+                            assert_eq!(reason, "upstream delivery refused")
+                        }
+                        (_, other) => panic!("lost original input error: {other:?}"),
+                    }
+                }
+                assert_eq!(frame, original, "failed parent staging never publishes");
+                assert_eq!(state.calls.load(Ordering::SeqCst), 2, "no replay");
+                assert_eq!(
+                    state.prepares.load(Ordering::SeqCst),
+                    1,
+                    "one actual warm owner"
+                );
+                assert_eq!(state.drops.load(Ordering::SeqCst), 1);
+                assert_eq!(session.diagnostics().processor_instances, 0);
+                assert!(!crate::effect_extension_runtime_status(&key).unwrap().disabled);
+                state.failing.store(false, Ordering::SeqCst);
+                apply_custom_render_op_f32(
+                    &mut frame,
+                    &op,
+                    2,
+                    Some(&mut session),
+                    16,
+                    &mut crate::EffectProcessorControl::uncancelled(),
+                )
+                .unwrap();
+                assert_eq!(
+                    state.prepares.load(Ordering::SeqCst),
+                    2,
+                    "a fresh invocation remains available"
+                );
+                assert_eq!(frame, original);
+            }
         }
     }
 

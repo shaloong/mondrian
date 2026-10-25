@@ -288,6 +288,30 @@ pub struct EffectFrameTileF32 {
 }
 
 impl EffectFrameTileF32 {
+    /// Transfer uniquely owned pixels without a copy. Shared tiles return
+    /// unchanged so callers can explicitly admit any required materialization.
+    /// This never allocates or silently clones cached/source pixels.
+    pub fn try_into_pixels(self) -> Result<Vec<[f32; 4]>, Self> {
+        let Self {
+            time,
+            frame_extent,
+            sampling,
+            roi,
+            frame_seed,
+            pixels,
+        } = self;
+        match Arc::try_unwrap(pixels) {
+            Ok(pixels) => Ok(pixels),
+            Err(pixels) => Err(Self {
+                time,
+                frame_extent,
+                sampling,
+                roi,
+                frame_seed,
+                pixels,
+            }),
+        }
+    }
     /// Validate and retain one exact source tile.
     pub fn new(
         time: TimelineTime,
@@ -624,6 +648,10 @@ pub struct EffectTemporalExecutionOutput {
 }
 
 impl EffectTemporalExecutionOutput {
+    /// Consume publication metadata and transfer the existing output tile.
+    pub fn into_tile(self) -> EffectFrameTileF32 {
+        self.tile
+    }
     /// Requested output tile.
     pub const fn tile(&self) -> &EffectFrameTileF32 {
         &self.tile
@@ -2528,6 +2556,28 @@ mod tests {
         EffectTemporalInputExtent,
     };
     use mondrian_core::BlendMode;
+
+    #[test]
+    fn output_tile_transfer_never_clones_shared_pixels() {
+        let extent = EffectFrameExtent::new(2, 1);
+        let pixels = vec![[1.0; 4]; 2];
+        let pointer = pixels.as_ptr();
+        let tile = EffectFrameTileF32::new(
+            TimelineTime::ZERO,
+            extent,
+            mondrian_core::ImageSampling::UNIT_SQUARE,
+            extent.full_frame_roi(),
+            0,
+            pixels,
+        )
+        .unwrap();
+        let shared = tile.clone();
+        let tile = tile.try_into_pixels().expect_err("shared backing must not be silently copied");
+        assert_eq!(tile.pixels().as_ptr(), pointer);
+        drop(shared);
+        let pixels = tile.try_into_pixels().unwrap();
+        assert_eq!(pixels.as_ptr(), pointer);
+    }
 
     #[test]
     fn temporal_blend_checks_cancellation_at_fixed_pixel_chunks() {

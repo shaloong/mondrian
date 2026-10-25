@@ -403,6 +403,11 @@ pub enum EffectProcessorRetention {
 /// Typed processor result, with one residency authority for host refusals.
 #[derive(Debug, thiserror::Error)]
 pub enum EffectProcessorInvocationError {
+    /// Resolving an upstream value failed during this invocation. The caller
+    /// owns that failure's attribution; interrupted native state is retired,
+    /// staged pixels are discarded, and this waiting provider is not blamed.
+    #[error("upstream effect input failed: {0}")]
+    InputFailed(Box<crate::EffectExecutionError>),
     /// A valid instance requires authored repair; this is not a native fault.
     #[error("processor is blocked by a persistent user error")]
     UserBlocked(Box<crate::EffectProcessorFeedback>),
@@ -641,6 +646,8 @@ pub(crate) fn frame_processor_charge(
 /// Distinguish resource-policy denial from processor execution faults.
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum FloatProcessorError {
+    #[error("upstream effect input failed: {0}")]
+    InputFailed(Box<crate::EffectExecutionError>),
     #[error("processor feedback occurrence capacity {limit} is exhausted")]
     FeedbackCapacity { limit: usize },
     #[error("processor is blocked by a persistent user error")]
@@ -1127,6 +1134,12 @@ impl FloatProcessorResidency {
         };
         let feedback = match outcome {
             Ok(feedback) => feedback,
+            Err(EffectProcessorInvocationError::InputFailed(error)) => {
+                // The interrupted instance cannot be retained or replayed.
+                // Preserve the upstream error rather than quarantining it as
+                // a failure of this parent occurrence.
+                return Err(FloatProcessorError::InputFailed(error));
+            }
             Err(EffectProcessorInvocationError::Failed(error)) => return Err(error.into()),
             Err(EffectProcessorInvocationError::PreflightBudgetRefused { refusal, feedback }) => {
                 if refused != Some(refusal)

@@ -279,7 +279,7 @@ fn actual_resident_source_delivery_preserves_pixels_owner_refusal_and_cancellati
         ));
         assert_eq!(grants, [160]);
         assert_eq!(session.sequence, serial);
-        assert!(session.pending_inputs.is_none());
+        assert!(session.pending_inputs.is_empty());
         assert_eq!(session.process.state, ProcessState::Running);
         grants.clear();
         let denied_domain = session.render_observed_with_sources(
@@ -304,7 +304,7 @@ fn actual_resident_source_delivery_preserves_pixels_owner_refusal_and_cancellati
             [160, 480],
             "held inputs compose with the actual 320-byte output domain"
         );
-        assert!(session.pending_inputs.is_none());
+        assert!(session.pending_inputs.is_empty());
         assert_eq!(session.process.state, ProcessState::Running);
         grants.clear();
         let output = session
@@ -323,7 +323,7 @@ fn actual_resident_source_delivery_preserves_pixels_owner_refusal_and_cancellati
             )
             .unwrap();
         assert_eq!(grants, [160, 480]);
-        assert!(session.pending_inputs.is_none());
+        assert!(session.pending_inputs.is_empty());
         assert_eq!(session.worker_process_id(), worker);
         let feedback = session.take_feedback().unwrap();
         let owner = feedback.snapshot.native_owner();
@@ -401,7 +401,7 @@ fn actual_resident_source_delivery_preserves_pixels_owner_refusal_and_cancellati
     );
     assert!(matches!(canceled, Err(OpenFxHostError::Canceled)));
     assert_eq!(session.process.state, ProcessState::Settled);
-    assert!(session.pending_inputs.is_none());
+    assert!(session.pending_inputs.is_empty());
     assert_eq!(current.pixels(), signal(3, 2, 0.5).pixels());
     println!("Source delivery: 4 complete RGBA renders/same native owner; 4 pre-submit and 4 composed pre-DSP refusals; duplicate rejection; cancellation with four image handles held; child settled");
 }

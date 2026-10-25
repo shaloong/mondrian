@@ -59,6 +59,17 @@ impl EffectDomainProcessorCacheKey {
 /// effect graph's color-domain contract.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum EffectExecutionError {
+    /// A requested upstream image could not be delivered. This is distinct
+    /// from an absent media value and never publishes a substitute black frame.
+    #[error("effect input delivery failed: {reason}")]
+    InputUnavailable { reason: String },
+    /// Original typed failure from a time-expanded upstream graph. A waiting
+    /// custom processor must not be quarantined for this dependency's failure.
+    #[error("upstream temporal graph failed: {source}")]
+    TemporalInput {
+        #[source]
+        source: Box<crate::EffectTemporalExecutionError>,
+    },
     /// The graph requires renderer-owned stock-OCIO RGB transitions.
     #[error("effect graph requires {transitions} unresolved RGB color-domain transition(s)")]
     ColorDomainConversionRequired {

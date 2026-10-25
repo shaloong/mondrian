@@ -19,6 +19,7 @@ pub(super) mod question_budget;
 #[cfg(windows)]
 mod retirement_wait;
 pub(super) mod source_frames;
+pub(super) mod source_input;
 #[cfg(any(test, feature = "validation"))]
 pub use diagnostic::OpenFxRenderDiagnostic;
 pub use diagnostic::OpenFxRenderPhase;
@@ -28,8 +29,8 @@ use diagnostic::{ParentProbe, ProbeEvent};
 pub const OPENFX_RESIDENT_WORKER_ARGUMENT: &str = "--internal-openfx-session-v13";
 const ENDPOINT_ENV: &str = "MONDRIAN_INTERNAL_OPENFX_ENDPOINT";
 const NONCE_ENV: &str = "MONDRIAN_INTERNAL_OPENFX_NONCE";
-// v16: mandatory bounded, immutable per-invocation Source delivery envelope.
-const VERSION: u16 = 16;
+// v17: explicit source-resolution admission and work-bound input services.
+const VERSION: u16 = 17;
 const POLL: Duration = Duration::from_millis(20);
 const RETIRE: Duration = Duration::from_millis(100);
 // Resource settlement after an asynchronous kill is separate from graceful exit.
@@ -70,10 +71,17 @@ enum Request {
         diagnostic: bool,
         #[serde(deserialize_with = "source_frames::required_optional")]
         sources: Option<source_frames::Manifest>,
+        resolve_input: bool,
     },
     Cancel {
         owner: mondrian_core::EffectProcessorOwnerId,
         sequence: u64,
+    },
+    InputReply {
+        owner: mondrian_core::EffectProcessorOwnerId,
+        sequence: u64,
+        identity: source_input::InputIdentity,
+        source: source_frames::Manifest,
     },
     QuestionReply {
         owner: mondrian_core::EffectProcessorOwnerId,
@@ -101,6 +109,11 @@ enum Request {
     reason = "fixed bounded diagnostic POD avoids a per-frame boxed allocation; inline size is charged by the host ledger"
 )]
 enum Response {
+    InputNeeded {
+        owner: mondrian_core::EffectProcessorOwnerId,
+        sequence: u64,
+        identity: source_input::InputIdentity,
+    },
     Connected {
         version: u16,
         nonce: String,
@@ -444,7 +457,7 @@ impl Drop for ProcessOwner {
 pub struct OpenFxFilterSession {
     process: ProcessOwner,
     // Keep backing on incomplete submission/retirement until child settlement.
-    pending_inputs: Option<tempfile::NamedTempFile>,
+    pending_inputs: Vec<tempfile::NamedTempFile>,
     control: TcpStream,
     shared: memmap2::MmapMut,
     _file: tempfile::NamedTempFile,
@@ -507,15 +520,9 @@ impl<'a> FrameRequest<'a> {
 }
 
 struct RenderObservation<'a, P> {
-    owner_control: &'a mut dyn FnMut(
-        OpenFxRenderObservation<'_>,
-    ) -> Result<
-        mondrian_effects::EffectProcessorQuestionState,
-        OpenFxHostError,
-    >,
+    owner: &'a mut dyn source_input::RenderOwner,
     gui: mondrian_effects::EffectProcessorGuiAdmission,
     probe: &'a mut P,
-    memory: &'a mut dyn FnMut(usize) -> Result<bool, OpenFxHostError>,
 }
 
 #[derive(Clone, Copy)]
@@ -870,7 +877,7 @@ impl OpenFxFilterSession {
             .ok_or_else(|| unavailable("native process identity is zero"))?;
         Ok(Self {
             process,
-            pending_inputs: None,
+            pending_inputs: Vec::new(),
             control,
             shared,
             _file: file,
@@ -1007,12 +1014,34 @@ impl OpenFxFilterSession {
             OpenFxHostError,
         >,
     ) -> Result<EffectFloatFrame, OpenFxHostError> {
+        self.render_with_owner(
+            timing,
+            parameters,
+            frame,
+            sources,
+            owner_deadline,
+            gui,
+            &mut source_input::ClosureOwner { observe: owner_control, memory },
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn render_with_owner(
+        &mut self,
+        timing: &OpenFxRenderTiming,
+        parameters: &BTreeMap<String, OpenFxParameterBinding>,
+        frame: &EffectFloatFrame,
+        sources: &[source_frames::SourceFrame<'_>],
+        owner_deadline: Option<Instant>,
+        gui: mondrian_effects::EffectProcessorGuiAdmission,
+        owner: &mut dyn source_input::RenderOwner,
+    ) -> Result<EffectFloatFrame, OpenFxHostError> {
         self.render_owned(
             timing,
             parameters,
             FrameRequest { sources, ..FrameRequest::image(frame) },
             owner_deadline,
-            RenderObservation { owner_control, gui, probe: &mut (), memory },
+            RenderObservation { owner, gui, probe: &mut () },
             reserve_native_output,
         )
     }
@@ -1091,7 +1120,11 @@ impl OpenFxFilterSession {
                 sources: &[],
             },
             owner_deadline,
-            RenderObservation { owner_control, gui, probe: &mut (), memory },
+            RenderObservation {
+                owner: &mut source_input::ClosureOwner { observe: owner_control, memory },
+                gui,
+                probe: &mut (),
+            },
             reserve_native_output,
         )
     }
@@ -1119,13 +1152,15 @@ impl OpenFxFilterSession {
             FrameRequest::image(frame),
             None,
             RenderObservation {
-                owner_control: &mut |_| {
-                    owner_checkpoint()?;
-                    Ok(mondrian_effects::EffectProcessorQuestionState::Unavailable)
+                owner: &mut source_input::ClosureOwner {
+                    observe: &mut |_| {
+                        owner_checkpoint()?;
+                        Ok(mondrian_effects::EffectProcessorQuestionState::Unavailable)
+                    },
+                    memory: &mut |_| Ok(true),
                 },
                 gui: mondrian_effects::EffectProcessorGuiAdmission::CLOSED,
                 probe: &mut *report,
-                memory: &mut |_| Ok(true),
             },
             reserve_native_output,
         );
@@ -1149,13 +1184,15 @@ impl OpenFxFilterSession {
             FrameRequest::image(frame),
             None,
             RenderObservation {
-                owner_control: &mut |_| {
-                    owner_checkpoint()?;
-                    Ok(mondrian_effects::EffectProcessorQuestionState::Unavailable)
+                owner: &mut source_input::ClosureOwner {
+                    observe: &mut |_| {
+                        owner_checkpoint()?;
+                        Ok(mondrian_effects::EffectProcessorQuestionState::Unavailable)
+                    },
+                    memory: &mut |_| Ok(true),
                 },
                 gui: mondrian_effects::EffectProcessorGuiAdmission::CLOSED,
                 probe: &mut (),
-                memory: &mut |_| Ok(true),
             },
             reserve,
         )
@@ -1170,7 +1207,7 @@ impl OpenFxFilterSession {
         observation: RenderObservation<'_, impl ParentProbe>,
         reserve: impl FnOnce(&mut Vec<[f32; 4]>, usize) -> Result<(), std::collections::TryReserveError>,
     ) -> Result<EffectFloatFrame, OpenFxHostError> {
-        let RenderObservation { owner_control, gui, probe, memory } = observation;
+        let RenderObservation { owner: services, gui, probe } = observation;
         self.feedback = None;
         let native_deadline = Instant::now() + DEADLINE;
         let mut budget =
@@ -1179,7 +1216,7 @@ impl OpenFxFilterSession {
             .deadline()
             .ok_or_else(|| unavailable("new native work has no active budget"))?;
         let mut owner_checkpoint =
-            || owner_control(OpenFxRenderObservation::Checkpoint).map(|_| ());
+            || services.observe(OpenFxRenderObservation::Checkpoint).map(|_| ());
         let phase = probe.start();
         let admission = (|| {
             self.process.check(&mut owner_checkpoint, deadline)?;
@@ -1233,17 +1270,67 @@ impl OpenFxFilterSession {
                 return Err(error);
             }
         };
-        let delivery = source_frames::Delivery::acquire(
+        let input_metadata_bytes = if services.resolves_input() {
+            source_input::storage_bytes()
+        } else {
+            0
+        };
+        let metadata_admission = (|| {
+            if input_metadata_bytes != 0 && !services.acquire_memory(input_metadata_bytes)? {
+                return Err(source_frames::refusal(input_metadata_bytes));
+            }
+            self.process.check(
+                &mut || services.observe(OpenFxRenderObservation::Checkpoint).map(|_| ()),
+                deadline,
+            )?;
+            if !frame.sources.is_empty() || input_metadata_bytes != 0 {
+                let slots = if input_metadata_bytes != 0 { 256 } else { 1 };
+                self.pending_inputs.try_reserve_exact(slots).map_err(|_| {
+                    source_frames::refusal(std::mem::size_of::<tempfile::NamedTempFile>() * slots)
+                })?;
+                if self.pending_inputs.capacity() > slots {
+                    return Err(source_frames::refusal(
+                        std::mem::size_of::<tempfile::NamedTempFile>()
+                            * self.pending_inputs.capacity(),
+                    ));
+                }
+            }
+            Ok(())
+        })();
+        if let Err(error) = metadata_admission {
+            self.pending_inputs = Vec::new();
+            if matches!(
+                error,
+                OpenFxHostError::Canceled | OpenFxHostError::DeadlineExceeded
+            ) {
+                self.process.terminate_reported("input metadata admission");
+            }
+            return Err(error);
+        }
+        let delivery = source_frames::Delivery::acquire_serviced(
             frame.sources,
             timing,
             frame.sampling,
             frame.format,
-            memory,
-            &mut || self.process.check(&mut owner_checkpoint, deadline),
+            &mut |request| match request {
+                source_frames::DeliveryService::Checkpoint => self
+                    .process
+                    .check(
+                        &mut || services.observe(OpenFxRenderObservation::Checkpoint).map(|_| ()),
+                        deadline,
+                    )
+                    .map(|()| true),
+                source_frames::DeliveryService::Memory(bytes) => services.acquire_memory(
+                    bytes
+                        .checked_add(input_metadata_bytes)
+                        .ok_or_else(|| invalid("input grant overflows"))?,
+                ),
+            },
         );
         let delivery = match delivery {
             Ok(delivery) => delivery,
             Err(error) => {
+                self.pending_inputs = Vec::new();
                 if matches!(
                     error,
                     OpenFxHostError::Canceled | OpenFxHostError::DeadlineExceeded
@@ -1254,17 +1341,18 @@ impl OpenFxFilterSession {
             }
         };
         let sources = delivery.map(|source_frames::Delivery { manifest, _file }| {
-            self.pending_inputs = Some(_file);
+            self.pending_inputs.push(_file);
             manifest
         });
         let result = self.render_inner(
             timing,
             parameters,
             frame,
-            RenderObservation { owner_control, gui, probe, memory },
+            RenderObservation { owner: services, gui, probe },
             &mut budget,
             output_owner,
             sources,
+            input_metadata_bytes,
         );
         if result.as_ref().is_err_and(|error| {
             !matches!(
@@ -1275,7 +1363,7 @@ impl OpenFxFilterSession {
             self.process.terminate_reported("render");
         }
         if self.process.state == ProcessState::Settled {
-            self.pending_inputs = None;
+            self.pending_inputs = Vec::new();
         }
         result
     }
@@ -1290,13 +1378,14 @@ impl OpenFxFilterSession {
         budget: &mut question_budget::QuestionExecutionBudget,
         output_owner: NativeOutputAllocation,
         sources: Option<source_frames::Manifest>,
+        input_metadata_bytes: usize,
     ) -> Result<EffectFloatFrame, OpenFxHostError> {
-        let RenderObservation { owner_control, gui, probe, memory } = observation;
+        let RenderObservation { owner: services, gui, probe } = observation;
         let deadline = budget
             .deadline()
             .ok_or_else(|| unavailable("unsubmitted native work has no active budget"))?;
         self.process.check(
-            &mut || owner_control(OpenFxRenderObservation::Checkpoint).map(|_| ()),
+            &mut || services.observe(OpenFxRenderObservation::Checkpoint).map(|_| ()),
             deadline,
         )?;
         let phase = probe.start();
@@ -1312,7 +1401,7 @@ impl OpenFxFilterSession {
         probe.event(ProbeEvent::Sequence(self.sequence));
         let mut copy_checkpoint = || {
             check_owner(
-                &mut || owner_control(OpenFxRenderObservation::Checkpoint).map(|_| ()),
+                &mut || services.observe(OpenFxRenderObservation::Checkpoint).map(|_| ()),
                 deadline,
             )
         };
@@ -1334,7 +1423,8 @@ impl OpenFxFilterSession {
             0
         }));
         let phase = probe.start();
-        let source_bytes = sources.as_ref().map_or(0, source_frames::Manifest::bytes);
+        let mut source_bytes = sources.as_ref().map_or(0, source_frames::Manifest::bytes);
+        let source_count = sources.as_ref().map_or(0, source_frames::Manifest::count);
         let request = Request::Render {
             owner: self.owner,
             sequence: self.sequence,
@@ -1346,6 +1436,7 @@ impl OpenFxFilterSession {
             parameters: parameters.clone(),
             diagnostic: probe.measure_child(),
             sources,
+            resolve_input: input_metadata_bytes != 0,
         };
         let mut submitted = false;
         let submission = self.request_writer.write(
@@ -1354,7 +1445,7 @@ impl OpenFxFilterSession {
             deadline,
             &mut || {
                 self.process.check(
-                    &mut || owner_control(OpenFxRenderObservation::Checkpoint).map(|_| ()),
+                    &mut || services.observe(OpenFxRenderObservation::Checkpoint).map(|_| ()),
                     deadline,
                 )
             },
@@ -1372,18 +1463,17 @@ impl OpenFxFilterSession {
         let phase = probe.start();
         let mut memory_admission = None;
         let response = self.await_render(
-            owner_control,
+            services,
             budget,
             gui,
             initial_stop,
             probe,
-            &mut |required| {
-                let combined = source_bytes
-                    .checked_add(required)
-                    .ok_or_else(|| invalid("simultaneous Source and output storage overflows"))?;
-                memory(combined)
-            },
+            &mut source_bytes,
             &mut memory_admission,
+            timing,
+            frame.sampling,
+            source_count,
+            input_metadata_bytes,
         );
         probe.finish(OpenFxRenderPhase::AwaitCompletion, phase);
         let response = response?;
@@ -1394,7 +1484,7 @@ impl OpenFxFilterSession {
             | Response::PreflightBudgetRefused { sequence, .. } | Response::Rejected { sequence, .. }
             if *sequence == self.sequence)
         {
-            self.pending_inputs = None;
+            self.pending_inputs = Vec::new();
         }
         let deadline = budget
             .deadline()
@@ -1402,7 +1492,7 @@ impl OpenFxFilterSession {
         let phase = probe.start();
         let mut checkpoint = || {
             self.process.check(
-                &mut || owner_control(OpenFxRenderObservation::Checkpoint).map(|_| ()),
+                &mut || services.observe(OpenFxRenderObservation::Checkpoint).map(|_| ()),
                 deadline,
             )
         };
@@ -1521,7 +1611,8 @@ impl OpenFxFilterSession {
             probe.finish(OpenFxRenderPhase::FeedbackAdmission, phase);
             return Err(OpenFxHostError::PreflightBudgetRefused {
                 required_bytes: source_bytes
-                    .checked_add(required_bytes)
+                    .checked_add(input_metadata_bytes)
+                    .and_then(|n| n.checked_add(required_bytes))
                     .ok_or_else(|| invalid("simultaneous preflight storage overflows"))?,
                 feedback: Box::new(feedback),
             });
@@ -1553,20 +1644,20 @@ impl OpenFxFilterSession {
         Ok(output)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn await_render(
         &mut self,
-        owner_control: &mut dyn FnMut(
-            OpenFxRenderObservation<'_>,
-        ) -> Result<
-            mondrian_effects::EffectProcessorQuestionState,
-            OpenFxHostError,
-        >,
+        services: &mut dyn source_input::RenderOwner,
         budget: &mut question_budget::QuestionExecutionBudget,
         gui: mondrian_effects::EffectProcessorGuiAdmission,
         mut stopped: Option<OpenFxHostError>,
         probe: &mut impl ParentProbe,
-        memory: &mut dyn FnMut(usize) -> Result<bool, OpenFxHostError>,
+        held_input_bytes: &mut usize,
         memory_admission: &mut Option<MemoryAdmission>,
+        timing: &OpenFxRenderTiming,
+        sampling: mondrian_core::ImageSampling,
+        initial_source_count: usize,
+        input_metadata_bytes: usize,
     ) -> Result<Response, OpenFxHostError> {
         use mondrian_effects::{
             EffectProcessorQuestionReply as Reply, EffectProcessorQuestionState as State,
@@ -1581,12 +1672,14 @@ impl OpenFxFilterSession {
             .checked_add(1)
             .ok_or_else(|| unavailable("native Render invocation exhausted"))?;
         let mut active: Option<ActiveQuestion> = None;
+        let mut pending_input: Option<source_input::InputIdentity> = None;
+        let mut last_input = 0u64;
         // Every exit clears only its original GUI service, including protocol,
         // native, cancellation and timeout errors. No borrowed native data is
         // retained in the product and no completed DSP invocation is replayed.
         let result = (|| loop {
             if stopped.is_none() {
-                match owner_control(OpenFxRenderObservation::Checkpoint) {
+                match services.observe(OpenFxRenderObservation::Checkpoint) {
                     Ok(_) => {}
                     Err(error @ OpenFxHostError::Canceled) => stopped = Some(error),
                     Err(error) => return Err(error),
@@ -1627,9 +1720,91 @@ impl OpenFxFilterSession {
                 return Err(stopped.take().unwrap_or(OpenFxHostError::DeadlineExceeded));
             }
             if stopped.is_none()
+                && active.is_none()
+                && let Some(identity) = pending_input.take()
+            {
+                let deadline = budget
+                    .deadline()
+                    .ok_or_else(|| unavailable("input resolution has no active budget"))?;
+                let domain_bytes =
+                    memory_admission.filter(|m| m.granted).map_or(0, |m| m.required_bytes);
+                let resolved = services.resolve_input(source_input::InputRequest {
+                    time: identity.time,
+                    held_native_bytes: held_input_bytes
+                        .checked_add(domain_bytes)
+                        .and_then(|n| n.checked_add(input_metadata_bytes))
+                        .ok_or_else(|| {
+                            source_input::delivery_error("held input/output storage overflows")
+                        })?,
+                    deadline,
+                });
+                source_input::check_input_owner(services, deadline)?;
+                let resolved = resolved?;
+                resolved
+                    .frame
+                    .view()
+                    .validate_controlled(&mut || {
+                        source_input::check_input_owner(services, deadline)
+                    })
+                    .map_err(source_input::classify_delivery_error)?;
+                let returned_bytes = resolved.frame.retained_bytes();
+                let delivery = source_frames::Delivery::acquire_serviced(
+                    &[source_frames::SourceFrame {
+                        time: identity.time,
+                        x: resolved.x,
+                        y: resolved.y,
+                        frame: &resolved.frame,
+                    }],
+                    timing,
+                    sampling,
+                    self.input_format,
+                    &mut |request| match request {
+                        source_frames::DeliveryService::Checkpoint => {
+                            source_input::check_input_owner(services, deadline).map(|()| true)
+                        }
+                        source_frames::DeliveryService::Memory(bytes) => {
+                            let total = held_input_bytes
+                                .checked_add(bytes)
+                                .filter(|n| *n <= MAX_FRAME_BYTES)
+                                .ok_or_else(|| {
+                                    source_input::delivery_error(
+                                        "additional Source payload exceeds policy",
+                                    )
+                                })?;
+                            services.acquire_memory(
+                                total
+                                    .checked_add(domain_bytes)
+                                    .and_then(|n| n.checked_add(input_metadata_bytes))
+                                    .and_then(|n| n.checked_add(returned_bytes))
+                                    .ok_or_else(|| {
+                                        source_input::delivery_error("input/output grant overflows")
+                                    })?,
+                            )
+                        }
+                    },
+                )
+                .map_err(source_input::classify_delivery_error)?
+                .ok_or_else(|| unavailable("input resolver produced no backing"))?;
+                *held_input_bytes += delivery.manifest.bytes();
+                self.pending_inputs.push(delivery._file);
+                self.request_writer.write(
+                    &mut self.control,
+                    &Request::InputReply {
+                        owner: self.owner,
+                        sequence: self.sequence,
+                        identity,
+                        source: delivery.manifest,
+                    },
+                    deadline,
+                    &mut || source_input::check_input_owner(services, deadline),
+                    &mut false,
+                )?;
+                continue;
+            }
+            if stopped.is_none()
                 && let Some(question) = active.as_mut()
             {
-                match owner_control(OpenFxRenderObservation::Question(&question.question)) {
+                match services.observe(OpenFxRenderObservation::Question(&question.question)) {
                     Err(error @ OpenFxHostError::Canceled) => {
                         stopped = Some(error);
                         continue;
@@ -1682,7 +1857,8 @@ impl OpenFxFilterSession {
                             &mut || {
                                 self.process.check(
                                     &mut || {
-                                        owner_control(OpenFxRenderObservation::Checkpoint)
+                                        services
+                                            .observe(OpenFxRenderObservation::Checkpoint)
                                             .map(|_| ())
                                     },
                                     deadline,
@@ -1693,9 +1869,8 @@ impl OpenFxFilterSession {
                         let original = active
                             .take()
                             .ok_or_else(|| unavailable("Question reply lost its service"))?;
-                        let _ = owner_control(OpenFxRenderObservation::QuestionEnded(
-                            &original.question,
-                        ));
+                        let _ = services
+                            .observe(OpenFxRenderObservation::QuestionEnded(&original.question));
                         continue;
                     }
                 }
@@ -1722,6 +1897,34 @@ impl OpenFxFilterSession {
                 }
                 Err(error) => return Err(stopped.take().unwrap_or(error)),
             };
+            if let Response::InputNeeded { owner, sequence, identity } = response {
+                if owner != self.owner
+                    || sequence != self.sequence
+                    || !services.resolves_input()
+                    || last_input.checked_add(1) != Some(identity.service)
+                    || identity.service > 257
+                    || !identity.time.is_finite()
+                    || identity.time == timing.frame
+                    || identity.time < timing.first_frame
+                    || identity.time > timing.last_frame
+                    || pending_input.is_some()
+                    || memory_admission.is_some_and(|m| !m.granted)
+                {
+                    return Err(unavailable(
+                        "input request lost its exact current work identity",
+                    ));
+                }
+                if identity.service as usize > 256 - initial_source_count {
+                    return Err(source_input::delivery_error(
+                        "additional Source value count exceeds policy",
+                    ));
+                }
+                last_input = identity.service;
+                if stopped.is_none() {
+                    pending_input = Some(identity);
+                }
+                continue;
+            }
             if let Response::MemoryNeeded { owner, sequence, required_bytes } = response {
                 if owner != self.owner
                     || sequence != self.sequence
@@ -1738,9 +1941,13 @@ impl OpenFxFilterSession {
                 if stopped.is_some() {
                     continue;
                 }
-                let granted = memory(required_bytes)?;
+                let combined = held_input_bytes
+                    .checked_add(input_metadata_bytes)
+                    .and_then(|n| n.checked_add(required_bytes))
+                    .ok_or_else(|| invalid("simultaneous Source and output storage overflows"))?;
+                let granted = services.acquire_memory(combined)?;
                 *memory_admission = Some(MemoryAdmission { required_bytes, granted });
-                match owner_control(OpenFxRenderObservation::Checkpoint) {
+                match services.observe(OpenFxRenderObservation::Checkpoint) {
                     Ok(_) => {}
                     Err(error @ OpenFxHostError::Canceled) => {
                         stopped = Some(error);
@@ -1762,7 +1969,9 @@ impl OpenFxFilterSession {
                     deadline,
                     &mut || {
                         check_owner(
-                            &mut || owner_control(OpenFxRenderObservation::Checkpoint).map(|_| ()),
+                            &mut || {
+                                services.observe(OpenFxRenderObservation::Checkpoint).map(|_| ())
+                            },
                             deadline,
                         )
                     },
@@ -1830,7 +2039,7 @@ impl OpenFxFilterSession {
                 self.progress_generation = progress.generation();
                 self.native_owner = Some(native_owner);
                 if stopped.is_none() {
-                    match owner_control(OpenFxRenderObservation::Checkpoint) {
+                    match services.observe(OpenFxRenderObservation::Checkpoint) {
                         Ok(_) => {}
                         Err(error @ OpenFxHostError::Canceled) => stopped = Some(error),
                         Err(error) => return Err(error),
@@ -1847,7 +2056,7 @@ impl OpenFxFilterSession {
                         revision,
                         progress,
                     };
-                    match owner_control(OpenFxRenderObservation::Progress(progress)) {
+                    match services.observe(OpenFxRenderObservation::Progress(progress)) {
                         Ok(_) => {}
                         Err(error @ OpenFxHostError::Canceled) => stopped = Some(error),
                         Err(error) => return Err(error),
@@ -1868,7 +2077,7 @@ impl OpenFxFilterSession {
                 }
                 return Err(reason);
             }
-            if active.is_some() {
+            if active.is_some() || pending_input.is_some() {
                 return Err(unavailable(
                     "native completed while its Question was unacknowledged",
                 ));
@@ -1876,7 +2085,7 @@ impl OpenFxFilterSession {
             return Ok(response);
         })();
         if let Some(original) = active.take() {
-            let _ = owner_control(OpenFxRenderObservation::QuestionEnded(&original.question));
+            let _ = services.observe(OpenFxRenderObservation::QuestionEnded(&original.question));
         }
         result
     }
@@ -2454,7 +2663,8 @@ fn run_openfx_resident_worker_inner(
             }
             Request::Cancel { .. }
             | Request::QuestionReply { .. }
-            | Request::MemoryReply { .. } => {
+            | Request::MemoryReply { .. }
+            | Request::InputReply { .. } => {
                 return Err(invalid("control service reached native dispatch"))
             }
             Request::CloseGui { owner, sequence: received } => {
@@ -2484,6 +2694,7 @@ fn run_openfx_resident_worker_inner(
                 parameters,
                 diagnostic,
                 sources,
+                resolve_input,
                 ..
             } => {
                 if owner != prepare.owner {
@@ -2512,6 +2723,7 @@ fn run_openfx_resident_worker_inner(
                     session: &mut session,
                     curves: &mut curves,
                     sources: sources.as_ref(),
+                    resolve_input,
                 };
                 let result = if diagnostic {
                     let mut report = OpenFxChildRenderDiagnostic::new(
@@ -2554,6 +2766,7 @@ struct WorkerRenderContext<'a> {
     session: &'a mut Option<NativeSession>,
     curves: &'a mut BTreeMap<String, std::sync::Arc<curves::CurveContext>>,
     sources: Option<&'a source_frames::Manifest>,
+    resolve_input: bool,
 }
 struct WorkerRenderResult {
     response: Response,
@@ -2579,6 +2792,7 @@ fn render_worker_request(
         session,
         curves,
         sources,
+        resolve_input,
     } = context;
     let phase = probe.start();
     validate_timing(&timing)?;
@@ -2592,6 +2806,14 @@ fn render_worker_request(
                 Ok(())
             }
         })?;
+    let source_arena = if resolve_input {
+        Some(Box::new(source_input::SourceArena::new(
+            shared, prepare, &timing, sampling, sources,
+        )?))
+    } else {
+        None
+    };
+    let source_provider = source_arena.as_ref().map(|arena| arena.provider());
     let mut candidate_curves = BTreeMap::new();
     for (name, binding) in &mut parameters {
         if let OpenFxParameterQueryMode::Curve { time_scale, .. } = &binding.query_mode {
@@ -2694,6 +2916,7 @@ fn render_worker_request(
             &native,
             probe,
             &mapped_sources.frames,
+            source_provider.as_ref(),
         )
     } else {
         let phase = probe.start();
@@ -2720,6 +2943,7 @@ fn render_worker_request(
                     &native,
                     probe,
                     &mapped_sources.frames,
+                    source_provider.as_ref(),
                 );
                 *session = Some(instance);
                 dispatched
@@ -2844,6 +3068,7 @@ fn dispatch_prepared_native_render(
         parameters,
         &mut (),
         &[],
+        None,
     )
 }
 
@@ -2857,6 +3082,7 @@ fn dispatch_prepared_native_render_profiled(
     parameters: &[NativeParameter],
     probe: &mut impl ChildProbe,
     sources: &[NativeSourceFrame],
+    provider: Option<&NativeSourceProvider>,
 ) -> NativeRenderDispatch {
     // Construction remains externally supervised; it has no invented SDK
     // abort authority. A stop accepted during it wins before entering Render.
@@ -2865,7 +3091,7 @@ fn dispatch_prepared_native_render_profiled(
     }
     let native_control = shared.native_control();
     let phase = probe.start();
-    let result = instance.render_with_sources(
+    let result = instance.render_with_source_provider(
         input,
         output,
         info,
@@ -2873,6 +3099,7 @@ fn dispatch_prepared_native_render_profiled(
         Some(&native_control),
         probe.native_target(),
         sources,
+        provider,
     );
     probe.finish(OpenFxChildRenderPhase::NativeDispatch, phase);
     NativeRenderDispatch::Invoked(result)
@@ -4444,7 +4671,7 @@ mod process_retirement_tests {
         shared.fill(0xa5);
         let mut session = OpenFxFilterSession {
             process,
-            pending_inputs: None,
+            pending_inputs: Vec::new(),
             control,
             shared,
             _file: file,

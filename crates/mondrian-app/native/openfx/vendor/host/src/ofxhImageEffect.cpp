@@ -2056,13 +2056,16 @@ namespace OFX {
         *h3 = image->getPropHandle();
 
         return kOfxStatOK;
+        } catch (const Property::Exception& error) {
+          if (h3) { *h3 = NULL; }
+          return error.getStatus() == kOfxStatErrMemory ? kOfxStatErrMemory : kOfxStatFailed;
         } catch (const std::bad_alloc&) {
           *h3 = NULL;
           return kOfxStatErrMemory;
         } catch (...) {
           *h3 = NULL;
 
-          return kOfxStatErrBadHandle;
+          return kOfxStatFailed;
         }
       }
 

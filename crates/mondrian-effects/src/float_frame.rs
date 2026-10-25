@@ -383,7 +383,10 @@ impl EffectFloatFrame {
     pub(crate) fn set_format_after_write(&mut self, format: EffectValueFormat) {
         self.format = format;
     }
-    pub(crate) fn retained_bytes(&self) -> usize {
+    /// Logical owned pixel capacity, including spare Vec capacity. Cross-crate
+    /// graph/native adapters use this to admit simultaneously held values.
+    /// This excludes allocator overhead and is not a physical heap/RSS bound.
+    pub fn retained_bytes(&self) -> usize {
         self.pixels.capacity().saturating_mul(std::mem::size_of::<[f32; 4]>())
     }
 }

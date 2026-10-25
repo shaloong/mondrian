@@ -362,6 +362,9 @@ pub struct OpenFxRenderTiming {
 /// Native host failure that leaves the caller's input frame unchanged.
 #[derive(Debug, thiserror::Error)]
 pub enum OpenFxHostError {
+    /// Original typed upstream graph error; never a fault of the waiting plugin.
+    #[error("OpenFX upstream image resolution failed: {0}")]
+    InputFailed(Box<mondrian_effects::EffectExecutionError>),
     /// A valid instance awaits authored repair; its worker is not a fault.
     #[error("OpenFX effect is blocked by a persistent user error")]
     UserBlocked(Box<mondrian_effects::EffectProcessorFeedback>),
@@ -558,6 +561,14 @@ struct NativeSourceFrame {
     alpha: c_int,
     pixel_aspect_ratio: f64,
 }
+
+#[repr(C)]
+struct NativeSourceProvider {
+    context: *const c_void,
+    fetch: Option<
+        unsafe extern "C" fn(*const c_void, f64, *mut NativeSourceFrame, *mut usize) -> c_int,
+    >,
+}
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct NativeLiveQuestion {
@@ -726,7 +737,7 @@ unsafe extern "C" {
         parameter_count: c_int,
         session: *mut *mut c_void,
     ) -> c_int;
-    fn mondrian_openfx_session_render_sources(
+    fn mondrian_openfx_session_render_resolved(
         session: *mut c_void,
         input: *const c_void,
         output: *mut c_void,
@@ -739,6 +750,7 @@ unsafe extern "C" {
         diagnostic: *mut resident::child_diagnostic::NativeRenderDiagnostic,
         sources: *const NativeSourceFrame,
         source_count: usize,
+        provider: *const NativeSourceProvider,
     ) -> c_int;
     fn mondrian_openfx_session_close_gui(
         session: *mut c_void,
@@ -872,6 +884,7 @@ impl NativeSession {
         self.render_with_sources(input, output, info, parameters, control, diagnostic, &[])
     }
 
+    #[cfg(test)]
     #[allow(clippy::too_many_arguments)]
     fn render_with_sources(
         &mut self,
@@ -883,6 +896,23 @@ impl NativeSession {
         diagnostic: Option<&mut resident::child_diagnostic::NativeRenderDiagnostic>,
         sources: &[NativeSourceFrame],
     ) -> Result<mondrian_core::ColorFrameAlpha, NativeRenderError> {
+        self.render_with_source_provider(
+            input, output, info, parameters, control, diagnostic, sources, None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn render_with_source_provider(
+        &mut self,
+        input: &[u8],
+        output: &mut [u8],
+        info: &NativeFrameInfo,
+        parameters: &[NativeParameter],
+        control: Option<&NativeInvocationControl>,
+        diagnostic: Option<&mut resident::child_diagnostic::NativeRenderDiagnostic>,
+        sources: &[NativeSourceFrame],
+        provider: Option<&NativeSourceProvider>,
+    ) -> Result<mondrian_core::ColorFrameAlpha, NativeRenderError> {
         self.feedback = None;
         if !input.is_empty() && output.len() != input.len() {
             return Err(NativeRenderError::Rejected(2));
@@ -891,7 +921,7 @@ impl NativeSession {
         // input/output slices and output metadata remain live for this call.
         // Native validation checks exact extents before reading or writing.
         let status = unsafe {
-            mondrian_openfx_session_render_sources(
+            mondrian_openfx_session_render_resolved(
                 self.handle.as_ptr(),
                 if input.is_empty() {
                     std::ptr::null()
@@ -908,6 +938,7 @@ impl NativeSession {
                 diagnostic.map_or(std::ptr::null_mut(), std::ptr::from_mut),
                 sources.as_ptr(),
                 sources.len(),
+                provider.map_or(std::ptr::null(), std::ptr::from_ref),
             )
         };
         if status != 0 {

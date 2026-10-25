@@ -55,3 +55,5 @@ The product filter host is maintained separately in `../host`.
 - `clipGetRegionOfDefinition` reports a valid clip's query failure as Failed,
   preserves allocation failures as ErrMemory and clears rejected bounds. Invalid
   handles still report BadHandle; nonfinite/inverted regions cannot return OK.
+  `clipGetImage` uses the same error distinction for valid clips, including
+  upstream delivery failures; a failed fetch cannot publish an image handle.
