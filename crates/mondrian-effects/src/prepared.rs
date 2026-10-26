@@ -11,8 +11,8 @@ use crate::{
     },
     mask::MaskComponent,
     EffectDeterminism, EffectExecutionContract, EffectExecutionEnvelope, EffectExecutionModes,
-    EffectExecutionSession, EffectGraphTopology, EffectRenderOp, EffectResourceLifetime,
-    EffectRoiPropagation, EffectStateModel, EffectTemporalInputExtent, LutPreparationCache,
+    EffectExecutionSession, EffectGraphTopology, EffectResourceLifetime, EffectRoiPropagation,
+    EffectStateModel, EffectTemporalInputExtent, LutPreparationCache,
 };
 use mondrian_core::{
     effect_data::EffectNode, EffectId, GradeGraph, GradeGraphNodeId, GradeGraphNodeKind,
@@ -918,18 +918,7 @@ impl PreparedEffectProgram {
         graph: &CompiledEffectGraph,
         node: EffectGraphNodeId,
     ) -> Option<PreparedEffectInput> {
-        let input = match &graph.graph().node(node)?.kind {
-            EffectGraphNodeKind::UnaryEffect { input, op: EffectRenderOp::Custom { .. } }
-            | EffectGraphNodeKind::DomainEffect {
-                input, op: EffectRenderOp::Custom { .. }, ..
-            } => *input,
-            _ => return None,
-        };
-        let stage = graph
-            .stage_bindings()
-            .iter()
-            .find(|stage| stage.emitted_nodes().contains(&node) && stage.input_value() == input)?;
-        self.input_for_stage(stage)
+        self.input_for_stage(graph.processor_input_stage(node)?)
     }
 
     /// Bind an entering-value capability from this program's actual compiler

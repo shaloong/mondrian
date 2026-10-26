@@ -1194,7 +1194,7 @@ fn apply_compiled_effect_graph_rgba_f32_inner(
         scalar_checkpoint(control)?;
         return Ok(output);
     }
-    if let Some(cached) = input.and_then(|input| {
+    if let Some(cached) = input.filter(|_| !control.uses_input_service()).and_then(|input| {
         get_cached_effect_output_f32(session, input, compiled, frame_seed, domain_cache_key)
     }) {
         scalar_checkpoint(control)?;
@@ -1270,15 +1270,18 @@ fn apply_compiled_effect_graph_rgba_f32_inner(
                             frame.capacity().saturating_mul(std::mem::size_of::<[f32; 4]>()),
                         )
                     }));
-                crate::adjustment::apply_custom_source_op_f32(
-                    &mut output,
-                    op,
-                    frame_seed,
-                    session,
-                    caller_owned_bytes,
-                    control,
-                )
-                .map_err(EffectFloatExecutionError::CustomProcessor)?;
+                control
+                    .with_input_stage(None, |control| {
+                        crate::adjustment::apply_custom_source_op_f32(
+                            &mut output,
+                            op,
+                            frame_seed,
+                            session,
+                            caller_owned_bytes,
+                            control,
+                        )
+                    })
+                    .map_err(EffectFloatExecutionError::CustomProcessor)?;
                 outputs.insert(node.id, output);
             }
             EffectGraphNodeKind::UnaryEffect { input: input_id, op }
@@ -1311,15 +1314,19 @@ fn apply_compiled_effect_graph_rgba_f32_inner(
                                 buffer.capacity().saturating_mul(std::mem::size_of::<[f32; 4]>()),
                             )
                         }));
-                    apply_custom_render_op_f32(
-                        &mut source,
-                        op,
-                        frame_seed,
-                        Some(session),
-                        caller_owned_bytes,
-                        control,
-                    )
-                    .map_err(EffectFloatExecutionError::CustomProcessor)?;
+                    let input_stage = control.input_stage_for(compiled, node.id);
+                    control
+                        .with_input_stage(input_stage, |control| {
+                            apply_custom_render_op_f32(
+                                &mut source,
+                                op,
+                                frame_seed,
+                                Some(session),
+                                caller_owned_bytes,
+                                control,
+                            )
+                        })
+                        .map_err(EffectFloatExecutionError::CustomProcessor)?;
                     true
                 } else {
                     source = crate::materialize_straight_coverage(
@@ -1620,7 +1627,7 @@ fn apply_compiled_effect_graph_rgba_f32_inner(
     output = apply_effect_domain_transition(compiled, None, output_id, output, &mut processor)?;
     output.validate().map_err(EffectFloatExecutionError::FrameContract)?;
     scalar_checkpoint(control)?;
-    if let Some(input) = input {
+    if let Some(input) = input.filter(|_| !control.uses_input_service()) {
         put_cached_effect_output_f32(
             session,
             input,

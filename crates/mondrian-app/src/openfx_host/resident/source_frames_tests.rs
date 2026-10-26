@@ -210,6 +210,46 @@ fn child_source_mapping_rejects_malformed_storage_pixels_and_context_before_nati
         &mut || Err(OpenFxHostError::Canceled),
     );
     assert!(matches!(stopped, Err(OpenFxHostError::Canceled)));
+
+    // The current and late Source paths share OFX association codes, while
+    // the original numeric alpha contract must still validate untrusted maps.
+    use mondrian_core::ColorFrameAlpha::*;
+    for (association, native_code) in [
+        (StraightCoverage, 0),
+        (PremultipliedCoverage, 1),
+        (StraightFloat, 0),
+        (PremultipliedFloat, 1),
+        (Opaque, 2),
+    ] {
+        prepare.input_alpha = association;
+        for alpha in [-0.25f32, 0.0, 0.5, 1.0, 1.25, f32::NAN, f32::INFINITY] {
+            for pixel in bytes.chunks_exact_mut(16) {
+                pixel[12..].copy_from_slice(&alpha.to_ne_bytes());
+            }
+            std::fs::write(delivery._file.path(), &bytes).unwrap();
+            let mapped = open(&delivery.manifest, &prepare);
+            let expected = match association {
+                StraightCoverage | PremultipliedCoverage => {
+                    alpha.is_finite() && (0.0..=1.0).contains(&alpha)
+                }
+                StraightFloat | PremultipliedFloat => alpha.is_finite(),
+                Opaque => alpha == 1.0,
+            };
+            assert_eq!(mapped.is_ok(), expected, "{association:?}: {alpha}");
+            if let Ok(mapped) = mapped {
+                for frame in &mapped.frames {
+                    assert_eq!(frame.alpha, native_code);
+                }
+                // SAFETY: both spans borrow the live immutable mapped owner.
+                let actual = unsafe { std::slice::from_raw_parts(mapped.frames[0].pixels, 6) };
+                assert_eq!(
+                    bytemuck::cast_slice::<_, u8>(actual),
+                    &bytes[..96],
+                    "native association lowering must not alter RGBA"
+                );
+            }
+        }
+    }
 }
 
 #[test]

@@ -1884,6 +1884,7 @@ impl<'a> ScalarTemporalEvaluator<'a> {
                 TemporalValueAddress::Graph { context, node_id } => {
                     let context_ref = self.temporal_program.context(context)?;
                     let frame_seed = context_ref.frame_seed;
+                    let input_stage = control.input_stage_for(&context_ref.graph, node_id);
                     let node = context_ref.graph.graph().node(node_id).cloned().ok_or(
                         EffectTemporalExecutionError::UnsupportedGraphNode {
                             node_id,
@@ -1973,14 +1974,14 @@ impl<'a> ScalarTemporalEvaluator<'a> {
                                             output,
                                         )?;
                                         let feedback_before = scope.feedback_bytes(control);
-                                        let processor_bytes = apply_custom_render_op_f32_on_bank(
+                                        let processor_bytes = control.with_input_stage(input_stage, |control| apply_custom_render_op_f32_on_bank(
                                             &mut frame,
                                             &op,
                                             frame_seed,
                                             scope,
                                             caller_owned_bytes,
                                             control,
-                                        )
+                                        ))
                                         .map_err(|error| match error {
                                             crate::EffectExecutionError::CustomProcessorStopped {
                                                 reason: crate::EffectProcessorStopReason::Canceled,

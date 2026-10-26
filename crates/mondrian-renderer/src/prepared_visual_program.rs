@@ -843,27 +843,52 @@ impl PreparedVisualProgram {
         node: mondrian_effects::EffectGraphNodeId,
         request: &EffectTemporalExecutionRequest,
     ) -> Result<PreparedEffectTemporalExecution> {
-        // This lookup also validates revision and Transition endpoint before
-        // any upstream evaluator can run. Hidden handles remain legal.
+        self.prepare_clip_input_execution(
+            placement,
+            request,
+            self.evaluation_time_base(),
+            |program| program.input_for_processor(graph, node),
+        )
+    }
+
+    pub(crate) fn prepare_clip_bound_input_execution(
+        &self,
+        placement: TimelineClipExecutionRef,
+        stage: &mondrian_effects::CompiledEffectStageBinding,
+        request: &EffectTemporalExecutionRequest,
+        grid: Rational,
+    ) -> Result<PreparedEffectTemporalExecution> {
+        self.prepare_clip_input_execution(placement, request, grid, |program| {
+            program.input_for_stage(stage)
+        })
+    }
+
+    fn prepare_clip_input_execution(
+        &self,
+        placement: TimelineClipExecutionRef,
+        request: &EffectTemporalExecutionRequest,
+        grid: Rational,
+        select: impl FnOnce(&PreparedEffectProgram) -> Option<mondrian_effects::PreparedEffectInput>,
+    ) -> Result<PreparedEffectTemporalExecution> {
         self.schedule.clip_content(placement)?;
         let program = self.clip_effect_program(placement)?;
-        let input = program.input_for_processor(graph, node).ok_or_else(|| {
-            MondrianError::EffectGraphEvaluationFailed {
-                reason: format!(
-                    "Clip {} processor {:?} has no direct input in this prepared program",
-                    placement.clip_id, node
-                ),
-            }
+        let input = select(program).ok_or_else(|| MondrianError::EffectGraphEvaluationFailed {
+            reason: format!(
+                "Clip {} processor has no direct input in this prepared program",
+                placement.clip_id
+            ),
         })?;
         // The original source admission supplies actual input extent/sampling.
         // A Clip processor runs before placement compositing: neither density
         // nor Source PAR can be inferred from the Sequence/project canvas.
         let request = request.clone().with_output_frame_seed(
-            self.temporal_frame_seed(placement, request.output_time())
+            self.temporal_frame_seed_on_grid(placement, request.output_time(), grid)
                 .map_err(|reason| MondrianError::EffectGraphEvaluationFailed { reason })?,
         );
         input
-            .prepare_execution(&request, |time| self.temporal_frame_seed(placement, time))
+            .prepare_execution(&request, |time| {
+                self.temporal_frame_seed_on_grid(placement, time, grid)
+            })
             .map_err(|error| self.temporal_preparation_error(placement.clip_id, error))
     }
 
@@ -916,14 +941,20 @@ impl PreparedVisualProgram {
         placement: TimelineClipExecutionRef,
         clip_time: TimelineTime,
     ) -> std::result::Result<i64, String> {
+        self.temporal_frame_seed_on_grid(placement, clip_time, self.evaluation_time_base())
+    }
+
+    fn temporal_frame_seed_on_grid(
+        &self,
+        placement: TimelineClipExecutionRef,
+        clip_time: TimelineTime,
+        grid: Rational,
+    ) -> std::result::Result<i64, String> {
         let sequence_time = self
             .schedule
             .clip_to_sequence_time(placement, clip_time)
             .map_err(|error| error.to_string())?;
-        Ok(visual_frame_seed(
-            sequence_time,
-            self.evaluation_time_base(),
-        ))
+        Ok(visual_frame_seed(sequence_time, grid))
     }
 
     fn temporal_preparation_error(

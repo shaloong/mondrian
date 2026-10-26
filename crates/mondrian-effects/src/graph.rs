@@ -510,6 +510,23 @@ impl CompiledEffectGraph {
         &self.graph
     }
 
+    /// Select only a Custom node that directly consumes its Definition input.
+    pub(crate) fn processor_input_stage(
+        &self,
+        node: EffectGraphNodeId,
+    ) -> Option<&CompiledEffectStageBinding> {
+        let input = match &self.graph.node(node)?.kind {
+            EffectGraphNodeKind::UnaryEffect { input, op: EffectRenderOp::Custom { .. } }
+            | EffectGraphNodeKind::DomainEffect {
+                input, op: EffectRenderOp::Custom { .. }, ..
+            } => *input,
+            _ => return None,
+        };
+        self.stage_bindings
+            .iter()
+            .find(|stage| stage.emitted_nodes().contains(&node) && stage.input_value() == input)
+    }
+
     pub(crate) const fn identity(&self) -> &EffectGraphIdentity {
         &self.identity
     }

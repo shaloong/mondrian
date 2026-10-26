@@ -328,12 +328,7 @@ impl MappedSources {
         if frames.capacity() > LIMIT {
             return Err(unavailable("native Source span capacity exceeds policy"));
         }
-        let alpha = match prepare.input_alpha {
-            mondrian_core::ColorFrameAlpha::StraightFloat => 0,
-            mondrian_core::ColorFrameAlpha::PremultipliedFloat => 1,
-            mondrian_core::ColorFrameAlpha::Opaque => 2,
-            _ => return Err(invalid("Source delivery requires negotiated Float alpha")),
-        };
+        let alpha = native_alpha_association(prepare.input_alpha);
         for d in &manifest.frames {
             let pixels =
                 bytemuck::try_cast_slice::<u8, [f32; 4]>(&mapping[d.offset..d.offset + d.bytes])
@@ -341,10 +336,9 @@ impl MappedSources {
             // Reject untrusted pixels before even constructing a native plugin.
             for chunk in pixels.chunks(FRAME_TRANSFER_PIXELS) {
                 checkpoint()?;
-                if chunk
-                    .iter()
-                    .any(|p| p.iter().any(|c| !c.is_finite()) || (alpha == 2 && p[3] != 1.0))
-                {
+                if chunk.iter().any(|p| {
+                    p.iter().any(|c| !c.is_finite()) || !prepare.input_alpha.admits_alpha(p[3])
+                }) {
                     return Err(invalid(
                         "Source delivery violates Float image representation",
                     ));

@@ -3,11 +3,11 @@
 Status: implementation in progress. The native pre-DSP boundary is explicit;
 OpenFX temporal access remains unsupported until the complete consumer path passes.
 
-The current host declares `CURRENT_FRAME`, rejects temporal descriptors and only
-returns the current image. Effects already has time-expanded value programs and
-`PreparedTemporalFrameSet`; Preview and Export resolve their source demands before
-pixel execution. A Custom processor currently receives only one current input.
-Changing a capability flag cannot connect these boundaries.
+The product still declares `CURRENT_FRAME` and rejects temporal descriptors.
+Effects has time-expanded value programs and `PreparedTemporalFrameSet`; the
+normal OFX factory can now consume an invocation-borrowed input service. Main
+Preview/Export source scheduling is not connected to that service yet. Changing
+a capability flag cannot connect these boundaries.
 
 OFX [GetFramesNeeded](https://openfx.readthedocs.io/en/main/Reference/ofxImageEffectActions.html#c.kOfxImageEffectActionGetFramesNeeded)
 returns per-input pairs of frame-range endpoints, including discontinuous ranges.
@@ -148,9 +148,10 @@ Parent active storage and still-held native backing are deducted before upstream
 work; its peak is then composed in the same ledger. Already charged parent feedback
 is the nested baseline, so only new nested feedback reduces the remaining grant.
 
-Input capabilities must be borrowed by the invocation. A strong capability retained
-inside a factory would make a program/factory/program ownership cycle. The native
-calibration uses weak test bootstrap only; that is not a production binding scheme.
+Input capabilities are borrowed by the invocation. A strong capability retained
+inside a factory would make a program/factory/program ownership cycle. Weak
+bootstrap remains only in legacy calibration fixtures; the normal factory gate
+borrows the original program directly, with no bootstrap or factory capture.
 `PreparedVisualProgram::prepare_clip_processor_input` now prepares that input
 from the original Clip/Transition-endpoint snapshot. Complete-frame temporal
 work and processor input use one source mapper: media retime plus interpretation
@@ -159,6 +160,43 @@ demand batch for the original Preview/Export scheduler and bank; it owns no
 Session, decoder or cache. Basic Title and Adjustment history remain refused.
 Input extent, PAR and sampling belong to the actual source value, not the
 Sequence/project canvas. The invocation must supply and preserve that contract.
+
+`EffectProcessorControl::with_input_service` borrows source preparation for one
+execution. The executor scopes the actual direct-input stage and restores it on
+success, error and unwind; NoImage processors receive no inherited input. Source
+preparation first admits the complete simultaneous source backing and returns
+frozen frames only. The mutable service loan is restored before upstream DSP,
+so nested processors may use the same service without aliasing it. Resources
+execute that input through the original bank, working grant and Control. Input
+failure retires the waiting owner without blaming its definition. Subrequest
+deadlines can only shorten the original deadline; stop reasons remain sticky.
+
+`PreparedVisualProgram::clip_processor_inputs` borrows the original placement,
+Frame Execution Request and source resolver. It shares the existing position
+validator, including the doubled field grid, and checks the placement instant.
+The original attempt's grid supplies historical seeds. This does not change the
+older full temporal path's field-grid policy. The Clip service currently admits
+SceneLinear Float32 StraightCoverage only; other formats fail explicitly.
+
+The normal OFX processor owns one RenderOwner for observation, memory and Source
+requests. Native double frame time is interpreted exactly using the original
+rational author rate; values not representable by `TimelineTime` fail rather than
+rounding onto a guessed grid. Returned source origin/extent can differ from the
+current image. Unique tile pixels transfer without an unadmitted Rust clone;
+the existing charged native file transfer still applies.
+
+Actual Coverage input exposed an association mismatch: current images admitted
+Coverage as native Float, but late Source mapping rejected its Rust label. Both
+now use one lossless straight/premultiplied/opaque association lowering. The
+original numeric alpha domain still validates mapped pixels through
+`ColorFrameAlpha::admits_alpha`: Coverage stays in [0,1], Float retains finite
+signed/out-of-range alpha, and Opaque requires one. No pixel conversion or clamp
+is introduced. Native requests must also stay inside the declared author range;
+negative-time calibration supplies an explicit range containing those times.
+
+Binding a dynamic input service disables scalar input-only output caching.
+Outer consumers must likewise forbid reuse without complete dependency identity;
+the installed OFX definition already propagates Uncacheable to Preview/nesting.
 
 Historical frame seeds use the Sequence grid: seconds-per-frame must be
 inverted before frame-rate conversion. The former reciprocal error produced
@@ -171,55 +209,41 @@ therefore checks exact configuration retirement, rather than assuming a variant
 cache. Optional native retention must use the recipe's declared bytes, not a guessed
 constant; a legal active render may intentionally run without optional retention.
 
-Current Windows affected-module qualification: Effects 377 passed/0 ignored,
-Renderer 678 passed/39 ignored, Export 300 passed/18 ignored and App 3122
-passed/212 ignored. Five new Renderer tests cover source mapping, temporal
-pixels, foreign provenance refusal, independent source sampling and the
-original historical-seed path; one Effects test rejects internal node inputs.
-The four libraries were built together: App validation opt0/debug0, Effects
-opt1/debug0 without extra features, Renderer/Export validation opt1/debug0.
-All original complete gates settled with empty stderr. Builds and Export/App
-full gates required execution outside the Windows sandbox: sandbox builds
-failed writing rmeta (OS650), and sandbox Export refused atomic publication
-and same-length replacement (OS5); no source, assertion or budget workaround.
-The unchanged native bank/transport remains qualified by the earlier five
-gates at2c56df00; the worker and C++13 groups were not rebuilt or rerun for
-this Clip mapping slice. No new whole-workspace, release, third-party, RT or
-performance qualification follows.
+Current Windows affected-module qualification: Effects 380 passed/0 ignored,
+Renderer 680 passed/39 ignored, Export 300 passed/18 ignored and App 3123
+passed/213 ignored. All complete gates settled with empty stderr under their
+original budgets. The four libraries were built together: App validation
+opt0/debug0, Effects opt1/debug0 without extra features, Renderer/Export
+validation opt1/debug0. Builds and full gates ran outside the Windows sandbox;
+earlier sandbox rmeta/publication failures are not source or assertion workarounds.
 
-The native late-request gate repeats four full-RGBA renders on one native owner,
-with eight readers coalescing two exact dependencies while Output/current leases
-remain live. Its original owner executes the existing bounded time-expanded graph
-with animated exposure and a real finite 1/48-second temporal blend. It selects
-the entering value from a full original program whose waiting/downstream metadata
-would fail at the requested time, rather than a caller-trimmed stack. Native output
-matches the original graph values bit for bit. A separate mathematical DSP oracle
-allows the documented Float32 pivot/luma rounding. Graph-budget, dependency,
-cancellation and copy-refusal cases all settle without publishing output. Shared
-Effects tests cover 12 failure/owner-stop combinations and fresh-owner recovery.
+The current-source default worker was rebuilt at test-profile opt0/debug0,
+without libtest or validation features. Its 12 existing diagnostics/test-helper
+warnings remain; this is not a zero-warning or release qualification.
+Six actual native gates passed with that worker. The normal installed factory
+gate performs four full-RGBA renders on one native owner, eight coalesced exact
+Source services with current/Output leases held, and twelve upstream
+configuration creations/retirements in the original bank. Source origin/extent
+vary; terminal feedback, generation, unique pixel transfer and Float alpha6
+remain intact. It borrows the original program through Control, with no weak
+bootstrap. The other gates retain graph/dependency/budget/cancellation/refusal
+and native lifecycle coverage. This does not prove universal100ms shutdown.
 
-The additional native bank gate executes the actual Filter inside an Effects
-processor invocation. Its Source resolver borrows that invocation's resources and
-Control, consumes the full original program's input capability, and never creates
-an execution Session. Four renders keep one native parent and eight exact Source
-services. One upstream occurrence switches current/historical size and format;
-the original bank correctly creates and retires twelve configurations, with one
-current configuration retained alongside the parent. Exact creation/drop counts
-would fail if upstream used a separate bank. Complete RGBA, original terminal
-feedback/generation, no output cache, unique pixel transfer and strict native
-shutdown pass. The grant derives from the native recipe's declared storage.
-Five Effects regression groups also cover same-owner progress/feedback, inherited
-retention ceilings, one-byte-short refusal, panic attribution, cancellation,
-sticky deadline, pixel-chunk polling and no duplicate charge of prior feedback.
+Three new Effects groups cover nested use, service/stage/deadline restoration,
+changed historical content without stale output reuse, panic/budget/identity
+refusal, recovery and sticky cancellation. Two Renderer groups cover the
+original attempt/field grid, source admission and foreign/unsupported input
+refusal. Native time conversion has its own exact-clock test. The source-map
+regression exercises five associations and 35 numeric-alpha conditions,
+including unclamped finite Float values and rejection of invalid Coverage.
 
-SourceDeliveryProbe deliberately does not declare temporal access: this is finite
-transport/graph calibration, not conforming third-party temporal compatibility.
-The normal product factory has no upstream resolver binding yet. Production invocation borrowing and actual source admission, native frame
-format/alpha handling, dependency-action scheduling, legal action/thread image
-coverage, field-grid seed parity, Preview/Export, real temporal plugins and cache
-invalidation remain open.
-Temporal capability flags stay false. No RT, performance, complete heap, GPU or
-other-platform qualification follows from these gates.
+SourceDeliveryProbe deliberately does not declare temporal access. These are
+owned finite integration calibrations, not conforming third-party temporal
+compatibility. Main Preview/Export source admission, mixed CPU/GPU service
+entry, native format/alpha beyond the bounded coverage executor, dependency
+scheduling, legal action/thread image coverage and complete field-grid parity
+remain open. Temporal flags stay false. No new whole-workspace, release, RT,
+performance, complete heap, GPU or other-platform qualification follows.
 
 The HostSupport dependency action now atomically replaces its complete input map
 on OK/ReplyDefault; an error leaves the caller's map unchanged. It preserves
@@ -234,10 +258,11 @@ fixture and actual HostSupport/Host. Action logs confirm one Create/Destroy per
 group, no Render, and no dispatch for invalid time/non-temporal declarations.
 These are action qualifications, not third-party temporal-renderer evidence.
 
-Next borrow the original program and prepared source service in the production
-Custom invocation, then resolve these existing demand batches through its
-original scheduler/decoder and shared bank. Do not retain a capability in the
-factory or reintroduce another Session.
+Next bind the borrowed Clip service at the actual Preview/Export consumer,
+resolving its existing demand batches through the original scheduler/decoder
+and shared bank. The mixed backend currently constructs a local Control without
+the service; its node scope hook alone is not an integrated consumer. Do not
+retain a capability in the factory or reintroduce another Session.
 Connect the dependency action to that same execution; verify all legal
 action/thread image requests before enabling capabilities. Distinguish declared media absence from an
 unprepared dependency; missing planned input cannot silently become a black frame.

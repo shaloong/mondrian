@@ -28,7 +28,7 @@ pub(super) fn classify_delivery_error(error: OpenFxHostError) -> OpenFxHostError
     }
 }
 
-pub(super) fn graph_error(
+pub(crate) fn graph_error(
     error: mondrian_effects::EffectTemporalExecutionError,
 ) -> OpenFxHostError {
     let error = match error {

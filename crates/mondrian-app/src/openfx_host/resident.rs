@@ -38,6 +38,17 @@ const TERMINATED_CHILD_WAIT_BUDGET: Duration = Duration::from_secs(2);
 const FRAME_TRANSFER_BYTES: usize = 1024 * 1024;
 const FRAME_TRANSFER_PIXELS: usize = FRAME_TRANSFER_BYTES / std::mem::size_of::<[f32; 4]>();
 
+/// OFX Float describes association, not the narrower Coverage numeric domain.
+/// Current and additional Source images must use the same lossless mapping.
+const fn native_alpha_association(alpha: mondrian_core::ColorFrameAlpha) -> c_int {
+    use mondrian_core::ColorFrameAlpha::*;
+    match alpha {
+        StraightCoverage | StraightFloat => 0,
+        PremultipliedCoverage | PremultipliedFloat => 1,
+        Opaque => 2,
+    }
+}
+
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Prepare {
@@ -1109,6 +1120,25 @@ impl OpenFxFilterSession {
             OpenFxHostError,
         >,
     ) -> Result<EffectFloatFrame, OpenFxHostError> {
+        self.generate_with_owner(
+            timing,
+            sampling,
+            parameters,
+            owner_deadline,
+            gui,
+            &mut source_input::ClosureOwner { observe: owner_control, memory },
+        )
+    }
+
+    pub(crate) fn generate_with_owner(
+        &mut self,
+        timing: &OpenFxRenderTiming,
+        sampling: mondrian_core::ImageSampling,
+        parameters: &BTreeMap<String, OpenFxParameterBinding>,
+        owner_deadline: Option<Instant>,
+        gui: mondrian_effects::EffectProcessorGuiAdmission,
+        owner: &mut dyn source_input::RenderOwner,
+    ) -> Result<EffectFloatFrame, OpenFxHostError> {
         self.render_owned(
             timing,
             parameters,
@@ -1120,11 +1150,7 @@ impl OpenFxFilterSession {
                 sources: &[],
             },
             owner_deadline,
-            RenderObservation {
-                owner: &mut source_input::ClosureOwner { observe: owner_control, memory },
-                gui,
-                probe: &mut (),
-            },
+            RenderObservation { owner, gui, probe: &mut () },
             reserve_native_output,
         )
     }
@@ -2886,13 +2912,7 @@ fn render_worker_request(
         })
         .collect::<Vec<_>>();
     let info = NativeFrameInfo {
-        source_alpha: if prepare.input_alpha.is_premultiplied() {
-            1
-        } else if prepare.input_alpha == mondrian_core::ColorFrameAlpha::Opaque {
-            2
-        } else {
-            0
-        },
+        source_alpha: native_alpha_association(prepare.input_alpha),
         width: prepare.width as c_int,
         height: prepare.height as c_int,
         project_width: prepare.project_geometry.width(),

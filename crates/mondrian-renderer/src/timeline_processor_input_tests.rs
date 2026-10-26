@@ -104,6 +104,195 @@ use mondrian_timeline::{Clip, Sequence, Track};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 #[test]
+fn borrowed_clip_service_uses_original_attempt_grid_and_admits_before_source_materialization() {
+    use mondrian_effects::{
+        EffectProcessorControl, EffectProcessorInputRequest, EffectProcessorInputService,
+    };
+    use std::{
+        cell::Cell,
+        time::{Duration, Instant},
+    };
+    let (sequence, _) = processor_input_scene(ClipContent::Media {
+        asset_id: AssetId::new(),
+        interpretation: Default::default(),
+    });
+    let program = PreparedVisualProgram::prepare(&sequence).unwrap();
+    let plan = input_scene_plan(&program);
+    let (placement, graph, _) = input_scene_binding(&plan);
+    let extent = EffectFrameExtent::new(2, 1);
+    let sampling = mondrian_core::ImageSampling::new(
+        mondrian_core::SampleAspectRatio::new(2, 1).unwrap(),
+        [Rational::new(1, 2), Rational::new(3, 4)],
+    )
+    .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let earlier = deadline - Duration::from_secs(10);
+    let cancellation = ExecutionCancellationToken::new().with_deadline(earlier);
+    let owner = TimelineFrameExecutionRequest::new(
+        crate::TimelineEvaluationRequest::export(FramePosition::new(96, Rational::new(1, 48))),
+        89,
+        EffectExecutionContinuity::Discontinuous,
+        EffectFrameExtent::new(1, 1),
+        EffectFrameExtent::new(1, 1).full_frame_roi(),
+        cancellation.clone(),
+    );
+    let granted = Cell::new(0);
+    let calls = Cell::new(0);
+    let mut resolve = |batch: &TimelineTemporalDemandBatch,
+                       _: &mut dyn FnMut(usize) -> Result<(), EffectTemporalExecutionError>,
+                       control: &mut EffectProcessorControl<'_>| {
+        control.check().map_err(|_| EffectTemporalExecutionError::Canceled)?;
+        assert!(granted.get() >= batch.effect_demands().coverage_bytes());
+        calls.set(calls.get() + 1);
+        let tiles = batch
+            .source_demands()
+            .iter()
+            .map(|demand| {
+                (
+                    demand.effect_request,
+                    EffectFrameTileF32::new(
+                        demand.effect_request.time(),
+                        extent,
+                        sampling,
+                        extent.full_frame_roi(),
+                        0,
+                        vec![[0.25, 0.5, 1.0, 1.0]; 2],
+                    )
+                    .unwrap(),
+                )
+            })
+            .collect::<Vec<_>>();
+        Ok(PreparedTemporalFrameSet::prepare(
+            EffectTemporalSourceIdentity::from_complete_semantic_fingerprint([91; 32]),
+            batch.effect_demands().clone(),
+            tiles,
+        )
+        .unwrap())
+    };
+    let mut service = program.clip_processor_inputs(placement, &owner, &mut resolve).unwrap();
+    let mut admit = |bytes| {
+        granted.set(granted.get().max(bytes));
+        Ok(())
+    };
+    let request = EffectProcessorInputRequest {
+        time: TimelineTime::new(-1, 48).unwrap(),
+        frame_extent: extent,
+        format: mondrian_effects::EffectValueFormat::new(
+            mondrian_effects::EffectWorkingPrecision::Float32,
+            mondrian_effects::EffectColorDomain::SceneLinearRgb,
+            mondrian_core::ColorFrameAlpha::StraightCoverage,
+        ),
+        sampling,
+        deadline,
+    };
+    let prepared = service
+        .prepare_input(
+            &graph.stage_bindings()[1],
+            request,
+            &mut admit,
+            &mut EffectProcessorControl::uncancelled(),
+        )
+        .unwrap();
+    assert_eq!(
+        prepared.execution.request().output_frame_seed(),
+        95,
+        "original doubled field grid, not base-frame hash"
+    );
+    assert_eq!(prepared.execution.request().generation(), 89);
+    assert_eq!(
+        prepared.execution.request().continuity(),
+        EffectExecutionContinuity::Discontinuous
+    );
+    assert_eq!(
+        prepared.execution.request().cancellation().deadline(),
+        Some(earlier)
+    );
+    assert_eq!(prepared.execution.request().sampling(), sampling);
+    assert_eq!(prepared.execution.request().frame_extent(), extent);
+    assert_eq!(prepared.origin, [0, 0]);
+    assert_eq!(calls.get(), 1);
+    cancellation.cancel();
+    assert!(prepared.execution.request().cancellation().is_canceled());
+}
+
+#[test]
+fn borrowed_clip_service_rejects_foreign_scope_and_native_float_alpha_before_sources() {
+    use mondrian_effects::{
+        EffectProcessorControl, EffectProcessorInputRequest, EffectProcessorInputService,
+    };
+    use std::{
+        cell::Cell,
+        time::{Duration, Instant},
+    };
+    let (sequence, _) = processor_input_scene(ClipContent::Media {
+        asset_id: AssetId::new(),
+        interpretation: Default::default(),
+    });
+    let program = PreparedVisualProgram::prepare(&sequence).unwrap();
+    let other = PreparedVisualProgram::prepare(&sequence).unwrap();
+    let plan = input_scene_plan(&program);
+    let foreign = input_scene_plan(&other);
+    let (placement, graph, _) = input_scene_binding(&plan);
+    let (_, foreign_graph, _) = input_scene_binding(&foreign);
+    let extent = EffectFrameExtent::new(1, 1);
+    let make_owner = |frame| {
+        TimelineFrameExecutionRequest::new(
+            crate::TimelineEvaluationRequest::export(FramePosition::new(
+                frame,
+                Rational::new(1, 24),
+            )),
+            89,
+            EffectExecutionContinuity::Continuous,
+            extent,
+            extent.full_frame_roi(),
+            ExecutionCancellationToken::new(),
+        )
+    };
+    let owner = make_owner(48);
+    let wrong_owner = make_owner(49);
+    let calls = Cell::new(0);
+    let mut resolve = |_: &TimelineTemporalDemandBatch,
+                       _: &mut dyn FnMut(usize) -> Result<(), EffectTemporalExecutionError>,
+                       _: &mut EffectProcessorControl<'_>| {
+        calls.set(calls.get() + 1);
+        Err(EffectTemporalExecutionError::Canceled)
+    };
+    assert!(program.clip_processor_inputs(placement, &wrong_owner, &mut resolve).is_err());
+    let mut service = program.clip_processor_inputs(placement, &owner, &mut resolve).unwrap();
+    let mut request = EffectProcessorInputRequest {
+        time: TimelineTime::ZERO,
+        frame_extent: extent,
+        format: mondrian_effects::EffectValueFormat::new(
+            mondrian_effects::EffectWorkingPrecision::Float32,
+            mondrian_effects::EffectColorDomain::SceneLinearRgb,
+            mondrian_core::ColorFrameAlpha::StraightFloat,
+        ),
+        sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
+        deadline: Instant::now() + Duration::from_secs(30),
+    };
+    let mut admit = |_| panic!("no source allocation is legal on a rejected request");
+    assert!(matches!(
+        service.prepare_input(
+            &graph.stage_bindings()[1],
+            request,
+            &mut admit,
+            &mut EffectProcessorControl::uncancelled()
+        ),
+        Err(EffectTemporalExecutionError::FrameContract(_))
+    ));
+    request.format = request.format.with_alpha(mondrian_core::ColorFrameAlpha::StraightCoverage);
+    assert!(service
+        .prepare_input(
+            &foreign_graph.stage_bindings()[1],
+            request,
+            &mut admit,
+            &mut EffectProcessorControl::uncancelled()
+        )
+        .is_err());
+    assert_eq!(calls.get(), 0);
+}
+
+#[test]
 fn processor_input_uses_original_clip_handles_interpretation_and_temporal_pixels() {
     let asset_id = AssetId::new();
     let (sequence, calls) = processor_input_scene(ClipContent::Media {

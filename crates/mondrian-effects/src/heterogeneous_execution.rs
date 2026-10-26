@@ -3466,16 +3466,19 @@ fn execute_cpu_dag_prefix(
                         };
                         let mut control = crate::EffectProcessorControl::new(&mut poll);
                         control.bind_observation(session.observation.clone());
-                        let result = apply_custom_render_op_f32(
-                            &mut output,
-                            &op,
-                            frame_seed,
-                            Some(session),
-                            caller_owned_bytes
-                                .saturating_add(prepared_masks.retained_bytes())
-                                .saturating_add(feedback_bytes),
-                            &mut control,
-                        );
+                        let input_stage = control.input_stage_for(compiled, dispatch.node);
+                        let result = control.with_input_stage(input_stage, |control| {
+                            apply_custom_render_op_f32(
+                                &mut output,
+                                &op,
+                                frame_seed,
+                                Some(session),
+                                caller_owned_bytes
+                                    .saturating_add(prepared_masks.retained_bytes())
+                                    .saturating_add(feedback_bytes),
+                                control,
+                            )
+                        });
                         if result.is_ok() {
                             feedback.append(control.take_feedback().map_err(|_| PreparedHeterogeneousEffectWorkError::CustomProcessor(crate::EffectExecutionError::ProcessorFeedbackCapacityExceeded { limit: crate::EFFECT_PROCESSOR_FEEDBACK_SLOTS }))?).map_err(|_| PreparedHeterogeneousEffectWorkError::CustomProcessor(crate::EffectExecutionError::ProcessorFeedbackCapacityExceeded { limit: crate::EFFECT_PROCESSOR_FEEDBACK_SLOTS }))?;
                         }

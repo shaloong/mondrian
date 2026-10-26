@@ -14,6 +14,10 @@ pub(crate) use description::{
     observe_selected_openfx_with_checkpoint, OpenFxDescribeNotices, OpenFxDescriptionObservation,
 };
 mod resident;
+pub(crate) use resident::source_input::{
+    graph_error as map_openfx_input_error, InputRequest as OpenFxInputRequest,
+    RenderOwner as OpenFxRenderOwner, ResolvedInput as OpenFxResolvedInput,
+};
 #[cfg(any(test, feature = "validation"))]
 pub use resident::{
     diagnose_openfx_output_materialization, OpenFxChildRenderDiagnostic, OpenFxChildRenderPhase,

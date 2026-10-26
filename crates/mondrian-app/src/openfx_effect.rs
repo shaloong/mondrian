@@ -21,6 +21,10 @@ use mondrian_effects::{
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+mod input_owner;
+#[cfg(test)]
+mod input_owner_native_tests;
+
 use crate::openfx_adapter::{OpenFxBinaryInspection, OpenFxPluginDescriptor};
 use crate::openfx_host::{
     observe_openfx_with_checkpoint, observe_selected_openfx_with_checkpoint, OpenFxContext,
@@ -54,6 +58,8 @@ struct BoundParameter {
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct OpenFxGraphParameters {
+    // Lossless author clock; timing.frame_rate is its native double projection.
+    author_frame_rate: mondrian_core::Rational,
     timing: OpenFxRenderTiming,
     values: BTreeMap<String, OpenFxParameterBinding>,
 }
@@ -260,76 +266,33 @@ impl EffectFloatProcessorInstance for OpenFxProcessorInstance {
                 mondrian_effects::EffectProcessorGuiAdmission::CLOSED
             };
             self.gui_presence = if gui.is_open() { presence } else { None };
-            let mut admit_memory = |bytes| match resources.acquire_transient(bytes) {
-                Ok(()) => Ok(true),
-                Err(refusal) => {
-                    memory_refusal = Some(refusal);
-                    Ok(false)
-                }
+            let mut owner = input_owner::ProcessorRenderOwner {
+                control,
+                resources,
+                memory_refusal: &mut memory_refusal,
+                source: self.context == OpenFxContext::Filter,
+                frame_extent: frame.extent(),
+                format: frame.format(),
+                sampling: frame.sampling(),
+                author_frame_rate: parameters.author_frame_rate,
             };
-            let mut owner_control =
-                |observation: crate::openfx_host::OpenFxRenderObservation<'_>| {
-                    use crate::openfx_host::OpenFxRenderObservation;
-                    use mondrian_effects::EffectProcessorQuestionState;
-                    match observation {
-                        OpenFxRenderObservation::Question(question) => {
-                            control.observe_question(question).map_err(|error| {
-                                if control.stop_reason().is_some() {
-                                    match control.stop_reason() {
-                                        Some(EffectProcessorStopReason::DeadlineExpired) => {
-                                            OpenFxHostError::DeadlineExceeded
-                                        }
-                                        _ => OpenFxHostError::Canceled,
-                                    }
-                                } else {
-                                    OpenFxHostError::Unavailable(error.to_string())
-                                }
-                            })
-                        }
-                        OpenFxRenderObservation::QuestionEnded(question) => {
-                            control.finish_question(question);
-                            Ok(EffectProcessorQuestionState::Unavailable)
-                        }
-                        OpenFxRenderObservation::Progress(progress) => {
-                            control.observe_progress(progress).map_err(|error| {
-                                if control.stop_reason().is_some() {
-                                    match control.stop_reason() {
-                                        Some(EffectProcessorStopReason::DeadlineExpired) => {
-                                            OpenFxHostError::DeadlineExceeded
-                                        }
-                                        _ => OpenFxHostError::Canceled,
-                                    }
-                                } else {
-                                    OpenFxHostError::Unavailable(error.to_string())
-                                }
-                            })?;
-                            processor_checkpoint(control)?;
-                            Ok(EffectProcessorQuestionState::Unavailable)
-                        }
-                        OpenFxRenderObservation::Checkpoint => {
-                            processor_checkpoint(control)?;
-                            Ok(EffectProcessorQuestionState::Unavailable)
-                        }
-                    }
-                };
             match self.context {
-                OpenFxContext::Filter => self.session.render_observed_with_memory(
+                OpenFxContext::Filter => self.session.render_with_owner(
                     &parameters.timing,
                     &parameters.values,
                     frame,
+                    &[],
                     deadline,
                     gui,
-                    &mut admit_memory,
-                    &mut owner_control,
+                    &mut owner,
                 ),
-                OpenFxContext::Generator => self.session.generate_observed_with_memory(
+                OpenFxContext::Generator => self.session.generate_with_owner(
                     &parameters.timing,
                     frame.sampling(),
                     &parameters.values,
                     deadline,
                     gui,
-                    &mut admit_memory,
-                    &mut owner_control,
+                    &mut owner,
                 ),
             }
         };
@@ -797,8 +760,12 @@ fn build_definition_in_context(
                 };
                 values.insert(parameter.name.clone(), binding);
             }
-            let params = serde_json::to_value(OpenFxGraphParameters { timing, values })
-                .map_err(|error| invalid(error.to_string()))?;
+            let params = serde_json::to_value(OpenFxGraphParameters {
+                author_frame_rate: frame_context.frame_rate(),
+                timing,
+                values,
+            })
+            .map_err(|error| invalid(error.to_string()))?;
             Ok(Some(params))
         },
     );

@@ -249,6 +249,51 @@ impl TimelineTemporalDemandBatch {
 }
 
 impl PreparedVisualProgram {
+    /// Borrow the original Clip and scheduler attempt for processor Source
+    /// requests. Materialization must use the consumer's existing source jobs,
+    /// obtain `admit` before source backing allocation, and return frozen tiles.
+    /// No Effect DSP runs in that callback; the original bank executes it after
+    /// restoring the mutable service loan. No factory retains this value.
+    pub fn clip_processor_inputs<'a, R>(
+        &'a self,
+        placement: TimelineClipExecutionRef,
+        owner: &'a TimelineFrameExecutionRequest,
+        resolve: &'a mut R,
+    ) -> Result<
+        impl mondrian_effects::EffectProcessorInputService + 'a,
+        TimelineTemporalPreparationError,
+    >
+    where
+        R: FnMut(
+                &TimelineTemporalDemandBatch,
+                &mut dyn FnMut(usize) -> Result<(), EffectTemporalExecutionError>,
+                &mut mondrian_effects::EffectProcessorControl<'_>,
+            ) -> Result<PreparedTemporalFrameSet, EffectTemporalExecutionError>
+            + 'a,
+    {
+        let sampling_error = |e: MondrianError| TimelineTemporalPreparationError::SourceSampling {
+            clip_id: placement.clip_id,
+            reason: e.to_string(),
+        };
+        let actual = crate::timeline_render_plan::validate_timeline_evaluation_position(
+            self.schedule(),
+            owner.evaluation().position,
+        )
+        .map_err(sampling_error)?;
+        let expected = self
+            .schedule()
+            .clip_to_sequence_time(placement, placement.clip_time)
+            .map_err(sampling_error)?;
+        if actual != expected {
+            return Err(TimelineTemporalPreparationError::SourceSampling {
+                clip_id: placement.clip_id,
+                reason: "input service and placement belong to different evaluation instants"
+                    .into(),
+            });
+        }
+        Ok(ClipProcessorInputs { program: self, placement, owner, resolve })
+    }
+
     /// Prepare a concrete processor's entering value at exact Clip author time.
     /// Uses the original immutable program, placement and source interpretation;
     /// the waiting processor and downstream stages are not evaluated. The batch
@@ -377,6 +422,77 @@ impl PreparedVisualProgram {
                     clip_id: placement.clip_id,
                 })
             }
+        })
+    }
+}
+
+struct ClipProcessorInputs<'a, R> {
+    program: &'a PreparedVisualProgram,
+    placement: TimelineClipExecutionRef,
+    owner: &'a TimelineFrameExecutionRequest,
+    resolve: &'a mut R,
+}
+
+impl<R> mondrian_effects::EffectProcessorInputService for ClipProcessorInputs<'_, R>
+where
+    R: FnMut(
+        &TimelineTemporalDemandBatch,
+        &mut dyn FnMut(usize) -> Result<(), EffectTemporalExecutionError>,
+        &mut mondrian_effects::EffectProcessorControl<'_>,
+    ) -> Result<PreparedTemporalFrameSet, EffectTemporalExecutionError>,
+{
+    fn prepare_input(
+        &mut self,
+        stage: &mondrian_effects::CompiledEffectStageBinding,
+        input: mondrian_effects::EffectProcessorInputRequest,
+        admit: &mut dyn FnMut(usize) -> Result<(), EffectTemporalExecutionError>,
+        control: &mut mondrian_effects::EffectProcessorControl<'_>,
+    ) -> Result<mondrian_effects::PreparedEffectProcessorInput, EffectTemporalExecutionError> {
+        let coverage = mondrian_effects::EffectValueFormat::new(
+            mondrian_effects::EffectWorkingPrecision::Float32,
+            mondrian_effects::EffectColorDomain::SceneLinearRgb,
+            mondrian_core::ColorFrameAlpha::StraightCoverage,
+        );
+        // This is the existing bounded coverage executor, not an implicit
+        // conversion of native Float alpha or an unresolved RGB domain.
+        if input.format != coverage {
+            return Err(mondrian_effects::EffectFloatFrameError::FormatMismatch {
+                expected: coverage,
+                actual: input.format,
+            }
+            .into());
+        }
+        let request = EffectTemporalExecutionRequest::new(
+            self.owner.generation(),
+            self.owner.continuity(),
+            input.time,
+            input.frame_extent,
+            input.sampling,
+            input.frame_extent.full_frame_roi(),
+            self.owner.cancellation().with_deadline(input.deadline),
+        );
+        let execution = self
+            .program
+            .prepare_clip_bound_input_execution(
+                self.placement,
+                stage,
+                &request,
+                self.owner.evaluation().position.time_base,
+            )
+            .map_err(
+                |e| mondrian_effects::EffectExecutionError::InputUnavailable {
+                    reason: e.to_string(),
+                },
+            )?;
+        let batch = self.program.bind_temporal_sources(self.placement, execution).map_err(|e| {
+            mondrian_effects::EffectExecutionError::InputUnavailable { reason: e.to_string() }
+        })?;
+        admit(batch.effect_demands().coverage_bytes())?;
+        let frames = (self.resolve)(&batch, admit, control)?;
+        Ok(mondrian_effects::PreparedEffectProcessorInput {
+            execution: batch.execution,
+            frames,
+            origin: [0, 0],
         })
     }
 }

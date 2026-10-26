@@ -4,6 +4,12 @@ use mondrian_core::{EffectId, MondrianError, Result};
 use std::collections::VecDeque;
 use std::sync::Arc;
 
+#[path = "processor_input_service.rs"]
+mod input_service;
+pub use input_service::{
+    EffectProcessorInputRequest, EffectProcessorInputService, PreparedEffectProcessorInput,
+};
+
 /// Authoritative reason the owning scheduler stopped a processor invocation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EffectProcessorStopReason {
@@ -25,6 +31,8 @@ pub struct EffectProcessorControl<'a> {
     planned_feedback_bytes: usize,
     observation: crate::EffectProcessorObservation,
     current_occurrence: Option<(EffectFloatProcessorPreparation, u64)>,
+    input_service: Option<&'a mut dyn EffectProcessorInputService>,
+    input_stage: Option<crate::CompiledEffectStageBinding>,
 }
 
 impl<'a> EffectProcessorControl<'a> {
@@ -37,6 +45,8 @@ impl<'a> EffectProcessorControl<'a> {
             planned_feedback_bytes: 0,
             observation: crate::EffectProcessorObservation { sink: None, deadline: None },
             current_occurrence: None,
+            input_service: None,
+            input_stage: None,
         }
     }
 
@@ -49,6 +59,8 @@ impl<'a> EffectProcessorControl<'a> {
             planned_feedback_bytes: 0,
             observation: crate::EffectProcessorObservation { sink: None, deadline: None },
             current_occurrence: None,
+            input_service: None,
+            input_stage: None,
         }
     }
 

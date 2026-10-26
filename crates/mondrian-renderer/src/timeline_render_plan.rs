@@ -572,11 +572,10 @@ impl ClipEffectResolver for SessionPreparedClipEffectResolver<'_> {
     }
 }
 
-fn evaluate_timeline_render_plan_with_effects(
+pub(crate) fn validate_timeline_evaluation_position(
     source: &dyn RenderPlanSource,
-    request: TimelineEvaluationRequest,
-    effects: &mut dyn ClipEffectResolver,
-) -> Result<TimelineRenderPlan> {
+    position: FramePosition,
+) -> Result<TimelineTime> {
     let expected_time_base = source.source_time_base();
     let field_time_base = Rational::new(
         expected_time_base.num,
@@ -591,31 +590,37 @@ fn evaluate_timeline_render_plan_with_effects(
                 ),
             })?,
     );
-    if request.position.time_base != expected_time_base
-        && request.position.time_base != field_time_base
-    {
+    if position.time_base != expected_time_base && position.time_base != field_time_base {
         return Err(MondrianError::WorkflowStepFailed {
             step_id: "evaluate_timeline_render_plan".to_owned(),
             reason: format!(
                 "evaluation position grid {} does not match Sequence {} frame grid {} or field grid {}",
-                request.position.time_base,
+                position.time_base,
                 source.source_sequence_id(),
                 expected_time_base,
                 field_time_base,
             ),
         });
     }
-    if request.position.frame < 0 {
+    if position.frame < 0 {
         return Err(MondrianError::WorkflowStepFailed {
             step_id: "evaluate_timeline_render_plan".to_owned(),
             reason: format!(
                 "evaluation position frame {} is negative for Sequence {}",
-                request.position.frame,
+                position.frame,
                 source.source_sequence_id()
             ),
         });
     }
-    let current_time = TimelineTime::from_frame_position(request.position)?;
+    Ok(TimelineTime::from_frame_position(position)?)
+}
+
+fn evaluate_timeline_render_plan_with_effects(
+    source: &dyn RenderPlanSource,
+    request: TimelineEvaluationRequest,
+    effects: &mut dyn ClipEffectResolver,
+) -> Result<TimelineRenderPlan> {
+    let current_time = validate_timeline_evaluation_position(source, request.position)?;
     let active = source.flat_visual_items_at(current_time)?;
     let mut diagnostics = TimelineEvaluationDiagnostics {
         active_visual_items: active.len(),
