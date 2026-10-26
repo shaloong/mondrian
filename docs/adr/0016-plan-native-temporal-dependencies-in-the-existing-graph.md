@@ -198,6 +198,23 @@ Binding a dynamic input service disables scalar input-only output caching.
 Outer consumers must likewise forbid reuse without complete dependency identity;
 the installed OFX definition already propagates Uncacheable to Preview/nesting.
 
+The heterogeneous CPU prefix now uses one Control for validation, masks, copies,
+scalar kernels and Custom processors. The legacy checkpoint entry binds the
+Session observation once, then delegates to the caller-Control entry. The former
+per-Custom Control discarded input-service borrowing and left ordinary CPU work
+outside the task deadline. An expired-deadline regression reproduced an erroneous
+completion before this change, even without a Custom processor.
+`TimelineCompositeScratch` exposes the same original-Control entry without
+exposing its bank. Existing Preview/Export prefix consumers use the common engine.
+
+Only new successful prefix receipts transfer into its completion; caller receipts
+remain in Control. Error/unwind drops partial prefix facts, preserves prior facts
+and never returns a completion. Preflight includes caller-owned feedback metadata;
+the Control's already reserved slots are charged once by the scalar adapter.
+The static frontier budget does not reserve arbitrary runtime Source demands:
+those still require separate admission from the same remaining grant. This is
+not a promise that a statically minimal prefix can execute dynamic history.
+
 Historical frame seeds use the Sequence grid: seconds-per-frame must be
 inverted before frame-rate conversion. The former reciprocal error produced
 hashed seeds at on-grid historical instants. The existing off-grid hash rule
@@ -209,18 +226,19 @@ therefore checks exact configuration retirement, rather than assuming a variant
 cache. Optional native retention must use the recipe's declared bytes, not a guessed
 constant; a legal active render may intentionally run without optional retention.
 
-Current Windows affected-module qualification: Effects 380 passed/0 ignored,
-Renderer 680 passed/39 ignored, Export 300 passed/18 ignored and App 3123
+Current Windows affected-module qualification: Effects 384 passed/0 ignored,
+Renderer 682 passed/39 ignored, Export 300 passed/18 ignored and App 3123
 passed/213 ignored. All complete gates settled with empty stderr under their
 original budgets. The four libraries were built together: App validation
 opt0/debug0, Effects opt1/debug0 without extra features, Renderer/Export
 validation opt1/debug0. Builds and full gates ran outside the Windows sandbox;
 earlier sandbox rmeta/publication failures are not source or assertion workarounds.
 
-The current-source default worker was rebuilt at test-profile opt0/debug0,
+The native baseline at edf25518 uses a default worker at test-profile opt0/debug0,
 without libtest or validation features. Its 12 existing diagnostics/test-helper
 warnings remain; this is not a zero-warning or release qualification.
-Six actual native gates passed with that worker. The normal installed factory
+Six actual native gates passed at that baseline; they were not rerun for this
+mixed-Control slice. The normal installed factory
 gate performs four full-RGBA renders on one native owner, eight coalesced exact
 Source services with current/Output leases held, and twelve upstream
 configuration creations/retirements in the original bank. Source origin/extent
@@ -236,11 +254,17 @@ original attempt/field grid, source admission and foreign/unsupported input
 refusal. Native time conversion has its own exact-clock test. The source-map
 regression exercises five associations and 35 numeric-alpha conditions,
 including unclamped finite Float values and rejection of invalid Coverage.
+Four additional Effects groups cover the no-Custom deadline regression, borrowed
+input service and original-bank reuse through the actual mixed execution plan,
+failure/stop restoration and caller feedback at the static grant boundary.
+Two additional Renderer tests cover the original-Control entry and the actual
+production batch executor with a bound deadline. GPU suffix execution and actual
+native plugins in the mixed route are not qualified by these fixture tests.
 
 SourceDeliveryProbe deliberately does not declare temporal access. These are
 owned finite integration calibrations, not conforming third-party temporal
-compatibility. Main Preview/Export source admission, mixed CPU/GPU service
-entry, native format/alpha beyond the bounded coverage executor, dependency
+compatibility. Main Preview/Export source admission and job-bound service
+consumption, native format/alpha beyond the bounded coverage executor, dependency
 scheduling, legal action/thread image coverage and complete field-grid parity
 remain open. Temporal flags stay false. No new whole-workspace, release, RT,
 performance, complete heap, GPU or other-platform qualification follows.
@@ -260,9 +284,16 @@ These are action qualifications, not third-party temporal-renderer evidence.
 
 Next bind the borrowed Clip service at the actual Preview/Export consumer,
 resolving its existing demand batches through the original scheduler/decoder
-and shared bank. The mixed backend currently constructs a local Control without
-the service; its node scope hook alone is not an integrated consumer. Do not
-retain a capability in the factory or reintroduce another Session.
+and shared bank. The Control entry is ready, but actual jobs still need the
+original program/placement and source-service binding. Do not retain a capability
+in the factory or reintroduce another Session.
+
+Preserve placement through the execution boundary: resolved composition layers
+do not suffice to recover it from EffectId. Preview source resolution may return
+Pending; it cannot become an ordinary failure followed by partial-DSP replay.
+Working-color preparation uses the existing scratch's color Session, so a late
+callback cannot recursively borrow that same scratch while its bank is active.
+Resolve those demands through the original source jobs and readiness phases.
 Connect the dependency action to that same execution; verify all legal
 action/thread image requests before enabling capabilities. Distinguish declared media absence from an
 unprepared dependency; missing planned input cannot silently become a black frame.

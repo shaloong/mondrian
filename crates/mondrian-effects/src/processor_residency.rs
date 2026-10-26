@@ -207,10 +207,22 @@ impl<'a> EffectProcessorControl<'a> {
         &mut self,
     ) -> std::result::Result<crate::EffectProcessorFeedbackBatch, crate::EffectProcessorFeedbackError>
     {
+        self.take_feedback_since(0)
+    }
+
+    /// Move only this execution scope's facts; preserve the caller's receipts.
+    pub(crate) fn take_feedback_since(
+        &mut self,
+        start: usize,
+    ) -> std::result::Result<crate::EffectProcessorFeedbackBatch, crate::EffectProcessorFeedbackError>
+    {
+        if start > self.feedback.len() {
+            return Err(crate::EffectProcessorFeedbackError::Capacity);
+        }
         let mut batch = crate::EffectProcessorFeedbackBatch::new();
         // Drain preserves the pre-admitted capacity even if an in-process
         // provider observes metadata during its callback. No later push grows it.
-        for receipt in self.feedback.drain(..) {
+        for receipt in self.feedback.drain(start..) {
             batch.push(receipt)?;
         }
         Ok(batch)
@@ -218,7 +230,7 @@ impl<'a> EffectProcessorControl<'a> {
 
     /// Exact logical feedback currently owned by this invocation.
     pub fn feedback_retained_bytes(&self) -> usize {
-        self.feedback.capacity() * std::mem::size_of::<crate::EffectProcessorFeedbackReceipt>()
+        self.feedback_slot_bytes()
             + self
                 .feedback
                 .iter()
@@ -227,6 +239,14 @@ impl<'a> EffectProcessorControl<'a> {
                         - std::mem::size_of::<crate::EffectProcessorFeedbackReceipt>()
                 })
                 .sum::<usize>()
+    }
+
+    pub(crate) fn feedback_slot_bytes(&self) -> usize {
+        self.feedback.capacity() * std::mem::size_of::<crate::EffectProcessorFeedbackReceipt>()
+    }
+
+    pub(crate) fn observation_storage_bytes(&self) -> usize {
+        self.observation.maximum_storage_bytes()
     }
 
     pub(crate) fn feedback_count(&self) -> usize {

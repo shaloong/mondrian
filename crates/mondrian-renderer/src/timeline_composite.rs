@@ -391,6 +391,28 @@ impl TimelineCompositeScratch {
         )
     }
 
+    /// Execute the prepared prefix with the original task Control, including
+    /// its borrowed processor input service. Observation/deadline and existing
+    /// feedback belong to the caller; this does not replace or rebind them.
+    pub fn execute_prepared_heterogeneous_cpu_prefix_with_control(
+        &mut self,
+        prepared: &PreparedHeterogeneousEffectWork,
+        generation: u64,
+        input: mondrian_effects::EffectFloatFrameView<'_>,
+        frame_seed: i64,
+        working_color_space: WorkingColorSpace,
+        control: &mut mondrian_effects::EffectProcessorControl<'_>,
+    ) -> Result<PreparedHeterogeneousCpuCompletion, PreparedHeterogeneousEffectWorkError> {
+        prepared.execute_cpu_prefix_with_control(
+            &mut self.effect_execution,
+            generation,
+            input,
+            frame_seed,
+            working_color_space,
+            control,
+        )
+    }
+
     /// Materialize one procedural Solid Color and execute a prepared
     /// heterogeneous CPU prefix through this owner's Effect Session.
     ///

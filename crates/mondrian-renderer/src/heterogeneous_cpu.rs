@@ -999,6 +999,72 @@ mod tests {
     }
 
     #[test]
+    fn original_control_deadline_survives_the_compositor_prefix_entry() {
+        let item = item(7);
+        let HeterogeneousCpuPrefixSource::WorkingFrame(input) = item.source else {
+            panic!("working source fixture");
+        };
+        let mut scratch = TimelineCompositeScratch::default();
+        scratch.reconfigure_effect_execution(grant().effect_session());
+        scratch.bind_effect_execution_generation(7);
+        let mut poll = || None;
+        let mut control = mondrian_effects::EffectProcessorControl::new(&mut poll);
+        let deadline = std::time::Instant::now();
+        control.bind_observation(mondrian_effects::EffectProcessorObservation {
+            sink: None,
+            deadline: Some(deadline),
+        });
+        let frame = input.rgba_f32();
+        let result = scratch.execute_prepared_heterogeneous_cpu_prefix_with_control(
+            item.route.work(),
+            7,
+            mondrian_effects::EffectFloatFrameView::new(
+                EXTENT,
+                mondrian_effects::EffectValueFormat::new(
+                    mondrian_effects::EffectWorkingPrecision::Float32,
+                    mondrian_effects::EffectColorDomain::SceneLinearRgb,
+                    frame.alpha,
+                ),
+                frame.sampling,
+                &frame.data,
+            ),
+            19,
+            WORKING_SPACE,
+            &mut control,
+        );
+        assert!(matches!(
+            result,
+            Err(PreparedHeterogeneousEffectWorkError::ExecutionStopped {
+                generation: 7,
+                reason: HeterogeneousCpuExecutionStopReason::DeadlineExpired,
+            })
+        ));
+        assert_eq!(control.deadline(), Some(deadline));
+        assert_eq!(
+            control.stop_reason(),
+            Some(mondrian_effects::EffectProcessorStopReason::DeadlineExpired)
+        );
+        assert_eq!(scratch.effect_execution_diagnostics().generation, Some(7));
+    }
+
+    #[test]
+    fn production_batch_observes_bound_deadline_without_custom_plugins() {
+        let mut executor = HeterogeneousCpuPrefixBatchExecutor::default();
+        executor.bind_processor_observation(mondrian_effects::EffectProcessorObservation {
+            sink: None,
+            deadline: Some(std::time::Instant::now()),
+        });
+        let request = HeterogeneousCpuPrefixBatchRequest::new(grant(), vec![item(7)]);
+        let result = executor.execute(request, 7, || None);
+        assert!(matches!(
+            result,
+            Err(HeterogeneousCpuPrefixBatchError::Stopped {
+                reason: HeterogeneousCpuExecutionStopReason::DeadlineExpired,
+            })
+        ));
+    }
+
+    #[test]
     fn validation_rejects_duplicate_addresses_before_execution() {
         let request = HeterogeneousCpuPrefixBatchRequest::new(grant(), vec![item(7), item(7)]);
         assert!(matches!(

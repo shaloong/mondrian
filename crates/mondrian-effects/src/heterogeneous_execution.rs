@@ -3155,200 +3155,264 @@ impl PreparedHeterogeneousEffectWork {
         working_color_space: WorkingColorSpace,
         mut checkpoint: impl FnMut() -> Option<HeterogeneousCpuExecutionStopReason>,
     ) -> Result<PreparedHeterogeneousCpuCompletion, PreparedHeterogeneousEffectWorkError> {
-        let mut checkpoint_result = || {
-            checkpoint().map_or(Ok(()), |reason| {
-                Err(PreparedHeterogeneousEffectWorkError::ExecutionStopped { generation, reason })
+        let mut poll = || {
+            checkpoint().map(|reason| match reason {
+                HeterogeneousCpuExecutionStopReason::Canceled => {
+                    crate::EffectProcessorStopReason::Canceled
+                }
+                HeterogeneousCpuExecutionStopReason::DeadlineExpired => {
+                    crate::EffectProcessorStopReason::DeadlineExpired
+                }
             })
         };
-        checkpoint_result()?;
-        let diagnostics = session.diagnostics();
-        if diagnostics.generation != Some(generation) {
-            return Err(
-                PreparedHeterogeneousEffectWorkError::SessionGenerationMismatch {
-                    expected: generation,
-                    observed: diagnostics.generation,
-                },
-            );
-        }
-        let expected = usize::try_from(self.frame_extent.width())
-            .ok()
-            .and_then(|width| {
-                usize::try_from(self.frame_extent.height())
-                    .ok()
-                    .and_then(|height| width.checked_mul(height))
-            })
-            .ok_or(PreparedHeterogeneousEffectWorkError::InputSizeOverflow)?;
-        input.validate()?;
-        let declared = self
-            .plan
-            .materialization(self.cpu_input_materialization)
-            .ok_or(
-                PreparedHeterogeneousEffectWorkError::UnsupportedRouteShape {
-                    reason: "source_materialization_missing",
-                },
-            )?
-            .residency()
-            .format();
-        if input.extent() != self.frame_extent {
-            return Err(crate::EffectFloatFrameError::ExtentMismatch {
-                expected,
-                actual: input.pixels().len(),
+        let mut control = crate::EffectProcessorControl::new(&mut poll);
+        control.bind_observation(session.observation.clone());
+        self.execute_cpu_prefix_with_control(
+            session,
+            generation,
+            input,
+            frame_seed,
+            working_color_space,
+            &mut control,
+        )
+    }
+
+    /// Execute the complete CPU prefix with the caller's original Control.
+    /// The caller binds observation/deadline and any invocation input service;
+    /// this entry never replaces them. Existing feedback remains in Control;
+    /// only new successful prefix facts move into the completion. Stop/failure
+    /// publishes no completion or partial prefix feedback and never replays DSP.
+    pub fn execute_cpu_prefix_with_control(
+        &self,
+        session: &mut EffectExecutionSession,
+        generation: u64,
+        input: crate::EffectFloatFrameView<'_>,
+        frame_seed: i64,
+        working_color_space: WorkingColorSpace,
+        control: &mut crate::EffectProcessorControl<'_>,
+    ) -> Result<PreparedHeterogeneousCpuCompletion, PreparedHeterogeneousEffectWorkError> {
+        let feedback_start = control.feedback_count();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            heterogeneous_processor_checkpoint(control, generation)?;
+            let diagnostics = session.diagnostics();
+            if diagnostics.generation != Some(generation) {
+                return Err(
+                    PreparedHeterogeneousEffectWorkError::SessionGenerationMismatch {
+                        expected: generation,
+                        observed: diagnostics.generation,
+                    },
+                );
             }
-            .into());
-        }
-        if declared.precision() != input.format().precision()
-            || declared.domain() != input.format().domain()
-        {
-            return Err(crate::EffectFloatFrameError::FormatMismatch {
-                expected: EffectValueFormat::new(
-                    declared.precision(),
-                    declared.domain(),
-                    input.format().alpha(),
-                ),
-                actual: input.format(),
+            let expected = usize::try_from(self.frame_extent.width())
+                .ok()
+                .and_then(|width| {
+                    usize::try_from(self.frame_extent.height())
+                        .ok()
+                        .and_then(|height| width.checked_mul(height))
+                })
+                .ok_or(PreparedHeterogeneousEffectWorkError::InputSizeOverflow)?;
+            input.validate_controlled(&mut || {
+                heterogeneous_processor_checkpoint(control, generation)
+            })?;
+            let declared = self
+                .plan
+                .materialization(self.cpu_input_materialization)
+                .ok_or(
+                    PreparedHeterogeneousEffectWorkError::UnsupportedRouteShape {
+                        reason: "source_materialization_missing",
+                    },
+                )?
+                .residency()
+                .format();
+            if input.extent() != self.frame_extent {
+                return Err(crate::EffectFloatFrameError::ExtentMismatch {
+                    expected,
+                    actual: input.pixels().len(),
+                }
+                .into());
             }
-            .into());
-        }
-        if !declared.alpha().formats().contains(input.format().alpha()) {
-            return Err(crate::EffectFloatFrameError::MaterializationAlpha {
-                admitted: declared.alpha().formats(),
-                actual: input.format().alpha(),
+            if declared.precision() != input.format().precision()
+                || declared.domain() != input.format().domain()
+            {
+                return Err(crate::EffectFloatFrameError::FormatMismatch {
+                    expected: EffectValueFormat::new(
+                        declared.precision(),
+                        declared.domain(),
+                        input.format().alpha(),
+                    ),
+                    actual: input.format(),
+                }
+                .into());
             }
-            .into());
-        }
-        if input.pixels().len() != expected {
-            return Err(PreparedHeterogeneousEffectWorkError::InputSizeMismatch {
-                expected,
-                actual: input.pixels().len(),
-            });
-        }
-        // Cold route preparation may size immutable factories without a
-        // sampling value. Actual CPU work admits its own dispatch subset before
-        // sizing, retaining owners, or allocating any execution staging.
-        if !input.extent().is_empty() {
-            for dispatch in self.cpu_dispatches.iter() {
+            if !declared.alpha().formats().contains(input.format().alpha()) {
+                return Err(crate::EffectFloatFrameError::MaterializationAlpha {
+                    admitted: declared.alpha().formats(),
+                    actual: input.format().alpha(),
+                }
+                .into());
+            }
+            if input.pixels().len() != expected {
+                return Err(PreparedHeterogeneousEffectWorkError::InputSizeMismatch {
+                    expected,
+                    actual: input.pixels().len(),
+                });
+            }
+            // Cold route preparation may size immutable factories without a
+            // sampling value. Actual CPU work admits its own dispatch subset before
+            // sizing, retaining owners, or allocating any execution staging.
+            if !input.extent().is_empty() {
+                for dispatch in self.cpu_dispatches.iter() {
+                    let node = self.compiled.graph().node(dispatch.node).ok_or(
+                        PreparedHeterogeneousEffectWorkError::InvalidCpuPrefix {
+                            node: dispatch.node,
+                        },
+                    )?;
+                    if let EffectGraphNodeKind::UnaryEffect { op, .. }
+                    | EffectGraphNodeKind::DomainEffect { op, .. } = &node.kind
+                    {
+                        crate::execution::admit_render_op_image_scale(op, input.sampling())?;
+                    }
+                }
+            }
+            let observation_bytes = control.observation_storage_bytes();
+            let prior_feedback_owned =
+                control.feedback_retained_bytes().saturating_sub(control.feedback_slot_bytes());
+            if control.feedback_count().saturating_add(self.cpu_feedback_slots)
+                > crate::EFFECT_PROCESSOR_FEEDBACK_SLOTS
+            {
+                return Err(PreparedHeterogeneousEffectWorkError::CustomProcessor(
+                    crate::EffectExecutionError::ProcessorFeedbackCapacityExceeded {
+                        limit: crate::EFFECT_PROCESSOR_FEEDBACK_SLOTS,
+                    },
+                ));
+            }
+            let observed_required = self
+                .cpu_required_working_bytes
+                .checked_add(observation_bytes)
+                .and_then(|bytes| bytes.checked_add(prior_feedback_owned))
+                .ok_or(PreparedHeterogeneousEffectWorkError::InputSizeOverflow)?;
+            if observed_required > diagnostics.max_working_bytes {
+                return Err(
+                    PreparedHeterogeneousEffectWorkError::WorkingBudgetExceeded {
+                        required: observed_required,
+                        limit: diagnostics.max_working_bytes,
+                    },
+                );
+            }
+            // Query immutable factory charges before masks, source copies or
+            // native instances are allocated. Each node has its own pixel peak.
+            for (dispatch, &pixels) in
+                self.cpu_dispatches.iter().zip(self.cpu_pixel_reservations.iter())
+            {
+                heterogeneous_processor_checkpoint(control, generation)?;
                 let node = self.compiled.graph().node(dispatch.node).ok_or(
                     PreparedHeterogeneousEffectWorkError::InvalidCpuPrefix { node: dispatch.node },
                 )?;
                 if let EffectGraphNodeKind::UnaryEffect { op, .. }
                 | EffectGraphNodeKind::DomainEffect { op, .. } = &node.kind
                 {
-                    crate::execution::admit_render_op_image_scale(op, input.sampling())?;
+                    let charge = crate::processor_residency::frame_processor_charge(
+                        op,
+                        self.frame_extent.width(),
+                        self.frame_extent.height(),
+                    )?;
+                    let required = pixels
+                        .checked_add(observation_bytes)
+                        .and_then(|bytes| bytes.checked_add(prior_feedback_owned))
+                        .and_then(|bytes| bytes.checked_add(charge))
+                        .ok_or(PreparedHeterogeneousEffectWorkError::InputSizeOverflow)?;
+                    if required > diagnostics.max_working_bytes {
+                        return Err(
+                            PreparedHeterogeneousEffectWorkError::WorkingBudgetExceeded {
+                                required,
+                                limit: diagnostics.max_working_bytes,
+                            },
+                        );
+                    }
                 }
             }
-        }
-        let observation_bytes = session.observation.maximum_storage_bytes();
-        let observed_required = self
-            .cpu_required_working_bytes
-            .checked_add(observation_bytes)
-            .ok_or(PreparedHeterogeneousEffectWorkError::InputSizeOverflow)?;
-        if observed_required > diagnostics.max_working_bytes {
-            return Err(
-                PreparedHeterogeneousEffectWorkError::WorkingBudgetExceeded {
-                    required: observed_required,
-                    limit: diagnostics.max_working_bytes,
-                },
-            );
-        }
-        // Query immutable factory charges before masks, source copies or
-        // native instances are allocated. Each node has its own pixel peak.
-        for (dispatch, &pixels) in
-            self.cpu_dispatches.iter().zip(self.cpu_pixel_reservations.iter())
-        {
-            checkpoint_result()?;
-            let node = self.compiled.graph().node(dispatch.node).ok_or(
-                PreparedHeterogeneousEffectWorkError::InvalidCpuPrefix { node: dispatch.node },
-            )?;
-            if let EffectGraphNodeKind::UnaryEffect { op, .. }
-            | EffectGraphNodeKind::DomainEffect { op, .. } = &node.kind
-            {
-                let charge = crate::processor_residency::frame_processor_charge(
-                    op,
-                    self.frame_extent.width(),
-                    self.frame_extent.height(),
-                )?;
-                let required = pixels
-                    .checked_add(observation_bytes)
-                    .and_then(|bytes| bytes.checked_add(charge))
-                    .ok_or(PreparedHeterogeneousEffectWorkError::InputSizeOverflow)?;
-                if required > diagnostics.max_working_bytes {
-                    return Err(
-                        PreparedHeterogeneousEffectWorkError::WorkingBudgetExceeded {
-                            required,
-                            limit: diagnostics.max_working_bytes,
-                        },
-                    );
-                }
+            let feedback_bytes = crate::EffectProcessorFeedbackBatch::storage_bytes()
+                .checked_mul(2)
+                .ok_or(PreparedHeterogeneousEffectWorkError::InputSizeOverflow)?;
+            let initial_bytes = expected
+                .checked_mul(std::mem::size_of::<[f32; 4]>())
+                .and_then(|bytes| bytes.checked_add(self.mask_auxiliary_bytes))
+                .and_then(|bytes| bytes.checked_add(observation_bytes))
+                .and_then(|bytes| bytes.checked_add(feedback_bytes))
+                .and_then(|bytes| bytes.checked_add(prior_feedback_owned))
+                .ok_or(PreparedHeterogeneousEffectWorkError::InputSizeOverflow)?;
+            session.processors.trim_working(diagnostics.max_working_bytes - initial_bytes);
+            heterogeneous_processor_checkpoint(control, generation)?;
+            let prepared_masks = PreparedMaskRasterSet::prepare_controlled(
+                self.compiled.graph(),
+                self.frame_extent,
+                &mut || heterogeneous_processor_checkpoint(control, generation),
+            )
+            .map_err(map_controlled_mask_error)?;
+            let actual_mask_auxiliary_bytes = prepared_masks
+                .retained_bytes()
+                .checked_add(prepared_masks.max_scratch_bytes())
+                .ok_or(PreparedHeterogeneousEffectWorkError::InputSizeOverflow)?;
+            if actual_mask_auxiliary_bytes > self.mask_auxiliary_bytes {
+                return Err(
+                    PreparedHeterogeneousEffectWorkError::MaskResourceContractMismatch {
+                        planned: self.mask_auxiliary_bytes,
+                        actual: actual_mask_auxiliary_bytes,
+                    },
+                );
             }
-        }
-        let feedback_bytes = crate::EffectProcessorFeedbackBatch::storage_bytes()
-            .checked_mul(2)
-            .ok_or(PreparedHeterogeneousEffectWorkError::InputSizeOverflow)?;
-        let initial_bytes = expected
-            .checked_mul(std::mem::size_of::<[f32; 4]>())
-            .and_then(|bytes| bytes.checked_add(self.mask_auxiliary_bytes))
-            .and_then(|bytes| bytes.checked_add(observation_bytes))
-            .and_then(|bytes| bytes.checked_add(feedback_bytes))
-            .ok_or(PreparedHeterogeneousEffectWorkError::InputSizeOverflow)?;
-        session.processors.trim_working(diagnostics.max_working_bytes - initial_bytes);
-        checkpoint_result()?;
-        let prepared_masks = PreparedMaskRasterSet::prepare_controlled(
-            self.compiled.graph(),
-            self.frame_extent,
-            &mut checkpoint_result,
-        )
-        .map_err(map_controlled_mask_error)?;
-        let actual_mask_auxiliary_bytes = prepared_masks
-            .retained_bytes()
-            .checked_add(prepared_masks.max_scratch_bytes())
-            .ok_or(PreparedHeterogeneousEffectWorkError::InputSizeOverflow)?;
-        if actual_mask_auxiliary_bytes > self.mask_auxiliary_bytes {
-            return Err(
-                PreparedHeterogeneousEffectWorkError::MaskResourceContractMismatch {
-                    planned: self.mask_auxiliary_bytes,
-                    actual: actual_mask_auxiliary_bytes,
-                },
-            );
-        }
-        checkpoint_result()?;
-        let (boundary_pixels, feedback) = execute_cpu_dag_prefix(
-            session,
-            &self.compiled,
-            &self.cpu_dispatches,
-            &self.cpu_pixel_reservations,
-            &self.cpu_use_counts,
-            self.cpu_input_materialization,
-            &self.transfers,
-            self.frame_extent,
-            input,
-            frame_seed,
-            &prepared_masks,
-            &mut checkpoint_result,
-        )?;
-        let boundary_values = self
-            .transfers
-            .iter()
-            .copied()
-            .zip(boundary_pixels)
-            .map(|(transfer, frame)| PreparedHeterogeneousCpuBoundaryValue { transfer, frame })
-            .collect();
-        Ok(PreparedHeterogeneousCpuCompletion {
-            boundary_values,
-            feedback,
-            execution_plan: Arc::clone(&self.plan),
-            gpu_suffix: Arc::clone(&self.gpu_suffix),
-            evidence: HeterogeneousCpuCompletionEvidence {
-                graph_fingerprint: self.compiled.semantic_fingerprint(),
-                generation,
-                frame_extent: self.frame_extent,
-                sampling: input.sampling(),
+            heterogeneous_processor_checkpoint(control, generation)?;
+            let (boundary_pixels, feedback) = execute_cpu_dag_prefix(
+                session,
+                &self.compiled,
+                &self.cpu_dispatches,
+                &self.cpu_pixel_reservations,
+                &self.cpu_use_counts,
+                self.cpu_input_materialization,
+                &self.transfers,
+                self.frame_extent,
+                input,
                 frame_seed,
-                working_color_space,
-                completed_cpu_nodes: Arc::clone(&self.cpu_nodes),
-                transfers: Arc::clone(&self.transfers),
-                pending_output_token: self.output_token,
-            },
-        })
+                &prepared_masks,
+                generation,
+                control,
+            )?;
+            let boundary_values = self
+                .transfers
+                .iter()
+                .copied()
+                .zip(boundary_pixels)
+                .map(|(transfer, frame)| PreparedHeterogeneousCpuBoundaryValue { transfer, frame })
+                .collect();
+            Ok(PreparedHeterogeneousCpuCompletion {
+                boundary_values,
+                feedback,
+                execution_plan: Arc::clone(&self.plan),
+                gpu_suffix: Arc::clone(&self.gpu_suffix),
+                evidence: HeterogeneousCpuCompletionEvidence {
+                    graph_fingerprint: self.compiled.semantic_fingerprint(),
+                    generation,
+                    frame_extent: self.frame_extent,
+                    sampling: input.sampling(),
+                    frame_seed,
+                    working_color_space,
+                    completed_cpu_nodes: Arc::clone(&self.cpu_nodes),
+                    transfers: Arc::clone(&self.transfers),
+                    pending_output_token: self.output_token,
+                },
+            })
+        }));
+        match result {
+            Ok(Ok(completion)) => Ok(completion),
+            Ok(Err(error)) => {
+                let _ = control.take_feedback_since(feedback_start);
+                Err(error)
+            }
+            Err(payload) => {
+                let _ = control.take_feedback_since(feedback_start);
+                std::panic::resume_unwind(payload)
+            }
+        }
     }
 }
 
@@ -3362,6 +3426,23 @@ fn map_controlled_mask_error(
 }
 
 #[allow(clippy::too_many_arguments)]
+fn heterogeneous_processor_checkpoint(
+    control: &mut crate::EffectProcessorControl<'_>,
+    generation: u64,
+) -> Result<(), PreparedHeterogeneousEffectWorkError> {
+    control
+        .check()
+        .map_err(|_| PreparedHeterogeneousEffectWorkError::ExecutionStopped {
+            generation,
+            reason: match control.stop_reason() {
+                Some(crate::EffectProcessorStopReason::DeadlineExpired) => {
+                    HeterogeneousCpuExecutionStopReason::DeadlineExpired
+                }
+                _ => HeterogeneousCpuExecutionStopReason::Canceled,
+            },
+        })
+}
+
 fn execute_cpu_dag_prefix(
     session: &mut EffectExecutionSession,
     compiled: &CompiledEffectGraph,
@@ -3374,7 +3455,8 @@ fn execute_cpu_dag_prefix(
     input: crate::EffectFloatFrameView<'_>,
     frame_seed: i64,
     prepared_masks: &PreparedMaskRasterSet,
-    checkpoint: &mut impl FnMut() -> Result<(), PreparedHeterogeneousEffectWorkError>,
+    generation: u64,
+    control: &mut crate::EffectProcessorControl<'_>,
 ) -> Result<
     (
         Vec<crate::EffectFloatFrame>,
@@ -3382,24 +3464,32 @@ fn execute_cpu_dag_prefix(
     ),
     PreparedHeterogeneousEffectWorkError,
 > {
+    let feedback_start = control.feedback_count();
     let mut feedback = crate::EffectProcessorFeedbackBatch::new();
     let mut outputs = HashMap::with_capacity(dispatches.len().saturating_add(1));
     outputs.insert(
         input_materialization,
-        copy_cpu_pixels_controlled(input, checkpoint)?,
+        copy_cpu_pixels_controlled(input, &mut || {
+            heterogeneous_processor_checkpoint(control, generation)
+        })?,
     );
     let mut remaining = use_counts.clone();
-    checkpoint()?;
+    heterogeneous_processor_checkpoint(control, generation)?;
 
     for (dispatch, &pixels) in dispatches.iter().zip(pixel_reservations) {
-        checkpoint()?;
+        heterogeneous_processor_checkpoint(control, generation)?;
         let feedback_bytes = feedback
             .retained_bytes()
             .checked_add(crate::EffectProcessorFeedbackBatch::storage_bytes())
             .ok_or(PreparedHeterogeneousEffectWorkError::InputSizeOverflow)?;
         let occupied = pixels
             .checked_add(feedback_bytes)
-            .and_then(|bytes| bytes.checked_add(session.observation.maximum_storage_bytes()))
+            .and_then(|bytes| bytes.checked_add(control.observation_storage_bytes()))
+            .and_then(|bytes| {
+                bytes.checked_add(
+                    control.feedback_retained_bytes().saturating_sub(control.feedback_slot_bytes()),
+                )
+            })
             .ok_or(PreparedHeterogeneousEffectWorkError::InputSizeOverflow)?;
         let available = session.max_working_bytes().checked_sub(occupied).ok_or(
             PreparedHeterogeneousEffectWorkError::WorkingBudgetExceeded {
@@ -3421,7 +3511,7 @@ fn execute_cpu_dag_prefix(
                     &mut remaining,
                     materialization,
                     dispatch.node,
-                    checkpoint,
+                    &mut || heterogeneous_processor_checkpoint(control, generation),
                 )
             })
             .collect::<Result<Vec<_>, _>>()?;
@@ -3438,7 +3528,8 @@ fn execute_cpu_dag_prefix(
                         .fold(0usize, |bytes, frame| {
                             bytes.saturating_add(frame.retained_bytes())
                         });
-                    if feedback.len() == crate::EFFECT_PROCESSOR_FEEDBACK_SLOTS
+                    if feedback.len().saturating_add(control.feedback_count())
+                        >= crate::EFFECT_PROCESSOR_FEEDBACK_SLOTS
                         && matches!(&op, crate::EffectRenderOp::Custom { processor: Some(binding), .. } if binding.float32_factory().is_some_and(|factory| factory.feedback_budget_bytes() != 0))
                     {
                         // Refuse before DSP; do not replay an advanced provider.
@@ -3448,53 +3539,48 @@ fn execute_cpu_dag_prefix(
                             },
                         ));
                     }
-                    let mut scheduler_error = None;
-                    let result = {
-                        let mut poll = || match checkpoint() {
-                            Ok(()) => None,
-                            Err(error) => {
-                                let reason = match &error {
-                                    PreparedHeterogeneousEffectWorkError::ExecutionStopped {
-                                        reason: HeterogeneousCpuExecutionStopReason::DeadlineExpired,
-                                        ..
-                                    } => crate::EffectProcessorStopReason::DeadlineExpired,
-                                    _ => crate::EffectProcessorStopReason::Canceled,
-                                };
-                                scheduler_error = Some(error);
-                                Some(reason)
-                            }
-                        };
-                        let mut control = crate::EffectProcessorControl::new(&mut poll);
-                        control.bind_observation(session.observation.clone());
-                        let input_stage = control.input_stage_for(compiled, dispatch.node);
-                        let result = control.with_input_stage(input_stage, |control| {
-                            apply_custom_render_op_f32(
-                                &mut output,
-                                &op,
-                                frame_seed,
-                                Some(session),
-                                caller_owned_bytes
-                                    .saturating_add(prepared_masks.retained_bytes())
-                                    .saturating_add(feedback_bytes),
-                                control,
-                            )
-                        });
-                        if result.is_ok() {
-                            feedback.append(control.take_feedback().map_err(|_| PreparedHeterogeneousEffectWorkError::CustomProcessor(crate::EffectExecutionError::ProcessorFeedbackCapacityExceeded { limit: crate::EFFECT_PROCESSOR_FEEDBACK_SLOTS }))?).map_err(|_| PreparedHeterogeneousEffectWorkError::CustomProcessor(crate::EffectExecutionError::ProcessorFeedbackCapacityExceeded { limit: crate::EFFECT_PROCESSOR_FEEDBACK_SLOTS }))?;
-                        }
-                        result
-                    };
-                    if let Some(error) = scheduler_error {
-                        return Err(error);
-                    }
+                    let input_stage = control.input_stage_for(compiled, dispatch.node);
+                    let result = control.with_input_stage(input_stage, |control| {
+                        apply_custom_render_op_f32(
+                            &mut output,
+                            &op,
+                            frame_seed,
+                            Some(session),
+                            // The existing two feedback-slot reservations already
+                            // include this Control's Vec. The scalar adapter
+                            // charges that Vec and caller-owned receipts itself.
+                            caller_owned_bytes
+                                .saturating_add(prepared_masks.retained_bytes())
+                                .saturating_add(
+                                    feedback_bytes.saturating_sub(control.feedback_slot_bytes()),
+                                )
+                                .saturating_add(control.observation_storage_bytes()),
+                            control,
+                        )
+                    });
+                    heterogeneous_processor_checkpoint(control, generation)?;
                     result?;
-                    checkpoint()?;
+                    feedback
+                        .append(control.take_feedback_since(feedback_start).map_err(|_| {
+                            PreparedHeterogeneousEffectWorkError::CustomProcessor(
+                                crate::EffectExecutionError::ProcessorFeedbackCapacityExceeded {
+                                    limit: crate::EFFECT_PROCESSOR_FEEDBACK_SLOTS,
+                                },
+                            )
+                        })?)
+                        .map_err(|_| {
+                            PreparedHeterogeneousEffectWorkError::CustomProcessor(
+                                crate::EffectExecutionError::ProcessorFeedbackCapacityExceeded {
+                                    limit: crate::EFFECT_PROCESSOR_FEEDBACK_SLOTS,
+                                },
+                            )
+                        })?;
                     true
                 } else {
                     output = crate::materialize_finite_coverage_controlled(
                         output,
                         crate::EffectAlphaConsumer::StraightCoverageOperation,
-                        checkpoint,
+                        &mut || heterogeneous_processor_checkpoint(control, generation),
                     )?;
                     apply_render_op_f32_controlled(
                         output.allocation_mut(),
@@ -3502,7 +3588,7 @@ fn execute_cpu_dag_prefix(
                         extent.height(),
                         &op,
                         frame_seed,
-                        checkpoint,
+                        &mut || heterogeneous_processor_checkpoint(control, generation),
                     )?
                 };
                 if !supported {
@@ -3534,7 +3620,7 @@ fn execute_cpu_dag_prefix(
                     opacity,
                     blend_mode,
                     frame_seed,
-                    checkpoint,
+                    &mut || heterogeneous_processor_checkpoint(control, generation),
                 )?;
                 base
             }
@@ -3560,12 +3646,12 @@ fn execute_cpu_dag_prefix(
                 let mut output = crate::materialize_finite_coverage_controlled(
                     output,
                     crate::EffectAlphaConsumer::AlphaMask,
-                    checkpoint,
+                    &mut || heterogeneous_processor_checkpoint(control, generation),
                 )?;
                 let mask = crate::materialize_finite_coverage_controlled(
                     mask,
                     crate::EffectAlphaConsumer::AlphaMask,
-                    checkpoint,
+                    &mut || heterogeneous_processor_checkpoint(control, generation),
                 )?;
                 output.ensure_same_sampling(mask.sampling())?;
                 apply_alpha_mask_f32_region_controlled(
@@ -3573,7 +3659,7 @@ fn execute_cpu_dag_prefix(
                     &mask,
                     invert,
                     mask_op,
-                    checkpoint,
+                    &mut || heterogeneous_processor_checkpoint(control, generation),
                 )?;
                 output
             }
@@ -3599,15 +3685,17 @@ fn execute_cpu_dag_prefix(
                 let mut left = crate::materialize_finite_coverage_controlled(
                     left,
                     crate::EffectAlphaConsumer::AlphaMask,
-                    checkpoint,
+                    &mut || heterogeneous_processor_checkpoint(control, generation),
                 )?;
                 let right = crate::materialize_finite_coverage_controlled(
                     right,
                     crate::EffectAlphaConsumer::AlphaMask,
-                    checkpoint,
+                    &mut || heterogeneous_processor_checkpoint(control, generation),
                 )?;
                 left.ensure_same_sampling(right.sampling())?;
-                combine_alpha_masks_f32_controlled(&mut left, &right, mask_op, checkpoint)?;
+                combine_alpha_masks_f32_controlled(&mut left, &right, mask_op, &mut || {
+                    heterogeneous_processor_checkpoint(control, generation)
+                })?;
                 left
             }
             EffectGraphNodeKind::MatteMix { .. } => {
@@ -3636,21 +3724,23 @@ fn execute_cpu_dag_prefix(
                 let mut base = crate::materialize_finite_coverage_controlled(
                     base,
                     crate::EffectAlphaConsumer::AlphaMask,
-                    checkpoint,
+                    &mut || heterogeneous_processor_checkpoint(control, generation),
                 )?;
                 let graded = crate::materialize_finite_coverage_controlled(
                     graded,
                     crate::EffectAlphaConsumer::AlphaMask,
-                    checkpoint,
+                    &mut || heterogeneous_processor_checkpoint(control, generation),
                 )?;
                 let matte = crate::materialize_finite_coverage_controlled(
                     matte,
                     crate::EffectAlphaConsumer::AlphaMask,
-                    checkpoint,
+                    &mut || heterogeneous_processor_checkpoint(control, generation),
                 )?;
                 base.ensure_same_sampling(graded.sampling())?;
                 base.ensure_same_sampling(matte.sampling())?;
-                matte_mix_f32_controlled(&mut base, &graded, &matte, checkpoint)?;
+                matte_mix_f32_controlled(&mut base, &graded, &matte, &mut || {
+                    heterogeneous_processor_checkpoint(control, generation)
+                })?;
                 base
             }
             EffectGraphNodeKind::MultiInput { blend_mode, opacity, .. } => {
@@ -3670,7 +3760,7 @@ fn execute_cpu_dag_prefix(
                         opacity,
                         blend_mode,
                         frame_seed,
-                        checkpoint,
+                        &mut || heterogeneous_processor_checkpoint(control, generation),
                     )?;
                 }
                 output
@@ -3685,7 +3775,9 @@ fn execute_cpu_dag_prefix(
                     PreparedHeterogeneousEffectWorkError::InvalidCpuPrefix { node: dispatch.node },
                 )?;
                 let mut output = raster
-                    .rasterize_rgba_f32_controlled(extent.full_frame_roi(), checkpoint)
+                    .rasterize_rgba_f32_controlled(extent.full_frame_roi(), &mut || {
+                        heterogeneous_processor_checkpoint(control, generation)
+                    })
                     .map_err(map_controlled_mask_error)?;
                 if invert {
                     invert_alpha_mask_f32_in_place(&mut output);
@@ -3723,7 +3815,7 @@ fn execute_cpu_dag_prefix(
             });
         }
     }
-    checkpoint()?;
+    heterogeneous_processor_checkpoint(control, generation)?;
     let output_node = dispatches.last().map(|dispatch| dispatch.node).ok_or(
         PreparedHeterogeneousEffectWorkError::UnsupportedRouteShape {
             reason: "cpu_dag_has_no_dispatch",
@@ -3757,7 +3849,7 @@ fn execute_cpu_dag_prefix(
                 crate::materialize_finite_coverage_controlled(
                     frame,
                     crate::EffectAlphaConsumer::HeterogeneousRoute,
-                    checkpoint,
+                    &mut || heterogeneous_processor_checkpoint(control, generation),
                 )?
             }
         };
@@ -5817,6 +5909,53 @@ mod tests {
             work.cpu_nodes()[2],
             "the upload consumes the joined CPU graph value"
         );
+    }
+
+    #[test]
+    fn cpu_prefix_observes_original_deadline_without_a_custom_processor() {
+        let extent = EffectFrameExtent::new(4, 3);
+        let work = PreparedHeterogeneousEffectWork::prepare(
+            mask_source_to_gpu_tail_graph(),
+            &test_environment(),
+            request(extent),
+        )
+        .unwrap();
+        let mut session =
+            EffectExecutionSession::new(EffectExecutionSessionConfig::uncached(1024 * 1024));
+        session.bind_generation(71);
+        session.bind_processor_observation(crate::EffectProcessorObservation {
+            sink: None,
+            deadline: Some(std::time::Instant::now()),
+        });
+        let pixels = [[0.2, 0.4, 0.6, 0.8]; 12];
+        let input = crate::EffectFloatFrameView::new(
+            extent,
+            EffectValueFormat::new(
+                EffectWorkingPrecision::Float32,
+                EffectColorDomain::SceneLinearRgb,
+                mondrian_core::ColorFrameAlpha::StraightCoverage,
+            ),
+            mondrian_core::ImageSampling::UNIT_SQUARE,
+            &pixels,
+        );
+        let result = work.execute_cpu_prefix_uncancelled(
+            &mut session,
+            71,
+            input,
+            5,
+            WorkingColorSpace::LinearRec2020,
+        );
+        assert!(
+            matches!(
+                result,
+                Err(PreparedHeterogeneousEffectWorkError::ExecutionStopped {
+                    generation: 71,
+                    reason: HeterogeneousCpuExecutionStopReason::DeadlineExpired,
+                })
+            ),
+            "a CPU-only prefix must not bypass its original task deadline: {result:?}"
+        );
+        assert_eq!(session.diagnostics().generation, Some(71));
     }
 
     #[test]
