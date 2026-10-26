@@ -230,20 +230,20 @@ therefore checks exact configuration retirement, rather than assuming a variant
 cache. Optional native retention must use the recipe's declared bytes, not a guessed
 constant; a legal active render may intentionally run without optional retention.
 
-Current Windows affected-module qualification: Renderer 684 passed/39 ignored,
-Export 300 passed/18 ignored and App 3123 passed/213 ignored. All three complete
-gates settled with empty stderr under their original budgets. The four libraries
-were built together: App validation opt0/debug0, Effects opt1/debug0 without extra
-features, Renderer/Export validation opt1/debug0. Effects was unchanged and its
-artifact reused; its 384 passed/0 ignored result remains the prior mixed-Control
-baseline rather than a new full Effects run. Builds and full gates ran outside the Windows sandbox;
-earlier sandbox rmeta/publication failures are not source or assertion workarounds.
+Current Windows source-readiness qualification: App 3127 passed/213 ignored,
+with validation, opt0/debug0, using the App-only Cargo selection. The complete
+gate settled with empty stderr under its original budget. The original failed
+decoder/Viewer diagnostic gate and four source-readiness groups also passed.
+The prior Renderer 684/39 and Export 300/18 results remain the historical-grid
+baseline; Effects 384/0 remains the unchanged mixed-Control baseline. Those
+libraries were not rerun for this App-only change. Builds and full gates ran
+outside the Windows sandbox; this is no new release or workspace qualification.
 
 The native baseline at edf25518 uses a default worker at test-profile opt0/debug0,
 without libtest or validation features. Its 12 existing diagnostics/test-helper
 warnings remain; this is not a zero-warning or release qualification.
 Six actual native gates passed at that baseline; they were not rerun for the
-mixed-Control or historical field-grid slices. The normal installed factory
+mixed-Control, historical field-grid or Preview source-readiness slices. The normal installed factory
 gate performs four full-RGBA renders on one native owner, eight coalesced exact
 Source services with current/Output leases held, and twelve upstream
 configuration creations/retirements in the original bank. Source origin/extent
@@ -286,6 +286,34 @@ The five protocol groups (27 queries) use an independently compiled owned OFX
 fixture and actual HostSupport/Host. Action logs confirm one Create/Destroy per
 group, no Render, and no dispatch for invalid time/non-temporal declarations.
 These are action qualifications, not third-party temporal-renderer evidence.
+
+Preview now admits and checks the canonical closure's preplanned media and
+Basic Title sources, including transition inputs, before executing any node DSP.
+Admission alone was insufficient: a ready child could execute before a parent's
+Pending result, then execute again on retry. The original source identities
+deduplicate requests; exact Ready results and leases survive this one execution.
+This is per-attempt input ownership, not another cross-frame cache. CPU/GPU
+representation and working-color conversion still use the original paths.
+
+Source errors precede DSP and retain their original typed disposition, stage
+and diagnostic context. Current, transition and temporal media share one context
+formatter; temporal context carries the original Clip and author time.
+Unadmitted media always preserves RetryAdmission, including temporal requests,
+rather than waiting for publication from a nonexistent producer.
+
+Three source cases reproduced one premature DSP invocation before Pending.
+Four regression groups use the same program cache/scratch across wait, admission
+retry, error and Ready, checking zero premature calls and the first invocation's
+actual pixels, complete mixed-source admission and typed error fidelity.
+The probe is an admitted nondeterministic current-frame callback; existing
+StatefulSequential admission guards remain. This does not qualify ordered
+continuity, real plugins or dynamic native image requests.
+
+Cross-retry input retention and progress under producer-cache pressure still
+require owner integration. The existing EvaluationWorkingSet wait entries own
+dependencies, not partially ready inputs; extend the original owner rather than
+adding a second cache. Retain program, placement and Frame Execution Request
+through the actual job boundary. This per-pass barrier does not settle that work.
 
 Next bind the borrowed Clip service at the actual Preview/Export consumer,
 resolving its existing demand batches through the original scheduler/decoder

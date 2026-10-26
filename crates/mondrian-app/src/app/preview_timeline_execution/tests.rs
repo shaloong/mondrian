@@ -786,6 +786,302 @@ fn ordinary_current_layers_are_admitted_together_before_pending_is_returned() {
 }
 
 #[test]
+fn source_readiness_media_never_replays_nested_dsp() {
+    assert_source_readiness_precedes_nested_dsp(ReadinessSource::Media);
+}
+
+#[test]
+fn source_readiness_temporal_media_never_replays_nested_dsp() {
+    assert_source_readiness_precedes_nested_dsp(ReadinessSource::TemporalMedia);
+}
+
+#[test]
+fn source_readiness_title_never_replays_nested_dsp() {
+    assert_source_readiness_precedes_nested_dsp(ReadinessSource::Title);
+}
+
+#[test]
+fn source_readiness_admits_the_mixed_batch_and_preserves_retry_or_error() {
+    ensure_mondrian_default_ocio_loaded().unwrap();
+    let mut root = Sequence::new("mixed readiness batch");
+    root.settings.resolution = Resolution { width: 64, height: 32 };
+    let duration = tt(24, root.time_base());
+    let producer = AssetId::new();
+    let retry = AssetId::new();
+    root.video_tracks[0]
+        .add_clip(Clip::new(producer, TimelineTime::ZERO, duration).unwrap())
+        .unwrap();
+    root.video_tracks[1]
+        .add_clip(
+            Clip::new_basic_title(
+                "Batch title",
+                mondrian_core::default_basic_title_font_family(),
+                TimelineTime::ZERO,
+                duration,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    root.video_tracks[2]
+        .add_clip(Clip::new(retry, TimelineTime::ZERO, duration).unwrap())
+        .unwrap();
+    for terminal_error in [false, true] {
+        let mut media_calls = Vec::new();
+        let mut title_calls = 0;
+        let result = resolve_preview_timeline(
+            &root,
+            &[],
+            5,
+            root.settings.resolution,
+            PreviewResolutionScale::Full,
+            color_context(&root),
+            &mut |request: PreviewTimelineMediaRequest| {
+                media_calls.push(request.asset_id);
+                if request.asset_id == retry {
+                    PreviewTimelineMediaFrame::Pending {
+                        wait: PreviewTimelineMediaWait::RetryAdmission,
+                    }
+                } else if terminal_error {
+                    PreviewTimelineMediaFrame::Unavailable {
+                        reason: PreviewUnavailability::failed(
+                            PreviewOutputStage::InputAdaptation,
+                            "terminal source error",
+                        ),
+                    }
+                } else {
+                    pending_media_frame()
+                }
+            },
+            &mut |_| {
+                title_calls += 1;
+                PreviewTimelineTitleFrame::Pending
+            },
+        );
+        assert_eq!(media_calls.len(), 2);
+        assert!(media_calls.contains(&producer) && media_calls.contains(&retry));
+        assert_eq!(
+            title_calls, 1,
+            "a media wait must not defer title admission"
+        );
+        if terminal_error {
+            assert!(matches!(
+                result,
+                PreviewTimelineResolution::Unavailable { .. }
+            ));
+        } else {
+            assert!(matches!(result, PreviewTimelineResolution::Pending {
+                dependency: PreviewTimelinePendingDependency::Media {
+                    asset_id, wait: PreviewTimelineMediaWait::RetryAdmission,
+                }
+            } if asset_id == retry));
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ReadinessSource {
+    Media,
+    TemporalMedia,
+    Title,
+}
+
+fn assert_source_readiness_precedes_nested_dsp(source_kind: ReadinessSource) {
+    use mondrian_effects::{
+        register_effect_definition, EffectColorDomainContract, EffectDefinition,
+        EffectExecutionContract, EffectExecutionModes, EffectNode, EffectType,
+    };
+    ensure_mondrian_default_ocio_loaded().unwrap();
+    let renders = Arc::new(AtomicU64::new(0));
+    let calls = renders.clone();
+    let kind = EffectType::External(format!("test.preview.readiness.{}", AssetId::new()));
+    register_effect_definition(
+        EffectDefinition::new(
+            kind.key(),
+            "Invocation readiness probe",
+            Default::default(),
+            EffectColorDomainContract::SCENE_LINEAR,
+        )
+        .with_execution_contract(EffectExecutionContract {
+            execution_modes: EffectExecutionModes::CPU_F32,
+            determinism: mondrian_effects::EffectDeterminism::Nondeterministic,
+            roi_propagation: mondrian_effects::EffectRoiPropagation::UnknownRequiresFullFrame,
+            ..EffectExecutionContract::IDENTITY
+        })
+        .with_custom_float_render_backend(
+            Arc::new(|_, _| Ok(Some(serde_json::json!({})))),
+            None,
+            mondrian_effects::EffectCachePolicy::Uncacheable,
+            Arc::new(move |frame, _, _| {
+                let value = (calls.fetch_add(1, Ordering::SeqCst) + 1) as f32 * 0.25;
+                for pixel in frame.pixels_mut() {
+                    pixel[0] = value;
+                }
+                Ok(())
+            }),
+        ),
+    )
+    .unwrap();
+    let target = Resolution { width: 64, height: 32 };
+    let mut child = solid_sequence("ready child", Color::from_rgba8(20, 40, 80, 255));
+    child.settings.resolution = target;
+    child.video_tracks[0].clips[0].add_effect_node(EffectNode::new(kind));
+    let mut root = Sequence::new("source readiness owner");
+    root.settings.resolution = target;
+    let duration = tt(24, root.time_base());
+    root.video_tracks[0]
+        .add_clip(Clip::new_nested_sequence(child.id, TimelineTime::ZERO, duration, None).unwrap())
+        .unwrap();
+    let asset = AssetId::new();
+    let mut waiting = if source_kind == ReadinessSource::Title {
+        Clip::new_basic_title(
+            "Pending title",
+            mondrian_core::default_basic_title_font_family(),
+            TimelineTime::ZERO,
+            duration,
+        )
+        .unwrap()
+    } else {
+        Clip::new(asset, TimelineTime::ZERO, duration).unwrap()
+    };
+    if source_kind == ReadinessSource::TemporalMedia {
+        waiting.add_effect_node(temporal_blend_effect(TimelineTime::new(1, 30).unwrap()));
+    }
+    let waiting_clip_id = waiting.id;
+    root.video_tracks[1].add_clip(waiting).unwrap();
+    let programs = RefCell::new(PreparedVisualProgramCache::default());
+    let scratch = RefCell::new(TimelineCompositeScratch::default());
+    let mut rasterizer = mondrian_renderer::BasicTitleRasterizer::new();
+    // Retry the same owner while media/raster preparation waits or fails. No
+    // upstream DSP may run until the entire frozen source closure is ready.
+    for disposition in 0..4 {
+        let mut media_calls = 0;
+        let mut title_calls = 0;
+        let result = resolve_preview_timeline_with_programs(
+            &root,
+            std::slice::from_ref(&child),
+            5,
+            target,
+            PreviewResolutionScale::Full,
+            color_context(&root),
+            &mut |request: PreviewTimelineMediaRequest| {
+                assert_eq!(request.asset_id, asset);
+                media_calls += 1;
+                match disposition {
+                    0 => pending_media_frame(),
+                    1 => PreviewTimelineMediaFrame::Pending {
+                        wait: PreviewTimelineMediaWait::RetryAdmission,
+                    },
+                    2 => PreviewTimelineMediaFrame::Unavailable {
+                        reason: PreviewUnavailability::failed(
+                            PreviewOutputStage::InputAdaptation,
+                            "source preparation failed",
+                        ),
+                    },
+                    _ => ready_temporal_media_frame(&request, 0.0, 92),
+                }
+            },
+            &mut |request: PreviewTimelineTitleRequest| {
+                title_calls += 1;
+                match disposition {
+                    0 | 1 => PreviewTimelineTitleFrame::Pending,
+                    2 => PreviewTimelineTitleFrame::Unavailable {
+                        reason: PreviewUnavailability::failed(
+                            PreviewOutputStage::GeneratedSource,
+                            "title preparation failed",
+                        ),
+                    },
+                    _ => PreviewTimelineTitleFrame::Ready(
+                        rasterizer
+                            .rasterize(
+                                &request.title,
+                                request.author_resolution,
+                                request.title_safe_margin,
+                                request.target_resolution,
+                                request.working_color_space,
+                                request.sample_aspect_ratio,
+                            )
+                            .unwrap(),
+                    ),
+                }
+            },
+            &programs,
+            &scratch,
+        );
+        if disposition != 2 {
+            if let PreviewTimelineResolution::Unavailable { reason } = &result {
+                panic!("source-readiness probe must pass owner admission: {reason}");
+            }
+        }
+        assert_eq!(
+            media_calls,
+            match source_kind {
+                ReadinessSource::Media => 1,
+                ReadinessSource::TemporalMedia => 2,
+                ReadinessSource::Title => 0,
+            }
+        );
+        assert_eq!(
+            title_calls,
+            usize::from(source_kind == ReadinessSource::Title)
+        );
+        if disposition < 2 {
+            assert!(matches!(result, PreviewTimelineResolution::Pending { .. }));
+            assert_eq!(
+                renders.load(Ordering::SeqCst),
+                0,
+                "pending source must precede nested DSP"
+            );
+            if disposition == 1 && source_kind != ReadinessSource::Title {
+                assert!(
+                    matches!(
+                        result,
+                        PreviewTimelineResolution::Pending {
+                            dependency: PreviewTimelinePendingDependency::Media {
+                                wait: PreviewTimelineMediaWait::RetryAdmission,
+                                ..
+                            }
+                        }
+                    ),
+                    "unadmitted temporal media must retain retry authority"
+                );
+            }
+        } else if disposition == 2 {
+            let PreviewTimelineResolution::Unavailable { reason } = result else {
+                panic!("source failure must remain terminal")
+            };
+            if source_kind == ReadinessSource::TemporalMedia {
+                assert_eq!(reason, PreviewUnavailability::failed(
+                    PreviewOutputStage::InputAdaptation,
+                    format!(
+                        "temporal media source for Clip {waiting_clip_id} at {}: source preparation failed",
+                        tt(5, root.time_base()),
+                    ),
+                ));
+            }
+            assert_eq!(renders.load(Ordering::SeqCst), 0);
+        } else {
+            let PreviewTimelineResolution::Ready(ready) = result else {
+                panic!("ready sources must execute")
+            };
+            assert_eq!(renders.load(Ordering::SeqCst), 1);
+            assert!(
+                ready.plan.elements.iter().any(|element| match element {
+                    ResolvedPreviewElement::Media { frame, .. } =>
+                        frame.working_frame().is_ok_and(|working| working
+                            .frame
+                            .rgba_f32()
+                            .data
+                            .iter()
+                            .all(|p| p[0] == 0.25)),
+                    _ => false,
+                }),
+                "nested processor must publish its first invocation, not a replayed state"
+            );
+        }
+    }
+}
+
+#[test]
 fn temporal_preview_schedules_the_complete_cross_zero_set_before_publishing() {
     let (sequence, asset_id, clip_id) = temporal_media_sequence();
     let target = sequence.settings.resolution;

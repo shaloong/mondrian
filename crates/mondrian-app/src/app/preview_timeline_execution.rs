@@ -145,6 +145,7 @@ pub(crate) enum PreviewTimelinePendingDependency {
     BasicTitle(BasicTitleRasterRequestIdentity),
     Temporal {
         clip_id: mondrian_core::ClipId,
+        /// Unresolved planned temporal source requests across the frozen closure.
         pending_sources: usize,
     },
 }
@@ -338,7 +339,15 @@ pub(crate) fn collect_preview_timeline_media_demands_with_programs(
         runtime_scale,
         raster_requirement,
     )?;
-    collect_prepared_visual_media_demands(&closure)
+    collect_prepared_visual_source_demands(&closure).map(|demands| {
+        demands
+            .into_iter()
+            .filter_map(|demand| match demand {
+                PreparedPreviewSourceDemand::Media { request, .. } => Some(request),
+                PreparedPreviewSourceDemand::BasicTitle(_) => None,
+            })
+            .collect()
+    })
 }
 
 /// Materialize one prepared root closure for both Window and Headless.
@@ -521,34 +530,50 @@ where
             ),
         };
     }
-    // Admit the complete already-prepared media closure before an early
-    // Pending return can defer another Current input until the next turn.
-    // Retain Ready protection leases across this bounded batch, and give the
-    // executor those exact results instead of querying an input twice.
-    let demands = match collect_prepared_visual_media_demands(&closure) {
+    // Source admission and readiness precede all DSP, including child nodes.
+    // Otherwise a later Pending can replay an already-executed child on retry.
+    let demands = match collect_prepared_visual_source_demands(&closure) {
         Ok(demands) => demands,
         Err(reason) => return PreviewTimelineResolution::Unavailable { reason },
     };
-    let mut admitted = HashMap::new();
-    for demand in demands {
-        admitted.entry(demand.clone()).or_insert_with(|| media_frame(demand));
-    }
-    let mut admitted_media = |demand: PreviewTimelineMediaRequest| {
-        admitted
-            .get(&demand)
-            .cloned()
-            .unwrap_or_else(|| PreviewTimelineMediaFrame::Unavailable {
+    let sources = match admit_prepared_preview_sources(demands, media_frame, title_frame) {
+        Ok(sources) => sources,
+        Err(PreviewTimelineAbort::Pending { dependency }) => {
+            return PreviewTimelineResolution::Pending { dependency };
+        }
+        Err(PreviewTimelineAbort::Unavailable(reason)) => {
+            return PreviewTimelineResolution::Unavailable { reason };
+        }
+    };
+    let mut admitted_media = |demand: PreviewTimelineMediaRequest| match sources.media.get(&demand)
+    {
+        Some(PreviewTimelineMediaFrame::Ready(frame)) => {
+            PreviewTimelineMediaFrame::Ready(frame.clone())
+        }
+        _ => PreviewTimelineMediaFrame::Unavailable {
+            reason: PreviewUnavailability::failed(
+                PreviewOutputStage::TimelineEvaluation,
+                "prepared media execution requested an input outside its ready closure",
+            ),
+        },
+    };
+    let mut admitted_title =
+        |demand: PreviewTimelineTitleRequest| match sources.titles.get(&demand.identity()) {
+            Some(PreviewTimelineTitleFrame::Ready(frame)) => {
+                PreviewTimelineTitleFrame::Ready(frame.clone())
+            }
+            _ => PreviewTimelineTitleFrame::Unavailable {
                 reason: PreviewUnavailability::failed(
                     PreviewOutputStage::TimelineEvaluation,
-                    "prepared media execution requested an input outside its admitted closure",
+                    "prepared title execution requested an input outside its ready closure",
                 ),
-            })
-    };
+            },
+        };
     let mut adapter = PreviewTimelineExecutionAdapter {
         closure: &closure,
         cancellation: graph.cancellation,
         media_frame: &mut admitted_media,
-        title_frame,
+        title_frame: &mut admitted_title,
         scratch,
         facts: Vec::new(),
     };
@@ -1122,13 +1147,13 @@ where
                     return Ok(PreviewTemporalSourceResolution::Pending);
                 }
                 PreviewTimelineMediaFrame::Unavailable { reason } => {
-                    return Err(PreviewTimelineAbort::Unavailable(reason.with_context(
-                        format_args!(
-                            "temporal media source for Clip {} at {}",
-                            demand.placement.clip_id,
-                            demand.effect_request.time()
-                        ),
-                    )));
+                    return Err(PreviewTimelineAbort::Unavailable(
+                        PreviewMediaSourceRole::Temporal {
+                            clip_id: demand.placement.clip_id,
+                            time: demand.effect_request.time(),
+                        }
+                        .failure(reason, *asset_id),
+                    ));
                 }
             };
             preview_temporal_source_from_media_frame(
@@ -1459,9 +1484,125 @@ fn prepare_preview_frame_closure(
     Ok(closure)
 }
 
-fn collect_prepared_visual_media_demands(
+enum PreparedPreviewSourceDemand {
+    Media {
+        request: PreviewTimelineMediaRequest,
+        role: PreviewMediaSourceRole,
+    },
+    BasicTitle(PreviewTimelineTitleRequest),
+}
+
+#[derive(Clone, Copy)]
+enum PreviewMediaSourceRole {
+    Current,
+    Transition,
+    Temporal {
+        clip_id: mondrian_core::ClipId,
+        time: mondrian_core::TimelineTime,
+    },
+}
+
+impl PreviewMediaSourceRole {
+    fn failure(self, reason: PreviewUnavailability, asset_id: AssetId) -> PreviewUnavailability {
+        match self {
+            Self::Current => reason.with_context(format_args!("media {asset_id}")),
+            Self::Transition => reason.with_context(format_args!("Transition media {asset_id}")),
+            Self::Temporal { clip_id, time } => reason.with_context(format_args!(
+                "temporal media source for Clip {clip_id} at {time}"
+            )),
+        }
+    }
+}
+
+/// One attempt's source results, not a cross-frame cache. Construction succeeds
+/// only when every result is Ready; these exact leases survive closure execution.
+struct ReadyPreviewSources {
+    media: HashMap<PreviewTimelineMediaRequest, PreviewTimelineMediaFrame>,
+    titles: HashMap<BasicTitleRasterRequestIdentity, PreviewTimelineTitleFrame>,
+}
+
+fn admit_prepared_preview_sources(
+    demands: Vec<PreparedPreviewSourceDemand>,
+    media_frame: &mut impl FnMut(PreviewTimelineMediaRequest) -> PreviewTimelineMediaFrame,
+    title_frame: &mut impl FnMut(PreviewTimelineTitleRequest) -> PreviewTimelineTitleFrame,
+) -> Result<ReadyPreviewSources, PreviewTimelineAbort> {
+    let mut media = HashMap::new();
+    let mut titles = HashMap::new();
+    let mut pending = None;
+    let mut retry_admission = None;
+    let mut unavailable = None;
+    let mut temporal_pending = 0usize;
+    // Admit the whole source batch even if an earlier result waits or fails.
+    // This lets the original media/raster producers make progress together.
+    for demand in demands {
+        match demand {
+            PreparedPreviewSourceDemand::Media { request, role } => {
+                let asset_id = request.asset_id;
+                match media.entry(request.clone()).or_insert_with(|| media_frame(request)) {
+                    PreviewTimelineMediaFrame::Ready(_) => {}
+                    PreviewTimelineMediaFrame::Pending { wait } => {
+                        let dependency = match role {
+                            PreviewMediaSourceRole::Temporal { clip_id, .. } => {
+                                temporal_pending = temporal_pending.saturating_add(1);
+                                PreviewTimelinePendingDependency::Temporal {
+                                    clip_id,
+                                    pending_sources: 0,
+                                }
+                            }
+                            PreviewMediaSourceRole::Current
+                            | PreviewMediaSourceRole::Transition => {
+                                PreviewTimelinePendingDependency::Media { asset_id, wait: *wait }
+                            }
+                        };
+                        pending.get_or_insert(dependency);
+                        if *wait == PreviewTimelineMediaWait::RetryAdmission {
+                            // A temporal request without a producer must also retry;
+                            // waiting for producer publication would suppress admission.
+                            retry_admission.get_or_insert(
+                                PreviewTimelinePendingDependency::Media { asset_id, wait: *wait },
+                            );
+                        }
+                    }
+                    PreviewTimelineMediaFrame::Unavailable { reason } => {
+                        unavailable.get_or_insert_with(|| role.failure(reason.clone(), asset_id));
+                    }
+                }
+            }
+            PreparedPreviewSourceDemand::BasicTitle(request) => {
+                let identity = request.identity();
+                match titles.entry(identity).or_insert_with(|| title_frame(request)) {
+                    PreviewTimelineTitleFrame::Ready(_) => {}
+                    PreviewTimelineTitleFrame::Pending => {
+                        pending
+                            .get_or_insert(PreviewTimelinePendingDependency::BasicTitle(identity));
+                    }
+                    PreviewTimelineTitleFrame::Unavailable { reason } => {
+                        unavailable.get_or_insert_with(|| {
+                            reason
+                                .clone()
+                                .with_context(format_args!("Basic Title raster request {identity}"))
+                        });
+                    }
+                }
+            }
+        }
+    }
+    if let Some(reason) = unavailable {
+        return Err(PreviewTimelineAbort::Unavailable(reason));
+    }
+    if let Some(mut dependency) = retry_admission.or(pending) {
+        if let PreviewTimelinePendingDependency::Temporal { pending_sources, .. } = &mut dependency
+        {
+            *pending_sources = temporal_pending;
+        }
+        return Err(PreviewTimelineAbort::Pending { dependency });
+    }
+    Ok(ReadyPreviewSources { media, titles })
+}
+
+fn collect_prepared_visual_source_demands(
     closure: &PreparedVisualFrameClosure<PreparedTimelinePreviewEffectRoutes>,
-) -> Result<Vec<PreviewTimelineMediaRequest>, PreviewUnavailability> {
+) -> Result<Vec<PreparedPreviewSourceDemand>, PreviewUnavailability> {
     let mut demands = Vec::new();
     for node in closure.nodes() {
         let color_context = node.color_context();
@@ -1483,17 +1624,23 @@ fn collect_prepared_visual_media_demands(
                     auto_tone_map,
                 } = &demand.source
                 {
-                    demands.push(preview_temporal_media_request(
-                        *asset_id,
-                        *source_sample,
-                        *color_space_override,
-                        *alpha_interpretation,
-                        *picture_overrides,
-                        *auto_tone_map,
-                        target_resolution,
-                        color_context,
-                        batch.graph().image_scale_requirement(),
-                    ));
+                    demands.push(PreparedPreviewSourceDemand::Media {
+                        request: preview_temporal_media_request(
+                            *asset_id,
+                            *source_sample,
+                            *color_space_override,
+                            *alpha_interpretation,
+                            *picture_overrides,
+                            *auto_tone_map,
+                            target_resolution,
+                            color_context,
+                            batch.graph().image_scale_requirement(),
+                        ),
+                        role: PreviewMediaSourceRole::Temporal {
+                            clip_id: batch.placement().clip_id,
+                            time: demand.effect_request.time(),
+                        },
+                    });
                 }
             }
         }
@@ -1501,33 +1648,45 @@ fn collect_prepared_visual_media_demands(
             match element {
                 TimelineRenderPlanElement::Media(media) => {
                     if !temporal_placements.contains(&media.placement) {
-                        demands.push(
-                            preview_timeline_media_request(
+                        demands.push(PreparedPreviewSourceDemand::Media {
+                            request: preview_timeline_media_request(
                                 media,
                                 target_resolution,
                                 color_context,
                                 node.evaluation().payload(),
                             )
                             .map_err(preview_route_unavailability)?,
-                        );
+                            role: PreviewMediaSourceRole::Current,
+                        });
                     }
                 }
                 TimelineRenderPlanElement::NestedSequence(_) => {}
+                TimelineRenderPlanElement::BasicTitle(title) => {
+                    demands.push(PreparedPreviewSourceDemand::BasicTitle(
+                        preview_timeline_title_request(
+                            node.materialization_contract(),
+                            title,
+                            target_resolution,
+                            color_context.working_color_space(),
+                        ),
+                    ));
+                }
                 TimelineRenderPlanElement::SolidColor(_)
-                | TimelineRenderPlanElement::BasicTitle(_)
                 | TimelineRenderPlanElement::Adjustment(_)
                 | TimelineRenderPlanElement::TimelineGrade(_) => {}
                 TimelineRenderPlanElement::CrossDissolve(transition) => {
-                    collect_prepared_transition_input_media_demand(
+                    collect_prepared_transition_input_source_demand(
                         &transition.left,
+                        node.materialization_contract(),
                         target_resolution,
                         color_context,
                         node.evaluation().payload(),
                         &temporal_placements,
                         &mut demands,
                     )?;
-                    collect_prepared_transition_input_media_demand(
+                    collect_prepared_transition_input_source_demand(
                         &transition.right,
+                        node.materialization_contract(),
                         target_resolution,
                         color_context,
                         node.evaluation().payload(),
@@ -1657,7 +1816,7 @@ where
                         }
                         PreviewTimelineMediaFrame::Unavailable { reason } => {
                             return Err(PreviewTimelineAbort::Unavailable(
-                                reason.with_context(format_args!("media {asset_id}")),
+                                PreviewMediaSourceRole::Current.failure(reason, asset_id),
                             ));
                         }
                     }
@@ -1800,13 +1959,14 @@ where
     Ok(Some(resolved))
 }
 
-fn collect_prepared_transition_input_media_demand(
+fn collect_prepared_transition_input_source_demand(
     input: &TimelineTransitionInputPlan,
+    materialization: PreparedVisualMaterializationContract,
     target_resolution: Resolution,
     color_context: &ProgramColorContext,
     routes: &PreparedTimelinePreviewEffectRoutes,
     temporal_placements: &HashSet<TimelineClipExecutionRef>,
-    demands: &mut Vec<PreviewTimelineMediaRequest>,
+    demands: &mut Vec<PreparedPreviewSourceDemand>,
 ) -> Result<(), PreviewUnavailability> {
     if transition_input_placement(input)
         .is_some_and(|placement| temporal_placements.contains(&placement))
@@ -1816,12 +1976,27 @@ fn collect_prepared_transition_input_media_demand(
     match input {
         TimelineTransitionInputPlan::Transparent
         | TimelineTransitionInputPlan::SolidColor(_)
-        | TimelineTransitionInputPlan::BasicTitle(_)
         | TimelineTransitionInputPlan::NestedSequence(_) => {}
-        TimelineTransitionInputPlan::Media(media) => demands.push(
-            preview_timeline_media_request(media, target_resolution, color_context, routes)
-                .map_err(preview_route_unavailability)?,
+        TimelineTransitionInputPlan::BasicTitle(title) => demands.push(
+            PreparedPreviewSourceDemand::BasicTitle(preview_timeline_title_request(
+                materialization,
+                title,
+                target_resolution,
+                color_context.working_color_space(),
+            )),
         ),
+        TimelineTransitionInputPlan::Media(media) => {
+            demands.push(PreparedPreviewSourceDemand::Media {
+                request: preview_timeline_media_request(
+                    media,
+                    target_resolution,
+                    color_context,
+                    routes,
+                )
+                .map_err(preview_route_unavailability)?,
+                role: PreviewMediaSourceRole::Transition,
+            })
+        }
     }
     Ok(())
 }
@@ -1964,7 +2139,7 @@ where
                 }
                 PreviewTimelineMediaFrame::Unavailable { reason } => {
                     return Err(PreviewTimelineAbort::Unavailable(
-                        reason.with_context(format_args!("Transition media {asset_id}")),
+                        PreviewMediaSourceRole::Transition.failure(reason, asset_id),
                     ));
                 }
             };
@@ -2055,6 +2230,22 @@ where
     })
 }
 
+fn preview_timeline_title_request(
+    materialization: PreparedVisualMaterializationContract,
+    title: &TimelineBasicTitlePlan,
+    target_resolution: Resolution,
+    working_color_space: mondrian_core::WorkingColorSpace,
+) -> PreviewTimelineTitleRequest {
+    PreviewTimelineTitleRequest {
+        title: title.title.clone(),
+        author_resolution: materialization.author_resolution(),
+        sample_aspect_ratio: materialization.sample_aspect_ratio(),
+        title_safe_margin: materialization.title_safe_margin(),
+        target_resolution,
+        working_color_space,
+    }
+}
+
 fn resolve_basic_title_frame<MediaFrame, TitleFrame>(
     execution: &mut PreviewTimelineExecutionAdapter<'_, MediaFrame, TitleFrame>,
     materialization: PreparedVisualMaterializationContract,
@@ -2067,14 +2258,12 @@ where
     TitleFrame: FnMut(PreviewTimelineTitleRequest) -> PreviewTimelineTitleFrame,
 {
     let author_resolution = materialization.author_resolution();
-    let request = PreviewTimelineTitleRequest {
-        title: title.title.clone(),
-        author_resolution,
-        sample_aspect_ratio: materialization.sample_aspect_ratio(),
-        title_safe_margin: materialization.title_safe_margin(),
+    let request = preview_timeline_title_request(
+        materialization,
+        title,
         target_resolution,
         working_color_space,
-    };
+    );
     let request_identity = request.identity();
     let raster = match (execution.title_frame)(request) {
         PreviewTimelineTitleFrame::Ready(frame) => frame,
