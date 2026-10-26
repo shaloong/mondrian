@@ -198,8 +198,8 @@ namespace MondrianOpenFx {
     bool outputRodReady = false;
     std::atomic<bool> queryingOutputRod{false};
     size_t pixelCount = 0;
-    bool imagesAvailable = false;
-    bool outputAvailable = false;
+    std::atomic<bool> imagesAvailable{false};
+    std::atomic<bool> outputAvailable{false};
     mutable std::atomic<size_t> imageHandles{0};
     bool invalidImageLifetime = false;
     // A transient unsupported ordinal-domain change is terminal even if the
@@ -262,13 +262,17 @@ namespace MondrianOpenFx {
     FrameState& state;
     const bool previous;
     const bool previousOutput;
+    const bool ownsImages;
     ImageAccess(FrameState& frame, bool available, bool output = false)
-      : state(frame), previous(frame.imagesAvailable), previousOutput(frame.outputAvailable) {
+      : state(frame), previous(frame.imagesAvailable), previousOutput(frame.outputAvailable),
+        ownsImages(available) {
       state.imagesAvailable = available;
       state.outputAvailable = output;
     }
     ~ImageAccess() {
-      if (state.imageHandles.load() != 0) { state.invalidImageLifetime = true; }
+      // A nested metadata action cannot fetch images. Existing handles belong
+      // to its suspended caller and remain valid until that caller returns.
+      if (ownsImages && state.imageHandles.load() != 0) { state.invalidImageLifetime = true; }
       state.imagesAvailable = previous;
       state.outputAvailable = previousOutput;
     }

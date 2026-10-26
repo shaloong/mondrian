@@ -498,3 +498,15 @@ graph semantics, then verify real Temporal plugins, seek/loop, Preview/Export
 parity and performance before enabling temporal capabilities. No new release,
 whole-workspace, third-party Temporal, RT, GPU interop or platform qualification
 follows from these tests; temporal flags stay false.
+
+Native image loans are narrowed at every instance action dispatch. A recursive
+RoD or preference action cannot inherit its enclosing UserEdited callback's
+permission to fetch images. The suspended caller's existing images survive the
+metadata action; their release is checked at the caller's legal action boundary.
+Atomic permission reads cover joined plugin callbacks on worker threads within
+the serialized native invocation. This does not qualify overlapping independent
+actions, native Temporal processing or additional render-thread concurrency.
+Windows MSVC passes the reproducer after its original RED, fourteen native
+control groups, 125 ordinary App OFX tests (68 existing ignored), and six actual
+resident/service gates. The ordinary development product also rebuilds; no new
+release, performance or other-platform qualification follows.

@@ -824,6 +824,28 @@ bool imageUnavailable(const void* handle, OfxPropertySetHandle in) {
   }
   return status == kOfxStatFailed;
 }
+// A legal UserEdited image loan remains alive while Output's RoD query reenters
+// the plugin. The metadata action itself must not inherit permission to fetch.
+bool nestedImageAction(const void* handle, OfxPropertySetHandle in) {
+  OfxImageClipHandle source = nullptr, output = nullptr;
+  OfxPropertySetHandle image = nullptr;
+  double time = 0.0;
+  if (gPropHost->propGetDouble(in, kOfxPropTime, 0, &time) != kOfxStatOK ||
+      gEffectHost->clipGetHandle((OfxImageEffectHandle)handle, "Source", &source, nullptr) != kOfxStatOK ||
+      gEffectHost->clipGetHandle((OfxImageEffectHandle)handle, "Output", &output, nullptr) != kOfxStatOK ||
+      gEffectHost->clipGetImage(source, time, nullptr, &image) != kOfxStatOK) { return false; }
+  void* before = nullptr;
+  void* after = nullptr;
+  OfxRectD rod{};
+  const bool valid = gPropHost->propGetPointer(image, kOfxImagePropData, 0, &before) == kOfxStatOK && before &&
+      gEffectHost->clipGetRegionOfDefinition(output, time, &rod) == kOfxStatOK &&
+      gPropHost->propGetPointer(image, kOfxImagePropData, 0, &after) == kOfxStatOK && before == after &&
+      imageLifetimes(handle, in, "Source");
+  bool workerValid = false;
+  std::thread worker([&] { workerValid = imageLifetimes(handle, in, "Source"); });
+  worker.join();
+  return gEffectHost->clipReleaseImage(image) == kOfxStatOK && valid && workerValid;
+}
 bool applyDiscreteGain(const void* handle, OfxPropertySetHandle in, const char* name = "count", bool choice = false) {
   OfxParamSetHandle params = nullptr;
   OfxParamHandle count = nullptr;
@@ -3404,6 +3426,16 @@ OfxStatus probeAction(const char* action, const void* handle,
                 OfxPropertySetHandle in, OfxPropertySetHandle out) {
   const std::string operation(action);
   const std::string selected = mode();
+  if (selected == "image_action_scope" && operation == kOfxImageEffectActionGetRegionOfDefinition) {
+    const bool denied = imageUnavailable(handle, in);
+    bool workerDenied = false;
+    std::thread worker([&] { workerDenied = imageUnavailable(handle, in); });
+    worker.join();
+    if (!denied || !workerDenied) {
+      std::fprintf(stderr, "GetRegionOfDefinition inherited illegal image access\n");
+      return kOfxStatFailed;
+    }
+  }
   if (operation == kOfxImageEffectActionIsIdentity) {
     // The other fixture modes test their real Render work, including pixel
     // overrides after Basic. Opt out of this optional optimization explicitly.
@@ -3604,6 +3636,8 @@ OfxStatus probeAction(const char* action, const void* handle,
     if (gPropHost->propGetString(in, kOfxPropChangeReason, 0, &reason) == kOfxStatOK &&
         reason && std::string(reason) == kOfxChangeUserEdited &&
         !imageLifetimes(handle, in, "Source")) { return kOfxStatFailed; }
+    if (selected == "image_action_scope" && reason && std::string(reason) == kOfxChangeUserEdited &&
+        !nestedImageAction(handle, in)) { return kOfxStatFailed; }
   } else if (operation == kOfxActionEndInstanceChanged) {
     auto& state = actions.at(handle);
     if (!state.changing || state.changes == 0) { return kOfxStatFailed; }

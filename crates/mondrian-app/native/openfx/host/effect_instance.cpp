@@ -103,6 +103,17 @@ namespace MondrianOpenFx {
   OfxStatus FilterEffectInstance::mainEntry(const char* action, const void* handle,
                                            OFX::Host::Property::Set* inArgs,
                                            OFX::Host::Property::Set* outArgs) {
+    const bool rendering = std::strcmp(action, kOfxImageEffectActionRender) == 0;
+    const bool changing = std::strcmp(action, kOfxActionInstanceChanged) == 0 ||
+        std::strcmp(action, kOfxActionEndInstanceChanged) == 0;
+    const bool userEdited = changing && inArgs &&
+        inArgs->getStringProperty(kOfxPropChangeReason) == kOfxChangeUserEdited;
+    // The serialized invocation lends storage; each dispatched action can only
+    // narrow that loan. In particular a recursive RoD/preferences action must
+    // not inherit its enclosing UserEdited action's image access.
+    ImageAccess images(_frameState,
+        _frameState.imagesAvailable.load() && (rendering || userEdited),
+        _frameState.outputAvailable.load() && rendering);
     const OfxStatus status = OFX::Host::ImageEffect::Instance::mainEntry(action, handle, inArgs, outArgs);
     // ReplyDefault's residual outArgs do not request preference changes.
     if (status != kOfxStatOK || !outArgs || std::strcmp(action, kOfxImageEffectActionGetClipPreferences) != 0) {
