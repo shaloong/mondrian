@@ -302,9 +302,10 @@ Unadmitted media always preserves RetryAdmission, including temporal requests,
 rather than waiting for publication from a nonexistent producer.
 
 Three source cases reproduced one premature DSP invocation before Pending.
-Four regression groups use the same program cache/scratch across wait, admission
-retry, error and Ready, checking zero premature calls and the first invocation's
-actual pixels, complete mixed-source admission and typed error fidelity.
+Three regression groups reuse one program cache/scratch across wait, admission
+retry, error and Ready, checking zero premature calls, the first invocation's
+actual pixels and typed error fidelity. A fourth checks complete mixed-source
+admission and retry/error priority.
 The probe is an admitted nondeterministic current-frame callback; existing
 StatefulSequential admission guards remain. This does not qualify ordered
 continuity, real plugins or dynamic native image requests.
