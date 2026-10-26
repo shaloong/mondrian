@@ -564,7 +564,7 @@ fn production_timeline_prepares_heterogeneous_route_before_media_materialization
     );
     assert!(matches!(
         resolved.plan.elements.as_slice(),
-        [ResolvedPreviewElement::Media { prepared_heterogeneous_route: Some(_), .. }]
+        [ResolvedPreviewElement::Media { prepared_effect_route: Some(_), .. }]
     ));
 }
 
@@ -664,14 +664,13 @@ fn production_timeline_binds_nested_cpu_materialization_to_parent_heterogeneous_
             panic!("nested heterogeneous Timeline returned no ready plan")
         }
     };
-    let [ResolvedPreviewElement::Media {
-        frame, prepared_heterogeneous_route: Some(route), ..
-    }] = resolved.plan.elements.as_slice()
+    let [ResolvedPreviewElement::Media { frame, prepared_effect_route: Some(route), .. }] =
+        resolved.plan.elements.as_slice()
     else {
         panic!("nested placement must bind its materialized frame to the frozen parent route")
     };
     assert_eq!(
-        route.frame_extent(),
+        route.heterogeneous().expect("frozen heterogeneous route").frame_extent(),
         EffectFrameExtent::new(frame.width(), frame.height()),
         "the parent route must bind the exact child materialization raster"
     );
@@ -2869,7 +2868,7 @@ fn full_odd_media_effect_and_mask_execute_before_small_canvas_spatial_join() {
     assert_eq!(output.frame.rgba_f32().data.len(), 6);
     assert!(matches!(
         result.plan.elements.as_slice(),
-        [ResolvedPreviewElement::Media { prepared_heterogeneous_route: None, .. }]
+        [ResolvedPreviewElement::Media { prepared_effect_route: None, .. }]
     ));
     for (actual, expected) in output.frame.rgba_f32().data.iter().zip(expected) {
         for (actual, expected) in actual.iter().zip(expected) {

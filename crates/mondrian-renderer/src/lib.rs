@@ -382,7 +382,8 @@ pub use source_frame_preparation::{
 pub use timeline_composite::{
     admit_timeline_render_plan_for_cpu_compositor, composite_path_diagnostics,
     composite_timeline_elements, composite_timeline_elements_color_frame,
-    composite_timeline_elements_color_frame_with_diagnostics, composite_timeline_elements_into,
+    composite_timeline_elements_color_frame_with_diagnostics,
+    composite_timeline_elements_color_frame_with_inputs, composite_timeline_elements_into,
     estimate_timeline_cpu_working_set, is_identity_transform, quantize_transform_signature,
     TimelineAdjustmentLayer, TimelineCompositeBackground, TimelineCompositeColorPath,
     TimelineCompositeColorPathSummary, TimelineCompositeDiagnostics,
@@ -408,7 +409,8 @@ pub use timeline_render_plan::{
     TimelineSolidColorPlan, TimelineTransitionInputPlan,
 };
 pub use timeline_temporal::{
-    PreparedTimelineFrameExecution, TimelineFrameExecutionRequest, TimelineFramePreparationError,
+    PreparedTimelineClipInputPlan, PreparedTimelineFrameExecution, TimelineFrameExecutionAuthority,
+    TimelineFrameExecutionRequest, TimelineFramePreparationError, TimelineProcessorInputExecution,
     TimelineTemporalDemandBatch, TimelineTemporalPreparationError, TimelineTemporalSource,
     TimelineTemporalSourceDemand,
 };

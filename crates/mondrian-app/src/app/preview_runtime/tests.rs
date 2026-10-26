@@ -1339,7 +1339,7 @@ fn completed_cpu_evaluation_releases_prefetch_headroom_without_clearing_store() 
             blend_mode: BlendMode::Normal,
             transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
             effect_graph: mondrian_effects::identity_compiled_effect_graph().expect("identity"),
-            prepared_heterogeneous_route: None,
+            prepared_effect_route: None,
             frame_seed: 0,
         })
         .collect::<Vec<_>>();
@@ -1452,7 +1452,7 @@ fn evaluation_working_set_retires_native_decoder_resource_owners() {
             transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
             effect_graph: mondrian_effects::identity_compiled_effect_graph()
                 .expect("identity graph"),
-            prepared_heterogeneous_route: None,
+            prepared_effect_route: None,
             frame_seed: 0,
         }]),
         color_context: test_color_context(ColorSpace::Srgb),
@@ -1526,7 +1526,7 @@ fn evaluation_working_set_retires_native_decoder_resource_owners() {
                 transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
                 effect_graph: mondrian_effects::identity_compiled_effect_graph()
                     .expect("identity graph"),
-                prepared_heterogeneous_route: None,
+                prepared_effect_route: None,
                 frame_seed: 0,
             }]),
             color_context: test_color_context(ColorSpace::Srgb),
@@ -2611,6 +2611,8 @@ fn cpu_raster_preview_retains_program_output_before_srgb_adaptation() {
             transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
             effect_graph,
             frame_seed: 0,
+
+            processor_input_plan: None,
         },
     )];
     let color_context = test_color_context(ColorSpace::Rec709);
@@ -3282,7 +3284,7 @@ fn gpu_composite_layers_accept_transformed_media_frame() {
         blend_mode: BlendMode::Normal,
         transform,
         effect_graph,
-        prepared_heterogeneous_route: None,
+        prepared_effect_route: None,
         frame_seed: 7,
     }];
 
@@ -3313,7 +3315,7 @@ fn gpu_viewer_lowering_reuses_the_preview_owned_effect_session() {
         blend_mode: BlendMode::Normal,
         transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
         effect_graph,
-        prepared_heterogeneous_route: None,
+        prepared_effect_route: None,
         frame_seed: 7,
     }];
     let mut scratch = TimelineCompositeScratch::default();
@@ -3356,7 +3358,7 @@ fn gpu_composite_layers_lower_cross_dissolve_as_typed_two_input_node() {
             blend_mode: BlendMode::Normal,
             transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
             effect_graph: Arc::clone(&effect_graph),
-            prepared_heterogeneous_route: None,
+            prepared_effect_route: None,
             frame_seed: 7,
         }),
         right: Box::new(ResolvedPreviewTransitionInput::SolidColor(
@@ -3367,6 +3369,8 @@ fn gpu_composite_layers_lower_cross_dissolve_as_typed_two_input_node() {
                 transform: [0.75, 0.0, 0.125, 0.0, 0.75, 0.125],
                 effect_graph,
                 frame_seed: 8,
+
+                processor_input_plan: None,
             },
         )),
         progress: 0.25,
@@ -3437,7 +3441,7 @@ fn gpu_composite_layers_lower_supported_working_effects() {
         blend_mode: BlendMode::Normal,
         transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
         effect_graph,
-        prepared_heterogeneous_route: None,
+        prepared_effect_route: None,
         frame_seed: 19,
     }];
 
@@ -3472,6 +3476,8 @@ fn gpu_composite_layers_lower_solid_and_adjustment_effects() {
             transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
             effect_graph: Arc::clone(&effect_graph),
             frame_seed: 11,
+
+            processor_input_plan: None,
         }),
         ResolvedPreviewElement::Adjustment(TimelineAdjustmentLayer {
             effect_graph,
@@ -3527,6 +3533,8 @@ fn gpu_composite_layers_skip_leading_adjustment_before_layer_limit() {
             effect_graph: mondrian_effects::identity_compiled_effect_graph()
                 .expect("identity compiled graph"),
             frame_seed: 0,
+
+            processor_input_plan: None,
         },
     ));
 
@@ -3566,7 +3574,7 @@ fn gpu_composite_layers_accept_source_only_media_frame() {
         blend_mode: BlendMode::Normal,
         transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
         effect_graph,
-        prepared_heterogeneous_route: None,
+        prepared_effect_route: None,
         frame_seed: 7,
     }];
 
@@ -3603,7 +3611,7 @@ fn gpu_composite_layers_preserve_native_source_only_media_frame() {
         blend_mode: BlendMode::Normal,
         transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
         effect_graph,
-        prepared_heterogeneous_route: None,
+        prepared_effect_route: None,
         frame_seed: 7,
     }];
 
@@ -3675,7 +3683,7 @@ fn gpu_composite_layers_materialize_native_video_at_projected_preview_density() 
         blend_mode: BlendMode::Normal,
         transform: [0.25, 0.0, 0.0, 0.0, 0.25, 0.0],
         effect_graph,
-        prepared_heterogeneous_route: None,
+        prepared_effect_route: None,
         frame_seed: 7,
     }];
 
@@ -3720,7 +3728,7 @@ fn gpu_composite_layers_keep_native_source_density_for_preview_zoom() {
         blend_mode: BlendMode::Normal,
         transform: [1.0, 0.0, -1440.0, 0.0, 1.0, -810.0],
         effect_graph: mondrian_effects::identity_compiled_effect_graph().expect("identity graph"),
-        prepared_heterogeneous_route: None,
+        prepared_effect_route: None,
         frame_seed: 7,
     }];
 
@@ -3773,7 +3781,7 @@ fn gpu_composite_layers_reject_singular_media_transform() {
         blend_mode: BlendMode::Normal,
         transform: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
         effect_graph,
-        prepared_heterogeneous_route: None,
+        prepared_effect_route: None,
         frame_seed: 7,
     }];
 
@@ -12067,7 +12075,7 @@ fn resolved_media_preview_cache_key_includes_media_frame_identity() {
             blend_mode: BlendMode::Normal,
             transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
             effect_graph: Arc::clone(&effect_graph),
-            prepared_heterogeneous_route: None,
+            prepared_effect_route: None,
             frame_seed: 12,
         }]
     };
@@ -12109,6 +12117,8 @@ fn uncacheable_effect_retains_semantic_identity_without_admitting_viewer_reuse()
             transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
             effect_graph,
             frame_seed: 12,
+
+            processor_input_plan: None,
         },
     )];
     let sequence_id = SequenceId::new();
@@ -12189,7 +12199,7 @@ fn stable_parameter_value_changes_compiled_graph_and_viewer_cache_identity() {
             blend_mode: BlendMode::Normal,
             transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
             effect_graph,
-            prepared_heterogeneous_route: None,
+            prepared_effect_route: None,
             frame_seed: 12,
         }]
     };
@@ -12224,7 +12234,7 @@ fn resolved_media_preview_cache_key_includes_color_context() {
         blend_mode: BlendMode::Normal,
         transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
         effect_graph,
-        prepared_heterogeneous_route: None,
+        prepared_effect_route: None,
         frame_seed: 12,
     }];
     let sequence_id = SequenceId::new();
@@ -12261,7 +12271,7 @@ fn resolved_media_preview_cache_key_includes_resolved_display_color_space() {
         blend_mode: BlendMode::Normal,
         transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
         effect_graph,
-        prepared_heterogeneous_route: None,
+        prepared_effect_route: None,
         frame_seed: 12,
     }];
     let sequence_id = SequenceId::new();
@@ -12298,7 +12308,7 @@ fn resolved_media_preview_cache_key_includes_versioned_output_transform_intent()
         blend_mode: BlendMode::Normal,
         transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
         effect_graph,
-        prepared_heterogeneous_route: None,
+        prepared_effect_route: None,
         frame_seed: 12,
     }];
     let sequence_id = SequenceId::new();
@@ -12340,7 +12350,7 @@ fn resolved_media_preview_cache_key_includes_output_transform_intent() {
         blend_mode: BlendMode::Normal,
         transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
         effect_graph,
-        prepared_heterogeneous_route: None,
+        prepared_effect_route: None,
         frame_seed: 12,
     }];
     let sequence_id = SequenceId::new();
@@ -12377,7 +12387,7 @@ fn resolved_media_preview_cache_key_includes_exact_standard_package() {
         blend_mode: BlendMode::Normal,
         transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
         effect_graph,
-        prepared_heterogeneous_route: None,
+        prepared_effect_route: None,
         frame_seed: 12,
     }];
     let sequence_id = SequenceId::new();
@@ -13289,7 +13299,7 @@ fn preview_single_media_color_output_matches_export_composite_contract() {
         blend_mode: BlendMode::Normal,
         transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
         effect_graph: Arc::clone(&effect_graph),
-        prepared_heterogeneous_route: None,
+        prepared_effect_route: None,
         frame_seed: 0,
     }];
     let mut preview_scratch = TimelineCompositeScratch::default();
@@ -13321,6 +13331,8 @@ fn preview_single_media_color_output_matches_export_composite_contract() {
         transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
         effect_graph,
         frame_seed: 0,
+
+        processor_input_plan: None,
     })];
     let mut export_scratch = TimelineCompositeScratch::default();
     let expected_frame = mondrian_renderer::composite_timeline_elements_color_frame(
@@ -13402,7 +13414,7 @@ fn preview_camera_log_input_matches_export_frame_hash() {
         blend_mode: BlendMode::Normal,
         transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
         effect_graph: Arc::clone(&effect_graph),
-        prepared_heterogeneous_route: None,
+        prepared_effect_route: None,
         frame_seed: 3_003,
     }];
     let preview_service = WindowPreviewAdapter::new();
@@ -13434,6 +13446,8 @@ fn preview_camera_log_input_matches_export_frame_hash() {
         transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
         effect_graph,
         frame_seed: 3_003,
+
+        processor_input_plan: None,
     })];
     let mut export_scratch = TimelineCompositeScratch::default();
     let export_working = mondrian_renderer::composite_timeline_elements_color_frame(
@@ -13527,6 +13541,8 @@ fn preview_multilayer_color_output_matches_export_frame_hash() {
         transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
         effect_graph: Arc::clone(&effect_graph),
         frame_seed: 14,
+
+        processor_input_plan: None,
     };
     let color_context =
         test_color_context_in_working(ColorSpace::Srgb, WorkingColorSpace::LinearRec2020);
@@ -13538,7 +13554,7 @@ fn preview_multilayer_color_output_matches_export_frame_hash() {
             blend_mode: BlendMode::Multiply,
             transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
             effect_graph: Arc::clone(&effect_graph),
-            prepared_heterogeneous_route: None,
+            prepared_effect_route: None,
             frame_seed: 7,
         },
         ResolvedPreviewElement::SolidColor(solid.clone()),
@@ -13566,6 +13582,8 @@ fn preview_multilayer_color_output_matches_export_frame_hash() {
             transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
             effect_graph,
             frame_seed: 7,
+
+            processor_input_plan: None,
         }),
         TimelineCompositeElement::SolidColor(solid),
     ];
@@ -19427,7 +19445,7 @@ fn retired_transport_releases_cpu_evaluation_guards_without_clearing_store() {
             blend_mode: BlendMode::Normal,
             transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
             effect_graph: mondrian_effects::identity_compiled_effect_graph().expect("identity"),
-            prepared_heterogeneous_route: None,
+            prepared_effect_route: None,
             frame_seed: 0,
         })
         .collect::<Vec<_>>();
@@ -19502,7 +19520,7 @@ fn ticketless_gpu_inputs_retain_physical_residency_without_current_protection() 
         blend_mode: BlendMode::Normal,
         transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
         effect_graph: mondrian_effects::identity_compiled_effect_graph().expect("identity"),
-        prepared_heterogeneous_route: None,
+        prepared_effect_route: None,
         frame_seed: 0,
     }];
     let gpu_guards = resolved_preview_media_residency(&elements);
@@ -20776,7 +20794,7 @@ fn openfx_unit_media_original_decode_reaches_native_before_preview_downscale() {
                 resolved.plan.elements.as_slice(),
                 [
                     crate::app::preview_viewer_plan::ResolvedPreviewElement::Media {
-                        prepared_heterogeneous_route: None,
+                        prepared_effect_route: None,
                         ..
                     }
                 ]

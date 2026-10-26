@@ -29,10 +29,20 @@ pub enum PreparedTimelinePreviewEffectRoute {
     /// The complete graph has one prepared CPU-F32 prefix and GPU-F32 suffix.
     Heterogeneous(PreparedHeterogeneousEffectRoute),
     /// The graph requires the complete CPU compositor path.
-    Cpu,
+    Cpu {
+        processor_input: Option<Arc<crate::PreparedTimelineClipInputPlan>>,
+    },
 }
 
 impl PreparedTimelinePreviewEffectRoute {
+    pub fn processor_input_plan(&self) -> Option<&Arc<crate::PreparedTimelineClipInputPlan>> {
+        match self {
+            Self::Gpu => None,
+            Self::Cpu { processor_input } => processor_input.as_ref(),
+            Self::Heterogeneous(route) => route.clip_input_plan(),
+        }
+    }
+
     /// Whether source materialization must provide a CPU working-linear frame.
     pub const fn requires_cpu_working_frame(&self) -> bool {
         !matches!(self, Self::Gpu)
@@ -42,7 +52,7 @@ impl PreparedTimelinePreviewEffectRoute {
     pub const fn heterogeneous(&self) -> Option<&PreparedHeterogeneousEffectRoute> {
         match self {
             Self::Heterogeneous(route) => Some(route),
-            Self::Gpu | Self::Cpu => None,
+            Self::Gpu | Self::Cpu { .. } => None,
         }
     }
 }
@@ -51,6 +61,8 @@ impl PreparedTimelinePreviewEffectRoute {
 struct PreparedTimelinePreviewEffectRouteEntry {
     placement: TimelineClipExecutionRef,
     graph_fingerprint: [u8; 32],
+    source: TimelinePreviewEffectSource,
+    requires_input_service: bool,
     route: PreparedTimelinePreviewEffectRoute,
 }
 
@@ -95,6 +107,36 @@ pub struct PreparedTimelinePreviewEffectRoutes {
 }
 
 impl PreparedTimelinePreviewEffectRoutes {
+    /// Carry original Clip input semantics through the route's actual CPU job.
+    /// Scheduling authority is supplied only when that job starts.
+    pub fn bind_clip_processor_inputs(
+        mut self,
+        program: &Arc<crate::PreparedVisualProgram>,
+        owner: &crate::TimelineFrameExecutionRequest,
+    ) -> Result<Self, TimelinePreviewEffectRouteError> {
+        for entry in Arc::make_mut(&mut self.entries) {
+            if !entry.requires_input_service
+                || entry.source == TimelinePreviewEffectSource::CompositedAccumulator
+            {
+                continue;
+            }
+            let plan = Arc::new(
+                program
+                    .clip_processor_input_plan(entry.placement, owner)
+                    .map_err(TimelinePreviewEffectRouteError::ProcessorInput)?,
+            );
+            match &mut entry.route {
+                PreparedTimelinePreviewEffectRoute::Heterogeneous(route) => {
+                    route.bind_clip_input(plan)
+                }
+                PreparedTimelinePreviewEffectRoute::Cpu { processor_input } => {
+                    *processor_input = Some(plan)
+                }
+                PreparedTimelinePreviewEffectRoute::Gpu => {}
+            }
+        }
+        Ok(self)
+    }
     /// Prepare every current-frame graph route under exact source rasters and
     /// one heterogeneous graph-planning grant.
     ///
@@ -122,7 +164,7 @@ impl PreparedTimelinePreviewEffectRoutes {
                 // A Full media raster is independent of the node canvas. The current
                 // heterogeneous ledger is sized to that canvas, so keep the complete
                 // graph on the existing source-before-composite CPU route.
-                PreparedTimelinePreviewEffectRoute::Cpu
+                PreparedTimelinePreviewEffectRoute::Cpu { processor_input: None }
             } else if scratch.get_or_lower_effect_gpu_plan(graph).is_ok() {
                 PreparedTimelinePreviewEffectRoute::Gpu
             } else if let Some(extent) =
@@ -134,13 +176,15 @@ impl PreparedTimelinePreviewEffectRoutes {
                     heterogeneous_budget,
                 )
                 .map(PreparedTimelinePreviewEffectRoute::Heterogeneous)
-                .unwrap_or(PreparedTimelinePreviewEffectRoute::Cpu)
+                .unwrap_or(PreparedTimelinePreviewEffectRoute::Cpu { processor_input: None })
             } else {
-                PreparedTimelinePreviewEffectRoute::Cpu
+                PreparedTimelinePreviewEffectRoute::Cpu { processor_input: None }
             };
             entries.push(PreparedTimelinePreviewEffectRouteEntry {
                 placement,
                 graph_fingerprint: graph.semantic_fingerprint(),
+                source,
+                requires_input_service: graph.requires_processor_input_service(),
                 route,
             });
             Ok(())
@@ -154,14 +198,14 @@ impl PreparedTimelinePreviewEffectRoutes {
             || self
                 .entries
                 .iter()
-                .all(|entry| !matches!(entry.route, PreparedTimelinePreviewEffectRoute::Cpu))
+                .all(|entry| !matches!(entry.route, PreparedTimelinePreviewEffectRoute::Cpu { .. }))
         {
             return Ok(());
         }
         let viewer_blocked_placements = self
             .entries
             .iter()
-            .filter(|entry| matches!(entry.route, PreparedTimelinePreviewEffectRoute::Cpu))
+            .filter(|entry| matches!(entry.route, PreparedTimelinePreviewEffectRoute::Cpu { .. }))
             .count();
         let Some(cpu_blocker) = &self.cpu_compositor_blocker else {
             return Ok(());
@@ -191,6 +235,23 @@ impl PreparedTimelinePreviewEffectRoutes {
         placement: TimelineClipExecutionRef,
         graph: &CompiledEffectGraph,
     ) -> Result<&PreparedTimelinePreviewEffectRoute, TimelinePreviewEffectRouteError> {
+        self.entry_for(placement, graph).map(|entry| &entry.route)
+    }
+
+    pub fn processor_input_plan_for(
+        &self,
+        placement: TimelineClipExecutionRef,
+        graph: &CompiledEffectGraph,
+    ) -> Result<Option<&Arc<crate::PreparedTimelineClipInputPlan>>, TimelinePreviewEffectRouteError>
+    {
+        self.entry_for(placement, graph).map(|entry| entry.route.processor_input_plan())
+    }
+
+    fn entry_for(
+        &self,
+        placement: TimelineClipExecutionRef,
+        graph: &CompiledEffectGraph,
+    ) -> Result<&PreparedTimelinePreviewEffectRouteEntry, TimelinePreviewEffectRouteError> {
         let entry = self
             .entries
             .iter()
@@ -200,13 +261,16 @@ impl PreparedTimelinePreviewEffectRoutes {
         if entry.graph_fingerprint != actual {
             return Err(TimelinePreviewEffectRouteError::GraphIdentityChanged { placement });
         }
-        Ok(&entry.route)
+        Ok(entry)
     }
 }
 
 /// Fail-closed route-ledger validation error.
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum TimelinePreviewEffectRouteError {
+    /// Clip input semantics did not belong to this frame's original program.
+    #[error("Timeline processor input binding failed: {0}")]
+    ProcessorInput(crate::TimelineTemporalPreparationError),
     /// Full-source temporal ROI coordinates have no producer in this slice.
     #[error("Unit-scale temporal source materialization is unsupported for {placement:?}")]
     UnitScaleTemporalUnsupported {
@@ -372,7 +436,7 @@ mod source_materialization_tests {
         };
         assert!(matches!(
             routes.route_for(layer.placement, &layer.effect_graph).unwrap(),
-            PreparedTimelinePreviewEffectRoute::Cpu
+            PreparedTimelinePreviewEffectRoute::Cpu { .. }
         ));
         probe.assert_untouched();
     }

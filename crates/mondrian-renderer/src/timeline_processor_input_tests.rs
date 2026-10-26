@@ -100,6 +100,106 @@ fn input_scene_request(time: TimelineTime) -> EffectTemporalExecutionRequest {
     .with_output_frame_seed(i64::MIN) // Caller cannot choose a second seed authority.
 }
 
+#[test]
+fn cpu_job_input_plan_rebinds_authority_without_losing_original_evaluation_grid() {
+    let (sequence, _) = processor_input_scene(ClipContent::Media {
+        asset_id: AssetId::new(),
+        interpretation: Default::default(),
+    });
+    let program = Arc::new(PreparedVisualProgram::prepare(&sequence).unwrap());
+    let plan = input_scene_plan(&program);
+    let (placement, _, _) = input_scene_binding(&plan);
+    let extent = EffectFrameExtent::new(1, 1);
+    let old = ExecutionCancellationToken::new();
+    let owner = TimelineFrameExecutionRequest::new(
+        crate::TimelineEvaluationRequest::export(FramePosition::new(96, Rational::new(1, 48))),
+        7,
+        EffectExecutionContinuity::Continuous,
+        extent,
+        extent.full_frame_roi(),
+        old.clone(),
+    );
+    let source_plan = program.clip_processor_input_plan(placement, &owner).unwrap();
+    old.cancel();
+    let actual = ExecutionCancellationToken::new();
+    let authority = TimelineFrameExecutionAuthority::new(
+        99,
+        EffectExecutionContinuity::Discontinuous,
+        actual.clone(),
+    );
+    let rebound = source_plan.bind(&authority);
+    assert_eq!(rebound.evaluation().position, owner.evaluation().position);
+    assert_eq!(rebound.evaluation().intent, owner.evaluation().intent);
+    assert_eq!(rebound.frame_extent(), extent);
+    assert_eq!(rebound.output_roi(), extent.full_frame_roi());
+    assert_eq!(rebound.generation(), 99);
+    assert_eq!(
+        rebound.continuity(),
+        EffectExecutionContinuity::Discontinuous
+    );
+    assert!(!rebound.cancellation().is_canceled());
+    actual.cancel();
+    assert!(rebound.cancellation().is_canceled());
+}
+
+#[test]
+fn cpu_job_available_sources_never_substitute_current_media_for_missing_history() {
+    let (sequence, _) = processor_input_scene(ClipContent::Media {
+        asset_id: AssetId::new(),
+        interpretation: Default::default(),
+    });
+    let program = Arc::new(PreparedVisualProgram::prepare(&sequence).unwrap());
+    let plan = input_scene_plan(&program);
+    let (placement, graph, node) = input_scene_binding(&plan);
+    let extent = EffectFrameExtent::new(1, 1);
+    let owner = TimelineFrameExecutionRequest::new(
+        crate::TimelineEvaluationRequest::export(FramePosition::new(48, Rational::new(1, 24))),
+        89,
+        EffectExecutionContinuity::Continuous,
+        extent,
+        extent.full_frame_roi(),
+        ExecutionCancellationToken::new(),
+    );
+    let source_plan = program.clip_processor_input_plan(placement, &owner).unwrap();
+    let batch = program
+        .prepare_clip_processor_input(
+            placement,
+            graph,
+            node,
+            &input_scene_request(TimelineTime::ZERO),
+        )
+        .unwrap();
+    let current = crate::CpuColorFrame::working(mondrian_core::WorkingRgbaF32Frame {
+        width: 1,
+        height: 1,
+        sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
+        color_space: mondrian_core::WorkingColorSpace::LinearRec709,
+        alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
+        data: vec![[0.75, 0.0, 0.0, 1.0]],
+    });
+    let mut admissions = 0;
+    let result = source_plan.prepare_available_sources(
+        &batch,
+        Some(&current),
+        mondrian_core::WorkingColorSpace::LinearRec709,
+        &mut |_| {
+            admissions += 1;
+            Ok(())
+        },
+        &mut mondrian_effects::EffectProcessorControl::uncancelled(),
+    );
+    assert!(matches!(
+        result,
+        Err(EffectTemporalExecutionError::CustomProcessor(
+            mondrian_effects::EffectExecutionError::InputUnavailable { .. }
+        ))
+    ));
+    assert_eq!(
+        admissions, 0,
+        "the complete source set is checked before tile allocation"
+    );
+}
+
 use mondrian_timeline::{Clip, Sequence, Track};
 use std::sync::atomic::{AtomicU64, Ordering};
 

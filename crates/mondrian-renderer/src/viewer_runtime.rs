@@ -3341,6 +3341,8 @@ mod tests {
                         transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
                         effect_graph: Arc::clone(&graph),
                         frame_seed: 0,
+
+                        processor_input_plan: None,
                     },
                     effect_plan: Arc::clone(&effect_plan),
                 },
@@ -4698,6 +4700,8 @@ mod tests {
                     transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
                     effect_graph: Arc::new(graph),
                     frame_seed: 11,
+
+                    processor_input_plan: None,
                 },
                 effect_plan,
             }));
@@ -4774,6 +4778,8 @@ mod tests {
                     transform: [0.75, 0.0, 0.125, 0.0, 0.75, 0.125],
                     effect_graph: Arc::clone(&graph),
                     frame_seed: 0,
+
+                    processor_input_plan: None,
                 },
                 effect_plan,
             }));
@@ -4853,6 +4859,8 @@ mod tests {
                         transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
                         effect_graph: Arc::clone(&graph),
                         frame_seed,
+
+                        processor_input_plan: None,
                     },
                     effect_plan: Arc::clone(&effect_plan),
                 },
@@ -5295,6 +5303,8 @@ mod tests {
                     transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
                     effect_graph: Arc::clone(&scene_graph),
                     frame_seed: 0,
+
+                    processor_input_plan: None,
                 },
                 effect_plan: scene_plan,
             })),

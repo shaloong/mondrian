@@ -339,11 +339,32 @@ result-cache budget and reuses the completed evaluation. This qualifies that
 finite source-wait path, not native plugin CPU-job service binding, ordered
 stateful continuity, allocation/RT performance or third-party Temporal support.
 
-Next bind the borrowed Clip service at the actual Preview/Export consumer,
-resolving its existing demand batches through the original scheduler/decoder
-and shared bank. The Control entry is ready, but actual jobs still need the
-original program/placement and source-service binding. Do not retain a capability
-in the factory or reintroduce another Session.
+The Preview CPU-job integration separates reusable semantic Clip input plans
+from actual-job generation, continuity and cancellation. Prepared routes carry
+the original program, placement, evaluation grid and raster contract. Ordinary
+CPU fallback and Broker CPU-prefix execution bind that plan only while the
+original Control exclusively lends its service; checkpoint, sticky stop,
+feedback and outer context survive the loan and unwind. No factory retains its
+own program, source service or another Session.
+
+Factories explicitly declare additional-input use. That declaration is frozen,
+included in complete/subtree identity and checked against later provider drift.
+Such output is uncacheable until complete dynamic dependencies can be proven;
+ordinary current-frame callbacks retain their existing policy. The initial
+materializer serves canonical procedural Solid samples and an already-admitted
+current image only when its exact source sample, raster, sampling and working
+identity match (including valid freeze/rate aliases). Missing history is explicit,
+never current-frame substitution. Finite Rust Solid fixtures qualify actual
+ordinary CPU and Broker-prefix workers, upstream pixels, retired-token isolation,
+cancellation and owner release. Complete Effects/Renderer/Export/App library
+gates and six existing native OFX regressions pass on Windows validation builds.
+These results do not qualify native Timeline Temporal, successful current-media
+or transition fetches, GPU completion, RT, release performance or other platforms.
+
+Next resolve asynchronous historical media through the original scheduler and
+readiness phases, bind Export and nested-child consumers, and cover title/stack
+input semantics. The current
+materializer copies admitted data and cannot reenter color preparation or DSP.
 
 Preserve placement through the execution boundary: resolved composition layers
 do not suffice to recover it from EffectId. Preview source resolution may return

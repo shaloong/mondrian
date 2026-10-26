@@ -52,6 +52,8 @@ fn media<'a>(frame: &'a CpuColorFrame, opacity: f32) -> TimelineCompositeElement
         transform: IDENTITY,
         effect_graph: identity_graph(),
         frame_seed: 0,
+
+        processor_input_plan: None,
     })
 }
 

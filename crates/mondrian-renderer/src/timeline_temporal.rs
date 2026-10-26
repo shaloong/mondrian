@@ -40,7 +40,7 @@ pub struct TimelineTemporalSourceDemand {
 }
 
 /// Closed source algebra admitted by the bounded temporal production contract.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum TimelineTemporalSource {
     /// File-backed media at one exact interpreted decode target.
     Media {
@@ -105,11 +105,39 @@ pub struct PreparedTimelineFrameExecution {
 #[derive(Debug, Clone)]
 pub struct TimelineFrameExecutionRequest {
     evaluation: crate::TimelineEvaluationRequest,
-    generation: u64,
-    continuity: EffectExecutionContinuity,
+    authority: TimelineFrameExecutionAuthority,
     frame_extent: EffectFrameExtent,
     output_roi: EffectPixelRoi,
+}
+
+/// One actual job's authority, separate from reusable semantic frame plans.
+/// Replacing this value starts a new attempt; it never resumes an old wait.
+#[derive(Debug, Clone)]
+pub struct TimelineFrameExecutionAuthority {
+    generation: u64,
+    continuity: EffectExecutionContinuity,
     cancellation: ExecutionCancellationToken,
+}
+
+impl TimelineFrameExecutionAuthority {
+    /// Bind the actual scheduler generation, continuity and cancellation scope.
+    pub fn new(
+        generation: u64,
+        continuity: EffectExecutionContinuity,
+        cancellation: ExecutionCancellationToken,
+    ) -> Self {
+        Self { generation, continuity, cancellation }
+    }
+
+    pub const fn generation(&self) -> u64 {
+        self.generation
+    }
+    pub const fn continuity(&self) -> EffectExecutionContinuity {
+        self.continuity
+    }
+    pub const fn cancellation(&self) -> &ExecutionCancellationToken {
+        &self.cancellation
+    }
 }
 
 impl TimelineFrameExecutionRequest {
@@ -125,11 +153,9 @@ impl TimelineFrameExecutionRequest {
     ) -> Self {
         Self {
             evaluation,
-            generation,
-            continuity,
+            authority: TimelineFrameExecutionAuthority::new(generation, continuity, cancellation),
             frame_extent,
             output_roi,
-            cancellation,
         }
     }
 
@@ -140,12 +166,12 @@ impl TimelineFrameExecutionRequest {
 
     /// Scheduler generation owning all prepared and executed work.
     pub const fn generation(&self) -> u64 {
-        self.generation
+        self.authority.generation()
     }
 
     /// Continuity evidence supplied by the scheduler.
     pub const fn continuity(&self) -> EffectExecutionContinuity {
-        self.continuity
+        self.authority.continuity()
     }
 
     /// Complete output frame coordinates.
@@ -160,7 +186,271 @@ impl TimelineFrameExecutionRequest {
 
     /// Monotonic cancellation authority for this generation.
     pub const fn cancellation(&self) -> &ExecutionCancellationToken {
-        &self.cancellation
+        self.authority.cancellation()
+    }
+}
+
+/// Immutable Clip input semantics carried through a resolved frame and into
+/// its actual CPU job. It owns no retired generation's cancellation token.
+#[derive(Debug, Clone)]
+pub struct PreparedTimelineClipInputPlan {
+    program: Arc<PreparedVisualProgram>,
+    placement: TimelineClipExecutionRef,
+    evaluation: crate::TimelineEvaluationRequest,
+    frame_extent: EffectFrameExtent,
+    output_roi: EffectPixelRoi,
+}
+
+type TimelineProcessorSourceResolver<'a> = dyn FnMut(
+        &PreparedTimelineClipInputPlan,
+        &TimelineTemporalDemandBatch,
+        Option<&crate::CpuColorFrame>,
+        mondrian_core::WorkingColorSpace,
+        &mut dyn FnMut(usize) -> Result<(), EffectTemporalExecutionError>,
+        &mut mondrian_effects::EffectProcessorControl<'_>,
+    ) -> Result<PreparedTemporalFrameSet, EffectTemporalExecutionError>
+    + 'a;
+
+/// One CPU job's source-materialization seam. Semantic plans may be reused;
+/// this authority and callback live only for the actual dispatched operation.
+pub struct TimelineProcessorInputExecution<'a> {
+    authority: TimelineFrameExecutionAuthority,
+    resolve: &'a mut TimelineProcessorSourceResolver<'a>,
+}
+
+impl<'a> TimelineProcessorInputExecution<'a> {
+    pub fn new(
+        authority: TimelineFrameExecutionAuthority,
+        resolve: &'a mut TimelineProcessorSourceResolver<'a>,
+    ) -> Self {
+        Self { authority, resolve }
+    }
+
+    pub const fn authority(&self) -> &TimelineFrameExecutionAuthority {
+        &self.authority
+    }
+
+    pub(crate) fn with_clip_inputs<T>(
+        &mut self,
+        plan: &PreparedTimelineClipInputPlan,
+        current: Option<&crate::CpuColorFrame>,
+        working_space: mondrian_core::WorkingColorSpace,
+        control: &mut mondrian_effects::EffectProcessorControl<'_>,
+        run: impl FnOnce(&mut mondrian_effects::EffectProcessorControl<'_>) -> T,
+    ) -> Result<T, TimelineTemporalPreparationError> {
+        let resolve = &mut self.resolve;
+        let mut fetch =
+            |batch: &TimelineTemporalDemandBatch,
+             admit: &mut dyn FnMut(usize) -> Result<(), EffectTemporalExecutionError>,
+             control: &mut mondrian_effects::EffectProcessorControl<'_>| {
+                resolve(plan, batch, current, working_space, admit, control)
+            };
+        plan.with_input_service(&self.authority, &mut fetch, control, run)
+    }
+}
+
+impl PreparedTimelineClipInputPlan {
+    pub const fn placement(&self) -> TimelineClipExecutionRef {
+        self.placement
+    }
+
+    /// Freeze sources already available to this CPU job. Procedural sources are
+    /// evaluated from the canonical program; file/nested images must match the
+    /// bound current source sample (including freeze/rate aliases). Missing history is never replaced by current
+    /// pixels. A consumer with asynchronous source jobs supplies its own resolver.
+    pub fn prepare_available_sources(
+        &self,
+        batch: &TimelineTemporalDemandBatch,
+        current: Option<&crate::CpuColorFrame>,
+        working_space: mondrian_core::WorkingColorSpace,
+        admit: &mut dyn FnMut(usize) -> Result<(), EffectTemporalExecutionError>,
+        control: &mut mondrian_effects::EffectProcessorControl<'_>,
+    ) -> Result<PreparedTemporalFrameSet, EffectTemporalExecutionError> {
+        use sha2::{Digest, Sha256};
+        let unavailable = |reason: &str| -> EffectTemporalExecutionError {
+            mondrian_effects::EffectExecutionError::InputUnavailable { reason: reason.into() }
+                .into()
+        };
+        control.check().map_err(|_| EffectTemporalExecutionError::Canceled)?;
+        if batch.placement() != self.placement {
+            return Err(unavailable(
+                "source batch belongs to another Clip placement",
+            ));
+        }
+        let current_source = self
+            .program
+            .temporal_source_at(self.placement, self.placement.clip_time)
+            .map_err(|_| unavailable("Clip has no admitted source algebra"))?;
+        // Prove the whole raw-source set before allocating any of its tiles.
+        for demand in batch.source_demands() {
+            let expected_source = self
+                .program
+                .temporal_source_at(self.placement, demand.effect_request.time())
+                .map_err(|_| {
+                    unavailable("source demand cannot be mapped by the original program")
+                })?;
+            if expected_source != demand.source {
+                return Err(unavailable(
+                    "source demand does not belong to the original program",
+                ));
+            }
+            match demand.source {
+                TimelineTemporalSource::SolidColor { .. } => {}
+                TimelineTemporalSource::Media { .. }
+                | TimelineTemporalSource::NestedSequence { .. } => {
+                    if demand.source != current_source {
+                        return Err(unavailable(
+                            "historical image requires the original source scheduler",
+                        ));
+                    }
+                    let frame =
+                        current.ok_or_else(|| unavailable("current Clip source is unavailable"))?;
+                    let payload = frame.rgba_f32();
+                    let extent = demand.effect_request.frame_extent();
+                    if payload.width != extent.width()
+                        || payload.height != extent.height()
+                        || payload.sampling != demand.effect_request.sampling()
+                        || payload.color_space != working_space
+                    {
+                        return Err(unavailable(
+                            "current Clip source shape, sampling or color differs from the demand",
+                        ));
+                    }
+                }
+            }
+        }
+        admit(batch.effect_demands().coverage_bytes())?;
+        let mut identity = Sha256::new();
+        identity.update(b"mondrian.timeline.available-processor-input.v1");
+        identity.update(
+            serde_json::to_vec(&working_space)
+                .map_err(|_| unavailable("source working-space identity is not representable"))?,
+        );
+        let mut tiles = Vec::with_capacity(batch.source_demands().len());
+        for demand in batch.source_demands() {
+            let request = demand.effect_request;
+            let roi = request.input_roi().region();
+            let extent = request.frame_extent();
+            let frame_seed = self
+                .program
+                .temporal_frame_seed_on_grid(
+                    self.placement,
+                    request.time(),
+                    self.evaluation.position.time_base,
+                )
+                .map_err(|_| unavailable("source seed is outside the original evaluation grid"))?;
+            for value in [
+                request.time().numerator(),
+                request.time().denominator(),
+                frame_seed,
+            ] {
+                identity.update(value.to_le_bytes());
+            }
+            for value in [
+                extent.width(),
+                extent.height(),
+                roi.x(),
+                roi.y(),
+                roi.width(),
+                roi.height(),
+                request.sampling().sample_aspect_ratio().numerator(),
+                request.sampling().sample_aspect_ratio().denominator(),
+            ] {
+                identity.update(value.to_le_bytes());
+            }
+            for rate in request.sampling().render_scale() {
+                identity.update(rate.num.to_le_bytes());
+                identity.update(rate.den.to_le_bytes());
+            }
+            let count = (roi.width() as usize)
+                .checked_mul(roi.height() as usize)
+                .ok_or_else(|| unavailable("source ROI storage overflowed"))?;
+            let mut pixels = Vec::with_capacity(count);
+            for y in roi.y()..roi.y() + roi.height() {
+                for x in roi.x()..roi.x() + roi.width() {
+                    if pixels.len() % 4096 == 0 {
+                        control.check().map_err(|_| EffectTemporalExecutionError::Canceled)?;
+                    }
+                    let pixel = match demand.source {
+                        TimelineTemporalSource::SolidColor { color } => {
+                            [color.r, color.g, color.b, color.a]
+                        }
+                        TimelineTemporalSource::Media { .. }
+                        | TimelineTemporalSource::NestedSequence { .. } => {
+                            let frame = current.expect("validated current source").rgba_f32();
+                            let sample = frame
+                                .data
+                                .get(y as usize * frame.width as usize + x as usize)
+                                .ok_or_else(|| {
+                                    unavailable("source ROI exceeds the bound current image")
+                                })?;
+                            mondrian_effects::convert_alpha_sample(
+                                *sample,
+                                frame.alpha,
+                                mondrian_core::ColorFrameAlpha::StraightCoverage,
+                            )?
+                        }
+                    };
+                    for value in pixel {
+                        identity.update(value.to_bits().to_le_bytes());
+                    }
+                    pixels.push(pixel);
+                }
+            }
+            tiles.push((
+                request,
+                mondrian_effects::EffectFrameTileF32::new(
+                    request.time(),
+                    extent,
+                    request.sampling(),
+                    roi,
+                    frame_seed,
+                    pixels,
+                )?,
+            ));
+        }
+        control.check().map_err(|_| EffectTemporalExecutionError::Canceled)?;
+        PreparedTemporalFrameSet::prepare(
+            mondrian_effects::EffectTemporalSourceIdentity::from_complete_semantic_fingerprint(
+                identity.finalize().into(),
+            ),
+            batch.effect_demands().clone(),
+            tiles,
+        )
+        .map_err(|error| unavailable(&format!("source frame-set validation failed: {error}")))
+    }
+
+    /// Bind the unchanged semantic request to this actual job, once before DSP.
+    pub fn bind(
+        &self,
+        authority: &TimelineFrameExecutionAuthority,
+    ) -> TimelineFrameExecutionRequest {
+        TimelineFrameExecutionRequest {
+            evaluation: self.evaluation,
+            authority: authority.clone(),
+            frame_extent: self.frame_extent,
+            output_roi: self.output_roi,
+        }
+    }
+
+    /// Loan only this placement's original program to the current Control.
+    pub fn with_input_service<T, R>(
+        &self,
+        authority: &TimelineFrameExecutionAuthority,
+        resolve: &mut R,
+        control: &mut mondrian_effects::EffectProcessorControl<'_>,
+        run: impl FnOnce(&mut mondrian_effects::EffectProcessorControl<'_>) -> T,
+    ) -> Result<T, TimelineTemporalPreparationError>
+    where
+        R: FnMut(
+            &TimelineTemporalDemandBatch,
+            &mut dyn FnMut(usize) -> Result<(), EffectTemporalExecutionError>,
+            &mut mondrian_effects::EffectProcessorControl<'_>,
+        ) -> Result<PreparedTemporalFrameSet, EffectTemporalExecutionError>,
+    {
+        let owner = self.bind(authority);
+        let mut service = self.program.clip_processor_inputs(self.placement, &owner, resolve)?;
+        Ok(control.with_borrowed_input_service(&mut service, run))
     }
 }
 
@@ -261,6 +551,22 @@ impl TimelineTemporalDemandBatch {
 }
 
 impl PreparedVisualProgram {
+    /// Freeze Clip input semantics without pinning a completed attempt's token.
+    pub fn clip_processor_input_plan(
+        self: &Arc<Self>,
+        placement: TimelineClipExecutionRef,
+        owner: &TimelineFrameExecutionRequest,
+    ) -> Result<PreparedTimelineClipInputPlan, TimelineTemporalPreparationError> {
+        self.validate_clip_input_owner(placement, owner)?;
+        Ok(PreparedTimelineClipInputPlan {
+            program: Arc::clone(self),
+            placement,
+            evaluation: *owner.evaluation(),
+            frame_extent: owner.frame_extent(),
+            output_roi: owner.output_roi(),
+        })
+    }
+
     /// Borrow the original Clip and scheduler attempt for processor Source
     /// requests. Materialization must use the consumer's existing source jobs,
     /// obtain `admit` before source backing allocation, and return frozen tiles.
@@ -283,6 +589,15 @@ impl PreparedVisualProgram {
             ) -> Result<PreparedTemporalFrameSet, EffectTemporalExecutionError>
             + 'a,
     {
+        self.validate_clip_input_owner(placement, owner)?;
+        Ok(ClipProcessorInputs { program: self, placement, owner, resolve })
+    }
+
+    fn validate_clip_input_owner(
+        &self,
+        placement: TimelineClipExecutionRef,
+        owner: &TimelineFrameExecutionRequest,
+    ) -> Result<(), TimelineTemporalPreparationError> {
         let sampling_error = |e: MondrianError| TimelineTemporalPreparationError::SourceSampling {
             clip_id: placement.clip_id,
             reason: e.to_string(),
@@ -303,7 +618,7 @@ impl PreparedVisualProgram {
                     .into(),
             });
         }
-        Ok(ClipProcessorInputs { program: self, placement, owner, resolve })
+        Ok(())
     }
 
     /// Prepare a concrete processor's entering value at exact Clip author time.

@@ -19,12 +19,11 @@ use mondrian_renderer::{
         MonitorColorModule, ProgramOutputBoundary, ProgramOutputBoundaryError, ProgramOutputModule,
         ProgramOutputRole, RenderColorStageDiagnostics,
     },
-    composite_timeline_elements_color_frame_with_diagnostics, CpuColorFrame,
-    RenderColorTransformDiagnostics, RenderColorTransformError, RenderMonitorAdaptationError,
-    TimelineAdjustmentLayer, TimelineCompositeDiagnostics, TimelineCompositeElement,
-    TimelineCompositeError, TimelineCompositeOptions, TimelineCompositeScratch,
-    TimelineCrossDissolveLayer, TimelineEffectColorRuntime, TimelineMediaLayer,
-    TimelineSolidColorLayer, TimelineTransitionInput,
+    CpuColorFrame, RenderColorTransformDiagnostics, RenderColorTransformError,
+    RenderMonitorAdaptationError, TimelineAdjustmentLayer, TimelineCompositeDiagnostics,
+    TimelineCompositeElement, TimelineCompositeError, TimelineCompositeOptions,
+    TimelineCompositeScratch, TimelineCrossDissolveLayer, TimelineEffectColorRuntime,
+    TimelineMediaLayer, TimelineSolidColorLayer, TimelineTransitionInput,
 };
 use mondrian_timeline::sequence::ProgramColorContext;
 
@@ -130,6 +129,7 @@ fn timeline_composite_is_blocked(error: &TimelineCompositeError) -> bool {
                 | EffectExecutionError::CustomProcessorUnavailable { .. }
                 | EffectExecutionError::ProcessorUserBlocked { .. }
                 | EffectExecutionError::ImageScaleNotAdmitted { .. }
+                | EffectExecutionError::InputUnavailable { .. }
         ),
         TimelineCompositeError::FloatEffect {
             reason: EffectFloatExecutionError::UnsupportedNode { reason, .. },
@@ -147,6 +147,7 @@ fn timeline_composite_is_blocked(error: &TimelineCompositeError) -> bool {
             EffectExecutionError::CustomProcessorUnavailable { .. }
                 | EffectExecutionError::ProcessorUserBlocked { .. }
                 | EffectExecutionError::ImageScaleNotAdmitted { .. }
+                | EffectExecutionError::InputUnavailable { .. }
         ),
         TimelineCompositeError::FloatEffect {
             reason: EffectFloatExecutionError::MaskRasterFailed { .. },
@@ -208,6 +209,7 @@ enum PreviewWorkingElement {
         transform: [f32; 6],
         effect_graph: Arc<CompiledEffectGraph>,
         frame_seed: i64,
+        processor_input_plan: Option<Arc<mondrian_renderer::PreparedTimelineClipInputPlan>>,
     },
     CrossDissolve {
         left: PreviewWorkingTransitionInput,
@@ -226,6 +228,7 @@ enum PreviewWorkingTransitionInput {
         transform: [f32; 6],
         effect_graph: Arc<CompiledEffectGraph>,
         frame_seed: i64,
+        processor_input_plan: Option<Arc<mondrian_renderer::PreparedTimelineClipInputPlan>>,
     },
 }
 
@@ -248,6 +251,28 @@ pub(crate) fn composite_resolved_preview_working(
     sampling: mondrian_core::ImageSampling,
     scratch: &mut TimelineCompositeScratch,
     control: &mut mondrian_effects::EffectProcessorControl<'_>,
+) -> Result<PreviewWorkingCompositeOutput, PreviewCpuExecutionError> {
+    composite_resolved_preview_working_with_inputs(
+        width,
+        height,
+        resolved,
+        color_context,
+        sampling,
+        scratch,
+        control,
+        None,
+    )
+}
+
+pub(crate) fn composite_resolved_preview_working_with_inputs(
+    width: u32,
+    height: u32,
+    resolved: &[ResolvedPreviewElement],
+    color_context: &ProgramColorContext,
+    sampling: mondrian_core::ImageSampling,
+    scratch: &mut TimelineCompositeScratch,
+    control: &mut mondrian_effects::EffectProcessorControl<'_>,
+    inputs: Option<&mut mondrian_renderer::TimelineProcessorInputExecution<'_>>,
 ) -> Result<PreviewWorkingCompositeOutput, PreviewCpuExecutionError> {
     preview_processor_checkpoint(control)?;
     let working_prepare_started_at = Instant::now();
@@ -275,6 +300,7 @@ pub(crate) fn composite_resolved_preview_working(
                 transform,
                 effect_graph,
                 frame_seed,
+                prepared_effect_route,
                 ..
             } => {
                 let working = frame.working_frame_with_session(scratch.color_execution_mut())?;
@@ -291,6 +317,10 @@ pub(crate) fn composite_resolved_preview_working(
                     transform: *transform,
                     effect_graph: Arc::clone(effect_graph),
                     frame_seed: *frame_seed,
+                    processor_input_plan: prepared_effect_route
+                        .as_ref()
+                        .and_then(|route| route.processor_input_plan())
+                        .cloned(),
                 });
             }
             ResolvedPreviewElement::CrossDissolve { left, right, progress } => {
@@ -333,6 +363,7 @@ pub(crate) fn composite_resolved_preview_working(
                 transform,
                 effect_graph,
                 frame_seed,
+                processor_input_plan,
             } => TimelineCompositeElement::Media(TimelineMediaLayer {
                 frame: &working_frames[*frame_index],
                 opacity: *opacity,
@@ -340,6 +371,8 @@ pub(crate) fn composite_resolved_preview_working(
                 transform: *transform,
                 effect_graph: Arc::clone(effect_graph),
                 frame_seed: *frame_seed,
+
+                processor_input_plan: processor_input_plan.clone(),
             }),
             PreviewWorkingElement::CrossDissolve { left, right, progress } => {
                 TimelineCompositeElement::CrossDissolve(TimelineCrossDissolveLayer {
@@ -352,7 +385,7 @@ pub(crate) fn composite_resolved_preview_working(
         .collect();
     let working_prepare_us = duration_us(working_prepare_started_at.elapsed());
     let cpu_composite_started_at = Instant::now();
-    let composite = composite_timeline_elements_color_frame_with_diagnostics(
+    let composite = mondrian_renderer::composite_timeline_elements_color_frame_with_inputs(
         width,
         height,
         &elements,
@@ -364,6 +397,7 @@ pub(crate) fn composite_resolved_preview_working(
         ),
         scratch,
         control,
+        inputs,
     )?;
     let cpu_composite_us = duration_us(cpu_composite_started_at.elapsed());
     Ok(PreviewWorkingCompositeOutput {
@@ -401,6 +435,7 @@ fn prepare_transition_input(
             transform,
             effect_graph,
             frame_seed,
+            prepared_effect_route,
             ..
         } => {
             let working = frame.working_frame_with_session(color_session)?;
@@ -417,6 +452,10 @@ fn prepare_transition_input(
                 transform: *transform,
                 effect_graph: Arc::clone(effect_graph),
                 frame_seed: *frame_seed,
+                processor_input_plan: prepared_effect_route
+                    .as_ref()
+                    .and_then(|route| route.processor_input_plan())
+                    .cloned(),
             }
         }
     })
@@ -438,6 +477,7 @@ fn lower_transition_input<'a>(
             transform,
             effect_graph,
             frame_seed,
+            processor_input_plan,
         } => TimelineTransitionInput::Media(TimelineMediaLayer {
             frame: &frames[*frame_index],
             opacity: *opacity,
@@ -445,6 +485,8 @@ fn lower_transition_input<'a>(
             transform: *transform,
             effect_graph: Arc::clone(effect_graph),
             frame_seed: *frame_seed,
+
+            processor_input_plan: processor_input_plan.clone(),
         }),
     }
 }

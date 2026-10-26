@@ -104,6 +104,9 @@ fn processor_host_error(
 }
 
 impl EffectFloatProcessorFactory for OpenFxProcessorFactory {
+    fn requires_input_service(&self) -> bool {
+        matches!(self.context, OpenFxContext::Filter)
+    }
     fn image_scale_requirement(&self) -> mondrian_effects::EffectImageScaleRequirement {
         mondrian_effects::EffectImageScaleRequirement::Unit
     }

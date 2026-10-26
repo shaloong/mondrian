@@ -36,6 +36,7 @@ pub struct PreparedHeterogeneousEffectRoute {
     graph_fingerprint: [u8; 32],
     budget: EffectGraphExecutionBudget,
     gpu_recording_requirements: HeterogeneousGpuRecordingRequirements,
+    clip_input: Option<Arc<crate::PreparedTimelineClipInputPlan>>,
 }
 
 impl PreparedHeterogeneousEffectRoute {
@@ -71,6 +72,7 @@ impl PreparedHeterogeneousEffectRoute {
             graph_fingerprint,
             budget,
             gpu_recording_requirements,
+            clip_input: None,
         })
     }
 
@@ -132,6 +134,14 @@ impl PreparedHeterogeneousEffectRoute {
     /// wgpu upload and physical recording residency known before CPU work.
     pub const fn gpu_recording_requirements(&self) -> HeterogeneousGpuRecordingRequirements {
         self.gpu_recording_requirements
+    }
+
+    pub(crate) fn clip_input_plan(&self) -> Option<&Arc<crate::PreparedTimelineClipInputPlan>> {
+        self.clip_input.as_ref()
+    }
+
+    pub(crate) fn bind_clip_input(&mut self, plan: Arc<crate::PreparedTimelineClipInputPlan>) {
+        self.clip_input = Some(plan);
     }
 
     fn work(&self) -> &PreparedHeterogeneousEffectWork {
@@ -507,6 +517,15 @@ pub enum HeterogeneousCpuPrefixFrameContractViolation {
 /// Request validation, route preparation, or controlled execution failure.
 #[derive(Debug, thiserror::Error)]
 pub enum HeterogeneousCpuPrefixBatchError {
+    /// The prepared Clip cannot borrow an input service for this job.
+    #[error("CPU batch item {address} input plan failed: {source}")]
+    InputPlan {
+        address: u32,
+        source: crate::TimelineTemporalPreparationError,
+    },
+    /// The whole task's existing and prospective feedback cannot be admitted.
+    #[error("CPU batch feedback admission failed: {0}")]
+    Feedback(mondrian_effects::EffectProcessorFeedbackError),
     /// Declared whole-batch feedback policy refused work before any DSP.
     #[error("CPU batch feedback occurrences {actual} exceed {limit}")]
     FeedbackCapacityExceeded {
@@ -607,6 +626,10 @@ pub struct HeterogeneousCpuPrefixBatchExecutor {
 }
 
 impl HeterogeneousCpuPrefixBatchExecutor {
+    /// Current owner observation; borrowing it cannot replace the bank.
+    pub fn processor_observation(&self) -> mondrian_effects::EffectProcessorObservation {
+        self.scratch.processor_observation()
+    }
     /// Reconcile closed generic native GUIs without executing a graph again.
     pub fn reconcile_processor_guis(&mut self) -> usize {
         self.scratch.reconcile_processor_guis()
@@ -629,49 +652,87 @@ impl HeterogeneousCpuPrefixBatchExecutor {
         generation: u64,
         mut checkpoint: impl FnMut() -> Option<HeterogeneousCpuExecutionStopReason>,
     ) -> Result<HeterogeneousCpuPrefixBatchOutput, HeterogeneousCpuPrefixBatchError> {
+        let mut poll = || checkpoint().map(processor_stop_reason);
+        let mut control = mondrian_effects::EffectProcessorControl::new(&mut poll);
+        control.bind_observation(self.scratch.processor_observation());
+        self.execute_with_control(request, generation, &mut control)
+    }
+
+    /// Execute the atomic batch using its actual task's Control. Source loans,
+    /// original observations, sticky stop and prior receipts survive every item.
+    pub fn execute_with_control(
+        &mut self,
+        request: HeterogeneousCpuPrefixBatchRequest,
+        generation: u64,
+        control: &mut mondrian_effects::EffectProcessorControl<'_>,
+    ) -> Result<HeterogeneousCpuPrefixBatchOutput, HeterogeneousCpuPrefixBatchError> {
+        self.execute_inner(request, generation, control, None)
+    }
+
+    /// Bind each original Clip plan to this actual job's authority and source
+    /// resolver. The resolver returns admitted source tiles only; the same bank
+    /// executes upstream DSP after the mutable service loan is restored.
+    pub fn execute_with_timeline_inputs(
+        &mut self,
+        request: HeterogeneousCpuPrefixBatchRequest,
+        inputs: &mut crate::TimelineProcessorInputExecution<'_>,
+        control: &mut mondrian_effects::EffectProcessorControl<'_>,
+    ) -> Result<HeterogeneousCpuPrefixBatchOutput, HeterogeneousCpuPrefixBatchError> {
+        self.execute_inner(
+            request,
+            inputs.authority().generation(),
+            control,
+            Some(inputs),
+        )
+    }
+
+    fn execute_inner(
+        &mut self,
+        request: HeterogeneousCpuPrefixBatchRequest,
+        generation: u64,
+        control: &mut mondrian_effects::EffectProcessorControl<'_>,
+        mut sources: Option<&mut crate::TimelineProcessorInputExecution<'_>>,
+    ) -> Result<HeterogeneousCpuPrefixBatchOutput, HeterogeneousCpuPrefixBatchError> {
         request.validate()?;
-        stop_if_requested(&mut checkpoint)?;
+        let mut feedback = mondrian_effects::EffectProcessorFeedbackRequirements::default();
+        for item in &request.items {
+            feedback.merge(
+                mondrian_effects::EffectProcessorFeedbackRequirements::for_compiled_graph(
+                    item.route.graph(),
+                ),
+            );
+        }
+        control
+            .admit_feedback_route(feedback)
+            .map_err(HeterogeneousCpuPrefixBatchError::Feedback)?;
+
+        stop_controlled(control)?;
         self.scratch.reconfigure_effect_execution(request.grant.effect_session);
         self.scratch.bind_effect_execution_generation(generation);
         let mut completions = Vec::with_capacity(request.items.len());
-        for item in request.items {
-            stop_if_requested(&mut checkpoint)?;
-            stop_if_requested(&mut checkpoint)?;
-            let completion_result = match item.source {
-                HeterogeneousCpuPrefixSource::WorkingFrame(input) => {
-                    self.scratch.execute_prepared_heterogeneous_cpu_prefix_with_checkpoint(
-                        item.route.work(),
-                        generation,
-                        mondrian_effects::EffectFloatFrameView::new(
-                            mondrian_effects::EffectFrameExtent::new(
-                                input.rgba_f32().width,
-                                input.rgba_f32().height,
-                            ),
-                            mondrian_effects::EffectValueFormat::new(
-                                mondrian_effects::EffectWorkingPrecision::Float32,
-                                mondrian_effects::EffectColorDomain::SceneLinearRgb,
-                                input.rgba_f32().alpha,
-                            ),
-                            input.rgba_f32().sampling,
-                            &input.rgba_f32().data,
-                        ),
-                        item.frame_seed,
+        for item in &request.items {
+            stop_controlled(control)?;
+            let completion_result = if let Some(inputs) = sources.as_deref_mut()
+                && let Some(plan) = &item.route.clip_input
+            {
+                let current = match &item.source {
+                    HeterogeneousCpuPrefixSource::WorkingFrame(frame) => Some(frame),
+                    HeterogeneousCpuPrefixSource::SolidColor { .. } => None,
+                };
+                inputs
+                    .with_clip_inputs(
+                        plan,
+                        current,
                         item.working_color_space,
-                        &mut checkpoint,
+                        control,
+                        |control| execute_batch_item(&mut self.scratch, item, generation, control),
                     )
-                }
-                HeterogeneousCpuPrefixSource::SolidColor { extent, sampling, color } => {
-                    self.scratch.execute_prepared_heterogeneous_solid_cpu_prefix_with_checkpoint(
-                        item.route.work(),
-                        generation,
-                        extent,
-                        sampling,
-                        color,
-                        item.frame_seed,
-                        item.working_color_space,
-                        &mut checkpoint,
-                    )
-                }
+                    .map_err(|source| HeterogeneousCpuPrefixBatchError::InputPlan {
+                        address: item.address,
+                        source,
+                    })?
+            } else {
+                execute_batch_item(&mut self.scratch, item, generation, control)
             };
             let completion = match completion_result {
                 Ok(completion) => completion,
@@ -685,7 +746,7 @@ impl HeterogeneousCpuPrefixBatchExecutor {
                     });
                 }
             };
-            stop_if_requested(&mut checkpoint)?;
+            stop_controlled(control)?;
             completions
                 .push(HeterogeneousCpuPrefixBatchCompletion { address: item.address, completion });
         }
@@ -693,13 +754,82 @@ impl HeterogeneousCpuPrefixBatchExecutor {
     }
 }
 
-fn stop_if_requested(
-    checkpoint: &mut impl FnMut() -> Option<HeterogeneousCpuExecutionStopReason>,
-) -> Result<(), HeterogeneousCpuPrefixBatchError> {
-    match checkpoint() {
-        Some(reason) => Err(HeterogeneousCpuPrefixBatchError::Stopped { reason }),
-        None => Ok(()),
+fn execute_batch_item(
+    scratch: &mut TimelineCompositeScratch,
+    item: &HeterogeneousCpuPrefixBatchItem,
+    generation: u64,
+    control: &mut mondrian_effects::EffectProcessorControl<'_>,
+) -> Result<PreparedHeterogeneousCpuCompletion, PreparedHeterogeneousEffectWorkError> {
+    match &item.source {
+        HeterogeneousCpuPrefixSource::WorkingFrame(input) => scratch
+            .execute_prepared_heterogeneous_cpu_prefix_with_control(
+                item.route.work(),
+                generation,
+                mondrian_effects::EffectFloatFrameView::new(
+                    mondrian_effects::EffectFrameExtent::new(
+                        input.rgba_f32().width,
+                        input.rgba_f32().height,
+                    ),
+                    mondrian_effects::EffectValueFormat::new(
+                        mondrian_effects::EffectWorkingPrecision::Float32,
+                        mondrian_effects::EffectColorDomain::SceneLinearRgb,
+                        input.rgba_f32().alpha,
+                    ),
+                    input.rgba_f32().sampling,
+                    &input.rgba_f32().data,
+                ),
+                item.frame_seed,
+                item.working_color_space,
+                control,
+            ),
+        HeterogeneousCpuPrefixSource::SolidColor { extent, sampling, color } => scratch
+            .execute_prepared_heterogeneous_solid_cpu_prefix_with_control(
+                item.route.work(),
+                generation,
+                *extent,
+                *sampling,
+                *color,
+                item.frame_seed,
+                item.working_color_space,
+                control,
+            ),
     }
+}
+
+pub(crate) fn processor_stop_reason(
+    reason: HeterogeneousCpuExecutionStopReason,
+) -> mondrian_effects::EffectProcessorStopReason {
+    match reason {
+        HeterogeneousCpuExecutionStopReason::Canceled => {
+            mondrian_effects::EffectProcessorStopReason::Canceled
+        }
+        HeterogeneousCpuExecutionStopReason::DeadlineExpired => {
+            mondrian_effects::EffectProcessorStopReason::DeadlineExpired
+        }
+    }
+}
+
+pub(crate) fn heterogeneous_stop_reason(
+    reason: mondrian_effects::EffectProcessorStopReason,
+) -> HeterogeneousCpuExecutionStopReason {
+    match reason {
+        mondrian_effects::EffectProcessorStopReason::Canceled => {
+            HeterogeneousCpuExecutionStopReason::Canceled
+        }
+        mondrian_effects::EffectProcessorStopReason::DeadlineExpired => {
+            HeterogeneousCpuExecutionStopReason::DeadlineExpired
+        }
+    }
+}
+
+fn stop_controlled(
+    control: &mut mondrian_effects::EffectProcessorControl<'_>,
+) -> Result<(), HeterogeneousCpuPrefixBatchError> {
+    control
+        .checkpoint()
+        .map_err(|reason| HeterogeneousCpuPrefixBatchError::Stopped {
+            reason: heterogeneous_stop_reason(reason),
+        })
 }
 
 fn validate_batch_request(

@@ -1458,6 +1458,8 @@ mod tests {
                     transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
                     effect_graph: Arc::clone(&graph),
                     frame_seed: seed,
+
+                    processor_input_plan: None,
                 },
                 effect_plan: Arc::clone(&effect_plan),
             }))

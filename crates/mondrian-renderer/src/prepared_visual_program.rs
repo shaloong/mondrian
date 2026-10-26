@@ -938,7 +938,7 @@ impl PreparedVisualProgram {
         Ok(effect_program)
     }
 
-    fn temporal_frame_seed_on_grid(
+    pub(crate) fn temporal_frame_seed_on_grid(
         &self,
         placement: TimelineClipExecutionRef,
         clip_time: TimelineTime,

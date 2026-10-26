@@ -30,6 +30,7 @@ pub(super) fn composite_transition_input_f32(
     runtime: TimelineEffectColorRuntime<'_>,
     scratch: &mut TimelineCompositeScratch,
     control: &mut mondrian_effects::EffectProcessorControl<'_>,
+    mut inputs: Option<&mut crate::TimelineProcessorInputExecution<'_>>,
 ) -> Result<mondrian_effects::EffectFloatFrame, EffectFloatExecutionError> {
     match input {
         TimelineTransitionInput::Transparent => {}
@@ -40,14 +41,23 @@ pub(super) fn composite_transition_input_f32(
             let source = if layer.effect_graph.graph().is_identity() {
                 input
             } else {
-                effect_output = apply_effect_graph_f32(
-                    &mut scratch.effect_execution,
-                    &mut scratch.color_execution,
-                    input,
-                    &layer.effect_graph,
-                    layer.frame_seed,
-                    runtime,
+                effect_output = with_clip_processor_inputs(
+                    layer.processor_input_plan.as_deref(),
+                    Some(layer.frame),
+                    runtime.working_color_space,
+                    inputs.as_deref_mut(),
                     control,
+                    |control| {
+                        apply_effect_graph_f32(
+                            &mut scratch.effect_execution,
+                            &mut scratch.color_execution,
+                            input,
+                            &layer.effect_graph,
+                            layer.frame_seed,
+                            runtime,
+                            control,
+                        )
+                    },
                 )?;
                 effect_output.view()
             };
@@ -78,14 +88,23 @@ pub(super) fn composite_transition_input_f32(
             let source = if layer.effect_graph.graph().is_identity() {
                 input
             } else {
-                effect_output = apply_effect_graph_f32(
-                    &mut scratch.effect_execution,
-                    &mut scratch.color_execution,
-                    input,
-                    &layer.effect_graph,
-                    layer.frame_seed,
-                    runtime,
+                effect_output = with_clip_processor_inputs(
+                    layer.processor_input_plan.as_deref(),
+                    None,
+                    runtime.working_color_space,
+                    inputs.as_deref_mut(),
                     control,
+                    |control| {
+                        apply_effect_graph_f32(
+                            &mut scratch.effect_execution,
+                            &mut scratch.color_execution,
+                            input,
+                            &layer.effect_graph,
+                            layer.frame_seed,
+                            runtime,
+                            control,
+                        )
+                    },
                 )?;
                 effect_output.view()
             };

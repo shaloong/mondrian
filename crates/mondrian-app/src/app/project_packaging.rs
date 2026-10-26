@@ -1227,6 +1227,8 @@ mod tests {
             transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
             effect_graph: compiled,
             frame_seed: 0,
+
+            processor_input_plan: None,
         };
         let mut preview_scratch = TimelineCompositeScratch::default();
         let preview = crate::app::preview_cpu_execution::composite_resolved_preview(

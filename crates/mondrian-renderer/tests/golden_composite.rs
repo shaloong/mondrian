@@ -116,6 +116,8 @@ fn composite_single_layer(w: u32, h: u32, rgba: &[u8], opacity: f32, blend: Blen
         transform: IDENTITY_TRANSFORM,
         effect_graph: identity_graph(),
         frame_seed: 0,
+
+        processor_input_plan: None,
     })];
     let mut scratch = TimelineCompositeScratch::default();
     let frame = composite_timeline_elements_color_frame(
@@ -248,6 +250,8 @@ fn golden_two_layers_normal() {
             transform: IDENTITY_TRANSFORM,
             effect_graph: identity_graph(),
             frame_seed: 0,
+
+            processor_input_plan: None,
         }),
         TimelineCompositeElement::Media(TimelineMediaLayer {
             frame: &fg,
@@ -256,6 +260,8 @@ fn golden_two_layers_normal() {
             transform: IDENTITY_TRANSFORM,
             effect_graph: identity_graph(),
             frame_seed: 0,
+
+            processor_input_plan: None,
         }),
     ];
     let mut scratch = TimelineCompositeScratch::default();
@@ -287,6 +293,8 @@ fn preview_display_and_export_delivery_boundaries_match_with_stable_hash() {
             transform: IDENTITY_TRANSFORM,
             effect_graph: identity_graph(),
             frame_seed: 11,
+
+            processor_input_plan: None,
         }),
         TimelineCompositeElement::Media(TimelineMediaLayer {
             frame: &fg,
@@ -295,6 +303,8 @@ fn preview_display_and_export_delivery_boundaries_match_with_stable_hash() {
             transform: IDENTITY_TRANSFORM,
             effect_graph: identity_graph(),
             frame_seed: 29,
+
+            processor_input_plan: None,
         }),
     ];
     let mut scratch = TimelineCompositeScratch::default();
@@ -402,6 +412,8 @@ fn golden_multilayer_float_linear_blend() {
             transform: IDENTITY_TRANSFORM,
             effect_graph: identity_graph(),
             frame_seed: 0,
+
+            processor_input_plan: None,
         }),
         TimelineCompositeElement::Media(TimelineMediaLayer {
             frame: &fg,
@@ -410,6 +422,8 @@ fn golden_multilayer_float_linear_blend() {
             transform: IDENTITY_TRANSFORM,
             effect_graph: identity_graph(),
             frame_seed: 1,
+
+            processor_input_plan: None,
         }),
     ];
     let mut scratch = TimelineCompositeScratch::default();
@@ -440,6 +454,8 @@ fn golden_non_identity_transform_float_path() {
         transform: [1.5, 0.0, 0.0, 0.0, 1.5, 0.0],
         effect_graph: identity_graph(),
         frame_seed: 0,
+
+        processor_input_plan: None,
     })];
     let mut scratch = TimelineCompositeScratch::default();
     let frame = composite_timeline_elements_color_frame(
@@ -515,6 +531,8 @@ fn golden_preview_export_parity_across_color_spaces() {
             transform: IDENTITY_TRANSFORM,
             effect_graph: identity_graph(),
             frame_seed: 0,
+
+            processor_input_plan: None,
         }),
         TimelineCompositeElement::Media(TimelineMediaLayer {
             frame: &fg,
@@ -523,6 +541,8 @@ fn golden_preview_export_parity_across_color_spaces() {
             transform: IDENTITY_TRANSFORM,
             effect_graph: identity_graph(),
             frame_seed: 2,
+
+            processor_input_plan: None,
         }),
     ];
     let mut scratch = TimelineCompositeScratch::default();

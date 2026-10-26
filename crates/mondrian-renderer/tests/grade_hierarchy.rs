@@ -230,6 +230,8 @@ fn composite_grade_plan(plan: &TimelineRenderPlan) -> Vec<[f32; 4]> {
                         transform: layer.transform,
                         effect_graph: Arc::clone(&layer.effect_graph),
                         frame_seed: layer.frame_seed,
+
+                        processor_input_plan: None,
                     },
                 ));
             }

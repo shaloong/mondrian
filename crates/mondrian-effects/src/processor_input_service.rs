@@ -69,6 +69,51 @@ impl<'a> EffectProcessorControl<'a> {
         self
     }
 
+    /// Reborrow this task for one graph's shorter-lived input service.
+    ///
+    /// The checkpoint, sticky stop and feedback ledger remain the same task's
+    /// authority. Contextual occurrence/stage, observation and outer service are
+    /// restored even on unwind; no factory retains the borrowed service.
+    pub fn with_borrowed_input_service<T>(
+        &mut self,
+        service: &mut dyn EffectProcessorInputService,
+        run: impl FnOnce(&mut EffectProcessorControl<'_>) -> T,
+    ) -> T {
+        // Exhaustive destructuring keeps future Control state from silently
+        // disappearing when this exclusive reborrow crosses a lifetime boundary.
+        let EffectProcessorControl {
+            checkpoint,
+            stopped,
+            feedback,
+            planned_feedback_bytes,
+            observation,
+            current_occurrence,
+            input_service: _,
+            input_stage,
+        } = self;
+        // Forward the original callback rather than shortening a mutable trait
+        // object's invariant lifetime or extending the service loan unsafely.
+        let mut forward_checkpoint = || checkpoint.as_mut().and_then(|check| check());
+        let mut borrowed = EffectProcessorControl {
+            checkpoint: Some(&mut forward_checkpoint),
+            stopped: *stopped,
+            feedback: std::mem::take(feedback),
+            planned_feedback_bytes: *planned_feedback_bytes,
+            observation: observation.clone(),
+            current_occurrence: *current_occurrence,
+            input_service: Some(service),
+            input_stage: input_stage.clone(),
+        };
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(&mut borrowed)));
+        *stopped = borrowed.stopped;
+        *feedback = std::mem::take(&mut borrowed.feedback);
+        *planned_feedback_bytes = borrowed.planned_feedback_bytes;
+        match result {
+            Ok(value) => value,
+            Err(payload) => std::panic::resume_unwind(payload),
+        }
+    }
+
     /// Only the executor's current direct-input node may request its Source.
     pub fn resolves_processor_input(&self) -> bool {
         self.input_service.is_some()

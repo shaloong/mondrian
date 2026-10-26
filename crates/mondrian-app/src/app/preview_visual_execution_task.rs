@@ -1021,12 +1021,43 @@ fn execute_visual_payload(
             media_residency_guards,
         } => {
             let mut observed_cancellation = None;
-            let output = executor.execute(request, identity.generation, || {
-                broker.execution_cancellation_evidence(identity.execution_id).map(|evidence| {
-                    observed_cancellation = Some(evidence);
-                    effect_stop_reason(evidence.cancellation)
-                })
-            });
+            let output = {
+                let observation = executor.processor_observation();
+                // This token is a downstream projection of this exact Broker
+                // execution, never a second cancellation authority or cached plan.
+                let cancellation = mondrian_core::ExecutionCancellationToken::new();
+                let cancellation = observation.deadline.map_or(cancellation.clone(), |deadline| {
+                    cancellation.with_deadline(deadline)
+                });
+                let authority = mondrian_renderer::TimelineFrameExecutionAuthority::new(
+                    identity.generation,
+                    mondrian_effects::EffectExecutionContinuity::Discontinuous,
+                    cancellation.clone(),
+                );
+                let mut checkpoint = || {
+                    broker.execution_cancellation_evidence(identity.execution_id).map(|evidence| {
+                        cancellation.cancel();
+                        observed_cancellation = Some(evidence);
+                        match effect_stop_reason(evidence.cancellation) {
+                            HeterogeneousCpuExecutionStopReason::Canceled => {
+                                mondrian_effects::EffectProcessorStopReason::Canceled
+                            }
+                            HeterogeneousCpuExecutionStopReason::DeadlineExpired => {
+                                mondrian_effects::EffectProcessorStopReason::DeadlineExpired
+                            }
+                        }
+                    })
+                };
+                let mut control = mondrian_effects::EffectProcessorControl::new(&mut checkpoint);
+                control.bind_observation(observation);
+                let mut resolve =
+                    mondrian_renderer::PreparedTimelineClipInputPlan::prepare_available_sources;
+                let mut inputs = mondrian_renderer::TimelineProcessorInputExecution::new(
+                    authority,
+                    &mut resolve,
+                );
+                executor.execute_with_timeline_inputs(request, &mut inputs, &mut control)
+            };
             match output {
                 Ok(output) => Ok(VisualExecutionTaskOutput::HeterogeneousCpuPrefixBatch {
                     output,

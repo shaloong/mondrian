@@ -510,6 +510,25 @@ impl CompiledEffectGraph {
         &self.graph
     }
 
+    /// Whether a reachable, sealed direct-input processor requests a host source
+    /// service. Legacy current-frame callbacks do not acquire hidden dependencies.
+    pub fn requires_processor_input_service(&self) -> bool {
+        self.schedule.ordered_nodes.iter().any(|node| {
+            self.processor_input_stage(*node).is_some()
+                && self.graph.node(*node).is_some_and(|node| match &node.kind {
+                    EffectGraphNodeKind::UnaryEffect {
+                        op: EffectRenderOp::Custom { processor: Some(binding), .. },
+                        ..
+                    }
+                    | EffectGraphNodeKind::DomainEffect {
+                        op: EffectRenderOp::Custom { processor: Some(binding), .. },
+                        ..
+                    } => binding.requires_input_service(),
+                    _ => false,
+                })
+        })
+    }
+
     /// Select only a Custom node that directly consumes its Definition input.
     pub(crate) fn processor_input_stage(
         &self,

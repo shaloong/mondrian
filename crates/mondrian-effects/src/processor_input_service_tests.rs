@@ -646,3 +646,93 @@ fn heterogeneous_prefix_preserves_caller_feedback_at_the_static_frontier_grant()
         assert_eq!(receipts.iter().collect::<Vec<_>>(), vec![&prior]);
     }
 }
+
+#[test]
+fn scoped_input_loan_uses_one_bank_and_restores_outer_source_and_facts() {
+    let facts = Arc::new(Facts::default());
+    let alternate = Arc::new(Facts::default());
+    alternate.epoch.store(10, Ordering::SeqCst);
+    let (program, graph) = program(&facts);
+    let mut outer = Source { program: &program, facts: &facts };
+    let mut inner = Source { program: &program, facts: &alternate };
+    let mut checkpoint = || None;
+    let mut control = EffectProcessorControl::new(&mut checkpoint).with_input_service(&mut outer);
+    let deadline = Instant::now() + Duration::from_secs(60);
+    control.bind_observation(EffectProcessorObservation { sink: None, deadline: Some(deadline) });
+    let prior = prior_feedback();
+    control.feedback.push(prior.clone());
+    let mut session = session();
+    let input = frame();
+    let first = session.apply_compiled_rgba_f32(input.view(), &graph, 0, &mut control).unwrap();
+    assert_eq!(first.pixels()[0][0], 3.5);
+    let second = control.with_borrowed_input_service(&mut inner, |borrowed| {
+        assert_eq!(borrowed.deadline(), Some(deadline));
+        assert_eq!(borrowed.feedback, vec![prior.clone()]);
+        let value = session.apply_compiled_rgba_f32(input.view(), &graph, 0, borrowed).unwrap();
+        // Context changes inside the lexical loan cannot replace its caller.
+        borrowed.bind_observation(EffectProcessorObservation { sink: None, deadline: None });
+        borrowed.input_stage = Some(
+            graph
+                .processor_input_stage(graph.stage_bindings()[0].emitted_nodes()[0])
+                .unwrap()
+                .clone(),
+        );
+        borrowed.current_occurrence = Some((prior.preparation, prior.provider_revision));
+        value
+    });
+    assert_eq!(second.pixels()[0][0], 23.5);
+    assert_eq!(control.deadline(), Some(deadline));
+    assert!(control.input_stage.is_none() && control.current_occurrence.is_none());
+    let last = session.apply_compiled_rgba_f32(input.view(), &graph, 0, &mut control).unwrap();
+    assert_eq!(last.pixels()[0][0], 3.5);
+    assert_eq!(
+        facts.created.load(Ordering::SeqCst),
+        2,
+        "same resident bank across source loans"
+    );
+    assert_eq!(
+        facts.dsp.load(Ordering::SeqCst),
+        9,
+        "no processor replay outside its actual request"
+    );
+    assert_eq!(alternate.calls.lock().unwrap().len(), 3);
+    assert_eq!(facts.calls.lock().unwrap().len(), 6);
+    assert_eq!(
+        control.take_feedback().unwrap().iter().collect::<Vec<_>>(),
+        vec![&prior]
+    );
+}
+
+#[test]
+fn scoped_input_loan_restores_feedback_on_unwind_and_preserves_sticky_stop() {
+    let facts = Arc::new(Facts::default());
+    let (program, _) = program(&facts);
+    let mut outer = Source { program: &program, facts: &facts };
+    let mut inner = Source { program: &program, facts: &facts };
+    let mut checkpoint = || Some(EffectProcessorStopReason::Canceled);
+    let mut control = EffectProcessorControl::new(&mut checkpoint).with_input_service(&mut outer);
+    let prior = prior_feedback();
+    control.feedback.push(prior.clone());
+    let planned = control.planned_feedback_bytes;
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        control.with_borrowed_input_service(&mut inner, |borrowed| {
+            assert_eq!(
+                borrowed.checkpoint(),
+                Err(EffectProcessorStopReason::Canceled)
+            );
+            borrowed.planned_feedback_bytes += 17;
+            panic!("unwind the borrowed graph scope");
+        });
+    }));
+    assert!(result.is_err());
+    assert!(control.input_service.is_some());
+    assert_eq!(control.planned_feedback_bytes, planned + 17);
+    assert_eq!(
+        control.checkpoint(),
+        Err(EffectProcessorStopReason::Canceled)
+    );
+    assert_eq!(
+        control.take_feedback().unwrap().iter().collect::<Vec<_>>(),
+        vec![&prior]
+    );
+}

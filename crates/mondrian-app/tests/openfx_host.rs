@@ -1779,6 +1779,8 @@ fn authored_native_factory_observes_scalar_and_timeline_owner_stops() {
             transform: [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
             effect_graph: graph.clone(),
             frame_seed: 0,
+
+            processor_input_plan: None,
         },
     )];
     let color = mondrian_core::ProjectColorEnvironment::default();
@@ -4455,6 +4457,8 @@ fn raw_native_float_survives_disk_cache_nested_over_and_real_opaque_output() {
         transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
         effect_graph: identity_graph.clone(),
         frame_seed: 0,
+
+        processor_input_plan: None,
     };
     let nested = mondrian_renderer::composite_timeline_elements_color_frame(
         raw.width(),
@@ -4478,6 +4482,8 @@ fn raw_native_float_survives_disk_cache_nested_over_and_real_opaque_output() {
         transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
         effect_graph: identity_graph,
         frame_seed: 0,
+
+        processor_input_plan: None,
     };
     let delivered = mondrian_renderer::composite_timeline_elements_color_frame(
         raw.width(),

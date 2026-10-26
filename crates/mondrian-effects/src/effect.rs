@@ -921,6 +921,7 @@ pub struct CustomEffectProcessorBinding {
     alpha_contract: crate::EffectAlphaContract,
     input_role: crate::EffectFloatProcessorInputRole,
     image_scale_requirement: crate::EffectImageScaleRequirement,
+    requires_input_service: bool,
     revision: u64,
     processor: CustomEffectProcessor,
     runtime_owner: Option<CustomEffectRuntimeOwner>,
@@ -950,6 +951,7 @@ impl CustomEffectProcessorBinding {
             alpha_contract: crate::EffectAlphaContract::COVERAGE_OPERATION,
             input_role: crate::EffectFloatProcessorInputRole::SingleImage,
             image_scale_requirement: crate::EffectImageScaleRequirement::Any,
+            requires_input_service: false,
             revision: NEXT_CUSTOM_PROCESSOR_REVISION.fetch_add(1, Ordering::AcqRel),
             processor: CustomEffectProcessor::Rgba8(processor),
             runtime_owner: None,
@@ -963,6 +965,7 @@ impl CustomEffectProcessorBinding {
             alpha_contract: crate::EffectAlphaContract::COVERAGE_OPERATION,
             input_role: crate::EffectFloatProcessorInputRole::SingleImage,
             image_scale_requirement: crate::EffectImageScaleRequirement::Any,
+            requires_input_service: false,
             revision: NEXT_CUSTOM_PROCESSOR_REVISION.fetch_add(1, Ordering::AcqRel),
             processor: CustomEffectProcessor::Float32(processor),
             runtime_owner: None,
@@ -989,6 +992,11 @@ impl CustomEffectProcessorBinding {
     /// Process-local implementation revision used by graph/cache identity.
     pub const fn revision(&self) -> u64 {
         self.revision
+    }
+
+    /// Frozen additional-input dependency declaration of this provider.
+    pub const fn requires_input_service(&self) -> bool {
+        self.requires_input_service
     }
 
     pub(crate) fn rgba8_processor(&self) -> Option<&CustomEffectRenderProcessor> {
@@ -1029,6 +1037,7 @@ impl CustomEffectProcessorBinding {
             factory.input_role() == self.input_role
                 && factory.alpha_contract() == self.alpha_contract
                 && factory.image_scale_requirement() == self.image_scale_requirement
+                && factory.requires_input_service() == self.requires_input_service
         })
     }
 
@@ -1057,6 +1066,7 @@ impl CustomEffectProcessorBinding {
             alpha_contract: self.alpha_contract,
             input_role: self.input_role,
             image_scale_requirement: self.image_scale_requirement,
+            requires_input_service: self.requires_input_service,
             revision: self.revision,
             processor: self.processor.clone(),
             occurrence_id: Some(occurrence_id),
@@ -1096,6 +1106,7 @@ impl std::fmt::Debug for CustomEffectProcessorBinding {
             .field("revision", &self.revision)
             .field("alpha_contract", &self.alpha_contract)
             .field("image_scale_requirement", &self.image_scale_requirement)
+            .field("requires_input_service", &self.requires_input_service)
             .field("runtime_owner_revision", &self.runtime_owner_revision())
             .finish_non_exhaustive()
     }
@@ -1266,6 +1277,10 @@ impl EffectRenderOp {
                     .as_ref()
                     .and_then(CustomEffectProcessorBinding::runtime_owner_revision)
                     .hash(state);
+                processor
+                    .as_ref()
+                    .map(CustomEffectProcessorBinding::requires_input_service)
+                    .hash(state);
                 cache_policy.hash(state);
                 // `cache_key` identifies stable external/custom implementation
                 // semantics; it never replaces the evaluated frame parameters.
@@ -1285,6 +1300,11 @@ impl EffectRenderOp {
     pub fn cache_policy(&self) -> EffectCachePolicy {
         match self {
             EffectRenderOp::Grain { .. } => EffectCachePolicy::FrameDependent,
+            EffectRenderOp::Custom { processor: Some(binding), .. }
+                if binding.requires_input_service() =>
+            {
+                EffectCachePolicy::Uncacheable
+            }
             EffectRenderOp::Custom { cache_policy, .. } => *cache_policy,
             _ => EffectCachePolicy::Deterministic,
         }
@@ -1617,6 +1637,7 @@ impl EffectDefinition {
                 alpha_contract: factory.alpha_contract(),
                 input_role: factory.input_role(),
                 image_scale_requirement: factory.image_scale_requirement(),
+                requires_input_service: factory.requires_input_service(),
                 processor: CustomEffectProcessor::Float32Factory(factory),
                 runtime_owner: None,
                 occurrence_id: None,
@@ -5591,6 +5612,7 @@ mod image_scale_requirement_tests {
     struct Factory {
         role: EffectFloatProcessorInputRole,
         unit: AtomicBool,
+        source_service: AtomicBool,
         storage_calls: AtomicUsize,
         prepare_calls: AtomicUsize,
     }
@@ -5600,6 +5622,7 @@ mod image_scale_requirement_tests {
             Arc::new(Self {
                 role,
                 unit: AtomicBool::new(unit),
+                source_service: AtomicBool::new(false),
                 storage_calls: AtomicUsize::new(0),
                 prepare_calls: AtomicUsize::new(0),
             })
@@ -5607,6 +5630,9 @@ mod image_scale_requirement_tests {
     }
 
     impl EffectFloatProcessorFactory for Factory {
+        fn requires_input_service(&self) -> bool {
+            self.source_service.load(Ordering::SeqCst)
+        }
         fn input_role(&self) -> EffectFloatProcessorInputRole {
             self.role
         }
@@ -5649,6 +5675,7 @@ mod image_scale_requirement_tests {
             alpha_contract: factory.alpha_contract(),
             input_role: factory.input_role(),
             image_scale_requirement: factory.image_scale_requirement(),
+            requires_input_service: factory.requires_input_service(),
             revision: NEXT_CUSTOM_PROCESSOR_REVISION.fetch_add(1, Ordering::AcqRel),
             processor: CustomEffectProcessor::Float32Factory(factory),
             runtime_owner: None,
@@ -5719,6 +5746,94 @@ mod image_scale_requirement_tests {
             literal_f32.image_scale_requirement(),
             EffectImageScaleRequirement::Any
         );
+    }
+
+    #[test]
+    fn frozen_source_service_changes_identity_and_disables_incomplete_output_caching() {
+        let factory = Factory::new(EffectFloatProcessorInputRole::SingleImage, false);
+        let plain = binding(factory.clone());
+        let mut plain_op = op(plain.clone());
+        if let EffectRenderOp::Custom { cache_policy, .. } = &mut plain_op {
+            *cache_policy = EffectCachePolicy::Deterministic;
+        }
+        assert_eq!(plain_op.cache_policy(), EffectCachePolicy::Deterministic);
+        let plain_graph =
+            crate::compile_reference_effect_graph(&EffectRenderPlan { ops: vec![plain_op] })
+                .unwrap();
+        factory.source_service.store(true, Ordering::SeqCst);
+        assert!(
+            !plain.factory_contract_matches(),
+            "provider cannot mutate a sealed contract"
+        );
+        let mut source = plain.clone();
+        source.requires_input_service = true;
+        assert_eq!(plain.revision(), source.revision());
+        assert!(source.factory_contract_matches());
+        let mut source_op = op(source.clone());
+        if let EffectRenderOp::Custom { cache_policy, .. } = &mut source_op {
+            *cache_policy = EffectCachePolicy::Deterministic;
+        }
+        assert_eq!(source_op.cache_policy(), EffectCachePolicy::Uncacheable);
+        let source_graph =
+            crate::compile_reference_effect_graph(&EffectRenderPlan { ops: vec![source_op] })
+                .unwrap();
+        assert_ne!(
+            plain_graph.semantic_fingerprint(),
+            source_graph.semantic_fingerprint()
+        );
+        let output = plain_graph.graph().output.unwrap();
+        assert_ne!(
+            plain_graph.node_profiles()[&output].subtree_signature,
+            source_graph.node_profiles()[&output].subtree_signature
+        );
+        let owned =
+            source.with_runtime_owner("test.source-service", EffectId::new(), 1, None, None);
+        assert!(owned.requires_input_service());
+        assert!(owned.factory_contract_matches());
+    }
+
+    #[test]
+    fn source_service_requirement_is_owned_by_reachable_prepared_definition_inputs() {
+        let key = format!("test.source-service.{}", EffectId::new());
+        let factory = Factory::new(EffectFloatProcessorInputRole::SingleImage, false);
+        factory.source_service.store(true, Ordering::SeqCst);
+        register_effect_definition(
+            EffectDefinition::new(
+                &key,
+                "Source service",
+                PropertyBag::default(),
+                EffectColorDomainContract::SCENE_LINEAR,
+            )
+            .with_execution_contract(EffectExecutionContract {
+                execution_modes: EffectExecutionModes::CPU_F32,
+                roi_propagation: EffectRoiPropagation::UnknownRequiresFullFrame,
+                ..EffectExecutionContract::IDENTITY
+            })
+            .with_custom_float_processor_factory(
+                Arc::new(|_, _| Ok(Some(serde_json::json!({})))),
+                None,
+                EffectCachePolicy::Deterministic,
+                factory,
+            ),
+        )
+        .unwrap();
+        let mut effect = instantiate_effect_node(EffectType::External(key)).unwrap();
+        let active = crate::PreparedEffectProgram::prepare(
+            &[effect.clone()],
+            &[],
+            WorkingColorSpace::LinearRec709,
+        )
+        .unwrap()
+        .evaluate(TimelineTime::ZERO)
+        .unwrap();
+        assert!(active.requires_processor_input_service());
+        effect.is_enabled = false;
+        let disabled =
+            crate::PreparedEffectProgram::prepare(&[effect], &[], WorkingColorSpace::LinearRec709)
+                .unwrap()
+                .evaluate(TimelineTime::ZERO)
+                .unwrap();
+        assert!(!disabled.requires_processor_input_service());
     }
 
     #[test]

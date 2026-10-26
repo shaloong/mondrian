@@ -1543,6 +1543,12 @@ fn prepare_preview_frame_closure(
                     ))
                 },
             )
+            .and_then(|routes| {
+                routes.bind_clip_processor_inputs(
+                    node.program(),
+                    node.evaluation().execution_request(),
+                )
+            })
         })
         .map_err(|error| {
             PreviewUnavailability::blocked(
@@ -1967,7 +1973,7 @@ where
                         opacity: solid.opacity,
                         blend_mode: solid.blend_mode,
                         transform,
-                        prepared_heterogeneous_route: prepared_preview_heterogeneous_route(
+                        prepared_effect_route: prepared_preview_effect_route(
                             &routes,
                             solid.placement,
                             &solid.effect_graph,
@@ -1982,6 +1988,11 @@ where
                         &solid.effect_graph,
                     )?;
                     let layer = TimelineSolidColorLayer {
+                        processor_input_plan: prepared_preview_processor_input_plan(
+                            &routes,
+                            solid.placement,
+                            &solid.effect_graph,
+                        )?,
                         color: solid.color,
                         opacity: solid.opacity,
                         blend_mode: solid.blend_mode,
@@ -2044,7 +2055,7 @@ where
                     opacity: media.opacity,
                     blend_mode: media.blend_mode,
                     transform,
-                    prepared_heterogeneous_route: prepared_preview_heterogeneous_route(
+                    prepared_effect_route: prepared_preview_effect_route(
                         &routes,
                         media.placement,
                         &media.effect_graph,
@@ -2066,7 +2077,7 @@ where
                     opacity: title.opacity,
                     blend_mode: title.blend_mode,
                     transform,
-                    prepared_heterogeneous_route: prepared_preview_heterogeneous_route(
+                    prepared_effect_route: prepared_preview_effect_route(
                         &routes,
                         title.placement,
                         &title.effect_graph,
@@ -2126,7 +2137,7 @@ where
                     opacity: nested.opacity,
                     blend_mode: nested.blend_mode,
                     transform,
-                    prepared_heterogeneous_route: prepared_preview_heterogeneous_route(
+                    prepared_effect_route: prepared_preview_effect_route(
                         &routes,
                         nested.placement,
                         &nested.effect_graph,
@@ -2298,7 +2309,7 @@ where
             opacity,
             blend_mode,
             transform,
-            prepared_heterogeneous_route: prepared_preview_heterogeneous_route(
+            prepared_effect_route: prepared_preview_effect_route(
                 &routes,
                 placement,
                 &effect_graph,
@@ -2316,6 +2327,11 @@ where
                 &solid.effect_graph,
             )?;
             let layer = TimelineSolidColorLayer {
+                processor_input_plan: prepared_preview_processor_input_plan(
+                    &routes,
+                    solid.placement,
+                    &solid.effect_graph,
+                )?,
                 color: solid.color,
                 opacity: solid.opacity,
                 blend_mode: solid.blend_mode,
@@ -2366,7 +2382,7 @@ where
                 opacity: media.opacity,
                 blend_mode: media.blend_mode,
                 transform,
-                prepared_heterogeneous_route: prepared_preview_heterogeneous_route(
+                prepared_effect_route: prepared_preview_effect_route(
                     &routes,
                     media.placement,
                     &media.effect_graph,
@@ -2388,7 +2404,7 @@ where
                 opacity: title.opacity,
                 blend_mode: title.blend_mode,
                 transform,
-                prepared_heterogeneous_route: prepared_preview_heterogeneous_route(
+                prepared_effect_route: prepared_preview_effect_route(
                     &routes,
                     title.placement,
                     &title.effect_graph,
@@ -2424,7 +2440,7 @@ where
                 opacity: nested.opacity,
                 blend_mode: nested.blend_mode,
                 transform,
-                prepared_heterogeneous_route: prepared_preview_heterogeneous_route(
+                prepared_effect_route: prepared_preview_effect_route(
                     &routes,
                     nested.placement,
                     &nested.effect_graph,
@@ -2669,6 +2685,30 @@ fn preview_route_unavailability(error: TimelinePreviewEffectRouteError) -> Previ
 
 fn preview_route_abort(error: TimelinePreviewEffectRouteError) -> PreviewTimelineAbort {
     PreviewTimelineAbort::Unavailable(preview_route_unavailability(error))
+}
+
+fn prepared_preview_processor_input_plan(
+    routes: &PreparedTimelinePreviewEffectRoutes,
+    placement: TimelineClipExecutionRef,
+    graph: &mondrian_effects::CompiledEffectGraph,
+) -> Result<Option<Arc<mondrian_renderer::PreparedTimelineClipInputPlan>>, PreviewTimelineAbort> {
+    routes
+        .processor_input_plan_for(placement, graph)
+        .map(|plan| plan.cloned())
+        .map_err(preview_route_abort)
+}
+
+fn prepared_preview_effect_route(
+    routes: &PreparedTimelinePreviewEffectRoutes,
+    placement: TimelineClipExecutionRef,
+    graph: &mondrian_effects::CompiledEffectGraph,
+) -> Result<Option<Box<mondrian_renderer::PreparedTimelinePreviewEffectRoute>>, PreviewTimelineAbort>
+{
+    let route = routes.route_for(placement, graph).map_err(preview_route_abort)?;
+    Ok(
+        (route.heterogeneous().is_some() || route.processor_input_plan().is_some())
+            .then(|| Box::new(route.clone())),
+    )
 }
 
 fn prepared_preview_heterogeneous_route(

@@ -664,6 +664,12 @@ impl EffectFloatProcessorStorage {
 /// Immutable recipe retained by a prepared program, without shared mutable
 /// native instances. Each execution session prepares its own instance.
 pub trait EffectFloatProcessorFactory: std::fmt::Debug + Send + Sync {
+    /// Request invocation-borrowed Definition input access. This is an adapter
+    /// dependency declaration, not a third-party standard capability claim.
+    /// Such output cannot use a current-image-only cache identity.
+    fn requires_input_service(&self) -> bool {
+        false
+    }
     /// Immutable arity declaration; existing providers consume one image.
     fn input_role(&self) -> EffectFloatProcessorInputRole {
         EffectFloatProcessorInputRole::SingleImage

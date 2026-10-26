@@ -44,7 +44,7 @@ pub(crate) enum ResolvedPreviewElement {
         blend_mode: BlendMode,
         transform: [f32; 6],
         effect_graph: Arc<CompiledEffectGraph>,
-        prepared_heterogeneous_route: Option<Box<PreparedHeterogeneousEffectRoute>>,
+        prepared_effect_route: Option<Box<mondrian_renderer::PreparedTimelinePreviewEffectRoute>>,
         frame_seed: i64,
     },
     CrossDissolve {
@@ -67,7 +67,7 @@ pub(crate) enum ResolvedPreviewTransitionInput {
         blend_mode: BlendMode,
         transform: [f32; 6],
         effect_graph: Arc<CompiledEffectGraph>,
-        prepared_heterogeneous_route: Option<Box<PreparedHeterogeneousEffectRoute>>,
+        prepared_effect_route: Option<Box<mondrian_renderer::PreparedTimelinePreviewEffectRoute>>,
         frame_seed: i64,
     },
 }
@@ -500,7 +500,7 @@ pub(crate) fn prepare_gpu_composite_layers_with_heterogeneous_effects(
                 blend_mode,
                 transform,
                 effect_graph,
-                prepared_heterogeneous_route,
+                prepared_effect_route,
                 frame_seed,
             } => {
                 if !opacity_has_contribution(*opacity) {
@@ -513,7 +513,7 @@ pub(crate) fn prepare_gpu_composite_layers_with_heterogeneous_effects(
                         *blend_mode,
                         *transform,
                         effect_graph,
-                        prepared_heterogeneous_route.as_deref(),
+                        prepared_effect_route.as_deref(),
                         *frame_seed,
                     )?,
                 )));
@@ -623,7 +623,7 @@ impl<'a> HeterogeneousPreviewLayerBuilder<'a> {
         blend_mode: BlendMode,
         transform: [f32; 6],
         effect_graph: &Arc<CompiledEffectGraph>,
-        prepared_heterogeneous_route: Option<&PreparedHeterogeneousEffectRoute>,
+        prepared_effect_route: Option<&mondrian_renderer::PreparedTimelinePreviewEffectRoute>,
         frame_seed: i64,
     ) -> Result<ViewerGpuSourceLayer, PreviewViewerGpuLayerPreparationError> {
         let layer_working_color_space = frame.working_color_space().ok_or(
@@ -662,7 +662,8 @@ impl<'a> HeterogeneousPreviewLayerBuilder<'a> {
         let input = frame
             .working_payload()
             .ok_or(PreviewViewerGpuLayerPreparationError::MissingCpuWorkingPayload { address })?;
-        let route = prepared_heterogeneous_route
+        let route = prepared_effect_route
+            .and_then(|route| route.heterogeneous())
             .cloned()
             .ok_or(PreviewViewerGpuLayerPreparationError::MissingPreparedRoute { address })?;
         let descriptor = input.descriptor();
@@ -773,7 +774,7 @@ impl<'a> HeterogeneousPreviewLayerBuilder<'a> {
                 blend_mode,
                 transform,
                 effect_graph,
-                prepared_heterogeneous_route,
+                prepared_effect_route,
                 frame_seed,
             } => {
                 if !opacity_has_contribution(*opacity) {
@@ -785,7 +786,7 @@ impl<'a> HeterogeneousPreviewLayerBuilder<'a> {
                     *blend_mode,
                     *transform,
                     effect_graph,
-                    prepared_heterogeneous_route.as_deref(),
+                    prepared_effect_route.as_deref(),
                     *frame_seed,
                 )?
             }
@@ -1212,7 +1213,7 @@ mod heterogeneous_tests {
         identity_salt: u64,
         blend_mode: BlendMode,
     ) -> ResolvedPreviewElement {
-        let prepared_heterogeneous_route = PreparedHeterogeneousEffectRoute::prepare(
+        let prepared_effect_route = PreparedHeterogeneousEffectRoute::prepare(
             Arc::clone(&graph),
             EffectFrameExtent::new(WIDTH, HEIGHT),
             cpu_grant().graph_execution(),
@@ -1225,7 +1226,11 @@ mod heterogeneous_tests {
             blend_mode,
             transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
             effect_graph: graph,
-            prepared_heterogeneous_route,
+            prepared_effect_route: prepared_effect_route.map(|route| {
+                Box::new(
+                    mondrian_renderer::PreparedTimelinePreviewEffectRoute::Heterogeneous(*route),
+                )
+            }),
             frame_seed: identity_salt as i64,
         }
     }
@@ -1245,6 +1250,8 @@ mod heterogeneous_tests {
                 transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
                 effect_graph: graph,
                 frame_seed: 31,
+
+                processor_input_plan: None,
             },
             prepared_route: Box::new(prepared_route),
         }
@@ -1258,6 +1265,8 @@ mod heterogeneous_tests {
             transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
             effect_graph: graph,
             frame_seed,
+
+            processor_input_plan: None,
         })
     }
 
@@ -1321,7 +1330,7 @@ mod heterogeneous_tests {
             blend_mode: BlendMode::Normal,
             transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
             effect_graph: graph,
-            prepared_heterogeneous_route: None,
+            prepared_effect_route: None,
             frame_seed: 9,
         }];
 
@@ -1486,7 +1495,7 @@ mod heterogeneous_tests {
                     blend_mode,
                     transform,
                     effect_graph,
-                    prepared_heterogeneous_route,
+                    prepared_effect_route,
                     frame_seed,
                 } => ResolvedPreviewTransitionInput::Media {
                     frame,
@@ -1494,7 +1503,7 @@ mod heterogeneous_tests {
                     blend_mode,
                     transform,
                     effect_graph,
-                    prepared_heterogeneous_route,
+                    prepared_effect_route,
                     frame_seed,
                 },
                 _ => unreachable!("media helper"),
@@ -1506,7 +1515,7 @@ mod heterogeneous_tests {
                     blend_mode,
                     transform,
                     effect_graph,
-                    prepared_heterogeneous_route,
+                    prepared_effect_route,
                     frame_seed,
                 } => ResolvedPreviewTransitionInput::Media {
                     frame,
@@ -1514,7 +1523,7 @@ mod heterogeneous_tests {
                     blend_mode,
                     transform,
                     effect_graph,
-                    prepared_heterogeneous_route,
+                    prepared_effect_route,
                     frame_seed,
                 },
                 _ => unreachable!("media helper"),

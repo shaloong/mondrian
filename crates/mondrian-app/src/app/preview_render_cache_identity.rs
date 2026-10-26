@@ -149,7 +149,7 @@ pub(crate) fn canonical_resolved_node_materialization(
                 blend_mode,
                 transform,
                 effect_graph,
-                prepared_heterogeneous_route: _,
+                prepared_effect_route: _,
                 frame_seed,
             } => {
                 bytes.u8(3);
@@ -198,7 +198,7 @@ fn encode_transition(
             blend_mode,
             transform,
             effect_graph,
-            prepared_heterogeneous_route: _,
+            prepared_effect_route: _,
             frame_seed,
         } => {
             bytes.u8(3);

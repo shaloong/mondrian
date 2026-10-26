@@ -70,6 +70,8 @@ fn bench_layers(c: &mut Criterion, name: &str, w: u32, h: u32, n: usize) {
                 transform: IDENTITY,
                 effect_graph: identity_graph(),
                 frame_seed: 0,
+
+                processor_input_plan: None,
             })
         })
         .collect();

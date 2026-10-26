@@ -808,6 +808,8 @@ mod tests {
                     transform: [1.0, 0.0, 1.0, 0.0, 1.0, 1.0],
                     effect_graph: graph,
                     frame_seed: 0,
+
+                    processor_input_plan: None,
                 },
             )];
             let engine = ColorEngine::mondrian_standard();

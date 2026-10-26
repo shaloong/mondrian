@@ -191,6 +191,11 @@ impl EffectExecutionSession {
         self.observation = observation;
     }
 
+    /// Reborrow the current task's exact observer/deadline at an execution seam.
+    pub fn processor_observation(&self) -> crate::EffectProcessorObservation {
+        self.observation.clone()
+    }
+
     /// Reconcile actual closed native GUIs on this Session's exclusive worker.
     /// Returns retired owner count and publishes bounded idle-action metadata
     /// through an existing GUI lifetime. This operation produces no pixels,

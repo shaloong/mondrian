@@ -9295,6 +9295,8 @@ fn render_prepared_visual_node_into(
                     transform,
                     effect_graph: media.effect_graph.clone(),
                     frame_seed: media.frame_seed,
+
+                    processor_input_plan: None,
                 }));
             }
             TimelineRenderPlanElement::BasicTitle(title) => {
@@ -9309,6 +9311,8 @@ fn render_prepared_visual_node_into(
                     transform: resolved.transform,
                     effect_graph: title.effect_graph.clone(),
                     frame_seed: title.frame_seed,
+
+                    processor_input_plan: None,
                 }));
             }
             TimelineRenderPlanElement::NestedSequence(nested) => {
@@ -9345,6 +9349,8 @@ fn render_prepared_visual_node_into(
                     transform,
                     effect_graph: nested.effect_graph.clone(),
                     frame_seed: nested.frame_seed,
+
+                    processor_input_plan: None,
                 }));
             }
             TimelineRenderPlanElement::SolidColor(solid) => {
@@ -9364,6 +9370,8 @@ fn render_prepared_visual_node_into(
                         transform,
                         effect_graph: solid.effect_graph.clone(),
                         frame_seed: solid.frame_seed,
+
+                        processor_input_plan: None,
                     }));
                 } else {
                     composite_elements.push(TimelineCompositeElement::SolidColor(
@@ -9374,6 +9382,8 @@ fn render_prepared_visual_node_into(
                             transform,
                             effect_graph: solid.effect_graph.clone(),
                             frame_seed: solid.frame_seed,
+
+                            processor_input_plan: None,
                         },
                     ));
                 }
@@ -10470,6 +10480,8 @@ fn lower_export_transition_input<'a>(
                 transform,
                 effect_graph: media.effect_graph.clone(),
                 frame_seed: media.frame_seed,
+
+                processor_input_plan: None,
             })
         }
         (
@@ -10498,6 +10510,8 @@ fn lower_export_transition_input<'a>(
                 transform,
                 effect_graph: nested.effect_graph.clone(),
                 frame_seed: nested.frame_seed,
+
+                processor_input_plan: None,
             })
         }
         (
@@ -10510,6 +10524,8 @@ fn lower_export_transition_input<'a>(
             transform: resolved.transform,
             effect_graph: title.effect_graph.clone(),
             frame_seed: title.frame_seed,
+
+            processor_input_plan: None,
         }),
         (
             TimelineTransitionInputPlan::SolidColor(solid),
@@ -10530,6 +10546,8 @@ fn lower_export_transition_input<'a>(
                 transform,
                 effect_graph: solid.effect_graph.clone(),
                 frame_seed: solid.frame_seed,
+
+                processor_input_plan: None,
             })
         }
         (plan, ResolvedExportTransitionInput::Temporal(temporal)) => {
@@ -10568,6 +10586,8 @@ fn lower_export_transition_input<'a>(
                     "renderer could not prepare the identity Effect graph".to_owned()
                 })?,
                 frame_seed: 0,
+
+                processor_input_plan: None,
             })
         }
         _ => {
@@ -19672,6 +19692,8 @@ mod tests {
                     })
                     .expect("compile media effect graph"),
                     frame_seed: 0,
+
+                    processor_input_plan: None,
                 },
             )],
             mondrian_renderer::TimelineCompositeOptions::default(),
@@ -19702,6 +19724,8 @@ mod tests {
                         effect_graph: compile_reference_effect_graph(&EffectRenderPlan::default())
                             .expect("compile identity graph"),
                         frame_seed: 0,
+
+                        processor_input_plan: None,
                     },
                 ),
                 mondrian_renderer::TimelineCompositeElement::Adjustment(
@@ -19731,6 +19755,8 @@ mod tests {
                         effect_graph: compile_reference_effect_graph(&EffectRenderPlan::default())
                             .expect("compile identity graph"),
                         frame_seed: 0,
+
+                        processor_input_plan: None,
                     },
                 ),
             ],
