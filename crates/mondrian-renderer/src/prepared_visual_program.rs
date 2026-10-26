@@ -812,10 +812,11 @@ impl PreparedVisualProgram {
         &self,
         placement: TimelineClipExecutionRef,
         request: &EffectTemporalExecutionRequest,
+        grid: Rational,
     ) -> Result<PreparedEffectTemporalExecution> {
         let effect_program = self.temporal_effect_program(placement, request)?;
         prepare_temporal_frame_execution(effect_program, request, |clip_time| {
-            self.temporal_frame_seed(placement, clip_time)
+            self.temporal_frame_seed_on_grid(placement, clip_time, grid)
         })
         .map_err(|error| self.temporal_preparation_error(placement.clip_id, error))
     }
@@ -826,12 +827,13 @@ impl PreparedVisualProgram {
         &self,
         placement: TimelineClipExecutionRef,
         request: &EffectTemporalExecutionRequest,
+        grid: Rational,
         session: &mut EffectExecutionSession,
     ) -> Result<PreparedEffectTemporalExecution> {
         let effect_program = self.temporal_effect_program(placement, request)?;
         session
             .prepare_temporal_frame_execution(effect_program, request, |clip_time| {
-                self.temporal_frame_seed(placement, clip_time)
+                self.temporal_frame_seed_on_grid(placement, clip_time, grid)
             })
             .map_err(|error| self.temporal_preparation_error(placement.clip_id, error))
     }
@@ -934,14 +936,6 @@ impl PreparedVisualProgram {
             }
         };
         Ok(effect_program)
-    }
-
-    fn temporal_frame_seed(
-        &self,
-        placement: TimelineClipExecutionRef,
-        clip_time: TimelineTime,
-    ) -> std::result::Result<i64, String> {
-        self.temporal_frame_seed_on_grid(placement, clip_time, self.evaluation_time_base())
     }
 
     fn temporal_frame_seed_on_grid(

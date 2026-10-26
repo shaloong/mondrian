@@ -537,6 +537,40 @@ use mondrian_effects::{
 
 #[test]
 fn historical_frame_seed_matches_the_original_sequence_grid_in_existing_temporal_execution() {
+    assert_temporal_frame_seeds(
+        Rational::new(24, 1),
+        FramePosition::new(72, Rational::new(1, 24)),
+        TimelineTime::new(-1, 8).unwrap(),
+        69,
+    );
+}
+
+#[test]
+fn historical_frame_seed_matches_the_original_doubled_field_grid() {
+    assert_temporal_frame_seeds(
+        Rational::new(24, 1),
+        FramePosition::new(145, Rational::new(1, 48)),
+        TimelineTime::new(-1, 8).unwrap(),
+        139,
+    );
+}
+
+#[test]
+fn historical_frame_seed_matches_the_original_fractional_field_grid() {
+    assert_temporal_frame_seeds(
+        Rational::new(30000, 1001),
+        FramePosition::new(145, Rational::new(1001, 60000)),
+        TimelineTime::new(-1001, 10000).unwrap(),
+        139,
+    );
+}
+
+fn assert_temporal_frame_seeds(
+    rate: Rational,
+    position: FramePosition,
+    sample_offset: TimelineTime,
+    historical_seed: i64,
+) {
     let kind = EffectType::External(format!(
         "test.timeline.seed.{}",
         mondrian_core::EffectId::new()
@@ -568,7 +602,7 @@ fn historical_frame_seed_matches_the_original_sequence_grid_in_existing_temporal
     )
     .unwrap();
     let mut sequence = Sequence::new("Original temporal seed");
-    sequence.settings.frame_rate = Rational::new(24, 1);
+    sequence.settings.frame_rate = rate;
     sequence.settings.resolution = mondrian_core::Resolution { width: 1, height: 1 };
     sequence.video_tracks.clear();
     let mut track = Track::new_video("V1");
@@ -579,59 +613,88 @@ fn historical_frame_seed_matches_the_original_sequence_grid_in_existing_temporal
     )
     .unwrap();
     clip.add_effect_node(EffectNode::new(kind));
-    clip.add_effect_node(temporal_sample_effect(TimelineTime::new(-1, 8).unwrap()));
+    clip.add_effect_node(temporal_sample_effect(sample_offset));
     track.add_clip(clip).unwrap();
     sequence.video_tracks.push(track);
     let program = PreparedVisualProgram::prepare(&sequence).unwrap();
-    let plan = evaluate_prepared_visual_program(
-        &program,
-        crate::TimelineEvaluationRequest::export(FramePosition::new(72, sequence.time_base())),
-    )
-    .unwrap();
     let extent = EffectFrameExtent::new(1, 1);
-    let batches = collect_timeline_temporal_demands(
-        &program,
-        &plan,
-        89,
-        EffectExecutionContinuity::Continuous,
-        extent,
-        extent.full_frame_roi(),
-        ExecutionCancellationToken::new(),
-    )
-    .unwrap();
-    let batch = &batches[0];
-    assert_eq!(batch.execution_request().output_frame_seed(), 72);
-    let tiles = batch
-        .source_demands()
-        .iter()
-        .map(|demand| {
-            (
-                demand.effect_request,
-                EffectFrameTileF32::new(
-                    demand.effect_request.time(),
+    for evaluation in [
+        crate::TimelineEvaluationRequest::preview(position, 1.0),
+        crate::TimelineEvaluationRequest::export(position),
+    ] {
+        for with_session in [false, true] {
+            let mut scratch = crate::TimelineCompositeScratch::default();
+            let batches = if with_session {
+                scratch
+                    .prepare_timeline_frame_execution(
+                        &program,
+                        TimelineFrameExecutionRequest::new(
+                            evaluation,
+                            89,
+                            EffectExecutionContinuity::Continuous,
+                            extent,
+                            extent.full_frame_roi(),
+                            ExecutionCancellationToken::new(),
+                        ),
+                    )
+                    .unwrap()
+                    .into_parts()
+                    .1
+            } else {
+                let plan = evaluate_prepared_visual_program(&program, evaluation).unwrap();
+                collect_timeline_temporal_demands(
+                    &program,
+                    &plan,
+                    89,
+                    EffectExecutionContinuity::Continuous,
                     extent,
-                    mondrian_core::ImageSampling::UNIT_SQUARE,
                     extent.full_frame_roi(),
-                    0,
-                    vec![[0.0, 0.0, 0.0, 1.0]],
+                    ExecutionCancellationToken::new(),
                 )
-                .unwrap(),
+                .unwrap()
+            };
+            let batch = &batches[0];
+            assert_eq!(
+                batch.execution_request().output_frame_seed(),
+                position.frame
+            );
+            let tiles = batch
+                .source_demands()
+                .iter()
+                .map(|demand| {
+                    (
+                        demand.effect_request,
+                        EffectFrameTileF32::new(
+                            demand.effect_request.time(),
+                            extent,
+                            mondrian_core::ImageSampling::UNIT_SQUARE,
+                            extent.full_frame_roi(),
+                            0,
+                            vec![[0.0, 0.0, 0.0, 1.0]],
+                        )
+                        .unwrap(),
+                    )
+                })
+                .collect::<Vec<_>>();
+            let mut frames = PreparedTemporalFrameSet::prepare(
+                EffectTemporalSourceIdentity::from_complete_semantic_fingerprint([89; 32]),
+                batch.effect_demands().clone(),
+                tiles,
             )
-        })
-        .collect::<Vec<_>>();
-    let mut frames = PreparedTemporalFrameSet::prepare(
-        EffectTemporalSourceIdentity::from_complete_semantic_fingerprint([89; 32]),
-        batch.effect_demands().clone(),
-        tiles,
-    )
-    .unwrap();
-    let mut session =
-        EffectExecutionSession::new(EffectExecutionSessionConfig::uncached(1024 * 1024));
-    let result =
-        execute_prepared_timeline_temporal_batch(&mut session, batch, &mut frames).unwrap();
-    // Current Sequence frame72; historical Clip7/8s + placement2s = frame69.
-    // Source tile seed0 is not the authority for processing either occurrence.
-    assert_eq!(result.tile().pixels()[0][0], 0.75 * 72.0 + 0.25 * 69.0);
+            .unwrap();
+            let mut session =
+                EffectExecutionSession::new(EffectExecutionSessionConfig::uncached(1024 * 1024));
+            let result =
+                execute_prepared_timeline_temporal_batch(&mut session, batch, &mut frames).unwrap();
+            // Source tile seed0 is not the authority for processing either occurrence.
+            assert_eq!(
+                result.tile().pixels()[0][0],
+                0.75 * position.frame as f32 + 0.25 * historical_seed as f32,
+                "intent={:?}, session={with_session}, position={position:?}",
+                evaluation.intent
+            );
+        }
+    }
 }
 
 #[test]

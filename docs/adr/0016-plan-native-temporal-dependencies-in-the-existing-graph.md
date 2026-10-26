@@ -215,30 +215,35 @@ The static frontier budget does not reserve arbitrary runtime Source demands:
 those still require separate admission from the same remaining grant. This is
 not a promise that a statically minimal prefix can execute dynamic history.
 
-Historical frame seeds use the Sequence grid: seconds-per-frame must be
-inverted before frame-rate conversion. The former reciprocal error produced
-hashed seeds at on-grid historical instants. The existing off-grid hash rule
-is unchanged. A regression executes the original temporal path with current
-frame72 and historical frame69 and verifies their exact mixed pixel.
+Historical frame seeds use the originating Render Plan's exact Sequence
+evaluation grid, including its doubled field grid. Clip-to-Sequence mapping
+remains authoritative; retimed source frames are not the seed authority.
+Seconds-per-frame is inverted before frame-rate conversion. Substituting the
+authored base grid incorrectly hashes legal odd-field instants. The existing
+off-grid hash rule is unchanged. Pixel regressions cover ordinary, integer-field
+and fractional-field grids through both Preview/Export intents and preparation
+entries, including the Session-owned path. These do not qualify complete native
+fielding or interlaced delivery.
 The bank retains one configuration per occurrence: changed raster/project geometry,
 format or recipe revision retires the obsolete idle worker. The native calibration
 therefore checks exact configuration retirement, rather than assuming a variant
 cache. Optional native retention must use the recipe's declared bytes, not a guessed
 constant; a legal active render may intentionally run without optional retention.
 
-Current Windows affected-module qualification: Effects 384 passed/0 ignored,
-Renderer 682 passed/39 ignored, Export 300 passed/18 ignored and App 3123
-passed/213 ignored. All complete gates settled with empty stderr under their
-original budgets. The four libraries were built together: App validation
-opt0/debug0, Effects opt1/debug0 without extra features, Renderer/Export
-validation opt1/debug0. Builds and full gates ran outside the Windows sandbox;
+Current Windows affected-module qualification: Renderer 684 passed/39 ignored,
+Export 300 passed/18 ignored and App 3123 passed/213 ignored. All three complete
+gates settled with empty stderr under their original budgets. The four libraries
+were built together: App validation opt0/debug0, Effects opt1/debug0 without extra
+features, Renderer/Export validation opt1/debug0. Effects was unchanged and its
+artifact reused; its 384 passed/0 ignored result remains the prior mixed-Control
+baseline rather than a new full Effects run. Builds and full gates ran outside the Windows sandbox;
 earlier sandbox rmeta/publication failures are not source or assertion workarounds.
 
 The native baseline at edf25518 uses a default worker at test-profile opt0/debug0,
 without libtest or validation features. Its 12 existing diagnostics/test-helper
 warnings remain; this is not a zero-warning or release qualification.
-Six actual native gates passed at that baseline; they were not rerun for this
-mixed-Control slice. The normal installed factory
+Six actual native gates passed at that baseline; they were not rerun for the
+mixed-Control or historical field-grid slices. The normal installed factory
 gate performs four full-RGBA renders on one native owner, eight coalesced exact
 Source services with current/Output leases held, and twelve upstream
 configuration creations/retirements in the original bank. Source origin/extent

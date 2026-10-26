@@ -701,6 +701,7 @@ fn collect_timeline_temporal_demands_inner(
             TimelineRenderPlanElement::Media(media) => collect_media_batch(
                 &mut batches,
                 program,
+                plan.position.time_base,
                 media,
                 generation,
                 continuity,
@@ -712,6 +713,7 @@ fn collect_timeline_temporal_demands_inner(
             TimelineRenderPlanElement::NestedSequence(nested) => collect_nested_batch(
                 &mut batches,
                 program,
+                plan.position.time_base,
                 nested,
                 generation,
                 continuity,
@@ -723,6 +725,7 @@ fn collect_timeline_temporal_demands_inner(
             TimelineRenderPlanElement::SolidColor(solid) => collect_solid_batch(
                 &mut batches,
                 program,
+                plan.position.time_base,
                 solid,
                 generation,
                 continuity,
@@ -753,6 +756,7 @@ fn collect_timeline_temporal_demands_inner(
                         TimelineTransitionInputPlan::Media(media) => collect_media_batch(
                             &mut batches,
                             program,
+                            plan.position.time_base,
                             media,
                             generation,
                             continuity,
@@ -765,6 +769,7 @@ fn collect_timeline_temporal_demands_inner(
                             collect_nested_batch(
                                 &mut batches,
                                 program,
+                                plan.position.time_base,
                                 nested,
                                 generation,
                                 continuity,
@@ -777,6 +782,7 @@ fn collect_timeline_temporal_demands_inner(
                         TimelineTransitionInputPlan::SolidColor(solid) => collect_solid_batch(
                             &mut batches,
                             program,
+                            plan.position.time_base,
                             solid,
                             generation,
                             continuity,
@@ -812,6 +818,7 @@ pub(crate) fn execute_prepared_timeline_temporal_batch(
 fn collect_media_batch(
     batches: &mut Vec<TimelineTemporalDemandBatch>,
     program: &PreparedVisualProgram,
+    grid: mondrian_core::Rational,
     media: &TimelineMediaPlan,
     generation: u64,
     continuity: EffectExecutionContinuity,
@@ -826,6 +833,7 @@ fn collect_media_batch(
     collect_batch(
         batches,
         program,
+        grid,
         media.placement,
         generation,
         continuity,
@@ -841,6 +849,7 @@ fn collect_media_batch(
 fn collect_nested_batch(
     batches: &mut Vec<TimelineTemporalDemandBatch>,
     program: &PreparedVisualProgram,
+    grid: mondrian_core::Rational,
     nested: &TimelineNestedSequencePlan,
     generation: u64,
     continuity: EffectExecutionContinuity,
@@ -855,6 +864,7 @@ fn collect_nested_batch(
     collect_batch(
         batches,
         program,
+        grid,
         nested.placement,
         generation,
         continuity,
@@ -870,6 +880,7 @@ fn collect_nested_batch(
 fn collect_solid_batch(
     batches: &mut Vec<TimelineTemporalDemandBatch>,
     program: &PreparedVisualProgram,
+    grid: mondrian_core::Rational,
     solid: &TimelineSolidColorPlan,
     generation: u64,
     continuity: EffectExecutionContinuity,
@@ -884,6 +895,7 @@ fn collect_solid_batch(
     collect_batch(
         batches,
         program,
+        grid,
         solid.placement,
         generation,
         continuity,
@@ -899,6 +911,7 @@ fn collect_solid_batch(
 fn collect_batch(
     batches: &mut Vec<TimelineTemporalDemandBatch>,
     program: &PreparedVisualProgram,
+    grid: mondrian_core::Rational,
     placement: TimelineClipExecutionRef,
     generation: u64,
     continuity: EffectExecutionContinuity,
@@ -922,10 +935,9 @@ fn collect_batch(
     )
     .with_output_frame_seed(output_frame_seed);
     let prepared = match session {
-        Some(session) => {
-            program.prepare_clip_temporal_execution_with_session(placement, &execution, session)
-        }
-        None => program.prepare_clip_temporal_execution(placement, &execution),
+        Some(session) => program
+            .prepare_clip_temporal_execution_with_session(placement, &execution, grid, session),
+        None => program.prepare_clip_temporal_execution(placement, &execution, grid),
     }
     .map_err(|error| TimelineTemporalPreparationError::EffectDemand {
         clip_id: placement.clip_id,
