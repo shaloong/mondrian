@@ -7,6 +7,7 @@ use std::sync::{
 };
 
 use super::*;
+use crate::app::preview_cpu_execution::composite_resolved_preview_working;
 
 fn pending_media_frame() -> PreviewTimelineMediaFrame {
     PreviewTimelineMediaFrame::Pending { wait: PreviewTimelineMediaWait::Producer }

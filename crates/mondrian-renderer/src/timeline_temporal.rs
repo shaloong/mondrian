@@ -230,7 +230,7 @@ impl<'a> TimelineProcessorInputExecution<'a> {
         &self.authority
     }
 
-    pub(crate) fn with_clip_inputs<T>(
+    pub fn with_clip_inputs<T>(
         &mut self,
         plan: &PreparedTimelineClipInputPlan,
         current: Option<&crate::CpuColorFrame>,
@@ -250,6 +250,16 @@ impl<'a> TimelineProcessorInputExecution<'a> {
 }
 
 impl PreparedTimelineClipInputPlan {
+    /// Match the exact frozen input occurrence, excluding later task authority.
+    /// A placement reused at another evaluation/raster must not borrow its key.
+    pub fn matches_semantics(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.program, &other.program)
+            && self.placement == other.placement
+            && self.evaluation == other.evaluation
+            && self.frame_extent == other.frame_extent
+            && self.output_roi == other.output_roi
+    }
+
     pub const fn placement(&self) -> TimelineClipExecutionRef {
         self.placement
     }

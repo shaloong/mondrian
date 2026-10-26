@@ -630,6 +630,16 @@ pub struct HeterogeneousCpuPrefixBatchExecutor {
 }
 
 impl HeterogeneousCpuPrefixBatchExecutor {
+    /// Loan this worker's existing compositor owner for prepared Timeline work.
+    /// The caller must retain the worker's panic boundary; no second Session or
+    /// processor bank is created by this loan.
+    pub fn with_composite_scratch<T>(
+        &mut self,
+        run: impl FnOnce(&mut TimelineCompositeScratch) -> T,
+    ) -> T {
+        run(&mut self.scratch)
+    }
+
     /// Current owner observation; borrowing it cannot replace the bank.
     pub fn processor_observation(&self) -> mondrian_effects::EffectProcessorObservation {
         self.scratch.processor_observation()

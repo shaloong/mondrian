@@ -1934,6 +1934,7 @@ fn visual_program_cache_does_not_cross_equal_author_state_between_open_sessions(
                     .settings
                     .root_program_color_context(state.project_color_environment())
                     .expect("valid test context"),
+                None,
             ) {
                 PreviewTimelineResolution::Ready(resolved) => return resolved,
                 PreviewTimelineResolution::Empty => {
@@ -11777,8 +11778,20 @@ fn nested_solid_color_sequence_returns_preview_frame() {
     state.seek(3).expect("seek");
 
     let service = WindowPreviewAdapter::new();
-    let frame = service.viewer_preview_for_state(&state);
-    let frame = ready_frame(frame);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let frame = loop {
+        service.poll_playback_work(None, state.preview_transport_intent());
+        match service.viewer_preview_for_state(&state) {
+            ready @ ViewerPreviewState::Ready(_) => break ready_frame(ready),
+            ViewerPreviewState::Loading | ViewerPreviewState::Stale(_) => {}
+            other => panic!("nested preview failed: {other:?}"),
+        }
+        assert!(
+            Instant::now() < deadline,
+            "nested preview did not complete its original work"
+        );
+        std::thread::sleep(Duration::from_millis(1));
+    };
 
     assert_eq!(frame.width, 960);
     assert_eq!(frame.height, 540);
@@ -20218,29 +20231,59 @@ fn canonical_program_raster_preserves_nested_canvases_with_equal_root_extent() {
         .settings
         .root_program_color_context(state.project_color_environment())
         .expect("Program context");
-    let PreviewTimelineResolution::Ready(viewer) =
-        runtime.resolve_timeline_for_test(&snapshot, &state, sequence, 4, 64, 32, context.clone())
-    else {
-        panic!("nested Viewer must resolve");
+    let resolve = |context: ProgramColorContext| {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut preparation = None;
+        loop {
+            runtime.poll_playback_work(None, snapshot.transport().intent());
+            match runtime.resolve_timeline_for_test(
+                &snapshot,
+                &state,
+                sequence,
+                4,
+                64,
+                32,
+                context.clone(),
+                preparation.take(),
+            ) {
+                PreviewTimelineResolution::Ready(ready) => break ready,
+                PreviewTimelineResolution::Pending { preparation: pending, .. } => {
+                    preparation = Some(pending)
+                }
+                other => panic!("nested raster preparation failed: {other:?}"),
+            }
+            assert!(
+                Instant::now() < deadline,
+                "nested raster did not finish its original preparation"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
     };
+    let viewer = resolve(context.clone());
     assert_eq!(
         viewer.semantic_trace.nodes[1].execution_resolution,
         Resolution { width: 8, height: 4 }
     );
-    let PreviewGpuFrameState::Ready(staged) = execute_gpu_preview_for_test_app(&runtime, &state)
-    else {
-        panic!("nested Viewer candidate must resolve");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let staged = loop {
+        runtime.poll_playback_work(None, snapshot.transport().intent());
+        match execute_gpu_preview_for_test_app(&runtime, &state) {
+            PreviewGpuFrameState::Ready(staged) => break staged,
+            PreviewGpuFrameState::Loading => {}
+            _ => panic!("nested Viewer candidate must resolve to Ready"),
+        }
+        assert!(
+            Instant::now() < deadline,
+            "nested GPU candidate did not resolve"
+        );
+        std::thread::sleep(Duration::from_millis(1));
     };
     runtime.set_raster_requirement(PreviewRasterRequirement::CanonicalProgram);
     assert!(
         runtime.bind_staged_gpu_frame_for_current(staged, &snapshot).is_none(),
         "equal root extents cannot authorize a reduced nested canvas"
     );
-    let PreviewTimelineResolution::Ready(program) =
-        runtime.resolve_timeline_for_test(&snapshot, &state, sequence, 4, 64, 32, context)
-    else {
-        panic!("nested canonical Program must resolve");
-    };
+    let program = resolve(context);
     assert_eq!(
         program.semantic_trace.nodes[0].execution_resolution,
         Resolution { width: 64, height: 32 }

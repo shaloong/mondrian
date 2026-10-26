@@ -4,10 +4,11 @@ use std::sync::Arc;
 
 use super::*;
 use crate::app::preview_timeline_execution::{
-    resolve_preview_timeline_with_programs_and_observer, PreviewTimelineExecutionBinding,
-    PreviewTimelineExecutionFact, PreviewTimelineFrameRequest, PreviewTimelineMediaRequest,
-    PreviewTimelinePendingDependency, PreviewTimelinePreparation, PreviewTimelineResolution,
-    PreviewTimelineSourceAdapters, PreviewTimelineTitleRequest,
+    resolve_preview_timeline_with_programs_and_observer, PreparedPreviewTimelineWork,
+    PreviewTimelineExecutionBinding, PreviewTimelineExecutionFact, PreviewTimelineFrameRequest,
+    PreviewTimelineMediaRequest, PreviewTimelinePendingDependency, PreviewTimelinePreparation,
+    PreviewTimelineResolution, PreviewTimelineSourceAdapters, PreviewTimelineTitleRequest,
+    PreviewTimelineWorkPoll,
 };
 
 /// Reconstruct the media timeline dependency for consumers that keep
@@ -162,6 +163,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                     }
                     PreviewTimelinePendingDependency::Media { .. }
                     | PreviewTimelinePendingDependency::BasicTitle(_)
+                    | PreviewTimelinePendingDependency::Execution { .. }
                     | PreviewTimelinePendingDependency::Temporal { .. } => false,
                 };
                 self.evaluation_working_set.borrow_mut().insert_preparing(
@@ -210,6 +212,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         width: u32,
         height: u32,
         color_context: ProgramColorContext,
+        preparation: Option<Box<PreviewTimelinePreparation>>,
     ) -> PreviewTimelineResolution {
         self.bump_timeline_resolve_count();
         self.synchronize_visual_program_authoring_session(snapshot);
@@ -228,7 +231,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                 color_context,
             )
             .with_raster_requirement(self.raster_requirement.get()),
-            None,
+            preparation,
             Arc::from([]),
         )
         .0
@@ -310,9 +313,11 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         };
         let heterogeneous_graph_budget =
             self.heterogeneous_effect_decision.get().cpu_prefix_grant().graph_execution();
+        let mut execute = |work| self.execute_prepared_timeline_work(snapshot, work);
         let resolution = resolve_preview_timeline_with_programs_and_observer(
             request,
-            PreviewTimelineSourceAdapters::new(&mut media_frame, &mut title_frame),
+            PreviewTimelineSourceAdapters::new(&mut media_frame, &mut title_frame)
+                .with_execution(&mut execute),
             PreviewTimelineExecutionBinding::new(
                 &self.visual_programs,
                 &self.scratch,
@@ -331,6 +336,9 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                 }
             }
             PreviewTimelineResolution::Pending { dependency, .. } => match dependency {
+                PreviewTimelinePendingDependency::Execution { .. } => {
+                    self.execution.borrow_mut().set_pending(true);
+                }
                 PreviewTimelinePendingDependency::Media { asset_id, wait } => {
                     let wait = match wait {
                         crate::app::preview_timeline_execution::PreviewTimelineMediaWait::Producer => "producer",
@@ -366,6 +374,175 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             media_dependencies.into_inner(),
             pending_dependencies.into_inner(),
         )
+    }
+
+    pub(super) fn execute_prepared_timeline_work(
+        &self,
+        snapshot: &PreviewExecutionSnapshot<'_>,
+        work: Arc<PreparedPreviewTimelineWork>,
+    ) -> PreviewTimelineWorkPoll {
+        let unavailable = |reason| {
+            PreviewTimelineWorkPoll::Finished(PreviewTimelineResolution::Unavailable { reason })
+        };
+        let generation = self.execution.borrow().generation();
+        let epoch = snapshot.transport().epoch();
+        if !work.is_active() || work.request().generation() != generation {
+            return unavailable(PreviewUnavailability::stopped(
+                PreviewOutputStage::TimelineEvaluation,
+                "prepared Timeline execution lost its original owner",
+            ));
+        }
+        let key = work.key();
+        let scope = super::super::preview_processor_feedback::PreviewProcessorFeedbackScope {
+            key: Some(
+                super::super::preview_processor_feedback::PreviewProcessorWorkKey::Visual(key),
+            ),
+            generation,
+            epoch,
+        };
+        if !snapshot.transport().is_speculative_preparation() {
+            self.bind_current_processor_feedback_scope(scope);
+        }
+        // This attempt ends on failure; its per-attempt key is never reused.
+        if let Some(failure) = self.visual_failures.borrow_mut().remove(&key) {
+            let is_user_blocked = failure.blocked.is_some();
+            if !snapshot.transport().is_speculative_preparation()
+                && let Some(receipt) = failure.blocked
+            {
+                let mut feedback = mondrian_effects::EffectProcessorFeedbackBatch::new();
+                if feedback.push((*receipt).clone()).is_ok() {
+                    *self.pending_processor_feedback.borrow_mut() = Some(
+                        super::super::preview_processor_feedback::PreviewProcessorFeedbackUpdate {
+                            scope,
+                            feedback,
+                        },
+                    );
+                }
+            }
+            return unavailable(if is_user_blocked {
+                PreviewUnavailability::blocked(
+                    PreviewOutputStage::TimelineComposite,
+                    failure.detail,
+                )
+            } else {
+                PreviewUnavailability::failed(PreviewOutputStage::TimelineComposite, failure.detail)
+            });
+        }
+        let ready = self.visual_ready.borrow_mut().remove(&key);
+        if let Some(mut ready) = ready {
+            if ready.generation() != generation
+                || ready.epoch() != epoch
+                || !ready.feedback_observation_is_active()
+            {
+                return unavailable(PreviewUnavailability::stopped(
+                    PreviewOutputStage::TimelineComposite,
+                    "prepared Timeline completion is stale",
+                ));
+            }
+            if !snapshot.transport().is_speculative_preparation() {
+                if let Ok(feedback) = ready.take_processor_feedback() {
+                    *self.pending_processor_feedback.borrow_mut() = Some(
+                        super::super::preview_processor_feedback::PreviewProcessorFeedbackUpdate {
+                            scope,
+                            feedback,
+                        },
+                    );
+                }
+            }
+            return match ready.into_prepared_timeline() {
+                Ok((output, lease)) => {
+                    if lease.finalize_preparation() {
+                        PreviewTimelineWorkPoll::Finished(output)
+                    } else {
+                        unavailable(PreviewUnavailability::stopped(
+                            PreviewOutputStage::TimelineComposite,
+                            "prepared Timeline completion missed its original binding or deadline",
+                        ))
+                    }
+                }
+                Err(_) => unavailable(PreviewUnavailability::failed(
+                    PreviewOutputStage::TimelineComposite,
+                    "prepared Timeline received a foreign visual completion",
+                )),
+            };
+        }
+        let Some(task) = self
+            .visual_execution
+            .as_ref()
+            .filter(|_| !self.visual_execution_health_failed.get())
+        else {
+            return unavailable(PreviewUnavailability::failed(
+                PreviewOutputStage::TimelineComposite,
+                "Preview visual execution worker is unavailable",
+            ));
+        };
+        work.bind_cancellation(task.cancellation_handle(key));
+        let sources = match work.processor_sources(self.media_source_work_policy(snapshot)) {
+            Ok(sources) => sources,
+            Err(reason) => return unavailable(reason),
+        };
+        let intent = media_preview_viewer_access_intent(
+            snapshot.transport().is_playing(),
+            snapshot.transport().seek_source(),
+        );
+        let class = media_preview_frame_work_class(media_preview_access_mode_for_intent(intent));
+        let demand = snapshot
+            .transport()
+            .is_playing()
+            .then(|| snapshot.transport().demand())
+            .flatten();
+        let sampled_at = Instant::now();
+        let adapter_deadline = demand.and_then(|demand| demand.adapter_deadline());
+        let deadline = match (adapter_deadline, work.request().cancellation().deadline()) {
+            (Some(owner), Some(prepared)) => Some(owner.min(prepared)),
+            (owner, prepared) => owner.or(prepared),
+        }
+        .map(|deadline| task.project_adapter_deadline(deadline, sampled_at));
+        let grant = self.heterogeneous_effect_decision.get().cpu_prefix_grant();
+        let sequence_id = work.sequence_id();
+        let payload = VisualExecutionTaskPayload::prepared_timeline(
+            epoch,
+            work,
+            grant.effect_session(),
+            self.scratch.borrow().cpu_working_set_diagnostics().grant,
+        )
+        .with_processor_sources(sources)
+        .with_native_gui_work(self.native_visual_gui_work(snapshot, sequence_id, scope));
+        let submission = task.submit(VisualExecutionAdmission::new(
+            key,
+            generation,
+            if snapshot.transport().is_speculative_preparation() {
+                mondrian_playback::FrameWorkPriority::Prefetch
+            } else {
+                mondrian_playback::FrameWorkPriority::Current
+            },
+            class,
+            demand.map(|demand| demand.identity()),
+            deadline,
+            payload,
+        ));
+        match submission {
+            mondrian_playback::FrameWorkSubmission::Queued { .. }
+            | mondrian_playback::FrameWorkSubmission::UpdatedQueued { .. }
+            | mondrian_playback::FrameWorkSubmission::ReusedInFlight
+            | mondrian_playback::FrameWorkSubmission::DroppedBackpressure => {
+                self.execution.borrow_mut().set_pending(true);
+                PreviewTimelineWorkPoll::Pending
+            }
+            mondrian_playback::FrameWorkSubmission::DroppedObsoleteGeneration => {
+                unavailable(PreviewUnavailability::stopped(
+                    PreviewOutputStage::TimelineComposite,
+                    "prepared Timeline generation is obsolete",
+                ))
+            }
+            mondrian_playback::FrameWorkSubmission::DroppedInvalidClass
+            | mondrian_playback::FrameWorkSubmission::Closed => {
+                unavailable(PreviewUnavailability::failed(
+                    PreviewOutputStage::TimelineComposite,
+                    "Preview visual Broker rejected prepared Timeline work",
+                ))
+            }
+        }
     }
 
     fn record_timeline_execution_fact(&self, fact: &PreviewTimelineExecutionFact) {

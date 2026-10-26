@@ -1489,6 +1489,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                     crate::app::preview_timeline_execution::PreviewTimelinePendingDependency::Media { .. } => "timeline_media",
                     crate::app::preview_timeline_execution::PreviewTimelinePendingDependency::BasicTitle(_) => "timeline_basic_title",
                     crate::app::preview_timeline_execution::PreviewTimelinePendingDependency::Temporal { .. } => "timeline_temporal",
+                    crate::app::preview_timeline_execution::PreviewTimelinePendingDependency::Execution { .. } => "timeline_execution",
                 }));
                 self.schedule_media_prefetches(
                     snapshot,
@@ -2590,6 +2591,12 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         let Some(task) = self.visual_execution.as_ref() else {
             return PreviewWorkPoll::default();
         };
+        self.visual_ready
+            .borrow_mut()
+            .retain(|_, ready| ready.preparation_owner_is_active());
+        self.visual_failures
+            .borrow_mut()
+            .retain(|_, failure| failure.preparation_owner_is_active());
         let active_generation = self.execution.borrow().generation();
         let active_epoch = self.transport_epoch.get();
         let mut outcome = PreviewWorkPoll::default();
@@ -2651,6 +2658,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                     }
                     if ready.generation() == active_generation
                         && active_epoch == Some(ready.epoch())
+                        && ready.preparation_owner_is_active()
                     {
                         self.visual_failures.borrow_mut().remove(&ready.key());
                         self.visual_ready.borrow_mut().insert(ready.key(), ready);
@@ -2660,6 +2668,9 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                     // unresolved Broker binding through RAII.
                 }
                 VisualExecutionTaskResult::Failed(failed) => {
+                    if !failed.preparation_owner_is_active() {
+                        continue;
+                    }
                     let scope = super::preview_processor_feedback::PreviewProcessorFeedbackScope {
                         key: Some(
                             super::preview_processor_feedback::PreviewProcessorWorkKey::Visual(
@@ -2894,6 +2905,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                                     detail: "Viewer CPU result exceeds its residency grant"
                                         .to_owned(),
                                     blocked: None,
+                                    preparation_interest: None,
                                 },
                             ));
                         }
@@ -2937,6 +2949,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                             VisualExecutionFailureView {
                                 detail: failed.reason,
                                 blocked: failed.blocked.clone(),
+                                preparation_interest: None,
                             },
                         ));
                         let scope = super::preview_processor_feedback::PreviewProcessorFeedbackScope::scalar(&failed.output_key, failed.generation, failed.epoch);
@@ -3032,6 +3045,9 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         active_generation: u64,
         active_epoch: Option<mondrian_playback::PlaybackEpoch>,
     ) {
+        if !failed.preparation_owner_is_active() {
+            return;
+        }
         if failed.owns_terminal_binding()
             && (failed.terminal_evidence().is_some()
                 || failed.failure().processor_blocked().is_some())
@@ -3043,6 +3059,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                 VisualExecutionFailureView {
                     detail: failed.failure().to_string(),
                     blocked: failed.failure().processor_blocked().map(std::sync::Arc::clone),
+                    preparation_interest: failed.preparation_interest().cloned(),
                 },
             );
         }
@@ -3065,6 +3082,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                 } => Some(mondrian_playback::FrameDeliveryKind::Late),
                 VisualExecutionTaskFailure::BrokerCanceled { .. } => None,
                 VisualExecutionTaskFailure::LeaseUnavailable
+                | VisualExecutionTaskFailure::PreparedTimeline { .. }
                 | VisualExecutionTaskFailure::RendererBatch(_)
                 | VisualExecutionTaskFailure::WorkerPanicked { .. } => {
                     Some(mondrian_playback::FrameDeliveryKind::Failed)
@@ -4157,4 +4175,14 @@ mod tests;
 struct VisualExecutionFailureView {
     detail: String,
     blocked: Option<std::sync::Arc<mondrian_effects::EffectProcessorFeedbackReceipt>>,
+    preparation_interest:
+        Option<std::sync::Weak<super::preview_timeline_execution::PreviewTimelineWorkInterest>>,
+}
+
+impl VisualExecutionFailureView {
+    fn preparation_owner_is_active(&self) -> bool {
+        self.preparation_interest
+            .as_ref()
+            .is_none_or(|interest| interest.upgrade().is_some())
+    }
 }

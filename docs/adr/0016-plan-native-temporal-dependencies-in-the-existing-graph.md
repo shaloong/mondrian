@@ -413,9 +413,10 @@ pixels prove that current differs and history matches the original upstream
 output. The test snapshots use the selected probe's exact stream, picture and
 color diagnostics; normal author-state and immutable-evidence guards remain.
 
-Windows affected gates now pass Effects 390, Renderer 688/39 ignored and
-Export 305/20 (1,383 passed, 59 ignored; opt1/debug0, Renderer/Export validation).
-Six related App tests pass with validation opt0/debug0. The new Export temporal
+Windows affected gates pass App 3,144/213 ignored, Renderer 688/39 ignored and
+Export 305/20 (4,137 passed, 272 ignored; App validation opt0/debug0,
+Renderer/Export validation opt1/debug0). Effects 390 retain their preceding
+opt1/debug0 qualification. The Export temporal
 cases prove real FFmpeg historical pixels after a finite upstream blend and
 mid-invocation cancellation, one reader DSP entry and complete owner release.
 Two Effects regressions exercise an actual finite temporal prefix, nested source
@@ -423,7 +424,7 @@ requests on reused instances, changing sources with an unchanged root provider,
 caller feedback/deadline restoration and sticky cancel/expiry. All gates settle
 with exit0/stderr0 under unchanged budgets; App/Renderer/Export test targets also
 compile. The preceding formal PNG/GPU checks
-and full App/Media/native OFX cohort retain their earlier conditions; they are
+and the Media/native OFX cohort retain their earlier conditions; they are
 not new full reruns.
 
 The shared preplanned temporal entry now accepts the original Control. The
@@ -434,15 +435,35 @@ Deadline, checkpoint, sticky stop and caller feedback cross the time-expanded
 execution unchanged. Export binds that entry to its original request, placement,
 decoder context and read-only cache through the existing source resolver.
 
-Preview's preplanned temporal materializer still executes before the CPU worker.
-Its media adapter can return Pending; moving the Export resolver there would
-block UI or require replay after partial DSP. The next consumer slice must move
-the frozen temporal work into the existing CPU worker/source-request protocol,
-retaining source leases and original cancellation without creating another bank
-or scheduler. This Preview route remains unqualified for dynamic processor input.
+Preview now uses the existing visual worker. Merely lending Control to the
+synchronous materializer would still block UI on late media or replay DSP after
+Pending. Production therefore lends the complete source-ready immutable closure
+to the existing visual Broker/worker; root per-layer GPU lowering stays intact,
+including other GPU-only layers. The worker borrows its existing compositor bank
+and Control for temporal and nested CPU work; no graph or scheduler is replaced.
+Standalone validation can execute the same source-ready work inline.
 
-This is finite Preview/Export source qualification. Transition rendering,
-nested/title/stack inputs, native formats beyond the
+The bounded evaluation working set owns distinct Sources and Executing phases.
+Sources retains partial Ready leases; Executing only polls the same owned work.
+Worker and result hold weak admission interest. Retirement cancels the original
+Broker binding without a payload-to-Broker ownership cycle or parent-generation
+cancellation. Raw keys match the frozen program, evaluation and raster, not only
+Clip placement; processed output never reconstructs those keys. Original stop,
+deadline and blocked feedback cross this handoff. Failed results also carry weak
+interest: retirement prevents publication and prunes stored observations;
+consumption removes the per-attempt failure key. A blocked processor keeps its
+Blocked disposition. Speculative work cannot displace current Viewer feedback.
+
+Seven focused App regressions pass under the original budgets. They cover actual
+FFmpeg history after a finite temporal prefix, one DSP call on the visual worker,
+Ready/Pending, sole-owner retirement, generation change, caller expiry, shutdown,
+bank release, current/speculative blocking and failure retirement before/after
+publication. Production acquire retains one evaluation and another GPU-only
+layer; this is GPU lowering evidence, not actual GPU submission. Existing nested
+canvas, cache invalidation and open-session separation assertions remain intact.
+
+This is finite Preview/Export source qualification. Transition source delivery,
+historical nested/title/stack inputs, native formats beyond the
 bounded coverage executor, all legal action/thread image requests and complete
 fielding still require implementation or acceptance. Reuse the existing Export
 temporal source and execution paths. Connect the dependency action to the same

@@ -9,7 +9,6 @@ use std::sync::{
 };
 use std::time::{Duration, Instant};
 
-use mondrian_core::timeline_data::TimelineClipExecutionRef;
 use mondrian_effects::{
     EffectProcessorControl, EffectTemporalExecutionError, PreparedTemporalFrameSet,
 };
@@ -30,7 +29,7 @@ const MAX_SOURCE_REQUEST_FRAMES: usize = 256;
 
 #[derive(Debug, Clone)]
 struct MediaBinding {
-    placement: TimelineClipExecutionRef,
+    plan: Arc<PreparedTimelineClipInputPlan>,
     key: MediaPreviewKey,
 }
 
@@ -43,6 +42,19 @@ pub(crate) struct PreviewProcessorSourceWork {
 }
 
 impl PreviewProcessorSourceWork {
+    pub(crate) fn from_bindings(
+        policy: PreviewMediaWorkPolicy,
+        bindings: impl IntoIterator<Item = (Arc<PreparedTimelineClipInputPlan>, MediaPreviewKey)>,
+    ) -> Self {
+        let mut selected: Vec<MediaBinding> = Vec::new();
+        for (plan, key) in bindings {
+            if !selected.iter().any(|binding| binding.plan.matches_semantics(&plan)) {
+                selected.push(MediaBinding { plan, key });
+            }
+        }
+        Self { policy, bindings: selected }
+    }
+
     pub(crate) fn from_elements(
         policy: PreviewMediaWorkPolicy,
         elements: &[ResolvedPreviewElement],
@@ -54,7 +66,7 @@ impl PreviewProcessorSourceWork {
                 if let Some(plan) = route.and_then(|route| route.processor_input_plan())
                     && let Some(key) = frame.source_key()
                 {
-                    bindings.push(MediaBinding { placement: plan.placement(), key: key.clone() });
+                    bindings.push(MediaBinding { plan: Arc::clone(plan), key: key.clone() });
                 }
             };
         let mut transition = |input: &ResolvedPreviewTransitionInput| {
@@ -235,7 +247,7 @@ impl<'a> PreviewProcessorSourceClient<'a> {
                 .work
                 .bindings
                 .iter()
-                .find(|binding| binding.placement == plan.placement())
+                .find(|binding| binding.plan.matches_semantics(plan))
                 .ok_or_else(|| {
                     unavailable("Clip has no original frozen media source key".into())
                 })?;

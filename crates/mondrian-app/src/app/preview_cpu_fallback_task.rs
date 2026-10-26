@@ -605,7 +605,8 @@ mod tests {
         pub(crate) created: std::sync::atomic::AtomicUsize,
         pub(crate) dropped: std::sync::atomic::AtomicUsize,
         pub(crate) calls: std::sync::atomic::AtomicUsize,
-        threads: std::sync::Mutex<Vec<String>>,
+        pub(crate) threads: std::sync::Mutex<Vec<String>>,
+        pub(crate) blocked: std::sync::atomic::AtomicBool,
     }
 
     #[derive(Debug)]
@@ -618,13 +619,18 @@ mod tests {
             mondrian_effects::EffectAlphaContract::IDENTITY
         }
         fn feedback_budget_bytes(&self) -> usize {
-            0
+            if self.0.blocked.load(std::sync::atomic::Ordering::SeqCst) {
+                mondrian_effects::EffectProcessorFeedbackSnapshot::maximum_retained_bytes()
+            } else {
+                0
+            }
         }
         fn storage(
             &self,
             _: mondrian_effects::EffectFloatProcessorSizing,
         ) -> mondrian_core::Result<mondrian_effects::EffectFloatProcessorStorage> {
-            mondrian_effects::EffectFloatProcessorStorage::new(0, 0)
+            let feedback = self.feedback_budget_bytes();
+            mondrian_effects::EffectFloatProcessorStorage::new(feedback, feedback)
         }
         fn prepare(
             &self,
@@ -663,6 +669,30 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push(thread::current().name().unwrap().to_owned());
+            if self.0.blocked.load(std::sync::atomic::Ordering::SeqCst) {
+                return Err(EffectProcessorInvocationError::UserBlocked(Box::new(
+                    EffectProcessorFeedback {
+                        owner: mondrian_core::EffectProcessorOwnerId::new(),
+                        origin: EffectProcessorExecutionOrigin::InProcess,
+                        snapshot: EffectProcessorFeedbackSnapshot::new(
+                            1,
+                            1,
+                            1,
+                            Some(
+                                EffectProcessorNotice::new(
+                                    EffectProcessorNoticeKind::Error,
+                                    "Repair the authored source parameter".into(),
+                                    "source-parameter".into(),
+                                )
+                                .unwrap(),
+                            ),
+                            None,
+                            vec![],
+                        )
+                        .unwrap(),
+                    },
+                )));
+            }
             let time = mondrian_core::TimelineTime::new(
                 params["n"].as_i64().unwrap(),
                 params["d"].as_i64().unwrap(),
@@ -721,6 +751,7 @@ mod tests {
         mondrian_renderer::PreparedTimelinePreviewEffectRoutes,
         Arc<SourceJobFacts>,
         std::sync::Weak<mondrian_renderer::PreparedVisualProgram>,
+        mondrian_timeline::Sequence,
     );
 
     fn source_job_request(mixed: bool) -> SourceJobFixture {
@@ -908,13 +939,13 @@ mod tests {
             _ => panic!("source fixture placement"),
         };
         request.elements = Arc::from([element]);
-        (request, plan, routes, facts, weak)
+        (request, plan, routes, facts, weak, sequence)
     }
 
     #[test]
     fn cpu_job_input_service_resolves_upstream_pixels_on_actual_worker_and_retires_owners() {
         use std::sync::atomic::Ordering;
-        let (mut request, plan, routes, facts, weak) = source_job_request(false);
+        let (mut request, plan, routes, facts, weak, _) = source_job_request(false);
         drop((plan, routes));
         type Store = mondrian_playback::PreviewFrameStore<u64, Vec<u8>, u64, Vec<u8>, (), String>;
         let mut store = Store::new(mondrian_playback::PreviewFrameStoreConfig::default());
@@ -965,7 +996,7 @@ mod tests {
     #[test]
     fn cpu_job_input_service_cancellation_prevents_processor_creation() {
         use std::sync::atomic::Ordering;
-        let (request, _, _, facts, _) = source_job_request(false);
+        let (request, _, _, facts, _, _) = source_job_request(false);
         request.cancellation.cancel();
         assert!(execute_cpu_fallback(&request, &mut TimelineCompositeScratch::default()).is_err());
         assert_eq!(facts.created.load(Ordering::SeqCst), 0);
@@ -988,7 +1019,7 @@ mod tests {
                 MonotonicTimestamp::ZERO
             }
         }
-        let (request, plan, routes, facts, weak) = source_job_request(true);
+        let (request, plan, routes, facts, weak, _) = source_job_request(true);
         let TimelineRenderPlanElement::SolidColor(solid) = &plan.elements[0] else {
             panic!("solid")
         };
