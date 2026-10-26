@@ -397,12 +397,30 @@ impl ExportVisualRenderSession {
         Ok(Some(route))
     }
 
+    #[cfg(test)]
     pub(super) fn execute_heterogeneous_element(
         &mut self,
         route: &PreparedExportHeterogeneousElement,
         input: HeterogeneousCpuPrefixSource,
         working_color_space: WorkingColorSpace,
         cancellation: &ExecutionCancellationToken,
+    ) -> Result<CpuColorFrame, ExportHeterogeneousEffectError> {
+        self.execute_heterogeneous_element_with_sources(
+            route,
+            input,
+            working_color_space,
+            cancellation,
+            None,
+        )
+    }
+
+    pub(super) fn execute_heterogeneous_element_with_sources(
+        &mut self,
+        route: &PreparedExportHeterogeneousElement,
+        input: HeterogeneousCpuPrefixSource,
+        working_color_space: WorkingColorSpace,
+        cancellation: &ExecutionCancellationToken,
+        sources: Option<&mut super::processor_sources::ExportProcessorSources<'_>>,
     ) -> Result<CpuColorFrame, ExportHeterogeneousEffectError> {
         let extent = route.route.frame_extent();
         let sampling = match &input {
@@ -490,12 +508,18 @@ impl ExportVisualRenderSession {
         let mut checkpoint = || {
             cancellation
                 .is_canceled()
-                .then_some(mondrian_effects::HeterogeneousCpuExecutionStopReason::Canceled)
+                .then_some(mondrian_effects::EffectProcessorStopReason::Canceled)
         };
-        let completion = match input {
-            HeterogeneousCpuPrefixSource::WorkingFrame(input) => self
-                .composite_scratch
-                .execute_prepared_heterogeneous_cpu_prefix_with_checkpoint(
+        let mut control = mondrian_effects::EffectProcessorControl::new(&mut checkpoint);
+        control.bind_observation(self.composite_scratch.processor_observation());
+        let current = match &input {
+            HeterogeneousCpuPrefixSource::WorkingFrame(frame) => Some(frame.clone()),
+            HeterogeneousCpuPrefixSource::SolidColor { .. } => None,
+        };
+        let scratch = &mut self.composite_scratch;
+        let run = |control: &mut mondrian_effects::EffectProcessorControl<'_>| match input {
+            HeterogeneousCpuPrefixSource::WorkingFrame(input) => scratch
+                .execute_prepared_heterogeneous_cpu_prefix_with_control(
                     route.route.prepared_work(),
                     generation,
                     mondrian_effects::EffectFloatFrameView::new(
@@ -510,11 +534,10 @@ impl ExportVisualRenderSession {
                     ),
                     route.frame_seed,
                     working_color_space,
-                    &mut checkpoint,
+                    control,
                 ),
-            HeterogeneousCpuPrefixSource::SolidColor { color, sampling, .. } => self
-                .composite_scratch
-                .execute_prepared_heterogeneous_solid_cpu_prefix_with_checkpoint(
+            HeterogeneousCpuPrefixSource::SolidColor { color, sampling, .. } => scratch
+                .execute_prepared_heterogeneous_solid_cpu_prefix_with_control(
                     route.route.prepared_work(),
                     generation,
                     extent,
@@ -522,8 +545,43 @@ impl ExportVisualRenderSession {
                     color,
                     route.frame_seed,
                     working_color_space,
-                    &mut checkpoint,
+                    control,
                 ),
+        };
+        let completion = if let (Some(plan), Some(sources)) =
+            (route.route.clip_input_plan(), sources)
+        {
+            let authority = sources.authority.clone();
+            let mut resolve =
+                |batch: &mondrian_renderer::TimelineTemporalDemandBatch,
+                 admit: &mut dyn FnMut(
+                    usize,
+                ) -> Result<
+                    (),
+                    mondrian_effects::EffectTemporalExecutionError,
+                >,
+                 control: &mut mondrian_effects::EffectProcessorControl<'_>| {
+                    sources.resolve(
+                        &mut self.decode_context,
+                        plan,
+                        batch,
+                        current.as_ref(),
+                        working_color_space,
+                        admit,
+                        control,
+                    )
+                };
+            plan.with_input_service(&authority, &mut resolve, &mut control, run).map_err(
+                |error| {
+                    self.visual_diagnostics.heterogeneous_terminal_failures =
+                        self.visual_diagnostics.heterogeneous_terminal_failures.saturating_add(1);
+                    ExportHeterogeneousEffectError::CapabilityUnavailable {
+                        reason: error.to_string(),
+                    }
+                },
+            )?
+        } else {
+            run(&mut control)
         }
         .map_err(|source| {
             self.visual_diagnostics.heterogeneous_terminal_failures =

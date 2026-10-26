@@ -374,20 +374,55 @@ reborrows the compositor's active color Session nor retains another pixel cache
 or processor bank. Aggregating additional per-source color-stage diagnostics
 and measuring this conversion overhead remain open.
 
-Current Windows library gates pass: App 3140/213 ignored, Effects 388/0,
-Renderer 688/39, Export 300/18 and Media 695/18 (5211 passed, 288 ignored).
-App uses validation opt0/debug0; Renderer/Export use validation opt1/debug0;
-Effects uses no features and Media default+validation, both opt1/debug0.
-All gates settled with exit0 and empty stderr under unchanged budgets.
-The new two-group source gate exercises an actual two-frame FFmpeg file through
+The two-group Preview source gate exercises an actual two-frame FFmpeg file through
 ordinary CPU and Broker-prefix jobs, exact historical pixels after upstream
 processing, one DSP entry, generation cancellation, caller expiry, shutdown and
 partial-Ready physical lease release. Existing Solid/service tests and six native
 OFX calibrations also pass. Broker completion in the new source test is a CPU
 frontier/lease check, with no actual GPU suffix rendering.
 
-This is finite Preview source qualification. Export job-bound borrowing,
-transition rendering, nested/title/stack inputs, native formats beyond the
+Export now lends source service to ordinary CPU composition and the heterogeneous
+CPU prefix on the existing job Session. Semantic plans come from the original
+program/placement and `PreparedVisualFrameEvaluation::execution_request`, not a
+new request reconstructed from the current frame. Transition endpoints retain
+their original placement; dedicated transition acceptance remains open. The
+heterogeneous route carries the same plan through its lowered identity graph.
+Its CPU prefix uses one Control for the source loan and upstream processing.
+The existing GPU continuation observes the original job cancellation;
+observation and instance ownership stay with the job.
+
+Planned and late media use one immutable decode-request lowering. Current cache
+hits and GPU capability negotiation preserve their existing order. Late source
+work borrows the frozen dependency map, original decoder context and existing
+cache read-only. Extra history never accumulates in that cache. A temporary
+uncached color Session avoids reborrowing the active compositor. Actual extra
+color-resolution counts and stage diagnostics join the existing job diagnostics.
+Metadata preflight admits total retained tile coverage plus one conservative
+decode/alpha/color host-pixel peak before allocation; each decoded working source
+is released after its tile is copied. The ceiling is four Float32 RGBA buffers
+per source pixel; decoder/SDK internal heaps and measured overhead are not
+qualified by that reservation. Demand metadata is limited to 256 entries.
+
+Five Export groups qualify real FFmpeg history after upstream processing,
+one DSP entry, caller cancellation, dynamic budget refusal, owner release, and
+an actual GPU-F32-only suffix with positive upload/readback and completion
+evidence. Three formal RenderQueue jobs publish 16x16 PNG controls/history from
+a two-frame source. Completed status, manifests and independently decoded PNG
+pixels prove that current differs and history matches the original upstream
+output. The test snapshots use the selected probe's exact stream, picture and
+color diagnostics; normal author-state and immutable-evidence guards remain.
+
+Current Windows affected gates: Renderer 688/39 ignored and Export 303/20
+(991 passed, 59 ignored), with validation opt1/debug0. Nine existing cross-module
+input-service/Preview source tests also pass. The five Export groups and all
+ordinary gates settled with exit0/stderr0 under unchanged budgets. Affected
+App/Renderer/Export test targets compile. The prior full App/Effects/Media and
+six native OFX cohort remains its earlier qualification, not a new full rerun.
+
+This is finite Preview/Export source qualification. The preplanned temporal
+batch entry still uses the legacy unobserved executor; it needs the same
+original-Control/source loan in the shared temporal engine. Transition rendering,
+nested/title/stack inputs, native formats beyond the
 bounded coverage executor, all legal action/thread image requests and complete
 fielding still require implementation or acceptance. Reuse the existing Export
 temporal source and execution paths. Connect the dependency action to the same

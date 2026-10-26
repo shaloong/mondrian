@@ -84,8 +84,7 @@ use mondrian_renderer::{
         ProgramOutputBoundary, ProgramOutputModule, ProgramOutputRole, RenderColorStageDiagnostics,
         RenderColorStageGpuBlockerBreakdown, SourceColorModule, WorkingColorModule,
     },
-    color_report_vocab, composite_timeline_elements_color_frame_with_diagnostics,
-    execute_prepared_visual_closure, prepare_decoded_cpu_source_frame,
+    color_report_vocab, execute_prepared_visual_closure, prepare_decoded_cpu_source_frame,
     prepare_visual_frame_closure, project_affine_to_sampled_extents, project_basic_title_transform,
     BasicTitleRasterizer, ColorFrameResidency, CpuColorFrame, GpuColorFrameHandle,
     GpuColorFrameReadbackPlan, GpuColorFrameTextureFormat, GpuColorFrameWgpuResourcePool,
@@ -134,10 +133,12 @@ use std::sync::{mpsc, Arc};
 use std::time::{Duration, Instant};
 use tokio::runtime::Builder as TokioRuntimeBuilder;
 
+mod processor_sources;
 mod service;
 #[cfg(feature = "validation")]
 mod validation;
 mod visual_effect_execution;
+use processor_sources::ExportProcessorSources;
 pub use service::*;
 #[cfg(feature = "validation")]
 pub use validation::{
@@ -8157,7 +8158,33 @@ fn prepare_export_visual_frame_closure(
                 &mut visual_session,
             )
             .map_err(|error| error.to_string())?;
-            let (render_plan, heterogeneous) = effect_frame_plan.into_parts();
+            let (render_plan, mut heterogeneous) = effect_frame_plan.into_parts();
+            for route in &mut heterogeneous {
+                let original = &prepared_frame.execution_plan().elements[route.element_index];
+                let (placement, graph) = match original {
+                    TimelineRenderPlanElement::Media(layer) => {
+                        (layer.placement, &layer.effect_graph)
+                    }
+                    TimelineRenderPlanElement::BasicTitle(layer) => {
+                        (layer.placement, &layer.effect_graph)
+                    }
+                    TimelineRenderPlanElement::NestedSequence(layer) => {
+                        (layer.placement, &layer.effect_graph)
+                    }
+                    TimelineRenderPlanElement::SolidColor(layer) => {
+                        (layer.placement, &layer.effect_graph)
+                    }
+                    _ => return Err("heterogeneous source has no original Clip placement".into()),
+                };
+                if let Some(plan) = processor_sources::clip_input_plan(
+                    program,
+                    prepared_frame.request(),
+                    placement,
+                    graph,
+                )? {
+                    route.route.bind_clip_input(plan);
+                }
+            }
             let prepared_frame = prepared_frame
                 .try_with_execution_plan(render_plan)
                 .map_err(|error| error.to_string())?;
@@ -9219,13 +9246,22 @@ fn render_prepared_visual_node_into(
                 ));
             }
         };
+        let mut sources = ExportProcessorSources::new(
+            node.evaluation().execution_request(),
+            context.media,
+            &color_context,
+            &decode_cache,
+            context.input_color_counts.as_deref_mut(),
+            context.stage_diagnostics.as_deref_mut(),
+        );
         let output = context
             .visual_session
-            .execute_heterogeneous_element(
+            .execute_heterogeneous_element_with_sources(
                 route,
                 input,
                 color_context.working_color_space(),
                 context.cancellation,
+                Some(&mut sources),
             )
             .map_err(|error| error.to_string())?;
         let slot = heterogeneous_media.get_mut(route.element_index).ok_or_else(|| {
@@ -9295,8 +9331,12 @@ fn render_prepared_visual_node_into(
                     transform,
                     effect_graph: media.effect_graph.clone(),
                     frame_seed: media.frame_seed,
-
-                    processor_input_plan: None,
+                    processor_input_plan: processor_sources::clip_input_plan(
+                        node.program(),
+                        node.evaluation().execution_request(),
+                        media.placement,
+                        &media.effect_graph,
+                    )?,
                 }));
             }
             TimelineRenderPlanElement::BasicTitle(title) => {
@@ -9311,8 +9351,12 @@ fn render_prepared_visual_node_into(
                     transform: resolved.transform,
                     effect_graph: title.effect_graph.clone(),
                     frame_seed: title.frame_seed,
-
-                    processor_input_plan: None,
+                    processor_input_plan: processor_sources::clip_input_plan(
+                        node.program(),
+                        node.evaluation().execution_request(),
+                        title.placement,
+                        &title.effect_graph,
+                    )?,
                 }));
             }
             TimelineRenderPlanElement::NestedSequence(nested) => {
@@ -9349,8 +9393,12 @@ fn render_prepared_visual_node_into(
                     transform,
                     effect_graph: nested.effect_graph.clone(),
                     frame_seed: nested.frame_seed,
-
-                    processor_input_plan: None,
+                    processor_input_plan: processor_sources::clip_input_plan(
+                        node.program(),
+                        node.evaluation().execution_request(),
+                        nested.placement,
+                        &nested.effect_graph,
+                    )?,
                 }));
             }
             TimelineRenderPlanElement::SolidColor(solid) => {
@@ -9371,7 +9419,12 @@ fn render_prepared_visual_node_into(
                         effect_graph: solid.effect_graph.clone(),
                         frame_seed: solid.frame_seed,
 
-                        processor_input_plan: None,
+                        processor_input_plan: processor_sources::clip_input_plan(
+                            node.program(),
+                            node.evaluation().execution_request(),
+                            solid.placement,
+                            &solid.effect_graph,
+                        )?,
                     }));
                 } else {
                     composite_elements.push(TimelineCompositeElement::SolidColor(
@@ -9383,7 +9436,12 @@ fn render_prepared_visual_node_into(
                             effect_graph: solid.effect_graph.clone(),
                             frame_seed: solid.frame_seed,
 
-                            processor_input_plan: None,
+                            processor_input_plan: processor_sources::clip_input_plan(
+                                node.program(),
+                                node.evaluation().execution_request(),
+                                solid.placement,
+                                &solid.effect_graph,
+                            )?,
                         },
                     ));
                 }
@@ -9451,19 +9509,55 @@ fn render_prepared_visual_node_into(
             .then_some(mondrian_effects::EffectProcessorStopReason::Canceled)
     };
     let mut control = mondrian_effects::EffectProcessorControl::new(&mut checkpoint);
-    let rendered = composite_timeline_elements_color_frame_with_diagnostics(
-        width,
-        height,
-        &composite_elements,
-        composite_options,
-        TimelineEffectColorRuntime::new(
-            color_context.engine(),
-            color_context.working_color_space(),
-            materialization.image_sampling(resolution).map_err(|error| error.to_string())?,
-        ),
-        &mut context.visual_session.composite_scratch,
-        &mut control,
-    )
+    let rendered = {
+        let mut sources = ExportProcessorSources::new(
+            node.evaluation().execution_request(),
+            context.media,
+            &color_context,
+            &decode_cache,
+            context.input_color_counts.as_deref_mut(),
+            context.stage_diagnostics.as_deref_mut(),
+        );
+        let authority = sources.authority.clone();
+        let mut resolve =
+            |plan: &mondrian_renderer::PreparedTimelineClipInputPlan,
+             batch: &TimelineTemporalDemandBatch,
+             current: Option<&CpuColorFrame>,
+             space: WorkingColorSpace,
+             admit: &mut dyn FnMut(
+                usize,
+            ) -> Result<
+                (),
+                mondrian_effects::EffectTemporalExecutionError,
+            >,
+             control: &mut mondrian_effects::EffectProcessorControl<'_>| {
+                sources.resolve(
+                    &mut context.visual_session.decode_context,
+                    plan,
+                    batch,
+                    current,
+                    space,
+                    admit,
+                    control,
+                )
+            };
+        let mut inputs =
+            mondrian_renderer::TimelineProcessorInputExecution::new(authority, &mut resolve);
+        mondrian_renderer::composite_timeline_elements_color_frame_with_inputs(
+            width,
+            height,
+            &composite_elements,
+            composite_options,
+            TimelineEffectColorRuntime::new(
+                color_context.engine(),
+                color_context.working_color_space(),
+                materialization.image_sampling(resolution).map_err(|error| error.to_string())?,
+            ),
+            &mut context.visual_session.composite_scratch,
+            &mut control,
+            Some(&mut inputs),
+        )
+    }
     .map_err(|error| format!("timeline composite failed: {error}"))?;
     if let Some(diagnostics) = context.composite_diagnostics.as_deref_mut() {
         diagnostics.accumulate(rendered.diagnostics);
@@ -9642,6 +9736,73 @@ fn decode_export_media_plan(
     cancellation: &ExecutionCancellationToken,
     route: ExportDecodedSourceRoute,
 ) -> Result<Arc<DecodedVideoLayer>, String> {
+    let (key, request) = prepare_export_media_decode(
+        media_dependencies,
+        media,
+        width,
+        height,
+        color_context,
+        input_color_counts,
+        route,
+    )?;
+    if let Some(decoded) = cache.get(&key) {
+        if decoded.route() != route {
+            return Err("Export decode cache route disagrees with its visual owner".to_owned());
+        }
+        if decoded.source_fingerprint != key.source_fingerprint
+            || decoded.video_stream_index != key.video_stream_index
+        {
+            return Err(format!(
+                "asset={} export decode cache evidence diverged from admitted source revision",
+                media.asset_id
+            ));
+        }
+        return Ok(Arc::clone(decoded));
+    }
+    let native_import_support = if route == ExportDecodedSourceRoute::GpuInput {
+        visual_session
+            .gpu_output
+            .native_import_support(&mut visual_session.decode_context)?
+    } else {
+        None
+    };
+    let decoded = decode_video_layer_scaled(
+        request,
+        ExportVideoLayerDecodeExecutionContext {
+            native_import_support: native_import_support.as_ref(),
+            color_session: visual_session.composite_scratch.color_execution_mut(),
+            decode_context: &mut visual_session.decode_context,
+            cancellation,
+            route,
+        },
+    )?;
+    if decoded.source_fingerprint != key.source_fingerprint
+        || decoded.video_stream_index != key.video_stream_index
+    {
+        return Err(format!(
+            "asset={} export decode result did not prove the cache-authorizing source revision",
+            media.asset_id
+        ));
+    }
+    if let Some(diagnostics) = stage_diagnostics {
+        diagnostics.accumulate(decoded.stage_diagnostics);
+    }
+    cache.insert(key, Arc::clone(&decoded));
+    Ok(decoded)
+}
+
+/// Freeze a source request without borrowing the active compositor Session.
+/// Both planned materialization and late processor input use this same lowering.
+#[allow(clippy::too_many_arguments)]
+fn prepare_export_media_decode<'a>(
+    media_dependencies: &'a HashMap<AssetId, crate::preset::ExportMediaDependency>,
+    media: &TimelineMediaPlan,
+    width: u32,
+    height: u32,
+    color_context: &ProgramColorContext,
+    input_color_counts: Option<&mut InputColorResolutionSourceCounts>,
+    route: ExportDecodedSourceRoute,
+) -> Result<(ExportDecodeCacheKey, ExportVideoLayerDecodeRequest<'a>), String> {
     let unit = media.effect_graph.image_scale_requirement()
         == mondrian_effects::EffectImageScaleRequirement::Unit;
     if unit && route != ExportDecodedSourceRoute::CpuWorking {
@@ -9708,28 +9869,8 @@ fn decode_export_media_plan(
         source_resolution,
         picture_geometry,
     )?;
-    if let Some(decoded) = cache.get(&key) {
-        if decoded.route() != route {
-            return Err("Export decode cache route disagrees with its visual owner".to_owned());
-        }
-        if decoded.source_fingerprint != dependency.source_fingerprint
-            || decoded.video_stream_index != key.video_stream_index
-        {
-            return Err(format!(
-                "asset={} export decode cache evidence diverged from admitted source revision",
-                media.asset_id
-            ));
-        }
-        return Ok(Arc::clone(decoded));
-    }
-    let native_import_support = if route == ExportDecodedSourceRoute::GpuInput {
-        visual_session
-            .gpu_output
-            .native_import_support(&mut visual_session.decode_context)?
-    } else {
-        None
-    };
-    let decoded = decode_video_layer_scaled(
+    Ok((
+        key,
         ExportVideoLayerDecodeRequest {
             asset_id: media.asset_id,
             dependency,
@@ -9741,27 +9882,7 @@ fn decode_export_media_plan(
             alpha_interpretation: media.alpha_interpretation,
             preparation_intent,
         },
-        ExportVideoLayerDecodeExecutionContext {
-            native_import_support: native_import_support.as_ref(),
-            color_session: visual_session.composite_scratch.color_execution_mut(),
-            decode_context: &mut visual_session.decode_context,
-            cancellation,
-            route,
-        },
-    )?;
-    if decoded.source_fingerprint != key.source_fingerprint
-        || decoded.video_stream_index != key.video_stream_index
-    {
-        return Err(format!(
-            "asset={} export decode result did not prove the cache-authorizing source revision",
-            media.asset_id
-        ));
-    }
-    if let Some(diagnostics) = stage_diagnostics {
-        diagnostics.accumulate(decoded.stage_diagnostics);
-    }
-    cache.insert(key, Arc::clone(&decoded));
-    Ok(decoded)
+    ))
 }
 
 /// Exact decode and renderer-preparation contract selected for one export source.
@@ -10481,7 +10602,12 @@ fn lower_export_transition_input<'a>(
                 effect_graph: media.effect_graph.clone(),
                 frame_seed: media.frame_seed,
 
-                processor_input_plan: None,
+                processor_input_plan: processor_sources::clip_input_plan(
+                    export_visual_node(closure, parent_node_id)?.program(),
+                    export_visual_node(closure, parent_node_id)?.evaluation().execution_request(),
+                    media.placement,
+                    &media.effect_graph,
+                )?,
             })
         }
         (
@@ -10511,7 +10637,12 @@ fn lower_export_transition_input<'a>(
                 effect_graph: nested.effect_graph.clone(),
                 frame_seed: nested.frame_seed,
 
-                processor_input_plan: None,
+                processor_input_plan: processor_sources::clip_input_plan(
+                    export_visual_node(closure, parent_node_id)?.program(),
+                    export_visual_node(closure, parent_node_id)?.evaluation().execution_request(),
+                    nested.placement,
+                    &nested.effect_graph,
+                )?,
             })
         }
         (
@@ -10525,7 +10656,12 @@ fn lower_export_transition_input<'a>(
             effect_graph: title.effect_graph.clone(),
             frame_seed: title.frame_seed,
 
-            processor_input_plan: None,
+            processor_input_plan: processor_sources::clip_input_plan(
+                export_visual_node(closure, parent_node_id)?.program(),
+                export_visual_node(closure, parent_node_id)?.evaluation().execution_request(),
+                title.placement,
+                &title.effect_graph,
+            )?,
         }),
         (
             TimelineTransitionInputPlan::SolidColor(solid),
@@ -10547,7 +10683,12 @@ fn lower_export_transition_input<'a>(
                 effect_graph: solid.effect_graph.clone(),
                 frame_seed: solid.frame_seed,
 
-                processor_input_plan: None,
+                processor_input_plan: processor_sources::clip_input_plan(
+                    export_visual_node(closure, parent_node_id)?.program(),
+                    export_visual_node(closure, parent_node_id)?.evaluation().execution_request(),
+                    solid.placement,
+                    &solid.effect_graph,
+                )?,
             })
         }
         (plan, ResolvedExportTransitionInput::Temporal(temporal)) => {
@@ -11013,6 +11154,7 @@ pub(crate) use helpers::*;
 #[cfg(test)]
 mod tests {
     mod native_transport_output;
+    mod processor_sources;
 
     #[test]
     fn smart_render_unclosed_probe_cannot_request_pixel_fallback() {

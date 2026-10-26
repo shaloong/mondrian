@@ -136,11 +136,15 @@ impl PreparedHeterogeneousEffectRoute {
         self.gpu_recording_requirements
     }
 
-    pub(crate) fn clip_input_plan(&self) -> Option<&Arc<crate::PreparedTimelineClipInputPlan>> {
+    /// Original Clip semantics carried into the route's actual execution.
+    pub fn clip_input_plan(&self) -> Option<&Arc<crate::PreparedTimelineClipInputPlan>> {
         self.clip_input.as_ref()
     }
 
-    pub(crate) fn bind_clip_input(&mut self, plan: Arc<crate::PreparedTimelineClipInputPlan>) {
+    /// Bind a plan prepared for this placement and originating frame request.
+    /// Actual job authority is lent only while executing the CPU prefix; input
+    /// stages still validate against the plan's original program.
+    pub fn bind_clip_input(&mut self, plan: Arc<crate::PreparedTimelineClipInputPlan>) {
         self.clip_input = Some(plan);
     }
 
