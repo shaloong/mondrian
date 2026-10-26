@@ -20913,3 +20913,6 @@ fn openfx_unit_media_original_decode_reaches_native_before_preview_downscale() {
     assert!(shutdown.all_workers_terminated());
     root.close().unwrap();
 }
+
+#[path = "../../../tests/protocol/preview_processor_sources.rs"]
+mod processor_source_tests;

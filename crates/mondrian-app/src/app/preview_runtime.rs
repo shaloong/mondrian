@@ -385,6 +385,8 @@ pub struct PreviewProductionRuntime<O: Clone> {
     pending_native_visual_question:
         RefCell<Option<super::preview_native_gui::NativeVisualQuestionPresentation>>,
     pending_native_visual_actions: RefCell<super::preview_native_gui::NativeVisualGuiActionBatch>,
+    pending_processor_sources:
+        RefCell<Vec<super::preview_processor_sources::PreviewProcessorSourceRequest>>,
     current_processor_feedback_scope:
         Cell<Option<super::preview_processor_feedback::PreviewProcessorFeedbackScope>>,
     pending_processor_feedback:
@@ -762,6 +764,12 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             reusable: resolved.cache_reusable,
         };
         let request = PreviewCpuFallbackRequest {
+            source_work: Some(
+                super::preview_processor_sources::PreviewProcessorSourceWork::from_elements(
+                    self.media_source_work_policy(snapshot),
+                    &resolved.elements,
+                ),
+            ),
             attempt: Some(attempt.clone()),
             working_reservation,
             output_target: target,
@@ -1052,6 +1060,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                 .then(|| transport.demand().map(PreviewFrameDemandSnapshot::identity))
                 .flatten(),
         );
+        let _ = self.pump_processor_source_requests();
         let preamble_us = app_duration_us(candidate_started.elapsed());
         observation.next("candidate-color-contract");
         self.execution.borrow_mut().set_pending(false);
@@ -1902,6 +1911,8 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                                 gpu_grant,
                                 std::mem::take(&mut media_residency_guards),
                             )
+                            .with_processor_sources(super::preview_processor_sources::PreviewProcessorSourceWork::from_elements(
+                                self.media_source_work_policy(snapshot), &resolved.elements))
                             .with_native_gui_work(
                                 self.native_visual_gui_work(snapshot, sequence.id, processor_scope),
                             ),
@@ -2595,6 +2606,10 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             };
             drained = drained.saturating_add(1);
             match result {
+                VisualExecutionTaskResult::SourceRequest(request) => {
+                    self.observe_processor_source_request(*request);
+                    outcome.needs_follow_up_poll = true;
+                }
                 VisualExecutionTaskResult::NativeGuiAction(action) => {
                     // This is an idle bank-owned action, with no current frame
                     // generation or fabricated completion scope. Main App
@@ -2671,7 +2686,55 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         // Reaching the exact bound cannot prove the channel is empty. Request
         // one more bounded turn even when every result was published before
         // the native event sampled its final work-watch revision.
-        outcome.needs_follow_up_poll = visual_execution_drain_needs_follow_up(drained);
+        outcome.needs_follow_up_poll |= visual_execution_drain_needs_follow_up(drained);
+        outcome
+    }
+
+    fn processor_source_scope_is_active(
+        &self,
+        request: &super::preview_processor_sources::PreviewProcessorSourceRequest,
+    ) -> bool {
+        let scope = request.scope();
+        request.is_active()
+            && scope.generation == self.execution.borrow().generation()
+            && self.transport_epoch.get() == Some(scope.epoch)
+            && (request.is_prefetch() || self.current_processor_feedback_scope.get() == Some(scope))
+    }
+
+    fn observe_processor_source_request(
+        &self,
+        request: super::preview_processor_sources::PreviewProcessorSourceRequest,
+    ) {
+        if !self.processor_source_scope_is_active(&request) {
+            return;
+        }
+        let mut pending = self.pending_processor_sources.borrow_mut();
+        pending.retain(|request| self.processor_source_scope_is_active(request));
+        // Each of the two existing serial CPU domains can have one live wait.
+        if pending.len() < 2 {
+            pending.push(request);
+        }
+    }
+
+    fn pump_processor_source_requests(&self) -> PreviewWorkPoll {
+        let mut outcome = PreviewWorkPoll::default();
+        // Admission can observe a producer failure and retire the generation.
+        // Never keep a queue borrow across that production callback.
+        let pending = std::mem::take(&mut *self.pending_processor_sources.borrow_mut());
+        for mut request in pending {
+            if !self.processor_source_scope_is_active(&request) {
+                continue;
+            }
+            let done = request
+                .poll(|key, policy| self.media_frame_for_frozen_key(key.clone(), policy, true));
+            if !done && self.processor_source_scope_is_active(&request) {
+                outcome.needs_follow_up_poll |= request.needs_admission_retry();
+                let mut queue = self.pending_processor_sources.borrow_mut();
+                if queue.len() < 2 {
+                    queue.push(request);
+                }
+            }
+        }
         outcome
     }
 
@@ -2684,6 +2747,10 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         let mut outcome = PreviewWorkPoll::default();
         while let Some(result) = task.try_poll() {
             match result {
+                PreviewCpuFallbackResult::SourceRequest(request) => {
+                    self.observe_processor_source_request(*request);
+                    outcome.needs_follow_up_poll = true;
+                }
                 PreviewCpuFallbackResult::NativeGuiAction(action) => {
                     // This is an idle bank-owned action, with no current frame
                     // generation or fabricated completion scope. Main App
@@ -3179,6 +3246,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             if let Some(task) = &self.visual_execution {
                 task.prune_before(generation);
             }
+            self.pending_processor_sources.borrow_mut().clear();
             self.visual_ready.borrow_mut().clear();
             self.visual_failures.borrow_mut().clear();
             self.retire_processor_feedback_view();
@@ -3203,6 +3271,9 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         if let Some(task) = &self.visual_execution {
             task.prune_before(generation);
         }
+        // Publish cancellation in both original execution domains before
+        // retiring their reply capabilities and partially acquired sources.
+        self.pending_processor_sources.borrow_mut().clear();
         self.visual_ready.borrow_mut().clear();
         self.visual_failures.borrow_mut().clear();
         self.retire_processor_feedback_view();
@@ -3449,6 +3520,7 @@ impl<O: Clone> PlaybackPreviewAdapter for PreviewProductionRuntime<O> {
         outcome.merge(self.pump_visual_execution_results(pending_demand));
         outcome.merge(self.pump_timeline_render_cache_results());
         outcome.merge(self.pump_cpu_fallback_results());
+        outcome.merge(self.pump_processor_source_requests());
         for candidate in self.take_visual_terminal_candidates(pending_demand) {
             if !outcome
                 .frame_delivery_candidates

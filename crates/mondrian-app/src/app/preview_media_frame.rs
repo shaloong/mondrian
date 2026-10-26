@@ -30,6 +30,9 @@ use super::preview_media_residency::PreviewMediaResidencyGuard;
 #[derive(Debug, Clone)]
 pub(crate) struct MediaPreviewFrame {
     payload: MediaPreviewPayload,
+    /// Complete key admitted with this allocation; no later Asset lookup may
+    /// replace its file/stream, RAW, picture or input-color interpretation.
+    source_key: Option<Arc<super::preview_access_mode::MediaPreviewKey>>,
     sampled_resolution: Resolution,
     logical_resolution: Resolution,
     source_to_display_affine: [f32; 6],
@@ -51,6 +54,18 @@ enum MediaPreviewPayload {
 }
 
 impl MediaPreviewFrame {
+    pub(crate) fn with_source_key(
+        mut self,
+        key: super::preview_access_mode::MediaPreviewKey,
+    ) -> Self {
+        self.source_key = Some(Arc::new(key));
+        self
+    }
+
+    pub(crate) fn source_key(&self) -> Option<&super::preview_access_mode::MediaPreviewKey> {
+        self.source_key.as_deref()
+    }
+
     pub(crate) fn from_working(
         frame: CpuColorFrame,
         logical_resolution: Resolution,
@@ -61,6 +76,7 @@ impl MediaPreviewFrame {
         let descriptor = frame.descriptor();
         Self {
             payload: MediaPreviewPayload::Working(frame),
+            source_key: None,
             sampled_resolution: Resolution { width: descriptor.width, height: descriptor.height },
             logical_resolution,
             source_to_display_affine: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
@@ -84,6 +100,7 @@ impl MediaPreviewFrame {
         let (width, height) = source.prepared_source.extent();
         Self {
             payload: MediaPreviewPayload::Source(Box::new(source)),
+            source_key: None,
             sampled_resolution: Resolution { width, height },
             logical_resolution,
             source_to_display_affine: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
@@ -107,6 +124,7 @@ impl MediaPreviewFrame {
     ) -> Self {
         Self {
             payload: MediaPreviewPayload::Native(source),
+            source_key: None,
             sampled_resolution,
             logical_resolution,
             source_to_display_affine: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
@@ -130,6 +148,7 @@ impl MediaPreviewFrame {
     ) -> Self {
         Self {
             payload: MediaPreviewPayload::CpuYuv(source),
+            source_key: None,
             sampled_resolution,
             logical_resolution,
             source_to_display_affine: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
@@ -183,6 +202,7 @@ impl MediaPreviewFrame {
         };
         source.temporal_selection = Some(Arc::new(selection));
         frame.identity = super::preview_media_task::media_preview_frame_identity(key, evidence);
+        frame.source_key = Some(Arc::new(key.clone()));
         frame.render_cache_source_fingerprint = Some(Arc::new(
             super::preview_render_cache_identity::canonical_media_source_fingerprint(key).ok()?,
         ));

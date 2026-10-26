@@ -61,6 +61,7 @@ const REQUEST_CAPACITY: usize = 1;
 const RESULT_CAPACITY: usize = 1;
 
 pub(crate) struct PreviewCpuFallbackRequest {
+    pub(crate) source_work: Option<super::preview_processor_sources::PreviewProcessorSourceWork>,
     pub(crate) attempt: Option<PreviewCpuFallbackAttempt>,
     pub(crate) output_target: PreviewCpuOutputTarget,
     pub(crate) native_gui_work: Option<super::preview_native_gui::PreviewNativeGuiWorkBatch>,
@@ -133,6 +134,7 @@ impl PreviewCpuFallbackFailure {
 }
 
 pub(crate) enum PreviewCpuFallbackResult {
+    SourceRequest(Box<super::preview_processor_sources::PreviewProcessorSourceRequest>),
     Progress(super::preview_processor_feedback::PreviewProcessorProgressUpdate),
     NativeQuestion(super::preview_native_gui::NativeVisualQuestionPresentation),
     NativeGuiAction(super::preview_native_gui::NativeVisualGuiActionDelivery),
@@ -290,10 +292,21 @@ fn cpu_fallback_worker(
                     RESULT_CAPACITY, question_service, progress_publication),
                 None => super::preview_processor_feedback::PreviewProcessorProgressPublisher::new_observer(RESULT_CAPACITY, progress_publication),
             };
+            let mut publish_source = |request| {
+                match results.try_send(PreviewCpuFallbackResult::SourceRequest(Box::new(request))) {
+                    Ok(()) => { work_notifier.result_became_pollable(); Ok(()) }
+                    Err(mpsc::TrySendError::Full(PreviewCpuFallbackResult::SourceRequest(request))) => Err(mpsc::TrySendError::Full(*request)),
+                    Err(mpsc::TrySendError::Disconnected(PreviewCpuFallbackResult::SourceRequest(request))) => Err(mpsc::TrySendError::Disconnected(*request)),
+                    _ => unreachable!("source publication returns its original payload"),
+                }
+            };
+            let mut source_client = request.source_work.as_ref().map(|work|
+                super::preview_processor_sources::PreviewProcessorSourceClient::new(scope, work, &mut publish_source));
             execute_cpu_fallback_observed(
                 &request,
                 &mut scratch,
                 mondrian_effects::EffectProcessorObservation { sink: Some(sink), deadline: None },
+                source_client.as_mut(),
             )
         }))
         .unwrap_or_else(|_| {
@@ -385,6 +398,7 @@ fn execute_cpu_fallback(
         request,
         scratch,
         mondrian_effects::EffectProcessorObservation::default(),
+        None,
     )
 }
 
@@ -392,6 +406,9 @@ fn execute_cpu_fallback_observed(
     request: &PreviewCpuFallbackRequest,
     scratch: &mut TimelineCompositeScratch,
     observation: mondrian_effects::EffectProcessorObservation,
+    mut source_client: Option<
+        &mut super::preview_processor_sources::PreviewProcessorSourceClient<'_>,
+    >,
 ) -> Result<
     (
         super::preview_frame_store::PreviewViewerCpuFrame,
@@ -432,7 +449,21 @@ fn execute_cpu_fallback_observed(
         mondrian_effects::EffectExecutionContinuity::Discontinuous,
         request.cancellation.clone(),
     );
-    let mut resolve = mondrian_renderer::PreparedTimelineClipInputPlan::prepare_available_sources;
+    let mut resolve =
+        |plan: &mondrian_renderer::PreparedTimelineClipInputPlan,
+         batch: &mondrian_renderer::TimelineTemporalDemandBatch,
+         current: Option<&CpuColorFrame>,
+         space: mondrian_core::WorkingColorSpace,
+         admit: &mut dyn FnMut(
+            usize,
+        )
+            -> Result<(), mondrian_effects::EffectTemporalExecutionError>,
+         control: &mut mondrian_effects::EffectProcessorControl<'_>| {
+            match source_client.as_deref_mut() {
+                Some(client) => client.resolve(plan, batch, current, space, admit, control),
+                None => plan.prepare_available_sources(batch, current, space, admit, control),
+            }
+        };
     let mut inputs =
         mondrian_renderer::TimelineProcessorInputExecution::new(authority, &mut resolve);
     let working = match &request.cached_working {
@@ -570,10 +601,10 @@ mod tests {
     use mondrian_effects::EffectFloatProcessorFactory;
 
     #[derive(Debug, Default)]
-    struct SourceJobFacts {
-        created: std::sync::atomic::AtomicUsize,
-        dropped: std::sync::atomic::AtomicUsize,
-        calls: std::sync::atomic::AtomicUsize,
+    pub(crate) struct SourceJobFacts {
+        pub(crate) created: std::sync::atomic::AtomicUsize,
+        pub(crate) dropped: std::sync::atomic::AtomicUsize,
+        pub(crate) calls: std::sync::atomic::AtomicUsize,
         threads: std::sync::Mutex<Vec<String>>,
     }
 
@@ -637,14 +668,23 @@ mod tests {
                 params["d"].as_i64().unwrap(),
             )
             .unwrap()
-            .checked_add(mondrian_core::TimelineTime::new(1, 4).unwrap())
+            .checked_add(
+                mondrian_core::TimelineTime::new(
+                    params["offset_n"].as_i64().unwrap(),
+                    params["offset_d"].as_i64().unwrap(),
+                )
+                .unwrap(),
+            )
             .unwrap();
             let (input, origin) = resources
                 .resolve_input_f32(
                     EffectProcessorInputRequest {
                         time,
                         frame_extent: frame.extent(),
-                        format: frame.format(),
+                        // Source representation is independent of the current image opacity tag.
+                        format: frame
+                            .format()
+                            .with_alpha(mondrian_core::ColorFrameAlpha::StraightCoverage),
                         sampling: frame.sampling(),
                         deadline: Instant::now() + std::time::Duration::from_secs(5),
                     },
@@ -675,19 +715,31 @@ mod tests {
         }
     }
 
-    fn source_job_request(
-        mixed: bool,
-    ) -> (
+    type SourceJobFixture = (
         PreviewCpuFallbackRequest,
         mondrian_renderer::TimelineRenderPlan,
         mondrian_renderer::PreparedTimelinePreviewEffectRoutes,
         Arc<SourceJobFacts>,
         std::sync::Weak<mondrian_renderer::PreparedVisualProgram>,
-    ) {
+    );
+
+    fn source_job_request(mixed: bool) -> SourceJobFixture {
+        source_job_request_with_media(mixed, None)
+    }
+
+    pub(crate) fn source_job_request_with_media(
+        mixed: bool,
+        media: Option<super::super::preview_media_frame::MediaPreviewFrame>,
+    ) -> SourceJobFixture {
         use mondrian_core::{AssetId, Color, FramePosition, Rational, TimelineTime};
         use mondrian_effects::*;
         use mondrian_renderer::*;
         let facts = Arc::new(SourceJobFacts::default());
+        let offset = if media.is_some() {
+            TimelineTime::new(-1, 1).unwrap()
+        } else {
+            TimelineTime::new(1, 4).unwrap()
+        };
         let kind = EffectType::External(format!(
             "test.cpu-job-source.{}",
             mondrian_core::EffectId::new()
@@ -706,9 +758,9 @@ mod tests {
             })
             .with_extension_contract(EffectExtensionContract::new("1.0"))
             .with_custom_float_processor_factory(
-                Arc::new(|_, c| {
+                Arc::new(move |_, c| {
                     Ok(Some(
-                        serde_json::json!({"n":c.time.numerator(), "d":c.time.denominator()}),
+                        serde_json::json!({"n":c.time.numerator(), "d":c.time.denominator(), "offset_n":offset.numerator(), "offset_d":offset.denominator()}),
                     ))
                 }),
                 None,
@@ -718,16 +770,30 @@ mod tests {
         )
         .unwrap();
         let mut sequence = mondrian_timeline::Sequence::new("Actual job source");
-        sequence.settings.resolution = mondrian_core::Resolution { width: 1, height: 1 };
+        let resolution = media
+            .as_ref()
+            .map_or(mondrian_core::Resolution { width: 1, height: 1 }, |frame| {
+                mondrian_core::Resolution { width: frame.width(), height: frame.height() }
+            });
+        sequence.settings.resolution = resolution;
         sequence.settings.frame_rate = Rational::new(24, 1);
         sequence.video_tracks.clear();
-        let mut clip = mondrian_timeline::Clip::new_solid_color(
-            AssetId::new(),
-            Color { r: 0.25, g: -0.5, b: 1.25, a: 0.5 },
-            TimelineTime::new(2, 1).unwrap(),
-            TimelineTime::new(5, 1).unwrap(),
-        )
-        .unwrap();
+        let mut clip = if let Some(frame) = &media {
+            mondrian_timeline::Clip::new(
+                frame.source_key().expect("frozen producer key").asset_id,
+                TimelineTime::new(2, 1).unwrap(),
+                TimelineTime::new(5, 1).unwrap(),
+            )
+            .unwrap()
+        } else {
+            mondrian_timeline::Clip::new_solid_color(
+                AssetId::new(),
+                Color { r: 0.25, g: -0.5, b: 1.25, a: 0.5 },
+                TimelineTime::new(2, 1).unwrap(),
+                TimelineTime::new(5, 1).unwrap(),
+            )
+            .unwrap()
+        };
         let gain = EffectType::External(format!(
             "test.cpu-job-gain.{}",
             mondrian_core::EffectId::new()
@@ -778,7 +844,7 @@ mod tests {
         let evaluation =
             TimelineEvaluationRequest::export(FramePosition::new(72, Rational::new(1, 24)));
         let plan = evaluate_prepared_visual_program(&program, evaluation.clone()).unwrap();
-        let extent = EffectFrameExtent::new(1, 1);
+        let extent = EffectFrameExtent::new(resolution.width, resolution.height);
         let retired = mondrian_core::ExecutionCancellationToken::new();
         let owner = TimelineFrameExecutionRequest::new(
             evaluation,
@@ -801,31 +867,47 @@ mod tests {
         .bind_clip_processor_inputs(&program, &owner)
         .unwrap();
         retired.cancel(); // Cached semantics must not inherit a retired job's authority.
-        let TimelineRenderPlanElement::SolidColor(solid) = &plan.elements[0] else {
-            panic!("solid")
-        };
-        let input = routes
-            .processor_input_plan_for(solid.placement, &solid.effect_graph)
-            .unwrap()
-            .cloned()
-            .expect("declared source plan");
         let mut request = working_request();
+        request.width = resolution.width;
+        request.height = resolution.height;
         request.color_context = sequence
             .settings
             .root_program_color_context(&mondrian_core::ProjectColorEnvironment::default())
             .unwrap();
         request.generation = 99;
-        request.elements = Arc::from([ResolvedPreviewElement::SolidColor(
-            TimelineSolidColorLayer {
-                color: solid.color,
-                opacity: solid.opacity,
-                blend_mode: solid.blend_mode,
-                transform: solid.transform,
-                effect_graph: solid.effect_graph.clone(),
-                frame_seed: solid.frame_seed,
-                processor_input_plan: Some(input),
-            },
-        )]);
+        let element = match (&plan.elements[0], media) {
+            (TimelineRenderPlanElement::SolidColor(solid), None) => {
+                let input = routes
+                    .processor_input_plan_for(solid.placement, &solid.effect_graph)
+                    .unwrap()
+                    .cloned()
+                    .expect("declared source plan");
+                ResolvedPreviewElement::SolidColor(TimelineSolidColorLayer {
+                    color: solid.color,
+                    opacity: solid.opacity,
+                    blend_mode: solid.blend_mode,
+                    transform: solid.transform,
+                    effect_graph: solid.effect_graph.clone(),
+                    frame_seed: solid.frame_seed,
+                    processor_input_plan: Some(input),
+                })
+            }
+            (TimelineRenderPlanElement::Media(layer), Some(frame)) => {
+                ResolvedPreviewElement::Media {
+                    frame,
+                    opacity: layer.opacity,
+                    blend_mode: layer.blend_mode,
+                    transform: layer.transform,
+                    effect_graph: layer.effect_graph.clone(),
+                    frame_seed: layer.frame_seed,
+                    prepared_effect_route: Some(Box::new(
+                        routes.route_for(layer.placement, &layer.effect_graph).unwrap().clone(),
+                    )),
+                }
+            }
+            _ => panic!("source fixture placement"),
+        };
+        request.elements = Arc::from([element]);
         (request, plan, routes, facts, weak)
     }
 
@@ -1000,6 +1082,7 @@ mod tests {
     fn working_request() -> PreviewCpuFallbackRequest {
         let sequence = mondrian_timeline::Sequence::new("CPU working output");
         PreviewCpuFallbackRequest {
+            source_work: None,
             sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
             attempt: None,
             working_reservation: None,
@@ -1143,6 +1226,7 @@ mod tests {
             max_retained_scratch_bytes: 0,
         };
         let mut request = PreviewCpuFallbackRequest {
+            source_work: None,
             sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
             attempt: None,
             working_reservation: None,
@@ -1294,3 +1378,6 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+pub(crate) use tests::source_job_request_with_media;

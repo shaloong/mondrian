@@ -193,7 +193,7 @@ impl PreviewFrameStoreAdapter {
         }
         let reserved_bytes = frame.reserved_cpu_bytes();
         let resource_units = frame.decoder_resource_units();
-        let frame = frame.into_unbound_store_payload();
+        let frame = frame.with_source_key(key.clone()).into_unbound_store_payload();
         self.store.admit_media_frame(key, frame, work, reserved_bytes, resource_units)
     }
 

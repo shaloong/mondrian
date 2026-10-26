@@ -230,19 +230,15 @@ therefore checks exact configuration retirement, rather than assuming a variant
 cache. Optional native retention must use the recipe's declared bytes, not a guessed
 constant; a legal active render may intentionally run without optional retention.
 
-Current Windows preparation-ownership qualification: App 3135 passed/213
-ignored, Renderer 686/39 and Export 300/18. All complete gates settled with
-empty stderr under their original budgets. The unified Cargo selection uses
-validation, opt0/debug0 for App and opt1/debug0 for Renderer/Export.
-Seventeen focused App tests and two original-request Renderer tests also passed.
-Effects 384/0 remains the unchanged mixed-Control baseline. Builds and gates
-ran outside the Windows sandbox; this is no new release or workspace qualification.
+Current affected-library qualification is summarized below. Earlier focused
+preparation tests remain in the ordinary library gates; their historical counts
+are not separate current compatibility claims.
 
 The native baseline at edf25518 uses a default worker at test-profile opt0/debug0,
 without libtest or validation features. Its 12 existing diagnostics/test-helper
 warnings remain; this is not a zero-warning or release qualification.
-Six actual native gates passed at that baseline; they were not rerun for the
-mixed-Control, historical field-grid or Preview source-readiness slices. The normal installed factory
+Six existing native gates pass again with the current parent and this reused
+worker; the worker was not rebuilt for the historical-media slice. The normal installed factory
 gate performs four full-RGBA renders on one native owner, eight coalesced exact
 Source services with current/Output leases held, and twelve upstream
 configuration creations/retirements in the original bank. Source origin/extent
@@ -267,8 +263,8 @@ native plugins in the mixed route are not qualified by these fixture tests.
 
 SourceDeliveryProbe deliberately does not declare temporal access. These are
 owned finite integration calibrations, not conforming third-party temporal
-compatibility. Main Preview/Export source admission and job-bound service
-consumption, native format/alpha beyond the bounded coverage executor, dependency
+compatibility. Remaining Preview/Export source cases, native format/alpha beyond
+the bounded coverage executor, dependency
 scheduling, legal action/thread image coverage and complete field-grid parity
 remain open. Temporal flags stay false. No new whole-workspace, release, RT,
 performance, complete heap, GPU or other-platform qualification follows.
@@ -350,33 +346,52 @@ own program, source service or another Session.
 Factories explicitly declare additional-input use. That declaration is frozen,
 included in complete/subtree identity and checked against later provider drift.
 Such output is uncacheable until complete dynamic dependencies can be proven;
-ordinary current-frame callbacks retain their existing policy. The initial
-materializer serves canonical procedural Solid samples and an already-admitted
-current image only when its exact source sample, raster, sampling and working
-identity match (including valid freeze/rate aliases). Missing history is explicit,
-never current-frame substitution. Finite Rust Solid fixtures qualify actual
-ordinary CPU and Broker-prefix workers, upstream pixels, retired-token isolation,
-cancellation and owner release. Complete Effects/Renderer/Export/App library
-gates and six existing native OFX regressions pass on Windows validation builds.
-These results do not qualify native Timeline Temporal, successful current-media
-or transition fetches, GPU completion, RT, release performance or other platforms.
+ordinary current-frame callbacks retain their existing policy. Canonical Solid
+samples and exact current-image aliases retain their conservative materializer.
+Missing history never substitutes the current image.
 
-Next resolve asynchronous historical media through the original scheduler and
-readiness phases, bind Export and nested-child consumers, and cover title/stack
-input semantics. The current
-materializer copies admitted data and cannot reenter color preparation or DSP.
+For historical media, Frame Store admission attaches the originating complete
+media key to the decoded allocation. The job freezes that key by exact Clip
+placement, including transition endpoints. Retargeting changes only the source
+sample: file/stream fingerprint, proxy representation, RAW/field interpretation,
+alpha and input-color preparation remain unchanged. Requests must match the
+original program's canonical source; changed raw interpretation and unsupported
+nested sources are refused explicitly rather than reopened from current assets.
 
-Preserve placement through the execution boundary: resolved composition layers
-do not suffice to recover it from EffectId. Preview source resolution may return
-Pending; it cannot become an ordinary failure followed by partial-DSP replay.
-Working-color preparation uses the existing scratch's color Session, so a late
-callback cannot recursively borrow that same scratch while its bank is active.
-Resolve those demands through the original source jobs and readiness phases.
-Connect the dependency action to that same execution; verify all legal
-action/thread image requests before enabling capabilities. Distinguish declared media absence from an
-unprepared dependency; missing planned input cannot silently become a black frame.
-Then verify Preview/Export with real temporal plugins. Qualification
-must cover discontinuous ranges, negative/fractional time under the clip sampling
-contract, changed parameters, upstream Effects, cancellation, exact image leases,
-bounded storage, cache invalidation and repeated same-owner use. Keep the current
-honest capability guards until those paths are connected and verified.
+The two existing serial CPU domains send move-only source requests through their
+existing result channels. Runtime admits them through the ordinary media
+scheduler and Frame Store. Each invocation retains partial exact Ready leases
+across admission retries; producer waits use the existing notifier. The queue
+holds at most one wait per CPU domain, with at most 256 distinct source keys per
+batch. A live processor waits with its original Control and scoped deadline,
+without replaying DSP. Generation/session retirement and shutdown cancel the
+original domains before dropping replies and partial source leases; decoder
+joins cannot wait on frames retained only by this queue.
+
+Historical working conversion uses the decoded allocation's existing,
+already-budgeted OnceLock and a temporary uncached color Session. It neither
+reborrows the compositor's active color Session nor retains another pixel cache
+or processor bank. Aggregating additional per-source color-stage diagnostics
+and measuring this conversion overhead remain open.
+
+Current Windows library gates pass: App 3140/213 ignored, Effects 388/0,
+Renderer 688/39, Export 300/18 and Media 695/18 (5211 passed, 288 ignored).
+App uses validation opt0/debug0; Renderer/Export use validation opt1/debug0;
+Effects uses no features and Media default+validation, both opt1/debug0.
+All gates settled with exit0 and empty stderr under unchanged budgets.
+The new two-group source gate exercises an actual two-frame FFmpeg file through
+ordinary CPU and Broker-prefix jobs, exact historical pixels after upstream
+processing, one DSP entry, generation cancellation, caller expiry, shutdown and
+partial-Ready physical lease release. Existing Solid/service tests and six native
+OFX calibrations also pass. Broker completion in the new source test is a CPU
+frontier/lease check, with no actual GPU suffix rendering.
+
+This is finite Preview source qualification. Export job-bound borrowing,
+transition rendering, nested/title/stack inputs, native formats beyond the
+bounded coverage executor, all legal action/thread image requests and complete
+fielding still require implementation or acceptance. Reuse the existing Export
+temporal source and execution paths. Connect the dependency action to the same
+graph semantics, then verify real Temporal plugins, seek/loop, Preview/Export
+parity and performance before enabling temporal capabilities. No new release,
+whole-workspace, third-party Temporal, RT, GPU interop or platform qualification
+follows from these tests; temporal flags stay false.

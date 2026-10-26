@@ -254,6 +254,44 @@ impl PreparedTimelineClipInputPlan {
         self.placement
     }
 
+    /// Original raw source at this placement's bound instant, including its
+    /// canonical media sampling policy rather than an inferred frame index.
+    pub fn current_source(
+        &self,
+    ) -> Result<TimelineTemporalSource, TimelineTemporalPreparationError> {
+        self.program.temporal_source_at(self.placement, self.placement.clip_time)
+    }
+
+    /// Validate ownership before a consumer admits any asynchronous source job.
+    pub fn validate_source_demands(
+        &self,
+        batch: &TimelineTemporalDemandBatch,
+    ) -> Result<(), EffectTemporalExecutionError> {
+        let unavailable = |reason: &str| -> EffectTemporalExecutionError {
+            mondrian_effects::EffectExecutionError::InputUnavailable { reason: reason.into() }
+                .into()
+        };
+        if batch.placement() != self.placement {
+            return Err(unavailable(
+                "source batch belongs to another Clip placement",
+            ));
+        }
+        for demand in batch.source_demands() {
+            let expected = self
+                .program
+                .temporal_source_at(self.placement, demand.effect_request.time())
+                .map_err(|_| {
+                    unavailable("source demand cannot be mapped by the original program")
+                })?;
+            if expected != demand.source {
+                return Err(unavailable(
+                    "source demand does not belong to the original program",
+                ));
+            }
+        }
+        Ok(())
+    }
+
     /// Freeze sources already available to this CPU job. Procedural sources are
     /// evaluated from the canonical program; file/nested images must match the
     /// bound current source sample (including freeze/rate aliases). Missing history is never replaced by current
@@ -266,7 +304,6 @@ impl PreparedTimelineClipInputPlan {
         admit: &mut dyn FnMut(usize) -> Result<(), EffectTemporalExecutionError>,
         control: &mut mondrian_effects::EffectProcessorControl<'_>,
     ) -> Result<PreparedTemporalFrameSet, EffectTemporalExecutionError> {
-        use sha2::{Digest, Sha256};
         let unavailable = |reason: &str| -> EffectTemporalExecutionError {
             mondrian_effects::EffectExecutionError::InputUnavailable { reason: reason.into() }
                 .into()
@@ -319,6 +356,40 @@ impl PreparedTimelineClipInputPlan {
                 }
             }
         }
+        self.prepare_sources(
+            batch,
+            working_space,
+            &mut |_, _| {
+                current
+                    .cloned()
+                    .ok_or_else(|| unavailable("current Clip source is unavailable"))
+            },
+            admit,
+            control,
+        )
+    }
+
+    /// Materialize canonical raw sources supplied by the actual job's producer.
+    /// The resolver returns working pixels only; upstream DSP remains in the
+    /// original processor bank after this source loan returns.
+    pub fn prepare_sources(
+        &self,
+        batch: &TimelineTemporalDemandBatch,
+        working_space: mondrian_core::WorkingColorSpace,
+        resolve: &mut impl FnMut(
+            &TimelineTemporalSourceDemand,
+            &mut mondrian_effects::EffectProcessorControl<'_>,
+        ) -> Result<crate::CpuColorFrame, EffectTemporalExecutionError>,
+        admit: &mut dyn FnMut(usize) -> Result<(), EffectTemporalExecutionError>,
+        control: &mut mondrian_effects::EffectProcessorControl<'_>,
+    ) -> Result<PreparedTemporalFrameSet, EffectTemporalExecutionError> {
+        use sha2::{Digest, Sha256};
+        let unavailable = |reason: &str| -> EffectTemporalExecutionError {
+            mondrian_effects::EffectExecutionError::InputUnavailable { reason: reason.into() }
+                .into()
+        };
+        control.check().map_err(|_| EffectTemporalExecutionError::Canceled)?;
+        self.validate_source_demands(batch)?;
         admit(batch.effect_demands().coverage_bytes())?;
         let mut identity = Sha256::new();
         identity.update(b"mondrian.timeline.available-processor-input.v1");
@@ -328,6 +399,25 @@ impl PreparedTimelineClipInputPlan {
         );
         let mut tiles = Vec::with_capacity(batch.source_demands().len());
         for demand in batch.source_demands() {
+            let source_frame = match demand.source {
+                TimelineTemporalSource::SolidColor { .. } => None,
+                TimelineTemporalSource::Media { .. }
+                | TimelineTemporalSource::NestedSequence { .. } => {
+                    let frame = resolve(demand, control)?;
+                    let payload = frame.rgba_f32();
+                    let extent = demand.effect_request.frame_extent();
+                    if payload.width != extent.width()
+                        || payload.height != extent.height()
+                        || payload.sampling != demand.effect_request.sampling()
+                        || payload.color_space != working_space
+                    {
+                        return Err(unavailable(
+                            "resolved source shape, sampling or color differs from the demand",
+                        ));
+                    }
+                    Some(frame)
+                }
+            };
             let request = demand.effect_request;
             let roi = request.input_roi().region();
             let extent = request.frame_extent();
@@ -377,7 +467,7 @@ impl PreparedTimelineClipInputPlan {
                         }
                         TimelineTemporalSource::Media { .. }
                         | TimelineTemporalSource::NestedSequence { .. } => {
-                            let frame = current.expect("validated current source").rgba_f32();
+                            let frame = source_frame.as_ref().expect("resolved source").rgba_f32();
                             let sample = frame
                                 .data
                                 .get(y as usize * frame.width as usize + x as usize)
@@ -420,7 +510,7 @@ impl PreparedTimelineClipInputPlan {
         .map_err(|error| unavailable(&format!("source frame-set validation failed: {error}")))
     }
 
-    /// Bind the unchanged semantic request to this actual job, once before DSP.
+    /// Bind reusable semantics to this actual execution attempt.
     pub fn bind(
         &self,
         authority: &TimelineFrameExecutionAuthority,

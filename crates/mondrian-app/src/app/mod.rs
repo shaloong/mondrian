@@ -242,6 +242,7 @@ pub(crate) mod preview_media_source;
 pub(crate) mod preview_media_task;
 pub(crate) mod preview_native_gui;
 pub(crate) mod preview_processor_feedback;
+mod preview_processor_sources;
 pub(crate) mod preview_quality;
 pub(crate) mod preview_raster_frame;
 pub(crate) mod preview_render_cache;

@@ -79,6 +79,7 @@ enum VisualExecutionWork {
 /// [`FrameWorkRequest`] and remain authoritative in the Broker.
 #[derive(Debug, Clone)]
 pub(crate) struct VisualExecutionTaskPayload {
+    source_work: Option<super::preview_processor_sources::PreviewProcessorSourceWork>,
     epoch: PlaybackEpoch,
     native_gui_work: Option<super::preview_native_gui::PreviewNativeGuiWorkBatch>,
     work: VisualExecutionWork,
@@ -95,6 +96,7 @@ impl VisualExecutionTaskPayload {
         media_residency_guards: Vec<PreviewMediaResidencyGuard>,
     ) -> Self {
         Self {
+            source_work: None,
             epoch,
             native_gui_work: None,
             work: VisualExecutionWork::HeterogeneousCpuPrefixBatch {
@@ -105,6 +107,14 @@ impl VisualExecutionTaskPayload {
             #[cfg(test)]
             control: VisualExecutionTestControl::default(),
         }
+    }
+
+    pub(crate) fn with_processor_sources(
+        mut self,
+        work: super::preview_processor_sources::PreviewProcessorSourceWork,
+    ) -> Self {
+        self.source_work = Some(work);
+        self
     }
 
     pub(crate) fn with_native_gui_work(
@@ -397,6 +407,7 @@ impl VisualExecutionFailed {
 /// One result emitted by the dedicated CPU preparation worker.
 #[derive(Debug)]
 pub(crate) enum VisualExecutionTaskResult {
+    SourceRequest(Box<super::preview_processor_sources::PreviewProcessorSourceRequest>),
     /// Bounded actual execution observation, with no Broker completion lease.
     Progress(super::preview_processor_feedback::PreviewProcessorProgressUpdate),
     /// Same bounded transport, opaque exact owner/work/service identity.
@@ -971,7 +982,27 @@ fn visual_execution_worker(
             catch_unwind(AssertUnwindSafe(|| {
                 #[cfg(test)]
                 execution.payload.apply_test_control();
-                execute_visual_payload(execution.payload, identity, &broker, &mut executor)
+                execute_visual_payload(
+                    execution.payload,
+                    identity,
+                    &broker,
+                    &mut executor,
+                    &mut |request| match results
+                        .try_send(VisualExecutionTaskResult::SourceRequest(Box::new(request)))
+                    {
+                        Ok(()) => {
+                            work_notifier.result_became_pollable();
+                            Ok(())
+                        }
+                        Err(mpsc::TrySendError::Full(
+                            VisualExecutionTaskResult::SourceRequest(request),
+                        )) => Err(mpsc::TrySendError::Full(*request)),
+                        Err(mpsc::TrySendError::Disconnected(
+                            VisualExecutionTaskResult::SourceRequest(request),
+                        )) => Err(mpsc::TrySendError::Disconnected(*request)),
+                        _ => unreachable!("source publication returns its original payload"),
+                    },
+                )
             }))
             .unwrap_or_else(|payload| {
                 // No mutable renderer/effect residency survives a task panic.
@@ -1013,6 +1044,12 @@ fn execute_visual_payload(
     identity: VisualExecutionIdentity,
     broker: &VisualExecutionBroker,
     executor: &mut HeterogeneousCpuPrefixBatchExecutor,
+    publish_source: &mut dyn FnMut(
+        super::preview_processor_sources::PreviewProcessorSourceRequest,
+    ) -> Result<
+        (),
+        mpsc::TrySendError<super::preview_processor_sources::PreviewProcessorSourceRequest>,
+    >,
 ) -> Result<VisualExecutionTaskOutput, VisualExecutionTaskFailure> {
     match payload.work {
         VisualExecutionWork::HeterogeneousCpuPrefixBatch {
@@ -1050,8 +1087,33 @@ fn execute_visual_payload(
                 };
                 let mut control = mondrian_effects::EffectProcessorControl::new(&mut checkpoint);
                 control.bind_observation(observation);
-                let mut resolve =
-                    mondrian_renderer::PreparedTimelineClipInputPlan::prepare_available_sources;
+                let source_scope =
+                    super::preview_processor_feedback::PreviewProcessorFeedbackScope {
+                        key: Some(
+                            super::preview_processor_feedback::PreviewProcessorWorkKey::Visual(
+                                identity.key,
+                            ),
+                        ),
+                        generation: identity.generation,
+                        epoch: payload.epoch,
+                    };
+                let mut source_client = payload.source_work.as_ref().map(|work| {
+                    super::preview_processor_sources::PreviewProcessorSourceClient::new(
+                        source_scope,
+                        work,
+                        publish_source,
+                    )
+                });
+                let mut resolve = |plan: &mondrian_renderer::PreparedTimelineClipInputPlan,
+                    batch: &mondrian_renderer::TimelineTemporalDemandBatch, current: Option<&mondrian_renderer::CpuColorFrame>,
+                    space: mondrian_core::WorkingColorSpace,
+                    admit: &mut dyn FnMut(usize) -> Result<(), mondrian_effects::EffectTemporalExecutionError>,
+                    control: &mut mondrian_effects::EffectProcessorControl<'_>| {
+                    match source_client.as_mut() {
+                        Some(client) => client.resolve(plan, batch, current, space, admit, control),
+                        None => plan.prepare_available_sources(batch, current, space, admit, control),
+                    }
+                };
                 let mut inputs = mondrian_renderer::TimelineProcessorInputExecution::new(
                     authority,
                     &mut resolve,

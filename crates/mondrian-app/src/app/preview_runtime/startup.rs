@@ -252,6 +252,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             visual_execution_start_failure: None,
             visual_execution_health_failed: Cell::new(false),
             pending_native_visual_actions: RefCell::new(Default::default()),
+            pending_processor_sources: RefCell::new(Vec::new()),
             cpu_fallback_task: None,
             cpu_fallback_start_failure: None,
             viewer_cpu_fallback_active: Cell::new(false),
