@@ -2653,7 +2653,7 @@ pub(crate) fn unit_scale_test_effect() -> mondrian_effects::EffectNode {
 }
 
 #[test]
-fn original_unit_temporal_graph_refuses_before_media_demand() {
+fn original_unit_temporal_graph_preserves_native_domain_and_refuses_reduced_sampling() {
     let mut sequence = Sequence::new("Unit temporal source domain");
     let tb = sequence.time_base();
     let mut clip = Clip::new(AssetId::new(), tt(0, tb), tt(24, tb)).unwrap();
@@ -2668,26 +2668,89 @@ fn original_unit_temporal_graph_refuses_before_media_demand() {
         PreviewResolutionScale::Quarter,
         color_context(&sequence),
     );
-    assert!(demands
-        .unwrap_err()
-        .detail()
-        .contains("Unit-scale temporal source materialization is unsupported"));
-    let outcome = resolve_preview_timeline(
-        &sequence,
-        &[],
-        4,
-        Resolution { width: 3, height: 2 },
-        PreviewResolutionScale::Quarter,
-        color_context(&sequence),
-        &mut |_| panic!("no decode demand before temporal grid admission"),
-        &mut |_| panic!("no title"),
-    );
-    let PreviewTimelineResolution::Unavailable { reason } = outcome else {
-        panic!("Unit temporal must retain its original requirement after extraction")
-    };
-    assert!(reason
-        .detail()
-        .contains("Unit-scale temporal source materialization is unsupported"));
+    let demands =
+        demands.expect("Unit Media requests its original source instead of the output grid");
+    assert_eq!(demands.len(), 2);
+    assert!(demands.iter().all(|request| request.cpu_working_required
+        && request.image_scale_requirement == mondrian_effects::EffectImageScaleRequirement::Unit));
+    for reduced in [false, true] {
+        let mut calls = 0;
+        let outcome = resolve_preview_timeline(
+            &sequence,
+            &[],
+            4,
+            Resolution { width: 3, height: 2 },
+            PreviewResolutionScale::Quarter,
+            color_context(&sequence),
+            &mut |request: PreviewTimelineMediaRequest| {
+                calls += 1;
+                assert!(request.cpu_working_required);
+                assert_eq!(
+                    request.image_scale_requirement,
+                    mondrian_effects::EffectImageScaleRequirement::Unit
+                );
+                let extent = if reduced {
+                    Resolution { width: 1, height: 2 }
+                } else {
+                    Resolution { width: 3, height: 5 }
+                };
+                let sampling = mondrian_core::ImageSampling::new(
+                    mondrian_core::SampleAspectRatio::SQUARE,
+                    [
+                        Rational::new(extent.width as i64, 3),
+                        Rational::new(extent.height as i64, 5),
+                    ],
+                )
+                .unwrap();
+                let mut identity =
+                    PreviewSemanticIdentityBuilder::new(b"test.unit.temporal-source-domain.v1");
+                std::hash::Hash::hash(&request.asset_id, &mut identity);
+                std::hash::Hash::hash(&request.source_sample, &mut identity);
+                std::hash::Hash::hash(&reduced, &mut identity);
+                PreviewTimelineMediaFrame::Ready(MediaPreviewFrame::from_working(
+                    CpuColorFrame::working(WorkingRgbaF32Frame {
+                        sampling,
+                        alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
+                        width: extent.width,
+                        height: extent.height,
+                        data: vec![[0.25, 0.0, 0.0, 1.0]; (extent.width * extent.height) as usize],
+                        color_space: request.input_color.working_color_space,
+                    }),
+                    Resolution { width: 3, height: 5 },
+                    identity.finish_identity(),
+                    FramePresentationQuality::Ready,
+                    PreviewDecodeExecutionSummary::default(),
+                ))
+            },
+            &mut |_| panic!("no title"),
+        );
+        assert_eq!(
+            calls, 2,
+            "complete source discovery precedes image-domain admission"
+        );
+        if reduced {
+            let PreviewTimelineResolution::Unavailable { reason } = outcome else {
+                panic!("Unit requirement must reject a reduced source before DSP")
+            };
+            assert!(
+                reason.detail().contains("requires unit-scale source sampling"),
+                "{reason}"
+            );
+        } else {
+            let PreviewTimelineResolution::Ready(ready) = outcome else {
+                panic!("actual original-source domain must render independently of the viewport")
+            };
+            let [ResolvedPreviewElement::Media { frame, .. }] = ready.plan.elements.as_slice()
+            else {
+                panic!("temporal Media")
+            };
+            let working = frame.working_frame().unwrap().frame;
+            let pixels = working.rgba_f32();
+            assert_eq!((pixels.width, pixels.height), (3, 5));
+            assert!(pixels.sampling.is_unit_scale());
+            assert_eq!(pixels.data, vec![[0.5, 0.0, 0.0, 1.0]; 15]);
+        }
+    }
 }
 
 #[test]

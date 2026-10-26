@@ -976,7 +976,7 @@ impl EffectExecutionEnvelope {
     }
 }
 
-fn plan_temporal_window(
+pub(crate) fn plan_temporal_window(
     output_time: TimelineTime,
     extent: EffectTemporalInputExtent,
 ) -> Result<EffectTemporalWindow, EffectExecutionDemandError> {

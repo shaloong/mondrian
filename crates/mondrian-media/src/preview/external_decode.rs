@@ -241,7 +241,10 @@ pub(super) fn run_external_decode_command_cancellable(
     }
 }
 
-pub(super) fn fit_target_size(
+/// Exact CPU full-source raster selected by the decoder's bounding-box policy.
+/// Consumers may plan against this size, but must still validate the decoded
+/// image: stream metadata alone cannot prove a variable-resolution sample.
+pub fn fit_target_size(
     src_width: u32,
     src_height: u32,
     max_width: Option<u32>,

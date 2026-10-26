@@ -553,18 +553,6 @@ where
             }
         }
     };
-    #[cfg(test)]
-    let semantic_trace = match prepared_visual_execution_semantic_trace(&closure) {
-        Ok(trace) => trace,
-        Err(error) => {
-            return PreviewTimelineResolution::Unavailable {
-                reason: PreviewUnavailability::failed(
-                    PreviewOutputStage::TimelineEvaluation,
-                    format!("Preview visual validation trace failed closed: {error}"),
-                ),
-            };
-        }
-    };
     let mut materialization_bytes = match closure.conservative_cpu_materialization_active_bytes() {
         Ok(bytes) => bytes,
         Err(error) => {
@@ -576,7 +564,7 @@ where
             };
         }
     };
-    let nested_materialization_bytes =
+    let mut nested_materialization_bytes =
         match closure.conservative_cpu_nested_materialization_active_bytes() {
             Ok(bytes) => bytes,
             Err(error) => {
@@ -625,6 +613,47 @@ where
             return PreviewTimelineResolution::Unavailable { reason }
         }
     };
+    if pending.is_none() {
+        let sources = match &preparation.state {
+            PreviewPreparationState::Sources(sources) => sources,
+            PreviewPreparationState::Executing(_) => unreachable!("handled dispatched work"),
+        };
+        let bound = Arc::make_mut(&mut preparation.closure).bind_temporal_media_image_domains(
+            |node, batch| preview_temporal_media_image_domain(node, batch, sources),
+        );
+        if let Err(error) = bound {
+            return PreviewTimelineResolution::Unavailable {
+                reason: PreviewUnavailability::blocked(
+                    PreviewOutputStage::InputAdaptation,
+                    error.to_string(),
+                ),
+            };
+        }
+        let bound = &preparation.closure;
+        materialization_bytes = match bound.conservative_cpu_materialization_active_bytes() {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                return PreviewTimelineResolution::Unavailable {
+                    reason: PreviewUnavailability::blocked(
+                        PreviewOutputStage::TimelineEvaluation,
+                        error.to_string(),
+                    ),
+                }
+            }
+        };
+        nested_materialization_bytes =
+            match bound.conservative_cpu_nested_materialization_active_bytes() {
+                Ok(bytes) => bytes,
+                Err(error) => {
+                    return PreviewTimelineResolution::Unavailable {
+                        reason: PreviewUnavailability::blocked(
+                            PreviewOutputStage::TimelineEvaluation,
+                            error.to_string(),
+                        ),
+                    }
+                }
+            };
+    }
     let Some(title_bytes) = preparation.retained_title_bytes() else {
         return PreviewTimelineResolution::Unavailable {
             reason: PreviewUnavailability::blocked(
@@ -666,6 +695,18 @@ where
     if let Some(dependency) = pending {
         return PreviewTimelineResolution::Pending { dependency, preparation };
     }
+    #[cfg(test)]
+    let semantic_trace = match prepared_visual_execution_semantic_trace(&preparation.closure) {
+        Ok(trace) => trace,
+        Err(error) => {
+            return PreviewTimelineResolution::Unavailable {
+                reason: PreviewUnavailability::failed(
+                    PreviewOutputStage::TimelineEvaluation,
+                    format!("Preview visual validation trace failed closed: {error}"),
+                ),
+            }
+        }
+    };
     let sources = match &mut preparation.state {
         PreviewPreparationState::Sources(sources) => std::mem::take(sources),
         PreviewPreparationState::Executing(_) => unreachable!("handled dispatched work"),
@@ -1296,6 +1337,7 @@ struct PreparedPreviewTemporalLayer {
 struct ResolvedPreviewTemporalSource {
     tile: EffectFrameTileF32,
     logical_resolution: Resolution,
+    source_to_display_affine: [f32; 6],
     identity: PreviewSemanticIdentity,
     presentation_quality: FramePresentationQuality,
     decode_execution: PreviewDecodeExecutionSummary,
@@ -1311,9 +1353,67 @@ struct ReadyPreviewTemporalBatch {
     batch_index: usize,
     prepared: PreparedTemporalFrameSet,
     logical_resolution: Resolution,
+    source_to_display_affine: [f32; 6],
     presentation_quality: FramePresentationQuality,
     decode_execution: PreviewDecodeExecutionSummary,
     cross_call_reusable: bool,
+}
+
+fn preview_temporal_media_image_domain(
+    node: &mondrian_renderer::PreparedVisualFrameNode<PreparedTimelinePreviewEffectRoutes>,
+    input: &mondrian_renderer::PreparedTimelineTemporalMediaInput,
+    sources: &PreviewSourcePreparation,
+) -> Result<
+    (EffectFrameExtent, mondrian_core::ImageSampling),
+    mondrian_renderer::TimelineTemporalPreparationError,
+> {
+    let media = input.media();
+    let invalid =
+        |reason: &str| mondrian_renderer::TimelineTemporalPreparationError::SourceSampling {
+            clip_id: media.placement.clip_id,
+            reason: reason.into(),
+        };
+    let mut selected = None;
+    for (_, source) in input.source_samples() {
+        let TimelineTemporalSource::Media {
+            asset_id,
+            source_sample,
+            color_space_override,
+            alpha_interpretation,
+            picture_overrides,
+            auto_tone_map,
+        } = source
+        else {
+            return Err(invalid(
+                "frozen Media program contains a different source kind",
+            ));
+        };
+        let request = preview_temporal_media_request(
+            *asset_id,
+            *source_sample,
+            *color_space_override,
+            *alpha_interpretation,
+            *picture_overrides,
+            *auto_tone_map,
+            node.execution_resolution(),
+            node.color_context(),
+            media.effect_graph.image_scale_requirement(),
+        );
+        let Some(PreviewTimelineMediaFrame::Ready(frame)) = sources.media.get(&request) else {
+            return Err(invalid(
+                "temporal image-domain binding requires its original Ready sources",
+            ));
+        };
+        let domain = frame.cpu_image_domain().ok_or_else(|| {
+            invalid("selected temporal source representation has no CPU working image domain")
+        })?;
+        if selected.replace(domain).is_some_and(|previous| previous != domain) {
+            return Err(invalid(
+                "temporal source image domains vary across selected samples",
+            ));
+        }
+    }
+    selected.ok_or_else(|| invalid("frozen Media program has no source image metadata"))
 }
 
 fn resolve_preview_temporal_batches<MediaFrame, TitleFrame>(
@@ -1341,6 +1441,7 @@ where
     for (batch_index, batch) in batches.iter().enumerate() {
         let mut resolved = Vec::with_capacity(batch.source_demands().len());
         let mut logical_resolution = None;
+        let mut source_to_display_affine = None;
         let mut presentation_quality = FramePresentationQuality::Ready;
         let mut decode_execution = PreviewDecodeExecutionSummary::default();
         let mut cross_call_reusable = batch.graph().output_cache_enabled();
@@ -1383,6 +1484,17 @@ where
                             ),
                         ));
                     }
+                    if source_to_display_affine
+                        .replace(source.source_to_display_affine)
+                        .is_some_and(|previous| previous != source.source_to_display_affine)
+                    {
+                        return Err(PreviewTimelineAbort::Unavailable(
+                            PreviewUnavailability::blocked(
+                                PreviewOutputStage::InputAdaptation,
+                                "temporal source picture mapping varies across selected samples",
+                            ),
+                        ));
+                    }
                     if source.presentation_quality == FramePresentationQuality::Degraded {
                         presentation_quality = FramePresentationQuality::Degraded;
                     }
@@ -1413,6 +1525,8 @@ where
             batch_index,
             prepared,
             logical_resolution: logical_resolution.unwrap_or(target_resolution),
+            source_to_display_affine: source_to_display_affine
+                .unwrap_or([1.0, 0.0, 0.0, 0.0, 1.0, 0.0]),
             presentation_quality,
             decode_execution,
             cross_call_reusable,
@@ -1517,7 +1631,8 @@ where
             ready.presentation_quality,
             ready.decode_execution,
         )
-        .with_cross_call_reuse(ready.cross_call_reusable);
+        .with_cross_call_reuse(ready.cross_call_reusable)
+        .with_source_to_display_affine(ready.source_to_display_affine);
         if layers
             .insert(batch.placement(), PreparedPreviewTemporalLayer { frame })
             .is_some()
@@ -1691,6 +1806,7 @@ where
                 ResolvedPreviewTemporalSource {
                     tile: preview_temporal_tile(&frame, demand)?,
                     logical_resolution: materialization.author_resolution(),
+                    source_to_display_affine: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
                     identity: identity.finish_identity(),
                     presentation_quality: FramePresentationQuality::Ready,
                     decode_execution: PreviewDecodeExecutionSummary::default(),
@@ -1709,6 +1825,7 @@ fn preview_temporal_source_from_media_frame<MediaFrame, TitleFrame>(
 ) -> Result<ResolvedPreviewTemporalSource, PreviewTimelineAbort> {
     let identity = frame.identity();
     let logical_resolution = frame.logical_resolution();
+    let source_to_display_affine = frame.source_to_display_affine();
     let presentation_quality = frame.presentation_quality();
     let decode_execution = frame.decode_execution();
     let cross_call_reusable = frame.permits_cross_call_reuse();
@@ -1749,6 +1866,7 @@ fn preview_temporal_source_from_media_frame<MediaFrame, TitleFrame>(
     Ok(ResolvedPreviewTemporalSource {
         tile: preview_temporal_tile(&working.frame, demand)?,
         logical_resolution,
+        source_to_display_affine,
         identity,
         presentation_quality,
         decode_execution,
@@ -2192,36 +2310,45 @@ fn collect_prepared_visual_source_demands(
             .temporal_batches()
             .iter()
             .map(TimelineTemporalDemandBatch::placement)
+            .chain(
+                node.evaluation()
+                    .temporal_media_inputs()
+                    .iter()
+                    .map(|input| input.media().placement),
+            )
             .collect::<HashSet<_>>();
-        for batch in node.evaluation().temporal_batches() {
-            for demand in batch.source_demands() {
-                if let TimelineTemporalSource::Media {
+        // Time discovery is image-domain independent. Admit the complete
+        // original source wave now, including signed history and lookahead.
+        for input in node.evaluation().temporal_media_inputs() {
+            for (time, source) in input.source_samples() {
+                let TimelineTemporalSource::Media {
                     asset_id,
                     source_sample,
                     color_space_override,
                     alpha_interpretation,
                     picture_overrides,
                     auto_tone_map,
-                } = &demand.source
-                {
-                    demands.push(PreparedPreviewSourceDemand::Media {
-                        request: preview_temporal_media_request(
-                            *asset_id,
-                            *source_sample,
-                            *color_space_override,
-                            *alpha_interpretation,
-                            *picture_overrides,
-                            *auto_tone_map,
-                            target_resolution,
-                            color_context,
-                            batch.graph().image_scale_requirement(),
-                        ),
-                        role: PreviewMediaSourceRole::Temporal {
-                            clip_id: batch.placement().clip_id,
-                            time: demand.effect_request.time(),
-                        },
-                    });
-                }
+                } = source
+                else {
+                    continue;
+                };
+                demands.push(PreparedPreviewSourceDemand::Media {
+                    request: preview_temporal_media_request(
+                        *asset_id,
+                        *source_sample,
+                        *color_space_override,
+                        *alpha_interpretation,
+                        *picture_overrides,
+                        *auto_tone_map,
+                        target_resolution,
+                        color_context,
+                        input.media().effect_graph.image_scale_requirement(),
+                    ),
+                    role: PreviewMediaSourceRole::Temporal {
+                        clip_id: input.media().placement.clip_id,
+                        time,
+                    },
+                });
             }
         }
         for element in &node.evaluation().plan().elements {

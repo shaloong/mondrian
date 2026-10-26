@@ -725,7 +725,7 @@ fn assert_temporal_frame_seeds(
         for with_session in [false, true] {
             let mut scratch = crate::TimelineCompositeScratch::default();
             let batches = if with_session {
-                scratch
+                let prepared = scratch
                     .prepare_timeline_frame_execution(
                         &program,
                         TimelineFrameExecutionRequest::new(
@@ -737,8 +737,22 @@ fn assert_temporal_frame_seeds(
                             ExecutionCancellationToken::new(),
                         ),
                     )
+                    .unwrap();
+                prepared
+                    .bind_temporal_media_image_domains(|_| {
+                        Ok((
+                            extent,
+                            program.materialization_contract().image_sampling(
+                                mondrian_core::Resolution {
+                                    width: extent.width(),
+                                    height: extent.height(),
+                                },
+                            )?,
+                        ))
+                    })
                     .unwrap()
-                    .into_parts()
+                    .try_into_parts()
+                    .unwrap()
                     .2
             } else {
                 let plan = evaluate_prepared_visual_program(&program, evaluation).unwrap();

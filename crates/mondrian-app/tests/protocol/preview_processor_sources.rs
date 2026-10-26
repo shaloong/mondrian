@@ -414,6 +414,20 @@ fn processor_source_preplanned_retired_failures_release_original_observation() {
 
 #[test]
 fn processor_source_preplanned_real_media_runs_on_original_visual_worker_and_retires_waits() {
+    preplanned_real_media(2, 2, &[0, 1, 2, 3, 4]);
+}
+
+#[test]
+fn processor_source_preplanned_preserves_non_square_native_media_domain() {
+    preplanned_real_media(4, 2, &[0]);
+}
+
+fn preplanned_real_media(source_width: u32, source_height: u32, modes: &[u8]) {
+    let source_mapping = if source_width != source_height {
+        [-1.0, 0.0, source_width as f32, 0.0, 1.0, 0.0]
+    } else {
+        [1.0, 0.0, 0.0, 0.0, 1.0, 0.0]
+    };
     use crate::app::preview_cpu_fallback_task::source_job_request_with_media;
     use crate::app::preview_timeline_execution::*;
     use crate::app::preview_visual_execution_task::*;
@@ -421,18 +435,20 @@ fn processor_source_preplanned_real_media_runs_on_original_visual_worker_and_ret
     ensure_test_ocio_loaded();
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("prepared-history.y4m");
-    let mut bytes = b"YUV4MPEG2 W2 H2 F1:1 Ip A1:1 C444\n".to_vec();
+    let mut bytes =
+        format!("YUV4MPEG2 W{source_width} H{source_height} F1:1 Ip A1:1 C444\n").into_bytes();
+    let pixels = (source_width * source_height) as usize;
     for [y, u, v] in [[76u8, 84, 255], [29, 255, 107]] {
         bytes.extend_from_slice(b"FRAME\n");
-        bytes.extend([y; 4]);
-        bytes.extend([u; 4]);
-        bytes.extend([v; 4]);
+        bytes.extend(std::iter::repeat_n(y, pixels));
+        bytes.extend(std::iter::repeat_n(u, pixels));
+        bytes.extend(std::iter::repeat_n(v, pixels));
     }
     std::fs::write(&path, bytes).unwrap();
     let path = std::fs::canonicalize(path).unwrap();
     // Success, sole preparation-owner retirement, seek/generation, caller
     // deadline and full service closure all exercise an actual live Source wait.
-    for mode in 0..5 {
+    for &mode in modes {
         let runtime = PreviewProductionRuntime::<()>::try_new_boxed().unwrap();
         let mut state = AppState::new();
         runtime.synchronize_transport_intent(state.preview_transport_intent());
@@ -455,7 +471,7 @@ fn processor_source_preplanned_real_media_runs_on_original_visual_worker_and_ret
             path.clone(),
             MediaFileFingerprint::capture(&path),
             mondrian_core::TimelineTime::ZERO,
-            Resolution { width: 2, height: 2 },
+            Resolution { width: source_width, height: source_height },
             mondrian_media::PreviewSourceColorContract::automatic(
                 ColorSpace::Rec709,
                 mondrian_media::DecodedVideoRange::Full,
@@ -468,13 +484,12 @@ fn processor_source_preplanned_real_media_runs_on_original_visual_worker_and_ret
             mondrian_core::ColorEngine::mondrian_standard(),
         )
         .into();
-        let expected = decoded_frame(&runtime, &base, policy)
-            .working_frame()
-            .unwrap()
-            .frame
-            .rgba_f32()
-            .data
-            .clone();
+        let historical = decoded_frame(&runtime, &base, policy).working_frame().unwrap().frame;
+        assert_eq!(
+            (historical.rgba_f32().width, historical.rgba_f32().height),
+            (source_width, source_height)
+        );
+        let expected = historical.rgba_f32().data.clone();
         let mut current_key = base.clone();
         current_key.decode = base
             .decode
@@ -491,6 +506,7 @@ fn processor_source_preplanned_real_media_runs_on_original_visual_worker_and_ret
             source_job_request_with_media(false, Some(current));
         drop((request, plan, routes));
         assert!(old_program.upgrade().is_none());
+        sequence.settings.resolution = Resolution { width: 2, height: 2 };
         sequence.video_tracks[0].clips[0].insert_effect_node_at(1, finite_temporal_prefix());
         state.test_set_sequence(Some(sequence));
         state.seek(72).unwrap();
@@ -513,11 +529,16 @@ fn processor_source_preplanned_real_media_runs_on_original_visual_worker_and_ret
             let mut media = |demand: PreviewTimelineMediaRequest| {
                 let mut key = base.clone();
                 key.decode = key.decode.at_source_sample(demand.source_sample).unwrap();
-                runtime.media_frame_for_frozen_key(
+                match runtime.media_frame_for_frozen_key(
                     key,
                     runtime.media_source_work_policy(&snapshot),
                     true,
-                )
+                ) {
+                    PreviewTimelineMediaFrame::Ready(frame) => PreviewTimelineMediaFrame::Ready(
+                        frame.with_source_to_display_affine(source_mapping),
+                    ),
+                    other => other,
+                }
             };
             let mut title = |_| panic!("no title");
             let mut execute = |work: Arc<PreparedPreviewTimelineWork>| {
@@ -689,6 +710,16 @@ fn processor_source_preplanned_real_media_runs_on_original_visual_worker_and_ret
                 panic!("temporal media")
             };
             let actual = frame.working_frame().unwrap().frame;
+            assert_eq!(
+                frame.source_to_display_affine(),
+                source_mapping,
+                "temporal pixels preserve the source's resolved picture mapping"
+            );
+            assert_eq!(
+                (actual.rgba_f32().width, actual.rgba_f32().height),
+                (source_width, source_height)
+            );
+            assert_eq!(actual.rgba_f32().data.len(), expected.len());
             for (actual, source) in actual.rgba_f32().data.iter().zip(&expected) {
                 for c in 0..4 {
                     assert!((actual[c] - source[c] * if c == 3 { 1.0 } else { 2.0 }).abs() < 1e-6);

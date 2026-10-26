@@ -8133,6 +8133,23 @@ fn prepare_export_visual_frame_closure(
                     ));
                 }
             }
+            // The media decoder owns aspect-preserving output sizing. Bind its
+            // selected plane before temporal demand expansion or byte admission;
+            // the source resolver still validates every actual decoded sample.
+            let prepared_frame = if prepared_frame.has_unbound_temporal_media() {
+                prepared_frame
+                    .bind_temporal_media_image_domains(|input| {
+                        export_temporal_media_image_domain(
+                            &timeline.media,
+                            input.media(),
+                            resolution,
+                            _color_context,
+                        )
+                    })
+                    .map_err(|error| error.to_string())?
+            } else {
+                prepared_frame
+            };
             if prepared_frame.execution_plan().is_empty() {
                 return Ok(PreparedVisualFrameEvaluation::new(
                     prepared_frame,
@@ -9791,6 +9808,43 @@ fn decode_export_media_plan(
     Ok(decoded)
 }
 
+fn export_temporal_media_image_domain(
+    media_dependencies: &HashMap<AssetId, crate::preset::ExportMediaDependency>,
+    media: &TimelineMediaPlan,
+    resolution: Resolution,
+    color_context: &ProgramColorContext,
+) -> Result<
+    (EffectFrameExtent, mondrian_core::ImageSampling),
+    mondrian_renderer::TimelineTemporalPreparationError,
+> {
+    let invalid =
+        |reason: String| mondrian_renderer::TimelineTemporalPreparationError::SourceSampling {
+            clip_id: media.placement.clip_id,
+            reason,
+        };
+    let (_, request) = prepare_export_media_decode(
+        media_dependencies,
+        media,
+        resolution.width,
+        resolution.height,
+        color_context,
+        None,
+        ExportDecodedSourceRoute::CpuWorking,
+    )
+    .map_err(invalid)?;
+    let (width, height) = mondrian_media::preview::fit_target_size(
+        request.source_resolution.width,
+        request.source_resolution.height,
+        Some(request.decode_resolution.width),
+        Some(request.decode_resolution.height),
+    );
+    let sampling = request
+        .picture_geometry
+        .image_sampling(Resolution { width, height })
+        .map_err(|error| invalid(error.to_string()))?;
+    Ok((EffectFrameExtent::new(width, height), sampling))
+}
+
 /// Freeze a source request without borrowing the active compositor Session.
 /// Both planned materialization and late processor input use this same lowering.
 #[allow(clippy::too_many_arguments)]
@@ -10203,8 +10257,6 @@ fn resolve_export_temporal_source(
     if context.cancellation.is_canceled() {
         return Err("export temporal source resolution was canceled".to_owned());
     }
-    let identity = identity_compiled_effect_graph()
-        .ok_or_else(|| "renderer could not prepare the identity Effect graph".to_owned())?;
     let (frame, source_resolution, source_to_display_affine) = match &demand.source {
         TimelineTemporalSource::Media {
             asset_id,
@@ -10226,7 +10278,7 @@ fn resolve_export_temporal_source(
                 opacity: 1.0,
                 blend_mode: mondrian_core::BlendMode::Normal,
                 transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
-                effect_graph: Arc::clone(&identity),
+                effect_graph: Arc::clone(batch.graph()),
                 frame_seed: demand.effect_request.time().numerator(),
                 auto_tone_map: *auto_tone_map,
             };

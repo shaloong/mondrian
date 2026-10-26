@@ -165,11 +165,12 @@ pub use qualifier::{
     MAX_QUALIFIER_BLUR_RADIUS, MAX_QUALIFIER_DENOISE_RADIUS,
 };
 pub use temporal_execution::{
-    collect_temporal_frame_demands, prepare_temporal_frame_execution, EffectExecutionContinuity,
-    EffectFrameTileF32, EffectTemporalExecutionError, EffectTemporalExecutionOutput,
-    EffectTemporalExecutionRequest, EffectTemporalFrameDemandBatch, EffectTemporalFrameProvider,
-    EffectTemporalFrameProviderError, EffectTemporalFrameRequest, EffectTemporalSourceIdentity,
-    PreparedEffectTemporalExecution, PreparedTemporalFrameSet, PreparedTemporalFrameSetError,
+    collect_temporal_frame_demands, prepare_temporal_frame_execution,
+    prepare_temporal_frame_program, EffectExecutionContinuity, EffectFrameTileF32,
+    EffectTemporalExecutionError, EffectTemporalExecutionOutput, EffectTemporalExecutionRequest,
+    EffectTemporalFrameDemandBatch, EffectTemporalFrameProvider, EffectTemporalFrameProviderError,
+    EffectTemporalFrameRequest, EffectTemporalSourceIdentity, PreparedEffectTemporalExecution,
+    PreparedEffectTemporalProgram, PreparedTemporalFrameSet, PreparedTemporalFrameSetError,
 };
 pub use tracking::{
     canonicalize_tracking_shape, track_frame_pair, transform_tracking_shape, TrackingError,

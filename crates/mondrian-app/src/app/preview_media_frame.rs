@@ -232,6 +232,16 @@ impl MediaPreviewFrame {
         self
     }
 
+    /// Preserve the already-resolved source mapping when Effects replace pixels.
+    pub(crate) fn source_to_display_affine(&self) -> [f32; 6] {
+        self.source_to_display_affine
+    }
+
+    pub(crate) fn with_source_to_display_affine(mut self, affine: [f32; 6]) -> Self {
+        self.source_to_display_affine = affine;
+        self
+    }
+
     pub(crate) fn decoder_resource_units(&self) -> usize {
         usize::from(matches!(self.payload, MediaPreviewPayload::Native(_)))
     }
@@ -303,6 +313,30 @@ impl MediaPreviewFrame {
 
     pub(crate) fn height(&self) -> u32 {
         self.sampled_resolution.height
+    }
+
+    /// The selected CPU image plane; querying it does not convert or copy pixels.
+    pub(crate) fn cpu_image_domain(
+        &self,
+    ) -> Option<(
+        mondrian_effects::EffectFrameExtent,
+        mondrian_core::ImageSampling,
+    )> {
+        let (width, height, sampling) = match &self.payload {
+            MediaPreviewPayload::Working(frame) => {
+                let payload = frame.rgba_f32();
+                (payload.width, payload.height, payload.sampling)
+            }
+            MediaPreviewPayload::Source(source) => {
+                let (width, height) = source.prepared_source.extent();
+                (width, height, source.prepared_source.sampling())
+            }
+            MediaPreviewPayload::CpuYuv(_) | MediaPreviewPayload::Native(_) => return None,
+        };
+        Some((
+            mondrian_effects::EffectFrameExtent::new(width, height),
+            sampling,
+        ))
     }
 
     pub(crate) fn logical_resolution(&self) -> Resolution {

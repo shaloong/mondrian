@@ -9,12 +9,20 @@ struct SourceFacts {
     created: AtomicUsize,
     dropped: AtomicUsize,
     cancel: std::sync::Mutex<Option<ExecutionCancellationToken>>,
+    image_domains: std::sync::Mutex<Vec<(EffectFrameExtent, mondrian_core::ImageSampling)>>,
 }
 
 #[derive(Debug)]
-struct HistoryFactory(Arc<SourceFacts>);
+struct HistoryFactory(Arc<SourceFacts>, bool);
 
 impl EffectFloatProcessorFactory for HistoryFactory {
+    fn image_scale_requirement(&self) -> EffectImageScaleRequirement {
+        if self.1 {
+            EffectImageScaleRequirement::Unit
+        } else {
+            EffectImageScaleRequirement::Any
+        }
+    }
     fn requires_input_service(&self) -> bool {
         true
     }
@@ -60,6 +68,7 @@ impl EffectFloatProcessorInstance for HistoryProcessor {
         resources: &mut EffectProcessorResources<'_>,
     ) -> Result<Option<EffectProcessorFeedback>, EffectProcessorInvocationError> {
         self.0.calls.fetch_add(1, Ordering::SeqCst);
+        self.0.image_domains.lock().unwrap().push((frame.extent(), frame.sampling()));
         if let Some(token) = self.0.cancel.lock().unwrap().take() {
             token.cancel();
         }
@@ -108,6 +117,26 @@ fn export_processor_source_preplanned_temporal_history_keeps_original_job() {
 }
 
 #[test]
+fn export_processor_source_preplanned_temporal_non_square_fit_keeps_source_domain() {
+    render_history_with_domain(
+        false,
+        SourceScenario::Temporal,
+        Resolution { width: 4, height: 2 },
+        false,
+    );
+}
+
+#[test]
+fn export_processor_source_preplanned_temporal_unit_odd_source_keeps_native_domain() {
+    render_history_with_domain(
+        false,
+        SourceScenario::Temporal,
+        Resolution { width: 3, height: 5 },
+        true,
+    );
+}
+
+#[test]
 fn export_processor_source_preplanned_temporal_cancellation_releases_original_job() {
     render_history(false, SourceScenario::TemporalCancel);
 }
@@ -145,15 +174,29 @@ enum SourceScenario {
 }
 
 fn render_history(mixed: bool, scenario: SourceScenario) {
+    render_history_with_domain(mixed, scenario, Resolution { width: 2, height: 2 }, false);
+}
+
+fn render_history_with_domain(
+    mixed: bool,
+    scenario: SourceScenario,
+    source_resolution: Resolution,
+    unit: bool,
+) {
     mondrian_core::ensure_mondrian_default_ocio_loaded().expect("production OCIO config");
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("history.y4m");
-    let mut y4m = b"YUV4MPEG2 W2 H2 F1:1 Ip A1:1 C444\n".to_vec();
+    let mut y4m = format!(
+        "YUV4MPEG2 W{} H{} F1:1 Ip A1:1 C444\n",
+        source_resolution.width, source_resolution.height
+    )
+    .into_bytes();
+    let pixels = (source_resolution.width * source_resolution.height) as usize;
     for [y, u, v] in [[76u8, 84, 255], [29, 255, 107]] {
         y4m.extend_from_slice(b"FRAME\n");
-        y4m.extend([y; 4]);
-        y4m.extend([u; 4]);
-        y4m.extend([v; 4]);
+        y4m.extend(std::iter::repeat_n(y, pixels));
+        y4m.extend(std::iter::repeat_n(u, pixels));
+        y4m.extend(std::iter::repeat_n(v, pixels));
     }
     std::fs::write(&path, y4m).unwrap();
     let mut dependency = test_media_dependency(
@@ -172,7 +215,7 @@ fn render_history(mixed: bool, scenario: SourceScenario) {
     dependency.picture = Some(stream.picture);
     dependency.color_diagnostic = Some(mondrian_media::VideoColorDiagnostic::from_stream(&stream));
     dependency.source_video_stream = Some(stream);
-    dependency.source_resolution = Some(Resolution { width: 2, height: 2 });
+    dependency.source_resolution = Some(source_resolution);
     dependency.picture_source_extent = Some(mondrian_timeline::PictureSourceExtent::TimelineRange(
         mondrian_core::TimelineTimeRange::new(TimelineTime::ZERO, TimelineTime::new(2, 1).unwrap())
             .unwrap(),
@@ -199,7 +242,7 @@ fn render_history(mixed: bool, scenario: SourceScenario) {
             }),
             None,
             EffectCachePolicy::Deterministic,
-            Arc::new(HistoryFactory(facts.clone())),
+            Arc::new(HistoryFactory(facts.clone(), unit)),
         ),
     )
     .unwrap();
@@ -400,6 +443,23 @@ fn render_history(mixed: bool, scenario: SourceScenario) {
             assert_eq!(
                 actual, expected,
                 "source must include upstream processing at historical time"
+            );
+            let extent = if unit {
+                EffectFrameExtent::new(source_resolution.width, source_resolution.height)
+            } else if source_resolution == (Resolution { width: 4, height: 2 }) {
+                EffectFrameExtent::new(2, 1)
+            } else {
+                assert_eq!(source_resolution, Resolution { width: 2, height: 2 });
+                EffectFrameExtent::new(2, 2)
+            };
+            let domains = facts.image_domains.lock().unwrap();
+            assert!(!domains.is_empty());
+            assert!(
+                domains
+                    .iter()
+                    .all(|(actual, sampling)| *actual == extent
+                        && (!unit || sampling.is_unit_scale())),
+                "{domains:?}"
             );
             if mixed {
                 assert_eq!(diagnostics.heterogeneous_frames_started, 1);

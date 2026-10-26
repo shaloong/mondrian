@@ -2011,8 +2011,9 @@ fn apply_preview_codec_threading_policy(
     requested
 }
 
+pub use external_decode::fit_target_size;
 use external_decode::{
-    ensure_ffmpeg_initialized, fit_target_size, preview_external_ffmpeg_cpu_rgba_enabled,
+    ensure_ffmpeg_initialized, preview_external_ffmpeg_cpu_rgba_enabled,
     try_decode_with_external_ffmpeg_cpu_rgba,
 };
 #[cfg(test)]

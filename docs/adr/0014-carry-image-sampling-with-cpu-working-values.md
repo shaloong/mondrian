@@ -70,8 +70,9 @@ Media Preview rendering, GPU interoperability or other platforms.
 The shared provider requirement and pre-processing scale admission now pass 352
 ordinary Effects controls and strict checks. Native v11 carries actual sampling;
 Unit media uses the original Full CPU source and complete Clip graph before the
-existing spatial compositor. Unit temporal source materialization remains an
-explicit unsupported boundary. Legal Unit title crops, authored nested canvases
+existing spatial compositor. Finite temporal Media binds its original source
+domain as described in ADR 0016; native temporal access remains unsupported.
+Legal Unit title crops, authored nested canvases
 and full accumulators retain their sampling; Reduced inputs require their own
 correct producer before native execution can be admitted.
 

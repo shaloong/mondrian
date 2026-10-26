@@ -222,6 +222,37 @@ pub struct PreparedEffectTemporalExecution {
     demands: EffectTemporalFrameDemandBatch,
 }
 
+/// Frozen time-expanded values and exact source instants, before an image
+/// producer has selected a raster. This is the same program later executed by
+/// `PreparedEffectTemporalExecution`; it owns no pixels or attempt authority.
+#[derive(Debug, Clone)]
+pub struct PreparedEffectTemporalProgram {
+    graph: Arc<CompiledEffectGraph>,
+    program: Arc<PreparedTemporalValueProgram>,
+}
+
+impl PreparedEffectTemporalProgram {
+    /// Exact, ordered source instants for early scheduling without a pixel ROI.
+    pub fn source_times(&self) -> &[TimelineTime] {
+        self.program.source_times()
+    }
+
+    /// Bind the producer-selected image domain without evaluating author state
+    /// again. Output time and seed must still address this frozen program.
+    pub fn bind_image_domain(
+        &self,
+        request: &EffectTemporalExecutionRequest,
+    ) -> Result<PreparedEffectTemporalExecution, EffectTemporalExecutionError> {
+        let root = self.program.context(0)?;
+        if root.time != request.output_time || root.frame_seed != request.output_frame_seed {
+            return Err(EffectTemporalExecutionError::InvalidTemporalOperation {
+                reason: "image-domain binding changed the frozen temporal time or seed",
+            });
+        }
+        bind_temporal_image_domain(self, request)
+    }
+}
+
 impl PreparedEffectTemporalExecution {
     /// Root compiled Effect IR at the requested output instant.
     pub const fn graph(&self) -> &Arc<CompiledEffectGraph> {
@@ -885,6 +916,23 @@ pub fn prepare_temporal_frame_execution(
     )
 }
 
+/// Freeze time dependencies before source readiness. Only time, frame seed and
+/// cancellation from `request` are consumed here; no raster demand or coverage
+/// is inferred from its output canvas. Bind the actual input plane afterwards.
+pub fn prepare_temporal_frame_program(
+    program: &PreparedEffectProgram,
+    request: &EffectTemporalExecutionRequest,
+    mut sample_frame_seed: impl FnMut(TimelineTime) -> Result<i64, String>,
+) -> Result<PreparedEffectTemporalProgram, EffectTemporalExecutionError> {
+    let prepared = prepare_exact_frame_program_with_evaluator(
+        request,
+        |time| program.evaluate(time).map_err(|error| error.to_string()),
+        &mut sample_frame_seed,
+    )?;
+    ensure_temporal_program(&prepared.program)?;
+    Ok(prepared)
+}
+
 fn prepare_temporal_frame_execution_with_evaluator(
     request: &EffectTemporalExecutionRequest,
     evaluate_graph: impl FnMut(TimelineTime) -> Result<Arc<CompiledEffectGraph>, String>,
@@ -916,9 +964,18 @@ impl PreparedEffectInput {
 
 fn prepare_exact_frame_execution_with_evaluator(
     request: &EffectTemporalExecutionRequest,
-    mut evaluate_graph: impl FnMut(TimelineTime) -> Result<Arc<CompiledEffectGraph>, String>,
+    evaluate_graph: impl FnMut(TimelineTime) -> Result<Arc<CompiledEffectGraph>, String>,
     sample_frame_seed: &mut impl FnMut(TimelineTime) -> Result<i64, String>,
 ) -> Result<PreparedEffectTemporalExecution, EffectTemporalExecutionError> {
+    prepare_exact_frame_program_with_evaluator(request, evaluate_graph, sample_frame_seed)?
+        .bind_image_domain(request)
+}
+
+fn prepare_exact_frame_program_with_evaluator(
+    request: &EffectTemporalExecutionRequest,
+    mut evaluate_graph: impl FnMut(TimelineTime) -> Result<Arc<CompiledEffectGraph>, String>,
+    sample_frame_seed: &mut impl FnMut(TimelineTime) -> Result<i64, String>,
+) -> Result<PreparedEffectTemporalProgram, EffectTemporalExecutionError> {
     let compiled = evaluate_graph(request.output_time).map_err(|reason| {
         EffectTemporalExecutionError::SampleGraphEvaluation { time: request.output_time, reason }
     })?;
@@ -927,7 +984,7 @@ fn prepare_exact_frame_execution_with_evaluator(
         let frame_seed = sample_frame_seed(time)?;
         Ok((graph, frame_seed))
     };
-    prepare_temporal_execution_inner(compiled, request, Some(&mut evaluate_sample))
+    prepare_temporal_program_inner(compiled, request, Some(&mut evaluate_sample))
 }
 
 fn prepare_temporal_execution_inner(
@@ -935,6 +992,14 @@ fn prepare_temporal_execution_inner(
     request: &EffectTemporalExecutionRequest,
     evaluate_sample: Option<TemporalSampleEvaluator<'_>>,
 ) -> Result<PreparedEffectTemporalExecution, EffectTemporalExecutionError> {
+    prepare_temporal_program_inner(compiled, request, evaluate_sample)?.bind_image_domain(request)
+}
+
+fn prepare_temporal_program_inner(
+    compiled: Arc<CompiledEffectGraph>,
+    request: &EffectTemporalExecutionRequest,
+    evaluate_sample: Option<TemporalSampleEvaluator<'_>>,
+) -> Result<PreparedEffectTemporalProgram, EffectTemporalExecutionError> {
     if request.cancellation.is_canceled() {
         return Err(EffectTemporalExecutionError::Canceled);
     }
@@ -942,7 +1007,44 @@ fn prepare_temporal_execution_inner(
     if compiled.domain_plan().requires_conversion() || !compiled.domain_plan().blockers.is_empty() {
         return Err(EffectTemporalExecutionError::ColorDomainUnsupported);
     }
-    let program = prepare_temporal_value_program(Arc::clone(&compiled), request, evaluate_sample)?;
+    let window = crate::execution_planning::plan_temporal_window(
+        request.output_time,
+        compiled.execution_envelope().aggregate().temporal_input,
+    )?;
+    ensure_bounded_temporal_window(window)?;
+    let (earliest, latest) = finite_temporal_bounds(window)?;
+    let program = prepare_temporal_value_program(
+        Arc::clone(&compiled),
+        request.output_time,
+        request.output_frame_seed,
+        evaluate_sample,
+    )?;
+    for &time in program.source_times() {
+        if time < earliest || time > latest {
+            return Err(EffectTemporalExecutionError::InvalidTemporalOperation {
+                reason: "time-expanded source sample exceeds the declared temporal extent",
+            });
+        }
+    }
+    for context in program.contexts() {
+        let window = crate::execution_planning::plan_temporal_window(
+            context.time,
+            context.graph.execution_envelope().aggregate().temporal_input,
+        )?;
+        ensure_bounded_temporal_window(window)?;
+    }
+    Ok(PreparedEffectTemporalProgram { graph: compiled, program: Arc::new(program) })
+}
+
+fn bind_temporal_image_domain(
+    frozen: &PreparedEffectTemporalProgram,
+    request: &EffectTemporalExecutionRequest,
+) -> Result<PreparedEffectTemporalExecution, EffectTemporalExecutionError> {
+    if request.cancellation.is_canceled() {
+        return Err(EffectTemporalExecutionError::Canceled);
+    }
+    let compiled = &frozen.graph;
+    let program = &frozen.program;
     let demand = compiled.plan_execution_demand(
         request.output_time,
         request.frame_extent,
@@ -996,9 +1098,9 @@ fn prepare_temporal_execution_inner(
         coverage_bytes,
     };
     Ok(PreparedEffectTemporalExecution {
-        graph: compiled,
+        graph: Arc::clone(compiled),
         request: request.clone(),
-        program: Arc::new(program),
+        program: Arc::clone(program),
         demands,
     })
 }
@@ -1114,6 +1216,24 @@ impl PreparedScalarTemporalRequest {
 }
 
 impl EffectExecutionSession {
+    /// Freeze the same time-expanded program on this owner's bounded topology
+    /// Session, without borrowing an unknown source image domain.
+    pub fn prepare_temporal_frame_program(
+        &mut self,
+        program: &PreparedEffectProgram,
+        request: &EffectTemporalExecutionRequest,
+        mut sample_frame_seed: impl FnMut(TimelineTime) -> Result<i64, String>,
+    ) -> Result<PreparedEffectTemporalProgram, EffectTemporalExecutionError> {
+        self.bind_generation(request.generation());
+        let prepared = prepare_exact_frame_program_with_evaluator(
+            request,
+            |time| program.evaluate_with_session(time, self).map_err(|error| error.to_string()),
+            &mut sample_frame_seed,
+        )?;
+        ensure_temporal_program(&prepared.program)?;
+        Ok(prepared)
+    }
+
     /// Prepare one exact finite temporal execution while retaining every
     /// dynamic topology in this owner-scoped Session.
     ///

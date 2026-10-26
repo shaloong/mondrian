@@ -162,6 +162,25 @@ Session, decoder or cache. Basic Title and Adjustment history remain refused.
 Input extent, PAR and sampling belong to the actual source value, not the
 Sequence/project canvas. The invocation must supply and preserve that contract.
 
+Finite Media preparation therefore has two phases. Expanding dependencies on the
+output canvas caused both wrong input admission and potentially wrong coverage
+budgets. The frame now freezes the existing time-expanded value program and
+original mapped Media source set before pixel geometry is known. Preview schedules
+that complete wave immediately, including signed history and lookahead; waiting
+for a current frame first would regress prefetch. Only image ROI/coverage binding
+waits for the producer's selected extent and sampling. Binding reuses that same
+program without author reevaluation; an unbound closure fails before any child
+DSP. Output evaluation, grid, seed, generation, continuity and cancellation stay
+unchanged. Preview validates its original Ready samples; Export reuses the decoder's exact aspect-preserving
+sizing policy and resolved picture geometry, then checks every decoded sample.
+Unit Media keeps its full original CPU raster, including odd extents. Varying
+sample domains fail explicitly. Proven source-free programs retain their explicit
+owner output target. Actual temporal tiles, outputs and local work
+enter the existing owner grant; source picture mapping survives pixel replacement
+and enters the existing projected transform/cache identity. No new decoder,
+cache or pixel-resampling path is introduced. Title, nested and stack history
+retain their separately declared limitations.
+
 `EffectProcessorControl::with_input_service` borrows source preparation for one
 execution. The executor scopes the actual direct-input stage and restores it on
 success, error and unwind; NoImage processors receive no inherited input. Source
@@ -454,13 +473,21 @@ interest: retirement prevents publication and prunes stored observations;
 consumption removes the per-attempt failure key. A blocked processor keeps its
 Blocked disposition. Speculative work cannot displace current Viewer feedback.
 
-Seven focused App regressions pass under the original budgets. They cover actual
-FFmpeg history after a finite temporal prefix, one DSP call on the visual worker,
-Ready/Pending, sole-owner retirement, generation change, caller expiry, shutdown,
-bank release, current/speculative blocking and failure retirement before/after
-publication. Production acquire retains one evaluation and another GPU-only
-layer; this is GPU lowering evidence, not actual GPU submission. Existing nested
-canvas, cache invalidation and open-session separation assertions remain intact.
+Windows ordinary regression passes Effects 390, Renderer 689, Export 307 and App
+3145; the existing 272 ignored cases remain excluded. Frozen-source checks and
+the original owned execution/cleanup budgets pass, with exit0, stderr0 and settled
+descendants. Actual FFmpeg Preview retains a 4x2 input plane in a 2x2 Sequence;
+Export covers fitted 2x1 and original Unit 3x5 inputs. The original complete
+history/lookahead wave and source-readiness assertions pass unchanged. Unit Media
+also proves original-domain output and reduced-sampling refusal before DSP.
+Exact time/seed/authority and actual-domain coverage checks pass.
+The ordinary no-validation development binary also builds at opt0/debug0.
+
+The worker controls retain one DSP call, Ready/Pending, retirement, generation,
+caller expiry, shutdown, bank release, blocking and failure retirement. Production
+acquire retains one evaluation and another GPU-only layer; this proves GPU
+lowering, not GPU submission. Existing nested canvas, cache invalidation and
+open-session separation assertions remain intact.
 
 This is finite Preview/Export source qualification. Transition source delivery,
 historical nested/title/stack inputs, native formats beyond the

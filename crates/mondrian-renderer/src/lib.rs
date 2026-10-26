@@ -409,7 +409,8 @@ pub use timeline_render_plan::{
     TimelineSolidColorPlan, TimelineTransitionInputPlan,
 };
 pub use timeline_temporal::{
-    PreparedTimelineClipInputPlan, PreparedTimelineFrameExecution, TimelineFrameExecutionAuthority,
+    PreparedTimelineClipInputPlan, PreparedTimelineFrameExecution,
+    PreparedTimelineTemporalMediaInput, TimelineFrameExecutionAuthority,
     TimelineFrameExecutionRequest, TimelineFramePreparationError, TimelineProcessorInputExecution,
     TimelineTemporalDemandBatch, TimelineTemporalPreparationError, TimelineTemporalSource,
     TimelineTemporalSourceDemand,

@@ -186,6 +186,14 @@ impl PreparedSourceFrame {
         (descriptor.width, descriptor.height)
     }
 
+    /// Sampling of the eventual working value, without executing its color transform.
+    pub fn sampling(&self) -> mondrian_core::ImageSampling {
+        match self {
+            Self::ColorManaged { sampling, .. } => *sampling,
+            Self::DataTexture { frame, .. } => frame.rgba_f32().sampling,
+        }
+    }
+
     /// CPU bytes retained by the decoded/prepared payload.
     pub fn retained_bytes(&self) -> usize {
         match self {

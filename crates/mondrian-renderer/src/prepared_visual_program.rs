@@ -821,6 +821,23 @@ impl PreparedVisualProgram {
         .map_err(|error| self.temporal_preparation_error(placement.clip_id, error))
     }
 
+    /// Freeze time dependencies before a Media pixel domain is available.
+    pub(crate) fn prepare_clip_temporal_program(
+        &self,
+        placement: TimelineClipExecutionRef,
+        request: &EffectTemporalExecutionRequest,
+        grid: Rational,
+        session: Option<&mut EffectExecutionSession>,
+    ) -> Result<mondrian_effects::PreparedEffectTemporalProgram> {
+        let effect_program = self.temporal_effect_program(placement, request)?;
+        let seed = |clip_time| self.temporal_frame_seed_on_grid(placement, clip_time, grid);
+        let prepared = match session {
+            Some(session) => session.prepare_temporal_frame_program(effect_program, request, seed),
+            None => mondrian_effects::prepare_temporal_frame_program(effect_program, request, seed),
+        };
+        prepared.map_err(|error| self.temporal_preparation_error(placement.clip_id, error))
+    }
+
     /// Freeze one Clip's time-expanded execution while sharing bounded dynamic
     /// topology residency with this consumer's ordinary frame evaluation.
     pub(crate) fn prepare_clip_temporal_execution_with_session(
