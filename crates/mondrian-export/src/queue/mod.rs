@@ -10051,6 +10051,8 @@ fn resolve_export_temporal_batches(
     batches: &[TimelineTemporalDemandBatch],
     decode_cache: &mut HashMap<ExportDecodeCacheKey, Arc<DecodedVideoLayer>>,
 ) -> Result<HashMap<TimelineClipExecutionRef, PreparedExportTemporalLayer>, String> {
+    use mondrian_effects::{EffectProcessorControl, EffectTemporalExecutionError};
+
     let node = inputs.node();
     let materialization = node.materialization_contract();
     let color_context = node.color_context().clone();
@@ -10106,11 +10108,56 @@ fn resolve_export_temporal_batches(
             resolved,
         )
         .map_err(|error| format!("export temporal frame set is invalid: {error}"))?;
-        let output = context
-            .visual_session
-            .composite_scratch
-            .execute_prepared_temporal_batch(batch, &mut prepared)
-            .map_err(|error| format!("export temporal Effect execution failed: {error}"))?;
+        let owner = node.evaluation().execution_request();
+        let plan = processor_sources::clip_input_plan(
+            node.program(),
+            owner,
+            batch.placement(),
+            batch.graph(),
+        )?;
+        let mut checkpoint = || {
+            context
+                .cancellation
+                .is_canceled()
+                .then_some(mondrian_effects::EffectProcessorStopReason::Canceled)
+        };
+        let mut control = EffectProcessorControl::new(&mut checkpoint);
+        control.bind_observation(context.visual_session.composite_scratch.processor_observation());
+        let session = &mut context.visual_session;
+        let scratch = &mut session.composite_scratch;
+        let mut run = |control: &mut EffectProcessorControl<'_>| {
+            scratch.execute_prepared_temporal_batch_with_control(batch, &mut prepared, control)
+        };
+        let output = if let Some(plan) = plan {
+            let mut sources = ExportProcessorSources::new(
+                owner,
+                context.media,
+                &color_context,
+                decode_cache,
+                context.input_color_counts.as_deref_mut(),
+                context.stage_diagnostics.as_deref_mut(),
+            );
+            let authority = sources.authority.clone();
+            let mut resolve =
+                |batch: &TimelineTemporalDemandBatch,
+                 admit: &mut dyn FnMut(usize) -> Result<(), EffectTemporalExecutionError>,
+                 control: &mut EffectProcessorControl<'_>| {
+                    sources.resolve(
+                        &mut session.decode_context,
+                        &plan,
+                        batch,
+                        None,
+                        color_context.working_color_space(),
+                        admit,
+                        control,
+                    )
+                };
+            plan.with_input_service(&authority, &mut resolve, &mut control, run)
+                .map_err(|error| format!("export temporal input service failed: {error}"))?
+        } else {
+            run(&mut control)
+        }
+        .map_err(|error| format!("export temporal Effect execution failed: {error}"))?;
         let tile = output.tile();
         if tile.roi() != tile.frame_extent().full_frame_roi() {
             return Err(

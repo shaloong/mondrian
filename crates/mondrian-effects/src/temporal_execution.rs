@@ -1173,8 +1173,20 @@ impl EffectExecutionSession {
         // Keep this legacy standalone API unobserved. Invocation resolution
         // below borrows the actual owner Control instead of binding a new sink.
         let mut control = crate::EffectProcessorControl::new(&mut checkpoint);
-        let request = scoped_input_request(&execution.request, &control);
-        processor_input_checkpoint(&request, &mut control)?;
+        self.execute_prepared_temporal_f32_with_control(execution, provider, &mut control)
+    }
+
+    /// Execute the prepared temporal program with the original task Control.
+    /// Its source service, stop reason, deadline and feedback remain borrowed
+    /// by this same Session and processor bank for the complete invocation.
+    pub fn execute_prepared_temporal_f32_with_control(
+        &mut self,
+        execution: &PreparedEffectTemporalExecution,
+        provider: &mut dyn EffectTemporalFrameProvider,
+        control: &mut crate::EffectProcessorControl<'_>,
+    ) -> Result<EffectTemporalExecutionOutput, EffectTemporalExecutionError> {
+        let request = scoped_input_request(&execution.request, control);
+        processor_input_checkpoint(&request, control)?;
         let compiled = execution.graph.as_ref();
         let prepared = prepare_temporal_scalar_request(
             compiled,
@@ -1183,20 +1195,29 @@ impl EffectExecutionSession {
             provider,
         )?;
         self.bind_generation(request.generation);
-        if let Some(output) = self.cached_or_empty_temporal_output(compiled, &request, &prepared)? {
-            processor_input_checkpoint(&request, &mut control)?;
+        // Dynamic Source requests are not part of the frozen provider's
+        // identity. Do not reuse or publish input-only cached pixels.
+        let cached = if control.uses_input_service() {
+            empty_temporal_output(&request, &prepared)?
+        } else {
+            self.cached_or_empty_temporal_output(compiled, &request, &prepared)?
+        };
+        if let Some(output) = cached {
+            processor_input_checkpoint(&request, control)?;
             return Ok(output);
         }
         let output = execute_prepared_scalar_on_bank(
             &mut self.processor_execution(),
-            &mut control,
+            control,
             compiled,
             &request,
             provider,
             prepared,
         )?;
-        processor_input_checkpoint(&request, &mut control)?;
-        self.publish_temporal_output(compiled, &request, &output);
+        processor_input_checkpoint(&request, control)?;
+        if !control.uses_input_service() {
+            self.publish_temporal_output(compiled, &request, &output);
+        }
         Ok(output)
     }
 

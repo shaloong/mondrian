@@ -347,6 +347,25 @@ impl TimelineCompositeScratch {
         )
     }
 
+    /// Execute a frozen temporal batch with its original task's source service,
+    /// cancellation, deadline and observation, without replacing this Session.
+    pub fn execute_prepared_temporal_batch_with_control(
+        &mut self,
+        batch: &crate::TimelineTemporalDemandBatch,
+        prepared: &mut mondrian_effects::PreparedTemporalFrameSet,
+        control: &mut mondrian_effects::EffectProcessorControl<'_>,
+    ) -> Result<
+        mondrian_effects::EffectTemporalExecutionOutput,
+        mondrian_effects::EffectTemporalExecutionError,
+    > {
+        crate::timeline_temporal::execute_prepared_timeline_temporal_batch_with_control(
+            &mut self.effect_execution,
+            batch,
+            prepared,
+            control,
+        )
+    }
+
     /// Close disappeared actual native GUIs on the existing execution owner.
     pub fn reconcile_processor_guis(&mut self) -> usize {
         self.effect_execution.reconcile_processor_guis()

@@ -1224,6 +1224,15 @@ pub(crate) fn execute_prepared_timeline_temporal_batch(
     session.execute_prepared_temporal_f32(&batch.execution, prepared)
 }
 
+pub(crate) fn execute_prepared_timeline_temporal_batch_with_control(
+    session: &mut EffectExecutionSession,
+    batch: &TimelineTemporalDemandBatch,
+    prepared: &mut PreparedTemporalFrameSet,
+    control: &mut mondrian_effects::EffectProcessorControl<'_>,
+) -> Result<EffectTemporalExecutionOutput, EffectTemporalExecutionError> {
+    session.execute_prepared_temporal_f32_with_control(&batch.execution, prepared, control)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn collect_media_batch(
     batches: &mut Vec<TimelineTemporalDemandBatch>,

@@ -5,9 +5,10 @@ OpenFX temporal access remains unsupported until the complete consumer path pass
 
 The product still declares `CURRENT_FRAME` and rejects temporal descriptors.
 Effects has time-expanded value programs and `PreparedTemporalFrameSet`; the
-normal OFX factory can now consume an invocation-borrowed input service. Main
-Preview/Export source scheduling is not connected to that service yet. Changing
-a capability flag cannot connect these boundaries.
+normal OFX factory can now consume an invocation-borrowed input service. Finite
+Preview/Export source paths are qualified below; preplanned Preview temporal
+scheduling and complete native temporal semantics remain open. Changing a
+capability flag cannot connect these boundaries.
 
 OFX [GetFramesNeeded](https://openfx.readthedocs.io/en/main/Reference/ofxImageEffectActions.html#c.kOfxImageEffectActionGetFramesNeeded)
 returns per-input pairs of frame-range endpoints, including discontinuous ranges.
@@ -412,16 +413,35 @@ pixels prove that current differs and history matches the original upstream
 output. The test snapshots use the selected probe's exact stream, picture and
 color diagnostics; normal author-state and immutable-evidence guards remain.
 
-Current Windows affected gates: Renderer 688/39 ignored and Export 303/20
-(991 passed, 59 ignored), with validation opt1/debug0. Nine existing cross-module
-input-service/Preview source tests also pass. The five Export groups and all
-ordinary gates settled with exit0/stderr0 under unchanged budgets. Affected
-App/Renderer/Export test targets compile. The prior full App/Effects/Media and
-six native OFX cohort remains its earlier qualification, not a new full rerun.
+Windows affected gates now pass Effects 390, Renderer 688/39 ignored and
+Export 305/20 (1,383 passed, 59 ignored; opt1/debug0, Renderer/Export validation).
+Six related App tests pass with validation opt0/debug0. The new Export temporal
+cases prove real FFmpeg historical pixels after a finite upstream blend and
+mid-invocation cancellation, one reader DSP entry and complete owner release.
+Two Effects regressions exercise an actual finite temporal prefix, nested source
+requests on reused instances, changing sources with an unchanged root provider,
+caller feedback/deadline restoration and sticky cancel/expiry. All gates settle
+with exit0/stderr0 under unchanged budgets; App/Renderer/Export test targets also
+compile. The preceding formal PNG/GPU checks
+and full App/Media/native OFX cohort retain their earlier conditions; they are
+not new full reruns.
 
-This is finite Preview/Export source qualification. The preplanned temporal
-batch entry still uses the legacy unobserved executor; it needs the same
-original-Control/source loan in the shared temporal engine. Transition rendering,
+The shared preplanned temporal entry now accepts the original Control. The
+standalone entry delegates to that same engine with its unobserved Control;
+there is still one Session, processor bank and working grant. A borrowed dynamic
+source service bypasses both lookup and publication of input-only pixel caches.
+Deadline, checkpoint, sticky stop and caller feedback cross the time-expanded
+execution unchanged. Export binds that entry to its original request, placement,
+decoder context and read-only cache through the existing source resolver.
+
+Preview's preplanned temporal materializer still executes before the CPU worker.
+Its media adapter can return Pending; moving the Export resolver there would
+block UI or require replay after partial DSP. The next consumer slice must move
+the frozen temporal work into the existing CPU worker/source-request protocol,
+retaining source leases and original cancellation without creating another bank
+or scheduler. This Preview route remains unqualified for dynamic processor input.
+
+This is finite Preview/Export source qualification. Transition rendering,
 nested/title/stack inputs, native formats beyond the
 bounded coverage executor, all legal action/thread image requests and complete
 fielding still require implementation or acceptance. Reuse the existing Export

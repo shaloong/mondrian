@@ -140,7 +140,48 @@ fn program_with_gpu_tail(
     facts: &Arc<Facts>,
     gpu_tail: bool,
 ) -> (PreparedEffectProgram, Arc<CompiledEffectGraph>) {
+    program_with_options(facts, gpu_tail, false)
+}
+
+fn program_with_options(
+    facts: &Arc<Facts>,
+    gpu_tail: bool,
+    temporal_prefix: bool,
+) -> (PreparedEffectProgram, Arc<CompiledEffectGraph>) {
     let mut effects = Vec::new();
+    if temporal_prefix {
+        let kind = EffectType::External(format!(
+            "test.scoped-input.temporal.{}",
+            mondrian_core::EffectId::new()
+        ));
+        let offset = time(1, 8);
+        register_effect_definition(
+            EffectDefinition::new(
+                kind.key(),
+                "Finite source time",
+                Default::default(),
+                EffectColorDomainContract::SCENE_LINEAR,
+            )
+            .with_execution_contract(EffectExecutionContract {
+                execution_modes: EffectExecutionModes::CPU_F32,
+                temporal_input: EffectTemporalInputExtent {
+                    past: EffectTemporalSpan::None,
+                    future: EffectTemporalSpan::Finite(offset),
+                },
+                roi_propagation: EffectRoiPropagation::PixelLocal,
+                ..EffectExecutionContract::IDENTITY
+            })
+            .with_graph_builder(Arc::new(move |_, _, graph| {
+                graph.append_unary(EffectRenderOp::TemporalFrameBlend {
+                    sample_offset: offset,
+                    mix: 0.25,
+                });
+                Ok(())
+            })),
+        )
+        .unwrap();
+        effects.push(EffectNode::new(kind));
+    }
     for parent in [false, true] {
         let kind = EffectType::External(format!(
             "test.scoped-input.{}",
@@ -367,6 +408,141 @@ fn source_panic_missing_admission_bad_time_and_budget_refusal_do_not_poison_the_
             .apply_compiled_rgba_f32(input.view(), &graph, 0, &mut control)
             .expect("same provider remains usable");
         assert_eq!(output.pixels()[0][0], 3.5);
+    }
+}
+
+fn prepared_root(
+    program: &PreparedEffectProgram,
+    session: &mut EffectExecutionSession,
+) -> (PreparedEffectTemporalExecution, PreparedTemporalFrameSet) {
+    let input = frame();
+    let request = EffectTemporalExecutionRequest::new(
+        77,
+        EffectExecutionContinuity::Continuous,
+        TimelineTime::ZERO,
+        input.extent(),
+        input.sampling(),
+        input.extent().full_frame_roi(),
+        ExecutionCancellationToken::new(),
+    );
+    let execution = session.prepare_temporal_frame_execution(program, &request, |_| Ok(0)).unwrap();
+    let tiles = execution
+        .demands()
+        .requests()
+        .iter()
+        .copied()
+        .map(|r| {
+            (
+                r,
+                EffectFrameTileF32::new(
+                    r.time(),
+                    input.extent(),
+                    input.sampling(),
+                    r.input_roi().region(),
+                    0,
+                    input.pixels().to_vec(),
+                )
+                .unwrap(),
+            )
+        })
+        .collect::<Vec<_>>();
+    let frames = PreparedTemporalFrameSet::prepare(
+        EffectTemporalSourceIdentity::from_complete_semantic_fingerprint([42; 32]),
+        execution.demands().clone(),
+        tiles,
+    )
+    .unwrap();
+    (execution, frames)
+}
+
+#[test]
+fn preplanned_temporal_borrows_caller_service_bank_deadline_feedback_and_cache_policy() {
+    let facts = Arc::new(Facts::default());
+    let (program, _) = program_with_options(&facts, false, true);
+    let mut session = session();
+    let (execution, mut frames) = prepared_root(&program, &mut session);
+    let mut source = Source { program: &program, facts: &facts };
+    let checks = AtomicUsize::new(0);
+    let mut checkpoint = || {
+        checks.fetch_add(1, Ordering::SeqCst);
+        None
+    };
+    let mut control = EffectProcessorControl::new(&mut checkpoint).with_input_service(&mut source);
+    let deadline = Instant::now() + Duration::from_secs(60);
+    control.bind_observation(EffectProcessorObservation { sink: None, deadline: Some(deadline) });
+    let prior = prior_feedback();
+    control.feedback.push(prior.clone());
+    for epoch in 0..3 {
+        facts.epoch.store(epoch, Ordering::SeqCst);
+        let output = session
+            .execute_prepared_temporal_f32_with_control(&execution, &mut frames, &mut control)
+            .unwrap();
+        assert_eq!(
+            output.tile().pixels(),
+            &[[3.5625 + 2.0 * epoch as f32, 0.0, 0.0, 1.0]]
+        );
+        assert_eq!(session.diagnostics().cache_entries, 0);
+        assert_eq!(session.diagnostics().generation, Some(77));
+        assert_eq!(
+            control.deadline(),
+            Some(deadline),
+            "shorter nested deadline is restored"
+        );
+        assert!(control.input_stage.is_none() && control.current_occurrence.is_none());
+        assert!(control.input_service.is_some());
+    }
+    let receipts = control.take_feedback().unwrap();
+    assert_eq!(receipts.iter().collect::<Vec<_>>(), vec![&prior]);
+    assert!(
+        checks.load(Ordering::SeqCst) > 0,
+        "original caller checkpoints executed"
+    );
+    assert_eq!(facts.created.load(Ordering::SeqCst), 2);
+    assert_eq!(facts.dsp.load(Ordering::SeqCst), 9);
+    assert_eq!(
+        *facts.calls.lock().unwrap(),
+        [(1, time(1, 4)), (2, time(1, 2)), (1, time(3, 4))].repeat(3)
+    );
+    drop(session);
+    assert_eq!(facts.dropped.load(Ordering::SeqCst), 2);
+}
+
+#[test]
+fn preplanned_temporal_retains_caller_stop_reason_and_restores_service_after_input_stop() {
+    for mode in [4, 5] {
+        let facts = Arc::new(Facts::default());
+        facts.mode.store(mode, Ordering::SeqCst);
+        let (program, _) = program_with_options(&facts, false, true);
+        let mut session = session();
+        let (execution, mut frames) = prepared_root(&program, &mut session);
+        let mut source = Source { program: &program, facts: &facts };
+        let mut checkpoint =
+            || facts.cancellation.is_canceled().then_some(EffectProcessorStopReason::Canceled);
+        let mut control =
+            EffectProcessorControl::new(&mut checkpoint).with_input_service(&mut source);
+        let prior = prior_feedback();
+        control.feedback.push(prior.clone());
+        assert!(session
+            .execute_prepared_temporal_f32_with_control(&execution, &mut frames, &mut control)
+            .is_err());
+        assert_eq!(
+            control.stop_reason(),
+            Some(if mode == 4 {
+                EffectProcessorStopReason::Canceled
+            } else {
+                EffectProcessorStopReason::DeadlineExpired
+            })
+        );
+        assert_eq!(facts.dsp.load(Ordering::SeqCst), 0);
+        assert_eq!(facts.calls.lock().unwrap().len(), usize::from(mode == 4));
+        assert!(control.input_service.is_some());
+        assert!(control.input_stage.is_none() && control.current_occurrence.is_none());
+        assert_eq!(control.deadline(), None);
+        assert_eq!(
+            control.take_feedback().unwrap().iter().collect::<Vec<_>>(),
+            vec![&prior]
+        );
+        assert_eq!(session.diagnostics().cache_entries, 0);
     }
 }
 

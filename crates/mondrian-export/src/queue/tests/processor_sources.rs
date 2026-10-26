@@ -103,6 +103,16 @@ fn export_processor_source_real_media_history_uses_original_job_without_replayin
 }
 
 #[test]
+fn export_processor_source_preplanned_temporal_history_keeps_original_job() {
+    render_history(false, SourceScenario::Temporal);
+}
+
+#[test]
+fn export_processor_source_preplanned_temporal_cancellation_releases_original_job() {
+    render_history(false, SourceScenario::TemporalCancel);
+}
+
+#[test]
 #[ignore = "requires actual wgpu GPU suffix execution"]
 fn export_processor_source_mixed_real_media_history_uses_original_job_and_gpu_suffix() {
     render_history(true, SourceScenario::Pixels);
@@ -127,6 +137,8 @@ fn export_processor_source_production_queue_validates_history_png_artifact() {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum SourceScenario {
     Pixels,
+    Temporal,
+    TemporalCancel,
     Cancel,
     Budget,
     Artifact,
@@ -231,6 +243,43 @@ fn render_history(mixed: bool, scenario: SourceScenario) {
     let mut clip = Clip::new(asset, TimelineTime::ZERO, TimelineTime::new(2, 1).unwrap()).unwrap();
     let gain_node = EffectNode::new(gain);
     clip.add_effect_node(gain_node.clone());
+    let temporal = matches!(
+        scenario,
+        SourceScenario::Temporal | SourceScenario::TemporalCancel
+    )
+    .then(|| {
+        let kind = EffectType::External(format!("test.export.source-temporal.{}", AssetId::new()));
+        let offset = TimelineTime::new(1, 4).unwrap();
+        register_effect_definition(
+            EffectDefinition::new(
+                kind.key(),
+                "Finite source time",
+                Default::default(),
+                EffectColorDomainContract::SCENE_LINEAR,
+            )
+            .with_execution_contract(EffectExecutionContract {
+                execution_modes: EffectExecutionModes::CPU_F32,
+                temporal_input: EffectTemporalInputExtent {
+                    past: EffectTemporalSpan::None,
+                    future: EffectTemporalSpan::Finite(offset),
+                },
+                roi_propagation: EffectRoiPropagation::PixelLocal,
+                ..EffectExecutionContract::IDENTITY
+            })
+            .with_graph_builder(Arc::new(move |_, _, graph| {
+                graph.append_unary(EffectRenderOp::TemporalFrameBlend {
+                    sample_offset: offset,
+                    mix: 0.25,
+                });
+                Ok(())
+            })),
+        )
+        .unwrap();
+        EffectNode::new(kind)
+    });
+    if let Some(temporal) = &temporal {
+        clip.add_effect_node(temporal.clone());
+    }
     let tail = mixed.then(|| {
         let kind = EffectType::External(format!("test.export.source-gpu-tail.{}", AssetId::new()));
         register_effect_definition(
@@ -321,13 +370,19 @@ fn render_history(mixed: bool, scenario: SourceScenario) {
     let mut history_clip =
         Clip::new(asset, TimelineTime::ZERO, TimelineTime::new(2, 1).unwrap()).unwrap();
     history_clip.add_effect_node(gain_node);
+    if let Some(temporal) = temporal {
+        history_clip.add_effect_node(temporal);
+    }
     history_clip.add_effect_node(EffectNode::new(reader));
     if let Some(tail) = tail {
         history_clip.add_effect_node(tail);
     }
     timeline.sequence.video_tracks[0].clips[0] = history_clip;
     let cancellation = ExecutionCancellationToken::new();
-    if scenario == SourceScenario::Cancel {
+    if matches!(
+        scenario,
+        SourceScenario::Cancel | SourceScenario::TemporalCancel
+    ) {
         *facts.cancel.lock().unwrap() = Some(cancellation.clone());
     }
     let result = (scenario != SourceScenario::Artifact).then(|| {
@@ -339,7 +394,7 @@ fn render_history(mixed: bool, scenario: SourceScenario) {
         )
     });
     match scenario {
-        SourceScenario::Pixels => {
+        SourceScenario::Pixels | SourceScenario::Temporal => {
             let (actual, diagnostics) =
                 result.unwrap().expect("actual Export job must resolve valid historical source");
             assert_eq!(
@@ -355,7 +410,7 @@ fn render_history(mixed: bool, scenario: SourceScenario) {
                 assert!(diagnostics.last_heterogeneous_completion.is_some());
             }
         }
-        SourceScenario::Cancel => {
+        SourceScenario::Cancel | SourceScenario::TemporalCancel => {
             let error =
                 result.unwrap().expect_err("original caller cancellation cannot publish pixels");
             assert!(cancellation.is_canceled());
