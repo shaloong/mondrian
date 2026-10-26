@@ -251,23 +251,17 @@ impl TimelineCompositeScratch {
         program: &crate::PreparedVisualProgram,
         request: crate::TimelineFrameExecutionRequest,
     ) -> Result<crate::PreparedTimelineFrameExecution, crate::TimelineFramePreparationError> {
-        let (request, generation, continuity, frame_extent, output_roi, cancellation) =
-            request.into_parts();
-        self.effect_execution.bind_generation(generation);
+        self.effect_execution.bind_generation(request.generation());
         let plan = crate::evaluate_prepared_visual_program_with_session(
             program,
-            request,
+            *request.evaluation(),
             &mut self.effect_execution,
         )
         .map_err(crate::TimelineFramePreparationError::Evaluation)?;
         crate::timeline_temporal::prepare_timeline_temporal_execution_with_session(
             program,
             &plan,
-            generation,
-            continuity,
-            frame_extent,
-            output_roi,
-            cancellation,
+            request,
             &mut self.effect_execution,
         )
         .map_err(crate::TimelineFramePreparationError::Temporal)

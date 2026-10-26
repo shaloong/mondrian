@@ -6096,7 +6096,11 @@ fn render_audio_stems_to_pcm_f32(
         for stem in &mut active {
             stem.delivery
                 .render_into_cancellable(
-                    AudioRenderRequest { transport_activity: Some(mondrian_core::TimelineTransportActivity::Playing), start_sample: chunk_start, frames: chunk_frames },
+                    AudioRenderRequest {
+                        transport_activity: Some(mondrian_core::TimelineTransportActivity::Playing),
+                        start_sample: chunk_start,
+                        frames: chunk_frames,
+                    },
                     &mut pcm[..chunk_samples],
                     cancel,
                 )
@@ -6246,7 +6250,11 @@ fn render_timeline_audio_to_pcm_f32(
             };
             let chunk_samples = chunk_frames * channels;
             if let Err(error) = delivery.render_into_cancellable(
-                AudioRenderRequest { transport_activity: Some(mondrian_core::TimelineTransportActivity::Playing), start_sample: chunk_start, frames: chunk_frames },
+                AudioRenderRequest {
+                    transport_activity: Some(mondrian_core::TimelineTransportActivity::Playing),
+                    start_sample: chunk_start,
+                    frames: chunk_frames,
+                },
                 &mut pcm[..chunk_samples],
                 cancel,
             ) {
@@ -8125,15 +8133,12 @@ fn prepare_export_visual_frame_closure(
                 }
             }
             if prepared_frame.execution_plan().is_empty() {
-                let (render_plan, temporal_batches) = prepared_frame.into_parts();
                 return Ok(PreparedVisualFrameEvaluation::new(
-                    render_plan,
-                    temporal_batches,
+                    prepared_frame,
                     Vec::new(),
                 ));
             }
             let temporal_source_coverage_bytes = prepared_frame.source_coverage_bytes();
-            let (temporal_render_plan, temporal_batches) = prepared_frame.into_parts();
             visual_session
                 .composite_scratch
                 .admit_cpu_active_working_set(
@@ -8147,15 +8152,17 @@ fn prepare_export_visual_frame_closure(
                 })?;
             let effect_frame_plan = prepare_export_effect_frame_plan(
                 program.as_ref(),
-                &temporal_render_plan,
+                prepared_frame.execution_plan(),
                 resolution,
                 &mut visual_session,
             )
             .map_err(|error| error.to_string())?;
             let (render_plan, heterogeneous) = effect_frame_plan.into_parts();
+            let prepared_frame = prepared_frame
+                .try_with_execution_plan(render_plan)
+                .map_err(|error| error.to_string())?;
             Ok(PreparedVisualFrameEvaluation::new(
-                render_plan,
-                temporal_batches,
+                prepared_frame,
                 heterogeneous,
             ))
         },
@@ -18745,7 +18752,11 @@ mod tests {
         let mut output = [0.0_f32; 128];
         delivery
             .render_into_cancellable(
-                AudioRenderRequest { transport_activity: None, start_sample: 0, frames: 64 },
+                AudioRenderRequest {
+                    transport_activity: None,
+                    start_sample: 0,
+                    frames: 64,
+                },
                 &mut output,
                 &ExecutionCancellationToken::new(),
             )

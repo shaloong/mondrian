@@ -47,6 +47,317 @@ fn tt(frame: i64, time_base: mondrian_core::Rational) -> mondrian_core::Timeline
     mondrian_core::TimelineTime::new(numerator, time_base.den).expect("valid test time")
 }
 
+fn pending_preparation_fixture(
+    frame: i64,
+) -> (
+    FrameEvaluationKey,
+    Box<crate::app::preview_timeline_execution::PreviewTimelinePreparation>,
+) {
+    use crate::app::preview_timeline_execution::*;
+    ensure_test_ocio_loaded();
+    let mut sequence = Sequence::new("pending source ownership");
+    sequence.settings.resolution = Resolution { width: 2, height: 1 };
+    let duration = tt(48, sequence.time_base());
+    sequence.video_tracks[0]
+        .add_clip(Clip::new(AssetId::new(), mondrian_core::TimelineTime::ZERO, duration).unwrap())
+        .unwrap();
+    let key = FrameEvaluationKey {
+        sequence_id: sequence.id,
+        sequence_revision: sequence.revision,
+        author_generation: 0,
+        frame,
+        width: 2,
+        height: 1,
+        runtime_scale: mondrian_playback::PreviewResolutionScale::Full,
+        raster_requirement: PreviewRasterRequirement::Viewer,
+        display_color_space: ColorSpace::Srgb,
+        display_contract_identity: None,
+    };
+    let color = sequence
+        .settings
+        .root_program_color_context(&mondrian_core::ProjectColorEnvironment::default())
+        .unwrap();
+    let PreviewTimelineResolution::Pending { preparation, .. } = resolve_preview_timeline(
+        &sequence,
+        &[],
+        frame,
+        sequence.settings.resolution,
+        key.runtime_scale,
+        color,
+        &mut |_| PreviewTimelineMediaFrame::Pending { wait: PreviewTimelineMediaWait::Producer },
+        &mut |_| panic!("media only"),
+    ) else {
+        panic!("pending original preparation")
+    };
+    (key, preparation)
+}
+
+#[test]
+fn preparation_exact_wakeup_keeps_owner_and_complete_dependencies() {
+    let (key, preparation) = pending_preparation_fixture(4);
+    let owner = preparation.as_ref() as *const _;
+    let ready_key = test_media_key(4);
+    let pending_key = test_media_key(5);
+    let dependencies: Arc<[EvaluationDependency]> = Arc::from([
+        EvaluationDependency::MediaProducer(ready_key.clone()),
+        EvaluationDependency::MediaProducer(pending_key.clone()),
+    ]);
+    let mut set = EvaluationWorkingSet::new();
+    set.insert_preparing(
+        key,
+        MediaPreviewRequestPriority::Current,
+        dependencies.clone(),
+        Arc::from([EvaluationDependency::MediaProducer(pending_key.clone())]),
+        true,
+        preparation,
+        1,
+    );
+    assert_eq!(
+        set.waiting_for(key, MediaPreviewRequestPriority::Current).unwrap().as_ref(),
+        &[EvaluationDependency::MediaProducer(pending_key.clone())]
+    );
+    assert!(
+        !set.invalidate_for_media_key(&ready_key),
+        "ready input is already frozen"
+    );
+    assert!(set.invalidate_for_media_key(&pending_key));
+    assert!(
+        !set.invalidate_for_media_key(&pending_key),
+        "completion edge is idempotent"
+    );
+    assert!(set.waiting_for(key, MediaPreviewRequestPriority::Current).is_none());
+    let (resumed, observed) = set.take_preparation(key).expect("same owner survives wakeup");
+    assert_eq!(resumed.as_ref() as *const _, owner);
+    assert_eq!(observed, dependencies);
+    assert!(
+        set.take_preparation(key).is_none(),
+        "unique move into resolver"
+    );
+}
+
+#[test]
+fn preparation_owners_share_ready_capacity_and_retire_with_work() {
+    for retirement in 0..3 {
+        let mut set = EvaluationWorkingSet::new();
+        let mut keys = Vec::new();
+        for frame in 0..5 {
+            let (key, preparation) = pending_preparation_fixture(frame);
+            keys.push(key);
+            set.insert_preparing(
+                key,
+                if frame == 0 {
+                    MediaPreviewRequestPriority::Prefetch
+                } else {
+                    MediaPreviewRequestPriority::Current
+                },
+                Arc::from([]),
+                Arc::from([]),
+                false,
+                preparation,
+                frame as u64,
+            );
+        }
+        assert!(
+            set.take_preparation(keys[0]).is_none(),
+            "speculative owner evicted first"
+        );
+        let ready_key = FrameEvaluationKey { frame: 20, ..keys[1] };
+        let ready = Arc::new(ResolvedFrameEvaluation {
+            key: ready_key,
+            cpu_materialization_active_bytes: 0,
+            output_key: PreviewOutputKey::new(
+                ready_key.sequence_id,
+                2,
+                1,
+                test_preview_semantic_identity(201),
+            ),
+            elements: Arc::from([]),
+            color_context: test_color_context(ColorSpace::Srgb),
+            resolved_quality: ResolvedFrameQuality::Full,
+            reuse_policy: EvaluationReusePolicy::Reusable,
+            dependencies: Arc::from([]),
+            render_cache_identity: None,
+            sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
+        });
+        set.insert(ready_key, ready, 10);
+        assert!(
+            set.take_preparation(keys[1]).is_none(),
+            "Ready and preparing share four slots"
+        );
+        assert!(set.get(ready_key, 11).is_some());
+        match retirement {
+            0 => set.retire_generation_work(),
+            1 => set.retire_media_work(),
+            _ => set.clear(),
+        }
+        assert!(
+            keys.into_iter().all(|key| set.take_preparation(key).is_none()),
+            "retirement releases every partial-input owner"
+        );
+    }
+    let (key, preparation) = pending_preparation_fixture(4);
+    let cancel = preparation.request().cancellation().clone();
+    let mut set = EvaluationWorkingSet::new();
+    set.insert_preparing(
+        key,
+        MediaPreviewRequestPriority::Current,
+        Arc::from([]),
+        Arc::from([]),
+        false,
+        preparation,
+        1,
+    );
+    cancel.cancel();
+    set.discard_incompatible_preparation(
+        key,
+        0,
+        None,
+        mondrian_effects::EffectGraphExecutionBudget::new(
+            64 * 1024 * 1024,
+            64 * 1024 * 1024,
+            64 * 1024 * 1024,
+            64,
+            192,
+        ),
+    );
+    assert!(
+        set.take_preparation(key).is_none(),
+        "canceled attempt cannot be revived"
+    );
+}
+
+#[test]
+fn preparation_actual_title_worker_progresses_under_cache_pressure() {
+    ensure_test_ocio_loaded();
+    let mut state = AppState::new();
+    let mut sequence = Sequence::new("three asynchronous title sources");
+    sequence.settings.resolution = Resolution { width: 512, height: 128 };
+    let duration = tt(24, sequence.time_base());
+    for (index, text) in ["A", "B", "C"].into_iter().enumerate() {
+        sequence.video_tracks[index]
+            .add_clip(
+                Clip::new_basic_title(
+                    text,
+                    mondrian_core::default_basic_title_font_family(),
+                    mondrian_core::TimelineTime::ZERO,
+                    duration,
+                )
+                .unwrap(),
+            )
+            .unwrap();
+    }
+    state.test_set_sequence(Some(sequence));
+    state.seek(4).expect("seek title frame");
+    let runtime = PreviewProductionRuntime::<()>::new_without_workers_for_test();
+    runtime.synchronize_transport_intent(state.preview_transport_intent());
+    runtime.title_task.borrow_mut().set_cache_byte_budget(1);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let snapshot = state.preview_execution_snapshot(Instant::now());
+    let authoring = snapshot.authoring().unwrap();
+    let sequence = state.active_sequence().unwrap();
+    let key = FrameEvaluationKey {
+        sequence_id: sequence.id,
+        sequence_revision: sequence.revision,
+        author_generation: authoring.author_generation(),
+        frame: 4,
+        width: 512,
+        height: 128,
+        runtime_scale: mondrian_playback::PreviewResolutionScale::Full,
+        raster_requirement: PreviewRasterRequirement::Viewer,
+        display_color_space: ColorSpace::Srgb,
+        display_contract_identity: None,
+    };
+    let color = sequence
+        .settings
+        .root_program_color_context(state.project_color_environment())
+        .unwrap();
+    let evaluation = loop {
+        assert!(
+            Instant::now() < deadline,
+            "title preparation starved under result-cache pressure"
+        );
+        match runtime.acquire_frame_evaluation(
+            &snapshot,
+            &state,
+            sequence,
+            4,
+            512,
+            128,
+            color.clone(),
+            key,
+        ) {
+            FrameResolutionOutcome::Ready(ready) => break ready,
+            FrameResolutionOutcome::Pending(_) => std::thread::sleep(Duration::from_millis(2)),
+            _ => panic!("actual title preparation failed"),
+        }
+    };
+    assert_eq!(evaluation.elements.len(), 3);
+    for element in evaluation.elements.iter() {
+        let ResolvedPreviewElement::Media { frame, .. } = element else {
+            panic!("title source")
+        };
+        assert!(frame.working_frame().unwrap().frame.rgba_f32().data.iter().any(|p| p[3] > 0.0));
+    }
+    let resolves = evaluation_resolve_count(&runtime);
+    let FrameResolutionOutcome::Ready(reused) =
+        runtime.acquire_frame_evaluation(&snapshot, &state, sequence, 4, 512, 128, color, key)
+    else {
+        panic!("completed original evaluation")
+    };
+    assert!(Arc::ptr_eq(&evaluation, &reused));
+    assert_eq!(evaluation_resolve_count(&runtime), resolves);
+    runtime.shutdown_and_wait();
+}
+
+#[test]
+fn preparation_resource_policy_retires_only_replaced_active_grants() {
+    use crate::app::execution_resource_coordination::{
+        ExecutionResourceCoordinator, MachineResourceProfile,
+    };
+    let runtime = PreviewProductionRuntime::<()>::new_without_workers_for_test();
+    let coordinator = ExecutionResourceCoordinator::new(MachineResourceProfile::from_capacity(
+        Some(16 * 1024 * 1024 * 1024),
+        8,
+    ));
+    let mut decision = coordinator.decision().preview;
+    runtime.apply_resource_decision(&decision);
+    let (key, preparation) = pending_preparation_fixture(4);
+    let pointer = preparation.as_ref() as *const _;
+    runtime.evaluation_working_set.borrow_mut().insert_preparing(
+        key,
+        MediaPreviewRequestPriority::Current,
+        Arc::from([]),
+        Arc::from([]),
+        false,
+        preparation,
+        1,
+    );
+    runtime.apply_resource_decision(&decision);
+    decision.title_cache_budget_bytes = 1;
+    runtime.apply_resource_decision(&decision);
+    let (preparation, _) = runtime
+        .evaluation_working_set
+        .borrow_mut()
+        .take_preparation(key)
+        .expect("optional cache changes preserve active input ownership");
+    assert_eq!(preparation.as_ref() as *const _, pointer);
+    runtime.evaluation_working_set.borrow_mut().insert_preparing(
+        key,
+        MediaPreviewRequestPriority::Current,
+        Arc::from([]),
+        Arc::from([]),
+        false,
+        preparation,
+        2,
+    );
+    decision.cpu_composite_working_set.max_active_bytes -= 1;
+    runtime.apply_resource_decision(&decision);
+    assert!(
+        runtime.evaluation_working_set.borrow_mut().take_preparation(key).is_none(),
+        "changed active grant releases partial input ownership immediately"
+    );
+}
+
 fn register_test_window_preview_output(
     service: &WindowPreviewAdapter,
     frame: &PreviewGpuFrame,

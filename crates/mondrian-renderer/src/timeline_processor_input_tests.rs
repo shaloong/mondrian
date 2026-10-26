@@ -639,7 +639,7 @@ fn assert_temporal_frame_seeds(
                     )
                     .unwrap()
                     .into_parts()
-                    .1
+                    .2
             } else {
                 let plan = evaluate_prepared_visual_program(&program, evaluation).unwrap();
                 collect_timeline_temporal_demands(

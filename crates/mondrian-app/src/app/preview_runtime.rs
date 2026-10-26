@@ -3527,7 +3527,17 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         if self.applied_resource_decision.get() == Some(*decision) {
             return;
         }
-        self.applied_resource_decision.set(Some(*decision));
+        let previous = self.applied_resource_decision.replace(Some(*decision));
+        if previous.is_none_or(|previous| {
+            previous.cpu_composite_working_set != decision.cpu_composite_working_set
+                || previous.heterogeneous_effects != decision.heterogeneous_effects
+                || previous.effect_cache.max_working_bytes
+                    != decision.effect_cache.max_working_bytes
+        }) {
+            // A pre-DSP attempt cannot retain inputs under a replaced active
+            // grant. Optional cache pressure alone does not change its authority.
+            self.evaluation_working_set.borrow_mut().retire_preparation_owners();
+        }
         bump(&self.metrics.resource_decision_reconfigurations);
         self.heterogeneous_effect_decision.set(decision.heterogeneous_effects);
         self.frame_store.borrow_mut().reconfigure(decision.frame_store);

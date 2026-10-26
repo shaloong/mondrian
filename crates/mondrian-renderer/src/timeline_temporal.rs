@@ -91,6 +91,7 @@ pub struct TimelineTemporalDemandBatch {
 /// lowering the corresponding placement from this plan.
 #[derive(Debug, Clone)]
 pub struct PreparedTimelineFrameExecution {
+    request: TimelineFrameExecutionRequest,
     execution_plan: TimelineRenderPlan,
     batches: Vec<TimelineTemporalDemandBatch>,
     source_coverage_bytes: u64,
@@ -161,29 +162,14 @@ impl TimelineFrameExecutionRequest {
     pub const fn cancellation(&self) -> &ExecutionCancellationToken {
         &self.cancellation
     }
-
-    pub(crate) fn into_parts(
-        self,
-    ) -> (
-        crate::TimelineEvaluationRequest,
-        u64,
-        EffectExecutionContinuity,
-        EffectFrameExtent,
-        EffectPixelRoi,
-        ExecutionCancellationToken,
-    ) {
-        (
-            self.evaluation,
-            self.generation,
-            self.continuity,
-            self.frame_extent,
-            self.output_roi,
-            self.cancellation,
-        )
-    }
 }
 
 impl PreparedTimelineFrameExecution {
+    /// Original attempt authority, retained through consumer preparation.
+    pub const fn request(&self) -> &TimelineFrameExecutionRequest {
+        &self.request
+    }
+
     /// Render plan admitted only after all returned temporal batches execute.
     pub const fn execution_plan(&self) -> &TimelineRenderPlan {
         &self.execution_plan
@@ -200,9 +186,35 @@ impl PreparedTimelineFrameExecution {
         self.source_coverage_bytes
     }
 
-    /// Consume the preparation into its two owned products.
-    pub fn into_parts(self) -> (TimelineRenderPlan, Vec<TimelineTemporalDemandBatch>) {
-        (self.execution_plan, self.batches)
+    /// Lower a backend plan without replacing the originating request.
+    /// Evaluation identity must survive backend-specific graph rewriting.
+    pub fn try_with_execution_plan(
+        mut self,
+        plan: TimelineRenderPlan,
+    ) -> Result<Self, MondrianError> {
+        let evaluation = crate::TimelineEvaluationRequest {
+            position: plan.position,
+            intent: plan.intent,
+            settings: plan.settings,
+        };
+        if evaluation != *self.request.evaluation() {
+            return Err(MondrianError::EffectGraphEvaluationFailed {
+                reason: "backend plan changed the original frame evaluation identity".to_owned(),
+            });
+        }
+        self.execution_plan = plan;
+        Ok(self)
+    }
+
+    /// Consume the preparation without silently discarding its owner request.
+    pub fn into_parts(
+        self,
+    ) -> (
+        TimelineFrameExecutionRequest,
+        TimelineRenderPlan,
+        Vec<TimelineTemporalDemandBatch>,
+    ) {
+        (self.request, self.execution_plan, self.batches)
     }
 }
 
@@ -586,57 +598,45 @@ pub(crate) fn prepare_timeline_temporal_execution(
     prepare_timeline_temporal_execution_inner(
         program,
         plan,
-        generation,
-        continuity,
-        frame_extent,
-        output_roi,
-        cancellation,
+        TimelineFrameExecutionRequest::new(
+            crate::TimelineEvaluationRequest {
+                position: plan.position,
+                intent: plan.intent,
+                settings: plan.settings,
+            },
+            generation,
+            continuity,
+            frame_extent,
+            output_roi,
+            cancellation,
+        ),
         None,
     )
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn prepare_timeline_temporal_execution_with_session(
     program: &PreparedVisualProgram,
     plan: &TimelineRenderPlan,
-    generation: u64,
-    continuity: EffectExecutionContinuity,
-    frame_extent: EffectFrameExtent,
-    output_roi: EffectPixelRoi,
-    cancellation: ExecutionCancellationToken,
+    request: TimelineFrameExecutionRequest,
     session: &mut EffectExecutionSession,
 ) -> Result<PreparedTimelineFrameExecution, TimelineTemporalPreparationError> {
-    prepare_timeline_temporal_execution_inner(
-        program,
-        plan,
-        generation,
-        continuity,
-        frame_extent,
-        output_roi,
-        cancellation,
-        Some(session),
-    )
+    prepare_timeline_temporal_execution_inner(program, plan, request, Some(session))
 }
 
-#[allow(clippy::too_many_arguments)]
 fn prepare_timeline_temporal_execution_inner(
     program: &PreparedVisualProgram,
     plan: &TimelineRenderPlan,
-    generation: u64,
-    continuity: EffectExecutionContinuity,
-    frame_extent: EffectFrameExtent,
-    output_roi: EffectPixelRoi,
-    cancellation: ExecutionCancellationToken,
+    request: TimelineFrameExecutionRequest,
     session: Option<&mut EffectExecutionSession>,
 ) -> Result<PreparedTimelineFrameExecution, TimelineTemporalPreparationError> {
     let batches = collect_timeline_temporal_demands_inner(
         program,
         plan,
-        generation,
-        continuity,
-        frame_extent,
-        output_roi,
-        cancellation,
+        request.generation(),
+        request.continuity(),
+        request.frame_extent(),
+        request.output_roi(),
+        request.cancellation().clone(),
         session,
     )?;
     let source_coverage_bytes = batches.iter().try_fold(0_u64, |total, batch| {
@@ -657,7 +657,12 @@ fn prepare_timeline_temporal_execution_inner(
             )?;
         }
     }
-    Ok(PreparedTimelineFrameExecution { execution_plan, batches, source_coverage_bytes })
+    Ok(PreparedTimelineFrameExecution {
+        request,
+        execution_plan,
+        batches,
+        source_coverage_bytes,
+    })
 }
 
 /// Collect all admitted finite temporal source batches in deterministic render
@@ -1617,6 +1622,50 @@ mod tests {
                     ..
                 } if *sequence_id == child_id
             )))
+        );
+    }
+    #[test]
+    fn original_frame_request_survives_backend_lowering_and_evaluation() {
+        use std::time::{Duration, Instant};
+        let sequence = Sequence::new("original frame authority");
+        let program = PreparedVisualProgram::prepare(&sequence).unwrap();
+        let extent = EffectFrameExtent::new(12, 8);
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let cancellation = ExecutionCancellationToken::new().with_deadline(deadline);
+        let owner = TimelineFrameExecutionRequest::new(
+            crate::TimelineEvaluationRequest::export(FramePosition::new(1, sequence.time_base())),
+            601,
+            EffectExecutionContinuity::Continuous,
+            extent,
+            extent.full_frame_roi(),
+            cancellation.clone(),
+        );
+        let mut scratch = crate::TimelineCompositeScratch::default();
+        let prepared = scratch.prepare_timeline_frame_execution(&program, owner.clone()).unwrap();
+        assert_eq!(prepared.request().evaluation(), owner.evaluation());
+        assert_eq!(prepared.request().generation(), 601);
+        assert_eq!(
+            prepared.request().continuity(),
+            EffectExecutionContinuity::Continuous
+        );
+        assert_eq!(prepared.request().frame_extent(), extent);
+        assert_eq!(prepared.request().output_roi(), extent.full_frame_roi());
+        assert_eq!(prepared.request().cancellation().deadline(), Some(deadline));
+        let mut foreign = prepared.execution_plan().clone();
+        foreign.position.frame += 1;
+        assert!(prepared.clone().try_with_execution_plan(foreign).is_err());
+        let mut foreign = prepared.execution_plan().clone();
+        foreign.intent = crate::TimelineRenderIntent::Preview;
+        assert!(prepared.clone().try_with_execution_plan(foreign).is_err());
+        let plan = prepared.execution_plan().clone();
+        let lowered = prepared.try_with_execution_plan(plan).unwrap();
+        let evaluation = crate::PreparedVisualFrameEvaluation::new(lowered, ());
+        cancellation.cancel();
+        assert!(evaluation.execution_request().cancellation().is_canceled());
+        assert_eq!(evaluation.execution_request().generation(), 601);
+        assert_eq!(
+            evaluation.execution_request().cancellation().deadline(),
+            Some(deadline)
         );
     }
 }

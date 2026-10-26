@@ -10,7 +10,7 @@
 //! materialization consumes the closure and cannot reopen author state.
 
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+use std::collections::{hash_map::Entry, HashMap, HashSet};
 use std::hash::Hash;
 use std::sync::Arc;
 
@@ -185,6 +185,8 @@ pub(crate) enum PreviewTimelineResolution {
     Empty,
     Pending {
         dependency: PreviewTimelinePendingDependency,
+        /// Original pre-DSP attempt and any inputs already acquired.
+        preparation: Box<PreviewTimelinePreparation>,
     },
     Unavailable {
         reason: PreviewUnavailability,
@@ -412,6 +414,7 @@ pub(crate) fn resolve_preview_timeline_with_programs(
         ),
         PreviewTimelineSourceAdapters::new(media_frame, title_frame),
         graph,
+        None,
     )
 }
 
@@ -419,6 +422,7 @@ pub(crate) fn resolve_preview_timeline_with_programs_and_observer<MediaFrame, Ti
     request: PreviewTimelineFrameRequest<'_>,
     adapters: PreviewTimelineSourceAdapters<'_, MediaFrame, TitleFrame>,
     binding: PreviewTimelineExecutionBinding<'_>,
+    preparation: Option<Box<PreviewTimelinePreparation>>,
 ) -> PreviewTimelineResolution
 where
     MediaFrame: FnMut(PreviewTimelineMediaRequest) -> PreviewTimelineMediaFrame,
@@ -434,18 +438,35 @@ where
         author_snapshot: Some(binding.author_snapshot),
         heterogeneous_graph_budget: binding.heterogeneous_graph_budget,
     };
-    resolve_preview_timeline_with_graph(request, adapters, graph)
+    resolve_preview_timeline_with_graph(request, adapters, graph, preparation)
 }
 
 fn resolve_preview_timeline_with_graph<MediaFrame, TitleFrame>(
     request: PreviewTimelineFrameRequest<'_>,
     adapters: PreviewTimelineSourceAdapters<'_, MediaFrame, TitleFrame>,
     graph: PreviewTimelineGraph<'_>,
+    preparation: Option<Box<PreviewTimelinePreparation>>,
 ) -> PreviewTimelineResolution
 where
     MediaFrame: FnMut(PreviewTimelineMediaRequest) -> PreviewTimelineMediaFrame,
     TitleFrame: FnMut(PreviewTimelineTitleRequest) -> PreviewTimelineTitleFrame,
 {
+    if graph.cancellation.is_canceled()
+        || preparation.as_ref().is_some_and(|prepared| {
+            prepared.request().generation() == graph.generation
+                && (prepared.request().cancellation().is_canceled()
+                    || prepared.request().cancellation().deadline()
+                        != graph.cancellation.deadline())
+        })
+    {
+        return PreviewTimelineResolution::Unavailable {
+            reason: PreviewUnavailability::stopped(
+                PreviewOutputStage::TimelineEvaluation,
+                "Preview preparation lost its original cancellation or deadline scope",
+            ),
+        };
+    }
+    let preparation = preparation.filter(|prepared| prepared.matches(&request, graph));
     let PreviewTimelineFrameRequest {
         root_sequence: sequence,
         sequences,
@@ -457,19 +478,38 @@ where
     } = request;
     let PreviewTimelineSourceAdapters { media_frame, title_frame } = adapters;
     let scratch = graph.scratch;
-    let closure = match prepare_preview_frame_closure(
-        graph,
-        sequence,
-        sequences,
-        frame.max(0),
-        target_resolution,
-        color_context.clone(),
-        runtime_scale,
-        raster_requirement,
-    ) {
-        Ok(closure) => closure,
-        Err(reason) => return PreviewTimelineResolution::Unavailable { reason },
+    let mut preparation = match preparation {
+        Some(prepared) => prepared,
+        None => {
+            let closure = match prepare_preview_frame_closure(
+                graph,
+                sequence,
+                sequences,
+                frame.max(0),
+                target_resolution,
+                color_context.clone(),
+                runtime_scale,
+                raster_requirement,
+            ) {
+                Ok(closure) => closure,
+                Err(reason) => return PreviewTimelineResolution::Unavailable { reason },
+            };
+            let demands = match collect_prepared_visual_source_demands(&closure) {
+                Ok(demands) => demands,
+                Err(reason) => return PreviewTimelineResolution::Unavailable { reason },
+            };
+            Box::new(PreviewTimelinePreparation {
+                closure,
+                demands,
+                sources: PreviewSourcePreparation::default(),
+                author_snapshot: graph.author_snapshot,
+                graph_budget: graph.heterogeneous_graph_budget,
+                runtime_scale,
+                raster_requirement,
+            })
+        }
     };
+    let closure = &preparation.closure;
     let sampling = match closure
         .node(closure.root())
         .and_then(|node| node.materialization_contract().image_sampling(target_resolution).ok())
@@ -496,7 +536,7 @@ where
             };
         }
     };
-    let materialization_bytes = match closure.conservative_cpu_materialization_active_bytes() {
+    let mut materialization_bytes = match closure.conservative_cpu_materialization_active_bytes() {
         Ok(bytes) => bytes,
         Err(error) => {
             return PreviewTimelineResolution::Unavailable {
@@ -532,19 +572,69 @@ where
     }
     // Source admission and readiness precede all DSP, including child nodes.
     // Otherwise a later Pending can replay an already-executed child on retry.
-    let demands = match collect_prepared_visual_source_demands(&closure) {
-        Ok(demands) => demands,
-        Err(reason) => return PreviewTimelineResolution::Unavailable { reason },
-    };
-    let sources = match admit_prepared_preview_sources(demands, media_frame, title_frame) {
-        Ok(sources) => sources,
-        Err(PreviewTimelineAbort::Pending { dependency }) => {
-            return PreviewTimelineResolution::Pending { dependency };
-        }
+    let admission = admit_prepared_preview_sources(
+        &mut preparation.sources,
+        &preparation.demands,
+        media_frame,
+        title_frame,
+    );
+    if graph.cancellation.is_canceled() || preparation.request().cancellation().is_canceled() {
+        return PreviewTimelineResolution::Unavailable {
+            reason: PreviewUnavailability::stopped(
+                PreviewOutputStage::TimelineEvaluation,
+                "Preview preparation was canceled",
+            ),
+        };
+    }
+    let pending = match admission {
+        Ok(()) => None,
+        Err(PreviewTimelineAbort::Pending { dependency }) => Some(dependency),
         Err(PreviewTimelineAbort::Unavailable(reason)) => {
-            return PreviewTimelineResolution::Unavailable { reason };
+            return PreviewTimelineResolution::Unavailable { reason }
         }
     };
+    let Some(title_bytes) = preparation.retained_title_bytes() else {
+        return PreviewTimelineResolution::Unavailable {
+            reason: PreviewUnavailability::blocked(
+                PreviewOutputStage::GeneratedSource,
+                "retained title input size overflowed",
+            ),
+        };
+    };
+    let Some(active_bytes) = nested_materialization_bytes.checked_add(title_bytes) else {
+        return PreviewTimelineResolution::Unavailable {
+            reason: PreviewUnavailability::blocked(
+                PreviewOutputStage::GeneratedSource,
+                "Preview active input size overflowed",
+            ),
+        };
+    };
+    if let Err(error) = scratch
+        .borrow()
+        .admit_cpu_active_working_set(active_bytes, TimelineCpuCompositePrecision::Float32)
+    {
+        return PreviewTimelineResolution::Unavailable {
+            reason: PreviewUnavailability::blocked(
+                PreviewOutputStage::GeneratedSource,
+                error.to_string(),
+            ),
+        };
+    }
+    materialization_bytes = match materialization_bytes.checked_add(title_bytes) {
+        Some(bytes) => bytes,
+        None => {
+            return PreviewTimelineResolution::Unavailable {
+                reason: PreviewUnavailability::blocked(
+                    PreviewOutputStage::GeneratedSource,
+                    "Preview materialization size overflowed",
+                ),
+            }
+        }
+    };
+    if let Some(dependency) = pending {
+        return PreviewTimelineResolution::Pending { dependency, preparation };
+    }
+    let sources = &preparation.sources;
     let mut admitted_media = |demand: PreviewTimelineMediaRequest| match sources.media.get(&demand)
     {
         Some(PreviewTimelineMediaFrame::Ready(frame)) => {
@@ -571,7 +661,7 @@ where
         };
     let mut adapter = PreviewTimelineExecutionAdapter {
         closure: &closure,
-        cancellation: graph.cancellation,
+        cancellation: preparation.request().cancellation(),
         media_frame: &mut admitted_media,
         title_frame: &mut admitted_title,
         scratch,
@@ -579,10 +669,13 @@ where
     };
     let root = match execute_prepared_visual_closure(&closure, &mut adapter) {
         Ok(root) => root,
-        Err(PreparedVisualExecutionError::Adapter(PreviewTimelineAbort::Pending {
-            dependency,
-        })) => {
-            return PreviewTimelineResolution::Pending { dependency };
+        Err(PreparedVisualExecutionError::Adapter(PreviewTimelineAbort::Pending { .. })) => {
+            return PreviewTimelineResolution::Unavailable {
+                reason: PreviewUnavailability::failed(
+                    PreviewOutputStage::TimelineEvaluation,
+                    "prepared graph requested an unresolved input after source readiness",
+                ),
+            };
         }
         Err(PreparedVisualExecutionError::Adapter(PreviewTimelineAbort::Unavailable(reason))) => {
             return PreviewTimelineResolution::Unavailable { reason };
@@ -756,12 +849,7 @@ impl<'a> PreviewTimelineGraph<'a> {
                     ),
                 )
             })?;
-        let (execution_plan, temporal_batches) = prepared.into_parts();
-        Ok(PreparedVisualFrameEvaluation::new(
-            execution_plan,
-            temporal_batches,
-            (),
-        ))
+        Ok(PreparedVisualFrameEvaluation::new(prepared, ()))
     }
 }
 
@@ -1514,31 +1602,137 @@ impl PreviewMediaSourceRole {
     }
 }
 
-/// One attempt's source results, not a cross-frame cache. Construction succeeds
-/// only when every result is Ready; these exact leases survive closure execution.
-struct ReadyPreviewSources {
+/// One original pre-DSP attempt. The evaluation working set owns this value
+/// across producer waits; no graph execution has started while it is resumable.
+pub(crate) struct PreviewTimelinePreparation {
+    closure: PreparedVisualFrameClosure<PreparedTimelinePreviewEffectRoutes>,
+    demands: Vec<PreparedPreviewSourceDemand>,
+    sources: PreviewSourcePreparation,
+    author_snapshot: Option<PreparedVisualAuthorSnapshotIdentity>,
+    graph_budget: EffectGraphExecutionBudget,
+    runtime_scale: PreviewResolutionScale,
+    raster_requirement: PreviewRasterRequirement,
+}
+
+impl PreviewTimelinePreparation {
+    pub(crate) fn retained_title_bytes(&self) -> Option<u64> {
+        self.sources.title_bytes()
+    }
+    pub(crate) fn request(&self) -> &TimelineFrameExecutionRequest {
+        self.closure
+            .node(self.closure.root())
+            .expect("prepared closure root")
+            .evaluation()
+            .execution_request()
+    }
+
+    pub(crate) fn compatible_scope(
+        &self,
+        generation: u64,
+        author_snapshot: Option<PreparedVisualAuthorSnapshotIdentity>,
+        budget: EffectGraphExecutionBudget,
+    ) -> bool {
+        self.request().generation() == generation
+            && !self.request().cancellation().is_canceled()
+            && self.author_snapshot == author_snapshot
+            && self.graph_budget == budget
+    }
+
+    fn matches(
+        &self,
+        request: &PreviewTimelineFrameRequest<'_>,
+        graph: PreviewTimelineGraph<'_>,
+    ) -> bool {
+        let root = self.closure.node(self.closure.root()).expect("prepared closure root");
+        if !self.compatible_scope(
+            graph.generation,
+            graph.author_snapshot,
+            graph.heterogeneous_graph_budget,
+        ) || root.sequence_id() != request.root_sequence.id
+            || root.sequence_revision() != request.root_sequence.revision
+            || root.position()
+                != FramePosition::new(request.frame.max(0), request.root_sequence.time_base())
+            || root.execution_resolution() != request.target_resolution
+            || root.color_context() != &request.color_context
+            || self.runtime_scale != request.runtime_scale
+            || self.raster_requirement != request.raster_requirement
+        {
+            return false;
+        }
+        // Production has a trusted immutable author snapshot. Validation callers
+        // without it must still detect in-place edits to any frozen child.
+        graph.author_snapshot.is_some()
+            || self.closure.nodes().iter().all(|node| {
+                let sequence = if node.sequence_id() == request.root_sequence.id {
+                    Some(request.root_sequence)
+                } else {
+                    request.sequences.iter().find(|sequence| sequence.id == node.sequence_id())
+                };
+                sequence.is_some_and(|sequence| {
+                    graph.resolve_program(sequence).is_ok_and(|binding| {
+                        binding.program().visual_author_fingerprint()
+                            == node.program().visual_author_fingerprint()
+                            && binding.program().effect_registry_revision()
+                                == node.program().effect_registry_revision()
+                    })
+                })
+            })
+    }
+}
+
+/// Exact input results within this attempt; the original producers remain the
+/// cache authority. Full Ready values survive retries and retain their leases.
+#[derive(Default)]
+struct PreviewSourcePreparation {
     media: HashMap<PreviewTimelineMediaRequest, PreviewTimelineMediaFrame>,
     titles: HashMap<BasicTitleRasterRequestIdentity, PreviewTimelineTitleFrame>,
 }
 
+impl PreviewSourcePreparation {
+    fn title_bytes(&self) -> Option<u64> {
+        self.titles.values().try_fold(0_u64, |total, value| match value {
+            PreviewTimelineTitleFrame::Ready(frame) => {
+                total.checked_add(u64::try_from(frame.retained_bytes()).ok()?)
+            }
+            _ => Some(total),
+        })
+    }
+}
+
 fn admit_prepared_preview_sources(
-    demands: Vec<PreparedPreviewSourceDemand>,
+    sources: &mut PreviewSourcePreparation,
+    demands: &[PreparedPreviewSourceDemand],
     media_frame: &mut impl FnMut(PreviewTimelineMediaRequest) -> PreviewTimelineMediaFrame,
     title_frame: &mut impl FnMut(PreviewTimelineTitleRequest) -> PreviewTimelineTitleFrame,
-) -> Result<ReadyPreviewSources, PreviewTimelineAbort> {
-    let mut media = HashMap::new();
-    let mut titles = HashMap::new();
+) -> Result<(), PreviewTimelineAbort> {
+    let PreviewSourcePreparation { media, titles } = sources;
     let mut pending = None;
     let mut retry_admission = None;
     let mut unavailable = None;
     let mut temporal_pending = 0usize;
+    let mut queried_media = HashSet::new();
+    let mut queried_titles = HashSet::new();
     // Admit the whole source batch even if an earlier result waits or fails.
     // This lets the original media/raster producers make progress together.
     for demand in demands {
         match demand {
             PreparedPreviewSourceDemand::Media { request, role } => {
+                let role = *role;
                 let asset_id = request.asset_id;
-                match media.entry(request.clone()).or_insert_with(|| media_frame(request)) {
+                let first_query = queried_media.insert(request);
+                let response = match media.entry(request.clone()) {
+                    Entry::Occupied(mut entry) => {
+                        if first_query
+                            && !matches!(entry.get(), PreviewTimelineMediaFrame::Ready(frame)
+                            if frame.presentation_quality() == FramePresentationQuality::Ready)
+                        {
+                            entry.insert(media_frame(request.clone()));
+                        }
+                        entry.into_mut()
+                    }
+                    Entry::Vacant(entry) => entry.insert(media_frame(request.clone())),
+                };
+                match response {
                     PreviewTimelineMediaFrame::Ready(_) => {}
                     PreviewTimelineMediaFrame::Pending { wait } => {
                         let dependency = match role {
@@ -1570,7 +1764,19 @@ fn admit_prepared_preview_sources(
             }
             PreparedPreviewSourceDemand::BasicTitle(request) => {
                 let identity = request.identity();
-                match titles.entry(identity).or_insert_with(|| title_frame(request)) {
+                let first_query = queried_titles.insert(identity);
+                let response = match titles.entry(identity) {
+                    Entry::Occupied(mut entry) => {
+                        if first_query
+                            && !matches!(entry.get(), PreviewTimelineTitleFrame::Ready(_))
+                        {
+                            entry.insert(title_frame(request.clone()));
+                        }
+                        entry.into_mut()
+                    }
+                    Entry::Vacant(entry) => entry.insert(title_frame(request.clone())),
+                };
+                match response {
                     PreviewTimelineTitleFrame::Ready(_) => {}
                     PreviewTimelineTitleFrame::Pending => {
                         pending
@@ -1597,7 +1803,7 @@ fn admit_prepared_preview_sources(
         }
         return Err(PreviewTimelineAbort::Pending { dependency });
     }
-    Ok(ReadyPreviewSources { media, titles })
+    Ok(())
 }
 
 fn collect_prepared_visual_source_demands(

@@ -75,30 +75,30 @@ pub struct PreparedVisualNestedInstanceStep {
 /// after canonical recursion, without interpreting nesting a second time.
 #[derive(Debug)]
 pub struct PreparedVisualFrameEvaluation<T> {
-    plan: TimelineRenderPlan,
-    temporal_batches: Vec<TimelineTemporalDemandBatch>,
+    frame: crate::PreparedTimelineFrameExecution,
     payload: T,
 }
 
 impl<T> PreparedVisualFrameEvaluation<T> {
     /// Bind one evaluated per-Sequence plan to its temporal demands and
     /// consumer-owned execution evidence.
-    pub fn new(
-        plan: TimelineRenderPlan,
-        temporal_batches: Vec<TimelineTemporalDemandBatch>,
-        payload: T,
-    ) -> Self {
-        Self { plan, temporal_batches, payload }
+    pub fn new(frame: crate::PreparedTimelineFrameExecution, payload: T) -> Self {
+        Self { frame, payload }
     }
 
     /// Evaluated per-Sequence Render Plan.
     pub const fn plan(&self) -> &TimelineRenderPlan {
-        &self.plan
+        self.frame.execution_plan()
     }
 
     /// Temporal source batches removed from the ordinary compositing plan.
     pub fn temporal_batches(&self) -> &[TimelineTemporalDemandBatch] {
-        &self.temporal_batches
+        self.frame.batches()
+    }
+
+    /// Exact originating request, including its cancellation authority.
+    pub const fn execution_request(&self) -> &crate::TimelineFrameExecutionRequest {
+        self.frame.request()
     }
 
     /// Consumer-owned execution evidence.
@@ -107,11 +107,7 @@ impl<T> PreparedVisualFrameEvaluation<T> {
     }
 
     fn with_payload<U>(self, payload: U) -> PreparedVisualFrameEvaluation<U> {
-        PreparedVisualFrameEvaluation {
-            plan: self.plan,
-            temporal_batches: self.temporal_batches,
-            payload,
-        }
+        PreparedVisualFrameEvaluation { frame: self.frame, payload }
     }
 }
 
@@ -668,8 +664,8 @@ where
                 frame: position.frame,
                 reason,
             })?;
-            validate_evaluation(sequence, position, &evaluation.plan)?;
-            let demands = collect_nested_demands(&evaluation.plan, &evaluation.temporal_batches);
+            validate_evaluation(sequence, position, evaluation.plan())?;
+            let demands = collect_nested_demands(evaluation.plan(), evaluation.temporal_batches());
             let node_index = u32::try_from(self.nodes.len())
                 .map_err(|_| PreparedVisualFrameClosureError::NodeCapacityExceeded)?;
             let id = PreparedVisualFrameNodeId(node_index);
@@ -1392,13 +1388,25 @@ mod tests {
                     .map(Arc::new)
                     .map_err(|error| error.to_string())
             },
-            |program, position, _, _, _| {
+            |program, position, resolution, _, _| {
                 let plan = evaluate_prepared_visual_program(
                     program,
                     crate::TimelineEvaluationRequest::export(position),
                 )
                 .map_err(|error| error.to_string())?;
-                Ok(PreparedVisualFrameEvaluation::new(plan, Vec::new(), ()))
+                let extent =
+                    mondrian_effects::EffectFrameExtent::new(resolution.width, resolution.height);
+                let prepared = crate::timeline_temporal::prepare_timeline_temporal_execution(
+                    program,
+                    &plan,
+                    7,
+                    mondrian_effects::EffectExecutionContinuity::Discontinuous,
+                    extent,
+                    extent.full_frame_roi(),
+                    mondrian_core::ExecutionCancellationToken::new(),
+                )
+                .map_err(|error| error.to_string())?;
+                Ok(PreparedVisualFrameEvaluation::new(prepared, ()))
             },
         )
     }
@@ -1522,12 +1530,7 @@ mod tests {
                     ExecutionCancellationToken::new(),
                 )
                 .map_err(|error| error.to_string())?;
-                let (plan, temporal_batches) = prepared.into_parts();
-                Ok(PreparedVisualFrameEvaluation::new(
-                    plan,
-                    temporal_batches,
-                    (),
-                ))
+                Ok(PreparedVisualFrameEvaluation::new(prepared, ()))
             },
         )
     }
@@ -1624,14 +1627,26 @@ mod tests {
                     .map(Arc::new)
                     .map_err(|error| error.to_string())
             },
-            |program, position, _, _, _| {
+            |program, position, resolution, _, _| {
                 let mut plan = evaluate_prepared_visual_program(
                     program,
                     crate::TimelineEvaluationRequest::export(position),
                 )
                 .map_err(|error| error.to_string())?;
                 plan.position.time_base = equivalent_but_not_identical;
-                Ok(PreparedVisualFrameEvaluation::new(plan, Vec::new(), ()))
+                let extent =
+                    mondrian_effects::EffectFrameExtent::new(resolution.width, resolution.height);
+                let prepared = crate::timeline_temporal::prepare_timeline_temporal_execution(
+                    program,
+                    &plan,
+                    7,
+                    mondrian_effects::EffectExecutionContinuity::Discontinuous,
+                    extent,
+                    extent.full_frame_roi(),
+                    mondrian_core::ExecutionCancellationToken::new(),
+                )
+                .map_err(|error| error.to_string())?;
+                Ok(PreparedVisualFrameEvaluation::new(prepared, ()))
             },
         )
         .expect_err("closure must reject an evaluator plan on another grid");
@@ -2235,5 +2250,36 @@ mod tests {
         scratch
             .admit_cpu_active_working_set(required, TimelineCpuCompositePrecision::Float32)
             .expect("exact hard grant");
+    }
+    #[test]
+    fn original_frame_request_survives_payload_mapping() {
+        let sequence = Sequence::new("payload mapping owner");
+        let closure = prepare_direct_closure(
+            &sequence,
+            &[],
+            3,
+            Resolution { width: 12, height: 8 },
+            PreparedVisualChildCanvasPolicy::Authored,
+        )
+        .unwrap();
+        let request =
+            closure.node(closure.root()).unwrap().evaluation().execution_request().clone();
+        let mapped = closure
+            .try_map_payload(|node, _| {
+                Ok::<_, ()>(node.evaluation().execution_request().generation())
+            })
+            .unwrap();
+        request.cancellation().cancel();
+        let evaluated = mapped.node(mapped.root()).unwrap().evaluation();
+        assert!(evaluated.execution_request().cancellation().is_canceled());
+        assert_eq!(
+            evaluated.execution_request().evaluation(),
+            request.evaluation()
+        );
+        assert_eq!(
+            evaluated.execution_request().frame_extent(),
+            request.frame_extent()
+        );
+        assert_eq!(*evaluated.payload(), request.generation());
     }
 }

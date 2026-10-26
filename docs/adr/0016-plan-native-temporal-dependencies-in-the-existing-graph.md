@@ -230,14 +230,13 @@ therefore checks exact configuration retirement, rather than assuming a variant
 cache. Optional native retention must use the recipe's declared bytes, not a guessed
 constant; a legal active render may intentionally run without optional retention.
 
-Current Windows source-readiness qualification: App 3127 passed/213 ignored,
-with validation, opt0/debug0, using the App-only Cargo selection. The complete
-gate settled with empty stderr under its original budget. The original failed
-decoder/Viewer diagnostic gate and four source-readiness groups also passed.
-The prior Renderer 684/39 and Export 300/18 results remain the historical-grid
-baseline; Effects 384/0 remains the unchanged mixed-Control baseline. Those
-libraries were not rerun for this App-only change. Builds and full gates ran
-outside the Windows sandbox; this is no new release or workspace qualification.
+Current Windows preparation-ownership qualification: App 3135 passed/213
+ignored, Renderer 686/39 and Export 300/18. All complete gates settled with
+empty stderr under their original budgets. The unified Cargo selection uses
+validation, opt0/debug0 for App and opt1/debug0 for Renderer/Export.
+Seventeen focused App tests and two original-request Renderer tests also passed.
+Effects 384/0 remains the unchanged mixed-Control baseline. Builds and gates
+ran outside the Windows sandbox; this is no new release or workspace qualification.
 
 The native baseline at edf25518 uses a default worker at test-profile opt0/debug0,
 without libtest or validation features. Its 12 existing diagnostics/test-helper
@@ -310,11 +309,35 @@ The probe is an admitted nondeterministic current-frame callback; existing
 StatefulSequential admission guards remain. This does not qualify ordered
 continuity, real plugins or dynamic native image requests.
 
-Cross-retry input retention and progress under producer-cache pressure still
-require owner integration. The existing EvaluationWorkingSet wait entries own
-dependencies, not partially ready inputs; extend the original owner rather than
-adding a second cache. Retain program, placement and Frame Execution Request
-through the actual job boundary. This per-pass barrier does not settle that work.
+The existing EvaluationWorkingSet now owns the original pre-DSP preparation
+across retries: its canonical closure retains program, placement and each
+originating FrameExecutionRequest; its source results retain acquired frame
+leases. Ready evaluations and partial preparations share the existing four
+physical slots, with speculative preparations evicted first. This introduces
+neither another producer nor another cross-frame cache.
+
+Producer completion releases only the outstanding exact wait, keeping acquired
+inputs and complete dependency identity. Admission retries and title waits remain
+retryable; shared demands are queried once per pass. Degraded media is queried
+again so a full-quality upgrade is not frozen out. Generation/session changes,
+priority rebinding and existing cleanup retire preparation owners. Replacing an
+active CPU/graph grant releases partial inputs immediately; optional cache trims
+alone do not replace that authority. Retained title pixels count against the
+existing active CPU grant; media leases remain charged by Frame Store.
+
+The original cancellation token and absolute deadline survive payload mapping
+and Export backend lowering. A resumed attempt cannot renew either; backend
+lowering cannot change evaluation position, intent or settings. A preparation
+can resume only before DSP starts. Unexpected Pending during graph execution
+fails closed instead of replaying partially executed processors.
+
+Regression controls reproduce starvation when the continuation is discarded,
+then verify retained media/title pixels, exact wakeup, combined capacity,
+retirement and cancellation/deadline refusal. The actual Runtime title worker
+also completes three 512x128 title sources at frame4 with a one-byte optional
+result-cache budget and reuses the completed evaluation. This qualifies that
+finite source-wait path, not native plugin CPU-job service binding, ordered
+stateful continuity, allocation/RT performance or third-party Temporal support.
 
 Next bind the borrowed Clip service at the actual Preview/Export consumer,
 resolving its existing demand batches through the original scheduler/decoder
