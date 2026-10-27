@@ -5,12 +5,12 @@ use clack_extensions::audio_ports::*;
 use clack_extensions::latency::{PluginLatency, PluginLatencyImpl};
 use clack_extensions::log::{HostLog, LogSeverity};
 use clack_extensions::render::{PluginRender, PluginRenderImpl, RenderMode};
-use clack_extensions::thread_check::HostThreadCheck;
-use clack_extensions::timer::{HostTimer, PluginTimer, PluginTimerImpl, TimerId};
 use clack_extensions::state::{PluginState, PluginStateImpl};
 use clack_extensions::tail::{PluginTail, PluginTailImpl, TailLength};
-use clack_plugin::prelude::*;
+use clack_extensions::thread_check::HostThreadCheck;
+use clack_extensions::timer::{HostTimer, PluginTimer, PluginTimerImpl, TimerId};
 use clack_plugin::events::event_types::TransportFlags;
+use clack_plugin::prelude::*;
 use clack_plugin::stream::{InputStream, OutputStream};
 use std::cell::Cell;
 use std::io::{Read, Write};
@@ -745,7 +745,7 @@ impl PluginAudioPortsImpl for Main<'_> {
         }
         let reversed = self.0.mode.load(Ordering::Relaxed) == 1;
         let mode = self.0.mode.load(Ordering::Relaxed);
-        let mono = (matches!(mode, 17 | 19) && is_input && index == 1)
+        let mono = (matches!(mode, 17 | 19 | 22) && is_input && index == 1)
             || (mode == 18 && (index == 0 || (is_input && index == 2)));
         let id = match index {
             0 => 0,
@@ -786,7 +786,7 @@ const ECHO_FRAMES: usize = 256;
 // Mode15 appends a fixed 16-byte Windows event nonce; no live timer state is saved.
 fn configuration_gain(bytes: [u8; 5]) -> Result<f32, PluginError> {
     let gain = f32::from_le_bytes([bytes[1], bytes[2], bytes[3], bytes[4]]);
-    if bytes[0] > 19 || !gain.is_finite() || !(0.0..=1.0).contains(&gain) {
+    if bytes[0] > 22 || !gain.is_finite() || !(0.0..=1.0).contains(&gain) {
         return Err(PluginError::Message("invalid fixture state"));
     }
     Ok(gain)
@@ -917,6 +917,22 @@ impl<'a> PluginAudioProcessor<'a, Shared<'a>, Main<'a>> for Processor<'a> {
             // stereo only after processing has stopped and activation ended.
             self.shared.mode.store(0, Ordering::Relaxed);
         }
+        if matches!(self.mode, 20..=22) && self.shared.restart_seen.load(Ordering::Relaxed) {
+            // Each saved mode fully describes the next inactive port shape.
+            // 20 is a one-shot Stereo->Mono; 21/22 keep alternating after
+            // separate successful activations of the same native instance.
+            self.shared.mode.store(
+                match self.mode {
+                    20 => 17,
+                    21 => 22,
+                    _ => 21,
+                },
+                Ordering::Relaxed,
+            );
+            if self.mode != 20 {
+                self.shared.restart_seen.store(false, Ordering::Relaxed);
+            }
+        }
     }
 
     fn reset(&mut self) {
@@ -1035,8 +1051,8 @@ impl<'a> PluginAudioProcessor<'a, Shared<'a>, Main<'a>> for Processor<'a> {
             };
             let channels =
                 port.channels()?.into_f32().ok_or(PluginError::Message("f32 input required"))?;
-            if matches!(self.mode, 17 | 18 | 19) {
-                let expected = if (matches!(self.mode, 17 | 19) && port_index == 1)
+            if matches!(self.mode, 17..=22) {
+                let expected = if (matches!(self.mode, 17 | 19 | 22) && port_index == 1)
                     || (self.mode == 18 && matches!(port_index, 0 | 2))
                 {
                     1
@@ -1103,15 +1119,19 @@ impl<'a> PluginAudioProcessor<'a, Shared<'a>, Main<'a>> for Processor<'a> {
             // deactivates and activates at a later legal boundary.
             self.shared.host.request_restart();
         }
-        if self.mode == 13 && timeline_start.is_some_and(|start| {
-            repeat_restart_boundary(&self.shared.repeat_restart_count, start.saturating_add(frames as i64))
-        }) {
+        if self.mode == 13
+            && timeline_start.is_some_and(|start| {
+                repeat_restart_boundary(
+                    &self.shared.repeat_restart_count,
+                    start.saturating_add(frames as i64),
+                )
+            })
+        {
             self.shared.host.request_restart();
         }
-        if self.mode == 19 {
+        if matches!(self.mode, 19..=22) {
             self.processed_frames = self.processed_frames.saturating_add(frames);
-            if self.processed_frames > 9
-                && !self.shared.restart_seen.swap(true, Ordering::Relaxed)
+            if self.processed_frames > 9 && !self.shared.restart_seen.swap(true, Ordering::Relaxed)
             {
                 self.shared.host.request_restart();
             }
@@ -1235,6 +1255,12 @@ mod repeat_restart_tests {
         header[0] = 19;
         assert_eq!(configuration_gain(header).unwrap(), 0.5);
         header[0] = 20;
+        assert_eq!(configuration_gain(header).unwrap(), 0.5);
+        for mode in [21, 22] {
+            header[0] = mode;
+            assert_eq!(configuration_gain(header).unwrap(), 0.5);
+        }
+        header[0] = 23;
         assert!(configuration_gain(header).is_err());
     }
 

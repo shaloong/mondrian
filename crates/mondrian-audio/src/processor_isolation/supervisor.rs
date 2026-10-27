@@ -1204,6 +1204,7 @@ impl SupervisedAudioWorker {
     pub(super) fn commit_native_configuration_seed(
         &mut self,
         staged: super::NativeConfigurationSeedReceipt,
+        current_inputs: &super::AudioProcessorAuxiliaryInputContract,
     ) -> Result<
         (
             super::NativeConfigurationSeedOutcome,
@@ -1211,6 +1212,21 @@ impl SupervisedAudioWorker {
         ),
         AudioProcessorHostError,
     > {
+        if self.staged_audio_input_mapping.as_ref().is_some_and(|mapping| {
+            !mapping
+                .request
+                .buffers
+                .request
+                .proposal
+                .preserves_auxiliary_keys(current_inputs)
+        }) {
+            return Ok((
+                super::NativeConfigurationSeedOutcome::Refused(
+                    super::NativeConfigurationSeedRefusal::StaleTicket,
+                ),
+                None,
+            ));
+        }
         let outcome = self.seed_control(
             "configuration seed commit",
             super::protocol::CommandKind::CommitConfigurationSeed,

@@ -115,23 +115,29 @@ The table describes implementation boundaries. Qualification below states the te
 ## Current qualification summary (2026-10-28)
 
 CLAP input reconfiguration has finite **Verified** installed-width qualification:
-Windows x64, owned mode19, Offline/48k/Stereo/block4/latency3, stable native
-IDs/count/order, Main/output/parameter/Note contracts unchanged. A Mono detector
-becomes Stereo on legal deactivation, on the same child and original Root grant.
+Windows x64, owned modes19..22, Offline/48k/Stereo/block4/latency3, stable native
+IDs/count/order, Main/output/parameter/Note contracts unchanged. Mono/Stereo detector
+width changes only on legal deactivation, on the same child and original Root grant.
 The product's existing pending-notice entry stages native planes and both shared
 mappings, activates and captures actual state/latency/tail, then rebuilds the
 Factory and canonical routes/PDC over the unchanged Program. The joined owner
 commits matching native planes, typed metadata and mappings; Source CAS,
 retirement and explicit Fresh Enter produce complete independent new-geometry
 PCM (gain1 to gain2.5), including partitions. The original object/author remain
-unchanged and the child exits0. All overlap fees remain held until canonical
-retirement. Pre-cancel/wrong tickets/duplicates and unarmed old-layout seeds are
-refused. Pending preflight preserves caller PCM; an admitted Unentered Runtime
+unchanged and the child exits0. Single reverse and three consecutive alternating
+migrations also pass complete PCM/state/owner checks. Equal final shape/state
+has equal normalized fees across repeated rounds, without accumulated capture,
+codec, map or seed fees. Stable-key permanent metadata retains its original
+storage, with widths updated in place. A real unrelated Source authorization
+reaches the late WrongRegistration refusal after native commit: original Source,
+cursors and HOLD remain, retry is refused and seed/overlap fees stay retained.
+All overlap fees remain held until canonical retirement. Pre-cancel/wrong
+tickets/duplicates and unarmed old-layout seeds are refused. Pending preflight preserves caller PCM; an admitted Unentered Runtime
 refusal initializes it to zero, matching the existing CLAP/VST3 contract.
-IPC25 normal Product, twelve exact native gates and real Surge XT1.3.4 CLAP
+IPC25 normal Product, fifteen exact native gates and real Surge XT1.3.4 CLAP
 state/Notes/Main Runtime regression pass with empty stderr/exit0/settled owners.
 Port additions/removals/reordering, full audio-port configuration/rescan,
-repeated/reverse native width changes, actual App/Media output-quiescence and
+physical reply-loss and long-run stress, actual App/Media output-quiescence and
 export workflows, wider third-party dynamic topology, RT/performance and other
 platforms remain unqualified or unsupported. No author edit, second executor or
 wire schema is introduced.
@@ -140,7 +146,7 @@ Shared auxiliary-input layouts, 2026-10-27: finite Windows owned controls verify
 Mono/Stereo Main with simultaneous Mono/Stereo and unconnected silent inputs,
 two-route summing, PDC, target-time gain automation, partitioning and seek in
 both modes/backends, in-process and through actual generic child processing.
-All 899 ordinary Audio controls pass (202 conditional ignored, zero filtered,
+All 899 ordinary Audio controls pass (205 conditional ignored, zero filtered,
 empty stderr). Current IPC25 retains independent region/overflow, exact shared-byte fee and
 old/future-version rejection controls. The two original CLAP/VST3 native
 sidechain gates also pass with the matching rebuilt normal Product and original

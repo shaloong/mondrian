@@ -33,6 +33,22 @@ fn installed_clap_runtime_restart_captures_changed_inputs_without_old_geometry_s
     restart_detector_width(Qualification::Capture);
 }
 
+#[test]
+#[ignore = "matching production helper and CLAP mode20; Stereo-to-Mono installation"]
+fn installed_clap_runtime_restart_rebinds_stereo_detector_to_mono_on_same_owner() {
+    restart_detector_width(Qualification::Reverse);
+}
+#[test]
+#[ignore = "matching production helper and CLAP modes21/22; repeated bidirectional installation"]
+fn installed_clap_runtime_restart_repeats_width_changes_without_fee_accumulation() {
+    restart_detector_width(Qualification::Repeat);
+}
+#[test]
+#[ignore = "matching production helper and CLAP mode19; late Source refusal after native commit"]
+fn installed_clap_runtime_changed_inputs_refuse_foreign_source_without_retry_or_pcm() {
+    restart_detector_width(Qualification::RefuseCas);
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Qualification {
     Observe,
@@ -40,6 +56,9 @@ enum Qualification {
     StageMapping,
     Capture,
     Install,
+    Reverse,
+    Repeat,
+    RefuseCas,
 }
 
 fn restart_detector_width(qualification: Qualification) {
@@ -59,11 +78,23 @@ fn restart_detector_width(qualification: Qualification) {
         public_output_lookahead_budget_frames: 1024,
         compensation_delay_scratch_budget_bytes: 1024 * 1024,
     };
-    let mut state = vec![19];
+    let initial_mode = match qualification {
+        Qualification::Reverse => 20,
+        Qualification::Repeat => 21,
+        _ => 19,
+    };
+    let installs = matches!(
+        qualification,
+        Qualification::Install
+            | Qualification::Reverse
+            | Qualification::Repeat
+            | Qualification::RefuseCas
+    );
+    let mut state = vec![initial_mode];
     state.extend_from_slice(&0.5_f32.to_le_bytes());
     let instance = catalog
         .create_instance("org.mondrian.fixture.sidechain", render, Some(state))
-        .expect("initial stereo Main / mono detector activation");
+        .expect("initial declared input shape");
     assert!(instance.parameters.is_empty());
     let mut sequence = sequence_with_audio_clip();
     sequence.settings.audio_channel_layout = AudioChannelLayout::Stereo;
@@ -96,7 +127,7 @@ fn restart_detector_width(qualification: Qualification) {
     let source = AudioOwnerInstallationSource::new();
     let (registration, verifier) = source.register().unwrap();
     runtime.bind_native_owner_installation(verifier.clone()).unwrap();
-    let claim = source
+    let mut claim = source
         .reserve_install(&registration, None)
         .and_then(|reservation| source.begin_commit(reservation))
         .unwrap()
@@ -141,7 +172,7 @@ fn restart_detector_width(qualification: Qualification) {
                 )
                 .expect("complete old mono-detector window");
             // [r,-r] folds to zero in the mono detector; Main weight2 * gain.5.
-            assert_pcm(&pcm, start, 1.0);
+            assert_pcm(&pcm, start, if initial_mode == 19 { 1.0 } else { 2.5 });
         }
         let mut pcm = [99.0; 8];
         let ticket = match runtime.render_into(
@@ -158,12 +189,12 @@ fn restart_detector_width(qualification: Qualification) {
         assert_eq!(pcm, [99.0; 8]);
         let held = cursors(&runtime);
         let before_service = runtime.resource_footprint();
-        let outcome = if qualification == Qualification::Install {
+        let outcome = if installs {
             runtime.service_pending_native_reprepare(ticket.product_notice(), &cancellation)
         } else {
             runtime.service_native_reprepare(ticket, &cancellation)
         };
-        if qualification != Qualification::Install {
+        if !installs {
             assert!(matches!(
                 outcome,
                 Err(NativeAudioReprepareError::AudioInputChangeRequired)
@@ -379,79 +410,216 @@ fn restart_detector_width(qualification: Qualification) {
             );
             return;
         }
-        let operation =
-            outcome.expect("capture changed native detector contract after deactivation");
-        let mut expected_state = vec![0];
-        expected_state.extend_from_slice(&0.5_f32.to_le_bytes());
-        assert_eq!(
-            runtime.native_reprepare_configuration(&operation).unwrap(),
-            expected_state
-        );
-        runtime
-            .prepare_native_reprepare_plan(&operation, verifier.clone(), &cancellation)
-            .expect("prepare changed routing and buffer geometry under original Root grant");
-        assert_eq!(cursors(&runtime), held);
-        assert_eq!(runtime.observe_native_owner_object(lease).unwrap(), object);
-        let mut authorization = source
-            .authorize_runtime_installation(
-                source.reserve_install(&registration, Some(&claim)).unwrap(),
-            )
-            .unwrap();
-        let receipt = runtime
-            .install_native_reprepare_plan(&operation, &mut authorization, &cancellation)
-            .expect("same-owner native mapping and canonical plan installation");
-        assert_ne!(receipt.claim().generation(), claim.generation());
-        assert_eq!(runtime.public_output_lookahead_frames(), 3);
-        assert_eq!(
-            runtime.render_into(
-                AudioRenderRequest {
-                    transport_activity: None,
-                    start_sample: 8,
-                    frames: 4,
-                },
-                &mut pcm
-            ),
-            Err(AudioExecutionError::StateEntryRequired)
-        );
-        assert_eq!(
-            pcm, [0.0; 8],
-            "admitted Runtime refusal initializes output; pending preflight above preserves it"
-        );
-        runtime
-            .enter_state(AudioStateEntry {
-                epoch: AudioContinuityEpoch::new(2),
-                start_sample: 8,
-            })
-            .unwrap();
-        let next = cursors(&runtime);
-        let new_lease = runtime
-            .native_owner_lease(AudioNativeProcessorAddress {
-                root: next.session.unwrap().identity,
-                local: next.processor.unwrap().identity,
-                occurrence,
-                epoch: Some(AudioContinuityEpoch::new(2)),
-            })
-            .unwrap();
-        assert_eq!(
-            runtime.observe_native_owner_object(new_lease).unwrap(),
-            object
-        );
-        for (start, frames) in [(8, 1), (9, 3), (12, 4)] {
-            let mut pcm = vec![99.0; frames * 2];
-            runtime
-                .render_into(
+        let rounds = if qualification == Qualification::Repeat {
+            3
+        } else {
+            1
+        };
+        let mut pending_operation = Some(outcome.expect("same-instance native input capture"));
+        let mut start = 8;
+        let mut held = held;
+        let mut normalized_by_mode = std::collections::BTreeMap::new();
+        for round in 0..rounds {
+            let operation = pending_operation.take().unwrap();
+            let mode = match initial_mode {
+                19 => 0,
+                20 => 17,
+                _ if round % 2 == 0 => 22,
+                _ => 21,
+            };
+            let mono = matches!(mode, 17 | 22);
+            let mut expected_state = vec![mode];
+            expected_state.extend_from_slice(&0.5_f32.to_le_bytes());
+            assert_eq!(
+                runtime.native_reprepare_configuration(&operation).unwrap(),
+                expected_state
+            );
+            let prepared = runtime
+                .prepare_native_reprepare_plan(&operation, verifier.clone(), &cancellation)
+                .expect("canonical replacement graph under original Root grant");
+            assert_eq!(
+                prepared.schedule().maximum_processor_auxiliary_channels,
+                if mono { 3 } else { 4 }
+            );
+            assert_eq!(cursors(&runtime), held);
+            let current_lease = runtime
+                .native_owner_lease(AudioNativeProcessorAddress {
+                    root: held.session.unwrap().identity,
+                    local: held.processor.unwrap().identity,
+                    occurrence,
+                    epoch: Some(AudioContinuityEpoch::new(round + 1)),
+                })
+                .unwrap();
+            assert_eq!(
+                runtime.observe_native_owner_object(current_lease).unwrap(),
+                object
+            );
+            let mut authorization = source
+                .authorize_runtime_installation(
+                    source.reserve_install(&registration, Some(&claim)).unwrap(),
+                )
+                .unwrap();
+            let before_install = runtime.resource_footprint();
+            if qualification == Qualification::RefuseCas {
+                let unrelated = AudioOwnerInstallationSource::new();
+                let (other_registration, _) = unrelated.register().unwrap();
+                authorization = unrelated
+                    .authorize_runtime_installation(
+                        unrelated.reserve_install(&other_registration, None).unwrap(),
+                    )
+                    .unwrap();
+                assert!(matches!(
+                    runtime.install_native_reprepare_plan(
+                        &operation,
+                        &mut authorization,
+                        &cancellation
+                    ),
+                    Err(NativeAudioReprepareError::Owner(
+                        AudioNativeOwnerError::Installation(
+                            mondrian_core::AudioOwnerInstallationError::WrongRegistration
+                        )
+                    ))
+                ));
+                verifier.validate(&claim).unwrap();
+                assert_eq!(
+                    source.current_claim().unwrap().unwrap().generation(),
+                    claim.generation()
+                );
+                assert_eq!(cursors(&runtime), held);
+                assert_eq!(
+                    runtime.observe_native_owner_object(current_lease).unwrap(),
+                    object
+                );
+                let failed = runtime.resource_footprint();
+                assert_eq!(
+                    failed.fixed_resident_bytes,
+                    before_install.fixed_resident_bytes + expected_state.len()
+                );
+                let mut retry = source
+                    .authorize_runtime_installation(
+                        source.reserve_install(&registration, Some(&claim)).unwrap(),
+                    )
+                    .unwrap();
+                assert!(matches!(
+                    runtime.install_native_reprepare_plan(&operation, &mut retry, &cancellation),
+                    Err(NativeAudioReprepareError::Admission(
+                        "restart installation already attempted or not prepared"
+                    ))
+                ));
+                assert_eq!(runtime.resource_footprint(), failed);
+                pcm.fill(99.0);
+                assert_eq!(
+                    runtime.render_into(
+                        AudioRenderRequest {
+                            transport_activity: None,
+                            start_sample: start,
+                            frames: 4
+                        },
+                        &mut pcm
+                    ),
+                    Err(AudioExecutionError::ReprepareRequired(ticket))
+                );
+                assert_eq!(
+                    runtime.enter_state(AudioStateEntry {
+                        epoch: AudioContinuityEpoch::new(2),
+                        start_sample: start
+                    }),
+                    Err(AudioExecutionError::ReprepareRequired(ticket))
+                );
+                assert_eq!(pcm, [99.0; 8]);
+                assert_eq!(cursors(&runtime), held);
+                drop(operation);
+                assert_eq!(runtime.resource_footprint(), failed);
+                assert_eq!(serde_json::to_value(&sequence).unwrap(), author_before);
+                return;
+            }
+            let receipt = runtime
+                .install_native_reprepare_plan(&operation, &mut authorization, &cancellation)
+                .expect("same-owner planes/maps and Source installation");
+            assert_ne!(receipt.claim().generation(), claim.generation());
+            verifier.validate(receipt.claim()).unwrap();
+            assert_eq!(runtime.public_output_lookahead_frames(), 3);
+            pcm.fill(99.0);
+            assert_eq!(
+                runtime.render_into(
                     AudioRenderRequest {
                         transport_activity: None,
                         start_sample: start,
-                        frames,
+                        frames: 4
+                    },
+                    &mut pcm
+                ),
+                Err(AudioExecutionError::StateEntryRequired)
+            );
+            assert_eq!(
+                pcm, [0.0; 8],
+                "admitted Unentered Runtime initializes output"
+            );
+            let epoch = AudioContinuityEpoch::new(round + 2);
+            runtime.enter_state(AudioStateEntry { epoch, start_sample: start }).unwrap();
+            let next = cursors(&runtime);
+            let new_lease = runtime
+                .native_owner_lease(AudioNativeProcessorAddress {
+                    root: next.session.unwrap().identity,
+                    local: next.processor.unwrap().identity,
+                    occurrence,
+                    epoch: Some(epoch),
+                })
+                .unwrap();
+            assert_eq!(
+                runtime.observe_native_owner_object(new_lease).unwrap(),
+                object
+            );
+            for (offset, frames) in [(0, 1), (1, 3), (4, 4)] {
+                let mut pcm = vec![99.0; frames * 2];
+                runtime
+                    .render_into(
+                        AudioRenderRequest {
+                            transport_activity: None,
+                            start_sample: start + offset,
+                            frames,
+                        },
+                        &mut pcm,
+                    )
+                    .expect("complete new geometry PCM");
+                assert_pcm(&pcm, start + offset, if mono { 1.0 } else { 2.5 });
+            }
+            claim = receipt.claim().clone();
+            let high = runtime.resource_footprint();
+            runtime.finish_native_reprepare_retirement(receipt.retire()).unwrap();
+            let normalized = runtime.resource_footprint();
+            assert!(normalized.fixed_resident_bytes < high.fixed_resident_bytes);
+            assert_eq!(normalized.runtime_occurrences, 1);
+            if let Some(previous) = normalized_by_mode.insert(mode, normalized) {
+                assert_eq!(
+                    normalized, previous,
+                    "same shape/state must not accumulate capture/codec/map/seed fees"
+                );
+            }
+            assert_eq!(serde_json::to_value(&sequence).unwrap(), author_before);
+            if round + 1 < rounds {
+                start += 8;
+                pcm.fill(99.0);
+                let ticket = match runtime.render_into(
+                    AudioRenderRequest {
+                        transport_activity: None,
+                        start_sample: start,
+                        frames: 4,
                     },
                     &mut pcm,
-                )
-                .expect("new stereo detector PCM");
-            // Native port 11 keeps its identity and now receives both channels.
-            assert_pcm(&pcm, start, 2.5);
+                ) {
+                    Err(AudioExecutionError::ReprepareRequired(ticket)) => ticket,
+                    other => panic!("next real restart: {other:?}"),
+                };
+                assert_eq!(pcm, [99.0; 8]);
+                held = cursors(&runtime);
+                pending_operation = Some(
+                    runtime
+                        .service_pending_native_reprepare(ticket.product_notice(), &cancellation)
+                        .expect("next same-child width capture under unchanged Root grant"),
+                );
+            }
         }
-        runtime.finish_native_reprepare_retirement(receipt.retire()).unwrap();
         assert_eq!(serde_json::to_value(&sequence).unwrap(), author_before);
     }));
     // Keep failure reporting after original-owner cleanup, including RED gates.

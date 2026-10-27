@@ -1381,14 +1381,20 @@ impl AudioProcessor for IsolatedAudioProcessor {
                 NativeConfigurationSeedRefusal::SeedNotStaged,
             ));
         };
-        match self.worker.commit_native_configuration_seed(staged) {
+        match self.worker.commit_native_configuration_seed(staged, &self.auxiliary_inputs) {
             Ok((outcome, inputs)) => {
                 if let NativeConfigurationSeedOutcome::Accepted(_) = outcome {
                     // The authenticated reply matched this exact staged ticket.
                     // Keep the parent aligned with the committed native contract;
                     // this does not install a Runtime plan or authorize PCM.
                     if let Some(inputs) = inputs {
-                        self.auxiliary_inputs = inputs;
+                        // Stable keys were checked before RPC. Preserve the
+                        // original metadata capacities; staging owners retire.
+                        for (current, next) in
+                            self.auxiliary_inputs.buses.iter_mut().zip(inputs.buses)
+                        {
+                            current.channel_layout = next.channel_layout;
+                        }
                     }
                     self.native_plugin_contract = ticket.observed_contract;
                     self.staged_configuration_seed = None;

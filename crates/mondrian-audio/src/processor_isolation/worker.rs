@@ -235,6 +235,20 @@ fn dispatch_native_owner_with_io(
     ) = &command
         && let Some(mapping) = &io.staged_mapping
     {
+        if !mapping
+            .request
+            .buffers
+            .request
+            .proposal
+            .preserves_auxiliary_keys(&io.auxiliary_inputs)
+        {
+            return write_seed_operation_result(
+                control,
+                Ok(Ok(super::NativeConfigurationSeedOutcome::Refused(
+                    super::NativeConfigurationSeedRefusal::StaleTicket,
+                ))),
+            );
+        }
         let armed = catch_unwind(AssertUnwindSafe(|| {
             processor.arm_clap_audio_input_installation(mapping.request, seed.ticket)
         }));
@@ -274,7 +288,9 @@ fn dispatch_native_owner_with_io(
                 io.shared = shared;
                 io._shared_file = file;
                 io.layout = layout;
-                io.auxiliary_inputs = inputs;
+                for (current, next) in io.auxiliary_inputs.buses.iter_mut().zip(inputs.buses) {
+                    current.channel_layout = next.channel_layout;
+                }
             }
             Ok(outcome)
         }));
