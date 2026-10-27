@@ -199,24 +199,38 @@ Natron-2.3.16-beta3 TimeBlur1.0 through the product C ABI. Its 3x2 Float32/PAR1
 control checks complete independent RGBA literals, same owner, changed inputs,
 native times2/3/2/2 and divisions4/8/4/1. This covers fractional history/future,
 the plugin's multi-pass image-memory accumulator and temporal Identity. The real
-parameter is `shutterOffset`, with capital O. It is finite C ABI qualification,
-not Timeline/Preview/Export, GUI, performance or other-platform acceptance.
+parameter is `shutterOffset`, with capital O.
 
-Current Effects390, Renderer689/39 ignored, Export307/20 ignored, App OFX125/68
-ignored and seven resident/action controls pass under original owned budgets,
-with exit0, empty stderr and settled descendants. The normal development product
-rebuilds at opt0/debug0 without validation. A stale ignored test's Describe schema3
-was repaired to the original schema constant; production protocol rejection and
-assertions remain strict. Full App regression passes3145/213 ignored; together
-with Effects/Renderer/Export,4531 ordinary tests pass with272 existing ignored.
-App uses validation opt0/debug0; Effects/Renderer/Export use opt1/debug0. The
-original1800s ordinary/180s native budgets and cleanup policy are unchanged.
+The published TimeBlur also passes a finite NLE control with real lossless FFV1
+16x16/24fps media, public Timeline placement/curve edits, native feedback and
+2/4/2 seeks. Eight identical decoded frames isolate the independent upstream
+exposure oracle: average the linear samples at frame-.5/-.25/0/+.25, each with
+exposure=(requested frame)/4 stops. Full CPU Preview and Export working images
+match exactly; this does not qualify encoded Export or display/GPU presentation.
+
+A Ready frame evaluation owns the immutable plan; ordinary current-frame Custom
+DSP still belongs to the existing CPU composition task. Its original source
+client resolves late media. The synchronous no-input composition helper cannot
+qualify that path. Consume feedback from `PreviewWorkPoll`, which transfers it
+out of the internal pending slot. Preserve these boundaries in future controls.
+
+The current App regression passes3145/214 ignored; the published TimeBlur NLE
+control is separately run and passes. Original1800s ordinary/180s native budgets,
+exit0, empty stderr and settled descendants are retained. This batch changes
+tests/documentation only. Unchanged Effects390, Renderer689/39 ignored,
+Export307/20 ignored, 16 native groups and seven resident/action controls retain
+their prior qualification. The combined ordinary baseline remains4531 passed,
+with273 conditional tests ignored by default. App uses validation opt0/debug0;
+Effects/Renderer/Export use opt1/debug0. The ordinary development product remains
+opt0/debug0/features[] with unchanged runtime source; it was not rebuilt for a
+test/documentation-only change.
 
 Earlier finite real-FFmpeg Preview/Export source and formal PNG/GPU-prefix
 qualification retain their original conditions; they are not new TimeBlur
 product-flow or GPU-interop evidence. Native General/Transition/Paint/Retimer,
 historical input variants above, variable domains, other formats/fielding,
 tiles/upstream RoI/non-unit scale, overlapping action/thread requests, more real
-Temporal plugins, full product seek/loop/save/export, GUI, comparative performance
+Temporal plugins, varying-media TimeBlur workflows, loop/save/reopen/encoded
+export, GUI, comparative performance
 and other platforms remain open. F06/GL remain open; this does not establish
 universal100ms shutdown, whole-heap safety or realtime behavior.
