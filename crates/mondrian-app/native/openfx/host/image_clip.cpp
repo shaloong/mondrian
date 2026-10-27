@@ -208,6 +208,13 @@ namespace MondrianOpenFx {
   OfxRectD FilterClipInstance::getRegionOfDefinition(OfxTime time) const
   {
     if (isOutput()) { return _effect->outputRegionOfDefinition(time); }
+    // This input has no image outside its declared temporal domain. Its RoD is
+    // known to be empty; no Source fetch or pixel/time substitution is needed.
+    // Preserve failures for unknown in-range inputs, invalid time and memory.
+    if (getConnected() && std::isfinite(time) &&
+        (time < frameState().info.first_frame || time > frameState().info.last_frame)) {
+      return OfxRectD{0, 0, 0, 0};
+    }
     SourceFrameView source{};
     size_t index = 0;
     int failure = kOfxStatFailed;

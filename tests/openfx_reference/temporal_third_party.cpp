@@ -97,11 +97,14 @@ int main(int argc, char** argv) {
     const auto owner = session.value;
     // Unit centered shutter excludes its end. Divisions8 also exercises the
     // plugin's multi-pass ImageMemory accumulator. Independent moment literals.
-    const std::array<double, 4> times{2, 3, 2, 2};
-    const std::array<size_t, 4> divisions{4, 8, 4, 1};
-    const std::array<unsigned, 4> sourceMasks{0b1011, 0b11101111, 0b1011, 1};
-    const std::array<float, 4> mean{1.875f, 2.9375f, 1.875f, 1.5f};
-    const std::array<float, 4> squareMean{3.59375f, 8.7109375f, 3.59375f, 2.25f};
+    const std::array<double, 6> times{2, 3, 2, 2, 0, 10};
+    const std::array<size_t, 6> divisions{4, 8, 4, 1, 4, 4};
+    const std::array<unsigned, 6> sourceMasks{0b1011, 0b11101111, 0b1011, 1, 0b1000, 0b0011};
+    // Outside [0,10], Source has empty RoD and no image. Its contribution is
+    // transparent black, not a clamped endpoint or a renormalized average.
+    const std::array<float, 6> coverage{1, 1, 1, 1, .5f, .75f};
+    const std::array<float, 6> mean{1.875f, 2.9375f, 1.875f, 1.5f, .0625f, 7.3125f};
+    const std::array<float, 6> squareMean{3.59375f, 8.7109375f, 3.59375f, 2.25f, .015625f, 71.328125f};
     for (size_t pass = 0; pass < times.size(); ++pass) {
       info.frame = times[pass];
       const float seed = float(pass) / 4;
@@ -122,12 +125,14 @@ int main(int argc, char** argv) {
       require(sources.fetched.load() == sourceMasks[pass], "exact fractional historical/future sources");
       for (size_t i = 0; i < output.size(); ++i) {
         const float base = float(i) / 16;
-        const OfxRGBAColourF expected{base + mean[pass] + seed, -base - 2 * mean[pass] - seed,
-                                     4 * base + squareMean[pass] + seed, 1};
+        const float weight = coverage[pass];
+        const OfxRGBAColourF expected{weight * base + mean[pass] + weight * seed,
+                                     -weight * base - 2 * mean[pass] - weight * seed,
+                                     4 * weight * base + squareMean[pass] + weight * seed, weight};
         require(std::memcmp(&output[i], &expected, sizeof(expected)) == 0, "independent full Float32 RGBA oracle");
       }
     }
-    std::puts("TemporalThirdParty PASS: TimeBlur1.0 fractional sources/full RGBA/same owner; divisions4/8/4/1, time2/3/2/2, changed inputs, accumulator and temporal Identity");
+    std::puts("TemporalThirdParty PASS: TimeBlur1.0 fractional sources/full RGBA/same owner; original4 passes plus first/last-frame transparent absence, changed inputs, accumulator and temporal Identity");
     return 0;
   } catch (const std::exception& error) {
     std::fprintf(stderr, "TemporalThirdParty FAILED: %s\n", error.what());

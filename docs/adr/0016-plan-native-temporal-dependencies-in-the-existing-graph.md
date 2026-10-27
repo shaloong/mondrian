@@ -137,6 +137,14 @@ requests stay in the declared author range. Unique graph tiles transfer pixels;
 shared tiles refuse an unadmitted clone. Pre-submit refusal releases file slots;
 errors retain backing through retirement and never publish staged output.
 
+Outside the connected input's declared temporal range, this host already has
+NoImage semantics. Its spatial support is therefore known to be empty: answer
+the [Source RoD query](https://openfx.readthedocs.io/en/main/Reference/suites/ofxImageEffectSuiteReference.html)
+with an empty rectangle without acquiring pixels or clamping time. Unknown
+in-range dependencies, invalid time and memory failures retain their errors.
+This separates proven absence from inability to determine a region. No input
+time-domain, Image fetch, execution service or wire contract changes.
+
 ## Preview, Export and cache ownership
 
 `PreparedVisualProgram` borrows the original placement, Frame Execution Request
@@ -227,6 +235,15 @@ native times2/3/2/2 and divisions4/8/4/1. This covers fractional history/future,
 the plugin's multi-pass image-memory accumulator and temporal Identity. The real
 parameter is `shutterOffset`, with capital O.
 
+Two additional same-owner C ABI calls cover the first/last range endpoints0/10.
+Independent complete RGBA literals require transparent missing samples, alpha
+1/2 and3/4, and exact provider masks. Neither endpoint clamping nor average
+renormalization can satisfy them. The actual image suite also passes22 controls:
+its original21 plus before/after-range empty RoD, missing image/no Source fetch,
+preserved in-range Failed/ErrMemory and invalid-time refusal. On the old host,
+only the new control fails; after the fix all22 pass with empty stderr and settled
+ownership. The existing official Basic binary is reused; host sources are fresh.
+
 The published TimeBlur passes four finite NLE controls with real lossless FFV1
 16x16/24fps media, public Timeline placement/curve edits, native feedback and
 2/4/2 seeks. The uniform eight-frame control isolates upstream exposure; the
@@ -270,8 +287,10 @@ client resolves late media. The synchronous no-input composition helper cannot
 qualify that path. Consume feedback from `PreviewWorkPoll`, which transfers it
 out of the internal pending slot. Preserve these boundaries in future controls.
 
-Current Windows validation passes Source7, the typed-deadline demand/stale-attempt
-control, full App3147/218 ignored and all four finite real TimeBlur NLE gates.
+Windows Source7, the typed-deadline demand/stale-attempt control and full
+App3147/218 ignored pass at98f97cc5. The native-only RoD change keeps that Rust
+parent and passes all five real TimeBlur NLE gates with the freshly rebuilt
+default-feature Product; changed native execution is in that worker.
 The Source group includes an actual held media wait whose policy deadline expires
 while its parent generation stays live: one DSP call, a typed DeadlineExpired
 terminal, no pixels/failure memory and released leases. Original1800s ordinary
@@ -292,15 +311,15 @@ cancellation at other phases, encoded export, GUI, comparative performance
 and other platforms remain open. F06/GL remain open; this does not establish
 universal100ms shutdown, whole-heap safety or realtime behavior.
 
-The actual Headless/wgpu TimeBlur playback control remains **whole FAIL**.
-After the deadline fix, one diagnostic attempt reaches Ended/frame11 through
-pause/resume, then its final picture is rejected with native status6. No Source
-owner-retirement failure is reported there. Another attempt fails the original
-10s interval safety assertion with no final unavailability; it is not evidence
-of a deterministic deadlock. The parent includes the fix; the invoked worker's
-native backend source is unchanged. Paired GPU-to-decoder, Preview and GPU cleanup
-passes. These observations do not qualify complete timed playback or deadline
-recovery. Distinguish the native ABI/report rejection before changing lifecycle
-or image-range behavior. Do not extend deadlines or suppress the failed gate.
-Playback Engine has no loop-range/automatic-repeat contract; repeated public
-seek does not qualify an automatic loop.
+The original strict Headless/wgpu TimeBlur timed control now passes advancement,
+pause/resume, natural Ended/frame11 and final-picture delivery. Paired GPU-to-decoder,
+Preview and GPU cleanup also passes with original assertions/budgets and empty
+stderr. The diagnosed failure was a Source RoD after the declared last frame:
+known absence threw HostSupport Property(Failed), which escaped Output RoD into
+the C ABI's generic status6. Temporary boundary/type/action/source probes located
+that exact branch and were removed before the normal Product rebuild. The fix is
+the known-empty region above, with no plugin-name or lifecycle special case.
+An earlier10s interval safety failure remains unexplained; this finite pass does
+not establish long-run or realtime reliability. Native GPU interoperability and
+GPU pixel/performance qualification remain separate. Playback Engine has no
+loop-range/automatic-repeat contract; repeated public seek does not qualify it.

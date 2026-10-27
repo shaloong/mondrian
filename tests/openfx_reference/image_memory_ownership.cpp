@@ -14,6 +14,7 @@
 #include <cstring>
 #include <memory>
 #include <new>
+#include <limits>
 #include <stdexcept>
 
 namespace {
@@ -389,6 +390,51 @@ bool clipInstanceRecovery(const OfxImageEffectSuiteV1& suite, OfxImageEffectHand
   return passed;
 }
 
+bool sourceRodAbsenceAndFailure(const OfxImageEffectSuiteV1& suite,
+                                MondrianOpenFx::FilterClipInstance& source,
+                                MondrianOpenFx::FrameState& frame) {
+  struct Failure {
+    OfxStatus status = kOfxStatFailed;
+    mutable unsigned calls = 0;
+  } failure;
+  const MondrianOpenFxSourceProvider provider{&failure,
+      [](const void* context, double, MondrianOpenFxSourceFrame*, size_t*) noexcept {
+        const auto& failure = *static_cast<const Failure*>(context);
+        ++failure.calls;
+        return failure.status;
+      }};
+  const auto* previous = frame.sourceProvider;
+  frame.sourceProvider = &provider;
+  bool passed = true;
+  for (const double time : {frame.info.first_frame - .25, frame.info.last_frame + .25}) {
+    OfxRectD rod{11, 13, 17, 19};
+    const auto status = suite.clipGetRegionOfDefinition(source.getHandle(), time, &rod);
+    OfxPropertySetHandle image = nullptr;
+    const auto imageStatus = suite.clipGetImage(source.getHandle(), time, nullptr, &image);
+    passed &= status == kOfxStatOK && rod.x1 == 0 && rod.y1 == 0 && rod.x2 == 0 && rod.y2 == 0 &&
+        imageStatus == kOfxStatFailed && !image && failure.calls == 0;
+  }
+  // An unknown in-range dependency or allocation failure must not be turned
+  // into an empty region. These remain distinct from proven temporal absence.
+  for (const auto status : {kOfxStatFailed, kOfxStatErrMemory}) {
+    failure.status = status;
+    failure.calls = 0;
+    OfxRectD rod{11, 13, 17, 19};
+    const double time = (frame.info.first_frame + frame.info.last_frame) / 2;
+    passed &= suite.clipGetRegionOfDefinition(source.getHandle(), time, &rod) == status;
+    passed &= failure.calls == 1 && rod.x1 == 0 && rod.y1 == 0 && rod.x2 == 0 && rod.y2 == 0;
+  }
+  failure.calls = 0;
+  OfxRectD rod{11, 13, 17, 19};
+  passed &= suite.clipGetRegionOfDefinition(source.getHandle(),
+      std::numeric_limits<double>::infinity(), &rod) == kOfxStatFailed;
+  passed &= failure.calls == 0 && rod.x1 == 0 && rod.y1 == 0 && rod.x2 == 0 && rod.y2 == 0;
+  frame.sourceProvider = previous;
+  passed &= frame.imageHandles == 0 && !frame.invalidImageLifetime;
+  std::printf("{\"path\":\"source-rod-absence-and-failure\",\"passed\":%s}\n", passed ? "true" : "false");
+  return passed;
+}
+
 int exercise(MondrianOpenFx::Host& host, const char* binaryPath, const char* bundlePath) {
   OFX::Host::ImageEffect::PluginCache images(host);
   OFX::Host::PluginCache plugins;
@@ -505,12 +551,13 @@ int exercise(MondrianOpenFx::Host& host, const char* binaryPath, const char* bun
       !std::memcmp(&sourceBefore, &inputPixel, sizeof(inputPixel)) && !std::memcmp(&outputBefore, &outputPixel, sizeof(outputPixel));
   std::printf("{\"path\":\"output-rod-memory\",\"status\":%d,\"allocation_failures\":%u,\"bounds_zero\":%s,\"recovered\":%s,\"passed\":%s}\n",
       rodStatus, probe.scalar_failures, cleared ? "true" : "false", recoveredRod == kOfxStatOK ? "true" : "false", rodMemoryPassed ? "true" : "false");
+  const bool sourceRodBoundaryPassed = sourceRodAbsenceAndFailure(*suite, *source, frame);
   return hostPassed && instancePassed && sourcePassed && outputPassed &&
       rootRefused && contextRefused && hostRecovered && instanceRecovered && sourceImageRefused &&
       outputImageRefused && sourceRodRefused && outputRodRefused && sourceClipRecovered &&
       outputClipRecovered && rootSourceHandleRefused && rootOutputHandleRefused &&
       contextSourceHandleRefused && contextOutputHandleRefused && sourceHandleRecovered &&
-      outputHandleRecovered && rodMemoryPassed ? 0 : 1;
+      outputHandleRecovered && rodMemoryPassed && sourceRodBoundaryPassed ? 0 : 1;
 }
 }
 
