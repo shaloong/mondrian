@@ -206,19 +206,136 @@ fn reference_source_samples(
     sources
 }
 
+fn with_preview_runtime<R>(run: impl FnOnce(&PreviewProductionRuntime<()>) -> R) -> R {
+    let runtime = PreviewProductionRuntime::<()>::try_new_boxed().unwrap();
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(&runtime)));
+    runtime.shutdown_and_wait();
+    result.unwrap_or_else(|error| std::panic::resume_unwind(error))
+}
+
+fn verify_time_blur_frame(
+    runtime: &PreviewProductionRuntime<()>,
+    state: &mut AppState,
+    sources: &std::collections::BTreeMap<i64, mondrian_renderer::CpuColorFrame>,
+    frame: i64,
+    offsets: &[i64],
+) -> mondrian_effects::EffectProcessorFeedbackBatch {
+    let (output, feedback) = acquire_working(runtime, state, frame);
+    assert_eq!(output.rgba_f32().data.len(), 256);
+    for (pixel_index, pixel) in output.rgba_f32().data.iter().enumerate() {
+        for channel in 0..3 {
+            let expected = offsets
+                .iter()
+                .map(|offset| {
+                    let tick = frame * 4 + offset;
+                    sources[&tick].rgba_f32().data[pixel_index][channel]
+                        * 2.0_f32.powf(tick as f32 / 16.0)
+                })
+                .sum::<f32>()
+                / offsets.len() as f32;
+            assert!((pixel[channel] - expected).abs() < 2e-5,
+                "frame {frame} pixel {pixel_index} channel {channel}: {pixel:?}, expected={expected}");
+        }
+        assert_eq!(pixel[3], 1.0);
+    }
+    assert_eq!(feedback.len(), 1);
+    assert_ne!(
+        feedback.iter().next().unwrap().feedback.snapshot.native_owner(),
+        0
+    );
+    let exported = mondrian_export::queue::export_visual_frame_validation(
+        &export_snapshot(state),
+        frame,
+        state.active_sequence().unwrap().settings.resolution,
+    )
+    .unwrap();
+    assert_eq!(
+        output, exported.working_frame,
+        "real Preview/Export working-frame parity"
+    );
+    feedback
+}
+
+fn install_time_blur_catalog(
+    state: &mut AppState,
+    binary: &std::path::Path,
+    kind: &mondrian_effects::EffectType,
+    preferences_path: &std::path::Path,
+) {
+    use crate::app::openfx_catalog::OpenFxBundleSelection;
+    use crate::app_ui::preferences_store::{persist_app_ui_preferences_to, AppUiPreferences};
+    let bundle = binary.parent().unwrap().parent().unwrap().parent().unwrap().to_path_buf();
+    assert!(bundle.file_name().unwrap().to_string_lossy().ends_with(".ofx.bundle"));
+    let selection = OpenFxBundleSelection {
+        path: bundle.clone(),
+        context: crate::openfx_host::OpenFxContext::Filter,
+    };
+    let generation = state.project_author_generation();
+    state
+        .dispatch_action(
+            ProductAction::VisualEffect(VisualEffectProductAction::InstallOpenFxBundle(
+                VisualEffectInstallOpenFxBundlePayload { path: bundle, context: selection.context },
+            ))
+            .into_external_action(),
+        )
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(120);
+    let completed = loop {
+        let changed = state.poll_openfx_catalog();
+        let completed = state.take_completed_openfx_installs();
+        if !completed.is_empty() {
+            break completed;
+        }
+        assert!(
+            !(changed && state.status_hint.as_ref().is_some_and(|(_, failed)| *failed)),
+            "catalog installation failed: {:?}",
+            state.status_hint
+        );
+        assert!(
+            Instant::now() < deadline,
+            "catalog installation did not settle"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    };
+    assert_eq!(completed, vec![selection.clone()]);
+    assert_eq!(state.project_author_generation(), generation);
+    assert!(
+        mondrian_effects::effect_library_types().contains(kind),
+        "catalog must publish TimeBlur"
+    );
+    let mut preferences = AppUiPreferences::default();
+    preferences.record_openfx_bundle(selection);
+    persist_app_ui_preferences_to(preferences_path, &preferences).unwrap();
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TimeBlurNleCase {
+    Uniform,
+    Varying,
+    AuthorHistory,
+}
+
 #[test]
 #[ignore = "requires ordinary IPC17 Product, published OpenFX-Misc TimeBlur 1.0, FFmpeg and OCIO"]
 fn time_blur_real_media_preview_export_evaluate_upstream_animation_at_requested_times() {
-    qualify_time_blur_nle(false);
+    qualify_time_blur_nle(TimeBlurNleCase::Uniform);
 }
 
 #[test]
 #[ignore = "requires ordinary IPC17 Product, published OpenFX-Misc TimeBlur 1.0, FFmpeg and OCIO"]
 fn time_blur_varying_media_preserves_fractional_source_selection_and_animation() {
-    qualify_time_blur_nle(true);
+    qualify_time_blur_nle(TimeBlurNleCase::Varying);
 }
 
-fn qualify_time_blur_nle(varying_media: bool) {
+#[test]
+#[ignore = "requires ordinary IPC17 Product, published TimeBlur, catalog restore, FFmpeg and OCIO"]
+fn time_blur_public_parameter_history_and_project_reopen_preserve_temporal_output() {
+    qualify_time_blur_nle(TimeBlurNleCase::AuthorHistory);
+}
+
+fn qualify_time_blur_nle(case: TimeBlurNleCase) {
+    let varying_media = case != TimeBlurNleCase::Uniform;
+    let history = case == TimeBlurNleCase::AuthorHistory;
     let _guard = crate::app_ui::test_utils::theme_test_guard();
     ensure_test_ocio_loaded();
     let helper = PathBuf::from(std::env::var_os("MONDRIAN_OPENFX_TEST_HELPER").unwrap());
@@ -227,12 +344,34 @@ fn qualify_time_blur_nle(varying_media: bool) {
     let description =
         crate::openfx_host::describe_openfx_filter(&helper, &inspection, "net.sf.openfx.TimeBlur")
             .unwrap();
-    let kind = crate::openfx_effect::register_selected_openfx_filter(
-        &helper,
-        &inspection,
-        "net.sf.openfx.TimeBlur",
-    )
-    .unwrap();
+    let kind = if history {
+        use sha2::{Digest, Sha256};
+        assert_eq!(
+            inspection
+                .plugins
+                .iter()
+                .filter(|p| p.identifier == "net.sf.openfx.TimeBlur"
+                    && p.version_major == 1
+                    && p.version_minor == 0)
+                .count(),
+            1
+        );
+        let identity = format!(
+            "{}\0{}.{}\0{}",
+            "net.sf.openfx.TimeBlur", 1, 0, inspection.binary_sha256
+        );
+        mondrian_effects::EffectType::External(format!(
+            "openfx.{:x}",
+            Sha256::digest(identity.as_bytes())
+        ))
+    } else {
+        crate::openfx_effect::register_selected_openfx_filter(
+            &helper,
+            &inspection,
+            "net.sf.openfx.TimeBlur",
+        )
+        .unwrap()
+    };
     let directory = tempfile::tempdir().unwrap();
     // The uniform control isolates animation. The varying control supplies
     // distinct Y/U/V planes per frame and independently samples source time.
@@ -308,8 +447,6 @@ fn qualify_time_blur_nle(varying_media: bool) {
     }
     let info = mondrian_media::probe_media_info(&source).unwrap();
     assert_eq!(info.primary_video().unwrap().frame_rate, Rational::FPS_24);
-    let library = AssetLibrary::open(directory.path().join("library")).unwrap();
-    let asset = commit_preview_test_media(&library, source, info);
     let mut state = AppState::new();
     pin_standard_execution_resources(&mut state);
     state
@@ -321,7 +458,7 @@ fn qualify_time_blur_nle(varying_media: bool) {
             Rational::FPS_24,
         )
         .unwrap();
-    state.test_set_asset_library(Some(library));
+    let asset = commit_preview_test_media(state.asset_library().unwrap(), source, info);
     let sequence = state.active_sequence().unwrap();
     state
         .dispatch_action(
@@ -336,9 +473,16 @@ fn qualify_time_blur_nle(varying_media: bool) {
         )
         .unwrap();
     let clip_id = state.active_sequence().unwrap().video_tracks[0].clips[0].id;
-    let runtime = PreviewProductionRuntime::<()>::try_new_boxed().unwrap();
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let sources = reference_source_samples(&state, varying_media);
+    let preferences_path = directory.path().join("preferences.json");
+    if history {
+        assert_eq!(
+            crate::app::packaged_worker::discover_openfx_worker().unwrap(),
+            helper
+        );
+        install_time_blur_catalog(&mut state, &binary, &kind, &preferences_path);
+    }
+    let sources = reference_source_samples(&state, varying_media);
+    let saved = with_preview_runtime(|runtime| {
         state
             .add_effect_to_clip(clip_id, mondrian_effects::EffectType::BasicCorrection)
             .unwrap();
@@ -430,31 +574,10 @@ fn qualify_time_blur_nle(varying_media: bool) {
         let author_before =
             serde_json::to_value(state.active_sequence().unwrap().find_clip(clip_id).unwrap())
                 .unwrap();
-        let export = export_snapshot(&state);
         let mut previous = None;
         for frame in [2, 4, 2] {
-            let (output, feedback) = acquire_working(&runtime, &mut state, frame);
-            assert_eq!(output.rgba_f32().data.len(), 256);
-            // Published TimeBlur: centered shutter=1, four samples, excluded
-            // end. Each source-only reference is at that absolute author time;
-            // exposure is independently evaluated as requested-frame/4 stops.
-            for (pixel_index, pixel) in output.rgba_f32().data.iter().enumerate() {
-                for channel in 0..3 {
-                    let expected = [-2, -1, 0, 1]
-                        .into_iter()
-                        .map(|offset| {
-                            let tick = frame * 4 + offset;
-                            sources[&tick].rgba_f32().data[pixel_index][channel]
-                                * 2.0_f32.powf(tick as f32 / 16.0)
-                        })
-                        .sum::<f32>()
-                        / 4.0;
-                    assert!((pixel[channel] - expected).abs() < 2e-5,
-                        "varying={varying_media} frame {frame} pixel {pixel_index} channel {channel}: {pixel:?}, expected={expected}");
-                }
-                assert_eq!(pixel[3], 1.0);
-            }
-            assert_eq!(feedback.len(), 1);
+            let feedback =
+                verify_time_blur_frame(runtime, &mut state, &sources, frame, &[-2, -1, 0, 1]);
             let receipt = feedback.iter().next().unwrap();
             let identity = (
                 receipt.feedback.owner,
@@ -468,25 +591,114 @@ fn qualify_time_blur_nle(varying_media: bool) {
                 }
             }
             previous = Some((identity, receipt.feedback.snapshot.invocation()));
-            let exported = mondrian_export::queue::export_visual_frame_validation(
-                &export,
-                frame,
-                state.active_sequence().unwrap().settings.resolution,
-            )
-            .unwrap();
-            assert_eq!(
-                output, exported.working_frame,
-                "real Preview/Export working-frame parity"
-            );
             assert_eq!(
                 serde_json::to_value(state.active_sequence().unwrap().find_clip(clip_id).unwrap())
                     .unwrap(),
                 author_before
             );
         }
-    }));
-    runtime.shutdown_and_wait();
-    if let Err(error) = result {
-        std::panic::resume_unwind(error);
+        if !history {
+            return None;
+        }
+        let shutter_label =
+            &description.parameters.iter().find(|p| p.name == "shutter").unwrap().label;
+        let shutter = effect
+            .properties
+            .iter()
+            .find(|(_, p)| p.descriptor.display_name == *shutter_label)
+            .unwrap()
+            .1
+            .address();
+        state
+            .dispatch_action(
+                ProductAction::VisualEffect(VisualEffectProductAction::SetParameterValue(
+                    Box::new(VisualEffectSetParameterValuePayload {
+                        clip_id,
+                        effect_id: effect.id,
+                        write: ParameterValueWrite::Value {
+                            parameter: shutter,
+                            value: PropertyValue::Double(0.0),
+                        },
+                    }),
+                ))
+                .into_external_action(),
+            )
+            .unwrap();
+        verify_time_blur_frame(runtime, &mut state, &sources, 4, &[0]);
+        assert!(state.undo_timeline().unwrap());
+        verify_time_blur_frame(runtime, &mut state, &sources, 4, &[-2, -1, 0, 1]);
+        assert!(state.redo_timeline().unwrap());
+        verify_time_blur_frame(runtime, &mut state, &sources, 4, &[0]);
+        assert!(state.undo_timeline().unwrap());
+        let feedback = verify_time_blur_frame(runtime, &mut state, &sources, 4, &[-2, -1, 0, 1]);
+        let owner = feedback.iter().next().unwrap().feedback.owner;
+        let authored =
+            serde_json::to_value(state.active_sequence().unwrap().find_clip(clip_id).unwrap())
+                .unwrap();
+        assert_eq!(
+            authored, author_before,
+            "undo returns to exact authored Clip state"
+        );
+        let saved_path = directory.path().join("saved.mdp");
+        state.save_project_file_as(saved_path.clone()).unwrap();
+        Some((saved_path, authored, owner))
+    });
+    if let Some((saved_path, authored, old_owner)) = saved {
+        state.close_project().unwrap();
+        drop(state);
+        let installed = mondrian_effects::effect_definition(&kind).unwrap();
+        let mut reopened = AppState::new();
+        pin_standard_execution_resources(&mut reopened);
+        let preferences =
+            crate::app_ui::preferences_store::load_app_ui_preferences_from(&preferences_path);
+        assert_eq!(preferences.installed_openfx_bundles.len(), 1);
+        let generation = reopened.project_author_generation();
+        reopened.schedule_openfx_catalog_restore(preferences.installed_openfx_bundles);
+        let deadline = Instant::now() + Duration::from_secs(120);
+        loop {
+            reopened.poll_openfx_catalog();
+            if let Some(current) = mondrian_effects::effect_definition(&kind)
+                && !Arc::ptr_eq(&current, &installed)
+            {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "catalog restore did not publish a fresh definition"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(reopened.take_completed_openfx_installs().is_empty());
+        assert_eq!(reopened.project_author_generation(), generation);
+        reopened.open_project_file(saved_path).unwrap();
+        assert_eq!(
+            serde_json::to_value(reopened.active_sequence().unwrap().find_clip(clip_id).unwrap())
+                .unwrap(),
+            authored
+        );
+        with_preview_runtime(|runtime| {
+            for frame in [2, 4, 2] {
+                let feedback = verify_time_blur_frame(
+                    runtime,
+                    &mut reopened,
+                    &sources,
+                    frame,
+                    &[-2, -1, 0, 1],
+                );
+                assert_ne!(
+                    feedback.iter().next().unwrap().feedback.owner,
+                    old_owner,
+                    "reopened processing must use a fresh bank owner"
+                );
+                assert_eq!(
+                    serde_json::to_value(
+                        reopened.active_sequence().unwrap().find_clip(clip_id).unwrap()
+                    )
+                    .unwrap(),
+                    authored
+                );
+            }
+        });
+        reopened.close_project().unwrap();
     }
 }
