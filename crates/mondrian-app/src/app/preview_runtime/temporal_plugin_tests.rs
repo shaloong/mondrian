@@ -7,14 +7,11 @@ use mondrian_core::automation::{
 };
 use mondrian_core::{FramePosition, PropertyValue, Rational, TimelineTime};
 
-fn acquire_working(
+fn schedule_working(
     runtime: &PreviewProductionRuntime<()>,
     state: &mut AppState,
     frame: i64,
-) -> (
-    mondrian_renderer::CpuColorFrame,
-    mondrian_effects::EffectProcessorFeedbackBatch,
-) {
+) -> Arc<ResolvedFrameEvaluation> {
     state.seek(frame).unwrap();
     runtime.synchronize_transport_intent(state.preview_transport_intent());
     let snapshot = state.preview_execution_snapshot(Instant::now());
@@ -85,6 +82,19 @@ fn acquire_working(
         ),
         PreviewGpuFrameState::Loading
     ));
+    evaluation
+}
+
+fn acquire_working(
+    runtime: &PreviewProductionRuntime<()>,
+    state: &mut AppState,
+    frame: i64,
+) -> (
+    mondrian_renderer::CpuColorFrame,
+    mondrian_effects::EffectProcessorFeedbackBatch,
+) {
+    let _evaluation = schedule_working(runtime, state, frame);
+    let snapshot = state.preview_execution_snapshot(Instant::now());
     let deadline = Instant::now() + Duration::from_secs(10);
     let mut feedback = None;
     loop {
@@ -256,6 +266,92 @@ fn verify_time_blur_frame(
     feedback
 }
 
+fn cancel_time_blur_source_wait(
+    runtime: &PreviewProductionRuntime<()>,
+    state: &mut AppState,
+    sources: &std::collections::BTreeMap<i64, mondrian_renderer::CpuColorFrame>,
+    kind: &mondrian_effects::EffectType,
+    frame: i64,
+    destination: i64,
+) {
+    let evaluation = schedule_working(runtime, state, frame);
+    let old_epoch = state.preview_transport_intent().epoch();
+    let old_cancel = runtime.execution.borrow().generation_cancellation();
+    let attempt = runtime.cpu_fallback_in_flight.borrow().as_ref().unwrap().attempt.clone();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    // Drain only the original CPU task transport. Do not serve the Source
+    // request: the actual native invocation must still be waiting at seek.
+    loop {
+        if let Some(result) = runtime.cpu_fallback_task.as_ref().unwrap().try_poll() {
+            match result {
+                PreviewCpuFallbackResult::SourceRequest(request) => {
+                    assert!(request.is_active());
+                    runtime.observe_processor_source_request(*request);
+                    break;
+                }
+                PreviewCpuFallbackResult::Failed(failed) => {
+                    panic!("before actual wait: {}", failed.reason)
+                }
+                PreviewCpuFallbackResult::Ready(_) => {
+                    panic!("temporal invocation completed without its required Source wait")
+                }
+                _ => {}
+            }
+        }
+        assert!(
+            Instant::now() < deadline,
+            "native TimeBlur never reached Source wait"
+        );
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    assert_eq!(runtime.pending_processor_sources.borrow().len(), 1);
+    assert!(!old_cancel.is_canceled());
+    state.seek(destination).unwrap();
+    assert_ne!(state.preview_transport_intent().epoch(), old_epoch);
+    runtime.synchronize_transport_intent(state.preview_transport_intent());
+    assert!(
+        old_cancel.is_canceled(),
+        "public seek must retire original generation authority"
+    );
+    assert!(runtime.pending_processor_sources.borrow().is_empty());
+    assert!(runtime.cpu_fallback_in_flight.borrow().is_none());
+    let clear = runtime
+        .poll_playback_work(None, state.preview_transport_intent())
+        .processor_feedback
+        .expect("seek must deliver the current empty feedback view");
+    assert!(
+        clear.feedback.is_empty(),
+        "old native facts cannot survive retirement"
+    );
+    assert_eq!(clear.scope.key, None);
+    assert_eq!(clear.scope.epoch, state.preview_transport_intent().epoch());
+    assert_eq!(
+        clear.scope.generation,
+        runtime.execution.borrow().generation()
+    );
+    assert!(runtime
+        .frame_store
+        .borrow_mut()
+        .viewer_working_frame(&attempt.output_key)
+        .is_none());
+    drop(evaluation);
+    verify_time_blur_frame(runtime, state, sources, destination, &[-2, -1, 0, 1]);
+    assert!(runtime.pending_processor_sources.borrow().is_empty());
+    assert!(runtime.cpu_fallback_failure.borrow().is_none());
+    assert!(
+        runtime
+            .frame_store
+            .borrow_mut()
+            .viewer_working_frame(&attempt.output_key)
+            .is_none(),
+        "canceled native work must never publish its old output"
+    );
+    assert!(
+        !mondrian_effects::effect_extension_runtime_status(&kind.key()).unwrap().disabled,
+        "scheduler cancellation is not a plugin fault"
+    );
+}
+
 fn install_time_blur_catalog(
     state: &mut AppState,
     binary: &std::path::Path,
@@ -313,6 +409,7 @@ enum TimeBlurNleCase {
     Uniform,
     Varying,
     AuthorHistory,
+    CancelAndRecover,
 }
 
 #[test]
@@ -331,6 +428,12 @@ fn time_blur_varying_media_preserves_fractional_source_selection_and_animation()
 #[ignore = "requires ordinary IPC17 Product, published TimeBlur, catalog restore, FFmpeg and OCIO"]
 fn time_blur_public_parameter_history_and_project_reopen_preserve_temporal_output() {
     qualify_time_blur_nle(TimeBlurNleCase::AuthorHistory);
+}
+
+#[test]
+#[ignore = "requires ordinary IPC17 Product, published TimeBlur, FFmpeg and OCIO"]
+fn time_blur_seek_cancels_actual_source_wait_and_recovers_without_stale_output() {
+    qualify_time_blur_nle(TimeBlurNleCase::CancelAndRecover);
 }
 
 fn qualify_time_blur_nle(case: TimeBlurNleCase) {
@@ -574,6 +677,18 @@ fn qualify_time_blur_nle(case: TimeBlurNleCase) {
         let author_before =
             serde_json::to_value(state.active_sequence().unwrap().find_clip(clip_id).unwrap())
                 .unwrap();
+        if case == TimeBlurNleCase::CancelAndRecover {
+            for (frame, destination) in [(2, 4), (4, 2), (2, 4)] {
+                cancel_time_blur_source_wait(
+                    runtime,
+                    &mut state,
+                    &sources,
+                    &kind,
+                    frame,
+                    destination,
+                );
+            }
+        }
         let mut previous = None;
         for frame in [2, 4, 2] {
             let feedback =

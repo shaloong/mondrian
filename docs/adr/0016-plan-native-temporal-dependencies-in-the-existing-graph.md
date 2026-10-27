@@ -201,7 +201,7 @@ native times2/3/2/2 and divisions4/8/4/1. This covers fractional history/future,
 the plugin's multi-pass image-memory accumulator and temporal Identity. The real
 parameter is `shutterOffset`, with capital O.
 
-The published TimeBlur passes three finite NLE controls with real lossless FFV1
+The published TimeBlur passes four finite NLE controls with real lossless FFV1
 16x16/24fps media, public Timeline placement/curve edits, native feedback and
 2/4/2 seeks. The uniform eight-frame control isolates upstream exposure; the
 varying twelve-frame control changes Y/U/V per frame. Independent source-only
@@ -227,6 +227,17 @@ temporal Preview/Export pixels. This is a new AppState/Runtime/native child in
 the same parent test process, not a desktop GUI process-restart qualification.
 Only TimeBlur is functionally qualified by the bundle installation control.
 
+The cancellation control holds the first real native Source request on the
+existing CPU task transport, before replying, then performs public seek.
+Three2/4,4/2,2/4 waves retire the original generation and reply capabilities.
+The old attempt never publishes working pixels; the current empty feedback
+view has key=None and the new epoch/generation. That empty clearing update is
+required UI state, not stale native feedback or an absent update. Recovery
+reuses the original task/source client and matches independent/Export pixels
+without quarantining the definition. Retain the evaluation Arc through a
+scheduled job, including cancellation; do not let a test accidentally retire
+preparation interest before exercising the transport authority.
+
 A Ready frame evaluation owns the immutable plan; ordinary current-frame Custom
 DSP still belongs to the existing CPU composition task. Its original source
 client resolves late media. The synchronous no-input composition helper cannot
@@ -234,7 +245,10 @@ qualify that path. Consume feedback from `PreviewWorkPoll`, which transfers it
 out of the internal pending slot. Preserve these boundaries in future controls.
 
 The last full App regression at4e51ef86 passes3145/214 ignored. Current uniform,
-varying and public-state TimeBlur controls each run in an isolated process and pass; the
+varying and public-state controls pass after shared scheduling extraction. The
+new cancellation control passes a targeted isolated run after its clearing-view
+assertion was corrected; unrelated controls were not replayed for that assertion
+change. The
 unchanged ordinary regression is retained rather than rerun for an ignored-test
 change. Original1800s ordinary/180s native budgets,
 exit0, empty stderr and settled descendants are retained. This batch changes
@@ -251,7 +265,7 @@ qualification retain their original conditions; they are not new TimeBlur
 product-flow or GPU-interop evidence. Native General/Transition/Paint/Retimer,
 historical input variants above, variable domains, other formats/fielding,
 tiles/upstream RoI/non-unit scale, overlapping action/thread requests, more real
-Temporal plugins, broader TimeBlur placements/retiming, loop/cancellation/encoded
-export, GUI, comparative performance
+Temporal plugins, broader TimeBlur placements/retiming, timed Playback loop,
+cancellation at other phases, encoded export, GUI, comparative performance
 and other platforms remain open. F06/GL remain open; this does not establish
 universal100ms shutdown, whole-heap safety or realtime behavior.
