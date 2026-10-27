@@ -393,7 +393,7 @@ fn author_drain_eligibility_controls_the_real_scoped_dsp_slot_before_owner_hando
             let auxiliary = crate::AudioProcessorAuxiliaryInputContract::default();
             let auxiliary_outputs = crate::AudioProcessorAuxiliaryOutputContract::default();
             let notes = crate::AudioProcessorNoteInputContract::default();
-            let layout = SharedBlockLayout::new(2, 1, 0, 0).unwrap();
+            let layout = SharedBlockLayout::uniform(2, 1, 0, 0).unwrap();
             let context = WorkerProcessContext {
                 musical_time_reference: None,
                 layout,
@@ -569,7 +569,7 @@ fn explicit_parameter_query_returns_to_joined_full_owner_without_flush_process_o
     let auxiliary = crate::AudioProcessorAuxiliaryInputContract::default();
     let outputs = crate::AudioProcessorAuxiliaryOutputContract::default();
     let notes = crate::AudioProcessorNoteInputContract::default();
-    let layout = SharedBlockLayout::new(2, 1, 0, 0).unwrap();
+    let layout = SharedBlockLayout::uniform(2, 1, 0, 0).unwrap();
     let context = WorkerProcessContext {
         musical_time_reference: None,
         layout,

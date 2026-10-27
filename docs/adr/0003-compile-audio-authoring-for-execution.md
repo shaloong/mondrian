@@ -46,9 +46,13 @@ at preparation, applied before destination-width PDC, and followed by Route gain
 at target signal time. Unconnected ports own zero-filled PCM. Equal layouts keep
 the direct path; connected mixed layouts reuse one preallocated, charged mapping
 buffer. This changes neither author state nor the routing/execution authority.
-Additional outputs retain their current Main-layout restriction. IPC21 shared
-storage and both native adapters also remain Main-layout-only: parent and Worker
-reject mixed inputs before that homogeneous storage can be used.
+Additional outputs retain their current Main-layout restriction. IPC22 derives
+shared input capacity from the actual ordered port layouts at both ends, packs
+short blocks at their current frame count, and charges the existing shared-region
+byte extent. Equal-layout regions keep their former offsets; older protocol
+versions refuse. Generic Worker views now retain each input width. CLAP/VST3
+native port negotiation and planes still impose their separate Main-layout
+restriction; generic transport qualification does not open those native paths.
 
 `AudioProgramRuntime` is the shared high-level Implementation used by playback
 and export. It recursively instantiates nested public outputs and binds media
@@ -75,7 +79,7 @@ An entered epoch binds its exact optional activity on the first successful
 render. A change refuses before native callbacks, PCM publication or history
 consumption and requires a fresh epoch. Unentered stateless evaluation can change
 activity, invalidating nested prefetched PCM through the existing cache owner.
-IPC21 retains None/Stopped/Playing in fixed 32-byte Process tags; old
+IPC22 preserves None/Stopped/Playing in fixed 32-byte Process tags; old
 helpers refuse. The VST3 borrowed processing role updates only its ProcessContext,
 after canonical time installation, honoring requested/available validity. CLAP
 sets IS_PLAYING only for explicit Playing. Ordinary Audio/SDK tests and App/Export
@@ -175,7 +179,7 @@ reference participates in compiled/closure identity, preparation, Ready and
 callback binding; parameter handoffs/configuration seeds cannot replace it.
 Document schema35 preserves unknown meter when migrating schema34 and refuses
 nonnull meter mislabeled as legacy. The prior reference migration remains
-chained; container/library versions are unchanged. IPC21 carries a required
+chained; container/library versions are unchanged. IPC22 carries a required
 nullable reference without a second clock registry.
 
 Both adapters floor bars before format rounding. CLAP independently checks its

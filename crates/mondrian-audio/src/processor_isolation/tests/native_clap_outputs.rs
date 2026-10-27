@@ -556,7 +556,7 @@ mod installed {
             mondrian_core::ParameterId::new_static("clap.param.17"),
             mondrian_core::ParameterId::new_static("clap.param.19"),
         ];
-        let layout = SharedBlockLayout::new(
+        let layout = SharedBlockLayout::uniform(
             render.max_block_frames,
             render.channel_count(),
             inputs.buses.len(),

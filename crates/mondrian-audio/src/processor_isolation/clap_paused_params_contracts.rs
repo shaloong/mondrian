@@ -556,7 +556,7 @@ fn clap_paused_gui_requests_actual_audio_flush_without_process_old_api() {
     }
     .parameter_id()
     .expect("actual stable parameter");
-    let layout = super::super::protocol::SharedBlockLayout::new(16, 2, 0, 1)
+    let layout = super::super::protocol::SharedBlockLayout::uniform(16, 2, 0, 1)
         .expect("actual one-lane layout");
     let mut aligned = vec![0_u64; layout.total_bytes / 8];
     let shared: &mut [u8] = bytemuck::cast_slice_mut(&mut aligned);
@@ -780,7 +780,7 @@ fn exchange_another_paused_gui_value(worker: &mut dyn IsolatedAudioProcessorWork
     }
     .parameter_id()
     .expect("actual stable parameter");
-    let layout = super::super::protocol::SharedBlockLayout::new(16, 2, 0, 1).expect("layout");
+    let layout = super::super::protocol::SharedBlockLayout::uniform(16, 2, 0, 1).expect("layout");
     let mut aligned = vec![0_u64; layout.total_bytes / 8];
     let shared = bytemuck::cast_slice_mut(&mut aligned);
     let auxiliary = AudioProcessorAuxiliaryInputContract::default();
@@ -1360,7 +1360,7 @@ fn emit_paused_host_reference_controls(worker: &mut dyn IsolatedAudioProcessorWo
         hidden: false,
     };
     let ids = [descriptor.parameter_id().expect("same actual schema")];
-    let layout = super::super::protocol::SharedBlockLayout::new(16, 2, 0, 1).expect("layout");
+    let layout = super::super::protocol::SharedBlockLayout::uniform(16, 2, 0, 1).expect("layout");
     let mut aligned = vec![0_u64; layout.total_bytes / 8];
     let shared = bytemuck::cast_slice_mut(&mut aligned);
     let auxiliary = AudioProcessorAuxiliaryInputContract::default();

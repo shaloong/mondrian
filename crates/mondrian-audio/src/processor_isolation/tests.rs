@@ -17,6 +17,7 @@ enum TestBehavior {
     Hang,
     ContractDrift,
     ObservedPending,
+    MixedAux,
 }
 
 impl TestBehavior {
@@ -27,6 +28,7 @@ impl TestBehavior {
             Self::Hang => 2,
             Self::ContractDrift => 3,
             Self::ObservedPending => 5,
+            Self::MixedAux => 6,
         }]
     }
 
@@ -37,6 +39,7 @@ impl TestBehavior {
             [2] => Ok(Self::Hang),
             [3] => Ok(Self::ContractDrift),
             [5] => Ok(Self::ObservedPending),
+            [6] => Ok(Self::MixedAux),
             _ => Err(AudioProcessorHostError::InstanceCreation(
                 "unknown isolated test behavior".to_owned(),
             )),
@@ -170,7 +173,10 @@ impl IsolatedAudioProcessorWorker for TestWorker {
             TestBehavior::Hang => loop {
                 std::thread::sleep(Duration::from_secs(1));
             },
-            TestBehavior::Normal | TestBehavior::ContractDrift | TestBehavior::ObservedPending => {}
+            TestBehavior::Normal
+            | TestBehavior::ContractDrift
+            | TestBehavior::ObservedPending
+            | TestBehavior::MixedAux => {}
         }
         if self.contract.requires_state_entry() && !self.entered {
             return Err(AudioProcessorHostError::StateEntry(
@@ -181,6 +187,9 @@ impl IsolatedAudioProcessorWorker for TestWorker {
             return Err(invalid_contract(
                 "test worker music differs from prepared request",
             ));
+        }
+        if self.behavior == TestBehavior::MixedAux {
+            return process_mixed_test_block(&mut block, &self.auxiliary);
         }
         let gain = block
             .parameter_events(0)
@@ -200,6 +209,44 @@ impl IsolatedAudioProcessorWorker for TestWorker {
         }
         Ok(())
     }
+}
+
+fn process_mixed_test_block(
+    block: &mut IsolatedAudioProcessorWorkerBlock<'_>,
+    contract: &AudioProcessorAuxiliaryInputContract,
+) -> Result<(), AudioProcessorHostError> {
+    let frames = block.frames();
+    for (index, (key, layout)) in [
+        ("mono", AudioChannelLayout::Mono),
+        ("stereo", AudioChannelLayout::Stereo),
+        ("silent", AudioChannelLayout::Mono),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        assert_eq!(contract.buses[index].bus_key, key);
+        assert_eq!(contract.buses[index].channel_layout, layout);
+        let pcm = block.auxiliary_input(key).expect("real child port view");
+        assert_eq!(pcm.len(), frames * layout.channel_count());
+        if key == "silent" {
+            assert!(pcm.iter().all(|sample| *sample == 0.0));
+        }
+    }
+    assert!(block.auxiliary_input("absent").is_none());
+    let channels = block.channel_layout().channel_count();
+    let (main, mono) = block.main_and_auxiliary_input("mono").unwrap();
+    for (frame, sample) in main.chunks_exact_mut(channels).zip(mono) {
+        for value in frame {
+            *value += 2.0 * sample;
+        }
+    }
+    let (main, stereo) = block.main_and_auxiliary_input("stereo").unwrap();
+    for (frame, pair) in main.chunks_exact_mut(channels).zip(stereo.chunks_exact(2)) {
+        for value in frame {
+            *value += 3.0 * pair[0] + 5.0 * pair[1];
+        }
+    }
+    Ok(())
 }
 
 #[test]
@@ -283,15 +330,37 @@ fn native_probe_evidence_consumes_names_once_and_keeps_static_validation() {
 }
 
 #[test]
-fn isolated_shared_storage_refuses_mixed_input_layout_before_worker_preparation() {
+fn isolated_shared_storage_refuses_unmappable_input_layout_before_worker_preparation() {
     let directory = tempfile::tempdir().unwrap();
     let mut spec = cold_test_spec(directory.path(), cold_input_names(), false);
-    assert_eq!(spec.render_contract.channel_layout, AudioChannelLayout::Stereo);
-    spec.auxiliary_inputs.buses[0].channel_layout = AudioChannelLayout::Mono;
-    spec.auxiliary_inputs.validate(AudioChannelLayout::Stereo).unwrap();
+    assert_eq!(
+        spec.render_contract.channel_layout,
+        AudioChannelLayout::Stereo
+    );
+    spec.auxiliary_inputs.buses[0].channel_layout = AudioChannelLayout::discrete(3).unwrap();
+    assert!(spec.auxiliary_inputs.validate(AudioChannelLayout::Stereo).is_err());
     let error = IsolatedAudioProcessorFactory::prepare(spec).unwrap_err();
-    assert!(error.to_string().contains("storage requires the exact Main layout"));
+    assert!(error.to_string().contains("no standard mapping"));
     assert!(cold_prepared_pids(directory.path()).is_empty());
+}
+
+#[test]
+fn isolated_mixed_input_capacity_is_charged_from_exact_shared_extent() {
+    let directory = tempfile::tempdir().unwrap();
+    let uniform_spec = cold_test_spec(directory.path(), cold_input_names(), false);
+    let mut mixed_spec = uniform_spec.clone();
+    mixed_spec.auxiliary_inputs.buses[0].channel_layout = AudioChannelLayout::Mono;
+    let uniform = IsolatedAudioProcessorFactory::prepare(uniform_spec).unwrap();
+    let mixed = IsolatedAudioProcessorFactory::prepare(mixed_spec).unwrap();
+    // Main: 4*2 floats; Aux: 4*1 + 4*2 floats, no parameter or output regions.
+    assert_eq!(uniform.layout.total_bytes, 96);
+    assert_eq!(mixed.layout.total_bytes, 80);
+    assert_eq!(
+        uniform.execution_contract().session_scratch_bytes()
+            - mixed.execution_contract().session_scratch_bytes(),
+        16
+    );
+    assert_eq!(cold_prepared_pids(directory.path()).len(), 2);
 }
 
 fn check_native_probe_evidence_consumption(note_input: bool) {
@@ -1792,19 +1861,19 @@ impl AudioProcessorAudioIo for TestAudioIo {
 mod native_performance;
 
 mod native_clap_note_metadata;
-mod native_transport;
 #[cfg(windows)]
 mod native_meter;
+mod native_transport;
 #[cfg(target_os = "windows")]
 mod native_vst3_canonical_notes;
 #[cfg(target_os = "windows")]
 mod native_vst3_note_worker;
 #[cfg(target_os = "windows")]
+mod native_vst3_outputs;
+#[cfg(target_os = "windows")]
 mod native_vst3_rescan;
 #[cfg(target_os = "windows")]
 mod native_vst3_zero_input_runtime;
-#[cfg(target_os = "windows")]
-mod native_vst3_outputs;
 
 mod native_clap_restart;
 mod native_restart;
@@ -1870,7 +1939,7 @@ pub(super) fn pure_seed_factory(
     spec.startup_timeout = Duration::from_millis(301);
     spec.state_entry_timeout = Duration::from_millis(401);
     spec.operation_timeout = Duration::from_millis(501);
-    let layout = SharedBlockLayout::new(4, 2, 0, 0).expect("fixed mapping layout");
+    let layout = SharedBlockLayout::uniform(4, 2, 0, 0).expect("fixed mapping layout");
     let execution_contract = spec
         .plugin_execution_contract
         .with_additional_session_scratch_bytes(layout.total_bytes)

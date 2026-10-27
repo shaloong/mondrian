@@ -117,12 +117,14 @@ The table describes implementation boundaries. Qualification below states the te
 Shared auxiliary-input layouts, 2026-10-27: finite Windows owned controls verify
 Mono/Stereo Main with simultaneous Mono/Stereo and unconnected silent inputs,
 two-route summing, PDC, target-time gain automation, partitioning and seek in
-both processing modes/backends. All 877 ordinary Audio controls pass (193 original
-ignored, zero filtered, empty stderr). The two original CLAP/VST3 native sidechain
-gates also pass with the rebuilt normal Product and original ownership budgets.
-The mixed-layout grant is in-process only; parent and Worker still refuse mixed
-isolated storage. Broader layouts, native mixed-port sound, realtime/performance
-and other platforms remain unqualified. See the
+both modes/backends, in-process and through actual generic child processing.
+All 881 ordinary Audio controls pass (193 original ignored, zero filtered,
+empty stderr). IPC22 has independent region/overflow, exact shared-byte fee and
+old/future-version rejection controls. The two original CLAP/VST3 native
+sidechain gates also pass with the matching rebuilt normal Product and original
+ownership budgets. Native mixed-port negotiation/planes remain refused; broader
+layouts, third-party mixed-port sound, realtime/performance and other platforms
+remain unqualified. See the
 [shared contract](../adr/0003-compile-audio-authoring-for-execution.md) and
 [owned PCM controls](../../crates/mondrian-audio/src/tests/mixed_auxiliary_inputs.rs).
 

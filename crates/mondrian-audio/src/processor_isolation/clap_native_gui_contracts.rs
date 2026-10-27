@@ -553,8 +553,8 @@ fn clap_native_gui_idle_timer_and_callback_after_real_dsp_old_api() {
         before < 200,
         "preparation must leave a legal continuously requested callback pending"
     );
-    let layout =
-        super::super::protocol::SharedBlockLayout::new(16, 2, 0, 0).expect("actual shared layout");
+    let layout = super::super::protocol::SharedBlockLayout::uniform(16, 2, 0, 0)
+        .expect("actual shared layout");
     let mut aligned = vec![0_u64; layout.total_bytes / 8];
     let shared: &mut [u8] = bytemuck::cast_slice_mut(&mut aligned);
     for bytes in shared[..8 * 2 * 4].chunks_exact_mut(4) {
@@ -640,7 +640,7 @@ fn clap_native_gui_closed_true_acknowledges_destroy_without_hide() {
     worker.enter_state(0).expect("Enter");
     let binding = bind_and_open(worker.as_mut());
     let profile = worker.native_worker_lane_resources().expect("actual Windows profile");
-    let layout = super::super::protocol::SharedBlockLayout::new(16, 2, 0, 0).expect("layout");
+    let layout = super::super::protocol::SharedBlockLayout::uniform(16, 2, 0, 0).expect("layout");
     let mut aligned = vec![0_u64; layout.total_bytes / 8];
     let shared: &mut [u8] = bytemuck::cast_slice_mut(&mut aligned);
     let auxiliary_inputs = AudioProcessorAuxiliaryInputContract::default();
@@ -786,8 +786,8 @@ fn native_entry_binding_clap_first_signal_keeps_real_idle_gui_without_reset_old_
     assert!(
         matches!(worker.bind_native_audio_object(binding).expect("current same-object binding"),crate::NativeAudioObjectBindOutcome::Bound(receipt) if receipt.binding()==binding.binding)
     );
-    let layout =
-        super::super::protocol::SharedBlockLayout::new(16, 2, 0, 0).expect("real mapped layout");
+    let layout = super::super::protocol::SharedBlockLayout::uniform(16, 2, 0, 0)
+        .expect("real mapped layout");
     let mut aligned = vec![0_u64; layout.total_bytes / 8];
     let shared: &mut [u8] = bytemuck::cast_slice_mut(&mut aligned);
     for bytes in shared[..8 * 2 * 4].chunks_exact_mut(4) {

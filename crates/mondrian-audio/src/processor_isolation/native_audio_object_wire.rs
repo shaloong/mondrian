@@ -582,15 +582,15 @@ mod native_object_wire_contracts {
         )
         .expect("correlated acknowledgement");
         assert_eq!(bytes.len(), 40);
-        for version in [8_u32, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 22] {
+        for version in [8_u32, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 23] {
             let mut old = bytes.clone();
             old[4..8].copy_from_slice(&version.to_le_bytes());
             assert!(read_bind_reply(&mut Cursor::new(old), request).is_err());
         }
         assert_eq!(
             &bytes[..12],
-            &[77, 65, 79, 66, 21, 0, 0, 0, 3, 0, 0, 0],
-            "single current V21 schema"
+            &[77, 65, 79, 66, 22, 0, 0, 0, 3, 0, 0, 0],
+            "single current V22 schema"
         );
         assert_eq!(
             read_bind_reply(&mut Cursor::new(bytes.clone()), request).expect("same binding/object"),
@@ -672,8 +672,10 @@ mod native_object_wire_contracts {
         };
         let mut bytes = Vec::new();
         command.write_to(&mut bytes).expect("current header");
-        assert_eq!(&bytes[4..12], &[21, 0, 0, 0, 9, 0, 0, 0]);
-        for version in [5_u32, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 22] {
+        assert_eq!(&bytes[4..12], &[22, 0, 0, 0, 9, 0, 0, 0]);
+        for version in [
+            5_u32, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 23,
+        ] {
             let mut old = bytes.clone();
             old[4..8].copy_from_slice(&version.to_le_bytes());
             assert!(
@@ -755,7 +757,7 @@ mod native_log_wire_contracts {
         let mut bytes = Vec::new();
         write_reply(&mut bytes, ObjectReply::Observation(&expected))
             .expect("one bounded current response");
-        assert_eq!(&bytes[..12], &[77, 65, 79, 66, 21, 0, 0, 0, 1, 0, 0, 0]);
+        assert_eq!(&bytes[..12], &[77, 65, 79, 66, 22, 0, 0, 0, 1, 0, 0, 0]);
         assert_eq!(
             &bytes[17..37],
             &[0; 20],
@@ -874,7 +876,7 @@ mod native_preflight_snapshot_existing_wire_contracts {
         // Independent byte oracle, not the decoder or a mirrored field helper.
         let mut expected = Vec::new();
         expected.extend_from_slice(b"MAOB");
-        expected.extend_from_slice(&21_u32.to_le_bytes());
+        expected.extend_from_slice(&22_u32.to_le_bytes());
         expected.extend_from_slice(&1_u32.to_le_bytes());
         expected.extend_from_slice(&127_u32.to_le_bytes());
         expected.push(0);

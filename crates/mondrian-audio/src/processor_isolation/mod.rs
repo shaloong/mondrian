@@ -75,21 +75,6 @@ use std::sync::Arc;
 use std::time::Duration;
 use supervisor::SupervisedAudioWorker;
 
-// IPC21 packs every auxiliary input at Main width. Keep this storage
-// restriction at both ends even when the shared in-process host admits a mix.
-fn validate_isolated_auxiliary_inputs(
-    inputs: &AudioProcessorAuxiliaryInputContract,
-    main_layout: AudioChannelLayout,
-) -> Result<(), AudioProcessorHostError> {
-    inputs.validate(main_layout)?;
-    if inputs.buses.iter().any(|bus| bus.channel_layout != main_layout) {
-        return Err(invalid_contract(
-            "isolated auxiliary input storage requires the exact Main layout",
-        ));
-    }
-    Ok(())
-}
-
 pub use native_configuration_seed::{
     NativeConfigurationOwnedSeed, NativeConfigurationSeedOutcome, NativeConfigurationSeedReceipt,
     NativeConfigurationSeedRefusal, NativeConfigurationSeedRequest, NativeConfigurationSeedTicket,
@@ -327,10 +312,7 @@ impl IsolatedAudioProcessorWorkerSpec {
                 "isolated Worker path, payload, render extent, deadlines, or parameter capacity is invalid",
             ));
         }
-        validate_isolated_auxiliary_inputs(
-            &self.auxiliary_inputs,
-            self.render_contract.channel_layout,
-        )?;
+        self.auxiliary_inputs.validate(self.render_contract.channel_layout)?;
         self.auxiliary_outputs.validate(self.render_contract.channel_layout)?;
         if self.auxiliary_outputs.buses.len() > 31 {
             return Err(invalid_contract(
@@ -697,7 +679,7 @@ impl IsolatedAudioProcessorFactory {
         let layout = SharedBlockLayout::new(
             spec.render_contract.max_block_frames,
             spec.render_contract.channel_count(),
-            spec.auxiliary_inputs.buses.len(),
+            &spec.auxiliary_inputs,
             spec.parameter_ids.len(),
         )?
         .with_auxiliary_outputs(spec.auxiliary_outputs.buses.len())?
@@ -1533,9 +1515,8 @@ impl AudioProcessor for IsolatedAudioProcessor {
             }
             main.copy_from_slice(source_main);
 
-            let auxiliary_samples = samples
-                .checked_mul(self.auxiliary_inputs.buses.len())
-                .ok_or_else(|| invalid_contract("isolated auxiliary extent overflowed"))?;
+            let auxiliary_samples =
+                protocol::auxiliary_input_samples(&self.auxiliary_inputs, request.frames)?;
             let auxiliary_bytes = auxiliary_samples
                 .checked_mul(size_of::<f32>())
                 .ok_or_else(|| invalid_contract("isolated auxiliary bytes overflowed"))?;
@@ -1545,19 +1526,21 @@ impl AudioProcessor for IsolatedAudioProcessor {
                     .ok_or_else(|| invalid_contract("isolated auxiliary range is unavailable"))?,
             )
             .map_err(|_| invalid_contract("isolated auxiliary storage is not aligned"))?;
-            for (bus_index, bus) in self.auxiliary_inputs.buses.iter().enumerate() {
-                let start = bus_index
-                    .checked_mul(samples)
-                    .ok_or_else(|| invalid_contract("isolated auxiliary offset overflowed"))?;
+            let mut start = 0_usize;
+            for bus in &self.auxiliary_inputs.buses {
+                let bus_samples = request
+                    .frames
+                    .checked_mul(bus.channel_layout.channel_count())
+                    .ok_or_else(|| invalid_contract("isolated auxiliary extent overflowed"))?;
                 let end = start
-                    .checked_add(samples)
+                    .checked_add(bus_samples)
                     .ok_or_else(|| invalid_contract("isolated auxiliary range overflowed"))?;
                 let input = audio.auxiliary_input(&bus.bus_key).ok_or_else(|| {
                     invalid_contract("isolated auxiliary bus is absent from the prepared callback")
                 })?;
                 if input.channel_layout != bus.channel_layout
                     || input.frames != request.frames
-                    || input.interleaved.len() != samples
+                    || input.interleaved.len() != bus_samples
                 {
                     self.failed = true;
                     return Err(invalid_contract(
@@ -1565,6 +1548,7 @@ impl AudioProcessor for IsolatedAudioProcessor {
                     ));
                 }
                 auxiliary[start..end].copy_from_slice(input.interleaved);
+                start = end;
             }
 
             let event_storage: &mut [SharedParameterEvent] = bytemuck::try_cast_slice_mut(
@@ -2276,22 +2260,26 @@ impl<'a> IsolatedAudioProcessorWorkerBlock<'a> {
 
     /// Read one exact auxiliary bus by its stable definition key.
     pub fn auxiliary_input(&self, bus_key: &str) -> Option<&[f32]> {
-        let bus_index =
-            self.auxiliary_inputs.buses.iter().position(|bus| bus.bus_key == bus_key)?;
-        let samples = self.frames.checked_mul(self.render_contract.channel_count())?;
-        let start = bus_index.checked_mul(samples)?;
-        let end = start.checked_add(samples)?;
-        self.auxiliary.get(start..end)
+        self.auxiliary.get(self.auxiliary_input_range(bus_key)?)
     }
 
     /// Borrow mutable main PCM and one disjoint read-only auxiliary bus together.
     pub fn main_and_auxiliary_input(&mut self, bus_key: &str) -> Option<(&mut [f32], &[f32])> {
-        let bus_index =
-            self.auxiliary_inputs.buses.iter().position(|bus| bus.bus_key == bus_key)?;
-        let samples = self.frames.checked_mul(self.render_contract.channel_count())?;
-        let start = bus_index.checked_mul(samples)?;
-        let end = start.checked_add(samples)?;
-        Some((self.main, self.auxiliary.get(start..end)?))
+        let range = self.auxiliary_input_range(bus_key)?;
+        Some((self.main, self.auxiliary.get(range)?))
+    }
+
+    fn auxiliary_input_range(&self, bus_key: &str) -> Option<std::ops::Range<usize>> {
+        let mut start = 0_usize;
+        for bus in &self.auxiliary_inputs.buses {
+            let samples = self.frames.checked_mul(bus.channel_layout.channel_count())?;
+            let end = start.checked_add(samples)?;
+            if bus.bus_key == bus_key {
+                return Some(start..end);
+            }
+            start = end;
+        }
+        None
     }
 
     /// Number of stable parameter lanes.
@@ -2333,7 +2321,7 @@ mod note_spec_contracts {
     #[test]
     fn native_child_parent_slot_adds_exactly_one_existing_session_charge() {
         let spec = spec();
-        let layout = SharedBlockLayout::new(2, 1, 0, 0).unwrap();
+        let layout = SharedBlockLayout::uniform(2, 1, 0, 0).unwrap();
         let base = spec
             .plugin_execution_contract
             .session_scratch_bytes()
@@ -2464,7 +2452,7 @@ mod note_spec_contracts {
             "parameters": [], "parameter_ids": []
         }))
         .unwrap();
-        let layout = SharedBlockLayout::new(2, 1, 0, 0).unwrap();
+        let layout = SharedBlockLayout::uniform(2, 1, 0, 0).unwrap();
         let factory = IsolatedAudioProcessorFactory {
             execution_contract: IsolatedAudioProcessorFactory::requested_execution_contract(
                 &spec, layout,
@@ -2603,7 +2591,7 @@ mod note_spec_contracts {
             "parameters": [], "parameter_ids": [],
         }))
         .unwrap();
-        let layout = SharedBlockLayout::new(2, 1, 0, 0).unwrap();
+        let layout = SharedBlockLayout::uniform(2, 1, 0, 0).unwrap();
         let factory = IsolatedAudioProcessorFactory {
             execution_contract: IsolatedAudioProcessorFactory::requested_execution_contract(
                 &spec, layout,
@@ -2787,7 +2775,7 @@ mod note_spec_contracts {
             cloned.note_input_contract.ports.as_ptr(),
             spec.note_input_contract.ports.as_ptr()
         );
-        let layout = SharedBlockLayout::new(2, 1, 0, 0).unwrap().with_notes(2, 2).unwrap();
+        let layout = SharedBlockLayout::uniform(2, 1, 0, 0).unwrap().with_notes(2, 2).unwrap();
         // Manual metadata fixture: no validation launch or native qualification.
         let factory = IsolatedAudioProcessorFactory {
             input_names: Vec::new(),

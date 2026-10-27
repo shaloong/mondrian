@@ -214,7 +214,11 @@ impl AudioPcmSource for MixedSource {
     }
 }
 
-fn check_mixed_auxiliary_inputs(delayed_main: bool, automated: bool) {
+fn check_mixed_auxiliary_inputs(
+    delayed_main: bool,
+    automated: bool,
+    resolver: &dyn AudioProcessorResolver,
+) {
     for layout in [AudioChannelLayout::Mono, AudioChannelLayout::Stereo] {
         let (compiled, main_edit) = fixture(layout, delayed_main, automated);
         for mode in [AudioProcessingMode::Realtime, AudioProcessingMode::Offline] {
@@ -238,7 +242,7 @@ fn check_mixed_auxiliary_inputs(delayed_main: bool, automated: bool) {
                         Arc::clone(&compiled),
                         contract,
                         backend,
-                        &MixedAuxResolver,
+                        resolver,
                     )
                     .expect("exact per-port layouts and PDC budget must prepare"),
                 );
@@ -259,7 +263,7 @@ fn check_mixed_auxiliary_inputs(delayed_main: bool, automated: bool) {
                                 ..contract
                             },
                             backend,
-                            &MixedAuxResolver
+                            resolver
                         ),
                         Err(AudioCompileError::CompensationScratchBudgetExceeded { .. })
                     ));
@@ -341,12 +345,67 @@ fn check_mixed_auxiliary_inputs(delayed_main: bool, automated: bool) {
 
 #[test]
 fn mixed_auxiliary_inputs_preserve_port_layout_and_partition_pcm() {
-    check_mixed_auxiliary_inputs(false, false);
+    check_mixed_auxiliary_inputs(false, false, &MixedAuxResolver);
 }
 
 #[test]
 fn mixed_auxiliary_input_pdc_and_target_time_gain() {
-    check_mixed_auxiliary_inputs(true, true);
+    check_mixed_auxiliary_inputs(true, true, &MixedAuxResolver);
+}
+
+struct IsolatedMixedAuxResolver;
+impl AudioProcessorResolver for IsolatedMixedAuxResolver {
+    fn prepare(
+        &self,
+        request: AudioProcessorPrepareRequest<'_>,
+    ) -> Result<Arc<dyn AudioProcessorFactory>, AudioProcessorHostError> {
+        use crate::processor_isolation::{
+            IsolatedAudioProcessorFactory, IsolatedAudioProcessorWorkerSpec,
+        };
+        if !matches!(request.definition(),
+            mondrian_timeline::AudioProcessorDefinitionRef::Clap { plugin_id, .. }
+                if plugin_id == "test.mondrian.mixed_aux")
+        {
+            return MixedAuxResolver.prepare(request);
+        }
+        let contract = AudioProcessorExecutionContract::new(
+            0,
+            AudioProcessorTail::None,
+            true,
+            true,
+            true,
+            128,
+        )?;
+        let spec = IsolatedAudioProcessorWorkerSpec::new(
+            std::env::current_exe().unwrap(),
+            vec![6],
+            contract,
+            MixedAuxFactory.auxiliary_input_contract(),
+            Vec::new(),
+            request.render_contract(),
+        )?
+        .with_helper_arguments(vec![
+            "processor_isolation::tests::isolated_worker_child_entry".into(),
+            "--exact".into(),
+            "--nocapture".into(),
+        ])
+        .with_dispatch_argument(None)
+        .with_deadlines(
+            std::time::Duration::from_secs(5),
+            std::time::Duration::from_secs(2),
+        )?;
+        Ok(IsolatedAudioProcessorFactory::prepare(spec)?)
+    }
+}
+
+#[test]
+fn isolated_mixed_auxiliary_inputs_preserve_port_layout_and_partition_pcm() {
+    check_mixed_auxiliary_inputs(false, false, &IsolatedMixedAuxResolver);
+}
+
+#[test]
+fn isolated_mixed_auxiliary_input_pdc_and_target_time_gain() {
+    check_mixed_auxiliary_inputs(true, true, &IsolatedMixedAuxResolver);
 }
 
 #[test]

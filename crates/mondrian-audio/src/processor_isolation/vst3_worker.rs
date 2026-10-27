@@ -1,9 +1,9 @@
 //! VST3 audio effects run only inside the supervised native worker.
 
 mod author_state_entry;
-mod initial_parameter_values;
 #[cfg(target_os = "windows")]
 mod controller_projection;
+mod initial_parameter_values;
 #[cfg(test)]
 mod initial_parameter_values_tests;
 mod native_author;
@@ -3915,7 +3915,8 @@ mod bus_contract_tests {
             "all writable values, including nonautomatable ones, require original COM storage"
         );
         let shared =
-            super::super::protocol::SharedBlockLayout::new(512, 2, 0, parameters.len()).unwrap();
+            super::super::protocol::SharedBlockLayout::uniform(512, 2, 0, parameters.len())
+                .unwrap();
         assert_eq!(shared.event_capacity, 512 * 2855);
         assert_eq!(
             shared.total_bytes - shared.events_offset,

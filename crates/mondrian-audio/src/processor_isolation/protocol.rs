@@ -9,7 +9,7 @@ use mondrian_core::{AudioChannelLayout, ParameterId};
 use serde::{Deserialize, Serialize};
 use std::io::{self, Read, Write};
 
-pub(super) const PROTOCOL_VERSION: u32 = 21;
+pub(super) const PROTOCOL_VERSION: u32 = 22;
 pub(super) const MAX_CONTROL_FRAME_BYTES: usize = 1024 * 1024;
 pub(super) const MAX_PREPARATION_PAYLOAD_BYTES: usize = MAX_CONTROL_FRAME_BYTES / 2;
 
@@ -680,6 +680,18 @@ impl SharedNoteEnd {
     }
 }
 
+pub(super) fn auxiliary_input_samples(
+    inputs: &AudioProcessorAuxiliaryInputContract,
+    frames: usize,
+) -> Result<usize, AudioProcessorHostError> {
+    inputs.buses.iter().try_fold(0_usize, |samples, bus| {
+        frames
+            .checked_mul(bus.channel_layout.channel_count())
+            .and_then(|bus_samples| samples.checked_add(bus_samples))
+            .ok_or_else(|| invalid_contract("isolated auxiliary-bus capacity overflowed"))
+    })
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct SharedBlockLayout {
     pub main_offset: usize,
@@ -701,15 +713,47 @@ impl SharedBlockLayout {
     pub(super) fn new(
         max_block_frames: usize,
         channel_count: usize,
+        auxiliary_inputs: &AudioProcessorAuxiliaryInputContract,
+        parameter_lane_count: usize,
+    ) -> Result<Self, AudioProcessorHostError> {
+        Self::with_auxiliary_samples(
+            max_block_frames,
+            channel_count,
+            auxiliary_input_samples(auxiliary_inputs, max_block_frames)?,
+            parameter_lane_count,
+        )
+    }
+
+    // Independent uniform-layout controls keep their former scalar inputs and
+    // literal expected bytes. Production callers must supply the real contract.
+    #[cfg(test)]
+    pub(super) fn uniform(
+        max_block_frames: usize,
+        channel_count: usize,
         auxiliary_bus_count: usize,
+        parameter_lane_count: usize,
+    ) -> Result<Self, AudioProcessorHostError> {
+        let auxiliary_samples = max_block_frames
+            .checked_mul(channel_count)
+            .and_then(|samples| samples.checked_mul(auxiliary_bus_count))
+            .ok_or_else(|| invalid_contract("isolated auxiliary-bus capacity overflowed"))?;
+        Self::with_auxiliary_samples(
+            max_block_frames,
+            channel_count,
+            auxiliary_samples,
+            parameter_lane_count,
+        )
+    }
+
+    fn with_auxiliary_samples(
+        max_block_frames: usize,
+        channel_count: usize,
+        auxiliary_samples: usize,
         parameter_lane_count: usize,
     ) -> Result<Self, AudioProcessorHostError> {
         let main_samples = max_block_frames
             .checked_mul(channel_count)
             .ok_or_else(|| invalid_contract("isolated main-bus capacity overflowed"))?;
-        let auxiliary_samples = main_samples
-            .checked_mul(auxiliary_bus_count)
-            .ok_or_else(|| invalid_contract("isolated auxiliary-bus capacity overflowed"))?;
         let event_capacity = max_block_frames
             .checked_mul(parameter_lane_count)
             .ok_or_else(|| invalid_contract("isolated parameter-event capacity overflowed"))?;
@@ -904,15 +948,15 @@ mod response_write_qualification {
         }
     }
 
-    // Independent protocol-v21 wire bytes: MAPR, version=21, success=0, detail=0.
-    const COMPLETED_WIRE: [u8; 16] = [77, 65, 80, 82, 21, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+    // Independent protocol-v22 wire bytes: MAPR, version=22, success=0, detail=0.
+    const COMPLETED_WIRE: [u8; 16] = [77, 65, 80, 82, 22, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
 
     #[test]
     fn native_response_wire_completed_has_one_nonempty_header_write() -> io::Result<()> {
         let mut writer = RecordedWriter::new(usize::MAX);
         WorkerResponse::Completed.write_to(&mut writer)?;
         assert_eq!(writer.written(), COMPLETED_WIRE);
-        for version in [8_u32, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 22] {
+        for version in [8_u32, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 23] {
             let mut old = COMPLETED_WIRE;
             old[4..8].copy_from_slice(&version.to_le_bytes());
             assert!(WorkerResponse::read_from(&mut old.as_slice()).is_err());
@@ -931,7 +975,7 @@ mod response_write_qualification {
         let mut writer = RecordedWriter::new(usize::MAX);
         WorkerResponse::Failed("bad-λ".to_owned()).write_to(&mut writer)?;
         let expected = [
-            77, 65, 80, 82, 21, 0, 0, 0, 1, 0, 0, 0, 6, 0, 0, 0, 98, 97, 100, 45, 206, 187,
+            77, 65, 80, 82, 22, 0, 0, 0, 1, 0, 0, 0, 6, 0, 0, 0, 98, 97, 100, 45, 206, 187,
         ];
         assert_eq!(writer.written(), expected);
         assert_eq!(writer.nonempty_writes, 2);
@@ -948,7 +992,7 @@ mod response_write_qualification {
         let mut writer = RecordedWriter::new(3);
         WorkerResponse::Failed("bad-λ".to_owned()).write_to(&mut writer)?;
         let expected = [
-            77, 65, 80, 82, 21, 0, 0, 0, 1, 0, 0, 0, 6, 0, 0, 0, 98, 97, 100, 45, 206, 187,
+            77, 65, 80, 82, 22, 0, 0, 0, 1, 0, 0, 0, 6, 0, 0, 0, 98, 97, 100, 45, 206, 187,
         ];
         assert_eq!(writer.written(), expected);
         assert_eq!(writer.nonempty_writes, 8);
@@ -1060,7 +1104,7 @@ mod pending_tests {
                     32,
                     "fixed header plus exact sixteen-byte carrier"
                 );
-                assert_eq!(&encoded[..8], &[77, 65, 80, 82, 21, 0, 0, 0]);
+                assert_eq!(&encoded[..8], &[77, 65, 80, 82, 22, 0, 0, 0]);
                 let status = if matches!(response, WorkerResponse::DeferredForConfiguration(_)) {
                     3_u32
                 } else {
@@ -1118,7 +1162,8 @@ mod pending_tests {
             (4, 18),
             (4, 19),
             (4, 20),
-            (4, 22),
+            (4, 21),
+            (4, 23),
         ] {
             let mut invalid = canonical.clone();
             invalid[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
@@ -1177,7 +1222,7 @@ mod note_protocol_tests {
 
     #[test]
     fn note_free_layout_retains_exact_pcm_parameter_prefix_and_notes_append() {
-        let old = SharedBlockLayout::new(3, 2, 1, 2).unwrap();
+        let old = SharedBlockLayout::uniform(3, 2, 1, 2).unwrap();
         assert_eq!(
             (
                 old.main_offset,
@@ -1221,6 +1266,63 @@ mod note_protocol_tests {
     }
 
     #[test]
+    fn mixed_inputs_have_exact_disjoint_output_parameter_and_note_regions() {
+        let mut inputs = AudioProcessorAuxiliaryInputContract {
+            buses: [
+                AudioChannelLayout::Mono,
+                AudioChannelLayout::Stereo,
+                AudioChannelLayout::Mono,
+            ]
+            .into_iter()
+            .enumerate()
+            .map(
+                |(index, channel_layout)| AudioProcessorAuxiliaryInputBusContract {
+                    bus_key: format!("input.{index}"),
+                    channel_layout,
+                },
+            )
+            .collect(),
+        };
+        let layout = SharedBlockLayout::new(3, 2, &inputs, 2)
+            .unwrap()
+            .with_auxiliary_outputs(2)
+            .unwrap()
+            .with_notes(1, 1)
+            .unwrap();
+        assert_eq!((layout.main_offset, layout.main_samples), (0, 6));
+        assert_eq!(
+            (layout.auxiliary_offset, layout.auxiliary_samples),
+            (24, 12)
+        );
+        assert_eq!(
+            (
+                layout.auxiliary_outputs_offset,
+                layout.auxiliary_outputs_samples
+            ),
+            (72, 12)
+        );
+        assert_eq!((layout.events_offset, layout.event_capacity), (120, 6));
+        assert_eq!(
+            (
+                layout.note_events_offset,
+                layout.note_ends_offset,
+                layout.total_bytes
+            ),
+            (216, 240, 256)
+        );
+        assert_eq!(auxiliary_input_samples(&inputs, 1).unwrap(), 4);
+        assert!(auxiliary_input_samples(&inputs, usize::MAX).is_err());
+        assert!(SharedBlockLayout::new(usize::MAX, 2, &inputs, 0).is_err());
+        for bus in &mut inputs.buses {
+            bus.channel_layout = AudioChannelLayout::Stereo;
+        }
+        assert_eq!(
+            SharedBlockLayout::new(3, 2, &inputs, 2).unwrap(),
+            SharedBlockLayout::uniform(3, 2, 3, 2).unwrap()
+        );
+    }
+
+    #[test]
     fn command_uses_last_four_bytes_and_refuses_old_version_or_nonprocess_notes() {
         let command = WorkerCommand {
             transport_activity: None,
@@ -1238,7 +1340,7 @@ mod note_protocol_tests {
             WorkerCommand::read_from(&mut bytes.as_slice()).unwrap(),
             command
         );
-        for version in [8_u32, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 22] {
+        for version in [8_u32, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 23] {
             let mut old = bytes.clone();
             old[4..8].copy_from_slice(&version.to_le_bytes());
             assert!(WorkerCommand::read_from(&mut old.as_slice()).is_err());
@@ -1336,7 +1438,7 @@ mod note_protocol_tests {
             assert_eq!(bytes.len(), 36);
             assert_eq!(
                 &bytes[..16],
-                &[77, 65, 80, 82, 21, 0, 0, 0, 4, 0, 0, 0, 20, 0, 0, 0]
+                &[77, 65, 80, 82, 22, 0, 0, 0, 4, 0, 0, 0, 20, 0, 0, 0]
             );
             assert_eq!(&bytes[16..20], &4096_u32.to_le_bytes());
             for (index, word) in words.into_iter().enumerate() {
@@ -1372,7 +1474,8 @@ mod note_protocol_tests {
             (4, 18),
             (4, 19),
             (4, 20),
-            (4, 22),
+            (4, 21),
+            (4, 23),
             (12, 12),
             (16, 4097),
             (20, 3),
@@ -1438,7 +1541,7 @@ mod note_protocol_tests {
 
     #[test]
     fn auxiliary_output_regions_are_disjoint_bounded_and_included_before_events_and_notes() {
-        let old = SharedBlockLayout::new(7, 2, 2, 1).unwrap();
+        let old = SharedBlockLayout::uniform(7, 2, 2, 1).unwrap();
         let layout = old.with_auxiliary_outputs(2).unwrap().with_notes(3, 2).unwrap();
         assert_eq!(layout.main_offset, 0);
         assert_eq!(layout.auxiliary_offset, old.auxiliary_offset);
@@ -1462,7 +1565,7 @@ mod note_protocol_tests {
         assert!(old.with_auxiliary_outputs(32).is_err());
         assert!(old.with_auxiliary_outputs(1).unwrap().with_auxiliary_outputs(1).is_err());
         assert!(old.with_notes(1, 1).unwrap().with_auxiliary_outputs(1).is_err());
-        assert!(SharedBlockLayout::new(usize::MAX / 16, 2, 0, 0)
+        assert!(SharedBlockLayout::uniform(usize::MAX / 16, 2, 0, 0)
             .unwrap()
             .with_auxiliary_outputs(31)
             .is_err());
@@ -1471,7 +1574,7 @@ mod note_protocol_tests {
     #[test]
     fn current_protocol_note_contract_is_mandatory_in_prepare_and_ready_json() {
         let ready = ReadyWire {
-            schema_version: 21,
+            schema_version: 22,
             result: ReadyResultWire::Ready {
                 musical_time_reference: None,
                 auxiliary_outputs: Vec::new(),
@@ -1505,7 +1608,7 @@ mod note_protocol_tests {
         let prepare = PrepareWire {
             musical_time_reference: None,
             auxiliary_outputs: Vec::new(),
-            schema_version: 21,
+            schema_version: 22,
             native_lane: super::super::native_worker_lane_wire::NativeWorkerLaneWire::capture(None)
                 .unwrap(),
             nonce: "typed-only-test".to_owned(),

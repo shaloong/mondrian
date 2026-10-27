@@ -276,7 +276,7 @@ fn external_surge_xt_vst3_captured_state_notes_main_runtime_without_media() {
 }
 
 #[test]
-#[ignore = "requires outer native Job, current IPC21 Product and real Surge XT VST3; authored 7/8 crosses a bar during the held Note"]
+#[ignore = "requires outer native Job, current IPC22 Product and real Surge XT VST3; authored 7/8 crosses a bar during the held Note"]
 fn external_surge_xt_vst3_captured_state_notes_constant_meter_runtime_without_media() {
     // Quarter3.25 at sample0 reaches bar1 at sample6000 (48k/120 BPM),
     // inside Note127..8193 and the original measured sustain2048..6144.

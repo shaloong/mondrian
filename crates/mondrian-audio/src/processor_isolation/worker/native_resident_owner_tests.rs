@@ -184,7 +184,7 @@ impl AudioProcessorResolver for ChargedResolver {
             render,
         )?
         .with_native_worker_lane_resources(Some(self.profile));
-        let layout = SharedBlockLayout::new(
+        let layout = SharedBlockLayout::uniform(
             render.max_block_frames,
             render.channel_count(),
             spec.auxiliary_inputs.buses.len(),

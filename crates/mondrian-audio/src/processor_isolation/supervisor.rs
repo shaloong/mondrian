@@ -1614,7 +1614,7 @@ mod startup_preflight_tests {
         let error = SupervisedAudioWorker::launch(
             &spec,
             render,
-            SharedBlockLayout::new(4, 2, 1, 0).unwrap(),
+            SharedBlockLayout::uniform(4, 2, 1, 0).unwrap(),
             None,
             None,
         )
@@ -1674,7 +1674,7 @@ mod control_timeout_worker_lifecycle {
         let (worker, names) = SupervisedAudioWorker::launch(
             &spec,
             render,
-            SharedBlockLayout::new(4, 2, 0, 0)?,
+            SharedBlockLayout::uniform(4, 2, 0, 0)?,
             None,
             None,
         )?;
@@ -1892,7 +1892,7 @@ mod control_timeout_worker_lifecycle {
             &mut process.child,
             Instant::now() + Duration::from_secs(5),
         )?;
-        let layout = SharedBlockLayout::new(4, 2, 0, 0)?;
+        let layout = SharedBlockLayout::uniform(4, 2, 0, 0)?;
         let shared_file = NamedTempFile::new()?;
         shared_file.as_file().set_len(layout.total_bytes as u64)?;
         // SAFETY: the exclusively owned file is sized to the exact layout and

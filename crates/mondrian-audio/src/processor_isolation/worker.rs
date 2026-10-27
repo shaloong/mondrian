@@ -30,7 +30,7 @@ pub(super) fn run_worker(
     let max_block_frames = usize::try_from(prepare.max_block_frames)
         .map_err(|_| invalid_contract("maximum block extent exceeds Worker address space"))?;
     let auxiliary_inputs = auxiliary_from_wire(prepare.auxiliary_buses.clone());
-    super::validate_isolated_auxiliary_inputs(&auxiliary_inputs, prepare.channel_layout)?;
+    auxiliary_inputs.validate(prepare.channel_layout)?;
     let auxiliary_outputs = super::protocol::outputs_from_wire(prepare.auxiliary_outputs.clone());
     auxiliary_outputs.validate(prepare.channel_layout)?;
     prepare.note_input_contract.validate()?;
@@ -51,7 +51,7 @@ pub(super) fn run_worker(
     let layout = SharedBlockLayout::new(
         max_block_frames,
         prepare.channel_layout.channel_count(),
-        auxiliary_inputs.buses.len(),
+        &auxiliary_inputs,
         prepare.parameter_ids.len(),
     )?
     .with_auxiliary_outputs(auxiliary_outputs.buses.len())?
@@ -240,9 +240,8 @@ impl WorkerProcessContext<'_> {
         let samples = frames
             .checked_mul(self.render_contract.channel_count())
             .ok_or_else(|| invalid_contract("Worker block sample extent overflowed"))?;
-        let auxiliary_samples = samples
-            .checked_mul(self.auxiliary_inputs.buses.len())
-            .ok_or_else(|| invalid_contract("Worker auxiliary sample extent overflowed"))?;
+        let auxiliary_samples =
+            super::protocol::auxiliary_input_samples(self.auxiliary_inputs, frames)?;
         let main_bytes = samples
             .checked_mul(size_of::<f32>())
             .ok_or_else(|| invalid_contract("Worker main-bus bytes overflowed"))?;
@@ -1201,7 +1200,7 @@ mod inline_dispatch_contracts {
         };
         let auxiliary = crate::AudioProcessorAuxiliaryInputContract::default();
         let note_input_contract = crate::AudioProcessorNoteInputContract::default();
-        let layout = SharedBlockLayout::new(2, 1, 0, 0).expect("exact shared extent");
+        let layout = SharedBlockLayout::uniform(2, 1, 0, 0).expect("exact shared extent");
         let context = WorkerProcessContext {
             musical_time_reference: None,
             auxiliary_outputs: &crate::AudioProcessorAuxiliaryOutputContract::default(),
@@ -1478,7 +1477,7 @@ mod note_process_contracts {
     fn worker_notes_preserve_exact_input_bits_and_copy_end_after_actual_return() {
         let contract = notes(2, 2);
         let auxiliary = crate::AudioProcessorAuxiliaryInputContract::default();
-        let layout = SharedBlockLayout::new(2, 1, 0, 0).unwrap().with_notes(2, 2).unwrap();
+        let layout = SharedBlockLayout::uniform(2, 1, 0, 0).unwrap().with_notes(2, 2).unwrap();
         let context = WorkerProcessContext {
             musical_time_reference: None,
             auxiliary_outputs: &crate::AudioProcessorAuxiliaryOutputContract::default(),
@@ -1553,7 +1552,7 @@ mod note_process_contracts {
         contract.validate().unwrap();
         let auxiliary = crate::AudioProcessorAuxiliaryInputContract::default();
         let outputs = crate::AudioProcessorAuxiliaryOutputContract::default();
-        let layout = SharedBlockLayout::new(2, 1, 0, 0).unwrap().with_notes(2, 0).unwrap();
+        let layout = SharedBlockLayout::uniform(2, 1, 0, 0).unwrap().with_notes(2, 0).unwrap();
         let context = WorkerProcessContext {
             musical_time_reference: None,
             auxiliary_outputs: &outputs,
@@ -1624,7 +1623,7 @@ mod note_process_contracts {
     fn invalid_input_notes_never_call_processor_or_change_pcm() {
         let contract = notes(2, 1);
         let auxiliary = crate::AudioProcessorAuxiliaryInputContract::default();
-        let layout = SharedBlockLayout::new(2, 1, 0, 0).unwrap().with_notes(2, 1).unwrap();
+        let layout = SharedBlockLayout::uniform(2, 1, 0, 0).unwrap().with_notes(2, 1).unwrap();
         let context = WorkerProcessContext {
             musical_time_reference: None,
             auxiliary_outputs: &crate::AudioProcessorAuxiliaryOutputContract::default(),
@@ -1697,7 +1696,7 @@ mod note_process_contracts {
     fn ignored_note_end_overflow_or_invalid_push_remains_hard_failure() {
         let contract = notes(1, 1);
         let auxiliary = crate::AudioProcessorAuxiliaryInputContract::default();
-        let layout = SharedBlockLayout::new(2, 1, 0, 0).unwrap().with_notes(1, 1).unwrap();
+        let layout = SharedBlockLayout::uniform(2, 1, 0, 0).unwrap().with_notes(1, 1).unwrap();
         let context = WorkerProcessContext {
             musical_time_reference: None,
             auxiliary_outputs: &crate::AudioProcessorAuxiliaryOutputContract::default(),
@@ -1770,7 +1769,7 @@ mod note_process_contracts {
     fn note_region_extent_or_alignment_refuses_before_native_call() {
         let contract = notes(1, 1);
         let auxiliary = crate::AudioProcessorAuxiliaryInputContract::default();
-        let layout = SharedBlockLayout::new(2, 1, 0, 0).unwrap().with_notes(1, 1).unwrap();
+        let layout = SharedBlockLayout::uniform(2, 1, 0, 0).unwrap().with_notes(1, 1).unwrap();
         let context = WorkerProcessContext {
             musical_time_reference: None,
             auxiliary_outputs: &crate::AudioProcessorAuxiliaryOutputContract::default(),
@@ -1813,7 +1812,7 @@ mod note_process_contracts {
     fn empty_note_contract_keeps_legacy_completion_and_rejects_any_note_count() {
         let contract = AudioProcessorNoteInputContract::default();
         let auxiliary = crate::AudioProcessorAuxiliaryInputContract::default();
-        let layout = SharedBlockLayout::new(2, 1, 0, 0).unwrap().with_notes(0, 0).unwrap();
+        let layout = SharedBlockLayout::uniform(2, 1, 0, 0).unwrap().with_notes(0, 0).unwrap();
         assert_eq!(layout.total_bytes, 8);
         let context = WorkerProcessContext {
             musical_time_reference: None,
