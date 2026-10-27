@@ -93,6 +93,18 @@ impl ClapSignalFields<'_> {
         let channels = block.channel_layout().channel_count();
         if *self.last_end != Some(block.start_sample())
             || frames == 0
+            || self.input.len()
+                != self.main_audio_input.port_offset() + self.auxiliary_inputs.buses.len()
+            || self.input.iter().enumerate().any(|(index, port)| {
+                let width = if index < self.main_audio_input.port_offset() {
+                    channels
+                } else {
+                    self.auxiliary_inputs.buses[index - self.main_audio_input.port_offset()]
+                        .channel_layout
+                        .channel_count()
+                };
+                port.len() != width || port.iter().any(|channel| frames > channel.len())
+            })
             || self.output.len() != 1 + self.auxiliary_outputs.buses.len()
             || self.output.iter().any(|port| {
                 port.len() != channels || port.iter().any(|channel| frames > channel.len())
@@ -154,15 +166,16 @@ impl ClapSignalFields<'_> {
             }
         }
         for (index, bus) in self.auxiliary_inputs.buses.iter().enumerate() {
+            let bus_channels = bus.channel_layout.channel_count();
             let samples = block.auxiliary_input(&bus.bus_key).ok_or_else(|| {
                 AudioProcessorHostError::Process("CLAP auxiliary PCM is missing".to_owned())
             })?;
-            if samples.len() != frames * channels {
+            if samples.len() != frames * bus_channels {
                 return Err(AudioProcessorHostError::Process(
                     "CLAP auxiliary extent changed".to_owned(),
                 ));
             }
-            for (frame, samples) in samples.chunks_exact(channels).enumerate() {
+            for (frame, samples) in samples.chunks_exact(bus_channels).enumerate() {
                 for (channel, sample) in samples.iter().copied().enumerate() {
                     self.input[index + self.main_audio_input.port_offset()][channel][frame] =
                         sample;

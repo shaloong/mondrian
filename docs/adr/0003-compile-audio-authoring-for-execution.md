@@ -50,9 +50,11 @@ Additional outputs retain their current Main-layout restriction. IPC22 derives
 shared input capacity from the actual ordered port layouts at both ends, packs
 short blocks at their current frame count, and charges the existing shared-region
 byte extent. Equal-layout regions keep their former offsets; older protocol
-versions refuse. Generic Worker views now retain each input width. CLAP/VST3
-native port negotiation and planes still impose their separate Main-layout
-restriction; generic transport qualification does not open those native paths.
+versions refuse. Generic Worker views retain each input width. CLAP admits
+independently typed Mono/Stereo auxiliary inputs and preserves their widths in
+metadata, native planes, SDK capacity and declared/actual storage fees; its Main
+and all outputs retain the render layout. VST3 native inputs still require the
+Main layout until arrangement negotiation and native planes are completed.
 
 `AudioProgramRuntime` is the shared high-level Implementation used by playback
 and export. It recursively instantiates nested public outputs and binds media

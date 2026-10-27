@@ -744,6 +744,9 @@ impl PluginAudioPortsImpl for Main<'_> {
             return;
         }
         let reversed = self.0.mode.load(Ordering::Relaxed) == 1;
+        let mode = self.0.mode.load(Ordering::Relaxed);
+        let mono = (mode == 17 && is_input && index == 1)
+            || (mode == 18 && (index == 0 || (is_input && index == 2)));
         let id = match index {
             0 => 0,
             1 if !reversed => 11,
@@ -759,13 +762,17 @@ impl PluginAudioPortsImpl for Main<'_> {
                 _ => "备用探测",
             }
             .as_bytes(),
-            channel_count: 2,
+            channel_count: if mono { 1 } else { 2 },
             flags: if index == 0 {
                 AudioPortFlags::IS_MAIN
             } else {
                 AudioPortFlags::empty()
             },
-            port_type: Some(AudioPortType::STEREO),
+            port_type: Some(if mono {
+                AudioPortType::MONO
+            } else {
+                AudioPortType::STEREO
+            }),
             in_place_pair: None,
         });
     }
@@ -779,7 +786,7 @@ const ECHO_FRAMES: usize = 256;
 // Mode15 appends a fixed 16-byte Windows event nonce; no live timer state is saved.
 fn configuration_gain(bytes: [u8; 5]) -> Result<f32, PluginError> {
     let gain = f32::from_le_bytes([bytes[1], bytes[2], bytes[3], bytes[4]]);
-    if bytes[0] > 16 || !gain.is_finite() || !(0.0..=1.0).contains(&gain) {
+    if bytes[0] > 18 || !gain.is_finite() || !(0.0..=1.0).contains(&gain) {
         return Err(PluginError::Message("invalid fixture state"));
     }
     Ok(gain)
@@ -1020,6 +1027,18 @@ impl<'a> PluginAudioProcessor<'a, Shared<'a>, Main<'a>> for Processor<'a> {
             };
             let channels =
                 port.channels()?.into_f32().ok_or(PluginError::Message("f32 input required"))?;
+            if matches!(self.mode, 17 | 18) {
+                let expected = if (self.mode == 17 && port_index == 1)
+                    || (self.mode == 18 && matches!(port_index, 0 | 2))
+                {
+                    1
+                } else {
+                    2
+                };
+                if channels.iter().count() != expected {
+                    return Err(PluginError::Message("mixed fixture input width mismatch"));
+                }
+            }
             for (channel, samples) in channels.iter().enumerate() {
                 for (target, source) in mix.iter_mut().zip(samples.iter()) {
                     target[channel] += source * weight;

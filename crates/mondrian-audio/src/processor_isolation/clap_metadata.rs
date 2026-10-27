@@ -312,7 +312,7 @@ pub(super) fn scan_audio_ports(
     handle: &PluginMainThreadHandle<'_>,
     layout: AudioChannelLayout,
     scratch: &mut MetadataScanScratch,
-    mut visit: impl FnMut(bool, u32, &AudioPortInfo<'_>),
+    mut visit: impl FnMut(bool, u32, &AudioPortInfo<'_>, AudioChannelLayout),
 ) -> Result<(ClapMainAudioInput, u32, usize, usize), AudioProcessorHostError> {
     let expected_type = match layout {
         AudioChannelLayout::Mono => AudioPortType::MONO,
@@ -341,15 +341,28 @@ pub(super) fn scan_audio_ports(
             let port = ports
                 .get(handle, index, is_input, &mut buffer)
                 .ok_or_else(|| invalid("CLAP audio port metadata is unavailable"))?;
+            // Port type supplies channel meaning; count alone never selects a layout.
+            // Main and outputs keep the negotiated render layout. Auxiliary inputs
+            // may independently declare either of the supported semantic layouts.
+            let auxiliary_input = is_input && !port.flags.contains(AudioPortFlags::IS_MAIN);
+            let (port_layout, port_type) =
+                if auxiliary_input && port.port_type == Some(AudioPortType::MONO) {
+                    (AudioChannelLayout::Mono, AudioPortType::MONO)
+                } else if auxiliary_input && port.port_type == Some(AudioPortType::STEREO) {
+                    (AudioChannelLayout::Stereo, AudioPortType::STEREO)
+                } else {
+                    (layout, expected_type)
+                };
             let refusal = if !scratch.insert_id(port.id.get()) {
                 Some("duplicate_id")
             } else if (port.flags.contains(AudioPortFlags::IS_MAIN) && index != 0)
                 || (!is_input && index == 0 && !port.flags.contains(AudioPortFlags::IS_MAIN))
             {
                 Some("main_role")
-            } else if port.port_type != Some(expected_type) {
+            } else if port.port_type != Some(port_type) {
                 Some("port_type")
-            } else if usize::try_from(port.channel_count).ok() != Some(layout.channel_count()) {
+            } else if usize::try_from(port.channel_count).ok() != Some(port_layout.channel_count())
+            {
                 Some("channel_count")
             } else {
                 None
@@ -361,7 +374,7 @@ pub(super) fn scan_audio_ports(
                     index,
                     count,
                     &port,
-                    layout.channel_count(),
+                    port_layout.channel_count(),
                 ));
             }
             if !is_input && index == 0 {
@@ -373,7 +386,7 @@ pub(super) fn scan_audio_ports(
             } else {
                 auxiliary_inputs += 1;
             }
-            visit(is_input, index, &port);
+            visit(is_input, index, &port, port_layout);
             if is_input && !port.flags.contains(AudioPortFlags::IS_MAIN) {
                 main_input.validate_auxiliary_count(auxiliary_inputs)?;
             }
@@ -418,11 +431,14 @@ pub(super) fn revalidate_audio_ports(
     let mut input_index = 0;
     let mut output_index = 0;
     let mut matches = true;
-    let (actual_input, actual_output, input_count, output_count) =
-        scan_audio_ports(handle, layout, scratch, |is_input, index, port| {
+    let (actual_input, actual_output, input_count, output_count) = scan_audio_ports(
+        handle,
+        layout,
+        scratch,
+        |is_input, index, port, port_layout| {
             if is_input && !port.flags.contains(AudioPortFlags::IS_MAIN) {
                 matches &= inputs.buses.get(input_index).is_some_and(|bus| {
-                    bus.channel_layout == layout
+                    bus.channel_layout == port_layout
                         && canonical_port_key(&bus.bus_key, "clap.audio-input.", port.id.get())
                 });
                 input_index += 1;

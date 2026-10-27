@@ -1616,7 +1616,7 @@ pub(super) fn inspect_audio_ports(
         handle,
         channel_layout,
         &mut scratch,
-        |is_input, index, port| {
+        |is_input, index, port, port_layout| {
             if !is_input && index != 0 {
                 outputs.buses.push(crate::AudioProcessorAuxiliaryOutputBusContract {
                     bus_key: format!("clap.audio-output.{}", port.id.get()),
@@ -1633,7 +1633,7 @@ pub(super) fn inspect_audio_ports(
                 }
                 auxiliary_inputs.buses.push(AudioProcessorAuxiliaryInputBusContract {
                     bus_key: format!("clap.audio-input.{}", port.id.get()),
-                    channel_layout,
+                    channel_layout: port_layout,
                 });
             }
         },

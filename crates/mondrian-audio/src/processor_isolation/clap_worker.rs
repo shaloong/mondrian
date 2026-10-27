@@ -850,8 +850,8 @@ fn resolve_clap_registration(
                     bytes.checked_add(
                         clap_audio_storage_reservation(
                             request.render_contract(),
-                            plugin.main_audio_input.port_offset()
-                                + plugin.auxiliary_inputs.buses.len(),
+                            plugin.main_audio_input,
+                            &plugin.auxiliary_inputs,
                             &plugin.auxiliary_outputs,
                         )
                         .ok()?,
@@ -1153,19 +1153,43 @@ fn note_source_reservation_bytes(
 }
 
 // Known host-owned audio buffers only. SDK/foreign heaps remain outside this request.
+fn clap_input_audio_shape(
+    main_layout: mondrian_core::AudioChannelLayout,
+    main_input: ClapMainAudioInput,
+    inputs: &AudioProcessorAuxiliaryInputContract,
+) -> Result<(usize, usize), AudioProcessorHostError> {
+    let ports = main_input
+        .port_offset()
+        .checked_add(inputs.buses.len())
+        .ok_or_else(|| invalid("CLAP input count overflowed"))?;
+    let channels = inputs
+        .buses
+        .iter()
+        .try_fold(
+            main_input.port_offset() * main_layout.channel_count(),
+            |channels, bus| channels.checked_add(bus.channel_layout.channel_count()),
+        )
+        .ok_or_else(|| invalid("CLAP input channel count overflowed"))?;
+    Ok((ports, channels))
+}
+
 fn clap_audio_storage_reservation(
     render: crate::AudioRenderContract,
-    input_ports: usize,
+    main_input: ClapMainAudioInput,
+    inputs: &AudioProcessorAuxiliaryInputContract,
     outputs: &AudioProcessorAuxiliaryOutputContract,
 ) -> Result<usize, AudioProcessorHostError> {
+    let (input_ports, input_channels) =
+        clap_input_audio_shape(render.channel_layout, main_input, inputs)?;
     let output_ports = 1usize
         .checked_add(outputs.buses.len())
         .ok_or_else(|| invalid("CLAP output count overflowed"))?;
     let ports = input_ports
         .checked_add(output_ports)
         .ok_or_else(|| invalid("CLAP port count overflowed"))?;
-    let channels = ports
+    let channels = output_ports
         .checked_mul(render.channel_count())
+        .and_then(|channels| channels.checked_add(input_channels))
         .ok_or_else(|| invalid("CLAP channel count overflowed"))?;
     let pcm = channels
         .checked_mul(render.max_block_frames)
@@ -1549,17 +1573,18 @@ fn prepare_loaded_on_main(
             ))
         })
         .collect::<Result<Vec<_>, AudioProcessorHostError>>()?;
-    let input_port_count = main_audio_input.port_offset() + auxiliary_inputs.buses.len();
-    // Vec's repeat expression evaluates its element even when count is zero;
-    // do not allocate a throwaway main/channel buffer for a native instrument.
-    let input = if input_port_count == 0 {
-        Vec::new()
-    } else {
-        vec![vec![vec![0.0; frames]; channel_count]; input_port_count]
-    };
+    let (input_port_count, input_channels) =
+        clap_input_audio_shape(render.channel_layout, main_audio_input, &auxiliary_inputs)?;
+    // Allocate only actual native ports, each at its own validated width.
+    let input = (main_audio_input == ClapMainAudioInput::Present)
+        .then_some(render.channel_layout)
+        .into_iter()
+        .chain(auxiliary_inputs.buses.iter().map(|bus| bus.channel_layout))
+        .map(|layout| vec![vec![0.0; frames]; layout.channel_count()])
+        .collect::<Vec<_>>();
     let output =
         vec![vec![vec![0.0; frames]; channel_count]; 1 + request.auxiliary_outputs().buses.len()];
-    let input_ports = AudioPorts::with_capacity(channel_count * input_port_count, input_port_count);
+    let input_ports = AudioPorts::with_capacity(input_channels, input_port_count);
     let output_ports = AudioPorts::with_capacity(channel_count * output.len(), output.len());
     let auxiliary_outputs = request.auxiliary_outputs().clone();
     let actual_audio_bytes = clap_actual_audio_storage(
@@ -1573,8 +1598,12 @@ fn prepare_loaded_on_main(
         &output_ports,
         &auxiliary_outputs,
     )?;
-    let reserved_audio_bytes =
-        clap_audio_storage_reservation(render, input_port_count, request.auxiliary_outputs())?;
+    let reserved_audio_bytes = clap_audio_storage_reservation(
+        render,
+        main_audio_input,
+        &auxiliary_inputs,
+        request.auxiliary_outputs(),
+    )?;
     if actual_audio_bytes > reserved_audio_bytes {
         return Err(invalid(
             "CLAP actual audio owners exceed their admitted capacity",
@@ -2901,7 +2930,7 @@ mod tests {
                 matches!(CASE, 7 | 8),
                 if matches!(CASE, 7 | 8) {
                     0
-                } else if matches!(CASE, 9 | 11 | 12) {
+                } else if matches!(CASE, 9 | 11 | 12 | 23) {
                     2
                 } else {
                     3
@@ -2936,7 +2965,7 @@ mod tests {
                     0
                 } else if CASE == 4 {
                     33
-                } else if matches!(CASE, 9 | 11 | 12) {
+                } else if matches!(CASE, 9 | 11 | 12 | 23) {
                     2
                 } else if CASE == 10 {
                     32
@@ -2960,7 +2989,7 @@ mod tests {
             }
             let id = if is_input && CASE == 10 {
                 100 + index
-            } else if is_input && matches!(CASE, 9 | 11 | 12) {
+            } else if is_input && matches!(CASE, 9 | 11 | 12 | 23) {
                 if index == 0 {
                     11
                 } else {
@@ -2977,15 +3006,20 @@ mod tests {
             writer.set(&AudioPortInfo {
                 id: ClapId::new(id),
                 name: b"same display name",
-                channel_count: if (CASE == 3 && index != 0)
+                channel_count: if CASE == 22 && is_input && index != 0 {
+                    3
+                } else if (CASE == 3 && index != 0)
                     || matches!(CASE, 8 | 12)
+                    || (CASE == 23 && is_input && index == 0)
                     || (!is_input && CASE == 18 && index == 2)
                 {
                     1
                 } else {
                     2
                 },
-                flags: if (is_input && matches!(CASE, 9..=12)) || (!is_input && CASE == 15) {
+                flags: if (is_input && (matches!(CASE, 9..=12) || CASE == 23))
+                    || (!is_input && CASE == 15)
+                {
                     AudioPortFlags::empty()
                 } else if index == 0
                     || (CASE == 2 && index == 1)
@@ -2995,11 +3029,17 @@ mod tests {
                 } else {
                     AudioPortFlags::empty()
                 },
-                port_type: Some(if (CASE == 3 && index != 0) || matches!(CASE, 8 | 12) {
-                    AudioPortType::MONO
-                } else {
-                    AudioPortType::STEREO
-                }),
+                port_type: Some(
+                    if (CASE == 3 && index != 0)
+                        || matches!(CASE, 8 | 12)
+                        || (CASE == 22 && is_input && index != 0)
+                        || (CASE == 23 && is_input && index == 0)
+                    {
+                        AudioPortType::MONO
+                    } else {
+                        AudioPortType::STEREO
+                    },
+                ),
                 in_place_pair: None,
             });
         }
@@ -3835,6 +3875,166 @@ mod tests {
         assert_eq!(main, [0.25, -0.5]);
     }
 
+    #[test]
+    fn clap_mixed_input_storage_matches_actual_plane_and_sdk_owners() {
+        let request = sidechain_request();
+        let render = request.render_contract;
+        let mut inputs = request.auxiliary_inputs;
+        inputs.buses[0].channel_layout = AudioChannelLayout::Mono;
+        let outputs = AudioProcessorAuxiliaryOutputContract::default();
+        for (main, widths) in [
+            (ClapMainAudioInput::Present, vec![2, 1, 2]),
+            (ClapMainAudioInput::Absent, vec![1, 2]),
+        ] {
+            let input =
+                widths.iter().map(|&width| vec![vec![0.0_f32; 4]; width]).collect::<Vec<_>>();
+            let output = vec![vec![vec![0.0_f32; 4]; 2]];
+            let channels = widths.iter().sum::<usize>();
+            let input_ports = AudioPorts::with_capacity(channels, widths.len());
+            let output_ports = AudioPorts::with_capacity(2, 1);
+            assert_eq!(
+                clap_input_audio_shape(render.channel_layout, main, &inputs).unwrap(),
+                (widths.len(), channels)
+            );
+            let actual = clap_actual_audio_storage(
+                &input,
+                &output,
+                input.capacity() + output.capacity(),
+                &input_ports,
+                &output_ports,
+                &outputs,
+            )
+            .unwrap();
+            let declared = clap_audio_storage_reservation(render, main, &inputs, &outputs).unwrap();
+            assert_eq!(actual, declared);
+        }
+    }
+
+    #[test]
+    fn clap_mixed_input_abi_preserves_each_layout_with_and_without_main() {
+        check_mixed_input_abi::<3>(ClapMainAudioInput::Present);
+        check_mixed_input_abi::<23>(ClapMainAudioInput::Absent);
+    }
+
+    fn check_mixed_input_abi<const CASE: u8>(main_input: ClapMainAudioInput) {
+        let entry = PluginEntry::load_from_clack::<SinglePluginEntry<SidechainPlugin<CASE>>>(
+            c"/test/mixed-inputs",
+        )
+        .unwrap();
+        let mut request = sidechain_request();
+        request.auxiliary_inputs.buses[0].channel_layout = AudioChannelLayout::Mono;
+        if main_input == ClapMainAudioInput::Present {
+            request.auxiliary_inputs.buses[1].channel_layout = AudioChannelLayout::Mono;
+        }
+        let render = request.render_contract;
+        let auxiliary = request.auxiliary_inputs.clone();
+        let probe = super::super::clap_discovery::probe_loaded(
+            &entry,
+            "org.mondrian.test.sidechain",
+            render,
+            None,
+            false,
+        )
+        .unwrap();
+        assert_eq!(probe.main_audio_input, main_input);
+        assert_eq!(
+            super::super::protocol::auxiliary_from_wire(probe.auxiliary_buses),
+            auxiliary
+        );
+        // Same counts/keys cannot authorize a stale per-port layout.
+        assert!(prepare_loaded_with_audio_input(
+            sidechain_request(),
+            entry.clone(),
+            c"org.mondrian.test.sidechain",
+            None,
+            main_input,
+            &[],
+            &[]
+        )
+        .is_err());
+        let mut worker = prepare_loaded_with_audio_input(
+            request,
+            entry,
+            c"org.mondrian.test.sidechain",
+            None,
+            main_input,
+            &[],
+            &[],
+        )
+        .unwrap();
+        assert_eq!(worker.auxiliary_input_contract(), auxiliary);
+        worker.enter_state(12).unwrap();
+        let mut main = [0.25, -0.5, 1.0, 0.125];
+        let aux = if main_input == ClapMainAudioInput::Present {
+            vec![1.0, 2.0, 3.0, 4.0]
+        } else {
+            vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
+        };
+        worker
+            .process(IsolatedAudioProcessorWorkerBlock::new(
+                12,
+                2,
+                render,
+                &mut main,
+                &auxiliary,
+                &aux,
+                &[],
+                &[],
+            ))
+            .unwrap();
+        assert_eq!(
+            main,
+            if main_input == ClapMainAudioInput::Present {
+                [18.5, -1.0, 28.0, 0.25]
+            } else {
+                [11.0, 12.0, 19.0, 18.0]
+            }
+        );
+        let mut main = [0.75, -0.25];
+        let silent = vec![
+            0.0;
+            if main_input == ClapMainAudioInput::Present {
+                2
+            } else {
+                3
+            }
+        ];
+        worker
+            .process(IsolatedAudioProcessorWorkerBlock::new(
+                14,
+                1,
+                render,
+                &mut main,
+                &auxiliary,
+                &silent,
+                &[],
+                &[],
+            ))
+            .unwrap();
+        assert_eq!(
+            main,
+            if main_input == ClapMainAudioInput::Present {
+                [1.5, -0.5]
+            } else {
+                [0.0; 2]
+            }
+        );
+        let mut main = [0.25, -0.5];
+        assert!(worker
+            .process(IsolatedAudioProcessorWorkerBlock::new(
+                15,
+                1,
+                render,
+                &mut main,
+                &auxiliary,
+                &[],
+                &[],
+                &[]
+            ))
+            .is_err());
+        assert_eq!(main, [0.25, -0.5]);
+    }
+
     fn refuse_sidechain_ports<const CASE: u8>() {
         let entry = PluginEntry::load_from_clack::<SinglePluginEntry<SidechainPlugin<CASE>>>(
             c"/test/sidechain",
@@ -3871,7 +4071,7 @@ mod tests {
     fn clap_sidechain_abi_refuses_duplicate_main_layout_count_and_missing_metadata() {
         refuse_sidechain_ports::<1>();
         refuse_sidechain_ports::<2>();
-        refuse_sidechain_ports::<3>();
+        refuse_sidechain_ports::<22>();
         refuse_sidechain_ports::<4>();
         refuse_sidechain_ports::<5>();
     }

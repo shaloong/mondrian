@@ -10,6 +10,10 @@ use std::time::Duration;
 
 const CHILD_TEST_NAME: &str = "processor_isolation::tests::isolated_worker_child_entry";
 
+#[cfg(windows)]
+#[path = "tests/native_clap_mixed_inputs.rs"]
+mod native_clap_mixed_inputs;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TestBehavior {
     Normal,

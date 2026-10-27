@@ -206,7 +206,20 @@ fn clap_output_audio_storage_accounts_actual_pcm_descriptors_keys_and_unrouted_p
             let mut output = vec![vec![vec![0.0; 14]; channels]; 3];
             let ip = AudioPorts::with_capacity(channels * input_count, input_count);
             let op = AudioPorts::with_capacity(channels * 3, 3);
-            let reserved = clap_audio_storage_reservation(render, input_count, &outputs).unwrap();
+            let main = if input_count == 0 {
+                ClapMainAudioInput::Absent
+            } else {
+                ClapMainAudioInput::Present
+            };
+            let inputs = AudioProcessorAuxiliaryInputContract {
+                buses: (1..input_count)
+                    .map(|id| crate::AudioProcessorAuxiliaryInputBusContract {
+                        bus_key: format!("clap.audio-input.{id}"),
+                        channel_layout: layout,
+                    })
+                    .collect(),
+            };
+            let reserved = clap_audio_storage_reservation(render, main, &inputs, &outputs).unwrap();
             let actual = clap_actual_audio_storage(
                 &input,
                 &output,

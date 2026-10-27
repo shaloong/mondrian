@@ -100,6 +100,16 @@ the fixed musical reference. Original short boundary controls remain.
 Modes0–15 retain their prior contracts; this is an owned fixture, not third-party
 compatibility or realtime/performance evidence.
 
+## Mixed input layouts (state modes 17/18)
+
+Mode17 declares Stereo Main, Mono input11 and Stereo input7; mode18 declares
+Mono Main, Stereo input11 and Mono input7. Output0 follows Main. Both retain
+the original port weights2/3/5, gain configuration, latency3 and lifecycle roles.
+The native mixed-input gate checks complete independent DAG PCM, state restore,
+44.1/48 kHz, both processing modes, block partitions and seek. Modes0–16 retain
+their prior contracts. This qualifies an owned fixture, not third-party or RT
+performance.
+
 ## Finite echo history (state mode 12)
 
 Modes 0–11 retain their existing PCM, state and extension contracts. Mode12
