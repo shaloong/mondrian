@@ -112,14 +112,29 @@ Transition handles; they do not claim rendered transparent pixels or audio DSP.
 
 The table describes implementation boundaries. Qualification below states the tested conditions; detailed consumer obligations remain in the linked audio and OpenFX feature matrices.
 
-## Current qualification summary (2026-10-27)
+## Current qualification summary (2026-10-28)
+
+Stopped CLAP input reconfiguration has finite **Verified** staging qualification:
+Windows x64, owned mode19, Offline/48k/Stereo/block4/latency3, same native child
+and original Root/ticket/Source. Inactive input observations, native input planes
+and both shared mappings retain their actual owners under the original overlap
+grant. Both peers check typed geometry/file extent and actual shared backing;
+pre-cancel and wrong tickets add no fee, duplicate staging cannot allocate or
+credit, and Source revocation refuses access. Old Render/Enter, cursors and
+author state remain held. The IO owner supplies one joined DSP borrow; no second
+executor or parameter authority is added. Activation, actual state/latency/tail
+capture, Factory/routes/PDC replacement, Source installation and new-geometry
+PCM are still unsupported. IPC25 normal Product, ten exact native regression
+gates and the separate real Surge XT1.3.4 CLAP state/Notes/Main Runtime gate pass,
+with empty stderr, exit0 and settled owners. These are finite Windows conditions,
+not full dynamic third-party, realtime/performance or other-platform evidence.
 
 Shared auxiliary-input layouts, 2026-10-27: finite Windows owned controls verify
 Mono/Stereo Main with simultaneous Mono/Stereo and unconnected silent inputs,
 two-route summing, PDC, target-time gain automation, partitioning and seek in
 both modes/backends, in-process and through actual generic child processing.
-All 885 ordinary Audio controls pass (197 conditional ignored, zero filtered,
-empty stderr). IPC22 has independent region/overflow, exact shared-byte fee and
+All 897 ordinary Audio controls pass (201 conditional ignored, zero filtered,
+empty stderr). Current IPC25 retains independent region/overflow, exact shared-byte fee and
 old/future-version rejection controls. The two original CLAP/VST3 native
 sidechain gates also pass with the matching rebuilt normal Product and original
 ownership budgets. CLAP additionally passes owned direct ABI/storage controls
