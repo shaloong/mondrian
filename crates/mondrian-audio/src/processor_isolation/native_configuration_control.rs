@@ -211,6 +211,12 @@ pub(super) enum NativeConfigurationPhase {
     AudioInputsProposed(super::ClapAudioInputProposal),
     /// Replacement inputs are owned but inactive and not bound to a shared mapping.
     AudioInputsStaged(super::ClapAudioInputProposal),
+    /// Native activation/state captured; graph and transport installation are
+    /// still outstanding. An old-layout seed must never authorize processing.
+    AudioInputsCaptured {
+        proposal: super::ClapAudioInputProposal,
+        candidate: super::native_configuration_seed::ReadyNativeConfiguration,
+    },
     /// A complete serviced candidate exists, awaiting exact plan installation.
     ReadyForInstall {
         request: NativeAudioReprepareRequest,
@@ -220,6 +226,18 @@ pub(super) enum NativeConfigurationPhase {
 }
 
 impl NativeConfigurationPhase {
+    pub(super) fn issued_inputs(
+        proposal: super::ClapAudioInputProposal,
+        candidate: &NativeConfigurationCandidate,
+    ) -> Self {
+        Self::AudioInputsCaptured {
+            proposal,
+            candidate: super::native_configuration_seed::ReadyNativeConfiguration::issued(
+                candidate,
+            ),
+        }
+    }
+
     pub(super) fn issued(candidate: &NativeConfigurationCandidate) -> Self {
         Self::ReadyForInstall {
             request: candidate.serviced_cohort.request,
@@ -281,12 +299,14 @@ impl NativeConfigurationPhase {
             Self::AudioInputsProposed(proposal) | Self::AudioInputsStaged(proposal) => {
                 Some(proposal.observed_cohort.request)
             }
+            Self::AudioInputsCaptured { proposal, .. } => Some(proposal.observed_cohort.request),
         }
     }
 
     pub(super) const fn ready_token(&self) -> Option<NonZeroU64> {
         match self {
             Self::ReadyForInstall { control_token, .. } => Some(*control_token),
+            Self::AudioInputsCaptured { candidate, .. } => Some(candidate.ticket().control_token),
             _ => None,
         }
     }
@@ -353,6 +373,55 @@ impl std::io::Write for FixedConfigurationWriter {
 mod tests {
     use super::*;
     use std::io::Write;
+
+    #[test]
+    fn captured_input_change_cannot_stage_or_commit_an_old_geometry_seed() {
+        let cohort = NativeRequestCohort::new(3, NativeAudioReprepareRequest::ClapRestart).unwrap();
+        let token = NonZeroU64::new(9).unwrap();
+        let proposal = super::super::ClapAudioInputProposal::new(cohort, token).unwrap();
+        let candidate = NativeConfigurationCandidate {
+            serviced_cohort: cohort,
+            control_token: token,
+            observed_contract: AudioProcessorExecutionContract::new(
+                3,
+                crate::AudioProcessorTail::Finite(3),
+                true,
+                true,
+                true,
+                0,
+            )
+            .unwrap(),
+            format: NativeConfigurationFormat::ClapState,
+            configuration: vec![0],
+            buffers: NativeControlBufferReceipt {
+                request_value_capacity_bytes: 0,
+                capture_payload_bytes: 0,
+                configuration_capacity_bytes: 1,
+            },
+            parent_configuration_capacity_bytes: 0,
+        };
+        let ticket = super::super::NativeConfigurationSeedTicket::from_candidate(&candidate);
+        let mut phase = NativeConfigurationPhase::issued_inputs(proposal, &candidate);
+        assert_eq!(phase.blocked_request(), Some(cohort.request));
+        assert_eq!(phase.ready_token(), Some(token));
+        assert_eq!(phase.seed_ticket(), None);
+        assert!(matches!(
+            phase.stage_seed(super::super::NativeConfigurationOwnedSeed {
+                ticket,
+                configuration: vec![0],
+                seed_capacity_grant_bytes: 1,
+            }),
+            super::super::NativeConfigurationSeedOutcome::Refused(
+                super::super::NativeConfigurationSeedRefusal::StaleTicket
+            )
+        ));
+        assert!(phase.seed_receipt(ticket).is_err());
+        assert!(phase.take_seed(ticket).is_err());
+        assert_eq!(
+            NativeConfigurationPhase::issued(&candidate).seed_ticket(),
+            Some(ticket)
+        );
+    }
 
     #[test]
     fn retained_restart_format_requires_exact_abi_flags_and_preserves_capture_bounds() {

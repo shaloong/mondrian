@@ -165,6 +165,7 @@ enum CapturePhase {
     InputBuffersStaged,
     InputMappingStageAttempted,
     InputMappingStaged,
+    InputCaptureAttempted,
     Captured,
     Preparing,
     Prepared,
@@ -470,8 +471,6 @@ impl AudioProgramRuntime {
         let format =
             crate::NativeConfigurationFormat::for_retained_restart(ticket.request.request())
                 .ok_or(Error::Admission("unsupported retained restart format"))?;
-        let ledger_bytes =
-            NativeHostAllocationLedger::storage_layout(CAPTURE_OWNER_SLOTS)?.bytes()?;
         let (reserved_fixed, reserved, control_grant) = check_capture_overlap(
             self.resource_footprint,
             self.resource_grant,
@@ -581,6 +580,21 @@ impl AudioProgramRuntime {
                 return Err(error);
             }
         }
+        self.finish_native_reprepare_capture(cancellation, reserved, 0)
+    }
+
+    fn finish_native_reprepare_capture(
+        &mut self,
+        cancellation: &ExecutionCancellationToken,
+        reserved: usize,
+        additional_held: usize,
+    ) -> Result<NativeAudioReprepare, NativeAudioReprepareError> {
+        use NativeAudioReprepareError as Error;
+        let attempt = self.native_reprepare.attempt.as_ref().unwrap();
+        let key = attempt.key;
+        let serial = attempt.serial;
+        let ledger_bytes =
+            NativeHostAllocationLedger::storage_layout(CAPTURE_OWNER_SLOTS)?.bytes()?;
         let attempt = self.native_reprepare.attempt.as_ref().expect("captured Runtime owner");
         let candidate =
             attempt.candidate.as_ref().expect("capture published no external authority");
@@ -602,7 +616,9 @@ impl AudioProgramRuntime {
             .and_then(|total| total.checked_add(std::mem::size_of::<NativeReprepareAttempt>()))
             .and_then(|total| total.checked_add(ledger_bytes));
         let attempt = self.native_reprepare.attempt.as_mut().unwrap();
-        let held = reserved.max(actual_peak.unwrap_or(usize::MAX));
+        let held = attempt
+            .held_fixed_bytes
+            .max(additional_held.saturating_add(reserved.max(actual_peak.unwrap_or(usize::MAX))));
         self.resource_footprint.fixed_resident_bytes = self
             .resource_footprint
             .fixed_resident_bytes
@@ -674,6 +690,8 @@ impl AudioProgramRuntime {
                     | CapturePhase::InputBuffersStaged
                     | CapturePhase::InputMappingStageAttempted
                     | CapturePhase::InputMappingStaged
+                    | CapturePhase::InputCaptureAttempted
+                    | CapturePhase::Captured
                     | CapturePhase::Failed
             )
             || self.native_author_installation_serial()? != attempt.serial
@@ -686,6 +704,81 @@ impl AudioProgramRuntime {
             .input_proposal
             .as_ref()
             .ok_or(Error::Admission("native input proposal unavailable"))
+    }
+
+    /// Activate the same stopped instance after both input mappings exist and
+    /// capture actual state/latency/tail under the original capture reservation.
+    /// This never installs a graph, retires old storage or enables either DSP view.
+    pub fn capture_native_reprepare_audio_inputs(
+        &mut self,
+        ticket: crate::AudioProcessorReprepareTicket,
+        cancellation: &ExecutionCancellationToken,
+    ) -> Result<NativeAudioReprepare, NativeAudioReprepareError> {
+        use NativeAudioReprepareError as Error;
+        if cancellation.is_canceled() {
+            return Err(Error::Cancelled);
+        }
+        self.native_reprepare_audio_input_proposal(ticket)?;
+        let attempt = self.native_reprepare.attempt.as_ref().unwrap();
+        if attempt.phase != CapturePhase::InputMappingStaged
+            || attempt.input_mapping_receipt.is_none()
+        {
+            return Err(Error::Admission(
+                "changed native inputs are not mapped or capture already attempted",
+            ));
+        }
+        let values_bytes =
+            std::alloc::Layout::array::<Option<f64>>(attempt.selection.constants.len())
+                .map_err(|_| AudioRuntimeBuildError::InvalidResourceReplacement)?
+                .size();
+        let (_, reserved, control) = check_capture_overlap(
+            attempt.before_capture,
+            self.resource_grant,
+            crate::NativeConfigurationFormat::ClapState,
+            CONFIGURATION_LIMIT,
+            values_bytes,
+        )?;
+        if control != attempt.control_grant {
+            return Err(Error::Admission("original native capture grant changed"));
+        }
+        let additional_held = attempt
+            .held_fixed_bytes
+            .checked_sub(reserved)
+            .ok_or(AudioRuntimeBuildError::InvalidResourceReplacement)?;
+        let attempt = self.native_reprepare.attempt.as_mut().unwrap();
+        attempt.phase = CapturePhase::InputCaptureAttempted;
+        let result = self.session.service_native_reprepare(
+            &attempt.selection,
+            attempt.key,
+            CONFIGURATION_LIMIT,
+            attempt.control_grant,
+        );
+        let attempt = self.native_reprepare.attempt.as_mut().unwrap();
+        match result {
+            Ok(crate::NativeConfigurationControlOutcome::ReadyForInstall(candidate)) => {
+                attempt.candidate = Some(candidate);
+                attempt.phase = CapturePhase::Captured;
+            }
+            Ok(crate::NativeConfigurationControlOutcome::CapabilityRefused(refusal)) => {
+                attempt.phase = CapturePhase::Refused;
+                return Err(Error::Capability(refusal));
+            }
+            Ok(crate::NativeConfigurationControlOutcome::StillPending(cohort)) => {
+                attempt.phase = CapturePhase::Refused;
+                return Err(Error::Cohort(cohort));
+            }
+            Ok(crate::NativeConfigurationControlOutcome::ClapAudioInputsChanged(_)) => {
+                attempt.phase = CapturePhase::Failed;
+                return Err(Error::Admission(
+                    "native input observation changed during capture",
+                ));
+            }
+            Err(error) => {
+                attempt.phase = CapturePhase::Failed;
+                return Err(error);
+            }
+        }
+        self.finish_native_reprepare_capture(cancellation, reserved, additional_held)
     }
 
     /// Stage both transport mappings under the original Root grant. Their
@@ -881,6 +974,13 @@ impl AudioProgramRuntime {
             return Err(Error::Cancelled);
         }
         self.native_reprepare_configuration(operation)?;
+        // A captured new input layout cannot use the fixed-input Factory path.
+        // Seed permission stays unavailable until coordinated graph installation.
+        if self.native_reprepare.attempt.as_ref().unwrap().input_proposal.is_some() {
+            return Err(Error::Admission(
+                "changed input Factory/graph installation remains unsupported",
+            ));
+        }
         let attempt = self.native_reprepare.attempt.as_ref().unwrap();
         if attempt.phase != CapturePhase::Captured || attempt.prepared_factory.is_some() {
             return Err(Error::Admission(

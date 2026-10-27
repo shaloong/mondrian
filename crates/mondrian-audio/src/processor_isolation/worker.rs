@@ -230,6 +230,36 @@ fn dispatch_native_owner_with_io(
     control: &mut TcpStream,
     io: &mut WorkerAudioIo,
 ) -> Result<bool, AudioProcessorHostError> {
+    if matches!(
+        &command,
+        super::native_worker_command::NativeCommand::Configuration(_)
+    ) {
+        let input_layout = command.owned_input_layout()?;
+        admit_native_control_storage(
+            processor,
+            input_layout,
+            crate::NativeHostBufferLayout { bytes: 0, alignment: 1 },
+        )?;
+        let mapping = if let Some(staged) = &io.staged_mapping {
+            std::sync::atomic::fence(std::sync::atomic::Ordering::Acquire);
+            if staged.shared[..4] != [0; 4] {
+                use super::native_configuration_wire::{self as wire, ControlReply};
+                wire::write_reply(
+                    control,
+                    ControlReply::Failed("parent has not acknowledged shared backing".into()),
+                )
+                .map_err(|e| worker_failed("configuration mapping acknowledgement", e))?;
+                return Ok(false);
+            }
+            Some(staged.request)
+        } else {
+            None
+        };
+        let super::native_worker_command::NativeCommand::Configuration(request) = command else {
+            unreachable!()
+        };
+        return dispatch_configuration_command(processor, request, control, input_layout, mapping);
+    }
     if let super::native_worker_command::NativeCommand::StageClapAudioInputMapping(request) =
         command
     {
@@ -823,41 +853,7 @@ fn dispatch_native_owner_command(
             Ok(true)
         }
         NativeCommand::Configuration(request) => {
-            use super::native_configuration_wire::{self as wire, ControlReply};
-            let value_bytes = request
-                .value_bytes()
-                .map_err(|error| worker_failed("configuration request capacity", error))?;
-            let result = catch_unwind(AssertUnwindSafe(|| {
-                processor.service_native_configuration(
-                    request
-                        .borrow()
-                        .map_err(|error| worker_failed("configuration request grant", error))?,
-                )
-            }));
-            let reply = match result {
-                Ok(Ok(mut outcome)) => {
-                    if let super::NativeConfigurationControlOutcome::ReadyForInstall(candidate) =
-                        &mut outcome
-                    {
-                        candidate.buffers.request_value_capacity_bytes = value_bytes;
-                        admit_native_control_storage(
-                            processor,
-                            input_layout,
-                            crate::NativeHostBufferLayout {
-                                bytes: candidate.configuration.capacity(),
-                                alignment: align_of::<u8>(),
-                            },
-                        )?;
-                    }
-                    ControlReply::Outcome(outcome)
-                }
-                Ok(Err(error)) => ControlReply::Failed(error.to_string()),
-                Err(_) => ControlReply::Failed("native configuration control panicked".into()),
-            };
-            let success = !matches!(reply, ControlReply::Failed(_));
-            wire::write_reply(control, reply)
-                .map_err(|error| worker_failed("configuration reply", error))?;
-            Ok(success)
+            dispatch_configuration_command(processor, request, control, input_layout, None)
         }
         NativeCommand::StageClapAudioInputMapping(_) => Err(invalid_contract(
             "input mapping command requires the actual transport owner",
@@ -911,6 +907,52 @@ fn dispatch_native_owner_command(
             write_seed_operation_result(control, result)
         }
     }
+}
+
+fn dispatch_configuration_command(
+    processor: &mut dyn IsolatedAudioProcessorWorker,
+    request: super::native_configuration_wire::OwnedControlRequest,
+    control: &mut TcpStream,
+    input_layout: crate::NativeHostBufferLayout,
+    mapping: Option<super::ClapAudioInputMappingRequest>,
+) -> Result<bool, AudioProcessorHostError> {
+    use super::native_configuration_wire::{self as wire, ControlReply};
+    let value_bytes = request
+        .value_bytes()
+        .map_err(|error| worker_failed("configuration request capacity", error))?;
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        let request = request
+            .borrow()
+            .map_err(|error| worker_failed("configuration request grant", error))?;
+        match mapping {
+            Some(mapping) => processor.capture_clap_audio_input_configuration(mapping, request),
+            None => processor.service_native_configuration(request),
+        }
+    }));
+    let reply = match result {
+        Ok(Ok(mut outcome)) => {
+            if let super::NativeConfigurationControlOutcome::ReadyForInstall(candidate) =
+                &mut outcome
+            {
+                candidate.buffers.request_value_capacity_bytes = value_bytes;
+                admit_native_control_storage(
+                    processor,
+                    input_layout,
+                    crate::NativeHostBufferLayout {
+                        bytes: candidate.configuration.capacity(),
+                        alignment: align_of::<u8>(),
+                    },
+                )?;
+            }
+            ControlReply::Outcome(outcome)
+        }
+        Ok(Err(error)) => ControlReply::Failed(error.to_string()),
+        Err(_) => ControlReply::Failed("native configuration control panicked".into()),
+    };
+    let success = !matches!(reply, ControlReply::Failed(_));
+    wire::write_reply(control, reply)
+        .map_err(|error| worker_failed("configuration reply", error))?;
+    Ok(success)
 }
 
 /// Admit actual simultaneous host-owned payloads against the one known lane request.

@@ -2014,6 +2014,18 @@ pub trait IsolatedAudioProcessorWorker {
         ))
     }
 
+    /// Capture activated configuration only after the actual joined transport
+    /// owner supplies its matching staged map; graph/seed permission stays held.
+    fn capture_clap_audio_input_configuration(
+        &mut self,
+        _mapping: ClapAudioInputMappingRequest,
+        _request: NativeConfigurationControlRequest<'_>,
+    ) -> Result<NativeConfigurationControlOutcome, AudioProcessorHostError> {
+        Ok(NativeConfigurationControlOutcome::CapabilityRefused(
+            NativeConfigurationRefusal::UnsupportedAdapter,
+        ))
+    }
+
     /// Exact inactive owner retained by this adapter; not activation authority.
     fn staged_clap_audio_input_buffers(&mut self) -> Option<ClapAudioInputBufferReceipt> {
         None

@@ -114,18 +114,21 @@ The table describes implementation boundaries. Qualification below states the te
 
 ## Current qualification summary (2026-10-28)
 
-Stopped CLAP input reconfiguration has finite **Verified** staging qualification:
+CLAP input reconfiguration has finite **Verified** staging/capture qualification:
 Windows x64, owned mode19, Offline/48k/Stereo/block4/latency3, same native child
 and original Root/ticket/Source. Inactive input observations, native input planes
 and both shared mappings retain their actual owners under the original overlap
 grant. Both peers check typed geometry/file extent and actual shared backing;
 pre-cancel and wrong tickets add no fee, duplicate staging cannot allocate or
 credit, and Source revocation refuses access. Old Render/Enter, cursors and
-author state remain held. The IO owner supplies one joined DSP borrow; no second
-executor or parameter authority is added. Activation, actual state/latency/tail
-capture, Factory/routes/PDC replacement, Source installation and new-geometry
-PCM are still unsupported. IPC25 normal Product, ten exact native regression
-gates and the separate real Surge XT1.3.4 CLAP state/Notes/Main Runtime gate pass,
+author state remain held. The same instance legally reactivates and returns
+actual state/latency/tail under the original capture grant (mode19 becomes mode0,
+gain0.5, latency3/tail3). Captured changed inputs cannot stage an old-layout seed
+or enter the fixed-input Factory path. The IO owner supplies one joined DSP
+borrow; no second executor or parameter authority is added. Factory/routes/PDC
+replacement, Source installation and new-geometry PCM remain unsupported.
+IPC25 normal Product, eleven exact native regression gates and the separate real
+Surge XT1.3.4 CLAP state/Notes/Main Runtime gate pass,
 with empty stderr, exit0 and settled owners. These are finite Windows conditions,
 not full dynamic third-party, realtime/performance or other-platform evidence.
 
@@ -133,7 +136,7 @@ Shared auxiliary-input layouts, 2026-10-27: finite Windows owned controls verify
 Mono/Stereo Main with simultaneous Mono/Stereo and unconnected silent inputs,
 two-route summing, PDC, target-time gain automation, partitioning and seek in
 both modes/backends, in-process and through actual generic child processing.
-All 897 ordinary Audio controls pass (201 conditional ignored, zero filtered,
+All 898 ordinary Audio controls pass (202 conditional ignored, zero filtered,
 empty stderr). Current IPC25 retains independent region/overflow, exact shared-byte fee and
 old/future-version rejection controls. The two original CLAP/VST3 native
 sidechain gates also pass with the matching rebuilt normal Product and original

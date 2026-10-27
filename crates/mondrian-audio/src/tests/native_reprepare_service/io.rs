@@ -27,11 +27,18 @@ fn installed_clap_runtime_restart_stages_shared_inputs_without_releasing_old_dsp
     restart_detector_width(Qualification::StageMapping);
 }
 
+#[test]
+#[ignore = "matching production helper and CLAP mode19; native capture, graph install pending"]
+fn installed_clap_runtime_restart_captures_changed_inputs_without_old_geometry_seed() {
+    restart_detector_width(Qualification::Capture);
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Qualification {
     Observe,
     StageInputs,
     StageMapping,
+    Capture,
     Install,
 }
 
@@ -181,9 +188,16 @@ fn restart_detector_width(qualification: Qualification) {
             assert_eq!(cursors(&runtime), held);
             verifier.validate(&claim).unwrap();
             assert_eq!(runtime.observe_native_owner_object(lease).unwrap(), object);
+            if qualification == Qualification::Capture {
+                let before = runtime.resource_footprint();
+                assert!(runtime
+                    .capture_native_reprepare_audio_inputs(ticket, &cancellation)
+                    .is_err());
+                assert_eq!(runtime.resource_footprint(), before);
+            }
             if matches!(
                 qualification,
-                Qualification::StageInputs | Qualification::StageMapping
+                Qualification::StageInputs | Qualification::StageMapping | Qualification::Capture
             ) {
                 let before = runtime.resource_footprint();
                 let canceled = ExecutionCancellationToken::new();
@@ -222,7 +236,10 @@ fn restart_detector_width(qualification: Qualification) {
                 assert_eq!(runtime.observe_native_owner_object(lease).unwrap(), object);
                 assert_eq!(cursors(&runtime), held);
             }
-            if qualification == Qualification::StageMapping {
+            if matches!(
+                qualification,
+                Qualification::StageMapping | Qualification::Capture
+            ) {
                 let before = runtime.resource_footprint();
                 let canceled = ExecutionCancellationToken::new();
                 canceled.cancel();
@@ -266,6 +283,55 @@ fn restart_detector_width(qualification: Qualification) {
                 assert_eq!(runtime.observe_native_owner_object(lease).unwrap(), object);
                 assert_eq!(cursors(&runtime), held);
                 verifier.validate(&claim).unwrap();
+            }
+            if qualification == Qualification::Capture {
+                let before = runtime.resource_footprint();
+                let canceled = ExecutionCancellationToken::new();
+                canceled.cancel();
+                assert!(matches!(
+                    runtime.capture_native_reprepare_audio_inputs(ticket, &canceled),
+                    Err(NativeAudioReprepareError::Cancelled)
+                ));
+                assert!(runtime
+                    .capture_native_reprepare_audio_inputs(unrelated, &cancellation)
+                    .is_err());
+                assert_eq!(runtime.resource_footprint(), before);
+                let operation = runtime
+                    .capture_native_reprepare_audio_inputs(ticket, &cancellation)
+                    .expect("same-instance activation and actual state/latency/tail");
+                let facts = operation.configuration_identity();
+                assert_eq!(facts.serviced_cohort, cohort);
+                assert_eq!(facts.control_token, proposal.control_token);
+                assert_eq!(facts.format, NativeConfigurationFormat::ClapState);
+                assert_eq!(facts.observed_contract.algorithmic_latency_frames(), 3);
+                assert_eq!(
+                    facts.observed_contract.tail(),
+                    AudioProcessorTail::Finite(3)
+                );
+                let mut state = vec![0];
+                state.extend_from_slice(&0.5_f32.to_le_bytes());
+                assert_eq!(
+                    runtime.native_reprepare_configuration(&operation).unwrap(),
+                    state
+                );
+                assert_eq!(
+                    runtime.resource_footprint(),
+                    before,
+                    "all reservations stay held"
+                );
+                assert!(runtime
+                    .capture_native_reprepare_audio_inputs(ticket, &cancellation)
+                    .is_err());
+                assert!(
+                    runtime
+                        .prepare_native_reprepare_plan(&operation, verifier.clone(), &cancellation)
+                        .is_err(),
+                    "new inputs cannot enter the fixed-input Factory path"
+                );
+                assert_eq!(runtime.resource_footprint(), before);
+                assert_eq!(runtime.observe_native_owner_object(lease).unwrap(), object);
+                verifier.validate(&claim).unwrap();
+                assert_eq!(cursors(&runtime), held);
             }
             assert!(
                 runtime.resource_footprint().fixed_resident_bytes
