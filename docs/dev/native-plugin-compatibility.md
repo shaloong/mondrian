@@ -174,6 +174,14 @@ owned controls, not wider third-party, long-run, heap or performance evidence;
 Export's terminal resource report does not yet integrate native graceful
 shutdown observations, and this does not close F06.
 
+To reproduce the seven new queue cases, supply the matching normal Product
+and both owned sidechain fixtures through their existing CLAP/VST3 helper and
+fixture environment variables. Pre-create a private directory and set
+`MONDRIAN_EXPORT_TEST_TEMP_ROOT` and the process temp location to it (`TMP` and
+`TEMP` on Windows; `TMPDIR` on Unix) before starting the test process. Run
+`cargo test -p mondrian-export --features validation --lib queue::tests::native_reprepare:: -- --ignored --test-threads=1`.
+Only the Windows conditions above have been qualified.
+
 Port additions/removals/reordering, full audio-port configuration/rescan,
 physical reply-loss and long-run stress, repeated App width migration and
 dynamic stems, wider third-party dynamic topology, RT/performance and other
