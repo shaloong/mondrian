@@ -462,7 +462,7 @@ fn capture_endurance_sample(
 ) -> Result<EnduranceSample, EnduranceCaptureError> {
     if playback.schema_version != mondrian_playback::PLAYBACK_EVIDENCE_SCHEMA_VERSION
         || reference.schema_version != 1
-        || export.schema_version != 2
+        || export.schema_version != 3
         || export.observed_at_us != timing.completed_at_us
         || facts.schema_version != 1
         || facts.observed_at_us != timing.completed_at_us
@@ -485,6 +485,7 @@ fn capture_endurance_sample(
         .fatal_errors
         .checked_add(u64::from(export.worker_failed))
         .and_then(|value| value.checked_add(export.audio_source_owner_failures))
+        .and_then(|value| value.checked_add(u64::from(export.audio_native_children.unavailable)))
         .and_then(|value| value.checked_add(reference_terminal_failure))
         .ok_or(EnduranceCaptureError::CounterOverflow)?;
     let queue_depth = facts
@@ -493,6 +494,11 @@ fn capture_endurance_sample(
         .and_then(|value| value.checked_add(export.pending_jobs))
         .and_then(|value| value.checked_add(export.active_jobs))
         .and_then(|value| value.checked_add(export.active_audio_source_owners))
+        .ok_or(EnduranceCaptureError::CounterOverflow)?;
+    let owned_resource_units = facts
+        .owned_resource_units
+        .checked_add(export.audio_native_children.registration_scopes)
+        .and_then(|value| value.checked_add(export.audio_native_children.pending_children))
         .ok_or(EnduranceCaptureError::CounterOverflow)?;
     Ok(EnduranceSample {
         sequence: timing.sequence,
@@ -543,7 +549,7 @@ fn capture_endurance_sample(
             export_pending_jobs: export.pending_jobs,
             export_active_jobs: export.active_jobs,
             queue_depth,
-            owned_resource_units: facts.owned_resource_units,
+            owned_resource_units,
         },
     })
 }
@@ -966,7 +972,7 @@ impl EndurancePhaseCapture {
             )
             || export.pending_jobs != 0
             || export.active_jobs != 0
-            || export.schema_version != 4
+            || export.schema_version != 5
             || !export.all_resources_released()
             || !last.export_shutdown_requested
             || last.export_worker_running
@@ -1554,7 +1560,7 @@ mod tests {
         );
         let reference = ReferenceOutputDiagnostics::default();
         let export = ExportEnduranceSnapshot {
-            schema_version: 2,
+            schema_version: 3,
             observed_at_us: 1,
             shutdown_requested: false,
             worker_running: true,
@@ -1574,6 +1580,13 @@ mod tests {
             audio_source_owners_closed: 2,
             audio_source_owner_failures: 2,
             active_audio_source_owners: 3,
+            audio_native_children: mondrian_export::ExportNativeChildSettlementEvidence {
+                registration_scopes: 4,
+                children_registered: 6,
+                children_settled: 1,
+                pending_children: 5,
+                unavailable: true,
+            },
         };
         let sample = capture_endurance_sample(
             EnduranceSampleTiming {
@@ -1596,9 +1609,39 @@ mod tests {
         assert_eq!(sample.counters.export_frames, 10);
         assert_eq!(sample.counters.export_activity_events, 4);
         assert_eq!(sample.counters.export_artifacts_verified, 1);
-        assert_eq!(sample.counters.fatal_errors, 2);
+        assert_eq!(sample.counters.fatal_errors, 3);
         assert_eq!(sample.gauges.queue_depth, 3);
+        assert_eq!(sample.gauges.owned_resource_units, 9);
         assert_eq!(sample.process_memory.observed_process_count, 2);
+
+        let overflow = ExportEnduranceSnapshot {
+            audio_native_children: mondrian_export::ExportNativeChildSettlementEvidence {
+                registration_scopes: u64::MAX,
+                pending_children: 1,
+                ..Default::default()
+            },
+            ..export
+        };
+        assert!(matches!(
+            capture_endurance_sample(
+                EnduranceSampleTiming {
+                    sequence: 0,
+                    scheduled_at_us: 0,
+                    started_at_us: 0,
+                    completed_at_us: 1,
+                },
+                &process_memory,
+                &playback,
+                &reference,
+                overflow,
+                EnduranceCaptureFacts {
+                    observed_at_us: 1,
+                    ..EnduranceCaptureFacts::default()
+                },
+                EnduranceSemanticCounters { verified_export_artifacts: 1, recovery_cycles: 0 },
+            ),
+            Err(EnduranceCaptureError::CounterOverflow)
+        ));
     }
 
     #[test]
@@ -2034,7 +2077,7 @@ mod tests {
                 0,
                 &reference,
                 ExportQueueShutdownEvidence {
-                    schema_version: 4,
+                    schema_version: 5,
                     worker_started: true,
                     worker_start_failed: false,
                     worker_terminated: true,
@@ -2049,6 +2092,7 @@ mod tests {
                     audio_source_owners_closed: 1,
                     audio_source_owner_failures: 0,
                     active_audio_source_owners: 0,
+                    audio_native_children: Default::default(),
                 },
             ),
             Err(EnduranceCaptureError::InvalidTerminal)
@@ -2061,7 +2105,7 @@ mod tests {
                 0,
                 &reference,
                 ExportQueueShutdownEvidence {
-                    schema_version: 4,
+                    schema_version: 5,
                     worker_started: true,
                     worker_terminated: true,
                     worker_start_failed: false,
@@ -2076,6 +2120,7 @@ mod tests {
                     audio_source_owners_closed: 1,
                     audio_source_owner_failures: 0,
                     active_audio_source_owners: 0,
+                    audio_native_children: Default::default(),
                 },
             )
             .expect("finish executed phase");

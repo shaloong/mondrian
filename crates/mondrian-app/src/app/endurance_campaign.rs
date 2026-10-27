@@ -1983,7 +1983,7 @@ mod tests {
 
     fn empty_export_snapshot() -> ExportEnduranceSnapshot {
         ExportEnduranceSnapshot {
-            schema_version: 2,
+            schema_version: 3,
             observed_at_us: 0,
             shutdown_requested: false,
             worker_running: true,
@@ -2003,6 +2003,7 @@ mod tests {
             audio_source_owners_closed: 0,
             audio_source_owner_failures: 0,
             active_audio_source_owners: 0,
+            audio_native_children: Default::default(),
         }
     }
 
@@ -2252,7 +2253,7 @@ mod tests {
                     .report(),
                 reference_output: ReferenceOutputDiagnostics::default(),
                 export: ExportEnduranceSnapshot {
-                    schema_version: 2,
+                    schema_version: 3,
                     observed_at_us: 0,
                     shutdown_requested: self.shutdown,
                     worker_running: !self.shutdown,
@@ -2280,6 +2281,7 @@ mod tests {
                     audio_source_owners_closed: self.verified_exports,
                     audio_source_owner_failures: 0,
                     active_audio_source_owners: 0,
+                    audio_native_children: Default::default(),
                 },
                 capture_facts: EnduranceCaptureFacts::default(),
             })
@@ -2297,7 +2299,7 @@ mod tests {
                     playback_workers_terminated: true,
                     supervised_child_processes_remaining: 0,
                     export: ExportQueueShutdownEvidence {
-                        schema_version: 4,
+                        schema_version: 5,
                         worker_started: true,
                         worker_terminated: true,
                         worker_start_failed: false,
@@ -2312,6 +2314,7 @@ mod tests {
                         audio_source_owners_closed: self.verified_exports,
                         audio_source_owner_failures: 0,
                         active_audio_source_owners: 0,
+                        audio_native_children: Default::default(),
                     },
                 },
                 Vec::new(),
@@ -2367,7 +2370,7 @@ mod tests {
                     playback_workers_terminated: !self.cleanup_incomplete,
                     supervised_child_processes_remaining: 0,
                     export: ExportQueueShutdownEvidence {
-                        schema_version: 4,
+                        schema_version: 5,
                         worker_started: true,
                         worker_terminated: true,
                         worker_start_failed: false,
@@ -2382,6 +2385,7 @@ mod tests {
                         audio_source_owners_closed: 0,
                         audio_source_owner_failures: 0,
                         active_audio_source_owners: 0,
+                        audio_native_children: Default::default(),
                     },
                 },
                 Vec::new(),
@@ -2443,7 +2447,7 @@ mod tests {
     #[test]
     fn incomplete_cleanup_retains_joined_late_export_receipt() {
         let export = ExportQueueShutdownEvidence {
-            schema_version: 4,
+            schema_version: 5,
             worker_started: true,
             worker_start_failed: false,
             worker_terminated: true,
@@ -2458,6 +2462,7 @@ mod tests {
             audio_source_owners_closed: 1,
             audio_source_owner_failures: 0,
             active_audio_source_owners: 0,
+            audio_native_children: Default::default(),
         };
         let closure = EnduranceRuntimeClosure {
             status: EndurancePhaseTerminalStatus::Completed,
@@ -2721,7 +2726,7 @@ mod tests {
                     ),
                     supervised_child_processes_remaining: 0,
                     export: ExportQueueShutdownEvidence {
-                        schema_version: 4,
+                        schema_version: 5,
                         worker_started: true,
                         worker_terminated: true,
                         worker_start_failed: false,
@@ -2736,6 +2741,7 @@ mod tests {
                         audio_source_owners_closed: 0,
                         audio_source_owner_failures: 0,
                         active_audio_source_owners: 0,
+                        audio_native_children: Default::default(),
                     },
                 },
                 Vec::new(),

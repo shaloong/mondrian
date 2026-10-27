@@ -19,6 +19,7 @@ $script:IntegerLeaves = @(
     "outstanding_frames", "outstanding_resources", "pending_jobs", "active_jobs",
     "activity_events", "audio_source_owners_started", "audio_source_owners_closed",
     "audio_source_owner_failures", "active_audio_source_owners", "observed_at_us",
+    "registration_scopes", "children_registered", "children_settled", "pending_children",
     "admissions", "rejections", "completions", "failures", "cancellations",
     "rendered_frames", "durable_artifacts", "render_workers_started",
     "render_workers_terminated", "render_worker_panics", "render_worker_owner_abandonments",
@@ -326,6 +327,20 @@ function Assert-CleanReferenceOutput {
     Assert-Null $receipt.diagnostics.last_error "$Context.reference_output.diagnostics.last_error"
 }
 
+function Assert-CleanNativeAudioChildren {
+    param($Value, [string]$Context)
+    $fields = @('registration_scopes','children_registered','children_settled','pending_children','unavailable')
+    Assert-Fields $Value $fields $Context
+    if (@($Value.PSObject.Properties).Count -ne $fields.Count) { throw "$Context has unknown fields" }
+    foreach ($field in $fields[0..3]) {
+        if ([bigint]$Value.$field -gt [bigint][uint64]::MaxValue) { throw "$Context.$field exceeds u64" }
+    }
+    Assert-Zero $Value.registration_scopes "$Context.registration_scopes"
+    Assert-Zero $Value.pending_children "$Context.pending_children"
+    Assert-Bool $Value.unavailable $false "$Context.unavailable"
+    if ($Value.children_registered -ne $Value.children_settled) { throw "$Context has unconfirmed native owners" }
+}
+
 function Assert-CleanExport {
     param($App, [string]$Context)
     Assert-Bool $App.export_resources_released $true "$Context.export_resources_released"
@@ -334,9 +349,10 @@ function Assert-CleanExport {
         "schema_version", "worker_started", "worker_start_failed", "worker_terminated",
         "worker_panicked", "worker_timed_out", "worker_detached", "worker_owner_abandoned",
         "pending_jobs", "active_jobs", "activity_events", "audio_source_owners_started",
-        "audio_source_owners_closed", "audio_source_owner_failures", "active_audio_source_owners"
+        "audio_source_owners_closed", "audio_source_owner_failures", "active_audio_source_owners", "audio_native_children"
     ) "$Context.export"
-    if ([uint64]$queue.schema_version -ne 4) { throw "$Context.export has an unknown schema" }
+    if ([uint64]$queue.schema_version -ne 5) { throw "$Context.export has an unknown schema" }
+    Assert-CleanNativeAudioChildren $queue.audio_native_children "$Context.export.audio_native_children"
     Assert-Bool $queue.worker_started $true "$Context.export.worker_started"
     Assert-Bool $queue.worker_terminated $true "$Context.export.worker_terminated"
     foreach ($leaf in @(
@@ -355,9 +371,10 @@ function Assert-CleanExport {
         "worker_terminated", "activity_events", "admissions", "rejections", "completions",
         "failures", "cancellations", "rendered_frames", "durable_artifacts", "pending_jobs",
         "active_jobs", "worker_failed", "audio_source_owners_started",
-        "audio_source_owners_closed", "audio_source_owner_failures", "active_audio_source_owners"
+        "audio_source_owners_closed", "audio_source_owner_failures", "active_audio_source_owners", "audio_native_children"
     ) "$Context.export_terminal_snapshot"
-    if ([uint64]$terminal.schema_version -ne 2) { throw "$Context.export_terminal_snapshot has an unknown schema" }
+    if ([uint64]$terminal.schema_version -ne 3) { throw "$Context.export_terminal_snapshot has an unknown schema" }
+    Assert-CleanNativeAudioChildren $terminal.audio_native_children "$Context.export_terminal_snapshot.audio_native_children"
     Assert-Bool $terminal.shutdown_requested $true "$Context.export_terminal_snapshot.shutdown_requested"
     Assert-Bool $terminal.worker_running $false "$Context.export_terminal_snapshot.worker_running"
     Assert-Bool $terminal.worker_terminated $true "$Context.export_terminal_snapshot.worker_terminated"
@@ -373,6 +390,11 @@ function Assert-CleanExport {
         "audio_source_owner_failures", "active_audio_source_owners")) {
         if ($terminal.$leaf -ne $queue.$leaf) {
             throw "$Context.export and terminal snapshot disagree on '$leaf'"
+        }
+    }
+    foreach ($leaf in @('registration_scopes','children_registered','children_settled','pending_children','unavailable')) {
+        if ($terminal.audio_native_children.$leaf -ne $queue.audio_native_children.$leaf) {
+            throw "$Context.export and terminal snapshot disagree on native '$leaf'"
         }
     }
 }

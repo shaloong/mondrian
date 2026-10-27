@@ -6,6 +6,9 @@ mod st436;
 
 use audio_delivery::{partition_stem_grants, ExportAudioDelivery};
 
+#[cfg(test)]
+use mondrian_audio::AudioContinuityEpoch;
+
 use crate::audio_stems::{
     stem_file_name, stem_path, validate_and_write_audio_stem_manifest, AudioStemExpectation,
     AudioStemValidationContract,
@@ -44,7 +47,7 @@ use crate::{
 };
 use chrono::Utc;
 use mondrian_audio::{
-    AudioContinuityEpoch, AudioDecodedSource, AudioLoudnessAnalyzer, AudioLoudnessReport,
+    AudioDecodedSource, AudioLoudnessAnalyzer, AudioLoudnessReport,
     AudioMediaResolver, AudioProcessingMode, AudioProcessorResolver, AudioProgramDeliveryRuntime,
     AudioProgramRuntime, AudioRenderContract, AudioRenderRequest, AudioRuntimeResourceFootprint,
     AudioRuntimeResourceGrant, ResolvedAudioSource,
@@ -5855,6 +5858,7 @@ fn prepare_timeline_audio_delivery(
     cache: &Arc<AudioSourceCache>,
     resource_grant: AudioRuntimeResourceGrant,
     processor_resolver: &dyn AudioProcessorResolver,
+    native_child_settlement: Option<&mondrian_core::NativeChildSettlementRegistrar>,
 ) -> Result<AudioProgramDeliveryRuntime, String> {
     let resolver = ExportAudioMediaResolver { timeline, cache: Arc::clone(cache) };
     let contract = AudioRenderContract {
@@ -5871,7 +5875,7 @@ fn prepare_timeline_audio_delivery(
     };
     let public_time_range = range.time_range()?;
     let runtime =
-        AudioProgramRuntime::build_from_precompiled_closure_for_range_with_processor_resolver_and_resource_grant(
+        AudioProgramRuntime::build_from_precompiled_closure_for_range_observing_native_child_settlement(
             &timeline.sequence,
             &timeline.sequences,
             &resolver,
@@ -5881,6 +5885,7 @@ fn prepare_timeline_audio_delivery(
             public_time_range,
             prepared_audio.closure(),
             resource_grant,
+            native_child_settlement,
         )
         .map_err(|error| format!("编译导出音频 Program 失败（未使用降级混音）: {error}"))?;
     if runtime.execution_demand() != prepared_audio.execution_demand() {
@@ -5978,6 +5983,7 @@ fn render_audio_stems_to_pcm_f32(
     }
     let cache = audio_owner.cache(sample_rate).map_err(JobExecutionResult::Failed)?;
     let resource_grant = execution_gate.resource_policy().audio_runtime_grant;
+    let native_child_settlement = execution_gate.native_child_settlement_registrar();
 
     // Measure without retaining other Runtimes, then partition the original
     // job grant. Each live Runtime must admit dynamic overlap in its own slice.
@@ -5993,6 +5999,7 @@ fn render_audio_stems_to_pcm_f32(
             &cache,
             resource_grant,
             execution_gate.audio_processor_resolver(),
+            native_child_settlement.as_ref(),
         )
         .map_err(JobExecutionResult::Failed)?;
         let footprint = delivery.resource_footprint();
@@ -6042,6 +6049,7 @@ fn render_audio_stems_to_pcm_f32(
             &cache,
             resource_grant,
             execution_gate.audio_processor_resolver(),
+            native_child_settlement.as_ref(),
         )
         .map_err(JobExecutionResult::Failed)?;
         let mut delivery = ExportAudioDelivery::new(delivery, cancel).map_err(|error| {
@@ -6189,6 +6197,7 @@ fn render_timeline_audio_to_pcm_f32(
         Ok(cache) => cache,
         Err(error) => return JobExecutionResult::Failed(error),
     };
+    let native_child_settlement = execution_gate.native_child_settlement_registrar();
     {
         let delivery = match prepare_timeline_audio_delivery(
             timeline,
@@ -6199,6 +6208,7 @@ fn render_timeline_audio_to_pcm_f32(
             &cache,
             execution_gate.resource_policy().audio_runtime_grant,
             execution_gate.audio_processor_resolver(),
+            native_child_settlement.as_ref(),
         ) {
             Ok(delivery) => delivery,
             Err(error) => return JobExecutionResult::Failed(error),
@@ -18854,6 +18864,7 @@ mod tests {
             &Arc::new(AudioSourceCache::new(48_000)),
             service::ExportExecutionResourcePolicy::default().audio_runtime_grant,
             &RejectingProcessorResolver,
+            None,
         );
         assert!(
             matches!(result, Err(detail) if detail.contains("selected export resolver reached"))
@@ -19020,6 +19031,7 @@ mod tests {
             &Arc::new(AudioSourceCache::new(sample_rate)),
             service::ExportExecutionResourcePolicy::default().audio_runtime_grant,
             resolver,
+            None,
         )
         .expect("prepare offline export delivery with real plugin");
         if delivery.requires_state_entry() {

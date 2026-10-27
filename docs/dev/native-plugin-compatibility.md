@@ -173,14 +173,25 @@ publication; both primary and stem failures leave no output staging or PCM
 files in their dedicated process temp scope.
 Thirteen full-queue gates plus four original CLAP/VST3 main/stem
 transport/meter gates pass with the matching normal Product, empty stderr,
-exit0 and supervised process-tree settlement. Export ordinary310/33ignored
+exit0 and supervised process-tree settlement. Export ordinary313/33ignored
 passes with zero filtered and empty stderr. Untimed restart application is at
 the actual block boundary, not sample-accurate topology automation. These are
 owned controls, not wider third-party, long-run, heap or performance evidence.
 The grant proof covers the existing Runtime ledger, not complete physical,
-SDK/plugin or outer-consumer heaps. Export's terminal resource report does not
-yet integrate original-owner native child settlement observations. Graceful
-teardown is a separate condition and F06 remains open.
+SDK/plugin or outer-consumer heaps.
+
+Export now forwards original Audio child-owner settlement into the Queue's
+existing state and lock. Cold factory work and stem measurements are observed;
+the thirteen new queue gates require nonempty actual-owner registrations and
+fully balanced terminal obligations. Live schema3/shutdown schema5 reject missing
+JSON fields. Missing forwarding, counter faults and unconfirmed exit/reap remain
+sticky failures. App's affected endurance cohort passes94/2ignored, including
+owned-resource projection/overflow and current canonical receipt replay; Audio
+ordinary899/206ignored passes. The independent consumer script passes three
+baselines and rejects246 rehashed mutations under direct bundled PowerShell.
+All Rust gates have empty stderr and settled supervised Jobs. This is finite
+Windows/offline evidence; settlement does not prove graceful acknowledgement,
+OFX child closure, full App/Workspace regression or F06 resolution.
 
 To reproduce the thirteen queue cases, supply the matching normal Product
 and both owned sidechain fixtures through their existing CLAP/VST3 helper and

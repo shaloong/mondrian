@@ -65,9 +65,9 @@ pub use queue::{
     ExportColorHealthVerdict, ExportDynamicHdrKind, ExportDynamicHdrPreservationEvidence,
     ExportEnduranceSnapshot, ExportExecutionResourcePolicy, ExportFailure, ExportFailureReason,
     ExportJobColorDiagnostics, ExportJobColorDiagnosticsSummary, ExportJobDiagnostics,
-    ExportJobSnapshot, ExportProgress, ExportProgressDetail, ExportProgressPhase,
-    ExportPublicationState, ExportQueueDiagnostics, ExportQueueShutdownEvidence,
-    ExportSmartRenderEvidence, JobStatus, RenderJob, RenderQueue,
+    ExportJobSnapshot, ExportNativeChildSettlementEvidence, ExportProgress, ExportProgressDetail,
+    ExportProgressPhase, ExportPublicationState, ExportQueueDiagnostics,
+    ExportQueueShutdownEvidence, ExportSmartRenderEvidence, JobStatus, RenderJob, RenderQueue,
     EXPORT_HETEROGENEOUS_ROUTE_CONTRACT_LOGICAL_BYTES,
 };
 pub use video_encoding::{

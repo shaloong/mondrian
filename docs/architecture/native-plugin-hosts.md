@@ -70,6 +70,15 @@ slices sum to the original grant; each Runtime must admit its reprepare overlap
 inside its own slice. This bounds the existing Runtime ledger, not all SDK,
 foreign-plugin or outer-consumer allocations.
 
+Export observes Audio native-child settlement through Core's existing counted
+registrar in the Queue's original state and lock. Observation starts before cold
+precompiled factory work, including stem measurements and failed construction;
+Sessions and actual child owners retain their own obligations. Missing forwarding,
+counter faults and unconfirmed results permanently invalidate completeness.
+Live schema3 and shutdown schema5 expose these facts; pending scopes and children
+count as owned resources. This adds no teardown executor or DSP permission.
+Confirmed exit/reap remains separate from graceful acknowledgement and OFX closure.
+
 OpenFX discovery in `mondrian-app::openfx_adapter` loads installed binaries only
 in a supervised child. An optional exported OfxSetHost receives the actual native
 host before OfxGetNumberOfPlugins and OfxGetPlugin. Discovery returns bounded

@@ -1108,12 +1108,12 @@ fn audio_source_owner_lifecycle_is_latched_into_endurance_and_shutdown_evidence(
 
     let (clean, clean_shutdown) =
         execute_owner_outcome(GateOutcome::AudioOwnerClean, "owner-clean.mp4");
-    assert_eq!(clean.schema_version, 2);
+    assert_eq!(clean.schema_version, 3);
     assert_eq!(clean.audio_source_owners_started, 1);
     assert_eq!(clean.audio_source_owners_closed, 1);
     assert_eq!(clean.audio_source_owner_failures, 0);
     assert_eq!(clean.active_audio_source_owners, 0);
-    assert_eq!(clean_shutdown.schema_version, 4);
+    assert_eq!(clean_shutdown.schema_version, 5);
     assert!(clean_shutdown.all_resources_released());
 
     let (dirty, dirty_shutdown) =

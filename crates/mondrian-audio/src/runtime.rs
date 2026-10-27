@@ -1440,6 +1440,36 @@ impl AudioProgramRuntime {
         prepared_closure: &AudioDependencyClosure,
         resource_grant: AudioRuntimeResourceGrant,
     ) -> Result<Self, AudioRuntimeBuildError> {
+        Self::build_from_precompiled_closure_for_range_observing_native_child_settlement(
+            root,
+            sequences,
+            resolver,
+            processor_resolver,
+            contract,
+            output_id,
+            range,
+            prepared_closure,
+            resource_grant,
+            None,
+        )
+    }
+
+    /// Build the same frozen closure while observing cold native children.
+    /// Registration precedes factory preparation, including failed construction;
+    /// it grants no execution authority and adds no alternate compilation path.
+    #[allow(clippy::too_many_arguments)]
+    pub fn build_from_precompiled_closure_for_range_observing_native_child_settlement(
+        root: &Sequence,
+        sequences: &[Sequence],
+        resolver: &dyn AudioMediaResolver,
+        processor_resolver: &dyn AudioProcessorResolver,
+        contract: AudioRenderContract,
+        output_id: Option<ProgramOutputId>,
+        range: TimelineTimeRange,
+        prepared_closure: &AudioDependencyClosure,
+        resource_grant: AudioRuntimeResourceGrant,
+        native_child_settlement: Option<&mondrian_core::NativeChildSettlementRegistrar>,
+    ) -> Result<Self, AudioRuntimeBuildError> {
         if contract.channel_layout != root.settings.audio_channel_layout {
             return Err(AudioRuntimeBuildError::ProgramLayoutMismatch {
                 sequence_id: root.id,
@@ -1462,7 +1492,7 @@ impl AudioProgramRuntime {
             &mut stack,
             0,
             &mut ledger,
-            None,
+            native_child_settlement,
         )
     }
 

@@ -1243,7 +1243,13 @@ mod tests {
         assert!(evidence.app_owner_consumed);
         assert!(evidence.project.all_resources_released());
         assert!(evidence.reference_output.all_resources_released());
-        assert_eq!(evidence.export.schema_version, 4);
+        assert_eq!(evidence.export.schema_version, 5);
+        assert!(evidence.export.audio_native_children.all_resources_released());
+        assert_eq!(evidence.export_terminal_snapshot.schema_version, 3);
+        assert_eq!(
+            evidence.export.audio_native_children,
+            evidence.export_terminal_snapshot.audio_native_children
+        );
         assert!(evidence.export.worker_started);
         assert!(!evidence.export.worker_start_failed);
         assert!(evidence.export.worker_terminated);

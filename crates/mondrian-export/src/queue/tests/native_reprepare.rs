@@ -332,6 +332,7 @@ fn qualify(mode: u8, clap: bool, output_kind: Output) {
                     &cache,
                     policy.audio_runtime_grant,
                     resolver.as_ref(),
+                    None,
                 )
                 .unwrap();
                 fixed =
@@ -407,6 +408,14 @@ fn qualify(mode: u8, clap: bool, output_kind: Output) {
     }));
     let closed = queue.shutdown_and_wait(Duration::from_secs(2));
     assert!(closed.all_resources_released(), "{closed:?}");
+    assert!(
+        closed.audio_native_children.children_registered >= if stems { 2 } else { 1 },
+        "actual original native owners must have reported, not an empty observer: {closed:?}"
+    );
+    println!(
+        "original audio native-owner closure: {:?}",
+        closed.audio_native_children
+    );
     assert_eq!(closed.audio_source_owners_started, 1);
     assert_eq!(closed.audio_source_owners_closed, 1);
     if let Err(payload) = outcome {
