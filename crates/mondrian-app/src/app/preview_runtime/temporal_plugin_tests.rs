@@ -8,6 +8,86 @@ use mondrian_core::automation::{
 use mondrian_core::{FramePosition, PropertyValue, Rational, TimelineTime};
 
 #[test]
+fn cpu_deadline_terminal_keeps_original_demand_and_never_poisons_frame_failure_memory() {
+    use crate::app::preview_cpu_fallback_task::{
+        PreviewCpuFallbackAttempt, PreviewCpuFallbackPending, PreviewCpuFallbackStopped,
+        PreviewCpuOutputTarget,
+    };
+    let _guard = crate::app_ui::test_utils::theme_test_guard();
+    let mut state = state_with_solid_color_clip(Color::from_hex(0x244C7A));
+    state.play().unwrap();
+    let identity = state.pending_playback_frame_demand_identity().unwrap();
+    let runtime = PreviewProductionRuntime::<()>::new_without_workers_for_test();
+    runtime.synchronize_transport_intent(state.preview_transport_intent());
+    let generation = runtime.execution.borrow().generation();
+    let cancellation = runtime.execution.borrow().generation_cancellation();
+    let key = PreviewOutputKey::new(
+        state.active_sequence().unwrap().id,
+        1,
+        1,
+        test_preview_semantic_identity(7782),
+    );
+    let attempt = PreviewCpuFallbackAttempt {
+        generation,
+        epoch: identity.epoch,
+        semantic_key: key.clone(),
+        output_key: key.clone(),
+        intent: state.preview_execution_snapshot(Instant::now()).transport().playback_intent(),
+        target: PreviewCpuOutputTarget::WorkingGpu,
+        candidate_id: Some(7),
+        reusable: false,
+    };
+    let stopped = || PreviewCpuFallbackStopped {
+        attempt: Some(attempt.clone()),
+        generation,
+        epoch: identity.epoch,
+        output_key: key.clone(),
+        demand_identity: Some(identity),
+        reason: mondrian_effects::EffectProcessorStopReason::DeadlineExpired,
+    };
+    runtime.cpu_fallback_in_flight.replace(Some(PreviewCpuFallbackPending {
+        attempt: attempt.clone(),
+        completed: false,
+        completed_resource: None,
+    }));
+    let outcome = runtime.observe_cpu_fallback_stopped(stopped());
+    assert_eq!(
+        outcome.frame_delivery_candidates,
+        vec![mondrian_playback::FrameDeliveryCandidate::for_demand(
+            identity,
+            mondrian_playback::FrameDeliveryKind::Late,
+        ),]
+    );
+    assert!(runtime.cpu_fallback_in_flight.borrow().is_none());
+    assert!(runtime.cpu_fallback_failure.borrow().is_none());
+    assert!(
+        !cancellation.is_canceled(),
+        "child expiry cannot cancel its generation"
+    );
+    assert_eq!(
+        state.pending_playback_frame_demand_identity(),
+        Some(identity),
+        "the adapter reports a candidate; only Playback may consume it"
+    );
+
+    let mut successor = attempt.clone();
+    successor.output_key = key.with_execution_nonce(8);
+    runtime.cpu_fallback_in_flight.replace(Some(PreviewCpuFallbackPending {
+        attempt: successor.clone(),
+        completed: false,
+        completed_resource: None,
+    }));
+    let outcome = runtime.observe_cpu_fallback_stopped(stopped());
+    assert!(outcome.frame_delivery_candidates.is_empty());
+    assert_eq!(
+        runtime.cpu_fallback_in_flight.borrow().as_ref().unwrap().attempt,
+        successor,
+        "an obsolete completion cannot retire the newer physical attempt"
+    );
+    assert!(runtime.cpu_fallback_failure.borrow().is_none());
+}
+
+#[test]
 fn complete_cpu_route_remains_authoritative_for_gpu_capable_source_pixels() {
     use crate::app::preview_viewer_plan::gpu_composite_layers_for_resolved_with_session;
     use mondrian_renderer::GpuCompositingBlockerReason;
@@ -633,12 +713,25 @@ fn qualify_time_blur_playback(state: &mut AppState, kind: &mondrian_effects::Eff
     }));
     let owners = session.into_shutdown_owners();
     let last_refusal = owners.preview().last_unavailability();
+    let terminal_context = (
+        state.playback_engine.snapshot(),
+        state.pending_playback_frame_demand_identity(),
+        owners
+            .preview()
+            .cpu_fallback_in_flight
+            .borrow()
+            .as_ref()
+            .map(|pending| (pending.attempt.clone(), pending.completed)),
+        owners.preview().pending_processor_sources.borrow().len(),
+        owners.preview().execution.borrow().is_pending(),
+    );
     let shutdown = owners.shutdown_until(Instant::now() + Duration::from_secs(10));
     assert!(shutdown.gpu_preview_dependency_barrier.is_complete());
     assert!(shutdown.preview.all_workers_terminated());
     assert!(shutdown.gpu.qualifies_normal_runtime());
     result.unwrap_or_else(|error| {
         eprintln!("actual TimeBlur Viewer refusal: {last_refusal:?}");
+        eprintln!("transport/demand/CPU/source waits/execution: {terminal_context:?}");
         std::panic::resume_unwind(error)
     });
 }

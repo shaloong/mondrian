@@ -42,6 +42,21 @@ pub(crate) struct PreviewProcessorSourceWork {
 }
 
 impl PreviewProcessorSourceWork {
+    /// Original media-work deadline; downstream scopes may only shorten it.
+    pub(crate) fn deadline(&self) -> Option<Instant> {
+        self.policy.deadline
+    }
+
+    /// Only an original Current playback request can own a terminal delivery.
+    pub(crate) fn current_demand_identity(&self) -> Option<mondrian_playback::FrameDemandIdentity> {
+        matches!(
+            self.policy.intent,
+            super::preview_access_mode::MediaPreviewRequestIntent::Current(_)
+        )
+        .then_some(self.policy.demand_identity)
+        .flatten()
+    }
+
     pub(crate) fn from_bindings(
         policy: PreviewMediaWorkPolicy,
         bindings: impl IntoIterator<Item = (Arc<PreparedTimelineClipInputPlan>, MediaPreviewKey)>,

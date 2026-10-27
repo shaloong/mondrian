@@ -204,6 +204,20 @@ attempt checks. Seven real-media source controls retain the original cancellatio
 deadline, shutdown, pixel and no-DSP-replay assertions and add scalar/Broker
 feedback-view turnover. These use an owned processor, not a third-party plugin.
 
+The CPU invocation inherits the earliest original media-work, cancellation and
+observation deadline through the existing Control and execution authority. An
+expired Source reply cannot become a persistent plugin/semantic failure. Preserve
+the Control's typed stop reason; only a successful completion is additionally
+checked against the original deadline at the producer publication boundary.
+Release request-owned Sources and reservations before sending that terminal.
+
+A stopped terminal carries the original attempt, generation/epoch/output and
+Current demand identity. Only the exact active attempt may retire pending work;
+an original deadline may propose Late for its matching demand. Playback alone
+consumes that candidate, including its demand sequence. Child expiry neither
+cancels the generation nor publishes pixels, failure memory or success cache.
+Explicit generation cancellation keeps the existing retirement path.
+
 ## Qualification and remaining work
 
 Windows MSVC14.44 passes 16 native control groups, including the actual published
@@ -256,21 +270,17 @@ client resolves late media. The synchronous no-input composition helper cannot
 qualify that path. Consume feedback from `PreviewWorkPoll`, which transfers it
 out of the internal pending slot. Preserve these boundaries in future controls.
 
-The last full App regression at4e51ef86 passes3145/214 ignored. Current uniform,
-varying and public-state controls pass after shared scheduling extraction. The
-new cancellation control passes a targeted isolated run after its clearing-view
-assertion was corrected; unrelated controls were not replayed for that assertion
-change. The
-unchanged ordinary regression is retained rather than rerun for an ignored-test
-change. Original1800s ordinary/180s native budgets,
-exit0, empty stderr and settled descendants are retained. This batch changes
-tests/documentation only. Unchanged Effects390, Renderer689/39 ignored,
-Export307/20 ignored, 16 native groups and seven resident/action controls retain
-their prior qualification. The last full combined ordinary baseline remains4531 passed,
-with273 conditional tests ignored then; new native-only controls are explicitly invoked separately from that baseline. App uses validation opt0/debug0;
-Effects/Renderer/Export use opt1/debug0. The ordinary development product remains
-opt0/debug0/features[] with unchanged runtime source; it was not rebuilt for a
-test/documentation-only change.
+Current Windows validation passes Source7, the typed-deadline demand/stale-attempt
+control, full App3147/218 ignored and all four finite real TimeBlur NLE gates.
+The Source group includes an actual held media wait whose policy deadline expires
+while its parent generation stays live: one DSP call, a typed DeadlineExpired
+terminal, no pixels/failure memory and released leases. Original1800s ordinary
+and180s native budgets, exit0, empty stderr and settled descendants are retained.
+App uses opt0/debug0/validation and an App-only CGU1 memory override; the rebuilt
+ordinary development Product uses opt0/debug0/default features with CGU1.
+Unchanged Effects390, Renderer689/39 ignored, Export307/20 ignored,16 native
+groups and seven resident/action controls retain their prior conditions. This
+is not a new full Workspace regression or release/performance qualification.
 
 Earlier finite real-FFmpeg Preview/Export source and formal PNG/GPU-prefix
 qualification retain their original conditions; they are not new TimeBlur
@@ -282,20 +292,15 @@ cancellation at other phases, encoded export, GUI, comparative performance
 and other platforms remain open. F06/GL remain open; this does not establish
 universal100ms shutdown, whole-heap safety or realtime behavior.
 
-The new actual Headless/wgpu TimeBlur playback control remains **whole FAIL**.
-Honoring the complete-CPU route removes its first static Viewer refusal; timed
-advancement, pause and resume then reach frame7/8 before a Source wait reports
-"source request owner retired". Paired GPU-to-decoder, Preview and GPU cleanup
-passes. Source queue liveness also expires at its media deadline while the CPU
-job receives generation cancellation; the exact retirement/terminal-disposition
-path still needs diagnosis. Do not extend deadlines, suppress this failure or
-call repeated seek an automatic loop. Playback Engine currently has no loop-range
-or automatic-repeat contract. Finite working-image controls remain separately
-qualified; timed playback, deadline recovery and automatic loop remain open.
-
-Current Windows validation uses opt0/debug0 App with an App-only CGU1 build
-override for memory pressure, default-feature Product and validation libtest.
-Source7, full App3146/218ignored and all four earlier real TimeBlur NLE gates
-pass with empty stderr and settled jobs under original budgets. The failed timed
-gate was not retried merely for the build-profile change. Other crates retain
-their earlier regression conditions; this is not a new full Workspace run.
+The actual Headless/wgpu TimeBlur playback control remains **whole FAIL**.
+After the deadline fix, one diagnostic attempt reaches Ended/frame11 through
+pause/resume, then its final picture is rejected with native status6. No Source
+owner-retirement failure is reported there. Another attempt fails the original
+10s interval safety assertion with no final unavailability; it is not evidence
+of a deterministic deadlock. The parent includes the fix; the invoked worker's
+native backend source is unchanged. Paired GPU-to-decoder, Preview and GPU cleanup
+passes. These observations do not qualify complete timed playback or deadline
+recovery. Distinguish the native ABI/report rejection before changing lifecycle
+or image-range behavior. Do not extend deadlines or suppress the failed gate.
+Playback Engine has no loop-range/automatic-repeat contract; repeated public
+seek does not qualify an automatic loop.

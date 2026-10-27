@@ -2754,6 +2754,56 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         outcome
     }
 
+    fn observe_cpu_fallback_stopped(
+        &self,
+        stopped: super::preview_cpu_fallback_task::PreviewCpuFallbackStopped,
+    ) -> PreviewWorkPoll {
+        let mut outcome = PreviewWorkPoll::default();
+        let is_current = stopped.generation == self.execution.borrow().generation()
+            && self.transport_epoch.get() == Some(stopped.epoch)
+            && self.cpu_fallback_in_flight.borrow().as_ref().is_some_and(|pending| {
+                stopped.attempt.as_ref() == Some(&pending.attempt)
+                    && pending.attempt.generation == stopped.generation
+                    && pending.attempt.epoch == stopped.epoch
+                    && pending.attempt.output_key == stopped.output_key
+            });
+        if !is_current {
+            return outcome;
+        }
+        let pending = self.cpu_fallback_in_flight.borrow_mut().take().unwrap();
+        let scope = super::preview_processor_feedback::PreviewProcessorFeedbackScope::scalar(
+            &stopped.output_key,
+            stopped.generation,
+            stopped.epoch,
+        );
+        if self.current_processor_feedback_scope.get() == Some(scope) {
+            outcome.processor_progress = Some(
+                super::preview_processor_feedback::PreviewProcessorProgressUpdate {
+                    scope,
+                    receipt: None,
+                },
+            );
+        }
+        if stopped.reason == mondrian_effects::EffectProcessorStopReason::DeadlineExpired
+            && let Some(identity) = stopped.demand_identity
+            && identity.epoch == pending.attempt.intent.epoch
+            && identity.quality_revision == pending.attempt.intent.quality_revision
+            && identity.target_frame == pending.attempt.intent.frame
+        {
+            outcome.frame_delivery_candidates.push(
+                mondrian_playback::FrameDeliveryCandidate::for_demand(
+                    identity,
+                    mondrian_playback::FrameDeliveryKind::Late,
+                ),
+            );
+        }
+        // A cooperative stop is not a persistent semantic failure. Playback
+        // alone decides whether this exact original demand can consume Late.
+        self.execution.borrow_mut().set_pending(false);
+        outcome.visible_change = true;
+        outcome
+    }
+
     fn pump_cpu_fallback_results(&self) -> PreviewWorkPoll {
         let Some(task) = self.cpu_fallback_task.as_ref() else {
             return PreviewWorkPoll::default();
@@ -2917,6 +2967,9 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                         self.execution.borrow_mut().set_pending(false);
                         outcome.visible_change = true;
                     }
+                }
+                PreviewCpuFallbackResult::Stopped(stopped) => {
+                    outcome.merge(self.observe_cpu_fallback_stopped(*stopped));
                 }
                 PreviewCpuFallbackResult::Failed(failed) => {
                     let scope =

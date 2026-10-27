@@ -780,6 +780,7 @@ fn processor_source_real_media_resumes_original_cpu_and_broker_jobs_without_dsp_
     enum Completion {
         Pixels,
         FeedbackViewChanged,
+        MediaDeadline,
         CancelGeneration,
         Deadline,
         Shutdown,
@@ -789,6 +790,7 @@ fn processor_source_real_media_resumes_original_cpu_and_broker_jobs_without_dsp_
         (true, Completion::Pixels),
         (false, Completion::FeedbackViewChanged),
         (true, Completion::FeedbackViewChanged),
+        (false, Completion::MediaDeadline),
         (false, Completion::CancelGeneration),
         (true, Completion::CancelGeneration),
         (false, Completion::Deadline),
@@ -800,7 +802,7 @@ fn processor_source_real_media_resumes_original_cpu_and_broker_jobs_without_dsp_
         let epoch = mondrian_playback::PlaybackEngine::default().snapshot().epoch;
         runtime.synchronize_transport_intent(PreviewTransportIntent::new(false, false, epoch));
         let generation = runtime.execution.borrow().generation();
-        let policy = PreviewMediaWorkPolicy {
+        let mut policy = PreviewMediaWorkPolicy {
             intent: MediaPreviewRequestIntent::Current(
                 mondrian_playback::MediaWorkDemandId::for_preview_generation(epoch, generation, 72),
             ),
@@ -858,6 +860,10 @@ fn processor_source_real_media_resumes_original_cpu_and_broker_jobs_without_dsp_
         if completion == Completion::Deadline {
             request.cancellation =
                 request.cancellation.with_deadline(Instant::now() + Duration::from_millis(500));
+        }
+        if completion == Completion::MediaDeadline {
+            policy.deadline = Some(Instant::now() + Duration::from_millis(500));
+            assert_eq!(request.cancellation.deadline(), None);
         }
         let work = PreviewProcessorSourceWork::from_elements(policy, &request.elements);
         let visual_key = VisualExecutionTaskKey::from_complete_semantic_fingerprint([191; 32]);
@@ -990,7 +996,7 @@ fn processor_source_real_media_resumes_original_cpu_and_broker_jobs_without_dsp_
                     "shutdown must retire source leases before joining media workers"
                 );
             }
-            if completion == Completion::Deadline {
+            if matches!(completion, Completion::Deadline | Completion::MediaDeadline) {
                 // Keep the request unserved until the actual caller scope
                 // expires; servicing it here would race the condition under test.
                 while runtime
@@ -1016,11 +1022,40 @@ fn processor_source_real_media_resumes_original_cpu_and_broker_jobs_without_dsp_
             runtime.pump_processor_source_requests();
             assert!(runtime.pending_processor_sources.borrow().is_empty());
             assert_eq!(facts.calls.load(Ordering::SeqCst), 1);
-            if completion == Completion::Deadline {
+            if matches!(completion, Completion::Deadline | Completion::MediaDeadline) {
                 assert!(
                     !original_generation.is_canceled(),
                     "child expiry must not cancel the parent generation"
                 );
+            }
+            if completion == Completion::MediaDeadline {
+                loop {
+                    match runtime.cpu_fallback_task.as_ref().unwrap().try_poll() {
+                        Some(PreviewCpuFallbackResult::Stopped(stopped)) => {
+                            assert_eq!(
+                                stopped.reason,
+                                mondrian_effects::EffectProcessorStopReason::DeadlineExpired
+                            );
+                            assert_eq!(stopped.generation, generation);
+                            assert_eq!(stopped.epoch, epoch);
+                            assert!(stopped.demand_identity.is_none());
+                            break;
+                        }
+                        Some(PreviewCpuFallbackResult::Failed(failed)) => {
+                            panic!(
+                                "deadline became a plugin/semantic failure: {}",
+                                failed.reason
+                            )
+                        }
+                        Some(PreviewCpuFallbackResult::Ready(_)) => {
+                            panic!("expired Source wait published pixels")
+                        }
+                        _ => {}
+                    }
+                    assert!(Instant::now() < deadline, "missing typed deadline terminal");
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                assert!(runtime.cpu_fallback_failure.borrow().is_none());
             }
             let _shutdown = runtime.shutdown_and_wait();
             assert_eq!(
