@@ -132,9 +132,93 @@ fn export_snapshot(state: &AppState) -> mondrian_export::preset::TimelineExportS
     .unwrap()
 }
 
+fn reference_source_samples(
+    state: &AppState,
+    varying_media: bool,
+) -> std::collections::BTreeMap<i64, mondrian_renderer::CpuColorFrame> {
+    let ticks = [6, 7, 8, 9, 14, 15, 16, 17];
+    let target = state.active_sequence().unwrap().settings.resolution;
+    if !varying_media {
+        let base = mondrian_export::queue::export_visual_frame_validation(
+            &export_snapshot(state),
+            2,
+            target,
+        )
+        .unwrap()
+        .working_frame;
+        assert_eq!(base.rgba_f32().data.len(), 256);
+        assert!(base.rgba_f32().data.iter().all(|p| p[0] > 0.01 && p[3] == 1.0));
+        return ticks.into_iter().map(|tick| (tick, base.clone())).collect();
+    }
+    // This source-only reference uses a finer evaluation grid to express exact
+    // quarter-frame author times. The real 24fps program is unchanged. Original
+    // media metadata/Source Sample Target/decoder and color conversion still
+    // decide the physical samples; the test introduces no rounding policy.
+    let mut reference = state.active_sequence().unwrap().clone();
+    reference.settings.frame_rate = Rational::new(96, 1);
+    let snapshot = crate::app::exporting::capture_timeline_export_snapshot(
+        state,
+        reference,
+        vec![],
+        mondrian_export::preset::TimelineExportRange::WorkArea {
+            start_frame: 0,
+            end_frame_exclusive: 32,
+        },
+        false,
+    )
+    .unwrap();
+    let sources: std::collections::BTreeMap<_, _> = ticks
+        .into_iter()
+        .map(|tick| {
+            let frame =
+                mondrian_export::queue::export_visual_frame_validation(&snapshot, tick, target)
+                    .unwrap()
+                    .working_frame;
+            assert_eq!(frame.rgba_f32().data.len(), 256);
+            assert!(frame
+                .rgba_f32()
+                .data
+                .iter()
+                .all(|p| p[3] == 1.0 && p.iter().all(|v| v.is_finite())));
+            (tick, frame)
+        })
+        .collect();
+    // Millisecond Matroska PTS: frame 4 starts at .167, after 16/96.
+    // Keep the preceding picture until that actual boundary; 17/96 crosses it.
+    for (left, right) in [(6, 7), (8, 9), (14, 15), (15, 16)] {
+        assert!(
+            sources[&left] == sources[&right],
+            "same decoded presentation interval {left}/96 and {right}/96"
+        );
+    }
+    assert!(
+        sources[&16] != sources[&17],
+        "fractional request must cross the actual .167s presentation boundary"
+    );
+    assert!(
+        sources[&6] != sources[&8],
+        "varying-media control must distinguish source frames"
+    );
+    assert!(
+        sources[&14] != sources[&17],
+        "later source frames must also differ"
+    );
+    sources
+}
+
 #[test]
 #[ignore = "requires ordinary IPC17 Product, published OpenFX-Misc TimeBlur 1.0, FFmpeg and OCIO"]
 fn time_blur_real_media_preview_export_evaluate_upstream_animation_at_requested_times() {
+    qualify_time_blur_nle(false);
+}
+
+#[test]
+#[ignore = "requires ordinary IPC17 Product, published OpenFX-Misc TimeBlur 1.0, FFmpeg and OCIO"]
+fn time_blur_varying_media_preserves_fractional_source_selection_and_animation() {
+    qualify_time_blur_nle(true);
+}
+
+fn qualify_time_blur_nle(varying_media: bool) {
     let _guard = crate::app_ui::test_utils::theme_test_guard();
     ensure_test_ocio_loaded();
     let helper = PathBuf::from(std::env::var_os("MONDRIAN_OPENFX_TEST_HELPER").unwrap());
@@ -150,15 +234,16 @@ fn time_blur_real_media_preview_export_evaluate_upstream_animation_at_requested_
     )
     .unwrap();
     let directory = tempfile::tempdir().unwrap();
-    // Constant decoded samples isolate the temporal upstream-animation oracle
-    // from decoder frame rounding. This is still real probed/decoded media.
+    // The uniform control isolates animation. The varying control supplies
+    // distinct Y/U/V planes per frame and independently samples source time.
     let raw = directory.path().join("source.y4m");
     let source = directory.path().join("source.mkv");
     let mut media = b"YUV4MPEG2 W16 H16 F24:1 Ip A1:1 C444 XCOLORRANGE=LIMITED\n".to_vec();
-    for _ in 0..8 {
+    for frame in 0..(if varying_media { 12_u8 } else { 8_u8 }) {
         media.extend_from_slice(b"FRAME\n");
-        media.extend_from_slice(&[80; 256]);
-        media.extend_from_slice(&[128; 512]);
+        media.extend_from_slice(&[if varying_media { 48 + frame * 12 } else { 80 }; 256]);
+        media.extend_from_slice(&[if varying_media { 112 + frame * 2 } else { 128 }; 256]);
+        media.extend_from_slice(&[if varying_media { 144 - frame * 2 } else { 128 }; 256]);
     }
     std::fs::write(&raw, media).unwrap();
     // Y4M cannot carry all required color metadata. Encode losslessly rather
@@ -189,6 +274,38 @@ fn time_blur_real_media_preview_export_evaluate_upstream_animation_at_requested_
         "{}",
         String::from_utf8_lossy(&encoded.stderr)
     );
+    if varying_media {
+        let timing = std::process::Command::new("ffprobe.exe")
+            .args([
+                "-v",
+                "error",
+                "-select_streams",
+                "v:0",
+                "-show_frames",
+                "-show_entries",
+                "stream=time_base:frame=best_effort_timestamp",
+                "-of",
+                "json",
+            ])
+            .arg(&source)
+            .output()
+            .unwrap();
+        assert!(
+            timing.status.success(),
+            "{}",
+            String::from_utf8_lossy(&timing.stderr)
+        );
+        let timing: serde_json::Value = serde_json::from_slice(&timing.stdout).unwrap();
+        assert_eq!(timing["streams"][0]["time_base"], "1/1000");
+        let pts: Vec<_> = timing["frames"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|frame| frame["best_effort_timestamp"].as_i64().unwrap())
+            .collect();
+        assert_eq!(pts.len(), 12);
+        assert_eq!(&pts[..5], &[0, 42, 83, 125, 167], "controlled fixture PTS");
+    }
     let info = mondrian_media::probe_media_info(&source).unwrap();
     assert_eq!(info.primary_video().unwrap().frame_rate, Rational::FPS_24);
     let library = AssetLibrary::open(directory.path().join("library")).unwrap();
@@ -221,15 +338,7 @@ fn time_blur_real_media_preview_export_evaluate_upstream_animation_at_requested_
     let clip_id = state.active_sequence().unwrap().video_tracks[0].clips[0].id;
     let runtime = PreviewProductionRuntime::<()>::try_new_boxed().unwrap();
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let base = mondrian_export::queue::export_visual_frame_validation(
-            &export_snapshot(&state),
-            2,
-            state.active_sequence().unwrap().settings.resolution,
-        )
-        .unwrap()
-        .working_frame;
-        assert_eq!(base.rgba_f32().data.len(), 256);
-        assert!(base.rgba_f32().data.iter().all(|p| p[0] > 0.01 && p[3] == 1.0));
+        let sources = reference_source_samples(&state, varying_media);
         state
             .add_effect_to_clip(clip_id, mondrian_effects::EffectType::BasicCorrection)
             .unwrap();
@@ -326,20 +435,22 @@ fn time_blur_real_media_preview_export_evaluate_upstream_animation_at_requested_
         for frame in [2, 4, 2] {
             let (output, feedback) = acquire_working(&runtime, &mut state, frame);
             assert_eq!(output.rgba_f32().data.len(), 256);
-            // TimeBlur 1.0: centered shutter=1, four samples, excluded end.
-            // Exposure is authored as frame/4 stops and must be reevaluated at
-            // each fractional Source request, before averaging linear samples.
-            let gain = [-0.5_f32, -0.25, 0.0, 0.25]
-                .into_iter()
-                .map(|offset| 2.0_f32.powf((frame as f32 + offset) / 4.0))
-                .sum::<f32>()
-                / 4.0;
-            for (pixel, source) in output.rgba_f32().data.iter().zip(&base.rgba_f32().data) {
+            // Published TimeBlur: centered shutter=1, four samples, excluded
+            // end. Each source-only reference is at that absolute author time;
+            // exposure is independently evaluated as requested-frame/4 stops.
+            for (pixel_index, pixel) in output.rgba_f32().data.iter().enumerate() {
                 for channel in 0..3 {
-                    assert!(
-                        (pixel[channel] - source[channel] * gain).abs() < 2e-5,
-                        "frame {frame} channel {channel}: {pixel:?}, base={source:?}, gain={gain}"
-                    );
+                    let expected = [-2, -1, 0, 1]
+                        .into_iter()
+                        .map(|offset| {
+                            let tick = frame * 4 + offset;
+                            sources[&tick].rgba_f32().data[pixel_index][channel]
+                                * 2.0_f32.powf(tick as f32 / 16.0)
+                        })
+                        .sum::<f32>()
+                        / 4.0;
+                    assert!((pixel[channel] - expected).abs() < 2e-5,
+                        "varying={varying_media} frame {frame} pixel {pixel_index} channel {channel}: {pixel:?}, expected={expected}");
                 }
                 assert_eq!(pixel[3], 1.0);
             }
