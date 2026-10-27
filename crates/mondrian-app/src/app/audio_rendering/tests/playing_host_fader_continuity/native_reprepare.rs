@@ -15,7 +15,16 @@ const RESTART: Scenario = Scenario {
     lookahead: 3,
 };
 
-fn assert_restart_windows(output: &CaptureState, first: usize, anchor: i64) {
+fn restart_sample(mode: u8, frame: usize) -> [f32; 2] {
+    let [left, right] = input_sample(frame);
+    match mode {
+        19 | 17 => [left + 1.5 * ((left + right) * 0.5), right],
+        0 | 20 => [2.5 * left, 2.5 * right],
+        _ => [left, right],
+    }
+}
+
+fn assert_restart_windows(output: &CaptureState, first: usize, anchor: i64, mode: u8) {
     let windows = &output.windows[first..first + 2];
     assert_eq!(windows[0].clear_serial, windows[1].clear_serial);
     for (block, window) in windows.iter().enumerate() {
@@ -23,7 +32,7 @@ fn assert_restart_windows(output: &CaptureState, first: usize, anchor: i64) {
         for (offset, pair) in window.samples.chunks_exact(2).enumerate() {
             let absolute = usize::try_from(anchor).unwrap() + block * 4 + offset;
             assert!(absolute < SOURCE_FRAMES, "finite real WAV coverage");
-            let expected = input_sample(absolute);
+            let expected = restart_sample(mode, absolute);
             for channel in 0..2 {
                 assert!(
                     (pair[channel] - expected[channel]).abs() <= 1e-6,
@@ -39,22 +48,52 @@ fn assert_restart_windows(output: &CaptureState, first: usize, anchor: i64) {
 #[test]
 #[ignore = "current normal Product and owned CLAP sidechain mode7; actual App/Media queues and software output, no physical DAC"]
 fn native_clap_restart_installs_same_source_and_enters_fresh_pdc_pcm() {
-    run_native_restart_control(&[]);
+    run_native_restart_control(&[], 7);
 }
 
-pub(super) fn run_native_restart_control(seek_frames: &[i64]) {
+#[test]
+#[ignore = "current normal Product and CLAP mode19; actual App/Media width migration"]
+fn native_clap_input_width_installs_same_source_and_fresh_stereo_pcm() {
+    run_native_restart_control(&[], 19);
+}
+#[test]
+#[ignore = "current normal Product and CLAP mode20; actual App/Media reverse width migration"]
+fn native_clap_input_width_installs_same_source_and_fresh_mono_pcm() {
+    run_native_restart_control(&[], 20);
+}
+#[test]
+#[ignore = "current normal Product and CLAP mode19; public seeks before output quiescence"]
+fn native_clap_input_width_seek_before_quiescence_preserves_latest_fresh_target() {
+    run_native_restart_control(&[0, 1, 2], 19);
+}
+#[test]
+#[ignore = "current normal Product and CLAP mode20; reverse width with public seeks"]
+fn native_clap_reverse_input_width_seek_preserves_latest_fresh_target() {
+    run_native_restart_control(&[0, 1, 2], 20);
+}
+
+pub(super) fn run_native_restart_control(seek_frames: &[i64], mode: u8) {
     // Each explicit seek can clear immediately and again at its real output ack.
     // These extra bounded records are observations, never more FIFO or PCM.
     let scenario = Scenario {
+        mode,
         capture_clears: RESTART
             .capture_clears
             .checked_add(seek_frames.len().checked_mul(2).unwrap())
             .unwrap(),
         ..RESTART
     };
-    let mut configuration = vec![7];
+    let next_mode = match mode {
+        19 => 0,
+        20 => 17,
+        _ => 7,
+    };
+    let next_lookahead = if mode == 7 { 7 } else { 3 };
+    let mut configuration = vec![mode];
     configuration.extend_from_slice(&0.5_f32.to_le_bytes());
-    configuration.push(0);
+    if mode == 7 {
+        configuration.push(0);
+    }
     let (_directory, mut state, output, _) =
         native_fader_fixture_with_configuration(scenario, Some(configuration));
     let target = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -129,7 +168,7 @@ pub(super) fn run_native_restart_control(seek_frames: &[i64]) {
                         }
                     }
                     AudioPlaybackEvent::NativeParameterObservationsObserved { .. } => {
-                        panic!("mode7 has no parameter lanes or parameter-observation DTOs");
+                        panic!("restart fixtures have no parameter lanes or parameter-observation DTOs");
                     }
                     AudioPlaybackEvent::NativeReprepareRequired {
                         previous_generation,
@@ -148,7 +187,7 @@ pub(super) fn run_native_restart_control(seek_frames: &[i64]) {
                         );
                         let facts = cursor_facts(state);
                         assert_eq!(facts.session.unwrap().identity, old_identity);
-                        assert_heads(&facts, old_generation, 8, RESTART);
+                        assert_heads(&facts, old_generation, 8, scenario);
                         let lease = actual_native_lease(&renderer, &facts);
                         old_lease = Some(lease);
                         // One real non-RT Preserve RPC under the original Runtime mutex.
@@ -167,7 +206,7 @@ pub(super) fn run_native_restart_control(seek_frames: &[i64]) {
                         );
                         let capture = output.lock();
                         assert_eq!(capture.windows.len(), 2);
-                        assert_restart_windows(&capture, 0, 0);
+                        assert_restart_windows(&capture, 0, 0, mode);
                         assert!(capture.queue.is_empty() && !capture.snapshot.active);
                         pending = Some(*pending_generation);
                     }
@@ -215,7 +254,7 @@ pub(super) fn run_native_restart_control(seek_frames: &[i64]) {
                             facts.processor.unwrap().state,
                             AudioProcessorCursorState::Unentered
                         );
-                        assert_eq!(facts.session.unwrap().public_output_lookahead_frames, 7);
+                        assert_eq!(facts.session.unwrap().public_output_lookahead_frames, next_lookahead);
                         let runtime = renderer.state.lock();
                         assert!(runtime.generation.is_none());
                         assert!(runtime
@@ -373,7 +412,7 @@ pub(super) fn run_native_restart_control(seek_frames: &[i64]) {
                         );
                     let consumed = capture.consume(4, tick);
                     for (frame, sample) in consumed.iter().enumerate() {
-                        assert_eq!(*sample, input_sample(frame));
+                        assert_eq!(*sample, restart_sample(mode, frame));
                     }
                     consumed_old = true;
                 }
@@ -411,8 +450,8 @@ pub(super) fn run_native_restart_control(seek_frames: &[i64]) {
                                 4,
                                 "two complete old and two complete new windows"
                             );
-                            assert_restart_windows(&capture, 0, 0);
-                            assert_restart_windows(&capture, 2, anchor);
+                            assert_restart_windows(&capture, 0, 0, mode);
+                            assert_restart_windows(&capture, 2, anchor, next_mode);
                             assert!(!capture.overflow);
                             assert_eq!(capture.activation_discarded, 0);
                         }
@@ -452,7 +491,7 @@ pub(super) fn run_native_restart_control(seek_frames: &[i64]) {
         let (generation, anchor) = fresh.unwrap();
         let facts = cursor_facts(&state);
         assert_eq!(facts.session.unwrap().identity, new_identity.unwrap());
-        let final_scenario = Scenario { lookahead: 7, ..RESTART };
+        let final_scenario = Scenario { lookahead: i64::try_from(next_lookahead).unwrap(), ..scenario };
         assert_heads(&facts, generation, anchor + 8, final_scenario);
         let new_lease = actual_native_lease(&renderer, &facts);
         assert_ne!(new_lease.binding(), old_lease.unwrap().binding());
@@ -474,7 +513,7 @@ pub(super) fn run_native_restart_control(seek_frames: &[i64]) {
             panic!("the original Media remains available");
         };
         assert!(playback.native_reprepare_pending_generation().is_none());
-        println!("owned restart E2E: old_generation={old_generation} pending={:?} fresh={generation} A={anchor} PDC=3->7 same_child={old_object:?}", pending);
+        println!("owned restart E2E: old_generation={old_generation} pending={:?} fresh={generation} A={anchor} PDC=3->{next_lookahead} mode={mode} same_child={old_object:?}", pending);
         drop(renderer);
     }));
     let deadline = Instant::now() + Duration::from_secs(2);
@@ -784,7 +823,7 @@ fn native_clap_repeated_restart_preserves_same_source_and_fresh_pdc_pcm() {
                                 "two complete Fresh public windows"
                             );
                             assert_eq!(published, capture.queue.len());
-                            assert_restart_windows(&capture, held_windows.unwrap(), anchor);
+                            assert_restart_windows(&capture, held_windows.unwrap(), anchor, 13);
                             drop(capture);
                             let facts = cursor_facts(&state);
                             assert_eq!(facts.session.unwrap().identity, next_identity.unwrap());

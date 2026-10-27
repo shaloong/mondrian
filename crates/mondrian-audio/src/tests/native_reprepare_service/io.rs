@@ -49,6 +49,12 @@ fn installed_clap_runtime_changed_inputs_refuse_foreign_source_without_retry_or_
     restart_detector_width(Qualification::RefuseCas);
 }
 
+#[test]
+#[ignore = "current production helper and CLAP mode19; authenticated commit reply suppressed before parent consumption"]
+fn installed_clap_runtime_changed_inputs_hold_after_actual_commit_reply_is_lost() {
+    restart_detector_width(Qualification::LostCommitReply);
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Qualification {
     Observe,
@@ -59,6 +65,7 @@ enum Qualification {
     Reverse,
     Repeat,
     RefuseCas,
+    LostCommitReply,
 }
 
 fn restart_detector_width(qualification: Qualification) {
@@ -89,6 +96,7 @@ fn restart_detector_width(qualification: Qualification) {
             | Qualification::Reverse
             | Qualification::Repeat
             | Qualification::RefuseCas
+            | Qualification::LostCommitReply
     );
     let mut state = vec![initial_mode];
     state.extend_from_slice(&0.5_f32.to_le_bytes());
@@ -114,11 +122,17 @@ fn restart_detector_width(qualification: Qualification) {
     ));
     sequence.audio_program.outputs[0].strip.pre_fader.processors.push(instance);
     let author_before = serde_json::to_value(&sequence).unwrap();
+    let mut processors = IsolatedAudioProcessorResolver::new(catalog);
+    let lost_reply = (qualification == Qualification::LostCommitReply)
+        .then(|| Arc::new(std::sync::atomic::AtomicBool::new(false)));
+    if let Some(observed) = &lost_reply {
+        processors.discard_next_seed_commit_reply_for_test(Arc::clone(observed));
+    }
     let mut runtime = AudioProgramRuntime::build_with_processor_resolver_and_resource_grant(
         &sequence,
         &[],
         &StereoRampResolver,
-        &IsolatedAudioProcessorResolver::new(catalog),
+        &processors,
         render,
         None,
         AudioRuntimeResourceGrant::new(1, 64 * 1024 * 1024, 32 * 1024 * 1024),
@@ -460,26 +474,43 @@ fn restart_detector_width(qualification: Qualification) {
                 )
                 .unwrap();
             let before_install = runtime.resource_footprint();
-            if qualification == Qualification::RefuseCas {
+            if matches!(
+                qualification,
+                Qualification::RefuseCas | Qualification::LostCommitReply
+            ) {
                 let unrelated = AudioOwnerInstallationSource::new();
                 let (other_registration, _) = unrelated.register().unwrap();
-                authorization = unrelated
-                    .authorize_runtime_installation(
-                        unrelated.reserve_install(&other_registration, None).unwrap(),
-                    )
-                    .unwrap();
-                assert!(matches!(
-                    runtime.install_native_reprepare_plan(
-                        &operation,
-                        &mut authorization,
-                        &cancellation
-                    ),
-                    Err(NativeAudioReprepareError::Owner(
-                        AudioNativeOwnerError::Installation(
-                            mondrian_core::AudioOwnerInstallationError::WrongRegistration
+                if qualification == Qualification::RefuseCas {
+                    authorization = unrelated
+                        .authorize_runtime_installation(
+                            unrelated.reserve_install(&other_registration, None).unwrap(),
                         )
-                    ))
-                ));
+                        .unwrap();
+                }
+                let result = runtime.install_native_reprepare_plan(
+                    &operation,
+                    &mut authorization,
+                    &cancellation,
+                );
+                match result {
+                    Err(NativeAudioReprepareError::Owner(AudioNativeOwnerError::Installation(
+                        mondrian_core::AudioOwnerInstallationError::WrongRegistration,
+                    ))) if qualification == Qualification::RefuseCas => {}
+                    Err(NativeAudioReprepareError::Processor(
+                        AudioProcessorHostError::WorkerFailed {
+                            operation: "configuration seed commit",
+                            detail,
+                        },
+                    )) if qualification == Qualification::LostCommitReply => {
+                        assert!(detail.contains("test discarded authenticated seed commit reply"));
+                        assert!(lost_reply
+                            .as_ref()
+                            .unwrap()
+                            .load(std::sync::atomic::Ordering::SeqCst));
+                    }
+                    Ok(_) => panic!("unexpected installation after a late failure"),
+                    Err(error) => panic!("exact late failure was not reached: {error:?}"),
+                }
                 verifier.validate(&claim).unwrap();
                 assert_eq!(
                     source.current_claim().unwrap().unwrap().generation(),
@@ -487,9 +518,15 @@ fn restart_detector_width(qualification: Qualification) {
                 );
                 assert_eq!(cursors(&runtime), held);
                 assert_eq!(
-                    runtime.observe_native_owner_object(current_lease).unwrap(),
-                    object
+                    runtime.native_owner_lease(current_lease.address()).unwrap(),
+                    current_lease
                 );
+                if qualification != Qualification::LostCommitReply {
+                    assert_eq!(
+                        runtime.observe_native_owner_object(current_lease).unwrap(),
+                        object
+                    );
+                }
                 let failed = runtime.resource_footprint();
                 assert_eq!(
                     failed.fixed_resident_bytes,
@@ -638,7 +675,9 @@ fn restart_detector_width(qualification: Qualification) {
         "original child must settle even when qualification fails"
     );
     assert_ne!(queried, 0);
-    assert_eq!(exit, 0);
+    if qualification != Qualification::LostCommitReply {
+        assert_eq!(exit, 0);
+    }
     if let Err(payload) = outcome {
         std::panic::resume_unwind(payload);
     }

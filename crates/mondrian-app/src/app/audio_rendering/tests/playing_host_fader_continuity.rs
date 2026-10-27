@@ -655,6 +655,19 @@ fn native_fader_fixture_with_processor(
     let (directory, library, mut sequence) =
         native_gain_media_fixture_with_samples(SOURCE_FRAMES, input_sample);
     let output_id = sequence.audio_program.outputs[0].id;
+    if matches!(scenario.mode, 19 | 20) {
+        use mondrian_timeline::audio::{
+            AudioChannelStripOutputPort, AudioProcessorSidechainRoute, AudioRouteSource,
+        };
+        sequence.audio_program.sidechain_routes.push(AudioProcessorSidechainRoute::new(
+            AudioRouteSource::Track {
+                track_id: sequence.audio_tracks[0].id,
+                port: AudioChannelStripOutputPort::PostMute,
+            },
+            instance.id,
+            "clap.audio-input.11",
+        ));
+    }
     sequence.audio_program.outputs[0].strip.pre_fader.processors.push(instance);
     let mut state = AppState::with_audio_processor_resolver(resolver);
     assert!(state.shutdown_audio_playback_and_wait().all_workers_terminated());

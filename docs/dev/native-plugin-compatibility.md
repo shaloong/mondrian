@@ -134,10 +134,24 @@ cursors and HOLD remain, retry is refused and seed/overlap fees stay retained.
 All overlap fees remain held until canonical retirement. Pre-cancel/wrong
 tickets/duplicates and unarmed old-layout seeds are refused. Pending preflight preserves caller PCM; an admitted Unentered Runtime
 refusal initializes it to zero, matching the existing CLAP/VST3 contract.
-IPC25 normal Product, fifteen exact native gates and real Surge XT1.3.4 CLAP
-state/Notes/Main Runtime regression pass with empty stderr/exit0/settled owners.
+Actual App/Media software output also passes both width directions, including
+public seeks0/1/2 before output quiescence: the latest seek target, original
+Source/native object, unchanged author, retirement and complete new PCM remain
+correct. Eight exact App native gates include the original CLAP latency/seek/
+repeat and VST3 controls. An actual same-ticket Accepted seed-commit reply is
+read and then suppressed by the existing test seam: the original Source,
+cursors, HOLD and overlap fees remain, retry is refused and the owned child
+is terminated and reaped. This qualifies controlled reply suppression only.
+IPC25 normal Product, sixteen exact Audio native gates and real Surge XT1.3.4
+CLAP state/Notes/Main Runtime regression pass with empty stderr/exit0/settled
+owners. Audio ordinary899/206ignored and Media ordinary695/18ignored pass with
+zero filtered and empty stderr. Full App regression remains **unqualified**:
+3146passed/1failed/224ignored; the title cache-pressure progress test exceeded
+its existing10-second deadline. Its isolated run and351-test Preview cohort
+pass; the cohort's nocapture stderr contains intentional panic-injection
+diagnostics. The full-suite failure remains open pending root-cause evidence.
 Port additions/removals/reordering, full audio-port configuration/rescan,
-physical reply-loss and long-run stress, actual App/Media output-quiescence and
+physical reply-loss and long-run stress, repeated App width migration and
 export workflows, wider third-party dynamic topology, RT/performance and other
 platforms remain unqualified or unsupported. No author edit, second executor or
 wire schema is introduced.
@@ -146,7 +160,7 @@ Shared auxiliary-input layouts, 2026-10-27: finite Windows owned controls verify
 Mono/Stereo Main with simultaneous Mono/Stereo and unconnected silent inputs,
 two-route summing, PDC, target-time gain automation, partitioning and seek in
 both modes/backends, in-process and through actual generic child processing.
-All 899 ordinary Audio controls pass (205 conditional ignored, zero filtered,
+All 899 ordinary Audio controls pass (206 conditional ignored, zero filtered,
 empty stderr). Current IPC25 retains independent region/overflow, exact shared-byte fee and
 old/future-version rejection controls. The two original CLAP/VST3 native
 sidechain gates also pass with the matching rebuilt normal Product and original
