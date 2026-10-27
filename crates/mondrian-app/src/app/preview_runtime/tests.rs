@@ -273,11 +273,14 @@ fn preparation_actual_title_worker_progresses_under_cache_pressure() {
         .settings
         .root_program_color_context(state.project_color_environment())
         .unwrap();
+    let mut last_pending = None;
+    let mut attempts = 0;
     let evaluation = loop {
         assert!(
             Instant::now() < deadline,
-            "title preparation starved under result-cache pressure"
+            "title preparation starved under result-cache pressure after {attempts} acquisitions; last dependency: {last_pending:?}"
         );
+        attempts += 1;
         match runtime.acquire_frame_evaluation(
             &snapshot,
             &state,
@@ -289,7 +292,10 @@ fn preparation_actual_title_worker_progresses_under_cache_pressure() {
             key,
         ) {
             FrameResolutionOutcome::Ready(ready) => break ready,
-            FrameResolutionOutcome::Pending(_) => std::thread::sleep(Duration::from_millis(2)),
+            FrameResolutionOutcome::Pending(dependency) => {
+                last_pending = Some(dependency);
+                std::thread::sleep(Duration::from_millis(2));
+            }
             _ => panic!("actual title preparation failed"),
         }
     };
@@ -309,6 +315,15 @@ fn preparation_actual_title_worker_progresses_under_cache_pressure() {
     assert!(Arc::ptr_eq(&evaluation, &reused));
     assert_eq!(evaluation_resolve_count(&runtime), resolves);
     runtime.shutdown_and_wait();
+}
+
+#[test]
+#[ignore = "five explicit real system-font/raster lifecycles under result-cache pressure; each retains the ordinary10-second deadline"]
+fn preparation_actual_title_worker_repeated_lifecycles_preserve_cache_progress() {
+    for round in 0..5 {
+        println!("title cache-pressure lifecycle {round}");
+        preparation_actual_title_worker_progresses_under_cache_pressure();
+    }
 }
 
 #[test]

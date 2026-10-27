@@ -147,9 +147,12 @@ CLAP state/Notes/Main Runtime regression pass with empty stderr/exit0/settled
 owners. Audio ordinary899/206ignored and Media ordinary695/18ignored pass with
 zero filtered and empty stderr. Full App regression remains **unqualified**:
 3146passed/1failed/224ignored; the title cache-pressure progress test exceeded
-its existing10-second deadline. Its isolated run and351-test Preview cohort
-pass; the cohort's nocapture stderr contains intentional panic-injection
-diagnostics. The full-suite failure remains open pending root-cause evidence.
+its existing10-second deadline. Its isolated run, affected Preview cohort
+(351passed/12ignored) and five repeated real font/raster lifecycles pass with
+empty stderr and settled exit0. Timeout diagnostics now report the last typed
+pending dependency and acquisition count, without changing the deadline.
+The full-suite failure remains open pending root-cause evidence; no production
+fix is claimed.
 Port additions/removals/reordering, full audio-port configuration/rescan,
 physical reply-loss and long-run stress, repeated App width migration and
 export workflows, wider third-party dynamic topology, RT/performance and other
