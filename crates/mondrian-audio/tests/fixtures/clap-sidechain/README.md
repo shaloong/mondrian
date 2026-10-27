@@ -118,9 +118,13 @@ Only deactivation changes its configuration to mode0, making input11 Stereo
 while preserving native IDs, gain and latency. Processing never mutates ports.
 The positive Runtime gate `installed_clap_runtime_restart_rebinds_mono_detector_without_replacing_native_owner`
 checks old PCM, held publication, same native owner, canonical installation,
-Fresh Enter and new PCM. It currently fails at `Capability(MetadataChanged)`;
-dynamic I/O migration is unsupported. Original-owner cleanup exits0 even on
-this failure. Fixture unit tests additionally cover the actual current header
+Fresh Enter and new PCM. Dynamic I/O migration is still unsupported. The separate
+`installed_clap_runtime_restart_observes_changed_inputs_without_resuming_old_geometry`
+gate checks the exact inactive input proposal, unchanged cursors/author/Source,
+blocked old-layout PCM and Enter, rejection of another ticket and real Source
+revocation. Proposal observation does not activate, consume a cohort, migrate
+buffers or install a plan. Original-owner cleanup must exit0 even on failure.
+Fixture unit tests additionally cover the actual current header
 boundary; previously stale assertions incorrectly treated supported mode17 as
 invalid.
 

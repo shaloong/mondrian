@@ -144,6 +144,11 @@ pub enum NativeAudioReprepareError {
     /// Adapter explicitly refused retained configuration capture.
     #[error("native restart configuration capability refused: {0:?}")]
     Capability(crate::NativeConfigurationRefusal),
+    /// Actual inactive inputs differ; retained proposal needs coordinated migration.
+    #[error(
+        "native restart observed changed audio inputs; resource and mapping migration required"
+    )]
+    AudioInputChangeRequired,
     /// Another real native callback generation is pending.
     #[error("native restart cohort changed: {0:?}")]
     Cohort(Option<crate::NativeRequestCohort>),
@@ -155,6 +160,7 @@ pub enum NativeAudioReprepareError {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CapturePhase {
     Servicing,
+    InputConfigurationObserved,
     Captured,
     Preparing,
     Prepared,
@@ -190,6 +196,7 @@ pub(super) struct NativeReprepareAttempt {
     serial: NonZeroU64,
     selection: ReprepareSelection,
     candidate: Option<crate::NativeConfigurationCandidate>,
+    input_proposal: Option<crate::ClapAudioInputProposal>,
     phase: CapturePhase,
     // Reserved before foreign work. An unexpectedly larger actual owner raises
     // this held charge even on refusal; no handle Drop can release it.
@@ -484,6 +491,7 @@ impl AudioProgramRuntime {
             serial,
             selection,
             candidate: None,
+            input_proposal: None,
             phase: CapturePhase::Servicing,
             held_fixed_bytes: reserved,
             control_grant,
@@ -507,6 +515,28 @@ impl AudioProgramRuntime {
         );
         let attempt = self.native_reprepare.attempt.as_mut().expect("same exclusive Runtime");
         match result {
+            Ok(crate::NativeConfigurationControlOutcome::ClapAudioInputsChanged(proposal)) => {
+                // Inline metadata lives in the attempt whose complete Box layout
+                // was charged before service. No new planes, mapping or Factory
+                // are admitted by this observation and no cohort is consumed.
+                if proposal.observed_cohort != attempt.selection.cohort
+                    || proposal.control_token != key
+                {
+                    attempt.phase = CapturePhase::Failed;
+                    return Err(Error::Admission("native input proposal identity changed"));
+                }
+                attempt.input_proposal = Some(proposal);
+                attempt.phase = CapturePhase::InputConfigurationObserved;
+                if cancellation.is_canceled() {
+                    return Err(Error::Cancelled);
+                }
+                if self.native_author_installation_serial()? != serial {
+                    return Err(Error::Admission(
+                        "Source changed during native input observation",
+                    ));
+                }
+                return Err(Error::AudioInputChangeRequired);
+            }
             Ok(crate::NativeConfigurationControlOutcome::ReadyForInstall(candidate)) => {
                 attempt.candidate = Some(candidate);
                 attempt.phase = CapturePhase::Captured;
@@ -594,6 +624,33 @@ impl AudioProgramRuntime {
             facts: crate::NativeConfigurationSeedTicket::from_candidate(candidate),
             local_peak,
         })
+    }
+
+    /// Inspect the bounded native input observation for this exact stopped
+    /// attempt. This supplies metadata only; it is not installation authority,
+    /// native state capture or permission to resume either buffer geometry.
+    pub fn native_reprepare_audio_input_proposal(
+        &self,
+        ticket: crate::AudioProcessorReprepareTicket,
+    ) -> Result<&crate::ClapAudioInputProposal, NativeAudioReprepareError> {
+        use NativeAudioReprepareError as Error;
+        let attempt = self
+            .native_reprepare
+            .attempt
+            .as_ref()
+            .ok_or(Error::Admission("no retained native input proposal"))?;
+        if attempt.ticket != ticket
+            || attempt.phase != CapturePhase::InputConfigurationObserved
+            || self.native_author_installation_serial()? != attempt.serial
+        {
+            return Err(Error::Admission(
+                "native input proposal attempt or Source changed",
+            ));
+        }
+        attempt
+            .input_proposal
+            .as_ref()
+            .ok_or(Error::Admission("native input proposal unavailable"))
     }
 
     /// Prepare a new execution-only Factory, canonical PDC schedule and empty

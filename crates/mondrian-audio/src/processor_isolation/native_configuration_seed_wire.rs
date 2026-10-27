@@ -429,13 +429,15 @@ mod seed_wire_tests {
         .expect("reply");
         assert_eq!(
             &bytes[..16],
-            &[77, 65, 83, 68, 22, 0, 0, 0, 0, 0, 0, 0, 112, 0, 0, 0]
+            &[77, 65, 83, 68, 23, 0, 0, 0, 0, 0, 0, 0, 112, 0, 0, 0]
         );
         assert!(
             matches!(read_reply(&mut bytes.as_slice(), request.ticket, 19).expect("same-child receipt"),
             SeedReply::Outcome(NativeConfigurationSeedOutcome::Accepted(observed)) if observed == receipt)
         );
-        for version in [8_u32, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 23] {
+        for version in [
+            8_u32, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 24,
+        ] {
             let mut old = bytes.clone();
             put32(&mut old, 4, version);
             let mut input = old.as_slice();

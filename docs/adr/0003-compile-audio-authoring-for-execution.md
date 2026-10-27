@@ -550,11 +550,14 @@ remain until their complete native buffers, IPC and contracts are implemented.
 
 ### Retained restart and native I/O migration boundary
 
-The current retained restart transaction preserves every port contract and
-shared mapping; it can update admitted scheduling facts, not native I/O geometry.
-The real CLAP mode19 Runtime gate confirms that a legal inactive Mono-to-Stereo
-detector change is refused before activation, while old publication remains held
-and original-child retirement exits normally. This is an open capability gap.
+Retained restart installation still preserves every port contract and shared
+mapping. CLAP can now retain a bounded inline input proposal after legal
+deactivation, using actual native IDs/order, declared Mono/Stereo meaning,
+cohort and control token. Main/output compatibility remains frozen. IPC23
+transfers this observation into the existing Root-owned attempt; its inline
+layout is charged before service. The proposal cannot activate, consume a
+cohort, issue a seed or unblock DSP. Reading it requires the exact original
+ticket and a still-valid Source claim. Native I/O migration remains an open gap.
 
 Future migration must reuse the existing joined native processing scope and
 Root transaction. Inactive native metadata supplies a typed proposal using the

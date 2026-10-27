@@ -1949,7 +1949,9 @@ impl IsolatedAudioProcessorWorker for ClapWorker {
             NativeConfigurationRefusal as Refusal, NativeControlBufferReceipt as Buffers,
         };
         use clack_extensions::params::PluginParams;
-        if self.configuration_phase.ready_token().is_some() {
+        if self.configuration_phase.ready_token().is_some()
+            || matches!(self.configuration_phase, Phase::AudioInputsProposed(_))
+        {
             return Ok(Outcome::CapabilityRefused(Refusal::AwaitingInstallation));
         }
         let expected_native = self.shared.restart_cohort();
@@ -2061,16 +2063,41 @@ impl IsolatedAudioProcessorWorker for ClapWorker {
         )? {
             return Ok(Outcome::CapabilityRefused(Refusal::MetadataChanged));
         }
-        if !super::clap_metadata::revalidate_audio_ports(
-            &handle,
-            self.render.channel_layout,
-            self.main_audio_input,
-            &self.auxiliary_inputs,
-            self.main_audio_output_id,
-            &self.auxiliary_outputs,
-            &mut metadata_scratch,
-        )? {
+        let mut proposal =
+            super::ClapAudioInputProposal::new(request.expected_cohort, request.control_token)
+                .map_err(invalid)?;
+        let mut proposal_error = None;
+        let (inputs_match, main_and_outputs_match) =
+            super::clap_metadata::inspect_audio_port_configuration(
+                &handle,
+                self.render.channel_layout,
+                self.main_audio_input,
+                &self.auxiliary_inputs,
+                self.main_audio_output_id,
+                &self.auxiliary_outputs,
+                &mut metadata_scratch,
+                |port| {
+                    if let Err(error) = proposal.push(port) {
+                        proposal_error.get_or_insert(error);
+                    }
+                },
+            )?;
+        if let Some(error) = proposal_error {
+            return Err(invalid(error));
+        }
+        if !main_and_outputs_match {
             return Ok(Outcome::CapabilityRefused(Refusal::MetadataChanged));
+        }
+        if !inputs_match {
+            // No native plane allocation, activation or cohort retirement. The
+            // existing owner remains stopped; Root must admit and coordinate
+            // the prospective geometry before any further lifecycle action.
+            let actual = self.native_configuration_cohort();
+            if actual != Some(request.expected_cohort) {
+                return Ok(Outcome::StillPending(actual));
+            }
+            self.configuration_phase = Phase::AudioInputsProposed(proposal);
+            return Ok(Outcome::ClapAudioInputsChanged(proposal));
         }
         let configuration = PluginAudioConfiguration {
             sample_rate: f64::from(self.render.sample_rate),

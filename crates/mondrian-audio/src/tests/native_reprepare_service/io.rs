@@ -6,6 +6,22 @@ use windows_sys::Win32::System::Threading::{GetExitCodeProcess, OpenProcess, Wai
 #[test]
 #[ignore = "current production helper and CLAP mode19; dynamic native I/O migration is not implemented"]
 fn installed_clap_runtime_restart_rebinds_mono_detector_without_replacing_native_owner() {
+    restart_detector_width(Qualification::Install);
+}
+
+#[test]
+#[ignore = "current production helper and CLAP mode19; inactive proposal only, not I/O migration"]
+fn installed_clap_runtime_restart_observes_changed_inputs_without_resuming_old_geometry() {
+    restart_detector_width(Qualification::Observe);
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Qualification {
+    Observe,
+    Install,
+}
+
+fn restart_detector_width(qualification: Qualification) {
     let catalog = Arc::new(
         DiscoveredClapAudioProcessorSpecResolver::discover(
             path("MONDRIAN_CLAP_TEST_HELPER"),
@@ -120,9 +136,77 @@ fn installed_clap_runtime_restart_rebinds_mono_detector_without_replacing_native
         };
         assert_eq!(pcm, [99.0; 8]);
         let held = cursors(&runtime);
-        let operation = runtime
-            .service_native_reprepare(ticket, &cancellation)
-            .expect("capture changed native detector contract after deactivation");
+        let before_service = runtime.resource_footprint();
+        let outcome = runtime.service_native_reprepare(ticket, &cancellation);
+        if qualification == Qualification::Observe {
+            assert!(matches!(
+                outcome,
+                Err(NativeAudioReprepareError::AudioInputChangeRequired)
+            ));
+            let proposal = runtime
+                .native_reprepare_audio_input_proposal(ticket)
+                .expect("same retained inactive observation");
+            let NativeObservedRequest::Cohort(cohort) = ticket.request else {
+                panic!("exact cohort");
+            };
+            assert_eq!(proposal.observed_cohort, cohort);
+            assert_eq!(
+                proposal
+                    .ports()
+                    .map(|port| (port.native_id, port.channel_layout, port.is_main))
+                    .collect::<Vec<_>>(),
+                [
+                    (0, AudioChannelLayout::Stereo, true),
+                    (11, AudioChannelLayout::Stereo, false),
+                    (7, AudioChannelLayout::Stereo, false)
+                ]
+            );
+            let mut unrelated = ticket;
+            unrelated.continuity_epoch = Some(AudioContinuityEpoch::new(99));
+            assert!(runtime.native_reprepare_audio_input_proposal(unrelated).is_err());
+            assert_eq!(cursors(&runtime), held);
+            verifier.validate(&claim).unwrap();
+            assert_eq!(runtime.observe_native_owner_object(lease).unwrap(), object);
+            assert!(
+                runtime.resource_footprint().fixed_resident_bytes
+                    > before_service.fixed_resident_bytes
+            );
+            assert_eq!(
+                runtime.render_into(
+                    AudioRenderRequest {
+                        transport_activity: None,
+                        start_sample: 8,
+                        frames: 4,
+                    },
+                    &mut pcm
+                ),
+                Err(AudioExecutionError::ReprepareRequired(ticket))
+            );
+            assert_eq!(pcm, [99.0; 8]);
+            assert_eq!(
+                runtime.enter_state(AudioStateEntry {
+                    epoch: AudioContinuityEpoch::new(2),
+                    start_sample: 8,
+                }),
+                Err(AudioExecutionError::ReprepareRequired(ticket))
+            );
+            assert_eq!(cursors(&runtime), held);
+            assert_eq!(serde_json::to_value(&sequence).unwrap(), author_before);
+            let replacement_claim = source
+                .reserve_install(&registration, Some(&claim))
+                .and_then(|reservation| source.begin_commit(reservation))
+                .unwrap()
+                .commit()
+                .unwrap();
+            assert_ne!(replacement_claim.generation(), claim.generation());
+            assert!(
+                runtime.native_reprepare_audio_input_proposal(ticket).is_err(),
+                "a real Source revocation cannot be revived by a retained observation"
+            );
+            return;
+        }
+        let operation =
+            outcome.expect("capture changed native detector contract after deactivation");
         let mut expected_state = vec![0];
         expected_state.extend_from_slice(&0.5_f32.to_le_bytes());
         assert_eq!(

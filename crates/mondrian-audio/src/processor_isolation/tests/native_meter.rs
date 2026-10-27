@@ -17,13 +17,13 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use windows_sys::Win32::System::Threading::{GetExitCodeProcess, OpenProcess, WaitForSingleObject};
 
 #[test]
-#[ignore = "current IPC22 Product and rebuilt CLAP sidechain mode16; actual meter DSP/PCM/Scope/retime/PDC"]
+#[ignore = "matching current Product and rebuilt CLAP sidechain mode16; actual meter DSP/PCM/Scope/retime/PDC"]
 fn installed_clap_canonical_meter_reaches_dsp_and_pcm() {
     canonical_meter(true);
 }
 
 #[test]
-#[ignore = "current IPC22 Product and rebuilt VST3 sidechain mode9; actual meter DSP/PCM/Scope/retime/PDC"]
+#[ignore = "matching current Product and rebuilt VST3 sidechain mode9; actual meter DSP/PCM/Scope/retime/PDC"]
 fn installed_vst3_canonical_meter_reaches_dsp_and_pcm() {
     canonical_meter(false);
 }

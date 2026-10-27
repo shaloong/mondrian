@@ -356,7 +356,7 @@ fn external_surge_xt_clap_captured_state_notes_musical_runtime_without_media() {
 }
 
 #[test]
-#[ignore = "requires outer native Job, current IPC22 Product and real Surge XT CLAP; authored 7/8 crosses a bar during the held Note"]
+#[ignore = "requires outer native Job, matching current Product and real Surge XT CLAP; authored 7/8 crosses a bar during the held Note"]
 fn external_surge_xt_clap_captured_state_notes_constant_meter_runtime_without_media() {
     // At 48k/120 BPM, quarter3.25 at sample0 reaches bar1 at sample6000,
     // inside the original held Note127..8193 and complete16384-frame gate.

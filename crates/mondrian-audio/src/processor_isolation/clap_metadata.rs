@@ -428,31 +428,67 @@ pub(super) fn revalidate_audio_ports(
     outputs: &AudioProcessorAuxiliaryOutputContract,
     scratch: &mut MetadataScanScratch,
 ) -> Result<bool, AudioProcessorHostError> {
+    let (inputs_match, main_and_outputs_match) = inspect_audio_port_configuration(
+        handle,
+        layout,
+        main_input,
+        inputs,
+        main_output,
+        outputs,
+        scratch,
+        |_| {},
+    )?;
+    Ok(inputs_match && main_and_outputs_match)
+}
+
+/// One inactive traversal. An input-only proposal cannot relax Main/output
+/// compatibility. Both paths retain the original bounded native validation.
+pub(super) fn inspect_audio_port_configuration(
+    handle: &PluginMainThreadHandle<'_>,
+    layout: AudioChannelLayout,
+    main_input: ClapMainAudioInput,
+    inputs: &AudioProcessorAuxiliaryInputContract,
+    main_output: u32,
+    outputs: &AudioProcessorAuxiliaryOutputContract,
+    scratch: &mut MetadataScanScratch,
+    mut visit_input: impl FnMut(super::ClapAudioInputPort),
+) -> Result<(bool, bool), AudioProcessorHostError> {
     let mut input_index = 0;
     let mut output_index = 0;
-    let mut matches = true;
+    let mut inputs_match = true;
+    let mut outputs_match = true;
     let (actual_input, actual_output, input_count, output_count) = scan_audio_ports(
         handle,
         layout,
         scratch,
         |is_input, index, port, port_layout| {
+            if is_input {
+                visit_input(super::ClapAudioInputPort {
+                    native_id: port.id.get(),
+                    channel_layout: port_layout,
+                    is_main: port.flags.contains(AudioPortFlags::IS_MAIN),
+                });
+            }
             if is_input && !port.flags.contains(AudioPortFlags::IS_MAIN) {
-                matches &= inputs.buses.get(input_index).is_some_and(|bus| {
+                inputs_match &= inputs.buses.get(input_index).is_some_and(|bus| {
                     bus.channel_layout == port_layout
                         && canonical_port_key(&bus.bus_key, "clap.audio-input.", port.id.get())
                 });
                 input_index += 1;
             } else if !is_input && index != 0 {
-                matches &= outputs.buses.get(output_index).is_some_and(|bus| {
+                outputs_match &= outputs.buses.get(output_index).is_some_and(|bus| {
                     bus.channel_layout == layout
                         && canonical_port_key(&bus.bus_key, "clap.audio-output.", port.id.get())
                 });
                 output_index += 1;
             }
-        })?;
-    Ok(matches
-        && actual_input == main_input
-        && actual_output == main_output
-        && input_count == inputs.buses.len()
-        && output_count == outputs.buses.len())
+        },
+    )?;
+    Ok((
+        inputs_match && input_count == inputs.buses.len(),
+        outputs_match
+            && actual_input == main_input
+            && actual_output == main_output
+            && output_count == outputs.buses.len(),
+    ))
 }

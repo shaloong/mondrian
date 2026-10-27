@@ -18,6 +18,7 @@ pub use clap_discovery::probe_clap_note_input_contract;
 pub use clap_discovery::probe_clap_note_processing_offer;
 pub use clap_note_input_contract::ClapNoteInputContractProbe;
 pub use clap_note_input_contract::ClapNoteProcessingOfferV6;
+mod clap_audio_input_proposal;
 /// Bounded typed ownership of the actual CLAP output callbacks.
 /// These source facts do not grant an author Session or installed runtime lease.
 pub mod clap_output_events;
@@ -31,8 +32,8 @@ mod native_audio_author_wire;
 mod native_audio_editor_wire;
 mod native_audio_log;
 mod native_audio_object_wire;
-mod native_audio_parameter_wire;
 mod native_audio_parameter_query_wire;
+mod native_audio_parameter_wire;
 mod native_configuration_control;
 mod native_configuration_seed;
 mod native_configuration_seed_wire;
@@ -85,6 +86,8 @@ pub use native_configuration_control::{
     NativeConfigurationControlRequest, NativeConfigurationFormat, NativeConfigurationRefusal,
     NativeControlBufferReceipt, NativeObservedRequest, NativeRequestCohort,
 };
+
+pub use clap_audio_input_proposal::{ClapAudioInputPort, ClapAudioInputProposal};
 
 pub use clap_discovery::{
     probe_clap_note_input_metadata, probe_clap_plugin_registration, run_clap_discovery_worker,

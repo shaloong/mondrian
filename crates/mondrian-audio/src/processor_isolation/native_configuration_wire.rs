@@ -16,6 +16,8 @@ const REQUEST_SIZE: usize = 40;
 // for every admitted lane. This wire extent is independent of Rust Option Layout.
 const VALUE_WIRE_SIZE: usize = 16;
 const READY_SIZE: usize = 112;
+// Fixed inline observation; no native metadata-sized allocation in either peer.
+const INPUT_PROPOSAL_SIZE: usize = 24 + super::clap_audio_input_proposal::MAX_PORTS * 12;
 
 fn invalid(detail: &'static str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, detail)
@@ -357,6 +359,37 @@ pub(super) enum ControlReply {
 }
 pub(super) fn write_reply(writer: &mut impl Write, reply: ControlReply) -> io::Result<()> {
     match reply {
+        ControlReply::Outcome(NativeConfigurationControlOutcome::ClapAudioInputsChanged(
+            proposal,
+        )) => {
+            // Validate everything before publishing even the response header.
+            let mut checked = super::ClapAudioInputProposal::new(
+                proposal.observed_cohort,
+                proposal.control_token,
+            )
+            .map_err(invalid)?;
+            let mut bytes = [0; INPUT_PROPOSAL_SIZE];
+            put_u64(&mut bytes, 0, proposal.control_token.get());
+            put_cohort(&mut bytes, 8, proposal.observed_cohort)?;
+            put_u32(&mut bytes, 20, proposal.ports().len() as u32);
+            for (index, port) in proposal.ports().enumerate() {
+                checked.push(*port).map_err(invalid)?;
+                let offset = 24 + index * 12;
+                put_u32(&mut bytes, offset, port.native_id);
+                put_u32(
+                    &mut bytes,
+                    offset + 4,
+                    if port.channel_layout == mondrian_core::AudioChannelLayout::Mono {
+                        1
+                    } else {
+                        2
+                    },
+                );
+                put_u32(&mut bytes, offset + 8, u32::from(port.is_main));
+            }
+            write_header(writer, 4, INPUT_PROPOSAL_SIZE)?;
+            writer.write_all(&bytes)?;
+        }
         ControlReply::Outcome(NativeConfigurationControlOutcome::ReadyForInstall(candidate)) => {
             if candidate.configuration.len() > MAX_STATE
                 || candidate.buffers.configuration_capacity_bytes
@@ -446,6 +479,49 @@ pub(super) fn read_reply(
 ) -> io::Result<ControlReply> {
     let (status, extent) = read_header(reader)?;
     match (status, extent) {
+        (4, INPUT_PROPOSAL_SIZE) => {
+            let mut bytes = [0; INPUT_PROPOSAL_SIZE];
+            reader.read_exact(&mut bytes)?;
+            let token = NonZeroU64::new(u64_at(&bytes, 0)?)
+                .ok_or_else(|| invalid("empty CLAP input proposal token"))?;
+            let cohort = get_cohort(&bytes, 8)?;
+            if token != request.control_token || cohort != request.expected_cohort {
+                return Err(invalid("CLAP input proposal identity mismatch"));
+            }
+            let mut proposal =
+                super::ClapAudioInputProposal::new(cohort, token).map_err(invalid)?;
+            let count = u32_at(&bytes, 20)? as usize;
+            if count > super::clap_audio_input_proposal::MAX_PORTS
+                || bytes[24 + count * 12..].iter().any(|&byte| byte != 0)
+            {
+                return Err(invalid(
+                    "invalid CLAP input proposal count or reserved rows",
+                ));
+            }
+            for index in 0..count {
+                let offset = 24 + index * 12;
+                let layout = match u32_at(&bytes, offset + 4)? {
+                    1 => mondrian_core::AudioChannelLayout::Mono,
+                    2 => mondrian_core::AudioChannelLayout::Stereo,
+                    _ => return Err(invalid("unknown CLAP input proposal layout")),
+                };
+                let is_main = match u32_at(&bytes, offset + 8)? {
+                    0 => false,
+                    1 => true,
+                    _ => return Err(invalid("unknown CLAP input proposal role")),
+                };
+                proposal
+                    .push(super::ClapAudioInputPort {
+                        native_id: u32_at(&bytes, offset)?,
+                        channel_layout: layout,
+                        is_main,
+                    })
+                    .map_err(invalid)?;
+            }
+            Ok(ControlReply::Outcome(
+                NativeConfigurationControlOutcome::ClapAudioInputsChanged(proposal),
+            ))
+        }
         (0, extent)
             if extent >= READY_SIZE && extent <= READY_SIZE + request.configuration_limit_bytes =>
         {
@@ -558,6 +634,97 @@ pub(super) fn read_reply(
         _ => Err(invalid(
             "native configuration response rejected before allocation",
         )),
+    }
+}
+
+#[cfg(test)]
+mod input_proposal_tests {
+    use super::*;
+    use crate::{ClapAudioInputPort, ClapAudioInputProposal};
+    use mondrian_core::AudioChannelLayout;
+
+    fn request() -> NativeConfigurationControlRequest<'static> {
+        NativeConfigurationControlRequest {
+            expected_cohort: NativeRequestCohort::new(3, NativeAudioReprepareRequest::ClapRestart)
+                .unwrap(),
+            control_token: NonZeroU64::new(9).unwrap(),
+            canonical_constant_values: &[],
+            configuration_limit_bytes: 64 * 1024,
+            control_buffer_grant_bytes: 64 * 1024,
+        }
+    }
+
+    fn encoded() -> (Vec<u8>, ClapAudioInputProposal) {
+        let request = request();
+        let mut proposal =
+            ClapAudioInputProposal::new(request.expected_cohort, request.control_token).unwrap();
+        for (id, main, layout) in [
+            (0, true, AudioChannelLayout::Stereo),
+            (u32::MAX - 1, false, AudioChannelLayout::Mono),
+        ] {
+            proposal
+                .push(ClapAudioInputPort {
+                    native_id: id,
+                    is_main: main,
+                    channel_layout: layout,
+                })
+                .unwrap();
+        }
+        let mut bytes = Vec::new();
+        write_reply(
+            &mut bytes,
+            ControlReply::Outcome(NativeConfigurationControlOutcome::ClapAudioInputsChanged(
+                proposal,
+            )),
+        )
+        .unwrap();
+        (bytes, proposal)
+    }
+
+    #[test]
+    fn inactive_proposal_roundtrips_exact_identity_order_and_unsigned_ids() {
+        let (bytes, original) = encoded();
+        let mut input = bytes.as_slice();
+        let ControlReply::Outcome(NativeConfigurationControlOutcome::ClapAudioInputsChanged(
+            decoded,
+        )) = read_reply(&mut input, &request()).unwrap()
+        else {
+            panic!("input proposal");
+        };
+        assert!(input.is_empty());
+        assert_eq!(decoded, original);
+        let mut another = request();
+        another.control_token = NonZeroU64::new(10).unwrap();
+        assert!(read_reply(&mut bytes.as_slice(), &another).is_err());
+        another = request();
+        another.expected_cohort.serial += 1;
+        assert!(read_reply(&mut bytes.as_slice(), &another).is_err());
+    }
+
+    #[test]
+    fn malformed_input_proposals_fail_without_native_sized_allocations() {
+        let (bytes, _) = encoded();
+        for (offset, value) in [
+            (4, PROTOCOL_VERSION - 1),
+            (12, (INPUT_PROPOSAL_SIZE - 1) as u32),
+            (16 + 20, 33),         // count before any row indexing
+            (16 + 24, u32::MAX),   // reserved native ID
+            (16 + 24 + 4, 99),     // unknown semantic layout
+            (16 + 24 + 12, 0),     // duplicate ID
+            (16 + 24 + 12 + 8, 1), // Main at native index1
+            (16 + 24 + 8, 7),      // unknown role bits
+            (16 + 24 + 24, 1),     // nonzero unused row
+        ] {
+            let mut invalid = bytes.clone();
+            put_u32(&mut invalid, offset, value);
+            assert!(
+                read_reply(&mut invalid.as_slice(), &request()).is_err(),
+                "offset{offset}/value{value}"
+            );
+        }
+        for len in [0, 15, 16, bytes.len() - 1] {
+            assert!(read_reply(&mut &bytes[..len], &request()).is_err());
+        }
     }
 }
 

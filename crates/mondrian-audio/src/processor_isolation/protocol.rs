@@ -9,7 +9,7 @@ use mondrian_core::{AudioChannelLayout, ParameterId};
 use serde::{Deserialize, Serialize};
 use std::io::{self, Read, Write};
 
-pub(super) const PROTOCOL_VERSION: u32 = 22;
+pub(super) const PROTOCOL_VERSION: u32 = 23;
 pub(super) const MAX_CONTROL_FRAME_BYTES: usize = 1024 * 1024;
 pub(super) const MAX_PREPARATION_PAYLOAD_BYTES: usize = MAX_CONTROL_FRAME_BYTES / 2;
 
@@ -948,15 +948,17 @@ mod response_write_qualification {
         }
     }
 
-    // Independent protocol-v22 wire bytes: MAPR, version=22, success=0, detail=0.
-    const COMPLETED_WIRE: [u8; 16] = [77, 65, 80, 82, 22, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+    // Independent protocol-v23 wire bytes: MAPR, version=23, success=0, detail=0.
+    const COMPLETED_WIRE: [u8; 16] = [77, 65, 80, 82, 23, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
 
     #[test]
     fn native_response_wire_completed_has_one_nonempty_header_write() -> io::Result<()> {
         let mut writer = RecordedWriter::new(usize::MAX);
         WorkerResponse::Completed.write_to(&mut writer)?;
         assert_eq!(writer.written(), COMPLETED_WIRE);
-        for version in [8_u32, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 23] {
+        for version in [
+            8_u32, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 24,
+        ] {
             let mut old = COMPLETED_WIRE;
             old[4..8].copy_from_slice(&version.to_le_bytes());
             assert!(WorkerResponse::read_from(&mut old.as_slice()).is_err());
@@ -975,7 +977,7 @@ mod response_write_qualification {
         let mut writer = RecordedWriter::new(usize::MAX);
         WorkerResponse::Failed("bad-λ".to_owned()).write_to(&mut writer)?;
         let expected = [
-            77, 65, 80, 82, 22, 0, 0, 0, 1, 0, 0, 0, 6, 0, 0, 0, 98, 97, 100, 45, 206, 187,
+            77, 65, 80, 82, 23, 0, 0, 0, 1, 0, 0, 0, 6, 0, 0, 0, 98, 97, 100, 45, 206, 187,
         ];
         assert_eq!(writer.written(), expected);
         assert_eq!(writer.nonempty_writes, 2);
@@ -992,7 +994,7 @@ mod response_write_qualification {
         let mut writer = RecordedWriter::new(3);
         WorkerResponse::Failed("bad-λ".to_owned()).write_to(&mut writer)?;
         let expected = [
-            77, 65, 80, 82, 22, 0, 0, 0, 1, 0, 0, 0, 6, 0, 0, 0, 98, 97, 100, 45, 206, 187,
+            77, 65, 80, 82, 23, 0, 0, 0, 1, 0, 0, 0, 6, 0, 0, 0, 98, 97, 100, 45, 206, 187,
         ];
         assert_eq!(writer.written(), expected);
         assert_eq!(writer.nonempty_writes, 8);
@@ -1104,7 +1106,7 @@ mod pending_tests {
                     32,
                     "fixed header plus exact sixteen-byte carrier"
                 );
-                assert_eq!(&encoded[..8], &[77, 65, 80, 82, 22, 0, 0, 0]);
+                assert_eq!(&encoded[..8], &[77, 65, 80, 82, 23, 0, 0, 0]);
                 let status = if matches!(response, WorkerResponse::DeferredForConfiguration(_)) {
                     3_u32
                 } else {
@@ -1163,7 +1165,8 @@ mod pending_tests {
             (4, 19),
             (4, 20),
             (4, 21),
-            (4, 23),
+            (4, 22),
+            (4, 24),
         ] {
             let mut invalid = canonical.clone();
             invalid[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
@@ -1340,7 +1343,9 @@ mod note_protocol_tests {
             WorkerCommand::read_from(&mut bytes.as_slice()).unwrap(),
             command
         );
-        for version in [8_u32, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 23] {
+        for version in [
+            8_u32, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 24,
+        ] {
             let mut old = bytes.clone();
             old[4..8].copy_from_slice(&version.to_le_bytes());
             assert!(WorkerCommand::read_from(&mut old.as_slice()).is_err());
@@ -1438,7 +1443,7 @@ mod note_protocol_tests {
             assert_eq!(bytes.len(), 36);
             assert_eq!(
                 &bytes[..16],
-                &[77, 65, 80, 82, 22, 0, 0, 0, 4, 0, 0, 0, 20, 0, 0, 0]
+                &[77, 65, 80, 82, 23, 0, 0, 0, 4, 0, 0, 0, 20, 0, 0, 0]
             );
             assert_eq!(&bytes[16..20], &4096_u32.to_le_bytes());
             for (index, word) in words.into_iter().enumerate() {
@@ -1475,7 +1480,8 @@ mod note_protocol_tests {
             (4, 19),
             (4, 20),
             (4, 21),
-            (4, 23),
+            (4, 22),
+            (4, 24),
             (12, 12),
             (16, 4097),
             (20, 3),
@@ -1574,7 +1580,7 @@ mod note_protocol_tests {
     #[test]
     fn current_protocol_note_contract_is_mandatory_in_prepare_and_ready_json() {
         let ready = ReadyWire {
-            schema_version: 22,
+            schema_version: 23,
             result: ReadyResultWire::Ready {
                 musical_time_reference: None,
                 auxiliary_outputs: Vec::new(),
@@ -1608,7 +1614,7 @@ mod note_protocol_tests {
         let prepare = PrepareWire {
             musical_time_reference: None,
             auxiliary_outputs: Vec::new(),
-            schema_version: 22,
+            schema_version: 23,
             native_lane: super::super::native_worker_lane_wire::NativeWorkerLaneWire::capture(None)
                 .unwrap(),
             nonce: "typed-only-test".to_owned(),

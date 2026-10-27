@@ -193,6 +193,8 @@ pub struct NativeConfigurationCandidate {
 pub enum NativeConfigurationControlOutcome {
     /// Native component is activated but stopped; old contract remains blocked.
     ReadyForInstall(NativeConfigurationCandidate),
+    /// Legally observed while inactive; no activation or mapping migration yet.
+    ClapAudioInputsChanged(super::ClapAudioInputProposal),
     /// A newer callback invalidated the expected cohort; no automatic retry follows.
     StillPending(Option<NativeRequestCohort>),
     /// This bounded service cannot safely provide the requested capability.
@@ -205,6 +207,8 @@ pub(super) enum NativeConfigurationPhase {
     Admitted,
     /// A non-RT service has started; no further old-contract DSP is legal.
     Blocked(NativeAudioReprepareRequest),
+    /// An exact inactive input observation remains owned by the stopped child.
+    AudioInputsProposed(super::ClapAudioInputProposal),
     /// A complete serviced candidate exists, awaiting exact plan installation.
     ReadyForInstall {
         request: NativeAudioReprepareRequest,
@@ -272,6 +276,7 @@ impl NativeConfigurationPhase {
         match self {
             Self::Admitted => None,
             Self::Blocked(request) | Self::ReadyForInstall { request, .. } => Some(*request),
+            Self::AudioInputsProposed(proposal) => Some(proposal.observed_cohort.request),
         }
     }
 
