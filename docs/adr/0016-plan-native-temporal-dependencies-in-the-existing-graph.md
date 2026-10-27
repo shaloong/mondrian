@@ -270,25 +270,34 @@ temporal Preview/Export pixels. This is a new AppState/Runtime/native child in
 the same parent test process, not a desktop GUI process-restart qualification.
 Only TimeBlur is functionally qualified by the bundle installation control.
 
-The public retime control authors exposure before trimming the source from[0,12)
-to[2,8), then moves the Clip to Sequence frame17. Sequence19/21 map to Clip4/6;
-3/2 forward, -3/2 reverse and a media6.5/24 hold change source sampling without
-retiming Clip-local exposure. Reversal uses the original exclusive terminal
-boundary. Fifteen complete256-pixel Float32 RGBA Preview/Export comparisons pass
-through seek bounce and hold Undo/Redo, with exact authored Clip preservation.
-The oracle captures effect-free, unretimed media on a192fps grid before edits and
-uses literal source-coordinate tables; it does not call the retimed mapper.
-Actual PTS equality/difference controls distinguish source pictures. Curve keys
-are inserted while visible; public trim preserves their Clip-local history.
+The public retime controls author exposure before trimming source[0,12) to[2,8),
+then move the Clip to Sequence frame17. The3/2 forward/-3/2 reverse/media6.5/24
+hold control keeps Sequence19/21, Clip4/6 and media time distinct. Fifteen
+complete256-pixel Float32 RGBA Preview/Export comparisons pass through seek bounce
+and hold Undo/Redo, with exact authored Clip preservation. Reversal uses the old
+exclusive terminal boundary. The oracle samples effect-free, unretimed media
+on a192fps grid before edits and uses literal coordinate tables.
 
-This test-only addition passes with the validation App parent and unchanged
-normal5fb4d923 Product; the original varying-media gate also passes. Original180s,
-empty stderr and settled owners remain required. Runtime/SDK source, the ordinary
-App baseline and other closed qualifications are unchanged; no whole suite is
-replayed for this ignored-test addition. The reverse samples avoid exact PTS ties,
-so strict-predecessor boundary pixels, broader rates/placements/nesting/transitions,
-encoded output, timed retime, hardware, GPU interoperability, performance and
-other platforms remain separate work.
+A second control uses unit forward/reverse rates and a two-frame shutter. Forward
+first warms the exact AtOrBefore(.250s) image. While rendering Clip5/Sequence20,
+reverse requests additional Source at Clip4: exactly media6/24, with Before
+ownership. The fixture independently proves PTS208/250ms and different predecessor/
+current pixels. The expected Source image comes from the complete preceding
+picture, without an epsilon request or retimed-mapper oracle. A public hold at
+Sequence19 preserves Before(.250s) while Clip-local exposure keeps advancing.
+Fifteen more complete Preview/Export comparisons pass with seeks and Undo/Redo;
+metadata assertions also require the exact original strict-predecessor target.
+Native frame4 is decoded exactly and scaled by the rational1/24 period, so
+timestamp rounding cannot explain the predecessor result.
+
+Both controls pass on the current validation App parent and unchanged normal
+5fb4d923 Product; the original3/2 case is rerun after shared fixture changes.
+Original180s, empty stderr and settled owners remain required. Runtime/SDK source
+and ordinary App/Workspace baselines are unchanged for this test-only addition.
+Public no-op rate commands stay refused; the unit-rate baseline is rendered
+without reauthoring it. Broader rates/placements/nesting/transitions and PTS/time-base
+boundaries, encoded output, timed retime, hardware, GPU interoperability,
+performance and other platforms remain separate work.
 
 The cancellation control holds the first real native Source request on the
 existing CPU task transport, before replying, then performs public seek.
