@@ -4,7 +4,7 @@ use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 use windows_sys::Win32::System::Threading::{GetExitCodeProcess, OpenProcess, WaitForSingleObject};
 
 #[test]
-#[ignore = "current production helper and CLAP mode19; dynamic native I/O migration is not implemented"]
+#[ignore = "matching production helper and CLAP mode19; stable-ID native input-width migration"]
 fn installed_clap_runtime_restart_rebinds_mono_detector_without_replacing_native_owner() {
     restart_detector_width(Qualification::Install);
 }
@@ -158,7 +158,11 @@ fn restart_detector_width(qualification: Qualification) {
         assert_eq!(pcm, [99.0; 8]);
         let held = cursors(&runtime);
         let before_service = runtime.resource_footprint();
-        let outcome = runtime.service_native_reprepare(ticket, &cancellation);
+        let outcome = if qualification == Qualification::Install {
+            runtime.service_pending_native_reprepare(ticket.product_notice(), &cancellation)
+        } else {
+            runtime.service_native_reprepare(ticket, &cancellation)
+        };
         if qualification != Qualification::Install {
             assert!(matches!(
                 outcome,
@@ -322,13 +326,17 @@ fn restart_detector_width(qualification: Qualification) {
                 assert!(runtime
                     .capture_native_reprepare_audio_inputs(ticket, &cancellation)
                     .is_err());
+                let prepared = runtime
+                    .prepare_native_reprepare_plan(&operation, verifier.clone(), &cancellation)
+                    .expect("new input Factory and canonical graph under the original Root grant");
+                assert_eq!(prepared.schedule().maximum_processor_auxiliary_channels, 4);
+                assert_ne!(prepared.identity(), held.session.unwrap().identity);
                 assert!(
-                    runtime
-                        .prepare_native_reprepare_plan(&operation, verifier.clone(), &cancellation)
-                        .is_err(),
-                    "new inputs cannot enter the fixed-input Factory path"
+                    runtime.resource_footprint().fixed_resident_bytes > before.fixed_resident_bytes
                 );
-                assert_eq!(runtime.resource_footprint(), before);
+                assert!(runtime
+                    .prepare_native_reprepare_plan(&operation, verifier.clone(), &cancellation)
+                    .is_err());
                 assert_eq!(runtime.observe_native_owner_object(lease).unwrap(), object);
                 verifier.validate(&claim).unwrap();
                 assert_eq!(cursors(&runtime), held);
@@ -405,7 +413,10 @@ fn restart_detector_width(qualification: Qualification) {
             ),
             Err(AudioExecutionError::StateEntryRequired)
         );
-        assert_eq!(pcm, [99.0; 8]);
+        assert_eq!(
+            pcm, [0.0; 8],
+            "admitted Runtime refusal initializes output; pending preflight above preserves it"
+        );
         runtime
             .enter_state(AudioStateEntry {
                 epoch: AudioContinuityEpoch::new(2),

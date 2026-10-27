@@ -214,9 +214,10 @@ impl PreparedProcessorFactoryBinding {
         &self,
         identity: crate::NativeConfigurationSeedTicket,
         bytes: usize,
+        inputs: Option<&crate::ClapAudioInputProposal>,
     ) -> Option<usize> {
         catch_unwind(AssertUnwindSafe(|| {
-            self.factory.native_reprepare_factory_bound(identity, bytes)
+            self.factory.native_reprepare_factory_bound(identity, bytes, inputs)
         }))
         .ok()
         .flatten()
@@ -226,10 +227,12 @@ impl PreparedProcessorFactoryBinding {
         &self,
         identity: crate::NativeConfigurationSeedTicket,
         bytes: &[u8],
+        inputs: Option<&crate::ClapAudioInputProposal>,
         report_peak: &mut dyn FnMut(usize),
     ) -> Result<Option<Arc<dyn AudioProcessorFactory>>, AudioProcessorHostError> {
         isolate_adapter_call("execution-only restart Factory", || {
-            self.factory.with_native_reprepare_configuration(identity, bytes, report_peak)
+            self.factory
+                .with_native_reprepare_configuration(identity, bytes, inputs, report_peak)
         })
     }
 

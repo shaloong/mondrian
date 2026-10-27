@@ -42,6 +42,7 @@ impl PreparedAudioSessionStorage {
         current: &mut AudioRenderSession,
         selection: &crate::processor_host::native_reprepare::ReprepareSelection,
         expected: crate::AudioProcessorExecutionContract,
+        inputs: Option<&crate::ClapAudioInputProposal>,
         cancellation: &mondrian_core::ExecutionCancellationToken,
     ) -> Result<(), crate::NativeAudioReprepareError> {
         if !self.is_empty_unentered()
@@ -68,6 +69,7 @@ impl PreparedAudioSessionStorage {
             &self.plan().schedule,
             selection,
             expected,
+            inputs,
             cancellation,
         )
     }

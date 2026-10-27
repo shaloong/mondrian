@@ -226,6 +226,29 @@ pub(super) enum NativeConfigurationPhase {
 }
 
 impl NativeConfigurationPhase {
+    pub(super) fn arm_inputs(
+        &mut self,
+        proposal: super::ClapAudioInputProposal,
+        ticket: super::NativeConfigurationSeedTicket,
+    ) -> bool {
+        if !matches!(self, Self::AudioInputsCaptured { proposal: p, candidate }
+            if *p == proposal && candidate.ticket() == ticket)
+        {
+            return false;
+        }
+        let Self::AudioInputsCaptured { candidate, .. } =
+            std::mem::replace(self, Self::Blocked(proposal.observed_cohort.request))
+        else {
+            unreachable!()
+        };
+        *self = Self::ReadyForInstall {
+            request: proposal.observed_cohort.request,
+            control_token: proposal.control_token,
+            candidate,
+        };
+        true
+    }
+
     pub(super) fn issued_inputs(
         proposal: super::ClapAudioInputProposal,
         candidate: &NativeConfigurationCandidate,
@@ -417,6 +440,13 @@ mod tests {
         ));
         assert!(phase.seed_receipt(ticket).is_err());
         assert!(phase.take_seed(ticket).is_err());
+        let mut wrong = ticket;
+        wrong.control_token = NonZeroU64::new(10).unwrap();
+        assert!(!phase.arm_inputs(proposal, wrong));
+        assert_eq!(phase.seed_ticket(), None);
+        assert!(phase.arm_inputs(proposal, ticket));
+        assert_eq!(phase.seed_ticket(), Some(ticket));
+        assert_eq!(phase.blocked_request(), Some(cohort.request));
         assert_eq!(
             NativeConfigurationPhase::issued(&candidate).seed_ticket(),
             Some(ticket)

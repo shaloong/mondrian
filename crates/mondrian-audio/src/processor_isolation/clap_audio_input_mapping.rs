@@ -176,6 +176,36 @@ fn challenge(request: ClapAudioInputMappingRequest) -> u32 {
 }
 
 impl StagedClapInputMapping {
+    pub(super) fn into_parent(
+        self: Box<Self>,
+    ) -> (
+        MmapMut,
+        tempfile::NamedTempFile,
+        SharedBlockLayout,
+        AudioProcessorAuxiliaryInputContract,
+    ) {
+        let Self { shared, file, layout, auxiliary_inputs, .. } = *self;
+        let MappingFile::Parent(file) = file else {
+            unreachable!("parent constructor retains parent file")
+        };
+        (shared, file, layout, auxiliary_inputs)
+    }
+
+    pub(super) fn into_child(
+        self: Box<Self>,
+    ) -> (
+        MmapMut,
+        File,
+        SharedBlockLayout,
+        AudioProcessorAuxiliaryInputContract,
+    ) {
+        let Self { shared, file, layout, auxiliary_inputs, .. } = *self;
+        let MappingFile::Child { _file: file } = file else {
+            unreachable!("child constructor retains child file")
+        };
+        (shared, file, layout, auxiliary_inputs)
+    }
+
     pub(super) fn known_bytes(&self) -> Option<usize> {
         let mut n = size_of::<Self>().checked_add(self.shared.len())?.checked_add(
             self.auxiliary_inputs

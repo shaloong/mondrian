@@ -1799,7 +1799,26 @@ impl ClapWorker {
             TailLength::Finite(frames) => crate::AudioProcessorTail::Finite(frames as usize),
             TailLength::Infinite => crate::AudioProcessorTail::Infinite,
         };
-        let observed = observed_contract(self.contract, latency, tail)?;
+        let mut observed = observed_contract(self.contract, latency, tail)?;
+        if let Some(proposal) = inputs {
+            let bytes = proposal
+                .native_scratch_bytes(
+                    self.contract.session_scratch_bytes(),
+                    self.render.max_block_frames,
+                    &self.auxiliary_inputs,
+                )
+                .ok_or_else(|| {
+                    invalid("input migration requires unchanged native port keys/order")
+                })?;
+            observed = AudioProcessorExecutionContract::new(
+                latency,
+                tail,
+                observed.requires_state_entry(),
+                observed.realtime_capable(),
+                observed.offline_capable(),
+                bytes,
+            )?;
+        }
         self.shared.service_callbacks(&mut self.instance)?;
         let handle = self.instance.plugin_handle();
         // CLAP audio-ports may only be scanned while deactivated. The inactive
@@ -2247,6 +2266,14 @@ impl IsolatedAudioProcessorWorker for ClapWorker {
         use super::{
             NativeConfigurationControlOutcome as Outcome, NativeConfigurationRefusal as Refusal,
         };
+        if !mapping
+            .buffers
+            .request
+            .proposal
+            .preserves_auxiliary_keys(&self.auxiliary_inputs)
+        {
+            return Ok(Outcome::CapabilityRefused(Refusal::UnsupportedRequest));
+        }
         if self.configuration_phase.ready_token().is_some() {
             return Ok(Outcome::CapabilityRefused(Refusal::AwaitingInstallation));
         }
@@ -2346,6 +2373,26 @@ impl IsolatedAudioProcessorWorker for ClapWorker {
         Ok(Outcome::Staged(receipt))
     }
 
+    fn arm_clap_audio_input_installation(
+        &mut self,
+        mapping: super::ClapAudioInputMappingRequest,
+        ticket: super::NativeConfigurationSeedTicket,
+    ) -> Result<bool, AudioProcessorHostError> {
+        let Some(staged) = &self.staged_audio_inputs else {
+            return Ok(false);
+        };
+        if staged.receipt != mapping.buffers
+            || !staged.receipt.request.proposal.preserves_auxiliary_keys(&self.auxiliary_inputs)
+        {
+            return Ok(false);
+        }
+        let cohort = self.shared.restart_cohort();
+        if cohort.pending() || cohort.serial() != ticket.serviced_cohort.serial {
+            return Ok(false);
+        }
+        Ok(self.configuration_phase.arm_inputs(mapping.buffers.request.proposal, ticket))
+    }
+
     fn stage_native_configuration_seed(
         &mut self,
         seed: super::NativeConfigurationOwnedSeed,
@@ -2382,6 +2429,23 @@ impl IsolatedAudioProcessorWorker for ClapWorker {
         // Retain the seed owner for this installed candidate without reloading or
         // pretending it is private DSP history. Explicit Enter resets processing.
         let previous = self.configuration_seed.replace(seed);
+        if let Some(mut staged) = self.staged_audio_inputs.take() {
+            // Arm checked exact stable IDs/order; no allocation or native call
+            // separates these moves from installing the matching contract.
+            for (bus, port) in self
+                .auxiliary_inputs
+                .buses
+                .iter_mut()
+                .zip(staged.receipt.request.proposal.ports().filter(|p| !p.is_main))
+            {
+                bus.channel_layout = port.channel_layout;
+            }
+            std::mem::swap(&mut self.input, &mut staged.input);
+            std::mem::swap(&mut self.input_ports, &mut staged.ports);
+            // Old processing scope joined before this command; old planes/SDK
+            // owners retire here. Root retains their fee until graph retirement.
+            drop(staged);
+        }
         self.contract = ticket.observed_contract;
         self.last_end = None;
         self.configuration_phase =

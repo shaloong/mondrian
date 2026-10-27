@@ -560,6 +560,7 @@ impl IsolatedAudioProcessorFactory {
         &self,
         identity: NativeConfigurationSeedTicket,
         configuration_bytes: usize,
+        inputs: Option<&ClapAudioInputProposal>,
     ) -> bool {
         let old = self.spec.plugin_execution_contract;
         let next = identity.observed_contract;
@@ -572,7 +573,22 @@ impl IsolatedAudioProcessorFactory {
             && old.requires_state_entry() == next.requires_state_entry()
             && old.realtime_capable() == next.realtime_capable()
             && old.offline_capable() == next.offline_capable()
-            && old.session_scratch_bytes() == next.session_scratch_bytes()
+            && match inputs {
+                None => old.session_scratch_bytes() == next.session_scratch_bytes(),
+                Some(p) => {
+                    identity.format == NativeConfigurationFormat::ClapState
+                        && p.observed_cohort == identity.serviced_cohort
+                        && p.control_token == identity.control_token
+                        && p.native_scratch_bytes(
+                            old.session_scratch_bytes(),
+                            self.spec.render_contract.max_block_frames,
+                            &self.spec.auxiliary_inputs,
+                        ) == Some(next.session_scratch_bytes())
+                        && p.ports()
+                            .filter(|p| p.is_main)
+                            .all(|p| p.channel_layout == self.spec.render_contract.channel_layout)
+                }
+            }
     }
 
     // Observed known-parent storage only: platform buffers and Arc prefixes keep
@@ -593,10 +609,11 @@ impl IsolatedAudioProcessorFactory {
         &self,
         identity: NativeConfigurationSeedTicket,
         configuration: &[u8],
+        inputs: Option<&ClapAudioInputProposal>,
         report_peak: &mut dyn FnMut(usize),
     ) -> Result<Option<Arc<Self>>, AudioProcessorHostError> {
         use sha2::{Digest, Sha256};
-        if !self.admits_reprepare_identity(identity, configuration.len()) {
+        if !self.admits_reprepare_identity(identity, configuration.len(), inputs) {
             return Ok(None);
         }
         if <[u8; 32]>::from(Sha256::digest(configuration)) != identity.configuration_sha256 {
@@ -641,6 +658,22 @@ impl IsolatedAudioProcessorFactory {
         // a worker. For the concrete format, original immutable metadata passed
         // its typed worker/catalog admission; this is not external JSON admission
         // or a claim about arbitrary custom helper implementations.
+        let mut auxiliary_inputs = self.spec.auxiliary_inputs.clone();
+        if let Some(proposal) = inputs {
+            for (bus, port) in
+                auxiliary_inputs.buses.iter_mut().zip(proposal.ports().filter(|p| !p.is_main))
+            {
+                bus.channel_layout = port.channel_layout;
+            }
+        }
+        let layout = SharedBlockLayout::new(
+            self.spec.render_contract.max_block_frames,
+            self.spec.render_contract.channel_count(),
+            &auxiliary_inputs,
+            self.spec.parameter_ids.len(),
+        )?
+        .with_auxiliary_outputs(self.spec.auxiliary_outputs.buses.len())?
+        .with_notes(0, 0)?;
         let spec = IsolatedAudioProcessorWorkerSpec {
             musical_time_reference: self.spec.musical_time_reference,
             helper_executable: self.spec.helper_executable.clone(),
@@ -649,7 +682,7 @@ impl IsolatedAudioProcessorFactory {
             preparation_payload,
             preparation_evidence: PreparationEvidence::Unprobed,
             plugin_execution_contract: identity.observed_contract,
-            auxiliary_inputs: self.spec.auxiliary_inputs.clone(),
+            auxiliary_inputs,
             auxiliary_outputs: self.spec.auxiliary_outputs.clone(),
             note_input_contract: self.spec.note_input_contract.clone(),
             parameter_ids: self.spec.parameter_ids.clone(),
@@ -663,7 +696,7 @@ impl IsolatedAudioProcessorFactory {
             input_names: self.input_names.clone(),
             spec,
             execution_contract: self.execution_contract,
-            layout: self.layout,
+            layout,
             #[cfg(test)]
             retained_create_test_hook: self.retained_create_test_hook.clone(),
         };
@@ -807,8 +840,9 @@ impl AudioProcessorFactory for IsolatedAudioProcessorFactory {
         &self,
         identity: NativeConfigurationSeedTicket,
         configuration_bytes: usize,
+        inputs: Option<&ClapAudioInputProposal>,
     ) -> Option<usize> {
-        if !self.admits_reprepare_identity(identity, configuration_bytes) {
+        if !self.admits_reprepare_identity(identity, configuration_bytes, inputs) {
             return None;
         }
         let n = self.spec.preparation_payload.len();
@@ -832,9 +866,10 @@ impl AudioProcessorFactory for IsolatedAudioProcessorFactory {
         &self,
         identity: NativeConfigurationSeedTicket,
         configuration: &[u8],
+        inputs: Option<&ClapAudioInputProposal>,
         report_peak: &mut dyn FnMut(usize),
     ) -> Result<Option<Arc<dyn AudioProcessorFactory>>, AudioProcessorHostError> {
-        self.rebind_execution_configuration(identity, configuration, report_peak)
+        self.rebind_execution_configuration(identity, configuration, inputs, report_peak)
             .map(|factory| factory.map(|factory| factory as Arc<dyn AudioProcessorFactory>))
     }
 
@@ -1347,11 +1382,14 @@ impl AudioProcessor for IsolatedAudioProcessor {
             ));
         };
         match self.worker.commit_native_configuration_seed(staged) {
-            Ok(outcome) => {
+            Ok((outcome, inputs)) => {
                 if let NativeConfigurationSeedOutcome::Accepted(_) = outcome {
                     // The authenticated reply matched this exact staged ticket.
                     // Keep the parent aligned with the committed native contract;
                     // this does not install a Runtime plan or authorize PCM.
+                    if let Some(inputs) = inputs {
+                        self.auxiliary_inputs = inputs;
+                    }
                     self.native_plugin_contract = ticket.observed_contract;
                     self.staged_configuration_seed = None;
                     self.pending_reprepare = None;
@@ -2031,6 +2069,16 @@ pub trait IsolatedAudioProcessorWorker {
         None
     }
 
+    /// Only the actual transport owner may arm its captured matching layout.
+    /// This still leaves processing blocked until Commit and root installation.
+    fn arm_clap_audio_input_installation(
+        &mut self,
+        _mapping: ClapAudioInputMappingRequest,
+        _ticket: NativeConfigurationSeedTicket,
+    ) -> Result<bool, AudioProcessorHostError> {
+        Ok(false)
+    }
+
     /// Allocate only admitted replacement inputs; no activation or graph publication.
     fn stage_clap_audio_input_buffers(
         &mut self,
@@ -2568,7 +2616,7 @@ mod note_spec_contracts {
             configuration_sha256: Sha256::digest(configuration).into(),
         };
         let (bound, counts) = measure_host_allocations_for_test(|| {
-            factory.native_reprepare_factory_bound(identity, configuration.len())
+            factory.native_reprepare_factory_bound(identity, configuration.len(), None)
         });
         let bound = bound.unwrap();
         assert_eq!(
@@ -2591,7 +2639,7 @@ mod note_spec_contracts {
         let mut wrong = identity;
         wrong.configuration_sha256[0] ^= 1;
         assert!(factory
-            .with_native_reprepare_configuration(wrong, &configuration, &mut |_| {})
+            .with_native_reprepare_configuration(wrong, &configuration, None, &mut |_| {})
             .is_err());
         wrong = identity;
         wrong.observed_contract = AudioProcessorExecutionContract::new(
@@ -2603,14 +2651,16 @@ mod note_spec_contracts {
             17,
         )
         .unwrap();
-        assert!(factory.native_reprepare_factory_bound(wrong, configuration.len()).is_none());
         assert!(factory
-            .with_native_reprepare_configuration(wrong, &configuration, &mut |_| {})
+            .native_reprepare_factory_bound(wrong, configuration.len(), None)
+            .is_none());
+        assert!(factory
+            .with_native_reprepare_configuration(wrong, &configuration, None, &mut |_| {})
             .unwrap()
             .is_none());
         let mut peak = 0;
         let next = factory
-            .rebind_execution_configuration(identity, &configuration, &mut |bytes| {
+            .rebind_execution_configuration(identity, &configuration, None, &mut |bytes| {
                 peak = peak.max(bytes)
             })
             .unwrap()
@@ -2640,7 +2690,7 @@ mod note_spec_contracts {
         assert_eq!(next.spec.helper_arguments, factory.spec.helper_arguments);
         assert_eq!(next.spec.render_contract, factory.spec.render_contract);
         let public = factory
-            .with_native_reprepare_configuration(identity, &configuration, &mut |_| {})
+            .with_native_reprepare_configuration(identity, &configuration, None, &mut |_| {})
             .unwrap()
             .unwrap();
         assert_eq!(public.execution_contract(), next.execution_contract());
@@ -2707,7 +2757,7 @@ mod note_spec_contracts {
             configuration_sha256: Sha256::digest(configuration).into(),
         };
         let (bound, counts) = measure_host_allocations_for_test(|| {
-            factory.native_reprepare_factory_bound(identity, configuration.len())
+            factory.native_reprepare_factory_bound(identity, configuration.len(), None)
         });
         let bound = bound.unwrap();
         assert_eq!(counts, [0; 4], "Factory bound is a pure read");
@@ -2797,10 +2847,14 @@ mod note_spec_contracts {
             rejected.push(wrong);
         }
         for wrong in rejected {
-            assert!(factory.native_reprepare_factory_bound(wrong, configuration.len()).is_none());
+            assert!(factory
+                .native_reprepare_factory_bound(wrong, configuration.len(), None)
+                .is_none());
             let mut queried = false;
             assert!(factory
-                .with_native_reprepare_configuration(wrong, &configuration, &mut |_| queried = true)
+                .with_native_reprepare_configuration(wrong, &configuration, None, &mut |_| {
+                    queried = true
+                })
                 .unwrap()
                 .is_none());
             assert!(!queried);
@@ -2808,11 +2862,13 @@ mod note_spec_contracts {
         wrong = identity;
         wrong.configuration_sha256[0] ^= 1;
         assert!(factory
-            .with_native_reprepare_configuration(wrong, &configuration, &mut |_| {})
+            .with_native_reprepare_configuration(wrong, &configuration, None, &mut |_| {})
             .is_err());
         let mut peak = 0;
         let next = factory
-            .rebind_execution_configuration(identity, &configuration, &mut |n| peak = peak.max(n))
+            .rebind_execution_configuration(identity, &configuration, None, &mut |n| {
+                peak = peak.max(n)
+            })
             .unwrap()
             .unwrap();
         assert_eq!(
@@ -2837,7 +2893,7 @@ mod note_spec_contracts {
         after["state"] = before["state"].clone();
         assert_eq!(after, before, "all non-state fields remain identical");
         let public = factory
-            .with_native_reprepare_configuration(identity, &configuration, &mut |_| {})
+            .with_native_reprepare_configuration(identity, &configuration, None, &mut |_| {})
             .unwrap()
             .unwrap();
         assert_eq!(public.execution_contract(), next.execution_contract());

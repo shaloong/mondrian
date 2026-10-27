@@ -416,7 +416,17 @@ impl AudioProgramRuntime {
                 "pending Session restart does not match the expected notice",
             ));
         }
-        self.service_native_reprepare(ticket, cancellation)
+        match self.service_native_reprepare(ticket, cancellation) {
+            Err(NativeAudioReprepareError::AudioInputChangeRequired) => {
+                // One coordinated attempt under the original Root grant.
+                // Each stage records destructive work before its RPC; failure
+                // cannot implicitly retry or refund retained native/IO owners.
+                self.stage_native_reprepare_audio_input_buffers(ticket, cancellation)?;
+                self.stage_native_reprepare_audio_input_mapping(ticket, cancellation)?;
+                self.capture_native_reprepare_audio_inputs(ticket, cancellation)
+            }
+            result => result,
+        }
     }
 
     /// Capture one exact retained CLAP or VST3 latency restart under the original root grant.
@@ -974,13 +984,6 @@ impl AudioProgramRuntime {
             return Err(Error::Cancelled);
         }
         self.native_reprepare_configuration(operation)?;
-        // A captured new input layout cannot use the fixed-input Factory path.
-        // Seed permission stays unavailable until coordinated graph installation.
-        if self.native_reprepare.attempt.as_ref().unwrap().input_proposal.is_some() {
-            return Err(Error::Admission(
-                "changed input Factory/graph installation remains unsupported",
-            ));
-        }
         let attempt = self.native_reprepare.attempt.as_ref().unwrap();
         if attempt.phase != CapturePhase::Captured || attempt.prepared_factory.is_some() {
             return Err(Error::Admission(
@@ -1006,12 +1009,16 @@ impl AudioProgramRuntime {
         let old_plan = self.session.shared_resource_plan();
         let factory_bound = old_plan.schedule.processors[index]
             .factory
-            .native_reprepare_factory_bound(identity, candidate.configuration.len())
+            .native_reprepare_factory_bound(
+                identity,
+                candidate.configuration.len(),
+                attempt.input_proposal.as_ref(),
+            )
             .ok_or(Error::Admission(
                 "execution-only restart Factory bound is unavailable",
             ))?;
         let session_bound = old_plan
-            .native_reprepare_session_bound()
+            .native_reprepare_session_bound(index, attempt.input_proposal.as_ref())
             .map_err(AudioRuntimeBuildError::from)?;
         // The existing lazy fee scope may allocate one AtomicUsize Arc payload;
         // include that known payload before calling the original fee helper.
@@ -1074,9 +1081,12 @@ impl AudioProgramRuntime {
             let configuration = &attempt.candidate.as_ref().unwrap().configuration;
             self.session.resource_plan().schedule.processors[index]
                 .factory
-                .reprepare_factory(identity, configuration, &mut |bytes| {
-                    factory_peak = factory_peak.max(bytes)
-                })
+                .reprepare_factory(
+                    identity,
+                    configuration,
+                    attempt.input_proposal.as_ref(),
+                    &mut |bytes| factory_peak = factory_peak.max(bytes),
+                )
         };
         // Adopt a formed Factory BEFORE cap/cancel/Source checks. On Err its
         // temporaries have already reported their peak; credit is not returned.
@@ -1160,7 +1170,11 @@ impl AudioProgramRuntime {
                 "actual restart Session exceeded fixed reservation",
             ));
         }
-        self.session.resource_plan().validate_native_reprepare_plan(plan, index)?;
+        self.session.resource_plan().validate_native_reprepare_plan(
+            plan,
+            index,
+            self.native_reprepare.attempt.as_ref().unwrap().input_proposal.as_ref(),
+        )?;
         // The real Plan is already retained. Refine the SAME enrolled fee to
         // its checked actual policy amount before a future replacement can use
         // the original retirement equation; no owner or fee is dropped here.
@@ -1424,6 +1438,7 @@ impl AudioProgramRuntime {
                 &mut self.session,
                 &attempt.selection,
                 seed.observed_contract,
+                attempt.input_proposal.as_ref(),
                 cancellation,
             )?;
             if cancellation.is_canceled() {

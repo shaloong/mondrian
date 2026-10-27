@@ -659,11 +659,11 @@ fn installed_vst3_configuration_seed_commit_preserves_new_profile_on_fresh_enter
         let old_contract = factory.execution_contract();
         let old_payload = factory.spec.preparation_payload.clone();
         let bound = factory
-            .native_reprepare_factory_bound(ticket, candidate.configuration.len())
+            .native_reprepare_factory_bound(ticket, candidate.configuration.len(), None)
             .expect("real flags8 candidate has a finite Factory bound");
         let mut peak = 0;
         let next = factory
-            .with_native_reprepare_configuration(ticket, &candidate.configuration, &mut |n| {
+            .with_native_reprepare_configuration(ticket, &candidate.configuration, None, &mut |n| {
                 peak = peak.max(n)
             })
             .expect("actual VST3 execution-only Factory rebind")

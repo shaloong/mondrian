@@ -230,6 +230,56 @@ fn dispatch_native_owner_with_io(
     control: &mut TcpStream,
     io: &mut WorkerAudioIo,
 ) -> Result<bool, AudioProcessorHostError> {
+    if let super::native_worker_command::NativeCommand::StageSeed(
+        super::native_configuration_seed_wire::DecodedStage::Owned(seed),
+    ) = &command
+        && let Some(mapping) = &io.staged_mapping
+    {
+        let armed = catch_unwind(AssertUnwindSafe(|| {
+            processor.arm_clap_audio_input_installation(mapping.request, seed.ticket)
+        }));
+        match armed {
+            Ok(Ok(true)) => {}
+            Ok(Ok(false)) => {
+                return write_seed_operation_result(
+                    control,
+                    Ok(Ok(super::NativeConfigurationSeedOutcome::Refused(
+                        super::NativeConfigurationSeedRefusal::StaleTicket,
+                    ))),
+                )
+            }
+            Ok(Err(error)) => return write_seed_operation_result(control, Ok(Err(error))),
+            Err(panic) => return write_seed_operation_result(control, Err(panic)),
+        }
+    }
+    if let super::native_worker_command::NativeCommand::CommitSeed(ticket) = &command
+        && let Some(mapping) = &io.staged_mapping
+    {
+        let ticket = *ticket;
+        let proposal = mapping.request.buffers.request.proposal;
+        if ticket.serviced_cohort != proposal.observed_cohort
+            || ticket.control_token != proposal.control_token
+        {
+            return write_seed_operation_result(
+                control,
+                Ok(Ok(super::NativeConfigurationSeedOutcome::Refused(
+                    super::NativeConfigurationSeedRefusal::StaleTicket,
+                ))),
+            );
+        }
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            let outcome = processor.commit_native_configuration_seed(ticket)?;
+            if matches!(outcome, super::NativeConfigurationSeedOutcome::Accepted(_)) {
+                let (shared, file, layout, inputs) = io.staged_mapping.take().unwrap().into_child();
+                io.shared = shared;
+                io._shared_file = file;
+                io.layout = layout;
+                io.auxiliary_inputs = inputs;
+            }
+            Ok(outcome)
+        }));
+        return write_seed_operation_result(control, result);
+    }
     if matches!(
         &command,
         super::native_worker_command::NativeCommand::Configuration(_)

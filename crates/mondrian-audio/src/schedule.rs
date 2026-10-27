@@ -504,13 +504,21 @@ impl PreparedAudioPlan {
         &self,
         next: &Self,
         index: usize,
+        inputs: Option<&crate::ClapAudioInputProposal>,
     ) -> Result<(), AudioCompileError> {
         for (slot, (old, prepared)) in
             self.schedule.processors.iter().zip(&next.schedule.processors).enumerate()
         {
             if old.occurrence != prepared.occurrence
                 || old.parameter_ids != prepared.parameter_ids
-                || old.factory.auxiliary_inputs() != prepared.factory.auxiliary_inputs()
+                || if slot == index && inputs.is_some() {
+                    !inputs.unwrap().matches_reconfigured_inputs(
+                        old.factory.auxiliary_inputs(),
+                        prepared.factory.auxiliary_inputs(),
+                    )
+                } else {
+                    old.factory.auxiliary_inputs() != prepared.factory.auxiliary_inputs()
+                }
                 || old.factory.auxiliary_outputs() != prepared.factory.auxiliary_outputs()
                 || old.factory.note_inputs() != prepared.factory.note_inputs()
                 || (slot != index && old.factory.contract() != prepared.factory.contract())
@@ -533,8 +541,37 @@ impl PreparedAudioPlan {
     // This can conservatively refuse a wide contract under a smaller Root grant.
     pub(crate) fn native_reprepare_session_bound(
         &self,
+        index: usize,
+        inputs: Option<&crate::ClapAudioInputProposal>,
     ) -> Result<AudioSessionResourceFootprint, AudioResourceFootprintError> {
         let mut summary = self.schedule.summary;
+        if let Some(proposal) = inputs {
+            let old = self
+                .schedule
+                .processors
+                .get(index)
+                .ok_or(AudioResourceFootprintError::ExtentOverflow)?
+                .factory
+                .auxiliary_inputs();
+            summary.processor_session_scratch_bytes = proposal
+                .isolated_scratch_bytes(
+                    summary.processor_session_scratch_bytes,
+                    self.contract.max_block_frames,
+                    old,
+                )
+                .ok_or(AudioResourceFootprintError::ExtentOverflow)?;
+            let channels = proposal
+                .ports()
+                .filter(|p| !p.is_main)
+                .try_fold(0_usize, |n, p| {
+                    n.checked_add(p.channel_layout.channel_count())
+                })
+                .ok_or(AudioResourceFootprintError::ExtentOverflow)?;
+            summary.maximum_processor_auxiliary_channels =
+                summary.maximum_processor_auxiliary_channels.max(channels);
+            // Existing bindings may change from identity to Mono/Stereo mix.
+            summary.maximum_sidechain_mix_channels = summary.maximum_sidechain_mix_channels.max(2);
+        }
         summary.scratch_slot_count = summary.node_count;
         summary.compensation_delay_samples =
             self.contract.compensation_delay_scratch_budget_bytes / std::mem::size_of::<f32>();

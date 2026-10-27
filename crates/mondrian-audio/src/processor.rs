@@ -500,13 +500,14 @@ pub trait AudioProcessorFactory: Send + Sync {
         &self,
         _identity: crate::NativeConfigurationSeedTicket,
         _configuration_bytes: usize,
+        _inputs: Option<&crate::ClapAudioInputProposal>,
     ) -> Option<usize> {
         None
     }
 
     /// Prepare an immutable execution-only Factory from the caller's actual
-    /// retained capture. Unlike an author seed, latency/tail may change; ports,
-    /// schema, render mode and all other behavior must remain identical.
+    /// retained capture. Latency/tail and an explicit authenticated CLAP input
+    /// proposal may change; schema, output ports and render mode remain fixed.
     /// `report_peak` records known-parent overlap even before an error returns.
     /// Neither the returned Factory nor the capture ticket grants native/Source
     /// or canonical author permission. No create/probe/Enter/seed RPC is allowed.
@@ -514,6 +515,7 @@ pub trait AudioProcessorFactory: Send + Sync {
         &self,
         _identity: crate::NativeConfigurationSeedTicket,
         _configuration: &[u8],
+        _inputs: Option<&crate::ClapAudioInputProposal>,
         _report_peak: &mut dyn FnMut(usize),
     ) -> Result<Option<Arc<dyn AudioProcessorFactory>>, AudioProcessorHostError> {
         Ok(None)

@@ -262,6 +262,7 @@ impl PreparedProcessorHost {
         next: &PreparedAudioSchedule,
         selection: &ReprepareSelection,
         expected: crate::AudioProcessorExecutionContract,
+        inputs: Option<&crate::ClapAudioInputProposal>,
         cancellation: &ExecutionCancellationToken,
     ) -> Result<(), Error> {
         if self.instances.len() != old.processors.len()
@@ -293,7 +294,14 @@ impl PreparedProcessorHost {
                     }
                     _ => true,
                 })
-                || before.factory.auxiliary_inputs() != after.factory.auxiliary_inputs()
+                || if index == selection.index && inputs.is_some() {
+                    !inputs.unwrap().matches_reconfigured_inputs(
+                        before.factory.auxiliary_inputs(),
+                        after.factory.auxiliary_inputs(),
+                    )
+                } else {
+                    before.factory.auxiliary_inputs() != after.factory.auxiliary_inputs()
+                }
                 || before.factory.auxiliary_outputs() != after.factory.auxiliary_outputs()
                 || before.factory.note_inputs() != after.factory.note_inputs()
                 || instance.notes.is_some()
@@ -307,10 +315,23 @@ impl PreparedProcessorHost {
                         || a.requires_state_entry() != b.requires_state_entry()
                         || a.realtime_capable() != b.realtime_capable()
                         || a.offline_capable() != b.offline_capable()
-                        || a.session_scratch_bytes() != b.session_scratch_bytes()))
+                        || (inputs.is_none()
+                            && a.session_scratch_bytes() != b.session_scratch_bytes())))
             {
                 return Err(Error::Admission(
                     "restart changed non-scheduling contract or owners",
+                ));
+            }
+            if index == selection.index
+                && inputs.is_some()
+                && inputs.unwrap().isolated_scratch_bytes(
+                    a.session_scratch_bytes(),
+                    self.render_contract.max_block_frames,
+                    before.factory.auxiliary_inputs(),
+                ) != Some(b.session_scratch_bytes())
+            {
+                return Err(Error::Admission(
+                    "migrated resource model does not match the prepared Factory",
                 ));
             }
             if cancellation.is_canceled() {
