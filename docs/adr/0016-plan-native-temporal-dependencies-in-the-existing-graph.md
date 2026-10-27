@@ -192,6 +192,18 @@ native caching. Missing media, unprepared input and RetryAdmission stay distinct
 typed upstream failure retires the waiting owner without quarantining its
 definition or substituting the current image.
 
+A prepared complete-CPU route is binding for Viewer media, including transition
+inputs. GPU lowering must return the existing EffectRequiresCpu disposition before
+demanding a heterogeneous working payload. The original CPU task then owns color
+conversion, processor input service and the later GPU continuation.
+
+Source reply liveness belongs to the active wait and its generation/epoch, not the
+current UI feedback scope. A newer feedback view cannot revoke an executing
+worker's admitted dependencies. Output/feedback publication keeps its exact
+attempt checks. Seven real-media source controls retain the original cancellation,
+deadline, shutdown, pixel and no-DSP-replay assertions and add scalar/Broker
+feedback-view turnover. These use an owned processor, not a third-party plugin.
+
 ## Qualification and remaining work
 
 Windows MSVC14.44 passes 16 native control groups, including the actual published
@@ -269,3 +281,21 @@ Temporal plugins, broader TimeBlur placements/retiming, timed Playback loop,
 cancellation at other phases, encoded export, GUI, comparative performance
 and other platforms remain open. F06/GL remain open; this does not establish
 universal100ms shutdown, whole-heap safety or realtime behavior.
+
+The new actual Headless/wgpu TimeBlur playback control remains **whole FAIL**.
+Honoring the complete-CPU route removes its first static Viewer refusal; timed
+advancement, pause and resume then reach frame7/8 before a Source wait reports
+"source request owner retired". Paired GPU-to-decoder, Preview and GPU cleanup
+passes. Source queue liveness also expires at its media deadline while the CPU
+job receives generation cancellation; the exact retirement/terminal-disposition
+path still needs diagnosis. Do not extend deadlines, suppress this failure or
+call repeated seek an automatic loop. Playback Engine currently has no loop-range
+or automatic-repeat contract. Finite working-image controls remain separately
+qualified; timed playback, deadline recovery and automatic loop remain open.
+
+Current Windows validation uses opt0/debug0 App with an App-only CGU1 build
+override for memory pressure, default-feature Product and validation libtest.
+Source7, full App3146/218ignored and all four earlier real TimeBlur NLE gates
+pass with empty stderr and settled jobs under original budgets. The failed timed
+gate was not retried merely for the build-profile change. Other crates retain
+their earlier regression conditions; this is not a new full Workspace run.

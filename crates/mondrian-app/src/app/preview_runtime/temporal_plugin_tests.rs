@@ -7,6 +7,81 @@ use mondrian_core::automation::{
 };
 use mondrian_core::{FramePosition, PropertyValue, Rational, TimelineTime};
 
+#[test]
+fn complete_cpu_route_remains_authoritative_for_gpu_capable_source_pixels() {
+    use crate::app::preview_viewer_plan::gpu_composite_layers_for_resolved_with_session;
+    use mondrian_renderer::GpuCompositingBlockerReason;
+    let _guard = crate::app_ui::test_utils::theme_test_guard();
+    ensure_test_ocio_loaded();
+    let mut elements = [ResolvedPreviewElement::Media {
+        frame: test_media_frame(80),
+        opacity: 1.0,
+        blend_mode: BlendMode::Normal,
+        transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+        effect_graph: mondrian_effects::identity_compiled_effect_graph().unwrap(),
+        prepared_effect_route: None,
+        frame_seed: 0,
+    }];
+    let mut scratch = TimelineCompositeScratch::default();
+    assert!(
+        gpu_composite_layers_for_resolved_with_session(
+            &elements,
+            WorkingColorSpace::LinearRec709,
+            &mut scratch,
+        )
+        .is_ok(),
+        "control: the source and graph themselves support GPU lowering"
+    );
+    let ResolvedPreviewElement::Media { prepared_effect_route, .. } = &mut elements[0] else {
+        unreachable!()
+    };
+    *prepared_effect_route = Some(Box::new(
+        mondrian_renderer::PreparedTimelinePreviewEffectRoute::Cpu { processor_input: None },
+    ));
+    assert_eq!(
+        gpu_composite_layers_for_resolved_with_session(
+            &elements,
+            WorkingColorSpace::LinearRec709,
+            &mut scratch,
+        )
+        .err()
+        .expect("the preselected complete CPU route must reach its existing compositor"),
+        GpuCompositingBlockerReason::EffectRequiresCpu
+    );
+    let [ResolvedPreviewElement::Media { frame, effect_graph, prepared_effect_route, .. }] =
+        elements
+    else {
+        unreachable!()
+    };
+    let transition = [ResolvedPreviewElement::CrossDissolve {
+        left: Box::new(
+            crate::app::preview_viewer_plan::ResolvedPreviewTransitionInput::Media {
+                frame,
+                opacity: 1.0,
+                blend_mode: BlendMode::Normal,
+                transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+                effect_graph,
+                prepared_effect_route,
+                frame_seed: 0,
+            },
+        ),
+        right: Box::new(
+            crate::app::preview_viewer_plan::ResolvedPreviewTransitionInput::Transparent,
+        ),
+        progress: 0.5,
+    }];
+    assert_eq!(
+        gpu_composite_layers_for_resolved_with_session(
+            &transition,
+            WorkingColorSpace::LinearRec709,
+            &mut scratch,
+        )
+        .err()
+        .expect("transition media must honor the same preselected route"),
+        GpuCompositingBlockerReason::EffectRequiresCpu,
+    );
+}
+
 fn schedule_working(
     runtime: &PreviewProductionRuntime<()>,
     state: &mut AppState,
@@ -404,12 +479,177 @@ fn install_time_blur_catalog(
     persist_app_ui_preferences_to(preferences_path, &preferences).unwrap();
 }
 
+fn qualify_time_blur_playback(state: &mut AppState, kind: &mondrian_effects::EffectType) {
+    use crate::app::headless_realtime_playback::{
+        HeadlessGpuExecutionDisposition, HeadlessGpuExecutionObserver,
+        HeadlessRealtimeIntervalOutcome, HeadlessRealtimePlaybackSession,
+    };
+    use crate::app::headless_viewer_gpu::HeadlessViewerGpuExecution;
+    use mondrian_playback::FrameDemandIdentity;
+
+    // Only bounded scalar observations occur inside the actual realtime driver.
+    #[derive(Default)]
+    struct Presentations {
+        epoch: Option<mondrian_playback::PlaybackEpoch>,
+        first: Option<i64>,
+        last: Option<i64>,
+        count: usize,
+        wrong_epoch: bool,
+    }
+    impl Presentations {
+        fn observe(&mut self, demand: Option<FrameDemandIdentity>) {
+            if let Some(demand) = demand {
+                self.wrong_epoch |= self.epoch != Some(demand.epoch);
+                self.first.get_or_insert(demand.target_frame);
+                self.last = Some(demand.target_frame);
+                self.count += 1;
+            }
+        }
+    }
+    impl HeadlessGpuExecutionObserver for Presentations {
+        fn execution_completed(
+            &mut self,
+            _: HeadlessViewerGpuExecution,
+            disposition: HeadlessGpuExecutionDisposition,
+            demand: Option<FrameDemandIdentity>,
+        ) {
+            if disposition == HeadlessGpuExecutionDisposition::PublishedCurrent {
+                self.observe(demand);
+            }
+        }
+        fn current_output_presented(&mut self, demand: Option<FrameDemandIdentity>) {
+            self.observe(demand);
+        }
+        fn successor_preparation(&mut self, _: bool) {}
+    }
+
+    let authored = serde_json::to_value(state.active_sequence().unwrap()).unwrap();
+    let mut session = HeadlessRealtimePlaybackSession::new().unwrap();
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        // Stopped Play intentionally starts at zero. Establish the ordinary
+        // paused coordinate before starting the first timed Playback Session.
+        state.play().unwrap();
+        state.pause().unwrap();
+        state.seek(2).unwrap();
+        let mut observer = Presentations::default();
+        session
+            .prepare_stopped_picture(
+                state,
+                &mut observer,
+                Instant::now() + Duration::from_secs(10),
+            )
+            .unwrap_or_else(|error| {
+                panic!(
+                    "{error:#}; actual Viewer refusal: {:?}",
+                    session.preview().unwrap().last_unavailability()
+                )
+            });
+        state.play().unwrap();
+        let first_epoch = state.playback_epoch();
+        observer = Presentations { epoch: Some(first_epoch), ..Default::default() };
+        let deadline = Instant::now() + Duration::from_secs(10);
+        session.begin_realtime(state, Some(deadline)).unwrap();
+        session
+            .complete_current_video_opportunity(state, &mut observer, Duration::from_secs(10))
+            .unwrap();
+        while state.current_frame() < 4 {
+            assert!(
+                Instant::now() < deadline,
+                "actual Playback clock did not advance"
+            );
+            assert!(matches!(
+                session
+                    .run_video_interval(state, &mut observer, Duration::from_secs(10))
+                    .unwrap(),
+                HeadlessRealtimeIntervalOutcome::Advanced { .. }
+            ));
+        }
+        assert!(!state.is_playback_priming());
+        assert!(observer.count >= 2 && observer.last.is_some_and(|frame| frame > 2));
+        assert!(!observer.wrong_epoch);
+        state.pause().unwrap();
+        session.finish_realtime().unwrap();
+        let paused = state.current_frame();
+        session
+            .prepare_stopped_picture(
+                state,
+                &mut Presentations::default(),
+                Instant::now() + Duration::from_secs(10),
+            )
+            .unwrap();
+        std::thread::sleep(Duration::from_millis(50));
+        state.advance_playback_clock_at(Instant::now());
+        assert_eq!(
+            state.current_frame(),
+            paused,
+            "paused clock holds the actual picture"
+        );
+
+        state.play().unwrap();
+        let resumed_epoch = state.playback_epoch();
+        assert_ne!(resumed_epoch, first_epoch);
+        observer = Presentations { epoch: Some(resumed_epoch), ..Default::default() };
+        let deadline = Instant::now() + Duration::from_secs(10);
+        session.begin_realtime(state, Some(deadline)).unwrap();
+        session
+            .complete_current_video_opportunity(state, &mut observer, Duration::from_secs(10))
+            .unwrap();
+        loop {
+            assert!(
+                Instant::now() < deadline,
+                "resumed Playback did not reach natural end"
+            );
+            if let HeadlessRealtimeIntervalOutcome::NaturalEnd { terminal_frame } = session
+                .run_video_interval(state, &mut observer, Duration::from_secs(10))
+                .unwrap()
+            {
+                assert_eq!(terminal_frame, 11);
+                break;
+            }
+        }
+        session.finish_realtime().unwrap();
+        assert!(observer.count >= 2 && observer.last.is_some_and(|frame| frame > paused));
+        assert!(
+            !observer.wrong_epoch,
+            "old epoch cannot complete a resumed demand"
+        );
+        assert_eq!(
+            state.playback_engine.snapshot().state,
+            mondrian_playback::TransportState::Ended
+        );
+        assert_eq!(state.current_frame(), 11);
+        session
+            .prepare_stopped_picture(
+                state,
+                &mut Presentations::default(),
+                Instant::now() + Duration::from_secs(10),
+            )
+            .unwrap();
+        assert_eq!(
+            serde_json::to_value(state.active_sequence().unwrap()).unwrap(),
+            authored
+        );
+        assert!(!mondrian_effects::effect_extension_runtime_status(&kind.key()).unwrap().disabled);
+    }));
+    let owners = session.into_shutdown_owners();
+    let last_refusal = owners.preview().last_unavailability();
+    let shutdown = owners.shutdown_until(Instant::now() + Duration::from_secs(10));
+    assert!(shutdown.gpu_preview_dependency_barrier.is_complete());
+    assert!(shutdown.preview.all_workers_terminated());
+    assert!(shutdown.gpu.qualifies_normal_runtime());
+    result.unwrap_or_else(|error| {
+        eprintln!("actual TimeBlur Viewer refusal: {last_refusal:?}");
+        std::panic::resume_unwind(error)
+    });
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum TimeBlurNleCase {
     Uniform,
     Varying,
     AuthorHistory,
     CancelAndRecover,
+    TimedPlayback,
 }
 
 #[test]
@@ -434,6 +674,12 @@ fn time_blur_public_parameter_history_and_project_reopen_preserve_temporal_outpu
 #[ignore = "requires ordinary IPC17 Product, published TimeBlur, FFmpeg and OCIO"]
 fn time_blur_seek_cancels_actual_source_wait_and_recovers_without_stale_output() {
     qualify_time_blur_nle(TimeBlurNleCase::CancelAndRecover);
+}
+
+#[test]
+#[ignore = "requires ordinary IPC17 Product, published TimeBlur, FFmpeg, OCIO and real Viewer GPU"]
+fn time_blur_timed_playback_pause_resume_and_natural_end_keep_current_authority() {
+    qualify_time_blur_nle(TimeBlurNleCase::TimedPlayback);
 }
 
 fn qualify_time_blur_nle(case: TimeBlurNleCase) {
@@ -758,6 +1004,9 @@ fn qualify_time_blur_nle(case: TimeBlurNleCase) {
         state.save_project_file_as(saved_path.clone()).unwrap();
         Some((saved_path, authored, owner))
     });
+    if case == TimeBlurNleCase::TimedPlayback {
+        qualify_time_blur_playback(&mut state, &kind);
+    }
     if let Some((saved_path, authored, old_owner)) = saved {
         state.close_project().unwrap();
         drop(state);

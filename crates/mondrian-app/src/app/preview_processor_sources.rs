@@ -121,12 +121,6 @@ impl PreviewProcessorSourceRequest {
     pub(crate) fn scope(&self) -> PreviewProcessorFeedbackScope {
         self.scope
     }
-    pub(crate) fn is_prefetch(&self) -> bool {
-        matches!(
-            self.policy.intent,
-            super::preview_access_mode::MediaPreviewRequestIntent::Prefetch
-        )
-    }
     pub(crate) fn needs_admission_retry(&self) -> bool {
         self.retry_admission
     }

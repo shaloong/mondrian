@@ -374,8 +374,8 @@ pub(crate) fn gpu_composite_layers_for_resolved_with_session(
                 blend_mode,
                 transform,
                 effect_graph,
+                prepared_effect_route,
                 frame_seed,
-                ..
             } => {
                 layers.push(ViewerGpuExecutionLayer::Source(Box::new(gpu_media_source(
                     frame,
@@ -383,6 +383,7 @@ pub(crate) fn gpu_composite_layers_for_resolved_with_session(
                     *blend_mode,
                     *transform,
                     effect_graph,
+                    prepared_effect_route.as_deref(),
                     *frame_seed,
                     working_color_space,
                     scratch,
@@ -626,6 +627,18 @@ impl<'a> HeterogeneousPreviewLayerBuilder<'a> {
         prepared_effect_route: Option<&mondrian_renderer::PreparedTimelinePreviewEffectRoute>,
         frame_seed: i64,
     ) -> Result<ViewerGpuSourceLayer, PreviewViewerGpuLayerPreparationError> {
+        // The Renderer already selected the complete compositor, for example
+        // to preserve a native effect's source raster. Honor that route before
+        // requiring a working payload or a heterogeneous prefix. The existing
+        // CPU task owns conversion and late processor-input requests.
+        if matches!(
+            prepared_effect_route,
+            Some(mondrian_renderer::PreparedTimelinePreviewEffectRoute::Cpu { .. })
+        ) {
+            return Err(PreviewViewerGpuLayerPreparationError::Compositing {
+                reason: GpuCompositingBlockerReason::EffectRequiresCpu,
+            });
+        }
         let layer_working_color_space = frame.working_color_space().ok_or(
             PreviewViewerGpuLayerPreparationError::Compositing {
                 reason: GpuCompositingBlockerReason::GpuUnavailable,
@@ -845,10 +858,17 @@ fn gpu_media_source(
     blend_mode: BlendMode,
     transform: [f32; 6],
     effect_graph: &Arc<CompiledEffectGraph>,
+    prepared_effect_route: Option<&mondrian_renderer::PreparedTimelinePreviewEffectRoute>,
     frame_seed: i64,
     working_color_space: WorkingColorSpace,
     scratch: &mut TimelineCompositeScratch,
 ) -> Result<ViewerGpuSourceLayer, GpuCompositingBlockerReason> {
+    if matches!(
+        prepared_effect_route,
+        Some(mondrian_renderer::PreparedTimelinePreviewEffectRoute::Cpu { .. })
+    ) {
+        return Err(GpuCompositingBlockerReason::EffectRequiresCpu);
+    }
     let layer_working_color_space =
         frame.working_color_space().ok_or(GpuCompositingBlockerReason::GpuUnavailable)?;
     if layer_working_color_space != working_color_space
@@ -942,14 +962,15 @@ fn gpu_transition_input(
             blend_mode,
             transform,
             effect_graph,
+            prepared_effect_route,
             frame_seed,
-            ..
         } => gpu_media_source(
             frame,
             *opacity,
             *blend_mode,
             *transform,
             effect_graph,
+            prepared_effect_route.as_deref(),
             *frame_seed,
             working_color_space,
             scratch,

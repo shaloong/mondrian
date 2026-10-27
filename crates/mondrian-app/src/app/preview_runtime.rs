@@ -2706,10 +2706,15 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         request: &super::preview_processor_sources::PreviewProcessorSourceRequest,
     ) -> bool {
         let scope = request.scope();
+        // A live execution owns its Source reply independently of the current
+        // UI feedback view. Another same-generation candidate may replace that
+        // view while this serial worker is still waiting for admitted pixels.
+        // Generation/epoch retirement and the worker's wait owner remain the
+        // execution authority; output and feedback publication have their own
+        // stricter attempt checks.
         request.is_active()
             && scope.generation == self.execution.borrow().generation()
             && self.transport_epoch.get() == Some(scope.epoch)
-            && (request.is_prefetch() || self.current_processor_feedback_scope.get() == Some(scope))
     }
 
     fn observe_processor_source_request(

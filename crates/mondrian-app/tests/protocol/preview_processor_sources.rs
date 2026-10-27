@@ -779,6 +779,7 @@ fn processor_source_real_media_resumes_original_cpu_and_broker_jobs_without_dsp_
     #[derive(Clone, Copy, PartialEq, Eq)]
     enum Completion {
         Pixels,
+        FeedbackViewChanged,
         CancelGeneration,
         Deadline,
         Shutdown,
@@ -786,6 +787,8 @@ fn processor_source_real_media_resumes_original_cpu_and_broker_jobs_without_dsp_
     for (mixed, completion) in [
         (false, Completion::Pixels),
         (true, Completion::Pixels),
+        (false, Completion::FeedbackViewChanged),
+        (true, Completion::FeedbackViewChanged),
         (false, Completion::CancelGeneration),
         (true, Completion::CancelGeneration),
         (false, Completion::Deadline),
@@ -965,7 +968,17 @@ fn processor_source_real_media_resumes_original_cpu_and_broker_jobs_without_dsp_
         }
         assert_eq!(facts.calls.load(Ordering::SeqCst), 1);
         assert_eq!(runtime.pending_processor_sources.borrow().len(), 1);
-        if completion != Completion::Pixels {
+        if completion == Completion::FeedbackViewChanged {
+            runtime.retire_processor_feedback_view();
+            assert_ne!(runtime.current_processor_feedback_scope.get(), Some(scope));
+            assert_eq!(runtime.execution.borrow().generation(), generation);
+            assert_eq!(runtime.transport_epoch.get(), Some(epoch));
+            assert!(!runtime.execution.borrow().generation_cancellation().is_canceled());
+        }
+        if !matches!(
+            completion,
+            Completion::Pixels | Completion::FeedbackViewChanged
+        ) {
             let original_generation = runtime.execution.borrow().generation_cancellation();
             if completion == Completion::CancelGeneration {
                 runtime.invalidate_preview_generation();
