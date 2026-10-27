@@ -154,27 +154,35 @@ pending dependency and acquisition count, without changing the deadline.
 The full-suite failure remains open pending root-cause evidence; no production
 fix is claimed.
 
-Primary Export now has finite **Verified** queue-to-artifact reprepare coverage:
+Primary and stem Export have finite **Verified** queue-to-artifact reprepare coverage:
 Windows x64, Offline/48k/Stereo, actual immutable queue, one-second varying
 Float32 WAV, PCM24 MOV and blocks9600 (maximum16384). Owned CLAP19/20 verify
 both input-width directions; CLAP21 verifies four consecutive installations;
-CLAP7 and VST3 modes5-to6 verify latency3-to7. All five published artifacts
-decode to all48000 independent exact sample-frame references, including each
-Fresh boundary. The consumer owns the real Source and uses the original job
-token and shared Runtime lifecycle. CLAP8's new restart during capture fails
-without publication. Stems still refuse dynamic restart until aggregate-grant
-admission is implemented; that refusal and the primary failure leave no
-output staging or PCM files in the dedicated process temp scope.
-Seven new full-queue gates plus four original CLAP/VST3 main/stem
+CLAP7 and VST3 modes5-to6 verify latency3-to7. Each successful primary artifact
+and both stems decode to all48000 independent exact sample-frame references,
+including every Fresh boundary. The two real native stem instances have
+different authored gains0.5/0.25, detecting cross-instance state reuse.
+The consumer owns the real Source and uses the original job token and shared
+Runtime lifecycle. Stems reserve cold occupancy, then divide the remaining
+occurrence/fixed/logical job grant into disjoint hard slices without increasing
+defaults. Three quota controls cover exact fit, each insufficient dimension,
+conservation, empty input and overflow. A real cold-fit grant with2MiB spare
+completes the first PCM block but refuses native capture overlap before
+allocation/publication. CLAP8's new request during capture also fails without
+publication; both primary and stem failures leave no output staging or PCM
+files in their dedicated process temp scope.
+Thirteen full-queue gates plus four original CLAP/VST3 main/stem
 transport/meter gates pass with the matching normal Product, empty stderr,
-exit0 and supervised process-tree settlement. Export ordinary307/27ignored
+exit0 and supervised process-tree settlement. Export ordinary310/33ignored
 passes with zero filtered and empty stderr. Untimed restart application is at
 the actual block boundary, not sample-accurate topology automation. These are
-owned controls, not wider third-party, long-run, heap or performance evidence;
-Export's terminal resource report does not yet integrate native graceful
-shutdown observations, and this does not close F06.
+owned controls, not wider third-party, long-run, heap or performance evidence.
+The grant proof covers the existing Runtime ledger, not complete physical,
+SDK/plugin or outer-consumer heaps. Export's terminal resource report does not
+yet integrate original-owner native child settlement observations. Graceful
+teardown is a separate condition and F06 remains open.
 
-To reproduce the seven new queue cases, supply the matching normal Product
+To reproduce the thirteen queue cases, supply the matching normal Product
 and both owned sidechain fixtures through their existing CLAP/VST3 helper and
 fixture environment variables. Pre-create a private directory and set
 `MONDRIAN_EXPORT_TEST_TEMP_ROOT` and the process temp location to it (`TMP` and
@@ -184,7 +192,7 @@ Only the Windows conditions above have been qualified.
 
 Port additions/removals/reordering, full audio-port configuration/rescan,
 physical reply-loss and long-run stress, repeated App width migration and
-dynamic stems, wider third-party dynamic topology, RT/performance and other
+wider third-party dynamic topology, RT/performance and other
 platforms remain unqualified or unsupported. No author edit, second executor or
 wire schema is introduced.
 

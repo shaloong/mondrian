@@ -4,7 +4,7 @@ mod audio_delivery;
 mod final_broadcast_qc;
 mod st436;
 
-use audio_delivery::ExportAudioDelivery;
+use audio_delivery::{partition_stem_grants, ExportAudioDelivery};
 
 use crate::audio_stems::{
     stem_file_name, stem_path, validate_and_write_audio_stem_manifest, AudioStemExpectation,
@@ -5969,7 +5969,7 @@ fn render_audio_stems_to_pcm_f32(
         path: PathBuf,
         guard: ExportAudioTempFile,
         writer: BufWriter<std::fs::File>,
-        delivery: AudioProgramDeliveryRuntime,
+        delivery: ExportAudioDelivery,
         loudness: AudioLoudnessAnalyzer,
     }
 
@@ -5977,13 +5977,13 @@ fn render_audio_stems_to_pcm_f32(
         return Err(JobExecutionResult::Cancelled);
     }
     let cache = audio_owner.cache(sample_rate).map_err(JobExecutionResult::Failed)?;
-    let outputs = prepared_audio.outputs().collect::<Vec<_>>();
     let resource_grant = execution_gate.resource_policy().audio_runtime_grant;
 
-    // Measure each immutable Runtime without retaining the others, then admit
-    // the aggregate before the simultaneously-live stem set is constructed.
-    let mut aggregate_footprint = AudioRuntimeResourceFootprint::default();
-    for output in &outputs {
+    // Measure without retaining other Runtimes, then partition the original
+    // job grant. Each live Runtime must admit dynamic overlap in its own slice.
+    let mut footprints = Vec::new();
+    let mut aggregate = AudioRuntimeResourceFootprint::default();
+    for output in prepared_audio.outputs() {
         let delivery = prepare_timeline_audio_delivery(
             timeline,
             output,
@@ -5995,22 +5995,23 @@ fn render_audio_stems_to_pcm_f32(
             execution_gate.audio_processor_resolver(),
         )
         .map_err(JobExecutionResult::Failed)?;
-        aggregate_footprint =
-            add_audio_runtime_footprint(aggregate_footprint, delivery.resource_footprint())
-                .ok_or_else(|| {
-                    JobExecutionResult::Failed(
-                        "audio-stem aggregate Runtime footprint exceeds addressable capacity"
-                            .to_owned(),
-                    )
-                })?;
+        let footprint = delivery.resource_footprint();
+        aggregate = add_audio_runtime_footprint(aggregate, footprint).ok_or_else(|| {
+            JobExecutionResult::Failed(
+                "audio-stem aggregate Runtime footprint exceeds addressable capacity".to_owned(),
+            )
+        })?;
+        validate_audio_runtime_footprint_grant(aggregate, resource_grant)
+            .map_err(JobExecutionResult::Failed)?;
+        footprints.push(footprint);
     }
-    validate_audio_runtime_footprint_grant(aggregate_footprint, resource_grant)
-        .map_err(JobExecutionResult::Failed)?;
+    let grants =
+        partition_stem_grants(&footprints, resource_grant).map_err(JobExecutionResult::Failed)?;
 
     let (start_sample, total_samples) =
         timeline_audio_sample_range(range, sample_rate).map_err(JobExecutionResult::Failed)?;
-    let mut active = Vec::with_capacity(outputs.len());
-    for output in &outputs {
+    let mut active = Vec::with_capacity(grants.len());
+    for (output, resource_grant) in prepared_audio.outputs().zip(grants) {
         if !execution_gate.wait_at_boundary(ExportProgressPhase::Preparing, cancel) {
             return Err(JobExecutionResult::Cancelled);
         }
@@ -6032,7 +6033,7 @@ fn render_audio_stems_to_pcm_f32(
                 path.display()
             ))
         })?;
-        let mut delivery = prepare_timeline_audio_delivery(
+        let delivery = prepare_timeline_audio_delivery(
             timeline,
             output,
             range,
@@ -6043,15 +6044,21 @@ fn render_audio_stems_to_pcm_f32(
             execution_gate.audio_processor_resolver(),
         )
         .map_err(JobExecutionResult::Failed)?;
-        if delivery.requires_state_entry() {
-            delivery
-                .enter_state(AudioContinuityEpoch::new(1), start_sample)
-                .map_err(|error| {
-                    JobExecutionResult::Failed(format!(
-                        "failed to enter audio-stem continuity state: {error}"
-                    ))
-                })?;
-        }
+        let mut delivery = ExportAudioDelivery::new(delivery, cancel).map_err(|error| {
+            if cancel.is_canceled() {
+                JobExecutionResult::Cancelled
+            } else {
+                JobExecutionResult::Failed(error)
+            }
+        })?;
+        delivery.enter_state(start_sample, cancel).map_err(|error| {
+            if cancel.is_canceled() {
+                return JobExecutionResult::Cancelled;
+            }
+            JobExecutionResult::Failed(format!(
+                "failed to enter audio-stem continuity state: {error}"
+            ))
+        })?;
         let loudness =
             AudioLoudnessAnalyzer::new(sample_rate, channel_layout).map_err(|error| {
                 JobExecutionResult::Failed(format!(

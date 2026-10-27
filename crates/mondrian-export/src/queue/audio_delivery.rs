@@ -1,4 +1,4 @@
-//! Sole-consumer ownership for primary offline audio delivery.
+//! Sole-consumer ownership and admission for offline Program Outputs.
 //!
 //! DSP, PDC, state capture and installation remain in the shared Audio Runtime.
 //! This consumer supplies the actual Source and a quiescent block boundary:
@@ -6,12 +6,67 @@
 
 use mondrian_audio::{
     AudioContinuityEpoch, AudioDeliveryError, AudioExecutionError, AudioProcessorReprepareTicket,
-    AudioProgramDeliveryRuntime, AudioRenderRequest,
+    AudioProgramDeliveryRuntime, AudioRenderRequest, AudioRuntimeResourceFootprint,
+    AudioRuntimeResourceGrant,
 };
 use mondrian_core::{
     AudioOwnerInstallationClaim, AudioOwnerInstallationRegistration, AudioOwnerInstallationSource,
     ExecutionCancellationToken,
 };
+
+/// Give each simultaneously-live stem a disjoint hard grant before native work.
+/// Cold requirements are retained first; equal shares of each remaining resource
+/// go to the outputs in authored order. Each Runtime admits its own retained
+/// reprepare overlap, so their peaks cannot multiply the original job grant.
+pub(super) fn partition_stem_grants(
+    cold: &[AudioRuntimeResourceFootprint],
+    job: AudioRuntimeResourceGrant,
+) -> Result<Vec<AudioRuntimeResourceGrant>, String> {
+    if cold.is_empty() {
+        return Err("audio-stem grant partition requires at least one output".to_owned());
+    }
+    let total = cold
+        .iter()
+        .try_fold(AudioRuntimeResourceFootprint::default(), |total, next| {
+            super::add_audio_runtime_footprint(total, *next)
+        })
+        .ok_or_else(|| {
+            "audio-stem aggregate Runtime footprint exceeds addressable capacity".to_owned()
+        })?;
+    super::validate_audio_runtime_footprint_grant(total, job)?;
+    let count = cold.len();
+    let share = |base: usize, used: usize, granted: usize, index: usize| {
+        let slack = granted - used;
+        // base <= used <= granted; this share is at most granted-used.
+        base + slack / count + usize::from(index < slack % count)
+    };
+    Ok(cold
+        .iter()
+        .enumerate()
+        .map(|(index, base)| {
+            AudioRuntimeResourceGrant::new(
+                share(
+                    base.runtime_occurrences,
+                    total.runtime_occurrences,
+                    job.max_runtime_occurrences,
+                    index,
+                ),
+                share(
+                    base.fixed_resident_bytes,
+                    total.fixed_resident_bytes,
+                    job.max_fixed_resident_bytes,
+                    index,
+                ),
+                share(
+                    base.prepared_logical_bytes,
+                    total.prepared_logical_bytes,
+                    job.max_prepared_logical_bytes,
+                    index,
+                ),
+            )
+        })
+        .collect())
+}
 
 pub(super) struct ExportAudioDelivery {
     // Drop the Runtime/native children before closing their actual Source.
@@ -144,5 +199,80 @@ impl ExportAudioDelivery {
                 cancellation,
             )
             .map_err(|e| format!("native export Fresh entry failed: {e}"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cold(occurrences: usize, fixed: usize, logical: usize) -> AudioRuntimeResourceFootprint {
+        AudioRuntimeResourceFootprint {
+            runtime_occurrences: occurrences,
+            fixed_resident_bytes: fixed,
+            prepared_logical_bytes: logical,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn stem_grants_reserve_cold_requirements_and_conserve_all_three_job_limits() {
+        let inputs = [cold(1, 7, 9), cold(3, 2, 4)];
+        let job = AudioRuntimeResourceGrant::new(7, 22, 21);
+        let quotas = partition_stem_grants(&inputs, job).unwrap();
+        assert_eq!(
+            quotas,
+            [
+                AudioRuntimeResourceGrant::new(3, 14, 13),
+                AudioRuntimeResourceGrant::new(4, 8, 8)
+            ]
+        );
+        assert_eq!(
+            quotas.iter().map(|q| q.max_runtime_occurrences).sum::<usize>(),
+            7
+        );
+        assert_eq!(
+            quotas.iter().map(|q| q.max_fixed_resident_bytes).sum::<usize>(),
+            22
+        );
+        assert_eq!(
+            quotas.iter().map(|q| q.max_prepared_logical_bytes).sum::<usize>(),
+            21
+        );
+        for (required, quota) in inputs.iter().zip(quotas) {
+            assert!(required.runtime_occurrences <= quota.max_runtime_occurrences);
+            assert!(required.fixed_resident_bytes <= quota.max_fixed_resident_bytes);
+            assert!(required.prepared_logical_bytes <= quota.max_prepared_logical_bytes);
+        }
+    }
+
+    #[test]
+    fn stem_grants_accept_exact_cold_fit_and_refuse_each_insufficient_dimension() {
+        let inputs = [cold(1, 7, 9), cold(3, 2, 4)];
+        assert_eq!(
+            partition_stem_grants(&inputs, AudioRuntimeResourceGrant::new(4, 9, 13)).unwrap(),
+            [
+                AudioRuntimeResourceGrant::new(1, 7, 9),
+                AudioRuntimeResourceGrant::new(3, 2, 4)
+            ]
+        );
+        for job in [
+            AudioRuntimeResourceGrant::new(3, 9, 13),
+            AudioRuntimeResourceGrant::new(4, 8, 13),
+            AudioRuntimeResourceGrant::new(4, 9, 12),
+        ] {
+            assert!(partition_stem_grants(&inputs, job).is_err());
+        }
+    }
+
+    #[test]
+    fn stem_grants_refuse_empty_and_overflow_but_accept_one_maximum_grant() {
+        let job = AudioRuntimeResourceGrant::new(usize::MAX, usize::MAX, usize::MAX);
+        assert!(partition_stem_grants(&[], job).is_err());
+        assert!(partition_stem_grants(&[cold(1, usize::MAX, 0), cold(1, 1, 0)], job).is_err());
+        assert_eq!(
+            partition_stem_grants(&[cold(usize::MAX, usize::MAX, usize::MAX)], job).unwrap(),
+            [job]
+        );
     }
 }
