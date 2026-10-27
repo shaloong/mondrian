@@ -153,9 +153,30 @@ empty stderr and settled exit0. Timeout diagnostics now report the last typed
 pending dependency and acquisition count, without changing the deadline.
 The full-suite failure remains open pending root-cause evidence; no production
 fix is claimed.
+
+Primary Export now has finite **Verified** queue-to-artifact reprepare coverage:
+Windows x64, Offline/48k/Stereo, actual immutable queue, one-second varying
+Float32 WAV, PCM24 MOV and blocks9600 (maximum16384). Owned CLAP19/20 verify
+both input-width directions; CLAP21 verifies four consecutive installations;
+CLAP7 and VST3 modes5-to6 verify latency3-to7. All five published artifacts
+decode to all48000 independent exact sample-frame references, including each
+Fresh boundary. The consumer owns the real Source and uses the original job
+token and shared Runtime lifecycle. CLAP8's new restart during capture fails
+without publication. Stems still refuse dynamic restart until aggregate-grant
+admission is implemented; that refusal and the primary failure leave no
+output staging or PCM files in the dedicated process temp scope.
+Seven new full-queue gates plus four original CLAP/VST3 main/stem
+transport/meter gates pass with the matching normal Product, empty stderr,
+exit0 and supervised process-tree settlement. Export ordinary307/27ignored
+passes with zero filtered and empty stderr. Untimed restart application is at
+the actual block boundary, not sample-accurate topology automation. These are
+owned controls, not wider third-party, long-run, heap or performance evidence;
+Export's terminal resource report does not yet integrate native graceful
+shutdown observations, and this does not close F06.
+
 Port additions/removals/reordering, full audio-port configuration/rescan,
 physical reply-loss and long-run stress, repeated App width migration and
-export workflows, wider third-party dynamic topology, RT/performance and other
+dynamic stems, wider third-party dynamic topology, RT/performance and other
 platforms remain unqualified or unsupported. No author edit, second executor or
 wire schema is introduced.
 

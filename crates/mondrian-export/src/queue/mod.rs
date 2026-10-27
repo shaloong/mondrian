@@ -1,7 +1,10 @@
 //! 后台渲染队列
 
+mod audio_delivery;
 mod final_broadcast_qc;
 mod st436;
+
+use audio_delivery::ExportAudioDelivery;
 
 use crate::audio_stems::{
     stem_file_name, stem_path, validate_and_write_audio_stem_manifest, AudioStemExpectation,
@@ -5681,12 +5684,12 @@ fn prepare_timeline_audio_input(
         &mut analysis,
     ) {
         JobExecutionResult::ReversibleWorkCompleted => {
-            temp_guard.defuse();
             let Some(analysis) = analysis else {
                 return Err(JobExecutionResult::Failed(
                     "rendered audio completed without loudness/true-peak evidence".to_owned(),
                 ));
             };
+            temp_guard.defuse();
             Ok(TimelineAudioInput::PcmFile {
                 path: temp_path,
                 sample_rate,
@@ -6180,7 +6183,7 @@ fn render_timeline_audio_to_pcm_f32(
         Err(error) => return JobExecutionResult::Failed(error),
     };
     {
-        let mut delivery = match prepare_timeline_audio_delivery(
+        let delivery = match prepare_timeline_audio_delivery(
             timeline,
             prepared_audio,
             range,
@@ -6217,9 +6220,15 @@ fn render_timeline_audio_to_pcm_f32(
                 )),
             };
         }
-        if delivery.requires_state_entry()
-            && let Err(error) = delivery.enter_state(AudioContinuityEpoch::new(1), start_sample)
-        {
+        let mut delivery = match ExportAudioDelivery::new(delivery, cancel) {
+            Ok(delivery) => delivery,
+            Err(_) if cancel.is_canceled() => return JobExecutionResult::Cancelled,
+            Err(error) => return JobExecutionResult::Failed(error),
+        };
+        if let Err(error) = delivery.enter_state(start_sample, cancel) {
+            if cancel.is_canceled() {
+                return JobExecutionResult::Cancelled;
+            }
             return JobExecutionResult::Failed(format!("进入导出音频连续性状态失败: {error}"));
         }
 
@@ -11252,6 +11261,7 @@ pub(crate) use helpers::*;
 
 #[cfg(test)]
 mod tests {
+    mod native_reprepare;
     mod native_transport_output;
     mod processor_sources;
 

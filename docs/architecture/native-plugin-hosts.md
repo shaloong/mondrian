@@ -56,6 +56,16 @@ the product advertises VST3 support. Vendor
 editors and auxiliary buses require separate qualified slices. Unbound
 definitions record `null` and cannot authorize native execution.
 
+Primary offline delivery owns its actual consumer Source in
+`mondrian-export::queue::audio_delivery`. Exclusive preparation of temporary PCM
+provides the quiescent block boundary. A deferred native restart uses the shared
+Runtime's capture, canonical plan, Source installation and retirement, followed
+by explicit Fresh entry at the next unwritten public sample. The installed
+Source generation supplies the epoch; the adapter adds no DSP graph, clock or
+project-state authority. A new hold during Fresh entry or its single render
+attempt fails the job rather than starting an unbounded retry loop. Dynamic
+stems still need coordinated admission against their aggregate job grant.
+
 OpenFX discovery in `mondrian-app::openfx_adapter` loads installed binaries only
 in a supervised child. An optional exported OfxSetHost receives the actual native
 host before OfxGetNumberOfPlugins and OfxGetPlugin. Discovery returns bounded
