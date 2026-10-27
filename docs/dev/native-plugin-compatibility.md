@@ -118,7 +118,7 @@ Shared auxiliary-input layouts, 2026-10-27: finite Windows owned controls verify
 Mono/Stereo Main with simultaneous Mono/Stereo and unconnected silent inputs,
 two-route summing, PDC, target-time gain automation, partitioning and seek in
 both modes/backends, in-process and through actual generic child processing.
-All 885 ordinary Audio controls pass (196 conditional ignored, zero filtered,
+All 885 ordinary Audio controls pass (197 conditional ignored, zero filtered,
 empty stderr). IPC22 has independent region/overflow, exact shared-byte fee and
 old/future-version rejection controls. The two original CLAP/VST3 native
 sidechain gates also pass with the matching rebuilt normal Product and original
@@ -129,12 +129,36 @@ with Mono/Stereo inputs and Mono Main with Stereo/Mono inputs, 44.1/48 kHz,
 Realtime/Offline setup, native state, latency3, full literal PCM, partitions and
 seek. All gates exit0 with empty stderr and settled original ownership budgets.
 VST3 reuses SDK per-bus planes and validates input extents before native calls.
-Broader layouts, third-party mixed-port sound, realtime/performance and other
-platforms remain unqualified. See the
+Broader layouts, third-party coverage beyond the finite ZamCompX2 VST3 case
+below, realtime/performance and other platforms remain unqualified. See the
 [shared contract](../adr/0003-compile-audio-authoring-for-execution.md) and
 [owned PCM controls](../../crates/mondrian-audio/src/tests/mixed_auxiliary_inputs.rs) and
 [native CLAP controls](../../crates/mondrian-audio/src/processor_isolation/tests/native_clap_mixed_inputs.rs) and
 [native VST3 controls](../../crates/mondrian-audio/src/processor_isolation/tests/native_vst3_mixed_inputs.rs).
+
+ZamCompX2 4.5.0 official Windows64 VST3 now has finite qualification at48k,
+Stereo Main, Mono sidechain, block64, Offline. Actual discovery/probe, native
+default-state capture/fresh restore,14 parameters (4 read-only), and canonical
+DAG processing pass. With the same asymmetric low Main signal, silent detector
+and disabled-sidechain cases return exact dry PCM; enabled high detector
+gives positive gain below0.5 over the final512 frames, retaining the stereo
+relationship. Complete returned PCM
+matches across block partitions and seek. The
+[native gate](../../crates/mondrian-audio/src/processor_isolation/tests/native_vst3_mixed_vendor.rs)
+passes with exit0, empty stderr and settled original180s/190s/2s ownership limits.
+This is not a complete compressor algorithm oracle, nondefault state round-trip,
+GUI, realtime/performance, public Playback/Export or other-platform grant.
+
+That probe exposed dependent COM references released after their parent objects.
+The SDK now releases processor/view/connection interfaces before controller and
+component anchors, then unloads the module while HostApplication still lives;
+the failed-load guard preserves the same dependency order. An actual final
+Release control fails before the fix (parent refcount4 instead of5), then passes;
+the failed-load control and full no-default-features SDK411PASS/13ignored also
+pass. The original Probe's three native warnings become empty stderr without
+filtering. Audio885PASS/197ignored and all three affected owned native regression
+gates pass with matching Product. This does not establish a universal shutdown
+deadline or qualify unrelated lifecycle failures.
 
 ZamCompX2 4.5 official Windows64 CLAP: List succeeds, but the processing Probe
 refuses input0 (Main, two channels, unspecified type). This legal CLAP arbitrary

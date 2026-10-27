@@ -146,10 +146,8 @@ struct BusActivationState {
 
 /// Internal plugin implementation that handles all VST3 COM interactions
 pub struct PluginImpl {
-    // Core VST3 interfaces
-    component: ComPtr<IComponent>,
+    // Dependent interfaces are released before the parent anchors below.
     processor: ComPtr<IAudioProcessor>,
-    controller: Option<ComPtr<IEditController>>,
     /// True when the component and controller are the same object (single-component
     /// plugin). Then `IComponent::setState` already restores the controller, and calling
     /// `setComponentState` on top of it would double-apply and corrupt parameters.
@@ -260,6 +258,11 @@ pub struct PluginImpl {
     // timers), serviced on the host UI thread via `service_run_loop`.
     #[cfg(target_os = "linux")]
     run_loop: Arc<Mutex<RunLoopRegistry>>,
+
+    // Rust drops fields in declaration order. Release processor, connection points
+    // and views before their parent objects, while module code and host context live.
+    controller: Option<ComPtr<IEditController>>,
+    component: ComPtr<IComponent>,
 
     // VST3 module handle (kept alive). Declared after every plugin-side COM reference above so
     // those are released while the module's vtables still exist, and before `_host_app` below.
@@ -5876,10 +5879,11 @@ fn stage_chunk_events(
 /// It holds its own references (COM refcounts), so `load` keeps using the originals as it
 /// builds; the extra references are released when the guard drops either way.
 struct InitializedComponent {
-    component: ComPtr<IComponent>,
-    controller: Option<ComPtr<IEditController>>,
-    single_component: bool,
+    // The failed-load owner preserves the same dependent-before-parent order.
     connection: Option<ConnectionPair>,
+    controller: Option<ComPtr<IEditController>>,
+    component: ComPtr<IComponent>,
+    single_component: bool,
     armed: bool,
 }
 
@@ -13078,6 +13082,177 @@ mod restored_audio_activation_tests {
         unsafe fn getTailSamples(&self) -> u32 {
             0
         }
+    }
+
+    struct ReleaseWitness {
+        parent: ComPtr<IComponent>,
+        role: &'static str,
+        observations: Arc<Mutex<Vec<(&'static str, u32)>>>,
+    }
+    impl Drop for ReleaseWitness {
+        fn drop(&mut self) {
+            // This witness owns an independent parent reference, so even the
+            // broken release order is memory-safe. Observe, never assert in COM.
+            // FUnknown is the common prefix of IComponent.
+            let parent = self.parent.as_ptr().cast::<FUnknown>();
+            // SAFETY: the owned parent reference spans both balanced vtable calls.
+            let count = unsafe { ((*(*parent).vtbl).addRef)(parent) };
+            unsafe {
+                ((*(*parent).vtbl).release)(parent);
+            }
+            self.observations.lock().unwrap().push((self.role, count));
+        }
+    }
+    struct ReleaseProcessor {
+        _witness: ReleaseWitness,
+    }
+    impl Class for ReleaseProcessor {
+        type Interfaces = (IAudioProcessor,);
+    }
+    impl IAudioProcessorTrait for ReleaseProcessor {
+        unsafe fn setBusArrangements(&self, _: *mut u64, _: i32, _: *mut u64, _: i32) -> tresult {
+            kResultOk
+        }
+        unsafe fn getBusArrangement(&self, _: i32, _: i32, _: *mut u64) -> tresult {
+            kNotImplemented
+        }
+        unsafe fn canProcessSampleSize(&self, _: i32) -> tresult {
+            kResultOk
+        }
+        unsafe fn getLatencySamples(&self) -> u32 {
+            0
+        }
+        unsafe fn setupProcessing(&self, _: *mut ProcessSetup) -> tresult {
+            kResultOk
+        }
+        unsafe fn setProcessing(&self, _: u8) -> tresult {
+            kResultOk
+        }
+        unsafe fn process(&self, _: *mut ProcessData) -> tresult {
+            kNotImplemented
+        }
+        unsafe fn getTailSamples(&self) -> u32 {
+            0
+        }
+    }
+    struct ReleasePoint {
+        _witness: ReleaseWitness,
+    }
+    impl Class for ReleasePoint {
+        type Interfaces = (IConnectionPoint,);
+    }
+    impl IConnectionPointTrait for ReleasePoint {
+        unsafe fn connect(&self, _: *mut IConnectionPoint) -> tresult {
+            kResultOk
+        }
+        unsafe fn disconnect(&self, _: *mut IConnectionPoint) -> tresult {
+            kResultOk
+        }
+        unsafe fn notify(&self, _: *mut IMessage) -> tresult {
+            kResultOk
+        }
+    }
+
+    #[test]
+    fn plugin_drop_releases_dependent_interfaces_before_component_anchor() {
+        let mut fixture = Fixture::with_preparation(
+            vec![true],
+            vec![true],
+            crate::host::PluginLoadPreparation::Deferred,
+            None,
+        );
+        let observations = Arc::new(Mutex::new(Vec::new()));
+        let witness = |role| ReleaseWitness {
+            parent: fixture.plugin.component.clone(),
+            role,
+            observations: Arc::clone(&observations),
+        };
+        let processor = ComWrapper::new(ReleaseProcessor {
+            _witness: witness("processor"),
+        })
+        .to_com_ptr::<IAudioProcessor>()
+        .unwrap();
+        let component_point = ComWrapper::new(ReleasePoint {
+            _witness: witness("component_point"),
+        })
+        .to_com_ptr::<IConnectionPoint>()
+        .unwrap();
+        let controller_point = ComWrapper::new(ReleasePoint {
+            _witness: witness("controller_point"),
+        })
+        .to_com_ptr::<IConnectionPoint>()
+        .unwrap();
+        fixture.plugin.processor = processor;
+        // SAFETY: both live, owned endpoints implement inert connect/disconnect callbacks.
+        fixture.plugin.connection =
+            unsafe { ConnectionPair::connect(component_point, controller_point) };
+        assert!(fixture.plugin.connection.is_some());
+        drop(fixture);
+        let observations = observations.lock().unwrap();
+        assert_eq!(
+            observations.len(),
+            3,
+            "all final native Release callbacks returned"
+        );
+        // One parent field + three witness-owned refs + the temporary addRef.
+        assert_eq!(observations[0], ("processor", 5));
+        let mut point_counts = observations[1..]
+            .iter()
+            .map(|(_, count)| *count)
+            .collect::<Vec<_>>();
+        point_counts.sort_unstable();
+        assert_eq!(
+            point_counts,
+            [3, 4],
+            "parent anchor remains for both endpoints"
+        );
+    }
+
+    #[test]
+    fn failed_load_guard_releases_connection_interfaces_before_component_anchor() {
+        let fixture = Fixture::with_preparation(
+            vec![true],
+            vec![true],
+            crate::host::PluginLoadPreparation::Deferred,
+            None,
+        );
+        // A fresh, independent native object, not the fixture's terminated one.
+        let parent = ComWrapper::new(Component(Arc::clone(&fixture.probe)))
+            .to_com_ptr::<IComponent>()
+            .unwrap();
+        drop(fixture);
+        assert_eq!(unsafe { parent.initialize(ptr::null_mut()) }, kResultOk);
+        let observations = Arc::new(Mutex::new(Vec::new()));
+        let point = |role| {
+            ComWrapper::new(ReleasePoint {
+                _witness: ReleaseWitness {
+                    parent: parent.clone(),
+                    role,
+                    observations: Arc::clone(&observations),
+                },
+            })
+            .to_com_ptr::<IConnectionPoint>()
+            .unwrap()
+        };
+        let component_point = point("component_point");
+        let controller_point = point("controller_point");
+        let mut guard = InitializedComponent::new(parent);
+        // SAFETY: the fresh initialized parent and both owned inert endpoints live.
+        guard.attach_connection(unsafe {
+            ConnectionPair::connect(component_point, controller_point)
+        });
+        drop(guard);
+        let observations = observations.lock().unwrap();
+        let mut counts = observations
+            .iter()
+            .map(|(_, count)| *count)
+            .collect::<Vec<_>>();
+        counts.sort_unstable();
+        assert_eq!(
+            counts,
+            [3, 4],
+            "failed-load parent spans both final Release callbacks"
+        );
     }
 
     // No module is loaded by these controls. Only the real COM-backed PluginImpl
