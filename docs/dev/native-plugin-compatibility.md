@@ -31,7 +31,7 @@ product consumers and pending closure for each feature family.
 | --- | --- | --- |
 | Native discovery and isolation | Selected class/descriptor, fingerprinted native binary, supervised discovery and persistent processing child, bounded control traffic and shared buffers | Standard scan locations/workflow, permitted vendor corpus, platform and native editor lifecycle |
 | VST3 SDK interfaces | One canonical runtime binding package generated from verified SDK 3.8.1 sources; independent layout/signature and actual cross-language calls for all nine methods of the four new interfaces | Optional host-service implementation, MIDI 2 event routing, native MSVC/macOS/Linux qualification; upstream generator excludes SDK testing interfaces |
-| Audio layout | Native mono/stereo Main output; CLAP auxiliary inputs independently declare Mono/Stereo, while VST3 inputs retain the Main layout. Both admit up to 31 ordered same-layout auxiliary outputs through the existing DAG. CLAP retains absent-main and auxiliary-only inputs; VST3 absent input requires explicit Some Note and no auxiliary inputs. Native shape checks and finite owned routing/PDC conditions are below. | VST3 native mixed inputs, surround/ambisonic, live topology recovery, broader third-party auxiliary sound and product output-selection workflows remain unqualified or refused. |
+| Audio layout | Native mono/stereo Main output; both CLAP and VST3 auxiliary inputs independently declare Mono/Stereo, validated against exact native type/arrangement and counts. Both admit up to 31 ordered same-layout auxiliary outputs through the existing DAG. CLAP retains absent-main and auxiliary-only inputs; VST3 absent input requires explicit Some Note and no auxiliary inputs. Native shape checks and finite owned routing/PDC conditions are below. | Arbitrary unspecified ports, surround/ambisonic, live topology recovery, broader third-party auxiliary sound and product output-selection workflows remain unqualified or refused. |
 | Processor-output graph | Track/Bus processor identity plus Main/Auxiliary key uses the existing routing DAG, producer PDC and Session storage; raw producer tap precedes later rack processors and Mute, retaining Track Solo semantics; schema 33 preserves version-32 author values. CLAP native output IDs and VST3 direction-local output indices bind to this same graph | Product output selection, other rack/owner families, broader native adapters and realtime/performance evidence |
 | Audio parameters | Canonical author curves and sample offsets; CLAP plain values, VST normalized values; insertion/rebinding/history/archive state; one App custody slot for single-owner gestures or terminal frontiers; finite single-CLAP and two-owner VST3 headless Session/Media/Audio handoffs | The first headless consumer requires terminal, direct-root, same-object preserved execution. Broader multi-owner frontiers, Scope/nested execution, native display conversion, units/programs/presets, output events, broader gestures and large state/resources remain unqualified |
 | Audio render mode and threads | Explicit VST realtime/offline selection; CLAP requested-mode probe and execution, hard-realtime/declined-mode refusal; instance-local CLAP symbolic thread checks | Dynamic restart/rescan/latency/tail handling, sleep/request-process scheduling and extension event loops |
@@ -118,20 +118,23 @@ Shared auxiliary-input layouts, 2026-10-27: finite Windows owned controls verify
 Mono/Stereo Main with simultaneous Mono/Stereo and unconnected silent inputs,
 two-route summing, PDC, target-time gain automation, partitioning and seek in
 both modes/backends, in-process and through actual generic child processing.
-All 883 ordinary Audio controls pass (195 conditional ignored, zero filtered,
+All 885 ordinary Audio controls pass (196 conditional ignored, zero filtered,
 empty stderr). IPC22 has independent region/overflow, exact shared-byte fee and
 old/future-version rejection controls. The two original CLAP/VST3 native
 sidechain gates also pass with the matching rebuilt normal Product and original
 ownership budgets. CLAP additionally passes owned direct ABI/storage controls
-with Main present/absent, and a real DLL plus canonical DAG gate: Stereo Main
+with Main present/absent; VST3 passes cold/retained semantic metadata and widest
+port resource controls. Both pass real DLL plus canonical DAG gates: Stereo Main
 with Mono/Stereo inputs and Mono Main with Stereo/Mono inputs, 44.1/48 kHz,
 Realtime/Offline setup, native state, latency3, full literal PCM, partitions and
 seek. All gates exit0 with empty stderr and settled original ownership budgets.
-VST3 native mixed inputs remain refused. Broader layouts, third-party mixed-port
-sound, realtime/performance and other platforms remain unqualified. See the
+VST3 reuses SDK per-bus planes and validates input extents before native calls.
+Broader layouts, third-party mixed-port sound, realtime/performance and other
+platforms remain unqualified. See the
 [shared contract](../adr/0003-compile-audio-authoring-for-execution.md) and
 [owned PCM controls](../../crates/mondrian-audio/src/tests/mixed_auxiliary_inputs.rs) and
-[native CLAP controls](../../crates/mondrian-audio/src/processor_isolation/tests/native_clap_mixed_inputs.rs).
+[native CLAP controls](../../crates/mondrian-audio/src/processor_isolation/tests/native_clap_mixed_inputs.rs) and
+[native VST3 controls](../../crates/mondrian-audio/src/processor_isolation/tests/native_vst3_mixed_inputs.rs).
 
 ZamCompX2 4.5 official Windows64 CLAP: List succeeds, but the processing Probe
 refuses input0 (Main, two channels, unspecified type). This legal CLAP arbitrary

@@ -516,6 +516,7 @@ fn native_startup_metadata_phase_observation() {
         public_output_lookahead_budget_frames: usize::MAX,
         compensation_delay_scratch_budget_bytes: usize::MAX,
     };
+    let auxiliary_inputs = super::super::protocol::auxiliary_from_wire(auxiliary_buses);
     let request = IsolatedAudioProcessorWorkerPrepareRequest {
         musical_time_reference: None,
         auxiliary_outputs: crate::AudioProcessorAuxiliaryOutputContract::default(),
@@ -523,6 +524,7 @@ fn native_startup_metadata_phase_observation() {
             &parameters,
             &crate::AudioProcessorNoteInputContract::default(),
             render,
+            &auxiliary_inputs,
         )
         .expect("known native lane layout"),
         payload: serde_json::to_vec(&Vst3Payload {
@@ -541,7 +543,7 @@ fn native_startup_metadata_phase_observation() {
         })
         .unwrap(),
         plugin_execution_contract: contract,
-        auxiliary_inputs: super::super::protocol::auxiliary_from_wire(auxiliary_buses),
+        auxiliary_inputs,
         note_input_contract: crate::AudioProcessorNoteInputContract::default(),
         parameter_ids: lanes.keys().cloned().collect(),
         render_contract: render,

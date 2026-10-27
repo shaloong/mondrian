@@ -481,6 +481,7 @@ impl IsolatedAudioProcessorSpecResolver for Vst3AudioProcessorSpecResolver {
             &plugin.parameters,
             &note_input_contract,
             request.render_contract(),
+            &plugin.auxiliary_inputs,
         )?;
         if !note_input_contract.ports.is_empty() && native_lane.is_none() {
             return Err(unavailable(
@@ -663,6 +664,7 @@ impl IsolatedAudioProcessorWorkerFactory for Vst3AudioProcessorWorkerFactory {
             &payload.parameters,
             request.note_input_contract(),
             request.render_contract(),
+            request.auxiliary_inputs(),
         )
     }
     fn prepare(
@@ -686,6 +688,7 @@ impl Vst3AudioProcessorWorkerFactory {
                 &payload.parameters,
                 request.note_input_contract(),
                 request.render_contract(),
+                request.auxiliary_inputs(),
             )?
         {
             return Err(invalid(
@@ -749,7 +752,10 @@ impl Vst3AudioProcessorWorkerFactory {
             .output_channels(channels);
         if request.native_worker_lane_resources().is_some() {
             host_builder = host_builder
-                .processing_resource_bounds(processing_audio_buffer_bounds(render)?)
+                .processing_resource_bounds(processing_audio_buffer_bounds(
+                    render,
+                    request.auxiliary_inputs(),
+                )?)
                 .load_preparation(vst3_host::host::PluginLoadPreparation::Deferred);
         }
         let mut host = host_builder
@@ -1914,6 +1920,30 @@ impl VstSignalFields<'_> {
             ));
         }
         validate_audio_output_count(self.payload.audio_output_count)?;
+        if self.buffers.inputs.len()
+            != self.payload.main_audio_input.port_offset() + self.auxiliary_inputs.buses.len()
+            || self.buffers.inputs.iter().enumerate().any(|(index, bus)| {
+                let width = if index < self.payload.main_audio_input.port_offset() {
+                    channels
+                } else {
+                    self.auxiliary_inputs.buses[index - self.payload.main_audio_input.port_offset()]
+                        .channel_layout
+                        .channel_count()
+                };
+                !bus.active
+                    || bus.channels.len() != width
+                    || bus.channels.iter().any(|channel| channel.capacity() < frames)
+            })
+        {
+            return Err(invalid("VST3 prepared input storage changed shape"));
+        }
+        for bus in &self.auxiliary_inputs.buses {
+            if block.auxiliary_input(&bus.bus_key).is_none_or(|pcm| {
+                frames.checked_mul(bus.channel_layout.channel_count()) != Some(pcm.len())
+            }) {
+                return Err(invalid("VST3 auxiliary PCM extent changed"));
+            }
+        }
         if self.buffers.outputs.len() != usize::from(self.payload.audio_output_count)
             || self.buffers.outputs.iter().any(|bus| {
                 !bus.active
@@ -2035,15 +2065,16 @@ impl VstSignalFields<'_> {
             }
         }
         for (index, bus) in self.auxiliary_inputs.buses.iter().enumerate() {
+            let bus_channels = bus.channel_layout.channel_count();
             let samples = block.auxiliary_input(&bus.bus_key).ok_or_else(|| {
                 AudioProcessorHostError::Process("VST3 auxiliary PCM is missing".to_owned())
             })?;
-            if samples.len() != frames * channels {
+            if samples.len() != frames * bus_channels {
                 return Err(AudioProcessorHostError::Process(
                     "VST3 auxiliary extent changed".to_owned(),
                 ));
             }
-            for (frame, values) in samples.chunks_exact(channels).enumerate() {
+            for (frame, values) in samples.chunks_exact(bus_channels).enumerate() {
                 for (channel, sample) in values.iter().copied().enumerate() {
                     self.buffers.inputs[index + self.payload.main_audio_input.port_offset()]
                         .channels[channel][frame] = sample;
@@ -2226,11 +2257,12 @@ fn audio_bus_observation_matches(
 ) -> Result<bool, AudioProcessorHostError> {
     // All three SDK stages must finish before domain validation. Preserve the
     // cold contract's shape errors before inactivity, then compare identity.
-    let speaker_layout = match channel_layout {
-        AudioChannelLayout::Mono => SpeakerArrangement::MONO,
-        AudioChannelLayout::Stereo => SpeakerArrangement::STEREO,
-        _ => return Err(invalid("VST3 audio channel layout is unsupported")),
-    };
+    if !matches!(
+        channel_layout,
+        AudioChannelLayout::Mono | AudioChannelLayout::Stereo
+    ) {
+        return Err(invalid("VST3 audio channel layout is unsupported"));
+    }
     if observed.native_inputs.len() > 32
         || !(1..=32).contains(&observed.native_outputs.len())
         || observed.layout_inputs.len() != observed.native_inputs.len()
@@ -2267,10 +2299,17 @@ fn audio_bus_observation_matches(
             native.iter().zip(prepared).zip(speakers).enumerate()
         {
             let role = expected_audio_bus_role(direction, index, main, main_outputs);
+            let port_layout =
+                negotiated_audio_bus_layout(direction, role, *arrangement, channel_layout);
+            let port_speakers = if port_layout == AudioChannelLayout::Mono {
+                SpeakerArrangement::MONO
+            } else {
+                SpeakerArrangement::STEREO
+            };
             if bus.role != role
-                || bus.channel_count != channel_layout.channel_count()
+                || bus.channel_count != port_layout.channel_count()
                 || prepared.channel_count != bus.channel_count
-                || *arrangement != speaker_layout
+                || *arrangement != port_speakers
             {
                 return Err(audio_bus_shape_refusal(AudioBusShapeFailure {
                     stage: "retained",
@@ -2282,8 +2321,8 @@ fn audio_bus_observation_matches(
                     prepared_channels: prepared.channel_count,
                     host_active: prepared.active,
                     arrangement: *arrangement,
-                    expected_arrangement: speaker_layout,
-                    expected_layout: channel_layout,
+                    expected_arrangement: port_speakers,
+                    expected_layout: port_layout,
                 }));
             }
         }
@@ -2312,8 +2351,33 @@ fn audio_bus_observation_matches(
         && admitted_auxiliary.buses.len() == auxiliary_count
         && admitted_auxiliary.buses.iter().enumerate().all(|(index, bus)| {
             canonical_audio_input_key_matches(&bus.bus_key, index + offset)
-                && bus.channel_layout == channel_layout
+                && bus.channel_layout
+                    == negotiated_audio_bus_layout(
+                        BusDirection::Input,
+                        AudioBusRole::Auxiliary,
+                        observed.input_arrangements[index + offset],
+                        channel_layout,
+                    )
         }))
+}
+
+// Arrangement supplies semantic channel meaning. Unknown arrangements keep the
+// render shape only as a diagnostic expectation and fail the exact-mask check.
+fn negotiated_audio_bus_layout(
+    direction: BusDirection,
+    role: AudioBusRole,
+    arrangement: SpeakerArrangement,
+    render: AudioChannelLayout,
+) -> AudioChannelLayout {
+    if direction == BusDirection::Input && role == AudioBusRole::Auxiliary {
+        if arrangement == SpeakerArrangement::MONO {
+            return AudioChannelLayout::Mono;
+        }
+        if arrangement == SpeakerArrangement::STEREO {
+            return AudioChannelLayout::Stereo;
+        }
+    }
+    render
 }
 
 fn canonical_audio_input_key_matches(key: &str, index: usize) -> bool {
@@ -2360,7 +2424,7 @@ fn audio_bus_shape_refusal(facts: AudioBusShapeFailure) -> AudioProcessorHostErr
         BusDirection::Output => "output",
     };
     invalid(format!(
-        "VST3 host requires optional Main input zero, Auxiliary inputs and a nonempty Main output prefix followed by Auxiliary outputs with the exact render layout; stage={} reason={reason} direction={direction} index={} native_role={:?} expected_role={:?} native_channels={} prepared_channels={} host_active={} actual_arrangement_raw={:016X} expected_arrangement_raw={:016X} expected_layout={:?} expected_channels={expected_channels}",
+        "VST3 host requires optional Main input zero, typed Mono/Stereo Auxiliary inputs and a nonempty Main output prefix followed by Auxiliary outputs with the exact render layout; stage={} reason={reason} direction={direction} index={} native_role={:?} expected_role={:?} native_channels={} prepared_channels={} host_active={} actual_arrangement_raw={:016X} expected_arrangement_raw={:016X} expected_layout={:?} expected_channels={expected_channels}",
         facts.stage, facts.index, facts.native_role, facts.expected_role,
         facts.native_channels, facts.prepared_channels, facts.host_active,
         facts.arrangement.raw(), facts.expected_arrangement.raw(), facts.expected_layout,
@@ -2449,11 +2513,12 @@ fn audio_inputs_from_metadata(
     stage: &'static str,
 ) -> Result<(Vst3MainAudioInput, AudioProcessorAuxiliaryInputContract, u8), AudioProcessorHostError>
 {
-    let speaker_layout = match channel_layout {
-        AudioChannelLayout::Mono => SpeakerArrangement::MONO,
-        AudioChannelLayout::Stereo => SpeakerArrangement::STEREO,
-        _ => return Err(invalid("VST3 audio channel layout is unsupported")),
-    };
+    if !matches!(
+        channel_layout,
+        AudioChannelLayout::Mono | AudioChannelLayout::Stereo
+    ) {
+        return Err(invalid("VST3 audio channel layout is unsupported"));
+    }
     if metadata.inputs.len() > 32
         || !(1..=32).contains(&metadata.outputs.len())
         || layout.inputs.len() != metadata.inputs.len()
@@ -2490,10 +2555,17 @@ fn audio_inputs_from_metadata(
             native.iter().zip(prepared).zip(speakers).enumerate()
         {
             let role = expected_audio_bus_role(direction, index, main, main_outputs);
+            let port_layout =
+                negotiated_audio_bus_layout(direction, role, *arrangement, channel_layout);
+            let port_speakers = if port_layout == AudioChannelLayout::Mono {
+                SpeakerArrangement::MONO
+            } else {
+                SpeakerArrangement::STEREO
+            };
             if bus.role != role
-                || bus.channel_count != channel_layout.channel_count()
+                || bus.channel_count != port_layout.channel_count()
                 || prepared.channel_count != bus.channel_count
-                || *arrangement != speaker_layout
+                || *arrangement != port_speakers
             {
                 return Err(audio_bus_shape_refusal(AudioBusShapeFailure {
                     stage,
@@ -2505,8 +2577,8 @@ fn audio_inputs_from_metadata(
                     prepared_channels: prepared.channel_count,
                     host_active: prepared.active,
                     arrangement: *arrangement,
-                    expected_arrangement: speaker_layout,
-                    expected_layout: channel_layout,
+                    expected_arrangement: port_speakers,
+                    expected_layout: port_layout,
                 }));
             }
         }
@@ -2516,7 +2588,12 @@ fn audio_inputs_from_metadata(
         buses: (main_audio_input.port_offset()..metadata.inputs.len())
             .map(|index| AudioProcessorAuxiliaryInputBusContract {
                 bus_key: format!("vst3.audio-input.{index}"),
-                channel_layout,
+                channel_layout: negotiated_audio_bus_layout(
+                    BusDirection::Input,
+                    AudioBusRole::Auxiliary,
+                    arrangements.inputs[index],
+                    channel_layout,
+                ),
             })
             .collect(),
     };
@@ -2990,12 +3067,21 @@ fn native_worker_lane_profile_for_notes(
 
 fn processing_audio_buffer_bounds(
     render: crate::AudioRenderContract,
+    inputs: &AudioProcessorAuxiliaryInputContract,
 ) -> Result<vst3_host::audio::ProcessingResourceBounds, AudioProcessorHostError> {
-    let channels = match render.channel_layout {
+    let mut channels = match render.channel_layout {
         AudioChannelLayout::Mono => 1,
         AudioChannelLayout::Stereo => 2,
         _ => return Err(invalid("VST3 channel layout is not admitted")),
     };
+    for bus in &inputs.buses {
+        let width = match bus.channel_layout {
+            AudioChannelLayout::Mono => 1,
+            AudioChannelLayout::Stereo => 2,
+            _ => return Err(invalid("VST3 auxiliary channel layout is not admitted")),
+        };
+        channels = channels.max(width);
+    }
     let buses = vst3_host::audio::MAX_OBSERVED_AUDIO_BUSES;
     let total = buses
         .checked_mul(2)
@@ -3009,12 +3095,15 @@ fn native_worker_lane_profile_for_preparation(
     parameters: &[Vst3ParameterDescriptor],
     notes: &crate::AudioProcessorNoteInputContract,
     render: crate::AudioRenderContract,
+    inputs: &AudioProcessorAuxiliaryInputContract,
 ) -> Result<Option<crate::NativeWorkerLaneResourceProfile>, AudioProcessorHostError> {
     native_worker_lane_profile_for_notes(parameters, notes)?
         .map(|profile| {
-            let peak = processing_audio_buffer_bounds(render)?.host_buffer_peak_bytes().map_err(
-                |error| invalid(format!("VST3 audio-buffer request overflowed: {error}")),
-            )?;
+            let peak = processing_audio_buffer_bounds(render, inputs)?
+                .host_buffer_peak_bytes()
+                .map_err(|error| {
+                    invalid(format!("VST3 audio-buffer request overflowed: {error}"))
+                })?;
             profile
                 .with_processing_audio_buffer_peak_bytes(peak)
                 .map_err(AudioProcessorHostError::from)
@@ -3376,6 +3465,114 @@ mod bus_contract_tests {
             owned,
             "borrowed shape, activation and identity must preserve the cold owned contract",
         );
+    }
+
+    #[test]
+    fn vst3_mixed_inputs_preserve_exact_speaker_meaning_in_cold_and_retained_metadata() {
+        for render in [AudioChannelLayout::Mono, AudioChannelLayout::Stereo] {
+            let (mut native, mut layout, mut arrangements) = metadata();
+            let render_speakers = if render == AudioChannelLayout::Mono {
+                SpeakerArrangement::MONO
+            } else {
+                SpeakerArrangement::STEREO
+            };
+            for (index, width) in [render.channel_count(), 1, 2].into_iter().enumerate() {
+                native.inputs[index].channel_count = width;
+                layout.inputs[index].channel_count = width;
+                layout.inputs[index].active = true;
+            }
+            native.outputs[0].channel_count = render.channel_count();
+            layout.outputs[0].channel_count = render.channel_count();
+            layout.outputs[0].active = true;
+            arrangements.inputs = vec![
+                render_speakers,
+                SpeakerArrangement::MONO,
+                SpeakerArrangement::STEREO,
+            ];
+            arrangements.outputs[0] = render_speakers;
+            let (main, inputs, _) =
+                audio_inputs_from_metadata(&native, &layout, &arrangements, render, "test")
+                    .unwrap();
+            assert_eq!(main, Vst3MainAudioInput::Present);
+            assert_eq!(
+                inputs
+                    .buses
+                    .iter()
+                    .map(|b| (b.bus_key.as_str(), b.channel_layout))
+                    .collect::<Vec<_>>(),
+                vec![
+                    ("vst3.audio-input.1", AudioChannelLayout::Mono),
+                    ("vst3.audio-input.2", AudioChannelLayout::Stereo)
+                ]
+            );
+            assert_borrowed_matches_owned(
+                &native,
+                &layout,
+                &arrangements,
+                render,
+                main,
+                &inputs,
+                1,
+            );
+            let mut stale = inputs.clone();
+            stale.buses[0].channel_layout = AudioChannelLayout::Stereo;
+            assert_borrowed_matches_owned(&native, &layout, &arrangements, render, main, &stale, 1);
+            for change in 0..5 {
+                let mut n = native.clone();
+                let mut l = layout.clone();
+                let mut a = arrangements.clone();
+                match change {
+                    0 => n.inputs[1].channel_count = 2,
+                    1 => l.inputs[1].channel_count = 2,
+                    2 => a.inputs[2] = SpeakerArrangement::STEREO_SURROUND,
+                    3 => n.inputs[1].role = AudioBusRole::Main,
+                    4 => {
+                        a.outputs[0] = if render == AudioChannelLayout::Mono {
+                            SpeakerArrangement::STEREO
+                        } else {
+                            SpeakerArrangement::MONO
+                        }
+                    }
+                    _ => unreachable!(),
+                }
+                assert!(audio_inputs_from_metadata(&n, &l, &a, render, "test").is_err());
+                assert_borrowed_matches_owned(&n, &l, &a, render, main, &inputs, 1);
+            }
+        }
+    }
+
+    #[test]
+    fn vst3_mixed_input_resource_geometry_covers_the_widest_admitted_port() {
+        use vst3_host::audio::ProcessingResourceBounds;
+        let render = crate::AudioRenderContract {
+            sample_rate: 48_000,
+            channel_layout: AudioChannelLayout::Mono,
+            max_block_frames: 4,
+            processing_mode: AudioProcessingMode::Offline,
+            processor_session_scratch_budget_bytes: usize::MAX,
+            public_output_lookahead_budget_frames: usize::MAX,
+            compensation_delay_scratch_budget_bytes: usize::MAX,
+        };
+        let empty = AudioProcessorAuxiliaryInputContract::default();
+        let mut inputs = AudioProcessorAuxiliaryInputContract {
+            buses: vec![AudioProcessorAuxiliaryInputBusContract {
+                bus_key: "vst3.audio-input.1".to_owned(),
+                channel_layout: AudioChannelLayout::Stereo,
+            }],
+        };
+        let mono = processing_audio_buffer_bounds(render, &empty).unwrap();
+        assert_eq!(
+            mono,
+            ProcessingResourceBounds::new(32, 1, 64, render.max_block_frames).unwrap()
+        );
+        let mixed = processing_audio_buffer_bounds(render, &inputs).unwrap();
+        assert_eq!(
+            mixed,
+            ProcessingResourceBounds::new(32, 2, 128, render.max_block_frames).unwrap()
+        );
+        assert!(mixed.host_buffer_peak_bytes().unwrap() > mono.host_buffer_peak_bytes().unwrap());
+        inputs.buses[0].channel_layout = AudioChannelLayout::discrete(2).unwrap();
+        assert!(processing_audio_buffer_bounds(render, &inputs).is_err());
     }
 
     #[test]
@@ -4070,6 +4267,7 @@ mod bus_contract_tests {
                 &payload.parameters,
                 request.note_input_contract(),
                 request.render_contract(),
+                request.auxiliary_inputs(),
             )
             .unwrap()
         );
@@ -4087,6 +4285,7 @@ mod bus_contract_tests {
                 &payload.parameters,
                 request.note_input_contract(),
                 larger_render,
+                request.auxiliary_inputs(),
             )
             .unwrap()
             .unwrap();
@@ -4352,8 +4551,8 @@ mod bus_contract_tests {
         layout.outputs[0].active = false;
         arrangements.outputs[0] = SpeakerArrangement::MONO;
         for (stage, expected) in [
-            ("before_activation", "VST3 host requires optional Main input zero, Auxiliary inputs and a nonempty Main output prefix followed by Auxiliary outputs with the exact render layout; stage=before_activation reason=prepared_channels direction=output index=0 native_role=Main expected_role=Main native_channels=2 prepared_channels=4 host_active=false actual_arrangement_raw=0000000000080000 expected_arrangement_raw=0000000000000003 expected_layout=Speakers(AudioSpeakerSet(3)) expected_channels=2"),
-            ("after_activation", "VST3 host requires optional Main input zero, Auxiliary inputs and a nonempty Main output prefix followed by Auxiliary outputs with the exact render layout; stage=after_activation reason=prepared_channels direction=output index=0 native_role=Main expected_role=Main native_channels=2 prepared_channels=4 host_active=false actual_arrangement_raw=0000000000080000 expected_arrangement_raw=0000000000000003 expected_layout=Speakers(AudioSpeakerSet(3)) expected_channels=2"),
+            ("before_activation", "VST3 host requires optional Main input zero, typed Mono/Stereo Auxiliary inputs and a nonempty Main output prefix followed by Auxiliary outputs with the exact render layout; stage=before_activation reason=prepared_channels direction=output index=0 native_role=Main expected_role=Main native_channels=2 prepared_channels=4 host_active=false actual_arrangement_raw=0000000000080000 expected_arrangement_raw=0000000000000003 expected_layout=Speakers(AudioSpeakerSet(3)) expected_channels=2"),
+            ("after_activation", "VST3 host requires optional Main input zero, typed Mono/Stereo Auxiliary inputs and a nonempty Main output prefix followed by Auxiliary outputs with the exact render layout; stage=after_activation reason=prepared_channels direction=output index=0 native_role=Main expected_role=Main native_channels=2 prepared_channels=4 host_active=false actual_arrangement_raw=0000000000080000 expected_arrangement_raw=0000000000000003 expected_layout=Speakers(AudioSpeakerSet(3)) expected_channels=2"),
         ] {
             assert_eq!(
                 audio_inputs_from_metadata(&native, &layout, &arrangements,
@@ -5602,6 +5801,7 @@ mod musical_effect_tests {
             &payload.parameters,
             &note_input_contract,
             render(),
+            &AudioProcessorAuxiliaryInputContract::default(),
         )
         .unwrap()
         .unwrap();

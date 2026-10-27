@@ -978,6 +978,7 @@ mod tests {
             &registration.parameters,
             &crate::AudioProcessorNoteInputContract::default(),
             render,
+            &registration.auxiliary_inputs,
         )
         .unwrap();
         let payload = Vst3Payload {

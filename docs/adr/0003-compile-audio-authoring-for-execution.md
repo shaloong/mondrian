@@ -53,8 +53,11 @@ byte extent. Equal-layout regions keep their former offsets; older protocol
 versions refuse. Generic Worker views retain each input width. CLAP admits
 independently typed Mono/Stereo auxiliary inputs and preserves their widths in
 metadata, native planes, SDK capacity and declared/actual storage fees; its Main
-and all outputs retain the render layout. VST3 native inputs still require the
-Main layout until arrangement negotiation and native planes are completed.
+and all outputs retain the render layout. VST3 likewise retains each auxiliary
+input's exact Mono/Stereo Speaker Arrangement in cold and stopped retained
+metadata. It reuses the SDK's existing per-bus planes and arrangement negotiation;
+its native resource bound includes the widest admitted input. Both formats
+validate counts and prepared storage against semantic layouts before processing.
 
 `AudioProgramRuntime` is the shared high-level Implementation used by playback
 and export. It recursively instantiates nested public outputs and binds media

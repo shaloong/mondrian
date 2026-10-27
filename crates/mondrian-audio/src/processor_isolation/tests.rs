@@ -18,6 +18,10 @@ mod native_clap_mixed_inputs;
 #[path = "tests/native_clap_mixed_vendor.rs"]
 mod native_clap_mixed_vendor;
 
+#[cfg(windows)]
+#[path = "tests/native_vst3_mixed_inputs.rs"]
+mod native_vst3_mixed_inputs;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TestBehavior {
     Normal,

@@ -13,6 +13,13 @@ state uses 20bytes (magic/version/f64 gain/u32 mode) inside the existing host st
 envelope. Delay storage is fixed per instance with no process allocation. Fresh
 worker state entry reconstructs the instance and clears delay.
 
+Modes10/11 retain those lifecycle, gain and latency contracts. Mode10 declares
+Stereo Main, Mono input1 and Stereo input2; mode11 declares Mono Main, Stereo
+input1 and Mono input2. Output0 follows Main, and a one-channel input contributes
+to channel0. Native BusInfo, Speaker Arrangements and ProcessData widths must
+agree. The mixed-input gate checks independent complete DAG PCM, state restore,
+44.1/48 kHz, both processing modes, block partitions and seek. Modes0–9 are unchanged.
+
 Build outside the workspace with `cargo build --locked --manifest-path
 crates/mondrian-audio/tests/fixtures/vst3-sidechain/Cargo.toml --target-dir
 target/vst3-sidechain-fixture`. This is a qualification oracle, not a shipped

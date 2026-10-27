@@ -62,6 +62,7 @@ pub(super) fn prepare(gain: f64, mode: u32) -> Vst3Worker {
             &payload.parameters,
             &crate::AudioProcessorNoteInputContract::default(),
             render_contract,
+            &AudioProcessorAuxiliaryInputContract::default(),
         )
         .expect("actual known layout"),
         payload: serde_json::to_vec(&payload).expect("exact authored fixture payload"),

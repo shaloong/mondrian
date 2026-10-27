@@ -78,7 +78,7 @@ unsafe fn read_gain_state(stream: *mut IBStream) -> Option<(f64, u32)> {
     }
     let gain = f64::from_le_bytes(bytes[8..16].try_into().ok()?);
     let mode = u32::from_le_bytes(bytes[16..20].try_into().ok()?);
-    (gain.is_finite() && (0.0..=1.0).contains(&gain) && mode <= 9).then_some((gain, mode))
+    (gain.is_finite() && (0.0..=1.0).contains(&gain) && mode <= 11).then_some((gain, mode))
 }
 
 unsafe fn write_gain_state(stream: *mut IBStream, gain: f64, mode: u32) -> tresult {
@@ -367,10 +367,33 @@ struct GainProcessor {
 }
 
 impl Class for GainProcessor {
-    type Interfaces = (IComponent, IAudioProcessor, IProcessContextRequirements, IConnectionPoint);
+    type Interfaces = (
+        IComponent,
+        IAudioProcessor,
+        IProcessContextRequirements,
+        IConnectionPoint,
+    );
 }
 
 impl GainProcessor {
+    fn audio_channels(&self, direction: BusDirection, index: i32) -> i32 {
+        let mode = self.mode.load(Ordering::Relaxed);
+        if (mode == 10 && direction == BusDirections_::kInput && index == 1)
+            || (mode == 11 && (index == 0 || (direction == BusDirections_::kInput && index == 2)))
+        {
+            1
+        } else {
+            2
+        }
+    }
+    fn audio_arrangement(&self, direction: BusDirection, index: i32) -> SpeakerArrangement {
+        if self.audio_channels(direction, index) == 1 {
+            SpeakerArr::kMono
+        } else {
+            SpeakerArr::kStereo
+        }
+    }
+
     const CID: TUID = uid(0x7486AF22, 0x234A480B, 0x9DF13173, 0xF12EB620);
 
     fn new() -> GainProcessor {
@@ -564,7 +587,7 @@ impl IComponentTrait for GainProcessor {
         let bus = &mut *output;
         bus.mediaType = media_type;
         bus.direction = direction;
-        bus.channelCount = 2;
+        bus.channelCount = self.audio_channels(direction, index);
         let name = match (direction, index, self.mode.load(Ordering::Relaxed)) {
             (BusDirections_::kInput, 0, _) => "Main",
             (BusDirections_::kInput, _, 2) => "   ",
@@ -692,8 +715,11 @@ impl IAudioProcessorTrait for GainProcessor {
         }
         if slice::from_raw_parts(inputs, count as usize)
             .iter()
-            .any(|value| *value != SpeakerArr::kStereo)
-            || *outputs != SpeakerArr::kStereo
+            .enumerate()
+            .any(|(index, value)| {
+                *value != self.audio_arrangement(BusDirections_::kInput, index as i32)
+            })
+            || *outputs != self.audio_arrangement(BusDirections_::kOutput, 0)
         {
             return kResultFalse;
         }
@@ -710,7 +736,7 @@ impl IAudioProcessorTrait for GainProcessor {
         match dir as BusDirections {
             BusDirections_::kInput => {
                 if index >= 0 && index < self.getBusCount(MediaTypes_::kAudio, dir) {
-                    *arr = SpeakerArr::kStereo;
+                    *arr = self.audio_arrangement(dir, index);
                     kResultOk
                 } else {
                     kInvalidArgument
@@ -718,7 +744,7 @@ impl IAudioProcessorTrait for GainProcessor {
             }
             BusDirections_::kOutput => {
                 if index == 0 {
-                    *arr = SpeakerArr::kStereo;
+                    *arr = self.audio_arrangement(dir, index);
                     kResultOk
                 } else {
                     kInvalidArgument
@@ -874,15 +900,17 @@ impl IAudioProcessorTrait for GainProcessor {
         }
         let inputs = slice::from_raw_parts(data.inputs, count as usize);
         let outputs = slice::from_raw_parts(data.outputs, 1);
-        if inputs
-            .iter()
-            .chain(outputs)
-            .any(|bus| bus.numChannels != 2 || bus.__field0.channelBuffers32.is_null())
+        if inputs.iter().enumerate().any(|(index, bus)| {
+            bus.numChannels != self.audio_channels(BusDirections_::kInput, index as i32)
+                || bus.__field0.channelBuffers32.is_null()
+        }) || outputs[0].numChannels != self.audio_channels(BusDirections_::kOutput, 0)
+            || outputs[0].__field0.channelBuffers32.is_null()
         {
             return kInvalidArgument;
         }
         if inputs.iter().chain(outputs).any(|bus| {
-            (0..2).any(|channel| (*bus.__field0.channelBuffers32.add(channel)).is_null())
+            (0..bus.numChannels as usize)
+                .any(|channel| (*bus.__field0.channelBuffers32.add(channel)).is_null())
         }) {
             return kInvalidArgument;
         }
@@ -891,10 +919,15 @@ impl IAudioProcessorTrait for GainProcessor {
         let mut write_frame = |frame: usize, gain: f64| -> Result<(), ()> {
             let meter_tag = if let Some(((start, bar, signature), rate)) = meter {
                 meter_oracle::pcm_tag(start, start + frame as i64, rate, bar, signature).ok_or(())?
-            } else { 0.0 };
-            for channel in 0..2 {
+            } else {
+                0.0
+            };
+            for channel in 0..outputs[0].numChannels as usize {
                 let mut value = 0.0;
                 for (index, bus) in inputs.iter().enumerate() {
+                    if channel >= bus.numChannels as usize {
+                        continue;
+                    }
                     let pointer = *bus.__field0.channelBuffers32.add(channel);
                     let weight = match (mode, index) {
                         (_, 0) => 2.0,
