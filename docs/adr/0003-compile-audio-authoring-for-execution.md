@@ -547,3 +547,22 @@ literal PCM, intermediate taps, PDC, fanout, partitioning, budget boundaries and
 project roundtrips qualify the first slice; independent native fixtures and
 real plugins qualify subsequent format adapters. Existing VST3/CLAP guards
 remain until their complete native buffers, IPC and contracts are implemented.
+
+### Retained restart and native I/O migration boundary
+
+The current retained restart transaction preserves every port contract and
+shared mapping; it can update admitted scheduling facts, not native I/O geometry.
+The real CLAP mode19 Runtime gate confirms that a legal inactive Mono-to-Stereo
+detector change is refused before activation, while old publication remains held
+and original-child retirement exits normally. This is an open capability gap.
+
+Future migration must reuse the existing joined native processing scope and
+Root transaction. Inactive native metadata supplies a typed proposal using the
+existing ordered port contracts. Before allocating replacement planes or a
+shared mapping, admit their peak together with all retained owners under the
+original grant. Rebuild routes and PDC from the unchanged author Program; an
+unresolvable referenced port must refuse preparation. State/configuration and
+mapping installation must identify the same observed native candidate and
+Source permission, retain old owners through acknowledgement, and require Fresh
+Enter. Do not relax transfer port equality or resume the old mapping in isolation.
+IPC22 currently provides none of this topology migration.

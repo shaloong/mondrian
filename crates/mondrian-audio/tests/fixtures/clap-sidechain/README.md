@@ -110,6 +110,20 @@ The native mixed-input gate checks complete independent DAG PCM, state restore,
 their prior contracts. This qualifies an owned fixture, not third-party or RT
 performance.
 
+## Inactive input reconfiguration (state mode 19)
+
+Mode19 starts with mode17's Stereo Main, Mono input11, Stereo input7 and
+latency3. After more than nine processed frames it requests one real restart.
+Only deactivation changes its configuration to mode0, making input11 Stereo
+while preserving native IDs, gain and latency. Processing never mutates ports.
+The positive Runtime gate `installed_clap_runtime_restart_rebinds_mono_detector_without_replacing_native_owner`
+checks old PCM, held publication, same native owner, canonical installation,
+Fresh Enter and new PCM. It currently fails at `Capability(MetadataChanged)`;
+dynamic I/O migration is unsupported. Original-owner cleanup exits0 even on
+this failure. Fixture unit tests additionally cover the actual current header
+boundary; previously stale assertions incorrectly treated supported mode17 as
+invalid.
+
 ## Finite echo history (state mode 12)
 
 Modes 0–11 retain their existing PCM, state and extension contracts. Mode12

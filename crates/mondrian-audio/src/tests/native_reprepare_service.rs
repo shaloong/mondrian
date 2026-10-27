@@ -6,6 +6,9 @@ use std::path::PathBuf;
 #[path = "native_reprepare_service/vst3.rs"]
 mod vst3;
 
+#[path = "native_reprepare_service/io.rs"]
+mod io;
+
 #[derive(Default, Debug, PartialEq, Eq)]
 struct Cursors {
     session: Option<AudioSessionCursorEvidence>,

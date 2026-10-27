@@ -745,7 +745,7 @@ impl PluginAudioPortsImpl for Main<'_> {
         }
         let reversed = self.0.mode.load(Ordering::Relaxed) == 1;
         let mode = self.0.mode.load(Ordering::Relaxed);
-        let mono = (mode == 17 && is_input && index == 1)
+        let mono = (matches!(mode, 17 | 19) && is_input && index == 1)
             || (mode == 18 && (index == 0 || (is_input && index == 2)));
         let id = match index {
             0 => 0,
@@ -786,7 +786,7 @@ const ECHO_FRAMES: usize = 256;
 // Mode15 appends a fixed 16-byte Windows event nonce; no live timer state is saved.
 fn configuration_gain(bytes: [u8; 5]) -> Result<f32, PluginError> {
     let gain = f32::from_le_bytes([bytes[1], bytes[2], bytes[3], bytes[4]]);
-    if bytes[0] > 18 || !gain.is_finite() || !(0.0..=1.0).contains(&gain) {
+    if bytes[0] > 19 || !gain.is_finite() || !(0.0..=1.0).contains(&gain) {
         return Err(PluginError::Message("invalid fixture state"));
     }
     Ok(gain)
@@ -847,6 +847,7 @@ pub struct Processor<'a> {
     delay: Vec<[f32; 2]>,
     echo: Option<Box<FiniteEcho>>,
     cursor: usize,
+    processed_frames: usize,
     mode: u8,
     gain: f32,
     sample_rate: u32,
@@ -901,6 +902,7 @@ impl<'a> PluginAudioProcessor<'a, Shared<'a>, Main<'a>> for Processor<'a> {
             delay: vec![[0.0; 2]; shared.delay_frames()],
             echo: (shared.mode.load(Ordering::Relaxed) == 12).then(|| Box::new(FiniteEcho::new())),
             cursor: 0,
+            processed_frames: 0,
             mode: shared.mode.load(Ordering::Relaxed),
             gain: f32::from_bits(shared.gain.load(Ordering::Relaxed))
                 * if shared.mode.load(Ordering::Relaxed) == 3 && shared.render_mode.load(Ordering::Relaxed) == 1 { 1.5 } else { 1.0 },
@@ -910,12 +912,18 @@ impl<'a> PluginAudioProcessor<'a, Shared<'a>, Main<'a>> for Processor<'a> {
     fn deactivate(self, _main: &Main<'a>) {
         let _ = self.shared.check_role(RoleRequirement::Main);
         self.shared.active.store(false, Ordering::Relaxed);
+        if self.mode == 19 && self.shared.restart_seen.load(Ordering::Relaxed) {
+            // The completed old block stays mono. Change native port 11 to
+            // stereo only after processing has stopped and activation ended.
+            self.shared.mode.store(0, Ordering::Relaxed);
+        }
     }
 
     fn reset(&mut self) {
         let _ = self.shared.check_role(RoleRequirement::Audio);
         self.delay.fill([0.0; 2]);
         self.cursor = 0;
+        self.processed_frames = 0;
         if let Some(echo) = self.echo.as_mut() { echo.reset(); }
     }
 
@@ -1027,8 +1035,8 @@ impl<'a> PluginAudioProcessor<'a, Shared<'a>, Main<'a>> for Processor<'a> {
             };
             let channels =
                 port.channels()?.into_f32().ok_or(PluginError::Message("f32 input required"))?;
-            if matches!(self.mode, 17 | 18) {
-                let expected = if (self.mode == 17 && port_index == 1)
+            if matches!(self.mode, 17 | 18 | 19) {
+                let expected = if (matches!(self.mode, 17 | 19) && port_index == 1)
                     || (self.mode == 18 && matches!(port_index, 0 | 2))
                 {
                     1
@@ -1099,6 +1107,14 @@ impl<'a> PluginAudioProcessor<'a, Shared<'a>, Main<'a>> for Processor<'a> {
             repeat_restart_boundary(&self.shared.repeat_restart_count, start.saturating_add(frames as i64))
         }) {
             self.shared.host.request_restart();
+        }
+        if self.mode == 19 {
+            self.processed_frames = self.processed_frames.saturating_add(frames);
+            if self.processed_frames > 9
+                && !self.shared.restart_seen.swap(true, Ordering::Relaxed)
+            {
+                self.shared.host.request_restart();
+            }
         }
         Ok(ProcessStatus::Continue)
     }
@@ -1191,7 +1207,7 @@ mod finite_echo_tests {
         }
         bytes[0] = 16;
         assert_eq!(configuration_gain(bytes).unwrap(), 0.5);
-        bytes[0] = 17;
+        bytes[0] = u8::MAX;
         assert!(configuration_gain(bytes).is_err());
     }
 }
@@ -1216,7 +1232,9 @@ mod repeat_restart_tests {
         assert!(read_repeat_restart_count(&mut &[3][..]).is_err());
         header[0] = 16;
         assert_eq!(configuration_gain(header).unwrap(), 0.5);
-        header[0] = 17;
+        header[0] = 19;
+        assert_eq!(configuration_gain(header).unwrap(), 0.5);
+        header[0] = 20;
         assert!(configuration_gain(header).is_err());
     }
 
