@@ -2766,7 +2766,7 @@ pub(crate) mod shared_frame_tests {
                 .expect("probe bundle");
             let identifier = "uk.co.thefoundry.BasicGainPlugin";
             let description = describe_in_worker(&DescribeRequest {
-                schema_version: 3,
+                schema_version: description::DESCRIBE_SCHEMA,
                 context: OpenFxContext::Filter,
                 binary_path: path.clone(),
                 bundle_path: bundle_path.to_path_buf(),
@@ -2779,7 +2779,7 @@ pub(crate) mod shared_frame_tests {
                 },
             })
             .expect("probe description");
-            let descriptor_rejected = matches!(mode.as_str(), "required" | "temporal");
+            let descriptor_rejected = mode == "required";
             if descriptor_rejected {
                 assert!(matches!(
                     description,

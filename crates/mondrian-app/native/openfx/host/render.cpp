@@ -270,28 +270,29 @@ static bool accepted(OfxStatus status)
   return status == kOfxStatOK || status == kOfxStatReplyDefault;
 }
 
-static bool admitsIndependentFrames(const OFX::Host::ImageEffect::Base& effect,
+static bool admitsRandomAccessFrames(const OFX::Host::ImageEffect::Base& effect,
                                     const OFX::Host::ImageEffect::ClipBase* source,
                                     const OFX::Host::ImageEffect::ClipBase* output,
                                     bool generator)
 {
   const int sequential = effect.getProps().getIntProperty(kOfxImageEffectInstancePropSequentialRender);
-  return !effect.temporalAccess() && (sequential == 0 || sequential == 2) &&
-         output && !output->temporalAccess() &&
-          (generator ? (!source || source->isOptional()) : source && !source->temporalAccess());
+  if ((sequential != 0 && sequential != 2) || !output || output->temporalAccess()) { return false; }
+  if (generator) { return !effect.temporalAccess() && (!source || source->isOptional()); }
+  return source && (!source->temporalAccess() || effect.temporalAccess());
 }
 
-static bool admitsIndependentFrames(const OFX::Host::ImageEffect::Descriptor& effect, bool generator = false)
+static bool admitsRandomAccessFrames(const OFX::Host::ImageEffect::Descriptor& effect, bool generator = false)
 {
   // Admission runs after DescribeInContext. A Generator may declare optional
   // inputs; only Filter Source and Output acquire image bindings in this host.
   const auto& clips = effect.getClips();
   const auto source = clips.find(kOfxImageEffectSimpleSourceClipName);
   const auto output = clips.find(kOfxImageEffectOutputClipName);
-  if (!admitsIndependentFrames(effect,
+  if (!admitsRandomAccessFrames(effect,
       source == clips.end() ? nullptr : source->second,
       output == clips.end() ? nullptr : output->second, generator)) { return false; }
   for (const auto& entry : clips) {
+    if (entry.second->temporalAccess() && !effect.temporalAccess()) { return false; }
     if (entry.first != kOfxImageEffectOutputClipName &&
         (generator || entry.first != kOfxImageEffectSimpleSourceClipName) &&
         !entry.second->isOptional()) { return false; }
@@ -299,9 +300,9 @@ static bool admitsIndependentFrames(const OFX::Host::ImageEffect::Descriptor& ef
   return true;
 }
 
-static bool admitsIndependentFrames(const OFX::Host::ImageEffect::Instance& effect)
+static bool admitsRandomAccessFrames(const OFX::Host::ImageEffect::Instance& effect)
 {
-  return admitsIndependentFrames(effect,
+  return admitsRandomAccessFrames(effect,
       effect.getClip(kOfxImageEffectSimpleSourceClipName),
       effect.getClip(kOfxImageEffectOutputClipName), effect.getContext() == kOfxImageEffectContextGenerator);
 }
@@ -657,14 +658,14 @@ struct MondrianOpenFxSession {
     auto* plugin = selectFilter(imageCache.get(), *binary, identifier, versionMajor, versionMinor, selectionStatus);
     if (!plugin) { return selectionStatus; }
     auto* descriptor = plugin->getContext(contextName);
-    if (!descriptor || !admitsCpu(*descriptor) || !admitsIndependentFrames(*descriptor, generator) || !admitsParameterDefaults(*descriptor)) { return 7; }
+    if (!descriptor || !admitsCpu(*descriptor) || !admitsRandomAccessFrames(*descriptor, generator) || !admitsParameterDefaults(*descriptor)) { return 7; }
     instance.reset(plugin->createInstance(contextName, &frame));
     if (!instance) { return 4; }
     const int applied = applyParameters(parameters, count, false, kOfxChangeUserEdited, false);
     if (applied != 0) { return applied; }
     if (!accepted(instance->createInstanceAction())) { return 4; }
     if (frame.invalidChoiceDomain.load(std::memory_order_relaxed)) { failed = true; return 7; }
-    return admitsCpu(*instance) && admitsIndependentFrames(*instance) ? 0 : 7;
+    return admitsCpu(*instance) && admitsRandomAccessFrames(*instance) ? 0 : 7;
   }
 
   // The pre-DSP actions share this exact instance and invocation borrow. UserEdited
@@ -720,7 +721,7 @@ struct MondrianOpenFxSession {
       report.completion = MONDRIAN_OPENFX_RENDER_USER_BLOCKED;
       return 0;
     }
-    if (!admitsCpu(*instance) || !admitsIndependentFrames(*instance)) { return 7; }
+    if (!admitsCpu(*instance) || !admitsRandomAccessFrames(*instance)) { return 7; }
     for (const char* name : {"Source", "Output"}) {
       if (generator && std::strcmp(name, "Source") == 0) { continue; }
       auto* clip = instance->getClip(name);
@@ -735,6 +736,26 @@ struct MondrianOpenFxSession {
     else { return 7; }
     probe.finish(MONDRIAN_OPENFX_CLIP_PREFERENCES, phase);
     phase = probe.start();
+    if (instance->temporalAccess()) {
+      OFX::Host::ImageEffect::RangeMap dependencies;
+      const auto status = instance->getFrameNeededAction(info.frame, dependencies);
+      if (!accepted(status)) { failed = true; return status == kOfxStatErrUnsupported ? 7 : 5; }
+      for (const auto& input : dependencies) {
+        if (!input.first->getConnected()) { continue; }
+        for (const auto& range : input.second) {
+          if ((range.min != info.frame || range.max != info.frame) &&
+              (!input.first->temporalAccess() ||
+               (!frame.sourceFrameCount && !frame.sourceProvider))) { failed = true; return 7; }
+        }
+      }
+      if (frame.invalidImageLifetime) { failed = true; return 5; }
+      if (host.auxiliary().fatal()) { failed = true; return 6; }
+      if (host.auxiliary().blocked(instance->getHandle())) {
+        failed = false;
+        report.completion = MONDRIAN_OPENFX_RENDER_USER_BLOCKED;
+        return 0;
+      }
+    }
     // Clear the retained allocation and require a new fetch for this render.
     // Change/preference callbacks cannot make an old output appear completed.
     outputClip->beginFrame();
@@ -817,8 +838,8 @@ struct MondrianOpenFxSession {
     }
     const bool guiOpen = host.auxiliary().hasInteractiveControl();
     const bool userEdited = host.auxiliary().hasUserEditedControl();
-    // Only ask for an identity whose current Source can be published without
-    // fetching another clip/time or converting its fixed raster representation.
+    // Ask for the optional identity when the current Source admits the exact
+    // copy path. Other declared Source times can still use normal Render.
     const auto currentSourceIdentityCompatible = [&]() {
       if (generator || representation != info.source_alpha) { return false; }
       for (const char* name : {"Source", "Output"}) {
@@ -856,7 +877,9 @@ struct MondrianOpenFxSession {
         return 5;
       }
       if (identityStatus == kOfxStatOK &&
-          (identityClip != "Source" || !std::isfinite(identityTime) || identityTime != info.frame ||
+          (identityClip != "Source" || !std::isfinite(identityTime) ||
+           (identityTime != info.frame &&
+            (!instance->temporalAccess() || !instance->getClip("Source")->temporalAccess())) ||
            !currentSourceIdentityCompatible())) {
         probe.finish(MONDRIAN_OPENFX_DISPOSITION, phase);
         return 7;
@@ -869,7 +892,7 @@ struct MondrianOpenFxSession {
         probe.finish(MONDRIAN_OPENFX_DISPOSITION, phase);
         return 0;
       }
-      if (identityStatus == kOfxStatOK) {
+      if (identityStatus == kOfxStatOK && identityTime == info.frame) {
         // loadFrame already validated all source pixels and the exact byte
         // count. Use the existing staging allocation without pretending Output
         // was fetched. memmove adds no partial-overlap assumption to the CABI.
@@ -882,6 +905,9 @@ struct MondrianOpenFxSession {
         probe.finish(MONDRIAN_OPENFX_DISPOSITION, phase);
         return 0;
       }
+      // Identity is optional. A declared temporal Source identity can use the
+      // normal Render path and original input service; do not copy the current
+      // image or create another execution path for the returned source time.
     } else {
       probe.finish(MONDRIAN_OPENFX_FRAME_SETUP, phase);
     }
@@ -1007,7 +1033,7 @@ static int describe(MondrianOpenFx::Host& host, const char* binary, const char* 
   if (!plugin) { return selectionStatus; }
   const bool generator = selectedContext == 1;
   auto* descriptor = plugin->getContext(generator ? kOfxImageEffectContextGenerator : kOfxImageEffectContextFilter);
-  if (!descriptor || !admitsCpu(*descriptor) || !admitsIndependentFrames(*descriptor, generator) || !admitsParameterDefaults(*descriptor)) { return 7; }
+  if (!descriptor || !admitsCpu(*descriptor) || !admitsRandomAccessFrames(*descriptor, generator) || !admitsParameterDefaults(*descriptor)) { return 7; }
   const std::string& displayName = descriptor->getLabel();
   if (displayName.size() > labelCapacity) { return 7; }
   std::memcpy(label, displayName.data(), displayName.size());

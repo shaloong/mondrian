@@ -80,6 +80,12 @@ int exercise(MondrianOpenFx::Host& host, const char* binaryPath, const char* bun
   frame.info.frame_rate = 24; frame.info.pixel_aspect_ratio = 2;
   frame.info.source_alpha = 0;
   frame.imageNamespace[0] = 1;
+  // This host-side image-wrapper control does not turn Basic into a temporal
+  // algorithm. Declare the synthetic instance's access before constructing it.
+  auto* descriptor = plugin->getContext(kOfxImageEffectContextFilter);
+  require(descriptor, "actual context descriptor");
+  descriptor->getProps().setIntProperty(kOfxImageEffectPropTemporalClipAccess, 1);
+  descriptor->getClips().at("Source")->getProps().setIntProperty(kOfxImageEffectPropTemporalClipAccess, 1);
   std::unique_ptr<OFX::Host::ImageEffect::Instance> instance(plugin->createInstance(kOfxImageEffectContextFilter, &frame));
   require(instance && instance->createInstanceAction() == kOfxStatOK, "actual SDK instance");
   const auto& image = *static_cast<const OfxImageEffectSuiteV1*>(host.fetchSuite(kOfxImageEffectSuite, 1));

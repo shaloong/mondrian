@@ -231,6 +231,8 @@ namespace MondrianOpenFx {
         (isOutput() && (!frame.output || !frame.outputAvailable || !frame.outputRodReady || frame.outputPixelCount == 0 || time != frame.info.frame)) || !std::isfinite(time)) {
       return nullptr;
     }
+    if (!isOutput() && time != frame.info.frame &&
+        (!_effect->temporalAccess() || !temporalAccess())) { return nullptr; }
     if (!isOutput()) {
       SourceFrameView source{};
       size_t index = 0;

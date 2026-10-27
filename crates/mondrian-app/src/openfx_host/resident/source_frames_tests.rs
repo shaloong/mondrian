@@ -253,7 +253,7 @@ fn child_source_mapping_rejects_malformed_storage_pixels_and_context_before_nati
 }
 
 #[test]
-#[ignore = "requires a fresh normal worker and SourceDeliveryProbe; ABI calibration, not temporal compatibility"]
+#[ignore = "requires a fresh normal worker and SourceDeliveryProbe; finite native temporal control"]
 fn actual_resident_source_delivery_preserves_pixels_owner_refusal_and_cancellation() {
     const TEST: &str = "openfx_host::resident::source_frames::tests::actual_resident_source_delivery_preserves_pixels_owner_refusal_and_cancellation";
     if !super::super::super::shared_frame_tests::qualification_child(TEST, &[]) {
@@ -410,6 +410,20 @@ fn actual_resident_source_delivery_preserves_pixels_owner_refusal_and_cancellati
         4
     );
     assert_eq!(
+        actions.lines().filter(|s| *s == "OfxImageEffectActionGetFramesNeeded").count(),
+        8,
+        "each accepted and domain-refused invocation queries its own dependencies"
+    );
+    let mut dependencies_ready = false;
+    for action in actions.lines() {
+        if action == "OfxImageEffectActionGetFramesNeeded" {
+            dependencies_ready = true;
+        } else if action == "OfxImageEffectActionBeginSequenceRender" {
+            assert!(dependencies_ready, "dependency query precedes DSP");
+            dependencies_ready = false;
+        }
+    }
+    assert_eq!(
         actions.lines().filter(|s| *s == "OfxActionDestroyInstance").count(),
         1
     );
@@ -443,5 +457,41 @@ fn actual_resident_source_delivery_preserves_pixels_owner_refusal_and_cancellati
     assert_eq!(session.process.state, ProcessState::Settled);
     assert!(session.pending_inputs.is_empty());
     assert_eq!(current.pixels(), signal(3, 2, 0.5).pixels());
-    println!("Source delivery: 4 complete RGBA renders/same native owner; 4 pre-submit and 4 composed pre-DSP refusals; duplicate rejection; cancellation with four image handles held; child settled");
+    std::fs::write(log.path(), []).unwrap();
+    unsafe {
+        std::env::remove_var("MONDRIAN_OPENFX_SOURCE_DELIVERY_WAIT");
+        std::env::set_var("MONDRIAN_OPENFX_SOURCE_DELIVERY_BAD_DEPENDENCIES", "1");
+    }
+    let mut session = prepare();
+    let invalid = session.render_observed_with_sources(
+        &timing(),
+        &BTreeMap::new(),
+        &current,
+        &input_set(&past, &future),
+        None,
+        mondrian_effects::EffectProcessorGuiAdmission::CLOSED,
+        &mut |_| Ok(true),
+        &mut |_| Ok(mondrian_effects::EffectProcessorQuestionState::Unavailable),
+    );
+    assert!(
+        matches!(invalid, Err(OpenFxHostError::WorkerFailed(ref reason)) if reason == "native status 5")
+    );
+    assert_eq!(session.process.state, ProcessState::Settled);
+    assert!(session.pending_inputs.is_empty());
+    let actions = std::fs::read_to_string(log.path()).unwrap();
+    assert_eq!(
+        actions.lines().filter(|s| *s == "OfxImageEffectActionGetFramesNeeded").count(),
+        1
+    );
+    for action in [
+        "OfxImageEffectActionBeginSequenceRender",
+        "OfxImageEffectActionRender",
+        "OfxImageEffectActionEndSequenceRender",
+    ] {
+        assert!(
+            !actions.lines().any(|s| s == action),
+            "invalid dependencies cannot enter {action}"
+        );
+    }
+    println!("Temporal source delivery: complete RGBA/same owner; dependency actions precede DSP; original refusals and cancellation preserved; malformed dependencies retire before DSP");
 }

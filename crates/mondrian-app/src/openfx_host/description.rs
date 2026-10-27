@@ -7,7 +7,7 @@ mod catalog;
 pub(crate) use catalog::observe_openfx_catalog_with_checkpoint;
 pub use catalog::{run_openfx_catalog_describe_worker, OPENFX_CATALOG_DESCRIBE_WORKER_ARGUMENT};
 
-const DESCRIBE_SCHEMA: u32 = 5;
+pub(super) const DESCRIBE_SCHEMA: u32 = 5;
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

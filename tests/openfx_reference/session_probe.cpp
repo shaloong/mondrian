@@ -65,9 +65,11 @@ bool honestHostCapabilities(const OfxHost* host) {
   int multiResolution = -1;
   if (properties->propGetInt(host->host, kOfxImageEffectPropSupportsMultiResolution,
           0, &multiResolution) != kOfxStatOK || multiResolution != 1) { return false; }
+  int temporal = -1;
+  if (properties->propGetInt(host->host, kOfxImageEffectPropTemporalClipAccess,
+          0, &temporal) != kOfxStatOK || temporal != 1) { return false; }
   for (const char* name : {kOfxImageEffectPropSupportsOverlays,
                            kOfxImageEffectPropSupportsTiles,
-                           kOfxImageEffectPropTemporalClipAccess,
                            kOfxImageEffectPropSupportsMultipleClipDepths,
                            kOfxImageEffectPropSupportsMultipleClipPARs,
                            kOfxParamHostPropSupportsCustomInteract}) {
@@ -235,7 +237,7 @@ bool defineTemporalClipAdmissionProbe(const void* handle, const std::string& sel
       gPropHost->propGetInt(properties, kOfxImageEffectPropTemporalClipAccess, 0, &temporal) != kOfxStatOK ||
       temporal != 0 ||
       gPropHost->propGetInt(gHost->host, kOfxImageEffectPropTemporalClipAccess, 0, &temporal) != kOfxStatOK ||
-      temporal != 0) { return false; }
+      temporal != 1) { return false; }
   for (const char* name : {kOfxImageEffectSimpleSourceClipName, kOfxImageEffectOutputClipName,
                            "TemporalOptional"}) {
     const bool optional = std::strcmp(name, "TemporalOptional") == 0;

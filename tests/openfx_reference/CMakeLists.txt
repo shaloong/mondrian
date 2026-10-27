@@ -148,6 +148,22 @@ if(WIN32)
 endif()
 target_link_libraries(FramePreparation PRIVATE Threads::Threads ${CMAKE_DL_LIBS})
 
+add_executable(TemporalThirdParty EXCLUDE_FROM_ALL temporal_third_party.cpp
+  ${MONDRIAN_OPENFX_TEST_HOST_SOURCES} "${MONDRIAN_OPENFX_HOST}/host/render.cpp")
+target_compile_features(TemporalThirdParty PRIVATE cxx_std_17)
+target_compile_definitions(TemporalThirdParty PRIVATE NOMINMAX OFX_SUPPORTS_MULTITHREAD)
+target_include_directories(TemporalThirdParty PRIVATE
+  "${MONDRIAN_OPENFX_HOST}/vendor/include"
+  "${MONDRIAN_OPENFX_HOST}/vendor/host/include"
+  "${MONDRIAN_OPENFX_HOST}/host")
+if(MSVC)
+  target_compile_options(TemporalThirdParty PRIVATE /EHsc /utf-8)
+endif()
+if(WIN32)
+  target_link_libraries(TemporalThirdParty PRIVATE shell32)
+endif()
+target_link_libraries(TemporalThirdParty PRIVATE Threads::Threads ${CMAKE_DL_LIBS})
+
 # Actual HostSupport dependency action with an independent protocol fixture.
 add_executable(FrameDependencies EXCLUDE_FROM_ALL frame_dependencies.cpp
   ${MONDRIAN_OPENFX_TEST_HOST_SOURCES})

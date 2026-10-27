@@ -940,8 +940,9 @@ impl EffectExecutionEnvelope {
         Ok(EffectLinearStagePlacement { steps: steps.into(), total_cost })
     }
 
-    /// Admit this complete program to one current-frame backend without
-    /// implicit transfers, hidden temporal fetches, or session state.
+    /// Admit this program's static demand to one current-frame backend without
+    /// implicit transfers or continuity state. A declared invocation input service
+    /// remains a separate execution prerequisite; this does not lend that service.
     ///
     /// This proof scans every retained stage directly. It does not call the
     /// linear placement planner, so a General DAG remains admissible when all

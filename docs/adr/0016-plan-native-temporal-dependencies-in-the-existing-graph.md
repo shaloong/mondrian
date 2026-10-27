@@ -1,512 +1,222 @@
 # Plan native temporal dependencies in the existing graph
 
-Status: implementation in progress. The native pre-DSP boundary is explicit;
-OpenFX temporal access remains unsupported until the complete consumer path passes.
+Status: native temporal Filter Source implemented with finite Windows
+qualification. Current evidence and limits are recorded below. This decision
+extends the existing graph and invocation ownership, not the project time model.
 
-The product still declares `CURRENT_FRAME` and rejects temporal descriptors.
-Effects has time-expanded value programs and `PreparedTemporalFrameSet`; the
-normal OFX factory can now consume an invocation-borrowed input service. Finite
-Preview/Export source paths are qualified below; preplanned Preview temporal
-scheduling and complete native temporal semantics remain open. Changing a
-capability flag cannot connect these boundaries.
+## Demand and execution authority
 
-OFX [GetFramesNeeded](https://openfx.readthedocs.io/en/main/Reference/ofxImageEffectActions.html#c.kOfxImageEffectActionGetFramesNeeded)
-returns per-input pairs of frame-range endpoints, including discontinuous ranges.
-The host initializes every input to the current frame. ReplyDefault uses that
-default, rather than residual writes. Malformed/nonfinite/reversed or excessive
-requests must fail before DSP, without replacing them with a range hull or
-silently substituting the current frame.
+`EffectTemporalInputExtent` describes statically expanded IR demand.
+`CURRENT_FRAME` does not grant late image access. A sealed processor factory
+separately declares `requires_input_service`; that immutable declaration enters
+complete/subtree identity and is checked for provider drift. Dynamic input uses
+the original program, bank, working grant and `EffectProcessorControl`. Do not
+invent an unbounded static window, another temporal interpreter or another
+decoder/session/cache to satisfy it.
 
-The dependency path will use the existing immutable author/program snapshot,
-exact Clip mapping, graph evaluation and source scheduler. Historical input means
-the upstream graph evaluated at that time, including its animated parameters;
-it does not mean a raw media frame bypassing upstream Effects. Each dependency
-contributes to the same cancellation, memory and cache identity. No second
-decoder, scheduler, parameter store or temporal cache is introduced.
+Historical input is the upstream graph at the requested author time, including
+animated parameters, original Grade ordering and Clip masks. It is not a raw
+media frame bypassing Effects. `PreparedEffectInput` carries a program-owned
+proof: legacy stack slot or before/after Grade assignment plus Grade node. A
+reused Grade, dense compiled ordinal or occurrence ID alone cannot select input.
+`input_for_processor` also verifies that the concrete Custom node directly
+consumes the Definition entering value. Synthetic mask/composition stages,
+internal multi-node values and NoImage producers do not grant that capability.
+Only ancestors of that input execute; the waiting Definition, unrelated branches,
+downstream metadata builders and their DSP remain excluded.
 
-OFX time is measured in frames, not seconds. Dependency conversion must use the
-same owner frame context and exact Clip retime map as ordinary execution. Native
-fractional requests follow the declared clip sampling contract; do not silently
-round them or create a second interpretation of Sequence time.
+Selection provenance is not GPU execution identity. GPU keys retain graph
+semantics/contracts while excluding this selection metadata. Snapshot proofs
+remain nontransferable even when equivalent GPU plans share. A factory must not
+retain its own prepared program or source capability: that creates a strong
+program/factory/program cycle. The normal factory borrows input per invocation.
 
-The native pre-DSP prefix must retain the original instance, frame borrow,
-parameter callbacks and resource bank. `UserEdited` change actions may legally
-read the current Source image. Thus a universally pixel-free metadata preflight
-is not the contract: prepare that prerequisite through the original graph before
-expanding native historical/future demand. Do not supply dummy pixels or create a
-second instance to query dependencies. Exact author time, parameters,
-geometry/sampling and dependency identity must survive through consumption or
-cancellation.
+## Time, sampling and image domain
 
-Keep the staged dependency exchange inside the original active processor call.
-The existing child pump can carry dependency messages while the native call keeps
-its FrameBorrow and parameter callback borrows alive; do not introduce a
-cross-call plan handle or a second instance registry first. This is the chosen
-transport direction; the internal IPC17 service below now implements the exchange. The current bank already
-holds the active instance outside evictable optional entries. Upstream work must
-exclude the waiting parent's active peak, held rasters and transient grant from
-its remaining budget, then compose the nested peak in the same ledger. Each
-dependency wave must use the original immutable graph/source admission; an SDK
-callback cannot open a new decoder. Missing prerequisites stop the invocation,
-without replaying partially executed DSP or substituting the current frame.
+OFX uses frames. Native double time is interpreted exactly with the original
+rational author rate; an unrepresentable `TimelineTime` fails explicitly. The
+original Clip/source mapper applies retime and the physical interpretation grid
+once, including the half-open Source Sample Target boundary. Never substitute a
+guessed grid or silently round a fractional native request.
 
-Same-bank staged probes exposed and fixed two scope defects: nested work cleared
-the parent's observation binding, and final retention did not reapply the outer
-count/byte ceilings after nested owners were added. The original bank now restores
-the previous binding on normal/error/unwind paths and reapplies ceilings at the
-actual retention boundary. Two regression tests cover success/reuse, refusal,
-panic, cancellation, five optional grants and actual progress receipts; the
-complete Windows Effects library passed 376 tests with zero ignored. These are
-in-process fixtures with explicit held-byte/peak accounting, not a native staged
-resolver, full heap accounting or real temporal-plugin qualification.
+Historical seeds use the originating Render Plan's exact Sequence evaluation
+grid, including its doubled field grid. The retimed source grid is not seed
+authority. Invert seconds-per-frame before frame-rate conversion; the existing
+off-grid hash rule remains unchanged. Field-grid tests do not qualify native
+interlaced image delivery or widen older full-temporal entry admission.
 
-The first native boundary produces an invocation-local output-domain value after
-parameter changes, ClipPreferences and RoD admission. It owns no image or plugin.
-The existing Render path consumes it for empty output, Identity, resource
-authorization and normal processing. Invalid-input checks, action order, legal
-current-image access, failure precedence and diagnostic phases remain unchanged.
-This is preparation for dependency negotiation, not temporal execution support.
+Extent, origin, PAR and sampling belong to the producer value, independently of
+the Sequence/project canvas. Finite Media preparation first freezes the existing
+time-expanded value program and complete mapped source wave, including signed
+history/lookahead. Preview schedules that wave immediately. Only ROI/coverage
+binding waits for actual producer extent/sampling; binding must not reevaluate
+author state, replace time/seed or run DSP from an unbound closure. Do not use a
+provisional canvas or serialize discovery behind the current frame. Proven
+source-free programs keep an explicit owner output target.
 
-The native image adapter now reads immutable, caller-owned Source frame views.
-Views carry exact native time, pixel origin/extent, Float32 RGBA and the same
-clip alpha/PAR contract. Binding validates the complete set before replacing it,
-with at most 256 additional views and the existing 128 MiB per-image limit.
-Backing belongs to the caller's original ledger; no raster copy/cache is added.
-Bind only between foreign actions with no image handles leased. Each wrapper
-owns its property handle, not the pixels. FrameBorrow retires source image addresses;
-rebinding changes historical image identities even at the same time/array slot.
-Validation polls the original abort control in 64 KiB chunks and before commit;
-callers preserve the original stop reason before classifying a refused bind.
-Unknown times do not borrow the current image or fabricate its RoD. The RoD
-suite now distinguishes query failure from allocation failure on a valid clip,
-rather than misreporting BadHandle, and clears rejected/nonfinite bounds.
+Preview validates Ready samples; Export uses the decoder's exact aspect-fit
+policy and resolved picture interpretation, then checks each decoded sample.
+Unit Media retains the original CPU raster, including odd sizes. Varying source
+domains refuse explicitly. Source picture mapping survives temporal pixel
+replacement into the existing projected transform/cache identity. This introduces
+no resampler. Title, nested and stack history retain their stated limitations.
 
-Already-resolved sources and late Source requests now travel through resident
-IPC17 inside the same native call. Source resolution is explicitly admitted per
-invocation. Foreign callbacks send bounded POD identities through the original
-pump; only the original mutable RenderOwner may evaluate an upstream graph,
-observe cancellation and grant memory. There is no decoder or graph closure on
-plugin threads. Owner/serial/service/time replies must match the one outstanding
-request. Concurrent readers coalesce exact-time misses in one invocation-owned
-arena. Existing mappings remain immutable while images are leased; new mappings
-append without rebinding their addresses or identities. The arena and backing
-outlive native actions and error teardown, with no cross-call temporal cache.
+## One Control and resource ledger
 
-At most 256 additional images and 128 MiB aggregate payload are accepted. Files
-are read-only in the child, never pixels in JSON or process addresses. Exact time,
-geometry, alpha/PAR, representation, disjoint byte ranges, actual file length and
-finite samples are checked before publication. Known descriptor/map/path storage
-is charged when resolution is enabled. Each grant composes held inputs, the native
-output domain and the returned graph frame while copying it. The upstream owner
-must also deduct its waiting parent's already-admitted active backing before
-using its remaining original grant. This is logical controlled storage, not SDK
-heap/RSS accounting. Pre-submit refusal releases reserved file slots; invocation
+The scalar/adaptive engine exclusively borrows the existing processor bank,
+retention limits and working grant. Session wrappers own generation changes and
+complete output-cache publication; invocation input resolution does neither.
+`with_input_service` scopes the actual direct-input stage and restores caller
+bindings on success, error and unwind. Prepare/admit the complete simultaneous
+source backing first, then restore the mutable service loan before upstream DSP
+so nested processors can use it without aliasing. NoImage inherits no Source.
+
+Deduct the waiting parent's active storage and all held native backing before
+nested work; compose its peak in the same ledger. Already charged caller feedback
+is the baseline: only newly added nested feedback consumes the remaining grant.
+After nested owners are added, retention must reapply the original count/byte
+ceilings. The bank retains one idle configuration per occurrence; raster/project,
+format or recipe changes retire obsolete workers. Optional retention uses actual
+recipe bytes and may be refused without invalidating a legal active render.
+
+One original Control covers masks, copies, scalar kernels and Custom processors,
+including heterogeneous CPU prefixes. Deadlines never renew; child deadlines may
+only shorten them. Cancellation and stop reasons remain sticky. Preserve caller
+observation, GUI/feedback occurrence and previously reserved receipts. Only new
+successful prefix receipts enter completion; failure/unwind drops partial facts
+without dropping caller facts or publishing completion. Static frontier grants
+do not reserve arbitrary dynamic Source demand: admit it from the same remaining
+grant. The legacy standalone entry remains unobserved.
+
+## Native invocation and borrowed images
+
+The same native instance, current image borrow, parameters and resource bank own
+the complete call. UserEdited notifications may legally read current Source;
+there is no universally pixel-free metadata preflight. Prepare that prerequisite
+through the original graph, without dummy images or a second planning instance.
+
+After parameter/clip preferences and before RoD/DSP, a temporal instance queries
+[GetFramesNeeded](https://openfx.readthedocs.io/en/main/Reference/ofxImageEffectActions.html#c.kOfxImageEffectActionGetFramesNeeded).
+HostSupport initializes each input to `[time,time]`, preserves discontinuous
+ranges and explicit empty input sets, uses defaults on ReplyDefault despite
+residual writes, and atomically rejects malformed/nonfinite/reversed/excessive
+requests. Range metadata and temporal Clip/service admission are checked before
+DSP. Actual pixels use the invocation-borrowed source resolver on demand; do not
+enumerate continuous ranges into invented sample points or collapse range hulls.
+
+Filter Source temporal access requires the effect and Clip declarations. Output
+images remain current-time. Required sequential processing and temporal
+Output/Generator processing are unsupported. Current Source Identity retains its
+exact copy optimization. A legal temporal Source Identity uses normal Render and
+the original input service, preserving plugin behavior without another executor.
+
+Every instance action narrows the borrowed image permission. Recursive
+RoD/preferences/FramesNeeded actions cannot inherit UserEdited image access;
+suspended caller handles survive until release at the caller's own action
+boundary. Atomic permission reads cover joined plugin workers within a serialized
+invocation. Overlapping independent actions/render threads are not qualified.
+
+IPC17 keeps dependency exchange inside that active native call. Foreign threads
+send bounded POD requests through the original child pump. Only its original
+mutable RenderOwner evaluates upstream graphs, observes stop and grants memory;
+no decoder, parent FnMut or graph closure executes on a plugin thread. Match
+owner/serial/service/time to the single outstanding request. Exact-time misses
+coalesce in one invocation arena; new immutable mappings append without rebinding
+leased addresses. Arena backing outlives actions and error teardown. FrameBorrow
+retires all source/provider addresses; image identifiers change on rebinding even
+when time and storage slots repeat.
+
+At most 256 additional images and 128 MiB aggregate payload are admitted. Frame
+views validate time, bounds, stride, disjoint ranges, file length, matching
+alpha/PAR and finite pixels; publication validation polls original cancellation
+in 64 KiB chunks. Files are read-only in the child; JSON contains neither pixels
+nor process pointers. Known map/path/descriptor storage is charged. Coverage
+alpha remains in [0,1], Float alpha may be finite signed/out-of-range, and Opaque
+requires one; lossless native association lowering does not clamp pixels. Native
+requests stay in the declared author range. Unique graph tiles transfer pixels;
+shared tiles refuse an unadmitted clone. Pre-submit refusal releases file slots;
 errors retain backing through retirement and never publish staged output.
 
-A typed dependency failure keeps its upstream provenance, retires the waiting
-native owner without replay, and does not quarantine that parent's definition.
-Declared media absence and unprepared input remain distinct. An upstream graph
-inherits the same absolute invocation deadline; derived cancellation scopes can
-shorten it but never renew it. Explicit cancellation still reaches the entire
-execution generation. Consuming a uniquely owned graph tile transfers its pixels;
-shared tiles refuse transfer rather than silently copying unadmitted backing.
+## Preview, Export and cache ownership
 
-`PreparedEffectInput` selects one Definition entering value from the original
-immutable program. Compiler provenance includes the legacy stack slot, or the
-before/after Grade assignment and Grade node; a reused Grade or a dense compiled
-stage index is insufficient. A program-owned proof rejects bindings from another
-snapshot. Synthetic composition/mask stages and emitted zero-input producers do
-not grant this input. The concrete node selector
-`PreparedEffectProgram::input_for_processor` verifies the actual Custom node
-directly consumes that entering value; an internal multi-node Definition value
-is not silently substituted.
+`PreparedVisualProgram` borrows the original placement, Frame Execution Request
+and source resolver. Media retime/interpretation, nested Sequence color semantics
+and Solid input use the existing mapper. Historical Title/Adjustment and some
+nested/stack/transition variants refuse explicitly. The Clip service's current
+format is SceneLinear Float32 StraightCoverage; other formats require their own
+admission, independently of the native association lowering above.
 
-At the requested exact author time, only that input's ancestors are evaluated.
-The waiting Definition, unrelated Grade branches and downstream metadata builders
-are excluded, as well as their DSP. Grade ordering and Clip mask placement stay
-with the existing compiler. Ordinary and temporal upstream values use the same
-bounded frame executor; the older temporal-only entry points retain their guard.
-The capability owns no execution session, processor bank, cache or decoder.
+Frame Store admission attaches the complete originating media key to its decoded
+allocation. Retarget only the source sample: file/stream fingerprint, proxy, RAW,
+field, alpha and input color remain frozen. Never reopen current asset settings
+to satisfy an older program. Both serial CPU domains use their existing result
+channels, media scheduler and Frame Store, with one wait per domain and at most
+256 distinct source keys per batch. Live processors wait under original Control
+without DSP replay. Retirement/shutdown cancels domains before dropping replies
+and partial leases, so decoder joins cannot wait on frames retained by this queue.
 
-Position provenance is not GPU lowering identity. GPU plan keys retain graph
-semantics and stage execution contracts while stripping this selection metadata;
-equal plans still share, changed parameter values remain isolated, and snapshot
-capabilities remain nontransferable. One proof allocation is shared per prepared
-program. Controlled metadata estimates include binding storage and the Grade's
-zero evaluation; these remain conservative logical charges, not allocator/RSS.
+The original bounded EvaluationWorkingSet owns Sources and Executing phases.
+Canonical program/placement/request and partial exact Ready leases survive
+admission retries and producer wakes in its existing four physical slots;
+speculative preparations evict first. Degraded media is queried again for quality
+upgrade. Active grant replacement retires partial preparation; optional cache
+trims do not replace that authority. Title pixels charge active CPU grants;
+media leases remain charged by Frame Store. Resume only before DSP; unexpected
+Pending after execution begins fails closed instead of replaying processors.
 
-The scalar/adaptive frame engine now borrows the existing processor bank,
-working grant and retention limits instead of requiring the entire Session.
-That exclusive borrow is necessary inside an active native processor: constructing
-another Session to satisfy it would create a second instance/budget authority.
-Session wrappers keep generation changes and complete output-cache publication;
-invocation input resolution performs neither cache access nor generation rebinding.
-The original Control crosses nested processor calls and bounded pixel checkpoints,
-so progress, GUI/feedback provenance and sticky stop reasons remain with the owner.
-The legacy standalone entry remains unobserved; borrowing an owner Control does
-not implicitly enable another product observation route.
-Parent active storage and still-held native backing are deducted before upstream
-work; its peak is then composed in the same ledger. Already charged parent feedback
-is the nested baseline, so only new nested feedback reduces the remaining grant.
+Source-ready temporal/nested CPU closures execute on the existing visual
+Broker/worker and compositor bank; UI materialization must not block on late
+media. Worker/results hold weak admission interest. Retirement cancels the exact
+Broker binding without a payload cycle or parent-generation cancellation, blocks
+publication and prunes failed observations. Failure consumption removes its
+per-attempt failure key. Raw keys use the frozen program,
+evaluation and raster, never reconstructed processed output. Only current work
+can publish Viewer feedback. Original blocked, failure, stop and deadline
+dispositions survive the handoff. Root per-layer GPU lowering remains intact.
 
-Input capabilities are borrowed by the invocation. A strong capability retained
-inside a factory would make a program/factory/program ownership cycle. Weak
-bootstrap remains only in legacy calibration fixtures; the normal factory gate
-borrows the original program directly, with no bootstrap or factory capture.
-`PreparedVisualProgram::prepare_clip_processor_input` now prepares that input
-from the original Clip/Transition-endpoint snapshot. Complete-frame temporal
-work and processor input use one source mapper: media retime plus interpretation
-grid, nested Sequence color semantics, or solid color. It emits the existing
-demand batch for the original Preview/Export scheduler and bank; it owns no
-Session, decoder or cache. Basic Title and Adjustment history remain refused.
-Input extent, PAR and sampling belong to the actual source value, not the
-Sequence/project canvas. The invocation must supply and preserve that contract.
+Export uses its existing job Session and original execution request through CPU
+and heterogeneous-prefix lowering. GPU continuation observes original job
+cancellation; lowering cannot change time, intent, settings or observation owner.
+Planned/late media share immutable decode-request lowering and read the existing
+cache without storing extra history. Working conversion uses the decoded
+allocation's already charged OnceLock and a temporary uncached color Session,
+without reborrowing the active compositor's color Session or adding a bank/cache.
+Preflight charges retained coverage plus conservative decode/alpha/color peak
+(four Float32 RGBA buffers per source pixel); SDK/decoder heaps and RSS are outside
+that logical reservation.
 
-Finite Media preparation therefore has two phases. Expanding dependencies on the
-output canvas caused both wrong input admission and potentially wrong coverage
-budgets. The frame now freezes the existing time-expanded value program and
-original mapped Media source set before pixel geometry is known. Preview schedules
-that complete wave immediately, including signed history and lookahead; waiting
-for a current frame first would regress prefetch. Only image ROI/coverage binding
-waits for the producer's selected extent and sampling. Binding reuses that same
-program without author reevaluation; an unbound closure fails before any child
-DSP. Output evaluation, grid, seed, generation, continuity and cancellation stay
-unchanged. Preview validates its original Ready samples; Export reuses the decoder's exact aspect-preserving
-sizing policy and resolved picture geometry, then checks every decoded sample.
-Unit Media keeps its full original CPU raster, including odd extents. Varying
-sample domains fail explicitly. Proven source-free programs retain their explicit
-owner output target. Actual temporal tiles, outputs and local work
-enter the existing owner grant; source picture mapping survives pixel replacement
-and enters the existing projected transform/cache identity. No new decoder,
-cache or pixel-resampling path is introduced. Title, nested and stack history
-retain their separately declared limitations.
+Lending dynamic input disables both lookup and publication of input-only output
+caches. Installed OFX propagates Uncacheable through Preview, nested and persistent
+consumers. Complete dependency identity is required before future cross-call
+native caching. Missing media, unprepared input and RetryAdmission stay distinct;
+typed upstream failure retires the waiting owner without quarantining its
+definition or substituting the current image.
 
-`EffectProcessorControl::with_input_service` borrows source preparation for one
-execution. The executor scopes the actual direct-input stage and restores it on
-success, error and unwind; NoImage processors receive no inherited input. Source
-preparation first admits the complete simultaneous source backing and returns
-frozen frames only. The mutable service loan is restored before upstream DSP,
-so nested processors may use the same service without aliasing it. Resources
-execute that input through the original bank, working grant and Control. Input
-failure retires the waiting owner without blaming its definition. Subrequest
-deadlines can only shorten the original deadline; stop reasons remain sticky.
+## Qualification and remaining work
 
-`PreparedVisualProgram::clip_processor_inputs` borrows the original placement,
-Frame Execution Request and source resolver. It shares the existing position
-validator, including the doubled field grid, and checks the placement instant.
-The original attempt's grid supplies historical seeds. This does not change the
-older full temporal path's field-grid policy. The Clip service currently admits
-SceneLinear Float32 StraightCoverage only; other formats fail explicitly.
+Windows MSVC14.44 passes 16 native control groups, including the actual published
+Natron-2.3.16-beta3 TimeBlur1.0 through the product C ABI. Its 3x2 Float32/PAR1
+control checks complete independent RGBA literals, same owner, changed inputs,
+native times2/3/2/2 and divisions4/8/4/1. This covers fractional history/future,
+the plugin's multi-pass image-memory accumulator and temporal Identity. The real
+parameter is `shutterOffset`, with capital O. It is finite C ABI qualification,
+not Timeline/Preview/Export, GUI, performance or other-platform acceptance.
 
-The normal OFX processor owns one RenderOwner for observation, memory and Source
-requests. Native double frame time is interpreted exactly using the original
-rational author rate; values not representable by `TimelineTime` fail rather than
-rounding onto a guessed grid. Returned source origin/extent can differ from the
-current image. Unique tile pixels transfer without an unadmitted Rust clone;
-the existing charged native file transfer still applies.
+Current Effects390, Renderer689/39 ignored, Export307/20 ignored, App OFX125/68
+ignored and seven resident/action controls pass under original owned budgets,
+with exit0, empty stderr and settled descendants. The normal development product
+rebuilds at opt0/debug0 without validation. A stale ignored test's Describe schema3
+was repaired to the original schema constant; production protocol rejection and
+assertions remain strict. Full App regression passes3145/213 ignored; together
+with Effects/Renderer/Export,4531 ordinary tests pass with272 existing ignored.
+App uses validation opt0/debug0; Effects/Renderer/Export use opt1/debug0. The
+original1800s ordinary/180s native budgets and cleanup policy are unchanged.
 
-Actual Coverage input exposed an association mismatch: current images admitted
-Coverage as native Float, but late Source mapping rejected its Rust label. Both
-now use one lossless straight/premultiplied/opaque association lowering. The
-original numeric alpha domain still validates mapped pixels through
-`ColorFrameAlpha::admits_alpha`: Coverage stays in [0,1], Float retains finite
-signed/out-of-range alpha, and Opaque requires one. No pixel conversion or clamp
-is introduced. Native requests must also stay inside the declared author range;
-negative-time calibration supplies an explicit range containing those times.
-
-Binding a dynamic input service disables scalar input-only output caching.
-Outer consumers must likewise forbid reuse without complete dependency identity;
-the installed OFX definition already propagates Uncacheable to Preview/nesting.
-
-The heterogeneous CPU prefix now uses one Control for validation, masks, copies,
-scalar kernels and Custom processors. The legacy checkpoint entry binds the
-Session observation once, then delegates to the caller-Control entry. The former
-per-Custom Control discarded input-service borrowing and left ordinary CPU work
-outside the task deadline. An expired-deadline regression reproduced an erroneous
-completion before this change, even without a Custom processor.
-`TimelineCompositeScratch` exposes the same original-Control entry without
-exposing its bank. Existing Preview/Export prefix consumers use the common engine.
-
-Only new successful prefix receipts transfer into its completion; caller receipts
-remain in Control. Error/unwind drops partial prefix facts, preserves prior facts
-and never returns a completion. Preflight includes caller-owned feedback metadata;
-the Control's already reserved slots are charged once by the scalar adapter.
-The static frontier budget does not reserve arbitrary runtime Source demands:
-those still require separate admission from the same remaining grant. This is
-not a promise that a statically minimal prefix can execute dynamic history.
-
-Historical frame seeds use the originating Render Plan's exact Sequence
-evaluation grid, including its doubled field grid. Clip-to-Sequence mapping
-remains authoritative; retimed source frames are not the seed authority.
-Seconds-per-frame is inverted before frame-rate conversion. Substituting the
-authored base grid incorrectly hashes legal odd-field instants. The existing
-off-grid hash rule is unchanged. Pixel regressions cover ordinary, integer-field
-and fractional-field grids through both Preview/Export intents and preparation
-entries, including the Session-owned path. These do not qualify complete native
-fielding or interlaced delivery.
-The bank retains one configuration per occurrence: changed raster/project geometry,
-format or recipe revision retires the obsolete idle worker. The native calibration
-therefore checks exact configuration retirement, rather than assuming a variant
-cache. Optional native retention must use the recipe's declared bytes, not a guessed
-constant; a legal active render may intentionally run without optional retention.
-
-Current affected-library qualification is summarized below. Earlier focused
-preparation tests remain in the ordinary library gates; their historical counts
-are not separate current compatibility claims.
-
-The native baseline at edf25518 uses a default worker at test-profile opt0/debug0,
-without libtest or validation features. Its 12 existing diagnostics/test-helper
-warnings remain; this is not a zero-warning or release qualification.
-Six existing native gates pass again with the current parent and this reused
-worker; the worker was not rebuilt for the historical-media slice. The normal installed factory
-gate performs four full-RGBA renders on one native owner, eight coalesced exact
-Source services with current/Output leases held, and twelve upstream
-configuration creations/retirements in the original bank. Source origin/extent
-vary; terminal feedback, generation, unique pixel transfer and Float alpha6
-remain intact. It borrows the original program through Control, with no weak
-bootstrap. The other gates retain graph/dependency/budget/cancellation/refusal
-and native lifecycle coverage. This does not prove universal100ms shutdown.
-
-Three new Effects groups cover nested use, service/stage/deadline restoration,
-changed historical content without stale output reuse, panic/budget/identity
-refusal, recovery and sticky cancellation. Two Renderer groups cover the
-original attempt/field grid, source admission and foreign/unsupported input
-refusal. Native time conversion has its own exact-clock test. The source-map
-regression exercises five associations and 35 numeric-alpha conditions,
-including unclamped finite Float values and rejection of invalid Coverage.
-Four additional Effects groups cover the no-Custom deadline regression, borrowed
-input service and original-bank reuse through the actual mixed execution plan,
-failure/stop restoration and caller feedback at the static grant boundary.
-Two additional Renderer tests cover the original-Control entry and the actual
-production batch executor with a bound deadline. GPU suffix execution and actual
-native plugins in the mixed route are not qualified by these fixture tests.
-
-SourceDeliveryProbe deliberately does not declare temporal access. These are
-owned finite integration calibrations, not conforming third-party temporal
-compatibility. Remaining Preview/Export source cases, native format/alpha beyond
-the bounded coverage executor, dependency
-scheduling, legal action/thread image coverage and complete field-grid parity
-remain open. Temporal flags stay false. No new whole-workspace, release, RT,
-performance, complete heap, GPU or other-platform qualification follows.
-
-The HostSupport dependency action now atomically replaces its complete input map
-on OK/ReplyDefault; an error leaves the caller's map unchanged. It preserves
-disjoint, fractional and explicit empty OK ranges, ignores ReplyDefault residuals
-and refuses invalid time, malformed/nonfinite/reversed pairs. A product limit of
-256 returned range pairs across inputs bounds negotiation metadata. Per-input
-property writes are bounded before resize/copy; a refused write remains visible
-even after reset. This does not bound the number of frames inside a range, SDK
-heap/RSS, or raster payload: the shared planner must admit those separately.
-The five protocol groups (27 queries) use an independently compiled owned OFX
-fixture and actual HostSupport/Host. Action logs confirm one Create/Destroy per
-group, no Render, and no dispatch for invalid time/non-temporal declarations.
-These are action qualifications, not third-party temporal-renderer evidence.
-
-Preview now admits and checks the canonical closure's preplanned media and
-Basic Title sources, including transition inputs, before executing any node DSP.
-Admission alone was insufficient: a ready child could execute before a parent's
-Pending result, then execute again on retry. The original source identities
-deduplicate requests; exact Ready results and leases survive this one execution.
-This is per-attempt input ownership, not another cross-frame cache. CPU/GPU
-representation and working-color conversion still use the original paths.
-
-Source errors precede DSP and retain their original typed disposition, stage
-and diagnostic context. Current, transition and temporal media share one context
-formatter; temporal context carries the original Clip and author time.
-Unadmitted media always preserves RetryAdmission, including temporal requests,
-rather than waiting for publication from a nonexistent producer.
-
-Three source cases reproduced one premature DSP invocation before Pending.
-Three regression groups reuse one program cache/scratch across wait, admission
-retry, error and Ready, checking zero premature calls, the first invocation's
-actual pixels and typed error fidelity. A fourth checks complete mixed-source
-admission and retry/error priority.
-The probe is an admitted nondeterministic current-frame callback; existing
-StatefulSequential admission guards remain. This does not qualify ordered
-continuity, real plugins or dynamic native image requests.
-
-The existing EvaluationWorkingSet now owns the original pre-DSP preparation
-across retries: its canonical closure retains program, placement and each
-originating FrameExecutionRequest; its source results retain acquired frame
-leases. Ready evaluations and partial preparations share the existing four
-physical slots, with speculative preparations evicted first. This introduces
-neither another producer nor another cross-frame cache.
-
-Producer completion releases only the outstanding exact wait, keeping acquired
-inputs and complete dependency identity. Admission retries and title waits remain
-retryable; shared demands are queried once per pass. Degraded media is queried
-again so a full-quality upgrade is not frozen out. Generation/session changes,
-priority rebinding and existing cleanup retire preparation owners. Replacing an
-active CPU/graph grant releases partial inputs immediately; optional cache trims
-alone do not replace that authority. Retained title pixels count against the
-existing active CPU grant; media leases remain charged by Frame Store.
-
-The original cancellation token and absolute deadline survive payload mapping
-and Export backend lowering. A resumed attempt cannot renew either; backend
-lowering cannot change evaluation position, intent or settings. A preparation
-can resume only before DSP starts. Unexpected Pending during graph execution
-fails closed instead of replaying partially executed processors.
-
-Regression controls reproduce starvation when the continuation is discarded,
-then verify retained media/title pixels, exact wakeup, combined capacity,
-retirement and cancellation/deadline refusal. The actual Runtime title worker
-also completes three 512x128 title sources at frame4 with a one-byte optional
-result-cache budget and reuses the completed evaluation. This qualifies that
-finite source-wait path, not native plugin CPU-job service binding, ordered
-stateful continuity, allocation/RT performance or third-party Temporal support.
-
-The Preview CPU-job integration separates reusable semantic Clip input plans
-from actual-job generation, continuity and cancellation. Prepared routes carry
-the original program, placement, evaluation grid and raster contract. Ordinary
-CPU fallback and Broker CPU-prefix execution bind that plan only while the
-original Control exclusively lends its service; checkpoint, sticky stop,
-feedback and outer context survive the loan and unwind. No factory retains its
-own program, source service or another Session.
-
-Factories explicitly declare additional-input use. That declaration is frozen,
-included in complete/subtree identity and checked against later provider drift.
-Such output is uncacheable until complete dynamic dependencies can be proven;
-ordinary current-frame callbacks retain their existing policy. Canonical Solid
-samples and exact current-image aliases retain their conservative materializer.
-Missing history never substitutes the current image.
-
-For historical media, Frame Store admission attaches the originating complete
-media key to the decoded allocation. The job freezes that key by exact Clip
-placement, including transition endpoints. Retargeting changes only the source
-sample: file/stream fingerprint, proxy representation, RAW/field interpretation,
-alpha and input-color preparation remain unchanged. Requests must match the
-original program's canonical source; changed raw interpretation and unsupported
-nested sources are refused explicitly rather than reopened from current assets.
-
-The two existing serial CPU domains send move-only source requests through their
-existing result channels. Runtime admits them through the ordinary media
-scheduler and Frame Store. Each invocation retains partial exact Ready leases
-across admission retries; producer waits use the existing notifier. The queue
-holds at most one wait per CPU domain, with at most 256 distinct source keys per
-batch. A live processor waits with its original Control and scoped deadline,
-without replaying DSP. Generation/session retirement and shutdown cancel the
-original domains before dropping replies and partial source leases; decoder
-joins cannot wait on frames retained only by this queue.
-
-Historical working conversion uses the decoded allocation's existing,
-already-budgeted OnceLock and a temporary uncached color Session. It neither
-reborrows the compositor's active color Session nor retains another pixel cache
-or processor bank. Aggregating additional per-source color-stage diagnostics
-and measuring this conversion overhead remain open.
-
-The two-group Preview source gate exercises an actual two-frame FFmpeg file through
-ordinary CPU and Broker-prefix jobs, exact historical pixels after upstream
-processing, one DSP entry, generation cancellation, caller expiry, shutdown and
-partial-Ready physical lease release. Existing Solid/service tests and six native
-OFX calibrations also pass. Broker completion in the new source test is a CPU
-frontier/lease check, with no actual GPU suffix rendering.
-
-Export now lends source service to ordinary CPU composition and the heterogeneous
-CPU prefix on the existing job Session. Semantic plans come from the original
-program/placement and `PreparedVisualFrameEvaluation::execution_request`, not a
-new request reconstructed from the current frame. Transition endpoints retain
-their original placement; dedicated transition acceptance remains open. The
-heterogeneous route carries the same plan through its lowered identity graph.
-Its CPU prefix uses one Control for the source loan and upstream processing.
-The existing GPU continuation observes the original job cancellation;
-observation and instance ownership stay with the job.
-
-Planned and late media use one immutable decode-request lowering. Current cache
-hits and GPU capability negotiation preserve their existing order. Late source
-work borrows the frozen dependency map, original decoder context and existing
-cache read-only. Extra history never accumulates in that cache. A temporary
-uncached color Session avoids reborrowing the active compositor. Actual extra
-color-resolution counts and stage diagnostics join the existing job diagnostics.
-Metadata preflight admits total retained tile coverage plus one conservative
-decode/alpha/color host-pixel peak before allocation; each decoded working source
-is released after its tile is copied. The ceiling is four Float32 RGBA buffers
-per source pixel; decoder/SDK internal heaps and measured overhead are not
-qualified by that reservation. Demand metadata is limited to 256 entries.
-
-Five Export groups qualify real FFmpeg history after upstream processing,
-one DSP entry, caller cancellation, dynamic budget refusal, owner release, and
-an actual GPU-F32-only suffix with positive upload/readback and completion
-evidence. Three formal RenderQueue jobs publish 16x16 PNG controls/history from
-a two-frame source. Completed status, manifests and independently decoded PNG
-pixels prove that current differs and history matches the original upstream
-output. The test snapshots use the selected probe's exact stream, picture and
-color diagnostics; normal author-state and immutable-evidence guards remain.
-
-Windows affected gates pass App 3,144/213 ignored, Renderer 688/39 ignored and
-Export 305/20 (4,137 passed, 272 ignored; App validation opt0/debug0,
-Renderer/Export validation opt1/debug0). Effects 390 retain their preceding
-opt1/debug0 qualification. The Export temporal
-cases prove real FFmpeg historical pixels after a finite upstream blend and
-mid-invocation cancellation, one reader DSP entry and complete owner release.
-Two Effects regressions exercise an actual finite temporal prefix, nested source
-requests on reused instances, changing sources with an unchanged root provider,
-caller feedback/deadline restoration and sticky cancel/expiry. All gates settle
-with exit0/stderr0 under unchanged budgets; App/Renderer/Export test targets also
-compile. The preceding formal PNG/GPU checks
-and the Media/native OFX cohort retain their earlier conditions; they are
-not new full reruns.
-
-The shared preplanned temporal entry now accepts the original Control. The
-standalone entry delegates to that same engine with its unobserved Control;
-there is still one Session, processor bank and working grant. A borrowed dynamic
-source service bypasses both lookup and publication of input-only pixel caches.
-Deadline, checkpoint, sticky stop and caller feedback cross the time-expanded
-execution unchanged. Export binds that entry to its original request, placement,
-decoder context and read-only cache through the existing source resolver.
-
-Preview now uses the existing visual worker. Merely lending Control to the
-synchronous materializer would still block UI on late media or replay DSP after
-Pending. Production therefore lends the complete source-ready immutable closure
-to the existing visual Broker/worker; root per-layer GPU lowering stays intact,
-including other GPU-only layers. The worker borrows its existing compositor bank
-and Control for temporal and nested CPU work; no graph or scheduler is replaced.
-Standalone validation can execute the same source-ready work inline.
-
-The bounded evaluation working set owns distinct Sources and Executing phases.
-Sources retains partial Ready leases; Executing only polls the same owned work.
-Worker and result hold weak admission interest. Retirement cancels the original
-Broker binding without a payload-to-Broker ownership cycle or parent-generation
-cancellation. Raw keys match the frozen program, evaluation and raster, not only
-Clip placement; processed output never reconstructs those keys. Original stop,
-deadline and blocked feedback cross this handoff. Failed results also carry weak
-interest: retirement prevents publication and prunes stored observations;
-consumption removes the per-attempt failure key. A blocked processor keeps its
-Blocked disposition. Speculative work cannot displace current Viewer feedback.
-
-Windows ordinary regression passes Effects 390, Renderer 689, Export 307 and App
-3145; the existing 272 ignored cases remain excluded. Frozen-source checks and
-the original owned execution/cleanup budgets pass, with exit0, stderr0 and settled
-descendants. Actual FFmpeg Preview retains a 4x2 input plane in a 2x2 Sequence;
-Export covers fitted 2x1 and original Unit 3x5 inputs. The original complete
-history/lookahead wave and source-readiness assertions pass unchanged. Unit Media
-also proves original-domain output and reduced-sampling refusal before DSP.
-Exact time/seed/authority and actual-domain coverage checks pass.
-The ordinary no-validation development binary also builds at opt0/debug0.
-
-The worker controls retain one DSP call, Ready/Pending, retirement, generation,
-caller expiry, shutdown, bank release, blocking and failure retirement. Production
-acquire retains one evaluation and another GPU-only layer; this proves GPU
-lowering, not GPU submission. Existing nested canvas, cache invalidation and
-open-session separation assertions remain intact.
-
-This is finite Preview/Export source qualification. Transition source delivery,
-historical nested/title/stack inputs, native formats beyond the
-bounded coverage executor, all legal action/thread image requests and complete
-fielding still require implementation or acceptance. Reuse the existing Export
-temporal source and execution paths. Connect the dependency action to the same
-graph semantics, then verify real Temporal plugins, seek/loop, Preview/Export
-parity and performance before enabling temporal capabilities. No new release,
-whole-workspace, third-party Temporal, RT, GPU interop or platform qualification
-follows from these tests; temporal flags stay false.
-
-Native image loans are narrowed at every instance action dispatch. A recursive
-RoD or preference action cannot inherit its enclosing UserEdited callback's
-permission to fetch images. The suspended caller's existing images survive the
-metadata action; their release is checked at the caller's legal action boundary.
-Atomic permission reads cover joined plugin callbacks on worker threads within
-the serialized native invocation. This does not qualify overlapping independent
-actions, native Temporal processing or additional render-thread concurrency.
-Windows MSVC passes the reproducer after its original RED, fourteen native
-control groups, 125 ordinary App OFX tests (68 existing ignored), and six actual
-resident/service gates. The ordinary development product also rebuilds; no new
-release, performance or other-platform qualification follows.
+Earlier finite real-FFmpeg Preview/Export source and formal PNG/GPU-prefix
+qualification retain their original conditions; they are not new TimeBlur
+product-flow or GPU-interop evidence. Native General/Transition/Paint/Retimer,
+historical input variants above, variable domains, other formats/fielding,
+tiles/upstream RoI/non-unit scale, overlapping action/thread requests, more real
+Temporal plugins, full product seek/loop/save/export, GUI, comparative performance
+and other platforms remain open. F06/GL remain open; this does not establish
+universal100ms shutdown, whole-heap safety or realtime behavior.

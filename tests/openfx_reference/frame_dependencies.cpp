@@ -41,9 +41,8 @@ int exercise(const char* group, MondrianOpenFx::Host& host, const char* binaryPa
   frame.info.width = frame.info.height = 1;
   frame.info.frame_rate = 24; frame.info.first_frame = -1000; frame.info.last_frame = 1000;
   frame.info.pixel_aspect_ratio = 1;
-  // Production descriptor admission remains current-frame-only. Deliberately
-  // construct the fixture here to test the actual HostSupport action method,
-  // without advertising temporal support or providing a replacement Host.
+  // This protocol fixture tests the actual HostSupport action method directly;
+  // resident processing and graph-owned image delivery have separate controls.
   std::unique_ptr<Instance> instance(plugin->createInstance(kOfxImageEffectContextFilter, &frame));
   require(instance && instance->createInstanceAction() == kOfxStatOK, "actual native instance");
   auto* source = instance->getClip("Source");

@@ -156,7 +156,10 @@ impl EffectTemporalSpan {
     }
 }
 
-/// Past and future input demand for one output instant.
+/// Statically expanded past and future input demand for one output instant.
+/// Invocation-dependent Definition input is separately declared by the processor
+/// factory's `requires_input_service`; it uses that borrowed service and cannot
+/// use a current-image-only cache identity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct EffectTemporalInputExtent {
     /// Required history before the output instant.
@@ -166,7 +169,8 @@ pub struct EffectTemporalInputExtent {
 }
 
 impl EffectTemporalInputExtent {
-    /// Current-frame-only execution.
+    /// No statically expanded demand outside the current instant. This does not
+    /// authorize late input access without the factory's explicit service binding.
     pub const CURRENT_FRAME: Self = Self {
         past: EffectTemporalSpan::None,
         future: EffectTemporalSpan::None,

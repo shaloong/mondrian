@@ -230,8 +230,8 @@ int mondrian_openfx_session_render(
 #endif
     ;
 
-// Same execution/owner as session_render; no capability or temporal admission
-// change. The complete array and every pixel backing outlive the native call.
+// Same execution/owner as session_render. Temporal input must be declared by the
+// effect and Clip; array/backings outlive this call. No source address is retained.
 int mondrian_openfx_session_render_sources(
     struct MondrianOpenFxSession* session, const void* input, void* output,
     size_t frame_bytes, const struct MondrianOpenFxFrameInfo* frame_info,

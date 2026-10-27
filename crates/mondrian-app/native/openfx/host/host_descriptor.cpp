@@ -79,7 +79,9 @@ namespace MondrianOpenFx
     _properties.setIntProperty(kOfxImageEffectPropSupportsOverlays, 0);
     _properties.setIntProperty(kOfxImageEffectPropSupportsMultiResolution, 1);
     _properties.setIntProperty(kOfxImageEffectPropSupportsTiles, false);
-    _properties.setIntProperty(kOfxImageEffectPropTemporalClipAccess, false);
+    // Source images are resolved inside the current invocation by the original
+    // graph owner. Output remains current-time and ordered effects are refused.
+    _properties.setIntProperty(kOfxImageEffectPropTemporalClipAccess, true);
     _properties.setStringProperty(kOfxImageEffectPropSupportedComponents, kOfxImageComponentRGBA, 0);
     _properties.setStringProperty(kOfxImageEffectPropSupportedPixelDepths, kOfxBitDepthFloat, 0);
     _properties.createProperty({kOfxImageEffectPropCPURenderSupported,

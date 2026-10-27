@@ -1,7 +1,7 @@
 // Copyright Mondrian contributors.
 // SPDX-License-Identifier: BSD-3-Clause
-// Deliberately a transport calibration fixture, NOT a conforming temporal
-// plugin: temporal admission remains disabled while the graph resolver is absent.
+// Native temporal/source-delivery fixture. Keep the independent pixel,
+// concurrent lease, cancellation and ownership oracles when extending it.
 #include "ofxCore.h"
 #include "ofxImageEffect.h"
 #include "ofxProperty.h"
@@ -13,6 +13,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <thread>
+#include <limits>
 
 namespace {
 OfxHost* host = nullptr;
@@ -57,6 +58,10 @@ struct Image {
     return reinterpret_cast<OfxRGBAColourF*>(reinterpret_cast<char*>(data) + (y - bounds[1])*row)[x - bounds[0]];
   }
 };
+struct Instance {
+  bool dependenciesPrepared = false;
+  double time = 0;
+};
 OfxStatus entry(const char* action, const void* raw, OfxPropertySetHandle in, OfxPropertySetHandle out) {
   try {
     if (!log(action)) { return kOfxStatFailed; }
@@ -70,10 +75,10 @@ OfxStatus entry(const char* action, const void* raw, OfxPropertySetHandle in, Of
     OfxPropertySetHandle props = nullptr;
     if (image->getPropertySet(handle, &props) != kOfxStatOK) { return kOfxStatErrBadHandle; }
     if (!std::strcmp(action, kOfxActionDescribe)) {
-      property->propSetString(props, kOfxPropLabel, 0, "Source delivery ABI calibration");
+      property->propSetString(props, kOfxPropLabel, 0, "Temporal source delivery probe");
       property->propSetString(props, kOfxImageEffectPropSupportedContexts, 0, kOfxImageEffectContextFilter);
       property->propSetString(props, kOfxImageEffectPropSupportedPixelDepths, 0, kOfxBitDepthFloat);
-      property->propSetInt(props, kOfxImageEffectPropTemporalClipAccess, 0, 0);
+      property->propSetInt(props, kOfxImageEffectPropTemporalClipAccess, 0, 1);
       return kOfxStatOK;
     }
     if (!std::strcmp(action, kOfxImageEffectActionDescribeInContext)) {
@@ -81,10 +86,49 @@ OfxStatus entry(const char* action, const void* raw, OfxPropertySetHandle in, Of
         OfxPropertySetHandle clip = nullptr;
         if (image->clipDefine(handle, name, &clip) != kOfxStatOK) { return kOfxStatFailed; }
         property->propSetString(clip, kOfxImageEffectPropSupportedComponents, 0, kOfxImageComponentRGBA);
+        property->propSetInt(clip, kOfxImageEffectPropTemporalClipAccess, 0,
+                            std::strcmp(name, "Source") == 0 ? 1 : 0);
       }
       return kOfxStatOK;
     }
-    if (!std::strcmp(action, kOfxActionCreateInstance) || !std::strcmp(action, kOfxActionDestroyInstance)) {
+    if (!std::strcmp(action, kOfxActionCreateInstance)) {
+      auto* instance = new Instance;
+      const auto status = property->propSetPointer(props, kOfxPropInstanceData, 0, instance);
+      if (status != kOfxStatOK) { delete instance; }
+      return status;
+    }
+    if (!std::strcmp(action, kOfxActionDestroyInstance)) {
+      void* pointer = nullptr;
+      if (property->propGetPointer(props, kOfxPropInstanceData, 0, &pointer) != kOfxStatOK) { return kOfxStatFailed; }
+      delete static_cast<Instance*>(pointer);
+      property->propSetPointer(props, kOfxPropInstanceData, 0, nullptr);
+      return kOfxStatOK;
+    }
+    if (!std::strcmp(action, kOfxImageEffectActionGetFramesNeeded)) {
+      void* pointer = nullptr;
+      double time = 0;
+      double initial[2]{};
+      if (property->propGetPointer(props, kOfxPropInstanceData, 0, &pointer) != kOfxStatOK || !pointer ||
+          property->propGetDouble(in, kOfxPropTime, 0, &time) != kOfxStatOK ||
+          property->propGetDoubleN(out, "OfxImageClipPropFrameRange_Source", 2, initial) != kOfxStatOK ||
+          initial[0] != time || initial[1] != time) { return kOfxStatFailed; }
+      OfxImageClipHandle source = nullptr;
+      OfxPropertySetHandle forbidden = nullptr;
+      if (image->clipGetHandle(handle, "Source", &source, nullptr) != kOfxStatOK ||
+          image->clipGetImage(source, time, nullptr, &forbidden) != kOfxStatFailed || forbidden) {
+        if (forbidden) { image->clipReleaseImage(forbidden); }
+        return kOfxStatFailed;
+      }
+      const double ranges[] = {-1.5, -1.5, time, time, 2.25, 2.25};
+      const double invalid[] = {std::numeric_limits<double>::quiet_NaN(), time};
+      const bool bad = std::getenv("MONDRIAN_OPENFX_SOURCE_DELIVERY_BAD_DEPENDENCIES") != nullptr;
+      if (property->propSetDoubleN(out, "OfxImageClipPropFrameRange_Source",
+                                  bad ? 2 : 6, bad ? invalid : ranges) != kOfxStatOK) {
+        return kOfxStatFailed;
+      }
+      auto& instance = *static_cast<Instance*>(pointer);
+      instance.time = time;
+      instance.dependenciesPrepared = true;
       return kOfxStatOK;
     }
     if (!std::strcmp(action, kOfxImageEffectActionGetRegionOfDefinition)) {
@@ -92,11 +136,16 @@ OfxStatus entry(const char* action, const void* raw, OfxPropertySetHandle in, Of
       return property->propSetDoubleN(out, kOfxImageEffectPropRegionOfDefinition, 4, rod);
     }
     if (std::strcmp(action, kOfxImageEffectActionRender)) { return kOfxStatReplyDefault; }
+    void* pointer = nullptr;
     OfxImageClipHandle source = nullptr, output = nullptr;
     double time = 0;
-    if (property->propGetDouble(in, kOfxPropTime, 0, &time) != kOfxStatOK ||
+    if (property->propGetPointer(props, kOfxPropInstanceData, 0, &pointer) != kOfxStatOK || !pointer ||
+        property->propGetDouble(in, kOfxPropTime, 0, &time) != kOfxStatOK ||
         image->clipGetHandle(handle, "Source", &source, nullptr) != kOfxStatOK ||
         image->clipGetHandle(handle, "Output", &output, nullptr) != kOfxStatOK) { return kOfxStatFailed; }
+    auto& instance = *static_cast<Instance*>(pointer);
+    if (!instance.dependenciesPrepared || instance.time != time) { return kOfxStatFailed; }
+    instance.dependenciesPrepared = false;
     Image current, past, future, result;
     if (!current.fetch(source, time, {0, 0, 3, 2}) ||
         !result.fetch(output, time, {-1, -1, 4, 3})) { return kOfxStatFailed; }
