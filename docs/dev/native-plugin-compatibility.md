@@ -118,7 +118,7 @@ Shared auxiliary-input layouts, 2026-10-27: finite Windows owned controls verify
 Mono/Stereo Main with simultaneous Mono/Stereo and unconnected silent inputs,
 two-route summing, PDC, target-time gain automation, partitioning and seek in
 both modes/backends, in-process and through actual generic child processing.
-All 883 ordinary Audio controls pass (194 conditional ignored, zero filtered,
+All 883 ordinary Audio controls pass (195 conditional ignored, zero filtered,
 empty stderr). IPC22 has independent region/overflow, exact shared-byte fee and
 old/future-version rejection controls. The two original CLAP/VST3 native
 sidechain gates also pass with the matching rebuilt normal Product and original
@@ -132,6 +132,17 @@ sound, realtime/performance and other platforms remain unqualified. See the
 [shared contract](../adr/0003-compile-audio-authoring-for-execution.md) and
 [owned PCM controls](../../crates/mondrian-audio/src/tests/mixed_auxiliary_inputs.rs) and
 [native CLAP controls](../../crates/mondrian-audio/src/processor_isolation/tests/native_clap_mixed_inputs.rs).
+
+ZamCompX2 4.5 official Windows64 CLAP: List succeeds, but the processing Probe
+refuses input0 (Main, two channels, unspecified type). This legal CLAP arbitrary
+audio type lacks an explicit mapping in the current host; it is not evidence of
+a plugin violation. The pinned [DPF adapter source](https://github.com/DISTRHO/DPF/blob/461ea6d45d842d273ae4d53ad5490e43459419cc/distrho/src/DistrhoPluginCLAP.cpp)
+does not implement port-configuration extensions. The
+[positive qualification gate](../../crates/mondrian-audio/src/processor_isolation/tests/native_clap_mixed_vendor.rs)
+remains ignored and currently fails at that boundary; its later state/PCM
+assertions are unattempted. No unchanged retry or layout-inference workaround.
+The separate GPL-2.0-or-later test binary and license are local materials only;
+the release ZIP was discarded.
 
 OpenFX owner project geometry now has finite Windows CPU qualification:
 SessionProbe checks project10x7/PAR2 independently of image3x5, Direct image

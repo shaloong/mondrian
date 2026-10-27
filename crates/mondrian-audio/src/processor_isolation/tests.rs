@@ -14,6 +14,10 @@ const CHILD_TEST_NAME: &str = "processor_isolation::tests::isolated_worker_child
 #[path = "tests/native_clap_mixed_inputs.rs"]
 mod native_clap_mixed_inputs;
 
+#[cfg(windows)]
+#[path = "tests/native_clap_mixed_vendor.rs"]
+mod native_clap_mixed_vendor;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TestBehavior {
     Normal,
