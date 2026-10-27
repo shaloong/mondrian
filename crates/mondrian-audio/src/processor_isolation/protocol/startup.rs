@@ -204,7 +204,7 @@ mod tests {
     fn metadata(raw_bytes: usize) -> PrepareWire {
         PrepareWire {
             musical_time_reference: None,
-            schema_version: 24,
+            schema_version: 25,
             native_lane: NativeWorkerLaneWire::Inline {},
             nonce: "same-startup-nonce".into(),
             payload_bytes: raw_bytes as u64,
@@ -266,7 +266,7 @@ mod tests {
             assert_eq!(body_length, serde_json::to_vec(&metadata).unwrap().len());
             assert_eq!(&stream[4 + body_length..], payload);
             let ready = ReadyWire {
-                schema_version: 24,
+                schema_version: 25,
                 result: ReadyResultWire::Rejected { detail: "alignment-only".into() },
             };
             write_json_frame(&mut stream, &ready).unwrap();
@@ -348,7 +348,7 @@ mod tests {
     fn startup_raw_validates_current_version_nonce_and_mandatory_shape_before_payload_phase() {
         let good = metadata(256);
         for version in [
-            8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 25,
+            8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 26,
         ] {
             let mut old = good.clone();
             old.schema_version = version;

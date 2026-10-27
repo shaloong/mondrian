@@ -2162,6 +2162,18 @@ impl IsolatedAudioProcessorWorker for ClapWorker {
         self.configuration_phase = Phase::issued(&candidate);
         Ok(Outcome::ReadyForInstall(candidate))
     }
+    fn staged_clap_audio_input_buffers(&mut self) -> Option<super::ClapAudioInputBufferReceipt> {
+        use super::native_configuration_control::NativeConfigurationPhase as Phase;
+        let staged = self.staged_audio_inputs.as_ref()?;
+        if !matches!(&self.configuration_phase, Phase::AudioInputsStaged(p) if *p == staged.receipt.request.proposal)
+            || self.processor.is_some()
+            || self.instance.inactive_plugin_handle().is_none()
+        {
+            return None;
+        }
+        Some(staged.receipt)
+    }
+
     fn stage_clap_audio_input_buffers(
         &mut self,
         request: super::ClapAudioInputBufferRequest,

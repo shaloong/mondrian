@@ -11,6 +11,7 @@ pub(crate) struct ReprepareSelection {
     pub(crate) object: crate::NativeAudioObjectObservation,
     pub(crate) cohort: crate::NativeRequestCohort,
     pub(crate) constants: Vec<Option<f64>>,
+    pub(crate) auxiliary_output_count: usize,
 }
 
 // One real inline capacity slot per Hosted occurrence. Existing metadata
@@ -171,7 +172,14 @@ impl PreparedProcessorHost {
         if cancellation.is_canceled() {
             return Err(Error::Cancelled);
         }
-        Ok(ReprepareSelection { index, lease, object, cohort, constants })
+        Ok(ReprepareSelection {
+            index,
+            lease,
+            object,
+            cohort,
+            constants,
+            auxiliary_output_count: prepared.factory.auxiliary_outputs.buses.len(),
+        })
     }
 
     pub(crate) fn service_native_reprepare(
@@ -222,6 +230,25 @@ impl PreparedProcessorHost {
         }
         Ok(isolate_adapter_call("native input buffer stage", || {
             instance.processor.stage_clap_audio_input_buffers(request)
+        })?)
+    }
+    pub(crate) fn stage_native_reprepare_audio_input_mapping(
+        &mut self,
+        selected: &ReprepareSelection,
+        request: crate::ClapAudioInputMappingRequest,
+    ) -> Result<crate::ClapAudioInputMappingOutcome, Error> {
+        let instance = self
+            .instances
+            .get_mut(selected.index)
+            .ok_or(Error::Admission("input stage Hosted index changed"))?;
+        if request.buffers.request.proposal.observed_cohort != selected.cohort
+            || !matches!(instance.native_binding, NativeHostedBinding::Installed { lease, object }
+                if lease == selected.lease && object == selected.object)
+        {
+            return Err(Error::Admission("input stage original owner changed"));
+        }
+        Ok(isolate_adapter_call("native input mapping stage", || {
+            instance.processor.stage_clap_audio_input_mapping(request)
         })?)
     }
 }

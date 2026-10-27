@@ -163,6 +163,8 @@ enum CapturePhase {
     InputConfigurationObserved,
     InputBuffersStageAttempted,
     InputBuffersStaged,
+    InputMappingStageAttempted,
+    InputMappingStaged,
     Captured,
     Preparing,
     Prepared,
@@ -200,6 +202,7 @@ pub(super) struct NativeReprepareAttempt {
     candidate: Option<crate::NativeConfigurationCandidate>,
     input_proposal: Option<crate::ClapAudioInputProposal>,
     input_buffer_receipt: Option<crate::ClapAudioInputBufferReceipt>,
+    input_mapping_receipt: Option<crate::ClapAudioInputMappingReceipt>,
     phase: CapturePhase,
     // Reserved before foreign work. An unexpectedly larger actual owner raises
     // this held charge even on refusal; no handle Drop can release it.
@@ -515,6 +518,7 @@ impl AudioProgramRuntime {
             candidate: None,
             input_proposal: None,
             input_buffer_receipt: None,
+            input_mapping_receipt: None,
             phase: CapturePhase::Servicing,
             held_fixed_bytes: reserved,
             control_grant,
@@ -668,6 +672,8 @@ impl AudioProgramRuntime {
                 CapturePhase::InputConfigurationObserved
                     | CapturePhase::InputBuffersStageAttempted
                     | CapturePhase::InputBuffersStaged
+                    | CapturePhase::InputMappingStageAttempted
+                    | CapturePhase::InputMappingStaged
                     | CapturePhase::Failed
             )
             || self.native_author_installation_serial()? != attempt.serial
@@ -680,6 +686,96 @@ impl AudioProgramRuntime {
             .input_proposal
             .as_ref()
             .ok_or(Error::Admission("native input proposal unavailable"))
+    }
+
+    /// Stage both transport mappings under the original Root grant. Their
+    /// geometry stays private until later activation and graph installation.
+    pub fn stage_native_reprepare_audio_input_mapping(
+        &mut self,
+        ticket: crate::AudioProcessorReprepareTicket,
+        cancellation: &ExecutionCancellationToken,
+    ) -> Result<crate::ClapAudioInputMappingReceipt, NativeAudioReprepareError> {
+        use NativeAudioReprepareError as Error;
+        if cancellation.is_canceled() {
+            return Err(Error::Cancelled);
+        }
+        self.native_reprepare_audio_input_proposal(ticket)?;
+        let attempt = self.native_reprepare.attempt.as_ref().unwrap();
+        if attempt.phase != CapturePhase::InputBuffersStaged {
+            return Err(Error::Admission(
+                "input mappings already attempted or native buffers unavailable",
+            ));
+        }
+        let buffers = attempt
+            .input_buffer_receipt
+            .ok_or(Error::Admission("native input receipt unavailable"))?;
+        let mut request = crate::ClapAudioInputMappingRequest {
+            buffers,
+            channel_layout: self.session.contract().channel_layout,
+            parameter_lane_count: attempt.selection.constants.len(),
+            auxiliary_output_count: attempt.selection.auxiliary_output_count,
+            mapping_grant_bytes: 0,
+        };
+        let bytes = crate::processor_isolation::clap_audio_input_mapping_reservation(request)
+            .ok_or(AudioRuntimeBuildError::InvalidResourceReplacement)?;
+        request.mapping_grant_bytes = bytes;
+        let shared = crate::processor_isolation::clap_audio_input_mapping_shared_bytes(request)
+            .ok_or(AudioRuntimeBuildError::InvalidResourceReplacement)?;
+        let fixed =
+            check_input_buffer_overlap(self.resource_footprint, self.resource_grant, bytes)?;
+        let attempt = self.native_reprepare.attempt.as_mut().unwrap();
+        let held = add(attempt.held_fixed_bytes, bytes)?;
+        attempt.held_fixed_bytes = held;
+        attempt.phase = CapturePhase::InputMappingStageAttempted;
+        self.resource_footprint.fixed_resident_bytes = fixed;
+        let result = self
+            .session
+            .stage_native_reprepare_audio_input_mapping(&attempt.selection, request);
+        let attempt = self.native_reprepare.attempt.as_mut().unwrap();
+        let receipt = match result {
+            Ok(crate::ClapAudioInputMappingOutcome::Staged(receipt)) => {
+                attempt.input_mapping_receipt = Some(receipt);
+                let actual = receipt.parent_owner_bytes.saturating_add(receipt.child_owner_bytes);
+                if actual > bytes {
+                    let extra = actual - bytes;
+                    attempt.held_fixed_bytes = attempt.held_fixed_bytes.saturating_add(extra);
+                    self.resource_footprint.fixed_resident_bytes =
+                        self.resource_footprint.fixed_resident_bytes.saturating_add(extra);
+                }
+                if receipt.request != request
+                    || receipt.shared_bytes != shared
+                    || receipt.parent_owner_bytes < shared
+                    || receipt.parent_owner_bytes > bytes / 2
+                    || receipt.child_owner_bytes < shared
+                    || receipt.child_owner_bytes > bytes / 2
+                {
+                    attempt.phase = CapturePhase::Failed;
+                    return Err(Error::Admission(
+                        "input mapping receipt exceeded exact admission",
+                    ));
+                }
+                attempt.phase = CapturePhase::InputMappingStaged;
+                receipt
+            }
+            Ok(crate::ClapAudioInputMappingOutcome::Refused(refusal)) => {
+                attempt.phase = CapturePhase::Failed;
+                return Err(Error::Capability(refusal));
+            }
+            Err(error) => {
+                attempt.phase = CapturePhase::Failed;
+                return Err(error);
+            }
+        };
+        let serial = attempt.serial;
+        if cancellation.is_canceled() {
+            return Err(Error::Cancelled);
+        }
+        if self.native_author_installation_serial()? != serial {
+            return Err(Error::Admission(
+                "Source changed while input mappings were staged",
+            ));
+        }
+        Ok(receipt)
     }
 
     /// Non-RT resource staging on the original stopped child. This does not

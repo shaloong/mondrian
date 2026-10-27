@@ -43,6 +43,9 @@ pub(super) struct SupervisedAudioWorker {
     shared: MmapMut,
     _shared_file: NamedTempFile,
     layout: SharedBlockLayout,
+    render_contract: AudioRenderContract,
+    staged_audio_input_mapping:
+        Option<Box<super::clap_audio_input_mapping::StagedClapInputMapping>>,
     operation_timeout: Duration,
     state_entry_timeout: Duration,
     configured_control_timeout: Option<Duration>,
@@ -516,6 +519,8 @@ impl SupervisedAudioWorker {
                 shared,
                 _shared_file: shared_file,
                 layout,
+                render_contract: contract,
+                staged_audio_input_mapping: None,
                 operation_timeout: spec.operation_timeout,
                 state_entry_timeout: spec.state_entry_timeout,
                 configured_control_timeout: Some(spec.operation_timeout),
@@ -1077,6 +1082,94 @@ impl SupervisedAudioWorker {
         })();
         match result {
             Ok(outcome) => Ok(outcome),
+            Err(error) => {
+                let classified = self.classify_operation_io(operation, error);
+                self.terminate();
+                Err(classified)
+            }
+        }
+    }
+
+    pub(super) fn stage_clap_audio_input_mapping(
+        &mut self,
+        request: super::ClapAudioInputMappingRequest,
+    ) -> Result<super::ClapAudioInputMappingOutcome, AudioProcessorHostError> {
+        use super::clap_audio_input_mapping::{wire, StagedClapInputMapping};
+        use super::{
+            ClapAudioInputMappingOutcome as Outcome, NativeConfigurationRefusal as Refusal,
+        };
+        let operation = "CLAP input mapping stage";
+        if self.process.state != ProcessState::Running {
+            return Err(AudioProcessorHostError::PoisonedInstance);
+        }
+        if self.staged_audio_input_mapping.is_some() {
+            return Ok(Outcome::Refused(Refusal::AwaitingInstallation));
+        }
+        // These admitted context facts remain frozen, independently of the
+        // caller's proposal. The native owner checks the exact buffer receipt.
+        if request.channel_layout != self.render_contract.channel_layout
+            || request.buffers.request.max_block_frames != self.render_contract.max_block_frames
+            || request.parameter_lane_count.checked_mul(self.render_contract.max_block_frames)
+                != Some(self.layout.event_capacity)
+            || request.auxiliary_output_count.checked_mul(self.layout.main_samples)
+                != Some(self.layout.auxiliary_outputs_samples)
+            || self.layout.note_event_capacity != 0
+            || self.layout.note_end_capacity != 0
+        {
+            return Ok(Outcome::Refused(Refusal::MetadataChanged));
+        }
+        let directory = self
+            ._shared_file
+            .path()
+            .parent()
+            .ok_or_else(|| invalid_contract("original shared directory unavailable"))?;
+        let staged = StagedClapInputMapping::create_parent(request, directory)?;
+        let parent_bytes = staged
+            .known_bytes()
+            .ok_or_else(|| invalid_contract("input mapping parent extent overflow"))?;
+        let path = staged
+            .path()
+            .and_then(|p| p.to_str())
+            .ok_or_else(|| invalid_contract("input mapping path is not UTF-8"))?;
+        wire::validate_request(request, path, parent_bytes)
+            .map_err(|e| invalid_contract(&e.to_string()))?;
+        // Adopt before any command can reach the child. A lost reply never
+        // releases these still-live owners or permits an implicit retry.
+        self.staged_audio_input_mapping = Some(staged);
+        if let Err(error) = self.configure_control_timeout(self.state_entry_timeout) {
+            self.terminate();
+            return Err(worker_failed(operation, error));
+        }
+        let result = (|| -> io::Result<_> {
+            let staged = self.staged_audio_input_mapping.as_ref().unwrap();
+            let path = staged
+                .path()
+                .and_then(|p| p.to_str())
+                .ok_or_else(|| io::Error::other("staged path unavailable"))?;
+            WorkerCommand {
+                transport_activity: None,
+                kind: super::protocol::CommandKind::StageClapAudioInputMapping,
+                start_sample: 0,
+                frames: 0,
+                event_count: 0,
+                note_count: 0,
+            }
+            .write_to(&mut self.control)?;
+            wire::write_request(&mut self.control, request, path, parent_bytes)?;
+            wire::read_reply(&mut self.control, request, parent_bytes)
+        })();
+        match result {
+            Ok(outcome) => {
+                if matches!(outcome, Outcome::Staged(_)) {
+                    if let Err(error) =
+                        self.staged_audio_input_mapping.as_mut().unwrap().verify_child_backing()
+                    {
+                        self.terminate();
+                        return Err(error);
+                    }
+                }
+                Ok(outcome)
+            }
             Err(error) => {
                 let classified = self.classify_operation_io(operation, error);
                 self.terminate();
@@ -1942,6 +2035,16 @@ mod control_timeout_worker_lifecycle {
             shared,
             _shared_file: shared_file,
             layout,
+            render_contract: AudioRenderContract {
+                sample_rate: 48000,
+                channel_layout: mondrian_core::AudioChannelLayout::Stereo,
+                processing_mode: crate::AudioProcessingMode::Offline,
+                max_block_frames: 4,
+                processor_session_scratch_budget_bytes: 1024,
+                public_output_lookahead_budget_frames: 0,
+                compensation_delay_scratch_budget_bytes: 0,
+            },
+            staged_audio_input_mapping: None,
             operation_timeout: operation,
             state_entry_timeout: Duration::from_secs(30),
             configured_control_timeout: None,

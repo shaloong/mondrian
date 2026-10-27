@@ -119,7 +119,7 @@ pub(super) fn run_worker(
     // SAFETY: the parent created and retains this exact fixed-size file. The
     // Worker validates the independently computed layout and file extent before
     // creating any typed view, and never resizes the mapping.
-    let mut shared = unsafe { MmapOptions::new().len(layout.total_bytes).map_mut(&shared_file) }
+    let shared = unsafe { MmapOptions::new().len(layout.total_bytes).map_mut(&shared_file) }
         .map_err(|error| worker_failed("startup", error))?;
     let ready = ReadyWire {
         schema_version: PROTOCOL_VERSION,
@@ -132,38 +132,33 @@ pub(super) fn run_worker(
             input_names,
         },
     };
-    let context = WorkerProcessContext {
+    let mut io = WorkerAudioIo {
+        shared,
+        _shared_file: shared_file,
+        shared_path,
+        staged_mapping: None,
         musical_time_reference: prepare.musical_time_reference,
         layout,
-        auxiliary_inputs: &auxiliary_inputs,
-        auxiliary_outputs: &auxiliary_outputs,
-        note_input_contract: &prepare.note_input_contract,
-        parameter_ids: &prepare.parameter_ids,
+        auxiliary_inputs,
+        auxiliary_outputs,
+        note_input_contract: prepare.note_input_contract,
+        parameter_ids: prepare.parameter_ids,
         render_contract,
     };
     let result = if processor.uses_native_processing_split() {
-        run_native_command_service(
-            processor.as_mut(),
-            &mut control,
-            &mut shared,
-            context,
-            &ready,
-        )
+        run_native_command_service(processor.as_mut(), &mut control, &mut io, &ready)
     } else {
         (|| {
             write_json_frame(&mut control, &ready)
                 .map_err(|error| worker_failed("startup", error))?;
             loop {
-                let command = super::native_worker_command::decode(
-                    &mut control,
-                    prepare.parameter_ids.len(),
-                )?;
-                if !dispatch_native_owner_command(
+                let command =
+                    super::native_worker_command::decode(&mut control, io.parameter_ids.len())?;
+                if !dispatch_native_owner_with_io(
                     processor.as_mut(),
                     command,
                     &mut control,
-                    &mut shared,
-                    context,
+                    &mut io,
                 )? {
                     break Ok(());
                 }
@@ -194,6 +189,131 @@ pub(super) struct WorkerProcessContext<'a> {
     pub(super) note_input_contract: &'a crate::AudioProcessorNoteInputContract,
     pub(super) parameter_ids: &'a [mondrian_core::ParameterId],
     pub(super) render_contract: AudioRenderContract,
+}
+
+// Sole ownership of the current mapping and its matching interpretation. A DSP
+// scope borrows both together; owner commands run only after that scope joins.
+struct WorkerAudioIo {
+    shared: memmap2::MmapMut,
+    _shared_file: std::fs::File,
+    shared_path: std::path::PathBuf,
+    staged_mapping: Option<Box<super::clap_audio_input_mapping::StagedClapInputMapping>>,
+    musical_time_reference: Option<mondrian_core::MusicalTimeReference>,
+    layout: SharedBlockLayout,
+    auxiliary_inputs: crate::AudioProcessorAuxiliaryInputContract,
+    auxiliary_outputs: crate::AudioProcessorAuxiliaryOutputContract,
+    note_input_contract: crate::AudioProcessorNoteInputContract,
+    parameter_ids: Vec<mondrian_core::ParameterId>,
+    render_contract: AudioRenderContract,
+}
+
+impl WorkerAudioIo {
+    fn parts(&mut self) -> (&mut [u8], WorkerProcessContext<'_>) {
+        (
+            &mut self.shared,
+            WorkerProcessContext {
+                musical_time_reference: self.musical_time_reference,
+                layout: self.layout,
+                auxiliary_inputs: &self.auxiliary_inputs,
+                auxiliary_outputs: &self.auxiliary_outputs,
+                note_input_contract: &self.note_input_contract,
+                parameter_ids: &self.parameter_ids,
+                render_contract: self.render_contract,
+            },
+        )
+    }
+}
+
+fn dispatch_native_owner_with_io(
+    processor: &mut dyn IsolatedAudioProcessorWorker,
+    command: super::native_worker_command::NativeCommand,
+    control: &mut TcpStream,
+    io: &mut WorkerAudioIo,
+) -> Result<bool, AudioProcessorHostError> {
+    if let super::native_worker_command::NativeCommand::StageClapAudioInputMapping(request) =
+        command
+    {
+        use super::clap_audio_input_mapping::wire;
+        admit_native_control_storage(
+            processor,
+            crate::NativeHostBufferLayout { bytes: request.path.capacity(), alignment: 1 },
+            crate::NativeHostBufferLayout { bytes: 0, alignment: 1 },
+        )?;
+        let result = catch_unwind(AssertUnwindSafe(|| io.stage_mapping(processor, request)));
+        return match result {
+            Ok(Ok(outcome)) => {
+                wire::write_reply(control, outcome)
+                    .map_err(|e| worker_failed("input mapping reply", e))?;
+                Ok(true)
+            }
+            Ok(Err(error)) => {
+                wire::write_failed(control, &error.to_string())
+                    .map_err(|e| worker_failed("input mapping failure reply", e))?;
+                Err(error)
+            }
+            Err(_) => {
+                wire::write_failed(control, "input mapping stage panicked")
+                    .map_err(|e| worker_failed("input mapping panic reply", e))?;
+                Err(worker_failed("input mapping stage", "owner panicked"))
+            }
+        };
+    }
+    let (shared, context) = io.parts();
+    dispatch_native_owner_command(processor, command, control, shared, context)
+}
+
+impl WorkerAudioIo {
+    fn stage_mapping(
+        &mut self,
+        processor: &mut dyn IsolatedAudioProcessorWorker,
+        owned: super::clap_audio_input_mapping::wire::OwnedRequest,
+    ) -> Result<super::ClapAudioInputMappingOutcome, AudioProcessorHostError> {
+        use super::{
+            ClapAudioInputMappingOutcome as Outcome, NativeConfigurationRefusal as Refusal,
+        };
+        let request = owned.request;
+        if self.staged_mapping.is_some() {
+            return Ok(Outcome::Refused(Refusal::AwaitingInstallation));
+        }
+        if processor.staged_clap_audio_input_buffers() != Some(request.buffers)
+            || processor.native_configuration_cohort()
+                != Some(request.buffers.request.proposal.observed_cohort)
+            || request.buffers.request.max_block_frames != self.render_contract.max_block_frames
+            || request.channel_layout != self.render_contract.channel_layout
+            || request.parameter_lane_count != self.parameter_ids.len()
+            || request.auxiliary_output_count != self.auxiliary_outputs.buses.len()
+            || self.note_input_contract != crate::AudioProcessorNoteInputContract::default()
+        {
+            return Ok(Outcome::Refused(Refusal::MetadataChanged));
+        }
+        let directory = self
+            .shared_path
+            .parent()
+            .ok_or_else(|| invalid_contract("original shared directory unavailable"))?;
+        let staged = super::clap_audio_input_mapping::StagedClapInputMapping::open_child(
+            request,
+            std::path::Path::new(&owned.path),
+            directory,
+        )?;
+        let shared_bytes = staged.layout.total_bytes;
+        let child_owner_bytes = staged
+            .known_bytes()
+            .ok_or_else(|| invalid_contract("input mapping owner extent overflow"))?;
+        // Retain before callback postcheck. Neither the old DSP view nor its
+        // metadata is replaced, and failed/unconfirmed work cannot gain credit.
+        self.staged_mapping = Some(staged);
+        if processor.native_configuration_cohort()
+            != Some(request.buffers.request.proposal.observed_cohort)
+        {
+            return Ok(Outcome::Refused(Refusal::MetadataChanged));
+        }
+        Ok(Outcome::Staged(super::ClapAudioInputMappingReceipt {
+            request,
+            shared_bytes,
+            parent_owner_bytes: owned.parent_bytes,
+            child_owner_bytes,
+        }))
+    }
 }
 
 /// Successful actual Process completion carried through the existing DSP slot.
@@ -600,6 +720,7 @@ fn dispatch_native_owner_command(
                 | CommandKind::PollConfigurationCohort
                 | CommandKind::ServiceConfiguration
                 | CommandKind::StageClapAudioInputBuffers
+                | CommandKind::StageClapAudioInputMapping
                 | CommandKind::StageConfigurationSeed
                 | CommandKind::CommitConfigurationSeed
                 | CommandKind::PollNativeObservations
@@ -738,6 +859,9 @@ fn dispatch_native_owner_command(
                 .map_err(|error| worker_failed("configuration reply", error))?;
             Ok(success)
         }
+        NativeCommand::StageClapAudioInputMapping(_) => Err(invalid_contract(
+            "input mapping command requires the actual transport owner",
+        )),
         NativeCommand::StageClapAudioInputBuffers(request) => {
             use super::clap_audio_input_buffers::wire;
             match catch_unwind(AssertUnwindSafe(|| {
@@ -792,7 +916,7 @@ fn dispatch_native_owner_command(
 /// Admit actual simultaneous host-owned payloads against the one known lane request.
 /// Native/private plugin memory and error Strings remain separate declared frontiers.
 fn admit_native_control_storage(
-    processor: &dyn IsolatedAudioProcessorWorker,
+    processor: &mut dyn IsolatedAudioProcessorWorker,
     decoded_input: crate::NativeHostBufferLayout,
     reply_storage: crate::NativeHostBufferLayout,
 ) -> Result<(), AudioProcessorHostError> {
@@ -993,8 +1117,7 @@ fn admit_native_main_role(
 fn run_native_command_service(
     processor: &mut dyn IsolatedAudioProcessorWorker,
     control: &mut TcpStream,
-    shared: &mut [u8],
-    context: WorkerProcessContext<'_>,
+    io: &mut WorkerAudioIo,
     ready: &ReadyWire,
 ) -> Result<(), AudioProcessorHostError> {
     use super::native_worker_ingress::with_native_ingress;
@@ -1004,7 +1127,7 @@ fn run_native_command_service(
     })?;
     with_native_ingress(
         control,
-        context.parameter_ids.len(),
+        io.parameter_ids.len(),
         Some(profile),
         |control, ingress| {
             let mut ready_sent = false;
@@ -1035,9 +1158,7 @@ fn run_native_command_service(
                         ingress.acknowledge()?;
                         return Ok(());
                     }
-                    let success = dispatch_native_owner_command(
-                        processor, command, control, shared, context,
-                    )?;
+                    let success = dispatch_native_owner_with_io(processor, command, control, io)?;
                     ingress.acknowledge()?;
                     if !success {
                         return Ok(());
@@ -1066,6 +1187,7 @@ fn run_native_command_service(
                     exit
                 } else {
                     let split = processor.split_native_processing()?;
+                    let (shared, context) = io.parts();
                     let outcome = with_processing_scope(
                         split,
                         profile,
@@ -1114,9 +1236,8 @@ fn run_native_command_service(
                         }
                     }
                     NativeScopeExit::OwnerCommand(command) => {
-                        let success = dispatch_native_owner_command(
-                            processor, command, control, shared, context,
-                        )?;
+                        let success =
+                            dispatch_native_owner_with_io(processor, command, control, io)?;
                         ingress.acknowledge()?;
                         if !success {
                             return Ok(());

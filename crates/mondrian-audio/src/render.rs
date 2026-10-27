@@ -1631,6 +1631,15 @@ impl AudioRenderSession {
         self.processor_host.stage_native_reprepare_audio_inputs(selected, request)
     }
 
+    pub(crate) fn stage_native_reprepare_audio_input_mapping(
+        &mut self,
+        selected: &crate::processor_host::native_reprepare::ReprepareSelection,
+        request: crate::ClapAudioInputMappingRequest,
+    ) -> Result<crate::ClapAudioInputMappingOutcome, crate::NativeAudioReprepareError> {
+        self.processor_host
+            .stage_native_reprepare_audio_input_mapping(selected, request)
+    }
+
     /// Retained exact local ticket; other native pending markers remain unconsumed.
     pub fn pending_reprepare_ticket(&self) -> Option<crate::AudioProcessorReprepareTicket> {
         self.pending_reprepare_ticket

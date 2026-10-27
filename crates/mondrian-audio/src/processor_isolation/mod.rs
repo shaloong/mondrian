@@ -19,6 +19,7 @@ pub use clap_discovery::probe_clap_note_processing_offer;
 pub use clap_note_input_contract::ClapNoteInputContractProbe;
 pub use clap_note_input_contract::ClapNoteProcessingOfferV6;
 mod clap_audio_input_buffers;
+mod clap_audio_input_mapping;
 mod clap_audio_input_proposal;
 /// Bounded typed ownership of the actual CLAP output callbacks.
 /// These source facts do not grant an author Session or installed runtime lease.
@@ -91,6 +92,11 @@ pub use native_configuration_control::{
 pub(crate) use clap_audio_input_buffers::reservation as clap_audio_input_buffer_reservation;
 pub use clap_audio_input_buffers::{
     ClapAudioInputBufferOutcome, ClapAudioInputBufferReceipt, ClapAudioInputBufferRequest,
+};
+pub(crate) use clap_audio_input_mapping::reservation as clap_audio_input_mapping_reservation;
+pub(crate) use clap_audio_input_mapping::shared_bytes as clap_audio_input_mapping_shared_bytes;
+pub use clap_audio_input_mapping::{
+    ClapAudioInputMappingOutcome, ClapAudioInputMappingReceipt, ClapAudioInputMappingRequest,
 };
 pub use clap_audio_input_proposal::{ClapAudioInputPort, ClapAudioInputProposal};
 
@@ -1285,6 +1291,25 @@ impl AudioProcessor for IsolatedAudioProcessor {
         }
     }
 
+    fn stage_clap_audio_input_mapping(
+        &mut self,
+        request: ClapAudioInputMappingRequest,
+    ) -> Result<ClapAudioInputMappingOutcome, AudioProcessorHostError> {
+        if self.failed {
+            return Err(AudioProcessorHostError::PoisonedInstance);
+        }
+        match self.worker.stage_clap_audio_input_mapping(request) {
+            Ok(outcome) => Ok(outcome),
+            Err(AudioProcessorHostError::InvalidContract(detail)) => {
+                Err(AudioProcessorHostError::InvalidContract(detail))
+            }
+            Err(error) => {
+                self.failed = true;
+                Err(error)
+            }
+        }
+    }
+
     fn stage_native_configuration_seed(
         &mut self,
         request: NativeConfigurationSeedRequest<'_>,
@@ -1987,6 +2012,11 @@ pub trait IsolatedAudioProcessorWorker {
         Ok(NativeConfigurationControlOutcome::CapabilityRefused(
             NativeConfigurationRefusal::UnsupportedAdapter,
         ))
+    }
+
+    /// Exact inactive owner retained by this adapter; not activation authority.
+    fn staged_clap_audio_input_buffers(&mut self) -> Option<ClapAudioInputBufferReceipt> {
+        None
     }
 
     /// Allocate only admitted replacement inputs; no activation or graph publication.

@@ -21,10 +21,17 @@ fn installed_clap_runtime_restart_stages_new_inputs_under_original_root_grant() 
     restart_detector_width(Qualification::StageInputs);
 }
 
+#[test]
+#[ignore = "matching production helper and CLAP mode19; stopped shared mapping staging"]
+fn installed_clap_runtime_restart_stages_shared_inputs_without_releasing_old_dsp() {
+    restart_detector_width(Qualification::StageMapping);
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Qualification {
     Observe,
     StageInputs,
+    StageMapping,
     Install,
 }
 
@@ -174,7 +181,10 @@ fn restart_detector_width(qualification: Qualification) {
             assert_eq!(cursors(&runtime), held);
             verifier.validate(&claim).unwrap();
             assert_eq!(runtime.observe_native_owner_object(lease).unwrap(), object);
-            if qualification == Qualification::StageInputs {
+            if matches!(
+                qualification,
+                Qualification::StageInputs | Qualification::StageMapping
+            ) {
                 let before = runtime.resource_footprint();
                 let canceled = ExecutionCancellationToken::new();
                 canceled.cancel();
@@ -211,6 +221,51 @@ fn restart_detector_width(qualification: Qualification) {
                 );
                 assert_eq!(runtime.observe_native_owner_object(lease).unwrap(), object);
                 assert_eq!(cursors(&runtime), held);
+            }
+            if qualification == Qualification::StageMapping {
+                let before = runtime.resource_footprint();
+                let canceled = ExecutionCancellationToken::new();
+                canceled.cancel();
+                assert!(matches!(
+                    runtime.stage_native_reprepare_audio_input_mapping(ticket, &canceled),
+                    Err(NativeAudioReprepareError::Cancelled)
+                ));
+                assert_eq!(runtime.resource_footprint(), before);
+                assert!(runtime
+                    .stage_native_reprepare_audio_input_mapping(unrelated, &cancellation)
+                    .is_err());
+                assert_eq!(runtime.resource_footprint(), before);
+                let receipt = runtime
+                    .stage_native_reprepare_audio_input_mapping(ticket, &cancellation)
+                    .expect("both real same-child shared mappings and backing acknowledgement");
+                assert_eq!(receipt.request.buffers.request.proposal, proposal);
+                assert_eq!(receipt.request.channel_layout, AudioChannelLayout::Stereo);
+                assert_eq!(receipt.request.parameter_lane_count, 0);
+                assert_eq!(receipt.request.auxiliary_output_count, 0);
+                assert!(receipt.shared_bytes >= 4 * (2 + 2 + 2) * 4);
+                let bound = receipt.request.mapping_grant_bytes;
+                assert!(receipt.parent_owner_bytes >= receipt.shared_bytes);
+                assert!(receipt.child_owner_bytes >= receipt.shared_bytes);
+                assert!(
+                    receipt.parent_owner_bytes <= bound / 2
+                        && receipt.child_owner_bytes <= bound / 2
+                );
+                let staged = runtime.resource_footprint();
+                assert_eq!(
+                    staged.fixed_resident_bytes,
+                    before.fixed_resident_bytes + bound
+                );
+                assert!(runtime
+                    .stage_native_reprepare_audio_input_mapping(ticket, &cancellation)
+                    .is_err());
+                assert_eq!(
+                    runtime.resource_footprint(),
+                    staged,
+                    "no duplicate allocation or credit"
+                );
+                assert_eq!(runtime.observe_native_owner_object(lease).unwrap(), object);
+                assert_eq!(cursors(&runtime), held);
+                verifier.validate(&claim).unwrap();
             }
             assert!(
                 runtime.resource_footprint().fixed_resident_bytes

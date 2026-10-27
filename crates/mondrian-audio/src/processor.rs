@@ -686,6 +686,16 @@ pub trait AudioProcessor: Send {
         ))
     }
 
+    /// Stage matching shared input storage on both peers while DSP remains stopped.
+    fn stage_clap_audio_input_mapping(
+        &mut self,
+        _request: crate::ClapAudioInputMappingRequest,
+    ) -> Result<crate::ClapAudioInputMappingOutcome, AudioProcessorHostError> {
+        Ok(crate::ClapAudioInputMappingOutcome::Refused(
+            crate::NativeConfigurationRefusal::UnsupportedAdapter,
+        ))
+    }
+
     /// Stage an exact same-child configuration seed while DSP/output are quiesced.
     ///
     /// Accepted storage is one additional accounted child owner. It does not

@@ -163,7 +163,7 @@ pub(super) mod wire {
     use std::io::{self, Read, Write};
 
     const REQUEST: usize = INPUT_PROPOSAL_SIZE + 16;
-    const RECEIPT: usize = REQUEST + 16;
+    pub(crate) const RECEIPT: usize = REQUEST + 16;
     fn invalid() -> io::Error {
         io::Error::new(
             io::ErrorKind::InvalidData,
@@ -241,6 +241,38 @@ pub(super) mod wire {
         reader.read_exact(&mut bytes)?;
         parse_request(&bytes)
     }
+    fn validate_receipt(receipt: ClapAudioInputBufferReceipt) -> io::Result<()> {
+        let bound = reservation(&receipt.request.proposal, receipt.request.max_block_frames)
+            .ok_or_else(invalid)?;
+        if receipt.reservation_bytes != bound
+            || receipt.allocated_bytes < size_of::<StagedClapAudioInputs>()
+            || receipt.allocated_bytes > bound
+            || bound > receipt.request.buffer_grant_bytes
+        {
+            return Err(invalid());
+        }
+        Ok(())
+    }
+    pub(crate) fn encode_receipt(
+        receipt: ClapAudioInputBufferReceipt,
+    ) -> io::Result<[u8; RECEIPT]> {
+        validate_receipt(receipt)?;
+        let mut bytes = [0; RECEIPT];
+        bytes[..REQUEST].copy_from_slice(&request_bytes(receipt.request)?);
+        put(&mut bytes, REQUEST, receipt.reservation_bytes);
+        put(&mut bytes, REQUEST + 8, receipt.allocated_bytes);
+        Ok(bytes)
+    }
+    pub(crate) fn decode_receipt(bytes: &[u8; RECEIPT]) -> io::Result<ClapAudioInputBufferReceipt> {
+        let request = parse_request(bytes[..REQUEST].try_into().unwrap())?;
+        let receipt = ClapAudioInputBufferReceipt {
+            request,
+            reservation_bytes: number(bytes, REQUEST)?,
+            allocated_bytes: number(bytes, REQUEST + 8)?,
+        };
+        validate_receipt(receipt)?;
+        Ok(receipt)
+    }
     pub(crate) fn write_reply(
         writer: &mut impl Write,
         outcome: ClapAudioInputBufferOutcome,
@@ -251,20 +283,7 @@ pub(super) mod wire {
                 writer.write_all(&refusal_tag(refusal).to_le_bytes())?;
             }
             ClapAudioInputBufferOutcome::Staged(receipt) => {
-                let bound =
-                    reservation(&receipt.request.proposal, receipt.request.max_block_frames)
-                        .ok_or_else(invalid)?;
-                if receipt.reservation_bytes != bound
-                    || receipt.allocated_bytes < size_of::<StagedClapAudioInputs>()
-                    || receipt.allocated_bytes > bound
-                    || bound > receipt.request.buffer_grant_bytes
-                {
-                    return Err(invalid());
-                }
-                let mut bytes = [0; RECEIPT];
-                bytes[..REQUEST].copy_from_slice(&request_bytes(receipt.request)?);
-                put(&mut bytes, REQUEST, receipt.reservation_bytes);
-                put(&mut bytes, REQUEST + 8, receipt.allocated_bytes);
+                let bytes = encode_receipt(receipt)?;
                 header(writer, 0, RECEIPT)?;
                 writer.write_all(&bytes)?;
             }
@@ -301,26 +320,11 @@ pub(super) mod wire {
             (0, RECEIPT) => {
                 let mut bytes = [0; RECEIPT];
                 reader.read_exact(&mut bytes)?;
-                let request = parse_request(bytes[..REQUEST].try_into().unwrap())?;
-                let bound =
-                    reservation(&request.proposal, request.max_block_frames).ok_or_else(invalid)?;
-                let reserved = number(&bytes, REQUEST)?;
-                let actual = number(&bytes, REQUEST + 8)?;
-                if request != expected
-                    || reserved != bound
-                    || actual < size_of::<StagedClapAudioInputs>()
-                    || actual > bound
-                    || bound > request.buffer_grant_bytes
-                {
+                let receipt = decode_receipt(&bytes)?;
+                if receipt.request != expected {
                     return Err(invalid());
                 }
-                Ok(ClapAudioInputBufferOutcome::Staged(
-                    ClapAudioInputBufferReceipt {
-                        request,
-                        reservation_bytes: reserved,
-                        allocated_bytes: actual,
-                    },
-                ))
+                Ok(ClapAudioInputBufferOutcome::Staged(receipt))
             }
             _ => Err(invalid()),
         }
