@@ -114,6 +114,18 @@ The table describes implementation boundaries. Qualification below states the te
 
 ## Current qualification summary (2026-10-23)
 
+Shared auxiliary-input layouts, 2026-10-27: finite Windows owned controls verify
+Mono/Stereo Main with simultaneous Mono/Stereo and unconnected silent inputs,
+two-route summing, PDC, target-time gain automation, partitioning and seek in
+both processing modes/backends. All 877 ordinary Audio controls pass (193 original
+ignored, zero filtered, empty stderr). The two original CLAP/VST3 native sidechain
+gates also pass with the rebuilt normal Product and original ownership budgets.
+The mixed-layout grant is in-process only; parent and Worker still refuse mixed
+isolated storage. Broader layouts, native mixed-port sound, realtime/performance
+and other platforms remain unqualified. See the
+[shared contract](../adr/0003-compile-audio-authoring-for-execution.md) and
+[owned PCM controls](../../crates/mondrian-audio/src/tests/mixed_auxiliary_inputs.rs).
+
 OpenFX owner project geometry now has finite Windows CPU qualification:
 SessionProbe checks project10x7/PAR2 independently of image3x5, Direct image
 PAR1→1.2→1, all15 literal pixels, same-project Graph owner reuse and project12x9

@@ -360,15 +360,12 @@ impl AudioProcessorAudioIo for MainBusAudioIo<'_> {
     }
 
     fn auxiliary_input(&self, bus_key: &str) -> Option<AudioProcessorInputBus<'_>> {
-        let samples = self.frames.checked_mul(self.channel_layout.channel_count())?;
-        let bus_index = self.auxiliary_buses.iter().position(|bus| bus.bus_key == bus_key)?;
-        let start = bus_index.checked_mul(samples)?;
-        let end = start.checked_add(samples)?;
+        let bus = self.auxiliary_buses.iter().find(|bus| bus.bus_key == bus_key)?;
         Some(AudioProcessorInputBus {
-            bus_key: &self.auxiliary_buses[bus_index].bus_key,
-            channel_layout: self.channel_layout,
+            bus_key: &bus.bus_key,
+            channel_layout: bus.channel_layout,
             frames: self.frames,
-            interleaved: self.auxiliary_pcm.get(start..end)?,
+            interleaved: self.auxiliary_pcm.get(bus.sample_range(self.frames)?)?,
         })
     }
 
@@ -376,15 +373,12 @@ impl AudioProcessorAudioIo for MainBusAudioIo<'_> {
         &mut self,
         bus_key: &str,
     ) -> Option<AudioProcessorMainAndInputBuses<'_>> {
-        let samples = self.frames.checked_mul(self.channel_layout.channel_count())?;
-        let bus_index = self.auxiliary_buses.iter().position(|bus| bus.bus_key == bus_key)?;
-        let start = bus_index.checked_mul(samples)?;
-        let end = start.checked_add(samples)?;
+        let bus = self.auxiliary_buses.iter().find(|bus| bus.bus_key == bus_key)?;
         let auxiliary = AudioProcessorInputBus {
-            bus_key: &self.auxiliary_buses[bus_index].bus_key,
-            channel_layout: self.channel_layout,
+            bus_key: &bus.bus_key,
+            channel_layout: bus.channel_layout,
             frames: self.frames,
-            interleaved: self.auxiliary_pcm.get(start..end)?,
+            interleaved: self.auxiliary_pcm.get(bus.sample_range(self.frames)?)?,
         };
         Some(AudioProcessorMainAndInputBuses {
             main_layout: self.channel_layout,
@@ -452,6 +446,7 @@ pub(crate) struct PreparedProcessorHost {
     auxiliary_pcm: Vec<f32>,
     sidechain_frame_db: Vec<f64>,
     sidechain_gains: Vec<f32>,
+    sidechain_mix_pcm: Vec<f32>,
     prepared_notes: Vec<Option<Box<notes::HostedNoteState>>>,
 }
 
@@ -1349,15 +1344,13 @@ impl PreparedProcessorHost {
         {
             return Err(AudioExecutionError::InvalidPreparedSchedule);
         }
-        let maximum_auxiliary_buses = schedule
-            .processors
-            .iter()
-            .map(|processor| processor.auxiliary_buses.len())
-            .max()
-            .unwrap_or(0);
-        let block_samples = render_contract
+        let gain_samples = render_contract
             .max_block_frames
-            .checked_mul(render_contract.channel_count())
+            .checked_mul(
+                render_contract
+                    .channel_count()
+                    .max(schedule.summary.maximum_sidechain_mix_channels),
+            )
             .ok_or(AudioExecutionError::BufferTooLarge)?;
         // All Note storage is admitted and allocated before ANY native create.
         let mut prepared_notes = Vec::new();
@@ -1392,12 +1385,22 @@ impl PreparedProcessorHost {
             session_scratch_bytes,
             auxiliary_pcm: vec![
                 0.0;
-                maximum_auxiliary_buses
-                    .checked_mul(block_samples)
+                schedule
+                    .summary
+                    .maximum_processor_auxiliary_channels
+                    .checked_mul(render_contract.max_block_frames)
                     .ok_or(AudioExecutionError::BufferTooLarge)?
             ],
             sidechain_frame_db: vec![0.0; render_contract.max_block_frames],
-            sidechain_gains: vec![0.0; block_samples],
+            sidechain_gains: vec![0.0; gain_samples],
+            sidechain_mix_pcm: vec![
+                0.0;
+                schedule
+                    .summary
+                    .maximum_sidechain_mix_channels
+                    .checked_mul(render_contract.max_block_frames)
+                    .ok_or(AudioExecutionError::BufferTooLarge)?
+            ],
             prepared_notes,
         })
     }
@@ -1809,6 +1812,7 @@ impl PreparedProcessorHost {
         let auxiliary_pcm = &mut self.auxiliary_pcm;
         let sidechain_frame_db = &mut self.sidechain_frame_db;
         let sidechain_gains = &mut self.sidechain_gains;
+        let sidechain_mix_pcm = &mut self.sidechain_mix_pcm;
         for processor_index in rack.processors.clone() {
             let processor = processors
                 .get(processor_index)
@@ -1904,10 +1908,13 @@ impl PreparedProcessorHost {
                 auxiliary_pcm,
                 sidechain_frame_db,
                 sidechain_gains,
+                sidechain_mix_pcm,
+                backend,
             )?;
             let auxiliary_samples = auxiliary_buses
-                .len()
-                .checked_mul(expected_samples)
+                .last()
+                .map(|bus| bus.sample_range(signal_request.frames).map(|range| range.end))
+                .unwrap_or(Some(0))
                 .ok_or(AudioExecutionError::BufferTooLarge)?;
             processor_delay_lines
                 .get_mut(processor_index)
@@ -2049,12 +2056,17 @@ fn prepare_processor_auxiliary_buses<'a>(
     auxiliary_pcm: &mut [f32],
     sidechain_frame_db: &mut [f64],
     sidechain_gains: &mut [f32],
+    sidechain_mix_pcm: &mut [f32],
+    backend: AudioKernelBackend,
 ) -> Result<&'a [PreparedProcessorAuxiliaryBus], AudioExecutionError> {
     let buses = processor_auxiliary_buses
         .get(processor.auxiliary_buses.clone())
         .ok_or(AudioExecutionError::InvalidPreparedSchedule)?;
-    let required_samples =
-        buses.len().checked_mul(samples).ok_or(AudioExecutionError::BufferTooLarge)?;
+    let required_samples = buses
+        .last()
+        .map(|bus| bus.sample_range(signal_request.frames).map(|range| range.end))
+        .unwrap_or(Some(0))
+        .ok_or(AudioExecutionError::BufferTooLarge)?;
     let auxiliary_pcm = auxiliary_pcm
         .get_mut(..required_samples)
         .ok_or(AudioExecutionError::InvalidPreparedSchedule)?;
@@ -2064,10 +2076,15 @@ fn prepare_processor_auxiliary_buses<'a>(
         .ok_or(AudioExecutionError::BufferTooLarge)?;
     let source_end =
         source_start.checked_add(samples).ok_or(AudioExecutionError::BufferTooLarge)?;
-    for (bus_index, bus) in buses.iter().enumerate() {
-        let start = bus_index.checked_mul(samples).ok_or(AudioExecutionError::BufferTooLarge)?;
-        let end = start.checked_add(samples).ok_or(AudioExecutionError::BufferTooLarge)?;
-        let destination = &mut auxiliary_pcm[start..end];
+    for bus in buses {
+        let range = bus
+            .sample_range(signal_request.frames)
+            .ok_or(AudioExecutionError::BufferTooLarge)?;
+        let destination = auxiliary_pcm
+            .get_mut(range)
+            .ok_or(AudioExecutionError::InvalidPreparedSchedule)?;
+        let bus_samples = destination.len();
+        let bus_channels = bus.channel_layout.channel_count();
         for binding_index in bus.bindings.clone() {
             let binding = sidechain_bindings
                 .get(binding_index)
@@ -2079,6 +2096,17 @@ fn prepare_processor_auxiliary_buses<'a>(
             let delay_line = sidechain_delay_lines
                 .get_mut(binding_index)
                 .ok_or(AudioExecutionError::InvalidPreparedSchedule)?;
+            // The immutable matrix precedes the route's destination-width PDC.
+            // Gain still evaluates at target signal time after the delay.
+            let source = if let Some(mixer) = &bus.channel_mixer {
+                let mapped = sidechain_mix_pcm
+                    .get_mut(..bus_samples)
+                    .ok_or(AudioExecutionError::InvalidPreparedSchedule)?;
+                mixer.mix_into(backend, signal_request.frames, source, mapped)?;
+                &mapped[..]
+            } else {
+                source
+            };
             if let Some(curve) = &binding.gain_automation {
                 let frame_db = sidechain_frame_db
                     .get_mut(..signal_request.frames)
@@ -2095,9 +2123,9 @@ fn prepare_processor_auxiliary_buses<'a>(
                     *value = curve.evaluate_sample(sample, sample_rate, &mut cursor)?;
                 }
                 let gains = sidechain_gains
-                    .get_mut(..samples)
+                    .get_mut(..bus_samples)
                     .ok_or(AudioExecutionError::InvalidPreparedSchedule)?;
-                dsp::expand_frame_db_to_interleaved_gains(frame_db, channels, gains);
+                dsp::expand_frame_db_to_interleaved_gains(frame_db, bus_channels, gains);
                 delay_line.add_interleaved_with_gains(source, destination, gains)?;
             } else {
                 let gain =

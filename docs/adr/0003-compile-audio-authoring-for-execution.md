@@ -39,6 +39,17 @@ their extents match another layout. Representability does not grant execution:
 media, plugin, device, and export Adapters must negotiate an exact layout or
 fail closed, and may not select a matrix from channel count alone.
 
+Auxiliary inputs retain their own semantic layouts and per-processor packed
+channel prefixes in the existing prepared schedule. Track/Bus taps still use
+the Render Contract layout. Their existing standard channel matrix is resolved
+at preparation, applied before destination-width PDC, and followed by Route gain
+at target signal time. Unconnected ports own zero-filled PCM. Equal layouts keep
+the direct path; connected mixed layouts reuse one preallocated, charged mapping
+buffer. This changes neither author state nor the routing/execution authority.
+Additional outputs retain their current Main-layout restriction. IPC21 shared
+storage and both native adapters also remain Main-layout-only: parent and Worker
+reject mixed inputs before that homogeneous storage can be used.
+
 `AudioProgramRuntime` is the shared high-level Implementation used by playback
 and export. It recursively instantiates nested public outputs and binds media
 through the narrow `AudioMediaResolver`/`AudioDecodedSource` Adapter Seam.

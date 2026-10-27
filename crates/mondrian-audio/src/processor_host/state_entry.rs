@@ -166,7 +166,8 @@ impl PreparedProcessorHost {
         visitor(Storage::complete(lanes)?)?;
         visitor(Storage::complete(&self.auxiliary_pcm)?)?;
         visitor(Storage::complete(&self.sidechain_frame_db)?)?;
-        visitor(Storage::complete(&self.sidechain_gains)?)
+        visitor(Storage::complete(&self.sidechain_gains)?)?;
+        visitor(Storage::complete(&self.sidechain_mix_pcm)?)
     }
     pub(crate) fn retains_parameter_author(&self, proposal: &NativeAudioAuthorProposal) -> bool {
         self.instances.iter().any(|instance| {

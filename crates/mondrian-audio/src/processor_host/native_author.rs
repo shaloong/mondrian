@@ -1044,6 +1044,7 @@ mod terminal_source_revision_tests {
             auxiliary_pcm: Vec::new(),
             sidechain_frame_db: Vec::new(),
             sidechain_gains: Vec::new(),
+            sidechain_mix_pcm: Vec::new(),
             prepared_notes: Vec::new(),
         };
         let fresh_request = crate::NativeAudioObjectBindRequest {

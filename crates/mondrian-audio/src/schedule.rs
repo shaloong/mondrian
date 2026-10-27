@@ -184,6 +184,10 @@ pub struct PreparedAudioScheduleSummary {
     pub processor_output_buffer_count: usize,
     /// Largest auxiliary-bus set exposed by one processor occurrence.
     pub maximum_processor_auxiliary_buses: usize,
+    /// Largest sum of auxiliary channel widths presented to one processor.
+    pub maximum_processor_auxiliary_channels: usize,
+    /// Largest connected nonidentity auxiliary width; zero needs no mix scratch.
+    pub maximum_sidechain_mix_channels: usize,
     /// Enabled typed sidechain bindings materialized per processor occurrence.
     pub sidechain_binding_count: usize,
     /// Unique Track/Bus ports snapshotted for downstream sidechain consumers.
@@ -1015,15 +1019,24 @@ fn session_resource_footprint(
     ])?;
     let reusable_pcm = checked_product([block_samples, 5, std::mem::size_of::<f32>()])?;
     let processor_auxiliary_pcm = checked_product([
-        summary.maximum_processor_auxiliary_buses,
-        block_samples,
+        summary.maximum_processor_auxiliary_channels,
+        contract.max_block_frames,
         std::mem::size_of::<f32>(),
     ])?;
     let processor_sidechain_lanes = if summary.sidechain_binding_count == 0 {
         0
     } else {
         checked_sum([
-            checked_product([block_samples, std::mem::size_of::<f32>()])?,
+            checked_product([
+                contract.max_block_frames,
+                channels.max(summary.maximum_sidechain_mix_channels),
+                std::mem::size_of::<f32>(),
+            ])?,
+            checked_product([
+                contract.max_block_frames,
+                summary.maximum_sidechain_mix_channels,
+                std::mem::size_of::<f32>(),
+            ])?,
             checked_product([contract.max_block_frames, std::mem::size_of::<f64>()])?,
         ])?
     };
@@ -1276,7 +1289,20 @@ pub(crate) struct PreparedProcessor {
 #[derive(Debug, Clone)]
 pub(crate) struct PreparedProcessorAuxiliaryBus {
     pub(crate) bus_key: String,
+    pub(crate) channel_layout: AudioChannelLayout,
+    /// Channel prefix within this processor's packed auxiliary set.
+    pub(crate) channel_offset: usize,
+    /// Equal-layout routes keep the original direct path and allocate no matrix.
+    pub(crate) channel_mixer: Option<PreparedAudioChannelMixer>,
     pub(crate) bindings: Range<usize>,
+}
+
+impl PreparedProcessorAuxiliaryBus {
+    pub(crate) fn sample_range(&self, frames: usize) -> Option<Range<usize>> {
+        let start = self.channel_offset.checked_mul(frames)?;
+        let samples = self.channel_layout.channel_count().checked_mul(frames)?;
+        Some(start..start.checked_add(samples)?)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -1932,10 +1958,13 @@ impl PreparedAudioSchedule {
         let mut sidechain_sources = Vec::new();
         let mut sidechain_source_slots = BTreeMap::new();
         let mut matched_sidechain_routes = BTreeSet::new();
+        let mut maximum_processor_auxiliary_channels = 0;
+        let mut maximum_sidechain_mix_channels = 0;
         for processor_index in 0..processors.len() {
             let processor = &processors[processor_index];
             let auxiliary_contract = processor.factory.auxiliary_inputs().clone();
             let auxiliary_start = processor_auxiliary_buses.len();
+            let mut auxiliary_channels = 0_usize;
             for bus in auxiliary_contract.buses {
                 let binding_start = sidechain_bindings.len();
                 for route in program.sidechain_routes.iter().filter(|route| {
@@ -2001,13 +2030,39 @@ impl PreparedAudioSchedule {
                     });
                     matched_sidechain_routes.insert(route.id);
                 }
+                let channel_mixer = if bus.channel_layout == contract.channel_layout {
+                    None
+                } else {
+                    Some(PreparedAudioChannelMixer::new(resolve_channel_mapping(
+                        &AudioComponentChannelMapping::Standard,
+                        contract.channel_layout,
+                        bus.channel_layout,
+                    )?))
+                };
+                if channel_mixer.is_some() && binding_start != sidechain_bindings.len() {
+                    maximum_sidechain_mix_channels =
+                        maximum_sidechain_mix_channels.max(bus.channel_layout.channel_count());
+                }
+                let channel_offset = auxiliary_channels;
+                auxiliary_channels = auxiliary_channels
+                    .checked_add(bus.channel_layout.channel_count())
+                    .ok_or_else(|| {
+                        AudioCompileError::InvalidPreparedGraph(
+                            "processor auxiliary channel extent overflowed".to_owned(),
+                        )
+                    })?;
                 processor_auxiliary_buses.push(PreparedProcessorAuxiliaryBus {
                     bus_key: bus.bus_key,
+                    channel_layout: bus.channel_layout,
+                    channel_offset,
+                    channel_mixer,
                     bindings: binding_start..sidechain_bindings.len(),
                 });
             }
             processors[processor_index].auxiliary_buses =
                 auxiliary_start..processor_auxiliary_buses.len();
+            maximum_processor_auxiliary_channels =
+                maximum_processor_auxiliary_channels.max(auxiliary_channels);
         }
         if matched_sidechain_routes.len() != program.sidechain_routes.len() {
             let missing = program
@@ -2114,13 +2169,15 @@ impl PreparedAudioSchedule {
                     "compensation delay storage overflowed".to_owned(),
                 )
             })?;
-        let sidechain_compensation_delay_samples = sidechain_bindings
+        let sidechain_compensation_delay_samples = processor_auxiliary_buses
             .iter()
-            .try_fold(0_usize, |samples, binding| {
-                binding
-                    .compensation_delay_frames
-                    .checked_mul(contract.channel_count())
-                    .and_then(|delay_samples| samples.checked_add(delay_samples))
+            .try_fold(0_usize, |samples, bus| {
+                bus.bindings.clone().try_fold(samples, |samples, index| {
+                    sidechain_bindings[index]
+                        .compensation_delay_frames
+                        .checked_mul(bus.channel_layout.channel_count())
+                        .and_then(|delay_samples| samples.checked_add(delay_samples))
+                })
             })
             .ok_or_else(|| {
                 AudioCompileError::InvalidPreparedGraph(
@@ -2170,6 +2227,8 @@ impl PreparedAudioSchedule {
                 .map(|processor| processor.auxiliary_buses.len())
                 .max()
                 .unwrap_or(0),
+            maximum_processor_auxiliary_channels,
+            maximum_sidechain_mix_channels,
             sidechain_binding_count: sidechain_bindings.len(),
             sidechain_source_count: sidechain_sources.len(),
             transition_binding_count: transitions.len(),

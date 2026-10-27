@@ -75,6 +75,21 @@ use std::sync::Arc;
 use std::time::Duration;
 use supervisor::SupervisedAudioWorker;
 
+// IPC21 packs every auxiliary input at Main width. Keep this storage
+// restriction at both ends even when the shared in-process host admits a mix.
+fn validate_isolated_auxiliary_inputs(
+    inputs: &AudioProcessorAuxiliaryInputContract,
+    main_layout: AudioChannelLayout,
+) -> Result<(), AudioProcessorHostError> {
+    inputs.validate(main_layout)?;
+    if inputs.buses.iter().any(|bus| bus.channel_layout != main_layout) {
+        return Err(invalid_contract(
+            "isolated auxiliary input storage requires the exact Main layout",
+        ));
+    }
+    Ok(())
+}
+
 pub use native_configuration_seed::{
     NativeConfigurationOwnedSeed, NativeConfigurationSeedOutcome, NativeConfigurationSeedReceipt,
     NativeConfigurationSeedRefusal, NativeConfigurationSeedRequest, NativeConfigurationSeedTicket,
@@ -312,7 +327,10 @@ impl IsolatedAudioProcessorWorkerSpec {
                 "isolated Worker path, payload, render extent, deadlines, or parameter capacity is invalid",
             ));
         }
-        self.auxiliary_inputs.validate(self.render_contract.channel_layout)?;
+        validate_isolated_auxiliary_inputs(
+            &self.auxiliary_inputs,
+            self.render_contract.channel_layout,
+        )?;
         self.auxiliary_outputs.validate(self.render_contract.channel_layout)?;
         if self.auxiliary_outputs.buses.len() > 31 {
             return Err(invalid_contract(

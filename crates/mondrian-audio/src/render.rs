@@ -470,10 +470,19 @@ impl AudioRenderSession {
             .collect::<Result<Vec<_>, AudioExecutionError>>()?;
         let sidechain_delay_lines = plan
             .schedule
-            .sidechain_bindings
+            .processor_auxiliary_buses
             .iter()
-            .map(|binding| {
-                FixedDelayLine::new(binding.compensation_delay_frames, contract.channel_count())
+            .flat_map(|bus| bus.bindings.clone().map(move |index| (bus, index)))
+            .map(|(bus, index)| {
+                let binding = plan
+                    .schedule
+                    .sidechain_bindings
+                    .get(index)
+                    .ok_or(AudioExecutionError::InvalidPreparedSchedule)?;
+                FixedDelayLine::new(
+                    binding.compensation_delay_frames,
+                    bus.channel_layout.channel_count(),
+                )
             })
             .collect::<Result<Vec<_>, AudioExecutionError>>()?;
         let processor_delay_lines = plan
@@ -567,8 +576,8 @@ impl AudioRenderSession {
             processor_auxiliary_scratch_samples: plan
                 .schedule
                 .summary
-                .maximum_processor_auxiliary_buses
-                .checked_mul(samples)
+                .maximum_processor_auxiliary_channels
+                .checked_mul(contract.max_block_frames)
                 .ok_or(AudioExecutionError::BufferTooLarge)?,
             processor_output_buffers: processor_output_buffers.len(),
             processor_output_samples,

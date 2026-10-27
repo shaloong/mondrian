@@ -41,6 +41,9 @@ mod prepared_admission_tests;
 #[path = "tests/processor_outputs.rs"]
 pub(crate) mod processor_output_tests;
 
+#[path = "tests/mixed_auxiliary_inputs.rs"]
+mod mixed_auxiliary_inputs;
+
 #[derive(Default)]
 struct RampSource {
     block_reads: usize,
@@ -1441,6 +1444,8 @@ fn clip_track_bus_output_math_is_unclipped_and_block_invariant() {
             processor_auxiliary_bus_count: 0,
             processor_output_buffer_count: 0,
             maximum_processor_auxiliary_buses: 0,
+            maximum_processor_auxiliary_channels: 0,
+            maximum_sidechain_mix_channels: 0,
             sidechain_binding_count: 0,
             sidechain_source_count: 0,
             transition_binding_count: 0,

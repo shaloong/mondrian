@@ -30,7 +30,7 @@ pub(super) fn run_worker(
     let max_block_frames = usize::try_from(prepare.max_block_frames)
         .map_err(|_| invalid_contract("maximum block extent exceeds Worker address space"))?;
     let auxiliary_inputs = auxiliary_from_wire(prepare.auxiliary_buses.clone());
-    auxiliary_inputs.validate(prepare.channel_layout)?;
+    super::validate_isolated_auxiliary_inputs(&auxiliary_inputs, prepare.channel_layout)?;
     let auxiliary_outputs = super::protocol::outputs_from_wire(prepare.auxiliary_outputs.clone());
     auxiliary_outputs.validate(prepare.channel_layout)?;
     prepare.note_input_contract.validate()?;

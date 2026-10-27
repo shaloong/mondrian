@@ -972,9 +972,12 @@ impl AudioProcessorAuxiliaryInputContract {
                         .to_owned(),
                 ));
             }
-            if bus.channel_layout != main_layout {
+            if bus.channel_layout != main_layout
+                && mondrian_core::AudioChannelMixMatrix::standard(main_layout, bus.channel_layout)
+                    .is_err()
+            {
                 return Err(AudioProcessorHostError::InvalidContract(format!(
-                    "processor auxiliary bus {} requires {:?}, but this host currently admits exact main-layout auxiliary buses ({main_layout:?})",
+                    "processor auxiliary bus {} has no standard mapping from {main_layout:?} to {:?}",
                     bus.bus_key, bus.channel_layout
                 )));
             }

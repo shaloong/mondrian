@@ -282,6 +282,18 @@ fn native_probe_evidence_consumes_names_once_and_keeps_static_validation() {
     }
 }
 
+#[test]
+fn isolated_shared_storage_refuses_mixed_input_layout_before_worker_preparation() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut spec = cold_test_spec(directory.path(), cold_input_names(), false);
+    assert_eq!(spec.render_contract.channel_layout, AudioChannelLayout::Stereo);
+    spec.auxiliary_inputs.buses[0].channel_layout = AudioChannelLayout::Mono;
+    spec.auxiliary_inputs.validate(AudioChannelLayout::Stereo).unwrap();
+    let error = IsolatedAudioProcessorFactory::prepare(spec).unwrap_err();
+    assert!(error.to_string().contains("storage requires the exact Main layout"));
+    assert!(cold_prepared_pids(directory.path()).is_empty());
+}
+
 fn check_native_probe_evidence_consumption(note_input: bool) {
     let directory = tempfile::tempdir().unwrap();
     let mut spec = cold_test_spec(directory.path(), cold_input_names(), false);

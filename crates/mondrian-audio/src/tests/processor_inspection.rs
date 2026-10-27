@@ -8,6 +8,7 @@ enum FactoryMode {
     Valid,
     DuplicateKeys,
     WrongLayout,
+    MixedLayout,
     OfflineOnly,
     Panic,
     UnknownNameKey,
@@ -64,7 +65,10 @@ impl AudioProcessorResolver for InspectionResolver {
             buses.push(buses[0].clone());
         }
         if matches!(self.mode, FactoryMode::WrongLayout) {
-            buses[0].channel_layout = AudioChannelLayout::Surround51Side;
+            buses[0].channel_layout = AudioChannelLayout::discrete(3).unwrap();
+        }
+        if matches!(self.mode, FactoryMode::MixedLayout) {
+            buses[0].channel_layout = AudioChannelLayout::Mono;
         }
         Ok(Arc::new(InspectionFactory {
             buses,
@@ -398,6 +402,25 @@ fn processor_input_inspection_reuses_mode_layout_key_and_panic_admission() {
         ));
         assert_eq!(resolver.creates.load(Ordering::SeqCst), 0);
     }
+    let before = serde_json::to_value(&sequence).unwrap();
+    let resolver = InspectionResolver::new(expected, FactoryMode::MixedLayout);
+    let facts = inspect_audio_processor_inputs(&sequence, request, &resolver)
+        .expect("inspection preserves supported per-port layouts");
+    assert_eq!(
+        facts
+            .auxiliary_inputs
+            .buses
+            .iter()
+            .map(|bus| (bus.bus_key.as_str(), bus.channel_layout))
+            .collect::<Vec<_>>(),
+        vec![
+            ("detector.11", AudioChannelLayout::Mono),
+            ("detector.7", AudioChannelLayout::Stereo)
+        ]
+    );
+    assert_eq!(resolver.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(resolver.creates.load(Ordering::SeqCst), 0);
+    assert_eq!(serde_json::to_value(&sequence).unwrap(), before);
     let resolver = InspectionResolver::new(expected, FactoryMode::Valid);
     let overflow = usize::try_from(u64::from(u32::MAX) + 1).ok();
     for (sample_rate, max_block_frames) in [(0, 64), (48_000, 0)]
