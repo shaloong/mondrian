@@ -270,6 +270,26 @@ temporal Preview/Export pixels. This is a new AppState/Runtime/native child in
 the same parent test process, not a desktop GUI process-restart qualification.
 Only TimeBlur is functionally qualified by the bundle installation control.
 
+The public retime control authors exposure before trimming the source from[0,12)
+to[2,8), then moves the Clip to Sequence frame17. Sequence19/21 map to Clip4/6;
+3/2 forward, -3/2 reverse and a media6.5/24 hold change source sampling without
+retiming Clip-local exposure. Reversal uses the original exclusive terminal
+boundary. Fifteen complete256-pixel Float32 RGBA Preview/Export comparisons pass
+through seek bounce and hold Undo/Redo, with exact authored Clip preservation.
+The oracle captures effect-free, unretimed media on a192fps grid before edits and
+uses literal source-coordinate tables; it does not call the retimed mapper.
+Actual PTS equality/difference controls distinguish source pictures. Curve keys
+are inserted while visible; public trim preserves their Clip-local history.
+
+This test-only addition passes with the validation App parent and unchanged
+normal5fb4d923 Product; the original varying-media gate also passes. Original180s,
+empty stderr and settled owners remain required. Runtime/SDK source, the ordinary
+App baseline and other closed qualifications are unchanged; no whole suite is
+replayed for this ignored-test addition. The reverse samples avoid exact PTS ties,
+so strict-predecessor boundary pixels, broader rates/placements/nesting/transitions,
+encoded output, timed retime, hardware, GPU interoperability, performance and
+other platforms remain separate work.
+
 The cancellation control holds the first real native Source request on the
 existing CPU task transport, before replying, then performs public seek.
 Three2/4,4/2,2/4 waves retire the original generation and reply capabilities.

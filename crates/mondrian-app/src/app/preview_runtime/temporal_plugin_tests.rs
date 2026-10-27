@@ -378,6 +378,100 @@ fn with_preview_runtime<R>(run: impl FnOnce(&PreviewProductionRuntime<()>) -> R)
     result.unwrap_or_else(|error| std::panic::resume_unwind(error))
 }
 
+fn reference_retime_source_samples(
+    state: &AppState,
+) -> std::collections::BTreeMap<i64, mondrian_renderer::CpuColorFrame> {
+    // Capture the original untrimmed, unretimed, effect-free source. Eighth
+    // source-frame coordinates express 3/2 times quarter Clip-frame offsets.
+    // The oracle below uses literal media coordinates, never the retimed mapper.
+    let mut reference = state.active_sequence().unwrap().clone();
+    let original = &reference.video_tracks[0].clips[0];
+    assert_eq!(original.position, TimelineTime::ZERO);
+    assert_eq!(original.clip_time_in, TimelineTime::ZERO);
+    assert_eq!(original.source_origin(), TimelineTime::ZERO);
+    assert_eq!(
+        original.source_time_scale(),
+        mondrian_core::TimeScale::new(1, 1).unwrap()
+    );
+    assert!(original.effects.is_empty());
+    reference.settings.frame_rate = Rational::new(192, 1);
+    let target = reference.settings.resolution;
+    let snapshot = crate::app::exporting::capture_timeline_export_snapshot(
+        state,
+        reference,
+        vec![],
+        mondrian_export::preset::TimelineExportRange::WorkArea {
+            start_frame: 0,
+            end_frame_exclusive: 96,
+        },
+        false,
+    )
+    .unwrap();
+    let sources: std::collections::BTreeMap<_, _> = [34, 37, 40, 43, 46, 52, 58, 61, 64, 67, 70]
+        .into_iter()
+        .map(|tick| {
+            let frame =
+                mondrian_export::queue::export_visual_frame_validation(&snapshot, tick, target)
+                    .unwrap()
+                    .working_frame;
+            assert_eq!(frame.rgba_f32().data.len(), 256);
+            assert!(frame.rgba_f32().data.iter().all(|p| p[3] == 1.0));
+            (tick, frame)
+        })
+        .collect();
+    for (left, right) in [(34, 37), (40, 43), (43, 46), (58, 61), (64, 67), (67, 70)] {
+        assert_eq!(
+            sources[&left], sources[&right],
+            "controlled actual PTS interval"
+        );
+    }
+    for (left, right) in [(34, 40), (40, 52), (52, 58), (58, 64)] {
+        assert_ne!(
+            sources[&left], sources[&right],
+            "oracle distinguishes source pictures"
+        );
+    }
+    sources
+}
+
+fn place_trimmed_time_blur_clip(state: &mut AppState, clip_id: mondrian_core::ClipId) {
+    use crate::app::product_action::{
+        TimelineMoveClipPayload, TimelineTrimClipsPayload, TimelineTrimPayloadEdge,
+    };
+    // Original media [0,12) -> trimmed [2,8), placed at Sequence frame17.
+    // Clip-local author time remains [2,8), independently of source retiming.
+    let time_base = state.active_sequence().unwrap().time_base();
+    for (edge, frame) in [
+        (TimelineTrimPayloadEdge::Out, 8),
+        (TimelineTrimPayloadEdge::In, 2),
+    ] {
+        state
+            .dispatch_action(crate::app::ui_actions::timeline_trim_clips_action(
+                TimelineTrimClipsPayload {
+                    clip_ids: vec![clip_id],
+                    edge,
+                    position: FramePosition::new(frame, time_base),
+                },
+            ))
+            .unwrap();
+    }
+    let track = state.active_sequence().unwrap().video_tracks[0].id;
+    state
+        .dispatch_action(crate::app::ui_actions::timeline_move_clip_action(
+            TimelineMoveClipPayload {
+                target_track_id: track,
+                clip_id,
+                position: FramePosition::new(17, time_base),
+            },
+        ))
+        .unwrap();
+    let clip = state.active_sequence().unwrap().find_clip(clip_id).unwrap();
+    assert_eq!(clip.position, TimelineTime::new(17, 24).unwrap());
+    assert_eq!(clip.clip_time_in, TimelineTime::new(2, 24).unwrap());
+    assert_eq!(clip.duration, TimelineTime::new(6, 24).unwrap());
+    assert_eq!(clip.source_origin(), TimelineTime::new(2, 24).unwrap());
+}
+
 fn verify_time_blur_frame(
     runtime: &PreviewProductionRuntime<()>,
     state: &mut AppState,
@@ -419,6 +513,133 @@ fn verify_time_blur_frame(
         "real Preview/Export working-frame parity"
     );
     feedback
+}
+
+fn verify_time_blur_retimed_frame(
+    runtime: &PreviewProductionRuntime<()>,
+    state: &mut AppState,
+    sources: &std::collections::BTreeMap<i64, mondrian_renderer::CpuColorFrame>,
+    sequence_frame: i64,
+    clip_frame: i64,
+    media_ticks: [i64; 4],
+) {
+    let (output, feedback) = acquire_working(runtime, state, sequence_frame);
+    assert_eq!(output.rgba_f32().data.len(), 256);
+    for (index, pixel) in output.rgba_f32().data.iter().enumerate() {
+        for channel in 0..3 {
+            let expected = media_ticks
+                .iter()
+                .zip([-2, -1, 0, 1])
+                .map(|(source, offset)| {
+                    // Exposure belongs to Clip time, not Sequence placement or
+                    // media time. Media samples use the independent192fps grid.
+                    let exposure = (clip_frame * 4 + offset) as f32 / 16.0;
+                    sources[source].rgba_f32().data[index][channel] * 2.0_f32.powf(exposure)
+                })
+                .sum::<f32>()
+                / 4.0;
+            assert!((pixel[channel] - expected).abs() < 2e-5,
+                "Sequence{sequence_frame}/Clip{clip_frame}, source{media_ticks:?}, pixel{index}/{channel}: {pixel:?}, expected={expected}");
+        }
+        assert_eq!(pixel[3], 1.0);
+    }
+    assert_eq!(feedback.len(), 1);
+    assert_ne!(
+        feedback.iter().next().unwrap().feedback.snapshot.native_owner(),
+        0
+    );
+    let snapshot = crate::app::exporting::capture_timeline_export_snapshot(
+        state,
+        state.active_sequence().unwrap().clone(),
+        vec![],
+        mondrian_export::preset::TimelineExportRange::WorkArea {
+            start_frame: 17,
+            end_frame_exclusive: 23,
+        },
+        false,
+    )
+    .unwrap();
+    let exported = mondrian_export::queue::export_visual_frame_validation(
+        &snapshot,
+        sequence_frame,
+        state.active_sequence().unwrap().settings.resolution,
+    )
+    .unwrap();
+    assert_eq!(
+        output, exported.working_frame,
+        "retimed real Preview/Export working pixels"
+    );
+}
+
+fn qualify_time_blur_retime(
+    runtime: &PreviewProductionRuntime<()>,
+    state: &mut AppState,
+    sources: &std::collections::BTreeMap<i64, mondrian_renderer::CpuColorFrame>,
+    clip_id: mondrian_core::ClipId,
+) {
+    use crate::app::product_action::{ClipHoldFramePayload, ClipSetRatePayload};
+    use mondrian_core::TimeScale;
+    // Clip starts at Sequence17, Clip-local2, media2. Its duration is6 frames.
+    // Forward source=2+3/2*offset; reversal anchors at exclusive terminal11.
+    let forward = [[34, 37, 40, 43], [58, 61, 64, 67]];
+    let reverse = [[70, 67, 64, 61], [46, 43, 40, 37]];
+    let held = [[52; 4]; 2]; // Reverse sample at Sequence20 is media6.5/24.
+    let author = |state: &AppState| {
+        serde_json::to_value(state.active_sequence().unwrap().find_clip(clip_id).unwrap()).unwrap()
+    };
+    let verify = |state: &mut AppState, samples: [[i64; 4]; 2]| {
+        let before = author(state);
+        for index in [0, 1, 0] {
+            verify_time_blur_retimed_frame(
+                runtime,
+                state,
+                sources,
+                [19, 21][index],
+                [4, 6][index],
+                samples[index],
+            );
+            assert_eq!(
+                author(state),
+                before,
+                "processing cannot mutate authored Clip state"
+            );
+        }
+    };
+    for (numerator, origin, samples) in [(3, 2, forward), (-3, 11, reverse)] {
+        let rate = TimeScale::new(numerator, 2).unwrap();
+        state
+            .dispatch_action(crate::app::ui_actions::clip_set_rate_action(
+                ClipSetRatePayload { clip_id, rate, include_linked: false },
+            ))
+            .unwrap();
+        let clip = state.active_sequence().unwrap().find_clip(clip_id).unwrap();
+        assert_eq!(clip.source_time_scale(), rate);
+        assert_eq!(clip.source_origin(), TimelineTime::new(origin, 24).unwrap());
+        assert_eq!(clip.clip_time_in, TimelineTime::new(2, 24).unwrap());
+        assert_eq!(clip.position, TimelineTime::new(17, 24).unwrap());
+        assert_eq!(clip.duration, TimelineTime::new(6, 24).unwrap());
+        verify(state, samples);
+    }
+    let reversed_author = author(state);
+    state
+        .dispatch_action(crate::app::ui_actions::clip_hold_frame_action(
+            ClipHoldFramePayload {
+                clip_id,
+                sequence_time: FramePosition::new(20, Rational::new(1, 24)),
+            },
+        ))
+        .unwrap();
+    let clip = state.active_sequence().unwrap().find_clip(clip_id).unwrap();
+    assert_eq!(clip.source_time_scale(), TimeScale::new(0, 1).unwrap());
+    assert_eq!(clip.source_origin(), TimelineTime::new(13, 48).unwrap());
+    let held_author = author(state);
+    verify(state, held);
+    assert!(state.undo_timeline().unwrap());
+    assert_eq!(author(state), reversed_author);
+    verify(state, reverse);
+    assert!(state.redo_timeline().unwrap());
+    assert_eq!(author(state), held_author);
+    verify(state, held);
 }
 
 fn cancel_time_blur_source_wait(
@@ -743,6 +964,7 @@ enum TimeBlurNleCase {
     AuthorHistory,
     CancelAndRecover,
     TimedPlayback,
+    RetimedPlacement,
 }
 
 #[test]
@@ -773,6 +995,12 @@ fn time_blur_seek_cancels_actual_source_wait_and_recovers_without_stale_output()
 #[ignore = "requires ordinary IPC17 Product, published TimeBlur, FFmpeg, OCIO and real Viewer GPU"]
 fn time_blur_timed_playback_pause_resume_and_natural_end_keep_current_authority() {
     qualify_time_blur_nle(TimeBlurNleCase::TimedPlayback);
+}
+
+#[test]
+#[ignore = "requires ordinary IPC17 Product, published TimeBlur, FFmpeg and OCIO"]
+fn time_blur_public_trim_move_forward_reverse_hold_preserve_three_time_domains() {
+    qualify_time_blur_nle(TimeBlurNleCase::RetimedPlacement);
 }
 
 fn qualify_time_blur_nle(case: TimeBlurNleCase) {
@@ -923,7 +1151,11 @@ fn qualify_time_blur_nle(case: TimeBlurNleCase) {
         );
         install_time_blur_catalog(&mut state, &binary, &kind, &preferences_path);
     }
-    let sources = reference_source_samples(&state, varying_media);
+    let sources = if case == TimeBlurNleCase::RetimedPlacement {
+        reference_retime_source_samples(&state)
+    } else {
+        reference_source_samples(&state, varying_media)
+    };
     let saved = with_preview_runtime(|runtime| {
         state
             .add_effect_to_clip(clip_id, mondrian_effects::EffectType::BasicCorrection)
@@ -1012,6 +1244,13 @@ fn qualify_time_blur_nle(case: TimeBlurNleCase) {
                     .into_external_action(),
                 )
                 .unwrap();
+        }
+        if case == TimeBlurNleCase::RetimedPlacement {
+            // Author the curve while its keys are visible, then preserve that
+            // Clip-local animation through the public trim/move operations.
+            place_trimmed_time_blur_clip(&mut state, clip_id);
+            qualify_time_blur_retime(runtime, &mut state, &sources, clip_id);
+            return None;
         }
         let author_before =
             serde_json::to_value(state.active_sequence().unwrap().find_clip(clip_id).unwrap())
