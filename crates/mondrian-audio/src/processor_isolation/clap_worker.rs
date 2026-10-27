@@ -1184,29 +1184,26 @@ fn clap_audio_storage_reservation(
     let output_ports = 1usize
         .checked_add(outputs.buses.len())
         .ok_or_else(|| invalid("CLAP output count overflowed"))?;
-    let ports = input_ports
-        .checked_add(output_ports)
-        .ok_or_else(|| invalid("CLAP port count overflowed"))?;
-    let channels = output_ports
+    let output_channels = output_ports
         .checked_mul(render.channel_count())
-        .and_then(|channels| channels.checked_add(input_channels))
         .ok_or_else(|| invalid("CLAP channel count overflowed"))?;
-    let pcm = channels
-        .checked_mul(render.max_block_frames)
-        .and_then(|n| n.checked_mul(size_of::<f32>()));
-    let vectors = ports
-        .checked_mul(size_of::<Vec<Vec<f32>>>())
-        .and_then(|n| n.checked_add(channels.checked_mul(size_of::<Vec<f32>>())?));
-    let sdk = channels.checked_mul(size_of::<*mut f32>()).and_then(|n| {
-        n.checked_add(ports.checked_mul(size_of::<clap_sys::audio_buffer::clap_audio_buffer>())?)
-    });
+    let input = super::clap_audio_input_buffers::plane_heap_reservation(
+        input_ports,
+        input_channels,
+        render.max_block_frames,
+    );
+    let output = super::clap_audio_input_buffers::plane_heap_reservation(
+        output_ports,
+        output_channels,
+        render.max_block_frames,
+    );
     let metadata = outputs
         .buses
         .len()
         .checked_mul(size_of::<crate::AudioProcessorAuxiliaryOutputBusContract>())
         .and_then(|n| outputs.buses.iter().try_fold(n, |n, bus| n.checked_add(bus.bus_key.len())));
-    pcm.and_then(|n| n.checked_add(vectors?))
-        .and_then(|n| n.checked_add(sdk?))
+    input
+        .and_then(|n| n.checked_add(output?))
         .and_then(|n| n.checked_add(metadata?))
         .ok_or_else(|| invalid("CLAP audio storage reservation overflowed"))
 }
@@ -1219,42 +1216,21 @@ fn clap_actual_audio_storage(
     output_ports: &AudioPorts,
     outputs: &AudioProcessorAuxiliaryOutputContract,
 ) -> Result<usize, AudioProcessorHostError> {
-    // Outer buffers are exact-count Vecs created immediately above; observe their
-    // complete allocations at the caller, not the slice lengths used for DSP.
     let mut bytes = outer_port_capacity
         .checked_mul(size_of::<Vec<Vec<f32>>>())
+        .and_then(|n| {
+            n.checked_add(super::clap_audio_input_buffers::nested_storage_bytes(
+                input,
+                input_ports,
+            )?)
+        })
+        .and_then(|n| {
+            n.checked_add(super::clap_audio_input_buffers::nested_storage_bytes(
+                output,
+                output_ports,
+            )?)
+        })
         .ok_or_else(|| invalid("CLAP audio owner overflowed"))?;
-    for ports in [input, output] {
-        for port in ports {
-            bytes = bytes
-                .checked_add(
-                    port.capacity()
-                        .checked_mul(size_of::<Vec<f32>>())
-                        .ok_or_else(|| invalid("CLAP channel owner overflowed"))?,
-                )
-                .ok_or_else(|| invalid("CLAP channel owner overflowed"))?;
-            for channel in port {
-                bytes = bytes
-                    .checked_add(
-                        channel
-                            .capacity()
-                            .checked_mul(size_of::<f32>())
-                            .ok_or_else(|| invalid("CLAP PCM owner overflowed"))?,
-                    )
-                    .ok_or_else(|| invalid("CLAP PCM owner overflowed"))?;
-            }
-        }
-    }
-    for ports in [input_ports, output_ports] {
-        for allocation in ports
-            .allocated_storage()
-            .map_err(|_| invalid("CLAP SDK audio owner layout overflowed"))?
-        {
-            bytes = bytes
-                .checked_add(allocation.allocation_layout().size())
-                .ok_or_else(|| invalid("CLAP SDK audio owner overflowed"))?;
-        }
-    }
     bytes = bytes
         .checked_add(
             outputs
@@ -1626,6 +1602,7 @@ fn prepare_loaded_on_main(
         configuration_phase:
             super::native_configuration_control::NativeConfigurationPhase::Admitted,
         configuration_seed: None,
+        staged_audio_inputs: None,
         processor: Some(processor),
         instance,
         contract: request.plugin_execution_contract(),
@@ -1664,6 +1641,7 @@ struct ClapWorker {
     expected_parameters: Vec<super::ClapParameterDescriptor>,
     configuration_phase: super::native_configuration_control::NativeConfigurationPhase,
     configuration_seed: Option<Vec<u8>>,
+    staged_audio_inputs: Option<Box<super::clap_audio_input_buffers::StagedClapAudioInputs>>,
     processor: Option<PluginAudioProcessor<ClapHost>>,
     instance: PluginInstance<ClapHost>,
     contract: AudioProcessorExecutionContract,
@@ -1949,7 +1927,8 @@ impl IsolatedAudioProcessorWorker for ClapWorker {
             NativeConfigurationRefusal as Refusal, NativeControlBufferReceipt as Buffers,
         };
         use clack_extensions::params::PluginParams;
-        if self.configuration_phase.ready_token().is_some()
+        if self.staged_audio_inputs.is_some()
+            || self.configuration_phase.ready_token().is_some()
             || matches!(self.configuration_phase, Phase::AudioInputsProposed(_))
         {
             return Ok(Outcome::CapabilityRefused(Refusal::AwaitingInstallation));
@@ -2183,6 +2162,79 @@ impl IsolatedAudioProcessorWorker for ClapWorker {
         self.configuration_phase = Phase::issued(&candidate);
         Ok(Outcome::ReadyForInstall(candidate))
     }
+    fn stage_clap_audio_input_buffers(
+        &mut self,
+        request: super::ClapAudioInputBufferRequest,
+    ) -> Result<super::ClapAudioInputBufferOutcome, AudioProcessorHostError> {
+        use super::native_configuration_control::NativeConfigurationPhase as Phase;
+        use super::{
+            ClapAudioInputBufferOutcome as Outcome, NativeConfigurationRefusal as Refusal,
+        };
+        if self.staged_audio_inputs.is_some() {
+            return Ok(Outcome::Refused(Refusal::AwaitingInstallation));
+        }
+        if !matches!(&self.configuration_phase, Phase::AudioInputsProposed(proposal) if *proposal == request.proposal)
+            || request.max_block_frames != self.render.max_block_frames
+            || self.processor.is_some()
+            || self.instance.inactive_plugin_handle().is_none()
+        {
+            return Ok(Outcome::Refused(Refusal::UnsupportedRequest));
+        }
+        let Some(bound) = super::clap_audio_input_buffers::reservation(
+            &request.proposal,
+            request.max_block_frames,
+        ) else {
+            return Ok(Outcome::Refused(Refusal::BufferGrantExceeded));
+        };
+        if bound > request.buffer_grant_bytes {
+            return Ok(Outcome::Refused(Refusal::BufferGrantExceeded));
+        }
+        if self.native_configuration_cohort() != Some(request.proposal.observed_cohort) {
+            return Ok(Outcome::Refused(Refusal::MetadataChanged));
+        }
+        let mut scratch = super::clap_metadata::MetadataScanScratch::new();
+        let handle = self.instance.plugin_handle();
+        if !super::clap_metadata::revalidate_parameters(
+            &handle,
+            &self.expected_parameters,
+            &mut scratch,
+        )? {
+            return Ok(Outcome::Refused(Refusal::MetadataChanged));
+        }
+        let mut expected = request.proposal.ports();
+        let mut matches = true;
+        let (_, main_and_outputs_match) = super::clap_metadata::inspect_audio_port_configuration(
+            &handle,
+            self.render.channel_layout,
+            self.main_audio_input,
+            &self.auxiliary_inputs,
+            self.main_audio_output_id,
+            &self.auxiliary_outputs,
+            &mut scratch,
+            |port| {
+                matches &= expected.next() == Some(&port);
+            },
+        )?;
+        if !matches || expected.next().is_some() || !main_and_outputs_match {
+            return Ok(Outcome::Refused(Refusal::MetadataChanged));
+        }
+        let staged = match super::clap_audio_input_buffers::StagedClapAudioInputs::prepare(request)
+        {
+            Ok(staged) => staged,
+            Err(refusal) => return Ok(Outcome::Refused(refusal)),
+        };
+        let receipt = staged.receipt;
+        // Adopt before the final callback check. A stale request must not expose
+        // either geometry or accidentally credit still-retained resource owners.
+        self.staged_audio_inputs = Some(staged);
+        if self.native_configuration_cohort() != Some(request.proposal.observed_cohort) {
+            self.configuration_phase = Phase::Blocked(request.proposal.observed_cohort.request);
+            return Ok(Outcome::Refused(Refusal::MetadataChanged));
+        }
+        self.configuration_phase = Phase::AudioInputsStaged(request.proposal);
+        Ok(Outcome::Staged(receipt))
+    }
+
     fn stage_native_configuration_seed(
         &mut self,
         seed: super::NativeConfigurationOwnedSeed,

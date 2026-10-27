@@ -209,6 +209,8 @@ pub(super) enum NativeConfigurationPhase {
     Blocked(NativeAudioReprepareRequest),
     /// An exact inactive input observation remains owned by the stopped child.
     AudioInputsProposed(super::ClapAudioInputProposal),
+    /// Replacement inputs are owned but inactive and not bound to a shared mapping.
+    AudioInputsStaged(super::ClapAudioInputProposal),
     /// A complete serviced candidate exists, awaiting exact plan installation.
     ReadyForInstall {
         request: NativeAudioReprepareRequest,
@@ -276,7 +278,9 @@ impl NativeConfigurationPhase {
         match self {
             Self::Admitted => None,
             Self::Blocked(request) | Self::ReadyForInstall { request, .. } => Some(*request),
-            Self::AudioInputsProposed(proposal) => Some(proposal.observed_cohort.request),
+            Self::AudioInputsProposed(proposal) | Self::AudioInputsStaged(proposal) => {
+                Some(proposal.observed_cohort.request)
+            }
         }
     }
 

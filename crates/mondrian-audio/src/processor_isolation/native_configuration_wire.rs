@@ -17,7 +17,7 @@ const REQUEST_SIZE: usize = 40;
 const VALUE_WIRE_SIZE: usize = 16;
 const READY_SIZE: usize = 112;
 // Fixed inline observation; no native metadata-sized allocation in either peer.
-const INPUT_PROPOSAL_SIZE: usize = 24 + super::clap_audio_input_proposal::MAX_PORTS * 12;
+pub(super) const INPUT_PROPOSAL_SIZE: usize = 24 + super::clap_audio_input_proposal::MAX_PORTS * 12;
 
 fn invalid(detail: &'static str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, detail)
@@ -323,7 +323,7 @@ pub(super) fn read_request(
     Ok(OwnedControlRequest { cohort, token, values, state_limit, buffer_grant })
 }
 
-fn refusal_tag(refusal: NativeConfigurationRefusal) -> u32 {
+pub(super) fn refusal_tag(refusal: NativeConfigurationRefusal) -> u32 {
     match refusal {
         NativeConfigurationRefusal::UnsupportedAdapter => 1,
         NativeConfigurationRefusal::SerialExhausted => 2,
@@ -337,7 +337,7 @@ fn refusal_tag(refusal: NativeConfigurationRefusal) -> u32 {
         NativeConfigurationRefusal::HostAllocationUnavailable => 10,
     }
 }
-fn refusal_from_tag(tag: u32) -> io::Result<NativeConfigurationRefusal> {
+pub(super) fn refusal_from_tag(tag: u32) -> io::Result<NativeConfigurationRefusal> {
     Ok(match tag {
         1 => NativeConfigurationRefusal::UnsupportedAdapter,
         2 => NativeConfigurationRefusal::SerialExhausted,
@@ -357,36 +357,79 @@ pub(super) enum ControlReply {
     Outcome(NativeConfigurationControlOutcome),
     Failed(String),
 }
+pub(super) fn encode_input_proposal(
+    proposal: super::ClapAudioInputProposal,
+) -> io::Result<[u8; INPUT_PROPOSAL_SIZE]> {
+    // Validate everything before publishing even the response header.
+    let mut checked =
+        super::ClapAudioInputProposal::new(proposal.observed_cohort, proposal.control_token)
+            .map_err(invalid)?;
+    let mut bytes = [0; INPUT_PROPOSAL_SIZE];
+    put_u64(&mut bytes, 0, proposal.control_token.get());
+    put_cohort(&mut bytes, 8, proposal.observed_cohort)?;
+    put_u32(&mut bytes, 20, proposal.ports().len() as u32);
+    for (index, port) in proposal.ports().enumerate() {
+        checked.push(*port).map_err(invalid)?;
+        let offset = 24 + index * 12;
+        put_u32(&mut bytes, offset, port.native_id);
+        put_u32(
+            &mut bytes,
+            offset + 4,
+            if port.channel_layout == mondrian_core::AudioChannelLayout::Mono {
+                1
+            } else {
+                2
+            },
+        );
+        put_u32(&mut bytes, offset + 8, u32::from(port.is_main));
+    }
+    Ok(bytes)
+}
+
+pub(super) fn decode_input_proposal(
+    bytes: &[u8; INPUT_PROPOSAL_SIZE],
+) -> io::Result<super::ClapAudioInputProposal> {
+    let token = NonZeroU64::new(u64_at(bytes, 0)?)
+        .ok_or_else(|| invalid("empty CLAP input proposal token"))?;
+    let cohort = get_cohort(bytes, 8)?;
+    let mut proposal = super::ClapAudioInputProposal::new(cohort, token).map_err(invalid)?;
+    let count = u32_at(bytes, 20)? as usize;
+    if count > super::clap_audio_input_proposal::MAX_PORTS
+        || bytes[24 + count * 12..].iter().any(|&byte| byte != 0)
+    {
+        return Err(invalid(
+            "invalid CLAP input proposal count or reserved rows",
+        ));
+    }
+    for index in 0..count {
+        let offset = 24 + index * 12;
+        let layout = match u32_at(bytes, offset + 4)? {
+            1 => mondrian_core::AudioChannelLayout::Mono,
+            2 => mondrian_core::AudioChannelLayout::Stereo,
+            _ => return Err(invalid("unknown CLAP input proposal layout")),
+        };
+        let is_main = match u32_at(bytes, offset + 8)? {
+            0 => false,
+            1 => true,
+            _ => return Err(invalid("unknown CLAP input proposal role")),
+        };
+        proposal
+            .push(super::ClapAudioInputPort {
+                native_id: u32_at(bytes, offset)?,
+                channel_layout: layout,
+                is_main,
+            })
+            .map_err(invalid)?;
+    }
+    Ok(proposal)
+}
+
 pub(super) fn write_reply(writer: &mut impl Write, reply: ControlReply) -> io::Result<()> {
     match reply {
         ControlReply::Outcome(NativeConfigurationControlOutcome::ClapAudioInputsChanged(
             proposal,
         )) => {
-            // Validate everything before publishing even the response header.
-            let mut checked = super::ClapAudioInputProposal::new(
-                proposal.observed_cohort,
-                proposal.control_token,
-            )
-            .map_err(invalid)?;
-            let mut bytes = [0; INPUT_PROPOSAL_SIZE];
-            put_u64(&mut bytes, 0, proposal.control_token.get());
-            put_cohort(&mut bytes, 8, proposal.observed_cohort)?;
-            put_u32(&mut bytes, 20, proposal.ports().len() as u32);
-            for (index, port) in proposal.ports().enumerate() {
-                checked.push(*port).map_err(invalid)?;
-                let offset = 24 + index * 12;
-                put_u32(&mut bytes, offset, port.native_id);
-                put_u32(
-                    &mut bytes,
-                    offset + 4,
-                    if port.channel_layout == mondrian_core::AudioChannelLayout::Mono {
-                        1
-                    } else {
-                        2
-                    },
-                );
-                put_u32(&mut bytes, offset + 8, u32::from(port.is_main));
-            }
+            let bytes = encode_input_proposal(proposal)?;
             write_header(writer, 4, INPUT_PROPOSAL_SIZE)?;
             writer.write_all(&bytes)?;
         }
@@ -482,41 +525,11 @@ pub(super) fn read_reply(
         (4, INPUT_PROPOSAL_SIZE) => {
             let mut bytes = [0; INPUT_PROPOSAL_SIZE];
             reader.read_exact(&mut bytes)?;
-            let token = NonZeroU64::new(u64_at(&bytes, 0)?)
-                .ok_or_else(|| invalid("empty CLAP input proposal token"))?;
-            let cohort = get_cohort(&bytes, 8)?;
-            if token != request.control_token || cohort != request.expected_cohort {
-                return Err(invalid("CLAP input proposal identity mismatch"));
-            }
-            let mut proposal =
-                super::ClapAudioInputProposal::new(cohort, token).map_err(invalid)?;
-            let count = u32_at(&bytes, 20)? as usize;
-            if count > super::clap_audio_input_proposal::MAX_PORTS
-                || bytes[24 + count * 12..].iter().any(|&byte| byte != 0)
+            let proposal = decode_input_proposal(&bytes)?;
+            if proposal.control_token != request.control_token
+                || proposal.observed_cohort != request.expected_cohort
             {
-                return Err(invalid(
-                    "invalid CLAP input proposal count or reserved rows",
-                ));
-            }
-            for index in 0..count {
-                let offset = 24 + index * 12;
-                let layout = match u32_at(&bytes, offset + 4)? {
-                    1 => mondrian_core::AudioChannelLayout::Mono,
-                    2 => mondrian_core::AudioChannelLayout::Stereo,
-                    _ => return Err(invalid("unknown CLAP input proposal layout")),
-                };
-                let is_main = match u32_at(&bytes, offset + 8)? {
-                    0 => false,
-                    1 => true,
-                    _ => return Err(invalid("unknown CLAP input proposal role")),
-                };
-                proposal
-                    .push(super::ClapAudioInputPort {
-                        native_id: u32_at(&bytes, offset)?,
-                        channel_layout: layout,
-                        is_main,
-                    })
-                    .map_err(invalid)?;
+                return Err(invalid("CLAP input proposal identity mismatch"));
             }
             Ok(ControlReply::Outcome(
                 NativeConfigurationControlOutcome::ClapAudioInputsChanged(proposal),

@@ -1047,6 +1047,44 @@ impl SupervisedAudioWorker {
         }
     }
 
+    pub(super) fn stage_clap_audio_input_buffers(
+        &mut self,
+        request: super::ClapAudioInputBufferRequest,
+    ) -> Result<super::ClapAudioInputBufferOutcome, AudioProcessorHostError> {
+        use super::clap_audio_input_buffers::wire;
+        let operation = "CLAP input buffer stage";
+        if self.process.state != ProcessState::Running {
+            return Err(AudioProcessorHostError::PoisonedInstance);
+        }
+        wire::validate_request(request)
+            .map_err(|error| AudioProcessorHostError::InvalidContract(error.to_string()))?;
+        if let Err(error) = self.configure_control_timeout(self.state_entry_timeout) {
+            self.terminate();
+            return Err(worker_failed(operation, error));
+        }
+        let result = (|| -> io::Result<_> {
+            WorkerCommand {
+                transport_activity: None,
+                kind: super::protocol::CommandKind::StageClapAudioInputBuffers,
+                start_sample: 0,
+                frames: 0,
+                event_count: 0,
+                note_count: 0,
+            }
+            .write_to(&mut self.control)?;
+            wire::write_request(&mut self.control, request)?;
+            wire::read_reply(&mut self.control, request)
+        })();
+        match result {
+            Ok(outcome) => Ok(outcome),
+            Err(error) => {
+                let classified = self.classify_operation_io(operation, error);
+                self.terminate();
+                Err(classified)
+            }
+        }
+    }
+
     #[cfg(test)]
     pub(super) fn discard_next_seed_commit_reply_for_test(
         &mut self,

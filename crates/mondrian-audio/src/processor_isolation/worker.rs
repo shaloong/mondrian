@@ -599,6 +599,7 @@ fn dispatch_native_owner_command(
                 CommandKind::PollPending
                 | CommandKind::PollConfigurationCohort
                 | CommandKind::ServiceConfiguration
+                | CommandKind::StageClapAudioInputBuffers
                 | CommandKind::StageConfigurationSeed
                 | CommandKind::CommitConfigurationSeed
                 | CommandKind::PollNativeObservations
@@ -736,6 +737,31 @@ fn dispatch_native_owner_command(
             wire::write_reply(control, reply)
                 .map_err(|error| worker_failed("configuration reply", error))?;
             Ok(success)
+        }
+        NativeCommand::StageClapAudioInputBuffers(request) => {
+            use super::clap_audio_input_buffers::wire;
+            match catch_unwind(AssertUnwindSafe(|| {
+                processor.stage_clap_audio_input_buffers(request)
+            })) {
+                Ok(Ok(outcome)) => {
+                    wire::write_reply(control, outcome)
+                        .map_err(|error| worker_failed("CLAP input buffer stage reply", error))?;
+                    Ok(true)
+                }
+                Ok(Err(error)) => {
+                    wire::write_failed(control, &error.to_string())
+                        .map_err(|error| worker_failed("CLAP input buffer failure reply", error))?;
+                    Err(error)
+                }
+                Err(_) => {
+                    wire::write_failed(control, "CLAP input buffer stage panicked")
+                        .map_err(|error| worker_failed("CLAP input buffer panic reply", error))?;
+                    Err(worker_failed(
+                        "CLAP input buffer stage",
+                        "native adapter panicked",
+                    ))
+                }
+            }
         }
         NativeCommand::StageSeed(stage) => {
             use super::native_configuration_seed_wire::DecodedStage;

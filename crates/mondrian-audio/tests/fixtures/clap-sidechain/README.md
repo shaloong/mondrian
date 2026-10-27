@@ -124,6 +124,12 @@ gate checks the exact inactive input proposal, unchanged cursors/author/Source,
 blocked old-layout PCM and Enter, rejection of another ticket and real Source
 revocation. Proposal observation does not activate, consume a cohort, migrate
 buffers or install a plan. Original-owner cleanup must exit0 even on failure.
+The separate
+`installed_clap_runtime_restart_stages_new_inputs_under_original_root_grant`
+gate checks real inactive plane staging, original-Root overlap accounting,
+cancel-before-stage, duplicate-stage refusal without extra fee, retained native
+identity and the same held PCM/Enter/Source-revocation conditions. It does not
+qualify replacement-plane processing or mapping installation.
 Fixture unit tests additionally cover the actual current header
 boundary; previously stale assertions incorrectly treated supported mode17 as
 invalid.

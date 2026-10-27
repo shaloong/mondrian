@@ -676,6 +676,16 @@ pub trait AudioProcessor: Send {
         ))
     }
 
+    /// Stage input owners after Root resource admission, keeping native DSP inactive.
+    fn stage_clap_audio_input_buffers(
+        &mut self,
+        _request: crate::ClapAudioInputBufferRequest,
+    ) -> Result<crate::ClapAudioInputBufferOutcome, AudioProcessorHostError> {
+        Ok(crate::ClapAudioInputBufferOutcome::Refused(
+            crate::NativeConfigurationRefusal::UnsupportedAdapter,
+        ))
+    }
+
     /// Stage an exact same-child configuration seed while DSP/output are quiesced.
     ///
     /// Accepted storage is one additional accounted child owner. It does not

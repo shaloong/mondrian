@@ -553,11 +553,22 @@ remain until their complete native buffers, IPC and contracts are implemented.
 Retained restart installation still preserves every port contract and shared
 mapping. CLAP can now retain a bounded inline input proposal after legal
 deactivation, using actual native IDs/order, declared Mono/Stereo meaning,
-cohort and control token. Main/output compatibility remains frozen. IPC23
+cohort and control token. Main/output compatibility remains frozen. IPC24
 transfers this observation into the existing Root-owned attempt; its inline
 layout is charged before service. The proposal cannot activate, consume a
 cohort, issue a seed or unblock DSP. Reading it requires the exact original
 ticket and a still-valid Source claim. Native I/O migration remains an open gap.
+
+IPC24 adds a separate input-buffer stage. The original Root admits the complete
+replacement Box, nested PCM vectors and SDK port storage together with every
+retained owner before allocation. Cold and staged planes share the same pure
+reservation and actual-capacity model. The stopped child revalidates the exact
+proposal, native cohort and block extent, retains the new owners and returns
+their capacities; cancellation, failure or an unconfirmed operation cannot
+credit the reservation. Staged inputs have no ready token or seed authority.
+This stage neither activates the plugin nor replaces the shared mapping or
+canonical processing contract. Those owners must be coordinated before DSP can
+use the replacement planes.
 
 Future migration must reuse the existing joined native processing scope and
 Root transaction. Inactive native metadata supplies a typed proposal using the

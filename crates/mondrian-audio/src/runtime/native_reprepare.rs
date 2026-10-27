@@ -161,6 +161,8 @@ pub enum NativeAudioReprepareError {
 enum CapturePhase {
     Servicing,
     InputConfigurationObserved,
+    InputBuffersStageAttempted,
+    InputBuffersStaged,
     Captured,
     Preparing,
     Prepared,
@@ -197,6 +199,7 @@ pub(super) struct NativeReprepareAttempt {
     selection: ReprepareSelection,
     candidate: Option<crate::NativeConfigurationCandidate>,
     input_proposal: Option<crate::ClapAudioInputProposal>,
+    input_buffer_receipt: Option<crate::ClapAudioInputBufferReceipt>,
     phase: CapturePhase,
     // Reserved before foreign work. An unexpectedly larger actual owner raises
     // this held charge even on refusal; no handle Drop can release it.
@@ -294,6 +297,25 @@ fn check_capture_overlap(
         .into());
     }
     Ok((fixed, reserved, control))
+}
+
+fn check_input_buffer_overlap(
+    current: AudioRuntimeResourceFootprint,
+    grant: AudioRuntimeResourceGrant,
+    bytes: usize,
+) -> Result<usize, AudioRuntimeBuildError> {
+    let fixed = current
+        .fixed_resident_bytes
+        .checked_add(bytes)
+        .ok_or(AudioRuntimeBuildError::InvalidResourceReplacement)?;
+    if fixed > grant.max_fixed_resident_bytes {
+        return Err(AudioRuntimeBuildError::ResourceOverlapGrantExceeded {
+            category: AudioRuntimeResourceCategory::FixedResidentBytes,
+            required: fixed,
+            granted: grant.max_fixed_resident_bytes,
+        });
+    }
+    Ok(fixed)
 }
 
 // The original Root grant/footprint (including H from the existing logical fee
@@ -492,6 +514,7 @@ impl AudioProgramRuntime {
             selection,
             candidate: None,
             input_proposal: None,
+            input_buffer_receipt: None,
             phase: CapturePhase::Servicing,
             held_fixed_bytes: reserved,
             control_grant,
@@ -640,7 +663,13 @@ impl AudioProgramRuntime {
             .as_ref()
             .ok_or(Error::Admission("no retained native input proposal"))?;
         if attempt.ticket != ticket
-            || attempt.phase != CapturePhase::InputConfigurationObserved
+            || !matches!(
+                attempt.phase,
+                CapturePhase::InputConfigurationObserved
+                    | CapturePhase::InputBuffersStageAttempted
+                    | CapturePhase::InputBuffersStaged
+                    | CapturePhase::Failed
+            )
             || self.native_author_installation_serial()? != attempt.serial
         {
             return Err(Error::Admission(
@@ -651,6 +680,89 @@ impl AudioProgramRuntime {
             .input_proposal
             .as_ref()
             .ok_or(Error::Admission("native input proposal unavailable"))
+    }
+
+    /// Non-RT resource staging on the original stopped child. This does not
+    /// activate, map or install a configuration. Old-shape DSP stays blocked.
+    pub fn stage_native_reprepare_audio_input_buffers(
+        &mut self,
+        ticket: crate::AudioProcessorReprepareTicket,
+        cancellation: &ExecutionCancellationToken,
+    ) -> Result<crate::ClapAudioInputBufferReceipt, NativeAudioReprepareError> {
+        use NativeAudioReprepareError as Error;
+        if cancellation.is_canceled() {
+            return Err(Error::Cancelled);
+        }
+        let proposal = *self.native_reprepare_audio_input_proposal(ticket)?;
+        if self.native_reprepare.attempt.as_ref().unwrap().phase
+            != CapturePhase::InputConfigurationObserved
+        {
+            return Err(Error::Admission(
+                "native inputs already staged or attempted",
+            ));
+        }
+        let bytes = crate::processor_isolation::clap_audio_input_buffer_reservation(
+            &proposal,
+            self.session.contract().max_block_frames,
+        )
+        .ok_or(AudioRuntimeBuildError::InvalidResourceReplacement)?;
+        let fixed =
+            check_input_buffer_overlap(self.resource_footprint, self.resource_grant, bytes)?;
+        let attempt = self.native_reprepare.attempt.as_mut().unwrap();
+        let held = add(attempt.held_fixed_bytes, bytes)?;
+        let request = crate::ClapAudioInputBufferRequest {
+            proposal,
+            max_block_frames: self.session.contract().max_block_frames,
+            buffer_grant_bytes: bytes,
+        };
+        // The sole Root reserves the entire new owner overlap BEFORE native
+        // allocation. Failed/unconfirmed work retains this fee until teardown.
+        attempt.held_fixed_bytes = held;
+        attempt.phase = CapturePhase::InputBuffersStageAttempted;
+        self.resource_footprint.fixed_resident_bytes = fixed;
+        let result = self.session.stage_native_reprepare_audio_inputs(&attempt.selection, request);
+        let attempt = self.native_reprepare.attempt.as_mut().unwrap();
+        let receipt = match result {
+            Ok(crate::ClapAudioInputBufferOutcome::Staged(receipt)) => {
+                attempt.input_buffer_receipt = Some(receipt);
+                if receipt.allocated_bytes > bytes {
+                    let extra = receipt.allocated_bytes - bytes;
+                    attempt.held_fixed_bytes = attempt.held_fixed_bytes.saturating_add(extra);
+                    self.resource_footprint.fixed_resident_bytes =
+                        self.resource_footprint.fixed_resident_bytes.saturating_add(extra);
+                }
+                if receipt.request != request
+                    || receipt.reservation_bytes != bytes
+                    || receipt.allocated_bytes == 0
+                    || receipt.allocated_bytes > bytes
+                {
+                    attempt.phase = CapturePhase::Failed;
+                    return Err(Error::Admission(
+                        "native staged input receipt exceeded exact admission",
+                    ));
+                }
+                attempt.phase = CapturePhase::InputBuffersStaged;
+                receipt
+            }
+            Ok(crate::ClapAudioInputBufferOutcome::Refused(refusal)) => {
+                attempt.phase = CapturePhase::Failed;
+                return Err(Error::Capability(refusal));
+            }
+            Err(error) => {
+                attempt.phase = CapturePhase::Failed;
+                return Err(error);
+            }
+        };
+        let serial = attempt.serial;
+        if cancellation.is_canceled() {
+            return Err(Error::Cancelled);
+        }
+        if self.native_author_installation_serial()? != serial {
+            return Err(Error::Admission(
+                "Source changed while native inputs were staged",
+            ));
+        }
+        Ok(receipt)
     }
 
     /// Prepare a new execution-only Factory, canonical PDC schedule and empty
@@ -1288,6 +1400,33 @@ impl AudioProgramRuntime {
 #[cfg(test)]
 mod inline_admission_tests {
     use super::*;
+
+    #[test]
+    fn input_staging_overlap_uses_original_root_ceiling_without_crediting_old_owners() {
+        let current =
+            AudioRuntimeResourceFootprint { fixed_resident_bytes: 100, ..Default::default() };
+        let grant = AudioRuntimeResourceGrant::new(1, 199, 1000);
+        assert!(matches!(
+            check_input_buffer_overlap(current, grant, 100),
+            Err(AudioRuntimeBuildError::ResourceOverlapGrantExceeded {
+                category: AudioRuntimeResourceCategory::FixedResidentBytes,
+                required: 200,
+                granted: 199
+            })
+        ));
+        assert_eq!(
+            check_input_buffer_overlap(current, AudioRuntimeResourceGrant::new(1, 200, 1000), 100)
+                .unwrap(),
+            200
+        );
+        assert!(check_input_buffer_overlap(
+            current,
+            AudioRuntimeResourceGrant::new(1, usize::MAX, usize::MAX),
+            usize::MAX
+        )
+        .is_err());
+        assert_eq!(current.fixed_resident_bytes, 100);
+    }
 
     fn session(fixed: usize) -> AudioSessionResourceFootprint {
         AudioSessionResourceFootprint {

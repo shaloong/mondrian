@@ -205,6 +205,25 @@ impl PreparedProcessorHost {
             },
         )?)
     }
+    pub(crate) fn stage_native_reprepare_audio_inputs(
+        &mut self,
+        selected: &ReprepareSelection,
+        request: crate::ClapAudioInputBufferRequest,
+    ) -> Result<crate::ClapAudioInputBufferOutcome, Error> {
+        let instance = self
+            .instances
+            .get_mut(selected.index)
+            .ok_or(Error::Admission("input stage Hosted index changed"))?;
+        if request.proposal.observed_cohort != selected.cohort
+            || !matches!(instance.native_binding, NativeHostedBinding::Installed { lease, object }
+                if lease == selected.lease && object == selected.object)
+        {
+            return Err(Error::Admission("input stage original owner changed"));
+        }
+        Ok(isolate_adapter_call("native input buffer stage", || {
+            instance.processor.stage_clap_audio_input_buffers(request)
+        })?)
+    }
 }
 
 impl PreparedProcessorHost {

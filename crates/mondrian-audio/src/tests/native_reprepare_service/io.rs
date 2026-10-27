@@ -15,9 +15,16 @@ fn installed_clap_runtime_restart_observes_changed_inputs_without_resuming_old_g
     restart_detector_width(Qualification::Observe);
 }
 
+#[test]
+#[ignore = "matching production helper and CLAP mode19; Root-granted inactive input staging only"]
+fn installed_clap_runtime_restart_stages_new_inputs_under_original_root_grant() {
+    restart_detector_width(Qualification::StageInputs);
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Qualification {
     Observe,
+    StageInputs,
     Install,
 }
 
@@ -138,12 +145,12 @@ fn restart_detector_width(qualification: Qualification) {
         let held = cursors(&runtime);
         let before_service = runtime.resource_footprint();
         let outcome = runtime.service_native_reprepare(ticket, &cancellation);
-        if qualification == Qualification::Observe {
+        if qualification != Qualification::Install {
             assert!(matches!(
                 outcome,
                 Err(NativeAudioReprepareError::AudioInputChangeRequired)
             ));
-            let proposal = runtime
+            let proposal = *runtime
                 .native_reprepare_audio_input_proposal(ticket)
                 .expect("same retained inactive observation");
             let NativeObservedRequest::Cohort(cohort) = ticket.request else {
@@ -167,6 +174,44 @@ fn restart_detector_width(qualification: Qualification) {
             assert_eq!(cursors(&runtime), held);
             verifier.validate(&claim).unwrap();
             assert_eq!(runtime.observe_native_owner_object(lease).unwrap(), object);
+            if qualification == Qualification::StageInputs {
+                let before = runtime.resource_footprint();
+                let canceled = ExecutionCancellationToken::new();
+                canceled.cancel();
+                assert!(matches!(
+                    runtime.stage_native_reprepare_audio_input_buffers(ticket, &canceled),
+                    Err(NativeAudioReprepareError::Cancelled)
+                ));
+                assert_eq!(runtime.resource_footprint(), before);
+                let receipt = runtime
+                    .stage_native_reprepare_audio_input_buffers(ticket, &cancellation)
+                    .expect("Root-admitted real replacement input owners");
+                assert_eq!(receipt.request.proposal, proposal);
+                assert_eq!(receipt.request.max_block_frames, 4);
+                assert_eq!(
+                    receipt.request.buffer_grant_bytes,
+                    receipt.reservation_bytes
+                );
+                assert!(
+                    receipt.allocated_bytes > 0
+                        && receipt.allocated_bytes <= receipt.reservation_bytes
+                );
+                let staged = runtime.resource_footprint();
+                assert_eq!(
+                    staged.fixed_resident_bytes,
+                    before.fixed_resident_bytes + receipt.reservation_bytes
+                );
+                assert!(runtime
+                    .stage_native_reprepare_audio_input_buffers(ticket, &cancellation)
+                    .is_err());
+                assert_eq!(
+                    runtime.resource_footprint(),
+                    staged,
+                    "duplicate stage neither allocates nor credits"
+                );
+                assert_eq!(runtime.observe_native_owner_object(lease).unwrap(), object);
+                assert_eq!(cursors(&runtime), held);
+            }
             assert!(
                 runtime.resource_footprint().fixed_resident_bytes
                     > before_service.fixed_resident_bytes

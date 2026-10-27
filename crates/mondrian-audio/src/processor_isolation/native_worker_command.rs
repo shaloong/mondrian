@@ -12,6 +12,7 @@ use std::io::Read;
 pub(super) enum NativeCommand {
     Plain(WorkerCommand),
     Configuration(OwnedControlRequest),
+    StageClapAudioInputBuffers(super::ClapAudioInputBufferRequest),
     StageSeed(DecodedStage),
     CommitSeed(NativeConfigurationSeedTicket),
     BindObject(crate::NativeAudioObjectBindRequest),
@@ -62,6 +63,11 @@ pub(super) fn decode(
         CommandKind::ServiceConfiguration => control_wire::read_request(stream, parameter_lanes)
             .map(NativeCommand::Configuration)
             .map_err(|error| failed("configuration request", error)),
+        CommandKind::StageClapAudioInputBuffers => {
+            super::clap_audio_input_buffers::wire::read_request(stream)
+                .map(NativeCommand::StageClapAudioInputBuffers)
+                .map_err(|error| failed("CLAP input buffer stage request", error))
+        }
         CommandKind::StageConfigurationSeed => seed_wire::read_stage(stream)
             .map(NativeCommand::StageSeed)
             .map_err(|error| failed("seed stage request", error)),
@@ -236,7 +242,7 @@ mod inline_command_contracts {
             let bytes = [3, 5, 7];
             let seed = ticket(&bytes);
             for version in [
-                8_u32, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 24,
+                8_u32, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 25,
             ] {
                 let mut old = Vec::new();
                 header(1).write_to(&mut old).expect("one complete old command");
@@ -254,7 +260,7 @@ mod inline_command_contracts {
                 command.write_to(&mut wire).expect("existing command codec");
                 assert_eq!(
                     &wire[4..12],
-                    &[23, 0, 0, 0, tag as u8, 0, 0, 0],
+                    &[24, 0, 0, 0, tag as u8, 0, 0, 0],
                     "independent version/tag contract"
                 );
                 use std::io::Write;
@@ -308,6 +314,9 @@ mod inline_command_contracts {
                         assert_eq!(observed, seed);
                     }
                     NativeCommand::StageSeed(_) => panic!("admitted body cannot become refusal"),
+                    NativeCommand::StageClapAudioInputBuffers(_) => {
+                        panic!("old tag cannot become input buffer staging")
+                    }
                     NativeCommand::BindObject(_) => panic!("old tag cannot decode as bind object"),
                     NativeCommand::QueryParameter(_, _) => {
                         panic!("old tag cannot decode as parameter query")
