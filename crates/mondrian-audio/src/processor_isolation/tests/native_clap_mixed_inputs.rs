@@ -38,7 +38,7 @@ impl AudioPcmSource for Source {
 }
 
 #[test]
-#[ignore = "requires matching Product and rebuilt CLAP sidechain modes17/18 under native Job"]
+#[ignore = "requires matching Product and rebuilt CLAP sidechain modes17/18/23/24 under native Job"]
 fn installed_clap_mixed_inputs_preserve_native_state_layout_and_dag_pcm() {
     let helper = PathBuf::from(std::env::var_os("MONDRIAN_CLAP_TEST_HELPER").unwrap());
     let plugin = PathBuf::from(std::env::var_os("MONDRIAN_CLAP_SIDECHAIN_TEST_PLUGIN").unwrap());
@@ -54,6 +54,20 @@ fn installed_clap_mixed_inputs_preserve_native_state_layout_and_dag_pcm() {
         ),
         (
             18,
+            AudioChannelLayout::Mono,
+            [AudioChannelLayout::Stereo, AudioChannelLayout::Mono],
+            [2.125, 0.0],
+        ),
+        // Same native planes and independent oracle, now arbitrary NULL/empty
+        // declarations on every Main/Aux port. Opaque mode bytes must survive.
+        (
+            23,
+            AudioChannelLayout::Stereo,
+            [AudioChannelLayout::Mono, AudioChannelLayout::Stereo],
+            [2.875, 4.0],
+        ),
+        (
+            24,
             AudioChannelLayout::Mono,
             [AudioChannelLayout::Stereo, AudioChannelLayout::Mono],
             [2.125, 0.0],

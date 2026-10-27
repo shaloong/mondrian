@@ -79,6 +79,15 @@ Live schema3 and shutdown schema5 expose these facts; pending scopes and childre
 count as owned resources. This adds no teardown executor or DSP permission.
 Confirmed exit/reap remains separate from graceful acknowledgement and OFX closure.
 
+CLAP null/empty audio-port types retain their native arbitrary-audio declaration.
+The format adapter explicitly maps fixed Main/output lanes by ordinal identity
+to the requested Mono/Stereo render contract; one/two-lane arbitrary auxiliary
+inputs expose the corresponding host Mono/Stereo lane contract. This assigns
+host routing meaning without inventing native speaker metadata. Named types
+still require exact widths, while custom types and other widths are refused.
+Cold and stopped scans share this processing projection; no PCM mapping loop,
+graph, author state or IPC field is added.
+
 OpenFX discovery in `mondrian-app::openfx_adapter` loads installed binaries only
 in a supervised child. An optional exported OfxSetHost receives the actual native
 host before OfxGetNumberOfPlugins and OfxGetPlugin. Discovery returns bounded

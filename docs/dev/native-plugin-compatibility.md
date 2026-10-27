@@ -31,7 +31,7 @@ product consumers and pending closure for each feature family.
 | --- | --- | --- |
 | Native discovery and isolation | Selected class/descriptor, fingerprinted native binary, supervised discovery and persistent processing child, bounded control traffic and shared buffers | Standard scan locations/workflow, permitted vendor corpus, platform and native editor lifecycle |
 | VST3 SDK interfaces | One canonical runtime binding package generated from verified SDK 3.8.1 sources; independent layout/signature and actual cross-language calls for all nine methods of the four new interfaces | Optional host-service implementation, MIDI 2 event routing, native MSVC/macOS/Linux qualification; upstream generator excludes SDK testing interfaces |
-| Audio layout | Native mono/stereo Main output; both CLAP and VST3 auxiliary inputs independently declare Mono/Stereo, validated against exact native type/arrangement and counts. Both admit up to 31 ordered same-layout auxiliary outputs through the existing DAG. CLAP retains absent-main and auxiliary-only inputs; VST3 absent input requires explicit Some Note and no auxiliary inputs. Native shape checks and finite owned routing/PDC conditions are below. | Arbitrary unspecified ports, surround/ambisonic, live topology recovery, broader third-party auxiliary sound and product output-selection workflows remain unqualified or refused. |
+| Audio layout | Native Mono/Stereo Main and mixed auxiliary inputs; named types retain exact native type/arrangement and width checks. CLAP additionally maps arbitrary NULL/empty fixed Main/output lanes to the requested host Mono/Stereo contract, and one/two-lane arbitrary Aux to host Mono/Stereo by explicit ordinal identity. Native speaker declarations are not invented. Both formats admit up to 31 ordered same-layout auxiliary outputs through the existing DAG. CLAP retains absent-main and auxiliary-only inputs; VST3 absent input requires explicit Some Note and no auxiliary inputs. | Wider arbitrary/custom types, surround/ambisonic, full topology/configuration recovery, broader third-party auxiliary sound and product output-selection workflows remain unqualified or refused. |
 | Processor-output graph | Track/Bus processor identity plus Main/Auxiliary key uses the existing routing DAG, producer PDC and Session storage; raw producer tap precedes later rack processors and Mute, retaining Track Solo semantics; schema 33 preserves version-32 author values. CLAP native output IDs and VST3 direction-local output indices bind to this same graph | Product output selection, other rack/owner families, broader native adapters and realtime/performance evidence |
 | Audio parameters | Canonical author curves and sample offsets; CLAP plain values, VST normalized values; insertion/rebinding/history/archive state; one App custody slot for single-owner gestures or terminal frontiers; finite single-CLAP and two-owner VST3 headless Session/Media/Audio handoffs | The first headless consumer requires terminal, direct-root, same-object preserved execution. Broader multi-owner frontiers, Scope/nested execution, native display conversion, units/programs/presets, output events, broader gestures and large state/resources remain unqualified |
 | Audio render mode and threads | Explicit VST realtime/offline selection; CLAP requested-mode probe and execution, hard-realtime/declined-mode refusal; instance-local CLAP symbolic thread checks | Dynamic restart/rescan/latency/tail handling, sleep/request-process scheduling and extension event loops |
@@ -253,14 +253,31 @@ filtering. Audio885PASS/197ignored and all three affected owned native regressio
 gates pass with matching Product. This does not establish a universal shutdown
 deadline or qualify unrelated lifecycle failures.
 
-ZamCompX2 4.5 official Windows64 CLAP: List succeeds, but the processing Probe
-refuses input0 (Main, two channels, unspecified type). This legal CLAP arbitrary
-audio type lacks an explicit mapping in the current host; it is not evidence of
-a plugin violation. The pinned [DPF adapter source](https://github.com/DISTRHO/DPF/blob/461ea6d45d842d273ae4d53ad5490e43459419cc/distrho/src/DistrhoPluginCLAP.cpp)
-does not implement port-configuration extensions. The
-[positive qualification gate](../../crates/mondrian-audio/src/processor_isolation/tests/native_clap_mixed_vendor.rs)
-remains ignored and currently fails at that boundary; its later state/PCM
-assertions are unattempted. No unchanged retry or layout-inference workaround.
+CLAP arbitrary-lane mapping has finite Windows owned qualification, 2026-10-28:
+NULL and empty declarations on Main, auxiliary and output ports preserve their
+actual configuration bytes and complete literal PCM through the existing DAG.
+Both Mono/Stereo shapes pass at44.1/48k and both setup modes, including latency3,
+partitions and three state epochs/seek. These are eight new configurations plus
+the original eight declared-layout configurations in one expanded native gate.
+The full16 native regressions, Audio901/206ignored and fixture9/0 pass with the
+matching normal Product, empty stderr and original settled ownership budgets.
+Zero/3/u32-max widths, custom types, identity/role faults and declared-width
+conflicts retain strict refusal before activation. This is a host-selected
+ordinal mapping, not channel-count inference of native speaker positions or
+full configuration/rescan, Float64, realtime/performance or platform support.
+
+ZamCompX2 4.5 official Windows64 CLAP remains **Partially Supported**. The
+deactivated census confirms Main input/output0 with two arbitrary lanes,
+Aux536870912 with one arbitrary lane, and no audio-ports-config extension under
+this Host. The original Probe refusal is resolved. The unchanged
+[positive gate](../../crates/mondrian-audio/src/processor_isolation/tests/native_clap_mixed_vendor.rs)
+now reaches processing but fails at the second epoch with an unserviced
+`ClapRestart` ticket: whole gate0PASS/1FAIL, exit101, stderr899B and settled Job.
+Its later complete PCM/seek assertions are not qualified. The pinned
+[DPF reset implementation](https://github.com/DISTRHO/DPF/blob/461ea6d45d842d273ae4d53ad5490e43459419cc/distrho/src/DistrhoPluginCLAP.cpp#L840)
+requests restart when no dedicated reset parameter exists, consistent with the
+observed retained-entry boundary. Next verification must use the actual Runtime
+Source/capture/install/Fresh consumer; no ignored request or vendor special case.
 The separate GPL-2.0-or-later test binary and license are local materials only;
 the release ZIP was discarded.
 

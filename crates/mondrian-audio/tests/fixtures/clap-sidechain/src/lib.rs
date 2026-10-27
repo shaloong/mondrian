@@ -745,8 +745,8 @@ impl PluginAudioPortsImpl for Main<'_> {
         }
         let reversed = self.0.mode.load(Ordering::Relaxed) == 1;
         let mode = self.0.mode.load(Ordering::Relaxed);
-        let mono = (matches!(mode, 17 | 19 | 22) && is_input && index == 1)
-            || (mode == 18 && (index == 0 || (is_input && index == 2)));
+        let mono = (matches!(mode, 17 | 19 | 22 | 23) && is_input && index == 1)
+            || (matches!(mode, 18 | 24) && (index == 0 || (is_input && index == 2)));
         let id = match index {
             0 => 0,
             1 if !reversed => 11,
@@ -768,11 +768,17 @@ impl PluginAudioPortsImpl for Main<'_> {
             } else {
                 AudioPortFlags::empty()
             },
-            port_type: Some(if mono {
-                AudioPortType::MONO
+            port_type: if mode == 23 {
+                None
+            } else if mode == 24 {
+                Some(AudioPortType(c""))
             } else {
-                AudioPortType::STEREO
-            }),
+                Some(if mono {
+                    AudioPortType::MONO
+                } else {
+                    AudioPortType::STEREO
+                })
+            },
             in_place_pair: None,
         });
     }
@@ -786,7 +792,7 @@ const ECHO_FRAMES: usize = 256;
 // Mode15 appends a fixed 16-byte Windows event nonce; no live timer state is saved.
 fn configuration_gain(bytes: [u8; 5]) -> Result<f32, PluginError> {
     let gain = f32::from_le_bytes([bytes[1], bytes[2], bytes[3], bytes[4]]);
-    if bytes[0] > 22 || !gain.is_finite() || !(0.0..=1.0).contains(&gain) {
+    if bytes[0] > 24 || !gain.is_finite() || !(0.0..=1.0).contains(&gain) {
         return Err(PluginError::Message("invalid fixture state"));
     }
     Ok(gain)
@@ -1051,9 +1057,9 @@ impl<'a> PluginAudioProcessor<'a, Shared<'a>, Main<'a>> for Processor<'a> {
             };
             let channels =
                 port.channels()?.into_f32().ok_or(PluginError::Message("f32 input required"))?;
-            if matches!(self.mode, 17..=22) {
-                let expected = if (matches!(self.mode, 17 | 19 | 22) && port_index == 1)
-                    || (self.mode == 18 && matches!(port_index, 0 | 2))
+            if matches!(self.mode, 17..=24) {
+                let expected = if (matches!(self.mode, 17 | 19 | 22 | 23) && port_index == 1)
+                    || (matches!(self.mode, 18 | 24) && matches!(port_index, 0 | 2))
                 {
                     1
                 } else {
@@ -1256,11 +1262,11 @@ mod repeat_restart_tests {
         assert_eq!(configuration_gain(header).unwrap(), 0.5);
         header[0] = 20;
         assert_eq!(configuration_gain(header).unwrap(), 0.5);
-        for mode in [21, 22] {
+        for mode in [21, 22, 23, 24] {
             header[0] = mode;
             assert_eq!(configuration_gain(header).unwrap(), 0.5);
         }
-        header[0] = 23;
+        header[0] = 25;
         assert!(configuration_gain(header).is_err());
     }
 

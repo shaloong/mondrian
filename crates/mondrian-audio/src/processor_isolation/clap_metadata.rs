@@ -341,25 +341,33 @@ pub(super) fn scan_audio_ports(
             let port = ports
                 .get(handle, index, is_input, &mut buffer)
                 .ok_or_else(|| invalid("CLAP audio port metadata is unavailable"))?;
-            // Port type supplies channel meaning; count alone never selects a layout.
-            // Main and outputs keep the negotiated render layout. Auxiliary inputs
-            // may independently declare either of the supported semantic layouts.
+            // This is the host-facing lane contract, not a claim that an arbitrary
+            // CLAP port declared speaker positions. A null/empty type accepts an
+            // ordinal identity mapping: Main/outputs keep the requested render
+            // layout; auxiliary one/two-lane audio maps to host Mono/Stereo.
+            // Named types must match exactly, including their native width.
+            // Custom types and other widths need a separate explicit mapping.
             let auxiliary_input = is_input && !port.flags.contains(AudioPortFlags::IS_MAIN);
-            let (port_layout, port_type) =
-                if auxiliary_input && port.port_type == Some(AudioPortType::MONO) {
-                    (AudioChannelLayout::Mono, AudioPortType::MONO)
-                } else if auxiliary_input && port.port_type == Some(AudioPortType::STEREO) {
-                    (AudioChannelLayout::Stereo, AudioPortType::STEREO)
-                } else {
-                    (layout, expected_type)
-                };
+            let (port_layout, port_type) = if auxiliary_input
+                && (port.port_type == Some(AudioPortType::MONO)
+                    || (port.port_type.is_none() && port.channel_count == 1))
+            {
+                (AudioChannelLayout::Mono, AudioPortType::MONO)
+            } else if auxiliary_input
+                && (port.port_type == Some(AudioPortType::STEREO)
+                    || (port.port_type.is_none() && port.channel_count == 2))
+            {
+                (AudioChannelLayout::Stereo, AudioPortType::STEREO)
+            } else {
+                (layout, expected_type)
+            };
             let refusal = if !scratch.insert_id(port.id.get()) {
                 Some("duplicate_id")
             } else if (port.flags.contains(AudioPortFlags::IS_MAIN) && index != 0)
                 || (!is_input && index == 0 && !port.flags.contains(AudioPortFlags::IS_MAIN))
             {
                 Some("main_role")
-            } else if port.port_type != Some(port_type) {
+            } else if port.port_type.is_some() && port.port_type != Some(port_type) {
                 Some("port_type")
             } else if usize::try_from(port.channel_count).ok() != Some(port_layout.channel_count())
             {

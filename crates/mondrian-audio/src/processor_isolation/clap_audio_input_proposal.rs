@@ -10,7 +10,8 @@ pub(super) const MAX_PORTS: usize = 32;
 pub struct ClapAudioInputPort {
     /// Native CLAP port ID, not the index used for process buffers.
     pub native_id: u32,
-    /// Explicitly declared channel meaning; never inferred from count alone.
+    /// Host-facing layout. An arbitrary native port uses the adapter's explicit
+    /// ordinal lane mapping; this does not claim native speaker semantics.
     pub channel_layout: AudioChannelLayout,
     /// A Main input, when present, is at native index zero.
     pub is_main: bool,

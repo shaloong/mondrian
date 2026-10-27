@@ -1,7 +1,7 @@
 //! Finite third-party CLAP sidechain qualification; no vendor DSP implementation.
-//! The official 4.5 Windows binary currently fails the positive gate at Probe:
-//! its Main type is unspecified. Keep this gap visible; later PCM assertions
-//! have not run. No channel-count inference or vendor-specific adapter is used.
+//! The official 4.5 binary now admits arbitrary Main/Aux lanes. The bare Session
+//! gate currently holds at epoch2 on a real reset-triggered restart; complete
+//! repeated-entry qualification needs the original Runtime Source/install path.
 use super::*;
 use crate::{
     compile_audio_program, AudioCompileRequest, AudioContinuityEpoch, AudioPcmSource,

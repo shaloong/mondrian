@@ -3734,6 +3734,10 @@ mod tests {
         const PORT_TYPE_NONE: u8 = 9;
         const PORT_TYPE_EMPTY: u8 = 10;
         const PORT_TYPE_OTHER: u8 = 11;
+        const PORT_ARBITRARY_WIDE: u8 = 12;
+        const PORT_ARBITRARY_ZERO: u8 = 13;
+        const PORT_ARBITRARY_MAX: u8 = 14;
+        const PORT_ARBITRARY_AUX_WIDE: u8 = 15;
         static PORT_CUSTOM_TYPE: [u8; 4097] = {
             let mut bytes = [b'Z'; 4097];
             bytes[4096] = 0;
@@ -3881,6 +3885,8 @@ mod tests {
                     .fetch_add(1, Ordering::SeqCst);
                 if is_input && matches!(CASE, PORT_DUPLICATE_ID | PORT_MAIN_ROLE) {
                     3
+                } else if is_input && CASE == PORT_ARBITRARY_AUX_WIDE {
+                    2
                 } else {
                     1
                 }
@@ -3889,14 +3895,27 @@ mod tests {
             fn get(&self, index: u32, is_input: bool, writer: &mut AudioPortInfoWriter) {
                 self.shared.audit.port_get_calls[usize::from(!is_input)]
                     .fetch_add(1, Ordering::SeqCst);
-                let extra_input = is_input && matches!(CASE, PORT_DUPLICATE_ID | PORT_MAIN_ROLE);
+                let extra_input = is_input
+                    && matches!(
+                        CASE,
+                        PORT_DUPLICATE_ID | PORT_MAIN_ROLE | PORT_ARBITRARY_AUX_WIDE
+                    );
                 if index != 0 && !(extra_input && index < 3) {
                     return;
                 }
-                let early_conflict = extra_input && index == 1;
+                let early_conflict = extra_input && index == 1 && CASE != PORT_ARBITRARY_AUX_WIDE;
                 let output_conflict =
                     !is_input && matches!(CASE, PORT_TYPE_MONO | PORT_CHANNEL_COUNT);
-                let port_type = if early_conflict || (is_input && CASE == PORT_TYPE_NONE) {
+                let port_type = if early_conflict
+                    || (is_input
+                        && matches!(
+                            CASE,
+                            PORT_TYPE_NONE
+                                | PORT_ARBITRARY_WIDE
+                                | PORT_ARBITRARY_ZERO
+                                | PORT_ARBITRARY_MAX
+                                | PORT_ARBITRARY_AUX_WIDE
+                        )) {
                     None
                 } else if is_input && CASE == PORT_TYPE_EMPTY {
                     Some(AudioPortType(c""))
@@ -3916,7 +3935,15 @@ mod tests {
                     } else {
                         b"main"
                     },
-                    channel_count: if early_conflict {
+                    channel_count: if is_input && CASE == PORT_ARBITRARY_ZERO {
+                        0
+                    } else if is_input && CASE == PORT_ARBITRARY_MAX {
+                        u32::MAX
+                    } else if early_conflict
+                        || (is_input
+                            && (CASE == PORT_ARBITRARY_WIDE
+                                || (CASE == PORT_ARBITRARY_AUX_WIDE && index == 1)))
+                    {
                         3
                     } else if output_conflict {
                         1
@@ -4198,12 +4225,42 @@ mod tests {
 
         #[test]
         fn probe_audio_port_type_classification_never_copies_custom_bytes() {
-            let unspecified = "direction=input index=0 count=1 id=0 known_flags_bits=00000001 main=true channels=2 type=unspecified";
-            assert_port_refusal::<PORT_TYPE_NONE>("port_type", unspecified, [1, 0], [1, 0]);
-            assert_port_refusal::<PORT_TYPE_EMPTY>("port_type", unspecified, [1, 0], [1, 0]);
             // The raw fixture sets an unknown flag: Clack's known-bit projection is all we report.
             assert_port_refusal::<PORT_TYPE_OTHER>("port_type",
                 "direction=input index=0 count=1 id=0 known_flags_bits=00000001 main=true channels=2 type=other", [1, 0], [1, 0]);
+        }
+
+        #[test]
+        fn probe_arbitrary_main_lanes_accept_null_and_empty_under_host_stereo_contract() {
+            for (result, audit) in [run::<PORT_TYPE_NONE>(), run::<PORT_TYPE_EMPTY>()] {
+                let result =
+                    result.expect("host Stereo ordinal mapping accepts two arbitrary lanes");
+                assert_eq!(result.main_audio_input, ClapMainAudioInput::Present);
+                assert_eq!(result.main_audio_output_id, 0);
+                assert!(result.auxiliary_buses.is_empty());
+                assert!(result.auxiliary_outputs.is_empty());
+                for direction in 0..2 {
+                    assert_eq!(audit.port_count_calls[direction].load(Ordering::SeqCst), 2);
+                    assert_eq!(audit.port_get_calls[direction].load(Ordering::SeqCst), 2);
+                }
+                assert_eq!(audit.activations.load(Ordering::SeqCst), 1);
+                assert_eq!(audit.deactivations.load(Ordering::SeqCst), 1);
+                assert_eq!(audit.destroy_calls.load(Ordering::SeqCst), 1);
+                assert!(!audit.destroy_native_active.load(Ordering::SeqCst));
+                assert!(!audit.destroy_host_active.load(Ordering::SeqCst));
+            }
+        }
+
+        #[test]
+        fn arbitrary_audio_lanes_refuse_unsupported_widths_before_activation() {
+            assert_port_refusal::<PORT_ARBITRARY_WIDE>("channel_count",
+                "direction=input index=0 count=1 id=0 known_flags_bits=00000001 main=true channels=3 type=unspecified", [1, 0], [1, 0]);
+            assert_port_refusal::<PORT_ARBITRARY_ZERO>("channel_count",
+                "direction=input index=0 count=1 id=0 known_flags_bits=00000001 main=true channels=0 type=unspecified", [1, 0], [1, 0]);
+            assert_port_refusal::<PORT_ARBITRARY_MAX>("channel_count",
+                "direction=input index=0 count=1 id=0 known_flags_bits=00000001 main=true channels=4294967295 type=unspecified", [1, 0], [1, 0]);
+            assert_port_refusal::<PORT_ARBITRARY_AUX_WIDE>("channel_count",
+                "direction=input index=1 count=2 id=1 known_flags_bits=00000000 main=false channels=3 type=unspecified", [1, 0], [2, 0]);
         }
 
         #[test]
