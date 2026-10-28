@@ -321,17 +321,16 @@ impl AuthoringSession {
                 "native author before/current changed",
             ));
         }
-        if let Some(prepared) = prepared {
-            if prepared.session_id != self.session_id
+        if let Some(prepared) = prepared
+            && (prepared.session_id != self.session_id
                 || prepared.expected_generation != expected_generation
                 || prepared.sequence_id != sequence
-                || prepared.group != self.sequence_gesture.map(|active| active.group)
-            {
-                return Err(session_error(
-                    "commit_native_sequence_candidate",
-                    "prepared native edit belongs to another group",
-                ));
-            }
+                || prepared.group != self.sequence_gesture.map(|active| active.group))
+        {
+            return Err(session_error(
+                "commit_native_sequence_candidate",
+                "prepared native edit belongs to another group",
+            ));
         }
         Ok(())
     }

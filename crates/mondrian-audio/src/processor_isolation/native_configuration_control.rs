@@ -190,6 +190,10 @@ pub struct NativeConfigurationCandidate {
 
 /// Non-RT result; none of these variants unblocks DSP or installs a prepared plan.
 #[derive(Debug, PartialEq, Eq)]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "The bounded proposal is part of the admitted inline control owner; no hidden boxed allocation."
+)]
 pub enum NativeConfigurationControlOutcome {
     /// Native component is activated but stopped; old contract remains blocked.
     ReadyForInstall(NativeConfigurationCandidate),

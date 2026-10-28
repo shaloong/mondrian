@@ -381,6 +381,7 @@ impl ClapOutputEvents {
 
     /// Local sticky rejections include failures which do not set the shared source.
     /// Reading this never clears the original accepted output prefix.
+    #[cfg(windows)]
     pub(super) const fn has_refusals(&self) -> bool {
         self.refusals != 0
     }

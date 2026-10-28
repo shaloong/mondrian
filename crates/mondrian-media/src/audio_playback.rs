@@ -1332,12 +1332,20 @@ impl RenderWorkQueue {
         }
     }
 
+    #[expect(
+        clippy::result_large_err,
+        reason = "Return rejected work and its original owners intact without a caller-side allocation."
+    )]
     fn push(&self, work: RenderWork) -> Result<(), RenderWork> {
         self.try_push(work).map_err(|error| match error {
             RenderQueuePushError::Closed(work) | RenderQueuePushError::Busy(work) => work,
         })
     }
 
+    #[expect(
+        clippy::result_large_err,
+        reason = "Busy/closed retain the inline work owner; boxing would add an unadmitted allocation."
+    )]
     fn try_push(&self, work: RenderWork) -> Result<(), RenderQueuePushError> {
         let mut state = self.state.lock();
         if state.stopped {

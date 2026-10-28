@@ -192,7 +192,7 @@ impl EffectProcessorProgress {
     pub const fn active(&self) -> bool {
         self.active
     }
-    /// Latest admitted finite [0,1] fraction.
+    /// Latest admitted finite `[0,1]` fraction.
     pub const fn fraction(&self) -> f64 {
         self.fraction
     }

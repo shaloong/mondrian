@@ -41,6 +41,10 @@ pub struct ClapAudioInputMappingReceipt {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "The bounded Copy mapping receipt preserves the exact inline cross-process accounting contract."
+)]
 pub enum ClapAudioInputMappingOutcome {
     /// Storage exists on both peers but remains unavailable to processing.
     Staged(ClapAudioInputMappingReceipt),

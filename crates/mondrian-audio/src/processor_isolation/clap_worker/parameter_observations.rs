@@ -35,6 +35,7 @@ impl ParameterSignature {
         info.flags.bits() & !ParamInfoFlags::all().bits() == 0 && *self == signature(info)
     }
 
+    #[cfg(windows)]
     pub(super) const fn id(self) -> u32 {
         self.id
     }

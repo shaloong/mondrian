@@ -1160,13 +1160,12 @@ impl SupervisedAudioWorker {
         })();
         match result {
             Ok(outcome) => {
-                if matches!(outcome, Outcome::Staged(_)) {
-                    if let Err(error) =
+                if matches!(outcome, Outcome::Staged(_))
+                    && let Err(error) =
                         self.staged_audio_input_mapping.as_mut().unwrap().verify_child_backing()
-                    {
-                        self.terminate();
-                        return Err(error);
-                    }
+                {
+                    self.terminate();
+                    return Err(error);
                 }
                 Ok(outcome)
             }

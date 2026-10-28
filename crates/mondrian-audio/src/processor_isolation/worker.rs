@@ -1113,6 +1113,10 @@ fn write_seed_operation_result(
 /// owner and this existing connection. A lifecycle command is returned intact;
 /// the caller joins the scope before dispatching it, then acknowledges only
 /// after its correlated control response has actually been written.
+#[expect(
+    clippy::large_enum_variant,
+    reason = "Return the already admitted command intact across DSP join without allocating another envelope."
+)]
 enum NativeScopeExit {
     OwnerCommand(super::native_worker_command::NativeCommand),
     UserCloseRequested,

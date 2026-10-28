@@ -353,6 +353,10 @@ pub(super) fn refusal_from_tag(tag: u32) -> io::Result<NativeConfigurationRefusa
     })
 }
 
+#[expect(
+    clippy::large_enum_variant,
+    reason = "Keep the admitted control outcome inline through the existing bounded wire encoder."
+)]
 pub(super) enum ControlReply {
     Outcome(NativeConfigurationControlOutcome),
     Failed(String),

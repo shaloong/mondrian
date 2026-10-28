@@ -294,8 +294,10 @@ impl PreparedProcessorHost {
                     }
                     _ => true,
                 })
-                || if index == selection.index && inputs.is_some() {
-                    !inputs.unwrap().matches_reconfigured_inputs(
+                || if index == selection.index
+                    && let Some(inputs) = inputs
+                {
+                    !inputs.matches_reconfigured_inputs(
                         before.factory.auxiliary_inputs(),
                         after.factory.auxiliary_inputs(),
                     )

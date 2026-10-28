@@ -28,6 +28,10 @@ pub struct ClapAudioInputBufferReceipt {
 
 /// No outcome permits activation, cohort retirement, Enter or old-shape DSP.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "The bounded Copy receipt is an inline admission fact; boxing adds an unaccounted owner."
+)]
 pub enum ClapAudioInputBufferOutcome {
     /// New planes exist on the original child but have not been installed.
     Staged(ClapAudioInputBufferReceipt),

@@ -1531,10 +1531,9 @@ impl AudioRenderSession {
     ) -> Result<(), AudioExecutionError> {
         if let SessionContinuity::Active { transport_activity: Some(expected), .. } =
             self.continuity
+            && expected != request.transport_activity
         {
-            if expected != request.transport_activity {
-                return Err(AudioExecutionError::TransportActivityChanged);
-            }
+            return Err(AudioExecutionError::TransportActivityChanged);
         }
         Ok(())
     }

@@ -436,6 +436,7 @@ fn canonical_port_key(key: &str, prefix: &str, id: u32) -> bool {
     digits.parse::<u32>() == Ok(id)
 }
 
+#[cfg(test)]
 pub(super) fn revalidate_audio_ports(
     handle: &PluginMainThreadHandle<'_>,
     layout: AudioChannelLayout,

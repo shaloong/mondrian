@@ -511,8 +511,10 @@ impl PreparedAudioPlan {
         {
             if old.occurrence != prepared.occurrence
                 || old.parameter_ids != prepared.parameter_ids
-                || if slot == index && inputs.is_some() {
-                    !inputs.unwrap().matches_reconfigured_inputs(
+                || if slot == index
+                    && let Some(inputs) = inputs
+                {
+                    !inputs.matches_reconfigured_inputs(
                         old.factory.auxiliary_inputs(),
                         prepared.factory.auxiliary_inputs(),
                     )
