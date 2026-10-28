@@ -285,7 +285,7 @@ fn repeated_shared_grade_has_distinct_before_stack_after_input_capabilities() {
         &[exposure(-1.0)],
         &[],
         std::slice::from_ref(&shared),
-        &[shared],
+        std::slice::from_ref(&shared),
         WorkingColorSpace::LinearRec709,
         &LutPreparationCache::uncached(),
     )
