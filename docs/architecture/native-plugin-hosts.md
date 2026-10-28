@@ -110,6 +110,17 @@ still require exact widths, while custom types and other widths are refused.
 Cold and stopped scans share this processing projection; no PCM mapping loop,
 graph, author state or IPC field is added.
 
+Cold CLAP probes (including Note offers) and Workers may negotiate a known
+Mono/Stereo Main-output mismatch through audio-ports-config. An inactive
+main-thread borrow bounds the census to 128 entries and permits only one
+matching Main-layout preset; compatible defaults are preserved. Selection
+precedes native state load. The complete port scanner checks the selected
+summary's counts, Main presence and named/ordinal types, then validates ports
+again after restore. Restored incompatible topology is refused,
+never overwritten by another select. IDs stay instance-local; no project field,
+opaque-state wrapper, wire field or retained-instance mutation is introduced.
+Explicit arbitrary choices and dynamic configuration-list rescans remain open.
+
 OpenFX discovery in `mondrian-app::openfx_adapter` loads installed binaries only
 in a supervised child. An optional exported OfxSetHost receives the actual native
 host before OfxGetNumberOfPlugins and OfxGetPlugin. Discovery returns bounded

@@ -5,6 +5,7 @@
 //! discovery and ABI loading live behind the Worker factory Interface; they do
 //! not enter Timeline compilation or the in-process Processor Host.
 
+mod clap_audio_config;
 mod clap_audio_role;
 mod clap_discovery;
 #[cfg(windows)]

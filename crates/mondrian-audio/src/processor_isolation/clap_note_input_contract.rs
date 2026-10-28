@@ -408,6 +408,12 @@ pub(super) fn probe_loaded(
     )
     .map_err(|error| unavailable(format!("CLAP Note probe instance failed: {error}")))?;
     shared.service_callbacks(&mut instance)?;
+    let inactive = instance
+        .inactive_plugin_handle()
+        .ok_or_else(|| invalid("CLAP cold Note probe is active"))?;
+    if super::clap_audio_config::negotiate_initial(&inactive, render.channel_layout)? {
+        shared.service_callbacks(&mut instance)?;
+    }
     if let Some(state) = state {
         let handle = instance.plugin_handle();
         let extension = handle
@@ -590,6 +596,13 @@ pub(super) fn probe_loaded_processing_v6(
     })?;
     shared.service_callbacks(&mut instance)?;
     instance.access_shared_handler(|host| check_processing_sources(host, true))?;
+    let inactive = instance
+        .inactive_plugin_handle()
+        .ok_or_else(|| invalid("CLAP cold Note processing probe is active"))?;
+    if super::clap_audio_config::negotiate_initial(&inactive, render.channel_layout)? {
+        shared.service_callbacks(&mut instance)?;
+        instance.access_shared_handler(|host| check_processing_sources(host, true))?;
+    }
     if let Some(state) = state {
         let handle = instance.plugin_handle();
         let extension = handle

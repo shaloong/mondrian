@@ -1428,6 +1428,12 @@ fn probe_loaded_with_names(
     )
     .map_err(|error| unavailable(format!("CLAP probe instance failed: {error}")))?;
     shared.service_callbacks(&mut instance)?;
+    let inactive = instance
+        .inactive_plugin_handle()
+        .ok_or_else(|| invalid("CLAP cold probe is active"))?;
+    if super::clap_audio_config::negotiate_initial(&inactive, render_contract.channel_layout)? {
+        shared.service_callbacks(&mut instance)?;
+    }
     if let Some(state) = state {
         let handle = instance.plugin_handle();
         let extension = handle

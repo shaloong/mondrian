@@ -1373,6 +1373,13 @@ fn prepare_loaded_on_main(
         .access_shared_handler(|host| host.logs.claim_receiver())
         .ok_or_else(|| invalid("CLAP native log receiver already claimed"))?;
     shared.service_callbacks(&mut instance)?;
+    let inactive = instance
+        .inactive_plugin_handle()
+        .ok_or_else(|| invalid("CLAP cold worker is active"))?;
+    if super::clap_audio_config::negotiate_initial(&inactive, request.render_contract().channel_layout)?
+    {
+        shared.service_callbacks(&mut instance)?;
+    }
     if let Some(state) = state {
         let handle = instance.plugin_handle();
         let extension = handle
@@ -2750,6 +2757,8 @@ fn unavailable(detail: impl Into<String>) -> AudioProcessorHostError {
 
 #[cfg(test)]
 mod tests {
+    mod audio_config_tests;
+
     use super::*;
     use crate::{AudioProcessingMode, AudioProcessorTail, AudioRenderContract};
     use clack_extensions::audio_ports::{
