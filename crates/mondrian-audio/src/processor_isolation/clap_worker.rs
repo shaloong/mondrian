@@ -1354,7 +1354,7 @@ fn prepare_loaded_on_main(
     } else {
         ClapHostShared::new()
     };
-    let output_events = ClapOutputEvents::new_with_note_capacity(
+    let mut output_events = ClapOutputEvents::new_with_note_capacity(
         expected_parameters,
         Arc::clone(&shared.parameter_source),
         note_limits.output_ends,
@@ -1391,8 +1391,9 @@ fn prepare_loaded_on_main(
     )?;
     shared.service_callbacks(&mut instance)?;
     let channel_count = request.render_contract().channel_count();
-    let handle = instance.plugin_handle();
+    let initial_parameter_source = shared.parameter_source.snapshot();
     {
+        let handle = instance.plugin_handle();
         // Own the one existing query snapshot only through the original check;
         // its Vec is dropped before signature/port/activation work as before.
         let mut capture = ParameterQueryCapture::from_environment();
@@ -1410,7 +1411,21 @@ fn prepare_loaded_on_main(
             .unwrap_or_else(|| "CLAP parameter metadata changed since contract probe".to_owned());
             return Err(invalid(detail));
         }
+        if parameters.iter().zip(expected_parameters).all(|(actual, expected)| {
+            actual.read_only || actual.current_value.to_bits() == expected.current_value.to_bits()
+        }) {
+            // This is the completion of the parent's cold native restore, before
+            // activation or publication of any editor/signal owner. Host curves
+            // remain authoritative; unrelated source work is never cleared.
+            instance.access_handler(|main| {
+                main.acknowledge_initial_parameter_rescans(
+                    initial_parameter_source,
+                    &mut output_events,
+                )
+            });
+        }
     }
+    let handle = instance.plugin_handle();
     let parameter_signatures = parameter_observations::capture_signatures(&handle)?;
     let signature_bytes = std::alloc::Layout::array::<parameter_observations::ParameterSignature>(
         parameter_signatures.capacity(),
@@ -5400,10 +5415,12 @@ mod tests {
         render_mode: AtomicU32,
         active: AtomicBool,
         mode_configured: AtomicBool,
+        initial_oracle: AtomicU32,
+        initial_query_notified: AtomicBool,
         input_present: AtomicBool,
         configuration_values: [std::sync::atomic::AtomicU64; 2],
     }
-    struct LifecycleMain<'a>(&'a LifecycleShared<'a>);
+    struct LifecycleMain<'a>(&'a LifecycleShared<'a>, HostMainThreadHandle<'a>);
     struct LifecycleProcessor<'a, const CASE: usize> {
         shared: &'a LifecycleShared<'a>,
         delay: Vec<[f32; 2]>,
@@ -5437,7 +5454,7 @@ mod tests {
             self.configuration_events.store(0, TestOrdering::SeqCst);
         }
     }
-    static LIFECYCLE_AUDITS: [LifecycleAudit; 13] = [const { LifecycleAudit::new() }; 13];
+    static LIFECYCLE_AUDITS: [LifecycleAudit; 14] = [const { LifecycleAudit::new() }; 14];
     static CALLBACK_COUNTS: [AtomicU32; 2] = [const { AtomicU32::new(0) }; 2];
     const INIT: u32 = 1;
     const CALLBACK: u32 = 2;
@@ -5495,14 +5512,14 @@ mod tests {
     // native start/process stages distinguish failure from consuming a request.
     impl PluginMainThreadParams for LifecycleMain<'_> {
         fn count(&self) -> u32 {
-            if self.0.case == 12 {
+            if matches!(self.0.case, 12 | 13) {
                 2
             } else {
                 0
             }
         }
         fn get_info(&self, index: u32, writer: &mut ParamInfoWriter) {
-            if self.0.case == 12 && index < 2 {
+            if matches!(self.0.case, 12 | 13) && index < 2 {
                 writer.set(&ParamInfo {
                     id: ClapId::new(index + 1),
                     flags: ParamInfoFlags::IS_AUTOMATABLE,
@@ -5516,8 +5533,17 @@ mod tests {
             }
         }
         fn get_value(&self, id: ClapId) -> Option<f64> {
-            if self.0.case != 12 {
+            if !matches!(self.0.case, 12 | 13) {
                 return None;
+            }
+            if self.0.case == 13
+                && self.0.initial_oracle.load(TestOrdering::SeqCst) == 3
+                && !self.0.initial_query_notified.swap(true, TestOrdering::SeqCst)
+            {
+                self.1
+                    .get_extension::<clack_extensions::params::HostParams>()
+                    .unwrap()
+                    .rescan(&self.1, clack_extensions::params::ParamRescanFlags::TEXT);
             }
             [ClapId::new(1), ClapId::new(2)]
                 .iter()
@@ -5539,9 +5565,9 @@ mod tests {
         }
         fn flush(&self, input: &clack_plugin::prelude::InputEvents, _output: &mut OutputEvents) {
             self.0.check(FLUSH, false);
-            if self.0.case == 12 {
+            if matches!(self.0.case, 12 | 13) {
                 assert!(!self.0.active.load(TestOrdering::SeqCst));
-                let audit = &LIFECYCLE_AUDITS[12];
+                let audit = &LIFECYCLE_AUDITS[self.0.case];
                 audit.configuration_flushes.fetch_add(1, TestOrdering::SeqCst);
                 let mut previous = 0;
                 for event in input.iter() {
@@ -5586,10 +5612,10 @@ mod tests {
                 .register::<PluginRender>()
                 .register::<PluginLatency>()
                 .register::<PluginTail>();
-            if matches!(CASE, 8..=10 | 12) {
+            if matches!(CASE, 8..=10 | 12 | 13) {
                 builder.register::<PluginState>();
             }
-            if matches!(CASE, 11 | 12) {
+            if matches!(CASE, 11 | 12 | 13) {
                 builder.register::<PluginParams>();
             }
         }
@@ -5611,6 +5637,8 @@ mod tests {
                 render_mode: AtomicU32::new(0),
                 active: AtomicBool::new(false),
                 mode_configured: AtomicBool::new(false),
+                initial_oracle: AtomicU32::new(0),
+                initial_query_notified: AtomicBool::new(false),
                 input_present: AtomicBool::new(CASE != 9),
                 configuration_values: [
                     std::sync::atomic::AtomicU64::new(0.25_f64.to_bits()),
@@ -5634,16 +5662,16 @@ mod tests {
                 }
             }
             host.request_callback();
-            if matches!(CASE, 8..=10 | 12) {
+            if matches!(CASE, 8..=10 | 12 | 13) {
                 host.request_restart();
             }
             Ok(shared)
         }
         fn new_main_thread<'a>(
-            _host: HostMainThreadHandle<'a>,
+            host: HostMainThreadHandle<'a>,
             shared: &'a Self::Shared<'a>,
         ) -> Result<Self::MainThread<'a>, PluginError> {
-            Ok(LifecycleMain(shared))
+            Ok(LifecycleMain(shared, host))
         }
     }
     impl<'a> PluginMainThread<'a, LifecycleShared<'a>> for LifecycleMain<'a> {
@@ -5684,7 +5712,7 @@ mod tests {
     impl PluginStateImpl for LifecycleMain<'_> {
         fn save(&self, output: &mut OutputStream) -> Result<(), PluginError> {
             output.write_all(&[0x43])?;
-            if self.0.case == 12 {
+            if matches!(self.0.case, 12 | 13) {
                 for value in &self.0.configuration_values {
                     output.write_all(&value.load(TestOrdering::SeqCst).to_le_bytes())?;
                 }
@@ -5697,11 +5725,38 @@ mod tests {
             if byte != [0x43] {
                 return Err(PluginError::Message("owned lifecycle state"));
             }
-            if self.0.case == 12 {
+            if matches!(self.0.case, 12 | 13) {
                 for value in &self.0.configuration_values {
                     let mut bytes = [0; 8];
                     input.read_exact(&mut bytes)?;
                     value.store(u64::from_le_bytes(bytes), TestOrdering::SeqCst);
+                }
+            }
+            if self.0.case == 13 {
+                let mut mode = [0];
+                input.read_exact(&mut mode)?;
+                self.0.initial_oracle.store(u32::from(mode[0]), TestOrdering::SeqCst);
+                let params =
+                    self.1.get_extension::<clack_extensions::params::HostParams>().unwrap();
+                use clack_extensions::params::{ParamClearFlags, ParamRescanFlags};
+                params.rescan(
+                    &self.1,
+                    if mode[0] == 5 {
+                        ParamRescanFlags::from_bits_retain(1 << 31)
+                    } else {
+                        ParamRescanFlags::VALUES | ParamRescanFlags::TEXT
+                    },
+                );
+                match mode[0] {
+                    1 => params.rescan(&self.1, ParamRescanFlags::INFO),
+                    2 => self
+                        .1
+                        .get_extension::<clack_extensions::state::HostState>()
+                        .unwrap()
+                        .mark_dirty(&self.1),
+                    6 => params.clear(&self.1, ClapId::new(1), ParamClearFlags::all()),
+                    7 => params.request_flush(&self.0.host),
+                    _ => {}
                 }
             }
             Ok(())
@@ -5831,13 +5886,127 @@ mod tests {
         }
     }
 
+    fn lifecycle_parameters() -> Vec<super::super::ClapParameterDescriptor> {
+        use super::super::ClapParameterDescriptor;
+        [0.25, 0.75]
+            .into_iter()
+            .enumerate()
+            .map(|(index, value)| ClapParameterDescriptor {
+                id: index as u32 + 1,
+                name: if index == 0 { "First" } else { "Second" }.to_owned(),
+                min_value: 0.0,
+                max_value: 1.0,
+                default_value: value,
+                current_value: value,
+                automatable: true,
+                stepped: false,
+                enumeration: false,
+                read_only: false,
+                hidden: false,
+            })
+            .collect::<Vec<_>>()
+    }
+
+    #[test]
+    fn cold_clap_snapshot_retires_only_verified_initial_rescans_and_preserves_live_work() {
+        for mode in 1..=7_u8 {
+            LIFECYCLE_AUDITS[13].clear();
+            let entry = PluginEntry::load_from_clack::<SinglePluginEntry<LifecyclePlugin<13>>>(
+                c"/test/initial-parameter-snapshot",
+            )
+            .unwrap();
+            let mut request = sidechain_request();
+            request.auxiliary_inputs = AudioProcessorAuxiliaryInputContract::default();
+            request.render_contract.max_block_frames = 16;
+            request.plugin_execution_contract = AudioProcessorExecutionContract::new(
+                5,
+                AudioProcessorTail::Finite(5),
+                true,
+                true,
+                true,
+                0,
+            )
+            .unwrap();
+            let parameters = lifecycle_parameters();
+            let mut state = vec![0x43];
+            state.extend_from_slice(&(if mode == 4 { 0.125_f64 } else { 0.25 }).to_le_bytes());
+            state.extend_from_slice(&0.75_f64.to_le_bytes());
+            state.push(mode);
+            #[cfg(windows)]
+            let native_main =
+                std::rc::Rc::new(vst3_host::window::WindowsEditorMainThread::initialize().unwrap());
+            let mut worker = prepare_loaded_on_main(
+                #[cfg(windows)]
+                native_main,
+                request,
+                entry,
+                c"org.mondrian.test.render-lifecycle",
+                Some(&state),
+                ClapMainAudioInput::Present,
+                0,
+                &parameters,
+                &[1, 2],
+            )
+            .unwrap();
+            let observed = worker.shared.parameter_source.snapshot();
+            assert!(
+                observed.revision > 0,
+                "the callback sequence is never reset"
+            );
+            assert!(
+                worker.pending_reprepare().is_some(),
+                "metadata retirement cannot clear restart"
+            );
+            match mode {
+                1 => {
+                    assert_eq!(
+                        observed.pending_controls, 0,
+                        "both initial rescan records consumed by the actual snapshot"
+                    );
+                    assert_eq!(observed.incomplete, 0);
+                    let handle = worker.instance.plugin_handle();
+                    let mut reader = state.as_slice();
+                    handle
+                        .get_extension::<PluginState>()
+                        .unwrap()
+                        .load(&handle, &mut reader)
+                        .unwrap();
+                    let live = worker.shared.parameter_source.snapshot();
+                    assert_eq!(
+                        live.pending_controls, 2,
+                        "subsequent native loads remain ordinary source work"
+                    );
+                    assert!(
+                        !worker.instance.access_handler(|main| {
+                            main.acknowledge_initial_parameter_rescans(
+                                live,
+                                &mut worker.output_events,
+                            )
+                        }),
+                        "active objects cannot invoke cold completion"
+                    );
+                    assert_eq!(worker.shared.parameter_source.snapshot(), live);
+                }
+                2 | 3 | 6 => assert_eq!(
+                    observed.pending_controls, 2,
+                    "mode{mode}: dirty/query-race/clear remains intact"
+                ),
+                4 | 7 => assert_eq!(
+                    observed.pending_controls, 1,
+                    "mode{mode}: unproved value or pending flush remains intact"
+                ),
+                5 => assert_ne!(observed.incomplete, 0, "unknown flag loss stays sticky"),
+                _ => unreachable!(),
+            }
+            drop(worker);
+            assert_eq!(LIFECYCLE_AUDITS[13].failures.load(TestOrdering::SeqCst), 0);
+        }
+    }
+
     #[test]
     fn clap_configuration_service_preserves_native_owned_lanes_and_flushes_only_explicit_constants()
     {
-        use super::super::{
-            ClapParameterDescriptor, NativeConfigurationControlOutcome,
-            NativeConfigurationControlRequest,
-        };
+        use super::super::{NativeConfigurationControlOutcome, NativeConfigurationControlRequest};
         for (profile, expected, flushes, event_count) in [
             ([None, None], [0.25, 0.75], 0, 0),
             ([None, Some(0.5)], [0.25, 0.5], 1, 1),
@@ -5861,23 +6030,7 @@ mod tests {
                 0,
             )
             .unwrap();
-            let parameters = [0.25, 0.75]
-                .into_iter()
-                .enumerate()
-                .map(|(index, value)| ClapParameterDescriptor {
-                    id: index as u32 + 1,
-                    name: if index == 0 { "First" } else { "Second" }.to_owned(),
-                    min_value: 0.0,
-                    max_value: 1.0,
-                    default_value: value,
-                    current_value: value,
-                    automatable: true,
-                    stepped: false,
-                    enumeration: false,
-                    read_only: false,
-                    hidden: false,
-                })
-                .collect::<Vec<_>>();
+            let parameters = lifecycle_parameters();
             #[cfg(windows)]
             let native_main = std::rc::Rc::new(
                 vst3_host::window::WindowsEditorMainThread::initialize()
@@ -6776,6 +6929,7 @@ pub(super) fn clap_native_worker_lane_profile(
                 super::native_worker_processing::NativeDspDispatch<'static>,
                 crate::NativeAudioObservations,
                 super::clap_metadata::MetadataScanScratch,
+                super::clap_parameter_source::ClapParameterControlSnapshot,
                 clack_extensions::params::ParamInfoBuffer,
             )>()),
             runtime_main_role: clap_native_layout(

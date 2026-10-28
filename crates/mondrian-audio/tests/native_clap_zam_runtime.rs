@@ -3,17 +3,14 @@
 #![cfg(windows)]
 
 use mondrian_audio::{
-    compile_audio_program, probe_clap_plugin_registration, AudioCompileRequest,
-    AudioContinuityEpoch, AudioDecodedSource, AudioExecutionError, AudioMediaResolver,
-    AudioProcessingMode, AudioProgramRuntime, AudioRenderContract, AudioRenderRequest,
-    AudioRuntimeResourceGrant, AudioStateEntry, ClapMainAudioInput,
-    DiscoveredClapAudioProcessorSpecResolver, IsolatedAudioProcessorResolver,
-    NativeAudioAuthorProgram, NativeAudioParameterHandoffContinuity, ResolvedAudioSource,
+    probe_clap_plugin_registration, AudioContinuityEpoch, AudioDecodedSource, AudioExecutionError,
+    AudioMediaResolver, AudioProcessingMode, AudioProgramRuntime, AudioRenderContract,
+    AudioRenderRequest, AudioRuntimeResourceGrant, AudioStateEntry, ClapMainAudioInput,
+    DiscoveredClapAudioProcessorSpecResolver, IsolatedAudioProcessorResolver, ResolvedAudioSource,
 };
 use mondrian_core::{
     AssetId, AudioChannelLayout, AudioOwnerInstallationSource, AudioSourceComponentId,
-    ExactAutomationCurve, ExecutionCancellationToken, NativeAudioAuthorCallback,
-    NativeAudioParameterRescanKind, TimelineTime,
+    ExactAutomationCurve, ExecutionCancellationToken, TimelineTime,
 };
 use mondrian_timeline::audio::{
     AudioChannelStripOutputPort, AudioProcessorSidechainRoute, AudioRouteSource,
@@ -179,76 +176,26 @@ fn render_cases(cases: &[(f64, f32)]) -> Vec<Vec<f32>> {
             .unwrap();
         let cancellation = ExecutionCancellationToken::new();
         runtime.install_native_owner_bindings(&claim, &cancellation).unwrap();
-        // Loading this captured native state reports its existing values. Accept
-        // that exact echo through the real Plan/Source/Ack transaction. Host
-        // overrides stay authoritative; this is not a policy for arbitrary edits.
-        let proposal = runtime
+        // Cold native restoration has already refreshed the matching snapshot.
+        // No experiment-only author handoff is permitted before first PCM.
+        let observed = runtime
             .poll_native_observations(&cancellation)
             .unwrap()
-            .and_then(|batch| batch.author)
-            .expect("actual state-load rescan");
-        assert_eq!(
-            proposal.state(),
-            Some(state),
-            "only the unchanged loaded seed is admitted"
+            .expect("initial current parameter presentation");
+        assert!(
+            observed.author.is_none(),
+            "a completed host restore is not an author edit"
         );
-        assert_eq!(
-            (proposal.open_parameter_edits(), proposal.group_depth()),
-            (0, 0)
-        );
-        let [NativeAudioAuthorCallback::ParameterValuesRescanned { kind, values }] =
-            proposal.callbacks()
-        else {
-            panic!(
-                "unexpected initial native author edits: {:?}",
-                proposal.callbacks()
+        let facts = observed.parameters.as_ref().expect("actual native parameter queries").facts();
+        for descriptor in registration.parameters.iter().filter(|parameter| !parameter.read_only) {
+            let id = descriptor.parameter_id().unwrap();
+            let fact = facts.iter().find(|fact| fact.parameter == id).unwrap();
+            assert_eq!(fact.value_bits, Some(descriptor.current_value.to_bits()));
+            assert_eq!(
+                fact.author_value_bits,
+                Some(descriptor.current_value.to_bits())
             );
-        };
-        assert_eq!(*kind, NativeAudioParameterRescanKind::Values);
-        let expected_values = registration
-            .parameters
-            .iter()
-            .filter(|p| !p.read_only)
-            .map(|p| (p.parameter_id().unwrap(), p.current_value.to_bits()))
-            .collect::<Vec<_>>();
-        assert_eq!(values, &expected_values);
-        let programs = [NativeAudioAuthorProgram {
-            sequence: sequence.id,
-            program: Arc::new(
-                compile_audio_program(
-                    &sequence,
-                    AudioCompileRequest::program(sequence.audio_program.outputs[0].id),
-                )
-                .unwrap(),
-            ),
-        }];
-        let mut handoff = runtime
-            .prepare_native_author_parameter_handoff(
-                &programs,
-                &proposal,
-                verifier.clone(),
-                &cancellation,
-            )
-            .expect("unchanged seed rescan with host overrides retained");
-        let reservation = source.reserve_install(&source_registration, Some(&claim)).unwrap();
-        let mut authorization = source.authorize_runtime_installation(reservation).unwrap();
-        let installed = runtime
-            .install_native_author_parameter_handoff(
-                &mut handoff,
-                &mut authorization,
-                &cancellation,
-            )
-            .unwrap();
-        claim = installed.claim;
-        assert_eq!(
-            installed.continuity,
-            NativeAudioParameterHandoffContinuity::Preserved
-        );
-        drop(handoff);
-        let acknowledged = runtime
-            .acknowledge_native_author_parameter_handoff(&proposal, &cancellation)
-            .unwrap();
-        assert_eq!(acknowledged.claim.generation(), claim.generation());
+        }
         runtime.validate_native_author_source_closed(&cancellation).unwrap();
         assert_eq!(serde_json::to_value(&sequence).unwrap(), before);
         let mut reference = None;

@@ -1143,6 +1143,7 @@ fn retained_clap_metadata_scratch_is_charged_once_in_main_inline_obligation() {
         super::super::worker::WorkerProcessContext<'static>,
         super::super::native_worker_processing::NativeDspDispatch<'static>,
         crate::NativeAudioObservations,
+        super::super::clap_parameter_source::ClapParameterControlSnapshot,
         clack_extensions::params::ParamInfoBuffer,
     )>();
     let with_scratch = Layout::new::<(
@@ -1151,6 +1152,7 @@ fn retained_clap_metadata_scratch_is_charged_once_in_main_inline_obligation() {
         super::super::native_worker_processing::NativeDspDispatch<'static>,
         crate::NativeAudioObservations,
         MetadataScanScratch,
+        super::super::clap_parameter_source::ClapParameterControlSnapshot,
         clack_extensions::params::ParamInfoBuffer,
     )>();
     assert_eq!(

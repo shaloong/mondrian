@@ -194,6 +194,65 @@ impl<'a> ClapHostMainThread<'a> {
         prefix.acknowledge(output, &self.parameter_controls)
     }
 
+    /// Cold, unexposed construction only: the caller has admitted the complete
+    /// post-restore snapshot and exact writable values under `observed`.
+    /// Retire only rescan invalidations already satisfied by that snapshot;
+    /// editor/state edits, outputs, loss and later notifications stay retained.
+    pub(super) fn acknowledge_initial_parameter_rescans(
+        &self,
+        observed: super::clap_parameter_source::ClapParameterSourceSnapshot,
+        output: &mut super::clap_output_events::ClapOutputEvents,
+    ) -> bool {
+        use super::clap_parameter_source::ClapParameterControlKind;
+        if self.ensure_main().is_err()
+            || self.shared.services.active.load(Ordering::Acquire)
+            || self.shared.services.flush_requested.load(Ordering::Acquire)
+            || observed.publishing_output
+            || observed.incomplete != 0
+            || observed.pending_output != 0
+            || observed.pending_author_output != 0
+            || observed.open_parameter_gestures != 0
+            || self.shared.control.parameter_source.snapshot() != observed
+        {
+            return false;
+        }
+        let (records, count) = self.parameter_controls.snapshot();
+        if count == 0 {
+            return observed.pending_controls == 0;
+        }
+        if observed.pending_controls as usize != count {
+            return false;
+        }
+        let Some(through) = records[..count].iter().try_fold(0_u64, |previous, record| {
+            let record = record.as_ref()?;
+            match record.kind {
+                ClapParameterControlKind::Rescan { flags }
+                    if flags & !15 == 0
+                        && record.sequence > previous
+                        && record.sequence <= observed.revision =>
+                {
+                    Some(record.sequence)
+                }
+                _ => None,
+            }
+        }) else {
+            return false;
+        };
+        if through != observed.revision {
+            return false;
+        }
+        // The existing atomic two-owner retirement checks exact identity and
+        // prefixes. No native call or new dispatcher is introduced here.
+        super::clap_output_events::acknowledge_parameter_prefix(
+            output,
+            &self.parameter_controls,
+            None,
+            0,
+            Some(through),
+            count,
+        )
+    }
+
     pub(super) fn has_timers(&self) -> bool {
         self.timers.get().iter().any(Option::is_some)
     }

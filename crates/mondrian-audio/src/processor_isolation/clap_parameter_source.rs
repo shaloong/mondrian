@@ -276,6 +276,11 @@ pub(super) struct ClapParameterControl {
     pub(super) kind: ClapParameterControlKind,
 }
 
+pub(super) type ClapParameterControlSnapshot = (
+    [Option<ClapParameterControl>; CLAP_PARAMETER_CONTROLS],
+    usize,
+);
+
 /// Inline main control storage. Cell prevents concurrent safe main access.
 /// It creates no second dispatcher, IPC reader, controller or author authority.
 pub(super) struct ClapParameterControlSource<'a> {
@@ -324,12 +329,7 @@ impl<'a> ClapParameterControlSource<'a> {
         slot.commit();
         true
     }
-    pub(super) fn snapshot(
-        &self,
-    ) -> (
-        [Option<ClapParameterControl>; CLAP_PARAMETER_CONTROLS],
-        usize,
-    ) {
+    pub(super) fn snapshot(&self) -> ClapParameterControlSnapshot {
         (self.records.get(), self.count.get())
     }
     /// Check an exact retained local prefix before either source owner retires.

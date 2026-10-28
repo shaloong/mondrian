@@ -266,31 +266,41 @@ conflicts retain strict refusal before activation. This is a host-selected
 ordinal mapping, not channel-count inference of native speaker positions or
 full configuration/rescan, Float64, realtime/performance or platform support.
 
-ZamCompX2 4.5 official Windows64 CLAP has **Verified finite Runtime sound**;
-overall support remains **Partial**. The original
+ZamCompX2 4.5 official Windows64 CLAP has **Verified finite Runtime and
+public Export sound**; overall support remains **Partial**. The original
 [three-scenario gate](../../crates/mondrian-audio/tests/native_clap_zam_runtime.rs)
 passes at48k Offline/Stereo/block64 with silent/enabled, loud/disabled and
 loud/enabled detector controls. Each case renders three complete1024-frame runs
 at starts0/0/97, partitions64/64,17/47,47/17: dry PCM, active attenuation/stereo
 relationship, partition/seek invariance, two actual restart installations and
-unchanged author state all pass. Exact1PASS, stderr0, exit0 and settled Job.
+unchanged author state all pass. The lab-only initial author echo transaction
+has been removed: the actual cold native owner completes verified pure rescans,
+and the test requires no initial author proposal plus all writable current facts.
 
-The former readonly Gain Reduction id9 out-of-range refusal is resolved at the
-appropriate boundary: retained definition revalidation now queries get_info only,
-matching its existing structure comparison. It does not query or clamp transient
-meter values. Complete cold/value snapshots and finite/range/step/readonly author
-projection checks remain strict. Actual ABI regressions cover writable/readonly
-queries returning lower/upper out-of-range values, NaN or failure, definition
-changes, query ordering and zero container allocation in successful revalidation.
-Current Audio902PASS/205ignored and16 native regression gates pass.
+The [public RenderQueue regression](../../crates/mondrian-export/tests/native_clap_zam_startup.rs)
+first failed Preparing with NativeAuthorPending(PendingCallbacks). After the
+cold completion fix, the unchanged original gate passes through the normal
+Product and original consumer: one complete48000-frame stereo PCM24 MOV, with
+an authored Makeup12dB override. Every decoded sample matches input times
+10^(12/20) within the predeclared two-PCM24-LSB DSP/quantization bound.
+Both real gates have stderr0, exit0 and settled original Job budgets; Export
+also verifies complete Queue shutdown and nonempty native-child registrations.
+This is48k Offline, a captured default native state and one static host override,
+not nondefault opaque-state/Project, GUI, Preview/device or realtime qualification.
 
-The lab consumer accepts only an unchanged state-load echo whose native state
-bytes and writable values match the original loaded seed, using the existing
-Plan/Source/Ack transaction while retaining host overrides. Preview/Export's
-automatic startup-callback handling is not qualified by this lab. Other rates,
-Realtime safety, GUI, long runs, reference-host performance and other platforms
-remain unqualified. GPL-2.0-or-later binaries/licenses remain external local test
-materials; the release ZIP was discarded.
+Retained definition revalidation queries get_info only, without querying or
+clamping transient meter values. Full cold/value and author projection checks
+remain strict. Audio903PASS/205ignored includes an actual SDK seven-case cold
+notification fixture: matching rescans complete, while value mismatch,
+query-time notification, Dirty/Clear, unknown flags, pending flush and active
+subsequent loads retain their work; restart intent and source sequence remain.
+Matching-build regressions pass: sixteen Audio native gates; Export313/33ignored
+plus17 native gates; App audio13/27ignored, eight native reprepare gates, and
+Queue-related94/2ignored. All have stderr0 and settled ownership. This does not
+close the historical full-App title-pressure or F06 failures. Other rates, long
+runs, reference-host performance and macOS/Linux remain unqualified.
+GPL-2.0-or-later binaries/licenses remain external local test materials; the
+release ZIP was discarded.
 
 OpenFX owner project geometry now has finite Windows CPU qualification:
 SessionProbe checks project10x7/PAR2 independently of image3x5, Direct image

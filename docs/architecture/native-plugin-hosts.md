@@ -83,6 +83,15 @@ current_bits=unqueried. Complete cold snapshots and canonical value/author
 projections retain their finite/range/step/readonly checks; raw presentation
 values confer no author authority. No meter clamping or plugin exception applies.
 
+Before activation or editor/signal publication, the original cold CLAP owner may
+complete pure rescan invalidations already satisfied by its full post-restore
+snapshot. Ordered definitions and exact writable current bits must match the
+parent's probed contract, with an unchanged source revision and no output,
+gesture, loss or flush work. The existing atomic prefix retirement preserves
+sequence numbers; Dirty, Clear, mismatched values and later/live callbacks keep
+their ordinary author path. This completes a host-authorized restore without
+writing project curves/state or adding an author transaction/executor.
+
 Export observes Audio native-child settlement through Core's existing counted
 registrar in the Queue's original state and lock. Observation starts before cold
 precompiled factory work, including stem measurements and failed construction;
