@@ -102,25 +102,92 @@ fn product_default_run_targets_app_ui_main_binary() {
     }
 }
 
+fn product_ci_contract_is_complete(workflow: &serde_json::Value) -> bool {
+    let Some(steps) = workflow.pointer("/jobs/test/steps").and_then(serde_json::Value::as_array)
+    else {
+        return false;
+    };
+    [
+        ("cargo test -p mondrian-app --all-targets -j1", None),
+        (
+            "cargo build -p mondrian-app --features validation --bin mondrian-golden -j1",
+            Some("runner.os == 'Windows'"),
+        ),
+    ]
+    .into_iter()
+    .all(|(required, condition)| {
+        let required: Vec<_> = required.split_whitespace().collect();
+        steps.iter().any(|step| {
+            let Some(run) = step.get("run").and_then(serde_json::Value::as_str) else {
+                return false;
+            };
+            let run: Vec<_> = run.split_whitespace().collect();
+            let complete_run = run == required
+                || (condition.is_none()
+                    && run.starts_with(&required)
+                    && run[required.len()..] == ["--", "--test-threads=1"]);
+            complete_run
+                && step.pointer("/env/CARGO_INCREMENTAL").and_then(serde_json::Value::as_str)
+                    == Some("0")
+                && match condition {
+                    None => step.get("if").is_none(),
+                    Some(expected) => {
+                        step.get("if").and_then(serde_json::Value::as_str) == Some(expected)
+                    }
+                }
+        })
+    })
+}
+
 #[test]
 fn cross_platform_ci_covers_the_complete_app_and_windows_golden_entrypoint() {
     let workflow = include_str!("../../../.github/workflows/ci.yml");
-    for required in [
-        r#"- name: 测试完整 App 产品路径
-        env:
-          CARGO_INCREMENTAL: "0"
-        run: cargo test -p mondrian-app --all-targets -j1"#,
-        r#"- name: 编译 Golden 验证入口 (Windows)
-        if: runner.os == 'Windows'
-        env:
-          CARGO_INCREMENTAL: "0"
-        run: cargo build -p mondrian-app --features validation --bin mondrian-golden -j1"#,
+    let workflow: serde_json::Value = serde_saphyr::from_str(workflow).expect("valid CI workflow");
+    assert!(
+        product_ci_contract_is_complete(&workflow),
+        "CI must retain complete non-incremental App tests and Windows Golden compilation"
+    );
+}
+
+#[test]
+fn product_ci_contract_rejects_partial_conditional_and_incremental_routes() {
+    let workflow: serde_json::Value =
+        serde_saphyr::from_str(include_str!("../../../.github/workflows/ci.yml")).unwrap();
+    let steps = workflow.pointer("/jobs/test/steps").unwrap().as_array().unwrap();
+    let app = steps
+        .iter()
+        .position(|step| {
+            step["run"]
+                .as_str()
+                .is_some_and(|run| run.starts_with("cargo test -p mondrian-app"))
+        })
+        .expect("actual App test step");
+    for (key, value) in [
+        ("run", "cargo test -p mondrian-app --lib -j1"),
+        (
+            "run",
+            "cargo test -p mondrian-app --all-targets -j1 -- --exact smoke",
+        ),
+        ("if", "runner.os == 'Windows'"),
     ] {
+        let mut partial = workflow.clone();
+        partial["jobs"]["test"]["steps"][app][key] = serde_json::json!(value);
         assert!(
-            workflow.contains(required),
-            "cross-platform CI must retain required App contract: {required}"
+            !product_ci_contract_is_complete(&partial),
+            "accepted {key}={value}"
         );
     }
+    let mut incremental = workflow.clone();
+    incremental["jobs"]["test"]["steps"][app]["env"]["CARGO_INCREMENTAL"] = serde_json::json!("1");
+    assert!(!product_ci_contract_is_complete(&incremental));
+    let mut disabled = workflow.clone();
+    disabled["jobs"]["test"]["steps"][app]["if"] = serde_json::json!(false);
+    assert!(!product_ci_contract_is_complete(&disabled));
+    let mut missing_golden = workflow.clone();
+    missing_golden["jobs"]["test"]["steps"].as_array_mut().unwrap().retain(|step| {
+        !step["run"].as_str().is_some_and(|run| run.contains("--bin mondrian-golden"))
+    });
+    assert!(!product_ci_contract_is_complete(&missing_golden));
 }
 
 #[test]

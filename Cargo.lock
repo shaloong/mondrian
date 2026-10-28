@@ -2419,6 +2419,7 @@ dependencies = [
  "resvg",
  "rfd",
  "serde",
+ "serde-saphyr",
  "serde_json",
  "sha2",
  "sys-locale",

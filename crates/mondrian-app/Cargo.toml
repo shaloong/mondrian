@@ -219,6 +219,7 @@ cc = "1"
 winres = "0.1"
 
 [dev-dependencies]
+serde-saphyr = "2.0.0"
 toml = { workspace = true }
 mondrian-editor-state = { workspace = true, features = ["test-support"] }
 mondrian-export = { workspace = true, features = ["validation"] }
