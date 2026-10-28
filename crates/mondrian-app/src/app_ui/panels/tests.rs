@@ -6690,7 +6690,28 @@ fn inspector_vector_slider_uses_its_own_channel_contract() {
         Some(selection),
         effect_id,
     );
-    widget.layout(Rect::new(0.0, 0.0, 220.0, 94.0));
+    let size =
+        widget.measure(LayoutConstraint { min: Size::ZERO, max: Size::new(220.0, f32::MAX) });
+    widget.layout(Rect::new(0.0, 0.0, 220.0, size.height));
+
+    fn slider_bounds(widget: &dyn mondrian_ui_core::widget::Widget, bounds: &mut Vec<Rect>) {
+        if widget
+            .accessibility()
+            .is_some_and(|node| node.role == mondrian_ui_core::AccessibilityRole::Slider)
+        {
+            bounds.push(widget.accessibility_bounds().expect("laid-out slider bounds"));
+        }
+        for index in 0..widget.child_count() {
+            slider_bounds(widget.child(index).expect("declared child"), bounds);
+        }
+    }
+    let mut bounds = Vec::new();
+    slider_bounds(widget.as_ref(), &mut bounds);
+    assert_eq!(bounds.len(), 3, "one slider for each Vec3 channel");
+    let z = bounds[2];
+    // Select a value away from the current midpoint using the actual layout,
+    // independent of platform font metrics and numeric-input width.
+    let position = Point::new(z.x + z.width * 0.8, z.y + z.height * 0.5);
 
     let actions = RefCell::new(Vec::new());
     let dispatch = |action| actions.borrow_mut().push(action);
@@ -6708,7 +6729,7 @@ fn inspector_vector_slider_uses_its_own_channel_contract() {
 
     let result = widget.event(
         &UiEvent::MouseDown {
-            position: Point::new(80.0, 75.0),
+            position,
             button: MouseButton::Left,
             modifiers: Modifiers::none(),
         },

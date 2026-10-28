@@ -750,6 +750,11 @@ pub struct ExportEnduranceSnapshot {
     pub audio_native_children: ExportNativeChildSettlementEvidence,
 }
 
+impl ExportEnduranceSnapshot {
+    /// Version emitted by the current queue observation contract.
+    pub const SCHEMA_VERSION: u32 = 3;
+}
+
 /// Terminal evidence returned by explicit queue retirement.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -1760,7 +1765,7 @@ impl RenderQueue {
             })
             .count() as u64;
         ExportEnduranceSnapshot {
-            schema_version: 3,
+            schema_version: ExportEnduranceSnapshot::SCHEMA_VERSION,
             observed_at_us,
             shutdown_requested: state.shutdown_requested,
             worker_running: state.worker_running,
