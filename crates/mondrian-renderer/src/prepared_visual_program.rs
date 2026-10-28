@@ -1448,7 +1448,7 @@ impl PreparedVisualProgramBinding {
         sequence: &Sequence,
         program: Arc<PreparedVisualProgram>,
     ) -> std::result::Result<Self, PreparedVisualProgramBindingError> {
-        validate_program_identity(sequence, &program, true, false)?;
+        validate_program_identity(sequence, &program, true)?;
         Ok(Self { author_snapshot: None, program })
     }
 
@@ -1457,7 +1457,11 @@ impl PreparedVisualProgramBinding {
         sequence: &Sequence,
         program: Arc<PreparedVisualProgram>,
     ) -> std::result::Result<Self, PreparedVisualProgramBindingError> {
-        validate_program_identity(sequence, &program, false, true)?;
+        // The cache admits a Program prepared at one coherent registry revision.
+        // A later registration cannot revoke its immutable definitions between
+        // preparation and binding. The next cache lookup and dependency observer
+        // still detect the new revision, just as they do after a cache hit.
+        validate_program_identity(sequence, &program, false)?;
         Ok(Self { author_snapshot: Some(author_snapshot), program })
     }
 
@@ -1475,7 +1479,7 @@ impl PreparedVisualProgramBinding {
         &self,
         sequence: &Sequence,
     ) -> std::result::Result<(), PreparedVisualProgramBindingError> {
-        validate_program_identity(sequence, &self.program, false, false)
+        validate_program_identity(sequence, &self.program, false)
     }
 }
 
@@ -1493,7 +1497,6 @@ fn validate_program_identity(
     sequence: &Sequence,
     program: &PreparedVisualProgram,
     validate_author_fingerprint: bool,
-    validate_current_effect_registry: bool,
 ) -> std::result::Result<(), PreparedVisualProgramBindingError> {
     if program.sequence_id() != sequence.id || program.sequence_revision() != sequence.revision {
         return Err(PreparedVisualProgramBindingError {
@@ -1504,18 +1507,6 @@ fn validate_program_identity(
                 sequence.revision,
                 program.sequence_id(),
                 program.sequence_revision()
-            ),
-        });
-    }
-    if validate_current_effect_registry
-        && program.effect_registry_revision() != effect_registry_revision()
-    {
-        return Err(PreparedVisualProgramBindingError {
-            sequence_id: sequence.id,
-            reason: format!(
-                "Effect registry revision changed (Program {}, current {})",
-                program.effect_registry_revision(),
-                effect_registry_revision()
             ),
         });
     }

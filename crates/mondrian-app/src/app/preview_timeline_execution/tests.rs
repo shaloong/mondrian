@@ -932,7 +932,8 @@ fn preparation_keeps_title_pixels_after_producer_cache_eviction() {
         dependency_observer: None,
         generation: 78,
         cancellation: &cancellation,
-        author_snapshot: None,
+        // This attempt owns one immutable author snapshot, as production does.
+        author_snapshot: Some(PreparedVisualAuthorSnapshotIdentity::new(78)),
         heterogeneous_graph_budget: standalone_preview_heterogeneous_graph_budget(),
     };
     let mut rasterizer = mondrian_renderer::BasicTitleRasterizer::with_cache_budget(1, 0);
@@ -941,6 +942,11 @@ fn preparation_keeps_title_pixels_after_producer_cache_eviction() {
     let mut saved = None;
     let mut calls = Vec::new();
     for step in 0..3 {
+        if step == 2 {
+            // A concurrent registration must not replace the in-flight closure
+            // or discard title pixels retained from its original producers.
+            let _ = temporal_sample_effect(TimelineTime::ZERO);
+        }
         if step > 0 {
             let request = &requested[step - 1];
             let frame = rasterizer

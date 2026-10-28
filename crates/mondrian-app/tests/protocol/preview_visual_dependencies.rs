@@ -221,10 +221,25 @@ fn wait_for_refresh(
 
 #[test]
 fn identity_program_does_not_publish_false_refresh() {
-    let observer = PreviewVisualDependencyObserver::with_timing(test_timing());
-    observer.observe(prepare_stable(&single_solid_sequence(None)));
-    std::thread::sleep(Duration::from_millis(25));
-    assert!(observer.poll_refreshes().is_empty());
+    for _ in 0..32 {
+        let observer = PreviewVisualDependencyObserver::with_timing(test_timing());
+        let program = prepare_stable(&single_solid_sequence(None));
+        let revision = program.effect_registry_revision();
+        observer.observe(program);
+        std::thread::sleep(Duration::from_millis(25));
+        let refreshes = observer.poll_refreshes();
+        // Other tests register definitions concurrently. That is a real
+        // dependency change, so only a stable observation tests a false refresh.
+        if mondrian_effects::effect_registry_revision() != revision {
+            continue;
+        }
+        assert!(
+            refreshes.is_empty(),
+            "stable identity Program refreshed: {refreshes:?}"
+        );
+        return;
+    }
+    panic!("Effect registry did not stabilize during identity observation");
 }
 
 #[test]
