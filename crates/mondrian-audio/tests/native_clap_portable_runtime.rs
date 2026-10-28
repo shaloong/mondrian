@@ -150,13 +150,18 @@ impl NativeChildSettlementReporter for Census {
 }
 
 #[test]
-#[ignore = "requires the matching normal Product and official Ring Out CLAP in MONDRIAN_CLAP_TEST_HELPER / MONDRIAN_CLAP_TEST_PLUGIN"]
+#[ignore = "requires the matching normal Product, official Ring Out CLAP and its actual -6dB state in MONDRIAN_CLAP_TEST_HELPER / MONDRIAN_CLAP_TEST_PLUGIN / MONDRIAN_CLAP_TEST_STATE"]
 fn ring_out_runtime_restores_state_preserves_pcm_across_seek_and_retires_children() {
     let helper =
         PathBuf::from(std::env::var_os("MONDRIAN_CLAP_TEST_HELPER").expect("normal Product"));
     let plugin = PathBuf::from(
         std::env::var_os("MONDRIAN_CLAP_TEST_PLUGIN").expect("official Ring Out CLAP"),
     );
+    let minus6 = std::fs::read(
+        std::env::var_os("MONDRIAN_CLAP_TEST_STATE").expect("actual native Ring Out -6dB state"),
+    )
+    .unwrap();
+    assert!(!minus6.is_empty());
     let catalog = Arc::new(
         DiscoveredClapAudioProcessorSpecResolver::discover(helper.clone(), [plugin.clone()])
             .unwrap(),
@@ -168,7 +173,10 @@ fn ring_out_runtime_restores_state_preserves_pcm_across_seek_and_retires_childre
     let registrar = NativeChildSettlementRegistrar::try_new(census.clone()).unwrap();
     let cancel = ExecutionCancellationToken::new();
 
-    for layout in [AudioChannelLayout::Mono, AudioChannelLayout::Stereo] {
+    let layouts = [AudioChannelLayout::Mono, AudioChannelLayout::Stereo];
+    let states = [(0.0_f32, None), (-6.0, Some(minus6.as_slice()))];
+    let cases = layouts.map(|layout| states.map(|(gain, seed)| (layout, gain, seed)));
+    for (layout, gain_db, seed) in cases.into_iter().flatten() {
         let render = AudioRenderContract {
             sample_rate: 48_000,
             channel_layout: layout,
@@ -179,12 +187,12 @@ fn ring_out_runtime_restores_state_preserves_pcm_across_seek_and_retires_childre
             compensation_delay_scratch_budget_bytes: 1024 * 1024,
         };
         let native_registration =
-            probe_clap_plugin_registration(&helper, &plugin, ID, render, None).unwrap();
+            probe_clap_plugin_registration(&helper, &plugin, ID, render, seed).unwrap();
         assert!(native_registration.auxiliary_inputs.buses.is_empty());
         assert!(native_registration.auxiliary_outputs.buses.is_empty());
-        // This release's flat captured preset is the input to the unity oracle.
-        // Fail a changed corpus condition instead of silently changing the oracle.
-        for id in [7, 8] {
+        // Check actual native getters before using either independent PCM oracle.
+        // A nonidentity gain makes a skipped native process call observable.
+        for (id, value) in [(7, f64::from(gain_db)), (8, 0.0)] {
             assert_eq!(
                 native_registration
                     .parameters
@@ -192,10 +200,10 @@ fn ring_out_runtime_restores_state_preserves_pcm_across_seek_and_retires_childre
                     .find(|p| p.id == id)
                     .unwrap()
                     .current_value,
-                0.0
+                value
             );
         }
-        let initial = catalog.create_instance(ID, render, None).unwrap();
+        let initial = catalog.create_instance(ID, render, seed.map(<[u8]>::to_vec)).unwrap();
         let state = initial.opaque_state.as_ref().expect("native state capture").to_vec();
         assert!(!state.is_empty());
         let restored = catalog.create_instance(ID, render, Some(state.clone())).unwrap();
@@ -344,9 +352,10 @@ fn ring_out_runtime_restores_state_preserves_pcm_across_seek_and_retires_childre
                 }
                 for (frame, pcm) in output.chunks_exact(layout.channel_count()).enumerate() {
                     for (channel, &actual) in pcm.iter().enumerate() {
-                        let expected = sample(start + (done + frame) as i64, channel);
+                        let expected = sample(start + (done + frame) as i64, channel)
+                            * 10.0_f32.powf(gain_db / 20.0);
                         assert!(actual.is_finite() && (actual - expected).abs() <= 2e-6,
-                            "{layout:?} epoch{index} frame{} channel{channel}: {actual} vs {expected}", done + frame);
+                            "{layout:?} {gain_db}dB epoch{index} frame{} channel{channel}: {actual} vs {expected}", done + frame);
                     }
                 }
                 done += frames;
@@ -378,5 +387,5 @@ fn ring_out_runtime_restores_state_preserves_pcm_across_seek_and_retires_childre
     let final_state = census.lock();
     assert!(!final_state.unavailable);
     assert_eq!((final_state.scopes, final_state.children), (0, 0));
-    assert!(final_state.settled >= 2);
+    assert!(final_state.settled >= layouts.len() * states.len());
 }
