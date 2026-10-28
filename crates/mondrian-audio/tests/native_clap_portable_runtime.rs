@@ -2,10 +2,10 @@
 //! The corpus is explicit; no native implementation or synthesized opaque state.
 
 use mondrian_audio::{
-    probe_clap_plugin_registration, AudioContinuityEpoch, AudioDecodedSource, AudioMediaResolver,
-    AudioProcessingMode, AudioProgramRuntime, AudioRenderContract, AudioRenderRequest,
-    AudioRuntimeResourceGrant, AudioStateEntry, DiscoveredClapAudioProcessorSpecResolver,
-    IsolatedAudioProcessorResolver, ResolvedAudioSource,
+    probe_clap_plugin_registration, AudioContinuityEpoch, AudioDecodedSource, AudioExecutionError,
+    AudioMediaResolver, AudioProcessingMode, AudioProgramRuntime, AudioRenderContract,
+    AudioRenderRequest, AudioRuntimeResourceGrant, AudioStateEntry,
+    DiscoveredClapAudioProcessorSpecResolver, IsolatedAudioProcessorResolver, ResolvedAudioSource,
 };
 use mondrian_core::{
     AssetId, AudioChannelLayout, AudioOwnerInstallationSource, AudioSourceComponentId,
@@ -248,8 +248,8 @@ fn ring_out_runtime_restores_state_preserves_pcm_across_seek_and_retires_childre
         );
         let installation = AudioOwnerInstallationSource::new();
         let (owner_registration, verifier) = installation.register().unwrap();
-        runtime.bind_native_owner_installation(verifier).unwrap();
-        let claim = installation
+        runtime.bind_native_owner_installation(verifier.clone()).unwrap();
+        let mut claim = installation
             .reserve_install(&owner_registration, None)
             .and_then(|r| installation.begin_commit(r))
             .unwrap()
@@ -282,12 +282,15 @@ fn ring_out_runtime_restores_state_preserves_pcm_across_seek_and_retires_childre
         }
         runtime.validate_native_author_source_closed(&cancel).unwrap();
 
+        let mut epoch = 0;
+        let mut installs = 0;
         for (index, (start, partitions)) in
             [(0, [64, 64]), (0, [17, 47]), (97, [47, 17])].into_iter().enumerate()
         {
+            epoch += 1;
             runtime
                 .enter_state(AudioStateEntry {
-                    epoch: AudioContinuityEpoch::new(index as u64 + 1),
+                    epoch: AudioContinuityEpoch::new(epoch),
                     start_sample: start,
                 })
                 .unwrap();
@@ -296,16 +299,49 @@ fn ring_out_runtime_restores_state_preserves_pcm_across_seek_and_retires_childre
             while done < 257 {
                 let frames = partitions[block % partitions.len()].min(257 - done);
                 let mut output = vec![f32::NAN; frames * layout.channel_count()];
-                runtime
-                    .render_into(
-                        AudioRenderRequest {
-                            transport_activity: None,
-                            start_sample: start + done as i64,
-                            frames,
-                        },
-                        &mut output,
-                    )
-                    .unwrap();
+                let request = AudioRenderRequest {
+                    transport_activity: None,
+                    start_sample: start + done as i64,
+                    frames,
+                };
+                match runtime.render_into(request, &mut output) {
+                    Ok(()) => {}
+                    Err(AudioExecutionError::ReprepareRequired(ticket)) => {
+                        assert!(installs < 2, "unexpected recurring restart: {ticket:?}");
+                        assert!(
+                            output.iter().all(|v| v.to_bits() == f32::NAN.to_bits()),
+                            "preflight HOLD preserves every output word"
+                        );
+                        let operation = runtime
+                            .service_pending_native_reprepare(ticket.product_notice(), &cancel)
+                            .expect("capture actual native restart");
+                        runtime
+                            .prepare_native_reprepare_plan(&operation, verifier.clone(), &cancel)
+                            .expect("prepare within the original resource grant");
+                        let reservation = installation
+                            .reserve_install(&owner_registration, Some(&claim))
+                            .unwrap();
+                        let mut authorization =
+                            installation.authorize_runtime_installation(reservation).unwrap();
+                        let receipt = runtime
+                            .install_native_reprepare_plan(&operation, &mut authorization, &cancel)
+                            .expect("install retained native owner");
+                        claim = receipt.claim().clone();
+                        runtime.finish_native_reprepare_retirement(receipt.retire()).unwrap();
+                        epoch += 1;
+                        runtime
+                            .enter_state(AudioStateEntry {
+                                epoch: AudioContinuityEpoch::new(epoch),
+                                start_sample: request.start_sample,
+                            })
+                            .expect("explicit Fresh Enter after installation");
+                        installs += 1;
+                        runtime
+                            .render_into(request, &mut output)
+                            .expect("Fresh produces the full unchanged PCM request");
+                    }
+                    Err(error) => panic!("native render failed: {error:?}"),
+                }
                 for (frame, pcm) in output.chunks_exact(layout.channel_count()).enumerate() {
                     for (channel, &actual) in pcm.iter().enumerate() {
                         let expected = sample(start + (done + frame) as i64, channel);
@@ -331,6 +367,10 @@ fn ring_out_runtime_restores_state_preserves_pcm_across_seek_and_retires_childre
             runtime.validate_native_author_source_closed(&cancel).unwrap();
             assert_eq!(serde_json::to_value(&sequence).unwrap(), before);
         }
+        assert!(
+            installs > 0,
+            "the corpus must exercise actual reset/restart installation"
+        );
         drop(runtime);
         assert_eq!(census.lock().children, 0);
     }
