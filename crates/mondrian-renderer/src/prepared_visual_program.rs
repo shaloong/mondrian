@@ -2280,6 +2280,32 @@ mod tests {
     }
 
     #[test]
+    fn author_snapshot_binding_preserves_program_captured_before_registry_update() {
+        let sequence = single_solid_sequence(None);
+        let snapshot = PreparedVisualAuthorSnapshotIdentity::new(19);
+        let mut cache = PreparedVisualProgramCache::new(4);
+        let program = with_stable_effect_registry(|| cache.prepare(&sequence).ok());
+        let captured_revision = program.effect_registry_revision();
+
+        let _ = identity_effect_with_contract("binding registry race", cpu_float_contract());
+        assert_ne!(effect_registry_revision(), captured_revision);
+        let binding =
+            PreparedVisualProgramBinding::from_prepared(snapshot, &sequence, Arc::clone(&program))
+                .expect(
+                    "registration after preparation cannot revoke the captured immutable Program",
+                );
+        assert!(Arc::ptr_eq(binding.program(), &program));
+        assert_eq!(binding.author_snapshot(), Some(snapshot));
+        binding.validate_for_sequence(&sequence).expect("same author identity");
+        assert!(program.dependency_refresh_required().expect("dependency check"));
+
+        let next =
+            with_stable_effect_registry(|| cache.bind_author_snapshot(snapshot, &sequence).ok());
+        assert_ne!(next.program().effect_registry_revision(), captured_revision);
+        assert!(!Arc::ptr_eq(next.program(), &program));
+    }
+
+    #[test]
     fn program_freezes_materialization_contract_with_author_fingerprint() {
         let mut sequence = Sequence::new("materialization contract");
         sequence.settings.resolution = Resolution { width: 4096, height: 1716 };
