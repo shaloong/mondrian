@@ -725,6 +725,27 @@ replacement test. The unchanged 180s gate and Job settlement pass. This qualifie
 ordinary tests, not Linux third-party plugins, App/Export, GUI/device, realtime,
 performance or macOS execution.
 
+FFmpeg integration at `78d9eede` passes the ordinary Media library suite on
+Ubuntu24.04.5 x86_64 (671 passed, 16 ignored) and Windows x64 (678 passed,
+18 ignored), with Rust1.97.1, default features, opt1/debug0, zero filtering and
+empty stderr. Windows uses an owned temporary directory and settled Job. Linux's
+private patched8.1.2 SDK retains NASM and both precision changes; all six actual
+ELF dependencies resolve inside that SDK. The six RGBA64 precision cases and an
+explicit ignored FFV1/libx264 Proxy round trip pass. Actual ProRes422 HQ CLI
+encode/decode with explicit source/output TV/BT709 gives twelve-bit black0 and
+white4092, with byte-identical native/scalar decode under the original thresholds.
+
+ALSA's transitive system-library search previously linked FFmpeg6 against SDK8
+headers. SDK-first Rust search fixes selection, and one shared initialization
+gate checks all six library ABIs before struct-dependent FFI. A versioned scalar
+probe fault is explicitly rejected in an isolated process. Explicit renderer
+device selection now constrains probes before recording fallback evidence,
+including unsupported codecs; CUDA/VAAPI/D3D12/D3D11 controls pass without requiring
+physical hardware. CI/runtime recipes carry the matching SDK; Linux packaging
+retains its source and clears loader overrides before closure verification.
+Workflow syntax passes; new packaged artifacts, Product/plugin execution, GPU,
+realtime/performance and macOS physical behavior remain separately unverified.
+
 The default Windows workspace regression closed on 2026-10-25: all 30 members
 and 127 executable test targets completed at `df8ddd49`, with 9,417 passed,
 one failed and 641 originally ignored tests. The sole failure was a stale
