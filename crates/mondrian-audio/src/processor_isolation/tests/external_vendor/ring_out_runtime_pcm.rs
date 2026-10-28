@@ -3,8 +3,8 @@
 
 use super::*;
 use crate::{
-    AudioContinuityEpoch, AudioProgramRuntime, AudioStateEntry, NativeAudioAuthorProgram,
-    NativeAudioParameterHandoffContinuity,
+    AudioContinuityEpoch, AudioDecodedSource, AudioMediaResolver, AudioProgramRuntime, AudioStateEntry,
+    NativeAudioAuthorProgram, NativeAudioParameterHandoffContinuity, ResolvedAudioSource,
 };
 use mondrian_core::{
     AssetId, AudioOwnerInstallationSource, AudioSourceComponentId, AutomationSegmentInterpolation,
@@ -23,6 +23,298 @@ const RUNTIME_CASE_HASH_ENV: &str = "MONDRIAN_RING_OUT_RUNTIME_PCM_CASE_SHA256";
 const TRANSITION_FRAMES: usize = 6144;
 const OBSERVED_FRAMES: usize = TRANSITION_FRAMES + FRAMES;
 
+// Explicit source layout/rate, independent of project and plugin defaults.
+#[derive(Clone)]
+struct ConfigPcm {
+    layout: AudioChannelLayout,
+    rate: u32,
+    period: Arc<[f32]>,
+}
+impl AudioMediaResolver for ConfigPcm {
+    fn resolve(
+        &self,
+        _: AssetId,
+        _: AudioSourceComponentId,
+        rate: u32,
+    ) -> Result<ResolvedAudioSource, String> {
+        assert_eq!(rate, self.rate);
+        Ok(ResolvedAudioSource::new(
+            self.layout,
+            Arc::new(self.clone()),
+        ))
+    }
+}
+impl AudioDecodedSource for ConfigPcm {
+    fn read_interleaved(
+        &self,
+        start: i64,
+        frames: usize,
+        out: &mut [f32],
+        cancel: &ExecutionCancellationToken,
+    ) -> Result<(), String> {
+        let channels = self.layout.channel_count();
+        assert!(!cancel.is_canceled());
+        assert_eq!(out.len(), frames * channels);
+        for (offset, frame) in out.chunks_exact_mut(channels).enumerate() {
+            let sample = start.checked_add(offset as i64).unwrap();
+            if sample < 0 {
+                frame.fill(0.0);
+            } else {
+                let at = sample as usize % FRAMES * channels;
+                frame.copy_from_slice(&self.period[at..at + channels]);
+            }
+        }
+        Ok(())
+    }
+}
+
+fn run_config_runtime(
+    catalog: Arc<DiscoveredClapAudioProcessorSpecResolver>,
+    state: &[u8],
+    render: AudioRenderContract,
+    gain_db: f64,
+    partitions: &[usize],
+    directory: &Path,
+    label: &str,
+) -> Vec<f32> {
+    let channels = render.channel_count();
+    let author = catalog
+        .create_instance("com.duskaudio.ring-out", render, Some(state.to_vec()))
+        .expect("actual selected-layout state restore");
+    assert!(!author.bypassed);
+    assert!(author.parameters.values().all(|p| p.automation.is_none()));
+    assert_eq!(
+        author.opaque_state.as_deref().map(Vec::as_slice),
+        Some(state)
+    );
+    let instance_id = author.id;
+    let saved = serde_json::to_vec(&author).unwrap();
+    let reopened: AudioProcessorInstance = serde_json::from_slice(&saved).unwrap();
+    assert_eq!(author, reopened);
+    let mut sequence = Sequence::new("Real CLAP configuration and native state");
+    sequence.settings.audio_channel_layout = render.channel_layout;
+    sequence.settings.audio_sample_rate = render.sample_rate;
+    let unity = mondrian_timeline::audio::AudioChannelStrip {
+        input_trim_db: 0.0,
+        pre_fader: Default::default(),
+        fader_db: 0.0,
+        fader_automation: None,
+        post_fader: Default::default(),
+    };
+    for channel in sequence.audio_program.track_channels.values_mut() {
+        channel.strip = unity.clone();
+    }
+    for output in sequence.audio_program.outputs.iter_mut() {
+        output.strip = unity.clone();
+    }
+    sequence
+        .add_media_audio_clip(
+            sequence.audio_tracks[0].id,
+            Clip::new(AssetId::new(), TimelineTime::ZERO, TimelineTime::ONE).unwrap(),
+            AudioSourceComponentId::primary(),
+        )
+        .unwrap();
+    sequence.audio_program.outputs[0].strip.pre_fader.processors.push(reopened);
+    let period: Arc<[f32]> = (0..FRAMES * channels)
+        .map(|i| (((i / channels * 29 + i % channels * 11) % 113) as f32 - 56.0) / 256.0)
+        .collect::<Vec<_>>()
+        .into();
+    let source = ConfigPcm {
+        layout: render.channel_layout,
+        rate: render.sample_rate,
+        period: period.clone(),
+    };
+    let resolver = IsolatedAudioProcessorResolver::new(catalog);
+    let mut runtime = AudioProgramRuntime::build_with_processor_resolver(
+        &sequence,
+        &[],
+        &source,
+        &resolver,
+        render,
+        None,
+    )
+    .unwrap();
+    assert_eq!(runtime.public_output_lookahead_frames(), 0);
+    let installation = AudioOwnerInstallationSource::new();
+    let (registration, verifier) = installation.register().unwrap();
+    runtime.bind_native_owner_installation(verifier).unwrap();
+    let claim = installation
+        .reserve_install(&registration, None)
+        .and_then(|r| installation.begin_commit(r))
+        .unwrap()
+        .commit()
+        .unwrap();
+    runtime
+        .install_native_owner_bindings(&claim, &ExecutionCancellationToken::new())
+        .unwrap();
+    let (_, object) = accept_cold_startup(
+        &mut runtime,
+        &mut sequence,
+        &installation,
+        directory,
+        label,
+        Some(gain_db),
+    );
+    let (pid, serial) = object.expect("actual pre-DSP worker parameter readback");
+    assert_ne!(pid, std::process::id());
+    assert_ne!(serial, 0);
+    let current = &sequence.audio_program.outputs[0].strip.pre_fader.processors[0];
+    assert_eq!(current.id, instance_id);
+    assert!(current.parameters.values().all(|p| p.automation.is_none()));
+    assert_eq!(
+        current.opaque_state.as_deref().map(Vec::as_slice),
+        Some(state)
+    );
+    let canonical = serde_json::to_value(&sequence).unwrap();
+    // SAFETY: the PID comes from this installed Runtime's authenticated native
+    // object observation. This HANDLE only observes that exact process object.
+    let raw = unsafe { OpenProcess(0x0010_0000 | 0x1000, 0, pid) };
+    assert!(!raw.is_null());
+    let process = unsafe { OwnedHandle::from_raw_handle(raw.cast()) };
+    runtime
+        .enter_state(AudioStateEntry {
+            epoch: AudioContinuityEpoch::new(1),
+            start_sample: 0,
+        })
+        .unwrap();
+    let lease = owner(&runtime);
+    assert_eq!(lease.editor_target().instance, instance_id);
+    let mut output = Vec::with_capacity(FRAMES * channels);
+    let mut block = 0;
+    while output.len() < FRAMES * channels {
+        let start = output.len() / channels;
+        let frames = partitions[block % partitions.len()].min(FRAMES - start);
+        assert!(frames > 0 && frames <= render.max_block_frames);
+        let mut pcm = vec![f32::NAN; frames * channels];
+        runtime
+            .render_into(
+                AudioRenderRequest {
+                    transport_activity: None,
+                    start_sample: start as i64,
+                    frames,
+                },
+                &mut pcm,
+            )
+            .unwrap();
+        output.extend(pcm);
+        let mut observations = Observations {
+            native_object: Some((pid, serial)),
+            ..Default::default()
+        };
+        observe(&mut runtime, lease, &mut observations);
+        block += 1;
+    }
+    runtime.validate_native_owner(lease).unwrap();
+    runtime
+        .validate_native_author_source_closed(&ExecutionCancellationToken::new())
+        .unwrap();
+    assert_eq!(serde_json::to_value(&sequence).unwrap(), canonical);
+    let alive = unsafe { WaitForSingleObject(process.as_raw_handle().cast(), 0) };
+    drop(runtime);
+    let settled = unsafe { WaitForSingleObject(process.as_raw_handle().cast(), 0) };
+    let mut exit = 0;
+    let queried = unsafe { GetExitCodeProcess(process.as_raw_handle().cast(), &mut exit) };
+    assert_eq!((alive, settled), (258, 0));
+    assert_ne!(queried, 0);
+    assert_eq!(exit, 0);
+    // Empty-filter state, native-owned gain, no host curves/bypass. Check the
+    // entire output from sample0, including startup, against independent math.
+    let gain = 10.0_f64.powf(gain_db / 20.0) as f32;
+    for (index, (&actual, &input)) in output.iter().zip(period.iter()).enumerate() {
+        let expected = 0.0_f32 + input * gain;
+        assert!(
+            actual.is_finite() && (actual - expected).abs() <= 2.0 * f32::EPSILON,
+            "{label}: sample {index}, actual={actual:?}, expected={expected:?}"
+        );
+    }
+    output
+}
+
+#[test]
+#[ignore = "real Ring Out config/state inputs, current Product and original outer Job required"]
+fn external_clap_ring_out_mono_config_preserves_native_state_and_runtime_pcm() {
+    let helper = PathBuf::from(std::env::var_os("MONDRIAN_CLAP_TEST_HELPER").unwrap());
+    let plugin = PathBuf::from(std::env::var_os("MONDRIAN_RING_OUT_TEST_PLUGIN").unwrap());
+    let directory = PathBuf::from(std::env::var_os("MONDRIAN_RING_OUT_CONFIG_DIR").unwrap());
+    assert!(fs::read_dir(&directory).unwrap().next().is_none());
+    let catalog = Arc::new(
+        DiscoveredClapAudioProcessorSpecResolver::discover(helper.clone(), [plugin.clone()])
+            .unwrap(),
+    );
+    assert_eq!(catalog.descriptors().len(), 1);
+    assert_eq!(catalog.descriptors()[0].plugin_id, "com.duskaudio.ring-out");
+    for (state_env, gain_db) in [
+        ("MONDRIAN_RING_OUT_FLAT_STATE", 0.0_f64),
+        ("MONDRIAN_RING_OUT_GAIN_STATE", -6.0_f64),
+    ] {
+        let path = PathBuf::from(std::env::var_os(state_env).unwrap());
+        assert!(fs::metadata(&path).unwrap().len() <= 64 * 1024);
+        let state = fs::read(&path).unwrap();
+        assert!(!state.is_empty());
+        for (layout, rate) in [
+            (AudioChannelLayout::Mono, 44_100),
+            (AudioChannelLayout::Mono, 48_000),
+            (AudioChannelLayout::Stereo, 48_000),
+        ] {
+            for processing_mode in [AudioProcessingMode::Realtime, AudioProcessingMode::Offline] {
+                let render = AudioRenderContract {
+                    sample_rate: rate,
+                    channel_layout: layout,
+                    max_block_frames: 64,
+                    processing_mode,
+                    processor_session_scratch_budget_bytes: 16 * 1024 * 1024,
+                    public_output_lookahead_budget_frames: 4096,
+                    compensation_delay_scratch_budget_bytes: 1024 * 1024,
+                };
+                let registration = crate::probe_clap_plugin_registration(
+                    &helper,
+                    &plugin,
+                    "com.duskaudio.ring-out",
+                    render,
+                    Some(&state),
+                )
+                .unwrap();
+                assert_eq!(
+                    registration.main_audio_input,
+                    crate::ClapMainAudioInput::Present
+                );
+                assert!(registration.auxiliary_inputs.buses.is_empty());
+                assert!(registration.auxiliary_outputs.buses.is_empty());
+                for (id, value) in [(7, gain_db), (8, 0.0)] {
+                    assert_eq!(
+                        registration
+                            .parameters
+                            .iter()
+                            .find(|p| p.id == id)
+                            .unwrap()
+                            .current_value
+                            .to_bits(),
+                        value.to_bits()
+                    );
+                }
+                let mut reference = None;
+                for (index, partitions) in [[64, 64], [17, 47]].iter().enumerate() {
+                    let label = format!("{layout:?}-{rate}-{processing_mode:?}-{gain_db}-p{index}");
+                    let output = run_config_runtime(
+                        catalog.clone(),
+                        &state,
+                        render,
+                        gain_db,
+                        partitions,
+                        &directory,
+                        &label,
+                    );
+                    if let Some(expected) = &reference {
+                        assert_eq!(&output, expected, "fresh partition invariance");
+                    } else {
+                        reference = Some(output);
+                    }
+                }
+            }
+        }
+    }
+}
+
 // Consume the real cold installed source before public Enter can erase or
 // overwrite it. This is the same canonical transaction/plan/Source/Ack path as
 // the App, bounded to four actual prefixes for this finite startup scenario.
@@ -32,6 +324,7 @@ fn accept_cold_startup(
     installation: &AudioOwnerInstallationSource,
     directory: &Path,
     label: &str,
+    expected_native_gain: Option<f64>,
 ) -> (usize, Option<(u32, u64)>) {
     let cancel = ExecutionCancellationToken::new();
     let mut handoffs = 0;
@@ -61,6 +354,18 @@ fn accept_cold_startup(
             }
             if let Some(parameters) = &batch.parameters {
                 assert_eq!(parameters.target(), lease.editor_target());
+                if let Some(gain) = expected_native_gain {
+                    for (id, value) in [(7, gain), (8, 0.0)] {
+                        let id = ParameterId::new(format!("clap.param.{id}")).unwrap();
+                        let fact = parameters
+                            .facts()
+                            .iter()
+                            .find(|fact| fact.parameter == id)
+                            .expect("actual restored gain/bypass observation");
+                        assert_eq!(fact.value_bits, Some(value.to_bits()));
+                        assert_eq!(fact.author_value_bits, Some(value.to_bits()));
+                    }
+                }
                 let actual = (
                     parameters.process_id().get(),
                     parameters.object_serial().get(),
@@ -292,7 +597,7 @@ fn run_runtime(
         .install_native_owner_bindings(&claim, &ExecutionCancellationToken::new())
         .expect("real child acknowledges exact installed Output occurrence");
     let (cold_handoffs, cold_object) =
-        accept_cold_startup(&mut runtime, &mut sequence, &installation, directory, label);
+        accept_cold_startup(&mut runtime, &mut sequence, &installation, directory, label, None);
     for id in [7, 8] {
         let id = ParameterId::new(format!("clap.param.{id}")).unwrap();
         let actual =
