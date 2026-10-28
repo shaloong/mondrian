@@ -1193,7 +1193,7 @@ fn clap_idle_static_values_exchange_uses_actual_active_role_and_preserves_live_o
     assert_eq!(STATIC_FLUSHES.load(AuditOrdering::SeqCst), 1);
     assert_eq!(worker.shared.parameter_source.snapshot(), source);
     assert_eq!(worker.native_object, object);
-    assert!(worker.initial_signal_available);
+    assert!(worker.fresh_activation_available);
     assert_eq!(worker.last_end, None);
     assert_eq!(PROCESSES.load(AuditOrdering::SeqCst), 0);
     assert_eq!(RESETS.load(AuditOrdering::SeqCst), 0);
@@ -1430,7 +1430,7 @@ fn clap_idle_static_values_reopen_after_real_configuration_ack_without_signal_en
     assert_eq!(object.process_id().get(), std::process::id());
     assert!(worker.configuration_seed.is_none());
     assert_eq!(worker.last_end, None);
-    assert!(worker.initial_signal_available);
+    assert!(worker.fresh_activation_available);
     assert!(matches!(
         static_open(&mut worker, 1, 0.25).unwrap(),
         crate::NativeAudioEditorOutcome::Opened { .. }
@@ -1488,7 +1488,7 @@ fn clap_idle_static_values_reopen_after_real_configuration_ack_without_signal_en
         worker.last_end, None,
         "Ack does not manufacture signal entry"
     );
-    assert!(worker.initial_signal_available);
+    assert!(worker.fresh_activation_available);
     assert!(worker.processor.is_some());
     assert!(worker
         .instance
@@ -1515,7 +1515,7 @@ fn clap_idle_static_values_reopen_after_real_configuration_ack_without_signal_en
     assert_eq!(worker.native_object, object);
     assert_eq!(worker.instance.plugin_handle().as_raw_ptr(), instance);
     assert_eq!(worker.last_end, None);
-    assert!(worker.initial_signal_available);
+    assert!(worker.fresh_activation_available);
     assert!(worker.author_source_status().closed_empty());
     assert_eq!(
         worker.configuration_seed.as_deref(),

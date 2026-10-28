@@ -266,20 +266,29 @@ conflicts retain strict refusal before activation. This is a host-selected
 ordinal mapping, not channel-count inference of native speaker positions or
 full configuration/rescan, Float64, realtime/performance or platform support.
 
-ZamCompX2 4.5 official Windows64 CLAP remains **Partially Supported**. The
-deactivated census confirms Main input/output0 with two arbitrary lanes,
-Aux536870912 with one arbitrary lane, and no audio-ports-config extension under
-this Host. The original Probe refusal is resolved. The unchanged
-[positive gate](../../crates/mondrian-audio/src/processor_isolation/tests/native_clap_mixed_vendor.rs)
-now reaches processing but fails at the second epoch with an unserviced
-`ClapRestart` ticket: whole gate0PASS/1FAIL, exit101, stderr899B and settled Job.
-Its later complete PCM/seek assertions are not qualified. The pinned
+ZamCompX2 4.5 official Windows64 CLAP remains **Partially Supported**. Its
+arbitrary Main input/output0 and Mono Aux536870912 now pass Probe. The
+[public Runtime gates](../../crates/mondrian-audio/tests/native_clap_zam_runtime.rs)
+use actual consumer Source/Plan/Ack and retained native restart installation.
+The separate silent-detector case passes at48k Offline/Stereo/block64: three
+1024-frame runs at starts0/0/97, partitions64/64,17/47,47/17, every dry PCM value,
+two restart installations, and unchanged author state; exact1PASS, stderr0,
+exit0 and settled Job. This does not qualify Preview/Export's automatic handling
+of startup callbacks. The lab consumer accepts only an unchanged state-load echo
+whose native state bytes and all writable values match the original loaded seed;
+host parameter overrides remain authoritative.
+
+The complete three-scenario sidechain gate is still **FAIL**. With sidechain
+disabled and detector1, epoch2 configuration capture observes readonly
+Gain Reduction id9 = -2.232059017615029e-7 outside declared0..20 and refuses:
+0PASS/1FAIL, exit101, settled Job. The later active-detector attenuation assertions
+remain unqualified. No clamp or plugin exception was added. The
 [DPF reset implementation](https://github.com/DISTRHO/DPF/blob/461ea6d45d842d273ae4d53ad5490e43459419cc/distrho/src/DistrhoPluginCLAP.cpp#L840)
-requests restart when no dedicated reset parameter exists, consistent with the
-observed retained-entry boundary. Next verification must use the actual Runtime
-Source/capture/install/Fresh consumer; no ignored request or vendor special case.
-The separate GPL-2.0-or-later test binary and license are local materials only;
-the release ZIP was discarded.
+requests restart without a dedicated reset parameter; the host's former repeated
+reset after successful reactivation is fixed and independently regression-tested.
+Readonly observation/schema policy needs separate review; the overall failed
+gate is not a full compatibility claim. The GPL-2.0-or-later binary and license
+remain external local test materials; the release ZIP was discarded.
 
 OpenFX owner project geometry now has finite Windows CPU qualification:
 SessionProbe checks project10x7/PAR2 independently of image3x5, Direct image

@@ -1620,7 +1620,7 @@ fn prepare_loaded_on_main(
         input_events,
         output_events,
         last_end: None,
-        initial_signal_available: true,
+        fresh_activation_available: true,
         log_receiver,
         shared,
     }))
@@ -1658,8 +1658,9 @@ struct ClapWorker {
     input_events: ClapInputEvents,
     output_events: ClapOutputEvents,
     last_end: Option<i64>,
-    // Actual accepted activation, consumed once by the first signal entry.
-    initial_signal_available: bool,
+    // Every successful activation supplies one fresh signal entry. Pending
+    // configuration/Source installation must still be admitted before use.
+    fresh_activation_available: bool,
     log_receiver: super::native_audio_log::NativeAudioLogReceiver,
     shared: ClapHostShared,
     // Last: OLE/main lifetime outlives every native GUI/processor/instance drop.
@@ -1794,6 +1795,7 @@ impl ClapWorker {
                 .unwrap_or(TailLength::Finite(0))
         };
         self.processor = Some(processor);
+        self.fresh_activation_available = true;
         let tail = match tail {
             TailLength::Finite(0) => crate::AudioProcessorTail::None,
             TailLength::Finite(frames) => crate::AudioProcessorTail::Finite(frames as usize),
@@ -2194,6 +2196,7 @@ impl IsolatedAudioProcessorWorker for ClapWorker {
             Ok(writer) => writer,
             Err(refusal) => return Ok(Outcome::CapabilityRefused(refusal)),
         };
+        self.fresh_activation_available = false;
         if let Some(mut processor) = self.processor.take() {
             {
                 let _audio_role = self.shared.enter_audio_thread();
@@ -2427,7 +2430,8 @@ impl IsolatedAudioProcessorWorker for ClapWorker {
         };
         // The legally activated stopped component already has this configuration.
         // Retain the seed owner for this installed candidate without reloading or
-        // pretending it is private DSP history. Explicit Enter resets processing.
+        // pretending it is private DSP history. The next Enter consumes the fresh
+        // activation; resetting it again can immediately request another restart.
         let previous = self.configuration_seed.replace(seed);
         if let Some(mut staged) = self.staged_audio_inputs.take() {
             // Arm checked exact stable IDs/order; no allocation or native call
@@ -2484,8 +2488,8 @@ impl IsolatedAudioProcessorWorker for ClapWorker {
             return Err(AudioProcessorHostError::ReprepareRequired(request));
         }
         self.native_binding = None;
-        if self.initial_signal_available {
-            self.initial_signal_available = false;
+        if self.fresh_activation_available {
+            self.fresh_activation_available = false;
             self.last_end = Some(start_sample);
             return Ok(());
         }
@@ -5929,6 +5933,62 @@ mod tests {
                 LIFECYCLE_AUDITS[12].configuration_events.load(TestOrdering::SeqCst),
                 event_count
             );
+            // Exercise two real activate/capture/seed cycles on this same object.
+            // Ready alone cannot enter. After Commit, only the first Enter is
+            // supplied by activation; a subsequent Enter must still call reset.
+            let mut candidate = candidate;
+            for round in 0..2 {
+                assert!(matches!(
+                    worker.enter_state(0),
+                    Err(AudioProcessorHostError::ReprepareRequired(_))
+                ));
+                let ticket =
+                    super::super::NativeConfigurationSeedTicket::from_candidate(&candidate);
+                let staged = worker
+                    .stage_native_configuration_seed(super::super::NativeConfigurationOwnedSeed {
+                        ticket,
+                        configuration: candidate.configuration.clone(),
+                        seed_capacity_grant_bytes: 64,
+                    })
+                    .unwrap();
+                assert!(matches!(
+                    staged,
+                    super::super::NativeConfigurationSeedOutcome::Accepted(_)
+                ));
+                assert!(matches!(
+                    worker.commit_native_configuration_seed(ticket).unwrap(),
+                    super::super::NativeConfigurationSeedOutcome::Accepted(_)
+                ));
+                worker.enter_state(97).unwrap();
+                assert_eq!(
+                    LIFECYCLE_AUDITS[12].visited.load(TestOrdering::SeqCst) & RESET,
+                    0,
+                    "a successful activation already provides the first fresh signal"
+                );
+                worker.enter_state(101).unwrap();
+                assert_ne!(
+                    LIFECYCLE_AUDITS[12].visited.fetch_and(!RESET, TestOrdering::SeqCst) & RESET,
+                    0,
+                    "later state entries retain the native reset contract"
+                );
+                if round == 0 {
+                    worker.shared.request_restart();
+                    let cohort = worker.native_configuration_cohort().unwrap();
+                    let outcome = worker
+                        .service_native_configuration(NativeConfigurationControlRequest {
+                            expected_cohort: cohort,
+                            control_token: std::num::NonZeroU64::new(80).unwrap(),
+                            canonical_constant_values: &profile,
+                            configuration_limit_bytes: 64,
+                            control_buffer_grant_bytes: 128 * 1024,
+                        })
+                        .unwrap();
+                    let NativeConfigurationControlOutcome::ReadyForInstall(next) = outcome else {
+                        panic!("second actual activation: {outcome:?}");
+                    };
+                    candidate = next;
+                }
+            }
             drop(worker);
             assert_eq!(LIFECYCLE_AUDITS[12].failures.load(TestOrdering::SeqCst), 0);
         }

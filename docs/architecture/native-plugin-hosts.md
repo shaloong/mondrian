@@ -70,6 +70,13 @@ slices sum to the original grant; each Runtime must admit its reprepare overlap
 inside its own slice. This bounds the existing Runtime ledger, not all SDK,
 foreign-plugin or outer-consumer allocations.
 
+Each successful CLAP activation supplies one fresh signal entry, including a
+retained restart. Reconfiguration revokes availability before stop/deactivation;
+pending cohorts
+and staged configurations still block entry until the original seed/Source
+installation; later entries keep the native reset contract. Repeating reset
+immediately after reactivation can otherwise cause a restart/reset cycle.
+
 Export observes Audio native-child settlement through Core's existing counted
 registrar in the Queue's original state and lock. Observation starts before cold
 precompiled factory work, including stem measurements and failed construction;
