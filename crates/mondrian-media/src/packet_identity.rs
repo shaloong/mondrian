@@ -35,7 +35,7 @@ pub enum VideoPacketIdentityError {
     Canceled,
     /// FFmpeg runtime initialization failed.
     #[error("initialize FFmpeg for packet identity: {0}")]
-    Initialize(ffmpeg::Error),
+    Initialize(String),
     /// Source revision evidence was incomplete or changed during inspection.
     #[error("media revision changed or is incomplete while inspecting {path}")]
     SourceRevisionChanged {
@@ -111,7 +111,7 @@ pub fn capture_video_packet_identity_cancellable(
     if cancellation.is_canceled() {
         return Err(VideoPacketIdentityError::Canceled);
     }
-    ffmpeg::init().map_err(VideoPacketIdentityError::Initialize)?;
+    crate::ffmpeg_runtime::initialize_ffmpeg().map_err(VideoPacketIdentityError::Initialize)?;
     let before = MediaFileFingerprint::capture(path);
     if !before.authorizes_reuse() {
         return Err(VideoPacketIdentityError::SourceRevisionChanged { path: path.to_path_buf() });

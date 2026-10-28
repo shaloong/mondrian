@@ -226,7 +226,8 @@ mod linux_cuda_impl {
             device_root: &RendererHwAccelDeviceContext,
             config: ResidentVideoEncoderConfig,
         ) -> Result<Self, ResidentEncodeError> {
-            ffmpeg::init().map_err(|error| ffmpeg_error("initialize", error))?;
+            crate::ffmpeg_runtime::initialize_ffmpeg()
+                .map_err(|reason| ResidentEncodeError::Ffmpeg { stage: "initialize", reason })?;
             let codec =
                 encoder::find_by_name("hevc_nvenc").ok_or_else(|| ResidentEncodeError::Ffmpeg {
                     stage: "find_encoder",
@@ -1031,7 +1032,8 @@ mod windows_impl {
             device_root: &RendererHwAccelDeviceContext,
             config: ResidentVideoEncoderConfig,
         ) -> Result<Self, ResidentEncodeError> {
-            ffmpeg::init().map_err(|error| ffmpeg_error("initialize", error))?;
+            crate::ffmpeg_runtime::initialize_ffmpeg()
+                .map_err(|reason| ResidentEncodeError::Ffmpeg { stage: "initialize", reason })?;
             let codec = encoder::find_by_name("hevc_d3d12va").ok_or_else(|| {
                 ResidentEncodeError::Ffmpeg {
                     stage: "find_encoder",

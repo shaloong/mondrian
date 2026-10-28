@@ -62,25 +62,103 @@ const REQUIRED_COMMAND_FILTERS: &[&str] = &[
 const REQUIRED_COMMAND_MUXERS: &[&str] =
     &["mp4", "mov", "matroska", "webm", "mxf", "gif", "image2"];
 
-/// Initialize FFmpeg once with Mondrian's product log policy.
-pub(crate) fn ensure_ffmpeg_initialized(path: &Path) -> Result<()> {
+/// Check the linked ABI before using generated struct layouts, then initialize once.
+pub(crate) fn initialize_ffmpeg() -> std::result::Result<(), String> {
     static INIT_RESULT: OnceLock<std::result::Result<(), String>> = OnceLock::new();
-    let init = INIT_RESULT.get_or_init(|| {
-        let log_level =
-            ffmpeg_log_level_from_env_value(std::env::var("MONDRIAN_FFMPEG_LOG_LEVEL").ok());
+    INIT_RESULT
+        .get_or_init(|| {
+            verify_linked_ffmpeg_abi()?;
+            let log_level =
+                ffmpeg_log_level_from_env_value(std::env::var("MONDRIAN_FFMPEG_LOG_LEVEL").ok());
 
-        unsafe {
-            ffmpeg::ffi::av_log_set_level(log_level);
-        }
+            unsafe {
+                ffmpeg::ffi::av_log_set_level(log_level);
+            }
 
-        ffmpeg::init().map_err(|e| format!("{e}"))
-    });
-    match init {
-        Ok(()) => Ok(()),
-        Err(reason) => Err(MondrianError::MediaOpen {
-            path: path.display().to_string(),
-            reason: format!("ffmpeg init failed: {reason}"),
-        }),
+            ffmpeg::init().map_err(|e| format!("{e}"))
+        })
+        .clone()
+}
+
+/// Initialize FFmpeg once with Mondrian's product log policy and source context.
+pub(crate) fn ensure_ffmpeg_initialized(path: &Path) -> Result<()> {
+    initialize_ffmpeg().map_err(|reason| MondrianError::MediaOpen {
+        path: path.display().to_string(),
+        reason: format!("ffmpeg init failed: {reason}"),
+    })
+}
+
+fn verify_linked_ffmpeg_abi() -> std::result::Result<(), String> {
+    // SAFETY: These stable C functions return scalar version numbers. They do
+    // not consume pointers or depend on the generated FFmpeg struct layouts.
+    let versions = unsafe {
+        [
+            (
+                "libavcodec",
+                ffmpeg::ffi::LIBAVCODEC_VERSION_INT,
+                ffmpeg::ffi::avcodec_version(),
+            ),
+            (
+                "libavformat",
+                ffmpeg::ffi::LIBAVFORMAT_VERSION_INT,
+                ffmpeg::ffi::avformat_version(),
+            ),
+            (
+                "libavutil",
+                ffmpeg::ffi::LIBAVUTIL_VERSION_INT,
+                ffmpeg::ffi::avutil_version(),
+            ),
+            (
+                "libavfilter",
+                ffmpeg::ffi::LIBAVFILTER_VERSION_INT,
+                ffmpeg::ffi::avfilter_version(),
+            ),
+            (
+                "libswscale",
+                ffmpeg::ffi::LIBSWSCALE_VERSION_INT,
+                ffmpeg::ffi::swscale_version(),
+            ),
+            (
+                "libswresample",
+                ffmpeg::ffi::LIBSWRESAMPLE_VERSION_INT,
+                ffmpeg::ffi::swresample_version(),
+            ),
+        ]
+    };
+    verify_ffmpeg_versions(&versions)
+}
+
+fn verify_ffmpeg_versions(versions: &[(&str, u32, u32)]) -> std::result::Result<(), String> {
+    let version_text = |version: u32| {
+        format!(
+            "{}.{}.{}",
+            version >> 16,
+            (version >> 8) & 255,
+            version & 255
+        )
+    };
+    let mismatches = versions
+        .iter()
+        .filter(|&&(_, headers, runtime)| {
+            // A newer release within the same ABI can serve older bindings. Older
+            // libraries may lack fields/functions used by the selected headers.
+            headers >> 16 != runtime >> 16 || runtime < headers
+        })
+        .map(|&(name, headers, runtime)| {
+            format!(
+                "{name}: headers {}, loaded {}",
+                version_text(headers),
+                version_text(runtime)
+            )
+        })
+        .collect::<Vec<_>>();
+    if mismatches.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "incompatible FFmpeg runtime ({}); rebuild and load libraries from the same SDK",
+            mismatches.join("; ")
+        ))
     }
 }
 
@@ -366,6 +444,31 @@ mod tests {
         ensure_ffmpeg_initialized(Path::new("<test-runtime>")).expect("FFmpeg init");
         verify_required_decoders(Path::new("<test-runtime>"))
             .expect("linked FFmpeg decoder contract");
+    }
+
+    #[test]
+    fn linked_abi_allows_newer_compatible_libraries_and_rejects_older_ones() {
+        let version = |major, minor, micro| (major << 16) | (minor << 8) | micro;
+        let headers = version(3, 4, 5);
+        for runtime in [headers, version(3, 4, 6), version(3, 5, 0)] {
+            verify_ffmpeg_versions(&[("library", headers, runtime)]).expect("compatible ABI");
+        }
+        for runtime in [version(2, 99, 99), version(4, 0, 0), version(3, 4, 4)] {
+            let error = verify_ffmpeg_versions(&[("library", headers, runtime)])
+                .expect_err("incompatible ABI must fail before struct-dependent FFI");
+            assert!(error.contains("library: headers 3.4.5, loaded"), "{error}");
+        }
+        let error = verify_ffmpeg_versions(&[
+            ("codec", headers, version(2, 4, 5)),
+            ("format", headers, headers),
+            ("scale", headers, version(4, 4, 5)),
+        ])
+        .unwrap_err();
+        assert!(
+            error.contains("codec:") && error.contains("scale:"),
+            "{error}"
+        );
+        assert!(!error.contains("format:"), "{error}");
     }
 
     #[test]

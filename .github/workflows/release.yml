@@ -184,9 +184,18 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            ffmpeg libavcodec-dev libavformat-dev libavfilter-dev \
-            libavdevice-dev libswscale-dev libswresample-dev \
+            nasm libx264-dev libx265-dev libaom-dev libdav1d-dev \
+            libopenjp2-7-dev libfreetype-dev libharfbuzz-dev libfontconfig-dev \
+            libass-dev libssl-dev zlib1g-dev \
             libasound2-dev pkg-config patchelf pax-utils
+          ffmpeg_prefix="$RUNNER_TEMP/mondrian-ffmpeg"
+          bash scripts/build-linux-ffmpeg.sh "$RUNNER_TEMP/mondrian-ffmpeg-build" "$ffmpeg_prefix" 2
+          echo "MONDRIAN_FFMPEG_SOURCE_DIR=$ffmpeg_prefix/share/mondrian-ffmpeg-source" >> "$GITHUB_ENV"
+          echo "$ffmpeg_prefix/bin" >> "$GITHUB_PATH"
+          echo "FFMPEG_DIR=$ffmpeg_prefix" >> "$GITHUB_ENV"
+          echo "PKG_CONFIG_PATH=$ffmpeg_prefix/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}" >> "$GITHUB_ENV"
+          echo "RUSTFLAGS=-Lnative=$ffmpeg_prefix/lib${RUSTFLAGS:+ $RUSTFLAGS}" >> "$GITHUB_ENV"
+          echo "LD_LIBRARY_PATH=$ffmpeg_prefix/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" >> "$GITHUB_ENV"
 
       # ── macOS ──────────────────────────────────────────────────────────────
       - name: 安装 FFmpeg 与系统依赖 (macOS)
@@ -202,7 +211,9 @@ jobs:
           bash scripts/build-macos-ffmpeg.sh "$RUNNER_TEMP/mondrian-ffmpeg-build" "$ffmpeg_prefix" 2
           echo "MONDRIAN_FFMPEG_SOURCE_DIR=$ffmpeg_prefix/share/mondrian-ffmpeg-source" >> "$GITHUB_ENV"
           echo "$ffmpeg_prefix/bin" >> "$GITHUB_PATH"
+          echo "FFMPEG_DIR=$ffmpeg_prefix" >> "$GITHUB_ENV"
           echo "PKG_CONFIG_PATH=$ffmpeg_prefix/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}" >> "$GITHUB_ENV"
+          echo "RUSTFLAGS=-Lnative=$ffmpeg_prefix/lib${RUSTFLAGS:+ $RUSTFLAGS}" >> "$GITHUB_ENV"
           PKG_CONFIG_PATH="$ffmpeg_prefix/lib/pkgconfig" pkg-config --modversion libavcodec | grep -E '^62\.'
 
       # ── Windows ────────────────────────────────────────────────────────────

@@ -192,9 +192,17 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            ffmpeg libavcodec-dev libavformat-dev libavfilter-dev \
-            libavdevice-dev libswscale-dev libswresample-dev \
+            nasm libx264-dev libx265-dev libaom-dev libdav1d-dev \
+            libopenjp2-7-dev libfreetype-dev libharfbuzz-dev libfontconfig-dev \
+            libass-dev libssl-dev zlib1g-dev \
             libasound2-dev libdbus-1-dev libxcb1-dev pkg-config
+          ffmpeg_prefix="$RUNNER_TEMP/mondrian-ffmpeg"
+          bash scripts/build-linux-ffmpeg.sh "$RUNNER_TEMP/mondrian-ffmpeg-build" "$ffmpeg_prefix" 2
+          echo "$ffmpeg_prefix/bin" >> "$GITHUB_PATH"
+          echo "FFMPEG_DIR=$ffmpeg_prefix" >> "$GITHUB_ENV"
+          echo "PKG_CONFIG_PATH=$ffmpeg_prefix/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}" >> "$GITHUB_ENV"
+          echo "RUSTFLAGS=-Lnative=$ffmpeg_prefix/lib${RUSTFLAGS:+ $RUSTFLAGS}" >> "$GITHUB_ENV"
+          echo "LD_LIBRARY_PATH=$ffmpeg_prefix/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" >> "$GITHUB_ENV"
 
       # Hosted Linux runners use Mesa software Vulkan for shader correctness.
       # This provider is not evidence of physical GPU or playback qualification.
@@ -221,7 +229,9 @@ jobs:
           ffmpeg_prefix="$RUNNER_TEMP/mondrian-ffmpeg"
           bash scripts/build-macos-ffmpeg.sh "$RUNNER_TEMP/mondrian-ffmpeg-build" "$ffmpeg_prefix" 2
           echo "$ffmpeg_prefix/bin" >> "$GITHUB_PATH"
+          echo "FFMPEG_DIR=$ffmpeg_prefix" >> "$GITHUB_ENV"
           echo "PKG_CONFIG_PATH=$ffmpeg_prefix/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}" >> "$GITHUB_ENV"
+          echo "RUSTFLAGS=-Lnative=$ffmpeg_prefix/lib${RUSTFLAGS:+ $RUSTFLAGS}" >> "$GITHUB_ENV"
           PKG_CONFIG_PATH="$ffmpeg_prefix/lib/pkgconfig" pkg-config --modversion libavcodec | grep -E '^62\.'
 
       # ── Windows ───────────────────────────────────────────────────────────
@@ -421,9 +431,17 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            ffmpeg libavcodec-dev libavformat-dev libavfilter-dev \
-            libavdevice-dev libswscale-dev libswresample-dev \
+            nasm libx264-dev libx265-dev libaom-dev libdav1d-dev \
+            libopenjp2-7-dev libfreetype-dev libharfbuzz-dev libfontconfig-dev \
+            libass-dev libssl-dev zlib1g-dev \
             libasound2-dev libdbus-1-dev libxcb1-dev pkg-config
+          ffmpeg_prefix="$RUNNER_TEMP/mondrian-ffmpeg"
+          bash scripts/build-linux-ffmpeg.sh "$RUNNER_TEMP/mondrian-ffmpeg-build" "$ffmpeg_prefix" 2
+          echo "$ffmpeg_prefix/bin" >> "$GITHUB_PATH"
+          echo "FFMPEG_DIR=$ffmpeg_prefix" >> "$GITHUB_ENV"
+          echo "PKG_CONFIG_PATH=$ffmpeg_prefix/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}" >> "$GITHUB_ENV"
+          echo "RUSTFLAGS=-Lnative=$ffmpeg_prefix/lib${RUSTFLAGS:+ $RUSTFLAGS}" >> "$GITHUB_ENV"
+          echo "LD_LIBRARY_PATH=$ffmpeg_prefix/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" >> "$GITHUB_ENV"
 
       # Exercise the same shader and compositor contracts on software Vulkan.
       # Physical Metal qualification remains a separate real-machine test.

@@ -149,7 +149,7 @@ impl RendererHwAccelDeviceContext {
     pub fn from_cuda_device_ordinal(
         ordinal: u16,
     ) -> Result<Self, RendererHwAccelDeviceContextCreateError> {
-        ffmpeg::init().map_err(|error| {
+        crate::ffmpeg_runtime::initialize_ffmpeg().map_err(|error| {
             RendererHwAccelDeviceContextCreateError::InitializationFailed {
                 backend: HwAccelBackend::Cuda,
                 reason: error.to_string(),
@@ -195,7 +195,12 @@ impl RendererHwAccelDeviceContext {
     pub fn from_d3d12_device(
         device: ID3D12Device,
     ) -> Result<Self, RendererHwAccelDeviceContextCreateError> {
-        let _ = ffmpeg::init();
+        crate::ffmpeg_runtime::initialize_ffmpeg().map_err(|reason| {
+            RendererHwAccelDeviceContextCreateError::InitializationFailed {
+                backend: HwAccelBackend::D3D12VA,
+                reason,
+            }
+        })?;
         let identity = query_d3d12_device_identity(&device)
             .ok_or(RendererHwAccelDeviceContextCreateError::AdapterIdentityUnavailable)?;
         let device_context = unsafe {
@@ -878,7 +883,8 @@ impl HwDeviceContextPool {
                 ),
             ));
         };
-        let _ = ffmpeg::init();
+        crate::ffmpeg_runtime::initialize_ffmpeg()
+            .map_err(|reason| HwAccelDeviceContextProbe::unavailable(backend, reason))?;
         let ffmpeg_device_type_available = ffmpeg_hwdevice_type_available(device_type);
         if !ffmpeg_device_type_available {
             return Err(HwAccelDeviceContextProbe {
@@ -2021,7 +2027,9 @@ impl HwAccelBackend {
                 ),
             );
         };
-        let _ = ffmpeg::init();
+        if let Err(reason) = crate::ffmpeg_runtime::initialize_ffmpeg() {
+            return HwAccelCodecConfigProbe::unavailable(self, reason);
+        }
         let ffmpeg_device_type_available = ffmpeg_hwdevice_type_available(device_type);
         let codec = unsafe { ffmpeg::ffi::avcodec_find_decoder(codec_id.into()) };
         if codec.is_null() {
@@ -2095,7 +2103,9 @@ impl HwAccelBackend {
                 ),
             );
         };
-        let _ = ffmpeg::init();
+        if let Err(reason) = crate::ffmpeg_runtime::initialize_ffmpeg() {
+            return HwAccelDeviceContextProbe::unavailable(self, reason);
+        }
         let ffmpeg_device_type_available = ffmpeg_hwdevice_type_available(device_type);
         if !ffmpeg_device_type_available {
             return HwAccelDeviceContextProbe {

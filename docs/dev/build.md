@@ -51,8 +51,10 @@ the dependencies listed in the macOS CI step:
 ffmpeg_work=$(mktemp -d /tmp/mondrian-ffmpeg.XXXXXX)
 ffmpeg_prefix="$ffmpeg_work/runtime"
 bash scripts/build-macos-ffmpeg.sh "$ffmpeg_work" "$ffmpeg_prefix" 2
+export FFMPEG_DIR="$ffmpeg_prefix"
 export PATH="$ffmpeg_prefix/bin:$PATH"
 export PKG_CONFIG_PATH="$ffmpeg_prefix/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
+export RUSTFLAGS="-Lnative=$ffmpeg_prefix/lib${RUSTFLAGS:+ $RUSTFLAGS}"
 cargo build --locked -p mondrian-app -j 2
 ```
 
@@ -111,11 +113,22 @@ Both sources are pinned and use the same precision patches.
 ffmpeg_work=$(mktemp -d /tmp/mondrian-ffmpeg.XXXXXX)
 ffmpeg_prefix="$ffmpeg_work/runtime"
 bash scripts/build-linux-ffmpeg.sh "$ffmpeg_work" "$ffmpeg_prefix" 2
+export FFMPEG_DIR="$ffmpeg_prefix"
 export PATH="$ffmpeg_prefix/bin:$PATH"
 export PKG_CONFIG_PATH="$ffmpeg_prefix/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
+export RUSTFLAGS="-Lnative=$ffmpeg_prefix/lib${RUSTFLAGS:+ $RUSTFLAGS}"
 export LD_LIBRARY_PATH="$ffmpeg_prefix/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 cargo build --locked -p mondrian-app -j 2
 ```
+
+Keep the SDK library directory first in Rust's native search paths: transitive
+dependencies such as ALSA can otherwise introduce a system directory before it,
+linking older FFmpeg libraries against newer generated headers. `PKG_CONFIG_PATH`
+alone selects metadata, not the final linker precedence. If using
+`CARGO_ENCODED_RUSTFLAGS`, prepend `-Lnative=<prefix>/lib` there instead of
+`RUSTFLAGS`; Cargo gives the encoded variable precedence. The runtime initialization
+gate checks all six linked library versions against the generated bindings before
+using FFmpeg struct layouts. A mismatched ABI or older runtime fails explicitly.
 
 The installed `share/mondrian-ffmpeg-source` preserves the source archive,
 configuration, licenses and the builder/patch directory layout for rebuilding.
