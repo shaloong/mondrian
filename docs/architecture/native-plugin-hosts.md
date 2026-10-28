@@ -77,6 +77,12 @@ and staged configurations still block entry until the original seed/Source
 installation; later entries keep the native reset contract. Repeating reset
 immediately after reactivation can otherwise cause a restart/reset cycle.
 
+Retained CLAP parameter revalidation reads definitions through get_info, not
+mutable current values through get_value. Definition failures explicitly mark
+current_bits=unqueried. Complete cold snapshots and canonical value/author
+projections retain their finite/range/step/readonly checks; raw presentation
+values confer no author authority. No meter clamping or plugin exception applies.
+
 Export observes Audio native-child settlement through Core's existing counted
 registrar in the Queue's original state and lock. Observation starts before cold
 precompiled factory work, including stem measurements and failed construction;

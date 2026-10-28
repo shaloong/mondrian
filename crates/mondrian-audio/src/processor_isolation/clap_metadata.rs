@@ -25,21 +25,23 @@ pub(super) struct ParameterRow<'a> {
     min_value: f64,
     max_value: f64,
     default_value: f64,
-    current_value: f64,
+    // None means get_value was not requested by a definition-only consumer.
+    // It is neither a fallback value nor admission of an invalid observation.
+    current_value: Option<f64>,
     automatable: bool,
     stepped: bool,
     enumeration: bool,
     read_only: bool,
 }
 impl<'a> ParameterRow<'a> {
-    fn from_info(info: &ParamInfo<'a>, name: &'a str, current_value: f64) -> Self {
+    fn from_info(info: &ParamInfo<'a>, name: &'a str) -> Self {
         Self {
             id: info.id.get(),
             name,
             min_value: info.min_value,
             max_value: info.max_value,
             default_value: info.default_value,
-            current_value,
+            current_value: None,
             automatable: info.flags.contains(ParamInfoFlags::IS_AUTOMATABLE),
             stepped: info.flags.contains(ParamInfoFlags::IS_STEPPED),
             enumeration: info.flags.contains(ParamInfoFlags::IS_ENUM),
@@ -54,7 +56,7 @@ impl<'a> ParameterRow<'a> {
             min_value: value.min_value,
             max_value: value.max_value,
             default_value: value.default_value,
-            current_value: value.current_value,
+            current_value: Some(value.current_value),
             automatable: value.automatable,
             stepped: value.stepped,
             enumeration: value.enumeration,
@@ -138,26 +140,30 @@ pub(super) fn parameter_invalid_reason(
         Some("max_nonfinite")
     } else if !parameter.default_value.is_finite() {
         Some("default_nonfinite")
-    } else if !parameter.current_value.is_finite() {
+    } else if parameter.current_value.is_some_and(|value| !value.is_finite()) {
         Some("current_nonfinite")
     } else if parameter.min_value > parameter.max_value {
         Some("reversed_range")
     } else if !(parameter.min_value..=parameter.max_value).contains(&parameter.default_value) {
         Some("default_out_of_range")
-    } else if !(parameter.min_value..=parameter.max_value).contains(&parameter.current_value) {
+    } else if parameter
+        .current_value
+        .is_some_and(|value| !(parameter.min_value..=parameter.max_value).contains(&value))
+    {
         Some("current_out_of_range")
     } else if parameter.enumeration && !parameter.stepped {
         Some("enum_not_stepped")
     } else if parameter.stepped {
         [
-            parameter.min_value,
-            parameter.max_value,
-            parameter.default_value,
+            Some(parameter.min_value),
+            Some(parameter.max_value),
+            Some(parameter.default_value),
             parameter.current_value,
         ]
         .into_iter()
         .enumerate()
         .find_map(|(field, value)| {
+            let value = value?;
             // Preserve field order and fractional-before-precision checks.
             if value.fract() != 0.0 {
                 Some(
@@ -191,7 +197,8 @@ pub(super) struct ParameterFailure {
     index: usize,
     id: u32,
     reason: &'static str,
-    bits: [u64; 4],
+    bits: [u64; 3],
+    current_bits: Option<u64>,
 }
 impl ParameterFailure {
     pub(super) fn new(index: usize, row: ParameterRow<'_>, reason: &'static str) -> Self {
@@ -203,12 +210,15 @@ impl ParameterFailure {
                 row.min_value.to_bits(),
                 row.max_value.to_bits(),
                 row.default_value.to_bits(),
-                row.current_value.to_bits(),
             ],
+            current_bits: row.current_value.map(f64::to_bits),
         }
     }
     pub(super) fn error(self) -> AudioProcessorHostError {
-        invalid(format!("CLAP parameter metadata is invalid or ambiguous: index={} native_id={} reason={} min_bits={:016X} max_bits={:016X} default_bits={:016X} current_bits={:016X}",self.index,self.id,self.reason,self.bits[0],self.bits[1],self.bits[2],self.bits[3]))
+        let current = self
+            .current_bits
+            .map_or_else(|| "unqueried".to_owned(), |bits| format!("{bits:016X}"));
+        invalid(format!("CLAP parameter metadata is invalid or ambiguous: index={} native_id={} reason={} min_bits={:016X} max_bits={:016X} default_bits={:016X} current_bits={current}",self.index,self.id,self.reason,self.bits[0],self.bits[1],self.bits[2]))
     }
 }
 /// Definition facts only: current values, display name and hidden stay excluded.
@@ -264,10 +274,10 @@ impl MetadataScanScratch {
     }
 }
 
-/// A full single native snapshot, without owned descriptors/names or a tree.
-/// Query failures still outrank earlier row/shape errors, exactly as the owned
-/// collector which queries every row before validating its captured vector.
-pub(super) fn revalidate_parameters(
+/// Reinspect definitions only, without querying mutable current values. Those
+/// belong to the complete cold snapshot or the native observation/author path.
+/// Definition query errors still outrank earlier deferred row/shape errors.
+pub(super) fn revalidate_parameter_structure(
     handle: &PluginMainThreadHandle<'_>,
     expected: &[ClapParameterDescriptor],
     scratch: &mut MetadataScanScratch,
@@ -285,8 +295,7 @@ pub(super) fn revalidate_parameters(
         // Preserve the original fresh, zero-initialized native query buffer.
         let mut buffer = ParamInfoBuffer::new();
         let (info, name) = parameter_info_at(handle, &extension, index, &mut buffer, None)?;
-        let current = parameter_value_at(handle, &extension, info.id, index, None)?;
-        let row = ParameterRow::from_info(&info, name, current);
+        let row = ParameterRow::from_info(&info, name);
         let duplicate = ClapId::from_raw(row.id).is_some() && !scratch.insert_id(row.id);
         if scratch.first_invalid.is_none()
             && let Some(reason) = parameter_invalid_reason(row, duplicate)

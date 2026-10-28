@@ -266,29 +266,31 @@ conflicts retain strict refusal before activation. This is a host-selected
 ordinal mapping, not channel-count inference of native speaker positions or
 full configuration/rescan, Float64, realtime/performance or platform support.
 
-ZamCompX2 4.5 official Windows64 CLAP remains **Partially Supported**. Its
-arbitrary Main input/output0 and Mono Aux536870912 now pass Probe. The
-[public Runtime gates](../../crates/mondrian-audio/tests/native_clap_zam_runtime.rs)
-use actual consumer Source/Plan/Ack and retained native restart installation.
-The separate silent-detector case passes at48k Offline/Stereo/block64: three
-1024-frame runs at starts0/0/97, partitions64/64,17/47,47/17, every dry PCM value,
-two restart installations, and unchanged author state; exact1PASS, stderr0,
-exit0 and settled Job. This does not qualify Preview/Export's automatic handling
-of startup callbacks. The lab consumer accepts only an unchanged state-load echo
-whose native state bytes and all writable values match the original loaded seed;
-host parameter overrides remain authoritative.
+ZamCompX2 4.5 official Windows64 CLAP has **Verified finite Runtime sound**;
+overall support remains **Partial**. The original
+[three-scenario gate](../../crates/mondrian-audio/tests/native_clap_zam_runtime.rs)
+passes at48k Offline/Stereo/block64 with silent/enabled, loud/disabled and
+loud/enabled detector controls. Each case renders three complete1024-frame runs
+at starts0/0/97, partitions64/64,17/47,47/17: dry PCM, active attenuation/stereo
+relationship, partition/seek invariance, two actual restart installations and
+unchanged author state all pass. Exact1PASS, stderr0, exit0 and settled Job.
 
-The complete three-scenario sidechain gate is still **FAIL**. With sidechain
-disabled and detector1, epoch2 configuration capture observes readonly
-Gain Reduction id9 = -2.232059017615029e-7 outside declared0..20 and refuses:
-0PASS/1FAIL, exit101, settled Job. The later active-detector attenuation assertions
-remain unqualified. No clamp or plugin exception was added. The
-[DPF reset implementation](https://github.com/DISTRHO/DPF/blob/461ea6d45d842d273ae4d53ad5490e43459419cc/distrho/src/DistrhoPluginCLAP.cpp#L840)
-requests restart without a dedicated reset parameter; the host's former repeated
-reset after successful reactivation is fixed and independently regression-tested.
-Readonly observation/schema policy needs separate review; the overall failed
-gate is not a full compatibility claim. The GPL-2.0-or-later binary and license
-remain external local test materials; the release ZIP was discarded.
+The former readonly Gain Reduction id9 out-of-range refusal is resolved at the
+appropriate boundary: retained definition revalidation now queries get_info only,
+matching its existing structure comparison. It does not query or clamp transient
+meter values. Complete cold/value snapshots and finite/range/step/readonly author
+projection checks remain strict. Actual ABI regressions cover writable/readonly
+queries returning lower/upper out-of-range values, NaN or failure, definition
+changes, query ordering and zero container allocation in successful revalidation.
+Current Audio902PASS/205ignored and16 native regression gates pass.
+
+The lab consumer accepts only an unchanged state-load echo whose native state
+bytes and writable values match the original loaded seed, using the existing
+Plan/Source/Ack transaction while retaining host overrides. Preview/Export's
+automatic startup-callback handling is not qualified by this lab. Other rates,
+Realtime safety, GUI, long runs, reference-host performance and other platforms
+remain unqualified. GPL-2.0-or-later binaries/licenses remain external local test
+materials; the release ZIP was discarded.
 
 OpenFX owner project geometry now has finite Windows CPU qualification:
 SessionProbe checks project10x7/PAR2 independently of image3x5, Direct image

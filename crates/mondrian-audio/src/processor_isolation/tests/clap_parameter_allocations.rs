@@ -109,9 +109,10 @@ fn measure<T>(execute: impl FnOnce() -> T) -> (T, AllocationCounts) {
 struct MetadataOracle {
     parameters: u8,
     ports: u8,
+    values: u8,
 }
 thread_local! {
-    static METADATA_ORACLE: Cell<MetadataOracle> = const { Cell::new(MetadataOracle { parameters: 0, ports: 0 }) };
+    static METADATA_ORACLE: Cell<MetadataOracle> = const { Cell::new(MetadataOracle { parameters: 0, ports: 0, values: 0 }) };
     static METADATA_CALLS: Cell<[u32; 5]> = const { Cell::new([0; 5]) };
     static METADATA_PORT_COUNTS: Cell<[u32; 2]> = const { Cell::new([0; 2]) };
 }
@@ -129,7 +130,7 @@ impl Drop for MetadataOracleReset {
     }
 }
 fn set_metadata_oracle(parameters: u8, ports: u8) {
-    METADATA_ORACLE.with(|slot| slot.set(MetadataOracle { parameters, ports }));
+    METADATA_ORACLE.with(|slot| slot.set(MetadataOracle { parameters, ports, values: 0 }));
     METADATA_CALLS.with(|slot| slot.set([0; 5]));
     METADATA_PORT_COUNTS.with(|slot| slot.set([0; 2]));
 }
@@ -255,7 +256,9 @@ impl PluginMainThreadParams for ParameterOrderMain {
         writer.set(&ParamInfo {
             id: ClapId::new(id),
             flags: ParamInfoFlags::IS_AUTOMATABLE
-                | if case == 2 {
+                | if case == 9 {
+                    ParamInfoFlags::IS_READONLY
+                } else if case == 2 {
                     ParamInfoFlags::IS_HIDDEN
                 } else {
                     ParamInfoFlags::empty()
@@ -285,7 +288,15 @@ impl PluginMainThreadParams for ParameterOrderMain {
 
     fn get_value(&self, id: ClapId) -> Option<f64> {
         metadata_call(2);
-        let case = METADATA_ORACLE.with(|slot| slot.get().parameters);
+        let oracle = METADATA_ORACLE.with(Cell::get);
+        match oracle.values {
+            1 => return Some(-2.232059017615029e-7),
+            2 => return Some(f64::NAN),
+            3 => return None,
+            4 => return Some(1.25),
+            _ => {}
+        }
+        let case = oracle.parameters;
         if case == 5 && id.get() == 3 {
             return None;
         }
@@ -862,7 +873,7 @@ fn metadata_instance() -> PluginInstance<ClapHost> {
 
 #[test]
 fn retained_clap_metadata_success_and_schema_mismatch_allocate_no_containers() {
-    use super::super::clap_metadata::{revalidate_parameters, MetadataScanScratch};
+    use super::super::clap_metadata::{revalidate_parameter_structure, MetadataScanScratch};
     let _reset = MetadataOracleReset;
     set_metadata_oracle(0, 0);
     let mut instance = metadata_instance();
@@ -870,27 +881,30 @@ fn retained_clap_metadata_success_and_schema_mismatch_allocate_no_containers() {
     let expected = list_parameters(&handle).expect("actual original snapshot");
     let mut scratch = MetadataScanScratch::new();
     set_metadata_oracle(2, 0);
-    let (result, counts) = measure(|| revalidate_parameters(&handle, &expected, &mut scratch));
+    let (result, counts) =
+        measure(|| revalidate_parameter_structure(&handle, &expected, &mut scratch));
     assert!(result.expect("current/name/hidden/signed-zero remain legal"));
     assert_eq!(counts, AllocationCounts::default());
-    assert_eq!(METADATA_CALLS.with(Cell::get), [1, 2, 2, 0, 0]);
+    assert_eq!(METADATA_CALLS.with(Cell::get), [1, 2, 0, 0, 0]);
     let mut changed = expected.clone();
     changed[0].default_value = 0.5;
     set_metadata_oracle(2, 0);
-    let (result, counts) = measure(|| revalidate_parameters(&handle, &changed, &mut scratch));
+    let (result, counts) =
+        measure(|| revalidate_parameter_structure(&handle, &changed, &mut scratch));
     assert!(!result.expect("valid but changed schema"));
     assert_eq!(counts, AllocationCounts::default());
-    assert_eq!(METADATA_CALLS.with(Cell::get), [1, 2, 2, 0, 0]);
+    assert_eq!(METADATA_CALLS.with(Cell::get), [1, 2, 0, 0, 0]);
 
     set_metadata_oracle(1, 0);
     let expected = list_parameters(&handle).expect("actual maximum reverse-ID snapshot");
     set_metadata_oracle(1, 0);
     let started = std::time::Instant::now();
-    let (result, counts) = measure(|| revalidate_parameters(&handle, &expected, &mut scratch));
+    let (result, counts) =
+        measure(|| revalidate_parameter_structure(&handle, &expected, &mut scratch));
     let elapsed = started.elapsed();
     assert!(result.expect("1,024 reverse IDs"));
     assert_eq!(counts, AllocationCounts::default());
-    assert_eq!(METADATA_CALLS.with(Cell::get), [1, 1024, 1024, 0, 0]);
+    assert_eq!(METADATA_CALLS.with(Cell::get), [1, 1024, 0, 0, 0]);
     eprintln!(
         "retained metadata: scratch={}B reverse_ids=1024 max_id_move_bytes={} elapsed={elapsed:?}",
         size_of::<MetadataScanScratch>(),
@@ -900,7 +914,7 @@ fn retained_clap_metadata_success_and_schema_mismatch_allocate_no_containers() {
 
 #[test]
 fn retained_clap_metadata_preserves_query_errors_before_deferred_row_or_shape_errors() {
-    use super::super::clap_metadata::{revalidate_parameters, MetadataScanScratch};
+    use super::super::clap_metadata::{revalidate_parameter_structure, MetadataScanScratch};
     let _reset = MetadataOracleReset;
     set_metadata_oracle(0, 0);
     let mut instance = metadata_instance();
@@ -908,18 +922,40 @@ fn retained_clap_metadata_preserves_query_errors_before_deferred_row_or_shape_er
     let mut expected = list_parameters(&handle).expect("actual expected snapshot");
     expected[0].default_value = 0.5; // A valid early structural mismatch must defer.
     let mut scratch = MetadataScanScratch::new();
-    for (case, reason, expected_calls) in [
-        (3, "CLAP parameter metadata is missing", [1, 2, 1, 0, 0]),
-        (4, "CLAP parameter name is not UTF-8", [1, 2, 1, 0, 0]),
+    for (case, value_reason, definition_reason, expected_calls) in [
+        (
+            3,
+            "CLAP parameter metadata is missing",
+            "CLAP parameter metadata is missing",
+            [1, 2, 1, 0, 0],
+        ),
+        (
+            4,
+            "CLAP parameter name is not UTF-8",
+            "CLAP parameter name is not UTF-8",
+            [1, 2, 1, 0, 0],
+        ),
         (
             5,
             "CLAP parameter current value is unavailable",
+            "reason=min_nonfinite",
             [1, 2, 2, 0, 0],
         ),
-        (6, "reason=min_nonfinite", [1, 2, 2, 0, 0]),
-        (7, "reason=duplicate_id", [1, 2, 2, 0, 0]),
+        (
+            6,
+            "reason=min_nonfinite",
+            "reason=min_nonfinite",
+            [1, 2, 2, 0, 0],
+        ),
+        (
+            7,
+            "reason=duplicate_id",
+            "reason=duplicate_id",
+            [1, 2, 2, 0, 0],
+        ),
         (
             8,
+            "CLAP parameter count exceeds the supported bound",
             "CLAP parameter count exceeds the supported bound",
             [1, 0, 0, 0, 0],
         ),
@@ -928,12 +964,73 @@ fn retained_clap_metadata_preserves_query_errors_before_deferred_row_or_shape_er
         let owned = list_parameters(&handle).expect_err("original malformed snapshot");
         let original_calls = METADATA_CALLS.with(Cell::get);
         set_metadata_oracle(case, 0);
-        let borrowed = revalidate_parameters(&handle, &expected, &mut scratch)
-            .expect_err("same original metadata refusal");
-        assert_eq!(METADATA_CALLS.with(Cell::get), expected_calls);
+        let borrowed = revalidate_parameter_structure(&handle, &expected, &mut scratch)
+            .expect_err("invalid definition still refuses without a value query");
+        let mut definition_calls = expected_calls;
+        definition_calls[2] = 0;
+        assert_eq!(METADATA_CALLS.with(Cell::get), definition_calls);
         assert_eq!(original_calls, expected_calls);
-        assert_eq!(format!("{borrowed:?}"), format!("{owned:?}"));
-        assert!(format!("{borrowed:?}").contains(reason), "{borrowed:?}");
+        assert!(format!("{owned:?}").contains(value_reason), "{owned:?}");
+        assert!(
+            format!("{borrowed:?}").contains(definition_reason),
+            "{borrowed:?}"
+        );
+        if definition_reason.starts_with("reason=") {
+            assert!(format!("{borrowed:?}").contains("current_bits=unqueried"));
+        }
+    }
+}
+
+#[test]
+fn retained_clap_parameter_structure_never_consumes_transient_value_queries() {
+    use super::super::clap_metadata::{revalidate_parameter_structure, MetadataScanScratch};
+    let _reset = MetadataOracleReset;
+    let mut instance = metadata_instance();
+    let handle = instance.plugin_handle();
+    let params = handle.get_extension::<PluginParams>().unwrap();
+    let mut scratch = MetadataScanScratch::new();
+    for parameter_case in [0, 9] {
+        // Writable and readonly use the same definition contract.
+        set_metadata_oracle(parameter_case, 0);
+        let expected = list_parameters(&handle).unwrap();
+        for (values, reason) in [
+            (1, "current_out_of_range"),
+            (2, "current_nonfinite"),
+            (3, "current value is unavailable"),
+            (4, "current_out_of_range"),
+        ] {
+            set_metadata_oracle(parameter_case, 0);
+            METADATA_ORACLE.with(|slot| slot.set(MetadataOracle { values, ..slot.get() }));
+            let error =
+                list_parameters(&handle).expect_err("complete value snapshots remain strict");
+            assert!(format!("{error:?}").contains(reason), "{error:?}");
+            set_metadata_oracle(parameter_case, 0);
+            METADATA_ORACLE.with(|slot| slot.set(MetadataOracle { values, ..slot.get() }));
+            let (result, allocations) =
+                measure(|| revalidate_parameter_structure(&handle, &expected, &mut scratch));
+            assert!(result.unwrap(), "unchanged definition, value mode {values}");
+            assert_eq!(allocations, AllocationCounts::default());
+            assert_eq!(METADATA_CALLS.with(Cell::get), [1, 2, 0, 0, 0]);
+            let raw = params.get_value(&handle, ClapId::new(17));
+            let expected_raw = match values {
+                1 => Some((-2.232059017615029e-7_f64).to_bits()),
+                2 => Some(f64::NAN.to_bits()),
+                3 => None,
+                4 => Some(1.25_f64.to_bits()),
+                _ => unreachable!(),
+            };
+            assert_eq!(
+                raw.map(f64::to_bits),
+                expected_raw,
+                "no clamp or invented value"
+            );
+        }
+        set_metadata_oracle(if parameter_case == 0 { 9 } else { 0 }, 0);
+        assert!(
+            !revalidate_parameter_structure(&handle, &expected, &mut scratch).unwrap(),
+            "readonly definition changes still require a new contract"
+        );
+        assert_eq!(METADATA_CALLS.with(Cell::get), [1, 2, 0, 0, 0]);
     }
 }
 

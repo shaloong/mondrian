@@ -1826,7 +1826,7 @@ impl ClapWorker {
         // CLAP audio-ports may only be scanned while deactivated. The inactive
         // shape+auxiliary check above remains authoritative through activation;
         // active changes require the existing restart/cohort control path.
-        if !super::clap_metadata::revalidate_parameters(
+        if !super::clap_metadata::revalidate_parameter_structure(
             &handle,
             &self.expected_parameters,
             &mut metadata_scratch,
@@ -1880,7 +1880,7 @@ impl ClapWorker {
     ) -> Result<bool, AudioProcessorHostError> {
         let mut scratch = super::clap_metadata::MetadataScanScratch::new();
         let handle = self.instance.plugin_handle();
-        if !super::clap_metadata::revalidate_parameters(
+        if !super::clap_metadata::revalidate_parameter_structure(
             &handle,
             &self.expected_parameters,
             &mut scratch,
@@ -2213,7 +2213,7 @@ impl IsolatedAudioProcessorWorker for ClapWorker {
         let handle = self.instance.plugin_handle();
         let mut metadata_scratch = super::clap_metadata::MetadataScanScratch::new();
         // Current values change after a valid flush; structural metadata must not.
-        if !super::clap_metadata::revalidate_parameters(
+        if !super::clap_metadata::revalidate_parameter_structure(
             &handle,
             &self.expected_parameters,
             &mut metadata_scratch,
