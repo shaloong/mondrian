@@ -2220,8 +2220,41 @@ fn authoring_session_rotation_clears_decoded_media_residency() {
 }
 
 fn unique_preview_test_root(name: &str) -> PathBuf {
-    crate::app::test_fixture::create_root(&std::env::temp_dir(), name)
-        .expect("claim isolated Preview fixture root")
+    preview_test_root_in(&std::env::temp_dir(), name)
+}
+
+fn preview_test_root_in(parent: &std::path::Path, name: &str) -> PathBuf {
+    let root = crate::app::test_fixture::create_root(parent, name)
+        .expect("claim isolated Preview fixture root");
+    // Asset import resolves directory aliases. Build source/proxy expectations
+    // in that same namespace while retaining the Preview owner's lifetime.
+    mondrian_assets::canonical_native_path(&root).expect("canonical Preview fixture root")
+}
+
+#[test]
+fn preview_fixture_paths_share_the_asset_identity_namespace_through_parent_aliases() {
+    let parent = tempfile::tempdir().expect("owned Preview fixture parent");
+    let transit = parent.path().join("transit");
+    std::fs::create_dir(&transit).expect("create directory alias traversal");
+    let alias_parent = transit.join("..");
+    let root = preview_test_root_in(&alias_parent, "mondrian-preview-aliased-parent");
+    let media = root.join("source.mp4");
+    std::fs::write(&media, b"fixture identity only").expect("create fixture media");
+
+    assert_eq!(
+        mondrian_assets::canonical_asset_file_path(&media).expect("canonical asset identity"),
+        media,
+        "Preview expectations and Asset Library identity must share one native namespace"
+    );
+    let aliased_media = alias_parent
+        .join(root.file_name().expect("owned fixture directory name"))
+        .join("source.mp4");
+    assert_eq!(
+        mondrian_assets::canonical_asset_file_path(&aliased_media)
+            .expect("resolve aliased fixture media"),
+        media
+    );
+    assert!(root.is_dir(), "the fixture owner retains its directory");
 }
 
 fn rec709_video_media_info(file_size: u64) -> MediaInfo {
