@@ -196,7 +196,7 @@ impl AudioOutputAdapter for CaptureOutput {
                 actual: buffer.channel_layout,
             });
         }
-        if buffer.samples.len() % 2 != 0 {
+        if !buffer.samples.len().is_multiple_of(2) {
             return Err(
                 RealtimeAudioOutputEnqueueError::IncompleteInterleavedFrame {
                     samples: buffer.samples.len(),

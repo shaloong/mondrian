@@ -678,6 +678,9 @@ fn execute_cpu_fallback_observed(
 }
 
 #[cfg(test)]
+pub(crate) use tests::source_job_request_with_media;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use mondrian_effects::EffectFloatProcessorFactory;
@@ -956,7 +959,7 @@ mod tests {
         let weak = Arc::downgrade(&program);
         let evaluation =
             TimelineEvaluationRequest::export(FramePosition::new(72, Rational::new(1, 24)));
-        let plan = evaluate_prepared_visual_program(&program, evaluation.clone()).unwrap();
+        let plan = evaluate_prepared_visual_program(&program, evaluation).unwrap();
         let extent = EffectFrameExtent::new(resolution.width, resolution.height);
         let retired = mondrian_core::ExecutionCancellationToken::new();
         let owner = TimelineFrameExecutionRequest::new(
@@ -1491,6 +1494,3 @@ mod tests {
         );
     }
 }
-
-#[cfg(test)]
-pub(crate) use tests::source_job_request_with_media;

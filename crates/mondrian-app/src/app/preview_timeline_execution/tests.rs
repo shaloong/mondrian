@@ -1362,10 +1362,10 @@ fn assert_source_readiness_precedes_nested_dsp(source_kind: ReadinessSource) {
             &programs,
             &scratch,
         );
-        if disposition != 2 {
-            if let PreviewTimelineResolution::Unavailable { reason } = &result {
-                panic!("source-readiness probe must pass owner admission: {reason}");
-            }
+        if disposition != 2
+            && let PreviewTimelineResolution::Unavailable { reason } = &result
+        {
+            panic!("source-readiness probe must pass owner admission: {reason}");
         }
         assert_eq!(
             media_calls,

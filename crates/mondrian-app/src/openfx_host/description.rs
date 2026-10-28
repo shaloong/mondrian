@@ -596,9 +596,11 @@ mod tests {
 
     #[test]
     fn describe_report_rejects_overbound_utf8_and_false_success_atomically() {
-        let mut raw = NativeDescribeNotices::default();
-        raw.complete = 1;
-        raw.notice_count = 32;
+        let mut raw = NativeDescribeNotices {
+            complete: 1,
+            notice_count: 32,
+            ..NativeDescribeNotices::default()
+        };
         for notice in &mut raw.notices {
             notice.kind = 1;
             notice.text_length = 1;

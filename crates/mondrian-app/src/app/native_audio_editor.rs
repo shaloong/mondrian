@@ -2030,7 +2030,7 @@ mod attachment_continuity_contracts {
                 group_depth: 0,
             },
             vec![mondrian_core::NativeAudioAuthorCallback::GroupFinished],
-            Some(vec![9, 8].into()),
+            Some(vec![9, 8]),
         )
         .unwrap();
         state.observe_native_audio_author_proposal(terminal.clone()).unwrap();

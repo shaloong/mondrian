@@ -456,9 +456,11 @@ mod tests {
             path: bundle.clone(),
             context: OpenFxContext::Generator,
         };
-        let mut expected = AppUiPreferences::default();
-        expected.recent_projects = vec![path.clone()];
-        expected.installed_openfx_bundles = vec![filter.clone()];
+        let expected = AppUiPreferences {
+            recent_projects: vec![path.clone()],
+            installed_openfx_bundles: vec![filter.clone()],
+            ..AppUiPreferences::default()
+        };
         let mut old = serde_json::to_value(&expected).unwrap();
         old["version"] = serde_json::json!(3);
         old["installed_openfx_bundles"] = serde_json::json!([bundle]);

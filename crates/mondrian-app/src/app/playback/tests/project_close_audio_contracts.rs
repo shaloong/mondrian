@@ -534,10 +534,10 @@ pub(in crate::app) fn settle_current_builtin_binding(state: &mut AppState) {
         .unwrap();
     let deadline = Instant::now() + Duration::from_secs(2);
     loop {
-        if let AppAudioPlayback::Available(playback) = &state.audio_playback {
-            if playback.native_owner_binding_status().is_some() {
-                break;
-            }
+        if let AppAudioPlayback::Available(playback) = &state.audio_playback
+            && playback.native_owner_binding_status().is_some()
+        {
+            break;
         }
         let poll = state.audio_playback.poll(AudioPlaybackMode::Idle, anchor).unwrap();
         assert_eq!(poll.snapshot.in_flight, 0);

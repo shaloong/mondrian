@@ -417,61 +417,59 @@ pub(super) fn run_native_restart_control(seek_frames: &[i64], mode: u8) {
                     consumed_old = true;
                 }
             }
-            if let Some((generation, anchor)) = fresh {
-                if snapshot.generation == generation
-                    && snapshot.in_flight == 0
-                    && snapshot.output.unwrap().buffered_frames == 8
-                {
-                    if !fresh_video_ready {
+            if let Some((generation, anchor)) = fresh
+                && snapshot.generation == generation
+                && snapshot.in_flight == 0
+                && snapshot.output.unwrap().buffered_frames == 8
+            {
+                if !fresh_video_ready {
+                    assert_eq!(
+                        state.playback_engine.snapshot().state,
+                        mondrian_playback::TransportState::Priming
+                    );
+                    assert_ne!(
+                        state.playback_engine.snapshot().epoch,
+                        original_playback_epoch
+                    );
+                    assert!(
+                        !snapshot.output.unwrap().active,
+                        "Fresh PCM cannot activate before its current video demand is ready"
+                    );
+                    crate::app::playback::tests::current_playback_ready_at(&mut state, tick);
+                    fresh_video_ready = true;
+                } else {
+                    assert!(
+                        snapshot.activation_preroll_satisfied && snapshot.output.unwrap().active
+                    );
+                    assert_eq!(snapshot.media_anchor.unwrap().sample(), anchor);
+                    {
+                        let capture = output.lock();
                         assert_eq!(
-                            state.playback_engine.snapshot().state,
-                            mondrian_playback::TransportState::Priming
+                            capture.windows.len(),
+                            4,
+                            "two complete old and two complete new windows"
                         );
-                        assert_ne!(
-                            state.playback_engine.snapshot().epoch,
-                            original_playback_epoch
-                        );
-                        assert!(
-                            !snapshot.output.unwrap().active,
-                            "Fresh PCM cannot activate before its current video demand is ready"
-                        );
-                        crate::app::playback::tests::current_playback_ready_at(&mut state, tick);
-                        fresh_video_ready = true;
-                    } else {
-                        assert!(
-                            snapshot.activation_preroll_satisfied
-                                && snapshot.output.unwrap().active
-                        );
-                        assert_eq!(snapshot.media_anchor.unwrap().sample(), anchor);
-                        {
-                            let capture = output.lock();
-                            assert_eq!(
-                                capture.windows.len(),
-                                4,
-                                "two complete old and two complete new windows"
-                            );
-                            assert_restart_windows(&capture, 0, 0, mode);
-                            assert_restart_windows(&capture, 2, anchor, next_mode);
-                            assert!(!capture.overflow);
-                            assert_eq!(capture.activation_discarded, 0);
-                        }
-                        let facts = cursor_facts(&state);
-                        let lease = actual_native_lease(&renderer, &facts);
-                        // A second real non-RT RPC, only after actual Fresh Ready,
-                        // activation and both complete new PCM windows. No output lock.
-                        let object = renderer
-                            .state
-                            .lock()
-                            .delivery
-                            .observe_native_owner_object(lease)
-                            .expect("authenticated new object after the original Fresh entry");
-                        new_object = Some((object.process_id(), object.object_serial()));
-                        assert!(
-                            Instant::now() < deadline,
-                            "authenticated identity RPC exceeded the original restart deadline"
-                        );
-                        break;
+                        assert_restart_windows(&capture, 0, 0, mode);
+                        assert_restart_windows(&capture, 2, anchor, next_mode);
+                        assert!(!capture.overflow);
+                        assert_eq!(capture.activation_discarded, 0);
                     }
+                    let facts = cursor_facts(&state);
+                    let lease = actual_native_lease(&renderer, &facts);
+                    // A second real non-RT RPC, only after actual Fresh Ready,
+                    // activation and both complete new PCM windows. No output lock.
+                    let object = renderer
+                        .state
+                        .lock()
+                        .delivery
+                        .observe_native_owner_object(lease)
+                        .expect("authenticated new object after the original Fresh entry");
+                    new_object = Some((object.process_id(), object.object_serial()));
+                    assert!(
+                        Instant::now() < deadline,
+                        "authenticated identity RPC exceeded the original restart deadline"
+                    );
+                    break;
                 }
             }
             assert!(

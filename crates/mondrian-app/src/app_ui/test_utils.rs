@@ -290,6 +290,7 @@ pub(crate) fn native_sidechain_source_action(
 
 /// Select the exact manual query payload projected by the real visible Rack.
 /// Keep private UI projection modules behind this existing test-only seam.
+#[cfg(windows)]
 pub(crate) fn native_parameter_query_payload(
     state: &crate::app::AppState,
     address: mondrian_timeline::AudioProcessorRackAddress,
@@ -300,6 +301,7 @@ pub(crate) fn native_parameter_query_payload(
 }
 
 /// Select the existing Adopt action from the same actual visible Rack row.
+#[cfg(windows)]
 pub(crate) fn native_parameter_adoption_payload(
     state: &crate::app::AppState,
     address: mondrian_timeline::AudioProcessorRackAddress,
@@ -309,6 +311,7 @@ pub(crate) fn native_parameter_adoption_payload(
     native_parameter_row(state, address, processor_id, parameter)?.native_adoption
 }
 
+#[cfg(windows)]
 fn native_parameter_row(
     state: &crate::app::AppState,
     address: mondrian_timeline::AudioProcessorRackAddress,

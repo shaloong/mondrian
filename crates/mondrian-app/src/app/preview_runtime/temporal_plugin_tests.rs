@@ -1371,10 +1371,10 @@ fn qualify_time_blur_nle(case: TimeBlurNleCase) {
                 receipt.feedback.snapshot.native_owner(),
             );
             assert_ne!(identity.2, 0);
-            if let Some((owner, invocation)) = previous {
-                if owner == identity {
-                    assert!(receipt.feedback.snapshot.invocation() > invocation);
-                }
+            if let Some((owner, invocation)) = previous
+                && owner == identity
+            {
+                assert!(receipt.feedback.snapshot.invocation() > invocation);
             }
             previous = Some((identity, receipt.feedback.snapshot.invocation()));
             assert_eq!(

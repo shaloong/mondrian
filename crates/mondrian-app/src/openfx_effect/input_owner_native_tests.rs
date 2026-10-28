@@ -270,15 +270,15 @@ fn normal_openfx_factory_borrows_original_input_service_without_factory_program_
         let future = raw(4, 1, 2.0 + pass as f32);
         for (i, pixel) in output.pixels().iter().enumerate() {
             let mut expected = current.pixels()[i];
-            for lane in 0..3 {
-                expected[lane] *= 2.0;
+            for component in &mut expected[..3] {
+                *component *= 2.0;
             }
             for (input, index, factor, gain) in [
                 (&past, (i + 1) % 6, 2.0, 0.5),
                 (&future, (i + 2) % 4, 3.0, 2.0),
             ] {
-                for lane in 0..4 {
-                    expected[lane] +=
+                for (lane, component) in expected.iter_mut().enumerate() {
+                    *component +=
                         factor * input.pixels()[index][lane] * if lane < 3 { gain } else { 1.0 };
                 }
             }

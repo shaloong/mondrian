@@ -5447,11 +5447,10 @@ mod tests {
             temp_preferences_path("buffering-stall-release"),
         );
         host.preview_service.shutdown();
-        host.preview_service = Box::new(
+        *host.preview_service =
             WindowPreviewAdapter::new_without_workers_with_scheduler_clock_for_test(
                 scheduler_clock.clone(),
-            ),
-        );
+            );
         host.preview_service
             .synchronize_transport_intent(host.app_state.borrow().preview_transport_intent());
         let bounds = Rect::new(0.0, 0.0, 1280.0, 720.0);
