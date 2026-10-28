@@ -285,8 +285,27 @@ an authored Makeup12dB override. Every decoded sample matches input times
 10^(12/20) within the predeclared two-PCM24-LSB DSP/quantization bound.
 Both real gates have stderr0, exit0 and settled original Job budgets; Export
 also verifies complete Queue shutdown and nonempty native-child registrations.
-This is48k Offline, a captured default native state and one static host override,
-not nondefault opaque-state/Project, GUI, Preview/device or realtime qualification.
+
+Nondefault state now has separate finite qualification. The existing inactive
+SDK diagnostic flushes Makeup0→12dB, reads back exactly12 and calls the plugin's
+state.save; its137 bytes are published after instance/library Drop. The
+[App Project regression](../../crates/mondrian-app/src/app/playback/tests/cold_native_joint_controls/zam_state_roundtrip.rs)
+passes public SaveAs/Close/new-App Open with both native-owned None and a
+conflicting Host Some6dB over that same opaque12dB. The actual getter returns12
+before host DSP; all11 native facts and nine writable author IDs remain distinct.
+Each fresh, installed App Timeline/Delivery source renders all32 test frames;
+every Float32 sample matches the independent gain formula within two Float32
+epsilons, with unchanged author data and actual old/new Source retirement.
+Realtime setup48k/stereo/block4 with a software output grants no realtime safety
+or automatic transport/device/Preview scheduling qualification.
+
+The public Export regression also passes both nondefault cases, each with all
+48000 stereo PCM24 frames and the original two-LSB bound; the default-state
+Host12dB baseline still passes. Capture, App and Export gates have stderr0,
+exit0 and settled original Job budgets. Only tests changed for this extension;
+the normal Product from69f05fc1 is reused with identical production sources.
+GUI, complex or
+larger states, arbitrary DSP-history snapshots and broader platforms remain open.
 
 Retained definition revalidation queries get_info only, without querying or
 clamping transient meter values. Full cold/value and author projection checks
@@ -294,7 +313,7 @@ remain strict. Audio903PASS/205ignored includes an actual SDK seven-case cold
 notification fixture: matching rescans complete, while value mismatch,
 query-time notification, Dirty/Clear, unknown flags, pending flush and active
 subsequent loads retain their work; restart intent and source sequence remain.
-Matching-build regressions pass: sixteen Audio native gates; Export313/33ignored
+Cold-fix regressions pass: sixteen Audio native gates; Export313/33ignored
 plus17 native gates; App audio13/27ignored, eight native reprepare gates, and
 Queue-related94/2ignored. All have stderr0 and settled ownership. This does not
 close the historical full-App title-pressure or F06 failures. Other rates, long
