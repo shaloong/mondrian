@@ -714,6 +714,17 @@ instruments, other platforms, realtime and performance remain unqualified.
 
 ## Qualification and record policy
 
+At `af29c49b`, the ordinary Audio library suite passes on Ubuntu24.04.5 x86_64
+(846 passed, 65 ignored) and Windows x64 (906 passed, 207 ignored), using
+Rust1.97.1, default features, opt1/debug0, zero filtering and empty stderr.
+Owned fixtures now respect absent Linux host Params/State services and scoped
+VST3 Note admission; production capabilities remain unchanged. Windows uses a
+workspace-owned temporary directory: sandbox `AC\Temp` refuses native rename
+even after handle closure, while the owned path permits the original held-handle
+replacement test. The unchanged 180s gate and Job settlement pass. This qualifies
+ordinary tests, not Linux third-party plugins, App/Export, GUI/device, realtime,
+performance or macOS execution.
+
 The default Windows workspace regression closed on 2026-10-25: all 30 members
 and 127 executable test targets completed at `df8ddd49`, with 9,417 passed,
 one failed and 641 originally ignored tests. The sole failure was a stale
