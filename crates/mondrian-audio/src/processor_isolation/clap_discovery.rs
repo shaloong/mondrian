@@ -4924,6 +4924,10 @@ mod clap_deactivated_parameter_diagnostic;
 #[path = "clap_nondefault_state_diagnostic.rs"]
 mod clap_nondefault_state_diagnostic;
 
+#[cfg(all(test, windows))]
+#[path = "clap_gain_reference_diagnostic.rs"]
+mod clap_gain_reference_diagnostic;
+
 // Test-only direct-native observation. This is not processing admission and has
 // no internal native-call deadline: the actual caller's frozen outer Job owns it.
 #[cfg(all(test, windows))]

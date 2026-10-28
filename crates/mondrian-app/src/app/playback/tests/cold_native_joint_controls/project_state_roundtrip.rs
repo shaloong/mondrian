@@ -59,34 +59,46 @@ pub(super) fn unentered_owner(
     facts
 }
 
+// Explicit fixture extent, independent of project defaults.
+pub(super) const GAIN_SOURCE_FRAMES: u32 = 32;
+
 pub(super) fn initialize_nonzero_audio(
     sequence: &mut Sequence,
     library: &Arc<AssetLibrary>,
     root: &std::path::Path,
 ) {
     use std::io::Write;
-    const FRAMES: u32 = 32;
-    let path = root.join("author-roundtrip-stereo.wav");
+    let rate = sequence.settings.audio_sample_rate;
+    assert!(matches!(
+        sequence.settings.audio_channel_layout,
+        AudioChannelLayout::Mono | AudioChannelLayout::Stereo
+    ));
+    let channels = u16::try_from(sequence.settings.audio_channel_layout.channel_count()).unwrap();
+    let align = channels.checked_mul(4).unwrap();
+    let bytes = GAIN_SOURCE_FRAMES.checked_mul(u32::from(align)).unwrap();
+    let path = root.join("author-roundtrip.wav");
     let mut wave = std::io::BufWriter::new(std::fs::File::create(&path).expect("create WAV"));
     for bytes in [
         b"RIFF".as_slice(),
-        &(36 + FRAMES * 8).to_le_bytes(),
+        &(36 + bytes).to_le_bytes(),
         b"WAVEfmt ",
         &16_u32.to_le_bytes(),
         &3_u16.to_le_bytes(),
-        &2_u16.to_le_bytes(),
-        &48_000_u32.to_le_bytes(),
-        &384_000_u32.to_le_bytes(),
-        &8_u16.to_le_bytes(),
+        &channels.to_le_bytes(),
+        &rate.to_le_bytes(),
+        &rate.checked_mul(u32::from(align)).unwrap().to_le_bytes(),
+        &align.to_le_bytes(),
         &32_u16.to_le_bytes(),
         b"data",
-        &(FRAMES * 8).to_le_bytes(),
+        &bytes.to_le_bytes(),
     ] {
         wave.write_all(bytes).expect("WAV header");
     }
-    for _ in 0..FRAMES {
-        wave.write_all(&0.25_f32.to_le_bytes()).expect("left source");
-        wave.write_all(&(-0.25_f32).to_le_bytes()).expect("right source");
+    for _ in 0..GAIN_SOURCE_FRAMES {
+        for channel in 0..channels {
+            let sample = if channel == 0 { 0.25_f32 } else { -0.25_f32 };
+            wave.write_all(&sample.to_le_bytes()).expect("source channel");
+        }
     }
     wave.flush().expect("complete bounded source");
     drop(wave);
@@ -108,7 +120,7 @@ pub(super) fn initialize_nonzero_audio(
             mondrian_timeline::Clip::new(
                 asset,
                 TimelineTime::ZERO,
-                TimelineTime::new(i64::from(FRAMES), 48_000).unwrap(),
+                TimelineTime::new(i64::from(GAIN_SOURCE_FRAMES), i64::from(rate)).unwrap(),
             )
             .expect("actual Clip"),
             mondrian_core::AudioSourceComponentId::primary(),

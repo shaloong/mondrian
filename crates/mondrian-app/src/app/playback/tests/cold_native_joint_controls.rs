@@ -205,11 +205,24 @@ fn prepare_app_native_control_with_instance(
     ));
     let directory = tempfile::tempdir().expect("actual Project Asset Library");
     let library = AssetLibrary::open(directory.path().join("library")).unwrap();
-    let mut sequence = Sequence::new("App cold owned VST3 closure");
+    let mut sequence = Sequence::new("App cold native closure");
     // The software output and native fixture define these inputs. Sequence
     // defaults are not the behavior under test.
     sequence.settings.audio_sample_rate = config.sample_rate;
     sequence.settings.audio_channel_layout = config.channel_layout;
+    let unity = mondrian_timeline::audio::AudioChannelStrip {
+        input_trim_db: 0.0,
+        pre_fader: Default::default(),
+        fader_db: 0.0,
+        fader_automation: None,
+        post_fader: Default::default(),
+    };
+    for channel in sequence.audio_program.track_channels.values_mut() {
+        channel.strip = unity.clone();
+    }
+    for output in &mut sequence.audio_program.outputs {
+        output.strip = unity.clone();
+    }
     sequence.audio_program.outputs[0].strip.pre_fader.processors.push(instance);
     initialize(&mut sequence, &library, directory.path());
     state.test_set_sequence(Some(sequence));
@@ -4022,6 +4035,8 @@ mod fresh_vst3_host_overlay;
 mod idle_clap_constant;
 mod fresh_clap_host_overlay;
 mod zam_state_roundtrip;
+mod native_gain_project;
+mod ring_out_project_roundtrip;
 
 mod nonzero_note_playback;
 mod surge_note_playback;
