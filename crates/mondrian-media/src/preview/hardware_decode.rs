@@ -270,8 +270,8 @@ impl PreviewHardwareDecodePlan {
             )
         } else {
             format!(
-                "no statically compatible hardware-decode candidate was admitted; codec probe: {}; device probe: {}",
-                codec_config.reason, device_context.reason
+                "{} has no statically compatible hardware-decode configuration; codec probe: {}; device probe: {}",
+                candidate.as_str(), codec_config.reason, device_context.reason
             )
         };
         (probe, codec_config, device_context, candidates)
