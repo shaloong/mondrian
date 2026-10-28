@@ -1601,13 +1601,13 @@ mod tests {
             crate::EffectProcessorInvocationError,
         > {
             control.check()?;
-            if let Some(bytes) = params["transient_bytes"].as_u64() {
-                if let Err(refusal) = resources.acquire_transient(usize::try_from(bytes).unwrap()) {
-                    return Err(EffectProcessorInvocationError::PreflightBudgetRefused {
-                        refusal,
-                        feedback: None,
-                    });
-                }
+            if let Some(bytes) = params["transient_bytes"].as_u64()
+                && let Err(refusal) = resources.acquire_transient(usize::try_from(bytes).unwrap())
+            {
+                return Err(EffectProcessorInvocationError::PreflightBudgetRefused {
+                    refusal,
+                    feedback: None,
+                });
             }
             if params["nested"].as_bool() == Some(true) {
                 // A staged native invocation will stay on this original call

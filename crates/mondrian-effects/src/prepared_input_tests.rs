@@ -284,7 +284,7 @@ fn repeated_shared_grade_has_distinct_before_stack_after_input_capabilities() {
     let program = PreparedEffectProgram::prepare_hierarchical_with_lut_cache(
         &[exposure(-1.0)],
         &[],
-        &[shared.clone()],
+        std::slice::from_ref(&shared),
         &[shared],
         WorkingColorSpace::LinearRec709,
         &LutPreparationCache::uncached(),

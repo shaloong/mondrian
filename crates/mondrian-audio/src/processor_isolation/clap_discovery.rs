@@ -13,7 +13,7 @@ use crate::{
     AudioProcessorTail, AudioRenderContract,
 };
 use clack_extensions::audio_ports::{AudioPortFlags, AudioPortType};
-#[cfg(test)]
+#[cfg(all(test, windows))]
 use clack_extensions::audio_ports::{AudioPortInfoBuffer, PluginAudioPorts};
 use clack_extensions::latency::PluginLatency;
 use clack_extensions::params::{ParamInfoBuffer, ParamInfoFlags, PluginParams};

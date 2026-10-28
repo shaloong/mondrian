@@ -31,9 +31,23 @@ enum Mode {
     DestroyRestart,
     DestroyUnknownNote,
     DestroyNames,
+    #[cfg_attr(
+        not(windows),
+        allow(
+            dead_code,
+            reason = "The GUI-coupled destruction-flush fixture currently runs on Windows"
+        )
+    )]
     DestroyFlush,
     DestroyWrongThread,
     ParameterRescan,
+    #[cfg_attr(
+        not(windows),
+        allow(
+            dead_code,
+            reason = "The editor-coupled parameter-flush fixture currently runs on Windows"
+        )
+    )]
     ParameterFlush,
 }
 struct Audit {

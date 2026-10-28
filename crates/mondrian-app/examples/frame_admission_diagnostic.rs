@@ -84,7 +84,9 @@ fn stats(samples: &[u64]) -> serde_json::Value {
 }
 
 fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
-    assert!(!cfg!(debug_assertions), "use the release profile");
+    if cfg!(debug_assertions) {
+        return Err("use the release profile".into());
+    }
     let args = std::env::args().skip(1).collect::<Vec<_>>();
     let width: u32 = args.first().map_or(Ok(1920), |s| s.parse())?;
     let height: u32 = args.get(1).map_or(Ok(1080), |s| s.parse())?;

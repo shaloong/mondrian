@@ -166,7 +166,7 @@ impl ProcessOwner {
         exit_wait::wait_for_termination(child, deadline)
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, windows))]
     fn terminate_with(
         &mut self,
         observe: impl FnMut(&mut Child) -> io::Result<Option<std::process::ExitStatus>>,
@@ -1177,7 +1177,7 @@ impl SupervisedAudioWorker {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, windows))]
     pub(super) fn discard_next_seed_commit_reply_for_test(
         &mut self,
         observed: std::sync::Arc<std::sync::atomic::AtomicBool>,

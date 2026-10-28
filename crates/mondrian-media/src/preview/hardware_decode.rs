@@ -613,6 +613,22 @@ pub(super) fn ffmpeg_native_resource_adapter_available(config: &HwAccelCodecConf
     }
 }
 
+/// An FFmpeg hardware-acceleration frame proves execution on the explicit
+/// hardware-only backends. VideoToolbox can also use a software decoder while
+/// exporting CVPixelBuffer; the current AVHWDeviceContext adapter cannot expose
+/// that session's public UsingHardware property through its supported interface.
+fn backend_hardware_execution_observation(backend: HwAccelBackend) -> Option<bool> {
+    match backend {
+        HwAccelBackend::None | HwAccelBackend::VideoToolbox => None,
+        HwAccelBackend::Cuda
+        | HwAccelBackend::D3D12VA
+        | HwAccelBackend::D3D11VA
+        | HwAccelBackend::Dxva2
+        | HwAccelBackend::Vaapi
+        | HwAccelBackend::Vdpau => Some(true),
+    }
+}
+
 #[cfg(test)]
 mod backend_selection_tests {
     use super::*;
@@ -720,21 +736,5 @@ mod stream_capability_tests {
                 Some(PreviewNativeDecodeFallback::DeviceStreamCapabilityRejected)
             );
         }
-    }
-}
-
-/// An FFmpeg hardware-acceleration frame proves execution on the explicit
-/// hardware-only backends. VideoToolbox can also use a software decoder while
-/// exporting CVPixelBuffer; the current AVHWDeviceContext adapter cannot expose
-/// that session's public UsingHardware property through its supported interface.
-fn backend_hardware_execution_observation(backend: HwAccelBackend) -> Option<bool> {
-    match backend {
-        HwAccelBackend::None | HwAccelBackend::VideoToolbox => None,
-        HwAccelBackend::Cuda
-        | HwAccelBackend::D3D12VA
-        | HwAccelBackend::D3D11VA
-        | HwAccelBackend::Dxva2
-        | HwAccelBackend::Vaapi
-        | HwAccelBackend::Vdpau => Some(true),
     }
 }

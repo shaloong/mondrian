@@ -286,7 +286,7 @@ impl AudioProgramDeliveryRuntime {
         self.runtime.requires_state_entry()
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, windows))]
     pub(crate) fn submitted_window_for_test(&self) -> Option<(AudioContinuityEpoch, i64)> {
         self.submitted_window.map(|cursor| (cursor.epoch, cursor.next_start_sample))
     }

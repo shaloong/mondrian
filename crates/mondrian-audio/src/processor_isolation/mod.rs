@@ -55,7 +55,7 @@ mod worker;
 
 #[cfg(test)]
 mod tests;
-#[cfg(test)]
+#[cfg(all(test, windows))]
 pub(crate) use tests::vst3_sidechain_snapshot;
 
 use crate::{
@@ -416,7 +416,7 @@ impl IsolatedAudioProcessorResolver {
     }
     // Existing create seam applies only to the actual retained Ready owner.
     // A single-occurrence test owns the one-shot witness, not a global switch.
-    #[cfg(test)]
+    #[cfg(all(test, windows))]
     pub(crate) fn discard_next_seed_commit_reply_for_test(
         &mut self,
         observed: Arc<std::sync::atomic::AtomicBool>,

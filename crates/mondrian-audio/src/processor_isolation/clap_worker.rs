@@ -5556,11 +5556,9 @@ mod tests {
             if self.0.case == 13
                 && self.0.initial_oracle.load(TestOrdering::SeqCst) == 3
                 && !self.0.initial_query_notified.swap(true, TestOrdering::SeqCst)
+                && let Some(params) = self.1.get_extension::<clack_extensions::params::HostParams>()
             {
-                if let Some(params) = self.1.get_extension::<clack_extensions::params::HostParams>()
-                {
-                    params.rescan(&self.1, clack_extensions::params::ParamRescanFlags::TEXT);
-                }
+                params.rescan(&self.1, clack_extensions::params::ParamRescanFlags::TEXT);
             }
             [ClapId::new(1), ClapId::new(2)]
                 .iter()
@@ -5632,7 +5630,7 @@ mod tests {
             if matches!(CASE, 8..=10 | 12 | 13) {
                 builder.register::<PluginState>();
             }
-            if matches!(CASE, 11 | 12 | 13) {
+            if matches!(CASE, 11..=13) {
                 builder.register::<PluginParams>();
             }
         }
@@ -5837,12 +5835,11 @@ mod tests {
             _config: PluginConfig,
         ) -> Result<Self, PluginError> {
             shared.check(ACTIVATE, false);
-            if CASE == 11 {
-                if let Some(params) =
+            if CASE == 11
+                && let Some(params) =
                     shared.host.get_extension::<clack_extensions::params::HostParams>()
-                {
-                    params.request_flush(&shared.host);
-                }
+            {
+                params.request_flush(&shared.host);
             }
             LIFECYCLE_AUDITS[CASE].activations.fetch_add(1, TestOrdering::SeqCst);
             shared.active.store(true, TestOrdering::SeqCst);

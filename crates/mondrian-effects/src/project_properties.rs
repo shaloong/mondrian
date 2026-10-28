@@ -188,7 +188,7 @@ mod tests {
         )
         .unwrap();
         PreparedEffectProgram::prepare_hierarchical_with_frame_context(
-            &[effect.clone()],
+            std::slice::from_ref(effect),
             &[],
             &[],
             &[],
@@ -288,7 +288,7 @@ mod tests {
         missing.params = serde_json::json!({});
         assert!(prepare(&missing, geometry(3, 2)).is_err());
         assert!(PreparedEffectProgram::prepare(
-            &[first.clone()],
+            std::slice::from_ref(&first),
             &[],
             WorkingColorSpace::LinearRec709
         )

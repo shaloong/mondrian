@@ -38,14 +38,14 @@ fn idle_state_entry_work(
 ) -> NativeAudioAuthorWork {
     // Model the already settled App latch only. The real Media slot below is
     // installed/cleared by its public API; this creates no native permission.
-    NativeAudioAuthorWork::Single(NativeAudioSingleAuthorWork {
+    NativeAudioAuthorWork::Single(Box::new(NativeAudioSingleAuthorWork {
         session_id: state.authoring_session_id().unwrap(),
         sequence_id: state.active_sequence().unwrap().id,
         renderer: Arc::downgrade(renderer),
         gesture: None,
         outstanding: None,
         state_entry_accepted: true,
-    })
+    }))
 }
 
 #[test]
