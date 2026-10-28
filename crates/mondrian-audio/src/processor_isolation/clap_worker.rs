@@ -109,7 +109,7 @@ impl ClapHostShared {
     /// the previous mark. Nested markers preserve the enclosing role; they do
     /// not detect native processor reentry.
     pub(super) fn enter_audio_thread(&self) -> ClapAudioThreadGuard<'_> {
-        self.audio_thread.enter(self.main_thread)
+        self.audio_thread.enter()
     }
 
     pub(super) fn service_callbacks(
@@ -156,7 +156,7 @@ impl HostThreadCheckImpl for ClapHostShared {
     }
 
     fn is_audio_thread(&self) -> bool {
-        self.audio_thread.is_current(self.is_main_thread())
+        self.audio_thread.is_current()
     }
 }
 

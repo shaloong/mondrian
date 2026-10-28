@@ -2601,6 +2601,7 @@ dependencies = [
  "clack-plugin",
  "clap-sys",
  "crossbeam-queue",
+ "libc",
  "libloading",
  "memmap2",
  "mondrian-audio-scheduling",

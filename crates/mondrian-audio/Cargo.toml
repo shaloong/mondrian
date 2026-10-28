@@ -27,6 +27,10 @@ clack-host.workspace = true
 clack-extensions.workspace = true
 vst3-host.workspace = true
 
+[target.'cfg(unix)'.dependencies]
+# Actual pthread identity for the scoped CLAP audio role; already used by the workspace.
+libc = "0.2"
+
 [dev-dependencies]
 crossbeam-queue.workspace = true
 libloading.workspace = true
