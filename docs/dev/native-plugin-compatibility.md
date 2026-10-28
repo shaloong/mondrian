@@ -114,6 +114,13 @@ The table describes implementation boundaries. Qualification below states the te
 
 ## Current qualification summary (2026-10-28)
 
+Behavioral cases explicitly choose their relevant inputs; only default-value
+tests assert project defaults. Resolve frame/sample targets from the authored
+timebase with the canonical exact conversion, while keeping PCM oracles
+independent of produced output. Quantized clock observations must declare their
+representation uncertainty; do not alter production guards to accept false
+zero-uncertainty test data.
+
 CLAP input reconfiguration has finite **Verified** installed-width qualification:
 Windows x64, owned modes19..22, Offline/48k/Stereo/block4/latency3, stable native
 IDs/count/order, Main/output/parameter/Note contracts unchanged. Mono/Stereo detector
@@ -306,6 +313,23 @@ exit0 and settled original Job budgets. Only tests changed for this extension;
 the normal Product from69f05fc1 is reused with identical production sources.
 GUI, complex or
 larger states, arbitrary DSP-history snapshots and broader platforms remain open.
+
+The [real App transport case](../../crates/mondrian-app/src/app/audio_rendering/tests/playing_host_fader_continuity/zam_transport.rs)
+now passes four Windows48k/stereo/Realtime-setup cases: explicit24 and
+30000/1001 fps crossed with native-owned12dB and Host Some6dB. Public Play,
+Pause/Resume and two authored seek targets drive the original App/Media queues;
+all current FIFO samples and actual software consumption match an independent,
+position-dependent Float32 gain oracle within two Float32 epsilons. Initial
+AudioDevice handoff, zero substitution/recovery/underrun, unchanged author
+data/history and complete original2s cleanup pass; stderr0, exit0 and settled Job.
+The test uses128-frame processing and4096-frame watermark inputs, supports a
+partial final callback, derives positions from each project timebase and uses
+the public paused position as Resume input. It does not pin a default FPS or a
+wall-clock-dependent Pause frame. Integer-nanosecond timestamps round cumulative
+sample boundaries once and declare their one-nanosecond quantization bound via
+the existing adapter contract. Production sources/guards remain unchanged.
+The deterministic software callback and existing headless video-ready seam do
+not qualify a physical DAC, Viewer/GPU presentation, long runs or realtime cost.
 
 Retained definition revalidation queries get_info only, without querying or
 clamping transient meter values. Full cold/value and author projection checks
