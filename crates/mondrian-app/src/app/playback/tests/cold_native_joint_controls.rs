@@ -68,6 +68,8 @@ fn prepare_app_native_control_with_initializer(
         descriptor.class_id == expected_class && descriptor.name == expected_name
     }));
     let config = mondrian_media::AudioPlaybackConfig {
+        sample_rate: 48_000,
+        channel_layout: AudioChannelLayout::Stereo,
         chunk_frames: 4,
         preroll_frames: 4,
         high_watermark_frames: 8,
@@ -136,6 +138,8 @@ fn prepare_app_clap_editor_control_with_initializer(
     assert_eq!(descriptors[0].plugin_id, PLUGIN);
     assert_eq!(descriptors[0].name, "Mondrian Sample Gain Fixture");
     let config = mondrian_media::AudioPlaybackConfig {
+        sample_rate: 48_000,
+        channel_layout: AudioChannelLayout::Stereo,
         chunk_frames: 4,
         preroll_frames: 4,
         high_watermark_frames: 8,
@@ -202,10 +206,10 @@ fn prepare_app_native_control_with_instance(
     let directory = tempfile::tempdir().expect("actual Project Asset Library");
     let library = AssetLibrary::open(directory.path().join("library")).unwrap();
     let mut sequence = Sequence::new("App cold owned VST3 closure");
-    assert_eq!(
-        sequence.settings.audio_channel_layout,
-        config.channel_layout
-    );
+    // The software output and native fixture define these inputs. Sequence
+    // defaults are not the behavior under test.
+    sequence.settings.audio_sample_rate = config.sample_rate;
+    sequence.settings.audio_channel_layout = config.channel_layout;
     sequence.audio_program.outputs[0].strip.pre_fader.processors.push(instance);
     initialize(&mut sequence, &library, directory.path());
     state.test_set_sequence(Some(sequence));

@@ -100,6 +100,8 @@ fn project_roundtrip(host_override: Option<f64>) {
     let installed = clap.install_library(path("MONDRIAN_CLAP_MIXED_VENDOR_TEST_PLUGIN")).unwrap();
     assert!(installed.iter().any(|descriptor| descriptor.plugin_id == PLUGIN));
     let config = mondrian_media::AudioPlaybackConfig {
+        sample_rate: 48_000,
+        channel_layout: AudioChannelLayout::Stereo,
         chunk_frames: 4,
         preroll_frames: 4,
         high_watermark_frames: 8,
