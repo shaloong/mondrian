@@ -289,7 +289,11 @@ fn observe_pcm(
             })
             .collect();
         let context = AudioProcessorProcessContext::new(
-            AudioRenderRequest { transport_activity: None, start_sample: start, frames },
+            AudioRenderRequest {
+                transport_activity: None,
+                start_sample: start,
+                frames,
+            },
             AudioSampleRate::new(48_000).expect("actual sample grid"),
             AudioChannelLayout::Stereo,
             AudioProcessingMode::Offline,

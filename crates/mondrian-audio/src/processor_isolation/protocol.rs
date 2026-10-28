@@ -271,8 +271,10 @@ impl WorkerCommand {
     pub(super) fn write_to(self, writer: &mut impl Write) -> io::Result<()> {
         validate_note_count(self.kind, self.note_count)?;
         if self.kind != CommandKind::Process && self.transport_activity.is_some() {
-            return Err(io::Error::new(io::ErrorKind::InvalidData,
-                "transport activity belongs only to a signal Process command"));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "transport activity belongs only to a signal Process command",
+            ));
         }
         let kind = match self.kind {
             CommandKind::EnterState => 1_u32,
@@ -351,7 +353,9 @@ impl WorkerCommand {
             }
         };
         let command = Self {
-            transport_activity: match u32::from_le_bytes(bytes[8..12].try_into().map_err(invalid_slice)?) {
+            transport_activity: match u32::from_le_bytes(
+                bytes[8..12].try_into().map_err(invalid_slice)?,
+            ) {
                 17 => Some(mondrian_core::TimelineTransportActivity::Stopped),
                 18 => Some(mondrian_core::TimelineTransportActivity::Playing),
                 _ => None,

@@ -548,7 +548,10 @@ fn installed_clap_gain_matches_realtime_and_offline_signal_contracts() {
         for &frames in block_sizes {
             let mut block = vec![0.0_f32; frames * 2];
             runtime
-                .render_into(AudioRenderRequest { transport_activity: None, start_sample, frames }, &mut block)
+                .render_into(
+                    AudioRenderRequest { transport_activity: None, start_sample, frames },
+                    &mut block,
+                )
                 .expect("render CLAP block");
             rendered.extend(block);
             start_sample += frames as i64;
@@ -1105,7 +1108,11 @@ fn typed_sidechain_retains_detector_only_track_and_supplies_auxiliary_pcm() {
     let output = render_audio(
         plan,
         &mut source,
-        AudioRenderRequest { transport_activity: None, start_sample: 0, frames: 4 },
+        AudioRenderRequest {
+            transport_activity: None,
+            start_sample: 0,
+            frames: 4,
+        },
     )
     .expect("sidechain render");
     assert_eq!(output, vec![0.75; 4]);
@@ -1158,14 +1165,22 @@ fn clip_static_gain_and_edge_fades_execute_identically_on_scalar_and_runtime_bac
     let scalar_pcm = render_audio(
         scalar,
         &mut scalar_source,
-        AudioRenderRequest { transport_activity: None, start_sample: 0, frames: 8 },
+        AudioRenderRequest {
+            transport_activity: None,
+            start_sample: 0,
+            frames: 8,
+        },
     )
     .expect("scalar Clip edit");
     let mut runtime_source = RampSource::default();
     let runtime_pcm = render_audio(
         runtime,
         &mut runtime_source,
-        AudioRenderRequest { transport_activity: None, start_sample: 0, frames: 8 },
+        AudioRenderRequest {
+            transport_activity: None,
+            start_sample: 0,
+            frames: 8,
+        },
     )
     .expect("runtime Clip edit");
 
@@ -1183,7 +1198,11 @@ fn source_adapter_is_crossed_once_per_contribution_block() {
     let pcm = render_audio(
         prepared(&sequence, 4),
         &mut source,
-        AudioRenderRequest { transport_activity: None, start_sample: 0, frames: 4 },
+        AudioRenderRequest {
+            transport_activity: None,
+            start_sample: 0,
+            frames: 4,
+        },
     )
     .expect("block render");
 
@@ -1223,7 +1242,11 @@ fn session_executes_preallocated_contribution_and_route_compensation_block_invar
     let unentered = whole_session
         .render_into(
             &mut whole_source,
-            AudioRenderRequest { transport_activity: None, start_sample: 0, frames: 12 },
+            AudioRenderRequest {
+                transport_activity: None,
+                start_sample: 0,
+                frames: 12,
+            },
             &mut whole,
         )
         .expect_err("stateful Session must reject unentered execution");
@@ -1239,7 +1262,11 @@ fn session_executes_preallocated_contribution_and_route_compensation_block_invar
     whole_session
         .render_into(
             &mut whole_source,
-            AudioRenderRequest { transport_activity: None, start_sample: 0, frames: 12 },
+            AudioRenderRequest {
+                transport_activity: None,
+                start_sample: 0,
+                frames: 12,
+            },
             &mut whole,
         )
         .expect("whole render");
@@ -1292,7 +1319,11 @@ fn session_executes_preallocated_contribution_and_route_compensation_block_invar
     split_session
         .render_into(
             &mut split_source,
-            AudioRenderRequest { transport_activity: None, start_sample: 4, frames: 2 },
+            AudioRenderRequest {
+                transport_activity: None,
+                start_sample: 4,
+                frames: 2,
+            },
             &mut reset_output,
         )
         .expect("reset render");
@@ -1305,7 +1336,11 @@ fn session_executes_preallocated_contribution_and_route_compensation_block_invar
     assert!(matches!(
         split_session.render_into(
             &mut FailingSource,
-            AudioRenderRequest { transport_activity: None, start_sample: 6, frames: 2 },
+            AudioRenderRequest {
+                transport_activity: None,
+                start_sample: 6,
+                frames: 2
+            },
             &mut [0.0; 2],
         ),
         Err(AudioExecutionError::SourceUnavailable(_))
@@ -1314,7 +1349,11 @@ fn session_executes_preallocated_contribution_and_route_compensation_block_invar
         split_session
             .render_into(
                 &mut split_source,
-                AudioRenderRequest { transport_activity: None, start_sample: 6, frames: 2 },
+                AudioRenderRequest {
+                    transport_activity: None,
+                    start_sample: 6,
+                    frames: 2
+                },
                 &mut [0.0; 2],
             )
             .expect_err("partially advanced epoch must stay poisoned"),
@@ -1333,7 +1372,11 @@ fn prepared_source_schedule_preserves_fractional_forward_retime() {
     let pcm = render_audio(
         prepared(&sequence, 4),
         &mut source,
-        AudioRenderRequest { transport_activity: None, start_sample: 0, frames: 4 },
+        AudioRenderRequest {
+            transport_activity: None,
+            start_sample: 0,
+            frames: 4,
+        },
     )
     .expect("fractional forward render");
 
@@ -1356,7 +1399,11 @@ fn prepared_source_schedule_preserves_fractional_reverse_retime() {
     let pcm = render_audio(
         prepared(&sequence, 4),
         &mut source,
-        AudioRenderRequest { transport_activity: None, start_sample: 0, frames: 4 },
+        AudioRenderRequest {
+            transport_activity: None,
+            start_sample: 0,
+            frames: 4,
+        },
     )
     .expect("fractional reverse render");
 
@@ -1468,7 +1515,11 @@ fn clip_track_bus_output_math_is_unclipped_and_block_invariant() {
     meter_session
         .render_into(
             &mut source,
-            AudioRenderRequest { transport_activity: None, start_sample: 0, frames: 4 },
+            AudioRenderRequest {
+                transport_activity: None,
+                start_sample: 0,
+                frames: 4,
+            },
             &mut meter_pcm,
         )
         .expect("metered graph");
@@ -1490,19 +1541,31 @@ fn clip_track_bus_output_math_is_unclipped_and_block_invariant() {
     let whole = render_audio(
         Arc::clone(&plan),
         &mut source,
-        AudioRenderRequest { transport_activity: None, start_sample: 0, frames: 4 },
+        AudioRenderRequest {
+            transport_activity: None,
+            start_sample: 0,
+            frames: 4,
+        },
     )
     .expect("whole");
     let first = render_audio(
         Arc::clone(&plan),
         &mut source,
-        AudioRenderRequest { transport_activity: None, start_sample: 0, frames: 2 },
+        AudioRenderRequest {
+            transport_activity: None,
+            start_sample: 0,
+            frames: 2,
+        },
     )
     .expect("first");
     let second = render_audio(
         plan,
         &mut source,
-        AudioRenderRequest { transport_activity: None, start_sample: 2, frames: 2 },
+        AudioRenderRequest {
+            transport_activity: None,
+            start_sample: 2,
+            frames: 2,
+        },
     )
     .expect("second");
     assert_eq!(whole, [first, second].concat());
@@ -1562,14 +1625,22 @@ fn parallel_route_is_a_sample_accurate_block_invariant_send() {
     let runtime = render_audio(
         runtime_plan,
         &mut runtime_source,
-        AudioRenderRequest { transport_activity: None, start_sample: 0, frames: 4 },
+        AudioRenderRequest {
+            transport_activity: None,
+            start_sample: 0,
+            frames: 4,
+        },
     )
     .expect("runtime send");
     let mut scalar_source = RampSource::default();
     let scalar = render_audio(
         scalar_plan,
         &mut scalar_source,
-        AudioRenderRequest { transport_activity: None, start_sample: 0, frames: 4 },
+        AudioRenderRequest {
+            transport_activity: None,
+            start_sample: 0,
+            frames: 4,
+        },
     )
     .expect("scalar send");
 
@@ -1587,13 +1658,21 @@ fn parallel_route_is_a_sample_accurate_block_invariant_send() {
     let first = render_audio(
         Arc::clone(&split_plan),
         &mut split_source,
-        AudioRenderRequest { transport_activity: None, start_sample: 0, frames: 2 },
+        AudioRenderRequest {
+            transport_activity: None,
+            start_sample: 0,
+            frames: 2,
+        },
     )
     .expect("first partition");
     let second = render_audio(
         split_plan,
         &mut split_source,
-        AudioRenderRequest { transport_activity: None, start_sample: 2, frames: 2 },
+        AudioRenderRequest {
+            transport_activity: None,
+            start_sample: 2,
+            frames: 2,
+        },
     )
     .expect("second partition");
     assert_eq!([first, second].concat(), runtime);
@@ -1614,7 +1693,11 @@ fn disabled_route_is_absent_from_the_compiled_signal_closure() {
     let rendered = render_audio(
         plan,
         &mut source,
-        AudioRenderRequest { transport_activity: None, start_sample: 0, frames: 4 },
+        AudioRenderRequest {
+            transport_activity: None,
+            start_sample: 0,
+            frames: 4,
+        },
     )
     .expect("disabled Route");
     assert_eq!(rendered, vec![0.0; 4]);
@@ -1649,7 +1732,11 @@ fn prepared_automation_event_spans_preserve_hold_bezier_and_block_partitioning()
     let whole = render_audio(
         Arc::clone(&plan),
         &mut source,
-        AudioRenderRequest { transport_activity: None, start_sample: 0, frames: 6 },
+        AudioRenderRequest {
+            transport_activity: None,
+            start_sample: 0,
+            frames: 6,
+        },
     )
     .expect("whole prepared automation render");
     let mut partitioned = Vec::new();
@@ -1679,7 +1766,11 @@ fn prepared_automation_event_spans_preserve_hold_bezier_and_block_partitioning()
     session
         .render_into(
             &mut source,
-            AudioRenderRequest { transport_activity: None, start_sample: 0, frames: capacity.max_block_frames },
+            AudioRenderRequest {
+                transport_activity: None,
+                start_sample: 0,
+                frames: capacity.max_block_frames,
+            },
             &mut destination,
         )
         .expect("render within fixed allocation envelope");
@@ -1712,7 +1803,14 @@ fn processor_parameter_batches_are_sample_accurate_and_preallocated() {
     assert_eq!(session.capacity().meter_channel_state_count, 4);
 
     let lanes = session
-        .processor_parameter_events_for_test(0, AudioRenderRequest { transport_activity: None, start_sample: 0, frames: 4 })
+        .processor_parameter_events_for_test(
+            0,
+            AudioRenderRequest {
+                transport_activity: None,
+                start_sample: 0,
+                frames: 4,
+            },
+        )
         .expect("parameter batch");
     assert_eq!(lanes.len(), 1);
     assert_eq!(lanes[0].0.as_str(), GAIN_DB_PARAMETER_ID);
@@ -1809,13 +1907,21 @@ fn scalar_reference_and_runtime_vectorized_schedule_are_pcm_equivalent() {
     let scalar_pcm = render_audio(
         scalar,
         &mut scalar_source,
-        AudioRenderRequest { transport_activity: None, start_sample: 0, frames: 257 },
+        AudioRenderRequest {
+            transport_activity: None,
+            start_sample: 0,
+            frames: 257,
+        },
     )
     .expect("scalar render");
     let vectorized_pcm = render_audio(
         vectorized,
         &mut vectorized_source,
-        AudioRenderRequest { transport_activity: None, start_sample: 0, frames: 257 },
+        AudioRenderRequest {
+            transport_activity: None,
+            start_sample: 0,
+            frames: 257,
+        },
     )
     .expect("vectorized render");
     assert_eq!(scalar_pcm, vectorized_pcm);
@@ -1840,7 +1946,11 @@ fn track_mute_closes_post_mute_path_before_dependency_binding() {
     let pcm = render_audio(
         prepared(&sequence, 4),
         &mut source,
-        AudioRenderRequest { transport_activity: None, start_sample: 0, frames: 4 },
+        AudioRenderRequest {
+            transport_activity: None,
+            start_sample: 0,
+            frames: 4,
+        },
     )
     .expect("muted render");
     assert_eq!(pcm, vec![0.0; 4]);
@@ -1864,7 +1974,11 @@ fn audio_track_visibility_does_not_gate_the_program_signal() {
     let pcm = render_audio(
         prepared(&sequence, 4),
         &mut source,
-        AudioRenderRequest { transport_activity: None, start_sample: 0, frames: 4 },
+        AudioRenderRequest {
+            transport_activity: None,
+            start_sample: 0,
+            frames: 4,
+        },
     )
     .expect("visibility-independent render");
     assert_eq!(pcm, vec![1.0, 2.0, 3.0, 4.0]);
@@ -1894,7 +2008,11 @@ fn muted_track_pre_mute_sends_retain_the_source_execution_branch() {
         let pcm = render_audio(
             prepared(&sequence, 4),
             &mut source,
-            AudioRenderRequest { transport_activity: None, start_sample: 0, frames: 4 },
+            AudioRenderRequest {
+                transport_activity: None,
+                start_sample: 0,
+                frames: 4,
+            },
         )
         .expect("pre-mute send render");
         assert_eq!(pcm, vec![1.0, 2.0, 3.0, 4.0]);
@@ -2118,7 +2236,11 @@ fn built_in_sample_delay_preserves_audible_delay_state_and_partitioned_pcm() {
     whole
         .render_into(
             &mut source,
-            AudioRenderRequest { transport_activity: None, start_sample: 0, frames: 5 },
+            AudioRenderRequest {
+                transport_activity: None,
+                start_sample: 0,
+                frames: 5,
+            },
             &mut whole_pcm,
         )
         .expect("whole hosted block");
@@ -2145,14 +2267,22 @@ fn built_in_sample_delay_preserves_audible_delay_state_and_partitioned_pcm() {
     split
         .render_into(
             &mut split_source,
-            AudioRenderRequest { transport_activity: None, start_sample: 0, frames: 2 },
+            AudioRenderRequest {
+                transport_activity: None,
+                start_sample: 0,
+                frames: 2,
+            },
             &mut first,
         )
         .expect("first partition");
     split
         .render_into(
             &mut split_source,
-            AudioRenderRequest { transport_activity: None, start_sample: 2, frames: 3 },
+            AudioRenderRequest {
+                transport_activity: None,
+                start_sample: 2,
+                frames: 3,
+            },
             &mut second,
         )
         .expect("second partition");
@@ -2169,7 +2299,11 @@ fn built_in_sample_delay_preserves_audible_delay_state_and_partitioned_pcm() {
     split
         .render_into(
             &mut split_source,
-            AudioRenderRequest { transport_activity: None, start_sample: 0, frames: 2 },
+            AudioRenderRequest {
+                transport_activity: None,
+                start_sample: 0,
+                frames: 2,
+            },
             &mut after_seek,
         )
         .expect("render after seek");
@@ -2212,7 +2346,11 @@ fn contribution_processor_activates_lazily_and_flushes_its_declared_tail() {
     session
         .render_into(
             &mut source,
-            AudioRenderRequest { transport_activity: None, start_sample: 4, frames: 4 },
+            AudioRenderRequest {
+                transport_activity: None,
+                start_sample: 4,
+                frames: 4,
+            },
             &mut active_and_tail,
         )
         .expect("active interval and declared tail");
@@ -2229,7 +2367,11 @@ fn contribution_processor_activates_lazily_and_flushes_its_declared_tail() {
     session
         .render_into(
             &mut source,
-            AudioRenderRequest { transport_activity: None, start_sample: 5, frames: 3 },
+            AudioRenderRequest {
+                transport_activity: None,
+                start_sample: 5,
+                frames: 3,
+            },
             &mut seek_output,
         )
         .expect("cold Contribution-local entry");
@@ -2249,7 +2391,11 @@ fn contribution_processor_activates_lazily_and_flushes_its_declared_tail() {
     whole
         .render_into(
             &mut whole_source,
-            AudioRenderRequest { transport_activity: None, start_sample: 0, frames: 4 },
+            AudioRenderRequest {
+                transport_activity: None,
+                start_sample: 0,
+                frames: 4,
+            },
             &mut whole_pcm,
         )
         .expect("whole interval");
@@ -2330,7 +2476,11 @@ fn hosted_algorithmic_latency_drives_pdc_and_partitioned_pcm() {
     whole
         .render_into(
             &mut source,
-            AudioRenderRequest { transport_activity: None, start_sample: 0, frames: 5 },
+            AudioRenderRequest {
+                transport_activity: None,
+                start_sample: 0,
+                frames: 5,
+            },
             &mut whole_pcm,
         )
         .expect("whole block");
@@ -2349,14 +2499,22 @@ fn hosted_algorithmic_latency_drives_pdc_and_partitioned_pcm() {
     split
         .render_into(
             &mut split_source,
-            AudioRenderRequest { transport_activity: None, start_sample: 0, frames: 2 },
+            AudioRenderRequest {
+                transport_activity: None,
+                start_sample: 0,
+                frames: 2,
+            },
             &mut first,
         )
         .expect("first partition");
     split
         .render_into(
             &mut split_source,
-            AudioRenderRequest { transport_activity: None, start_sample: 2, frames: 3 },
+            AudioRenderRequest {
+                transport_activity: None,
+                start_sample: 2,
+                frames: 3,
+            },
             &mut second,
         )
         .expect("second partition");
@@ -2407,7 +2565,11 @@ fn hosted_algorithmic_latency_drives_pdc_and_partitioned_pcm() {
     long_session
         .render_into(
             &mut long_source,
-            AudioRenderRequest { transport_activity: None, start_sample: 0, frames: 3 },
+            AudioRenderRequest {
+                transport_activity: None,
+                start_sample: 0,
+                frames: 3,
+            },
             &mut aligned,
         )
         .expect("lookahead larger than max block");
@@ -2490,7 +2652,14 @@ fn algorithmic_latency_preserves_signal_time_for_every_downstream_automation_sta
 
     let mut session = AudioRenderSession::new(plan).expect("Session");
     let gain_events = session
-        .processor_parameter_events_for_test(1, AudioRenderRequest { transport_activity: None, start_sample: 2, frames: 3 })
+        .processor_parameter_events_for_test(
+            1,
+            AudioRenderRequest {
+                transport_activity: None,
+                start_sample: 2,
+                frames: 3,
+            },
+        )
         .expect("stage-local Gain events");
     assert_eq!(
         gain_events[0].1.iter().map(|event| event.value).collect::<Vec<_>>(),
@@ -2507,7 +2676,11 @@ fn algorithmic_latency_preserves_signal_time_for_every_downstream_automation_sta
     session
         .render_into(
             &mut source,
-            AudioRenderRequest { transport_activity: None, start_sample: 0, frames: 5 },
+            AudioRenderRequest {
+                transport_activity: None,
+                start_sample: 0,
+                frames: 5,
+            },
             &mut pcm,
         )
         .expect("Timeline-aligned render");
@@ -2725,7 +2898,11 @@ fn failed_processor_state_entry_poisons_the_new_epoch_before_partial_reset() {
     assert_eq!(
         session.render_into(
             &mut source,
-            AudioRenderRequest { transport_activity: None, start_sample: 0, frames: 4 },
+            AudioRenderRequest {
+                transport_activity: None,
+                start_sample: 0,
+                frames: 4
+            },
             &mut pcm,
         ),
         Err(AudioExecutionError::ContinuityPoisoned(first_epoch))
@@ -2744,7 +2921,11 @@ fn failed_processor_state_entry_poisons_the_new_epoch_before_partial_reset() {
     session
         .render_into(
             &mut source,
-            AudioRenderRequest { transport_activity: None, start_sample: 0, frames: 4 },
+            AudioRenderRequest {
+                transport_activity: None,
+                start_sample: 0,
+                frames: 4,
+            },
             &mut pcm,
         )
         .expect("recovered render");
@@ -2770,7 +2951,11 @@ fn processor_panic_is_contained_and_poisons_stateful_continuity() {
     assert!(matches!(
         session.render_into(
             &mut source,
-            AudioRenderRequest { transport_activity: None, start_sample: 0, frames: 4 },
+            AudioRenderRequest {
+                transport_activity: None,
+                start_sample: 0,
+                frames: 4
+            },
             &mut pcm,
         ),
         Err(AudioExecutionError::ProcessorHost(
@@ -2780,7 +2965,11 @@ fn processor_panic_is_contained_and_poisons_stateful_continuity() {
     assert_eq!(
         session.render_into(
             &mut source,
-            AudioRenderRequest { transport_activity: None, start_sample: 0, frames: 4 },
+            AudioRenderRequest {
+                transport_activity: None,
+                start_sample: 0,
+                frames: 4
+            },
             &mut pcm,
         ),
         Err(AudioExecutionError::ContinuityPoisoned(epoch))
@@ -2803,7 +2992,11 @@ fn failed_stateless_processor_instance_cannot_be_reused() {
     assert!(matches!(
         session.render_into(
             &mut source,
-            AudioRenderRequest { transport_activity: None, start_sample: 0, frames: 4 },
+            AudioRenderRequest {
+                transport_activity: None,
+                start_sample: 0,
+                frames: 4
+            },
             &mut pcm,
         ),
         Err(AudioExecutionError::ProcessorHost(
@@ -2813,7 +3006,11 @@ fn failed_stateless_processor_instance_cannot_be_reused() {
     assert_eq!(
         session.render_into(
             &mut source,
-            AudioRenderRequest { transport_activity: None, start_sample: 0, frames: 4 },
+            AudioRenderRequest {
+                transport_activity: None,
+                start_sample: 0,
+                frames: 4
+            },
             &mut pcm,
         ),
         Err(AudioExecutionError::ProcessorHost(
@@ -2886,7 +3083,14 @@ fn nested_public_output_uses_an_independent_recursive_session() {
     assert_eq!(runtime.public_output_lookahead_frames(), 0);
     let mut pcm = vec![0.0; 4];
     runtime
-        .render_into(AudioRenderRequest { transport_activity: None, start_sample: 0, frames: 4 }, &mut pcm)
+        .render_into(
+            AudioRenderRequest {
+                transport_activity: None,
+                start_sample: 0,
+                frames: 4,
+            },
+            &mut pcm,
+        )
         .expect("nested render");
     assert_eq!(pcm, vec![1.0, 2.0, 3.0, 4.0]);
 }
@@ -2942,7 +3146,14 @@ fn range_scoped_runtime_binds_only_audible_intersecting_sources() {
     );
     let mut pcm = [0.0; 4];
     runtime
-        .render_into(AudioRenderRequest { transport_activity: None, start_sample: 0, frames: 4 }, &mut pcm)
+        .render_into(
+            AudioRenderRequest {
+                transport_activity: None,
+                start_sample: 0,
+                frames: 4,
+            },
+            &mut pcm,
+        )
         .expect("selected render");
     assert_eq!(pcm, [1.0, 2.0, 3.0, 4.0]);
 }
@@ -2974,7 +3185,14 @@ fn whole_program_runtime_does_not_bind_a_mute_gated_post_mute_source() {
     assert!(resolver.resolved_assets.lock().expect("recorded sources").is_empty());
     let mut pcm = [1.0; 4];
     runtime
-        .render_into(AudioRenderRequest { transport_activity: None, start_sample: 0, frames: 4 }, &mut pcm)
+        .render_into(
+            AudioRenderRequest {
+                transport_activity: None,
+                start_sample: 0,
+                frames: 4,
+            },
+            &mut pcm,
+        )
         .expect("silent Runtime");
     assert_eq!(pcm, [0.0; 4]);
 }
@@ -3020,7 +3238,14 @@ fn root_audition_compiles_only_soloed_tracks_and_meters_the_executed_closure() {
     .expect("soloed Runtime");
     let mut pcm = [0.0; 4];
     runtime
-        .render_into(AudioRenderRequest { transport_activity: None, start_sample: 0, frames: 4 }, &mut pcm)
+        .render_into(
+            AudioRenderRequest {
+                transport_activity: None,
+                start_sample: 0,
+                frames: 4,
+            },
+            &mut pcm,
+        )
         .expect("soloed render");
 
     assert_eq!(pcm, [1.0, 2.0, 3.0, 4.0]);
@@ -3079,7 +3304,14 @@ fn root_audition_does_not_leak_parent_track_identity_into_nested_programs() {
     .expect("nested solo Runtime");
     let mut pcm = [0.0; 4];
     runtime
-        .render_into(AudioRenderRequest { transport_activity: None, start_sample: 0, frames: 4 }, &mut pcm)
+        .render_into(
+            AudioRenderRequest {
+                transport_activity: None,
+                start_sample: 0,
+                frames: 4,
+            },
+            &mut pcm,
+        )
         .expect("nested solo render");
 
     assert_eq!(pcm, [1.0, 2.0, 3.0, 4.0]);
@@ -3225,7 +3457,14 @@ fn nested_public_output_hides_child_lookahead_without_double_compensation() {
         .expect("root entry");
     let mut pcm = [0.0; 4];
     runtime
-        .render_into(AudioRenderRequest { transport_activity: None, start_sample: 0, frames: 4 }, &mut pcm)
+        .render_into(
+            AudioRenderRequest {
+                transport_activity: None,
+                start_sample: 0,
+                frames: 4,
+            },
+            &mut pcm,
+        )
         .expect("nested normalized render");
     assert_eq!(pcm, [2.0, 4.0, 6.0, 8.0]);
 }
@@ -3250,7 +3489,14 @@ fn standard_component_mapping_converts_native_media_before_sequence_processing()
         .expect("mono source mapped to stereo Sequence");
     let mut pcm = vec![0.0; 6];
     runtime
-        .render_into(AudioRenderRequest { transport_activity: None, start_sample: 0, frames: 3 }, &mut pcm)
+        .render_into(
+            AudioRenderRequest {
+                transport_activity: None,
+                start_sample: 0,
+                frames: 3,
+            },
+            &mut pcm,
+        )
         .expect("mapped media render");
     assert_eq!(pcm, vec![1.0, 1.0, 2.0, 2.0, 3.0, 3.0]);
 }
@@ -3292,7 +3538,14 @@ fn explicit_component_matrix_executes_in_the_shared_prepared_schedule() {
             .expect("explicit matrix runtime");
     let mut pcm = vec![0.0; 4];
     runtime
-        .render_into(AudioRenderRequest { transport_activity: None, start_sample: 0, frames: 2 }, &mut pcm)
+        .render_into(
+            AudioRenderRequest {
+                transport_activity: None,
+                start_sample: 0,
+                frames: 2,
+            },
+            &mut pcm,
+        )
         .expect("explicit matrix render");
     assert_eq!(pcm, vec![-1.0, 1.0, -2.0, 2.0]);
 }
@@ -3328,7 +3581,14 @@ fn nested_output_uses_child_layout_then_parent_component_mapping() {
         .expect("child output mapped to parent layout");
     let mut pcm = vec![0.0; 4];
     runtime
-        .render_into(AudioRenderRequest { transport_activity: None, start_sample: 0, frames: 2 }, &mut pcm)
+        .render_into(
+            AudioRenderRequest {
+                transport_activity: None,
+                start_sample: 0,
+                frames: 2,
+            },
+            &mut pcm,
+        )
         .expect("nested mapped render");
     assert_eq!(pcm, vec![1.0, 1.0, 2.0, 2.0]);
 }
@@ -3372,7 +3632,14 @@ fn stateless_nested_runtime_preserves_fractional_reverse_mapping() {
         .expect("stateless recursive runtime");
     let mut pcm = vec![0.0; 4];
     runtime
-        .render_into(AudioRenderRequest { transport_activity: None, start_sample: 0, frames: 4 }, &mut pcm)
+        .render_into(
+            AudioRenderRequest {
+                transport_activity: None,
+                start_sample: 0,
+                frames: 4,
+            },
+            &mut pcm,
+        )
         .expect("stateless nested reverse render");
     // Source targets are 3, 2.75, 2.5, and 2.25 seconds. On the 2 Hz
     // child grid strict-predecessor lowering selects frames 5, 5, 4, 4;
@@ -3427,14 +3694,22 @@ fn stateful_nested_runtime_replays_forward_mapping_across_child_blocks() {
     let mut first = vec![0.0; 2];
     runtime
         .render_into(
-            AudioRenderRequest { transport_activity: None, start_sample: 0, frames: 2 },
+            AudioRenderRequest {
+                transport_activity: None,
+                start_sample: 0,
+                frames: 2,
+            },
             &mut first,
         )
         .expect("first stateful nested retime block");
     let mut second = vec![0.0; 2];
     runtime
         .render_into(
-            AudioRenderRequest { transport_activity: None, start_sample: 2, frames: 2 },
+            AudioRenderRequest {
+                transport_activity: None,
+                start_sample: 2,
+                frames: 2,
+            },
             &mut second,
         )
         .expect("second stateful nested retime block");
@@ -3487,7 +3762,11 @@ fn stateful_nested_runtime_rejects_reverse_state_evaluation() {
     let edit_id = root.audio_tracks[0].clips[0].audio_components[0].id;
     let error = runtime
         .render_into(
-            AudioRenderRequest { transport_activity: None, start_sample: 0, frames: 4 },
+            AudioRenderRequest {
+                transport_activity: None,
+                start_sample: 0,
+                frames: 4,
+            },
             &mut [0.0; 4],
         )
         .expect_err("generic stateful child must not pretend to execute backwards");
@@ -3538,7 +3817,11 @@ fn stateful_nested_runtime_reenters_after_root_discontinuity() {
     let mut first = vec![0.0; 2];
     runtime
         .render_into(
-            AudioRenderRequest { transport_activity: None, start_sample: 0, frames: 2 },
+            AudioRenderRequest {
+                transport_activity: None,
+                start_sample: 0,
+                frames: 2,
+            },
             &mut first,
         )
         .expect("first nested block");
@@ -3552,7 +3835,11 @@ fn stateful_nested_runtime_reenters_after_root_discontinuity() {
     let mut after_seek = vec![0.0; 2];
     runtime
         .render_into(
-            AudioRenderRequest { transport_activity: None, start_sample: 6, frames: 2 },
+            AudioRenderRequest {
+                transport_activity: None,
+                start_sample: 6,
+                frames: 2,
+            },
             &mut after_seek,
         )
         .expect("nested block after seek");
@@ -3699,7 +3986,11 @@ fn clip_balance_targets_semantic_front_pair_without_touching_surround_channels()
         let actual = render_audio(
             plan,
             &mut RampSource::default(),
-            AudioRenderRequest { transport_activity: None, start_sample: 0, frames: 1 },
+            AudioRenderRequest {
+                transport_activity: None,
+                start_sample: 0,
+                frames: 1,
+            },
         )
         .expect("rendered layout");
         assert_eq!(actual.len(), expected.len());
@@ -4047,7 +4338,11 @@ fn assert_late_sidechain_pdc(
                     session
                         .render_into(
                             &mut source,
-                            AudioRenderRequest { transport_activity: None, start_sample: position, frames },
+                            AudioRenderRequest {
+                                transport_activity: None,
+                                start_sample: position,
+                                frames,
+                            },
                             &mut block,
                         )
                         .expect("compensated block");
@@ -4208,7 +4503,14 @@ fn native_parameter_references_no_host_events_preserve_native_pcm_across_partiti
     );
     let mut session = AudioRenderSession::new(Arc::clone(&plan)).expect("Session");
     let batch = session
-        .processor_parameter_events_for_test(0, AudioRenderRequest { transport_activity: None, start_sample: 0, frames: 4 })
+        .processor_parameter_events_for_test(
+            0,
+            AudioRenderRequest {
+                transport_activity: None,
+                start_sample: 0,
+                frames: 4,
+            },
+        )
         .expect("real compiled batch");
     assert_eq!(batch.len(), 1);
     assert_eq!(batch[0].0, id);
@@ -4217,7 +4519,11 @@ fn native_parameter_references_no_host_events_preserve_native_pcm_across_partiti
     session
         .render_into(
             &mut RampSource::default(),
-            AudioRenderRequest { transport_activity: None, start_sample: 0, frames: 4 },
+            AudioRenderRequest {
+                transport_activity: None,
+                start_sample: 0,
+                frames: 4,
+            },
             &mut whole,
         )
         .expect("whole PCM");
@@ -4233,7 +4539,11 @@ fn native_parameter_references_no_host_events_preserve_native_pcm_across_partiti
         session
             .render_into(
                 &mut source,
-                AudioRenderRequest { transport_activity: None, start_sample: start, frames },
+                AudioRenderRequest {
+                    transport_activity: None,
+                    start_sample: start,
+                    frames,
+                },
                 &mut split[start as usize..start as usize + frames],
             )
             .expect("partitioned PCM");
@@ -4279,7 +4589,14 @@ fn native_parameter_references_same_contract_none_to_curve_uses_original_owner_t
     );
     let mut session = AudioRenderSession::new(next).expect("prepared Session");
     let lanes = session
-        .processor_parameter_events_for_test(0, AudioRenderRequest { transport_activity: None, start_sample: 0, frames: 3 })
+        .processor_parameter_events_for_test(
+            0,
+            AudioRenderRequest {
+                transport_activity: None,
+                start_sample: 0,
+                frames: 3,
+            },
+        )
         .expect("original Scope clock");
     assert_eq!(
         lanes[0].1.iter().map(|event| event.value).collect::<Vec<_>>(),
@@ -5209,7 +5526,11 @@ mod vst3_note_entry_controls {
             let mut pcm = [91.0];
             runtime
                 .render_into(
-                    AudioRenderRequest { transport_activity: None, start_sample: start, frames: 1 },
+                    AudioRenderRequest {
+                        transport_activity: None,
+                        start_sample: start,
+                        frames: 1,
+                    },
                     &mut pcm,
                 )
                 .unwrap();
@@ -5387,7 +5708,11 @@ mod vst3_note_entry_controls {
                 }
                 runtime
                     .render_into(
-                        AudioRenderRequest { transport_activity: None, start_sample: frame, frames: 1 },
+                        AudioRenderRequest {
+                            transport_activity: None,
+                            start_sample: frame,
+                            frames: 1,
+                        },
                         &mut pcm,
                     )
                     .unwrap();

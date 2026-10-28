@@ -232,7 +232,11 @@ fn external_mda_dx10_vst3_captured_state_notes_without_media() {
                 let mut pcm = vec![f32::NAN; frames * 2];
                 runtime
                     .render_into(
-                        AudioRenderRequest { transport_activity: None, start_sample: start as i64, frames },
+                        AudioRenderRequest {
+                            transport_activity: None,
+                            start_sample: start as i64,
+                            frames,
+                        },
                         &mut pcm,
                     )
                     .unwrap();
@@ -780,7 +784,11 @@ fn external_mda_dx10_vst3_rescan_handoff_preserves_note_score_pcm() {
     // Exactly 64 admitted requests, each at most one Source service and one
     // execution after a proved non-consuming refusal. No native failure retry.
     for start in (0..TOTAL).step_by(BLOCK) {
-        let request = AudioRenderRequest { transport_activity: None, start_sample: start as i64, frames: BLOCK };
+        let request = AudioRenderRequest {
+            transport_activity: None,
+            start_sample: start as i64,
+            frames: BLOCK,
+        };
         let before = cursors(&runtime);
         let old = owner(&runtime);
         let old_claim = source.current_claim().unwrap().unwrap();

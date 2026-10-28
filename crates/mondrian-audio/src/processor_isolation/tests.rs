@@ -771,7 +771,11 @@ fn installed_clap_sidechain_preserves_native_buses_state_delay_and_partitions() 
                     };
                     let start = 100 + offset as i64;
                     let context = AudioProcessorProcessContext::new(
-                        AudioRenderRequest { transport_activity: None, start_sample: start, frames },
+                        AudioRenderRequest {
+                            transport_activity: None,
+                            start_sample: start,
+                            frames,
+                        },
                         AudioSampleRate::new(48_000).expect("sample rate"),
                         AudioChannelLayout::Stereo,
                         mode,
@@ -815,7 +819,11 @@ fn installed_clap_sidechain_preserves_native_buses_state_delay_and_partitions() 
                         .collect(),
                 };
                 let context = AudioProcessorProcessContext::new(
-                    AudioRenderRequest { transport_activity: None, start_sample: 0, frames: 4 },
+                    AudioRenderRequest {
+                        transport_activity: None,
+                        start_sample: 0,
+                        frames: 4,
+                    },
                     AudioSampleRate::new(48_000).expect("sample rate"),
                     AudioChannelLayout::Stereo,
                     mode,
@@ -1006,7 +1014,11 @@ fn installed_vst3_sidechain_preserves_native_buses_state_delay_and_partitions() 
                     };
                     let start = 100 + offset as i64;
                     let context = AudioProcessorProcessContext::new(
-                        AudioRenderRequest { transport_activity: None, start_sample: start, frames },
+                        AudioRenderRequest {
+                            transport_activity: None,
+                            start_sample: start,
+                            frames,
+                        },
                         AudioSampleRate::new(48_000).expect("sample rate"),
                         AudioChannelLayout::Stereo,
                         mode,
@@ -1055,7 +1067,11 @@ fn installed_vst3_sidechain_preserves_native_buses_state_delay_and_partitions() 
                         .collect(),
                 };
                 let context = AudioProcessorProcessContext::new(
-                    AudioRenderRequest { transport_activity: None, start_sample: 0, frames: 4 },
+                    AudioRenderRequest {
+                        transport_activity: None,
+                        start_sample: 0,
+                        frames: 4,
+                    },
                     AudioSampleRate::new(48_000).expect("sample rate"),
                     AudioChannelLayout::Stereo,
                     mode,
@@ -1459,7 +1475,11 @@ fn assert_installed_vst3_gain(plugin_env: &str, sample_accurate: bool) {
     };
     let original = audio.main.clone();
     let offline_context = AudioProcessorProcessContext::new(
-        AudioRenderRequest { transport_activity: None, start_sample: 100, frames: 4 },
+        AudioRenderRequest {
+            transport_activity: None,
+            start_sample: 100,
+            frames: 4,
+        },
         AudioSampleRate::new(48_000).expect("sample rate"),
         AudioChannelLayout::Stereo,
         AudioProcessingMode::Offline,
@@ -1541,7 +1561,11 @@ fn assert_native_parameter_signal(
             })
             .collect();
         let context = AudioProcessorProcessContext::new(
-            AudioRenderRequest { transport_activity: None, start_sample: *start_sample, frames: 4 },
+            AudioRenderRequest {
+                transport_activity: None,
+                start_sample: *start_sample,
+                frames: 4,
+            },
             AudioSampleRate::new(48_000).expect("sample rate"),
             AudioChannelLayout::Stereo,
             mode,

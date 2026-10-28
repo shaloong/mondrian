@@ -1363,7 +1363,9 @@ pub(crate) trait PluginProcessingRole: Send {
         ))
     }
     fn set_process_playing(&mut self, _playing: bool) -> Result<()> {
-        Err(Error::Other("processing-role transport activity is unsupported".to_owned()))
+        Err(Error::Other(
+            "processing-role transport activity is unsupported".to_owned(),
+        ))
     }
     fn queue_parameter_at(&mut self, id: u32, value: f64, sample_offset: i32) -> Result<()>;
     fn flush_pending_parameter_changes(&mut self) -> Result<PendingParameterFlushOutcome> {

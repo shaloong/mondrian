@@ -430,7 +430,11 @@ fn observe_runtime_pcm_inner(
             }
             let mut pcm = vec![f32::NAN; frames * 2];
             let rendered = runtime.render_into(
-                AudioRenderRequest { transport_activity: None, start_sample: start as i64, frames },
+                AudioRenderRequest {
+                    transport_activity: None,
+                    start_sample: start as i64,
+                    frames,
+                },
                 &mut pcm,
             );
             if matches!(control, Some(HostFaderControl::ContinuousReference)) {

@@ -2495,7 +2495,11 @@ impl NestedRuntimeSource {
         self.cache_start = i64::MIN;
         self.cache.fill(0.0);
         let result = self.runtime.render_into_admitted_cancellable(
-            AudioRenderRequest { transport_activity, start_sample, frames: self.cache_frames },
+            AudioRenderRequest {
+                transport_activity,
+                start_sample,
+                frames: self.cache_frames,
+            },
             &mut self.cache,
             cancellation,
         );

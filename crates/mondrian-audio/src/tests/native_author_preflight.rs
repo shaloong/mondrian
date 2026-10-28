@@ -355,7 +355,14 @@ fn preflight_build_with_pcm(
         .expect("actual Root entry");
     let mut pcm = [91.0];
     runtime
-        .render_into(AudioRenderRequest { transport_activity: None, start_sample: 0, frames: 1 }, &mut pcm)
+        .render_into(
+            AudioRenderRequest {
+                transport_activity: None,
+                start_sample: 0,
+                frames: 1,
+            },
+            &mut pcm,
+        )
         .expect("each actual occurrence entered once");
     assert_eq!(pcm, [expected_pcm]);
     let source = mondrian_core::AudioOwnerInstallationSource::new();
@@ -653,7 +660,11 @@ fn preflight_assert_early_denial(
     let mut untouched = [93.0];
     assert!(matches!(
         fixture.inner.runtime.render_into(
-            AudioRenderRequest { transport_activity: None, start_sample: 1, frames: 1 },
+            AudioRenderRequest {
+                transport_activity: None,
+                start_sample: 1,
+                frames: 1
+            },
             &mut untouched,
         ),
         Err(AudioExecutionError::NativeAuthorPending(_))
@@ -722,7 +733,14 @@ fn native_author_preflight_nested_exact_grant_preserves_final_footprint_and_pcm(
     fixture
         .inner
         .runtime
-        .render_into(AudioRenderRequest { transport_activity: None, start_sample: 1, frames: 1 }, &mut pcm)
+        .render_into(
+            AudioRenderRequest {
+                transport_activity: None,
+                start_sample: 1,
+                frames: 1,
+            },
+            &mut pcm,
+        )
         .unwrap();
     assert_eq!(
         pcm,
@@ -772,7 +790,14 @@ fn native_author_preflight_scope_two_contributions_exact_grant_preserves_policy(
     fixture
         .inner
         .runtime
-        .render_into(AudioRenderRequest { transport_activity: None, start_sample: 1, frames: 1 }, &mut pcm)
+        .render_into(
+            AudioRenderRequest {
+                transport_activity: None,
+                start_sample: 1,
+                frames: 1,
+            },
+            &mut pcm,
+        )
         .unwrap();
     assert_eq!(
         pcm,
@@ -836,7 +861,14 @@ fn native_author_preflight_unchanged_nested_peer_is_not_recharged() {
     fixture
         .inner
         .runtime
-        .render_into(AudioRenderRequest { transport_activity: None, start_sample: 1, frames: 1 }, &mut pcm)
+        .render_into(
+            AudioRenderRequest {
+                transport_activity: None,
+                start_sample: 1,
+                frames: 1,
+            },
+            &mut pcm,
+        )
         .unwrap();
     assert_eq!(pcm, [2.0]);
 }
@@ -1046,7 +1078,14 @@ fn vst_rescan_selected_singleton_preserves_all_native_peer_admission_guards() {
     let mut pcm = [91.0];
     f.inner
         .runtime
-        .render_into(AudioRenderRequest { transport_activity: None, start_sample: 1, frames: 1 }, &mut pcm)
+        .render_into(
+            AudioRenderRequest {
+                transport_activity: None,
+                start_sample: 1,
+                frames: 1,
+            },
+            &mut pcm,
+        )
         .unwrap();
     assert_eq!(
         pcm,

@@ -1866,7 +1866,9 @@ impl VstNativeSignal for vst3_host::plugin::PluginAudioProcessing<'_> {
             None => self.set_process_timeline_context(context),
         }?;
         if let Some(activity) = activity {
-            self.set_process_playing(activity == mondrian_core::TimelineTransportActivity::Playing)?;
+            self.set_process_playing(
+                activity == mondrian_core::TimelineTransportActivity::Playing,
+            )?;
         }
         Ok(())
     }
@@ -6170,9 +6172,13 @@ mod musical_effect_tests {
         for rate in [44_100, 48_000] {
             for start in [-17, i64::MAX - 32] {
                 for (with_music, activity) in [true, false].into_iter().flat_map(|music| {
-                    [Some(mondrian_core::TimelineTransportActivity::Playing),
-                     Some(mondrian_core::TimelineTransportActivity::Stopped), None]
-                        .into_iter().map(move |activity| (music, activity))
+                    [
+                        Some(mondrian_core::TimelineTransportActivity::Playing),
+                        Some(mondrian_core::TimelineTransportActivity::Stopped),
+                        None,
+                    ]
+                    .into_iter()
+                    .map(move |activity| (music, activity))
                 }) {
                     let reference = with_music.then(|| {
                         MusicalTimeReference::new(

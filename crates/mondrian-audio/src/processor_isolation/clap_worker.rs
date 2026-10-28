@@ -1376,8 +1376,10 @@ fn prepare_loaded_on_main(
     let inactive = instance
         .inactive_plugin_handle()
         .ok_or_else(|| invalid("CLAP cold worker is active"))?;
-    if super::clap_audio_config::negotiate_initial(&inactive, request.render_contract().channel_layout)?
-    {
+    if super::clap_audio_config::negotiate_initial(
+        &inactive,
+        request.render_contract().channel_layout,
+    )? {
         shared.service_callbacks(&mut instance)?;
     }
     if let Some(state) = state {
@@ -3139,10 +3141,15 @@ mod tests {
     #[test]
     fn clap_transport_activity_is_independent_of_music_and_never_invents_validity() {
         use mondrian_core::{MusicalTimeReference, TimelineTime, TimelineTransportActivity};
-        let music = MusicalTimeReference::new(TimelineTime::ZERO, TimelineTime::new(1, 2).unwrap()).unwrap();
+        let music = MusicalTimeReference::new(TimelineTime::ZERO, TimelineTime::new(1, 2).unwrap())
+            .unwrap();
         for reference in [None, Some(music)] {
             let baseline = clap_transport(-17, 48_000, reference, None).unwrap();
-            for activity in [Some(TimelineTransportActivity::Playing), Some(TimelineTransportActivity::Stopped), None] {
+            for activity in [
+                Some(TimelineTransportActivity::Playing),
+                Some(TimelineTransportActivity::Stopped),
+                None,
+            ] {
                 let actual = clap_transport(-17, 48_000, reference, activity).unwrap();
                 let playing = if activity == Some(TimelineTransportActivity::Playing) {
                     TransportFlags::IS_PLAYING

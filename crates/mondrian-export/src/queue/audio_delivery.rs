@@ -101,7 +101,9 @@ impl ExportAudioDelivery {
                 .and_then(|reservation| source.begin_commit(reservation))
                 .map_err(|e| e.to_string())?
                 .commit()
-                .ok_or_else(|| "native export initial Source commit produced no claim".to_owned())?;
+                .ok_or_else(|| {
+                    "native export initial Source commit produced no claim".to_owned()
+                })?;
             // Adopt before any foreign call or fallible native acknowledgement.
             owned.native = Some(NativeInstallation { source, registration, claim });
             owned

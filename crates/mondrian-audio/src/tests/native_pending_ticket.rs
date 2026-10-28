@@ -127,7 +127,11 @@ fn fixture_with_request(
 fn native_pending_ticket_old_session_some_then_none_keeps_zero_source_and_dsp() {
     let (mut session, _plan, pending, calls, queries) = fixture();
     let mut source = RampSource::default();
-    let request = AudioRenderRequest { transport_activity: None, start_sample: 0, frames: 8 };
+    let request = AudioRenderRequest {
+        transport_activity: None,
+        start_sample: 0,
+        frames: 8,
+    };
     let mut output = vec![73.0; 8];
     let first = match session.render_into(&mut source, request, &mut output) {
         Err(AudioExecutionError::ReprepareRequired(ticket)) => ticket,
@@ -164,7 +168,11 @@ fn native_pending_ticket_old_session_some_then_none_keeps_zero_source_and_dsp() 
 fn native_pending_ticket_old_session_fresh_enter_cannot_clear_uninstalled_configuration() {
     let (mut session, _plan, _pending, calls, _queries) = fixture();
     let mut source = RampSource::default();
-    let request = AudioRenderRequest { transport_activity: None, start_sample: 0, frames: 8 };
+    let request = AudioRenderRequest {
+        transport_activity: None,
+        start_sample: 0,
+        frames: 8,
+    };
     let mut output = vec![91.0; 8];
     let ticket = match session.render_into(&mut source, request, &mut output) {
         Err(AudioExecutionError::ReprepareRequired(ticket)) => ticket,
@@ -187,7 +195,11 @@ fn native_pending_ticket_old_session_fresh_enter_cannot_clear_uninstalled_config
 fn native_pending_ticket_actual_new_session_replacement_starts_clear_and_has_new_identity() {
     let (mut current, plan, pending, calls, _queries) = fixture();
     let mut source = RampSource::default();
-    let request = AudioRenderRequest { transport_activity: None, start_sample: 0, frames: 8 };
+    let request = AudioRenderRequest {
+        transport_activity: None,
+        start_sample: 0,
+        frames: 8,
+    };
     let mut output = vec![11.0; 8];
     let old_ticket = match current.render_into(&mut source, request, &mut output) {
         Err(AudioExecutionError::ReprepareRequired(ticket)) => ticket,
@@ -302,7 +314,11 @@ fn assert_public_canceled_preflight(nested: bool, has_pending: bool) {
     cancel.cancel();
     let mut pcm = [73.0; 8];
     let result = runtime.render_into_cancellable(
-        AudioRenderRequest { transport_activity: None, start_sample: 0, frames: 8 },
+        AudioRenderRequest {
+            transport_activity: None,
+            start_sample: 0,
+            frames: 8,
+        },
         &mut pcm,
         &cancel,
     );
@@ -352,7 +368,11 @@ fn native_pending_ticket_preserves_first_cohort_without_querying_a_later_identit
     );
     let (mut session, _plan, _pending, calls, queries) = fixture_with_request(observed);
     let mut source = RampSource::default();
-    let request = AudioRenderRequest { transport_activity: None, start_sample: 0, frames: 8 };
+    let request = AudioRenderRequest {
+        transport_activity: None,
+        start_sample: 0,
+        frames: 8,
+    };
     let mut output = vec![61.0; 8];
     let first = match session.render_into(&mut source, request, &mut output) {
         Err(AudioExecutionError::ReprepareRequired(ticket)) => ticket,

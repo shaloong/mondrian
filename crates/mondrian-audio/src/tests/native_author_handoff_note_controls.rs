@@ -390,7 +390,14 @@ fn owned_installed_note_same_epoch_nonzero_entry_keeps_old_owner_and_original_of
     let lease = runtime.native_owner_lease(address).expect("actual entered installed lease");
     let mut pcm = [91.0];
     runtime
-        .render_into(AudioRenderRequest { transport_activity: None, start_sample: 0, frames: 1 }, &mut pcm)
+        .render_into(
+            AudioRenderRequest {
+                transport_activity: None,
+                start_sample: 0,
+                frames: 1,
+            },
+            &mut pcm,
+        )
         .unwrap();
     assert_eq!(pcm, [0.5]);
     let on = calls.lock().unwrap().notes[0].unwrap();
@@ -432,11 +439,25 @@ fn owned_installed_note_same_epoch_nonzero_entry_keeps_old_owner_and_original_of
     }
 
     runtime
-        .render_into(AudioRenderRequest { transport_activity: None, start_sample: 1, frames: 1 }, &mut pcm)
+        .render_into(
+            AudioRenderRequest {
+                transport_activity: None,
+                start_sample: 1,
+                frames: 1,
+            },
+            &mut pcm,
+        )
         .expect("the old owner remains able to deliver its original Off");
     assert_eq!(pcm, [1.0]);
     runtime
-        .render_into(AudioRenderRequest { transport_activity: None, start_sample: 2, frames: 1 }, &mut pcm)
+        .render_into(
+            AudioRenderRequest {
+                transport_activity: None,
+                start_sample: 2,
+                frames: 1,
+            },
+            &mut pcm,
+        )
         .unwrap();
     assert_eq!(pcm, [1.5]);
     let c = calls.lock().unwrap();
@@ -641,10 +662,24 @@ fn owned_installed_successful_off_retires_only_after_success_and_never_replays_f
         let claim = source.current_claim().unwrap().unwrap();
         let mut pcm = [91.0];
         runtime
-            .render_into(AudioRenderRequest { transport_activity: None, start_sample: 0, frames: 1 }, &mut pcm)
+            .render_into(
+                AudioRenderRequest {
+                    transport_activity: None,
+                    start_sample: 0,
+                    frames: 1,
+                },
+                &mut pcm,
+            )
             .unwrap();
         assert_eq!(pcm, [0.5]);
-        let off = runtime.render_into(AudioRenderRequest { transport_activity: None, start_sample: 1, frames: 1 }, &mut pcm);
+        let off = runtime.render_into(
+            AudioRenderRequest {
+                transport_activity: None,
+                start_sample: 1,
+                frames: 1,
+            },
+            &mut pcm,
+        );
         match result {
             NoteModelReturn::Success => {
                 off.unwrap();
@@ -652,7 +687,11 @@ fn owned_installed_successful_off_retires_only_after_success_and_never_replays_f
                 for start in 2..6 {
                     runtime
                         .render_into(
-                            AudioRenderRequest { transport_activity: None, start_sample: start, frames: 1 },
+                            AudioRenderRequest {
+                                transport_activity: None,
+                                start_sample: start,
+                                frames: 1,
+                            },
                             &mut pcm,
                         )
                         .unwrap();
@@ -689,10 +728,24 @@ fn owned_installed_successful_off_retires_only_after_success_and_never_replays_f
                     matches!(off, Err(AudioExecutionError::ProcessorHost(ref error)) if error == &expected)
                 );
                 assert!(runtime
-                    .render_into(AudioRenderRequest { transport_activity: None, start_sample: 1, frames: 1 }, &mut pcm)
+                    .render_into(
+                        AudioRenderRequest {
+                            transport_activity: None,
+                            start_sample: 1,
+                            frames: 1
+                        },
+                        &mut pcm
+                    )
                     .is_err());
                 assert!(runtime
-                    .render_into(AudioRenderRequest { transport_activity: None, start_sample: 2, frames: 1 }, &mut pcm)
+                    .render_into(
+                        AudioRenderRequest {
+                            transport_activity: None,
+                            start_sample: 2,
+                            frames: 1
+                        },
+                        &mut pcm
+                    )
                     .is_err());
                 let c = calls.lock().unwrap();
                 assert_eq!((c.processes, c.note_count, c.ends), (2, 2, 0));
@@ -715,7 +768,14 @@ fn owned_vst_rescan_handoff_moves_ledger_origin_once_and_keeps_on_off_ids() {
     let lease = f.runtime.native_owner_lease(old_address).unwrap();
     let mut pcm = [91.0];
     f.runtime
-        .render_into(AudioRenderRequest { transport_activity: None, start_sample: 0, frames: 1 }, &mut pcm)
+        .render_into(
+            AudioRenderRequest {
+                transport_activity: None,
+                start_sample: 0,
+                frames: 1,
+            },
+            &mut pcm,
+        )
         .unwrap();
     assert_eq!(pcm, [0.5]);
     let on = calls.lock().unwrap().notes[0].unwrap();
@@ -783,11 +843,25 @@ fn owned_vst_rescan_handoff_moves_ledger_origin_once_and_keeps_on_off_ids() {
     // Off must be validated with the moved origin while retaining the original
     // Pressed record/ID. SuccessfulOffBlock retires only this actual success.
     f.runtime
-        .render_into(AudioRenderRequest { transport_activity: None, start_sample: 1, frames: 1 }, &mut pcm)
+        .render_into(
+            AudioRenderRequest {
+                transport_activity: None,
+                start_sample: 1,
+                frames: 1,
+            },
+            &mut pcm,
+        )
         .unwrap();
     assert_eq!(pcm, [1.5]);
     f.runtime
-        .render_into(AudioRenderRequest { transport_activity: None, start_sample: 2, frames: 1 }, &mut pcm)
+        .render_into(
+            AudioRenderRequest {
+                transport_activity: None,
+                start_sample: 2,
+                frames: 1,
+            },
+            &mut pcm,
+        )
         .unwrap();
     assert_eq!(pcm, [2.25]);
     let c = calls.lock().unwrap();

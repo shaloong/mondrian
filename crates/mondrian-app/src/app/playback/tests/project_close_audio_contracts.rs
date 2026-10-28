@@ -3,7 +3,8 @@
 
 use super::*;
 
-pub(in crate::app) fn available_state() -> (AppState, Arc<parking_lot::Mutex<NativeHoldPlatformState>>) {
+pub(in crate::app) fn available_state(
+) -> (AppState, Arc<parking_lot::Mutex<NativeHoldPlatformState>>) {
     let mut state = state_with_sequence(20);
     assert!(state.shutdown_audio_playback_and_wait().all_workers_terminated());
     let mut snapshot = audio_snapshot();

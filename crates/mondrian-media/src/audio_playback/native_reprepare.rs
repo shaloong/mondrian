@@ -1170,7 +1170,7 @@ mod tests {
         // Its queue-only callbacks must not execute or fabricate author permission.
         playback.native_author_state_entry_request =
             Some(Box::new(native_author::NativeAuthorHandoffWork {
-                    continuation: None,
+                continuation: None,
                 generation,
                 renderer_id: playback.renderer.as_ref().unwrap().materialization_id,
                 request: Box::new(QueuedAuthor(renderer.clone())),

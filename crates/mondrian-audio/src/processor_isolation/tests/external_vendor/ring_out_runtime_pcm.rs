@@ -3,8 +3,9 @@
 
 use super::*;
 use crate::{
-    AudioContinuityEpoch, AudioDecodedSource, AudioMediaResolver, AudioProgramRuntime, AudioStateEntry,
-    NativeAudioAuthorProgram, NativeAudioParameterHandoffContinuity, ResolvedAudioSource,
+    AudioContinuityEpoch, AudioDecodedSource, AudioMediaResolver, AudioProgramRuntime,
+    AudioStateEntry, NativeAudioAuthorProgram, NativeAudioParameterHandoffContinuity,
+    ResolvedAudioSource,
 };
 use mondrian_core::{
     AssetId, AudioOwnerInstallationSource, AudioSourceComponentId, AutomationSegmentInterpolation,
@@ -596,8 +597,14 @@ fn run_runtime(
     runtime
         .install_native_owner_bindings(&claim, &ExecutionCancellationToken::new())
         .expect("real child acknowledges exact installed Output occurrence");
-    let (cold_handoffs, cold_object) =
-        accept_cold_startup(&mut runtime, &mut sequence, &installation, directory, label, None);
+    let (cold_handoffs, cold_object) = accept_cold_startup(
+        &mut runtime,
+        &mut sequence,
+        &installation,
+        directory,
+        label,
+        None,
+    );
     for id in [7, 8] {
         let id = ParameterId::new(format!("clap.param.{id}")).unwrap();
         let actual =
@@ -654,7 +661,11 @@ fn run_runtime(
             let mut pcm = vec![f32::NAN; frames * 2];
             runtime
                 .render_into(
-                    AudioRenderRequest { transport_activity: None, start_sample: start as i64, frames },
+                    AudioRenderRequest {
+                        transport_activity: None,
+                        start_sample: start as i64,
+                        frames,
+                    },
                     &mut pcm,
                 )
                 .expect(

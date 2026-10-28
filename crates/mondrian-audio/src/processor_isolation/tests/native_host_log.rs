@@ -47,7 +47,11 @@ fn log_fixture_native_pcm(
         ],
     };
     let context = AudioProcessorProcessContext::new(
-        AudioRenderRequest { transport_activity: None, start_sample: start, frames: 4 },
+        AudioRenderRequest {
+            transport_activity: None,
+            start_sample: start,
+            frames: 4,
+        },
         AudioSampleRate::new(48_000).expect("rate"),
         AudioChannelLayout::Stereo,
         render.processing_mode,
@@ -282,7 +286,14 @@ fn installed_clap_host_log_whole_root_projects_exact_source_and_original_pcm_on_
             .expect("actual generation entry");
         let mut pcm = [99.0; 16];
         runtime
-            .render_into(AudioRenderRequest { transport_activity: None, start_sample: 0, frames: 8 }, &mut pcm)
+            .render_into(
+                AudioRenderRequest {
+                    transport_activity: None,
+                    start_sample: 0,
+                    frames: 8,
+                },
+                &mut pcm,
+            )
             .expect("whole actual root PCM");
         // Sole native main coefficient2 * authored gain0.5; unrouted aux zero.
         // Canonical PDC removes the real three-sample native latency.

@@ -366,7 +366,9 @@ fn external_surge_xt_clap_captured_state_notes_constant_meter_runtime_without_me
             TimelineTime::new(1, 2).unwrap(),
         )
         .unwrap()
-        .with_time_signature(Some(mondrian_core::MusicalTimeSignature::new(7, 8).unwrap())),
+        .with_time_signature(Some(
+            mondrian_core::MusicalTimeSignature::new(7, 8).unwrap(),
+        )),
     ));
 }
 
@@ -631,7 +633,11 @@ fn run_captured_state_notes_main_runtime(reference: Option<MusicalTimeReference>
     for (completed_blocks, start) in (0..TOTAL).step_by(BLOCK).enumerate() {
         let mut pcm = vec![f32::NAN; BLOCK * render.channel_count()];
         if let Err(error) = runtime.render_into(
-            AudioRenderRequest { transport_activity: None, start_sample: start as i64, frames: BLOCK },
+            AudioRenderRequest {
+                transport_activity: None,
+                start_sample: start as i64,
+                frames: BLOCK,
+            },
             &mut pcm,
         ) {
             println!(

@@ -371,12 +371,10 @@ impl HandoffFixture {
             parameters: Default::default(),
             opaque_state: None,
         };
-        let mut author_parameter =
-            mondrian_timeline::audio::AudioProcessorParameter::from_schema(ParameterSchema::v1(
-                parameter.clone(),
-                PropertyValue::Double(0.5),
-            ))
-            .expect("numeric author schema");
+        let mut author_parameter = mondrian_timeline::audio::AudioProcessorParameter::from_schema(
+            ParameterSchema::v1(parameter.clone(), PropertyValue::Double(0.5)),
+        )
+        .expect("numeric author schema");
         if native_owned {
             author_parameter.automation = None;
         }
@@ -569,7 +567,11 @@ impl HandoffFixture {
         let mut pcm = [91.0];
         self.runtime
             .render_into(
-                AudioRenderRequest { transport_activity: None, start_sample: start, frames: 1 },
+                AudioRenderRequest {
+                    transport_activity: None,
+                    start_sample: start,
+                    frames: 1,
+                },
                 &mut pcm,
             )
             .expect("same Session exact continued sample");
@@ -595,7 +597,11 @@ fn native_author_handoff_nonterminal_values_ack_and_continue_same_session_withou
         let mut destination = [91.0];
         assert!(matches!(
             fixture.runtime.render_into(
-                AudioRenderRequest { transport_activity: None, start_sample: start, frames: 1 },
+                AudioRenderRequest {
+                    transport_activity: None,
+                    start_sample: start,
+                    frames: 1
+                },
                 &mut destination
             ),
             Err(AudioExecutionError::NativeAuthorPending(_))
@@ -665,7 +671,11 @@ fn native_author_handoff_ack_retry_does_not_reinstall_plan_or_erase_newer_suffix
     let mut destination = [91.0];
     assert!(matches!(
         fixture.runtime.render_into(
-            AudioRenderRequest { transport_activity: None, start_sample: 1, frames: 1 },
+            AudioRenderRequest {
+                transport_activity: None,
+                start_sample: 1,
+                frames: 1
+            },
             &mut destination
         ),
         Err(AudioExecutionError::NativeAuthorPending(_))
@@ -699,7 +709,11 @@ fn native_author_handoff_ack_retry_does_not_reinstall_plan_or_erase_newer_suffix
     );
     assert!(matches!(
         fixture.runtime.render_into(
-            AudioRenderRequest { transport_activity: None, start_sample: 1, frames: 1 },
+            AudioRenderRequest {
+                transport_activity: None,
+                start_sample: 1,
+                frames: 1
+            },
             &mut destination
         ),
         Err(AudioExecutionError::NativeAuthorPending(_))
@@ -789,7 +803,11 @@ fn native_author_handoff_ack_preserves_newer_callback_suffix_until_its_own_plan(
     let mut destination = [91.0];
     assert!(matches!(
         fixture.runtime.render_into(
-            AudioRenderRequest { transport_activity: None, start_sample: 1, frames: 1 },
+            AudioRenderRequest {
+                transport_activity: None,
+                start_sample: 1,
+                frames: 1
+            },
             &mut destination
         ),
         Err(AudioExecutionError::NativeAuthorPending(_))
@@ -847,7 +865,11 @@ fn native_author_terminal_single_strip_installs_coherent_seed_and_continues_with
     let mut sentinel = [91.0];
     assert!(matches!(
         fixture.runtime.render_into(
-            AudioRenderRequest { transport_activity: None, start_sample: 2, frames: 1 },
+            AudioRenderRequest {
+                transport_activity: None,
+                start_sample: 2,
+                frames: 1
+            },
             &mut sentinel,
         ),
         Err(AudioExecutionError::NativeAuthorPending(_))
@@ -905,7 +927,11 @@ fn native_author_terminal_single_strip_ack_retry_preserves_a_new_open_suffix() {
     let mut sentinel = [91.0];
     assert!(matches!(
         fixture.runtime.render_into(
-            AudioRenderRequest { transport_activity: None, start_sample: 2, frames: 1 },
+            AudioRenderRequest {
+                transport_activity: None,
+                start_sample: 2,
+                frames: 1
+            },
             &mut sentinel,
         ),
         Err(AudioExecutionError::NativeAuthorPending(_))
@@ -924,7 +950,11 @@ fn native_author_terminal_single_strip_ack_retry_preserves_a_new_open_suffix() {
     assert_eq!(fixture.probe.lock().expect("fixture owner").open, 1);
     assert!(matches!(
         fixture.runtime.render_into(
-            AudioRenderRequest { transport_activity: None, start_sample: 2, frames: 1 },
+            AudioRenderRequest {
+                transport_activity: None,
+                start_sample: 2,
+                frames: 1
+            },
             &mut sentinel,
         ),
         Err(AudioExecutionError::NativeAuthorPending(_))
@@ -1178,7 +1208,11 @@ mod scope_native {
         let mut positive = [91.0; 8];
         runtime
             .render_into(
-                AudioRenderRequest { transport_activity: None, start_sample: 0, frames: 4 },
+                AudioRenderRequest {
+                    transport_activity: None,
+                    start_sample: 0,
+                    frames: 4,
+                },
                 &mut positive,
             )
             .expect("both real native peers processed positive PCM");
@@ -1328,7 +1362,11 @@ mod scope_native {
         let mut blocked = [91.0; 8];
         assert!(matches!(
             runtime.render_into(
-                AudioRenderRequest { transport_activity: None, start_sample: 4, frames: 4 },
+                AudioRenderRequest {
+                    transport_activity: None,
+                    start_sample: 4,
+                    frames: 4
+                },
                 &mut blocked
             ),
             Err(AudioExecutionError::NativeAuthorPending(_))
@@ -1391,7 +1429,11 @@ mod scope_native {
                 let mut untouched = [93.0; 8];
                 assert!(runtime
                     .render_into(
-                        AudioRenderRequest { transport_activity: None, start_sample: 4, frames: 4 },
+                        AudioRenderRequest {
+                            transport_activity: None,
+                            start_sample: 4,
+                            frames: 4
+                        },
                         &mut untouched
                     )
                     .is_err());
@@ -1472,7 +1514,11 @@ mod scope_native {
         let mut retained = [93.0; 8];
         assert!(runtime
             .render_into(
-                AudioRenderRequest { transport_activity: None, start_sample: 4, frames: 4 },
+                AudioRenderRequest {
+                    transport_activity: None,
+                    start_sample: 4,
+                    frames: 4
+                },
                 &mut retained
             )
             .is_err());
@@ -1518,7 +1564,11 @@ mod scope_native {
         assert!(
             runtime
                 .render_into(
-                    AudioRenderRequest { transport_activity: None, start_sample: 4, frames: 4 },
+                    AudioRenderRequest {
+                        transport_activity: None,
+                        start_sample: 4,
+                        frames: 4
+                    },
                     &mut refused
                 )
                 .is_err(),
@@ -1557,7 +1607,11 @@ mod scope_native {
         let mut accepted = [94.0; 8];
         runtime
             .render_into(
-                AudioRenderRequest { transport_activity: None, start_sample: 4, frames: 4 },
+                AudioRenderRequest {
+                    transport_activity: None,
+                    start_sample: 4,
+                    frames: 4,
+                },
                 &mut accepted,
             )
             .expect("every actual peer processes accepted state");
@@ -1737,7 +1791,11 @@ fn native_author_transient_dsp_feedback_retains_exact_source_then_handoff_and_pc
     let mut untouched = [91.0];
     assert!(matches!(
         fixture.runtime.render_into(
-            AudioRenderRequest { transport_activity: None, start_sample: 1, frames: 1 },
+            AudioRenderRequest {
+                transport_activity: None,
+                start_sample: 1,
+                frames: 1
+            },
             &mut untouched
         ),
         Err(AudioExecutionError::NativeAuthorPending(_))
@@ -2030,7 +2088,11 @@ fn native_scope_foreign_source_refused_before_native_binding_or_plan_mutation() 
     let mut untouched = [93.0];
     assert!(matches!(
         fixture.runtime.render_into(
-            AudioRenderRequest { transport_activity: None, start_sample: 1, frames: 1 },
+            AudioRenderRequest {
+                transport_activity: None,
+                start_sample: 1,
+                frames: 1
+            },
             &mut untouched
         ),
         Err(AudioExecutionError::NativeAuthorPending(_))
@@ -2182,7 +2244,9 @@ mod continuing_rescan_controls {
         } else {
             Vec::new()
         };
-        probe.pending.push(NativeAudioAuthorEvent::ParameterValuesRescanned { kind, values });
+        probe
+            .pending
+            .push(NativeAudioAuthorEvent::ParameterValuesRescanned { kind, values });
         if let Some(dirty) = dirty {
             probe.pending.push(NativeAudioAuthorEvent::DirtyChanged(dirty));
         }
@@ -2207,9 +2271,14 @@ mod continuing_rescan_controls {
     }
     pub(super) fn hold(fixture: &mut HandoffFixture) -> AudioProcessorReprepareTicket {
         let mut pcm = [93.0];
-        let result = fixture
-            .runtime
-            .render_into(AudioRenderRequest { transport_activity: None, start_sample: 1, frames: 1 }, &mut pcm);
+        let result = fixture.runtime.render_into(
+            AudioRenderRequest {
+                transport_activity: None,
+                start_sample: 1,
+                frames: 1,
+            },
+            &mut pcm,
+        );
         let Err(AudioExecutionError::ReprepareRequired(ticket)) = result else {
             panic!("expected the real Session ticket, actual={result:?}");
         };
@@ -2425,7 +2494,8 @@ mod continuing_rescan_controls {
             }
             let a = cohort(151, 16);
             f.probe.lock().unwrap().live_request = Some(observed(a));
-            let proposal = rescan_with_projection(&mut f, a, Kind::NoValueRefresh, false, Some(false));
+            let proposal =
+                rescan_with_projection(&mut f, a, Kind::NoValueRefresh, false, Some(false));
             assert!(matches!(proposal.callbacks(), [
                     Callback::ParameterValuesRescanned { kind: Kind::NoValueRefresh, values },
                     Callback::DirtyChanged(false),
@@ -2525,7 +2595,8 @@ mod continuing_rescan_controls {
                     let mut p = f.probe.lock().unwrap();
                     match case {
                         0 => {
-                            p.source_failure = Some(crate::NativeAudioAuthorSourceFailure::WrongThread)
+                            p.source_failure =
+                                Some(crate::NativeAudioAuthorSourceFailure::WrongThread)
                         }
                         1 => p.reported_request_cohort = Some(None),
                         2 => p.live_request = Some(observed(cohort(162, 20))),
@@ -2591,10 +2662,12 @@ mod continuing_rescan_controls {
             ] {
                 let mut f = fixture();
                 f.block(0, 0.5);
-                f.probe.lock().unwrap().live_request = Some(observed(if existing_b { b } else { a }));
+                f.probe.lock().unwrap().live_request =
+                    Some(observed(if existing_b { b } else { a }));
                 let original = hold(&mut f);
                 let proposal = rescan_with_projection(&mut f, a, Kind::NoValueRefresh, false, None);
-                let (mut prepared, mut authorization) = prepare_with_values(&mut f, &proposal, false);
+                let (mut prepared, mut authorization) =
+                    prepare_with_values(&mut f, &proposal, false);
                 let claim = install(&mut f, &proposal, &mut prepared, &mut authorization);
                 let installed = ticket(&f).unwrap();
                 assert_eq!(installed.request, original.request);

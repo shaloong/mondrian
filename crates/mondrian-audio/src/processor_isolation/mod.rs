@@ -2292,7 +2292,10 @@ impl<'a> IsolatedAudioProcessorWorkerBlock<'a> {
         self
     }
 
-    fn with_transport_activity(mut self, activity: Option<mondrian_core::TimelineTransportActivity>) -> Self {
+    fn with_transport_activity(
+        mut self,
+        activity: Option<mondrian_core::TimelineTransportActivity>,
+    ) -> Self {
         self.transport_activity = activity;
         self
     }

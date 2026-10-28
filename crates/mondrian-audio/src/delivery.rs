@@ -738,7 +738,11 @@ mod tests {
                 .expect("mono to stereo delivery");
         let error = delivery
             .render_into_cancellable(
-                AudioRenderRequest { transport_activity: None, start_sample: 0, frames: 2 },
+                AudioRenderRequest {
+                    transport_activity: None,
+                    start_sample: 0,
+                    frames: 2,
+                },
                 &mut [0.0; 3],
                 &ExecutionCancellationToken::new(),
             )
@@ -781,7 +785,11 @@ mod tests {
         let mut pcm = [73.0; 8];
         delivery
             .render_into_cancellable(
-                AudioRenderRequest { transport_activity: None, start_sample: 11, frames: 4 },
+                AudioRenderRequest {
+                    transport_activity: None,
+                    start_sample: 11,
+                    frames: 4,
+                },
                 &mut pcm,
                 &ExecutionCancellationToken::new(),
             )
@@ -803,7 +811,11 @@ mod tests {
         let cancel = ExecutionCancellationToken::new();
         let mut pcm = [73.0; 8];
         let wrong_first = delivery.render_into_cancellable(
-            AudioRenderRequest { transport_activity: None, start_sample: 1, frames: 4 },
+            AudioRenderRequest {
+                transport_activity: None,
+                start_sample: 1,
+                frames: 4,
+            },
             &mut pcm,
             &cancel,
         );
@@ -830,7 +842,11 @@ mod tests {
         }
         assert!(matches!(
             delivery.render_into_cancellable(
-                AudioRenderRequest { transport_activity: None, start_sample: 9, frames: 4 },
+                AudioRenderRequest {
+                    transport_activity: None,
+                    start_sample: 9,
+                    frames: 4
+                },
                 &mut pcm,
                 &cancel,
             ),
@@ -844,7 +860,11 @@ mod tests {
         ));
         delivery
             .render_into_cancellable(
-                AudioRenderRequest { transport_activity: None, start_sample: 8, frames: 4 },
+                AudioRenderRequest {
+                    transport_activity: None,
+                    start_sample: 8,
+                    frames: 4,
+                },
                 &mut pcm,
                 &cancel,
             )
@@ -938,7 +958,11 @@ mod tests {
         let cancellation = ExecutionCancellationToken::new();
         let mut pcm = [73.0; 8];
         let failed = delivery.render_into_cancellable(
-            AudioRenderRequest { transport_activity: None, start_sample: 0, frames: 4 },
+            AudioRenderRequest {
+                transport_activity: None,
+                start_sample: 0,
+                frames: 4,
+            },
             &mut pcm,
             &cancellation,
         );
@@ -949,7 +973,11 @@ mod tests {
         // frames. Its already queued next request starts inside the same cache.
         assert!(matches!(
             delivery.render_into_cancellable(
-                AudioRenderRequest { transport_activity: None, start_sample: 8, frames: 4 },
+                AudioRenderRequest {
+                    transport_activity: None,
+                    start_sample: 8,
+                    frames: 4
+                },
                 &mut pcm,
                 &cancellation,
             ),
@@ -963,7 +991,11 @@ mod tests {
         ));
         delivery
             .render_into_cancellable(
-                AudioRenderRequest { transport_activity: None, start_sample: 4, frames: 4 },
+                AudioRenderRequest {
+                    transport_activity: None,
+                    start_sample: 4,
+                    frames: 4,
+                },
                 &mut pcm,
                 &cancellation,
             )
@@ -1004,7 +1036,11 @@ mod tests {
         let mut pcm = [73.0; 8];
         assert!(matches!(
             delivery.render_into_cancellable(
-                AudioRenderRequest { transport_activity: None, start_sample: 0, frames: 4 },
+                AudioRenderRequest {
+                    transport_activity: None,
+                    start_sample: 0,
+                    frames: 4
+                },
                 &mut pcm,
                 &canceled,
             ),
@@ -1016,7 +1052,11 @@ mod tests {
         assert_eq!(pcm, [73.0; 8], "canceled source PCM cannot be delivered");
         delivery
             .render_into_cancellable(
-                AudioRenderRequest { transport_activity: None, start_sample: 0, frames: 4 },
+                AudioRenderRequest {
+                    transport_activity: None,
+                    start_sample: 0,
+                    frames: 4,
+                },
                 &mut pcm,
                 &ExecutionCancellationToken::new(),
             )

@@ -910,7 +910,11 @@ mod installed {
                             let mut pcm = vec![99.0; frames];
                             runtime
                                 .render_into(
-                                    AudioRenderRequest { transport_activity: None, start_sample: start as i64, frames },
+                                    AudioRenderRequest {
+                                        transport_activity: None,
+                                        start_sample: start as i64,
+                                        frames,
+                                    },
                                     &mut pcm,
                                 )
                                 .unwrap();

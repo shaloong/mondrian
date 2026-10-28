@@ -371,7 +371,11 @@ fn installed_vst3_latency_restart_finishes_nested_root_window_before_reprepare()
         let mut admitted = [99.0; 16];
         runtime
             .render_into(
-                AudioRenderRequest { transport_activity: None, start_sample: 0, frames: 8 },
+                AudioRenderRequest {
+                    transport_activity: None,
+                    start_sample: 0,
+                    frames: 8,
+                },
                 &mut admitted,
             )
             .expect("complete trigger root window, including later child fills, remains valid");
@@ -397,7 +401,11 @@ fn installed_vst3_latency_restart_finishes_nested_root_window_before_reprepare()
         for _ in 0..2 {
             let mut unpublished = [42.0; 16];
             let outcome = runtime.render_into(
-                AudioRenderRequest { transport_activity: None, start_sample: 8, frames: 8 },
+                AudioRenderRequest {
+                    transport_activity: None,
+                    start_sample: 8,
+                    frames: 8,
+                },
                 &mut unpublished,
             );
             let Err(crate::AudioExecutionError::ReprepareRequired(ticket)) = outcome else {

@@ -2714,7 +2714,11 @@ mod tests {
             let mut seek_samples = [0.0; 62];
             delivery
                 .render_into_cancellable(
-                    AudioRenderRequest { transport_activity: None, start_sample: 93, frames: 31 },
+                    AudioRenderRequest {
+                        transport_activity: None,
+                        start_sample: 93,
+                        frames: 31,
+                    },
                     &mut seek_samples,
                     &cancellation,
                 )
@@ -3444,7 +3448,10 @@ mod tests {
             for frames in partitions {
                 let mut samples = vec![0.0; frames * 2];
                 runtime
-                    .render_into(AudioRenderRequest { transport_activity: None, start_sample, frames }, &mut samples)
+                    .render_into(
+                        AudioRenderRequest { transport_activity: None, start_sample, frames },
+                        &mut samples,
+                    )
                     .expect("native signal block");
                 output.extend(samples);
                 start_sample += i64::try_from(frames).expect("short block");

@@ -93,7 +93,11 @@ fn assert_restarted_pcm(runtime: &mut AudioProgramRuntime, start: i64) {
     let mut pcm = [99.0; 8];
     runtime
         .render_into(
-            AudioRenderRequest { transport_activity: None, start_sample: start, frames: 4 },
+            AudioRenderRequest {
+                transport_activity: None,
+                start_sample: start,
+                frames: 4,
+            },
             &mut pcm,
         )
         .expect("new canonical PDC public window after explicit Fresh Enter");
@@ -351,7 +355,11 @@ fn retained_restart_control(preparation: Preparation) {
             let mut pcm = [99.0; 8];
             runtime
                 .render_into(
-                    AudioRenderRequest { transport_activity: None, start_sample: start, frames: 4 },
+                    AudioRenderRequest {
+                        transport_activity: None,
+                        start_sample: start,
+                        frames: 4,
+                    },
                     &mut pcm,
                 )
                 .expect("old complete public window including trigger");
@@ -366,7 +374,11 @@ fn retained_restart_control(preparation: Preparation) {
         }
         let mut unpublished = [99.0; 8];
         let ticket = match runtime.render_into(
-            AudioRenderRequest { transport_activity: None, start_sample: 8, frames: 4 },
+            AudioRenderRequest {
+                transport_activity: None,
+                start_sample: 8,
+                frames: 4,
+            },
             &mut unpublished,
         ) {
             Err(AudioExecutionError::ReprepareRequired(ticket)) => ticket,
@@ -640,7 +652,11 @@ fn retained_restart_control(preparation: Preparation) {
                 unpublished.fill(99.0);
                 assert_eq!(
                     runtime.render_into(
-                        AudioRenderRequest { transport_activity: None, start_sample: 8, frames: 4 },
+                        AudioRenderRequest {
+                            transport_activity: None,
+                            start_sample: 8,
+                            frames: 4
+                        },
                         &mut unpublished
                     ),
                     Err(AudioExecutionError::StateEntryRequired)
@@ -738,7 +754,11 @@ fn retained_restart_control(preparation: Preparation) {
                     }
                     unpublished.fill(99.0);
                     let ticket = match runtime.render_into(
-                        AudioRenderRequest { transport_activity: None, start_sample: 24, frames: 4 },
+                        AudioRenderRequest {
+                            transport_activity: None,
+                            start_sample: 24,
+                            frames: 4,
+                        },
                         &mut unpublished,
                     ) {
                         Err(AudioExecutionError::ReprepareRequired(ticket)) => ticket,
@@ -855,7 +875,11 @@ fn retained_restart_control(preparation: Preparation) {
                     unpublished.fill(99.0);
                     assert_eq!(
                         runtime.render_into(
-                            AudioRenderRequest { transport_activity: None, start_sample: 24, frames: 4 },
+                            AudioRenderRequest {
+                                transport_activity: None,
+                                start_sample: 24,
+                                frames: 4
+                            },
                             &mut unpublished
                         ),
                         Err(AudioExecutionError::StateEntryRequired)
@@ -1006,7 +1030,11 @@ fn retained_restart_control(preparation: Preparation) {
                 unpublished.fill(99.0);
                 assert_eq!(
                     runtime.render_into(
-                        AudioRenderRequest { transport_activity: None, start_sample: 8, frames: 4 },
+                        AudioRenderRequest {
+                            transport_activity: None,
+                            start_sample: 8,
+                            frames: 4
+                        },
                         &mut unpublished
                     ),
                     Err(AudioExecutionError::ReprepareRequired(ticket))
@@ -1043,7 +1071,11 @@ fn retained_restart_control(preparation: Preparation) {
         unpublished.fill(99.0);
         assert_eq!(
             runtime.render_into(
-                AudioRenderRequest { transport_activity: None, start_sample: 8, frames: 4 },
+                AudioRenderRequest {
+                    transport_activity: None,
+                    start_sample: 8,
+                    frames: 4
+                },
                 &mut unpublished
             ),
             Err(AudioExecutionError::ReprepareRequired(ticket))
@@ -1125,7 +1157,11 @@ fn assert_delivery_restarted_pcm(
     let mut pcm = [99.0; 8];
     delivery
         .render_into_cancellable(
-            AudioRenderRequest { transport_activity: None, start_sample: start, frames: 4 },
+            AudioRenderRequest {
+                transport_activity: None,
+                start_sample: start,
+                frames: 4,
+            },
             &mut pcm,
             cancellation,
         )
@@ -1221,7 +1257,11 @@ fn retained_restart_delivery_control() {
         let mut unpublished = [99.0; 8];
         // The real pending ticket must win even over an already queued gap.
         let ticket = match delivery.render_into_cancellable(
-            AudioRenderRequest { transport_activity: None, start_sample: 12, frames: 4 },
+            AudioRenderRequest {
+                transport_activity: None,
+                start_sample: 12,
+                frames: 4,
+            },
             &mut unpublished,
             &cancellation,
         ) {
@@ -1322,7 +1362,11 @@ fn retained_restart_delivery_control() {
         // Delivery cursor would wrongly reject a gap before reaching Unentered.
         assert!(matches!(
             delivery.render_into_cancellable(
-                AudioRenderRequest { transport_activity: None, start_sample: 20, frames: 4 },
+                AudioRenderRequest {
+                    transport_activity: None,
+                    start_sample: 20,
+                    frames: 4
+                },
                 &mut unpublished,
                 &cancellation,
             ),

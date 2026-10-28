@@ -4023,20 +4023,20 @@ fn app_owned_clap_project_close_releases_native_source_before_app_shutdown() {
 }
 
 mod headless_native_author;
-mod project_state_roundtrip;
 mod headless_vst3_terminal_author;
+mod project_state_roundtrip;
 
 mod native_parameter_adoption;
 mod surge_parameter_adoption;
 
-mod idle_vst3_controller;
 mod fresh_vst3_host_overlay;
+mod idle_vst3_controller;
 
-mod idle_clap_constant;
 mod fresh_clap_host_overlay;
-mod zam_state_roundtrip;
+mod idle_clap_constant;
 mod native_gain_project;
 mod ring_out_project_roundtrip;
+mod zam_state_roundtrip;
 
 mod nonzero_note_playback;
 mod surge_note_playback;

@@ -17,8 +17,15 @@ impl AudioProcessorResolver for Observer {
 }
 impl AudioProcessorFactory for Factory {
     fn execution_contract(&self) -> AudioProcessorExecutionContract {
-        AudioProcessorExecutionContract::new(self.1, AudioProcessorTail::None, self.1 != 0, true, true, 0)
-            .unwrap()
+        AudioProcessorExecutionContract::new(
+            self.1,
+            AudioProcessorTail::None,
+            self.1 != 0,
+            true,
+            true,
+            0,
+        )
+        .unwrap()
     }
     fn create(
         &self,
@@ -156,8 +163,10 @@ fn unentered_stateless_nested_cache_is_keyed_by_transport_and_reuses_equal_conte
     let first = calls.lock().unwrap().len();
     // A malformed changed-context request must not invalidate valid prefetched PCM.
     let mut wrong_shape = [99.0; 1];
-    assert!(matches!(runtime.render_into(request(0, Some(Activity::Stopped)), &mut wrong_shape),
-        Err(AudioExecutionError::OutputSizeMismatch)));
+    assert!(matches!(
+        runtime.render_into(request(0, Some(Activity::Stopped)), &mut wrong_shape),
+        Err(AudioExecutionError::OutputSizeMismatch)
+    ));
     assert_eq!(wrong_shape, [99.0]);
     assert_eq!(calls.lock().unwrap().len(), first);
     runtime.render_into(request(0, Some(Activity::Playing)), &mut pcm).unwrap();
@@ -185,19 +194,41 @@ fn pdc_priming_and_execution_keep_one_activity_and_canceled_change_is_pure() {
     let calls = Arc::new(Mutex::new(Vec::new()));
     // The observer's declared latency exercises PDC scheduling, not a DSP delay oracle.
     let mut runtime = AudioProgramRuntime::build_with_processor_resolver(
-        &sequence, &[], &RampResolver, &Observer(calls.clone(), 5), contract(), None,
-    ).unwrap();
-    runtime.enter_state(AudioStateEntry { epoch: AudioContinuityEpoch::new(1), start_sample: -2 }).unwrap();
+        &sequence,
+        &[],
+        &RampResolver,
+        &Observer(calls.clone(), 5),
+        contract(),
+        None,
+    )
+    .unwrap();
+    runtime
+        .enter_state(AudioStateEntry {
+            epoch: AudioContinuityEpoch::new(1),
+            start_sample: -2,
+        })
+        .unwrap();
     let mut pcm = [0.0; 2];
     runtime.render_into(request(-2, Some(Activity::Playing)), &mut pcm).unwrap();
-    assert_eq!(*calls.lock().unwrap(), [(-2, 4, Some(Activity::Playing)),
-        (2, 1, Some(Activity::Playing)), (3, 2, Some(Activity::Playing))]);
+    assert_eq!(
+        *calls.lock().unwrap(),
+        [
+            (-2, 4, Some(Activity::Playing)),
+            (2, 1, Some(Activity::Playing)),
+            (3, 2, Some(Activity::Playing))
+        ]
+    );
     let cancellation = mondrian_core::ExecutionCancellationToken::new();
     cancellation.cancel();
     pcm.fill(99.0);
-    assert!(runtime.render_into_cancellable(request(0, Some(Activity::Stopped)), &mut pcm, &cancellation).is_err());
+    assert!(runtime
+        .render_into_cancellable(request(0, Some(Activity::Stopped)), &mut pcm, &cancellation)
+        .is_err());
     assert_eq!(pcm, [99.0; 2]);
     assert_eq!(calls.lock().unwrap().len(), 3);
     runtime.render_into(request(0, Some(Activity::Playing)), &mut pcm).unwrap();
-    assert_eq!(calls.lock().unwrap().last(), Some(&(5, 2, Some(Activity::Playing))));
+    assert_eq!(
+        calls.lock().unwrap().last(),
+        Some(&(5, 2, Some(Activity::Playing)))
+    );
 }

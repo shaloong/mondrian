@@ -29,7 +29,11 @@ fn fixture_state(gain: f64, mode: u32) -> Vec<u8> {
 
 fn block_context(start: i64) -> AudioProcessorProcessContext {
     AudioProcessorProcessContext::new(
-        AudioRenderRequest { transport_activity: None, start_sample: start, frames: 4 },
+        AudioRenderRequest {
+            transport_activity: None,
+            start_sample: start,
+            frames: 4,
+        },
         AudioSampleRate::new(48_000).unwrap(),
         AudioChannelLayout::Stereo,
         AudioProcessingMode::Offline,
@@ -663,7 +667,11 @@ fn installed_vst3_runtime_rescan_handoff_resumes_pcm() {
         let mut output = [93.0; 8];
         runtime
             .render_into(
-                AudioRenderRequest { transport_activity: None, start_sample: start as i64, frames: 4 },
+                AudioRenderRequest {
+                    transport_activity: None,
+                    start_sample: start as i64,
+                    frames: 4,
+                },
                 &mut output,
             )
             .expect("actual contiguous Runtime PCM after exact Source/Ack admission");
@@ -1297,7 +1305,11 @@ fn run_terminal_peer_contract(install_batch: bool) {
     let mut first_pcm = [93.0; 8];
     runtime
         .render_into(
-            AudioRenderRequest { transport_activity: None, start_sample: 0, frames: 4 },
+            AudioRenderRequest {
+                transport_activity: None,
+                start_sample: 0,
+                frames: 4,
+            },
             &mut first_pcm,
         )
         .expect("both real native effects process their first four frames");
@@ -1552,7 +1564,14 @@ fn run_terminal_peer_contract(install_batch: bool) {
         let mut held = [93.0; 8];
         assert!(
             matches!(
-                runtime.render_into(AudioRenderRequest { transport_activity: None, start_sample: 4, frames: 4 }, &mut held),
+                runtime.render_into(
+                    AudioRenderRequest {
+                        transport_activity: None,
+                        start_sample: 4,
+                        frames: 4
+                    },
+                    &mut held
+                ),
                 Err(crate::AudioExecutionError::NativeAuthorPending(_))
             ),
             "unacknowledged member still owns HOLD"
@@ -1575,7 +1594,11 @@ fn run_terminal_peer_contract(install_batch: bool) {
         let mut resumed = [93.0; 8];
         runtime
             .render_into(
-                AudioRenderRequest { transport_activity: None, start_sample: 4, frames: 4 },
+                AudioRenderRequest {
+                    transport_activity: None,
+                    start_sample: 4,
+                    frames: 4,
+                },
                 &mut resumed,
             )
             .expect("one continued epoch produces full joint canonical PCM");

@@ -7208,7 +7208,8 @@ mod tests {
         assert!(activated.output.is_some_and(|output| output.active));
         assert_eq!(state.lock().queued_frames, primed_frames);
         assert_eq!(
-            *requests.lock(), prepared_requests,
+            *requests.lock(),
+            prepared_requests,
             "activation reuses PCM rendered for Playing"
         );
     }

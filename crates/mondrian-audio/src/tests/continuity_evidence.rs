@@ -63,7 +63,11 @@ fn continuity_evidence_separates_public_head_from_generated_lookahead() {
     session
         .render_into(
             &mut source,
-            AudioRenderRequest { transport_activity: None, start_sample: 0, frames: 4 },
+            AudioRenderRequest {
+                transport_activity: None,
+                start_sample: 0,
+                frames: 4,
+            },
             &mut pcm,
         )
         .expect("actual DSP");
@@ -109,7 +113,11 @@ fn continuity_evidence_separates_public_head_from_generated_lookahead() {
     session
         .render_into(
             &mut source,
-            AudioRenderRequest { transport_activity: None, start_sample: 4, frames: 2 },
+            AudioRenderRequest {
+                transport_activity: None,
+                start_sample: 4,
+                frames: 2,
+            },
             &mut suffix,
         )
         .expect("unchanged continuation");
@@ -128,7 +136,11 @@ fn continuity_evidence_keeps_signed_negative_signal_coordinates() {
     session
         .render_into(
             &mut source,
-            AudioRenderRequest { transport_activity: None, start_sample: -10, frames: 1 },
+            AudioRenderRequest {
+                transport_activity: None,
+                start_sample: -10,
+                frames: 1,
+            },
             &mut pcm,
         )
         .expect("actual negative-grid DSP");
@@ -186,7 +198,14 @@ fn continuity_evidence_visits_actual_nested_materializations_with_distinct_ident
         .expect("nested Runtime");
     let mut pcm = [0.0; 4];
     runtime
-        .render_into(AudioRenderRequest { transport_activity: None, start_sample: 0, frames: 4 }, &mut pcm)
+        .render_into(
+            AudioRenderRequest {
+                transport_activity: None,
+                start_sample: 0,
+                frames: 4,
+            },
+            &mut pcm,
+        )
         .expect("actual nested DSP");
     assert_eq!(pcm, [1.0, 2.0, 3.0, 4.0]);
     let mut facts = CursorCollector::default();
@@ -229,7 +248,11 @@ fn continuity_evidence_partial_failure_has_no_invented_restore_cursor() {
     assert!(session
         .render_into(
             &mut FailingSource,
-            AudioRenderRequest { transport_activity: None, start_sample: 0, frames: 2 },
+            AudioRenderRequest {
+                transport_activity: None,
+                start_sample: 0,
+                frames: 2
+            },
             &mut pcm
         )
         .is_err());
@@ -274,7 +297,11 @@ fn continuity_evidence_bounded_visitor_rejection_changes_no_signal_history() {
     session
         .render_into(
             &mut source,
-            AudioRenderRequest { transport_activity: None, start_sample: 0, frames: 2 },
+            AudioRenderRequest {
+                transport_activity: None,
+                start_sample: 0,
+                frames: 2,
+            },
             &mut pcm,
         )
         .expect("first actual DSP");

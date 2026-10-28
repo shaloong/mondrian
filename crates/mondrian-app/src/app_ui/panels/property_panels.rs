@@ -2361,14 +2361,17 @@ pub(super) fn audio_processor_static_parameter_control(
         // A snapshot stays native-owned until the explicit one-shot adoption.
         let display = parameter.native_presentation.as_ref().and_then(|fact| {
             fact.value_bits.and(fact.display.clone()).or_else(|| {
-                fact.author_value_bits.map(f64::from_bits).filter(|value| value.is_finite())
+                fact.author_value_bits
+                    .map(f64::from_bits)
+                    .filter(|value| value.is_finite())
                     .map(|value| {
                         let decimals = audio_processor_parameter_decimals(numeric.step);
                         format!("{value:.decimals$}")
                     })
             })
         });
-        let text = display.as_ref()
+        let text = display
+            .as_ref()
             .map(|display| {
                 format!(
                     "{} · {}",
@@ -2403,22 +2406,28 @@ pub(super) fn audio_processor_static_parameter_control(
         let action = parameter.native_adoption.as_ref().filter(|_| can_edit).map(|edit| {
             crate::app::parameter_gesture::ParameterGestureAction::AdoptDisplayedNativeParameter {
                 edit: edit.clone(),
-            }.action()
+            }
+            .action()
         });
         let Some(action) = action else {
             return label;
         };
         let adopt = Button::new(localizer.text("audio-rack-adopt-displayed-value"))
             .with_control_inspection_key(audio_rack_control_inspection_key(
-                rack, Some(processor), "parameter-adopt-displayed",
+                rack,
+                Some(processor),
+                "parameter-adopt-displayed",
                 AudioRackControlSubject::Parameter(&parameter.schema),
             ))
             .minimal()
             .on_click(Some(action));
-        return Box::new(FlexContainer::row(vec![
-            FlexChild::flex(label, 1.0),
-            FlexChild::fixed(Box::new(adopt)),
-        ]).with_gap(mondrian_ui_theme::current_theme().spacing.xs));
+        return Box::new(
+            FlexContainer::row(vec![
+                FlexChild::flex(label, 1.0),
+                FlexChild::fixed(Box::new(adopt)),
+            ])
+            .with_gap(mondrian_ui_theme::current_theme().spacing.xs),
+        );
     };
     let target = can_edit
         .then(|| {
@@ -7181,11 +7190,10 @@ mod temporal_handle_tests {
     }
 }
 
-
 #[cfg(test)]
 mod displayed_native_parameter_control_contracts {
-    use super::*;
     use super::super::tests::owned_panel_status_painted_text;
+    use super::*;
     use crate::app::parameter_gesture::ParameterGestureAction;
     use crate::app_ui::audio_processor_rack::{
         bind_audio_scalar_author_lease, project_audio_processor_rack, static_parameter_target,
@@ -7260,17 +7268,22 @@ mod displayed_native_parameter_control_contracts {
         );
         assert_eq!(control.child_count(), 2);
         let painted = owned_panel_status_painted_text(control.as_mut());
-        let label = painted.iter().find(|text|
-            text.contains(&localizer.text("audio-rack-native-controlled-parameter")))
+        let label = painted
+            .iter()
+            .find(|text| text.contains(&localizer.text("audio-rack-native-controlled-parameter")))
             .expect("actual painted native-owned label");
         assert!(
             label.contains("0.38"),
             "canonical schema-formatted fallback"
         );
-        assert!(painted.iter().any(|text| text == &localizer.text("audio-rack-adopt-displayed-value")));
+        assert!(painted
+            .iter()
+            .any(|text| text == &localizer.text("audio-rack-adopt-displayed-value")));
         let button = control.child(1).unwrap();
-        assert_eq!(button.control_inspection_state().unwrap().role,
-            mondrian_ui_core::AccessibilityRole::Button);
+        assert_eq!(
+            button.control_inspection_state().unwrap().role,
+            mondrian_ui_core::AccessibilityRole::Button
+        );
         assert!(button.can_focus());
         let mut disabled = audio_processor_static_parameter_control(
             &rack, processor, parameter, numeric, false, &localizer,

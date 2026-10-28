@@ -300,7 +300,11 @@ fn installed_clap_canonical_public_notes_produce_literal_pcm_across_partitions()
                 let mut pcm = vec![99.0; frames];
                 runtime
                     .render_into(
-                        AudioRenderRequest { transport_activity: None, start_sample: start as i64, frames },
+                        AudioRenderRequest {
+                            transport_activity: None,
+                            start_sample: start as i64,
+                            frames,
+                        },
                         &mut pcm,
                     )
                     .expect("public Runtime DAG through normal Product DSP IPC");
@@ -865,7 +869,11 @@ fn installed_clap_nonzero_public_notes_chase_and_reset_same_object() {
                 let mut pcm = vec![99.0; frames];
                 runtime
                     .render_into(
-                        AudioRenderRequest { transport_activity: None, start_sample: 5 + rendered.len() as i64, frames },
+                        AudioRenderRequest {
+                            transport_activity: None,
+                            start_sample: 5 + rendered.len() as i64,
+                            frames,
+                        },
                         &mut pcm,
                     )
                     .unwrap();

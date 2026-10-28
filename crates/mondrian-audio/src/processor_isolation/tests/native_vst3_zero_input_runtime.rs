@@ -340,7 +340,11 @@ fn installed_vst3_zero_input_runtime_notes_produce_literal_pcm_ppq_without_media
                 let mut pcm = vec![99.0; frames * 2];
                 runtime
                     .render_into(
-                        AudioRenderRequest { transport_activity: None, start_sample: start as i64, frames },
+                        AudioRenderRequest {
+                            transport_activity: None,
+                            start_sample: start as i64,
+                            frames,
+                        },
                         &mut pcm,
                     )
                     .unwrap();

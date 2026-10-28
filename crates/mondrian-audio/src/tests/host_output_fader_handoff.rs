@@ -130,7 +130,14 @@ fn host_fader_preserves_session_epoch_native_binding_and_exact_frontier() {
     let mut pcm = [91.0];
     fixture
         .runtime
-        .render_into(AudioRenderRequest { transport_activity: None, start_sample: 1, frames: 1 }, &mut pcm)
+        .render_into(
+            AudioRenderRequest {
+                transport_activity: None,
+                start_sample: 1,
+                frames: 1,
+            },
+            &mut pcm,
+        )
         .unwrap();
     assert!(
         (pcm[0] - 0.5).abs() < 1e-6,

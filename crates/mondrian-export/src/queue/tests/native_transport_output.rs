@@ -128,14 +128,14 @@ fn qualify(clap: bool, meter: bool) {
                     TimelineTime::new(3, 4).unwrap(),
                 )
                 .unwrap()
-                .with_time_signature(Some(mondrian_core::MusicalTimeSignature::new(7, 8).unwrap()))
+                .with_time_signature(Some(
+                    mondrian_core::MusicalTimeSignature::new(7, 8).unwrap(),
+                ))
             });
             // 2.60..2.64 seconds spans bar1 at2.625+2/rate for both rates.
             let start_frame = if meter { 65 } else { 0 };
-            config.timeline.range = TimelineExportRange::WorkArea {
-                start_frame,
-                end_frame_exclusive: start_frame + 1,
-            };
+            config.timeline.range =
+                TimelineExportRange::WorkArea { start_frame, end_frame_exclusive: start_frame + 1 };
             let asset = AssetId::new();
             let component = AudioSourceComponentId::primary();
             let track = config.timeline.sequence.audio_tracks[0].id;
@@ -147,8 +147,13 @@ fn qualify(clap: bool, meter: bool) {
                     Clip::new(
                         asset,
                         TimelineTime::ZERO,
-                        if meter { TimelineTime::new(3, 1).unwrap() } else { TimelineTime::ONE },
-                    ).unwrap(),
+                        if meter {
+                            TimelineTime::new(3, 1).unwrap()
+                        } else {
+                            TimelineTime::ONE
+                        },
+                    )
+                    .unwrap(),
                     component,
                 )
                 .unwrap();

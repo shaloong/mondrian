@@ -305,7 +305,14 @@ fn installed_clap_public_note_refusals_preserve_owner_clock_pcm_and_original_off
     assert_eq!(frozen(&runtime), before);
     let mut pcm = [91.0];
     assert!(matches!(
-        runtime.render_into(AudioRenderRequest { transport_activity: None, start_sample: 0, frames: 1 }, &mut pcm),
+        runtime.render_into(
+            AudioRenderRequest {
+                transport_activity: None,
+                start_sample: 0,
+                frames: 1
+            },
+            &mut pcm
+        ),
         Err(crate::AudioExecutionError::StateEntryRequired)
     ));
     assert_eq!(pcm, [91.0]);
@@ -357,7 +364,11 @@ fn installed_clap_public_note_refusals_preserve_owner_clock_pcm_and_original_off
     let mut adjacent = [91.0];
     assert!(matches!(
         runtime.render_into(
-            AudioRenderRequest { transport_activity: None, start_sample: 0, frames: 0 },
+            AudioRenderRequest {
+                transport_activity: None,
+                start_sample: 0,
+                frames: 0
+            },
             &mut adjacent[..0]
         ),
         Err(crate::AudioExecutionError::ProcessorHost(
@@ -375,7 +386,11 @@ fn installed_clap_public_note_refusals_preserve_owner_clock_pcm_and_original_off
     let mut first = [91.0; 3];
     runtime
         .render_into(
-            AudioRenderRequest { transport_activity: None, start_sample: 0, frames: 3 },
+            AudioRenderRequest {
+                transport_activity: None,
+                start_sample: 0,
+                frames: 3,
+            },
             &mut first,
         )
         .unwrap();
@@ -397,7 +412,14 @@ fn installed_clap_public_note_refusals_preserve_owner_clock_pcm_and_original_off
     assert_eq!(frozen(&runtime), before);
     pcm = [91.0];
     assert!(matches!(
-        runtime.render_into(AudioRenderRequest { transport_activity: None, start_sample: 4, frames: 1 }, &mut pcm),
+        runtime.render_into(
+            AudioRenderRequest {
+                transport_activity: None,
+                start_sample: 4,
+                frames: 1
+            },
+            &mut pcm
+        ),
         Err(crate::AudioExecutionError::NonContiguousBlock {
             expected_start_sample: 3,
             actual_start_sample: 4,
@@ -417,7 +439,11 @@ fn installed_clap_public_note_refusals_preserve_owner_clock_pcm_and_original_off
     let mut middle = [91.0; 6];
     runtime
         .render_into(
-            AudioRenderRequest { transport_activity: None, start_sample: 3, frames: 6 },
+            AudioRenderRequest {
+                transport_activity: None,
+                start_sample: 3,
+                frames: 6,
+            },
             &mut middle,
         )
         .expect("refusals did not replay On or advance native signal history");
@@ -440,7 +466,11 @@ fn installed_clap_public_note_refusals_preserve_owner_clock_pcm_and_original_off
     // following genuine poll must still deliver both original callbacks.
     assert!(matches!(
         runtime.render_into(
-            AudioRenderRequest { transport_activity: None, start_sample: 9, frames: 0 },
+            AudioRenderRequest {
+                transport_activity: None,
+                start_sample: 9,
+                frames: 0
+            },
             &mut adjacent[..0]
         ),
         Err(crate::AudioExecutionError::ProcessorHost(
@@ -506,7 +536,14 @@ fn installed_clap_public_note_refusals_preserve_owner_clock_pcm_and_original_off
     assert_eq!(accepted, 2);
     let mut last = [91.0; 5];
     runtime
-        .render_into(AudioRenderRequest { transport_activity: None, start_sample: 9, frames: 5 }, &mut last)
+        .render_into(
+            AudioRenderRequest {
+                transport_activity: None,
+                start_sample: 9,
+                frames: 5,
+            },
+            &mut last,
+        )
         .expect("same-score real handoff/Ack preserves the held second note's original Off");
     assert_eq!(last, [1.0 / 16.0, 3.0 / 64.0, 1.0 / 32.0, 1.0 / 64.0, 0.0]);
     let proposal = runtime
@@ -522,7 +559,11 @@ fn installed_clap_public_note_refusals_preserve_owner_clock_pcm_and_original_off
     let mut silent = [91.0];
     runtime
         .render_into(
-            AudioRenderRequest { transport_activity: None, start_sample: 14, frames: 1 },
+            AudioRenderRequest {
+                transport_activity: None,
+                start_sample: 14,
+                frames: 1,
+            },
             &mut silent,
         )
         .unwrap();

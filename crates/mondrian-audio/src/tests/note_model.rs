@@ -371,7 +371,14 @@ fn empty_nested_score_preserves_existing_runtime_and_silent_pcm() {
     .expect("existing empty-score nested Runtime");
     let mut pcm = [123.0_f32; 32];
     runtime
-        .render_into(AudioRenderRequest { transport_activity: None, start_sample: 0, frames: 32 }, &mut pcm)
+        .render_into(
+            AudioRenderRequest {
+                transport_activity: None,
+                start_sample: 0,
+                frames: 32,
+            },
+            &mut pcm,
+        )
         .expect("existing silent child render");
     assert_eq!(pcm, [0.0; 32]);
     assert_eq!(child.audio_program.note_lanes.len(), 1);

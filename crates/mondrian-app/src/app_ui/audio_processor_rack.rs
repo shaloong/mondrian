@@ -68,7 +68,8 @@ pub(crate) struct AudioProcessorParameterModel {
     pub(crate) static_value: Option<f64>,
     pub(crate) native_presentation: Option<mondrian_core::NativeAudioParameterFact>,
     /// One-shot adoption of the displayed canonical snapshot, never a slider lease.
-    pub(crate) native_adoption: Option<crate::app::parameter_gesture::AdoptDisplayedNativeParameterEdit>,
+    pub(crate) native_adoption:
+        Option<crate::app::parameter_gesture::AdoptDisplayedNativeParameterEdit>,
     /// Manual single-row query available only for a current Opened None/noFact surface.
     pub(crate) native_query: Option<crate::app::product_action::AudioNativeParameterQueryPayload>,
     /// Persisted discovery visibility used only until an actual same-owner query.
@@ -173,7 +174,8 @@ pub(crate) fn bind_audio_scalar_author_lease(
                     action,
                 }
             });
-            let adoption_owner = rack.scalar_author_lease
+            let adoption_owner = rack
+                .scalar_author_lease
                 .filter(|_| rack.is_editable && processor.native_format.is_some())
                 .zip(rack.input_inspection_target);
             for parameter in &mut processor.parameters {

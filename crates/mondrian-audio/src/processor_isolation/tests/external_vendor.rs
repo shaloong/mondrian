@@ -610,7 +610,11 @@ fn process_case(
             auxiliary: Vec::new(),
         };
         let context = AudioProcessorProcessContext::new(
-            AudioRenderRequest { transport_activity: None, start_sample: start, frames },
+            AudioRenderRequest {
+                transport_activity: None,
+                start_sample: start,
+                frames,
+            },
             AudioSampleRate::new(48000).expect("sample grid"),
             AudioChannelLayout::Stereo,
             AudioProcessingMode::Offline,

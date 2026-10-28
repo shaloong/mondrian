@@ -615,13 +615,12 @@ impl AppState {
         {
             return None;
         }
-        let AudioScalarOwner::Parameter {
-            owner, processor_id, definition, parameter_schema,
-        } = &edit.target.owner else {
+        let AudioScalarOwner::Parameter { owner, processor_id, definition, parameter_schema } =
+            &edit.target.owner
+        else {
             return None;
         };
-        let processor =
-            self.current_audio_scalar_processor(*owner, *processor_id, definition)?;
+        let processor = self.current_audio_scalar_processor(*owner, *processor_id, definition)?;
         let parameter = processor.parameters.get(&parameter_schema.parameter_id)?;
         if parameter.schema != **parameter_schema
             || parameter.schema.numeric.is_none()
@@ -637,11 +636,15 @@ impl AppState {
         // Validate through the unique Timeline implementation before finish or
         // author mutation. This clone is never installed or sent to a worker.
         let mut candidate = parameter.clone();
-        candidate.set_automation(
-            mondrian_core::ExactAutomationCurve::new(
-                parameter_schema.parameter_id.clone(), value,
-            ).ok()?,
-        ).ok()?;
+        candidate
+            .set_automation(
+                mondrian_core::ExactAutomationCurve::new(
+                    parameter_schema.parameter_id.clone(),
+                    value,
+                )
+                .ok()?,
+            )
+            .ok()?;
         Some(value)
     }
 
@@ -652,13 +655,12 @@ impl AppState {
         self.validate_displayed_native_parameter_adoption(&edit)
             .ok_or_else(|| gesture_error("displayed native parameter is no longer current"))?;
         self.finish_parameter_gesture()?;
-        let value = self.validate_displayed_native_parameter_adoption(&edit)
+        let value = self
+            .validate_displayed_native_parameter_adoption(&edit)
             .ok_or_else(|| gesture_error("displayed native parameter changed while finishing"))?;
         self.dispatch_product_action(
-            ParameterGestureEdit::AudioScalar(AudioScalarValueEdit {
-                target: edit.target,
-                value,
-            }).into_product(),
+            ParameterGestureEdit::AudioScalar(AudioScalarValueEdit { target: edit.target, value })
+                .into_product(),
         )
     }
 

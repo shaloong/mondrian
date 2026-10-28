@@ -286,7 +286,9 @@ fn external_surge_xt_vst3_captured_state_notes_constant_meter_runtime_without_me
             TimelineTime::new(1, 2).unwrap(),
         )
         .unwrap()
-        .with_time_signature(Some(mondrian_core::MusicalTimeSignature::new(7, 8).unwrap())),
+        .with_time_signature(Some(
+            mondrian_core::MusicalTimeSignature::new(7, 8).unwrap(),
+        )),
     );
 }
 
@@ -592,7 +594,11 @@ fn run_captured_state_notes_main_runtime(reference: MusicalTimeReference) {
     let mut sustain_block_energy = [0.0_f64; SUSTAIN_BLOCKS];
     let mut sustain_blocks_measured = 0;
     for start in (0..TOTAL).step_by(BLOCK) {
-        let request = AudioRenderRequest { transport_activity: None, start_sample: start as i64, frames: BLOCK };
+        let request = AudioRenderRequest {
+            transport_activity: None,
+            start_sample: start as i64,
+            frames: BLOCK,
+        };
         let before = cursors(&runtime);
         let old = owner(&runtime);
         let old_claim = source.current_claim().unwrap().unwrap();
@@ -1096,7 +1102,11 @@ fn run_surge_cold_entries(
             handoffs += accepted;
             rescans += scanned;
             for start in (starts[phase]..end).step_by(BLOCK) {
-                let request = AudioRenderRequest { transport_activity: None, start_sample: start as i64, frames: BLOCK };
+                let request = AudioRenderRequest {
+                    transport_activity: None,
+                    start_sample: start as i64,
+                    frames: BLOCK,
+                };
                 let before = cursors(&runtime);
                 let old = owner(&runtime);
                 let old_claim = source.current_claim().unwrap().unwrap();

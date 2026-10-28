@@ -9065,7 +9065,10 @@ fn native_anchored_musical_context_rejects_independent_tempo_and_keeps_explicit_
     let reference = ProcessMusicalReference::new(-1, 7, 3, 4).unwrap();
     native
         .set_process_musical_timeline_context(
-            ProcessTimelineContext { sample_position: -17, sample_rate: 48_000 },
+            ProcessTimelineContext {
+                sample_position: -17,
+                sample_rate: 48_000,
+            },
             reference,
         )
         .unwrap();
@@ -9138,7 +9141,10 @@ fn native_anchored_musical_context_rejects_independent_tempo_and_keeps_explicit_
         .unwrap();
     native
         .set_process_musical_timeline_context(
-            ProcessTimelineContext { sample_position: -48_000, sample_rate: 48_000 },
+            ProcessTimelineContext {
+                sample_position: -48_000,
+                sample_rate: 48_000,
+            },
             metered,
         )
         .unwrap();

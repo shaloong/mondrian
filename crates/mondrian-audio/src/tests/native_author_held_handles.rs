@@ -157,7 +157,14 @@ fn native_author_held_installed_handle_is_charged_before_next_prepare() {
     fixture
         .inner
         .runtime
-        .render_into(AudioRenderRequest { transport_activity: None, start_sample: 1, frames: 1 }, &mut pcm)
+        .render_into(
+            AudioRenderRequest {
+                transport_activity: None,
+                start_sample: 1,
+                frames: 1,
+            },
+            &mut pcm,
+        )
         .expect("actual installed current Plan remains usable after exact Ack");
     assert_eq!(pcm, [1.5]);
 

@@ -491,7 +491,10 @@ pub(super) fn run_native_restart_control(seek_frames: &[i64], mode: u8) {
         let (generation, anchor) = fresh.unwrap();
         let facts = cursor_facts(&state);
         assert_eq!(facts.session.unwrap().identity, new_identity.unwrap());
-        let final_scenario = Scenario { lookahead: i64::try_from(next_lookahead).unwrap(), ..scenario };
+        let final_scenario = Scenario {
+            lookahead: i64::try_from(next_lookahead).unwrap(),
+            ..scenario
+        };
         assert_heads(&facts, generation, anchor + 8, final_scenario);
         let new_lease = actual_native_lease(&renderer, &facts);
         assert_ne!(new_lease.binding(), old_lease.unwrap().binding());

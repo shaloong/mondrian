@@ -177,7 +177,11 @@ fn native_author_scope_repeated_preserved_prepare_retains_both_occurrences() {
         .inner
         .runtime
         .render_into(
-            AudioRenderRequest { transport_activity: None, start_sample: 1, frames: 1 },
+            AudioRenderRequest {
+                transport_activity: None,
+                start_sample: 1,
+                frames: 1,
+            },
             &mut first_pcm,
         )
         .expect("the first installed Scope plan actually renders both occurrences");
@@ -329,7 +333,11 @@ fn native_author_scope_repeated_preserved_prepare_retains_both_occurrences() {
         .inner
         .runtime
         .render_into(
-            AudioRenderRequest { transport_activity: None, start_sample: 2, frames: 1 },
+            AudioRenderRequest {
+                transport_activity: None,
+                start_sample: 2,
+                frames: 1,
+            },
             &mut second_pcm,
         )
         .expect("second installed Scope plan continues the exact DSP prefix");

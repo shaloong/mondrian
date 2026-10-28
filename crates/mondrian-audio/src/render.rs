@@ -365,7 +365,8 @@ impl AudioRenderSession {
         if matches!(self.continuity, SessionContinuity::Poisoned { .. }) {
             return mondrian_core::NativeChildSettlementRequirement::Unavailable;
         }
-        self.processor_host.installed_native_child_settlement_requirement(&self.plan.schedule)
+        self.processor_host
+            .installed_native_child_settlement_requirement(&self.plan.schedule)
     }
 
     pub(crate) fn validate_native_child_settlement_domain(
@@ -912,8 +913,13 @@ impl AudioRenderSession {
             return Err(crate::AudioExecutionError::InvalidPreparedSchedule);
         }
         let SessionContinuity::Active {
-            epoch, next_public_sample, next_execution_sample, alignment_primed: true, ..
-        } = self.continuity else {
+            epoch,
+            next_public_sample,
+            next_execution_sample,
+            alignment_primed: true,
+            ..
+        } = self.continuity
+        else {
             return Err(crate::AudioExecutionError::InvalidPreparedSchedule);
         };
         let sample_rate = AudioSampleRate::new(self.plan.contract().sample_rate)?;
@@ -923,8 +929,14 @@ impl AudioRenderSession {
             public_output_lookahead_frames: self.public_output_lookahead_frames(),
             state: crate::AudioSessionCursorState::Active {
                 epoch,
-                next_public_sample: mondrian_core::AudioSamplePosition::new(next_public_sample, sample_rate),
-                next_execution_sample: mondrian_core::AudioSamplePosition::new(next_execution_sample, sample_rate),
+                next_public_sample: mondrian_core::AudioSamplePosition::new(
+                    next_public_sample,
+                    sample_rate,
+                ),
+                next_execution_sample: mondrian_core::AudioSamplePosition::new(
+                    next_execution_sample,
+                    sample_rate,
+                ),
                 alignment_primed: true,
             },
         })
@@ -935,9 +947,17 @@ impl AudioRenderSession {
         next: crate::AudioSessionCursorIdentity,
         serial: std::num::NonZeroU64,
         cancellation: &mondrian_core::ExecutionCancellationToken,
-    ) -> Result<crate::processor_host::host_output_fader::PreparedHostFaderBindings, crate::NativeAudioAuthorAdmissionError> {
+    ) -> Result<
+        crate::processor_host::host_output_fader::PreparedHostFaderBindings,
+        crate::NativeAudioAuthorAdmissionError,
+    > {
         self.processor_host.prepare_host_fader_bindings(
-            self.native_owner_identity(), next, serial, self.plan.program(), &self.plan.schedule, cancellation,
+            self.native_owner_identity(),
+            next,
+            serial,
+            self.plan.program(),
+            &self.plan.schedule,
+            cancellation,
         )
     }
 
@@ -948,7 +968,12 @@ impl AudioRenderSession {
         cancellation: &mondrian_core::ExecutionCancellationToken,
     ) -> Result<(), crate::NativeAudioAuthorAdmissionError> {
         self.processor_host.validate_host_fader_bindings(
-            bindings, self.native_owner_identity(), serial, self.plan.program(), &self.plan.schedule, cancellation,
+            bindings,
+            self.native_owner_identity(),
+            serial,
+            self.plan.program(),
+            &self.plan.schedule,
+            cancellation,
         )
     }
 
@@ -1504,9 +1529,8 @@ impl AudioRenderSession {
         &self,
         request: AudioRenderRequest,
     ) -> Result<(), AudioExecutionError> {
-        if let SessionContinuity::Active {
-            transport_activity: Some(expected), ..
-        } = self.continuity
+        if let SessionContinuity::Active { transport_activity: Some(expected), .. } =
+            self.continuity
         {
             if expected != request.transport_activity {
                 return Err(AudioExecutionError::TransportActivityChanged);
@@ -1523,7 +1547,9 @@ impl AudioRenderSession {
         if request.frames > self.plan.contract().max_block_frames {
             return Err(AudioExecutionError::BlockTooLarge);
         }
-        let samples = request.frames.checked_mul(self.plan.contract().channel_count())
+        let samples = request
+            .frames
+            .checked_mul(self.plan.contract().channel_count())
             .ok_or(AudioExecutionError::BufferTooLarge)?;
         if destination_len != samples {
             return Err(AudioExecutionError::OutputSizeMismatch);
@@ -1774,7 +1800,11 @@ impl AudioRenderSession {
                 let frames = remaining.min(contract.max_block_frames);
                 self.render_internal(
                     source,
-                    AudioRenderRequest { transport_activity: request.transport_activity, start_sample: execution_start_sample, frames },
+                    AudioRenderRequest {
+                        transport_activity: request.transport_activity,
+                        start_sample: execution_start_sample,
+                        frames,
+                    },
                     None,
                     cancellation,
                 )?;
@@ -2889,12 +2919,23 @@ mod native_child_settlement_tests {
             let creates = Arc::new(AtomicUsize::new(0));
             let plan = plan(requirement, false, creates.clone());
             let session = AudioRenderSession::new(plan).unwrap();
-            assert_eq!(session.installed_native_child_settlement_requirement(), requirement);
-            assert_eq!(session.installed_native_child_settlement_requirement(), requirement);
-            assert_eq!(creates.load(Ordering::SeqCst), 1,
-                "capability observation cannot construct another instance");
-            assert!(session.native_child_settlement.is_none(),
-                "declaration observation does not acquire a settlement domain");
+            assert_eq!(
+                session.installed_native_child_settlement_requirement(),
+                requirement
+            );
+            assert_eq!(
+                session.installed_native_child_settlement_requirement(),
+                requirement
+            );
+            assert_eq!(
+                creates.load(Ordering::SeqCst),
+                1,
+                "capability observation cannot construct another instance"
+            );
+            assert!(
+                session.native_child_settlement.is_none(),
+                "declaration observation does not acquire a settlement domain"
+            );
         }
     }
 
@@ -2903,10 +2944,15 @@ mod native_child_settlement_tests {
         let creates = Arc::new(AtomicUsize::new(0));
         let plan = plan(Requirement::NotApplicable, false, creates.clone());
         let prospective = AudioRenderSession::allocate_storage(plan).unwrap();
-        assert_eq!(prospective.session.installed_native_child_settlement_requirement(),
-            Requirement::Unavailable);
-        assert_eq!(creates.load(Ordering::SeqCst), 0,
-            "unpopulated owners are unknown, never filled by observation");
+        assert_eq!(
+            prospective.session.installed_native_child_settlement_requirement(),
+            Requirement::Unavailable
+        );
+        assert_eq!(
+            creates.load(Ordering::SeqCst),
+            0,
+            "unpopulated owners are unknown, never filled by observation"
+        );
     }
 
     #[test]

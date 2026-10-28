@@ -128,21 +128,23 @@ fn continuing_rescan_cohort(
     let Some(cohort) = retained.request_cohort else {
         return Ok(None);
     };
-    let rescan_matches_cohort = proposal.callbacks().split_first().is_some_and(|(first, suffix)| {
-        use mondrian_core::{
-            NativeAudioAuthorCallback as Callback, NativeAudioParameterRescanKind as Kind,
-            NativeAudioReprepareRequest as Request,
-        };
-        let Callback::ParameterValuesRescanned { kind, values } = first else {
-            return false;
-        };
-        let matches = match (cohort.request, *kind) {
-            (Request::Vst3Restart { flags: 4 }, Kind::Values) => true,
-            (Request::Vst3Restart { flags: 16 }, Kind::NoValueRefresh) => values.is_empty(),
-            _ => false,
-        };
-        matches && suffix.iter().all(|callback| matches!(callback, Callback::DirtyChanged(false)))
-    });
+    let rescan_matches_cohort =
+        proposal.callbacks().split_first().is_some_and(|(first, suffix)| {
+            use mondrian_core::{
+                NativeAudioAuthorCallback as Callback, NativeAudioParameterRescanKind as Kind,
+                NativeAudioReprepareRequest as Request,
+            };
+            let Callback::ParameterValuesRescanned { kind, values } = first else {
+                return false;
+            };
+            let matches = match (cohort.request, *kind) {
+                (Request::Vst3Restart { flags: 4 }, Kind::Values) => true,
+                (Request::Vst3Restart { flags: 16 }, Kind::NoValueRefresh) => values.is_empty(),
+                _ => false,
+            };
+            matches
+                && suffix.iter().all(|callback| matches!(callback, Callback::DirtyChanged(false)))
+        });
     let address = lease.address();
     if cohort.serial == 0
         || cohort.exhausted()

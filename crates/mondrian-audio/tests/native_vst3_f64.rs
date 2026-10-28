@@ -277,7 +277,11 @@ fn installed_vst3_float64_only_publishes_literal_f32_pcm() {
                 let mut window = [f32::NAN; 8];
                 runtime
                     .render_into(
-                        AudioRenderRequest { transport_activity: None, start_sample: start, frames: 4 },
+                        AudioRenderRequest {
+                            transport_activity: None,
+                            start_sample: start,
+                            frames: 4,
+                        },
                         &mut window,
                     )
                     .expect("same-owner public Enter/Continue PCM window");

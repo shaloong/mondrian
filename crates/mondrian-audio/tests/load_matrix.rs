@@ -286,7 +286,11 @@ fn run_case(plan: Arc<PreparedAudioPlan>, block_frames: usize) -> (Vec<f32>, Vec
         .expect("load-matrix state entry");
     let mut source = DeterministicSource;
     let mut destination = vec![0.0; block_frames * CHANNELS];
-    let request = AudioRenderRequest { transport_activity: None, start_sample: 0, frames: block_frames };
+    let request = AudioRenderRequest {
+        transport_activity: None,
+        start_sample: 0,
+        frames: block_frames,
+    };
     session.render_into(&mut source, request, &mut destination).expect("warmup");
     let parity_pcm = destination.clone();
     let mut durations = Vec::with_capacity(ITERATIONS);
@@ -315,7 +319,11 @@ fn render_one_block(plan: Arc<PreparedAudioPlan>, block_frames: usize) -> Vec<f3
     session
         .render_into(
             &mut source,
-            AudioRenderRequest { transport_activity: None, start_sample: 0, frames: block_frames },
+            AudioRenderRequest {
+                transport_activity: None,
+                start_sample: 0,
+                frames: block_frames,
+            },
             &mut destination,
         )
         .expect("parity render");

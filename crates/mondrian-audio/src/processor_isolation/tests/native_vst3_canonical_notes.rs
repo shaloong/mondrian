@@ -1027,7 +1027,14 @@ fn installed_vst3_canonical_note_nonzero_entry_chases_only_public_cutoff_notes()
                 let mut pcm = [f32::NAN; 6];
                 subject
                     .runtime
-                    .render_into(AudioRenderRequest { transport_activity: None, start_sample: 0, frames: 3 }, &mut pcm)
+                    .render_into(
+                        AudioRenderRequest {
+                            transport_activity: None,
+                            start_sample: 0,
+                            frames: 3,
+                        },
+                        &mut pcm,
+                    )
                     .unwrap();
                 assert_eq!(
                     pcm.map(f32::to_bits),
@@ -1132,7 +1139,11 @@ fn installed_vst3_canonical_note_nonzero_entry_chases_only_public_cutoff_notes()
                 subject
                     .runtime
                     .render_into(
-                        AudioRenderRequest { transport_activity: None, start_sample: start as i64, frames },
+                        AudioRenderRequest {
+                            transport_activity: None,
+                            start_sample: start as i64,
+                            frames,
+                        },
                         &mut pcm,
                     )
                     .unwrap();
@@ -1275,7 +1286,11 @@ fn installed_vst3_canonical_note_failure_poison_preserves_parent_terminal_bounda
     let error = subject
         .runtime
         .render_into(
-            AudioRenderRequest { transport_activity: None, start_sample: 4, frames: 4 },
+            AudioRenderRequest {
+                transport_activity: None,
+                start_sample: 4,
+                frames: 4,
+            },
             &mut failed,
         )
         .unwrap_err();
@@ -1301,7 +1316,11 @@ fn installed_vst3_canonical_note_failure_poison_preserves_parent_terminal_bounda
         let error = subject
             .runtime
             .render_into(
-                AudioRenderRequest { transport_activity: None, start_sample: 4, frames: 4 },
+                AudioRenderRequest {
+                    transport_activity: None,
+                    start_sample: 4,
+                    frames: 4,
+                },
                 &mut untouched,
             )
             .unwrap_err();

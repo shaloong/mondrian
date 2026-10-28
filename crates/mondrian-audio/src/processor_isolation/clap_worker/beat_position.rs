@@ -257,7 +257,10 @@ mod tests {
         }
         for sample in [i64::from(i32::MIN) - 1, i64::from(i32::MAX) + 1] {
             assert!(position(sample, 1, unit_bar).is_ok());
-            assert_eq!(bar_position(sample, 1, unit_bar), Err(BeatPositionError::OutOfRange));
+            assert_eq!(
+                bar_position(sample, 1, unit_bar),
+                Err(BeatPositionError::OutOfRange)
+            );
         }
         let narrow = reference((0, 1), (1, 1)).with_time_signature(Some(
             mondrian_core::MusicalTimeSignature::new(1, u16::MAX).unwrap(),

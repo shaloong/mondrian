@@ -161,7 +161,11 @@ fn clap_output_owning_actual_isolated_child_does_not_accept_and_discard_unsuppor
         processor.enter_state(-3).expect("exact native continuity");
         for origin in [-3, 1] {
             let context = AudioProcessorProcessContext::new(
-                AudioRenderRequest { transport_activity: None, start_sample: origin, frames: 4 },
+                AudioRenderRequest {
+                    transport_activity: None,
+                    start_sample: origin,
+                    frames: 4,
+                },
                 AudioSampleRate::new(48_000).expect("rate"),
                 AudioChannelLayout::Stereo,
                 mode,
