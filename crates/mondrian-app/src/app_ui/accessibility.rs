@@ -173,42 +173,7 @@ impl SemanticTree {
             }
         }
         if let Some(value) = semantic.value {
-            match value {
-                AccessibilityValue::Text(value) => node.set_value(value),
-                AccessibilityValue::Number { value, min, max } => {
-                    if semantic.role == AccessibilityRole::Slider {
-                        node.set_numeric_value(f64::from(value));
-                        node.set_min_numeric_value(f64::from(min));
-                        node.set_max_numeric_value(f64::from(max));
-                    } else {
-                        node.set_description(format!("{value:.2}; range {min:.2} to {max:.2}"));
-                    }
-                }
-                AccessibilityValue::Scroll { x, y, max_x, max_y } => {
-                    node.set_scroll_x(f64::from(x));
-                    node.set_scroll_y(f64::from(y));
-                    node.set_scroll_x_max(f64::from(max_x));
-                    node.set_scroll_y_max(f64::from(max_y));
-                }
-                AccessibilityValue::Color { r, g, b, a } => {
-                    node.set_description(format!("RGBA {r:.3}, {g:.3}, {b:.3}, {a:.3}"));
-                }
-                AccessibilityValue::Timeline {
-                    playhead_frame, track_count, clip_count, ..
-                } => {
-                    node.set_description(format!(
-                        "Frame {playhead_frame}; {track_count} tracks; {clip_count} clips"
-                    ));
-                }
-                AccessibilityValue::Collection { total_count, selected_count, .. } => {
-                    node.set_description(format!("{total_count} items; {selected_count} selected"));
-                }
-                AccessibilityValue::Viewer { source_width, source_height, has_frame, .. } => {
-                    node.set_description(format!(
-                        "{source_width} by {source_height}; frame available: {has_frame}"
-                    ));
-                }
-            }
+            super::accessibility_value::apply_value(&mut node, semantic.role, value);
         }
         node.set_children(children);
         nodes.push((id, node));
@@ -419,9 +384,7 @@ impl MacAccessibility {
                     AccessibilityRole::Slider,
                     Some(AccessibilityValue::Number { min, max, .. }),
                     Some(accesskit::ActionData::NumericValue(value)),
-                ) if value.is_finite()
-                    && *value >= f64::from(*min)
-                    && *value <= f64::from(*max) => {}
+                ) if value.is_finite() && *value >= *min && *value <= *max => {}
                 (
                     AccessibilityRole::TextInput | AccessibilityRole::MultilineTextInput,
                     _,
@@ -517,5 +480,27 @@ mod tests {
         let focused = semantics.snapshot(&button, Some(widget_id), window_bounds, 2.0);
         assert_eq!(focused.focus, native_id);
         assert_eq!(semantics.ids[&widget_id], native_id);
+    }
+
+    #[test]
+    fn native_integer_input_keeps_exact_value_and_existing_edit_action() {
+        use mondrian_ui_widgets::number_input::NumberInput;
+
+        let exact = (1_i64 << f64::MANTISSA_DIGITS) + 1;
+        let mut input = NumberInput::new(exact, i64::MIN, i64::MAX);
+        let widget_id = input.id();
+        let bounds = Rect::new(0.0, 0.0, 200.0, 40.0);
+        input.layout(bounds);
+        let mut semantics = SemanticTree::default();
+        let snapshot = semantics.snapshot(&input, Some(widget_id), bounds, 1.0);
+        let native_id = semantics.ids[&widget_id];
+        let node = &snapshot.nodes.iter().find(|(id, _)| *id == native_id).unwrap().1;
+
+        assert_eq!(node.role(), Role::TextInput);
+        assert_eq!(node.value().unwrap().parse::<i64>().unwrap(), exact);
+        assert_eq!(node.numeric_value(), None);
+        assert!(node.supports_action(AxAction::SetValue));
+        assert_eq!(snapshot.focus, native_id);
+        assert_eq!(input.committed_value(), exact);
     }
 }

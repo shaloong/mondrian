@@ -7,6 +7,8 @@
 pub mod about_dialog;
 #[cfg(target_os = "macos")]
 pub mod accessibility;
+#[cfg(any(test, target_os = "macos"))]
+mod accessibility_value;
 pub mod action_availability;
 pub mod action_queue;
 pub mod asset_thumbnails;
