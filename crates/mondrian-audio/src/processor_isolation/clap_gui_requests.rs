@@ -146,7 +146,6 @@ impl GuiRequests {
         }
     }
 
-    #[cfg(windows)]
     pub(super) fn close_requested(&self) -> bool {
         let Some(current) = self.current() else {
             return false;

@@ -62,7 +62,6 @@ impl ClapNativeServicesShared {
         }
     }
 
-    #[cfg(windows)]
     pub(super) fn close_requested(&self) -> bool {
         self.gui.close_requested()
     }

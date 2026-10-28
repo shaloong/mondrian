@@ -207,14 +207,14 @@ impl HostHandlers for ClapHost {
             builder.register::<clack_extensions::note_ports::HostNotePortsRaw>();
         }
         #[cfg(windows)]
+        builder.register::<clack_extensions::gui::HostGui>();
         builder
-            .register::<clack_extensions::gui::HostGui>()
             .register::<clack_extensions::timer::HostTimer>()
             .register::<clack_extensions::params::HostParams>()
             .register::<clack_extensions::state::HostState>();
-        // Parameters/state are exposed on the Windows main/DSP lane: void
-        // requests retain one ordered source until canonical Plan/Ack acceptance.
-        // Other platforms need their actual idle audio/main service integration.
+        // Every prepared owner has the same scoped main/DSP service lane. GUI
+        // dispatch belongs to its platform editor; parameters, state and timers
+        // retain the existing ordered source and canonical Plan/Ack acceptance.
     }
 }
 
@@ -1966,10 +1966,9 @@ impl IsolatedAudioProcessorWorker for ClapWorker {
     }
 
     fn uses_native_processing_split(&self) -> bool {
-        cfg!(windows)
+        self.native_lane.is_some()
     }
 
-    #[cfg(windows)]
     fn native_control_only_role(
         &mut self,
     ) -> Result<Option<Box<dyn super::IsolatedAudioProcessorMainRole + '_>>, AudioProcessorHostError>
@@ -1988,6 +1987,7 @@ impl IsolatedAudioProcessorWorker for ClapWorker {
         Ok(Some(Box::new(ClapMainRole {
             note_inputs: self.note_inputs.as_ref(),
             instance: &mut self.instance,
+            #[cfg(windows)]
             gui: &mut self.gui,
             shared: &self.shared,
             phase: &self.configuration_phase,
@@ -1998,7 +1998,6 @@ impl IsolatedAudioProcessorWorker for ClapWorker {
         })))
     }
 
-    #[cfg(windows)]
     fn split_native_processing(
         &mut self,
     ) -> Result<super::IsolatedAudioProcessorWorkerSplit<'_>, AudioProcessorHostError> {
@@ -2023,6 +2022,7 @@ impl IsolatedAudioProcessorWorker for ClapWorker {
             main: Box::new(ClapMainRole {
                 note_inputs: self.note_inputs.as_ref(),
                 instance: &mut self.instance,
+                #[cfg(windows)]
                 gui: &mut self.gui,
                 shared: &self.shared,
                 phase: &self.configuration_phase,
@@ -5972,32 +5972,6 @@ mod tests {
                 worker.pending_reprepare().is_some(),
                 "metadata retirement cannot clear restart"
             );
-            if !cfg!(windows) {
-                let audit = &LIFECYCLE_AUDITS[13];
-                assert_eq!(
-                    audit.visited.load(TestOrdering::SeqCst) & PARAMETER_SERVICES_ABSENT,
-                    PARAMETER_SERVICES_ABSENT,
-                    "platforms without the native service lane do not advertise host Params/State"
-                );
-                assert_eq!(
-                    observed.revision, 0,
-                    "no unsupported host callbacks were emitted"
-                );
-                assert_eq!(observed.pending_controls, 0);
-                assert_eq!(observed.incomplete, 0);
-                let handle = worker.instance.plugin_handle();
-                let params = handle.get_extension::<PluginParams>().unwrap();
-                assert_eq!(
-                    [ClapId::new(1), ClapId::new(2)]
-                        .map(|id| params.get_value(&handle, id).unwrap()),
-                    [if mode == 4 { 0.125 } else { 0.25 }, 0.75],
-                    "the original native state loads without parameter-author services"
-                );
-                drop(worker);
-                assert_ne!(audit.visited.load(TestOrdering::SeqCst) & DESTROY, 0);
-                assert_eq!(audit.failures.load(TestOrdering::SeqCst), 0);
-                continue;
-            }
             assert!(
                 observed.revision > 0,
                 "the callback sequence is never reset"
@@ -6652,9 +6626,8 @@ mod tests {
                 .instance
                 .access_shared_handler(|host| host.services.flush_requested.load(Ordering::Acquire))
         };
-        assert_eq!(
+        assert!(
             flush_pending(&worker),
-            cfg!(windows),
             "the actual plugin can request flush only on the advertised native service lane"
         );
         worker.enter_state(-1).unwrap();
@@ -6683,9 +6656,8 @@ mod tests {
             audit.visited.load(TestOrdering::SeqCst) & (START | PROCESS | FLUSH),
             0
         );
-        assert_eq!(
+        assert!(
             flush_pending(&worker),
-            cfg!(windows),
             "overflow cannot claim an advertised flush or fabricate an unsupported request"
         );
         // Same prepared reference/instance, explicitly entered at its valid
@@ -6784,10 +6756,10 @@ mod clap_output_owning_tests;
 #[path = "clap_output_owner_contracts.rs"]
 mod clap_output_owner_contracts;
 
-#[cfg(windows)]
 struct ClapMainRole<'a> {
     note_inputs: Option<&'a super::clap_note_input_contract::RestoredNoteInputs>,
     instance: &'a mut PluginInstance<ClapHost>,
+    #[cfg(windows)]
     gui: &'a mut super::clap_gui_owner::ClapGuiOwner,
     shared: &'a ClapHostShared,
     phase: &'a super::native_configuration_control::NativeConfigurationPhase,
@@ -6797,7 +6769,6 @@ struct ClapMainRole<'a> {
     author_delivery: &'a Option<native_author::PendingDelivery>,
 }
 
-#[cfg(windows)]
 impl super::IsolatedAudioProcessorMainRole for ClapMainRole<'_> {
     fn allocation_layouts(&self) -> Option<[crate::NativeHostBufferLayout; 2]> {
         // Clack's existing PluginInstance/PluginAudioProcessor are borrowed
@@ -6812,6 +6783,7 @@ impl super::IsolatedAudioProcessorMainRole for ClapMainRole<'_> {
         if let Some(inputs) = self.note_inputs {
             super::clap_note_input_contract::service_names(self.instance, inputs)?;
         }
+        #[cfg(windows)]
         self.gui.service(self.instance)?;
         super::clap_main_services::service_main_tick(self.shared, self.instance)
     }
@@ -6879,18 +6851,19 @@ impl super::IsolatedAudioProcessorMainRole for ClapMainRole<'_> {
     }
 
     fn native_editor_close_requested(&self) -> Result<bool, AudioProcessorHostError> {
-        Ok(self.gui.close_requested()?
-            || self.instance.access_shared_handler(|host| host.services.close_requested()))
+        #[cfg(windows)]
+        if self.gui.close_requested()? {
+            return Ok(true);
+        }
+        Ok(self.instance.access_shared_handler(|host| host.services.close_requested()))
     }
 }
 
-#[cfg(windows)]
 struct ClapDspRole<'a> {
     native: &'a mut PluginAudioProcessor<ClapHost>,
     signal: ClapSignalFields<'a>,
 }
 
-#[cfg(windows)]
 impl super::IsolatedAudioProcessorProcessingRole for ClapDspRole<'_> {
     fn allocation_layouts(&self) -> Option<[crate::NativeHostBufferLayout; 2]> {
         Some([
@@ -6931,12 +6904,10 @@ fn clap_native_cohort(shared: &ClapHostShared) -> Option<super::NativeRequestCoh
     })
 }
 
-#[cfg(windows)]
 fn clap_native_layout(layout: std::alloc::Layout) -> crate::NativeHostBufferLayout {
     crate::NativeHostBufferLayout { bytes: layout.size(), alignment: layout.align() }
 }
 
-#[cfg(windows)]
 const fn clap_empty_layout() -> crate::NativeHostBufferLayout {
     crate::NativeHostBufferLayout { bytes: 0, alignment: 1 }
 }
@@ -6960,47 +6931,38 @@ fn next_clap_native_object() -> Result<crate::NativeAudioObjectObservation, Audi
 
 pub(super) fn clap_native_worker_lane_profile(
 ) -> Result<Option<crate::NativeWorkerLaneResourceProfile>, AudioProcessorHostError> {
-    #[cfg(windows)]
-    {
-        let owners = crate::NativeWorkerLaneOwnedLayouts {
-            adapter_resident: clap_native_layout(std::alloc::Layout::new::<ClapWorker>()),
-            reader_slots: clap_native_layout(std::alloc::Layout::new::<
-                super::native_worker_ingress::NativeReaderSlots,
-            >()),
-            processing_slots: clap_native_layout(std::alloc::Layout::new::<
-                super::native_worker_processing::NativeProcessingSlots,
-            >()),
-            main_inline: clap_native_layout(std::alloc::Layout::new::<(
-                super::native_worker_ingress::NativeCommandIngress<'static>,
-                super::worker::WorkerProcessContext<'static>,
-                super::native_worker_processing::NativeDspDispatch<'static>,
-                crate::NativeAudioObservations,
-                super::clap_metadata::MetadataScanScratch,
-                super::clap_parameter_source::ClapParameterControlSnapshot,
-                clack_extensions::params::ParamInfoBuffer,
-            )>()),
-            runtime_main_role: clap_native_layout(
-                std::alloc::Layout::new::<ClapMainRole<'static>>(),
-            ),
-            runtime_dsp_role: clap_native_layout(std::alloc::Layout::new::<ClapDspRole<'static>>()),
-            sdk_main_role: clap_empty_layout(),
-            sdk_dsp_role: clap_empty_layout(),
-        };
-        let bytes = super::MAX_CONTROL_FRAME_BYTES;
-        let control = crate::NativeWorkerControlOverlapLayout {
-            decoded_input: crate::NativeHostBufferLayout { bytes, alignment: align_of::<f64>() },
-            reply_storage: crate::NativeHostBufferLayout { bytes, alignment: 1 },
-            staged_seed: crate::NativeHostBufferLayout { bytes, alignment: 1 },
-        };
-        Ok(Some(
-            crate::NativeWorkerLaneResourceProfile::scoped_main_dsp(owners, control)
-                .map_err(AudioProcessorHostError::from)?,
-        ))
-    }
-    #[cfg(not(windows))]
-    {
-        Ok(None)
-    }
+    let owners = crate::NativeWorkerLaneOwnedLayouts {
+        adapter_resident: clap_native_layout(std::alloc::Layout::new::<ClapWorker>()),
+        reader_slots: clap_native_layout(std::alloc::Layout::new::<
+            super::native_worker_ingress::NativeReaderSlots,
+        >()),
+        processing_slots: clap_native_layout(std::alloc::Layout::new::<
+            super::native_worker_processing::NativeProcessingSlots,
+        >()),
+        main_inline: clap_native_layout(std::alloc::Layout::new::<(
+            super::native_worker_ingress::NativeCommandIngress<'static>,
+            super::worker::WorkerProcessContext<'static>,
+            super::native_worker_processing::NativeDspDispatch<'static>,
+            crate::NativeAudioObservations,
+            super::clap_metadata::MetadataScanScratch,
+            super::clap_parameter_source::ClapParameterControlSnapshot,
+            clack_extensions::params::ParamInfoBuffer,
+        )>()),
+        runtime_main_role: clap_native_layout(std::alloc::Layout::new::<ClapMainRole<'static>>()),
+        runtime_dsp_role: clap_native_layout(std::alloc::Layout::new::<ClapDspRole<'static>>()),
+        sdk_main_role: clap_empty_layout(),
+        sdk_dsp_role: clap_empty_layout(),
+    };
+    let bytes = super::MAX_CONTROL_FRAME_BYTES;
+    let control = crate::NativeWorkerControlOverlapLayout {
+        decoded_input: crate::NativeHostBufferLayout { bytes, alignment: align_of::<f64>() },
+        reply_storage: crate::NativeHostBufferLayout { bytes, alignment: 1 },
+        staged_seed: crate::NativeHostBufferLayout { bytes, alignment: 1 },
+    };
+    Ok(Some(
+        crate::NativeWorkerLaneResourceProfile::scoped_main_dsp(owners, control)
+            .map_err(AudioProcessorHostError::from)?,
+    ))
 }
 
 #[cfg(all(test, windows))]
