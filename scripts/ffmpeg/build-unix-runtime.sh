@@ -68,7 +68,11 @@ if [[ ! -f "$archive" ]]; then
     --connect-timeout 20 --max-time 180 "$archive_url" -o "$archive.part"
   mv "$archive.part" "$archive"
 fi
-printf '%s  %s\n' "$archive_sha256" "$archive" | sha256 -c
+actual_sha256=$(sha256 "$archive")
+if [[ ${actual_sha256%% *} != "$archive_sha256" ]]; then
+  echo "FFmpeg source archive checksum mismatch" >&2
+  exit 1
+fi
 
 source_dir=$(mktemp -d "$work_dir/ffmpeg-source.XXXXXX")
 tar -xf "$archive" -C "$source_dir" --strip-components=1

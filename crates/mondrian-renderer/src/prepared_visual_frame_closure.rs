@@ -846,7 +846,7 @@ where
                     return Err(PreparedVisualFrameClosureError::DuplicateNestedBinding {
                         parent_sequence_id: sequence.id,
                         placement: Box::new(demand.placement),
-                        sample: demand.sample,
+                        sample: Box::new(demand.sample),
                     });
                 }
                 node.bindings.push(binding);
@@ -1222,8 +1222,8 @@ pub enum PreparedVisualFrameClosureError {
         parent_sequence_id: SequenceId,
         /// Exact placement.
         placement: Box<TimelineClipExecutionRef>,
-        /// Current or temporal sample identity.
-        sample: PreparedVisualNestedSample,
+        /// Current or temporal sample identity, allocated only on failure.
+        sample: Box<PreparedVisualNestedSample>,
     },
     /// Closure exceeded its typed node-index capacity.
     NodeCapacityExceeded,

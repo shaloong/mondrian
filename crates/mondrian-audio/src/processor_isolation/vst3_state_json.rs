@@ -1,5 +1,5 @@
 //! Private JSON spelling for VST3 state bytes. The owning model remains
-//! Option<Vec<u8>>; this module only formats or validates that field.
+//! `Option<Vec<u8>>`; this module only formats or validates that field.
 
 use base64::{display::Base64Display, engine::general_purpose::STANDARD, Engine as _};
 use serde::{de, Deserializer, Serialize, Serializer};

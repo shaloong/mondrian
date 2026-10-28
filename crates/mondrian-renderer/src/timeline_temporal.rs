@@ -1116,10 +1116,10 @@ fn prepare_timeline_temporal_execution_inner(
             }
             TimelineRenderPlanElement::CrossDissolve(transition) => {
                 for input in [&transition.left, &transition.right] {
-                    if let TimelineTransitionInputPlan::Media(media) = input {
-                        if graph_requires_temporal(&media.effect_graph) {
-                            media_plans.push(media.clone());
-                        }
+                    if let TimelineTransitionInputPlan::Media(media) = input
+                        && graph_requires_temporal(&media.effect_graph)
+                    {
+                        media_plans.push(media.clone());
                     }
                 }
             }
