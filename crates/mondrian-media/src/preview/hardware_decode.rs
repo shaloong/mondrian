@@ -195,6 +195,12 @@ impl PreviewHardwareDecodePlan {
         let mut fallback = None;
         let mut candidates = Vec::new();
         for candidate in probe.candidate_backends.iter().copied() {
+            // The renderer's explicit selector bounds both admission and the
+            // failure evidence. An unavailable selected codec must not leave
+            // an unrelated adapter in the plan's fallback diagnostics.
+            if device_selector.is_some_and(|selector| !selector.selects_backend(candidate)) {
+                continue;
+            }
             let codec_config = candidate.probe_ffmpeg_codec_config(codec_id);
             let device_context = Self::device_context_probe_for_plan(
                 request,
@@ -215,11 +221,6 @@ impl PreviewHardwareDecodePlan {
             }
             if request.prefers_gpu_residency()
                 && !ffmpeg_native_resource_adapter_available(&codec_config)
-            {
-                continue;
-            }
-            if Self::plan_requires_device_context(request, access_mode, backend)
-                && device_selector.is_some_and(|selector| !selector.selects_backend(candidate))
             {
                 continue;
             }
@@ -609,6 +610,63 @@ pub(super) fn ffmpeg_native_resource_adapter_available(config: &HwAccelCodecConf
         Some(HwAccelPixelFormat::VideoToolbox) => cfg!(target_os = "macos"),
         Some(HwAccelPixelFormat::Vaapi | HwAccelPixelFormat::Cuda) => cfg!(target_os = "linux"),
         _ => false,
+    }
+}
+
+#[cfg(test)]
+mod backend_selection_tests {
+    use super::*;
+
+    #[test]
+    fn unsupported_codec_preserves_the_explicit_backend_in_failure_evidence() {
+        for (selector, selected, unrelated) in [
+            (
+                HwAccelDeviceSelector::CudaDeviceOrdinal(0),
+                HwAccelBackend::Cuda,
+                HwAccelBackend::Vaapi,
+            ),
+            (
+                HwAccelDeviceSelector::VaapiDrmRenderNode(128),
+                HwAccelBackend::Vaapi,
+                HwAccelBackend::Cuda,
+            ),
+            (
+                HwAccelDeviceSelector::D3D12VaAdapterIndex(0),
+                HwAccelBackend::D3D12VA,
+                HwAccelBackend::D3D11VA,
+            ),
+            (
+                HwAccelDeviceSelector::D3D11VaAdapterIndex(0),
+                HwAccelBackend::D3D11VA,
+                HwAccelBackend::D3D12VA,
+            ),
+        ] {
+            let mut platform_probe = HwAccelBackend::probe();
+            platform_probe.candidate_backends = vec![unrelated, selected];
+            let (probe, codec, device, candidates) =
+                PreviewHardwareDecodePlan::resolve_backend_probes(
+                    PreviewHardwareDecodeRequest::PreferGpuResident,
+                    PreviewDecodeAccessMode::PlaybackCursor,
+                    PreviewDecodeBackend::Auto,
+                    ffmpeg::ffi::AVCodecID::AV_CODEC_ID_NONE.into(),
+                    Some(selector),
+                    platform_probe,
+                );
+
+            assert_eq!(probe.candidate_backend, Some(selected));
+            assert_eq!(codec.backend, selected);
+            assert_eq!(device.backend, selected);
+            assert!(!codec.ffmpeg_decoder_available);
+            assert!(candidates.is_empty());
+            assert!(!device.device_create_attempted);
+            assert!(!device.device_context_created);
+            assert!(probe.reason.contains(selected.as_str()), "{}", probe.reason);
+            assert!(
+                !probe.reason.contains(unrelated.as_str()),
+                "{}",
+                probe.reason
+            );
+        }
     }
 }
 
