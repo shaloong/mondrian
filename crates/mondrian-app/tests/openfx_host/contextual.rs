@@ -31,7 +31,7 @@ fn program(
     geometry: mondrian_effects::EffectProjectGeometry,
 ) -> Result<PreparedEffectProgram, mondrian_effects::EffectGraphBuildError> {
     PreparedEffectProgram::prepare_hierarchical_with_frame_context(
-        &[effect.clone()],
+        std::slice::from_ref(effect),
         &[],
         &[],
         &[],

@@ -398,7 +398,10 @@ jobs:
       - name: 测试完整 App 产品路径
         env:
           CARGO_INCREMENTAL: "0"
-        run: cargo test -p mondrian-app --all-targets -j1
+        # App fixtures share the process-wide definition registry and own real
+        # Runtime/deadline scopes. Isolate fixtures; their explicit worker and
+        # child-process concurrency remains exercised inside each test.
+        run: cargo test -p mondrian-app --all-targets -j1 -- --test-threads=1
 
       - name: 编译 Golden 验证入口 (Windows)
         if: runner.os == 'Windows'
@@ -461,7 +464,7 @@ jobs:
           bash scripts/validation/verify-linux-title-font.sh
 
       - name: 运行完整 app 产品测试
-        run: cargo test -p mondrian-app --all-targets
+        run: cargo test -p mondrian-app --all-targets -- --test-threads=1
 
       - name: 运行 app UI primitive/draw-command renderer 测试
         run: cargo test -p mondrian-ui-renderer -- --nocapture
