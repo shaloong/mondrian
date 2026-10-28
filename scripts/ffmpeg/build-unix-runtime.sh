@@ -68,7 +68,7 @@ if [[ ! -f "$archive" ]]; then
     --connect-timeout 20 --max-time 180 "$archive_url" -o "$archive.part"
   mv "$archive.part" "$archive"
 fi
-printf '%s  %s\n' "$archive_sha256" "$archive" | sha256 --check
+printf '%s  %s\n' "$archive_sha256" "$archive" | sha256 -c
 
 source_dir=$(mktemp -d "$work_dir/ffmpeg-source.XXXXXX")
 tar -xf "$archive" -C "$source_dir" --strip-components=1
