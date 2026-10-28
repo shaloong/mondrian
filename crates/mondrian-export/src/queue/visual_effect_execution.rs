@@ -140,13 +140,13 @@ pub(super) enum ExportHeterogeneousEffectError {
     Preparation {
         placement: &'static str,
         #[source]
-        source: PreparedHeterogeneousEffectWorkError,
+        source: Box<PreparedHeterogeneousEffectWorkError>,
     },
     #[error("export heterogeneous CPU prefix failed for {placement}: {source}")]
     CpuPrefix {
         placement: &'static str,
         #[source]
-        source: PreparedHeterogeneousEffectWorkError,
+        source: Box<PreparedHeterogeneousEffectWorkError>,
     },
     #[error("export heterogeneous GPU suffix failed for {placement}: {source}")]
     GpuContinuation {
@@ -266,7 +266,7 @@ impl ExportVisualRenderSession {
         let prepared = PreparedHeterogeneousEffectRoute::prepare(Arc::clone(graph), extent, budget)
             .map_err(|source| ExportHeterogeneousEffectError::Preparation {
                 placement: placement.label(),
-                source,
+                source: Box::new(source),
             })?;
         Ok(prepared)
     }
@@ -593,7 +593,7 @@ impl ExportVisualRenderSession {
                 } => ExportHeterogeneousEffectError::Canceled { checkpoint: "cpu_prefix" },
                 source => ExportHeterogeneousEffectError::CpuPrefix {
                     placement: route.placement.label(),
-                    source,
+                    source: Box::new(source),
                 },
             }
         })?;
