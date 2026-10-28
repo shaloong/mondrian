@@ -501,6 +501,7 @@ jobs:
           cp LICENSE "$stage_dir/LICENSE"
           cp -R LICENSES "$stage_dir/LICENSES"
           cp RELEASE_PROVENANCE.json "$stage_dir/RELEASE_PROVENANCE.json"
+          cp -R "$MONDRIAN_FFMPEG_SOURCE_DIR" "$stage_dir/FFMPEG_SOURCE"
 
           for executable in "$stage_dir/mondrian" "$stage_dir/ffmpeg" "$stage_dir/ffprobe"; do
             while IFS= read -r dependency; do
@@ -525,6 +526,7 @@ jobs:
           # host: it may silently satisfy an omitted private dependency from
           # /usr/lib. Prove that every non-baseline object in the recursive
           # closure resolves back into this staged package.
+          unset LD_LIBRARY_PATH LD_PRELOAD
           stage_root="$(realpath "$stage_dir")"
           for executable in "$stage_dir/mondrian" "$stage_dir/ffmpeg" "$stage_dir/ffprobe"; do
             if ldd "$executable" | grep -q 'not found'; then
