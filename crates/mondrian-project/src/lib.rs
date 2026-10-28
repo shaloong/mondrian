@@ -1595,22 +1595,28 @@ where
 fn validate_exact_archive_entry_set<R: Read + Seek>(
     archive: &mut zip::ZipArchive<R>,
 ) -> anyhow::Result<()> {
+    // ZIP's indexed view merges duplicate names; reject its raw-directory fact
+    // before trusting the indexed entry count or parsing any payload.
+    if archive.has_duplicate_names() {
+        anyhow::bail!("duplicate project archive entry");
+    }
     let mut seen = [false; REQUIRED_ARCHIVE_ENTRIES.len()];
     for index in 0..archive.len() {
         let entry = archive.by_index(index)?;
+        let name = entry.name()?;
         if entry.is_dir() {
             anyhow::bail!(
                 "directories are not permitted in project archive v1: {}",
-                entry.name()
+                name
             );
         }
         let Some(required_index) =
-            REQUIRED_ARCHIVE_ENTRIES.iter().position(|required| *required == entry.name())
+            REQUIRED_ARCHIVE_ENTRIES.iter().position(|required| *required == name)
         else {
-            anyhow::bail!("unexpected project archive entry: {}", entry.name());
+            anyhow::bail!("unexpected project archive entry: {name}");
         };
         if seen[required_index] {
-            anyhow::bail!("duplicate project archive entry: {}", entry.name());
+            anyhow::bail!("duplicate project archive entry: {name}");
         }
         seen[required_index] = true;
     }
@@ -1664,7 +1670,7 @@ fn write_project_archive_from_open_library_to_open_file(
     target_file.set_len(0)?;
     target_file.seek(SeekFrom::Start(0))?;
     let mut writer = zip::ZipWriter::new(&mut *target_file);
-    let options = zip::write::FileOptions::default()
+    let options = zip::write::SimpleFileOptions::default()
         .compression_method(zip::CompressionMethod::Deflated)
         .unix_permissions(0o644);
 
@@ -1696,8 +1702,8 @@ fn write_project_archive_from_open_library_to_open_file(
     std::io::copy(&mut db_reader, &mut library_writer)?;
     let library = library_writer.finish(LIBRARY_ENTRY);
 
+    // finish consumes the ZIP owner and releases the original file borrow.
     writer.finish()?;
-    drop(writer);
     target_file.sync_all()?;
     Ok(ProjectArchiveWriteEvidence { manifest, project, library })
 }
@@ -2157,7 +2163,7 @@ mod tests {
         let project = serde_json::to_vec_pretty(document).expect("serialize project");
         let file = fs::File::create(path).expect("create stored fixture archive");
         let mut writer = zip::ZipWriter::new(file);
-        let options = zip::write::FileOptions::default()
+        let options = zip::write::SimpleFileOptions::default()
             .compression_method(zip::CompressionMethod::Stored)
             .unix_permissions(0o644);
         for (name, bytes) in [
@@ -2184,7 +2190,7 @@ mod tests {
     fn write_raw_stored_archive(path: &Path, entries: &[(&str, &[u8])]) {
         let file = fs::File::create(path).expect("create raw fixture archive");
         let mut writer = zip::ZipWriter::new(file);
-        let options = zip::write::FileOptions::default()
+        let options = zip::write::SimpleFileOptions::default()
             .compression_method(zip::CompressionMethod::Stored)
             .unix_permissions(0o644);
         for (name, bytes) in entries {
@@ -2397,15 +2403,33 @@ mod tests {
         let root = unique_temp_dir("exact-entry-contract");
         let document = serde_json::to_vec(&test_document()).expect("serialize Project");
         let duplicate = root.join("duplicate.mdp");
+        // Modern writers reject duplicates. Build a valid distinct member, then
+        // change only its two filename fields to produce the malformed input.
+        let alias = "_".repeat(MANIFEST_ENTRY.len());
         write_raw_stored_archive(
             &duplicate,
             &[
                 (MANIFEST_ENTRY, b"{"),
-                (MANIFEST_ENTRY, b"{"),
+                (&alias, b"{"),
                 (PROJECT_ENTRY, &document),
                 (LIBRARY_ENTRY, b"library"),
             ],
         );
+        let (local, central) = {
+            let file = fs::File::open(&duplicate).expect("fixture file");
+            let mut archive = zip::ZipArchive::new(file).expect("valid initial fixture");
+            let entry = archive.by_name(&alias).expect("distinct fixture member");
+            (entry.header_start(), entry.central_header_start())
+        };
+        let mut bytes = fs::read(&duplicate).expect("fixture bytes");
+        // ZIP's fixed local/central headers precede their variable filenames.
+        for (header, fixed_bytes) in [(local, 30), (central, 46)] {
+            let start = usize::try_from(header).unwrap() + fixed_bytes;
+            let name = &mut bytes[start..start + alias.len()];
+            assert_eq!(name, alias.as_bytes());
+            name.copy_from_slice(MANIFEST_ENTRY.as_bytes());
+        }
+        fs::write(&duplicate, bytes).expect("duplicate-name fixture");
         let error = read_project_document_from_archive(&duplicate)
             .expect_err("duplicate entry must fail before malformed Manifest parse");
         assert!(
@@ -2416,7 +2440,7 @@ mod tests {
         let directory = root.join("directory.mdp");
         let file = fs::File::create(&directory).expect("create directory-entry archive");
         let mut writer = zip::ZipWriter::new(file);
-        let options = zip::write::FileOptions::default();
+        let options = zip::write::SimpleFileOptions::default();
         writer.add_directory("unexpected/", options).expect("directory entry");
         writer.start_file(MANIFEST_ENTRY, options).expect("manifest");
         writer.write_all(b"{").expect("malformed manifest");
@@ -3589,7 +3613,7 @@ mod tests {
         let project_path = root.join("legacy.mdp");
         let file = fs::File::create(&project_path).expect("create archive");
         let mut writer = zip::ZipWriter::new(file);
-        let options = zip::write::FileOptions::default();
+        let options = zip::write::SimpleFileOptions::default();
         writer.start_file(PROJECT_ENTRY, options).expect("start project");
         writer.write_all(b"{}").expect("write project");
         writer.finish().expect("finish archive");
@@ -3633,7 +3657,7 @@ mod tests {
     fn write_current_fixture_archive(path: &Path, library: &[u8]) {
         let file = fs::File::create(path).expect("create fixture archive");
         let mut writer = zip::ZipWriter::new(file);
-        let options = zip::write::FileOptions::default();
+        let options = zip::write::SimpleFileOptions::default();
         writer.start_file(MANIFEST_ENTRY, options).expect("manifest entry");
         writer
             .write_all(include_bytes!("../tests/fixtures/current/manifest.json"))
@@ -3903,7 +3927,7 @@ mod tests {
         let source = root.join("invalid.mdp");
         let file = fs::File::create(&source).expect("archive");
         let mut writer = zip::ZipWriter::new(file);
-        let options = zip::write::FileOptions::default();
+        let options = zip::write::SimpleFileOptions::default();
         writer.start_file(MANIFEST_ENTRY, options).expect("manifest");
         writer
             .write_all(include_bytes!("../tests/fixtures/current/manifest.json"))

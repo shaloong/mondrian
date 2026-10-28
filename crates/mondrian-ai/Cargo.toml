@@ -18,4 +18,4 @@ serde_json  = { workspace = true }
 # 日志
 tracing     = { workspace = true }
 # YAML 工作流定义
-serde_yaml  = "0.9"
+serde-saphyr = "2.0.0"

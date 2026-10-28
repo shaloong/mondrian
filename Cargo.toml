@@ -78,7 +78,7 @@ mondrian-ui-widgets   = { path = "crates/mondrian-ui-widgets" }
 mondrian-ui-tooltip   = { path = "crates/mondrian-ui-tooltip" }
 
 # ---- 异步运行时 ----
-tokio            = { version = "1",    features = ["full"] }
+tokio            = { version = "1.53.3", features = ["full"] }
 async-trait      = "0.1"
 futures          = "0.3"
 
@@ -189,8 +189,9 @@ image            = { version = "0.25", default-features = false, features = ["pn
 base64           = "0.22"
 roxmltree        = "0.20"
 sha1             = "0.10"
-zip              = "0.6"
-zstd             = "0.11"
+# Preserve the archive codec set instead of enabling new ZIP defaults implicitly.
+zip              = { version = "9.1.3", default-features = false, features = ["aes-crypto", "bzip2", "deflate-flate2-zlib-rs", "time", "zstd"] }
+zstd             = "0.14.3"
 
 [patch.crates-io]
 harfrust = { path = "vendor/harfrust" }
