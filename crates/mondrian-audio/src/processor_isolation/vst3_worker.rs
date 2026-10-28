@@ -5346,7 +5346,6 @@ mod musical_effect_tests {
         }
     }
 
-    #[cfg(target_os = "windows")]
     #[test]
     fn vst3_zero_audio_input_cold_admission_requires_some_and_explicit_formal_note_input() {
         use crate::{
@@ -5411,6 +5410,13 @@ mod musical_effect_tests {
                         "VST3 zero audio input requires musical reference and requested Note input"
                     };
                     assert_eq!(result.unwrap_err(), unavailable(expected));
+                    continue;
+                }
+                if !cfg!(windows) {
+                    assert_eq!(
+                        result.unwrap_err(),
+                        unavailable("VST3 Note input requires the scoped native lane")
+                    );
                     continue;
                 }
                 let spec = result.unwrap();
@@ -5518,6 +5524,13 @@ mod musical_effect_tests {
                     assert_eq!(
                         result.unwrap_err(),
                         unavailable("VST3 Note input requires a musical time reference")
+                    );
+                    continue;
+                }
+                if requested && !cfg!(windows) {
+                    assert_eq!(
+                        result.unwrap_err(),
+                        unavailable("VST3 Note input requires the scoped native lane")
                     );
                     continue;
                 }

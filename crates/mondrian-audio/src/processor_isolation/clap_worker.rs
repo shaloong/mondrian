@@ -5479,6 +5479,7 @@ mod tests {
     const DESTROY: u32 = 2048;
     const BACKGROUND: u32 = 4096;
     const FLUSH: u32 = 8192;
+    const PARAMETER_SERVICES_ABSENT: u32 = 16384;
 
     impl LifecycleShared<'_> {
         fn check(&self, stage: u32, audio: bool) {
@@ -5517,7 +5518,7 @@ mod tests {
     }
 
     // Case12 is the retained optional-profile consumer with two native values.
-    // Case11 retains its zero-parameter active flush callback and
+    // Case11 retains its zero-parameter active flush callback where advertised; its
     // native start/process stages distinguish failure from consuming a request.
     impl PluginMainThreadParams for LifecycleMain<'_> {
         fn count(&self) -> u32 {
@@ -5549,10 +5550,10 @@ mod tests {
                 && self.0.initial_oracle.load(TestOrdering::SeqCst) == 3
                 && !self.0.initial_query_notified.swap(true, TestOrdering::SeqCst)
             {
-                self.1
-                    .get_extension::<clack_extensions::params::HostParams>()
-                    .unwrap()
-                    .rescan(&self.1, clack_extensions::params::ParamRescanFlags::TEXT);
+                if let Some(params) = self.1.get_extension::<clack_extensions::params::HostParams>()
+                {
+                    params.rescan(&self.1, clack_extensions::params::ParamRescanFlags::TEXT);
+                }
             }
             [ClapId::new(1), ClapId::new(2)]
                 .iter()
@@ -5745,8 +5746,17 @@ mod tests {
                 let mut mode = [0];
                 input.read_exact(&mut mode)?;
                 self.0.initial_oracle.store(u32::from(mode[0]), TestOrdering::SeqCst);
-                let params =
-                    self.1.get_extension::<clack_extensions::params::HostParams>().unwrap();
+                let Some(params) = self.1.get_extension::<clack_extensions::params::HostParams>()
+                else {
+                    // Cold plugin state still loads when the host has no
+                    // parameter-author service. Do not invent a callback lane.
+                    let audit = &LIFECYCLE_AUDITS[self.0.case];
+                    audit.visited.fetch_or(PARAMETER_SERVICES_ABSENT, TestOrdering::SeqCst);
+                    if self.1.get_extension::<clack_extensions::state::HostState>().is_some() {
+                        audit.failures.fetch_add(1, TestOrdering::SeqCst);
+                    }
+                    return Ok(());
+                };
                 use clack_extensions::params::{ParamClearFlags, ParamRescanFlags};
                 params.rescan(
                     &self.1,
@@ -5821,11 +5831,11 @@ mod tests {
         ) -> Result<Self, PluginError> {
             shared.check(ACTIVATE, false);
             if CASE == 11 {
-                let params = shared
-                    .host
-                    .get_extension::<clack_extensions::params::HostParams>()
-                    .ok_or(PluginError::Message("missing host params"))?;
-                params.request_flush(&shared.host);
+                if let Some(params) =
+                    shared.host.get_extension::<clack_extensions::params::HostParams>()
+                {
+                    params.request_flush(&shared.host);
+                }
             }
             LIFECYCLE_AUDITS[CASE].activations.fetch_add(1, TestOrdering::SeqCst);
             shared.active.store(true, TestOrdering::SeqCst);
@@ -5959,12 +5969,38 @@ mod tests {
             .unwrap();
             let observed = worker.shared.parameter_source.snapshot();
             assert!(
-                observed.revision > 0,
-                "the callback sequence is never reset"
-            );
-            assert!(
                 worker.pending_reprepare().is_some(),
                 "metadata retirement cannot clear restart"
+            );
+            if !cfg!(windows) {
+                let audit = &LIFECYCLE_AUDITS[13];
+                assert_eq!(
+                    audit.visited.load(TestOrdering::SeqCst) & PARAMETER_SERVICES_ABSENT,
+                    PARAMETER_SERVICES_ABSENT,
+                    "platforms without the native service lane do not advertise host Params/State"
+                );
+                assert_eq!(
+                    observed.revision, 0,
+                    "no unsupported host callbacks were emitted"
+                );
+                assert_eq!(observed.pending_controls, 0);
+                assert_eq!(observed.incomplete, 0);
+                let handle = worker.instance.plugin_handle();
+                let params = handle.get_extension::<PluginParams>().unwrap();
+                assert_eq!(
+                    [ClapId::new(1), ClapId::new(2)]
+                        .map(|id| params.get_value(&handle, id).unwrap()),
+                    [if mode == 4 { 0.125 } else { 0.25 }, 0.75],
+                    "the original native state loads without parameter-author services"
+                );
+                drop(worker);
+                assert_ne!(audit.visited.load(TestOrdering::SeqCst) & DESTROY, 0);
+                assert_eq!(audit.failures.load(TestOrdering::SeqCst), 0);
+                continue;
+            }
+            assert!(
+                observed.revision > 0,
+                "the callback sequence is never reset"
             );
             match mode {
                 1 => {
@@ -6616,9 +6652,10 @@ mod tests {
                 .instance
                 .access_shared_handler(|host| host.services.flush_requested.load(Ordering::Acquire))
         };
-        assert!(
+        assert_eq!(
             flush_pending(&worker),
-            "the actual plugin requested flush during activation"
+            cfg!(windows),
+            "the actual plugin can request flush only on the advertised native service lane"
         );
         worker.enter_state(-1).unwrap();
         let auxiliary = AudioProcessorAuxiliaryInputContract::default();
@@ -6646,9 +6683,10 @@ mod tests {
             audit.visited.load(TestOrdering::SeqCst) & (START | PROCESS | FLUSH),
             0
         );
-        assert!(
+        assert_eq!(
             flush_pending(&worker),
-            "overflow cannot claim the real pending flush"
+            cfg!(windows),
+            "overflow cannot claim an advertised flush or fabricate an unsupported request"
         );
         // Same prepared reference/instance, explicitly entered at its valid
         // boundary, reaches the real ABI and consumes the request in process.
