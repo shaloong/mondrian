@@ -72,6 +72,11 @@ printf '%s  %s\n' "$archive_sha256" "$archive" | sha256 --check
 
 source_dir=$(mktemp -d "$work_dir/ffmpeg-source.XXXXXX")
 tar -xf "$archive" -C "$source_dir" --strip-components=1
+# GitHub archives omit VERSION. Mirror release packaging so version.sh cannot
+# inherit the enclosing Mondrian checkout's Git revision instead of FFmpeg's.
+[[ $(cat "$source_dir/RELEASE") == "$version" ]]
+printf '%s\n' "$version" > "$source_dir/VERSION"
+[[ $(sh "$source_dir/ffbuild/version.sh" "$source_dir") == "$version" ]]
 patch_file="$script_dir/$version-prores12.patch"
 rgba_patch_file="$script_dir/$version-rgba64-signed-chroma.patch"
 patch --directory="$source_dir" --strip=1 --fuzz=0 < "$patch_file"
