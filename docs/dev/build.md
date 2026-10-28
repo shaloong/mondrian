@@ -64,6 +64,11 @@ manifest; release packaging retains it as `FFMPEG_SOURCE`. Existing recursive
 private-dylib closure and `--verify-runtime` gates remain required after bundling.
 This build recipe alone is not a physical decoder or HDR qualification result.
 
+The Darwin and Linux entrypoints share `scripts/ffmpeg/build-unix-runtime.sh`:
+the same FFmpeg version, ProRes twelve-bit reconstruction and RGBA64 signed-chroma
+patches, codec dependencies and source package. Platform branches select their
+compiler defaults, native frameworks and library search policy.
+
 ### Private app packaging
 
 The FFmpeg builder reserves Mach-O header space for dependency relocation.
@@ -85,6 +90,37 @@ environment and packaged sibling tools. A local development bundle passing
 these checks does not establish release provenance, notarization, codec hardware
 qualification or commercial performance. Release packaging separately retains
 licenses, source and immutable qualification provenance.
+
+## Linux FFmpeg Runtime
+
+On Ubuntu 24, install the development dependencies before invoking the builder:
+
+```bash
+sudo apt-get install --no-install-recommends \
+  nasm libx264-dev libx265-dev libaom-dev libdav1d-dev \
+  libopenjp2-7-dev libharfbuzz-dev libass-dev \
+  libfribidi-dev libgraphite2-dev libunibreak-dev
+```
+
+Use an absolute development prefix for the matching CLI and shared libraries.
+The Linux entrypoint defaults to the official signed-tag GitHub source mirror;
+`MONDRIAN_FFMPEG_SOURCE_KIND=release` selects the ffmpeg.org archive instead.
+Both sources are pinned and use the same precision patches.
+
+```bash
+ffmpeg_work=$(mktemp -d /tmp/mondrian-ffmpeg.XXXXXX)
+ffmpeg_prefix="$ffmpeg_work/runtime"
+bash scripts/build-linux-ffmpeg.sh "$ffmpeg_work" "$ffmpeg_prefix" 2
+export PATH="$ffmpeg_prefix/bin:$PATH"
+export PKG_CONFIG_PATH="$ffmpeg_prefix/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
+export LD_LIBRARY_PATH="$ffmpeg_prefix/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+cargo build --locked -p mondrian-app -j 2
+```
+
+The installed `share/mondrian-ffmpeg-source` preserves the source archive,
+configuration, licenses and the builder/patch directory layout for rebuilding.
+Development builds still require separate actual codec, host, device and packaged
+runtime qualification.
 
 ## Profiles
 
