@@ -714,16 +714,25 @@ instruments, other platforms, realtime and performance remain unqualified.
 
 ## Qualification and record policy
 
-At `af29c49b`, the ordinary Audio library suite passes on Ubuntu24.04.5 x86_64
-(846 passed, 65 ignored) and Windows x64 (906 passed, 207 ignored), using
-Rust1.97.1, default features, opt1/debug0, zero filtering and empty stderr.
-Owned fixtures now respect absent Linux host Params/State services and scoped
-VST3 Note admission; production capabilities remain unchanged. Windows uses a
-workspace-owned temporary directory: sandbox `AC\Temp` refuses native rename
-even after handle closure, while the owned path permits the original held-handle
-replacement test. The unchanged 180s gate and Job settlement pass. This qualifies
-ordinary tests, not Linux third-party plugins, App/Export, GUI/device, realtime,
-performance or macOS execution.
+The CLAP main/DSP and Params/State/Timer services now use the existing executor
+on every native platform; only the actual GUI backend remains platform-specific.
+Real Linux execution exposed a main-equals-audio identity assumption, corrected
+by a scoped actual pthread/Win32 identity guard. Ordinary Audio passes on
+Ubuntu24.04.5 x86_64 (848 passed, 65 ignored, `cdfafaa2`) and Windows x64
+(907 passed, 207 ignored, `d47cceed`), using Rust1.97.1, default features,
+opt1/debug0, zero filtering and empty stderr. Windows retains workspace-owned
+TMP because sandbox `AC\Temp` refuses native rename after handle closure; the
+original held-handle test, 180s deadline and Job settlement pass.
+
+At `d47cceed`, the same real Ring Out1.0.0 Runtime/Graph gate passes on both
+platforms with matching normal Products. Mono/Stereo at48k/offline/block64 use
+actual native0/-6dB states, native getters and project save/reopen. Every sample
+of257-frame entries at0/0/97 is compared against independent gain math under
+different block partitions, without warmup omission. Legitimate restarts use
+the original capture/prepare/install/Fresh path; HOLD preserves output, native
+identity and the canonical author source remain stable, and original child
+owners settle. This is finite offline PCM/state/lifecycle qualification, not
+native GUI, realtime/device, performance, all CLAP extensions or macOS execution.
 
 FFmpeg integration at `78d9eede` passes the ordinary Media library suite on
 Ubuntu24.04.5 x86_64 (671 passed, 16 ignored) and Windows x64 (678 passed,
@@ -743,24 +752,20 @@ device selection now constrains probes before recording fallback evidence,
 including unsupported codecs; CUDA/VAAPI/D3D12/D3D11 controls pass without requiring
 physical hardware. CI/runtime recipes carry the matching SDK; Linux packaging
 retains its source and clears loader overrides before closure verification.
-Workflow syntax passes; new packaged artifacts, Product/plugin execution, GPU,
-realtime/performance and macOS physical behavior remain separately unverified.
+Workflow syntax passes. Normal Product/plugin execution has the finite CLAP
+qualification above; new packaged artifacts, GPU, realtime/performance and
+macOS physical behavior remain separately unverified.
 
-The default Windows workspace regression closed on 2026-10-25: all 30 members
-and 127 executable test targets completed at `df8ddd49`, with 9,417 passed,
-one failed and 641 originally ignored tests. The sole failure was a stale
-scaled-image golden after the image-coverage correction. Fixture-only commit
-`98864c26` adds an independent f64 border/continuous Rec.709 toe oracle and
-corrects exactly 55 edge pixels, preserving 713 interior pixels and the original
-channel tolerance. The complete affected ten-test target then passed under the
-same Job/census checks; combined ordinary results are 9,418 passed and 641
-ignored, without counting repeated tests twice or calling the initial attempt
-all-green. All 30 library doctest groups completed at `98864c26`, including two
-passing audio-thread compile-fail tests. Expected negative-control stderr in
-the endurance verifier and native-bootstrap tests was reviewed. This qualifies
-the ordinary default-build regression; ignored native gates, other feature
-sets, actual GPU execution, third-party compatibility, performance and other
-platforms retain their separate acceptance requirements.
+The complete default Windows workspace baseline at `150ef2df` passes all30
+members and127 executable targets:9,455 passed, zero failed,654 originally
+ignored and zero filtering. All30 library doctest groups pass, including two
+audio-thread compile-fail controls. Original Job/census/deadline checks settle;
+the two expected negative-control stderr roles were reviewed. This supersedes
+the earlier combined baseline after the independently checked scaled-image
+golden correction, which retained the original pixel tolerance. Later scoped
+results do not replace final-candidate CI. Ignored native gates, other feature
+sets, physical GPU execution, realtime/performance and other platforms retain
+their separate acceptance requirements.
 
 A result records the tested feature, plugin/version, platform, relevant input and
 render settings, suite/result, and remaining limits. A mock, SDK validator,
