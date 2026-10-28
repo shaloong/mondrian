@@ -95,37 +95,65 @@ fn verify_linked_ffmpeg_abi() -> std::result::Result<(), String> {
         [
             (
                 "libavcodec",
-                ffmpeg::ffi::LIBAVCODEC_VERSION_INT,
+                ffmpeg_version(
+                    ffmpeg::ffi::LIBAVCODEC_VERSION_MAJOR,
+                    ffmpeg::ffi::LIBAVCODEC_VERSION_MINOR,
+                    ffmpeg::ffi::LIBAVCODEC_VERSION_MICRO,
+                ),
                 ffmpeg::ffi::avcodec_version(),
             ),
             (
                 "libavformat",
-                ffmpeg::ffi::LIBAVFORMAT_VERSION_INT,
+                ffmpeg_version(
+                    ffmpeg::ffi::LIBAVFORMAT_VERSION_MAJOR,
+                    ffmpeg::ffi::LIBAVFORMAT_VERSION_MINOR,
+                    ffmpeg::ffi::LIBAVFORMAT_VERSION_MICRO,
+                ),
                 ffmpeg::ffi::avformat_version(),
             ),
             (
                 "libavutil",
-                ffmpeg::ffi::LIBAVUTIL_VERSION_INT,
+                ffmpeg_version(
+                    ffmpeg::ffi::LIBAVUTIL_VERSION_MAJOR,
+                    ffmpeg::ffi::LIBAVUTIL_VERSION_MINOR,
+                    ffmpeg::ffi::LIBAVUTIL_VERSION_MICRO,
+                ),
                 ffmpeg::ffi::avutil_version(),
             ),
             (
                 "libavfilter",
-                ffmpeg::ffi::LIBAVFILTER_VERSION_INT,
+                ffmpeg_version(
+                    ffmpeg::ffi::LIBAVFILTER_VERSION_MAJOR,
+                    ffmpeg::ffi::LIBAVFILTER_VERSION_MINOR,
+                    ffmpeg::ffi::LIBAVFILTER_VERSION_MICRO,
+                ),
                 ffmpeg::ffi::avfilter_version(),
             ),
             (
                 "libswscale",
-                ffmpeg::ffi::LIBSWSCALE_VERSION_INT,
+                ffmpeg_version(
+                    ffmpeg::ffi::LIBSWSCALE_VERSION_MAJOR,
+                    ffmpeg::ffi::LIBSWSCALE_VERSION_MINOR,
+                    ffmpeg::ffi::LIBSWSCALE_VERSION_MICRO,
+                ),
                 ffmpeg::ffi::swscale_version(),
             ),
             (
                 "libswresample",
-                ffmpeg::ffi::LIBSWRESAMPLE_VERSION_INT,
+                ffmpeg_version(
+                    ffmpeg::ffi::LIBSWRESAMPLE_VERSION_MAJOR,
+                    ffmpeg::ffi::LIBSWRESAMPLE_VERSION_MINOR,
+                    ffmpeg::ffi::LIBSWRESAMPLE_VERSION_MICRO,
+                ),
                 ffmpeg::ffi::swresample_version(),
             ),
         ]
     };
     verify_ffmpeg_versions(&versions)
+}
+
+const fn ffmpeg_version(major: i32, minor: i32, micro: i32) -> u32 {
+    ((major as u32) << 16) | ((minor as u32) << 8) | micro as u32
 }
 
 fn verify_ffmpeg_versions(versions: &[(&str, u32, u32)]) -> std::result::Result<(), String> {
@@ -448,7 +476,7 @@ mod tests {
 
     #[test]
     fn linked_abi_allows_newer_compatible_libraries_and_rejects_older_ones() {
-        let version = |major, minor, micro| (major << 16) | (minor << 8) | micro;
+        let version = ffmpeg_version;
         let headers = version(3, 4, 5);
         for runtime in [headers, version(3, 4, 6), version(3, 5, 0)] {
             verify_ffmpeg_versions(&[("library", headers, runtime)]).expect("compatible ABI");
