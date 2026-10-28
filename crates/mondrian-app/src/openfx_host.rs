@@ -954,7 +954,7 @@ impl NativeSession {
             && self.report.output_alpha == -1
             && self.report.required_transient_bytes > 0
             && self.report.required_transient_bytes <= MAX_FRAME_BYTES
-            && self.report.required_transient_bytes % 16 == 0
+            && self.report.required_transient_bytes.is_multiple_of(16)
         {
             return Err(NativeRenderError::PreflightBudgetRefused {
                 required_bytes: self.report.required_transient_bytes,

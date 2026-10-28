@@ -439,15 +439,15 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                     "prepared Timeline completion is stale",
                 ));
             }
-            if !snapshot.transport().is_speculative_preparation() {
-                if let Ok(feedback) = ready.take_processor_feedback() {
-                    *self.pending_processor_feedback.borrow_mut() = Some(
-                        super::super::preview_processor_feedback::PreviewProcessorFeedbackUpdate {
-                            scope,
-                            feedback,
-                        },
-                    );
-                }
+            if !snapshot.transport().is_speculative_preparation()
+                && let Ok(feedback) = ready.take_processor_feedback()
+            {
+                *self.pending_processor_feedback.borrow_mut() = Some(
+                    super::super::preview_processor_feedback::PreviewProcessorFeedbackUpdate {
+                        scope,
+                        feedback,
+                    },
+                );
             }
             return match ready.into_prepared_timeline() {
                 Ok((output, lease)) => {

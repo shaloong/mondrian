@@ -317,6 +317,7 @@ fn cpu_fallback_worker(
                     RESULT_CAPACITY, question_service, progress_publication),
                 None => super::preview_processor_feedback::PreviewProcessorProgressPublisher::new_observer(RESULT_CAPACITY, progress_publication),
             };
+            #[expect(clippy::result_large_err, reason = "Backpressure returns the original source request and ownership without a new rejection allocation")]
             let mut publish_source = |request| {
                 match results.try_send(PreviewCpuFallbackResult::SourceRequest(Box::new(request))) {
                     Ok(()) => { work_notifier.result_became_pollable(); Ok(()) }

@@ -781,6 +781,13 @@ enum WindowCornerPreference {
 enum SurfaceLifecycleReason {
     Resize,
     ScaleFactorChanged,
+    #[cfg_attr(
+        not(windows),
+        allow(
+            dead_code,
+            reason = "Windows retains the session on role changes; other backends replace it"
+        )
+    )]
     RoleChanged,
 }
 

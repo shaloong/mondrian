@@ -1689,8 +1689,7 @@ impl AppState {
                             .and_then(std::sync::Weak::upgrade);
                         if let (AppAudioPlayback::Available(playback), Some(renderer)) =
                             (&mut self.audio_playback, renderer)
-                        {
-                            if playback
+                            && playback
                                 .request_native_reprepare(
                                     pending_generation,
                                     renderer.native_reprepare_request(),
@@ -1698,9 +1697,8 @@ impl AppState {
                                 .map_err(|error| {
                                     transport_action_error("native_audio_reprepare", error)
                                 })?
-                            {
-                                self.invalidate_native_audio_parameter_presentation();
-                            }
+                        {
+                            self.invalidate_native_audio_parameter_presentation();
                         }
                         self.finish_native_reprepare_product(pending_generation, handled_at)?;
                     }

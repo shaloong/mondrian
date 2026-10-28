@@ -110,6 +110,8 @@ impl WinitUiRuntime {
     }
 
     /// End transient native input sessions when replacing the visible widget root.
+    // Windows reuses the native window; other backends replace this Runtime.
+    #[cfg(windows)]
     pub(crate) fn reset_for_root_change(&mut self, window: &winit::window::Window) {
         self.eyedropper.cancel();
         self.tooltip = TooltipWidget::new();

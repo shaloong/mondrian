@@ -29,7 +29,7 @@ enum Phase {
     Collecting {
         attempted_members: usize,
     },
-    Preparing(Candidate),
+    Preparing(Box<Candidate>),
     Published {
         key: AudioPcmNativeAuthorResumeKey,
         queued: bool,
@@ -263,14 +263,14 @@ impl AppState {
             let members =
                 work.members.iter().map(|p| member(author, p)).collect::<Result<Vec<_>>>()?;
             let ticket = author.prepare_native_audio_terminal_group(&mut work.group, members)?;
-            work.phase = Phase::Preparing(Candidate {
+            work.phase = Phase::Preparing(Box::new(Candidate {
                 ticket,
                 programs: None,
                 publication: Arc::new(parking_lot::Mutex::new(None)),
                 submitted: work.members.len(),
                 admission: None,
                 prepared_key: None,
-            });
+            }));
         }
         let AppAudioPlayback::Available(playback) = &mut self.audio_playback else {
             return Err(failure("native author Media worker is unavailable"));

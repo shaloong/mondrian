@@ -235,6 +235,10 @@ impl VisualExecutionAdmission {
 
 /// Successful heavy preparation awaiting its exact GPU continuation.
 #[derive(Debug)]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "The bounded worker result and its admitted owners are already boxed at the poll boundary; avoid an additional per-output allocation"
+)]
 pub(crate) enum VisualExecutionTaskOutput {
     PreparedTimeline {
         output: Box<super::preview_timeline_execution::PreviewTimelineResolution>,
@@ -337,6 +341,10 @@ pub(crate) struct VisualExecutionPrefixReady {
 }
 
 impl VisualExecutionPrefixReady {
+    #[expect(
+        clippy::result_large_err,
+        reason = "A non-Timeline result must return its original output and completion lease intact"
+    )]
     pub(crate) fn into_prepared_timeline(
         self,
     ) -> Result<
@@ -497,6 +505,10 @@ impl VisualExecutionFailed {
 
 /// One result emitted by the dedicated CPU preparation worker.
 #[derive(Debug)]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "Bounded result-channel slots retain the original execution receipts; the consumer boxes each complete result once"
+)]
 pub(crate) enum VisualExecutionTaskResult {
     SourceRequest(Box<super::preview_processor_sources::PreviewProcessorSourceRequest>),
     /// Bounded actual execution observation, with no Broker completion lease.
@@ -1110,12 +1122,8 @@ fn visual_execution_worker(
             catch_unwind(AssertUnwindSafe(|| {
                 #[cfg(test)]
                 execution.payload.apply_test_control();
-                execute_visual_payload(
-                    execution.payload,
-                    identity,
-                    &broker,
-                    &mut executor,
-                    &mut |request| match results
+                #[expect(clippy::result_large_err, reason = "Backpressure returns the same source request and leases without allocating a new refusal carrier")]
+                let mut publish_source = |request| match results
                         .try_send(VisualExecutionTaskResult::SourceRequest(Box::new(request)))
                     {
                         Ok(()) => {
@@ -1129,7 +1137,13 @@ fn visual_execution_worker(
                             VisualExecutionTaskResult::SourceRequest(request),
                         )) => Err(mpsc::TrySendError::Disconnected(*request)),
                         _ => unreachable!("source publication returns its original payload"),
-                    },
+                    };
+                execute_visual_payload(
+                    execution.payload,
+                    identity,
+                    &broker,
+                    &mut executor,
+                    &mut publish_source,
                 )
             }))
             .unwrap_or_else(|payload| {

@@ -31,6 +31,13 @@ pub(super) enum Stage {
     PumpStopJoinBegin,
     PumpStopJoinEnd,
     ResidentInnerReturned,
+    #[cfg_attr(
+        not(windows),
+        allow(
+            dead_code,
+            reason = "Retain the shared stage ordinal; this optional QPC/WinJob probe is Windows-specific"
+        )
+    )]
     ChildAttached,
 }
 
@@ -118,9 +125,23 @@ pub(super) enum CleanupStep {
 
 #[derive(Clone, Copy, Debug, Default)]
 struct CleanupOperation {
+    #[cfg_attr(
+        not(windows),
+        allow(
+            dead_code,
+            reason = "Windows diagnostic payload field; preserve the common observation shape"
+        )
+    )]
     result: u32, // 0 not called, 1 pending, 2 exited, 3 kill Ok, 4 IO error
-    flags: u32,  // 1 usable QPC, 2 exit code present, 4 successful exit, 8 raw OS error present
-    value: i32,  // original exit code or raw OS error; flags distinguish absent from zero
+    flags: u32, // 1 usable QPC, 2 exit code present, 4 successful exit, 8 raw OS error present
+    #[cfg_attr(
+        not(windows),
+        allow(
+            dead_code,
+            reason = "Windows diagnostic payload field; preserve the common observation shape"
+        )
+    )]
+    value: i32, // original exit code or raw OS error; flags distinguish absent from zero
     start_qpc: i64,
     end_qpc: i64,
 }

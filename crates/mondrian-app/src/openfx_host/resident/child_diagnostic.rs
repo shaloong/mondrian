@@ -127,7 +127,7 @@ impl NativeRenderDiagnostic {
                 && (self.output_clear_bytes != 0 || self.output_clear_ns != 0))
             || (self.output_clear_calls == 1
                 && (self.output_clear_bytes == 0
-                    || self.output_clear_bytes % 16 != 0
+                    || !self.output_clear_bytes.is_multiple_of(16)
                     || self.output_clear_bytes > super::super::MAX_FRAME_BYTES as u64))
         {
             return Err(unavailable(

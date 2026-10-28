@@ -84,21 +84,23 @@ impl PreviewProcessorSourceWork {
                     bindings.push(MediaBinding { plan: Arc::clone(plan), key: key.clone() });
                 }
             };
-        let mut transition = |input: &ResolvedPreviewTransitionInput| {
-            if let ResolvedPreviewTransitionInput::Media { frame, prepared_effect_route, .. } =
-                input
-            {
-                media(frame, prepared_effect_route.as_deref());
-            }
-        };
         // Bind exact resolved placements, retaining their already-admitted keys.
-        for element in elements {
-            if let ResolvedPreviewElement::CrossDissolve { left, right, .. } = element {
-                transition(left);
-                transition(right);
+        {
+            let mut transition = |input: &ResolvedPreviewTransitionInput| {
+                if let ResolvedPreviewTransitionInput::Media {
+                    frame, prepared_effect_route, ..
+                } = input
+                {
+                    media(frame, prepared_effect_route.as_deref());
+                }
+            };
+            for element in elements {
+                if let ResolvedPreviewElement::CrossDissolve { left, right, .. } = element {
+                    transition(left);
+                    transition(right);
+                }
             }
         }
-        drop(transition);
         for element in elements {
             if let ResolvedPreviewElement::Media { frame, prepared_effect_route, .. } = element {
                 media(frame, prepared_effect_route.as_deref());

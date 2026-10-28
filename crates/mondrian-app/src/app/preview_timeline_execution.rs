@@ -181,6 +181,10 @@ pub(crate) struct ResolvedPreviewTimeline {
 }
 
 /// Exhaustive root result without Window-owned pending inference.
+#[expect(
+    clippy::large_enum_variant,
+    reason = "One resolution transfers existing frame and preparation owners inline; do not add a per-frame variant allocation"
+)]
 pub(crate) enum PreviewTimelineResolution {
     Ready(ResolvedPreviewTimeline),
     Empty,
@@ -770,6 +774,10 @@ fn poll_prepared_preview_work(
     }
 }
 
+#[expect(
+    clippy::large_enum_variant,
+    reason = "Forward the existing resolution and its leases directly through the single work poll"
+)]
 pub(crate) enum PreviewTimelineWorkPoll {
     Pending,
     Finished(PreviewTimelineResolution),
@@ -988,7 +996,7 @@ impl PreparedPreviewTimelineWork {
             blocked,
             facts: Vec::new(),
         };
-        let root = match execute_prepared_visual_closure(&closure, &mut adapter) {
+        let root = match execute_prepared_visual_closure(closure, &mut adapter) {
             Ok(root) => root,
             Err(PreparedVisualExecutionError::Adapter(PreviewTimelineAbort::Pending {
                 ..
@@ -3022,6 +3030,10 @@ where
     ))
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Pass the exact frozen child canvas, color, sources and execution authority together without a second context model"
+)]
 fn materialize_prepared_nested_node(
     sequence_id: SequenceId,
     author_resolution: Resolution,

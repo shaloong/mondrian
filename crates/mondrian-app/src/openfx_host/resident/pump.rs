@@ -401,7 +401,7 @@ unsafe extern "C" fn native_abort(context: *const c_void) -> c_int {
 }
 
 unsafe extern "C" fn native_acquire_memory(context: *const c_void, bytes: usize) -> c_int {
-    if context.is_null() || bytes == 0 || bytes > MAX_FRAME_BYTES || bytes % 16 != 0 {
+    if context.is_null() || bytes == 0 || bytes > MAX_FRAME_BYTES || !bytes.is_multiple_of(16) {
         return -1;
     }
     // SAFETY: the same action-scoped Shared borrow as native_abort. This is a

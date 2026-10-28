@@ -916,6 +916,10 @@ struct NativeAudioReprepareHandoffRequest {
     owner: NativeAudioReprepareOwner,
 }
 
+#[expect(
+    clippy::large_enum_variant,
+    reason = "The outer handoff is allocated before admission; store its accepted install receipt without a post-commit allocation"
+)]
 enum NativeAudioReprepareOwner {
     Empty,
     Installed(mondrian_audio::NativeAudioReprepareInstallReceipt),

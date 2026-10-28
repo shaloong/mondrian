@@ -26,7 +26,7 @@ mod terminal_author;
 /// One author transaction owns the App custody slot. Presentation is separate;
 /// single-owner gestures and a terminal frontier cannot coexist here.
 pub(super) enum NativeAudioAuthorWork {
-    Single(NativeAudioSingleAuthorWork),
+    Single(Box<NativeAudioSingleAuthorWork>),
     Terminal(Box<terminal_author::TerminalAuthorWork>),
 }
 
@@ -1000,15 +1000,16 @@ impl AppState {
             .and_then(NativeAudioAuthorWork::single)
             .is_none_or(|work| work.gesture.is_none())
         {
-            self.native_audio_author_work =
-                Some(NativeAudioAuthorWork::Single(NativeAudioSingleAuthorWork {
+            self.native_audio_author_work = Some(NativeAudioAuthorWork::Single(Box::new(
+                NativeAudioSingleAuthorWork {
                     session_id: payload.session_id,
                     sequence_id: payload.sequence_id,
                     renderer: captured_renderer,
                     gesture: Some(gesture.clone()),
                     outstanding: None,
                     state_entry_accepted: false,
-                }));
+                },
+            )));
         }
         let commit = self
             .authoring
@@ -2104,15 +2105,16 @@ mod attachment_continuity_contracts {
             let mut surface = context();
             surface.attachment_target = None;
             state.native_audio_editor = Some(surface);
-            state.native_audio_author_work =
-                Some(NativeAudioAuthorWork::Single(NativeAudioSingleAuthorWork {
+            state.native_audio_author_work = Some(NativeAudioAuthorWork::Single(Box::new(
+                NativeAudioSingleAuthorWork {
                     session_id: state.authoring_session_id().unwrap(),
                     sequence_id,
                     renderer: state.native_audio_renderer.clone().unwrap(),
                     gesture: None,
                     outstanding: None,
                     state_entry_accepted: true,
-                }));
+                },
+            )));
             assert!(state.native_audio_editor.is_some());
             assert!(state.native_audio_author_work.is_some());
             // No native processor is modeled: this is the original registered

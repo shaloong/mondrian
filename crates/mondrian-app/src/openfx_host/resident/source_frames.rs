@@ -132,7 +132,7 @@ fn validate_descriptor(d: &Descriptor, timing: &OpenFxRenderTiming) -> Result<()
             .and_then(|n| n.checked_mul(16))
             != Some(d.bytes)
         || d.bytes > MAX_FRAME_BYTES
-        || d.offset % 16 != 0
+        || !d.offset.is_multiple_of(16)
     {
         return Err(invalid(
             "invalid Source delivery time, bounds or byte range",
@@ -164,6 +164,7 @@ pub(super) enum DeliveryService {
 }
 
 impl Delivery {
+    #[cfg(test)]
     pub fn acquire(
         sources: &[SourceFrame<'_>],
         timing: &OpenFxRenderTiming,
