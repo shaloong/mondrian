@@ -40,6 +40,10 @@ clack-plugin.workspace = true
 clack-host = { workspace = true, features = ["clack-plugin"] }
 clack-extensions = { workspace = true, features = ["clack-plugin", "note-ports", "gui", "log", "timer"] }
 
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+# Observe the real foreign GUI through its public X11 server, not host internals.
+xcb = "1.7"
+
 [target.'cfg(windows)'.dev-dependencies]
 # Joint native-owner closure tests use the real Media retirement worker.
 mondrian-media.workspace = true

@@ -2489,6 +2489,7 @@ dependencies = [
  "vst3",
  "vst3-host",
  "windows-sys 0.61.2",
+ "xcb",
 ]
 
 [[package]]
