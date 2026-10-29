@@ -16,6 +16,7 @@ pub use float_frame::{
     validate_float32_frame_storage, EffectAlphaConversionFailure, EffectFloatFrame,
     EffectFloatFrameError, EffectFloatFrameView,
 };
+pub mod black_white;
 pub mod box_blur;
 pub mod chroma_key;
 pub mod color_curves;
@@ -64,6 +65,10 @@ pub mod unsharp_mask;
 
 pub use adjustment::{
     blend_rgba_f32_pixel, blend_rgba_f32_pixel_seeded, blend_rgba_pixel, blend_rgba_pixel_seeded,
+};
+pub use black_white::{
+    BlackAndWhiteError, BlackAndWhiteGrade, BLACK_WHITE_HUE_STOPS, BLACK_WHITE_NEUTRAL_WEIGHT,
+    BLACK_WHITE_STOP_KEYS, BLACK_WHITE_WEIGHT_MAX, BLACK_WHITE_WEIGHT_MIN,
 };
 pub use box_blur::{
     box_blur_frame_f32, box_blur_frame_u8, BoxBlurDirection, BOX_BLUR_AUTHOR_MAX_RADIUS_PIXELS,

@@ -2318,6 +2318,7 @@ fn effect_render_op_name(op: &EffectRenderOp) -> &'static str {
         EffectRenderOp::Invert { .. } => "invert",
         EffectRenderOp::BoxBlur { .. } => "box_blur",
         EffectRenderOp::HueSaturation { .. } => "hue_saturation",
+        EffectRenderOp::BlackAndWhite { .. } => "black_and_white",
         EffectRenderOp::UnsharpMask { .. } => "unsharp_mask",
         EffectRenderOp::Crop { .. } => "crop",
         EffectRenderOp::TemporalFrameBlend { .. } => "temporal_frame_blend",

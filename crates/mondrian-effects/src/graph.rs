@@ -1674,6 +1674,10 @@ fn render_op_requirements(op: &EffectRenderOp) -> EffectImplementationRequiremen
             execution_modes: cpu_float.execution_modes.union(EffectExecutionModes::GPU_F32),
             ..cpu_float
         },
+        EffectRenderOp::BlackAndWhite { .. } => EffectImplementationRequirements {
+            execution_modes: cpu_float.execution_modes.union(EffectExecutionModes::GPU_F32),
+            ..cpu_float
+        },
         EffectRenderOp::Invert { .. } => EffectImplementationRequirements {
             execution_modes: cpu_float.execution_modes.union(EffectExecutionModes::GPU_F32),
             ..cpu_float

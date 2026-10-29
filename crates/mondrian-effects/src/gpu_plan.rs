@@ -76,6 +76,11 @@ pub enum EffectGpuPointOp {
     /// The grade is carried whole and backends read exact controls through
     /// [`crate::HueSaturationGrade::gpu_controls`], so no backend re-derives them.
     HueSaturation { grade: crate::HueSaturationGrade },
+    /// Hue-keyed black and white conversion.
+    ///
+    /// The grade is carried whole and backends read exact controls through
+    /// [`crate::BlackAndWhiteGrade::gpu_controls`], so no backend re-derives them.
+    BlackAndWhite { grade: crate::BlackAndWhiteGrade },
     /// Prepared creative 3D LUT sampled in its explicitly authored processing domain.
     ///
     /// The backend-neutral plan retains the immutable semantic payload only;
@@ -757,6 +762,9 @@ fn lower_point_op(
         EffectRenderOp::HueSaturation { grade } => {
             Ok(EffectGpuPointOp::HueSaturation { grade: *grade })
         }
+        EffectRenderOp::BlackAndWhite { grade } => {
+            Ok(EffectGpuPointOp::BlackAndWhite { grade: *grade })
+        }
         EffectRenderOp::Invert { channels, blend_with_original } => {
             let (color_mask, flags) = channels.gpu_scope();
             Ok(EffectGpuPointOp::Invert {
@@ -809,6 +817,7 @@ fn operation_name(op: &EffectRenderOp) -> &'static str {
         EffectRenderOp::Invert { .. } => "invert",
         EffectRenderOp::BoxBlur { .. } => "box_blur",
         EffectRenderOp::HueSaturation { .. } => "hue_saturation",
+        EffectRenderOp::BlackAndWhite { .. } => "black_and_white",
         EffectRenderOp::UnsharpMask { .. } => "unsharp_mask",
         EffectRenderOp::Crop { .. } => "crop",
         EffectRenderOp::TemporalFrameBlend { .. } => "temporal_frame_blend",
@@ -890,6 +899,26 @@ mod tests {
         assert_eq!(
             plan.operations()[0],
             EffectGpuPointOp::HueSaturation { grade }
+        );
+        assert_eq!(plan.processing_domain(), EffectColorDomain::SceneLinearRgb);
+    }
+
+    #[test]
+    fn lowers_black_and_white_to_one_packed_point_op() {
+        let grade = crate::BlackAndWhiteGrade::new(
+            [40.0, 60.0, 40.0, 60.0, 20.0, 80.0],
+            0.25,
+            [0.88, 0.83, 0.70],
+        )
+        .expect("valid black and white grade");
+        let mut builder = EffectGraphBuilderState::new();
+        builder.append_unary(EffectRenderOp::BlackAndWhite { grade });
+        let compiled = compile_reference_render_graph(builder.finish()).expect("valid graph");
+        let plan = lower_effect_graph_to_gpu_plan(&compiled).expect("black and white is pointwise");
+        assert_eq!(plan.operations().len(), 1);
+        assert_eq!(
+            plan.operations()[0],
+            EffectGpuPointOp::BlackAndWhite { grade }
         );
         assert_eq!(plan.processing_domain(), EffectColorDomain::SceneLinearRgb);
     }

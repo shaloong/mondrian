@@ -954,6 +954,40 @@ fn hue_saturation_tinted(rgb: vec3<f32>, tint: vec4<f32>) -> vec3<f32> {
     return invert_rgb_from_hue_chroma_lightness(tint.x, range * tint.y, lightness);
 }
 
+fn black_and_white_weight_at(index: u32, head: vec4<f32>, tail: vec2<f32>) -> f32 {
+    // The six authored stops in hue order: red, yellow, green, cyan, blue, magenta.
+    if (index == 0u) { return head.x; }
+    if (index == 1u) { return head.y; }
+    if (index == 2u) { return head.z; }
+    if (index == 3u) { return head.w; }
+    if (index == 4u) { return tail.x; }
+    return tail.y;
+}
+
+fn black_and_white(rgb: vec3<f32>, head: vec4<f32>, tail: vec2<f32>, tint_amount: f32, tint: vec3<f32>) -> vec3<f32> {
+    // `BlackAndWhiteGrade::apply`: the per-hue weight scales working-space
+    // lightness, then the tint ramps the gray toward the authored color. Pixels
+    // without a hue keep their own lightness, and no channel is clamped.
+    let extremes = invert_extremes(rgb);
+    let chroma = extremes.x - extremes.y;
+    let lightness = (extremes.x + extremes.y) * 0.5;
+    var gain = 1.0;
+    if (chroma > 1.0e-6) {
+        let hue = invert_hue_of(rgb, extremes.x, chroma);
+        let scaled = fract(hue) * 6.0;
+        let base = floor(scaled);
+        let index = u32(base) % 6u;
+        let next = (index + 1u) % 6u;
+        let amount = scaled - base;
+        let low = black_and_white_weight_at(index, head, tail);
+        let high = black_and_white_weight_at(next, head, tail);
+        gain = (low + (high - low) * amount) / 100.0;
+    }
+    let gray = lightness * gain;
+    let tinted = gray + (gray * tint - vec3<f32>(gray)) * tint_amount;
+    return tinted;
+}
+
 fn apply_effects(input: vec4<f32>, position: vec2<f32>) -> vec4<f32> {
     if (input.a <= 0.0) { return input; }
     var pixel = input;
@@ -1089,6 +1123,18 @@ fn apply_effects(input: vec4<f32>, position: vec2<f32>) -> vec4<f32> {
                 rgb = mix(rgb, hue_saturation_tinted(rgb, effect.color), effect.params.w);
             }
             pixel = vec4<f32>(rgb, pixel.a);
+        } else if (effect.header.x == 15u) {
+            // `BlackAndWhiteGrade::gpu_controls`: params carries the first four
+            // hue weights, color carries the last two weights plus the tint
+            // amount, and extra0 carries the tint color.
+            let gray = black_and_white(
+                pixel.rgb,
+                effect.params,
+                vec2<f32>(effect.color.x, effect.color.y),
+                effect.color.z,
+                effect.extra0.xyz,
+            );
+            pixel = vec4<f32>(gray, pixel.a);
         }
     }
     return pixel;
@@ -4173,6 +4219,16 @@ fn effect_uniforms(
                     extra1: [0.0; 4],
                 }
             }
+            EffectGpuPointOp::BlackAndWhite { grade } => {
+                let controls = grade.gpu_controls();
+                GpuEffectUniform {
+                    header: [15, 0, 0, 0],
+                    params: [controls[0], controls[1], controls[2], controls[3]],
+                    color: [controls[4], controls[5], controls[6], 0.0],
+                    extra0: [controls[7], controls[8], controls[9], 0.0],
+                    extra1: [0.0; 4],
+                }
+            }
             EffectGpuPointOp::Lut3D { lut, intensity } => {
                 let effective_intensity = intensity.clamp(0.0, 1.0);
                 let location = if effective_intensity <= 1.0e-4 {
@@ -6298,6 +6354,44 @@ mod tests {
             uniforms[0].color[3] < 0.0,
             "master band packs a negative center"
         );
+    }
+
+    #[test]
+    fn gpu_effect_uniforms_carry_the_black_and_white_weights() {
+        use mondrian_effects::{
+            compile_reference_render_graph, lower_effect_graph_to_gpu_plan, BlackAndWhiteGrade,
+            EffectGraphBuilderState, EffectRenderOp,
+        };
+
+        let grade = BlackAndWhiteGrade::new(
+            [40.0, 60.0, 40.0, 60.0, 20.0, 80.0],
+            0.25,
+            [0.88, 0.83, 0.70],
+        )
+        .expect("valid black and white grade");
+        let mut builder = EffectGraphBuilderState::new();
+        builder.append_unary(EffectRenderOp::BlackAndWhite { grade });
+        let graph =
+            compile_reference_render_graph(builder.finish()).expect("black and white graph");
+        let plan = lower_effect_graph_to_gpu_plan(&graph).expect("black and white GPU plan");
+        assert_eq!(plan.operations().len(), 1);
+
+        let uniforms = effect_uniforms(Some(&plan), None).expect("black and white uniforms");
+        let controls = grade.gpu_controls();
+        assert_eq!(uniforms[0].header, [15, 0, 0, 0]);
+        assert_eq!(
+            uniforms[0].params,
+            [controls[0], controls[1], controls[2], controls[3]]
+        );
+        assert_eq!(
+            uniforms[0].color,
+            [controls[4], controls[5], controls[6], 0.0]
+        );
+        assert_eq!(
+            uniforms[0].extra0,
+            [controls[7], controls[8], controls[9], 0.0]
+        );
+        assert_eq!(uniforms[1].header[0], 0);
     }
 
     #[test]

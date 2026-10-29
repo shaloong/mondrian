@@ -816,6 +816,15 @@ pub enum EffectRenderOp {
     HueSaturation {
         grade: crate::HueSaturationGrade,
     },
+    /// Hue-keyed black and white conversion.
+    ///
+    /// Six per-hue weights scale the working-space lightness of every pixel, and
+    /// the authored tint then ramps the gray toward the tint color. The weighting
+    /// is linear in lightness, so extended-range and negative channels keep their
+    /// (unclamped) value, and pixels without a hue keep their own lightness.
+    BlackAndWhite {
+        grade: crate::BlackAndWhiteGrade,
+    },
     /// Source-relative hard crop expressed as normalized edge insets.
     ///
     /// Pixels outside the remaining rectangle become transparent black before
@@ -941,6 +950,9 @@ impl std::fmt::Debug for EffectRenderOp {
                 .field("direction", direction)
                 .field("repeat_edge_pixels", repeat_edge_pixels)
                 .finish(),
+            Self::BlackAndWhite { grade } => {
+                formatter.debug_struct("BlackAndWhite").field("grade", grade).finish()
+            }
             Self::HueSaturation { grade } => {
                 formatter.debug_struct("HueSaturation").field("grade", grade).finish()
             }
@@ -1322,6 +1334,12 @@ impl EffectRenderOp {
                 direction.hash(state);
                 u8::from(*repeat_edge_pixels).hash(state);
             }
+            EffectRenderOp::BlackAndWhite { grade } => {
+                25u8.hash(state);
+                for value in grade.gpu_controls() {
+                    value.to_bits().hash(state);
+                }
+            }
             EffectRenderOp::HueSaturation { grade } => {
                 24u8.hash(state);
                 grade.band().key().hash(state);
@@ -1423,6 +1441,7 @@ impl EffectRenderOp {
             EffectRenderOp::Crop { .. } => 1,
             EffectRenderOp::Invert { .. } => 1,
             EffectRenderOp::BoxBlur { .. } => 4,
+            EffectRenderOp::BlackAndWhite { .. } => 2,
             EffectRenderOp::HueSaturation { .. } => 2,
             EffectRenderOp::UnsharpMask { .. } => 4,
             EffectRenderOp::Lut3D { .. } => 2,
@@ -1956,7 +1975,7 @@ impl EffectDefinition {
     }
 }
 
-fn builtin_effect_types() -> [EffectType; 23] {
+fn builtin_effect_types() -> [EffectType; 24] {
     [
         EffectType::BasicCorrection,
         EffectType::WhiteBalance,
@@ -1981,6 +2000,7 @@ fn builtin_effect_types() -> [EffectType; 23] {
         EffectType::BoxBlur,
         EffectType::UnsharpMask,
         EffectType::HueSaturation,
+        EffectType::BlackAndWhite,
     ]
 }
 
@@ -3085,6 +3105,50 @@ fn default_properties_for(effect_type: EffectType) -> PropertyBag {
                 Some(1.0),
             );
         }
+        EffectType::BlackAndWhite => {
+            for (parameter, label, default) in [
+                ("red", "红色", 40.0),
+                ("yellow", "黄色", 60.0),
+                ("green", "绿色", 40.0),
+                ("cyan", "青色", 60.0),
+                ("blue", "蓝色", 20.0),
+                ("magenta", "洋红", 80.0),
+            ] {
+                define_builtin_property(
+                    &mut properties,
+                    &effect_type,
+                    parameter,
+                    "黑白",
+                    label,
+                    PropertyValue::Float(default),
+                    Some(crate::BLACK_WHITE_WEIGHT_MIN as f64),
+                    Some(crate::BLACK_WHITE_WEIGHT_MAX as f64),
+                    Some(1.0),
+                );
+            }
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "tint_amount",
+                "黑白",
+                "淡色",
+                PropertyValue::Float(0.0),
+                Some(0.0),
+                Some(1.0),
+                Some(0.01),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "tint_color",
+                "黑白",
+                "色调颜色",
+                PropertyValue::Color(Color { r: 0.88, g: 0.83, b: 0.70, a: 1.0 }),
+                None,
+                None,
+                None,
+            );
+        }
         EffectType::External(_) => {}
     }
 
@@ -3293,6 +3357,13 @@ fn builtin_parameter_unit(effect_type: &EffectType, parameter: &str) -> Paramete
         (EffectType::HueSaturation, "tint_hue") => ParameterUnit::Degrees,
         (EffectType::HueSaturation, "tint_saturation") => ParameterUnit::Percent,
         (EffectType::HueSaturation, "tint_lightness") => ParameterUnit::Percent,
+        (EffectType::BlackAndWhite, "red")
+        | (EffectType::BlackAndWhite, "yellow")
+        | (EffectType::BlackAndWhite, "green")
+        | (EffectType::BlackAndWhite, "cyan")
+        | (EffectType::BlackAndWhite, "blue")
+        | (EffectType::BlackAndWhite, "magenta") => ParameterUnit::Percent,
+        (EffectType::BlackAndWhite, "tint_amount") => ParameterUnit::Normalized,
         _ => ParameterUnit::Unitless,
     }
 }
@@ -3433,6 +3504,10 @@ fn builtin_effect_execution_contract(effect_type: &EffectType) -> EffectExecutio
             // definition-level envelope is a full-frame input. The graph
             // planner still narrows it per instance from the authored radius.
             roi_propagation: EffectRoiPropagation::FullFrame,
+            ..cpu_linear
+        },
+        EffectType::BlackAndWhite => EffectExecutionContract {
+            execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
             ..cpu_linear
         },
         EffectType::HueSaturation => EffectExecutionContract {
@@ -4284,6 +4359,48 @@ fn builtin_graph_builder_for(effect_type: &EffectType) -> Option<EffectGraphBuil
                 Ok(())
             }))
         }
+        EffectType::BlackAndWhite => {
+            let weights = [
+                builtin_parameter_id(effect_type, "red"),
+                builtin_parameter_id(effect_type, "yellow"),
+                builtin_parameter_id(effect_type, "green"),
+                builtin_parameter_id(effect_type, "cyan"),
+                builtin_parameter_id(effect_type, "blue"),
+                builtin_parameter_id(effect_type, "magenta"),
+            ];
+            let defaults = [40.0, 60.0, 40.0, 60.0, 20.0, 80.0];
+            let tint_amount_id = builtin_parameter_id(effect_type, "tint_amount");
+            let tint_color_id = builtin_parameter_id(effect_type, "tint_color");
+            Some(Arc::new(move |effect, context, graph| {
+                let mut authored = [0.0; crate::BLACK_WHITE_HUE_STOPS];
+                for (index, weight_id) in weights.iter().enumerate() {
+                    authored[index] =
+                        effect.evaluate_f32_parameter(weight_id, context.time, defaults[index]);
+                }
+                let Some(PropertyValue::Color(color)) =
+                    effect.evaluate_parameter(&tint_color_id, context.time)
+                else {
+                    return Err(EffectGraphBuildError::InvalidAuthorState {
+                        effect_key: effect.effect_type.key(),
+                        effect_id: effect.id,
+                        reason: "black and white requires a tint color".to_owned(),
+                    });
+                };
+                let rgba = color.to_rgba();
+                let grade = crate::BlackAndWhiteGrade::new(
+                    authored,
+                    effect.evaluate_f32_parameter(&tint_amount_id, context.time, 0.0),
+                    [rgba.r, rgba.g, rgba.b],
+                )
+                .map_err(|error| EffectGraphBuildError::InvalidAuthorState {
+                    effect_key: effect.effect_type.key(),
+                    effect_id: effect.id,
+                    reason: error.to_string(),
+                })?;
+                graph.append_unary(EffectRenderOp::BlackAndWhite { grade });
+                Ok(())
+            }))
+        }
         EffectType::HueSaturation => {
             let band_id = builtin_parameter_id(effect_type, "band");
             let hue_id = builtin_parameter_id(effect_type, "hue");
@@ -4359,6 +4476,7 @@ fn builtin_display_name(effect_type: &EffectType) -> &'static str {
         EffectType::BoxBlur => "方框模糊",
         EffectType::UnsharpMask => "钝化蒙版",
         EffectType::HueSaturation => "色相饱和度",
+        EffectType::BlackAndWhite => "黑白",
         EffectType::External(_) => "外部效果",
     }
 }
@@ -4711,6 +4829,162 @@ mod tests {
         })
     }
 
+    fn black_and_white_op(graph: &EffectRenderGraph) -> Option<crate::BlackAndWhiteGrade> {
+        graph.nodes.iter().find_map(|node| match &node.kind {
+            EffectGraphNodeKind::UnaryEffect {
+                op: EffectRenderOp::BlackAndWhite { grade },
+                ..
+            }
+            | EffectGraphNodeKind::DomainEffect {
+                op: EffectRenderOp::BlackAndWhite { grade },
+                ..
+            } => Some(*grade),
+            _ => None,
+        })
+    }
+
+    #[test]
+    fn black_and_white_defaults_compile_to_the_listed_weights() {
+        let effect = instantiate_effect_node(EffectType::BlackAndWhite)
+            .expect("registered Black and White definition");
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("evaluate default Black and White");
+
+        let grade = black_and_white_op(&graph).expect("black and white defaults reach the op");
+        assert_eq!(grade.weights(), [40.0, 60.0, 40.0, 60.0, 20.0, 80.0]);
+        assert_eq!(grade.tint_amount(), 0.0);
+        assert_eq!(grade.tint_color(), [0.88, 0.83, 0.70]);
+    }
+
+    #[test]
+    fn black_and_white_authored_state_reaches_the_operation() {
+        let mut effect = instantiate_effect_node(EffectType::BlackAndWhite)
+            .expect("registered Black and White definition");
+        for (parameter, value) in [
+            ("red", PropertyValue::Float(120.0)),
+            ("magenta", PropertyValue::Float(-40.0)),
+            ("tint_amount", PropertyValue::Float(0.5)),
+        ] {
+            effect
+                .apply_property_mutation(PropertyMutation::SetStaticValue {
+                    path: EffectType::BlackAndWhite.property_path(parameter),
+                    value,
+                })
+                .unwrap_or_else(|error| panic!("author Black and White {parameter}: {error}"));
+        }
+        effect
+            .apply_property_mutation(PropertyMutation::SetStaticValue {
+                path: EffectType::BlackAndWhite.property_path("tint_color"),
+                value: PropertyValue::Color(mondrian_core::Color {
+                    r: 0.5,
+                    g: 0.25,
+                    b: 0.75,
+                    a: 1.0,
+                }),
+            })
+            .expect("author the tint color");
+
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("evaluate authored Black and White");
+        let grade = black_and_white_op(&graph).expect("authored state reaches the op");
+        assert_eq!(grade.weights(), [120.0, 60.0, 40.0, 60.0, 20.0, -40.0]);
+        assert_eq!(grade.tint_amount(), 0.5);
+        assert_eq!(grade.tint_color(), [0.5, 0.25, 0.75]);
+    }
+
+    #[test]
+    fn black_and_white_rejects_author_values_outside_the_declared_ranges() {
+        for (parameter, value) in [
+            ("red", PropertyValue::Float(301.0)),
+            ("cyan", PropertyValue::Float(-201.0)),
+            ("tint_amount", PropertyValue::Float(1.5)),
+        ] {
+            let mut effect = instantiate_effect_node(EffectType::BlackAndWhite)
+                .expect("registered Black and White definition");
+            assert!(
+                effect
+                    .apply_property_mutation(PropertyMutation::SetStaticValue {
+                        path: EffectType::BlackAndWhite.property_path(parameter),
+                        value,
+                    })
+                    .is_err(),
+                "{parameter} must reject values outside the authored contract"
+            );
+        }
+    }
+
+    #[test]
+    fn black_and_white_converts_hue_weighted_lightness_without_clamping() {
+        let mut effect = instantiate_effect_node(EffectType::BlackAndWhite)
+            .expect("registered Black and White definition");
+        effect
+            .apply_property_mutation(PropertyMutation::SetStaticValue {
+                path: EffectType::BlackAndWhite.property_path("red"),
+                value: PropertyValue::Float(300.0),
+            })
+            .expect("author Black and White");
+
+        // A saturated red keeps the red weight (lightness 0.5 * 3 = 1.5), a
+        // neutral gray keeps its own lightness, and an extended-range red maps to
+        // 3.75 instead of being clamped into the scene-linear range.
+        let input = [
+            [1.0, 0.0, 0.0, 1.0],
+            [0.5, 0.5, 0.5, 1.0],
+            [2.0, 0.5, 0.5, 1.0],
+        ];
+        let view = || {
+            crate::EffectFloatFrameView::new(
+                crate::EffectFrameExtent::new(3, 1),
+                crate::EffectValueFormat::new(
+                    crate::EffectWorkingPrecision::Float32,
+                    crate::EffectColorDomain::SceneLinearRgb,
+                    mondrian_core::ColorFrameAlpha::StraightCoverage,
+                ),
+                mondrian_core::ImageSampling::UNIT_SQUARE,
+                &input,
+            )
+        };
+
+        let compiled = compile_clip_effect_graph(&[effect], &[], tt(0), TEST_WORKING_SPACE)
+            .expect("compile Black and White");
+        let output =
+            crate::apply_compiled_effect_graph_rgba_f32(view(), &compiled, 0).expect("execute");
+
+        assert_eq!(output[0], [1.5, 1.5, 1.5, 1.0]);
+        assert_eq!(output[1], [0.5, 0.5, 0.5, 1.0]);
+        assert_eq!(output[2], [3.75, 3.75, 3.75, 1.0]);
+    }
+
+    #[test]
+    fn black_and_white_authored_state_survives_project_serialization_round_trip() {
+        let mut effect = instantiate_effect_node(EffectType::BlackAndWhite)
+            .expect("registered Black and White definition");
+        for (parameter, value) in [
+            ("yellow", PropertyValue::Float(10.0)),
+            ("blue", PropertyValue::Float(240.0)),
+            ("tint_amount", PropertyValue::Float(0.4)),
+        ] {
+            effect
+                .apply_property_mutation(PropertyMutation::SetStaticValue {
+                    path: EffectType::BlackAndWhite.property_path(parameter),
+                    value,
+                })
+                .expect("author Black and White");
+        }
+
+        let wire = serde_json::to_string(&effect).expect("serialize the Black and White node");
+        let restored: EffectNode =
+            serde_json::from_str(&wire).expect("restore the Black and White node");
+        assert_eq!(restored.effect_type, EffectType::BlackAndWhite);
+        assert_eq!(restored, effect);
+
+        let graph = build_effect_render_graph(&[restored], tt(0), TEST_WORKING_SPACE)
+            .expect("evaluate the restored Black and White node");
+        let grade = black_and_white_op(&graph).expect("restored state reaches the op");
+        assert_eq!(grade.weights(), [40.0, 10.0, 40.0, 60.0, 240.0, 80.0]);
+        assert_eq!(grade.tint_amount(), 0.4);
+    }
+
     #[test]
     fn hue_saturation_defaults_compile_to_identity() {
         let effect = instantiate_effect_node(EffectType::HueSaturation)
@@ -4915,6 +5189,7 @@ mod tests {
             EffectType::BoxBlur,
             EffectType::UnsharpMask,
             EffectType::HueSaturation,
+            EffectType::BlackAndWhite,
         ]
         .into_iter()
         .map(|effect_type| effect_type.key())
