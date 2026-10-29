@@ -2331,6 +2331,7 @@ fn effect_render_op_name(op: &EffectRenderOp) -> &'static str {
         EffectRenderOp::Tritone { .. } => "tritone",
         EffectRenderOp::RadialBlur { .. } => "radial_blur",
         EffectRenderOp::Convolution { .. } => "convolution",
+        EffectRenderOp::Offset { .. } => "offset",
         EffectRenderOp::MotionTile { .. } => "motion_tile",
         EffectRenderOp::Kaleidoscope { .. } => "kaleidoscope",
         EffectRenderOp::Bevel { .. } => "bevel",

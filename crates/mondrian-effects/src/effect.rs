@@ -911,6 +911,11 @@ pub enum EffectRenderOp {
     Convolution {
         grade: crate::ConvolutionGrade,
     },
+    /// Offset: translates the frame by an authored shift and wraps the pixels
+    /// that leave one edge back onto the opposite edge.
+    Offset {
+        grade: crate::OffsetGrade,
+    },
     /// ColorEmboss: per-channel relief computed from the Sobel gradient of
     /// the working-space colour.
     ColorEmboss {
@@ -1093,6 +1098,9 @@ impl std::fmt::Debug for EffectRenderOp {
             }
             Self::Convolution { grade } => {
                 formatter.debug_struct("Convolution").field("grade", grade).finish()
+            }
+            Self::Offset { grade } => {
+                formatter.debug_struct("Offset").field("grade", grade).finish()
             }
             Self::ColorEmboss { grade } => {
                 formatter.debug_struct("ColorEmboss").field("grade", grade).finish()
@@ -1627,6 +1635,12 @@ impl EffectRenderOp {
                 grade.absolute_values().hash(state);
                 grade.blend_with_original().to_bits().hash(state);
             }
+            EffectRenderOp::Offset { grade } => {
+                46u8.hash(state);
+                for value in grade.gpu_controls() {
+                    value.to_bits().hash(state);
+                }
+            }
             EffectRenderOp::ColorEmboss { grade } => {
                 32u8.hash(state);
                 for value in grade.gpu_controls() {
@@ -1785,6 +1799,7 @@ impl EffectRenderOp {
             EffectRenderOp::Tritone { .. } => 1,
             EffectRenderOp::RadialBlur { .. } => 5,
             EffectRenderOp::Convolution { .. } => 3,
+            EffectRenderOp::Offset { .. } => 2,
             EffectRenderOp::Mosaic { .. } => 2,
             EffectRenderOp::Posterize { .. } => 1,
             EffectRenderOp::MotionTile { .. } => 3,
@@ -2327,7 +2342,7 @@ impl EffectDefinition {
     }
 }
 
-fn builtin_effect_types() -> [EffectType; 44] {
+fn builtin_effect_types() -> [EffectType; 45] {
     [
         EffectType::BasicCorrection,
         EffectType::WhiteBalance,
@@ -2373,6 +2388,7 @@ fn builtin_effect_types() -> [EffectType; 44] {
         EffectType::Tritone,
         EffectType::RadialBlur,
         EffectType::Convolution,
+        EffectType::Offset,
     ]
 }
 
@@ -4197,6 +4213,41 @@ fn default_properties_for(effect_type: EffectType) -> PropertyBag {
                 Some(1.0),
             );
         }
+        EffectType::Offset => {
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "shift_x",
+                "偏移",
+                "水平偏移",
+                PropertyValue::Float(0.0),
+                Some(-(crate::OFFSET_MAX_SHIFT_PIXELS as f64)),
+                Some(crate::OFFSET_MAX_SHIFT_PIXELS as f64),
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "shift_y",
+                "偏移",
+                "垂直偏移",
+                PropertyValue::Float(0.0),
+                Some(-(crate::OFFSET_MAX_SHIFT_PIXELS as f64)),
+                Some(crate::OFFSET_MAX_SHIFT_PIXELS as f64),
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "blend_with_original",
+                "偏移",
+                "与原始图像混合",
+                PropertyValue::Float(0.0),
+                Some(0.0),
+                Some(crate::OFFSET_MAX_BLEND_PERCENT as f64),
+                Some(1.0),
+            );
+        }
         EffectType::ColorEmboss => {
             define_builtin_property(
                 &mut properties,
@@ -4834,6 +4885,9 @@ fn builtin_parameter_unit(effect_type: &EffectType, parameter: &str) -> Paramete
         (EffectType::RadialBlur, "centre_x") => ParameterUnit::Pixels,
         (EffectType::RadialBlur, "centre_y") => ParameterUnit::Pixels,
         (EffectType::Convolution, "blend_with_original") => ParameterUnit::Percent,
+        (EffectType::Offset, "shift_x") => ParameterUnit::Pixels,
+        (EffectType::Offset, "shift_y") => ParameterUnit::Pixels,
+        (EffectType::Offset, "blend_with_original") => ParameterUnit::Percent,
         (EffectType::Bevel, "thickness") => ParameterUnit::Pixels,
         (EffectType::Bevel, "angle") => ParameterUnit::Degrees,
         (EffectType::Bevel, "intensity") => ParameterUnit::Normalized,
@@ -5029,6 +5083,11 @@ fn builtin_effect_execution_contract(effect_type: &EffectType) -> EffectExecutio
                 horizontal_pixels: crate::CONVOLUTION_HALO_PIXELS,
                 vertical_pixels: crate::CONVOLUTION_HALO_PIXELS,
             },
+            ..cpu_linear
+        },
+        EffectType::Offset => EffectExecutionContract {
+            execution_modes: EffectExecutionModes::CPU_F32,
+            roi_propagation: EffectRoiPropagation::FullFrame,
             ..cpu_linear
         },
         EffectType::Mosaic => EffectExecutionContract {
@@ -6562,6 +6621,28 @@ fn builtin_graph_builder_for(effect_type: &EffectType) -> Option<EffectGraphBuil
                 Ok(())
             }))
         }
+        EffectType::Offset => {
+            let shift_x_id = builtin_parameter_id(effect_type, "shift_x");
+            let shift_y_id = builtin_parameter_id(effect_type, "shift_y");
+            let blend_id = builtin_parameter_id(effect_type, "blend_with_original");
+            Some(Arc::new(move |effect, context, graph| {
+                let shift_x = effect.evaluate_f32_parameter(&shift_x_id, context.time, 0.0);
+                let shift_y = effect.evaluate_f32_parameter(&shift_y_id, context.time, 0.0);
+                let blend = effect.evaluate_f32_parameter(&blend_id, context.time, 0.0) / 100.0;
+                let grade = crate::OffsetGrade::new([shift_x, shift_y], blend);
+                let Ok(grade) = grade else {
+                    return Err(EffectGraphBuildError::InvalidAuthorState {
+                        effect_key: effect.effect_type.key(),
+                        effect_id: effect.id,
+                        reason: "offset shift or blend is outside the declared range".to_owned(),
+                    });
+                };
+                if !grade.is_identity() {
+                    graph.append_unary(EffectRenderOp::Offset { grade });
+                }
+                Ok(())
+            }))
+        }
         EffectType::ColorEmboss => {
             let direction_id = builtin_parameter_id(effect_type, "direction");
             let relief_id = builtin_parameter_id(effect_type, "relief");
@@ -6923,6 +7004,7 @@ fn builtin_display_name(effect_type: &EffectType) -> &'static str {
         EffectType::Tritone => "三色调",
         EffectType::RadialBlur => "径向模糊",
         EffectType::Convolution => "卷积核",
+        EffectType::Offset => "偏移",
         EffectType::ColorEmboss => "色彩浮雕",
         EffectType::Emboss => "浮雕",
         EffectType::External(_) => "外部效果",
@@ -8203,6 +8285,7 @@ mod tests {
             EffectType::Tritone,
             EffectType::RadialBlur,
             EffectType::Convolution,
+            EffectType::Offset,
         ]
         .into_iter()
         .map(|effect_type| effect_type.key())
@@ -11762,6 +11845,102 @@ mod tests {
             .expect("builds restored tritone graph");
         let grade = tritone_op(&graph).expect("tritone op");
         assert_eq!(grade.midtones(), [0.2, 0.5, 0.1]);
+    }
+
+    fn offset_op(graph: &EffectRenderGraph) -> Option<crate::OffsetGrade> {
+        graph.nodes.iter().find_map(|node| match &node.kind {
+            EffectGraphNodeKind::UnaryEffect { op: EffectRenderOp::Offset { grade }, .. } => {
+                Some(*grade)
+            }
+            _ => None,
+        })
+    }
+
+    fn author_offset(parameter: &str, value: PropertyValue) -> EffectNode {
+        let mut effect =
+            instantiate_effect_node(EffectType::Offset).expect("registered offset definition");
+        effect
+            .apply_property_mutation(PropertyMutation::SetStaticValue {
+                path: EffectType::Offset.property_path(parameter),
+                value,
+            })
+            .expect("authors offset parameter");
+        effect
+    }
+
+    fn author_offset_more(
+        mut effect: EffectNode,
+        parameter: &str,
+        value: PropertyValue,
+    ) -> EffectNode {
+        effect
+            .apply_property_mutation(PropertyMutation::SetStaticValue {
+                path: EffectType::Offset.property_path(parameter),
+                value,
+            })
+            .expect("authors offset parameter");
+        effect
+    }
+
+    #[test]
+    fn offset_defaults_compile_to_identity() {
+        let effect =
+            instantiate_effect_node(EffectType::Offset).expect("registered offset definition");
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("builds offset graph");
+        assert!(offset_op(&graph).is_none());
+    }
+
+    #[test]
+    fn offset_authored_state_reaches_the_operation() {
+        let effect = author_offset("shift_x", PropertyValue::Float(12.0));
+        let effect = author_offset_more(effect, "shift_y", PropertyValue::Float(-30.0));
+        let effect = author_offset_more(effect, "blend_with_original", PropertyValue::Float(40.0));
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("builds offset graph");
+        let grade = offset_op(&graph).expect("offset op");
+        assert_eq!(grade.shift(), [12.0, -30.0]);
+        assert!((grade.blend_with_original() - 0.4).abs() < 1.0e-6);
+    }
+
+    #[test]
+    fn offset_full_blend_compiles_to_identity() {
+        let effect = author_offset("blend_with_original", PropertyValue::Float(100.0));
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("builds offset graph");
+        assert!(offset_op(&graph).is_none());
+    }
+
+    #[test]
+    fn offset_rejects_author_values_outside_the_declared_ranges() {
+        for (parameter, value) in [
+            ("shift_x", PropertyValue::Float(1_000_001.0)),
+            ("shift_y", PropertyValue::Float(-1_000_001.0)),
+            ("blend_with_original", PropertyValue::Float(101.0)),
+        ] {
+            let mut effect =
+                instantiate_effect_node(EffectType::Offset).expect("registered offset definition");
+            let _error = effect
+                .apply_property_mutation(PropertyMutation::SetStaticValue {
+                    path: EffectType::Offset.property_path(parameter),
+                    value,
+                })
+                .expect_err("rejects an out-of-range offset value");
+        }
+    }
+
+    #[test]
+    fn offset_authored_state_survives_project_serialization_round_trip() {
+        let effect = author_offset("shift_x", PropertyValue::Float(-6.0));
+        let effect = author_offset_more(effect, "blend_with_original", PropertyValue::Float(60.0));
+        let wire = serde_json::to_string(&effect).expect("serializes offset effect");
+        let restored: EffectNode = serde_json::from_str(&wire).expect("restores offset effect");
+        assert_eq!(restored, effect);
+        let graph = build_effect_render_graph(&[restored], tt(0), TEST_WORKING_SPACE)
+            .expect("builds restored offset graph");
+        let grade = offset_op(&graph).expect("offset op");
+        assert_eq!(grade.shift(), [-6.0, 0.0]);
+        assert!((grade.blend_with_original() - 0.6).abs() < 1.0e-6);
     }
 
     fn convolution_op(graph: &EffectRenderGraph) -> Option<crate::ConvolutionGrade> {

@@ -56,6 +56,7 @@ pub enum EffectType {
     Tritone,
     RadialBlur,
     Convolution,
+    Offset,
     BrushStrokes,
     Posterize,
     Emboss,
@@ -110,6 +111,7 @@ impl EffectType {
             Self::Tritone => "builtin.tritone".to_string(),
             Self::RadialBlur => "builtin.radial_blur".to_string(),
             Self::Convolution => "builtin.convolution".to_string(),
+            Self::Offset => "builtin.offset".to_string(),
             Self::Scatter => "builtin.scatter".to_string(),
             Self::BrushStrokes => "builtin.brush_strokes".to_string(),
             Self::Posterize => "builtin.posterize".to_string(),
@@ -160,6 +162,7 @@ impl EffectType {
             "builtin.tritone" => Self::Tritone,
             "builtin.radial_blur" => Self::RadialBlur,
             "builtin.convolution" => Self::Convolution,
+            "builtin.offset" => Self::Offset,
             "builtin.scatter" => Self::Scatter,
             "builtin.brush_strokes" => Self::BrushStrokes,
             "builtin.posterize" => Self::Posterize,
@@ -213,6 +216,7 @@ impl EffectType {
             Self::Tritone => "三色调",
             Self::RadialBlur => "径向模糊",
             Self::Convolution => "卷积核",
+            Self::Offset => "偏移",
             Self::External(name) => name,
         }
     }
@@ -261,6 +265,7 @@ impl EffectType {
             Self::Tritone => vec!["颜色/调色"],
             Self::RadialBlur => vec!["颜色", "模糊与锐化"],
             Self::Convolution => vec!["颜色", "调色"],
+            Self::Offset => vec!["变换与尺寸"],
             Self::External(_) => vec!["外部效果"],
         }
     }
@@ -311,6 +316,7 @@ impl EffectType {
             Self::Tritone => "tritone".to_string(),
             Self::RadialBlur => "radial_blur".to_string(),
             Self::Convolution => "convolution".to_string(),
+            Self::Offset => "offset".to_string(),
             Self::External(key) => key.clone(),
         }
     }
@@ -614,6 +620,7 @@ impl crate::AuthoringFootprint for EffectType {
             Self::Tritone => Ok(()),
             Self::RadialBlur => Ok(()),
             Self::Convolution => Ok(()),
+            Self::Offset => Ok(()),
         }
     }
 }

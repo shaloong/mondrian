@@ -2744,6 +2744,7 @@ const fn effect_operation_shape_tag(operation: &EffectRenderOp) -> u8 {
         EffectRenderOp::Tritone { .. } => 44,
         EffectRenderOp::RadialBlur { .. } => 45,
         EffectRenderOp::Convolution { .. } => 46,
+        EffectRenderOp::Offset { .. } => 47,
         EffectRenderOp::ColorEmboss { .. } => 33,
         EffectRenderOp::Emboss { .. } => 32,
         EffectRenderOp::DropShadow { .. } => 30,
@@ -4792,6 +4793,7 @@ fn cpu_node_scratch_frames(
             | crate::EffectRenderOp::Scatter { .. }
             | crate::EffectRenderOp::RadialBlur { .. }
             | crate::EffectRenderOp::Convolution { .. }
+            | crate::EffectRenderOp::Offset { .. }
             | crate::EffectRenderOp::BrushStrokes { .. }
             | crate::EffectRenderOp::ColorEmboss { .. }
             | crate::EffectRenderOp::Emboss { .. }

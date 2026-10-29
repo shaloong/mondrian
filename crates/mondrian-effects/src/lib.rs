@@ -75,6 +75,7 @@ pub mod brush_strokes;
 pub mod kaleidoscope;
 pub mod mosaic;
 pub mod motion_tile;
+pub mod offset;
 pub(crate) mod parallel;
 pub mod posterize;
 pub mod qualifier;
@@ -221,6 +222,9 @@ pub use mosaic::{
 };
 pub use motion_tile::{
     motion_tile_frame_f32, MotionTileError, MotionTileGrade, MOTION_TILE_MAX_PERCENT,
+};
+pub use offset::{
+    offset_frame_f32, OffsetError, OffsetGrade, OFFSET_MAX_BLEND_PERCENT, OFFSET_MAX_SHIFT_PIXELS,
 };
 pub use posterize::{
     posterize_frame_f32, PosterizeError, PosterizeGrade, POSTERIZE_MAX_LEVELS, POSTERIZE_MIN_LEVELS,
