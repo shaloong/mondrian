@@ -330,7 +330,6 @@ mod tests {
                     .unwrap();
                 assert_eq!((geometry.width(), geometry.height()), (317, 193));
                 let close = x::ClientMessageEvent::new(
-                    32,
                     parent.window,
                     parent.protocols,
                     x::ClientMessageData::Data32([parent.delete_window.resource_id(), 0, 0, 0, 0]),
