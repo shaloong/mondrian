@@ -894,6 +894,10 @@ pub enum EffectRenderOp {
     Tint {
         grade: crate::TintGrade,
     },
+    /// Vibrance: a saturation scale that protects already saturated colours.
+    Vibrance {
+        grade: crate::VibranceGrade,
+    },
     /// ColorEmboss: per-channel relief computed from the Sobel gradient of
     /// the working-space colour.
     ColorEmboss {
@@ -1065,6 +1069,9 @@ impl std::fmt::Debug for EffectRenderOp {
                 formatter.debug_struct("Threshold").field("grade", grade).finish()
             }
             Self::Tint { grade } => formatter.debug_struct("Tint").field("grade", grade).finish(),
+            Self::Vibrance { grade } => {
+                formatter.debug_struct("Vibrance").field("grade", grade).finish()
+            }
             Self::ColorEmboss { grade } => {
                 formatter.debug_struct("ColorEmboss").field("grade", grade).finish()
             }
@@ -1556,6 +1563,14 @@ impl EffectRenderOp {
                     value.to_bits().hash(state);
                 }
             }
+            EffectRenderOp::Vibrance { grade } => {
+                42u8.hash(state);
+                grade.vibrance().to_bits().hash(state);
+                grade.saturation().to_bits().hash(state);
+                for value in grade.luminance_coefficients() {
+                    value.to_bits().hash(state);
+                }
+            }
             EffectRenderOp::ColorEmboss { grade } => {
                 32u8.hash(state);
                 for value in grade.gpu_controls() {
@@ -1710,6 +1725,7 @@ impl EffectRenderOp {
             EffectRenderOp::FindEdges { .. } => 4,
             EffectRenderOp::Threshold { .. } => 1,
             EffectRenderOp::Tint { .. } => 1,
+            EffectRenderOp::Vibrance { .. } => 1,
             EffectRenderOp::Mosaic { .. } => 2,
             EffectRenderOp::Posterize { .. } => 1,
             EffectRenderOp::MotionTile { .. } => 3,
@@ -2252,7 +2268,7 @@ impl EffectDefinition {
     }
 }
 
-fn builtin_effect_types() -> [EffectType; 40] {
+fn builtin_effect_types() -> [EffectType; 41] {
     [
         EffectType::BasicCorrection,
         EffectType::WhiteBalance,
@@ -2294,6 +2310,7 @@ fn builtin_effect_types() -> [EffectType; 40] {
         EffectType::Scatter,
         EffectType::BrushStrokes,
         EffectType::Tint,
+        EffectType::Vibrance,
     ]
 }
 
@@ -3847,6 +3864,30 @@ fn default_properties_for(effect_type: EffectType) -> PropertyBag {
                 Some(0.1),
             );
         }
+        EffectType::Vibrance => {
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "vibrance",
+                "自然饱和度",
+                "自然饱和度",
+                PropertyValue::Float(0.0),
+                Some(-100.0),
+                Some(100.0),
+                Some(0.1),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "saturation",
+                "自然饱和度",
+                "饱和度",
+                PropertyValue::Float(0.0),
+                Some(-100.0),
+                Some(100.0),
+                Some(0.1),
+            );
+        }
         EffectType::ColorEmboss => {
             define_builtin_property(
                 &mut properties,
@@ -4478,6 +4519,8 @@ fn builtin_parameter_unit(effect_type: &EffectType, parameter: &str) -> Paramete
         (EffectType::BrushStrokes, "angle") => ParameterUnit::Degrees,
         (EffectType::BrushStrokes, "blend_with_original") => ParameterUnit::Normalized,
         (EffectType::Tint, "amount") => ParameterUnit::Percent,
+        (EffectType::Vibrance, "vibrance") => ParameterUnit::Percent,
+        (EffectType::Vibrance, "saturation") => ParameterUnit::Percent,
         (EffectType::Bevel, "thickness") => ParameterUnit::Pixels,
         (EffectType::Bevel, "angle") => ParameterUnit::Degrees,
         (EffectType::Bevel, "intensity") => ParameterUnit::Normalized,
@@ -4651,6 +4694,10 @@ fn builtin_effect_execution_contract(effect_type: &EffectType) -> EffectExecutio
             ..cpu_linear
         },
         EffectType::Tint => EffectExecutionContract {
+            execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
+            ..cpu_linear
+        },
+        EffectType::Vibrance => EffectExecutionContract {
             execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
             ..cpu_linear
         },
@@ -5975,6 +6022,26 @@ fn builtin_graph_builder_for(effect_type: &EffectType) -> Option<EffectGraphBuil
                 Ok(())
             }))
         }
+        EffectType::Vibrance => {
+            let vibrance_id = builtin_parameter_id(effect_type, "vibrance");
+            let saturation_id = builtin_parameter_id(effect_type, "saturation");
+            Some(Arc::new(move |effect, context, graph| {
+                let grade = crate::VibranceGrade::for_space(
+                    effect.evaluate_f32_parameter(&vibrance_id, context.time, 0.0) / 100.0,
+                    effect.evaluate_f32_parameter(&saturation_id, context.time, 0.0) / 100.0,
+                    context.working_color_space,
+                )
+                .map_err(|error| EffectGraphBuildError::InvalidAuthorState {
+                    effect_key: effect.effect_type.key(),
+                    effect_id: effect.id,
+                    reason: error.to_string(),
+                })?;
+                if !grade.is_identity() {
+                    graph.append_unary(EffectRenderOp::Vibrance { grade });
+                }
+                Ok(())
+            }))
+        }
         EffectType::ColorEmboss => {
             let direction_id = builtin_parameter_id(effect_type, "direction");
             let relief_id = builtin_parameter_id(effect_type, "relief");
@@ -6332,6 +6399,7 @@ fn builtin_display_name(effect_type: &EffectType) -> &'static str {
         EffectType::Scatter => "散射",
         EffectType::BrushStrokes => "画笔描边",
         EffectType::Tint => "色调",
+        EffectType::Vibrance => "自然饱和度",
         EffectType::ColorEmboss => "色彩浮雕",
         EffectType::Emboss => "浮雕",
         EffectType::External(_) => "外部效果",
@@ -7608,6 +7676,7 @@ mod tests {
             EffectType::Scatter,
             EffectType::BrushStrokes,
             EffectType::Tint,
+            EffectType::Vibrance,
         ]
         .into_iter()
         .map(|effect_type| effect_type.key())
@@ -10969,6 +11038,100 @@ mod tests {
         let grade = tint_op(&graph).expect("tint op");
         assert_eq!(grade.white(), [0.7, 0.2, 0.1]);
         assert_eq!(grade.amount(), 0.35);
+    }
+
+    fn vibrance_op(graph: &EffectRenderGraph) -> Option<crate::VibranceGrade> {
+        graph.nodes.iter().find_map(|node| match &node.kind {
+            EffectGraphNodeKind::UnaryEffect { op: EffectRenderOp::Vibrance { grade }, .. }
+            | EffectGraphNodeKind::DomainEffect {
+                op: EffectRenderOp::Vibrance { grade }, ..
+            } => Some(*grade),
+            _ => None,
+        })
+    }
+
+    fn author_vibrance(parameter: &str, value: PropertyValue) -> EffectNode {
+        let mut effect =
+            instantiate_effect_node(EffectType::Vibrance).expect("registered vibrance definition");
+        effect
+            .apply_property_mutation(PropertyMutation::SetStaticValue {
+                path: EffectType::Vibrance.property_path(parameter),
+                value,
+            })
+            .expect("authors vibrance parameter");
+        effect
+    }
+
+    #[test]
+    fn vibrance_defaults_compile_to_identity() {
+        // Both controls default to zero, so the effect is a no-op and must not
+        // reach the render graph at all.
+        let effect =
+            instantiate_effect_node(EffectType::Vibrance).expect("registered vibrance definition");
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("builds vibrance graph");
+        assert!(vibrance_op(&graph).is_none());
+    }
+
+    #[test]
+    fn vibrance_authored_state_reaches_the_operation() {
+        let mut effect = author_vibrance("vibrance", PropertyValue::Float(55.0));
+        effect
+            .apply_property_mutation(PropertyMutation::SetStaticValue {
+                path: EffectType::Vibrance.property_path("saturation"),
+                value: PropertyValue::Float(-20.0),
+            })
+            .expect("authors vibrance saturation");
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("builds vibrance graph");
+        let grade = vibrance_op(&graph).expect("vibrance op");
+        assert_eq!(grade.vibrance(), 0.55);
+        assert_eq!(grade.saturation(), -0.2);
+    }
+
+    #[test]
+    fn vibrance_rejects_author_values_outside_the_declared_ranges() {
+        for parameter in ["vibrance", "saturation"] {
+            for value in [PropertyValue::Float(-101.0), PropertyValue::Float(101.0)] {
+                let effect =
+                    instantiate_effect_node(EffectType::Vibrance).expect("vibrance definition");
+                let mut effect = effect;
+                effect
+                    .apply_property_mutation(PropertyMutation::SetStaticValue {
+                        path: EffectType::Vibrance.property_path(parameter),
+                        value,
+                    })
+                    .expect_err("rejects out of range vibrance parameter");
+            }
+        }
+    }
+
+    #[test]
+    fn vibrance_scale_keeps_luminance_and_stays_positive() {
+        let grade =
+            crate::VibranceGrade::for_space(1.0, -1.0, TEST_WORKING_SPACE).expect("valid vibrance");
+        // The combined scale can reach zero (all vibrance and saturation
+        // removed) but never crosses it, so no colour can invert its hue.
+        for rgb in [[0.9_f32, 0.1, 0.05], [0.2, 0.6, 0.1], [1.5, -0.2, 0.3]] {
+            let out = grade.apply_rgb(rgb);
+            let luma = |value: [f32; 3]| {
+                let coefficients = grade.luminance_coefficients();
+                value[0] * coefficients[0] + value[1] * coefficients[1] + value[2] * coefficients[2]
+            };
+            assert!((luma(out) - luma(rgb)).abs() <= 1.0e-5);
+        }
+    }
+
+    #[test]
+    fn vibrance_authored_state_survives_project_serialization_round_trip() {
+        let effect = author_vibrance("vibrance", PropertyValue::Float(-40.0));
+        let wire = serde_json::to_string(&effect).expect("serializes vibrance effect");
+        let restored: EffectNode = serde_json::from_str(&wire).expect("restores vibrance effect");
+        assert_eq!(restored, effect);
+        let graph = build_effect_render_graph(&[restored], tt(0), TEST_WORKING_SPACE)
+            .expect("builds restored vibrance graph");
+        let grade = vibrance_op(&graph).expect("vibrance op");
+        assert_eq!(grade.vibrance(), -0.4);
     }
 }
 

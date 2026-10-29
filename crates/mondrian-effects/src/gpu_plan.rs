@@ -106,6 +106,11 @@ pub enum EffectGpuPointOp {
     Tint {
         grade: crate::TintGrade,
     },
+    /// Vibrance: saturation scale weighted by the pixel's own saturation, packed
+    /// by [`crate::VibranceGrade::gpu_controls`].
+    Vibrance {
+        grade: crate::VibranceGrade,
+    },
     Threshold {
         level: f32,
         luminance_coefficients: [f32; 3],
@@ -810,6 +815,7 @@ pub(crate) fn lower_point_op(
             luminance_coefficients: grade.luminance_coefficients(),
         }),
         EffectRenderOp::Tint { grade } => Ok(EffectGpuPointOp::Tint { grade: *grade }),
+        EffectRenderOp::Vibrance { grade } => Ok(EffectGpuPointOp::Vibrance { grade: *grade }),
         EffectRenderOp::BlackAndWhite { grade } => {
             Ok(EffectGpuPointOp::BlackAndWhite { grade: *grade })
         }
@@ -880,6 +886,7 @@ fn operation_name(op: &EffectRenderOp) -> &'static str {
         EffectRenderOp::Mosaic { .. } => "mosaic",
         EffectRenderOp::Posterize { .. } => "posterize",
         EffectRenderOp::Tint { .. } => "tint",
+        EffectRenderOp::Vibrance { .. } => "vibrance",
         EffectRenderOp::MotionTile { .. } => "motion_tile",
         EffectRenderOp::Kaleidoscope { .. } => "kaleidoscope",
         EffectRenderOp::Bevel { .. } => "bevel",

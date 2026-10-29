@@ -2327,6 +2327,7 @@ fn effect_render_op_name(op: &EffectRenderOp) -> &'static str {
         EffectRenderOp::Mosaic { .. } => "mosaic",
         EffectRenderOp::Posterize { .. } => "posterize",
         EffectRenderOp::Tint { .. } => "tint",
+        EffectRenderOp::Vibrance { .. } => "vibrance",
         EffectRenderOp::MotionTile { .. } => "motion_tile",
         EffectRenderOp::Kaleidoscope { .. } => "kaleidoscope",
         EffectRenderOp::Bevel { .. } => "bevel",

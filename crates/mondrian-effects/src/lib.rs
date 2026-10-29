@@ -31,6 +31,7 @@ pub mod find_edges;
 mod project_properties;
 pub mod threshold;
 pub mod tint;
+pub mod vibrance;
 pub use project_properties::{rebind_effect_project_geometry, EffectProjectPropertyInitializer};
 pub mod execution;
 pub mod execution_contract;
@@ -248,6 +249,7 @@ pub use unsharp_mask::{
     UNSHARP_MASK_AUTHOR_MAX_AMOUNT_PERCENT, UNSHARP_MASK_AUTHOR_MAX_RADIUS_PIXELS,
     UNSHARP_MASK_AUTHOR_MIN_RADIUS_PIXELS,
 };
+pub use vibrance::{vibrance_frame_f32, VibranceError, VibranceGrade};
 
 pub use processor_question::{
     EffectProcessorGuiActionFeedback, EffectProcessorGuiActionReceipt, EffectProcessorGuiAdmission,
