@@ -43,8 +43,16 @@ The original Ring Out CLAP Runtime/Graph case also passes after sharing its
 unchanged input/census helper. Both runs have exit0, empty stderr and settled
 process groups. Native GUI, product timer/FD concurrency, broader instruments,
 physical devices, realtime/performance, full heap/leaks and macOS native-plugin
-qualification remain open. The new macOS actual-main CFRunLoop probe still
-requires its own CI acceptance; library/product CI is not that evidence.
+qualification remain open. The macOS actual-main CFRunLoop timer/retirement
+probe passes CI214; this is separate from the native editor parent probe below.
+
+Scoped X11 and Cocoa parent primitives are also implemented in the SDK, separate
+from Product GUI adapters. On Ubuntu, an authenticated private Xvfb gate passes
+three create/resize/deferred-close/retirement cycles with empty test stderr and
+settled process ownership; the complete SDK library passes 439 tests (16 ignored).
+The Cocoa actual-main parent probe awaits CI. These gates load no foreign view:
+Product GUI still uses the Windows adapter, and cross-platform plugin attachment,
+native input, full heap/resource and physical-display qualification remain open.
 
 ## Implementation boundary
 
