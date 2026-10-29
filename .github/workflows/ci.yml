@@ -444,15 +444,19 @@ jobs:
       - name: 测试
         run: cargo test --workspace --exclude mondrian-app
 
-      - name: Build official OpenFX Basic reference
+      - name: Build official OpenFX references
         shell: python
         run: |
           import json, os, pathlib, subprocess, sys
-          output = pathlib.Path(os.environ["RUNNER_TEMP"]) / "mondrian-openfx-reference"
-          subprocess.run([sys.executable, "scripts/validation/build-openfx-reference.py", "--output-dir", str(output)], check=True)
-          reference = json.loads((output / "reference.json").read_text(encoding="utf-8"))
           with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as environment:
-              environment.write("MONDRIAN_OPENFX_REFERENCE_BINARY=" + reference["binary"] + "\n")
+              for example, variable in [("Basic", "MONDRIAN_OPENFX_REFERENCE_BINARY"), ("Rectangle", "MONDRIAN_OPENFX_RECTANGLE_BINARY")]:
+                  output = pathlib.Path(os.environ["RUNNER_TEMP"]) / "mondrian-openfx-reference" / example
+                  command = [sys.executable, "scripts/validation/build-openfx-reference.py", "--output-dir", str(output)]
+                  if example != "Basic":
+                      command += ["--example", example]
+                  subprocess.run(command, check=True)
+                  reference = json.loads((output / "reference.json").read_text(encoding="utf-8"))
+                  environment.write(variable + "=" + reference["binary"] + "\n")
 
       - name: 编译默认 App 产品入口
         env:
@@ -507,6 +511,12 @@ jobs:
         env:
           CARGO_INCREMENTAL: "0"
         run: cargo test --locked -p mondrian-app --test openfx_host -j1 -- --exact official_basic_resident_transfer_preserves_partial_blocks_and_changed_rasters --ignored --test-threads=1
+
+      - name: Native OpenFX Rectangle output-only Generator
+        timeout-minutes: 3
+        env:
+          CARGO_INCREMENTAL: "0"
+        run: cargo test --locked -p mondrian-app --test openfx_host -j1 -- --exact generator::official_rectangle_generator_preserves_geometry_parameters_and_output_signal --ignored --test-threads=1
 
       - name: 编译 Golden 验证入口 (Windows)
         if: runner.os == 'Windows'
