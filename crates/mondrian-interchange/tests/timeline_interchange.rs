@@ -143,8 +143,8 @@ fn otio_extension_round_trips_color_identity_cdl_and_digest_bound_lut() {
     let mut lut = mondrian_effects::instantiate_effect_node(EffectType::Lut3D).expect("LUT");
     lut.set_static_value_by_parameter(
         &EffectType::Lut3D.parameter_id("path").expect("id"),
-        PropertyValue::Resource(ParameterResourceReference::Uri {
-            uri: "asset://show/look.cube".to_owned(),
+        PropertyValue::Resource(ParameterResourceReference::ExternalFile {
+            path: mondrian_core::NativePath::from_unix_bytes(b"/show/look.cube".to_vec()),
         }),
     )
     .expect("path");
@@ -308,8 +308,8 @@ fn color_loss_is_reported_and_unbound_lut_digest_fails_closed() {
     let mut lut = mondrian_effects::instantiate_effect_node(EffectType::Lut3D).expect("LUT");
     lut.set_static_value_by_parameter(
         &EffectType::Lut3D.parameter_id("path").expect("id"),
-        PropertyValue::Resource(ParameterResourceReference::Uri {
-            uri: "asset://show/unbound.cube".to_owned(),
+        PropertyValue::Resource(ParameterResourceReference::ExternalFile {
+            path: mondrian_core::NativePath::from_unix_bytes(b"/show/unbound.cube".to_vec()),
         }),
     )
     .expect("path");
@@ -336,6 +336,60 @@ fn color_loss_is_reported_and_unbound_lut_digest_fails_closed() {
     let report = error.conformance_report().expect("rejected report remains available");
     assert!(report.has_blockers());
     assert!(report.findings.iter().any(|finding| finding.code == "LUT_DIGEST_MISSING"));
+}
+
+#[test]
+fn external_lut_interchange_never_exports_lossy_native_filenames() {
+    let unicode = mondrian_core::NativePath::from_unix_bytes(b"/studio/look.cube".to_vec());
+    let non_unicode = mondrian_core::NativePath::from_windows_units(vec![
+        67, 58, 92, 0xd800, 46, 99, 117, 98, 101,
+    ]);
+    for path in [unicode, non_unicode] {
+        let (mut sequence, assets, _) = fixture();
+        let mut definition = GradeDefinition::new("Native LUT");
+        let mut graph = GradeGraph::identity();
+        let mut lut = mondrian_effects::instantiate_effect_node(EffectType::Lut3D).expect("LUT");
+        lut.set_static_value_by_parameter(
+            &EffectType::Lut3D.parameter_id("path").expect("id"),
+            PropertyValue::Resource(ParameterResourceReference::ExternalFile {
+                path: path.clone(),
+            }),
+        )
+        .expect("native reference");
+        lut.set_static_value_by_parameter(
+            &EffectType::Lut3D.parameter_id("processing_space").expect("id"),
+            PropertyValue::Enum("scene_linear".into()),
+        )
+        .expect("space");
+        lut.params = serde_json::json!({"interchange_sha256": "ab".repeat(32)});
+        let input = graph.output;
+        graph.output = append_grade_effect(&mut graph, input, lut);
+        definition.versions[0].graph = graph;
+        sequence.video_tracks[0].clips[0].grade = Some(definition.id);
+        sequence.grade_definitions.push(definition);
+        let result = prepare_export(InterchangeExportRequest {
+            profile: InterchangeFormatProfile::OtioJsonV1,
+            sequence: &sequence,
+            assets: &assets,
+            loss_policy: InterchangeLossPolicy::AllowWithReport,
+            limits: InterchangeLimits::default(),
+        });
+        if let Some(text) = path.utf8_text() {
+            let artifact = result.expect("exact UTF-8 reference");
+            let json = String::from_utf8(artifact.bytes().to_vec()).expect("JSON UTF-8");
+            assert!(
+                json.contains(&serde_json::to_string(text.as_ref()).expect("exact JSON string"))
+            );
+        } else {
+            let error = result.expect_err("no lossy resource export");
+            let report = error.conformance_report().expect("report");
+            assert!(report.has_blockers());
+            assert!(report
+                .findings
+                .iter()
+                .any(|finding| finding.code == "LUT_REFERENCE_UNRESOLVED"));
+        }
+    }
 }
 
 #[derive(Debug)]

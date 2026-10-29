@@ -1730,11 +1730,32 @@ impl Sequence {
         let mut end = TimelineTime::ZERO;
 
         for track in self.video_tracks.iter().chain(self.audio_tracks.iter()) {
-            if let Some(last) = track.clips.last() {
-                end = end.max(last.end_position()?);
+            for clip in &track.clips {
+                end = end.max(clip.end_position()?);
+            }
+        }
+        // Score order is editorial, not temporal. Runtime mute, bypass,
+        // dependency availability, and plugin tail do not change authored extent.
+        for lane in &self.audio_program.note_lanes {
+            for note in &lane.notes {
+                end = end.max(note.end);
             }
         }
         Ok(end)
+    }
+
+    /// Last frame occupied by authored content, whose end is exclusive.
+    ///
+    /// Empty and subframe Sequences select frame zero. Exact conversion remains
+    /// checked even for empty content, so invalid rates and overflow are errors.
+    pub fn last_content_frame(&self) -> mondrian_core::Result<i64> {
+        let end_exclusive = self
+            .total_duration()?
+            .to_frame_position(self.settings.frame_rate, mondrian_core::FrameRounding::Ceil)?
+            .frame;
+        let last =
+            end_exclusive.checked_sub(1).ok_or(mondrian_core::TimelineTimeError::Overflow)?;
+        Ok(last.max(0))
     }
 
     pub fn active_clips_at(&self, time: TimelineTime) -> mondrian_core::Result<Vec<ActiveClip>> {
@@ -2143,11 +2164,21 @@ impl Sequence {
             .into_iter()
             .zip(audio_processor_ids(&self.audio_program))
             .collect::<HashMap<_, _>>();
+        for lane in &mut self.audio_program.note_lanes {
+            lane.id = mondrian_core::AudioNoteLaneId::new();
+            lane.target.processor_id = processor_ids[&lane.target.processor_id];
+            for note in &mut lane.notes {
+                note.id = mondrian_core::AudioNoteId::new();
+            }
+        }
         for route in &mut self.audio_program.routes {
             route.id = AudioRouteId::new();
             rekey_optional_exact_curve(&mut route.gain_automation);
             if let AudioRouteSource::Bus { bus_id, .. } = &mut route.source {
                 *bus_id = bus_ids[bus_id];
+            }
+            if let AudioRouteSource::ProcessorOutput { processor_id, .. } = &mut route.source {
+                *processor_id = processor_ids[processor_id];
             }
             match &mut route.destination {
                 AudioRouteDestination::Bus(bus_id) => *bus_id = bus_ids[bus_id],
@@ -2162,6 +2193,9 @@ impl Sequence {
             rekey_optional_exact_curve(&mut route.gain_automation);
             if let AudioRouteSource::Bus { bus_id, .. } = &mut route.source {
                 *bus_id = bus_ids[bus_id];
+            }
+            if let AudioRouteSource::ProcessorOutput { processor_id, .. } = &mut route.source {
+                *processor_id = processor_ids[processor_id];
             }
         }
         for transition in &mut self.audio_program.transitions {
@@ -2299,6 +2333,10 @@ impl Sequence {
             if let AudioRouteSource::Track { track_id, .. } = &mut route.source {
                 *track_id = track_ids[track_id];
             }
+        }
+
+        for lane in &mut self.audio_program.note_lanes {
+            lane.target.track_id = track_ids[&lane.target.track_id];
         }
 
         for transition in &mut self.video_transitions {
@@ -2919,7 +2957,7 @@ fn rekey_audio_scope(scope: &mut crate::audio::AudioProcessingScope) {
     for processor in &mut scope.processors.processors {
         processor.id = AudioProcessorInstanceId::new();
         for parameter in processor.parameters.values_mut() {
-            rekey_exact_curve(&mut parameter.automation);
+            rekey_optional_exact_curve(&mut parameter.automation);
         }
     }
 }
@@ -2930,7 +2968,7 @@ fn rekey_audio_channel_strip(strip: &mut crate::audio::AudioChannelStrip) {
         for processor in &mut rack.processors {
             processor.id = AudioProcessorInstanceId::new();
             for parameter in processor.parameters.values_mut() {
-                rekey_exact_curve(&mut parameter.automation);
+                rekey_optional_exact_curve(&mut parameter.automation);
             }
         }
     }
@@ -3159,8 +3197,8 @@ pub(crate) fn flat_video_transition_definition_snapshot(
         crate::video_transition::VideoTransitionType::CrossDissolve => {
             FlatVideoTransitionDefinition::CrossDissolve
         }
-        crate::video_transition::VideoTransitionType::Plugin { definition_id } => {
-            FlatVideoTransitionDefinition::Plugin { definition_id: definition_id.clone() }
+        crate::video_transition::VideoTransitionType::External { definition_id } => {
+            FlatVideoTransitionDefinition::External { definition_id: definition_id.clone() }
         }
     };
     Arc::new(FlatVideoTransitionDefinitionSnapshot {
@@ -3641,7 +3679,7 @@ mod tests {
         let time_base = sequence.time_base();
 
         let transition = &mut sequence.video_transitions[0];
-        transition.transition_type = crate::VideoTransitionType::Plugin {
+        transition.transition_type = crate::VideoTransitionType::External {
             definition_id: "com.example.page-curl".to_owned(),
         };
         transition.params = serde_json::json!({
@@ -3652,7 +3690,7 @@ mod tests {
         });
 
         let clip = &mut sequence.video_tracks[0].clips[0];
-        clip.effects[0].effect_type = EffectType::Plugin("com.example.glow".to_owned());
+        clip.effects[0].effect_type = EffectType::External("com.example.glow".to_owned());
         clip.effects[0].params = serde_json::json!({
             "kernel": [1.0, 0.5, 0.25],
             "resource": "project://luts/glow.cube"
@@ -3741,7 +3779,7 @@ mod tests {
             .shares_allocation_with(&original.sequences[0].audio_program.track_channels));
 
         candidate.sequences[0].video_tracks[0].clips[0].effects.push(EffectNode::new(
-            EffectType::Plugin("com.example.detached".to_owned()),
+            EffectType::External("com.example.detached".to_owned()),
         ));
 
         assert!(!candidate.sequences.shares_allocation_with(&original.sequences));
@@ -3774,6 +3812,63 @@ mod tests {
         let detached_manifest = detached_collector.finish();
         assert!(detached_manifest.total_bytes() > single_manifest.total_bytes());
         assert!(detached_manifest.allocation_count() > single_manifest.allocation_count());
+    }
+
+    #[test]
+    fn musical_time_reference_revision_clone_and_duplicate_keep_one_author_value() {
+        let environment = standard_environment();
+        let original = Sequence::new("musical reference");
+        let certificate = original.prepare_author_contract_certificate(&environment).unwrap();
+        let reference = mondrian_core::MusicalTimeReference::new(
+            TimelineTime::new(-1001, 30000).unwrap(),
+            TimelineTime::new(1001, 2000).unwrap(),
+        )
+        .unwrap();
+        let mut changed = original.clone();
+        changed.audio_program.musical_time_reference = Some(reference);
+        assert!(!changed.author_state_eq_ignoring_revision(&original));
+        assert!(certificate
+            .prepare_replacement(&original, &changed, &environment)
+            .expect_err("reference edit needs a newer author revision")
+            .to_string()
+            .contains("must be newer"));
+        changed.revision = changed.revision.checked_next().unwrap();
+        certificate
+            .prepare_replacement(&original, &changed, &environment)
+            .expect("reference follows the existing author revision authority");
+        let mut stale_current = original.clone();
+        stale_current.audio_program.musical_time_reference = Some(reference);
+        let mut future = changed.clone();
+        future.revision = future.revision.checked_next().unwrap();
+        assert!(certificate
+            .prepare_replacement(&stale_current, &future, &environment)
+            .expect_err("reference edit also stales the old certificate baseline")
+            .to_string()
+            .contains("author state"));
+        let mut revision_only = changed.clone();
+        revision_only.revision = future.revision;
+        assert!(revision_only.author_state_eq_ignoring_revision(&changed));
+        let mut duplicate = changed.clone();
+        assert_eq!(
+            duplicate.audio_program.musical_time_reference,
+            Some(reference)
+        );
+        duplicate.fork_author_identities_for_sequence_duplicate();
+        assert_ne!(duplicate.id, changed.id);
+        assert_eq!(duplicate.revision, SequenceRevision::INITIAL);
+        assert_eq!(
+            duplicate.audio_program.musical_time_reference,
+            Some(reference)
+        );
+        assert_eq!(
+            changed.audio_program.musical_time_reference,
+            Some(reference)
+        );
+        assert_eq!(original.audio_program.musical_time_reference, None);
+        let restored: Sequence =
+            serde_json::from_slice(&serde_json::to_vec(&duplicate).unwrap()).unwrap();
+        assert_eq!(restored, duplicate);
+        duplicate.validate_author_contract(&environment).unwrap();
     }
 
     #[test]
@@ -3975,6 +4070,297 @@ mod tests {
             .validate_author_identities()
             .expect_err("ambiguous simultaneous Transitions must fail");
         assert!(error.to_string().contains("must not overlap"));
+    }
+
+    fn sequence_with_authored_note_ends(ends: &[TimelineTime]) -> Sequence {
+        use crate::audio::{AudioNote, AudioNoteLane, AudioNoteTarget};
+        let mut sequence = Sequence::new("authored score extent");
+        let track_id = sequence.audio_tracks[0].id;
+        let processor = AudioProcessorInstance {
+            id: mondrian_core::AudioProcessorInstanceId::new(),
+            definition: AudioProcessorDefinitionRef::Clap {
+                plugin_id: "test.mondrian.unavailable-extent-author".to_owned(),
+                schema_version: 1,
+                binary_sha256: None,
+            },
+            bypassed: false,
+            parameters: Default::default(),
+            opaque_state: None,
+        };
+        let target = AudioNoteTarget {
+            track_id,
+            processor_id: processor.id,
+            input_port_key: "notes.0".to_owned(),
+        };
+        sequence
+            .audio_program
+            .track_channels
+            .get_mut(&track_id)
+            .expect("channel")
+            .strip
+            .pre_fader
+            .processors
+            .push(processor);
+        sequence.audio_program.note_lanes.push(AudioNoteLane {
+            schema_version: 1,
+            id: mondrian_core::AudioNoteLaneId::new(),
+            target,
+            notes: AuthoringList::from(
+                ends.iter()
+                    .map(|&end| AudioNote {
+                        id: mondrian_core::AudioNoteId::new(),
+                        start: TimelineTime::ZERO,
+                        end,
+                        channel: 0,
+                        key: 60,
+                        on_velocity: 0.5,
+                        off_velocity: 0.0,
+                    })
+                    .collect::<Vec<_>>(),
+            ),
+        });
+        sequence
+    }
+
+    #[test]
+    fn authored_note_extent_uses_every_note_and_lane_and_survives_reopen() {
+        let mut sequence = sequence_with_authored_note_ends(&[
+            TimelineTime::new(4, 1).expect("end"),
+            TimelineTime::new(1, 1).expect("end"),
+        ]);
+        assert_eq!(
+            sequence.total_duration().unwrap(),
+            TimelineTime::new(4, 1).unwrap(),
+            "the last authored note is not necessarily the latest end"
+        );
+        let mut later_lane = sequence.audio_program.note_lanes[0].clone();
+        later_lane.id = mondrian_core::AudioNoteLaneId::new();
+        later_lane.notes = AuthoringList::from(vec![crate::audio::AudioNote {
+            id: mondrian_core::AudioNoteId::new(),
+            end: TimelineTime::new(7, 1).expect("latest end"),
+            ..later_lane.notes[0].clone()
+        }]);
+        // Neither lane order nor note order is a time-ordering contract.
+        sequence.audio_program.note_lanes.insert(0, later_lane);
+        let mut empty_lane = sequence.audio_program.note_lanes[0].clone();
+        empty_lane.id = mondrian_core::AudioNoteLaneId::new();
+        empty_lane.notes.clear();
+        sequence.audio_program.note_lanes.push(empty_lane);
+        let environment = ProjectColorEnvironment::default();
+        sequence.validate_author_contract(&environment).expect("valid Note authoring");
+        assert_eq!(
+            sequence.total_duration().expect("duration"),
+            TimelineTime::new(7, 1).unwrap()
+        );
+        assert!(sequence.video_tracks.iter().all(|track| track.clips.is_empty()));
+        sequence.audio_tracks[0].is_muted = true;
+        sequence
+            .audio_program
+            .track_channels
+            .get_mut(&sequence.audio_tracks[0].id)
+            .expect("channel")
+            .strip
+            .pre_fader
+            .processors[0]
+            .bypassed = true;
+        sequence
+            .validate_author_contract(&environment)
+            .expect("muted, bypassed unavailable author");
+        let encoded = serde_json::to_vec(&sequence).expect("save authoring");
+        let reopened: Sequence = serde_json::from_slice(&encoded).expect("reopen authoring");
+        reopened
+            .validate_author_contract(&environment)
+            .expect("reopened Note references");
+        assert_eq!(
+            reopened.audio_program.note_lanes,
+            sequence.audio_program.note_lanes
+        );
+        assert_eq!(
+            reopened.total_duration().unwrap(),
+            TimelineTime::new(7, 1).unwrap()
+        );
+        let mut invalid = reopened;
+        invalid.audio_program.note_lanes[0].notes[0].end = TimelineTime::ZERO;
+        assert!(
+            invalid.validate_author_contract(&environment).is_err(),
+            "extent does not relax Note validation"
+        );
+    }
+
+    #[test]
+    fn authored_extent_is_max_of_clips_and_notes_and_empty_lanes_add_nothing() {
+        let mut sequence = sequence_with_authored_note_ends(&[TimelineTime::new(2, 1).unwrap()]);
+        sequence.video_tracks[0]
+            .add_clip(
+                Clip::new(
+                    AssetId::new(),
+                    TimelineTime::ZERO,
+                    TimelineTime::new(3, 1).unwrap(),
+                )
+                .expect("clip"),
+            )
+            .expect("placement");
+        assert_eq!(
+            sequence.total_duration().unwrap(),
+            TimelineTime::new(3, 1).unwrap()
+        );
+        sequence.audio_program.note_lanes[0].notes[0].end = TimelineTime::new(5, 1).unwrap();
+        assert_eq!(
+            sequence.total_duration().unwrap(),
+            TimelineTime::new(5, 1).unwrap()
+        );
+        sequence.audio_program.note_lanes[0].notes.clear();
+        assert_eq!(
+            sequence.total_duration().unwrap(),
+            TimelineTime::new(3, 1).unwrap()
+        );
+        sequence.video_tracks[0].clips.clear();
+        assert_eq!(sequence.total_duration().unwrap(), TimelineTime::ZERO);
+        // Legal overlapping placements are ordered by start, not by end.
+        // The last-starting Clip must not truncate the earlier long Clip.
+        sequence.video_tracks[0]
+            .add_clip(
+                Clip::new(
+                    AssetId::new(),
+                    TimelineTime::ZERO,
+                    TimelineTime::new(10, 1).unwrap(),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        sequence.video_tracks[0]
+            .add_clip(
+                Clip::new(
+                    AssetId::new(),
+                    TimelineTime::new(1, 1).unwrap(),
+                    TimelineTime::new(1, 1).unwrap(),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        sequence
+            .validate_author_contract(&ProjectColorEnvironment::default())
+            .expect("overlapping placements are valid canonical authoring");
+        assert_eq!(
+            sequence.total_duration().unwrap(),
+            TimelineTime::new(10, 1).unwrap()
+        );
+    }
+
+    #[test]
+    fn authored_last_content_frame_uses_checked_exclusive_end_ceiling() {
+        for (rate, end, expected) in [
+            (Rational::FPS_25, TimelineTime::new(1, 100).unwrap(), 0),
+            (Rational::FPS_25, TimelineTime::new(1, 25).unwrap(), 0),
+            (Rational::FPS_25, TimelineTime::new(41, 1000).unwrap(), 1),
+            (Rational::FPS_25, TimelineTime::new(59, 1000).unwrap(), 1),
+            (Rational::FPS_25, TimelineTime::new(2, 25).unwrap(), 1),
+            (
+                Rational::FPS_2997,
+                TimelineTime::new(1001, 15000).unwrap(),
+                1,
+            ),
+            (
+                Rational::FPS_2997,
+                TimelineTime::new(2003, 30000).unwrap(),
+                2,
+            ),
+        ] {
+            let mut sequence = sequence_with_authored_note_ends(&[end]);
+            sequence.settings.frame_rate = rate;
+            assert_eq!(
+                sequence.last_content_frame().unwrap(),
+                expected,
+                "{rate:?}, {end:?}"
+            );
+        }
+        let mut empty = Sequence::new("empty");
+        assert_eq!(empty.last_content_frame().unwrap(), 0);
+        empty.settings.frame_rate = Rational::new(0, 1);
+        assert!(matches!(
+            empty.last_content_frame(),
+            Err(mondrian_core::MondrianError::InvalidTimelineTime(
+                mondrian_core::TimelineTimeError::InvalidFrameRate { .. }
+            ))
+        ));
+        let huge = sequence_with_authored_note_ends(&[TimelineTime::new(i64::MAX, 1).unwrap()]);
+        assert!(matches!(
+            huge.last_content_frame(),
+            Err(mondrian_core::MondrianError::InvalidTimelineTime(
+                mondrian_core::TimelineTimeError::Overflow
+            ))
+        ));
+        let mut limit =
+            sequence_with_authored_note_ends(&[TimelineTime::new(i64::MAX, 1).unwrap()]);
+        limit.settings.frame_rate = Rational::new(1, 1);
+        assert_eq!(limit.last_content_frame().unwrap(), i64::MAX - 1);
+    }
+
+    #[test]
+    fn note_model_sequence_duplicate_forks_score_and_preserves_internal_targets() {
+        use crate::audio::{AudioNote, AudioNoteLane, AudioNoteTarget};
+        let mut original = Sequence::new("score duplicate");
+        let track_id = original.audio_tracks[0].id;
+        let processor = AudioProcessorInstance::built_in(BUILTIN_GAIN_DEFINITION_ID, 1);
+        let processor_id = processor.id;
+        original
+            .audio_program
+            .track_channels
+            .get_mut(&track_id)
+            .expect("channel")
+            .strip
+            .pre_fader
+            .processors
+            .push(processor);
+        original.audio_program.note_lanes.push(AudioNoteLane {
+            schema_version: 1,
+            id: mondrian_core::AudioNoteLaneId::new(),
+            target: AudioNoteTarget {
+                track_id,
+                processor_id,
+                input_port_key: "notes.0".to_owned(),
+            },
+            notes: AuthoringList::from(vec![AudioNote {
+                id: mondrian_core::AudioNoteId::new(),
+                start: TimelineTime::new(1001, 30000).expect("start"),
+                end: TimelineTime::new(2002, 30000).expect("end"),
+                channel: 3,
+                key: 60,
+                on_velocity: 0.5,
+                off_velocity: -0.0,
+            }]),
+        });
+        let original_score = original.audio_program.note_lanes.clone();
+        let mut duplicate = original.clone();
+        assert_eq!(duplicate.audio_program.note_lanes, original_score);
+        duplicate.fork_author_identities_for_sequence_duplicate();
+        let lane = &duplicate.audio_program.note_lanes[0];
+        let copied_track = duplicate.audio_tracks[0].id;
+        assert_ne!(copied_track, track_id);
+        assert_ne!(lane.id, original_score[0].id);
+        assert_ne!(lane.notes[0].id, original_score[0].notes[0].id);
+        assert_ne!(lane.target.processor_id, processor_id);
+        assert_eq!(lane.target.track_id, copied_track);
+        assert_eq!(
+            lane.target.processor_id,
+            duplicate.audio_program.track_channels[&copied_track].strip.pre_fader.processors[0].id
+        );
+        assert_eq!(
+            lane.target.input_port_key,
+            original_score[0].target.input_port_key
+        );
+        assert_eq!(lane.notes[0].start, original_score[0].notes[0].start);
+        assert_eq!(lane.notes[0].end, original_score[0].notes[0].end);
+        assert_eq!(lane.notes[0].off_velocity.to_bits(), (-0.0_f64).to_bits());
+        assert_eq!(original.audio_program.note_lanes, original_score);
+        duplicate
+            .audio_program
+            .validate(
+                &duplicate.audio_tracks,
+                &duplicate.audio_roles,
+                duplicate.settings.audio_channel_layout,
+            )
+            .expect("duplicated strong references");
     }
 
     #[test]

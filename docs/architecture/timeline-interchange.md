@@ -111,3 +111,10 @@ that OTIO/AAF/XML/EDL structures or vendor extensions round-trip. Conversely,
 interchange conformance cannot substitute for pixel qualification. Until each
 evidence class exists, reports must not claim generic application compatibility
 beyond the declared profiles above.
+
+### External resource filename encoding
+
+Interchange LUT references require an exact UTF-8 projection of the persisted
+native filename. Non-Unicode filenames produce `LUT_REFERENCE_UNRESOLVED` with
+blocking unsupported evidence; lossy display names never enter exported resource
+URIs. A foreign-platform UTF-8 reference retains its original spelling.

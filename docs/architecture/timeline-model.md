@@ -1,5 +1,20 @@
 # Timeline Model
 
+Audio routing uses channel signal stages rather than collapsing whole strips
+into one node. Pre-fader taps are produced after the pre rack, while final taps
+follow the post rack. Retained main routes target input stages; sidechains target
+their exact pre/post rack stage, and Scope processors target every materialized
+Track input stage. Internal pre-to-post edges preserve causality. The same
+complete retained graph powers atomic author validation and candidate menus,
+including disabled connections. Safe same-strip and reciprocal pre-to-post
+connections are admitted without weakening actual feedback or source-lock rules.
+
+Mask parameter admission accepts Core's complete or sparse `ParameterValueWrite`,
+verifies Mask ownership and lock, and delegates canonical preparation to the
+current Mask Property Bag at explicit owner-local time. Applying the prepared
+mutation checks the lock again. Mask shape geometry remains a separate typed
+authoring operation; parameter channels do not reinterpret shape points.
+
 Audio Rack `RebindNative` is one format-neutral author mutation for CLAP and
 VST3. The App probes the selected binary and compares parameter schemas first;
 Timeline then requires the same stable plugin identity, vendor where the format
@@ -26,6 +41,13 @@ same persisted curve. Inspector interpolation commands resolve the current
 key by stable ID before committing one property mutation.
 Manual Bezier presets initialize the incoming handle toward earlier time and
 the outgoing handle toward later time.
+
+Audio `EditHandle` carries a stable key ID, temporal side and sparse exact
+coordinate edit through the same addressed author transaction as other curve
+edits. Timeline admits the Bezier family against the definition schema and
+checks owner locks before delegating constraint geometry to Core. Repeated
+identical edits are no-ops; invalid coordinates and stale IDs cannot publish a
+Sequence candidate. UI adapters do not reconstruct a second tangent model.
 
 Color-context construction delegates target-qualified output View lookup to the
 owning Project's exact `ColorEngine`. Sequence preview and export planning never read an
@@ -704,6 +726,14 @@ callers can test many additions in constant time without copying the Sequence
 or recreating Routing rules. This projection is advisory for interaction;
 commit-time complete Audio Program validation remains authoritative.
 
+`inspect_audio_mix_buses` projects canonical Bus deletion dependencies in one
+main-route and sidechain traversal. Single-Bus inspection and removal admission
+share its implementation. Both pre/post-fader processor targets and Bus sources
+count, including disabled retained routes; an edge incident at both ends counts
+once. The existing source-Track lock policy remains authoritative. Mixer deletion
+controls consume these domain facts rather than reproducing dependency or lock
+rules; invalid dependency addresses disable deletion with an explicit reason.
+
 All audio keyframes use one additional Timeline Interface:
 `AudioAutomationTarget` closes over Component volume/pan, Processing Scope input
 gain, Channel Strip fader, Route gain, and Processor parameter addresses.
@@ -1178,7 +1208,7 @@ Headless callers still receive exact execution failures.
 
 A visual Transition is a Sequence-owned, typed two-input author entity. It has
 a stable `VideoTransitionId`, two strong Clip endpoints, one exact Sequence-time
-range, a built-in or plugin definition identity, a complete Property Bag, and
+range, a built-in or external definition identity, a complete Property Bag, and
 explicit enabled state. It deliberately does not persist `track_id`: endpoint
 Track membership is derived from the two Clips, preventing two authorities from
 disagreeing.
@@ -1411,7 +1441,7 @@ milliseconds but marks it non-animatable and topology-affecting; audio plan
 preparation rounds it upward once to the concrete sample grid. A parameter that
 changes storage, latency, or continuity topology forces plan re-preparation
 rather than a live callback event.
-CLAP and VST3 processor definitions may store the selected binary's SHA-256
+Inserted CLAP and VST3 processor definitions store the selected binary's SHA-256
 revision; an all-zero revision is invalid. Processor parameters may also carry
 bounded plugin display metadata:
 the native default name and hidden-control flag. The `ui` snapshot is required
@@ -1419,15 +1449,20 @@ in the alpha Project format; built-ins use an empty display name and visible
 control. The display snapshot
 does not alter `ParameterSchema`, automation identity, saved opaque state, or
 binary revision binding; malformed control text is rejected during validation.
-An explicit CLAP rebind Rack edit
+An explicit CLAP or VST3 rebind Rack edit
 compares the old definition before replacing only that revision. It rejects a
 different plugin ID, schema version, or stale instance and commits only after
 complete Audio Program validation. The installed path remains machine-local.
 An explicitly unbound definition (`binary_sha256: null`) stays editable but
 fails native preparation until explicitly rebound. The alpha format requires
-this field in every plugin definition. VST3 discovery, rebind, and native
-preparation remain unimplemented; the persisted revision is only the necessary
-authoring identity contract for a future adapter.
+this field in every plugin definition: one required nullable decoder rejects
+omission while retaining explicit null. Processor definition objects reject
+unknown fields for built-in, CLAP and VST3 variants; loading cannot silently
+strip unsupported author intent. Canonical pinned and explicit-unbound payloads
+round-trip without migrations or aliases. VST3 discovery, insertion, explicit
+rebind and isolated native preparation are implemented by the application/audio
+adapters under the same author contract; the broader native bus/event/platform
+qualification remains separate from this persisted definition admission.
 
 Automation authoring uses `AnimationParameterAddress { animation_track_id,
 parameter_id }` as the stable property-instance address and `KeyframeId` as the
@@ -1459,8 +1494,12 @@ Exact audio automation also stores a per-key tangent constraint independent of
 the execution segment kind. The stable-ID `SetInterpolation` author edit maps
 hold, linear, manual Bezier, auto Bezier, and continuous Bezier to canonical
 exact handles. Neighbor changes regenerate constrained handles on a detached
-curve; absent legacy mode data means manual. Stale IDs and schema-disallowed
-interpolation families reject before Sequence publication.
+curve. The current alpha codec requires explicit tangent-mode data; missing
+mode fields reject instead of inferring an older manual format. Complete-selection
+`SetInterpolations` validates all unique stable IDs and the definition family,
+applies all constraints, then normalizes once before atomic publication. Stale
+IDs and schema-disallowed interpolation families reject before Sequence
+publication.
 
 Mask scalar properties are part of the persisted Property Bag, not runtime
 defaults. Every complete shape key owns a stable `KeyframeId`, exact Clip-local
@@ -1552,3 +1591,206 @@ Direct Asset placement treats a coherent still-image picture as timeless: it
 requires an admitted primary picture and valid geometry, not nonzero probed
 media duration. The existing Timeline still-clip duration remains authoritative.
 Timed Video and Audio Assets continue to require a positive media duration.
+
+
+### Bounded numeric integer animation
+
+Integer representation does not require categorical animation. Generic Int
+schemas default to Hold, while an owner may explicitly admit Linear/Bezier when
+it supplies a numeric hard range entirely inside the exact f64 integer domain
+[-2^53, 2^53]. Wider or unbounded interpolated Int schemas fail validation before
+channel lowering. Bool/Enum and other categorical representations retain their
+Hold-only contract. Canonical numeric channels evaluate the curve and round
+integer samples to the nearest integer, with halfway values away from zero.
+OpenFX Integer controls use this same path with stricter signed 32-bit hard
+bounds and a one-unit editor step; no plugin-specific curve evaluator exists.
+
+
+### Definition-owned new-key interpolation
+
+`ParameterSchema::allowed_interpolations` is ordered: its first entry is the
+new-key default. Generic numeric definitions put Linear first; categorical and
+generic Int definitions use Hold. Plugin definitions put their declared default
+first while retaining other admitted user choices. Animation enable, value writes
+that insert keys, and App curve insertion all ask the same core
+`AnimatedProperty::default_interpolation` seam. Numeric Int writes no longer
+normalize explicit owner-admitted modes to Hold; their bounded schema governs
+admission. Existing keys retain their authored handles and temporal flags.
+
+Enum parameter choices retain Core's explicit declared caption alongside the
+stable key and localization address. Clip blend options use their canonical
+display declarations while persisted values and discrete automation remain the
+existing stable keys. Caption equality never merges distinct author choices.
+
+Clip blend choice message addresses are the registered `blend-mode-*` messages,
+shared with the specialized menu rather than a second unresolved address set.
+Generic Inspector choices therefore use the same English/Chinese/pseudo catalog.
+
+### Processor channel admission
+
+Scalar audio automation and exact integer processor values consume channel zero
+of their validated canonical schema. Core enforces complete contract cardinality
+and atomic normalization for every full or sparse property write.
+
+Audio curve inspection supplies an immutable `AudioAutomationCurveContract`
+resolved from the target definition. Its `preview_edit` admits parameter identity,
+scalar keys and absolute handle values, animation permission and interpolation
+families through the same numeric schema validator used by canonical audio
+state. Component pan curves admit both keys and controls within [-1, 1]; gain
+curves retain their declared decibel bounds. Processor curves retain the complete
+saved parameter schema, including integer and non-animatable contracts.
+
+Both UI projection and fresh author admission prepare through this contract.
+The author path publishes the prepared curve into a structurally shared Sequence
+candidate, validates the complete Audio Program, and only then commits. A preview
+never publishes a transaction, generation, or history entry. The UI samples Core
+prepared segments once per edit and returns the admitted action and geometry
+from that same candidate. Constrained handle normalization cannot leave an
+illegal preview when a key crosses a neighbor; owner time and stable key identity
+remain authoritative.
+
+### Numeric automation ownership
+
+Timeline reexports only Core's `Keyframe` value DTO and `InterpolationType`.
+The unused generic `KeyframeTrack`/`Interpolatable` API is removed from both
+crates. Author numeric curves remain Core property channels and exact curves;
+Timeline does not provide a competing curve evaluator or mutation authority.
+
+
+### Atomic audio key-set time edits
+
+`AudioAutomationEdit::ShiftKeyframes` names one unique complete stable key set
+and an exact signed owner-time delta. The Timeline delegates final-topology
+admission to ExactAutomationCurve, preserves scalar values and tangent mode, and
+uses the same lock, numeric-contract and author generation rules as other audio
+edits. A Processing Scope curve remains Scope-owned even when the Inspector
+projects a chosen Clip occurrence; its canonical author bounds are not replaced
+by that Clip's visible viewport.
+
+
+Selected audio key values use one definition-bounded common increment in the
+stable-address automation editor. The candidate shares preview and canonical
+admission, retaining exact times, IDs, and unaffected curves. Audio-specific
+control-value limits and shared owner locks are checked before sequence
+publication; no sequential per-key transaction is used.
+
+
+Audio batch interpolation is one AudioAutomationEditRequest, with definition-backed complete-selection preparation. Constraint-created controls must fit current hard bounds; refusal preserves the whole Sequence, and later legal edits remain usable.
+
+### Exact audio automation group paste
+
+AudioAutomationEdit::PasteKeyframes lowers one complete exact group through Core's
+batch paste primitive. AudioAutomationCurveContract uses the same definition
+admission for preview and author publication. The existing target resolution,
+owner locks, full AudioProgram validation and no-op outcome remain the sole
+Timeline authoring path. App clipboard payloads never bypass this edit interface.
+
+AudioAutomationEdit::TransformKeyframes combines exact time translation with one
+numeric-contract value displacement for a complete stable key set. The existing
+Timeline curve editor delegates atomic final-topology preparation to Core and
+validates the resulting author state before publication. Preview and execution
+consume the same definition-admitted edit; the UI does not own another evaluator.
+
+### Definition reset for audio author parameters
+
+AudioAutomationEdit::ResetToDefault uses the resolved definition schema,
+independent of playhead or sampled curve value. Timeline's shared
+default_numeric_automation prepares and validates the unkeyed definition curve;
+AudioProcessorRackEdit::ResetParameterToDefault reuses it for both animatable
+and static integer processor parameters. Existing target/rack locks, schema
+validation, no-op outcomes and sequence publication apply. Optional automation
+returns to its static field; processor curves retain parameter and instance
+identity. App author transactions provide one Undo and durable snapshot history.
+
+
+### Complete audio routing candidate admission
+
+Timeline builds one retained author graph for both final cycle validation and
+bulk menu admission. Main routes and processor sidechains include disabled
+edges. Processor targets cover pre/post racks on Tracks, Buses and Outputs,
+and every Track materializing a shared processing Scope. The builder indexes
+Scope bindings and processor ownership once, rather than rescanning all racks
+for each sidechain or cloning Sequences for menu options.
+
+`inspect_audio_route_candidates` validates retained endpoint addresses and
+projects source Track locks. Its principal and processor addition queries use
+complete graph reachability; self-edges and feedback through any combination
+of retained routes are unavailable. Unused Scopes retain processor identity
+without inventing a signal occurrence. Native bus keys/layouts remain processor
+preparation facts, and complete author transactions remain the final authority.
+Inspection and refused edits never publish state or history.
+
+### Retained processor sidechain inspection
+
+`inspect_audio_processor_sidechain` resolves a canonical route and its source-lock
+admission without querying native bus availability. Product route controls and
+actual mutations share this inspection; disabled routes and unavailable plugin
+ports retain their author identity and remain removable under the same lock rule.
+
+### Native processor author transactions
+
+SetNativeAuthorState is one closed, targeted Rack operation. The existing Rack
+query owns address, shared-Scope lock and Processor resolution. Pinned native
+definition and each written ParameterSchema must match exactly; duplicate IDs,
+invalid scalar values and an unchosen keyed write are explicitly refused.
+A qualified exact owner-time policy preserves and edits the existing curve.
+Parameters and optional opaque bytes publish together after complete candidate
+Audio Program validation. None preserves opaque state; Some(empty) is an explicit
+replacement. Neighboring processors, bypass, routes and unwritten curves remain
+current. Opaque data remains structurally shared; Timeline cannot interpret its
+format, prove native callback origin, or install execution state.
+
+### Native parameter automation author policy
+
+Native audio author values carry a closed `NativeAudioParameterWriteMode`:
+`Unkeyed` refuses any existing keys; `AtOwnerTime(DomainTime)` writes at an
+explicit exact Sequence or Processing Scope time. The resolved automation
+inspection checks that domain. `AudioAutomationCurveContract::preview_value_at_time`
+retains an existing key identity/interpolation/tangent intent, or creates a key
+using the definition's first admitted interpolation, then uses the ordinary
+complete curve edit and normalization. A private prepared batch prevents partial
+parameter/state publication; the complete Audio Program still validates before
+the candidate Sequence is published. No native normalized coordinate, sample
+cursor or UI frame is a substitute author time. The product must prove actual
+installed origin separately and hand accepted values to the same-live canonical
+audio Plan before acknowledging their retained native delivery.
+
+### Native host parameter reference removal
+
+`AudioProcessorParameter::automation` is an explicit optional host reference.
+`Some` owns the existing exact curve and unkeyed host value. `None` keeps the
+stable `ParameterId`, complete schema and display facts, but has no host value
+or keyframes. The definition default remains metadata. Native opaque state and
+current native observations own the plugin value; clearing a reference does not
+reset it. Built-ins require a present host curve.
+
+`NativeAudioParameterOperation` preserves the source order of Values and
+ClearAutomation operations, including repeated IDs. Timeline prepares the whole
+ordered batch before the existing Session publishes it. Clear removes the entire
+curve, including an unkeyed value. Clearing an already removed ID is a no-op, not
+a new parameter. A later admitted Value explicitly binds a new host curve. An
+invalid suffix refuses all preceding operations and opaque-state changes.
+Explicit key authoring still uses the sole exact owner-domain curve contract.
+
+
+### Native parameter execution time
+
+Native Process parameter callbacks use audio_automation_execution_time over the
+same exact owner/domain projection as UI audio automation. Execution refuses
+outside a selected occurrence's half-open extent; it never clamps a callback to
+an endpoint or fabricates a boundary key. Inspector playhead projection retains
+its existing explicit clamping policy. An absent native automation reference
+keeps stable schema metadata; a real Value may create its canonical reference,
+while Clear and RESCAN_VALUES never substitute schema.default as native current.
+
+
+### Native audio gesture finality
+
+`AuthoringSession::finish_native_audio_gesture` receives the explicit native
+completion kind in addition to the targeted update. Nonterminal observations do
+not seal history. Coherent configuration requires actual opaque bytes. Parameter
+completion requires both the current authored processor and completion to have
+no opaque state; it cannot persist scalar edits beside a stale private seed.
+Both paths use the same pending group, one Undo entry and normal archive snapshot.
+The product supplies finality only after the retained callback prefix, canonical
+parameter Plan and exact same-object acknowledgement have been accepted.

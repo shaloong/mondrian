@@ -140,7 +140,7 @@ pub(crate) fn canonical_resolved_node_materialization(
             ResolvedPreviewElement::Adjustment(adjustment) => {
                 bytes.u8(2);
                 bytes.f32(adjustment.opacity);
-                bytes.json(&adjustment.blend_mode)?;
+                bytes.json(&adjustment.blend_policy)?;
                 encode_effect(&adjustment.effect_graph, adjustment.frame_seed, &mut bytes)?;
             }
             ResolvedPreviewElement::Media {
@@ -149,7 +149,7 @@ pub(crate) fn canonical_resolved_node_materialization(
                 blend_mode,
                 transform,
                 effect_graph,
-                prepared_heterogeneous_route: _,
+                prepared_effect_route: _,
                 frame_seed,
             } => {
                 bytes.u8(3);
@@ -198,7 +198,7 @@ fn encode_transition(
             blend_mode,
             transform,
             effect_graph,
-            prepared_heterogeneous_route: _,
+            prepared_effect_route: _,
             frame_seed,
         } => {
             bytes.u8(3);

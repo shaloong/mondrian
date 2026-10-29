@@ -1025,7 +1025,9 @@ fn render_program_reference_with_preference(
         resolution.height,
         &resolved.plan.elements,
         &resolved.plan.color_context,
+        resolved.plan.sampling,
         &mut scratch,
+        &mut mondrian_effects::EffectProcessorControl::uncancelled(),
     )?;
     ensure!(
         working.composite_diagnostics.float_linear_composites == 1
@@ -1207,6 +1209,7 @@ fn reimport_and_compare<const N: usize>(
         .root_program_color_context(state.project_color_environment())?
         .media_input(false);
     let request = PreviewTimelineMediaRequest {
+        image_scale_requirement: mondrian_effects::EffectImageScaleRequirement::Any,
         asset_id: asset.id,
         color_space_override: None,
         alpha_interpretation: AlphaInterpretation::Ignore,

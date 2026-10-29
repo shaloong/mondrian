@@ -44,8 +44,8 @@ pub enum ErrorPolicy {
 impl WorkflowDef {
     /// 从 YAML 字符串解析工作流定义
     pub fn from_yaml(yaml: &str) -> mondrian_core::Result<Self> {
-        serde_yaml::from_str(yaml).map_err(|e| mondrian_core::MondrianError::WorkflowParseFailed {
-            reason: e.to_string(),
+        serde_saphyr::from_str(yaml).map_err(|e| {
+            mondrian_core::MondrianError::WorkflowParseFailed { reason: e.to_string() }
         })
     }
 }
@@ -146,7 +146,7 @@ steps:
 
     #[test]
     fn error_policy_yaml_roundtrip() {
-        // serde_yaml 0.9 uses !Tag representation for enums by default
+        // Retain the existing YAML !Tag representation of enum policies.
         let yaml = r#"
 name: Test
 version: "1"

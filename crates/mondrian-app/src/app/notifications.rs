@@ -4,6 +4,8 @@ use std::collections::VecDeque;
 
 use uuid::Uuid;
 
+use super::AppMessage;
+
 const MAX_NOTIFICATIONS: usize = 64;
 
 /// Transient notification identity; independent of Project authoring IDs.
@@ -19,49 +21,14 @@ impl AppNotificationId {
 /// Product urgency for a notification shown without blocking the editor.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AppNotificationSeverity {
+    /// Plugin or operation information without a success claim.
+    Information,
     /// A long-running operation completed successfully.
     Success,
     /// The operation completed but needs attention.
     Warning,
     /// The requested operation failed.
     Error,
-}
-
-/// One Fluent argument retained so a locale change can reformat a visible toast.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum AppNotificationValue {
-    /// A numeric value used by plural/select rules.
-    Number(i64),
-    /// A human-readable detail such as a failure reason.
-    Text(String),
-}
-
-/// Stable message identity and named arguments, without preformatted UI text.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AppNotificationMessage {
-    /// Fluent message ID owned by the product catalog.
-    pub id: &'static str,
-    /// Named values consumed by the message template.
-    pub args: Vec<(&'static str, AppNotificationValue)>,
-}
-
-impl AppNotificationMessage {
-    /// Construct a message without arguments.
-    pub fn new(id: &'static str) -> Self {
-        Self { id, args: Vec::new() }
-    }
-
-    /// Add a named numeric argument.
-    pub fn with_number(mut self, name: &'static str, value: i64) -> Self {
-        self.args.push((name, AppNotificationValue::Number(value)));
-        self
-    }
-
-    /// Add a named text argument.
-    pub fn with_text(mut self, name: &'static str, value: impl Into<String>) -> Self {
-        self.args.push((name, AppNotificationValue::Text(value.into())));
-        self
-    }
 }
 
 /// One post-completion product notification fact.
@@ -74,7 +41,7 @@ pub struct AppNotification {
     /// Severity used for timeout and visual treatment.
     pub severity: AppNotificationSeverity,
     /// Language-neutral message data.
-    pub message: AppNotificationMessage,
+    pub message: AppMessage,
 }
 
 /// In-memory bounded feed; status history remains the persistent in-session record.
@@ -89,7 +56,7 @@ impl AppNotificationFeed {
         &mut self,
         operation_key: impl Into<String>,
         severity: AppNotificationSeverity,
-        message: AppNotificationMessage,
+        message: AppMessage,
     ) {
         let operation_key = operation_key.into();
         if self.entries.back().is_some_and(|last| {
@@ -123,8 +90,7 @@ mod tests {
     #[test]
     fn repeated_identical_terminal_fact_is_deduplicated_but_new_operation_is_not() {
         let mut feed = AppNotificationFeed::default();
-        let message =
-            AppNotificationMessage::new("notification-import-complete").with_number("count", 2);
+        let message = AppMessage::new("notification-import-complete").with_number("count", 2);
         feed.publish(
             "import:1",
             AppNotificationSeverity::Success,
@@ -146,7 +112,7 @@ mod tests {
             feed.publish(
                 format!("save:{index}"),
                 AppNotificationSeverity::Success,
-                AppNotificationMessage::new("notification-save-complete"),
+                AppMessage::new("notification-save-complete"),
             );
         }
         assert_eq!(feed.iter().count(), MAX_NOTIFICATIONS);

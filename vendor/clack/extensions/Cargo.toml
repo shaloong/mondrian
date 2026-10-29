@@ -1,0 +1,94 @@
+[package]
+name = "clack-extensions"
+version = "0.2.0"
+edition = "2024"
+rust-version = "1.85.0"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/prokopyl/clack"
+description = "A collection of wrappers and utilities for all the standard CLAP extensions, for use with the clack-plugin or clack-host crates."
+categories = ["api-bindings", "multimedia::audio"]
+keywords = ["clap", "audio", "plugin", "host", "bindings"]
+authors = ["Adrien Prokopowicz <prokopylmc@gmail.com>"]
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+clack-plugin = { workspace = true, optional = true }
+clack-host = { workspace = true, optional = true, default-features = false }
+clack-common = { workspace = true }
+clap-sys = { workspace = true }
+
+bitflags = { workspace = true }
+raw-window-handle_05 = { workspace = true, optional = true }
+raw-window-handle_06 = { workspace = true, optional = true, features = ["std"] }
+
+[dev-dependencies]
+clack-host = { workspace = true, features = ["clack-plugin"] }
+static_assertions = "1.1.0"
+
+[features]
+all-extensions = [
+    "ambisonic",
+    "audio-ports",
+    "audio-ports-activation",
+    "audio-ports-config",
+    "clap-wrapper",
+    "configurable-audio-ports",
+    "context-menu",
+    "event-registry",
+    "gui",
+    "latency",
+    "log",
+    "note-name",
+    "note-ports",
+    "params",
+    "param-indication",
+    "posix-fd",
+    "preset-discovery",
+    "remote-controls",
+    "render",
+    "state",
+    "state-context",
+    "surround",
+    "tail",
+    "thread-check",
+    "thread-pool",
+    "timer",
+    "track-info",
+    "voice-info"
+]
+ambisonic = ["audio-ports"]
+audio-ports = []
+audio-ports-activation = []
+audio-ports-config = ["audio-ports"]
+context-menu = []
+clap-wrapper = []
+configurable-audio-ports = ["audio-ports"]
+event-registry = []
+gui = []
+latency = []
+log = []
+note-name = []
+note-ports = []
+params = []
+param-indication = []
+posix-fd = []
+preset-discovery = []
+remote-controls = []
+render = []
+state = []
+state-context = ["state"]
+surround = ["audio-ports"]
+tail = []
+thread-check = []
+thread-pool = []
+timer = []
+track-info = ["audio-ports"]
+voice-info = []
+
+[lints]
+workspace = true
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]

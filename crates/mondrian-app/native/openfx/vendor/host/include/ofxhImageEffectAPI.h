@@ -39,6 +39,10 @@ namespace OFX {
         mutable std::set<std::string> _knownContexts;
         mutable bool _madeKnownContexts;
 
+        // One retained native lifecycle. A failed/retired handle cannot reload
+        // while PluginBinary still retains the same loaded module.
+        enum class LoadState { Unattempted, Loading, Loaded, Ready, Closed };
+        LoadState _loadState = LoadState::Unattempted;
         std::unique_ptr<PluginHandle> _pluginHandle;
 
         void addContextInternal(const std::string &context) const;

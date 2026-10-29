@@ -3,7 +3,7 @@
 Built-in Effect definitions project their category path from the canonical
 `EffectType::category_path` contract. The registry supplies that same path to
 the Effect Browser; it does not maintain a second built-in category table.
-Plugin definitions declare their own category paths.
+Externally registered effect definitions declare their own category paths.
 
 Timeline text generation is not an Effect capability. Basic Title is closed
 Clip content whose generated working-linear frame enters this effect system at
@@ -43,7 +43,7 @@ not share `EffectNode`, RGBA capabilities, JSON parameters, or runtime graphs.
 ## Data vs Execution
 
 - `mondrian-core::effect_data` defines `EffectType` and `EffectNode` as pure serializable data.
-- `mondrian-effects` owns definitions, defaults, graph compilation, execution, caching, and plugin contracts.
+- `mondrian-effects` owns definitions, defaults, graph compilation, execution, caching, and external effect contracts.
 - `mondrian-timeline::Clip` stores effect instances and namespaces their properties by `EffectId`.
 
 Adding an executable effect is a definition-bound authoring operation. Product
@@ -216,7 +216,7 @@ the intersection of the operation's real implementation and its owning
 Definition contract; neither side can broaden the other. Callers cannot mutate
 graph or execution semantics without recompiling all derived evidence.
 
-`EffectRenderGraph` is the authoring/compiler input used by built-in and plugin
+`EffectRenderGraph` is the authoring/compiler input used by built-in and external
 Definition builders. It is not an executable production IR. Raw graph
 scheduling remains compiler-internal and raw plan/graph execution exists only
 as test reference Implementation; Preview, Export, and renderer Adapters must
@@ -227,8 +227,8 @@ Graph construction is fallible. `EffectGraphBuildError` identifies an enabled
 instance by persistent `EffectId` and stable definition key when the definition
 is missing, modeled but not executable, runtime-disabled, missing a required
 resource, panics, or produces an invalid graph. Builders stage mutations in a
-temporary graph and commit only after successful return. Built-in and plugin
-builders share this boundary; the plugin SDK additionally exposes fallible
+temporary graph and commit only after successful return. Built-in and external
+builders share this boundary; the Effect SDK additionally exposes fallible
 builder registration for definition-specific resource checks.
 
 ## Execution Contract and Preparation
@@ -258,13 +258,13 @@ extent, and ROI may only be equally or more conservative; and retained
 dependencies require an adequate resource lifetime. Violations produce a typed
 `EffectExecutionContractViolation` before the graph can enter Preview, Export,
 or a Prepared Program. The check repeats when animated or topology-affecting
-parameters reveal a new graph shape. A plugin therefore cannot label a
+parameters reveal a new graph shape. A definition therefore cannot label a
 Gaussian branch pixel-local, label frame-dependent output deterministic, or
 advertise a float Custom processor while supplying only the encoded RGBA8 ABI.
 
-The plugin default is deliberately conservative: no execution mode is admitted,
+The external-definition default is deliberately conservative: no execution mode is admitted,
 temporal demand and ROI are unbounded/full-frame, and continuity state is
-required. A plugin becomes executable only after replacing that complete
+required. A definition becomes executable only after replacing that complete
 contract and binding a fallible evaluator. Unknown or incomplete capabilities
 therefore block preparation instead of authorizing plausible-looking identity
 output.
@@ -310,7 +310,7 @@ cannot change this number. A shared `Arc` may be charged to more than one
 Program so each cache owner is independently safe. Dynamic topology charges
 appear only in the owning `EffectExecutionSession` diagnostics. These numbers
 are for cache admission and regression evidence; they are not allocator usage,
-GPU memory, process Working Set, or RSS. A plugin preparer that captures an
+GPU memory, process Working Set, or RSS. A definition preparer that captures an
 opaque immutable payload must add its logical charge through
 `PreparedEffectEvaluator::with_retained_resource_bytes(...)`.
 
@@ -691,35 +691,35 @@ emitted graph node. Compiled execution never resolves that node by mutable
 string lookup. Replacing a Definition creates a new binding and graph
 signature; already prepared Preview or Export work continues to own its
 original processor until the program is retired. There is no parallel Custom
-processor registry: `EffectDefinition` / `EffectPluginDefinitionBuilder`
+processor registry: `EffectDefinition` / `EffectExtensionDefinitionBuilder`
 evaluation is the sole implementation-binding path. Compilation fails closed
 when any reachable raw Custom node remains unbound, so ambient process state
 cannot change the meaning of an author/program revision. No compile-time or
 per-frame global Custom implementation lookup exists.
 
 Disabled instances are the only implicit identity operation. An enabled
-effect without an executable evaluator, missing plugin definition,
+effect without an executable evaluator, missing external effect definition,
 unbound/invalid LUT, or failed builder never becomes an unchanged frame. The
 shared timeline render-plan compiler maps these failures into
 `MondrianError::EffectGraphEvaluationFailed`,
 so preview and export both stop before publishing a misleading result. Any
-future operator-approved plugin bypass must be an explicit, diagnosable policy
+future operator-approved effect bypass must be an explicit, diagnosable policy
 above this compiler seam rather than a warning followed by identity output.
-`EffectPluginRuntimeFailurePolicy` controls whether a failed definition remains
+`EffectExtensionRuntimeFailurePolicy` controls whether a failed definition remains
 callable or becomes disabled; the quarantine key combines the persistent effect
 key with the exact Definition Registry revision frozen into preparation.
 Consequently a late failure from an older compiled Program cannot disable a
 replacement Definition using the same key. The Contract has no independently
 mutable Registry: it is installed only as part of `EffectDefinition`.
-`EffectPluginLibraryPolicy` controls only whether the current unavailable
+`EffectExtensionLibraryPolicy` controls only whether the current unavailable
 Definition generation appears in new-insertion UI. Neither contract changes
 frame semantics or authorizes identity fallback.
 
 ## Effect Color Domains
 
-Every `EffectDefinition`, including plugin-authored definitions, declares an
+Every `EffectDefinition`, including externally authored definitions, declares an
 `EffectColorDomainContract` at registration. There is no implicit compatibility
-default in the definition or plugin-builder APIs. A builder may resolve a
+default in the definition or SDK builder APIs. A builder may resolve a
 topology-affecting parameter to a stricter per-instance contract through
 `append_unary_in_domain`; graph construction scopes that override to the one
 node and restores the definition contract afterwards. The resolved domain is
@@ -1049,7 +1049,7 @@ legal RGB transitions through
 `apply_compiled_effect_graph_rgba_f32_with_domain_processor(...)`; transition
 failures and domain blockers are fail-closed and never authorize RGBA8
 execution. The encoded executor returns `EffectExecutionError` for any domain
-plan because it has no typed OCIO runtime. Custom/plugin processors bind an
+plan because it has no typed OCIO runtime. Custom effect processors bind an
 explicit RGBA8 or Float32 callback to the compiled graph. The graph derives
 exact admission from that binding; it never converts a Float32 frame through
 RGBA8 to invoke an encoded processor. Float32 callbacks preserve extended and
@@ -1091,9 +1091,9 @@ and exact Definition-stage value/node bindings; two pixel-identical graphs
 whose node admission differs therefore cannot reuse one another's plan or
 blocker. Preview Viewer lowering, CPU compositor diagnostics, and each Export
 job reuse only their own returned `Arc`; no process-global GPU-plan cache can
-retain another Project or execution generation. Online reconfiguration trims
-synchronously, and the same generation barrier that retires pixel residency
-also retires every plan and blocker. `lower_effect_graph_to_gpu_plan(...)`
+retain another Project. Online reconfiguration trims synchronously. Frame
+generation changes retire pixel residency while retaining pure topology and
+GPU-plan entries with their exact complete graph/execution keys. `lower_effect_graph_to_gpu_plan(...)`
 remains the uncached reference helper.
 
 The `.cube` adapter accepts one finite 3D table of size 2 through 129, requires
@@ -1146,3 +1146,441 @@ and the final Headless float-linear raster must be byte-identical before and
 after reopen. This is a regression and integration contract, not an
 independent numerical or visual reference. Product qualification still needs
 such references before either effect can satisfy the complete operator DoD.
+
+### Reusable Float32 processor resources
+
+Prepared definitions can retain an immutable EffectFloatProcessorFactory recipe.
+The compiler binds its custom operation to the exact typed author EffectId;
+execution creates separate mutable instances for each occurrence in each
+EffectExecutionSession. Revision and raster extent are part of residency keys.
+The bank has explicit instance/byte grants, checks its conservative charge
+before creation, evicts least-recently-used instances before allocation, and
+retires obsolete extents/revisions. Frame-generation barriers clear pixel
+residency while retaining these frame-independent resources. Session drop and
+explicit owner retirement evict all instances. Errors, panics, and changed pixel counts retire the affected
+instance; frame staging preserves the caller's pixels.
+
+These reusable instances must preserve independently evaluable frame semantics.
+Continuity/stateful effects still need ordered execution admission. Ordinary
+Float32, finite temporal full-frame, and heterogeneous CPU-prefix routes use the
+same bank; prepared graphs/definitions never retain consumer-owned workers.
+
+Processor preparation and processing receive a borrowed EffectProcessorControl
+from the owning executor. Blocking adapters must poll it during bounded waits;
+no adapter-owned cancellation thread or alternate generation authority is needed.
+The control retains the exact cancellation/deadline reason once observed. A stop
+before publication preserves the original frame and retires the occurrence,
+including an instance just returned to residency. Scheduler stops bypass plugin
+runtime quarantine. The temporal executor returns its typed canceled result;
+the heterogeneous executor preserves the owner's stop reason and generation.
+An unsolicited processor `MondrianError::Cancelled` without an observed scheduler
+stop remains a processor failure rather than inventing a cancellation decision.
+
+Processor resource admission has a typed result separate from processor faults.
+Working-grant denial preserves pixels and definition availability, allowing
+retry after resource reconfiguration without quarantine. A processor larger
+than the optional residency cap executes once and is retired when it fits the
+active grant. Admission counts every resident sibling together with the active
+instance, evicts before preparation or cached-instance invocation, and never
+lets optional residency reduce supported execution. Scalar, temporal and
+heterogeneous executors provide still-owned raster bytes;
+the dispatcher subtracts them and its atomic staging frame before admission.
+Temporal dispatch also reserves coverage already deducted from its evaluator
+budget and reports the processor peak charge in its working-set evidence.
+Before any graph frame allocation or media fetch, all three Float32 routes
+query immutable recipe charges and prove each scheduled invocation against its
+own pixel reservation. Sizing is deterministic for the occurrence and extent;
+sizing errors/panics are plugin faults, whereas insufficient grants remain
+retryable resource denial. A later oversized recipe therefore cannot start an
+earlier plugin or fetch an otherwise unused source frame.
+
+The scalar planner models the actual buffer pool and sequential multi-input
+overlay reuse. The heterogeneous planner retains per-dispatch materialization
+peaks, including masks; temporal planning models exact-time uses, crop
+publication and tile assembly. Temporal mask geometry remains separately
+bounded and prepared before the frame proof. Each executor evicts retained
+workers before source/fan-out allocation or kernel scratch, and temporal peak
+evidence includes workers that remain resident during those operations.
+Built-in-only scalar graphs trim optional native siblings against their cold
+pixel peak before identity/cache copies, preserving instances when the grant
+fits both instead of restarting workers between unrelated clips. Optional residency cannot make cold-admitted work fail.
+
+Product scalar Preview, CPU-prefix, fallback and Export owners now receive
+explicit machine-class native instance/byte grants. Nominal playback preserves
+those grants; memory pressure trims optional retention without shrinking active
+working admission. Frame generations and unrelated built-in clips preserve
+independent instances only while the exact working/resident grants still fit. These
+owner-local frame/processor proofs do not claim a global process-memory cap
+or enforcement of arbitrary third-party native heap allocations.
+
+Heterogeneous work preparation includes the active recipe's charge in its
+published cpu_required_working_bytes(), in addition to per-node pixel/mask
+reservations. Export attempt contracts and CPU batch admission therefore use
+the complete declared CPU-prefix peak, before dispatch. Mutable stateless
+execution instances are implementation caches under the Frame lifetime:
+they require neither immutable author-time resources nor ordered continuity,
+and eviction/recreation cannot change frame semantics.
+
+Empty scalar frames end after input/graph validation and before recipe sizing:
+there is no raster or native instance to admit. A native recipe that rejects a
+zero extent must therefore never quarantine the definition for an empty request.
+The empty-frame regression covers zero width, zero height and both zero under
+a zero-byte execution grant, with no sizing error or instance preparation.
+
+### Ordinary scalar execution owner
+
+Float32 EffectExecutionSession methods require EffectProcessorControl. Cold
+recipe sizing, graph steps, controlled builtin and Mask raster execution, native
+prepare/render, cached/identity outputs and final publication use the same
+borrowed checkpoint. EffectFloatExecutionError::Stopped preserves the exact
+owner reason; stopping retires processor resources without runtime quarantine.
+Explicit uncancelled free functions remain standalone offline reference helpers.
+
+Built-in enum schemas declare choice captions independently of keys and message
+addresses. Curves, Qualifier and LUT processing-space options retain canonical
+keys for graph/property evaluation; localized UI captions do not replace values.
+LUT spaces declare their standard technical names rather than displaying internal
+snake-case keys when the translation catalog cannot resolve an address.
+
+## LUT resource declaration
+
+The built-in LUT path parameter declares external File bindings with the cube
+suffix. ProjectAsset and Uri are rejected before author mutation, matching the
+actual prepared cube-LUT provider. Inspector and native browsing read this same
+schema contract; extension checks preserve spelling and admit uppercase suffixes.
+
+### Native static OpenFX calculus
+
+Non-animatable native Double snapshots answer finite-time derivatives with zero
+and signed frame-coordinate integrals with their constant value times the
+interval. Overflowing endpoint subtraction is scaled before multiplication so
+a representable integral remains valid, including zero and subnormal values.
+Non-finite queries and unrepresentable results return ErrValue without changing
+caller outputs. Animatable definitions still reject calculus until Core owns
+the complete temporal query path; static support does not advertise animation.
+The owned native Choice/StrChoice fixture exercises these suite queries through
+resident and compiled graph execution while checking unchanged Float32 pixels.
+
+
+### External path selection contracts
+
+Core stores external path shape and selection intent together in
+`ResourcePathContract`: file/directory/either plus Reference, Existing or
+ExistingOrNew, with an optional nonzero UTF-8 byte bound.
+`ParameterResourceContract.path` is required exactly for external paths.
+An SDK-bound resource rejects non-Unicode and oversized paths before authoring;
+generic references retain native path support. Author admission and persistence remain independent of filesystem
+availability: a lost input reference is recoverable project intent. New editor
+selections with Existing policy require a matching existing object; ExistingOrNew
+also admits an absent target. Untouched unavailable references remain no-ops.
+The schema has one canonical representation, without the former flat path_kind
+field or compatibility conversion. Resource cache impact remains mandatory.
+
+### Native resource execution
+
+Builtin LUT preparation consumes the evaluated `NativePath` into an owned local
+`PathBuf` without another filename-buffer clone. Foreign-platform references and
+ownerless relative references return author-edit resource-unavailable evidence
+before filesystem access. OpenFX filename parameters additionally require exact
+UTF-8 according to the declared SDK contract. Preview and export retain the same
+compiled graph and prepared resource interpretation.
+
+### Numeric definition bounds
+
+Effect numeric schemas carry complete ordered channel contracts, including
+independent hard/soft ranges and admission policies. Uniform built-in bounds
+expand to each declared component. Graph signatures retain the canonical schema;
+this foundation does not itself admit native OpenFX double tuples or temporal APIs.
+
+## Complete Float association values
+
+Core owns `ColorFrameAlpha` and `ColorFrameAlphaFormats`. Float graph execution
+uses Effects-owned `EffectFloatFrame`/`EffectFloatFrameView`, carrying the complete
+extent, `EffectValueFormat`, one raster and actual association. Factory sizing
+admits a set without inventing an actual format; preparation binds the exact
+input format, including association, for native instance reuse. Definitions
+retain immutable `EffectAlphaContract` input/output declarations in the sole
+compiled graph and provider revision signature. No public bare Vec executor or
+default-alpha compatibility path remains.
+
+Normal Over associates operands once in the shared algebra and keeps emission
+at alpha zero. Its three-term dyadic polynomial accumulates the exact finite
+Float32 inputs before one nearest-even Float32 delivery rounding. Each monomial
+has at most four factors and a significand of at most 96 bits. Checked unsigned
+128-bit signed-magnitude accumulation handles common exponent spans; otherwise
+18 fixed 64-bit limbs cover the proven full finite input range, including carry.
+Both storage paths use the same guard/sticky/ties-even rounding authority. No
+intermediate multiplication, association or tiny residual is rounded away.
+This permits opaque replacement/attenuation when an intermediate association
+would exceed Float32 but the final result is finite Float32. Normalized
+independent-color frame blends retain the sole coverage primitive and its
+existing execution-precision contract. Opaque background alpha is algebraically one. Required final overflow
+returns a typed frame error; opacity is finite normalized author opacity and
+image alpha is never clamped. Artistic blend/mask/spatial/temporal consumers keep
+their declared coverage interpretation until a separate complete extension is
+qualified.
+
+The heterogeneous plan distinguishes exact `EffectValueFormat` from unresolved
+`EffectPlannedValueFormat`. Each CPU-to-GPU transfer retains its producer format,
+target format and `FiniteStraightCoverage` admission. Materialization follows
+the completed owned CPU result; a refusal neither quarantines a valid provider
+nor requests replay through another route. Native positive coverage keeps the
+existing CPU/GPU route. Raster working-budget accounting still counts retained
+pixel allocation; frame metadata is stack-owned and is not misreported as an
+additional image copy.
+
+Finite coverage conversion means the requested representation is expressible
+with finite Float32 channels, no extended alpha or zero-alpha emission. It does
+not promise bitwise reversibility of division/reassociation. Every nonzero alpha
+is used directly, without a semantic epsilon. Native transport and persistent
+artifact tests use raw-bit oracles. Complete Float Normal Over tests require
+the exact bits of independent rational references rounded once to nearest-even
+Float32, including signed nonzero underflow and the MAX/Infinity midpoint.
+Exact mathematical cancellation has canonical positive zero; the frame opacity
+zero identity path preserves its original sample bits and association. Other
+representation conversions retain their declared numeric tolerances and do not
+promise bitwise reversibility. The Normal Over pixel loop has no runtime
+arbitrary-precision dependency, heap allocation or additional raster copy.
+These arithmetic guarantees do not constitute a frame-throughput qualification.
+
+## Borrowed Float32 storage admission
+
+`validate_float32_frame_storage` is the sole allocation-free extent, alpha-domain
+and all-lane finite validator for borrowed RGBA storage. Complete Effects frames
+reuse it after their precision check; renderer GPU upload plans reuse it without
+manufacturing an Effects color-space identity for data textures or copying a
+raster. Admission preserves exact Float32 bits and actual alpha association. It
+does not perform alpha conversion or establish a consumer's color contract.
+
+
+Owned foreign Float32 buffers can enter `EffectFloatFrame::from_pixels_controlled`
+without a raster clone. This retains the existing sole storage validator used
+by complete frames and GPU transfers and adds owner checkpoints at bounded
+65,536-pixel intervals and before publication. The ordinary allocation-free
+storage API delegates to the same implementation with an infallible no-op
+checkpoint. It does not add a second finite/alpha policy, normalize any signal,
+or treat a scheduler stop as provider failure. An actual adapter keeps its
+existing execution-owner disposal policy. On success the original owned Vec is
+bound directly to its exact extent/format; on failure no frame is published.
+
+
+Processor instances return the sole `EffectProcessorInvocationError`: ordinary
+processor failure or a typed host-resource refusal guaranteed to occur before
+pixels/native state advance. The residency bank handles the latter without
+quarantine and emits the exact preparation/provider revision plus actual
+Retained/Evicted disposition. Its existing optional byte/count grant remains
+the only retention authority. No staged pixels commit on refusal, and neither
+scalar nor heterogeneous execution retries or falls back by replaying DSP.
+Cancellation still takes precedence at the shared owner checkpoint. The public
+graph error preserves the resource receipt; it does not turn host allocation
+failure into a plugin failure. The canonical invocation and retention types
+also provide the extension seam for recoverable user-blocked plugin results.
+
+
+## Processor-owned active and retained storage
+
+`EffectFloatProcessorStorage` is the sole immutable sizing contract. Its active
+peak includes processor backing plus prepare/invocation temporary owners; its
+retained bytes cover only backing that the instance still owns between calls.
+The compiler and every cold or reused invocation admit the active peak against
+the remaining working grant after existing Effects input/staging/cache/mask
+reservations. Optional processor entries and sibling charges use retained bytes.
+Reusing a worker cannot substitute retained backing for active admission.
+
+Heterogeneous CPU working admission reserves two concrete
+`EffectProcessorFeedbackBatch::storage_bytes()` containers: the accumulated
+completion and the invocation's temporary `take_feedback()` result. Initial and
+per-dispatch residency trimming protect both reservations before native work.
+The published CPU frontier retains only the single completion container; pixel,
+mask, observation and existing provider/control charges remain independent.
+This fixed-container reservation does not qualify every dynamic feedback
+capacity or foreign allocation peak.
+
+The sole residency bank decides success and pre-DSP host-refusal retention. An
+active budget refusal performs no prepare/DSP; an already valid idle entry may
+remain only under both optional and current working ceilings. Optional zero
+still permits an active-admitted cold invocation and then drops its instance.
+Cancellation/deadline after execution wins before retention/publication; no
+native state is replayed. Sizing is deterministic for the immutable provider
+revision, occurrence/extent and all admitted alpha associations. No compatibility
+alias for the former conflated resident-byte query is retained.
+
+`EffectFloatFrameView::validate_controlled` applies the same sole storage
+validator to borrowed complete Float32 frames after their precision admission.
+It preserves the original allocation, bits and association, propagates an
+owner-supplied typed error, and adds bounded checkpoints without introducing a
+second alpha/finite policy. Renderer timeline media validates public working
+frames at this boundary before its identity passthrough; the public renderer
+frame carrier itself does not promise that user-constructed samples are valid.
+
+
+Alpha `Preserve` admission at a graph-value Transfer compares the source's
+complete association formats against the destination's admitted formats. It
+does not require equal sample precision: the exact directed transfer capability
+separately authorizes that precision pair. The derived-plan validator continues
+to verify unchanged value/domain, source/destination residency, source wait,
+destination signal and declared transfer; byte peaks and completion-token order
+remain derived from the same materialization sequence. This prevents a valid
+U8→F32 or U8→F16 declared transfer from being rejected as an alpha mismatch.
+
+Scalar graph and adjustment entry points admit borrowed or owned Float32 samples
+through the same bounded frame validator. The owner is checked before each
+65,536-pixel block and successful publication; a stop before the next block wins
+over invalid samples that have not been examined. Shape errors use the sole
+`FrameContract(ExtentMismatch)` value. The obsolete execution-level pixel-count
+variant and its unreachable duplicate checks are removed. Owned entries borrow
+their existing storage for admission and keep the same raster allocation.
+
+
+### Current-invocation processor observations
+
+`EffectProcessorObservation` binds an optional bounded progress sink and the
+actual route deadline to the existing execution session/control. The sole
+residency bank binds the prepared occurrence and provider revision only around
+its actual processor call. A live receipt carries that binding, the real parent
+and native owners, origin, invocation and checked observation revision; it owns
+no frame, authoring mutation or retention decision. Observation capacity joins
+the canonical working admission before factory preparation/DSP, once per route.
+The owning stop is sticky even after the observation binding clears.
+
+The OpenFX adapter's borrowed owner callback executes on this same Effects
+thread. Foreign SDK callbacks hand off fixed metadata to the existing supervised
+channel and sample atomic abort; they never call borrowed `FnMut` control. A
+consumer may drop/coalesce progress under backpressure. It cannot re-execute a
+native node, keep another instance alive or turn a recoverable persistent Error
+into a plugin fault. Existing HostResourceRefused/UserBlocked/stop and optional
+storage decisions continue through the sole residency bank.
+
+## Bounded native GUI user services
+
+The executing bank binds `EffectProcessorObserver` to the exact preparation and
+provider revision before asking its optional Question service for actual GUI
+facts. Ordinary playback/scrub observes an open editor without gaining a human
+wait. A scheduler-issued nonrealtime editor refresh may ask a Question while its
+existing absolute owner deadline remains unchanged. Replies and End notices carry
+the actual parent processor namespace, native invocation and action/service
+coordinates. No second processor, graph or authoring owner is created.
+
+Idle GUI reconciliation visits the same canonical retained entries, admits its
+bounded action metadata against the current working grant, pairs End once and
+publishes a retained receipt only after the same bank retains that owner. Legal
+Failed Begin/End or an unavailable/dismissed Question is not a DSP fault. Opaque
+panic payloads follow the existing abandonment boundary; failed teardown retires
+only the actual bank entry. Fixed slots, complete owned text/view capacities and
+callback closure storage are known logical policy, not a whole-RSS claim.
+
+## Processor panic payload lifetime
+
+RGBA8 callbacks and Float32 callback/factory execution release caught panic
+payloads immediately through the same residency-owned policy used by GUI
+reconciliation. Host-owned String and static-str payloads may be dropped;
+opaque plugin payloads are abandoned because their destructors are arbitrary
+plugin code. This prevents a second panic from escaping frame isolation and
+prevents an owner-stop branch from dropping an unknown payload after the catch.
+
+Atomic staging, exact provider quarantine and the scheduler's sticky stop
+precedence remain unchanged. A stopped invocation retires through its original
+bank without replay, publishing staged pixels or classifying cancellation as a
+plugin fault. Abandonment is an exceptional leak boundary, not a claim of full
+plugin heap recovery or whole-process memory accounting.
+
+The factory sizing query uses this same panic-payload policy before returning
+its structured admission failure. A sizing panic quarantines only the bound
+provider; no processor prepare, DSP, staged output or retained instance occurs.
+# CPU graph output upload
+
+The prepared CPU-F32 to GPU-F32 route also admits a complete CPU graph whose
+sole GPU frontier is the exact graph output. Its suffix contains no dispatches:
+the compiled value plan's final transfer supplies the output completion token.
+CPU execution still runs every compiled node under the existing session,
+feedback, cancellation and memory contracts. No identity effect is appended.
+
+
+## Effect amount and explicit compositing policy
+
+`mondrian-core::EffectPassBlendPolicy` is the sole cross-module distinction.
+The Timeline plan compiler resolves the Clip/Track mode once: a Normal
+Adjustment is `Mix`, and every other authored mode is `Blend(mode)`.
+Selecting Normal in the actual Clip Inspector has the same Mix semantics as
+the default. Ordinary foreground layers, grade graph Blend/MultiInput nodes,
+and an explicit module-level `Blend(Normal)` retain Normal Over.
+The prepared Adjustment plan carries this typed value through Preview and
+Export. There is no fallback conversion to an optional mode downstream.
+
+Mix interpolates associated RGB and alpha in the declared image domain at the
+Effect amount, then expresses the result in the declared association. The
+Float working pipeline performs this in linear RGB. Finite negative/HDR RGB,
+low positive coverage, and declared extended Float alpha are not clamped.
+Exact amount endpoints retain their selected input. Identical typed samples
+retain their original samples, including Straight zero-alpha hidden RGB;
+a different mixture with zero associated signal canonicalizes RGB to zero.
+Nonzero zero-alpha emission cannot be published as Straight and is refused.
+Mixing an Opaque input with a coverage-changing result may lower the output
+to Coverage; Opaque is never inferred solely from the original base.
+
+Both owned Float pass entries reuse the actual admitted base allocation and
+the same bounded control checkpoints; borrowed and domain-processing entries
+delegate to them. The encoded legacy pass uses the same policy and associated
+coverage mixing in its admitted encoded channel domain. Explicit compositing
+modes continue to use their existing algebra. Identity shortcuts and the sole
+CPU working-set estimate honor the policy, so explicit Over of an identity
+result is neither skipped nor allowed an uncharged processed allocation.
+
+Resolved visual semantic epoch 3 and the complete typed policy in exhaustive
+cache materializations separate these pixels from the earlier self-Over law.
+The correction has source-only OLD controls for the real canonical default and
+selected Normal author paths, all Float pass entries and the encoded pass;
+actual build/CPU/GPU qualification is required before claiming acceptance.
+
+
+### Exact Float Mix arithmetic
+
+Float Mix uses the existing bounded dyadic engine that defines Normal Over.
+Its associated channels and alpha are each evaluated as B + t*S - t*B;
+no rounded `1-t`, intermediate association, or approximate cancellation is
+used. Straight output divides the exact associated numerator by exact alpha,
+then rounds the final rational once to nearest-even Float32. Alpha itself has
+one nearest-even Float32 rounding. Exact zero-alpha emission is still refused
+for Straight output; signed nonzero underflow, HDR/negative RGB and declared
+extended alpha retain their typed meanings. Endpoints and identical typed
+samples keep the existing exact input fast paths.
+
+The engine first tries checked u128 sums and aligned integer quotient/remainder.
+Only wider spans use the existing 18 fixed u64 limbs, followed by at most 24
+quotient-bit trials. A Mix monomial has at most three 24-bit significands.
+With normalized t, numerator quantum is at least 2^-447 and its fixed integer
+span is at most 705 bits; alpha's span is at most 428 bits. Exact leading-bit
+alignment and quotient trials need at most 730 bits, within the same 1152-bit
+capacity already used by Over. No per-pixel heap or additional raster is added.
+The existing raster ownership, alpha admission and bounded control checkpoints
+remain the publication gate. Stack objects have fixed Rust layouts; this does
+not constitute a whole-process or OS stack/RSS measurement.
+
+Independent fixed-bit OLD controls cover both extended alpha and normalized
+Coverage tiny-weight cancellation. A separate Fraction corpus covers 96
+finite signed/normal/subnormal cases, and arithmetic controls exercise exact
+ties, underflow, overflow midpoints and full-span cancellation. A source profile
+checks ordinary Coverage combinations use the checked-u128 sum/divide path;
+it is not a release throughput result. Runtime CPU/GPU/performance acceptance
+requires actual matching builds. GPU arithmetic is qualified separately.
+
+
+### Certified Float Mix common path
+
+The exact epoch-3 Mix law has a scalar common path that certifies the same
+nearest-even Float32 output with closed Float64 intervals. It never returns
+an unproved approximate value: both outward interval endpoints must narrow
+to identical Float32 bits. Exact association fits Float64; a conservative
+forward-error radius encloses ordinary interpolation. Difficult cancellation
+uses exact split-products and TwoSum residuals to tighten the enclosure. Three
+channels share a reciprocal-alpha interval. Uncertain zero/sign/ties and
+nonfinite bounds fall back to the existing fixed dyadic sum/divider. Exact
+zero-alpha emission and output overflow keep their original typed refusals.
+
+This introduces only fixed scalar stack values and preserves the admitted
+raster, output representation, endpoint/identity fast paths and cancellation
+checkpoints. The semantic output is identical, so the existing epoch-3 cache
+identity remains sufficient. The independent Fraction corpus and changing
+HD/UHD cost runner qualify correctness and actual release cost separately;
+source path certification does not establish a frame deadline or physical
+whole-process memory result.

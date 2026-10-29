@@ -35,7 +35,7 @@ use migration::{JsonMigrationRegistry, JsonMigrationStep};
 /// Current `.mdp` container format version.
 pub const PROJECT_FORMAT_VERSION: u32 = 1;
 /// Current canonical project document schema version.
-pub const PROJECT_DOCUMENT_SCHEMA_VERSION: u32 = 27;
+pub const PROJECT_DOCUMENT_SCHEMA_VERSION: u32 = 35;
 /// Current embedded asset-library SQLite schema version.
 pub const PROJECT_LIBRARY_SCHEMA_VERSION: u32 = 6;
 
@@ -332,34 +332,133 @@ const DOCUMENT_MIGRATIONS: JsonMigrationRegistry = JsonMigrationRegistry::new(
     "project document",
     "schema_version",
     PROJECT_DOCUMENT_SCHEMA_VERSION,
-    &[JsonMigrationStep {
-        from: 26,
-        to: 27,
-        migrate: migrate_project_document_26_to_27,
-    }],
+    &[
+        JsonMigrationStep {
+            from: 31,
+            to: 32,
+            migrate: migrate_document_v31_to_v32,
+        },
+        JsonMigrationStep {
+            from: 32,
+            to: 33,
+            migrate: migrate_document_v32_to_v33,
+        },
+        JsonMigrationStep {
+            from: 33,
+            to: 34,
+            migrate: migrate_document_v33_to_v34,
+        },
+        JsonMigrationStep {
+            from: 34,
+            to: 35,
+            migrate: migrate_document_v34_to_v35,
+        },
+    ],
 );
-const REQUIRED_ARCHIVE_ENTRIES: [&str; 3] = [MANIFEST_ENTRY, PROJECT_ENTRY, LIBRARY_ENTRY];
 
-fn migrate_project_document_26_to_27(
-    mut value: serde_json::Value,
-) -> anyhow::Result<serde_json::Value> {
+// Schema 32 prevents an older archive reader from silently discarding scores.
+// A real v31 document has no authored Notes. Preserve every other JSON value;
+// do not reinterpret a nonempty/new malformed score mislabeled as legacy.
+fn migrate_document_v31_to_v32(mut value: serde_json::Value) -> anyhow::Result<serde_json::Value> {
     let sequences = value
-        .get_mut("sequences")
-        .and_then(|collection| collection.get_mut("sequences"))
-        .and_then(serde_json::Value::as_array_mut)
-        .context("schema 26 document has no Sequence array")?;
+        .get("sequences")
+        .and_then(|collection| collection.get("sequences"))
+        .and_then(serde_json::Value::as_array)
+        .context("schema-31 document has no Sequence collection")?;
     for sequence in sequences {
-        let sequence = sequence.as_object_mut().context("schema 26 Sequence is not an object")?;
-        sequence.entry("dynamic_hdr").or_insert_with(|| {
-            serde_json::json!({
-                "delivery_intent": { "intent": "omit" },
-                "programs": []
-            })
-        });
+        let program = sequence
+            .get("audio_program")
+            .and_then(serde_json::Value::as_object)
+            .context("schema-31 Sequence has no AudioProgram")?;
+        if program
+            .get("note_lanes")
+            .is_some_and(|notes| !notes.as_array().is_some_and(Vec::is_empty))
+        {
+            anyhow::bail!("schema-31 document cannot contain authored audio notes");
+        }
     }
-    value["schema_version"] = serde_json::json!(27);
+    value["schema_version"] = serde_json::json!(32);
     Ok(value)
 }
+// New endpoints are a closed author-schema extension, not an archive/container change.
+fn migrate_document_v32_to_v33(mut value: serde_json::Value) -> anyhow::Result<serde_json::Value> {
+    let sequences = value
+        .get("sequences")
+        .and_then(|collection| collection.get("sequences"))
+        .and_then(serde_json::Value::as_array)
+        .context("schema-32 document has no Sequence collection")?;
+    for sequence in sequences {
+        let program = sequence
+            .get("audio_program")
+            .and_then(serde_json::Value::as_object)
+            .context("schema-32 Sequence has no AudioProgram")?;
+        for name in ["routes", "sidechain_routes"] {
+            if let Some(routes) = program.get(name) {
+                for route in routes.as_array().context("schema-32 routes must be an array")? {
+                    if route
+                        .get("source")
+                        .and_then(serde_json::Value::as_object)
+                        .is_some_and(|source| source.contains_key("ProcessorOutput"))
+                    {
+                        anyhow::bail!(
+                            "schema-32 document cannot contain processor output endpoints"
+                        );
+                    }
+                }
+            }
+        }
+    }
+    value["schema_version"] = serde_json::json!(33);
+    Ok(value)
+}
+
+// The reference is a new authored value, not an archive or library format.
+// Legacy absence/null means None. Never reinterpret a reference mislabeled v33.
+fn migrate_document_v33_to_v34(mut value: serde_json::Value) -> anyhow::Result<serde_json::Value> {
+    let sequences = value
+        .get("sequences")
+        .and_then(|collection| collection.get("sequences"))
+        .and_then(serde_json::Value::as_array)
+        .context("schema-33 document has no Sequence collection")?;
+    for sequence in sequences {
+        let program = sequence
+            .get("audio_program")
+            .and_then(serde_json::Value::as_object)
+            .context("schema-33 Sequence has no AudioProgram")?;
+        if program
+            .get("musical_time_reference")
+            .is_some_and(|reference| !reference.is_null())
+        {
+            anyhow::bail!("schema-33 document cannot contain an authored musical time reference");
+        }
+    }
+    value["schema_version"] = serde_json::json!(34);
+    Ok(value)
+}
+
+// Old documents have no authored meter. Preserve absence, never infer 4/4,
+// and do not admit a new authored meter mislabeled as schema 34.
+fn migrate_document_v34_to_v35(mut value: serde_json::Value) -> anyhow::Result<serde_json::Value> {
+    let sequences = value
+        .get("sequences")
+        .and_then(|collection| collection.get("sequences"))
+        .and_then(serde_json::Value::as_array)
+        .context("schema-34 document has no Sequence collection")?;
+    for sequence in sequences {
+        if sequence
+            .get("audio_program")
+            .and_then(|program| program.get("musical_time_reference"))
+            .and_then(|reference| reference.get("time_signature"))
+            .is_some_and(|signature| !signature.is_null())
+        {
+            anyhow::bail!("schema-34 document cannot contain an authored time signature");
+        }
+    }
+    value["schema_version"] = serde_json::json!(35);
+    Ok(value)
+}
+
+const REQUIRED_ARCHIVE_ENTRIES: [&str; 3] = [MANIFEST_ENTRY, PROJECT_ENTRY, LIBRARY_ENTRY];
 
 /// Admission limits for opening one untrusted `.mdp` archive.
 ///
@@ -754,6 +853,14 @@ pub struct PreparedProjectSequenceReplacement {
 }
 
 impl PreparedProjectSequenceReplacement {
+    /// Borrow the complete validated candidate collection for cold publication checks.
+    ///
+    /// The prepared ticket retains its document and certificate. This borrowed
+    /// view grants no installation authority and is intended for non-RT callers.
+    pub fn candidate_sequences(&self) -> &[Sequence] {
+        self.document.sequences.sequences.as_slice()
+    }
+
     /// Read the already-validated replacement for History preparation.
     pub fn replacement(&self) -> &Sequence {
         &self.document.sequences.sequences[self.replacement_index]
@@ -1488,22 +1595,28 @@ where
 fn validate_exact_archive_entry_set<R: Read + Seek>(
     archive: &mut zip::ZipArchive<R>,
 ) -> anyhow::Result<()> {
+    // ZIP's indexed view merges duplicate names; reject its raw-directory fact
+    // before trusting the indexed entry count or parsing any payload.
+    if archive.has_duplicate_names() {
+        anyhow::bail!("duplicate project archive entry");
+    }
     let mut seen = [false; REQUIRED_ARCHIVE_ENTRIES.len()];
     for index in 0..archive.len() {
         let entry = archive.by_index(index)?;
+        let name = entry.name()?;
         if entry.is_dir() {
             anyhow::bail!(
                 "directories are not permitted in project archive v1: {}",
-                entry.name()
+                name
             );
         }
         let Some(required_index) =
-            REQUIRED_ARCHIVE_ENTRIES.iter().position(|required| *required == entry.name())
+            REQUIRED_ARCHIVE_ENTRIES.iter().position(|required| *required == name)
         else {
-            anyhow::bail!("unexpected project archive entry: {}", entry.name());
+            anyhow::bail!("unexpected project archive entry: {name}");
         };
         if seen[required_index] {
-            anyhow::bail!("duplicate project archive entry: {}", entry.name());
+            anyhow::bail!("duplicate project archive entry: {name}");
         }
         seen[required_index] = true;
     }
@@ -1557,7 +1670,7 @@ fn write_project_archive_from_open_library_to_open_file(
     target_file.set_len(0)?;
     target_file.seek(SeekFrom::Start(0))?;
     let mut writer = zip::ZipWriter::new(&mut *target_file);
-    let options = zip::write::FileOptions::default()
+    let options = zip::write::SimpleFileOptions::default()
         .compression_method(zip::CompressionMethod::Deflated)
         .unix_permissions(0o644);
 
@@ -1589,8 +1702,8 @@ fn write_project_archive_from_open_library_to_open_file(
     std::io::copy(&mut db_reader, &mut library_writer)?;
     let library = library_writer.finish(LIBRARY_ENTRY);
 
+    // finish consumes the ZIP owner and releases the original file borrow.
     writer.finish()?;
-    drop(writer);
     target_file.sync_all()?;
     Ok(ProjectArchiveWriteEvidence { manifest, project, library })
 }
@@ -1736,6 +1849,252 @@ mod tests {
     };
     use mondrian_timeline::{Clip, Sequence};
 
+    fn insert_note_archive_fixture(
+        document: &mut ProjectDocument,
+    ) -> mondrian_timeline::AudioNoteLane {
+        use mondrian_core::{AudioNoteId, AudioNoteLaneId, AuthoringList};
+        use mondrian_timeline::{AudioNote, AudioNoteLane, AudioNoteTarget};
+        let sequence = document.sequences.active_mut().expect("active Sequence");
+        let track_id = sequence.audio_tracks[0].id;
+        let processor = AudioProcessorInstance::built_in(BUILTIN_GAIN_DEFINITION_ID, 1);
+        let processor_id = processor.id;
+        sequence
+            .audio_program
+            .track_channels
+            .get_mut(&track_id)
+            .expect("channel")
+            .strip
+            .pre_fader
+            .processors
+            .push(processor);
+        let lane = AudioNoteLane {
+            schema_version: 1,
+            id: AudioNoteLaneId::new(),
+            target: AudioNoteTarget {
+                track_id,
+                processor_id,
+                input_port_key: "  future.音符  ".to_owned(),
+            },
+            notes: AuthoringList::from(vec![AudioNote {
+                id: AudioNoteId::new(),
+                start: TimelineTime::new(1001, 30000).expect("exact start"),
+                end: TimelineTime::new(2002, 30000).expect("exact end"),
+                channel: 3,
+                key: 60,
+                on_velocity: f64::from_bits(0x3fd5_5555_5555_5556),
+                off_velocity: -0.0,
+            }]),
+        };
+        sequence.audio_program.note_lanes.push(lane.clone());
+        lane
+    }
+
+    #[test]
+    fn note_model_schema32_archive_roundtrip_retains_exact_score_without_plugin_resolution() {
+        let root = unique_temp_dir("note-model-schema32");
+        let database = root.join("index.db");
+        fs::write(&database, b"sqlite placeholder").expect("library fixture");
+        let archive = root.join("音符.mdp");
+        let mut document = test_document();
+        let lane = insert_note_archive_fixture(&mut document);
+        save_project_archive(&document, &database, &archive).expect("save authored score");
+        let reopened = read_project_document_from_archive(&archive).expect("validated reopen");
+        assert_eq!(reopened.schema_version, PROJECT_DOCUMENT_SCHEMA_VERSION);
+        let actual =
+            &reopened.sequences.active().expect("reopened Sequence").audio_program.note_lanes[0];
+        assert_eq!(actual, &lane);
+        assert_eq!(
+            actual.notes[0].on_velocity.to_bits(),
+            lane.notes[0].on_velocity.to_bits()
+        );
+        assert_eq!(actual.notes[0].off_velocity.to_bits(), (-0.0_f64).to_bits());
+        assert_eq!(
+            project_document_fingerprint(reopened).expect("reopened fingerprint"),
+            project_document_fingerprint(document).expect("author fingerprint")
+        );
+        fs::remove_dir_all(root).expect("owned fixture cleanup");
+    }
+
+    #[test]
+    fn note_model_legacy31_archive_migrates_empty_score_and_resaves_current_schema() {
+        let root = unique_temp_dir("note-model-legacy31");
+        let archive = root.join("legacy31.mdp");
+        let manifest = serde_json::to_vec(&ProjectManifest::default()).expect("manifest");
+        let legacy = include_bytes!("../tests/fixtures/legacy-v31/project.json");
+        write_raw_stored_archive(
+            &archive,
+            &[
+                (MANIFEST_ENTRY, &manifest),
+                (PROJECT_ENTRY, legacy),
+                (LIBRARY_ENTRY, b"sqlite legacy fixture"),
+            ],
+        );
+        let source_bytes = fs::read(&archive).expect("original archive");
+        let runtime = root.join("runtime");
+        let loaded = load_project_archive(&archive, &runtime).expect("actual registry migration");
+        assert_eq!(loaded.source_document_schema_version, 31);
+        assert_eq!(
+            loaded.document.schema_version,
+            PROJECT_DOCUMENT_SCHEMA_VERSION
+        );
+        assert!(loaded
+            .document
+            .sequences
+            .sequences
+            .iter()
+            .all(|sequence| sequence.audio_program.note_lanes.is_empty()));
+        let mut expected: ProjectDocument = serde_json::from_slice(legacy).expect("legacy fixture");
+        expected.schema_version = PROJECT_DOCUMENT_SCHEMA_VERSION;
+        assert_eq!(
+            project_document_fingerprint(loaded.document.clone()).expect("migrated fingerprint"),
+            project_document_fingerprint(expected).expect("independent expected empty migration")
+        );
+        assert_eq!(
+            fs::read(&archive).expect("source still present"),
+            source_bytes
+        );
+        let saved = root.join("resaved32.mdp");
+        save_project_archive(&loaded.document, &runtime.join("index.db"), &saved)
+            .expect("current resave");
+        let reopened =
+            load_project_archive(&saved, &root.join("reopened-runtime")).expect("current reopen");
+        assert_eq!(
+            reopened.source_document_schema_version,
+            PROJECT_DOCUMENT_SCHEMA_VERSION
+        );
+        assert_eq!(
+            project_document_fingerprint(reopened.document).expect("reopened fingerprint"),
+            project_document_fingerprint(loaded.document).expect("migrated fingerprint")
+        );
+        fs::remove_dir_all(root).expect("owned fixture cleanup");
+    }
+
+    #[test]
+    fn note_model_schema31_rejects_nonempty_or_malformed_score_before_runtime_publication() {
+        let root = unique_temp_dir("note-model-mislabeled31");
+        let manifest = serde_json::to_vec(&ProjectManifest::default()).expect("manifest");
+        let mut document = test_document();
+        insert_note_archive_fixture(&mut document);
+        let mut value = serde_json::to_value(document).expect("score document");
+        value["schema_version"] = serde_json::json!(31);
+        for case in 0..3 {
+            let mut invalid = value.clone();
+            if case == 1 {
+                invalid["sequences"]["sequences"][0]["audio_program"]["note_lanes"] =
+                    serde_json::Value::Null;
+            }
+            if case == 2 {
+                invalid["sequences"]["sequences"][0]["audio_program"]["note_lanes"] =
+                    serde_json::json!("not a lane list");
+            }
+            let bytes = serde_json::to_vec(&invalid).expect("mislabeled fixture");
+            let archive = root.join(format!("invalid-{case}.mdp"));
+            let runtime = root.join(format!("runtime-{case}"));
+            write_raw_stored_archive(
+                &archive,
+                &[
+                    (MANIFEST_ENTRY, &manifest),
+                    (PROJECT_ENTRY, &bytes),
+                    (LIBRARY_ENTRY, b"sqlite fixture"),
+                ],
+            );
+            let before = fs::read(&archive).expect("source bytes");
+            let error = load_project_archive(&archive, &runtime)
+                .expect_err("no schema31 score interpretation");
+            assert!(format!("{error:#}")
+                .contains("schema-31 document cannot contain authored audio notes"));
+            assert!(!runtime.exists());
+            assert_eq!(fs::read(&archive).expect("source retained"), before);
+        }
+        let mut empty: serde_json::Value =
+            serde_json::from_slice(include_bytes!("../tests/fixtures/legacy-v31/project.json"))
+                .expect("old fixture");
+        empty["sequences"]["sequences"][0]["audio_program"]["note_lanes"] = serde_json::json!([]);
+        let migrated: ProjectDocument = serde_json::from_value(
+            DOCUMENT_MIGRATIONS.migrate(empty).expect("explicitly empty legacy field"),
+        )
+        .expect("current author shape");
+        migrated.validate().expect("valid empty migration");
+        assert!(
+            serde_json::to_value(migrated).expect("canonical empty")["sequences"]["sequences"][0]
+                ["audio_program"]
+                .get("note_lanes")
+                .is_none()
+        );
+        fs::remove_dir_all(root).expect("owned fixture cleanup");
+    }
+
+    #[test]
+    fn note_model_old_reader_version_boundary_refuses_schema32_score() {
+        let root = unique_temp_dir("note-model-old-reader");
+        let database = root.join("index.db");
+        fs::write(&database, b"sqlite fixture").expect("library");
+        let archive = root.join("score32.mdp");
+        let mut document = test_document();
+        insert_note_archive_fixture(&mut document);
+        let mut score32 = serde_json::to_value(&document).expect("exact score");
+        score32["schema_version"] = serde_json::json!(32);
+        let manifest = serde_json::to_vec(&ProjectManifest::default()).expect("manifest");
+        let bytes = serde_json::to_vec(&score32).expect("schema32 score");
+        write_raw_stored_archive(
+            &archive,
+            &[
+                (MANIFEST_ENTRY, &manifest),
+                (PROJECT_ENTRY, &bytes),
+                (LIBRARY_ENTRY, b"sqlite fixture"),
+            ],
+        );
+        let file = fs::File::open(&archive).expect("held archive");
+        let mut zip = zip::ZipArchive::new(file).expect("archive");
+        // Exercise the exact existing version-boundary algorithm with a v31
+        // reader registry. This is source-level control, not an old PE execution.
+        let old_registry =
+            JsonMigrationRegistry::new("project document", "schema_version", 31, &[]);
+        let error = read_versioned_json_entry::<_, ProjectDocument>(
+            &mut zip,
+            PROJECT_ENTRY,
+            31,
+            |document| document.schema_version,
+            &old_registry,
+            ProjectArchiveReadBudget::default(),
+        )
+        .expect_err("old reader must refuse future score schema");
+        assert!(error.to_string().contains("unsupported project document version: 32"));
+        drop(zip);
+        let reopened =
+            read_project_document_from_archive(&archive).expect("current reader accepts score");
+        assert_eq!(
+            reopened.sequences.active().expect("Sequence").audio_program.note_lanes.len(),
+            1
+        );
+        fs::remove_dir_all(root).expect("owned fixture cleanup");
+    }
+
+    #[test]
+    fn note_model_sequence_replacement_certificate_revalidates_strong_score_target() {
+        let mut document = test_document();
+        let lane = insert_note_archive_fixture(&mut document);
+        let certificate = document
+            .prepare_authoring_validation_certificate()
+            .expect("baseline certificate");
+        let mut replacement = document.sequences.active().expect("Sequence").clone();
+        replacement.revision =
+            replacement.revision.checked_next().expect("newer candidate revision");
+        replacement.audio_program.note_lanes[0].target.processor_id =
+            mondrian_core::AudioProcessorInstanceId::new();
+        let error = certificate
+            .prepare_sequence_replacement(&document, replacement)
+            .expect_err("new score reference must be revalidated");
+        assert!(format!("{error:#}").contains("targets an absent or different Track processor"));
+        certificate
+            .validate_current_baseline(&document)
+            .expect("old baseline still valid");
+        assert_eq!(
+            document.sequences.active().expect("original").audio_program.note_lanes[0],
+            lane
+        );
+    }
+
     fn missing_custom_engine(path: PathBuf) -> mondrian_core::ColorEngine {
         mondrian_core::ColorEngine::CustomOcio {
             identity: Box::new(
@@ -1804,7 +2163,7 @@ mod tests {
         let project = serde_json::to_vec_pretty(document).expect("serialize project");
         let file = fs::File::create(path).expect("create stored fixture archive");
         let mut writer = zip::ZipWriter::new(file);
-        let options = zip::write::FileOptions::default()
+        let options = zip::write::SimpleFileOptions::default()
             .compression_method(zip::CompressionMethod::Stored)
             .unix_permissions(0o644);
         for (name, bytes) in [
@@ -1831,7 +2190,7 @@ mod tests {
     fn write_raw_stored_archive(path: &Path, entries: &[(&str, &[u8])]) {
         let file = fs::File::create(path).expect("create raw fixture archive");
         let mut writer = zip::ZipWriter::new(file);
-        let options = zip::write::FileOptions::default()
+        let options = zip::write::SimpleFileOptions::default()
             .compression_method(zip::CompressionMethod::Stored)
             .unix_permissions(0o644);
         for (name, bytes) in entries {
@@ -2044,15 +2403,33 @@ mod tests {
         let root = unique_temp_dir("exact-entry-contract");
         let document = serde_json::to_vec(&test_document()).expect("serialize Project");
         let duplicate = root.join("duplicate.mdp");
+        // Modern writers reject duplicates. Build a valid distinct member, then
+        // change only its two filename fields to produce the malformed input.
+        let alias = "_".repeat(MANIFEST_ENTRY.len());
         write_raw_stored_archive(
             &duplicate,
             &[
                 (MANIFEST_ENTRY, b"{"),
-                (MANIFEST_ENTRY, b"{"),
+                (&alias, b"{"),
                 (PROJECT_ENTRY, &document),
                 (LIBRARY_ENTRY, b"library"),
             ],
         );
+        let (local, central) = {
+            let file = fs::File::open(&duplicate).expect("fixture file");
+            let mut archive = zip::ZipArchive::new(file).expect("valid initial fixture");
+            let entry = archive.by_name(&alias).expect("distinct fixture member");
+            (entry.header_start(), entry.central_header_start())
+        };
+        let mut bytes = fs::read(&duplicate).expect("fixture bytes");
+        // ZIP's fixed local/central headers precede their variable filenames.
+        for (header, fixed_bytes) in [(local, 30), (central, 46)] {
+            let start = usize::try_from(header).unwrap() + fixed_bytes;
+            let name = &mut bytes[start..start + alias.len()];
+            assert_eq!(name, alias.as_bytes());
+            name.copy_from_slice(MANIFEST_ENTRY.as_bytes());
+        }
+        fs::write(&duplicate, bytes).expect("duplicate-name fixture");
         let error = read_project_document_from_archive(&duplicate)
             .expect_err("duplicate entry must fail before malformed Manifest parse");
         assert!(
@@ -2063,7 +2440,7 @@ mod tests {
         let directory = root.join("directory.mdp");
         let file = fs::File::create(&directory).expect("create directory-entry archive");
         let mut writer = zip::ZipWriter::new(file);
-        let options = zip::write::FileOptions::default();
+        let options = zip::write::SimpleFileOptions::default();
         writer.add_directory("unexpected/", options).expect("directory entry");
         writer.start_file(MANIFEST_ENTRY, options).expect("manifest");
         writer.write_all(b"{").expect("malformed manifest");
@@ -2986,6 +3363,112 @@ mod tests {
     }
 
     #[test]
+    fn project_archive_retains_exact_audio_gain_bits() {
+        let root = unique_temp_dir("exact-audio-gain-bits");
+        let db_path = root.join("index.db");
+        fs::write(&db_path, b"sqlite placeholder").expect("write db");
+        let project_path = root.join("precise.mdp");
+        let precise = f64::from_bits(0xbc69_cf42_7684_6d19);
+        let mut document = test_document();
+        let sequence = document.sequences.active_mut().expect("sequence");
+        let track_id = sequence.audio_tracks[0].id;
+        sequence
+            .audio_program
+            .track_channels
+            .get_mut(&track_id)
+            .expect("channel")
+            .strip
+            .input_trim_db = precise;
+        save_project_archive(&document, &db_path, &project_path).expect("save exact project");
+        let reopened =
+            read_project_document_from_archive(&project_path).expect("reopen exact project");
+        let sequence = reopened.sequences.active().expect("reopened sequence");
+        let actual = sequence.audio_program.track_channels[&track_id].strip.input_trim_db;
+        assert_eq!(
+            actual.to_bits(),
+            precise.to_bits(),
+            "saved gain must retain author identity"
+        );
+        fs::remove_dir_all(root).expect("remove fixture");
+    }
+
+    #[test]
+    fn floating_property_json_retains_zero_subnormal_and_limit_bits() {
+        for bits in [
+            0,
+            1_u64 << 63,
+            1,
+            (1_u64 << 63) | 1,
+            0x0010_0000_0000_0000,
+            0x7fef_ffff_ffff_ffff,
+            0xffef_ffff_ffff_ffff,
+        ] {
+            let value = PropertyValue::Double(f64::from_bits(bits));
+            let bytes = serde_json::to_vec(&value).expect("serialize Double");
+            let parsed: PropertyValue = serde_json::from_slice(&bytes).expect("parse Double");
+            let PropertyValue::Double(actual) = parsed else {
+                panic!("Double type");
+            };
+            assert_eq!(actual.to_bits(), bits);
+        }
+        for bits in [
+            0,
+            1_u32 << 31,
+            1,
+            (1_u32 << 31) | 1,
+            0x0080_0000,
+            0x7f7f_ffff,
+            0xff7f_ffff,
+        ] {
+            let value = PropertyValue::Float(f32::from_bits(bits));
+            let bytes = serde_json::to_vec(&value).expect("serialize Float");
+            let parsed: PropertyValue = serde_json::from_slice(&bytes).expect("parse Float");
+            let PropertyValue::Float(actual) = parsed else {
+                panic!("Float type");
+            };
+            assert_eq!(actual.to_bits(), bits);
+        }
+        let mut bits = 0x9e37_79b9_u32;
+        for _ in 0..10000 {
+            bits = bits.wrapping_mul(1664525).wrapping_add(1013904223);
+            let original = f32::from_bits(bits);
+            if !original.is_finite() {
+                continue;
+            }
+            let bytes =
+                serde_json::to_vec(&PropertyValue::Float(original)).expect("serialize Float");
+            let parsed: PropertyValue = serde_json::from_slice(&bytes).expect("parse Float");
+            let PropertyValue::Float(actual) = parsed else {
+                panic!("Float type");
+            };
+            assert_eq!(actual.to_bits(), original.to_bits());
+        }
+    }
+
+    #[test]
+    fn finite_double_property_json_retains_author_bits() {
+        let mut bits = 0x9e37_79b9_7f4a_7c15_u64;
+        for _ in 0..10000 {
+            bits = bits.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            let original = f64::from_bits(bits);
+            if !original.is_finite() {
+                continue;
+            }
+            let encoded = serde_json::to_vec(&PropertyValue::Double(original)).expect("serialize");
+            let decoded: PropertyValue = serde_json::from_slice(&encoded).expect("parse");
+            let PropertyValue::Double(actual) = decoded else {
+                panic!("Double type");
+            };
+            assert_eq!(
+                actual.to_bits(),
+                original.to_bits(),
+                "JSON {}",
+                String::from_utf8_lossy(&encoded)
+            );
+        }
+    }
+
+    #[test]
     fn audio_processor_schema_and_exact_curve_round_trip_without_plugin_resolution() {
         let root = unique_temp_dir("audio-parameter-schema-round-trip");
         let db_path = root.join("index.db");
@@ -2997,7 +3480,11 @@ mod tests {
         let track_id = sequence.audio_tracks[0].id;
         let mut processor = AudioProcessorInstance::built_in(BUILTIN_GAIN_DEFINITION_ID, 1);
         let parameter_id = ParameterId::new_static(GAIN_DB_PARAMETER_ID);
-        let mut curve = processor.parameters[&parameter_id].automation.clone();
+        let mut curve = processor.parameters[&parameter_id]
+            .automation
+            .as_ref()
+            .expect("bound host curve")
+            .clone();
         curve
             .set_keyframe(ExactAutomationKeyframe::linear(TimelineTime::ZERO, -6.0))
             .expect("gain key");
@@ -3050,20 +3537,29 @@ mod tests {
 
         assert_eq!(parameter.schema.parameter_id, parameter_id);
         assert_eq!(parameter.schema.default_value, PropertyValue::Double(0.0));
-        assert_eq!(parameter.automation.keyframes[0].value, -6.0);
+        assert_eq!(
+            parameter.automation.as_ref().expect("bound host curve").keyframes[0].value,
+            -6.0
+        );
         let delay = &sequence.audio_program.track_channels[&track_id].strip.pre_fader.processors[1]
             .parameters[&delay_parameter_id];
         assert_eq!(delay.schema.default_value, PropertyValue::Int(0));
         assert_eq!(delay.schema.unit, ParameterUnit::Samples);
         assert!(!delay.schema.is_animatable);
-        assert_eq!(delay.automation.default_value, 128.0);
-        assert!(delay.automation.keyframes.is_empty());
+        assert_eq!(
+            delay.automation.as_ref().expect("bound host curve").default_value,
+            128.0
+        );
+        assert!(delay.automation.as_ref().expect("bound host curve").keyframes.is_empty());
         let lookahead =
             &sequence.audio_program.track_channels[&track_id].strip.pre_fader.processors[2]
                 .parameters[&ParameterId::new_static(LOOKAHEAD_LIMITER_LOOKAHEAD_MS_PARAMETER_ID)];
         assert_eq!(lookahead.schema.unit, ParameterUnit::Milliseconds);
         assert!(!lookahead.schema.is_animatable);
-        assert_eq!(lookahead.automation.default_value, 5.0);
+        assert_eq!(
+            lookahead.automation.as_ref().expect("bound host curve").default_value,
+            5.0
+        );
     }
 
     #[test]
@@ -3078,6 +3574,8 @@ mod tests {
             .get_mut(&parameter_id)
             .expect("gain parameter")
             .automation
+            .as_mut()
+            .expect("bound host curve")
             .default_value = 25.0;
         sequence
             .audio_program
@@ -3115,7 +3613,7 @@ mod tests {
         let project_path = root.join("legacy.mdp");
         let file = fs::File::create(&project_path).expect("create archive");
         let mut writer = zip::ZipWriter::new(file);
-        let options = zip::write::FileOptions::default();
+        let options = zip::write::SimpleFileOptions::default();
         writer.start_file(PROJECT_ENTRY, options).expect("start project");
         writer.write_all(b"{}").expect("write project");
         writer.finish().expect("finish archive");
@@ -3159,7 +3657,7 @@ mod tests {
     fn write_current_fixture_archive(path: &Path, library: &[u8]) {
         let file = fs::File::create(path).expect("create fixture archive");
         let mut writer = zip::ZipWriter::new(file);
-        let options = zip::write::FileOptions::default();
+        let options = zip::write::SimpleFileOptions::default();
         writer.start_file(MANIFEST_ENTRY, options).expect("manifest entry");
         writer
             .write_all(include_bytes!("../tests/fixtures/current/manifest.json"))
@@ -3262,7 +3760,7 @@ mod tests {
     #[test]
     fn older_schemas_are_rejected_without_an_alpha_compatibility_migration() {
         let mut legacy = serde_json::to_value(test_document()).expect("serialize document");
-        for version in [5, 6, 10, 14, 17] {
+        for version in [5, 6, 10, 14, 17, 26, 27, 28] {
             legacy["schema_version"] = serde_json::json!(version);
             let err = DOCUMENT_MIGRATIONS
                 .migrate(legacy.clone())
@@ -3272,27 +3770,7 @@ mod tests {
     }
 
     #[test]
-    fn schema_26_migrates_explicit_empty_dynamic_hdr_author_state() {
-        let mut legacy = serde_json::to_value(test_document()).expect("serialize document");
-        legacy["schema_version"] = serde_json::json!(26);
-        for sequence in legacy["sequences"]["sequences"].as_array_mut().expect("Sequence array") {
-            sequence.as_object_mut().expect("Sequence object").remove("dynamic_hdr");
-        }
-
-        let migrated = DOCUMENT_MIGRATIONS.migrate(legacy).expect("migrate 26 to 27");
-        assert_eq!(migrated["schema_version"], serde_json::json!(27));
-        let document: ProjectDocument =
-            serde_json::from_value(migrated).expect("decode migrated document");
-        assert!(document
-            .sequences
-            .sequences
-            .iter()
-            .all(|sequence| sequence.dynamic_hdr
-                == mondrian_timeline::DynamicHdrAuthorState::default()));
-    }
-
-    #[test]
-    fn archive_load_reports_the_pre_migration_document_schema() {
+    fn archive_load_rejects_older_document_before_publishing_runtime() {
         let root = unique_temp_dir("source-document-schema");
         let archive_path = root.join("schema-26.mdp");
         let runtime = root.join("runtime");
@@ -3313,20 +3791,13 @@ mod tests {
             ],
         );
 
-        let loaded =
-            load_project_archive(&archive_path, &runtime).expect("migrate schema-26 archive");
-        assert_eq!(loaded.source_document_schema_version, 26);
-        assert_eq!(
-            loaded.document.schema_version,
-            PROJECT_DOCUMENT_SCHEMA_VERSION
+        let error = load_project_archive(&archive_path, &runtime)
+            .expect_err("alpha schemas have no compatibility adapter");
+        assert!(error.to_string().contains("missing project document migration"));
+        assert!(
+            !runtime.exists(),
+            "rejected input cannot publish a runtime library"
         );
-        assert!(loaded
-            .document
-            .sequences
-            .sequences
-            .iter()
-            .all(|sequence| sequence.dynamic_hdr
-                == mondrian_timeline::DynamicHdrAuthorState::default()));
 
         let _ = fs::remove_dir_all(root);
     }
@@ -3456,7 +3927,7 @@ mod tests {
         let source = root.join("invalid.mdp");
         let file = fs::File::create(&source).expect("archive");
         let mut writer = zip::ZipWriter::new(file);
-        let options = zip::write::FileOptions::default();
+        let options = zip::write::SimpleFileOptions::default();
         writer.start_file(MANIFEST_ENTRY, options).expect("manifest");
         writer
             .write_all(include_bytes!("../tests/fixtures/current/manifest.json"))
@@ -3477,6 +3948,294 @@ mod tests {
         assert_eq!(
             fs::read(runtime.join("index.db")).expect("runtime after"),
             b"existing-runtime"
+        );
+    }
+    #[test]
+    fn musical_time_reference_current_archive_roundtrip_preserves_meter_some_and_none() {
+        let reference = mondrian_core::MusicalTimeReference::new(
+            mondrian_core::TimelineTime::new(-1001, 30000).unwrap(),
+            mondrian_core::TimelineTime::new(1001, 2000).unwrap(),
+        )
+        .unwrap();
+        let root = unique_temp_dir("musical-reference-schema34");
+        let database = root.join("index.db");
+        fs::write(&database, b"sqlite fixture").unwrap();
+        for (name, reference) in [
+            ("none", None),
+            ("some", Some(reference)),
+            (
+                "meter",
+                Some(reference.with_time_signature(Some(
+                    mondrian_core::MusicalTimeSignature::new(7, 8).unwrap(),
+                ))),
+            ),
+        ] {
+            let mut document = test_document();
+            insert_note_archive_fixture(&mut document);
+            document.sequences.active_mut().unwrap().audio_program.musical_time_reference =
+                reference;
+            let archive = root.join(format!("{name}.mdp"));
+            save_project_archive(&document, &database, &archive).unwrap();
+            let reopened = read_project_document_from_archive(&archive).unwrap();
+            assert_eq!(reopened.schema_version, PROJECT_DOCUMENT_SCHEMA_VERSION);
+            assert_eq!(
+                reopened.sequences.active().unwrap().audio_program.musical_time_reference,
+                reference
+            );
+            assert_eq!(
+                serde_json::to_value(&reopened).unwrap(),
+                serde_json::to_value(&document).unwrap()
+            );
+            assert_eq!(
+                project_document_fingerprint(reopened).unwrap(),
+                project_document_fingerprint(document).unwrap()
+            );
+            let file = fs::File::open(&archive).unwrap();
+            let mut zip = zip::ZipArchive::new(file).unwrap();
+            let old33 = JsonMigrationRegistry::new("project document", "schema_version", 33, &[]);
+            let error = read_versioned_json_entry::<_, ProjectDocument>(
+                &mut zip,
+                PROJECT_ENTRY,
+                33,
+                |document| document.schema_version,
+                &old33,
+                ProjectArchiveReadBudget::default(),
+            )
+            .expect_err("old reader must refuse the new authored value schema");
+            assert!(error.to_string().contains("unsupported project document version: 35"));
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn constant_meter_schema34_migration_preserves_unknown_and_rejects_mislabeled_meter() {
+        let reference = mondrian_core::MusicalTimeReference::new(
+            mondrian_core::TimelineTime::new(-19, 7).unwrap(),
+            mondrian_core::TimelineTime::new(3, 4).unwrap(),
+        )
+        .unwrap();
+        let mut document = test_document();
+        document.sequences.active_mut().unwrap().audio_program.musical_time_reference =
+            Some(reference);
+        let mut legacy = serde_json::to_value(&document).unwrap();
+        legacy["schema_version"] = serde_json::json!(34);
+        let current = DOCUMENT_MIGRATIONS.migrate(legacy.clone()).unwrap();
+        assert_eq!(current, serde_json::to_value(&document).unwrap());
+        assert_eq!(
+            serde_json::from_value::<ProjectDocument>(current).unwrap(),
+            document
+        );
+        let root = unique_temp_dir("meter-schema34");
+        let manifest = serde_json::to_vec(&ProjectManifest::default()).unwrap();
+        let archive = root.join("legacy.mdp");
+        write_raw_stored_archive(
+            &archive,
+            &[
+                (MANIFEST_ENTRY, &manifest),
+                (PROJECT_ENTRY, &serde_json::to_vec(&legacy).unwrap()),
+                (LIBRARY_ENTRY, b"sqlite fixture"),
+            ],
+        );
+        assert_eq!(
+            read_project_document_from_archive(&archive).unwrap(),
+            document
+        );
+        for signature in [
+            serde_json::json!({"numerator":7,"denominator":8}),
+            serde_json::json!({"numerator":0,"denominator":0}),
+            serde_json::json!("invalid"),
+        ] {
+            let mut mislabeled = legacy.clone();
+            mislabeled["sequences"]["sequences"][0]["audio_program"]["musical_time_reference"]
+                ["time_signature"] = signature;
+            assert!(DOCUMENT_MIGRATIONS.migrate(mislabeled).is_err());
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn musical_time_reference_legacy_schemas_migrate_only_absent_or_null_reference() {
+        let root = unique_temp_dir("musical-reference-legacy");
+        let manifest = serde_json::to_vec(&ProjectManifest::default()).unwrap();
+        for version in [31, 32, 33] {
+            for explicit_null in [false, true] {
+                let mut legacy = serde_json::to_value(test_document()).unwrap();
+                legacy["schema_version"] = serde_json::json!(version);
+                if explicit_null {
+                    legacy["sequences"]["sequences"][0]["audio_program"]
+                        ["musical_time_reference"] = serde_json::Value::Null;
+                }
+                let mut expected = legacy.clone();
+                expected["schema_version"] = serde_json::json!(PROJECT_DOCUMENT_SCHEMA_VERSION);
+                let migrated = DOCUMENT_MIGRATIONS.migrate(legacy.clone()).unwrap();
+                assert_eq!(migrated, expected);
+                assert_eq!(
+                    serde_json::to_vec(&migrated).unwrap(),
+                    serde_json::to_vec(&expected).unwrap()
+                );
+                let bytes = serde_json::to_vec(&legacy).unwrap();
+                let archive = root.join(format!("legacy-{version}-{explicit_null}.mdp"));
+                write_raw_stored_archive(
+                    &archive,
+                    &[
+                        (MANIFEST_ENTRY, &manifest),
+                        (PROJECT_ENTRY, &bytes),
+                        (LIBRARY_ENTRY, b"sqlite fixture"),
+                    ],
+                );
+                let reopened = read_project_document_from_archive(&archive).unwrap();
+                assert_eq!(reopened.schema_version, PROJECT_DOCUMENT_SCHEMA_VERSION);
+                assert!(reopened
+                    .sequences
+                    .sequences
+                    .iter()
+                    .all(|sequence| sequence.audio_program.musical_time_reference.is_none()));
+                assert_eq!(
+                    reopened,
+                    serde_json::from_value::<ProjectDocument>(expected).unwrap()
+                );
+            }
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn musical_time_reference_legacy_non_null_is_rejected_before_runtime_publication() {
+        let root = unique_temp_dir("musical-reference-mislabeled");
+        let manifest = serde_json::to_vec(&ProjectManifest::default()).unwrap();
+        let reference = mondrian_core::MusicalTimeReference::new(
+            mondrian_core::TimelineTime::ZERO,
+            mondrian_core::TimelineTime::new(1, 2).unwrap(),
+        )
+        .unwrap();
+        for version in [31, 32, 33] {
+            for (case, reference) in [
+                serde_json::to_value(reference).unwrap(),
+                serde_json::json!({}),
+                serde_json::json!(false),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                let mut legacy = serde_json::to_value(test_document()).unwrap();
+                legacy["schema_version"] = serde_json::json!(version);
+                legacy["sequences"]["sequences"][0]["audio_program"]["musical_time_reference"] =
+                    reference;
+                let bytes = serde_json::to_vec(&legacy).unwrap();
+                let archive = root.join(format!("invalid-{version}-{case}.mdp"));
+                let runtime = root.join(format!("runtime-{version}-{case}"));
+                write_raw_stored_archive(
+                    &archive,
+                    &[
+                        (MANIFEST_ENTRY, &manifest),
+                        (PROJECT_ENTRY, &bytes),
+                        (LIBRARY_ENTRY, b"sqlite fixture"),
+                    ],
+                );
+                let original = fs::read(&archive).unwrap();
+                let error = load_project_archive(&archive, &runtime)
+                    .expect_err("legacy schema cannot authorize a reference");
+                assert!(format!("{error:#}").contains(
+                    "schema-33 document cannot contain an authored musical time reference"
+                ));
+                assert!(!runtime.exists());
+                assert_eq!(fs::read(&archive).unwrap(), original);
+            }
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn processor_output_schema33_roundtrip_migration_and_old_reader_boundary() {
+        use mondrian_timeline::audio::{
+            AudioProcessorDefinitionRef, AudioProcessorInstance, AudioProcessorOutputPort,
+            AudioRoute, AudioRouteDestination, AudioRouteSource,
+        };
+        let mut document = test_document();
+        let sequence = document.sequences.active_mut().expect("Sequence");
+        let track = sequence.audio_tracks[0].id;
+        let processor = AudioProcessorInstance {
+            id: mondrian_core::AudioProcessorInstanceId::new(),
+            definition: AudioProcessorDefinitionRef::Clap {
+                plugin_id: "not.installed.output.fixture".into(),
+                schema_version: 1,
+                binary_sha256: None,
+            },
+            bypassed: false,
+            parameters: Default::default(),
+            opaque_state: None,
+        };
+        let id = processor.id;
+        sequence
+            .audio_program
+            .track_channels
+            .get_mut(&track)
+            .unwrap()
+            .strip
+            .pre_fader
+            .processors
+            .push(processor);
+        sequence.audio_program.routes.push(AudioRoute::new(
+            AudioRouteSource::ProcessorOutput {
+                processor_id: id,
+                port: AudioProcessorOutputPort::Auxiliary { bus_key: "stable.output.2".into() },
+            },
+            AudioRouteDestination::Output(sequence.audio_program.outputs[0].id),
+        ));
+        document.validate().expect("author intent needs no installed plugin");
+        let value = serde_json::to_value(&document).unwrap();
+        let old32 = JsonMigrationRegistry::new("project document", "schema_version", 32, &[]);
+        let mut schema33 = value.clone();
+        schema33["schema_version"] = serde_json::json!(33);
+        assert!(old32
+            .migrate(schema33)
+            .unwrap_err()
+            .to_string()
+            .contains("unsupported project document version: 33"));
+        let mut mislabeled = value.clone();
+        mislabeled["schema_version"] = serde_json::json!(32);
+        assert!(
+            DOCUMENT_MIGRATIONS.migrate(mislabeled).is_err(),
+            "legacy32 must not smuggle a new endpoint through version-only migration"
+        );
+        let mut sidechain_mislabeled = value.clone();
+        let program = &mut sidechain_mislabeled["sequences"]["sequences"][0]["audio_program"];
+        let routes = program["routes"].as_array_mut().unwrap();
+        let index = routes
+            .iter()
+            .position(|route| route["source"].get("ProcessorOutput").is_some())
+            .unwrap();
+        let route = routes.remove(index);
+        program["sidechain_routes"] = serde_json::json!([route]);
+        sidechain_mislabeled["schema_version"] = serde_json::json!(32);
+        assert!(
+            DOCUMENT_MIGRATIONS.migrate(sidechain_mislabeled).is_err(),
+            "legacy sidechain cannot smuggle a new source either"
+        );
+        let root = unique_temp_dir("output-schema33");
+        let database = root.join("index.db");
+        fs::write(&database, b"sqlite fixture").unwrap();
+        let archive = root.join("outputs.mdp");
+        save_project_archive(&document, &database, &archive).unwrap();
+        let reopened = read_project_document_from_archive(&archive).unwrap();
+        assert_eq!(serde_json::to_value(reopened).unwrap(), value);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn processor_output_schema32_migration_preserves_every_existing_author_value() {
+        let mut document = test_document();
+        insert_note_archive_fixture(&mut document);
+        let mut legacy = serde_json::to_value(&document).unwrap();
+        legacy["schema_version"] = serde_json::json!(32);
+        let mut expected = legacy.clone();
+        expected["schema_version"] = serde_json::json!(PROJECT_DOCUMENT_SCHEMA_VERSION);
+        let migrated = DOCUMENT_MIGRATIONS.migrate(legacy).unwrap();
+        assert_eq!(migrated, expected);
+        assert_eq!(
+            serde_json::to_vec(&migrated).unwrap(),
+            serde_json::to_vec(&expected).unwrap(),
+            "version-only migration preserves exact numeric serialization including signed zero"
         );
     }
 }

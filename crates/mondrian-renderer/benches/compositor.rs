@@ -40,6 +40,7 @@ fn working_frame(w: u32, h: u32, rgba: Vec<u8>) -> CpuColorFrame {
             false,
             ColorEngine::mondrian_standard(),
         ),
+        mondrian_core::ImageSampling::UNIT_SQUARE,
         &mut session,
     )
     .expect("benchmark input transform")
@@ -69,6 +70,8 @@ fn bench_layers(c: &mut Criterion, name: &str, w: u32, h: u32, n: usize) {
                 transform: IDENTITY,
                 effect_graph: identity_graph(),
                 frame_seed: 0,
+
+                processor_input_plan: None,
             })
         })
         .collect();
@@ -82,8 +85,13 @@ fn bench_layers(c: &mut Criterion, name: &str, w: u32, h: u32, n: usize) {
                 black_box(h),
                 black_box(&elements),
                 TimelineCompositeOptions::default(),
-                TimelineEffectColorRuntime::new(&color_engine, WorkingColorSpace::LinearRec709),
+                TimelineEffectColorRuntime::new(
+                    &color_engine,
+                    WorkingColorSpace::LinearRec709,
+                    mondrian_core::ImageSampling::UNIT_SQUARE,
+                ),
                 &mut scratch,
+                &mut mondrian_effects::EffectProcessorControl::uncancelled(),
             )
             .expect("benchmark timeline composite");
             ProgramOutputModule::execute_cpu_rgba8(

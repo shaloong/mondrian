@@ -7,7 +7,7 @@ use mondrian_ui_core::types::*;
 use mondrian_ui_core::widget::{EventContext, PaintContext};
 use mondrian_ui_core::{EventResult, UiEvent, Widget};
 use mondrian_ui_layout::constraint::RectInsets;
-use mondrian_ui_layout::{AlignItems, FlexDirection, FlexLayout, JustifyContent};
+use mondrian_ui_layout::{AlignItems, FlexLayout, JustifyContent};
 
 /// A child widget with an optional flex grow factor.
 pub struct FlexChild {
@@ -95,49 +95,8 @@ impl Widget for FlexContainer {
     }
 
     fn measure(&self, constraint: LayoutConstraint) -> Size {
-        let is_row = matches!(self.layout.direction, FlexDirection::Row);
-        let mut main: f32 = 0.0;
-        let mut cross: f32 = 0.0;
-        for child in &self.children {
-            let child_constraint = if is_row {
-                LayoutConstraint::LOOSE
-            } else {
-                LayoutConstraint {
-                    min: Size::ZERO,
-                    max: Size::new(
-                        (constraint.max.width
-                            - self.layout.padding.left
-                            - self.layout.padding.right)
-                            .max(0.0),
-                        f32::MAX,
-                    ),
-                }
-            };
-            let measured = child.widget.measure(child_constraint);
-            if is_row {
-                main += measured.width;
-                cross = cross.max(measured.height);
-            } else {
-                main += measured.height;
-                cross = cross.max(measured.width);
-            }
-        }
-        let gaps = self.layout.gap * self.children.len().saturating_sub(1) as f32;
-        main += gaps;
-
-        let padding = self.layout.padding;
-        let size = if is_row {
-            Size::new(
-                main + padding.left + padding.right,
-                cross + padding.top + padding.bottom,
-            )
-        } else {
-            Size::new(
-                cross + padding.left + padding.right,
-                main + padding.top + padding.bottom,
-            )
-        };
-        constraint.constrain(size)
+        self.layout
+            .measure_with_flex(constraint, &self.child_refs(), &self.flex_grows())
     }
 
     fn layout(&mut self, bounds: Rect) {

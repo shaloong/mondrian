@@ -205,6 +205,7 @@ pub(crate) struct ResolvedFrameEvaluation {
     pub(crate) dependencies: Arc<[EvaluationDependency]>,
     /// Persistent post-composite cache identity, only for reusable enabled plans.
     pub(crate) render_cache_identity: Option<TimelineRenderCacheIdentity>,
+    pub(crate) sampling: mondrian_core::ImageSampling,
 }
 
 /// Spatial quality of the resolved evaluation itself.
@@ -248,7 +249,7 @@ pub(crate) struct FrameEvaluationLease {
 ///
 /// Pending evaluations are retained as typed wait entries so repeated
 /// acquires while a dependency is unresolved do not re-resolve; a completed
-/// dependency removes only the wait entries that name it.
+/// dependency releases only its exact waits while preserving prepared inputs.
 pub(crate) struct EvaluationWorkingSet {
     entries: Vec<EvaluationWorkingSetEntry>,
     waiting: Vec<EvaluationWaitEntry>,
@@ -279,6 +280,10 @@ struct EvaluationWaitEntry {
     key: FrameEvaluationKey,
     priority: MediaPreviewRequestPriority,
     dependencies: Arc<[EvaluationDependency]>,
+    pending_dependencies: Arc<[EvaluationDependency]>,
+    memoized: bool,
+    preparation: Option<Box<crate::app::preview_timeline_execution::PreviewTimelinePreparation>>,
+    last_used: u64,
 }
 
 impl EvaluationWorkingSet {
@@ -305,6 +310,15 @@ impl EvaluationWorkingSet {
     /// Ready semantic evaluations and independent in-flight owners remain valid.
     pub(crate) fn retire_producer_waits(&mut self) {
         self.waiting.clear();
+    }
+
+    /// Release pre-DSP inputs when active execution grants are replaced.
+    /// Exact producer waits remain valid independently of the retired body.
+    pub(crate) fn retire_preparation_owners(&mut self) {
+        self.waiting.retain_mut(|entry| {
+            entry.preparation = None;
+            entry.memoized
+        });
     }
 
     /// A transient evaluation belongs to its producing generation. Exact,
@@ -444,7 +458,10 @@ impl EvaluationWorkingSet {
             self.waiting.remove(index);
             return None;
         }
-        Some(Arc::clone(&self.waiting[index].dependencies))
+        if !self.waiting[index].memoized {
+            return None;
+        }
+        Some(Arc::clone(&self.waiting[index].pending_dependencies))
     }
 
     /// Retain one evaluation for its key, evicting the least recently used
@@ -455,6 +472,7 @@ impl EvaluationWorkingSet {
         evaluation: Arc<ResolvedFrameEvaluation>,
         clock: u64,
     ) {
+        self.waiting.retain(|entry| entry.key != key);
         if let Some(entry) = self.entries.iter_mut().find(|entry| entry.key == key) {
             entry.evaluation = evaluation;
             entry.last_used = clock;
@@ -477,6 +495,7 @@ impl EvaluationWorkingSet {
             last_used: clock,
             gpu_output_binding: None,
         });
+        self.trim_preparation_owners();
     }
 
     /// Retain one unresolved wait entry for an exact key.
@@ -491,9 +510,119 @@ impl EvaluationWorkingSet {
                 entry.priority = priority;
             }
             entry.dependencies = dependencies;
+            entry.pending_dependencies = Arc::clone(&entry.dependencies);
+            entry.memoized = true;
+            entry.preparation = None;
             return;
         }
-        self.waiting.push(EvaluationWaitEntry { key, priority, dependencies });
+        self.waiting.push(EvaluationWaitEntry {
+            key,
+            priority,
+            pending_dependencies: Arc::clone(&dependencies),
+            dependencies,
+            memoized: true,
+            preparation: None,
+            last_used: 0,
+        });
+    }
+
+    pub(crate) fn discard_incompatible_preparation(
+        &mut self,
+        key: FrameEvaluationKey,
+        generation: u64,
+        author_snapshot: Option<mondrian_renderer::PreparedVisualAuthorSnapshotIdentity>,
+        budget: mondrian_effects::EffectGraphExecutionBudget,
+    ) {
+        self.waiting.retain(|entry| {
+            entry.key != key
+                || entry.preparation.as_ref().is_none_or(|prepared| {
+                    prepared.compatible_scope(generation, author_snapshot, budget)
+                })
+        });
+    }
+
+    pub(crate) fn take_preparation(
+        &mut self,
+        key: FrameEvaluationKey,
+    ) -> Option<(
+        Box<crate::app::preview_timeline_execution::PreviewTimelinePreparation>,
+        Arc<[EvaluationDependency]>,
+    )> {
+        let index = self
+            .waiting
+            .iter()
+            .position(|entry| entry.key == key && entry.preparation.is_some())?;
+        let entry = self.waiting.remove(index);
+        Some((
+            entry.preparation.expect("selected preparation owner"),
+            entry.dependencies,
+        ))
+    }
+
+    pub(crate) fn insert_preparing(
+        &mut self,
+        key: FrameEvaluationKey,
+        priority: MediaPreviewRequestPriority,
+        dependencies: Arc<[EvaluationDependency]>,
+        pending_dependencies: Arc<[EvaluationDependency]>,
+        memoized: bool,
+        preparation: Box<crate::app::preview_timeline_execution::PreviewTimelinePreparation>,
+        clock: u64,
+    ) {
+        self.waiting.retain(|entry| entry.key != key);
+        self.waiting.push(EvaluationWaitEntry {
+            key,
+            priority,
+            dependencies,
+            pending_dependencies,
+            memoized,
+            preparation: Some(preparation),
+            last_used: clock,
+        });
+        self.trim_preparation_owners();
+    }
+
+    /// Ready evaluations and partially prepared inputs share the original four
+    /// physical owner slots. Cheap producer-wait metadata remains independent.
+    fn trim_preparation_owners(&mut self) {
+        while self.entries.len()
+            + self.waiting.iter().filter(|entry| entry.preparation.is_some()).count()
+            > Self::capacity()
+        {
+            let prepared = self
+                .waiting
+                .iter()
+                .enumerate()
+                .filter(|(_, entry)| entry.preparation.is_some())
+                .min_by_key(|(_, entry)| {
+                    (
+                        entry.priority == MediaPreviewRequestPriority::Current,
+                        entry.last_used,
+                    )
+                })
+                .map(|(index, entry)| (index, entry.priority, entry.last_used));
+            let ready = self
+                .entries
+                .iter()
+                .enumerate()
+                .min_by_key(|(_, entry)| entry.last_used)
+                .map(|(index, entry)| (index, entry.last_used));
+            let evict_prepared = prepared.is_some_and(|(_, priority, clock)| {
+                priority == MediaPreviewRequestPriority::Prefetch
+                    || ready.is_none_or(|(_, last)| clock <= last)
+            });
+            if evict_prepared {
+                let index = prepared.expect("selected input owner").0;
+                self.waiting[index].preparation = None;
+                if !self.waiting[index].memoized {
+                    self.waiting.remove(index);
+                }
+            } else if let Some((index, _)) = ready {
+                self.entries.remove(index);
+            } else {
+                break;
+            }
+        }
     }
 
     /// Drop exact dependents and report whether a waiting candidate became actionable.
@@ -505,14 +634,23 @@ impl EvaluationWorkingSet {
         }) {
             self.completed = None;
         }
-        let waiting_before = self.waiting.len();
-        self.waiting.retain(|entry| {
-            !entry.dependencies.iter().any(|dependency| {
+        let mut released = false;
+        self.waiting.retain_mut(|entry| {
+            let matches = entry.pending_dependencies.iter().any(|dependency| {
                 matches!(
                     dependency,
                     EvaluationDependency::MediaProducer(key) if key == media_key
                 )
-            })
+            });
+            if !matches { return true; }
+            released = true;
+            if entry.preparation.is_some() {
+                entry.memoized = false;
+                entry.pending_dependencies = entry.pending_dependencies.iter().filter(|dependency| {
+                    !matches!(dependency, EvaluationDependency::MediaProducer(key) if key == media_key)
+                }).cloned().collect::<Vec<_>>().into();
+                true
+            } else { false }
         });
         self.entries.retain(|entry| {
             !entry.evaluation.dependencies.iter().any(|dependency| {
@@ -522,7 +660,7 @@ impl EvaluationWorkingSet {
                 )
             })
         });
-        self.waiting.len() != waiting_before
+        released
     }
 }
 

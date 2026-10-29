@@ -3,6 +3,7 @@
 //! Discovery is bounded in a domain-owned thread; plugin code loads only in
 //! its format-specific isolated discovery child.
 
+use crate::app::AppMessage;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::sync::Arc;
@@ -64,7 +65,11 @@ impl AppState {
                     failed: 0,
                 });
             }
-            Err(error) => self.set_status_hint(format!("原生音频插件恢复无法启动：{error}"), true),
+            Err(error) => self.set_status_hint(
+                AppMessage::new("status-native-audio-restore-failed")
+                    .with_text("error", error.to_string()),
+                true,
+            ),
         }
     }
 
@@ -98,6 +103,9 @@ impl AppState {
                 }
             }
         }
+        if new_plugins {
+            self.audio_input_observations.invalidate();
+        }
         if new_plugins && self.active_sequence().is_some() {
             self.reconcile_audio_after_committed_authoring_change("native_audio_catalog_restore");
         }
@@ -108,16 +116,18 @@ impl AppState {
             }
             if restore.failed > 0 {
                 self.set_status_hint(
-                    format!(
-                        "音频插件恢复完成：{} 个库可用，{} 个库失败；可重新选择失败的插件文件",
-                        restore.succeeded, restore.failed
-                    ),
+                    AppMessage::new("status-audio-restored-partial")
+                        .with_count("available", restore.succeeded)
+                        .with_count("failed", restore.failed),
                     true,
                 );
             } else if restore.succeeded > 0
                 && !self.status_hint.as_ref().is_some_and(|(_, is_error)| *is_error)
             {
-                self.set_status_hint(format!("已恢复 {} 个音频插件库", restore.succeeded), false);
+                self.set_status_hint(
+                    AppMessage::new("status-audio-restored").with_count("count", restore.succeeded),
+                    false,
+                );
             }
             changed = true;
         } else {

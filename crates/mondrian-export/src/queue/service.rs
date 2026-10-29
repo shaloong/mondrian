@@ -1,5 +1,8 @@
 //! Bounded offline export admission, lifecycle, cancellation, and evidence.
 
+mod native_child_settlement;
+pub use native_child_settlement::ExportNativeChildSettlementEvidence;
+
 use std::collections::VecDeque;
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -78,6 +81,10 @@ pub struct ExportExecutionResourcePolicy {
     pub effect_cache_bytes: usize,
     /// Maximum transient Temporal/ROI working bytes for one frame.
     pub effect_working_bytes: usize,
+    /// Maximum frame-independent native Effect instances retained by this job.
+    pub effect_processor_instances: usize,
+    /// Optional native/buffer residency; active use also fits effect_working_bytes.
+    pub effect_processor_bytes: usize,
     /// Hard compositor-owned transient and retained working-set grant.
     ///
     /// This is frozen per attempt and does not shrink with cache pressure.
@@ -140,6 +147,8 @@ impl Default for ExportExecutionResourcePolicy {
             effect_cache_entries: 32,
             effect_cache_bytes: 96 * 1024 * 1024,
             effect_working_bytes: 384 * 1024 * 1024,
+            effect_processor_instances: 4,
+            effect_processor_bytes: 192 * 1024 * 1024,
             cpu_composite_working_set: TimelineCpuWorkingSetGrant {
                 max_active_bytes: 1024 * 1024 * 1024,
                 max_retained_scratch_bytes: 512 * 1024 * 1024,
@@ -737,6 +746,13 @@ pub struct ExportEnduranceSnapshot {
     pub audio_source_owner_failures: u64,
     /// Audio-source owners currently live inside an executing job.
     pub active_audio_source_owners: u64,
+    /// Original Audio native-child observations in this same Queue owner domain.
+    pub audio_native_children: ExportNativeChildSettlementEvidence,
+}
+
+impl ExportEnduranceSnapshot {
+    /// Version emitted by the current queue observation contract.
+    pub const SCHEMA_VERSION: u32 = 3;
 }
 
 /// Terminal evidence returned by explicit queue retirement.
@@ -779,6 +795,8 @@ pub struct ExportQueueShutdownEvidence {
     pub audio_source_owner_failures: u64,
     /// Audio-source owners still live after Queue retirement.
     pub active_audio_source_owners: u64,
+    /// Original Audio native-child observations; settlement is not graceful ACK.
+    pub audio_native_children: ExportNativeChildSettlementEvidence,
 }
 
 impl ExportQueueShutdownEvidence {
@@ -788,7 +806,7 @@ impl ExportQueueShutdownEvidence {
     /// normal worker termination, even when no jobs were admitted.
     #[must_use]
     pub const fn all_resources_released(&self) -> bool {
-        self.schema_version == 4
+        self.schema_version == 5
             && self.worker_started
             && !self.worker_start_failed
             && self.worker_terminated
@@ -801,6 +819,7 @@ impl ExportQueueShutdownEvidence {
             && self.audio_source_owners_started == self.audio_source_owners_closed
             && self.audio_source_owner_failures == 0
             && self.active_audio_source_owners == 0
+            && self.audio_native_children.all_resources_released()
     }
 }
 
@@ -848,6 +867,7 @@ struct ExportQueueState {
     worker_detached: bool,
     worker_owner_abandoned: bool,
     active_audio_source_owners: u64,
+    audio_native_children: ExportNativeChildSettlementEvidence,
 }
 
 struct RenderQueueInner {
@@ -1745,7 +1765,7 @@ impl RenderQueue {
             })
             .count() as u64;
         ExportEnduranceSnapshot {
-            schema_version: 2,
+            schema_version: ExportEnduranceSnapshot::SCHEMA_VERSION,
             observed_at_us,
             shutdown_requested: state.shutdown_requested,
             worker_running: state.worker_running,
@@ -1765,6 +1785,7 @@ impl RenderQueue {
             audio_source_owners_closed: state.counters.audio_source_owners_closed,
             audio_source_owner_failures: state.counters.audio_source_owner_failures,
             active_audio_source_owners: state.active_audio_source_owners,
+            audio_native_children: state.audio_native_children,
         }
     }
 
@@ -1910,7 +1931,7 @@ impl RenderQueue {
             })
             .count() as u64;
         ExportQueueShutdownEvidence {
-            schema_version: 4,
+            schema_version: 5,
             worker_started: state.worker_started,
             worker_start_failed: state.worker_start_failed,
             worker_terminated: state.worker_terminated,
@@ -1925,6 +1946,7 @@ impl RenderQueue {
             audio_source_owners_closed: state.counters.audio_source_owners_closed,
             audio_source_owner_failures: state.counters.audio_source_owner_failures,
             active_audio_source_owners: state.active_audio_source_owners,
+            audio_native_children: state.audio_native_children,
         }
     }
 
@@ -2420,7 +2442,7 @@ mod shutdown_evidence_contract_tests {
     #[test]
     fn shutdown_evidence_requires_started_terminated_worker_and_empty_workset() {
         let clean = ExportQueueShutdownEvidence {
-            schema_version: 4,
+            schema_version: 5,
             worker_started: true,
             worker_start_failed: false,
             worker_terminated: true,
@@ -2435,11 +2457,12 @@ mod shutdown_evidence_contract_tests {
             audio_source_owners_closed: 1,
             audio_source_owner_failures: 0,
             active_audio_source_owners: 0,
+            audio_native_children: Default::default(),
         };
 
         assert!(clean.all_resources_released());
         assert!(
-            !ExportQueueShutdownEvidence { schema_version: 3, ..clean }.all_resources_released()
+            !ExportQueueShutdownEvidence { schema_version: 4, ..clean }.all_resources_released()
         );
         assert!(!ExportQueueShutdownEvidence { pending_jobs: 1, ..clean }.all_resources_released());
         assert!(!ExportQueueShutdownEvidence { active_jobs: 1, ..clean }.all_resources_released());
@@ -2483,12 +2506,24 @@ mod shutdown_evidence_contract_tests {
             !ExportQueueShutdownEvidence { active_audio_source_owners: 1, ..clean }
                 .all_resources_released()
         );
+        for audio_native_children in [
+            ExportNativeChildSettlementEvidence { registration_scopes: 1, ..Default::default() },
+            ExportNativeChildSettlementEvidence { pending_children: 1, ..Default::default() },
+            ExportNativeChildSettlementEvidence { unavailable: true, ..Default::default() },
+            ExportNativeChildSettlementEvidence { children_registered: 1, ..Default::default() },
+            ExportNativeChildSettlementEvidence { children_settled: 1, ..Default::default() },
+        ] {
+            assert!(
+                !ExportQueueShutdownEvidence { audio_native_children, ..clean }
+                    .all_resources_released()
+            );
+        }
     }
 
     #[test]
-    fn shutdown_evidence_schema_four_round_trips_exact_owner_facts() {
+    fn shutdown_evidence_schema_five_round_trips_exact_owner_facts() {
         let evidence = ExportQueueShutdownEvidence {
-            schema_version: 4,
+            schema_version: 5,
             worker_started: false,
             worker_start_failed: true,
             worker_terminated: false,
@@ -2503,6 +2538,13 @@ mod shutdown_evidence_contract_tests {
             audio_source_owners_closed: 1,
             audio_source_owner_failures: 1,
             active_audio_source_owners: 0,
+            audio_native_children: ExportNativeChildSettlementEvidence {
+                registration_scopes: 1,
+                children_registered: 2,
+                children_settled: 1,
+                pending_children: 1,
+                unavailable: true,
+            },
         };
 
         let encoded = serde_json::to_string(&evidence).expect("serialize shutdown evidence");
@@ -2514,6 +2556,9 @@ mod shutdown_evidence_contract_tests {
         assert!(encoded.contains("\"worker_start_failed\":true"));
         assert!(encoded.contains("\"worker_owner_abandoned\":true"));
         assert!(encoded.contains("\"audio_source_owner_failures\":1"));
+        let mut legacy = serde_json::to_value(evidence).unwrap();
+        legacy.as_object_mut().unwrap().remove("audio_native_children");
+        assert!(serde_json::from_value::<ExportQueueShutdownEvidence>(legacy).is_err());
     }
 
     #[test]

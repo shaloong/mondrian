@@ -56,15 +56,45 @@ define_id!(AssetId, "素材资产 ID");
 define_id!(CharacterId, "角色 ID");
 define_id!(SceneId, "场景 ID");
 define_id!(EffectId, "效果节点 ID");
+define_id!(
+    EffectProcessorOwnerId,
+    "Parent-issued visual processor lifetime identity"
+);
 define_id!(AnimationTrackId, "动画轨道 ID");
 define_id!(KeyframeId, "关键帧 ID");
+define_id!(
+    AuthoringGestureId,
+    "Identity of one continuous authoring interaction"
+);
 define_id!(AudioComponentEditId, "音频组件编辑 ID");
 define_id!(AudioProcessingScopeId, "音频处理作用域 ID");
 define_id!(AudioSourceComponentId, "音频源组件 ID");
 define_id!(AudioTransitionId, "音频转场 ID");
+define_id!(
+    AudioNoteLaneId,
+    "Sequence-owned authored audio note lane identity"
+);
+define_id!(AudioNoteId, "Sequence-owned authored audio note identity");
 define_id!(VideoTransitionId, "视频转场 ID");
 define_id!(AudioRouteId, "音频路由 ID");
+define_id!(
+    AudioPreparedPlanId,
+    "Immutable prepared audio plan identity"
+);
+define_id!(
+    AudioRenderSessionId,
+    "Exclusive generated audio render session identity"
+);
 define_id!(AudioProcessorInstanceId, "音频处理器实例 ID");
+define_id!(AudioProcessorBindingId, "实际原生音频处理器绑定 ID");
+define_id!(
+    AudioProcessorInputObservationId,
+    "Transient realized processor input observation identity"
+);
+define_id!(
+    AudioPcmRendererMaterializationId,
+    "Exclusive live PCM renderer materialization; never an author/project ID"
+);
 define_id!(MixBusId, "混音总线 ID");
 define_id!(ProgramOutputId, "节目输出 ID");
 define_id!(AudioRoleId, "音频角色 ID");

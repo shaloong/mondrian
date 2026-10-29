@@ -3,6 +3,10 @@
 //! UI Adapters submit the closed product action; Timeline Modules own Channel
 //! Strip/Rack mutation and validation; App owns transaction and execution refresh.
 
+#[cfg(test)]
+mod musical_reference_tests;
+
+use crate::app::AppMessage;
 use mondrian_audio::{
     AudioProcessingMode, AudioRenderContract, ClapPluginDescriptor, Vst3PluginDescriptor,
 };
@@ -26,13 +30,69 @@ use super::product_action::{
 use super::AppState;
 
 impl AppState {
+    fn select_audio_scope_occurrence(
+        &mut self,
+        payload: super::product_action::AudioScopeOccurrencePayload,
+    ) -> Result<()> {
+        let failure = |reason: String| MondrianError::WorkflowStepFailed {
+            step_id: "audio_select_scope_occurrence".into(),
+            reason,
+        };
+        let sequence =
+            self.active_sequence().ok_or_else(|| failure("No active Sequence".into()))?;
+        if sequence.id != payload.sequence_id
+            || self
+                .primary_selected_clip()
+                .is_none_or(|clip| clip.clip_id != payload.address.clip_id)
+        {
+            return Err(failure(
+                "Scope occurrence no longer belongs to the inspected Clip".into(),
+            ));
+        }
+        let occurrence = inspect_audio_component(sequence, payload.address)
+            .map_err(|error| failure(error.to_string()))?;
+        if occurrence.component().processing.scope_id != payload.scope_id {
+            return Err(failure(
+                "Component occurrence belongs to another Scope".into(),
+            ));
+        }
+        self.selection.audio_scope_occurrences.retain(|(sequence_id, _), address| {
+            *sequence_id == payload.sequence_id && address.clip_id == payload.address.clip_id
+        });
+        self.selection
+            .audio_scope_occurrences
+            .insert((payload.sequence_id, payload.scope_id), payload.address);
+        Ok(())
+    }
+
     pub(super) fn dispatch_audio_product_action(
         &mut self,
         action: AudioProductAction,
     ) -> Result<()> {
         match action {
+            AudioProductAction::QueryNativeParameter(payload) => {
+                self.query_native_audio_parameter_product(payload)
+            }
+            AudioProductAction::NativeEditor(payload) => {
+                self.control_native_audio_editor_product(payload)
+            }
+            AudioProductAction::RewireProcessorInput(payload) => {
+                self.rewire_observed_processor_input(payload)
+            }
+            AudioProductAction::ConnectProcessorInput(payload) => {
+                self.connect_observed_processor_input(payload)
+            }
+            AudioProductAction::QueryProcessorInputs(payload) => {
+                self.query_audio_processor_inputs(payload)
+            }
+            AudioProductAction::SelectScopeOccurrence(payload) => {
+                self.select_audio_scope_occurrence(payload)
+            }
             AudioProductAction::SetTrackSolo(payload) => self.set_audio_track_solo(payload),
             AudioProductAction::EditAutomation(request) => self.edit_audio_automation(request),
+            AudioProductAction::CurveClipboard(payload) => {
+                self.dispatch_audio_curve_clipboard(*payload)
+            }
             AudioProductAction::EditComponent(request) => self.edit_audio_component(request),
             AudioProductAction::EditProcessorRack(request) => {
                 if matches!(request.edit, AudioProcessorRackEdit::RebindNative { .. }) {
@@ -65,8 +125,9 @@ impl AppState {
                 let descriptors = catalog
                     .install_library(payload.path)
                     .map_err(|error| clap_unavailable(error.to_string()))?;
+                self.audio_input_observations.invalidate();
                 self.set_status_hint(
-                    format!("已安装 {} 个 CLAP 处理器", descriptors.len()),
+                    AppMessage::new("status-clap-installed").with_count("count", descriptors.len()),
                     false,
                 );
                 if !descriptors.is_empty() && self.active_sequence().is_some() {
@@ -116,8 +177,9 @@ impl AppState {
                 let descriptors = catalog
                     .install_plugin(payload.path)
                     .map_err(|error| vst3_unavailable(error.to_string()))?;
+                self.audio_input_observations.invalidate();
                 self.set_status_hint(
-                    format!("已安装 {} 个 VST3 处理器", descriptors.len()),
+                    AppMessage::new("status-vst3-installed").with_count("count", descriptors.len()),
                     false,
                 );
                 if !descriptors.is_empty() && self.active_sequence().is_some() {
@@ -170,7 +232,7 @@ impl AppState {
         catalog.descriptors().map_err(|error| vst3_unavailable(error.to_string()))
     }
 
-    fn plugin_render_contract(
+    pub(super) fn plugin_render_contract(
         &self,
         channel_layout: mondrian_core::AudioChannelLayout,
     ) -> AudioRenderContract {
@@ -297,7 +359,10 @@ impl AppState {
         })
     }
 
-    fn edit_audio_automation(&mut self, request: AudioAutomationEditRequest) -> Result<()> {
+    pub(super) fn edit_audio_automation(
+        &mut self,
+        request: AudioAutomationEditRequest,
+    ) -> Result<()> {
         let sequence_id =
             self.active_sequence_id().ok_or_else(|| MondrianError::WorkflowStepFailed {
                 step_id: "audio_edit_automation".to_owned(),
@@ -427,6 +492,87 @@ impl AppState {
         Ok(())
     }
 
+    fn admit_observed_processor_input(
+        &self,
+        payload: &super::product_action::AudioProcessorInputConnectionPayload,
+        step_id: &str,
+    ) -> Result<()> {
+        let failure = |reason: &str| MondrianError::WorkflowStepFailed {
+            step_id: step_id.to_owned(),
+            reason: reason.to_owned(),
+        };
+        let super::audio_input_observation::AudioInputObservation::Ready(observed) =
+            self.audio_processor_input_observation(payload.binding.query_payload())
+        else {
+            return Err(failure(
+                "Processor input observation is unavailable; inspect inputs again",
+            ));
+        };
+        if observed.binding != payload.binding {
+            return Err(failure(
+                "Processor input observation has changed; refresh the connection menu",
+            ));
+        }
+        if !observed
+            .inputs
+            .auxiliary_inputs
+            .buses
+            .iter()
+            .any(|bus| bus.bus_key == payload.bus_key)
+        {
+            return Err(failure(
+                "Requested auxiliary input is absent from the observed contract",
+            ));
+        }
+        Ok(())
+    }
+
+    fn connect_observed_processor_input(
+        &mut self,
+        payload: super::product_action::AudioProcessorInputConnectionPayload,
+    ) -> Result<()> {
+        self.admit_observed_processor_input(&payload, "audio_connect_processor_input")?;
+        self.edit_audio_routing(AudioRoutingEditRequest {
+            edit: mondrian_timeline::AudioRoutingEdit::CreateProcessorSidechain {
+                source: payload.source,
+                processor_id: payload.binding.processor_id,
+                bus_key: payload.bus_key,
+            },
+        })
+    }
+
+    fn rewire_observed_processor_input(
+        &mut self,
+        payload: super::product_action::AudioProcessorInputRewirePayload,
+    ) -> Result<()> {
+        let failure = |reason: &str| MondrianError::WorkflowStepFailed {
+            step_id: "audio_rewire_processor_input".to_owned(),
+            reason: reason.to_owned(),
+        };
+        self.admit_observed_processor_input(&payload.connection, "audio_rewire_processor_input")?;
+        let sequence = self.active_sequence().ok_or_else(|| failure("No active Sequence"))?;
+        let inspected =
+            mondrian_timeline::inspect_audio_processor_sidechain(sequence, payload.route_id)
+                .map_err(|error| failure(&error.to_string()))?;
+        let route = inspected.route();
+        if route.source != payload.expected_source
+            || route.processor_id != payload.connection.binding.processor_id
+            || route.bus_key != payload.connection.bus_key
+        {
+            return Err(failure(
+                "Processor input Route has changed; refresh the source menu",
+            ));
+        }
+        self.edit_audio_routing(AudioRoutingEditRequest {
+            edit: mondrian_timeline::AudioRoutingEdit::SetProcessorSidechainEndpoints {
+                route_id: payload.route_id,
+                source: payload.connection.source,
+                processor_id: payload.connection.binding.processor_id,
+                bus_key: payload.connection.bus_key,
+            },
+        })
+    }
+
     fn edit_audio_routing(&mut self, request: AudioRoutingEditRequest) -> Result<()> {
         let sequence_id =
             self.active_sequence_id().ok_or_else(|| MondrianError::WorkflowStepFailed {
@@ -527,6 +673,218 @@ mod tests {
     }
 
     #[test]
+    fn parameter_reset_audio_roundtrips_constrained_history_and_unicode_archives() {
+        use mondrian_core::{ExactAutomationKeyframe, InterpolationType, TimelineTime};
+        let mut sequence = Sequence::new("Audio reset");
+        let track_id = sequence.audio_tracks[0].id;
+        let target = AudioAutomationTarget::ChannelFader {
+            owner: AudioChannelStripOwner::Track { track_id },
+        };
+        for (time, value) in [(0, -12.0), (1, -6.0), (2, -3.0)] {
+            mondrian_timeline::apply_audio_automation_edit(
+                &mut sequence,
+                &AudioAutomationEditRequest {
+                    target: target.clone(),
+                    edit: AudioAutomationEdit::UpsertKeyframe {
+                        keyframe: ExactAutomationKeyframe::linear(
+                            TimelineTime::new(time, 1).expect("time"),
+                            value,
+                        ),
+                    },
+                },
+            )
+            .expect("seed curve");
+        }
+        let key = mondrian_timeline::inspect_audio_automation(&sequence, &target)
+            .expect("target")
+            .curve()
+            .expect("curve")
+            .keyframes[1]
+            .id;
+        mondrian_timeline::apply_audio_automation_edit(
+            &mut sequence,
+            &AudioAutomationEditRequest {
+                target: target.clone(),
+                edit: AudioAutomationEdit::SetInterpolation {
+                    keyframe_id: key,
+                    interpolation: InterpolationType::AutoBezier,
+                },
+            },
+        )
+        .expect("constrained curve");
+        let original = sequence.clone();
+        let mut state = AppState::new();
+        state.test_set_sequence(Some(sequence));
+        let action = || {
+            audio_automation_edit_action(AudioAutomationEditRequest {
+                target: target.clone(),
+                edit: AudioAutomationEdit::ResetToDefault,
+            })
+        };
+        let generation = state.project_author_generation();
+        state.active_sequence_mut_uncommitted().expect("lock").audio_tracks[0].is_locked = true;
+        let locked = state.active_sequence().expect("locked").clone();
+        state.dispatch_action(action()).expect_err("locked reset");
+        assert!(state
+            .active_sequence()
+            .expect("unchanged")
+            .author_state_eq_ignoring_revision(&locked));
+        assert_eq!(state.project_author_generation(), generation);
+        state.active_sequence_mut_uncommitted().expect("unlock").audio_tracks[0].is_locked = false;
+        state.dispatch_action(action()).expect("reset");
+        let edited = state.active_sequence().expect("reset").clone();
+        let inspection =
+            mondrian_timeline::inspect_audio_automation(&edited, &target).expect("target");
+        assert!(inspection.curve().is_none());
+        assert_eq!(
+            inspection.default_value(),
+            0.0,
+            "definition default, not last sampled value"
+        );
+        assert_eq!(state.project_author_generation(), generation + 1);
+        let history = state.authoring_history().expect("history").diagnostics();
+        let _ = state.dispatch_action(action());
+        assert_eq!(state.project_author_generation(), generation + 1);
+        assert_eq!(
+            state.authoring_history().expect("history").diagnostics(),
+            history
+        );
+        assert!(state.undo_timeline().expect("one Undo"));
+        assert!(!state.can_undo_action());
+        assert!(state
+            .active_sequence()
+            .expect("undone")
+            .author_state_eq_ignoring_revision(&original));
+        let directory = tempfile::tempdir().expect("archives");
+        let undone = directory.path().join("音频参数重置撤销🙂.mdp");
+        state.save_project_file_as(undone.clone()).expect("save undone");
+        assert!(state.can_redo_action());
+        let mut reopened = AppState::new();
+        reopened.open_project_file(undone).expect("reopen original");
+        assert!(reopened
+            .active_sequence()
+            .expect("original archive")
+            .author_state_eq_ignoring_revision(&original));
+        assert!(!reopened.can_undo_action() && !reopened.can_redo_action());
+        drop(reopened);
+        assert!(state.redo_timeline().expect("Redo after save"));
+        let redone = directory.path().join("音频参数重置重做🙂.mdp");
+        state.save_project_file_as(redone.clone()).expect("save reset");
+        drop(state);
+        let mut reopened = AppState::new();
+        reopened.open_project_file(redone).expect("reopen reset");
+        assert!(reopened
+            .active_sequence()
+            .expect("reset archive")
+            .author_state_eq_ignoring_revision(&edited));
+        assert!(!reopened.can_undo_action() && !reopened.can_redo_action());
+    }
+
+    #[test]
+    fn batch_key_removal_audio_action_preserves_atomic_history_and_track_locks() {
+        use mondrian_core::{ExactAutomationKeyframe, InterpolationType, KeyframeId, TimelineTime};
+        for preset in [
+            InterpolationType::AutoBezier,
+            InterpolationType::ContinuousBezier,
+        ] {
+            let mut sequence = Sequence::new("Batch automation");
+            let track_id = sequence.audio_tracks[0].id;
+            let target = AudioAutomationTarget::ChannelFader {
+                owner: AudioChannelStripOwner::Track { track_id },
+            };
+            let mut ids = Vec::new();
+            for (time, value) in [(0, -12.0), (1, -6.0), (2, 0.0)] {
+                let key = ExactAutomationKeyframe::linear(
+                    TimelineTime::new(time, 1).expect("time"),
+                    value,
+                );
+                ids.push(key.id);
+                mondrian_timeline::apply_audio_automation_edit(
+                    &mut sequence,
+                    &AudioAutomationEditRequest {
+                        target: target.clone(),
+                        edit: AudioAutomationEdit::UpsertKeyframe { keyframe: key },
+                    },
+                )
+                .expect("seed");
+            }
+            mondrian_timeline::apply_audio_automation_edit(
+                &mut sequence,
+                &AudioAutomationEditRequest {
+                    target: target.clone(),
+                    edit: AudioAutomationEdit::SetInterpolation {
+                        keyframe_id: ids[1],
+                        interpolation: preset,
+                    },
+                },
+            )
+            .expect("mode");
+            let mut state = AppState::new();
+            state.test_set_sequence(Some(sequence));
+            let original = state.active_sequence().expect("origin").clone();
+            let retain_time = TimelineTime::new(3, 2).expect("retention");
+            let retained = mondrian_timeline::inspect_audio_automation(&original, &target)
+                .expect("inspection")
+                .curve()
+                .expect("curve")
+                .evaluate(retain_time)
+                .expect("retained");
+            let action = |ids| {
+                audio_automation_edit_action(AudioAutomationEditRequest {
+                    target: target.clone(),
+                    edit: AudioAutomationEdit::RemoveKeyframes { keyframe_ids: ids, retain_time },
+                })
+            };
+            let generation = state.project_author_generation();
+            let history = state.authoring_history().expect("history").diagnostics();
+            for invalid in [
+                vec![],
+                vec![ids[1], ids[1]],
+                vec![ids[1], KeyframeId::new()],
+            ] {
+                state.dispatch_action(action(invalid)).expect_err("invalid selection");
+                assert!(state
+                    .active_sequence()
+                    .expect("unchanged")
+                    .author_state_eq_ignoring_revision(&original));
+                assert_eq!(state.project_author_generation(), generation);
+                assert_eq!(
+                    state.authoring_history().expect("history").diagnostics(),
+                    history
+                );
+            }
+            state.dispatch_action(action(ids.clone())).expect("remove all");
+            let changed = state.active_sequence().expect("changed").clone();
+            let inspection =
+                mondrian_timeline::inspect_audio_automation(&changed, &target).expect("inspection");
+            assert!(inspection.curve().is_none());
+            assert_eq!(inspection.default_value(), retained);
+            assert!(state.undo_timeline().expect("one undo"));
+            assert!(state
+                .active_sequence()
+                .expect("undone")
+                .author_state_eq_ignoring_revision(&original));
+            assert!(state.redo_timeline().expect("one redo"));
+            assert!(state
+                .active_sequence()
+                .expect("redone")
+                .author_state_eq_ignoring_revision(&changed));
+            let mut locked = original.clone();
+            locked.audio_tracks[0].is_locked = true;
+            let before = locked.clone();
+            assert!(mondrian_timeline::apply_audio_automation_edit(
+                &mut locked,
+                &AudioAutomationEditRequest {
+                    target: target.clone(),
+                    edit: AudioAutomationEdit::RemoveKeyframes { keyframe_ids: ids, retain_time },
+                }
+            )
+            .is_err());
+            assert_eq!(locked, before);
+        }
+    }
+
+    #[test]
     fn typed_rack_actions_commit_once_and_round_trip_through_undo_redo() {
         let mut state = AppState::new();
         let sequence = Sequence::new("Processor authoring");
@@ -580,6 +938,8 @@ mod tests {
         assert_eq!(
             gain.parameters[&ParameterId::new_static(GAIN_DB_PARAMETER_ID)]
                 .automation
+                .as_ref()
+                .expect("bound host curve")
                 .default_value,
             0.0
         );
@@ -600,6 +960,8 @@ mod tests {
         assert_eq!(
             gain.parameters[&ParameterId::new_static(GAIN_DB_PARAMETER_ID)]
                 .automation
+                .as_ref()
+                .expect("bound host curve")
                 .default_value,
             -6.0
         );
@@ -643,6 +1005,137 @@ mod tests {
                 .fader_db,
             -6.0
         );
+    }
+
+    #[test]
+    fn typed_handle_edit_commits_once_and_preserves_curve_after_save_reopen() {
+        use mondrian_core::{
+            BezierHandleSide, ExactAutomationKeyframe, ExactAutomationTangentMode,
+            ExactBezierHandleEdit, InterpolationType, TimelineTime,
+        };
+        let mut sequence = Sequence::new("Handle history");
+        let owner = AudioChannelStripOwner::Track { track_id: sequence.audio_tracks[0].id };
+        let target = AudioAutomationTarget::ChannelFader { owner };
+        let keys = [
+            ExactAutomationKeyframe::linear(TimelineTime::ZERO, -12.0),
+            ExactAutomationKeyframe::linear(TimelineTime::ONE, -6.0),
+            ExactAutomationKeyframe::linear(TimelineTime::new(2, 1).expect("last time"), 0.0),
+        ];
+        for keyframe in keys.iter().cloned() {
+            apply_audio_automation_edit(
+                &mut sequence,
+                &AudioAutomationEditRequest {
+                    target: target.clone(),
+                    edit: AudioAutomationEdit::UpsertKeyframe { keyframe },
+                },
+            )
+            .expect("fixture key");
+        }
+        apply_audio_automation_edit(
+            &mut sequence,
+            &AudioAutomationEditRequest {
+                target: target.clone(),
+                edit: AudioAutomationEdit::SetInterpolation {
+                    keyframe_id: keys[1].id,
+                    interpolation: InterpolationType::AutoBezier,
+                },
+            },
+        )
+        .expect("fixture auto");
+        let mut state = AppState::new();
+        state.test_set_sequence(Some(sequence));
+        let curve = |state: &AppState| {
+            audio_channel_strip(state.active_sequence().expect("sequence"), owner)
+                .expect("strip")
+                .fader_automation
+                .clone()
+                .expect("curve")
+        };
+        let before = curve(&state);
+        let generation = state.project_author_generation();
+        let request = AudioAutomationEditRequest {
+            target: target.clone(),
+            edit: AudioAutomationEdit::EditHandle {
+                keyframe_id: keys[1].id,
+                side: BezierHandleSide::Outgoing,
+                edit: ExactBezierHandleEdit { time_offset: None, value_offset: Some(1.5) },
+            },
+        };
+        state
+            .dispatch_action(audio_automation_edit_action(request.clone()))
+            .expect("typed handle action");
+        let after = curve(&state);
+        assert_eq!(state.project_author_generation(), generation + 1);
+        assert_eq!(
+            after.keyframes[1].tangent_mode,
+            ExactAutomationTangentMode::Continuous
+        );
+        assert_eq!(
+            after.keyframes[1].out_handle.expect("handle").time_offset,
+            TimelineTime::new(1, 3).expect("untouched exact axis")
+        );
+        assert_eq!(
+            after.keyframes[1].out_handle.expect("handle").value_offset,
+            1.5
+        );
+        assert!(state.undo_timeline().expect("undo"));
+        assert_eq!(curve(&state), before);
+        assert!(
+            !state.can_undo_action(),
+            "one handle edit owns one history entry"
+        );
+        assert!(state.redo_timeline().expect("redo"));
+        assert_eq!(curve(&state), after);
+        let generation = state.project_author_generation();
+        state
+            .dispatch_action(audio_automation_edit_action(request))
+            .expect("noop action");
+        assert_eq!(state.project_author_generation(), generation);
+        assert_eq!(curve(&state), after);
+        assert!(
+            state.dispatch_action(audio_automation_edit_action(AudioAutomationEditRequest {
+                target: target.clone(),
+                edit: AudioAutomationEdit::EditHandle {
+                    keyframe_id: keys[1].id,
+                    side: BezierHandleSide::Outgoing,
+                    edit: ExactBezierHandleEdit {
+                        time_offset: Some(TimelineTime::new(1, 2).expect("changed time")),
+                        value_offset: Some(f64::INFINITY),
+                    },
+                },
+            })).is_err(),
+            "An invalid coordinate must not become an omitted axis and publish the other half of an edit"
+        );
+        assert_eq!(state.project_author_generation(), generation);
+        assert_eq!(curve(&state), after);
+        assert!(state
+            .dispatch_action(audio_automation_edit_action(AudioAutomationEditRequest {
+                target,
+                edit: AudioAutomationEdit::EditHandle {
+                    keyframe_id: mondrian_core::KeyframeId::new(),
+                    side: BezierHandleSide::Incoming,
+                    edit: ExactBezierHandleEdit { time_offset: None, value_offset: Some(0.5) },
+                },
+            }))
+            .is_err());
+        assert_eq!(state.project_author_generation(), generation);
+        assert_eq!(curve(&state), after);
+        let directory =
+            std::env::temp_dir().join(format!("mondrian-handle-history-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&directory).expect("directory");
+        let project = directory.join("手柄 曲线.mdp");
+        state.save_project_file_as(project.clone()).expect("durable save");
+        drop(state);
+        let mut reopened = AppState::new();
+        reopened.open_project_file(project).expect("actual reopen");
+        let restored = curve(&reopened);
+        assert_eq!(restored, after);
+        for numerator in 0..=40 {
+            let time = TimelineTime::new(numerator, 20).expect("sample");
+            assert_eq!(restored.evaluate(time), after.evaluate(time));
+        }
+        drop(reopened);
+        std::fs::remove_dir_all(directory).expect("cleanup");
     }
 
     #[test]

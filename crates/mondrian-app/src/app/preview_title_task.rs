@@ -29,6 +29,7 @@ const TITLE_MAX_RESULTS_PER_POLL: usize = 8;
 pub(crate) struct PreviewTitleRasterRequest {
     pub(crate) title: EvaluatedBasicTitle,
     pub(crate) author_resolution: Resolution,
+    pub(crate) sample_aspect_ratio: mondrian_core::SampleAspectRatio,
     pub(crate) title_safe_margin: f32,
     pub(crate) sampled_resolution: Resolution,
     pub(crate) working_color_space: WorkingColorSpace,
@@ -42,6 +43,7 @@ impl PreviewTitleRasterRequest {
             self.title_safe_margin,
             self.sampled_resolution,
             self.working_color_space,
+            self.sample_aspect_ratio,
         )
     }
 }
@@ -379,6 +381,7 @@ fn preview_title_worker(
             request.title_safe_margin,
             request.sampled_resolution,
             request.working_color_space,
+            request.sample_aspect_ratio,
         );
         if stop.load(Ordering::Acquire) {
             break;
@@ -416,6 +419,7 @@ mod tests {
 
     fn request_with_text(text: &str) -> PreviewTitleRasterRequest {
         PreviewTitleRasterRequest {
+            sample_aspect_ratio: mondrian_core::SampleAspectRatio::SQUARE,
             title: mondrian_core::BasicTitle::new(
                 text,
                 mondrian_core::default_basic_title_font_family(),
@@ -518,6 +522,7 @@ mod tests {
     fn timeline_and_background_title_requests_share_one_complete_identity() {
         let request = request();
         let timeline_request = PreviewTimelineTitleRequest {
+            sample_aspect_ratio: mondrian_core::SampleAspectRatio::SQUARE,
             title: request.title.clone(),
             author_resolution: request.author_resolution,
             title_safe_margin: request.title_safe_margin,

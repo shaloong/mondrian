@@ -59,11 +59,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         request: PreviewTimelineMediaRequest,
         mut observe_key: impl FnMut(&MediaPreviewKey),
     ) -> PreviewTimelineMediaFrame {
-        let transport = snapshot.transport();
-        let access_mode = media_preview_access_mode_for_intent(media_preview_viewer_access_intent(
-            transport.is_playing(),
-            transport.seek_source(),
-        ));
+        let policy = self.media_source_work_policy(snapshot);
         let representation_quality = preview_representation_quality(self.execution_scale(snapshot));
         let key = match self.media_preview_key_for_timeline_request(
             snapshot,
@@ -71,17 +67,35 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             &request,
             representation_quality,
             true,
-            access_mode == PreviewDecodeAccessMode::PlaybackCursor,
+            policy.access_mode == PreviewDecodeAccessMode::PlaybackCursor,
         ) {
             Ok(key) => key,
             Err(reason) => return PreviewTimelineMediaFrame::Unavailable { reason },
         };
         observe_key(&key);
+        self.media_frame_for_frozen_key(
+            key,
+            policy,
+            request.cpu_working_required
+                || request.image_scale_requirement
+                    == mondrian_effects::EffectImageScaleRequirement::Unit,
+        )
+    }
+
+    pub(super) fn media_source_work_policy(
+        &self,
+        snapshot: &PreviewExecutionSnapshot<'_>,
+    ) -> crate::app::preview_access_mode::PreviewMediaWorkPolicy {
+        let transport = snapshot.transport();
+        let access_mode = media_preview_access_mode_for_intent(media_preview_viewer_access_intent(
+            transport.is_playing(),
+            transport.seek_source(),
+        ));
         let generation = self.execution.borrow().generation();
         let demand_identity = (access_mode == PreviewDecodeAccessMode::PlaybackCursor)
             .then(|| transport.demand().map(PreviewFrameDemandSnapshot::identity))
             .flatten();
-        let current_demand_id = demand_identity.map_or_else(
+        let demand = demand_identity.map_or_else(
             || {
                 mondrian_playback::MediaWorkDemandId::for_preview_generation(
                     transport.epoch(),
@@ -94,8 +108,38 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         let intent = if transport.is_speculative_preparation() {
             MediaPreviewRequestIntent::Prefetch
         } else {
-            MediaPreviewRequestIntent::Current(current_demand_id)
+            MediaPreviewRequestIntent::Current(demand)
         };
+        let deadline = (access_mode == PreviewDecodeAccessMode::PlaybackCursor)
+            .then(|| {
+                if transport.is_speculative_preparation() {
+                    transport.priming_work_deadline()
+                } else {
+                    transport.demand().and_then(PreviewFrameDemandSnapshot::adapter_deadline)
+                }
+            })
+            .flatten();
+        crate::app::preview_access_mode::PreviewMediaWorkPolicy {
+            intent,
+            access_mode,
+            deadline,
+            demand_identity,
+            direction: transport.playback_direction(),
+        }
+    }
+
+    /// Admit an invocation's original physical/color key without reopening Asset
+    /// or proxy state. Pending work still belongs to the ordinary media scheduler.
+    pub(super) fn media_frame_for_frozen_key(
+        &self,
+        key: MediaPreviewKey,
+        policy: crate::app::preview_access_mode::PreviewMediaWorkPolicy,
+        cpu_working_required: bool,
+    ) -> PreviewTimelineMediaFrame {
+        let intent = policy.intent;
+        let access_mode = policy.access_mode;
+        let deadline = policy.deadline;
+        let demand_identity = policy.demand_identity;
         match self.cached_media_frame_for_intent(&key, intent) {
             Ok(Some(frame)) => return PreviewTimelineMediaFrame::Ready(frame),
             Ok(None) => {}
@@ -112,17 +156,8 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             return PreviewTimelineMediaFrame::Unavailable { reason };
         }
         let mut adaptive_hints = self.preview_decode_adaptive_hints(access_mode, &key);
-        adaptive_hints.playback_direction = transport.playback_direction();
-        let deadline = (access_mode == PreviewDecodeAccessMode::PlaybackCursor)
-            .then(|| {
-                if transport.is_speculative_preparation() {
-                    transport.priming_work_deadline()
-                } else {
-                    transport.demand().and_then(PreviewFrameDemandSnapshot::adapter_deadline)
-                }
-            })
-            .flatten();
-        let admission = if request.cpu_working_required || self.viewer_cpu_fallback_active.get() {
+        adaptive_hints.playback_direction = policy.direction;
+        let admission = if cpu_working_required || self.viewer_cpu_fallback_active.get() {
             self.request_cpu_working_media_preview(
                 key.clone(),
                 intent,
@@ -311,6 +346,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             self.hardware_decode_admission.get(),
             request.cpu_working_required || self.viewer_cpu_fallback_active.get(),
             representation_quality,
+            request.image_scale_requirement,
         )
     }
 
@@ -349,6 +385,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             preview_representation_quality(
                 self.raster_requirement.get().execution_scale(runtime_scale),
             ),
+            mondrian_effects::EffectImageScaleRequirement::Any,
         )
     }
 
@@ -370,6 +407,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         hardware_admission: PreviewHardwareDecodeAdmissionState,
         cpu_working_required: bool,
         representation_quality: mondrian_media::PreviewRepresentationQuality,
+        image_scale_requirement: mondrian_effects::EffectImageScaleRequirement,
     ) -> Result<MediaPreviewKey, PreviewUnavailability> {
         let authoring = snapshot.authoring().ok_or_else(|| {
             PreviewUnavailability::blocked(
@@ -401,9 +439,18 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                 ));
             }
         };
+        let unit = image_scale_requirement == mondrian_effects::EffectImageScaleRequirement::Unit;
+        let representation_quality = if unit {
+            mondrian_media::PreviewRepresentationQuality::Full
+        } else {
+            representation_quality
+        };
+        let cpu_working_required = cpu_working_required || unit;
+        let request_missing_proxy_generation = request_missing_proxy_generation && !unit;
         let proxy_config = authoring.proxy().config();
         let proxy_color = resolve_asset_proxy_color_contract(&asset, input_color).ok();
-        let prefer_proxy = self.raster_requirement.get() == PreviewRasterRequirement::Viewer
+        let prefer_proxy = !unit
+            && self.raster_requirement.get() == PreviewRasterRequirement::Viewer
             && authoring.proxy().prefers_proxy(*asset_id);
         match resolve_preview_media_source(PreviewMediaSourceRequest {
             asset: &asset,

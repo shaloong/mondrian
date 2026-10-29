@@ -19,6 +19,7 @@
 #include <assert.h>
 #include <float.h>
 #include <limits.h>
+#include <memory>
 #include <stdarg.h>
 
 namespace OFX {
@@ -177,6 +178,7 @@ namespace OFX {
         { kOfxParamTypeDouble,    Property::eDouble, 1 },
         { kOfxParamTypeBoolean,   Property::eInt,    1 },
         { kOfxParamTypeChoice,    Property::eInt,    1 },
+        { kOfxParamTypeStrChoice, Property::eString, 1 },
         { kOfxParamTypeRGBA,      Property::eDouble, 4 },
         { kOfxParamTypeRGB,       Property::eDouble, 3 },
         { kOfxParamTypeDouble2D,  Property::eDouble, 2 },
@@ -264,6 +266,12 @@ namespace OFX {
 
         static const Property::PropSpec allChoice[] = {
           { kOfxParamPropChoiceOption,    Property::eString,    0,    false,    "" },
+          { kOfxParamPropChoiceOrder,     Property::eInt,       0,    false,    "0" },
+          Property::propSpecEnd
+        };
+
+        static const Property::PropSpec allStrChoice[] = {
+          { kOfxParamPropChoiceEnum, Property::eString, 0, false, "" },
           Property::propSpecEnd
         };
 
@@ -308,8 +316,11 @@ namespace OFX {
           addInteractParamProps(type);
         }
 
-        if (type == kOfxParamTypeChoice) {
+        if (type == kOfxParamTypeChoice || type == kOfxParamTypeStrChoice) {
           _properties.addProperties(allChoice);
+        }
+        if (type == kOfxParamTypeStrChoice) {
+          _properties.addProperties(allStrChoice);
         }
 
         if (type == kOfxParamTypeCustom) {
@@ -375,7 +386,7 @@ namespace OFX {
         /// - kOfxParamTypeChoice
         /// If host doesn't support animation on them, then setting kOfxParamPropIsAnimating to 0 or 1 doesn't matter
         /// so just set the kOfxParamPropIsAnimating property to 0 for all those "extra animating" params.
-        bool animates = type != kOfxParamTypeCustom && type != kOfxParamTypeString && type != kOfxParamTypeBoolean && type != kOfxParamTypeChoice;
+        bool animates = type != kOfxParamTypeCustom && type != kOfxParamTypeString && type != kOfxParamTypeBoolean && type != kOfxParamTypeChoice && type != kOfxParamTypeStrChoice;
 
         Property::PropSpec variantProps[] = {
           { kOfxParamPropAnimates,    Property::eInt, 1,       false, animates ? "1" : "0" },
@@ -390,32 +401,32 @@ namespace OFX {
       /// add standard properties to a value holding param
       void Descriptor::addNumericParamProps(const std::string &type, Property::TypeEnum valueType, int dim)
       {
-        static std::string dbl_minstr, dbl_maxstr, int_minstr, int_maxstr;
-        static bool doneOne = false;
-
-        if(!doneOne) {
-          std::ostringstream dbl_min, dbl_max, int_min, int_max;
-          doneOne = true;
-          dbl_min << -DBL_MAX; // not a bug, @see kOfxParamPropDisplayMin
-          dbl_max << DBL_MAX;
-          int_min << INT_MIN;
-          int_max << INT_MAX;
-
-          dbl_minstr = dbl_min.str();
-          dbl_maxstr = dbl_max.str();
-          int_minstr = int_min.str();
-          int_maxstr = int_max.str();
+        // Construct typed defaults directly: text formatting must not narrow the
+        // SDK numeric domain or depend on the process numeric locale.
+        const char* names[] = {kOfxParamPropDisplayMin, kOfxParamPropDisplayMax,
+                               kOfxParamPropMin, kOfxParamPropMax};
+        if (valueType == Property::eDouble) {
+          const double defaults[] = {isColourParam(type) ? 0.0 : -DBL_MAX,
+                                     isColourParam(type) ? 1.0 : DBL_MAX,
+                                     -DBL_MAX, DBL_MAX};
+          for (int index = 0; index < 4; ++index) {
+            auto property = std::make_unique<Property::Double>(names[index], dim, false, defaults[index]);
+            _properties.addProperty(property.get());
+            property.release();
+          }
+        } else {
+          const int defaults[] = {INT_MIN, INT_MAX, INT_MIN, INT_MAX};
+          for (int index = 0; index < 4; ++index) {
+            auto property = std::make_unique<Property::Int>(names[index], dim, false, defaults[index]);
+            _properties.addProperty(property.get());
+            property.release();
+          }
         }
-
-        Property::PropSpec allNumeric[] = {
-          { kOfxParamPropDisplayMin, valueType, dim, false, isColourParam(type) ? "0" : (valueType == Property::eDouble ? dbl_minstr : int_minstr).c_str() },
-          { kOfxParamPropDisplayMax, valueType, dim, false, isColourParam(type) ? "1" : (valueType == Property::eDouble ? dbl_maxstr : int_maxstr).c_str() },
-          { kOfxParamPropMin, valueType, dim, false, (valueType == Property::eDouble ? dbl_minstr : int_minstr).c_str() },
-          { kOfxParamPropMax, valueType, dim, false, (valueType == Property::eDouble ? dbl_maxstr : int_maxstr).c_str() },
+        static const Property::PropSpec interpolation[] = {
+          { kOfxParamInterpType, Property::eString, 1, false, kOfxParamInterpTypeLinear },
           Property::propSpecEnd
         };
-
-        _properties.addProperties(allNumeric);
+        _properties.addProperties(interpolation);
 
         /// if any double or a colour
         if (valueType == Property::eDouble) {
@@ -547,6 +558,9 @@ namespace OFX {
         , _paramSetInstance(paramSet)
         , _parentInstance(0)
       {
+        if (auto* interpolation = _properties.fetchProperty(kOfxParamInterpType, false)) {
+          interpolation->setPluginReadOnly(true);
+        }
         _properties.addNotifyHook(kOfxParamPropEnabled, this);
         _properties.addNotifyHook(kOfxParamPropSecret, this);
         _properties.addNotifyHook(kOfxPropLabel, this);
@@ -954,11 +968,11 @@ namespace OFX {
       /// implementation of var args function
       OfxStatus BooleanInstance::getV(va_list arg)
       {
-        bool v;
+        bool v = false;
         OfxStatus stat = get(v);
 
         int *value = va_arg(arg, int*);
-        *value = v;
+        if (stat == kOfxStatOK) { *value = v; }
 #       ifdef OFX_DEBUG_PARAMETERS
         if (stat == kOfxStatOK) {
           std::cout << ' ' << *value;
@@ -970,11 +984,11 @@ namespace OFX {
       /// implementation of var args function
       OfxStatus BooleanInstance::getV(OfxTime time, va_list arg)
       {
-        bool v;
+        bool v = false;
         OfxStatus stat = get(time, v);
 
         int *value = va_arg(arg, int*);
-        *value = v;
+        if (stat == kOfxStatOK) { *value = v; }
 #       ifdef OFX_DEBUG_PARAMETERS
         if (stat == kOfxStatOK) {
           std::cout << ' ' << *value;
@@ -1575,7 +1589,7 @@ namespace OFX {
         const char **value = va_arg(arg, const char **);
 
         OfxStatus stat = get(_returnValue); // I so don't like this, temp storage should be delegated to the implementation
-        *value = _returnValue.c_str();
+        if (stat == kOfxStatOK) { *value = _returnValue.c_str(); }
 #       ifdef OFX_DEBUG_PARAMETERS
         if (stat == kOfxStatOK) {
           std::cout << ' ' << *value;
@@ -1590,7 +1604,7 @@ namespace OFX {
         const char **value = va_arg(arg, const char **);
 
         OfxStatus stat = get(time, _returnValue); // I so don't like this, temp storage should be delegated to the implementation
-        *value = _returnValue.c_str();
+        if (stat == kOfxStatOK) { *value = _returnValue.c_str(); }
 #       ifdef OFX_DEBUG_PARAMETERS
         if (stat == kOfxStatOK) {
           std::cout << ' ' << *value;

@@ -242,25 +242,26 @@ namespace OFX {
       // get the virtuals for viewport size, pixel scale, background colour
       void ClipInstance::getDoublePropertyN(const std::string &name, double *values, int n) const
       {
+        if(n < 0 || n > getDimension(name)) throw Property::Exception(kOfxStatErrBadIndex);
+        if(n == 0) return;
         if(name==kOfxImagePropPixelAspectRatio){
-          if(n>1) throw Property::Exception(kOfxStatErrValue);
           *values = getAspectRatio();
         }
         else if(name==kOfxImageEffectPropFrameRate){
-          if(n>1) throw Property::Exception(kOfxStatErrValue);
           *values = getFrameRate();
         }
         else if(name==kOfxImageEffectPropFrameRange){
-          if(n>2) throw Property::Exception(kOfxStatErrValue);
-          getFrameRange(values[0], values[1]);
+          double range[2];
+          getFrameRange(range[0], range[1]);
+          for(int index = 0; index < n; ++index) values[index] = range[index];
         }
         else if(name==kOfxImageEffectPropUnmappedFrameRate){
-          if(n>1) throw Property::Exception(kOfxStatErrValue);
-          *values =  getUnmappedFrameRate();
+          *values = getUnmappedFrameRate();
         }
         else if(name==kOfxImageEffectPropUnmappedFrameRange){
-          if(n>2) throw Property::Exception(kOfxStatErrValue);
-          getUnmappedFrameRange(values[0], values[1]);
+          double range[2];
+          getUnmappedFrameRange(range[0], range[1]);
+          for(int index = 0; index < n; ++index) values[index] = range[index];
         }
         else
           throw Property::Exception(kOfxStatErrValue);
@@ -269,26 +270,22 @@ namespace OFX {
       // get the virtuals for viewport size, pixel scale, background colour
       double ClipInstance::getDoubleProperty(const std::string &name, int n) const
       {
+        if(n < 0 || n >= getDimension(name)) throw Property::Exception(kOfxStatErrBadIndex);
         if(name==kOfxImagePropPixelAspectRatio){
-          if(n!=0) throw Property::Exception(kOfxStatErrValue);
           return getAspectRatio();
         }
         else if(name==kOfxImageEffectPropFrameRate){
-          if(n!=0) throw Property::Exception(kOfxStatErrValue);
           return getFrameRate();
         }
         else if(name==kOfxImageEffectPropFrameRange){
-          if(n>1) throw Property::Exception(kOfxStatErrValue);
           double range[2];
           getFrameRange(range[0], range[1]);
           return range[n];
         }
         else if(name==kOfxImageEffectPropUnmappedFrameRate){
-          if(n>0) throw Property::Exception(kOfxStatErrValue);
           return getUnmappedFrameRate();
         }
         else if(name==kOfxImageEffectPropUnmappedFrameRange){
-          if(n>1) throw Property::Exception(kOfxStatErrValue);
           double range[2];
           getUnmappedFrameRange(range[0], range[1]);
           return range[n];
@@ -296,7 +293,6 @@ namespace OFX {
         else
           throw Property::Exception(kOfxStatErrValue);
       }
-
       // get the virtuals for viewport size, pixel scale, background colour
       int ClipInstance::getIntProperty(const std::string &name, int n) const
       {
@@ -314,8 +310,9 @@ namespace OFX {
       // get the virtuals for viewport size, pixel scale, background colour
       void ClipInstance::getIntPropertyN(const std::string &name, int *values, int n) const
       {
-        if(n!=0) throw Property::Exception(kOfxStatErrValue);
-        *values = getIntProperty(name, 0);
+        // n is a value count, not an index. Empty queries never write.
+        if(n < 0 || n > 1) throw Property::Exception(kOfxStatErrBadIndex);
+        if(n == 1) *values = getIntProperty(name, 0);
       }
 
       // get the virtuals for viewport size, pixel scale, background colour

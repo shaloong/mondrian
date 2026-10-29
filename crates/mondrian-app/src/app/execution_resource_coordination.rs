@@ -47,7 +47,7 @@ use super::AppState;
 const MIB: usize = 1024 * 1024;
 
 /// Schema revision of the immutable execution-resource decision.
-pub(crate) const EXECUTION_RESOURCE_DECISION_VERSION: u32 = 15;
+pub(crate) const EXECUTION_RESOURCE_DECISION_VERSION: u32 = 16;
 const PROCESS_PRESSURE_OBSERVATION_INTERVAL: Duration = Duration::from_secs(1);
 const PROCESS_PRESSURE_RESULT_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const PREVIEW_HETEROGENEOUS_MAX_BATCH_ITEMS: usize = 5;
@@ -308,6 +308,10 @@ pub(crate) struct PreviewEffectCacheDecision {
     /// residency or request a coarser future frame; it cannot reinterpret an
     /// already-admitted frame or invalidate its frozen execution route.
     pub(crate) max_working_bytes: usize,
+    /// Optional frame-independent native instances per exclusive Preview owner.
+    pub(crate) max_processor_instances: usize,
+    /// Optional native/buffer bytes; active instances share the working grant.
+    pub(crate) max_processor_bytes: usize,
     /// Maximum retained GPU lowering plans or deterministic blockers.
     pub(crate) max_gpu_plan_entries: usize,
     /// Maximum conservatively estimated bytes retained by GPU planning.
@@ -345,6 +349,8 @@ impl PreviewHeterogeneousEffectExecutionDecision {
         preview_heterogeneous_effect_execution_decision(
             MachineResourceClass::UnknownConservative,
             128 * MIB,
+            0,
+            0,
         )
     }
 }
@@ -817,6 +823,43 @@ impl ExecutionResourceCoordinator {
         self.state.lock().heavy_slot_allocator.acknowledge_close(close_epoch, domain)
     }
 
+    /// Start the existing observer with a test-owned probe before its first poll.
+    /// The current inventory, cadence, classification, and consuming shutdown
+    /// remain owned by this coordinator; an active observer cannot be replaced.
+    #[cfg(test)]
+    fn test_start_execution_memory_probe<P>(&self, probe: P) -> std::io::Result<()>
+    where
+        P: ExecutionMemoryProbe + 'static,
+    {
+        let mut runtime = self.native_memory_runtime.lock();
+        if self.native_memory_admission_closed.load(Ordering::Acquire) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "native memory observer admission is closed",
+            ));
+        }
+        if runtime.is_some() || self.native_memory_start_attempted.swap(true, Ordering::AcqRel) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::AlreadyExists,
+                "native memory observer startup was already attempted",
+            ));
+        }
+        match NativeMemoryObservationRuntime::start_with_probe_and_inventory(
+            probe,
+            Arc::clone(&self.native_memory_inventory),
+        ) {
+            Ok(started) => {
+                self.native_memory_worker_started.store(true, Ordering::Release);
+                *runtime = Some(started);
+                Ok(())
+            }
+            Err(error) => {
+                saturating_atomic_add(&self.native_memory_start_failures, 1);
+                Err(error)
+            }
+        }
+    }
+
     /// Sample process and whole-system pressure no more than once per fixed
     /// monotonic cadence. The explicit instant is the test/Headless scheduling
     /// Seam.
@@ -1193,6 +1236,16 @@ impl Default for ExecutionResourceCoordinator {
 }
 
 impl AppState {
+    /// Inject only the native memory input of an otherwise ordinary Host test.
+    /// This must precede the first resource-observer poll and workload admission.
+    #[cfg(test)]
+    pub(crate) fn test_start_execution_memory_probe<P>(&self, probe: P) -> std::io::Result<()>
+    where
+        P: ExecutionMemoryProbe + 'static,
+    {
+        self.execution_resources.test_start_execution_memory_probe(probe)
+    }
+
     /// Bind immutable capacity from the exact active Viewer GPU generation to
     /// the existing product resource authority.
     #[cfg(any(target_os = "linux", target_os = "windows"))]
@@ -1731,8 +1784,25 @@ fn derive_decision(
         MachineResourceClass::Standard => 384 * MIB,
         MachineResourceClass::Professional => 768 * MIB,
     };
-    let heterogeneous_effects =
-        preview_heterogeneous_effect_execution_decision(profile.class, effect_working_bytes);
+    // Playback alone must not evict the worker needed for its next frame.
+    // Native residency follows measured memory pressure, not pixel-cache
+    // demand trimming: restarting a UHD worker every frame defeats reuse.
+    let native_residency_divisor = match pressure {
+        ExecutionResourcePressure::Nominal => 1,
+        ExecutionResourcePressure::Elevated => 2,
+        ExecutionResourcePressure::Critical => 4,
+    };
+    let (effect_processor_instances, effect_processor_bytes) = effect_processor_residency(
+        profile.class,
+        effect_working_bytes,
+        native_residency_divisor,
+    );
+    let heterogeneous_effects = preview_heterogeneous_effect_execution_decision(
+        profile.class,
+        effect_working_bytes,
+        effect_processor_instances,
+        effect_processor_bytes,
+    );
     let (seek_index_entries, seek_index_anchors, seek_index_bytes, hardware_idle_contexts) =
         match profile.class {
             MachineResourceClass::BelowMinimum => (8, 131_072, 2 * MIB, 0),
@@ -1794,6 +1864,8 @@ fn derive_decision(
                 max_entries: (effect_cache_entries / cache_divisor).max(1),
                 max_bytes: (effect_cache_bytes / cache_divisor).max(1),
                 max_working_bytes: effect_working_bytes,
+                max_processor_instances: effect_processor_instances,
+                max_processor_bytes: effect_processor_bytes,
                 max_gpu_plan_entries: (effect_gpu_plan_entries / cache_divisor).max(1),
                 max_gpu_plan_bytes: (effect_gpu_plan_bytes / cache_divisor).max(1),
             },
@@ -1852,6 +1924,7 @@ fn derive_decision(
             resource_policy: export_resource_policy(
                 profile.class,
                 cache_divisor,
+                native_residency_divisor,
                 realtime,
                 cpu_parallelism,
             ),
@@ -1863,16 +1936,41 @@ fn derive_decision(
     }
 }
 
+fn effect_processor_residency(
+    class: MachineResourceClass,
+    working_bytes: usize,
+    cache_divisor: usize,
+) -> (usize, usize) {
+    let instances = match class {
+        MachineResourceClass::BelowMinimum | MachineResourceClass::UnknownConservative => 0,
+        MachineResourceClass::MinimumSupported => 2,
+        MachineResourceClass::Standard => 4,
+        MachineResourceClass::Professional => 8,
+    };
+    if instances == 0 {
+        return (0, 0);
+    }
+    // Each exclusive owner gets a half-working-set idle ceiling. Preview has
+    // scalar, CPU-prefix and fallback banks (aggregate at most 1.5 working
+    // envelopes); Export has one. Active use also fits the exact working grant.
+    (
+        (instances / cache_divisor).max(1),
+        working_bytes / 2 / cache_divisor,
+    )
+}
+
 fn preview_heterogeneous_effect_execution_decision(
     class: MachineResourceClass,
     effect_working_bytes: usize,
+    max_processor_instances: usize,
+    max_processor_bytes: usize,
 ) -> PreviewHeterogeneousEffectExecutionDecision {
-    // `max_batch_pixel_bytes` is a policy ceiling. Renderer admission counts
-    // each immutable CPU input plus every Effects-owned frontier value for the
+    // `max_batch_retained_bytes` is a policy ceiling. Renderer admission counts
+    // each immutable CPU input, every Effects-owned frontier value, and bounded processor feedback for the
     // prepared route. One UHD input plus one frontier is 253.125 MiB, so
     // MinimumSupported admits that baseline shape; wider frontiers consume
     // proportionally more authority rather than being hidden by this policy.
-    let max_batch_pixel_bytes = match class {
+    let max_batch_retained_bytes = match class {
         MachineResourceClass::BelowMinimum | MachineResourceClass::UnknownConservative => {
             128 * MIB as u64
         }
@@ -1883,7 +1981,11 @@ fn preview_heterogeneous_effect_execution_decision(
     let effect_working_bytes = effect_working_bytes as u64;
     PreviewHeterogeneousEffectExecutionDecision {
         cpu_prefix: HeterogeneousCpuPrefixBatchGrant::new(
-            EffectExecutionSessionConfig::uncached(effect_working_bytes as usize),
+            EffectExecutionSessionConfig {
+                max_processor_instances,
+                max_processor_bytes,
+                ..EffectExecutionSessionConfig::uncached(effect_working_bytes as usize)
+            },
             EffectGraphExecutionBudget::new(
                 effect_working_bytes,
                 effect_working_bytes,
@@ -1892,7 +1994,7 @@ fn preview_heterogeneous_effect_execution_decision(
                 PREVIEW_HETEROGENEOUS_MAX_STEPS,
             ),
             PREVIEW_HETEROGENEOUS_MAX_BATCH_ITEMS,
-            max_batch_pixel_bytes,
+            max_batch_retained_bytes,
         ),
         gpu_continuation: HeterogeneousGpuResourceGrant::new(
             effect_working_bytes,
@@ -2049,6 +2151,7 @@ fn export_gpu_visual_active_grant(
 fn export_resource_policy(
     class: MachineResourceClass,
     cache_divisor: usize,
+    native_residency_divisor: usize,
     realtime: bool,
     cpu_parallelism: usize,
 ) -> ExportExecutionResourcePolicy {
@@ -2159,6 +2262,8 @@ fn export_resource_policy(
         MachineResourceClass::Standard => 256 * MIB,
         MachineResourceClass::Professional => 512 * MIB,
     };
+    let (effect_processor_instances, effect_processor_bytes) =
+        effect_processor_residency(class, effect_working_bytes, native_residency_divisor);
     ExportExecutionResourcePolicy {
         // Realtime Preview/Audio owns GPU priority. An admitted explicit
         // Export remains live, but equivalent CPU-capable visual work must not
@@ -2177,6 +2282,8 @@ fn export_resource_policy(
         effect_cache_entries: (effect_cache_entries / cache_divisor).max(1),
         effect_cache_bytes: (effect_cache_bytes / cache_divisor).max(1),
         effect_working_bytes,
+        effect_processor_instances,
+        effect_processor_bytes,
         cpu_composite_working_set: cpu_composite_working_set_grant(class),
         effect_gpu_plan_entries: (effect_gpu_plan_entries / cache_divisor).max(1),
         effect_gpu_plan_bytes: (effect_gpu_plan_bytes / cache_divisor).max(1),
@@ -2458,6 +2565,78 @@ mod tests {
     }
 
     #[test]
+    fn native_effect_residency_is_explicit_bounded_and_pressure_trimmable() {
+        for (class, instances, working) in [
+            (MachineResourceClass::BelowMinimum, 0, 128 * MIB),
+            (MachineResourceClass::UnknownConservative, 0, 128 * MIB),
+            (MachineResourceClass::MinimumSupported, 2, 256 * MIB),
+            (MachineResourceClass::Standard, 4, 384 * MIB),
+            (MachineResourceClass::Professional, 8, 768 * MIB),
+        ] {
+            let decision = ExecutionResourceCoordinator::new(profile(class)).decision();
+            let scalar = decision.preview.effect_cache;
+            let worker = decision.preview.heterogeneous_effects.cpu_prefix_grant().effect_session();
+            assert_eq!(scalar.max_processor_instances, instances);
+            assert_eq!(worker.max_processor_instances, instances);
+            let bytes = if instances == 0 { 0 } else { working / 2 };
+            assert_eq!(scalar.max_processor_bytes, bytes);
+            assert_eq!(worker.max_processor_bytes, bytes);
+            assert!(scalar.max_processor_bytes <= scalar.max_working_bytes);
+            for divisor in [1, 2, 4] {
+                let (trimmed_instances, trimmed_bytes) =
+                    effect_processor_residency(class, working, divisor);
+                assert!(trimmed_instances <= instances);
+                assert_eq!(trimmed_bytes, bytes / divisor);
+                let export = export_resource_policy(class, divisor, divisor, false, 4);
+                assert_eq!(export.effect_processor_instances, trimmed_instances);
+                // Unknown Export admits a larger working set than Preview but
+                // still grants no optional native residency.
+                assert_eq!(export.effect_processor_bytes, trimmed_bytes);
+                assert!(export.effect_processor_bytes <= export.effect_working_bytes);
+            }
+        }
+        let coordinator =
+            ExecutionResourceCoordinator::new(profile(MachineResourceClass::Professional));
+        let paused = coordinator.decision();
+        let realtime = coordinator.update_demand(ExecutionResourceDemandSnapshot {
+            preview_realtime: true,
+            ..ExecutionResourceDemandSnapshot::default()
+        });
+        assert_eq!(
+            realtime.preview.effect_cache.max_processor_bytes,
+            paused.preview.effect_cache.max_processor_bytes
+        );
+        assert_eq!(
+            realtime
+                .preview
+                .heterogeneous_effects
+                .cpu_prefix_grant()
+                .effect_session()
+                .max_processor_bytes,
+            paused
+                .preview
+                .heterogeneous_effects
+                .cpu_prefix_grant()
+                .effect_session()
+                .max_processor_bytes
+        );
+        assert_eq!(
+            realtime.export.resource_policy.effect_processor_bytes,
+            paused.export.resource_policy.effect_processor_bytes
+        );
+        let uhd_host_bytes = 3_840 * 2_160 * 16 * 3;
+        let (_, professional_bytes) =
+            effect_processor_residency(MachineResourceClass::Professional, 768 * MIB, 1);
+        assert!(professional_bytes >= uhd_host_bytes);
+        let (_, pressured_bytes) =
+            effect_processor_residency(MachineResourceClass::Professional, 768 * MIB, 2);
+        assert!(
+            pressured_bytes < uhd_host_bytes,
+            "retention is optional; active UHD admission remains unchanged"
+        );
+    }
+
+    #[test]
     fn heterogeneous_preview_grants_cover_one_single_frontier_uhd_route_at_eight_gib() {
         const UHD_RGBA_F32_FRAME_BYTES: u64 = 3_840 * 2_160 * 16;
         const UHD_CPU_PREFIX_RETAINED_BYTES: u64 = UHD_RGBA_F32_FRAME_BYTES * 2;
@@ -2470,7 +2649,7 @@ mod tests {
         let minimum_cpu = minimum.preview.heterogeneous_effects.cpu_prefix_grant();
         assert!(minimum_cpu.max_batch_items() >= 1);
         assert!(
-            minimum_cpu.max_batch_pixel_bytes() >= UHD_CPU_PREFIX_RETAINED_BYTES,
+            minimum_cpu.max_batch_retained_bytes() >= UHD_CPU_PREFIX_RETAINED_BYTES,
             "8 GiB must admit one UHD Float32 input plus one CPU frontier value"
         );
         assert!(
@@ -2491,8 +2670,8 @@ mod tests {
                 .preview
                 .heterogeneous_effects
                 .cpu_prefix_grant()
-                .max_batch_pixel_bytes()
-                > minimum_cpu.max_batch_pixel_bytes()
+                .max_batch_retained_bytes()
+                > minimum_cpu.max_batch_retained_bytes()
         );
     }
 
@@ -2544,9 +2723,37 @@ mod tests {
         let nominal = coordinator.decision();
         let critical = coordinator.observe_pressure(ExecutionResourcePressure::Critical);
 
+        let nominal_route = nominal.preview.heterogeneous_effects;
+        let critical_route = critical.preview.heterogeneous_effects;
+        let nominal_cpu = nominal_route.cpu_prefix_grant();
+        let critical_cpu = critical_route.cpu_prefix_grant();
         assert_eq!(
-            critical.preview.heterogeneous_effects,
-            nominal.preview.heterogeneous_effects
+            critical_cpu.graph_execution(),
+            nominal_cpu.graph_execution()
+        );
+        assert_eq!(
+            critical_cpu.max_batch_items(),
+            nominal_cpu.max_batch_items()
+        );
+        assert_eq!(
+            critical_cpu.max_batch_retained_bytes(),
+            nominal_cpu.max_batch_retained_bytes()
+        );
+        assert_eq!(
+            critical_cpu.effect_session().max_working_bytes,
+            nominal_cpu.effect_session().max_working_bytes
+        );
+        assert_eq!(
+            critical_route.gpu_continuation_grant(),
+            nominal_route.gpu_continuation_grant()
+        );
+        assert!(
+            critical_cpu.effect_session().max_processor_bytes
+                < nominal_cpu.effect_session().max_processor_bytes
+        );
+        assert!(
+            critical_cpu.effect_session().max_processor_instances
+                <= nominal_cpu.effect_session().max_processor_instances
         );
     }
 
@@ -3584,6 +3791,55 @@ mod tests {
     }
 
     #[test]
+    fn scripted_memory_observer_uses_current_inventory_and_consuming_shutdown() {
+        let coordinator =
+            ExecutionResourceCoordinator::new(profile(MachineResourceClass::Standard));
+        let probe = || CountingMemoryProbe {
+            calls: AtomicUsize::new(0),
+            private_committed_bytes: 64 * MIB as u64,
+        };
+        coordinator
+            .test_start_execution_memory_probe(probe())
+            .expect("start scripted observer");
+        assert_eq!(
+            coordinator
+                .test_start_execution_memory_probe(probe())
+                .expect_err("cannot replace owner")
+                .kind(),
+            std::io::ErrorKind::AlreadyExists
+        );
+        coordinator.poll_native_memory_observation(Duration::ZERO);
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while coordinator.decision().memory_observation.is_none() {
+            assert!(
+                Instant::now() < deadline,
+                "scripted observer did not publish its sample"
+            );
+            coordinator.poll_native_memory_observation(Duration::ZERO);
+            std::thread::yield_now();
+        }
+        let facts = coordinator.endurance_runtime_facts();
+        assert!(facts.startup_attempted);
+        assert!(facts.worker_started);
+        assert_eq!(facts.worker_health_failures, 0);
+        assert_eq!(facts.queue_depth, 0);
+        assert_eq!(facts.running_work, 0);
+        assert_eq!(facts.owned_resources, 0);
+        let terminal =
+            coordinator.finish_endurance_shutdown(Instant::now() + Duration::from_secs(1));
+        assert_eq!(terminal.started_workers, 1);
+        assert_eq!(terminal.terminated_workers, 1);
+        assert!(terminal.lifecycle_closed());
+        assert_eq!(
+            coordinator
+                .test_start_execution_memory_probe(probe())
+                .expect_err("closed owner cannot restart")
+                .kind(),
+            std::io::ErrorKind::PermissionDenied
+        );
+    }
+
+    #[test]
     fn observer_panic_retains_started_identity_and_unexpected_exit_health() {
         struct PanickingMemoryProbe;
 
@@ -3830,5 +4086,203 @@ mod tests {
 
         assert_eq!(decision.revision, u64::MAX);
         assert_eq!(decision.pressure, ExecutionResourcePressure::Elevated);
+    }
+    #[test]
+    #[ignore = "requires a fresh pinned product helper and the owned SessionProbe bundle"]
+    fn authored_uhd_processor_retains_only_its_owned_storage_under_professional_grant() {
+        use mondrian_core::{
+            Rational, SampleAspectRatio, TimelineTime, TimelineTimeRange, WorkingColorSpace,
+        };
+        use mondrian_effects::{
+            EffectColorDomain, EffectExecutionSession, EffectExecutionSessionConfig,
+            EffectFloatFrameView, EffectFrameContext, EffectFrameExtent, EffectProcessorControl,
+            EffectValueFormat, EffectWorkingPrecision, LutPreparationCache, PreparedEffectProgram,
+        };
+        const TEST: &str = "app::execution_resource_coordination::tests::authored_uhd_processor_retains_only_its_owned_storage_under_professional_grant";
+        const RECEIPT: &str = "MONDRIAN_OPENFX_PROCESSOR_OWNER_RECEIPT";
+        let directory = tempfile::tempdir().expect("owned receipt directory");
+        let receipt_path = directory.path().join("owners.tsv");
+        if !crate::openfx_host::shared_frame_tests::qualification_child(
+            TEST,
+            &[
+                (
+                    "MONDRIAN_OPENFX_SESSION_PROBE_MODE",
+                    "resident_owner_receipt",
+                ),
+                (RECEIPT, receipt_path.to_str().expect("UTF-8 receipt path")),
+            ],
+        ) {
+            return;
+        }
+        let helper = std::path::PathBuf::from(
+            std::env::var_os("MONDRIAN_OPENFX_TEST_HELPER").expect("pinned product helper"),
+        );
+        let probe = std::path::PathBuf::from(
+            std::env::var_os("MONDRIAN_OPENFX_SESSION_PROBE_BINARY").expect("owned probe"),
+        );
+        let receipt_path =
+            std::path::PathBuf::from(std::env::var_os(RECEIPT).expect("receipt path"));
+        let inspection = crate::openfx_adapter::inspect_openfx_binary(&helper, &probe)
+            .expect("real isolated inspection");
+        let effect_type = crate::openfx_effect::register_selected_openfx_filter(
+            &helper,
+            &inspection,
+            "uk.co.thefoundry.BasicGainPlugin",
+        )
+        .expect("register the actual native factory");
+        let occurrence =
+            mondrian_effects::instantiate_effect_node(effect_type).expect("author occurrence");
+        let context = EffectFrameContext::new(
+            Rational::FPS_24,
+            mondrian_effects::EffectProjectGeometry::new(3840, 2160, SampleAspectRatio::SQUARE)
+                .expect("explicit owner project geometry"),
+            TimelineTimeRange::new(
+                TimelineTime::ZERO,
+                TimelineTime::new(10, 24).expect("duration"),
+            )
+            .expect("author range"),
+        )
+        .expect("frame domain");
+        let prepared = PreparedEffectProgram::prepare_hierarchical_with_frame_context(
+            &[occurrence],
+            &[],
+            &[],
+            &[],
+            WorkingColorSpace::LinearRec709,
+            context,
+            &LutPreparationCache::uncached(),
+        )
+        .expect("immutable actual author program");
+        let decision =
+            ExecutionResourceCoordinator::new(profile(MachineResourceClass::Professional))
+                .update_demand(ExecutionResourceDemandSnapshot {
+                    preview_realtime: true,
+                    ..ExecutionResourceDemandSnapshot::default()
+                });
+        let policy = decision.preview.effect_cache;
+        assert_eq!(policy.max_working_bytes, 768 * MIB);
+        assert_eq!(
+            (policy.max_processor_instances, policy.max_processor_bytes),
+            (8, 384 * MIB)
+        );
+        // Exact production preview_runtime mapping; no grant is increased.
+        let config = EffectExecutionSessionConfig {
+            max_cache_entries: policy.max_entries,
+            max_cache_bytes: policy.max_bytes,
+            max_working_bytes: policy.max_working_bytes,
+            max_gpu_plan_entries: policy.max_gpu_plan_entries,
+            max_gpu_plan_bytes: policy.max_gpu_plan_bytes,
+            max_processor_instances: policy.max_processor_instances,
+            max_processor_bytes: policy.max_processor_bytes,
+        };
+        let width = 3840;
+        let height = 2160;
+        let count = width as usize * height as usize;
+        let format = EffectValueFormat::new(
+            EffectWorkingPrecision::Float32,
+            EffectColorDomain::SceneLinearRgb,
+            mondrian_core::ColorFrameAlpha::StraightFloat,
+        );
+        let mut input = vec![[1.5, -0.25, 0.75, 0.5]; count];
+        input[0] = [0.125, 2.5, 0.25, 0.75];
+        input[count - 1] = [0.875, 0.25, -0.5, 0.125];
+        let mut execution = EffectExecutionSession::new(config);
+        let mut diagnostics = Vec::new();
+        for frame in [0, 7] {
+            execution.bind_generation(frame as u64 + 1);
+            input.reverse();
+            let graph = prepared
+                .evaluate(TimelineTime::new(frame, 24).expect("exact time"))
+                .expect("same occurrence at a new authored time");
+            let output = execution
+                .apply_compiled_rgba_f32(
+                    EffectFloatFrameView::new(
+                        EffectFrameExtent::new(width, height),
+                        format,
+                        mondrian_core::ImageSampling::UNIT_SQUARE,
+                        &input,
+                    ),
+                    &graph,
+                    frame,
+                    &mut EffectProcessorControl::uncancelled(),
+                )
+                .expect("complete UHD frame under the actual Professional policy");
+            assert_eq!(
+                output.pixels(),
+                input.as_slice(),
+                "independent Basic gain=1 oracle"
+            );
+            drop(output);
+            diagnostics.push(execution.diagnostics());
+        }
+        let contents = std::fs::read_to_string(&receipt_path).expect("actual native owner records");
+        let records: Vec<_> = contents
+            .lines()
+            .map(|line| {
+                let (pid, uid) = line.split_once('\t').expect("PID and actual image identifier");
+                let pid =
+                    pid.parse::<std::num::NonZeroU32>().expect("actual nonzero native process ID");
+                let parts: Vec<_> = uid.split(':').collect();
+                assert_eq!(parts.len(), 4);
+                assert_eq!((parts[0], parts[3]), ("mondrian-ofx", "Source"));
+                assert_eq!(parts[1].len(), 32);
+                assert!(parts[1].bytes().all(|byte| byte.is_ascii_hexdigit()));
+                let generation =
+                    parts[2].parse::<std::num::NonZeroU64>().expect("image generation");
+                (pid, parts[1].to_owned(), generation)
+            })
+            .collect();
+        assert_eq!(records.len(), 2, "two real native renders, no DSP replay");
+        for sample in &diagnostics {
+            assert_eq!(sample.processor_instances, 1,
+                "the returned output is caller-owned and must not consume optional native retention");
+            assert!(sample.processor_bytes <= policy.max_processor_bytes);
+        }
+        assert_eq!(
+            records[0].0, records[1].0,
+            "same actual worker survived seek/change"
+        );
+        assert_eq!(
+            records[0].1, records[1].1,
+            "same parent-issued owner namespace"
+        );
+        assert_ne!(
+            records[0].2, records[1].2,
+            "new raster invalidates image analysis"
+        );
+        execution.reconfigure(EffectExecutionSessionConfig {
+            max_processor_instances: 0,
+            max_processor_bytes: 0,
+            ..config
+        });
+        assert_eq!(execution.diagnostics().processor_instances, 0);
+        let graph = prepared
+            .evaluate(TimelineTime::new(8, 24).expect("exact time"))
+            .expect("same actual author program");
+        let output = execution
+            .apply_compiled_rgba_f32(
+                EffectFloatFrameView::new(
+                    EffectFrameExtent::new(width, height),
+                    format,
+                    mondrian_core::ImageSampling::UNIT_SQUARE,
+                    &input,
+                ),
+                &graph,
+                8,
+                &mut EffectProcessorControl::uncancelled(),
+            )
+            .expect("optional zero never rejects an otherwise active-admitted frame");
+        assert_eq!(output.pixels(), input.as_slice());
+        drop(output);
+        assert_eq!(execution.diagnostics().processor_instances, 0);
+        let contents = std::fs::read_to_string(&receipt_path).expect("replacement owner record");
+        let replacement = contents.lines().last().expect("third record");
+        assert_eq!(contents.lines().count(), 3);
+        let (_, uid) = replacement.split_once('\t').expect("actual native record");
+        assert_ne!(
+            uid.split(':').nth(1).expect("new owner"),
+            records[0].1,
+            "actual eviction cannot be hidden as same-owner reuse; OS PID reuse is legal"
+        );
     }
 }

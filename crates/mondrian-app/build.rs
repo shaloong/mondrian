@@ -13,6 +13,7 @@ fn main() {
 
     #[cfg(target_os = "windows")]
     {
+        emit_windows_optional_graphics_link_policy();
         if let Err(err) = embed_windows_icon() {
             println!("cargo:warning=写入 Windows 图标资源失败: {err}");
         }
@@ -22,10 +23,35 @@ fn main() {
     }
 }
 
+#[cfg(target_os = "windows")]
+fn emit_windows_optional_graphics_link_policy() {
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows")
+        || std::env::var("CARGO_CFG_TARGET_ENV").as_deref() != Ok("msvc")
+    {
+        return;
+    }
+    // Native helpers dispatch before renderer initialization. WGPU's optional
+    // WGL backend checks LoadLibrary before creating a context, but its static
+    // WGL imports otherwise load OpenGL even for headless helper invocations.
+    // Keep that backend available while deferring the import until actual use.
+    // Only the Product binary receives MSVC's standard delay-import helper.
+    println!("cargo:rustc-link-arg-bin=mondrian=/DELAYLOAD:opengl32.dll");
+    println!("cargo:rustc-link-arg-bin=mondrian=delayimp.lib");
+}
+
 fn build_openfx_host() {
     let vendor = std::path::Path::new("native/openfx/vendor");
     let mut build = cc::Build::new();
-    build.cpp(true).std("c++17").define("NOMINMAX", None);
+    build
+        .cpp(true)
+        .std("c++17")
+        .define("NOMINMAX", None)
+        .define("OFX_SUPPORTS_MULTITHREAD", None);
+    if std::env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc") {
+        // SDK callbacks throw structured status exceptions; unwind their native
+        // owners before the C ABI converts a failure into a status code.
+        build.flag("/EHsc");
+    }
     build.include(vendor.join("include"));
     build.include(vendor.join("host/include"));
     for name in [
@@ -50,6 +76,8 @@ fn build_openfx_host() {
         "effect_instance",
         "host_descriptor",
         "parameter_instance",
+        "thread_suite",
+        "aux_suite",
     ] {
         build.file(format!("native/openfx/host/{name}.cpp"));
     }

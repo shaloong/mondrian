@@ -23,6 +23,8 @@ mod audio_output;
 mod audio_playback;
 pub mod audio_source;
 mod camera_raw;
+#[cfg(mondrian_ffmpeg_7_1)]
+mod d3d12va_abi;
 pub mod decoder;
 mod ffmpeg_command;
 mod ffmpeg_runtime;
@@ -45,6 +47,7 @@ pub mod waveform;
 
 pub use audio::{
     probe_realtime_audio_output_contract, AudioBuffer, RealtimeAudioOutputControlError,
+    RealtimeAudioOutputEnqueueError, RealtimeAudioOutputQuiescenceToken,
     RealtimeAudioOutputSnapshot,
 };
 pub use audio_device::{
@@ -57,17 +60,28 @@ pub use audio_device::{
     RealtimeAudioOutputOpenFailureCode, RealtimeAudioOutputShareMode, RealtimeAudioSampleFormat,
     RealtimeAudioSupportedBufferSize,
 };
-pub use audio_output::{RealtimeAudioOutputLossReason, RealtimeAudioOutputShutdownEvidence};
+pub use audio_output::{
+    RealtimeAudioOutputEvent, RealtimeAudioOutputLossReason, RealtimeAudioOutputShutdownEvidence,
+};
 #[cfg(feature = "validation")]
 pub use audio_playback::AudioPlaybackValidationError;
 pub use audio_playback::{
     handoff_unqualified_audio_pcm_renderer, validate_audio_playback_anchor,
+    AudioNativeObservationPollRefusal, AudioNativeParameterQueryCompletion, AudioOutputAdapter,
     AudioOutputLifecycleDiagnostics, AudioOutputLossSnapshot, AudioPcmContinuity,
-    AudioPcmContinuityModel, AudioPcmRenderGeneration, AudioPcmRenderRequest, AudioPcmRenderer,
-    AudioPlayback, AudioPlaybackConfig, AudioPlaybackConfigError, AudioPlaybackCreateError,
-    AudioPlaybackError, AudioPlaybackEvent, AudioPlaybackMode, AudioPlaybackPoll,
+    AudioPcmContinuityModel, AudioPcmNativeAuthorHandoff, AudioPcmNativeAuthorHandoffContinuity,
+    AudioPcmNativeAuthorHandoffIntent, AudioPcmNativeAuthorHandoffMode,
+    AudioPcmNativeAuthorHandoffOutcome, AudioPcmNativeAuthorHandoffRefusal,
+    AudioPcmNativeAuthorHandoffStatus, AudioPcmNativeAuthorResumeKey,
+    AudioPcmNativeAuthorTerminalBatchOutcome, AudioPcmNativeAuthorTerminalBatchStatus,
+    AudioPcmNativeOwnerBindingRefusal, AudioPcmNativeOwnerBindingStatus,
+    AudioPcmNativeReprepareHandoff, AudioPcmNativeReprepareRefusal, AudioPcmNativeReprepareStatus,
+    AudioPcmRenderGeneration, AudioPcmRenderOutcome, AudioPcmRenderRequest, AudioPcmRenderer,
+    AudioPcmSourceCloseStatus, AudioPcmSourceCloseTicket, AudioPlayback, AudioPlaybackConfig,
+    AudioPlaybackConfigError, AudioPlaybackCreateError, AudioPlaybackError, AudioPlaybackEvent,
+    AudioPlaybackMode, AudioPlaybackPoll, AudioPlaybackProducerScheduling,
     AudioPlaybackShutdownError, AudioPlaybackShutdownEvidence, AudioPlaybackSnapshot,
-    AudioPlaybackState, AudioRenderRecoveryDisposition,
+    AudioPlaybackState, AudioRenderRecoveryDisposition, AUDIO_PLAYBACK_PRODUCER_STACK_BYTES,
 };
 pub use audio_source::{
     AudioDecoderStartupShutdownEvidence, AudioSourceCache, AudioSourceCacheConfig,
@@ -184,6 +198,12 @@ pub use waveform::{
 
 #[cfg(target_os = "linux")]
 pub use preview::FfmpegCudaFrameView;
+
+#[cfg(test)]
+mod pcm_allocation_probe;
+
+mod pcm_journal;
+pub use pcm_journal::{AudioRetainedPcmError, AudioRetainedPcmEvidence, AudioRetainedPcmWindow};
 
 #[cfg(target_os = "macos")]
 pub use resident_encode::{

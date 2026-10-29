@@ -143,6 +143,63 @@ author metadata, or reconcile Recovery Authority.
 Generation, Asset Library revision, and authored metadata before accepting only
 the publication-owned timestamp.
 
+## Native terminal candidates
+
+A native terminal group uses the existing `NativeStatePending` Sequence gesture,
+candidate validation and History. Beginning the group establishes the pending
+barrier without publishing content. Preparation applies all admitted members to
+one private candidate; an invalid member cannot publish an earlier member.
+Parameters-only and opaque-state completion keep their existing distinct rules.
+A no-change candidate still retains the native acknowledgement barrier.
+
+A candidate retained across UI turns requires an owned native ticket. Commit
+revalidates the Session, Sequence, generation, exact group and unchanged canonical
+before/current content before using the existing infallible publication. A stale commit leaves
+the candidate and barrier intact. Explicitly discarding an unpublished candidate
+may reopen collection; dropping it never acknowledges native work or finishes
+the group. Only one successful commit and one final group completion are legal.
+Existing single-owner, nonterminal gestures retain their original behavior.
+Installation keeps the current durable document revision and publication
+timestamp. An in-flight save may legitimately update these while the candidate
+waits; they are publication evidence and do not advance Author Generation.
+
+The ticket proves canonical author preparation, not native origin, Source
+completeness or acknowledgement. Those require the original Audio/Media owner
+and work queues. If canonical publication has occurred and later Source
+installation fails, the accepted document and pending barrier remain; this is
+not atomic rollback across author and execution domains. Finish the group only
+after every admitted prefix has actually been acknowledged. The first consumer
+is limited to terminal, direct-root, same-object handoffs whose actual Runtime
+policy permits preserved execution; broader installation remains separate work.
+
+Audio's owned terminal batch retains the original native prefixes, prepared
+storage and admission receipts through one Source installation and each actual
+acknowledgement. Its preparation and final peer checks grant no canonical
+publication permission. SDK calls and allocation precede the caller's commit
+guard; cancellation is checked again after acquiring that guard, before the
+irreversible Source commit. Release the guard before Ack or owner retirement.
+Only the original producer and retirement paths may own this prepared storage
+while the existing Media queue parks the original work for canonical publication.
+UI receives facts and a typed work/phase key, not the prepared native owner.
+Actual Audio preparation precedes the App's canonical commit. The App publishes
+the resulting snapshot once and resumes that same prepared work with its exact
+key. A later refusal retains the accepted document and pending group; retry
+cannot recreate the candidate or repeat an already completed acknowledgement.
+An obsolete completion must transfer any remaining request owner to the existing
+retirement queue. Rejecting its identity never permits destruction on the UI path.
+
+The App's single author work slot selects either a single-owner gesture or a
+terminal frontier and is independent of its editor surface.
+It retains the captured weak Source, original gesture, prefix and execution
+snapshot; removing presentation never discards that custody. Only a matching
+surface may follow its receipts. Successful SourceClose clears both slots;
+failed author operations preserve the Session barrier. Historical author intent
+does not itself authorize execution. Strong renderer upgrades first match the
+actual Media slot; a Weak liveness check grants no native permission. Terminal,
+direct-root, same-object prefixes may enter the headless path only through the
+actual Media delivery and preparation protocol. Other new prefixes retain the
+existing GUI admission path.
+
 ## Consequences
 
 - A command error cannot leave a half-edited canonical Project that is later

@@ -16,6 +16,12 @@ allow = [
 ]
 confidence-threshold = 0.8
 
+# Reviewed upstream libbzip2 Rust translation: attribution, origin and
+# endorsement conditions. Retain its notice in LICENSES; no advisory waiver.
+[[licenses.exceptions]]
+name = "libbz2-rs-sys"
+allow = ["bzip2-1.0.6"]
+
 [bans]
 multiple-versions = "allow"
 wildcards = "allow"

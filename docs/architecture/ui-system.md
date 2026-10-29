@@ -1,5 +1,39 @@
 # UI System
 
+Shared Rack controls attach explicit semantic inspection identity to Slider,
+Checkbox, closed Dropdown, Button and IconButton views. The Widget contract
+carries identity, compatible role, focus presentation and owned keyboard release
+intent. Shell restores unambiguous
+keys within the same Panel and live author Session/Sequence; the event Router
+remains the sole focus and modal-scope authority. Rack keys include the exact
+Scope occurrence, Processor ID and native definition binding, parameter ID and
+control role. Translated labels, row ordinals, current author values and query
+operations never form identity. New model callbacks, values and schemas replace
+old presentation; deleted, disabled or rebound owners keep fresh identities.
+Pointer capture, drafts, raw press state and menu paths are never restored by this
+seam. Specialized CurveEditor geometry/key selection remains its own inspection
+snapshot under the same author-control scope guard.
+
+Clean source `718696e` qualifies the shared source menu models and their product
+actions against actual CLAP/VST3 PCM, one Undo/save-live-Redo and four Unicode
+archive reopens. Source-gain curves are retained by rewiring; their complete Rack
+editing UI and the physical Host/Scope pointer matrix remain separate work.
+See [current workflow evidence](../dev/modal-resource-lut-acceptance.md).
+
+Shared Rack retained-input rows show the current source and a localized source
+selector. Options require the current Ready native observation, an editable old
+source, a matching stable input key and canonical stage-cycle/source-lock
+admission. Missing ports remain visible and removable; query cancellation or
+invalidation clears replacement options. Choosing a source carries the retained
+Route ID and expected old source through a closed observed rewire action.
+
+Shared Mixer and Inspector Rack input controls bind native labels through the
+current cached input observation. Stable bus keys remain the connection payload
+and persisted routing identity. Repeated effective labels include their bus key;
+unnamed or unavailable retained ports use that key directly and remain removable.
+Locale changes and repeated model reads use cached preparation facts without
+native discovery or processor creation. Labels never mutate authoring state.
+
 Inspector enum dropdowns consume definition-owned stable option keys. The
 Dropdown widget supports non-action separator rows. Video Clip blend modes
 project Core's typed option order into a localized Inspector dropdown, with
@@ -16,6 +50,13 @@ opacity keys expose interpolation presets there; virtual Clip-boundary anchors
 have no key identity and no menu. UI actions carry stable key IDs and resolve
 the current author time at dispatch, so a stale menu cannot silently edit a
 different key after the curve changes.
+
+Typed audio handle actions use sparse exact coordinates through the existing
+product action codec and author session. The App publishes one history entry,
+retains no-op generations, rejects stale keys without publication, and persists
+the canonical Continuous geometry through durable `.mdp` save and reopen.
+Direct handle gesture drawing and hit routing are a separate widget integration;
+the typed author action does not imply that those controls are already exposed.
 
 The status bar remains the persistent summary of current work. Its status
 history is available by clicking the bar; the App retains at most 64
@@ -89,7 +130,24 @@ it does not allocate a Startup carrier only to replace it on the first event
 loop turn. A Host without a Project still starts with the Startup carrier.
 Both paths keep the original pre-active construction owner, deadline, wake
 registration, activation, and partial-start cleanup. Opening or closing a
-Project later still uses the production role-replacement lifecycle.
+Project later changes the role on that same native Window and Surface. The
+Viewer device progress owner, execution runtime, submission callback receiver,
+and deferred cleanup stay in the retained session. Publication retirement and
+display-contract invalidation still use their existing completion gates; a role
+change is not a device or surface generation change. Ticketless CPU staging
+frames from the retiring project are released immediately; submitted GPU owners
+still wait for exact completion. Only explicit validation
+surface/device recovery constructs another native carrier.
+
+Startup is transparent and fixed-size; Workspace uses the self-hosted chrome
+and permits native edge/corner resizing. Role changes clear native IME, tooltip,
+eyedropper and router focus/capture state, then publish and lay out the new root
+even if the OS has not changed its size yet. Display diagnostics distinguish
+RoleChanged from Resize and ScaleFactorChanged. Workspace retains its normal
+logical size and maximized flag across project close/open; maximized and
+minimized extents cannot overwrite the normal restore size. Startup always
+leaves minimized/maximized state and applies equal minimum/maximum dimensions.
+The fixed Startup maximum is removed before increasing the Workspace minimum.
 
 Empty and model-only UI construction must not create an `AppState`. A disabled
 empty Timeline has explicit unavailable edit flags, and a model-only shell has
@@ -322,17 +380,18 @@ vector component preserves the other component. Preview Full/1/2/1/4,
 proxy/original selection, and Viewer Fit zoom change only execution or
 presentation sampling and never rewrite these controls.
 
-`CurveEditor` is a normalized interaction Module, not an automation owner. It
-keeps high-frequency pointer motion local and emits exactly one committed
-`CurveEdit::{Insert, Move, Delete}` for a pointer gesture; keyboard edits are
-already atomic. The Inspector Adapter maps the snapshot-local point index to
+`CurveEditor` is a normalized interaction Module, not an automation owner.
+Its complete-value and non-live callbacks keep pointer edits local until release;
+its temporal gesture callback publishes Begin/Edit/Finish/Cancel with live
+canonical author updates and one history entry. Keyboard edits are atomic.
+Move/Delete carry CurvePointTarget and handles carry KeyframeId, independent
+of the current display slot. The Inspector Adapter resolves these targets to
 `AnimationParameterAddress + KeyframeId` before dispatch. Evaluated
 Hold/Linear/Bezier samples are a separate read-only paint series, so display
-fidelity cannot rewrite interpolation. Each editable point also carries an
-explicit interaction policy: virtual Clip-boundary samples are fixed and
-non-deletable, while real author keys remain movable and deletable even when
-their time lies exactly on a boundary. Escape cancels widget-local preview
-state and publishes no author mutation.
+fidelity cannot rewrite interpolation. Point metadata keeps identity, policy
+and context commands together. Virtual boundaries have fixed time and editable
+value; real author keys remain movable and deletable even at viewport edges.
+Escape restores widget projection and cancels the canonical author gesture.
 
 Scalar floating-point visual Effect parameters use this same curve editor and
 stable-key Product Action path. The Inspector projects the definition-owned
@@ -361,6 +420,35 @@ programmatic disable. App panel Adapters select the policy; they must not
 simulate author-transaction coalescing outside the Widget or turn each typed
 character into Undo/Author Generation history.
 
+`MultilineTextInput` exposes the same mutually exclusive live/transactional
+policies. Transactional multiline inputs retain ordinary Enter for newlines;
+Control/Command+Enter, focus loss, or form submission confirms the changed
+focus-session value once. Escape and programmatic disable cancel the draft;
+programmatic text replacement establishes a new confirmation baseline. Active
+IME composition owns its Enter/Escape keys and blocks form confirmation. Generic
+Inspector plugin Text and Resource controls use confirmation, initialize actual
+editable values, and never disable long Unicode text based on its byte length.
+Multiline property rows reuse content-height measurement so their edit regions
+fit the declared line count and do not overlap following controls.
+The existing Basic Title live Viewer text path remains live; continuous caption
+history coalescing is still a separate author-session requirement.
+
+Inspector parameter presentation is a locale projection over canonical schemas.
+Declared schema label and enum message addresses resolve through Fluent catalogs;
+owned built-in, Title, and Mask logical addresses have one validated catalog mapping.
+Vendor schemas can declare a direct registered message address or retain their
+display fallback. Enum Actions and current-item checkmarks use exact canonical
+option keys; group adjacency
+uses the original definition-owned identity independently of localized headings.
+All registered built-in parameter labels/options/groups are catalog-qualified in
+English, Chinese, and pseudo locale. Vendor property and group labels retain their
+declared fallback. The current enum schema has no independent vendor caption;
+unknown enum message addresses therefore fall back to their canonical keys.
+Locale changes do not mutate parameter schemas, author generations, or history.
+Qualifier sample operations and add/remove controls receive the same captured
+Localizer; localized labels still dispatch validated typed sample sets and the
+original stable owner/parameter address.
+
 Widget text measurement uses one thread-local owner shared by ordinary
 Label/Button layout and TextInput/NumberInput geometry. Numeric-control
 construction can already measure text before the first layout pass; it must
@@ -370,6 +458,12 @@ seam preserves TextInput's caller-supplied size, while ordinary label
 measurement keeps its existing minimum-size policy. This is measurement-owner
 reuse within one UI thread, not a process-global lock or a change to the
 separate text rasterization owner's lifetime.
+
+Text length above the measurement-cache byte budget bypasses retention, not
+shaping or measurement. Single-line and wrapped layout preserve the complete
+input and kerning across the 65,535-glyph boundary. The current text dependency
+uses the documented [Harfrust compatibility patch](../../vendor/harfrust/MONDRIAN-PATCH.md)
+until cosmic-text can consume the upstream fixed version series.
 
 Timeline Track Targeting and Sync-Lock are editor interaction policy, not
 renderable Sequence fields. `TimelineTargetingState` is keyed by stable
@@ -521,7 +615,7 @@ model refresh so translated trigger widths receive correct hit regions.
 
 ## Commands
 
-Menus, shortcut preferences, command palette, and future plugins should consume `app_ui::commands` descriptors. Menus are command presentation, not business logic owners.
+Menus, shortcut preferences, command palette, and future Extensions should consume `app_ui::commands` descriptors. Menus are command presentation, not business logic owners.
 
 Editorial transport commands are first-class descriptors and editor actions:
 `J` dispatches reverse shuttle, `K` dispatches stop-shuttle/Pause, and `L`
@@ -765,7 +859,7 @@ local input-routing state, not a second product Action hierarchy.
 
 Inside each migrated App slice, product meaning is carried by the closed
 `ProductAction` algebra. `Action::Custom` remains the external Widget,
-scripting, and plugin transport Seam; it must not become a second product-domain
+scripting, and Extension transport Seam; it must not become a second product-domain
 model. The current Timeline slice covers Clip selection, Clip movement, bulk
 trim, seek, exact In/Out mutation, atomic Lift/Extract intent, the complete
 current-selection edit algebra, Basic Title creation, direct Asset placement,
@@ -843,7 +937,7 @@ the existing workflow error path. File-manager reveal follows the same rule:
 dispatch failure is observable and is never presented as successful execution.
 Viewer gestures that manipulate picture geometry do not create a second Viewer
 transform model: they emit the same `ClipProductAction` used by Inspector,
-Headless, scripting, and future plugin Adapters.
+Headless, scripting, and future Extension Adapters.
 
 `ClipProductAction` closes enabled state, typed Solid Color source edits,
 atomic direct-parameter writes, and stable-key numeric curve edits. A direct
@@ -2606,9 +2700,9 @@ and validates the installed binary before authoring one undoable Rack edit;
 failed or canceled attempts leave the Project unchanged.
 
 The Effect Browser reads category paths from registered executable Definitions,
-including native plugin definitions, instead of reducing every Plugin key to
+including native plugin definitions, instead of reducing every External effect key to
 the generic core-data category. Built-in categories retain their semantic
-ordering and plugin subcategories retain stable tree IDs across locale changes.
+ordering and external-effect subcategories retain stable tree IDs across locale changes.
 
 The Mixer and shared Inspector/Mixer Audio Processor Rack widgets format their
 own control labels from the shell's captured Fluent locale. Their projected
@@ -2616,3 +2710,2243 @@ Channel Strip, Route, parameter, and processor identities remain typed and
 locale-independent; rebuilding the widgets after a language change does not
 rewrite audio authoring state. Both bundled catalogs must contain identical
 message IDs so an untranslated new control cannot silently fall back.
+
+Property rows can opt into content height, measuring their control at the actual
+form lane width with unconstrained vertical space and using the theme row height
+as a minimum. Panel measurement and layout use the same policy. Export queue
+rows use this mode for localized titles, progress, and diagnostic summaries so
+narrow panels reserve space for wrapped content instead of clipping later lines.
+
+FlexContainer delegates constrained measurement to the shared FlexLayout owner.
+Horizontal flexible children shrink proportionally to their preferred widths
+when fixed controls and gaps consume the available width. Both measurement and
+placement remeasure children at their allocated widths, preserving wrapped text
+height. Vertical content keeps its natural extent for scrolling.
+
+Product entrypoint guards parse Cargo TOML to check default-run, binary paths, validation feature gates, and test/benchmark exclusion. Whitespace and line endings are not route semantics.
+
+A panel with content-height rows fills a finite offered width during measurement, matching vertical ScrollView placement; unbounded measurements retain the theme preferred width. This keeps wrapping, row placement, and scroll extent consistent across viewport resizing.
+
+
+The App status composite localizes Export queue state, exact frame progress,
+history chrome and accessibility using the root's locale snapshot. Shared
+phase IDs prevent the Export panel and status bar from defining different
+lifecycle copy. Locale switching updates displayed status without replacing
+the status widget or clearing its open/scrolled history viewport. Pseudo
+formatting expands catalog AST text, preserving named argument data and
+already-localized nested strings. App-produced status/history messages now
+retain stable IDs and named arguments; each visible history row resolves in the
+current locale without changing the underlying history facts.
+
+
+### Common notification message projection
+
+Notifications now use the App-wide `AppMessage` tree and `Localizer::message`.
+Named argument identity is independent of insertion order, and nested product
+labels are resolved with the toast's current captured locale. Exact integers
+outside Fluent's precise numeric range remain decimal text. Notification feed
+identity, bounded retention, timeout and locale-change behavior are unchanged.
+The former notification-only message/value APIs are removed rather than retained
+as compatibility aliases. Current status and bounded history retain the same
+message facts. `set_status_hint` has no raw-string overload; the status bar and
+Export panel project the fact with their captured formatter, and history rows
+resolve at paint time. A language change preserves widget identity, author state,
+open history and scroll position. Failed status continues to outrank Export
+progress, and adjacent fact/severity duplicate suppression remains bounded.
+Product labels nested inside status messages resolve with that same locale;
+user-authored names and native failure evidence remain unchanged text data.
+
+
+### Typed fallback action errors
+
+The Host's unreported-action fallback nests `AppMessage::from_error` in its
+localized action-failure context. A newer operation-specific error still wins.
+Asset/workflow adapters similarly retain typed causes when available; contextual
+project failures use the actual anyhow chain. Locale switching therefore changes
+error headings without replacing paths, native details or error evidence. The
+App does not parse core diagnostic Display strings. Existing String reason bodies
+remain a separate typed-domain diagnostic migration requirement.
+
+
+### Status publication ownership
+
+Host fallback decisions use a typed transient `StatusPublicationId`, not equality
+of message text or arguments. App status set/clear generates a fresh identity,
+including an identical repeated report. A current error published during the
+synchronous dispatch retains its operation-specific context. If the action
+reports nothing, clears status, or only reports success before failing, the Host
+publishes its typed generic failure. The observation is made across the one
+Main-thread dispatch; it is not a realtime queue, EventBus request or authoring
+generation.
+
+Current status and history are private App state. Public read-only `status_hint`
+and `status_log` observations prevent callers bypassing publication. All changes
+use the existing set/clear interface; no mutable field compatibility aliases are
+retained. Publication identity stays outside `StatusLogEntry`: history still
+deduplicates identical adjacent message facts and severity, so repeated failures
+do not flood it. Locale projection never publishes another status.
+
+
+### Numeric Integer effect curves
+
+The Inspector curve projection and App authoring transaction accept owner-declared
+bounded numeric Integer parameters alongside Float and Double. Normalized curve
+writes round to an integer only within the exactly representable f64 integer
+range, then validate the canonical parameter contract. New keys and animation
+enable use the first allowed interpolation declared by the parameter owner.
+Audio curve insertion follows the same ordered contract. Undo/Redo retains typed
+integer values and stable key identities; evaluation remains in Core.
+
+### Typed numeric inputs
+
+`NumberInput<T>` keeps Float32, Double and signed Integer storage through parsing,
+dispatch and keyboard stepping. Integer fields parse i64 directly and saturate
+keyboard increments at the signed boundaries. Display text round-trips the typed
+value; minimum decimals never round a retained parameter. Editor increments apply
+to nudging and slider snapping, not to arbitrary text entry. Unchanged valid text
+publishes no duplicate value action. Text edits are local drafts: Enter or focus
+loss confirms a valid value once; Escape discards the draft without dispatching
+an author mutation. Keyboard increments remain immediate confirmed adjustments.
+Escape releases focus so a subsequent shell cancellation can close the enclosing
+dialog. `Widget::commit_pending_input` recursively confirms editable leaves before
+a form submission, so field updates precede the submission Action in the queue.
+Transactional TextInput leaves also confirm once through this interface and retain
+focus with a fresh cancellation baseline; active IME compositions remain local.
+Invalid text reverts to the last confirmed value without an author mutation.
+During active IME preedit, the inner TextInput owns key handling: arrows and Enter
+cannot nudge or confirm a NumberInput, and Escape first clears the composition.
+IME committed text remains a numeric draft until the usual confirmation seam.
+
+The Inspector numeric composite uses a normalized f32 slider for presentation
+and a typed NumberInput for author values. Integer pointer mapping uses a bounded
+i128 numerator with 24-bit slider coordinates, preserving exact endpoints and
+nearby integer steps even beyond f64's exact integer range. Double bounds and
+steps never pass through f32. Missing hard bounds retain the scalar's full finite
+range; soft bounds shape slider travel independently of manual entry.
+
+The production acceptance fixture registers a valid visual effect definition,
+types large Integer and high-precision Double values through the Inspector,
+decodes and commits the product Actions, then checks exact Undo/Redo and cancellation without an author write. Author admission and evaluation remain in Core/editor transactions.
+
+
+Sequence dimensions/start frames and export dimension, bitrate, CRF, GOP and
+palette fields use Integer input storage instead of floating value adapters.
+Audio Processor Rack, Mixer trim/fader/route gain, Component volume and pan
+retain their canonical f64 values through numeric controls and typed Actions.
+Rack Integer controls parse integers directly and remain inside the contiguous
+exact-integer domain supported by canonical audio f64 storage. Fractional or
+inexact Integer values are rejected rather than rounded by the Action adapter.
+Existing automation and lock admission remain authoritative.
+
+Pan percent and fade-second adapters retain their canonical baseline for unchanged
+presentation values. Canceling a text draft emits no command, preserving the
+original pan scalar and exact rational fade, including sub-millisecond sample
+durations. Cancellation also retains automation key identities and author history;
+it never attempts to compensate for an already committed draft by writing back a
+sampled baseline.
+
+Audio fade inputs use f64 seconds until the existing explicit millisecond
+quantization seam creates canonical TimelineTime. Long durations therefore do
+not lose millisecond resolution through f32. This changes presentation/input
+precision, not the audio DSP working format or temporal interpretation.
+
+Acceptance covers actual Rack and Mixer author commits with exact Undo/Redo,
+real Rack text entry for Double/Integer, invalid fraction/non-finite rejection,
+and a day-long fade retaining its final millisecond.
+
+Inspector audio source, stream-binding and track-lock reasons use the active
+Localizer. Component/catalog absence, unavailable nested output, physical rebinding,
+primary/default stream and unknown native channel-layout labels come from Fluent.
+Media language tags, user-authored stream titles, stable identities and named
+multichannel speaker layouts retain their canonical values. Re-projecting locale
+changes labels without modifying component selection, channel mapping or author
+generation. Rack Bus ownership, Mixer route destinations and route-create menus
+resolve their owned Bus prefix through the existing Fluent caption. Missing Bus
+identities use the existing unavailable-owner message. User-authored Bus names
+and stable identities remain opaque arguments in English, Chinese and pseudo
+locale projections. Both catalogs carry the same message IDs.
+
+Inspector position, scale and anchor axis controls emit sparse channel edits,
+resolved against the current Clip at admission. They never capture sibling
+values in callbacks. Viewer gestures explicitly replace complete vectors, and
+compensated anchor gestures still commit anchor and position atomically. The
+Viewer compensation uses the complete current linear transform, including
+rotation and nonuniform scale. Its addressed parameter batch is the application
+anchor-drag entry point. Both forms use Core's tagged parameter-write contract
+and the existing authoring
+transaction. Clip, Effect and Mask share that same write algebra. The alpha API
+requires an explicit write kind; there is no legacy
+payload interpretation. Opacity and scale percentages use Double presentation
+arithmetic until the canonical Float/vector author seam, retaining original
+Float bits through unit conversion. No-op component writes produce neither new
+keys nor history entries.
+
+Generic Vec2/Vec3/Vec4 Inspector controls emit one changed component and never
+rebuild a vector from captured siblings. Current stable owner admission supplies
+remaining values and exact Clip-local time; no-op components create no history
+or keys. Complete colors, curves and Viewer gestures remain whole-value writes.
+Mask parameters use the same value-write contract, while shape geometry retains
+its separate typed shape authoring interface.
+
+Value-widget callbacks and their action helpers take stable owner targets only;
+no ignored property-path argument or captured alias is retained. Basic Title
+multiline presentation resolves the title-text definition identity and uses the
+projected property label for its input hint. External resource file paths remain
+authored resource values, distinct from removed UI routing aliases.
+
+Undo/Redo pauses the Playback-owned transport at its authoritative current
+position before applying history. It does not invoke the explicit Stop command
+that returns to frame zero. Restored author snapshots retain monotonic revisions
+and the editor cursor, so the next animated parameter edit uses the same
+Clip-local author time rather than silently targeting an earlier key.
+
+### Refresh admission during pointer editing
+
+`Widget::has_active_pointer_interaction` reports local unfinished pointer
+input, independently of keyboard focus and accessibility presentation. Slider
+and CurveEditor report their actual drag state and clear it on release,
+focus loss, or disable; CurveEditor also clears it on Escape cancellation. AppUiHost includes this signal in its
+recursive transient-interaction admission check. Author actions still commit
+and synchronize Preview intent immediately; a same-mode full model rebuild is
+deferred until the gesture ends. The existing bounded Preview/frame projection
+still runs for full author dirtiness, even without a separate worker repaint,
+so retaining input widgets cannot retain an obsolete author picture. This retains the EventRouter capture owner
+without copying stale parameter values into new widgets. An empty action drain
+after pointer release admits the deferred model refresh. Real Inspector tests
+route pointer down/move/release and window focus loss through EventRouter and
+the Host, verifying continued live author edits and eventual refresh.
+
+This admission contract does not coalesce author history or establish validity
+for a removed/locked owner; current owner validation remains in action dispatch.
+Owner transitions and other captured widgets require their own qualification.
+
+## History transport coordinates
+
+The App pauses transport before restoring an authoring history entry. It captures
+the Playback engine's exact FramePosition and active Sequence owner before the
+restore, then rebinds through the existing settled timeline seek. For an unchanged
+owner, timeline_position performs nearest-frame lowering on the restored rate;
+a bare frame number is never reinterpreted with a different time base. If history
+removes the active owner, the restored Sequence's own playhead supplies navigation.
+Redo preserves a current navigation owner that still exists in the restored project.
+
+The seek seam binds the restored Sequence, reprimes audio and advances the playback
+epoch, invalidating work from the old grid. Current timeline time reads the actual
+Playback FramePosition rather than synthesizing one from the current author rate.
+Authoring restore and runtime admission remain separate: a committed author receipt
+is published even if subsequent playback admission reports an error. Physical device
+failure behavior is a separate qualification requirement.
+
+## Inspector text editor selection
+
+Generic Inspector Text controls use the definition's `ParameterTextMode`, not
+line breaks in the current value. Empty multiline parameters retain a text area;
+single-line fields retain their compact control when their authored value has
+line breaks. Generic plugin fields keep confirm/cancel draft semantics and one
+transaction on commit. Basic Title remains explicitly multiline with its existing
+live editing action policy. Event regression tests cover Unicode, empty multiline,
+line-break-containing single-line values, cancel, no-op, Undo and row geometry.
+
+## Typed resource editing
+
+Inspector Resource values open a shell-local draft modal. URI, project asset,
+external file/folder and Unbound retain their distinct author representations.
+Resource schema admission shapes available modes and native file filters. The
+full asset-library chooser loads names on open, independent from browser folder
+navigation, and supports searching. File/URI drafts survive kind changes; typing
+updates local form state without author transactions or focused-input replacement.
+Only confirmation lowers a stable target through the same Inspector parameter
+write action. Cancel and unchanged confirmation emit no author action. Native
+picker cancellation preserves the draft and does not import media. Draft IDs,
+author session/Sequence and current owner/schema/value checks reject stale
+updates and invalid owners. Qualification is tracked in the local issue tracker.
+
+## Overlay ownership and input targets
+
+UI Events keeps the winning overlay scope separate from its ordinary content
+hit target. Normal pointer routing descends into that scope to establish focus
+and capture on editable leaves; it cannot fall through to background siblings.
+Outside-close and clipped content retain the scope target. Nested popup overlays
+still take precedence. Captured-pointer preemption compares overlay scope ancestry,
+so moving a text-selection drag over another normal control in the same modal
+does not steal capture. Actual EventRouter resource-dialog regression covers
+pointer focus/capture and IME Enter/Escape before ordinary Enter confirmation.
+
+The Widget root declares its active keyboard focus scope directly. TreeWalker
+collects Tab/Shift+Tab order only within that subtree. EventRouter suspends the
+background focus, establishes modal focus before routing input, restricts keyboard
+bubbling to the scope, and blocks global shortcut fallback while the scope is
+active. Closing restores the original focus only if the control still exists and
+is focusable. Replacing a modal retains the original background restoration target.
+Scopes without focusable controls still consume keyboard input without targeting
+the background. This contract is independent of pointer overlay hit testing.
+
+Focused controls receive Tab first so an active IME or an editor's own Tab
+command can consume it before traversal. Resource locale updates change captions
+and hints in place; TextInput and Button caption setters retain identity and
+interaction state. Resource search caches normalized library captions and
+reconciles them when the Library connection identity or database revision changes.
+The connection identity uses a weak reference so the chooser cannot keep a retired
+Library alive. Host reconciles before transient-input refresh deferral; direct
+Root refresh and resource events use the same boundary. A revision is captured
+before reading rows so a later concurrent commit cannot mark older rows current.
+Unchanged revisions avoid listing and normalizing the Library again. Providers
+that disallow ProjectAsset bindings do not load the chooser catalog.
+
+Candidate replacement uses Dropdown's existing model API, retaining widget
+identity, focus and popup state while clearing obsolete row indices. It preserves
+the Resource draft, selected reference, search input and IME composition. Renamed
+and newly imported assets appear in current search results; retired assets leave
+the candidate list without silently changing a bound reference. Empty-result
+feedback is recomputed, and confirmation independently validates current membership.
+Catalog refresh errors do not block local draft edits or cancellation. Opening a
+new chooser and confirming a changed ProjectAsset still require authoritative
+Library reads; failures leave author state unchanged and retain a recoverable draft.
+
+The actual resource-shell LUT acceptance traverses native-picker adapter output,
+one author transaction, Undo/Redo, durable `.mdp` save/reopen and the compiled
+Float32 graph executor. The same resource modal traverses forward/reverse Tab
+through its editable, browse and confirmation controls without emitting author
+actions, then restores the background focus on cancellation. A Unicode cube path
+swaps red/blue for cube corners and fractional interior samples while preserving
+transparent, translucent and opaque alpha. Output before save and after durable
+reopen is compared exactly, in addition to checking the persisted binding.
+Cancellation, unchanged/stale confirmation, picker cancellation/failure/multiple
+selection, declared file filters and locked-owner invalidation have explicit
+regressions. This does not qualify physical native dialogs or third-party
+plugin resource providers on another platform.
+
+Resource confirmation checks unchanged author intent before applying new-input
+URI or provider-availability checks, without allocating a replacement reference.
+Unavailable original ProjectAsset references remain visibly bound and unchanged
+confirmation closes without a transaction. File/folder captions follow the
+declared resource path kind. New changed references still require full admission.
+
+## Workspace window resizing
+
+The undecorated workspace uses client-side edge and corner hit testing on
+Windows/Linux to start the native winit resize operation on left-button press.
+Hit geometry is evaluated in logical pixels so display scaling preserves the
+grab area. Matching native cursor hints take priority at the border. Startup,
+maximized/fullscreen windows, active widget capture and the eyedropper do not
+enter this path. AppKit retains its native resize handling because winit does
+not support explicit drag-resize on macOS. Workspace minimum size remains a
+native window constraint; startup retains matching minimum and maximum sizes.
+
+Resource drafts validate their stable author owner before Host defers a full
+refresh for focused text, IME or pointer interactions. Validation resolves the
+current Session/Sequence, selected Clip, actual Track lock, property instance
+address, schema and original resource directly from author state without
+rebuilding Inspector curve projections. Removed/locked/switched owners cancel
+the modal immediately; valid focused drafts retain their widgets and IME.
+Each resource update and browse request uses the same current-author check, so
+a delayed event cannot open a picker or retain input against an invalid owner.
+
+Slider exposes explicit begin/update/finish/cancel edit callbacks with a fresh typed
+identity for each pointer drag. Begin is emitted even if the value is unchanged;
+release/focus loss finish once. Keyboard edits are independent. The common
+numeric property builder wraps only canonical Clip/Effect/Mask parameter intents
+in a typed gesture action; preferences/form draft callbacks remain local. App
+validates the selected owner, actual lock and current Session/Sequence/generation
+lease on every update, then invokes the same property author modules. A failed
+or stale lease cannot keep authoring an obsolete captured control. Boundary/no-op
+actions do not publish author invalidations; live changes retain the bounded
+Viewer update path and defer dock rebuilding until release.
+
+All Host Root model replacements seal an active parameter gesture through the
+authoring session before discarding its input widgets, including preferences,
+asset-folder navigation and startup/workspace transitions. A failed history
+seal retains the existing controls and schedules a retry; a delayed event cannot
+continue writing through the removed interaction identity.
+
+Escape during a focused captured slider interaction restores the exact original
+value, releases pointer capture and emits Cancel once. Late pointer release or
+focus loss cannot accept the cancelled interaction. Value-only form controls
+restore their original draft; canonical Clip/Effect/Mask controls ask the authoring
+session to cancel the staged command. Failed author updates cancel the entire
+interaction and force a model refresh even if the initial update never changed
+an author generation.
+
+Undo during a captured parameter slider interaction uses the Session's next
+meaningful history command. A changed drag is accepted and reversed atomically;
+a net-zero drag releases its pending command while restoring the preceding
+command. Host discards invalidated controls before transient deferral, and late
+pointer events cannot recreate a write. This policy preserves original Redo on
+cancellation and net-zero finish without UI snapshot restoration.
+
+
+CurveEditor Escape clears selection and repaints independently of whether its
+point value changed. Any active drag releases pointer capture, including an
+unchanged press and a drag returned to its origin. Cancellation emits no
+incremental key edit; late pointer release or focus loss cannot commit a cancelled
+drag. Capture ownership is an interaction fact rather than a value-difference
+heuristic.
+
+
+### Numeric curve draft ownership
+
+CurveEditor can expose typed Begin/Edit/Finish/Cancel lifecycle events. This
+callback replaces live value and incremental callbacks: a pointer drag remains a
+local normalized draft until release or focus-loss acceptance. Keyboard nudges
+while captured adjust that draft without committing another edit. Delete accepts
+one deletion and releases capture; deleting an uncommitted inserted point cancels
+the draft. Escape, disabling and replacement of points cancel capture without
+emitting an incremental author edit. Standalone keyboard edits carry no pointer
+identity.
+
+Clip and Effect numeric Inspector curves register a stable parameter owner on
+pointer down through App's shared parameter gesture protocol. BeginCurve opens
+the existing AuthoringSession Sequence/generation lease without an initial
+write. Release sends one typed curve intent through the canonical curve authoring
+module, then Finish. Curve and value intents use distinct target kinds, so a
+matching interaction identity cannot authorize another edit family. Host checks
+owner selection, actual lock, Session, Sequence and author generation before
+transient refresh deferral. A stale lease discards the old control; late events
+cannot recreate or commit its draft. This does not wrap AI/headless product
+commands in UI selection policy, and does not introduce a second keyframe model.
+
+
+An identical numeric curve update inside a valid gesture is a no-op rather than
+an edit failure: it retains the live interaction and any preceding effective
+update. Ordinary independent no-op product commands keep their explicit failure
+contract. Finish/Cancel of any matching parameter interaction refreshes its canonical
+model even if frame/value lowering yielded no author change, so local normalized
+points cannot remain as misleading unsaved curve geometry. No-op updates do not
+advance author generations or publish author invalidations.
+
+
+Numeric Clip/Effect curve menus and audio automation curve menus translate
+interpolation captions through one exhaustive App-owned mode-to-message mapping.
+Menu rows retain stable message IDs alongside localized captions and typed
+commands. Locale changes affect presentation only: schema admission, supported
+mode sets, current interpolation checkmarks and key identities remain author
+facts. Chinese and English catalogs declare every mode, including automatic and
+continuous Bezier and the numeric-curve ease presets.
+
+
+Resource drafts inspect external path availability only when confirming changed
+intent under an explicit Existing/ExistingOrNew contract. Wrong object shapes,
+missing required inputs and inspection failures retain the draft with localized
+feedback. File browsing calls the native open picker for both existence policies.
+ExistingOrNew captions say Browse existing, and localized input hints explain
+that a new path can be typed. Selection never invokes a save dialog or its
+overwrite confirmation; permissive availability does not imply an output role.
+Directory browsing selects existing directories, while typed paths can specify
+new directory paths. The SDK flag does not declare an output destination.
+Browsing/cancellation never creates or imports files
+or emits author changes. Confirmation remains one reversible editor transaction;
+all stale owner/schema/focus/IME guards apply to the new selection policies.
+
+ResourceDraft validation is pure: confirming a changed path under an existence
+policy returns a typed inspection request, retaining the modal. Host lazily owns
+one supervised path inspection process and at most one replacement request.
+Only the private product helper performs filesystem metadata. Native OsStr paths
+are passed without lossy conversion; the helper emits one exact response of at
+most 32 bytes and starts before graphics/platform initialization.
+
+Both queued and running requests have a five-second UI deadline. Editing,
+browsing, cancellation, owner replacement and Project close revoke admission.
+Timeout remains bounded even if process creation or OS termination is delayed;
+the supervisor retains the child and no replacement process starts until its
+cleanup completes. The main thread never waits on a live child or joins a live
+supervisor. Window scheduling adds a ten-millisecond timed wake only while
+inspection work exists; it does not claim immediately drainable Preview work or
+spin the event loop through ControlFlow::Poll.
+
+Completion must match the current opaque ticket, Session, Sequence, selected
+owner, unlocked Track/Mask, schema and original author value. Every draft update
+revokes the ticket, including editing away and back to identical text. IME
+composition at completion requires another explicit confirmation. Only a current,
+valid success produces the same single author command used by synchronous resource
+edits. Relative-path resolution ownership and fresh-process/platform recovery
+remain separate qualification obligations.
+
+While inspection is pending, Apply is disabled in place through
+`Button::set_enabled`, preserving its widget identity and callback. Disabling
+clears pressed/focus state, so an outstanding pointer release cannot click after
+re-enabling. Modal traversal skips Apply but retains Cancel and editable controls;
+editing revokes the inspection and re-enables explicit confirmation.
+Opening a browser also withdraws the progress message before invoking the
+native picker. Cancelling that picker retains the draft without stale progress;
+locale changes cannot resurrect the withdrawn message.
+
+### Project-owned relative resource input
+
+The Resource draft captures the Project file alongside Session/Sequence identity.
+A changed Project path invalidates the draft and pending inspection. Confirmation
+binds new relative paths against that captured Project directory using the Core
+lexical resolver, then validates the resolved reference against the provider schema.
+The supervised inspection and eventual author action use the same bound path.
+Untouched references remain no-ops; equivalent resolved references also close
+without inspection or history. Missing targets are not created. This author input
+contract does not claim a resolution base for arbitrary native plugin defaults.
+
+### Native resource drafts
+
+Resource drafts retain `NativePath` rather than reconstructing file selections
+from their display strings. An untouched draft preserves foreign-platform or
+non-Unicode intent exactly. New text is a local path; inspection requires explicit
+local-path admission and cannot reinterpret a foreign path through the current
+working directory.
+
+### Live structured transfer curves
+
+`ValueEdit` is the shared typed Single/Begin/Update/Finish/Cancel lifecycle for
+Slider and complete-value CurveEditor callbacks. It replaces the slider-specific
+public enum; no compatibility alias remains. `CurveEditor::on_value_edit` replaces
+other callbacks and preserves live complete-value updates, while `on_gesture`
+continues to defer numeric keyframe edits until release. The generic widget does
+not interpret authoring schemas or execute Undo.
+
+Live curve Begin precedes insertion and carries the exact original points.
+Subsequent insertion, movement and captured keyboard edits share one typed
+identity. The Inspector maps complete transfer-curve values through the existing
+Clip/Effect/Mask write intents and canonical AuthoringSession gesture journal.
+Live author generations update Viewer output without rebuilding captured widgets;
+acceptance retains one reversible command, and cancellation restores author values
+and the original Redo branch through the Session. Selection changes, actual locks
+and intervening author generations revoke stale owners before refresh deferral.
+
+The widget retains original local points and point policies only for cancellation
+of its own live interaction. Escape, disabling or deletion of an uncommitted
+inserted point cancels once without publishing a separate restored-value edit.
+Release/focus loss accepts once. A new pointer interaction accepts the previous
+one before opening a fresh identity. All matching terminal parameter boundaries
+refresh canonical controls, including unchanged or rejected local values; late
+pointer release/focus loss cannot commit a cancelled edit. Existing numeric curve
+and ordinary slider behavior is qualified alongside the structured curve matrix.
+
+### Component-specific numeric controls
+
+Inspector vector controls read the matching schema channel range and step.
+Scalar model hints are projected only for scalar parameters; they do not stand
+in for all vector components. Sparse component actions retain the canonical
+parameter address and write only the selected index through the author session.
+
+### Exact numeric editor endpoints
+
+Float and vector Inspector controls edit f64 author channels with exact schema
+ranges and steps. Their values materialize through Core Float projection; the UI
+does not prematurely round a decimal hard endpoint to f32. Non-animated numeric
+components use the same sparse write seam without creating animation channels.
+
+
+### Precise compound numeric Inspector controls
+
+The shared component editor consumes f64 channel values for Float, precise
+Double and i32 vector families. Existing Float vectors retain their finite f32
+representation bounds; double components keep the full f64 domain and integer
+vectors use exact i32 limits and integral editor steps. Every component reads its
+own numeric contract and dispatches a sparse typed channel write so editing one
+field preserves all siblings. Double vectors use X/Y/Z and precise RGB/RGBA use
+R/G/B/A labels. Typed text editing, one-command Undo/Redo and Escape cancellation
+are exercised through actual Inspector widgets and the canonical App author
+boundary for all six compound families. Precision-preserving color picker and
+OpenFX descriptor/temporal/color binding remain outstanding product work.
+
+### Transfer curve insertion capacity
+
+CurveEditor accepts an optional user insertion limit without truncating supplied points. Structured normalized transfer curves configure the canonical 32-point limit; ordinary keyframe curves retain unrestricted insertion. Empty-plot clicks at capacity are rejected before a value gesture or pointer capture starts, preserving draft state and Undo/Redo history. Existing points remain editable and deleting an interior point frees capacity. Inspector captions show localized current and maximum point counts.
+
+### Curve drag coordinates
+
+A captured point drag owns its point index, original normalized point, original pointer position and insertion intent together. Movement is computed from pointer displacement, preserving the grab offset and the untouched axis exactly; a stationary pointer does not change the point. A collapsed plot axis retains its original coordinate without dividing by zero. Cancel restores the original point or removes a newly inserted point. Audio automation lowering retains the canonical key's original exact time or value when its projected axis has not changed, so horizontal movement never re-applies value stepping and vertical movement never quantizes existing author time.
+
+### Professional export localization
+
+Export controls and summaries resolve owned wording through the same Fluent locale snapshot, including video range and bit depth, alpha and legalizer titles, VBV units, integer PCM depth, fixed professional PCM descriptions, IMF/DCP package captions and essence descriptions. Codec, profile and color-standard identities remain presentation arguments or protocol labels; localized captions never determine preset values or dispatch. Chinese catalog copy also covers Processing Scope ownership, Sample Delay, ICC calibration, Camera RAW summaries and typed shell/startup/preferences/asset-browser failures without rewriting opaque diagnostic arguments.
+
+### Audio automation curve ownership
+
+Audio curves retain a local pointer draft and acquire the shared author-session
+gesture lease before capture. Release lowers the draft through the canonical
+audio automation action and seals one reversible command; Escape cancels without
+discarding the original Redo branch. The lease validates Session, Sequence,
+author generation and the authoritative audio target's editability. Component
+targets require their selected Clip; Processing Scope targets require a selected
+Clip bound to that scope. Mixer channel-strip targets remain independent of Clip
+selection. A locked, removed or superseded owner cannot accept a late release.
+Visual and audio target identities are separate enum variants, without dummy
+Clip identities or a second audio-authoring interpretation.
+
+### Sparse numeric curve movement
+
+Clip and Effect curves distinguish existing-key movement from insertion. A move
+names the stable key and supplies exact typed author coordinates for supplied axes. The shared author
+adapter validates supplied coordinates, retains exact original time/value for
+absent axes, and applies the same collision, identity and history rules as a full
+update. Unchanged moves create no command or author generation. Synthetic curve
+endpoints insert keys; they do not invent an existing key identity. UI projection
+never reconstructs an untouched exact rational time or f64 value from screen
+coordinates.
+
+### Finite curve value ranges
+
+Inspector and audio automation keys, samples and controls use absolute f64 author
+values. Soft bounds initialize the view; hard bounds constrain key input and the
+canonical schema remains author admission authority. A center/radius viewport
+represents full finite ranges without requiring a finite endpoint difference.
+Time and interpolation remain available for fixed hard ranges. Typed conversion
+occurs only when a value axis actually changes. Exact untouched coordinates keep
+the sparse-move semantics. Audio processor curve insertion is qualified through
+validated plugin parameter snapshots, canonical Rack insertion and author actions
+with Undo/Redo, including full finite intervals and fixed maximum values. Native
+DSP execution remains separate acceptance evidence.
+
+### Fixed-value curve interaction
+
+Inspector models carry a validated CurveValueAxis. Visual and audio factories
+use CurveEditor::with_author_points; a fixed hard interval retains its exact
+absolute value and locks value input. A fixed soft interval with a wider hard
+interval displays the hard interval and keeps value editing available. Pointer movement and insertion
+constrain the visible draft before any author action. Selected Up/Down keys are
+consumed without edits, including Shift; Ctrl/Alt/Meta chords keep normal shortcut
+routing. Horizontal movement, insertion, deletion and interpolation remain
+available. Programmatic point and display-sample replacement obey the same
+constraint. Cancellation restores the original points and publishes no edit;
+release publishes at most one edit. An unchanged constrained drag only closes
+its gesture. Ordinary constant curves with a nonzero value interval remain
+editable.
+
+### Continuous audio curve values
+
+Audio automation projection carries the declared value type and validated value
+axis. Continuous pointer edits retain absolute author units;
+the numeric editor's increment is not an author-value quantization grid. This
+preserves continuous values and avoids overflow from dividing large values by
+small editor increments. Integer parameters still round to integral values before
+hard-range admission. Numeric input and keyboard stepping retain their own editor
+increment behavior. Stable-key movement preserves untouched exact time/value
+coordinates, and every resulting edit uses the existing author transaction and
+Undo/Redo path.
+
+Sparse audio handle and visual curve actions distinguish an omitted coordinate
+from a supplied invalid coordinate at product-action decoding. The former
+retains exact author state; the latter rejects the entire action before history
+or author generation advances. Product-action regression tests cover both axes,
+nonfinite values, and unchanged state/history after rejection.
+
+### Current machine preference schema
+
+`AppUiPreferences` admits the current schema as one document: every machine
+field is required except the optional custom workspace layout. Unknown fields
+and unknown product locale choices are rejected instead of creating a hidden
+System-language variant or filling missing required fields independently.
+The real loader uses defaults for absent, malformed, or incompatible documents
+and does not rewrite their bytes. System locale resolution still accepts an
+external desktop language tag and selects a supported product language.
+Current-schema tests use nondefault theme/language fixtures, verify exact file
+preservation on rejection, and round-trip every supported locale with no
+custom layout. This is alpha schema admission, with no field migrations.
+
+Visual value adapters call the Core value-write seam without a Vec2 handle
+argument. Handles remain typed author geometry, edited through the separate
+Core mutation; value input retains stored control precision. The Inspector test
+caller follows this same API, without an unused optional override.
+
+Audio automation curves treat unauthored viewport endpoints as value-editable boundaries. A vertical boundary drag inserts a canonical key at the fixed owner time through the same author action as other curve edits; an unchanged boundary creates no automation. Existing keys retain stable identity and unchanged exact coordinates. Endpoint acceptance covers author-session Undo/Redo and a real Unicode .mdp archive with a SQLite library, followed by fresh projection from the reopened document.
+
+Temporal CurveEditor author gestures publish changed coordinates while captured; their canonical author-session lease supplies cancel restoration and one grouped history entry. Insertion reserves a KeyframeId once per pointer gesture, including virtual viewport boundaries, and reuses it across every update and release. Audio insertion and visual explicit-ID Upsert retain this identity, while visual Move still requires an existing key and occupied times reject other identities. The once-per-release edit callback remains distinct from live author gestures. Temporal handle interaction and full workflow acceptance remain required.
+
+CurveEditor accepts an owner-provided display projection for current point intents and restores pre-gesture samples on cancel. Audio Inspector/Mixer uses a canonical Timeline candidate and Core prepared segments, with no duplicated interpolation implementation. Visual display projection uses the canonical preparation described below; full temporal handle acceptance remains pending.
+
+Visual temporal graphs now retain an immutable canonical AnimatedProperty snapshot and exact owner interval. Display projection reuses the same visual author preparation, typed payload lowering, Core mutations, and Core evaluation as the real command. The snapshot is derived UI data and never project authority. Move/insert/delete preview samples are compared with real author results across Hold, Linear, Bezier, AutoBezier, and ContinuousBezier; pointer cancellation restores the original samples.
+
+Curve preview receives the same Begin/Edit/Finish/Cancel lifecycle as author commands. Its derived canonical candidate advances in command order, since Continuous Bezier normalization can change control geometry after each position edit. Begin retains the candidate for rollback, Cancel restores it, and sampled lines retain the widget rollback behavior. This transient projection never publishes project state or history; the author session remains the sole mutation seam. Nonzero manual/continuous controls and multiple moves are compared exactly with real author results, alongside insertion and deletion.
+
+Numeric curve Move actions carry absolute TimelineTime and typed PropertyValue targets; omitted axes explicitly retain current author coordinates. UI pointer movement supplies both targets, retaining the original canonical coordinate whenever its projected axis is unchanged or the pointer returns to its origin. Only changed axes use the shared App viewport-to-author mapping, avoiding needless quantization or scalar type conversion. Each absolute positional gesture update derives its candidate from the immutable original world geometry. Derived display candidates are output, not the next update's author source. The actual author gesture test restores an exact one-third-second key and its value, returns the complete author state to the origin, and leaves no Undo entry. Old normalized Move fields are removed from the alpha command schema.
+
+The Host qualification routes an Inspector curve through actual pointer capture, multiple live updates, return to the original grab point and release. Numeric keyframe and structured transfer curves must restore the original author state before release, finish without changing Undo/Redo diagnostics, preserve an existing Redo branch, and retire both pointer capture and the author gesture lease. This test supplements the exact one-third-second coordinate regression in the parameter authoring path.
+
+### Canonical numeric handle coordinates
+
+App curve point edits retain Core's exact owner-time/value handle offsets.
+Visual and audio numeric evaluation now use the shared Core cubic solver and
+constraints; the UI owns no normalized persisted handle geometry. Manual point
+edits retain legal controls, and time edits bound retained controls to new spans
+without rotating their direction. The author session remains the only commit and
+Undo/Redo seam. Temporal handle drag widgets are still pending; this change does
+not claim their interaction acceptance.
+
+Absolute visual numeric Move/Upsert gestures use the Session-owned original
+history snapshot. A handle shortened near a neighbor is recomputed from its
+original direction and extent at every target, so returning to the grab point
+restores complete geometry. Sparse Move axes resolve against current author
+coordinates before candidate derivation. Insertion identity remains reserved and
+stable. Relative mode/remove/value operations retain current-state semantics.
+The captured widget derives positional preview from its Begin snapshot using the
+same Core preparation. No extra author snapshot is retained by App.
+
+Numeric curve gestures distinguish time-addressed insert operations from stable-identity
+position updates. Time-addressed insertions accumulate in the current author candidate;
+stable-identity drag samples derive from the Session-owned gesture origin to avoid
+progressively shortening manual controls. A key created during the gesture is resolved
+against current author state before preparing its final position, retaining its identity
+and complete author metadata. Finish retains one reversible history entry; cancel
+restores the original Sequence through the same authoring session.
+
+
+### Resource confirmation focus and durable history qualification
+
+The App resource-modal acceptance routes Tab and Shift+Tab through EventRouter
+while the asynchronous inspection disables Apply. Disabled controls leave the
+focus order; all remaining focus stays in the active modal. Inspection timeout
+retains the draft and restores Apply for retry. Cancel restores the suspended
+background focus. Traversal and unsuccessful inspection publish no author edit.
+
+The LUT workflow qualifies both durable snapshots around Undo: saving an undone
+binding preserves the live Session's Redo branch, while a fresh Session opens the
+unbound author value with no inherited history. The shared graph must report an
+AuthorEdit resource error for the unbound LUT, never reuse the previous compiled
+resource. Redo in the original Session restores the exact six-sample RGBA output;
+saving and reopening the bound snapshot preserves that same output. These are
+real cube/SQLite/MDP tests with deterministic chooser input, not physical native
+keyboard or picker qualification.
+
+### Canonical temporal tangent editing
+
+CurveEditor receives canonical CurveTangent projections and a CurvePreview with
+both evaluated samples and current controls. Selected-key controls are painted
+with semantic theme colors and clipped to the graph; hit testing owns only the
+currently selected key's handles. Pointer edits retain the grab offset, constrain
+temporal coordinates to the neighboring owner span, and leave finite value
+coordinates unclamped. Value control excursions are independent of key values.
+
+Visual adapters lower stable keys to sparse exact EditHandle author coordinates;
+audio adapters use the existing exact AudioAutomationEdit::EditHandle. Core
+resolves default controls, owns Auto/Continuous constraints and rejects invalid
+candidates. UI projection neither evaluates Bezier curves nor owns author state.
+Complete current controls returned by the canonical preview update constrained
+partners during the draft. Absolute pointer candidates derive from the Session
+origin; omitted coordinates in external visual actions resolve against current
+author state first. Unchanged screen axes preserve exact rational handle offsets.
+Wide opposite-sign finite value intervals project and lower without overflowing
+their span. Invalid/nonfinite screen edits do not construct an author action.
+
+Pointer capture reporting covers point and tangent drafts. Escape, disable and
+point replacement cancel the author gesture and release capture; ordinary release
+finishes it. A completed draft creates one reversible history entry, while cancel
+or return to exact origin creates none. Keyboard handle edits are atomic actions;
+Delete on a handle cannot remove its owning key. The non-live on_edit adapter
+receives a tangent edit only on release. Actual EventRouter acceptance covers
+visual continuous handles and audio Track-fader controls, exact axis preservation,
+partner alignment, completion/Undo/Redo, cancellation and return to origin.
+
+Selecting another key or opening its context menu clears the previous tangent
+selection. Nearest-hit ties prefer the key, preserving key dragging when a
+zero-length control coincides with its owner. Collapsed viewport axes retain
+their exact original coordinates instead of synthesizing a movement scale.
+
+Viewport zoom/pan, frame-grid nudge controls, keyboard-only handle selection,
+large-curve projection performance and physical/platform interaction acceptance
+require further implementation and qualification before claiming a complete
+professional temporal curve editor.
+### Dense curve projection
+
+Visual and audio tangent adapters consume Core's ordered control iterator,
+filter exact owner times to the viewport, and retain KeyframeId ownership.
+The Widget owns a linear-size ID-to-display-slot index; no author callback
+interprets the current slot as a key identity. Virtual viewport anchors have
+no author identity and never acquire another key's controls. The scalar visual
+model reads its admitted single channel directly with exact-time partition
+boundaries; it preserves real keys at either viewport edge and uses virtual
+anchors only where no real key exists. Outside keys remain in the canonical
+source for interpolation and neighboring control spans. Presets derive from
+stored interpolation metadata without reconstructing complete property keys.
+
+The ignored temporal_handle_large_curve_projection_smoke exercises these real
+App adapters at 1024, 4096 and 16384 keys, records model/tangent timings and
+checks key/control counts plus finite geometry. It is a local projection
+measurement, not a full interactive/render/plugin realtime qualification.
+
+### Stable temporal point and tangent ownership
+
+CurvePointTarget distinguishes a canonical KeyframeId, a generic normalized
+owner-snapshot point, and an unauthored temporal viewport boundary. CurveEdit
+Move/Delete carry that target; Handle and CurveTangent carry KeyframeId.
+The temporal App adapters reject generic snapshot targets rather than infer
+an author key from its current array slot. Normalized transfer curves retain
+their complete-value callbacks and immutable snapshot identity semantics.
+
+CurveEditor keeps target, interaction policy and context menu together in
+point metadata. Structural insertion/deletion updates that metadata and the
+ID-to-slot map atomically. Tangent filtering, hit tests, painting, selection
+and author intents all resolve the same stable owner. A newly inserted key
+cannot inherit the former occupant's controls or context commands. Escape
+restores point metadata and the original canonical tangent projection.
+
+Visual and audio adapters lower each action against the current canonical
+preview source before applying that preview, retaining an immutable source
+origin during a pointer gesture. The callback consumes that already-lowered
+action, so projection order cannot change the unchanged-axis decision. Newly
+inserted keys can be edited again without rebuilding the Widget; audio edits
+clone current canonical key metadata rather than stale initial projected keys.
+Virtual boundaries reserve one ID when authored. Return to the original point
+cancels materialization and history; accepting a changed boundary makes it an
+editable real key. The non-live callback emits one Insert on release.
+
+A real App EventRouter/author/paint regression originally showed a linear
+inserted key drawing the displaced key's controls, despite having no controls
+in canonical state. Acceptance retains that assertion and routes insertion
+and deletion followed by keyboard edits and two Undo/Redo steps in the visual
+adapter, plus insertion/keyboard editing/Undo/Redo in the audio adapter.
+Component tests also retain shifted generic snapshot identity, context commands and canonical controls on cancellation. This does
+not establish physical keyboard, viewport zoom/pan or frame-grid qualification.
+
+
+### Curve selection across workspace refresh
+
+Temporal Inspector and audio controls attach a view key encoded from their typed
+parameter owner. AppUiPanelModels carries the current AuthoringSessionId and
+SequenceId. AppRoot retains inactive CurveEditorViewState only within that
+scope and the same owning panel/key. Restoration preserves widget focus identity
+and resolves selected author keys through KeyframeId, retaining new canonical
+geometry. Missing keys/controls lose selection. Snapshot/virtual selection
+requires identical geometry. Author-ID selection does not clone the point array.
+
+Live pointer gestures, author drafts and context menus are not transferable.
+Replacing a project/session or sequence retires the old focus identity even
+when persistent parameter/key IDs happen to match. A real Host/EventRouter
+regression routes pointer release through model rebuilding and a subsequent
+keyboard edit, then verifies two Undo/Redo steps and fresh-session isolation.
+Multi-key workflows and viewport controls remain separate qualification work.
+
+
+### Keyboard curve navigation
+
+Focused CurveEditor handles Home/End for first/last point, Ctrl or Cmd plus
+Left/Right for adjacent points, Alt plus Left/Right for incoming/outgoing
+canonical controls, and Alt plus Up to return to the owner point. These
+selection operations do not publish author edits or history. Navigation is
+contained during pointer capture, preserving the outstanding draft owner.
+Tab remains shell focus navigation. Shift+F10 opens the selected point's
+existing interpolation menu, initializes its keyboard selection, and uses
+its canonical stable-address commands.
+
+Temporal/audio and normalized transfer controls expose localized accessible
+canvas names, collection selection/focus/disabled state, and delayed keyboard
+help. Generic transfer help omits temporal control/menu instructions. Normalized
+transfer controls also attach their typed parameter owner view key, preserving
+focus and selection through unchanged canonical point projections. Actual
+Host regressions cover temporal and transfer refresh/key-edit/history/session
+isolation; a mouse-free EventRouter regression enters through Tab, selects a
+continuous handle, edits it while preserving exact time, returns to the point,
+and verifies two independent Undo/Redo steps. Viewport controls remain open.
+
+
+### Exact frame nudges
+
+Temporal visual/audio models supply the current sequence time base to the shared
+CurveEditor. Plain Left/Right emit a stable key/control ID and signed exact
+one-frame delta; Shift uses five frames. Time intent does not travel through
+normalized floating-point point geometry. The author adapter reads the current
+canonical key/control and retains omitted value coordinates and metadata.
+Keys cannot cross or replace neighbors or leave the owner viewport; controls
+clamp to their canonical neighbor span. Rejected/unchanged moves emit no author
+action or history. Pointer capture consumes horizontal frame commands without
+changing the draft owner. Generic transfer curves retain normalized behavior.
+Nonpositive configured frame steps are inert.
+
+CurvePreview now projects canonical key positions by KeyframeId alongside
+sampled curve and tangent geometry, keeping selection and drawn markers aligned
+with repeated exact edits. The API intentionally requires this field; alpha
+has no compatibility shim. Fractional-rate EventRouter regressions cover
+30, 30000/1001 and 24000/1001, repeated/Shift movements, unchanged values and
+three independent Undo/Redo operations. Boundary/collision and dense viewport
+admission checks do not use normalized minimum-point spacing.
+
+
+### Curve viewport interaction
+
+CurveEditor keeps time/value viewport ranges as local view state. Ctrl/Cmd wheel
+zooms time about the pointer; adding Shift zooms value. Ordinary wheel input
+continues to the surrounding scroll panel. Middle drag pans with an owned UI
+capture and no author gesture/action. Escape restores the pan origin; release
+or focus loss accepts the view. Disable or point replacement cancels pan and
+releases capture at the next routed event. Viewport state is copied through the
+existing same-owner/panel/author-session restoration seam; active captures are
+not transferable.
+
+Focused keyboard input supports Ctrl/Cmd PageUp/PageDown for time zoom (Shift
+for value), Ctrl/Cmd Shift arrows for pan, and Ctrl/Cmd 0 for the initial value
+view and complete owner-time span. Author point/control navigation reveals offscreen selection. Viewport
+commands are contained during an author pointer draft. Exact frame nudges still
+use the sequence grid independently of view scale. Both help locales describe
+the controls; normalized transfer curves share the view interaction.
+
+Geometry, hit testing, insertion, point/control pointer deltas and painting use
+one viewport mapping. Invisible keys/controls cannot capture plot-edge clicks.
+Curve/control segments are clipped in f64 projection coordinates before screen
+f32/GPU submission; all markers stay under the plot clip. Zoom/pan ranges are
+bounded and extreme finite value selection retains a representable span.
+EventRouter author regressions verify zoomed pointer edits followed by an exact
+frame nudge, with two independent Undo/Redo operations and untouched key values
+on time-only edits. Temporal key/sample/control projections retain absolute author
+values outside soft bounds. Only screen geometry and author key input are bounded;
+canonical evaluation is not clamped by UI display bounds. Physical high-DPI/platform input, domain
+axis rulers and multi-key workflows remain separate qualification.
+
+
+### Exact visual curve insert requests
+
+ClipCurveAuthorPoint contains owner-domain TimelineTime and typed PropertyValue.
+Both Upsert and sparse Move enter the same author preparation, stable-key/time
+collision admission, parameter schema validation and author transaction. Upsert
+checks the exact owner interval and never interprets a soft-range ratio. The
+obsolete normalized insertion command/parser is removed for alpha. Preview
+uses this same preparation. Editor range availability is not an author
+admission rule; the canonical property schema owns value validation.
+
+The UI performs its current viewport-to-author lowering before dispatch. Golden
+author acceptance now passes the existing exact typed endpoint value directly,
+with an exact 7/8 owner-duration time, retaining its Bezier metadata. Regression
+fixtures lower UI seed positions before the author seam. Direct codec/preparation
+checks cover exact one-seventh time, Float/Double/Integer values outside soft
+but inside hard bounds, hard/time rejection, immutable source and a property
+without numeric editor metadata. The absolute UI value projection described below
+uses this exact insertion contract rather than a normalized value parser.
+
+
+### Absolute temporal value coordinates
+
+CurvePoint.x is a normalized f32 owner-time projection; CurvePoint.y retains an
+absolute f64 value for temporal curves. The normalized transfer constructor and
+CurveEditor::with_points retain bounded f32 transfer storage precision. Temporal
+factories use with_author_points with a validated CurveValueAxis containing soft
+and hard bounds plus an optional author-unit keyboard step. No old coordinate
+payloads or compatibility aliases are added. Integer keyboard steps honor metadata
+at integer precision; continuous pointer values are not quantized to editor steps.
+
+Visual and audio projections retain raw canonical key values, evaluated samples
+and finite control excursions. Changed handle values subtract the canonical key
+value directly, avoiding an overflowing intermediate screen delta for legal
+opposite-sign controls. Moving an unchanged axis uses the current exact key
+value/time. Preview invokes the same canonical preparation/evaluator as the
+product action. A value viewport uses a finite center and radius, including full
+Double spans and subnormal views. Segment clipping rescales overflowing differences
+and pins boundary intersections before screen f32 conversion. Hit testing ignores
+invisible keys; keyboard selection reveals out-of-view values. Zoom, pan and reset
+carry only view state; raw value coordinates stay stable through owner refresh.
+
+Tests exercise a real visual model's former 1.5-to-1.0 clamp, an actual Effect
+with soft [0,1] and hard [-2,2], exact Double single-axis edits and Undo/Redo,
+raw audio values, canonical preview, fixed hard/soft intervals, signed zero,
+full finite geometry and real pointer edit/cancel/release after keyboard reveal.
+The original Host transfer-selection regression remains and verifies canonical
+f32 geometry after author refresh. Native output qualification remains bound to
+its independently recorded clean source and product hash. Axis rulers, multi-key
+workflows and physical high-DPI interaction remain separate professional
+workflow work; this change does not claim them.
+
+
+### Exact scalar key nudges
+
+Temporal Up/Down on authored keys emits NudgeValue with stable KeyframeId, a
+finite author-unit step and signed count (Shift uses five). Widget geometry is
+updated only by the canonical preview projection. Visual adapters read the typed
+source key and call the Core numeric offset contract; audio applies the same
+contract to its canonical f64 keys. Sparse visual Move retains exact time and
+metadata and enters the existing author transaction/Undo path. Transfer curves,
+virtual insertions and tangent controls retain their distinct coordinate edits.
+
+Integer curve projection uses the explicitly lossy as_numeric_f64/ channel
+projection APIs only for graph geometry. Core now retains exact Integer channel
+keys; preview/source reads and value nudges retain those bits independently of
+whether adjacent integer values occupy the same floating screen coordinate.
+
+### Exact scalar curve action coordinates
+
+Scalar curve author points and move payloads carry `AnimationChannelValue`.
+The inspector projects the raw author channel for geometry and comparison;
+pointer candidates carry absolute coordinates, retaining the exact original
+owner time and raw value for unchanged axes. Sparse direct actions resolve
+omitted coordinates against the current canonical key. Keyboard value nudges
+use the shared numeric offset contract with `Double` or `Int` author values,
+without an intermediate Float evaluation conversion.
+
+Preview and commit use the same canonical channel key mutation. During an
+absolute curve gesture, interpolation metadata comes from the origin key when
+that identity existed at gesture start, or from the current key for a key
+inserted during the gesture. Normalized manual controls from intermediate
+candidates cannot accumulate or overwrite origin metadata when returning to the
+origin or cancelling. No-op gestures preserve existing Redo history.
+
+This changes the alpha action payload value shape without a compatibility
+parser. Project storage remains schema 31. Native parameter evaluation,
+renderer and plugin execution continue using their existing typed seams.
+
+### Rejected curve preview admission
+
+An installed canonical curve preview provider owns edit admission: an absent
+Edit projection rejects the candidate; absent lifecycle projections still admit
+Begin/Finish/Cancel boundaries. The widget suppresses rejected author dispatch.
+Point and tangent movement restore just their previous local coordinate, keeping
+an existing pointer capture available for recovery or cancellation. Keyboard
+moves restore the original point metadata. Deletion stages one removed entry;
+a refusal restores its point, metadata, selection and capture before publication.
+An accepted projection reveals the replacement selection after removal.
+A rejected initial insertion cancels its gesture, removes the reserved local key
+and retains the previous selection without capturing the pointer. Owner-less
+curves continue to use local geometry. No full curve clone is added to pointer
+movement and no additional author state or evaluator is introduced.
+
+Recognized point and handle arrow edits remain handled when clamped or refused;
+geometry change and keyboard ownership are separate decisions. Rejected edits
+cannot leak their arrow keys to parent controls or global timeline shortcuts.
+
+
+### Dense temporal key spacing
+
+Transfer curves retain their normalized display spacing. Temporal insertion
+admits distinct representable projected coordinates without a fixed fraction of
+Clip duration. Temporal movement can cross neighbors inside the owner interval;
+exact owner admission rejects actual time collisions and parameter violations.
+Exact keyboard frame intents also permit crossing without floating conversion.
+
+Point coordinates and metadata reorder together after admitted projection, with
+selection and pointer capture following stable identity. The canonical key order
+resolves exact author times that share one projected coordinate. The existing
+ID map temporarily holds ranks and retains its allocation when rebuilt; points
+and metadata move in place, without a complete curve clone per pointer update.
+Rejected projection retains the last admitted local order. Cancel restores the
+origin geometry and identity order. Escape cancels an active draft while retaining
+an existing key/control selection; idle Escape clears selection. A cancelled
+new insertion cannot retain selection of its removed point.
+
+Actual Inspector acceptance uses Auto and Continuous Bezier keys in a long Clip,
+real wheel zoom/pointer editing, exact frame intents and stable canonical order.
+Unicode archives of undone/redone states compare the entire author Sequence;
+saving preserves live Redo and fresh reopen begins with empty history. Additional
+wide owner-time cases qualify exact keyboard crossing where projected coordinates
+coincide. These do not qualify physical pointer precision beyond its projection,
+all platform layouts, multi-key editing or full interactive performance.
+
+Point gestures retain the original point slot as well as the projected coordinate.
+Cancellation restores that slot by rotating points and metadata together in place;
+it never infers exact owner order from equal projected coordinates. Selection follows
+the restored target and the existing ID index is rebuilt without a full curve clone.
+Actual Inspector regressions cover crossed Auto/Continuous keys in ordinary and
+collapsed projected intervals, Escape and finished return-to-origin with a retained
+prior Redo, and compare full author state plus display order and identity.
+Exact neighbor-time pointer collisions retain the last admitted geometry and
+author state, capture and identity; a subsequent valid candidate recovers before
+Escape cancellation. Both constrained Bezier modes have real Inspector coverage.
+
+### Canonical temporal boundary projection
+
+CurvePreview supplies evaluated start/end points only where no author key owns
+that exact boundary time. CurveBoundary identifies owner Start/End, independent
+of mutable display slots. Visual and audio adapters lower boundaries through the
+exact owner interval and share projection from canonical samples. No legacy slot
+parser or alternate evaluator is retained. The widget updates or inserts/removes
+at most two boundary points in place; ID indices rebuild only on a shape change.
+Captured point gestures retain at most two original boundary entries and restore
+exact origin order on cancellation, accounting for a provisional inserted point.
+Real Inspector and audio EventRouter tests compare live projections to rebuilt
+owner models at both ends, after moving away, and after cancellation or single
+Undo/Redo. This does not qualify physical precision or native output for this
+subsequent source change.
+
+### Temporal curve rulers
+
+Inspector numeric curves and Mixer automation curves supply their existing exact
+owner interval to CurveEditor::with_time_axis. The widget reserves a value gutter
+and a seconds gutter in the same geometry used by painting and hit testing.
+Spacing comes from Theme spacing and metadata typography; layout bounds limit
+ruler reservation so narrow panels retain an editable plot. Labels use measured
+text widths and skip overlaps rather than truncate numeric content. Viewport
+zoom and pan update both axes without an author edit. Values retain absolute
+f64 units; fixed-value parameters display one actual value. Scientific labels
+remain finite at f64 extremes. Owner-time tick arithmetic uses checked rational
+operations; decimal seconds are display rounding only. When an extreme owner
+origin loses its visible duration in floating conversion, labels use exact
+rational time instead. Unrepresentable checked ticks are omitted.
+
+CurveEditor::plot_bounds and point_position expose the actual UI projection for
+routing tests. Actual Inspector and Mixer tests target authored points rather
+than assume the full widget center is a key. Transfer curves retain their
+normalized plot without temporal rulers. No project schema, author coordinates,
+Undo interpretation or renderer evaluation changes.
+
+### Key-set author command groundwork
+
+ClipCurveEditPayload::RemoveMany lowers to the existing Clip/Effect numeric
+curve author transaction and one Core RemoveKeyframes mutation. It carries
+stable IDs and an explicit exact owner retain_time, validated against the Clip
+owner interval. Both numeric product action handlers update selection only
+after a successful commit, removing every deleted ID from the addressed
+property while preserving surviving keys and other property selections. Empty,
+duplicate, stale or incomplete sets do not publish author state or history.
+
+Visual numeric CurveEditor owners enable selection deletion explicitly. Shift
+click toggles authored keys; Ctrl/Cmd+A selects all admitted authored keys,
+including offscreen keys in the current owner interval. Virtual evaluated
+boundaries never enter the deletion set. Selection snapshots carry stable IDs
+and restore surviving keys after canonical reordering or replacement. Painting
+and accessibility expose the entire set. Escape clears the set without an author
+edit. Plain navigation/click explicitly replaces selection with one point.
+
+CurveEdit::DeleteMany carries the complete set through one canonical preview
+and the existing Clip/Effect transaction. The Inspector projection carries the
+current exact Clip author time; removing every key retains its original value
+at that time. Local geometry and selection roll back together when the canonical
+preview rejects the set. Accepted previews reconcile virtual boundaries.
+
+Group pointer/value/time edits, rubber-band selection and group interpolation
+remain to be connected. Arrow edits and keyboard interpolation do not modify
+only the primary point while multiple keys are selected. Audio owners do not
+enable UI selection deletion until the current occurrence time is explicit;
+shared Scope time cannot be inferred from Sequence playhead alone. The canonical
+batch audio author action remains available with an explicit retain time.
+No widget-owned curve replacement or loop of independent author commands is
+introduced.
+
+
+### Audio curve selection current-time context
+
+Audio automation projections require AudioAutomationTimeContext containing the
+current domain-qualified Sequence time. Mixer faders, routes and processor racks
+use AppState's current timeline coordinate. Inspector Component curves use the
+same live coordinate. A selected Clip Scope rack supplies its Component address
+directly when that Clip has exactly one binding of the Scope. Multiple bindings
+in the same Clip expose a localized per-Scope time-reference Dropdown. No
+occurrence is selected implicitly. A closed SelectScopeOccurrence product action
+validates the active Sequence, inspected Clip, Component address and Scope binding
+before updating Session-only SelectionState navigation. Choices are retained
+independently for Scopes in the inspected Clip, never in the Project or Undo.
+The retained navigation set is bounded to the last explicitly navigated Clip;
+clearing selection clears it. Read-only Track navigation remains available while
+canonical shared-Scope author lock admission still rejects curve mutations.
+No global first-binding or viewport-origin fallback chooses retention time.
+
+The model retains Timeline's Result<DomainTime, AudioAutomationTimeError>.
+CurveEditor selection deletion is enabled only for an admitted current owner
+time. DeleteMany uses the canonical AudioAutomationEdit::RemoveKeyframes and one
+author transaction, including original-value retention when every key disappears.
+Preview uses the existing Timeline edit preparation and evaluator. Current-time
+projection does not create history; underlying shared Scope lock checks remain
+whole-definition admission. Group movement/interpolation remain open and are not
+presented as completed professional qualification.
+
+Audio view identity includes the explicit Scope occurrence's Clip/Component IDs,
+excluding transient playhead time and Track locator. Playback and cross-Track
+refresh preserve selection in the same occurrence; changing occurrence cannot
+inherit another occurrence's view state. Navigation resolves stable IDs against
+the current Clip's actual Scope bindings to obtain the current Track address.
+This does not relax full-address admission for queued author/navigation actions. If a refreshed widget
+retains multiple selected IDs but loses batch admission, Delete consumes the
+input without emitting a singleton edit, changing geometry or losing selection.
+Production time-context construction is shared by Mixer and Inspector callers.
+
+
+### Exact keyboard movement of selected curve keys
+
+Temporal curve owners explicitly admit `NudgeTimeMany` alongside stable selection.
+Left/Right applies one exact owner frame-grid increment to the whole key set;
+Shift uses five increments. Transfer curves do not acquire this capability by
+restoring a view snapshot. Capability loss, a locked time policy or an active
+pointer gesture consumes the key without falling back to the primary key.
+The Widget never reconstructs author times or values from projected points.
+
+Clip and audio owner adapters lower the closed group edit to the shared canonical
+primitive. Clip preparation checks the final owner interval before one Author
+Transaction; audio projection checks its exact occurrence viewport. Refused
+projection emits no author action and leaves the key set and geometry intact.
+Successful keyboard movement is one reversible edit and preserves all stable
+identities; pointer group movement, value changes and interpolation use separate
+future group edit contracts. Selection and author history remain session state,
+while saves persist the exact canonical shifted curve.
+
+Selection is admitted when either whole-set deletion or whole-set time movement
+is supported. Shift-click and Ctrl/Cmd+A select authored keys independently of
+deletability; virtual boundaries never join the author key set. Deletion and time
+movement each validate their complete set against their own capability and point
+policies. A time-only owner therefore does not acquire group deletion merely to
+make its keys selectable. Read-only selected keys cause whole-set edit refusal,
+not silent omission or a primary-key fallback.
+
+### Audio draft admission and matching actions
+
+The audio curve model retains the definition-backed inspection contract.
+`prepare_audio_curve_edit` lowers one widget intent and admits the resulting
+exact curve through that contract. `preview_audio_curve_edit` produces an action
+and sampled display points from this one prepared candidate, installing its
+local source only after projection succeeds. The panel never separately lowers
+an action from a different curve candidate. Interpolation menus use the same
+admission before emitting an action.
+
+Illegal gain/pan controls created by constrained neighbor crossing are refused
+before preview or author dispatch. Group selection remains intact; refusal does
+not create a generation or Undo entry. Legal crossing preserves stable IDs,
+uses one author transaction, and retains normal Undo/Redo and save/reopen
+semantics. Commit resolves the current owner and definition again; a stale UI
+snapshot does not bypass current locks or author-session admission.
+
+### Native group curve qualification contract
+
+The ignored App native group test submits the production `ShiftMany` action for
+Auto/Continuous Bezier keys. Its dedicated OpenFX SessionProbe mode checks exact
+key times, indices and values during native instance lifecycle callbacks,
+compares derivative queries to symmetric value samples, and compares integral
+queries to independent Simpson quadrature split at exact key boundaries.
+Native output consumes the queried curve value at off-key frame 3. Rust
+compares it with the canonical constrained author curve and proves the moved
+curve differs from a linear downgrade, so the accepted group move must change
+rendered pixels without losing its shape. Collision refusal, one Undo/Redo and
+fresh undone/redone Unicode project archives use the same plugin execution.
+This test requires an explicitly rebuilt product and fixture; an ignored result
+or an earlier single-key native test does not qualify the group operation.
+
+
+Curve group value keyboard editing has an independent selection-value capability.
+Shift-click and Select All establish stable authored-key selection when any group
+operation is admitted; each operation still gates its own capability. Up/Down
+submits one `NudgeValueMany` intent after checking the complete selected set's
+value locks, with Shift requesting five increments. Canonical preview owns values
+and geometry. Visual payloads prepare a common Core property mutation; audio
+payloads use the shared definition-admitted exact curve contract. Refusal cannot
+publish a partial key update. Bundled keyboard help describes shared boundary
+stopping in both locales.
+
+Point policy explicitly distinguishes time and value locks. Virtual viewport
+anchors retain their existing editable values while locking time; normal author
+keys default to both axes editable. A value lock constrains pointer projection,
+suppresses singleton value increments and rejects complete group increments
+containing that key. Selection and deletion permissions remain separate.
+
+Curve previews suppress author intent when the complete candidate equals the
+previous live display source. The comparison snapshot is taken before resetting
+an active pointer gesture to its origin, so returning a changed gesture to that
+origin still publishes a real update. Boundary keyboard no-ops therefore do not
+surface an unexecuted-action error or alter history.
+
+
+Native group curve qualification shares one fixture runner for exact-time and
+common-value edits. Value editing retains all author times and the unselected
+first key, changes the selected values together, and checks native off-keyframe
+pixels against canonical evaluation through the shared compiled graph. The owned
+OpenFX fixture verifies key count/time/index/value and independent derivative
+and integral queries across instance, edit, render and destruction actions.
+Both Undo/Redo states and fresh Unicode project reopens use real native execution.
+Each mode needs its current explicitly rebuilt product and fixture qualification;
+an ignored test or earlier time-mode receipt is not value-mode evidence.
+
+The App animation selection resolves manual asymmetric Linear/Bezier sides as
+EaseIn or EaseOut through the Core resolver. Current-mode and available-preset
+menus therefore retain the authored side intent for complete selections.
+
+
+CurveEditor accepts a stable-selection menu factory invoked only on menu opening. Right-clicking a selected key retains the complete group; Shift+F10 shares the same command factory. Active pointer drafts refuse menu opening. Visual and audio adapters use definition-admitted batch requests, disable equal candidates, keep localized labels and resolve mixed selections without a checked preset.
+
+Group menu selection permission is independent of deletion and coordinate movement;
+Ctrl/Cmd+A and Shift-click remain available when only interpolation is admitted.
+Active drafts refuse right-click and keyboard menus, and cancellation restores
+normal menu access. Author dispatch revalidates stale keys and late owner locks.
+
+Both singleton and complete-selection authored menus use the opening-time
+factory. UI reconstruction only prepares localized labels; it does not prepare
+seven candidates for every authored key. Preset admission is bounded to the
+one addressed selection when opening the menu, avoiding quadratic rebuilding.
+
+
+CurveEditor can own focused Ctrl/Cmd+C/V with on_clipboard and a typed
+CurveClipboardCommand. The callback receives the current complete stable authored
+selection. Empty Copy, active pointer drafts and active author gestures consume
+these commands without dispatch or a global shortcut fallback. Exact primary
+modifiers are required; unfocused editors do not own clipboard chords. The visual
+adapter lowers both keyboard and lazy localized context-menu commands to the
+same typed product request; reusable widgets retain no application clipboard or
+second author interpretation. Paste may target an empty selection.
+
+Owner-provided stable key selection is a view projection. CurveEditor retains its
+previous projected set alongside the inactive view snapshot: a changed set selects
+the newly published keys, while an unchanged set preserves current local selection.
+Projection order does not create a selection change. Missing keys are excluded
+before comparing projections, so Undo/Redo disappearance and restoration trigger
+the appropriate selection change;
+the same owner keeps widget identity, focus and viewport. A changed selection clears
+obsolete tangent selection. A different owner or author session cannot inherit the
+old view. This projection changes no author state and adds no clipboard authority.
+
+### Lossless visual curve clipboard
+
+Focused and global visual key Copy/Paste share the sole private App clipboard.
+Its transient payload stores complete canonical channel groups, preserving raw
+author values and per-channel metadata. The App renews one identity per complete
+property key and rebases exact owner time, then delegates batched admission to
+Core. Focused paste validates the entire owner extent before author publication.
+Selection changes only after the single author commit; refused paste retains
+clipboard, selection, history and generation. Undo and saved Redo use normal
+author history and durable project snapshots, without serializing clipboard UI
+state or introducing a second animation interpretation.
+
+### Focused curve Cut
+
+Curve clipboard commands explicitly carry Copy, Cut or Paste plus the current complete stable selection. Exact Ctrl/Cmd+X is consumed by its focused owner, including empty selection and active drafts. Numeric intrinsic/effect curve menus dispatch the same closed owner-qualified Cut request. Capture preparation is pure: the App resolves every raw key first, then removes the group in one author transaction and publishes the sole clipboard only after success. Track locks, stale owners/keys and incomplete selections retain clipboard and history. Removed selection entries are cleared only for the addressed property; other parameter selections remain intact. Undo and saved Redo use ordinary author history; clipboard content remains transient and is cleared on fresh project reopen.
+
+### Command menus and editing focus
+
+Root Cut/Copy/Paste rows carry a semantic `EditCommand`, rather than dispatching
+an application action before identifying its editing owner. `EventRouter`
+suspends the original Widget focus while a menu-bar Dropdown receives input.
+Opening command chrome preserves the editor's selection and text draft. Closing
+or cancelling restores that owner; switching to another control, losing window
+focus or entering a modal ends the appropriate original editing session. Active
+pointer drafts still receive their ordinary focus-loss termination.
+
+The router applies menu side-effect requests after the originating widget call,
+then invokes the original control's command implementation. Missing owners and
+owners outside the active modal scope refuse without an application fallback.
+CurveEditor resolves complete stable keys through the existing closed App command;
+TextInput and MultilineTextInput reuse their platform clipboard and text editing implementations. All
+consume owned refusals, including empty selection and failed clipboard writes.
+Controls without an owned command retain the application's authoring path.
+Resolved global shortcut actions use this same seam, including user overrides.
+
+Control-owned availability is a transient presentation projection into semantic
+menu rows. Painting, keyboard navigation and activation use the same effective
+readiness. This projection stores no clipboard content or project interpretation;
+author mutations still validate the fresh exact owner and commit atomically.
+
+Menu commands use one typed request slot. Non-clipboard menu actions and resolved
+global shortcut actions confirm the original control's pending input before
+dispatch, so a save snapshot observes confirmed text. Cancellation preserves the
+draft without publishing author edits. Suspending a text editor cancels provisional
+IME preedit before disabling native IME; confirmed draft text remains intact.
+
+Multiline command availability also preserves read-only semantics: selected text
+can be copied, while Cut and Paste are owned refusals. Both text widgets reuse
+their existing editing commands and local history rather than interpreting menu
+commands through application Clip actions.
+
+### Captured menu sibling coordination
+
+MenuBar and menu-bar Dropdowns identify command chrome through the same Widget
+metadata. Captured command menus permit ancestor coordination only inside command
+chrome; unrelated splitters and window chrome cannot preempt the captured input.
+MenuBar uses the existing before-child seam to switch sibling popups on hover or
+click, with the same helper used by direct events. A captured command menu receives
+keyboard focus through the router's ordinary focus lifecycle. Original curve/text
+ownership remains suspended until execution or cancellation, so sibling switching
+preserves complete selection and one-author-transaction clipboard semantics.
+Dropdowns process focus gained/lost independently of popup visibility; focus loss
+closes the popup and clears its focused affordance for enabled and disabled controls.
+
+Dropdown and ContextMenu share depth-aware keyboard navigation in `menu::popup`.
+Enter/Right opens a submenu; Up/Down/Home/End selects an enabled row at the active
+depth, and Left/Escape returns one level. Activation requires the selected leaf;
+parent rows never recursively execute their first descendant. Empty, disabled or
+invalid paths consume activation without falling through. Unhandled root Left/
+Right bubbles to MenuBar's sibling navigation and preserves the editing owner.
+Explicit pointer submenu entry shares the same depth transition.
+
+Dropdown opening selects and displays the first enabled row. Mouse-opened
+ContextMenu starts with no selection until hover or keyboard navigation chooses
+a row. Mouse hover may clear the selection; Enter/Space with no highlighted row
+is an owned refusal and never falls back to another command. Activation always
+matches the current painted row, independently of how the popup was opened.
+
+### Focused audio curve clipboard commands
+
+Audio CurveEditor callbacks and localized local Cut/Copy/Paste rows lower the same
+closed AudioCurveClipboardPayload as root edit commands. Stable Sequence/target
+identity and explicit shared-Scope occurrence accompany complete key IDs. The App
+uses its sole clipboard, performs fresh author admission and publishes Cut capture
+only after one successful author edit. Paste publishes fresh selected IDs through
+the existing AnimationSelectionState after commit. Panel-model composition joins
+that typed Sequence/target selection to all audio curves; CurveEditor's existing
+selection projection replaces local selection only when the explicit group changes.
+Missing Undo keys filter out at the widget boundary and restored Redo keys reappear.
+This does not put selection into author history or introduce a second clipboard.
+Command readiness and the wider owner/native matrix remain acceptance work.
+
+### Read-only curve inspection
+
+CurveEditor uses independent input availability and authoring permission.
+`enabled` governs focus and general input; `editable` governs changes to points,
+values and tangents. Locked author models use a focusable read-only curve rather
+than disabling the entire inspection surface. Stable selection, Copy, keyboard
+navigation and viewport zoom/pan remain available. Cut/Paste, deletion, nudges,
+point insertion and pointer drags are owned refusals without local geometry
+mutation or fallback to Clip commands. Root edit readiness follows the same
+permission. Owner-provided menus disable their own interpolation and mutation
+commands while retaining Copy.
+
+Revoking author permission restores an outstanding pointer draft and defers its
+balanced gesture cancellation/pointer release to the next routed event. It keeps
+inspection focus and selection. UI-core AccessibilityState exposes `read_only`
+separately from `disabled`, so the accessible canvas reports its actual capability.
+Audio, numeric visual animation and curve-shape controls share this widget policy;
+canonical author admission remains the final mutation boundary.
+
+Read-only help is localized separately for inspection-only shapes and
+clipboard-capable animation curves; instructions do not advertise blocked edits.
+The native window-role fixture uses an explicit temporary preference path. Its
+actual Windows cycle checks fixed Startup/resizable Workspace, remembered normal
+size/maximization, stable Window/Surface/Device authority and bounded resource
+shutdown independently of the user's machine preference and plugin selections.
+
+### Inspection survives author-lease invalidation
+
+A forced curve replacement after owner lock or intervening author edits retains
+only inspection state matched by the existing panel and exact owner view key.
+Stable key IDs, viewport and focus can survive an outstanding author gesture;
+transient point geometry and gesture callbacks cannot. Non-key point selection
+is transferable only from an inactive view with identical geometry. Changing
+the inspection owner still discards the old widget identity.
+
+Reusing the inspection widget ID also carries an obligation to release the old
+pointer capture on the next routed event. The replacement has no author gesture
+to finish or mutate. This keeps focus usable for read-only Copy while terminating
+the stale drag through the existing capture protocol. Active viewport pans and
+menus remain excluded from view snapshots.
+
+### Stable group pointer transforms
+
+A grab on an already selected authored key retains the complete stable key set.
+The widget captures the pointer and viewport origin and emits one joint exact
+owner-time and author-value displacement, rather than moving keys independently.
+Each preview and author draft is derived from the existing gesture origin. The
+owner admits the complete detached candidate before preview state is published;
+a refused motion retains the previous admitted draft. The existing author session
+seals one history entry, or restores the original state on cancellation. The
+widget's cancellation geometry is transient inspection state, not a second
+source of authored keys or curve evaluation.
+
+Numeric visual and audio adapters lower the same TransformMany UI intent into
+closed domain edits. Core prepares final topology and tangent constraints once.
+Shared selected-key locks apply to the whole displacement. Owner interval checks
+remain separate from viewport scaling, and readonly inspection cannot begin a
+transform. Clipboard commands are consumed during the active captured draft.
+
+### Retaining group identity after commit
+
+Successful numeric group transforms publish the complete stable selection through
+the existing App selection authority. ClipCurveEditPayload's retention and
+removal policies use exhaustive variant matches; adding a new edit cannot silently
+fall back to single-key selection. The UI's temporal ordering and the App's
+normalized identity ordering represent the same set. Undo and forced owner
+projection retain inspection by stable identity rather than pointer coordinates.
+
+Changed admitted curve drags follow the established terminal policy: Escape
+cancels and restores author/preview state, while FocusLost completes the last
+admitted candidate as one Undo. Net-zero group drags produce no history entry.
+Capture and gesture ownership terminate in either case. Invalidated author leases
+are canceled through the existing author session before view replacement.
+
+Audio live projection includes exact coordinates for all known authored key IDs,
+including those moved outside the visible interval. Painting still clips the
+current viewport. This prevents a moved key remaining as a stale edge point and
+does not extend the Component author bounds or invent another curve evaluator.
+
+### Pure authored-key marquee inspection
+
+Temporal curves with stable-key selection use blank-space left dragging for
+marquee selection. Plain input replaces the selection, Shift adds, and
+Ctrl/Cmd+Shift toggles against the frozen selection at pointer press. Selection
+is calculated from visible stable-key centers and clipped logical plot geometry;
+virtual viewport boundaries are excluded. Ctrl/Cmd clicking a key toggles it,
+while Ctrl/Cmd clicking blank space explicitly inserts an authored key. Transfer
+curves retain their point-editing interaction because they have no authored-key
+selection contract.
+
+Marquee capture changes only the existing widget inspection selection. It never
+opens an author gesture, emits a parameter edit or consumes an Undo entry.
+Escape restores the original stable selection; release retains the final set.
+Read-only curves expose the same inspection behavior. Nonfinite pointer events
+leave the last admitted selection intact, and repeated movement re-evaluates
+the frozen origin rather than cumulatively toggling keys.
+
+Owner replacement transfers the pre-marquee inspection and an obligation to
+release the previous widget's capture, without transferring drag geometry or
+callbacks. Programmatic geometry replacement discards the selection capture.
+Changing plot layout during selection restores the original selection and
+defers capture release to the next routed event, preventing stale rectangle
+coordinates after native window resizing. Distinct exact key identities that
+share a projected center remain individually included by the marquee.
+The selection rectangle consumes semantic theme colors and border spacing;
+English/Chinese help exposes the insertion and modifier policy. Existing
+complete-selection author actions and clipboard dispatch consume the resulting
+stable IDs, so marquee does not introduce an alternate author or selection
+service.
+
+### Notification history keyboard and accessibility
+
+The retained StatusBar history is one focusable, nonmodal inspection surface.
+Enter/Space toggles it. Its displayed order is newest first: Down/PageDown show
+older entries, Up/PageUp show newer entries, Home selects the newest viewport,
+and End the oldest viewport. Movement is bounded and consumes only unmodified
+keys while this widget owns focus; inspection never dispatches editor actions.
+Escape and FocusLost dismiss the popup. Navigation requests repaint only when
+the viewport changes. The existing history remains the sole message authority.
+
+Open accessibility projection includes current status, page range/count, every
+full localized visible message, error severity and keyboard instructions. Opaque
+user paths and diagnostic details remain intact; only painted text is elided.
+English/Chinese catalogs and pseudo-locale use the same message identities.
+The heading exposes compact keys and elides within the existing panel bounds.
+Empty/short histories and replacement snapshots clamp the same viewport state.
+
+The toast overlay still displays at most two terminal facts. Admission preserves
+errors ahead of warnings and warnings ahead of successes; equal priority retains
+the newest facts. Suppressed low-priority facts are observed without formatting,
+allocating a toast, requesting repaint or replaying after higher-priority expiry.
+The feed remains bounded and detailed status history remains available. Existing
+5/8/10-second lifetimes, per-operation deduplication and locale projection apply.
+The history painter consumes theme panel padding and rounding, clips to its
+popup bounds, and elides title, empty state and message rows to the same content
+width. Full accessible messages are independent of paint elision. A narrow
+pseudo-locale/custom-padding case checks this separation with opaque Unicode
+paths; it is widget draw-command evidence, not native screen-reader qualification.
+
+### Parameter reset affordances
+
+Inspector Clip, Effect and Mask property rows expose a localized Reset button
+using the existing stable owner/write action. Complete author-state projection
+disables the button at the definition default, including retained-animation
+awareness; owner read-only state also disables it. Audio curve context menus
+expose the same localized reset intent, while static processor controls expose
+a button, including non-animatable integer parameters. The current definition
+is admitted again at author execution; UI does not reconstruct defaults or own
+an alternate reversible snapshot. Reset is independent of curve key selection.
+
+Curve context-menu factories also receive empty selections for parameter-level
+commands. Shift+F10 anchors an unselected menu to the plot center; blank-area
+right-click retains selection and uses the same factory. Empty and virtual-only
+curves remain inspectable. Existing pointer-draft and author-gesture guards block
+menu opening until the interaction ends; the factory admits enabled commands.
+
+### Menu semantic inspection
+
+Widget semantic visitation derives virtual menu items from the existing shared
+MenuItem model without inserting extra hit-test, focus or capture widgets. The
+collector retains semantic parent IDs and real keyboard focus order. Dropdown
+and ContextMenu share the projection; items have lazy control-scoped identities,
+checked/unchecked/non-checkable states, effective disabled state and open submenu
+ancestry. Only open branches are emitted. Renaming/localizing labels retains IDs
+and interaction state; replacing a Dropdown model invalidates its item IDs.
+Curve, asset, timeline and shortcut owners include their popups in visitation.
+
+Application adapters provide localized popup names; ContextMenu has no invented
+English default. Timeline naming comes from the current application catalog.
+Semantic inspection and relabeling publish no editor action. This is the widget
+semantic contract; a native assistive-technology bridge and physical screen-reader
+qualification remain separate work. No native accessibility publication is
+claimed merely because these nodes can be collected.
+
+
+### Cached audio processor input controls
+
+The shared Rack projection gives native processors a localized input query row
+in Inspector and Mixer. It binds exact session/Sequence/owner/processor intent;
+shared Scopes require an explicit occurrence. Unknown/ready/failed states offer
+inspect or refresh, while pending state offers cancellation. Widget construction
+only reads App's transient observation cache and never resolves a native factory.
+Host polling refreshes the model when bounded control work terminates. Existing
+modal focus policy applies to these ordinary Buttons. Querying locked authors is
+read-only; future routing controls must use Timeline lock and cycle admission.
+
+The input status row remains mounted across unknown/pending/ready/failed states,
+so a reply or catalog invalidation updates copy without shifting parameter rows
+and their restored focus/drafts. Native control work contributes a 25 ms maximum
+idle wake delay, including canceled work until physical termination; no forced
+continuous redraw or synchronous native probe is added.
+
+### Shared processor sidechain controls
+
+Inspector and Mixer share `audio_sidechain` route projection and typed action
+construction. Every retained route appears independently with enable, exact
+static gain and disconnection. Sidechain gain curves use the same exact
+`RouteGain` projection, curve widget, selection and authoring actions as principal
+route gain curves. Their viewport and current author time belong to the Sequence,
+including routes into a Processing Scope; a Scope parameter viewport must not
+reinterpret a route's time. Automated gain refuses scalar replacement. Source
+locks remain authoritative even for unavailable native inputs, and editing a
+curve does not require a native input observation or load a plugin.
+The shared Rack formats linguistic parameter units through the current Localizer
+and Fluent catalogs (samples, exposure stops and nits); standard symbols such as
+dB, ms and percent remain invariant. Native parameter names stay plugin-owned.
+
+Scope input inspection binds the exact Track/Clip/Component occurrence as well
+as the shared Scope and processor. Another valid occurrence cannot reuse its
+receipt; deleting or rebinding the selected occurrence refuses connection and
+rewiring while other materializations remain. Native workflow references include
+Scope bindings at 5 and 7 seconds over overlapping Sequence placements at 0–1
+second. VST3 uses distinct Scope-time gains; the state-only CLAP reference uses
+distinct placement gain. Route gain curves retain Sequence signal time in both.
+Native cached input contracts offer additive source menus, admitted by Timeline
+complete retained routing graph and source locks. Projection loads no native
+factory and creates no alternate author/routing state.
+
+Connection source MenuItems carry the exact cached input binding and lower into
+the closed `ConnectProcessorInput` product action. They do not lower directly into
+an unqualified route creation request. App checks the live observation identity
+before entering the sole routing transaction, so a stale popup cannot silently
+connect a removed/replaced native input. Existing retained route controls remain
+available under canonical source locks without requiring the plugin to load.
+
+
+Rack move/remove icon Buttons and sidechain scalar/source controls use the same
+primitive inspection identity as parameter controls. Sidechain subjects name an
+exact canonical RouteId or the native definition's stable input bus key; source
+endpoints, captions, gain/enable values and display order do not enter the key.
+Keys retain the exact Rack, native processor definition binding and selected
+Processing Scope occurrence. Each refresh rebuilds live callbacks and current
+input-observation/source fingerprints. Deleted or disabled controls refuse input
+identity restoration. Scope occurrence navigation instead belongs to its Rack
+and originally inspected Clip: choosing another component keeps that selector's
+keyboard trigger, while the chosen component's parameter/route controls become
+new occurrence owners. Inspecting another outer Clip replaces the selector owner.
+
+
+Release-activated icon Buttons additionally inspect one typed Enter/Space
+keyboard activation lease. It is admitted only by the same enabled semantic
+key/role and existing live session/Sequence/panel gates. A matching release
+consumes it once and executes the newly projected callback. Locale and native
+metadata refresh may retain that lease without delaying refresh. Raw pointer
+press, hover, capture, callbacks and draft state remain outside the snapshot;
+pointer-pressed icon Buttons refuse inspection restoration. Focus loss,
+disabled/deleted/rebound/other-occurrence owners and modal entry cancel the lease.
+Every shell modal entry passes through the root's `show_modal` boundary, which
+invokes the primitive `cancel_keyboard_activation` seam throughout the current
+widget tree before installing the modal. Cancellation clears only an owned
+keyboard release intent and its pressed visual; focus identity and independent
+pointer interaction remain unchanged. This boundary also covers Resource and
+pending-close dialogs and applies even when a modal opens and closes before the
+Router receives another input event or the host refreshes models. Model rebuild
+only restores already admitted inspection state. Immediate-activation
+widgets do not accept a release lease from a replacement widget kind.
+
+
+### Numeric author draft inspection
+
+An explicitly addressed compound numeric control gives its Slider and NumberInput
+distinct role keys under the same stable author owner. NumberInput uses the shared
+inspection collection, duplicate-key refusal and session/Sequence/panel gates;
+it introduces no alternate focus authority. Parameter binding includes its exact
+canonical ParameterSchema, independent of translated labels and current value.
+The Host's existing transient-input gate permits model rebuild for an admitted
+typed numeric draft, so focus cannot indefinitely postpone fresh metadata or
+canonical owner validation. Unaddressed text, pointer selection and IME preedit
+keep the existing transient input policy.
+
+A focused NumberInput may retain committed-input text, grapheme-based selection
+and caret across a model rebuild only when the fresh enabled numeric model has
+the same exact typed committed baseline, hard bounds, configured step and display
+precision. Floating bits and i64 storage avoid narrowing or approximate equality.
+Native metadata and locale-only refresh therefore preserve an unfinished draft.
+Canonical value changes, schema changes, locking, deleted/rebound owners, another
+Scope occurrence or a new author session refuse it. Fresh models and callbacks
+remain authoritative. Enter publishes at most one edit through the current action;
+Escape restores the fresh canonical baseline without author history.
+
+The TextInput helper retains local single-line text/selection/caret and bounded
+local history; it
+refuses pointer selection or active IME preedit and never restores callbacks,
+pointer capture, composition, clipboard intent or author Undo history. NumberInput exposes
+its actual inner text-field accessibility node rather than disappearing from the
+semantic tree. Localized numeric names/units/ranges and native assistive-technology
+publication remain separate work and are not claimed by this draft-retention seam.
+
+
+### Numeric text Edit command ownership
+
+NumberInput delegates semantic Edit-menu availability and Copy/Cut/Paste execution
+to its owned TextInput through the existing Widget/Router command seam. These
+commands operate on local draft text and selection; numeric parsing and author
+history still occur only on numeric confirmation. No-selection Copy/Cut is
+unavailable, failed clipboard operations and empty Paste preserve the draft and
+selection, and an owned command cannot fall through to generic Clip actions.
+The existing numeric Escape, fresh-model admission and single-commit behavior
+remain the numeric transaction boundary.
+
+
+### Shared text platform keymap
+
+Single-line and multiline text command classifiers share the existing explicit
+Windows/Linux/macOS PlatformKeymap and modifier helpers. The real widget adapter
+selects the current platform; classifiers accept a supplied platform so Mac
+semantics are executable on any test host. NumberInput uses the same TextInput
+adapter. Clipboard/select-all use exact primary modifiers (Control on Windows
+and Linux, Command on macOS), while word arrows use Control or Option. macOS
+Command arrows address line boundaries and multiline document boundaries; Shift
+extends selection. Conflicting secondary modifiers remain available to shortcuts
+or the system. Raw native modifiers and the sole EventRouter are unchanged.
+
+Platform decisions inside a supplied-keymap classifier use that keymap rather
+than the build host. These changes reuse existing text selection, Unicode word
+and grapheme movement, clipboard failure handling and numeric author commit
+boundaries. They do not claim native macOS event/IME/assistive-technology
+qualification or implement app command defaults; application shortcut defaults
+remain a separate boundary.
+
+
+### Local text history and word deletion
+
+Single-line and multiline inputs use one bounded text/caret/selection history
+engine: at most 100 entries and 16 MiB of retained UTF-8 snapshot allocations,
+with cached byte accounting and oldest-entry eviction. The Host asks an allocation-free
+Widget admission predicate for its transient-input gate; NumberInput capture and
+that predicate share the same addressed enabled/focused/pointer/IME guard. Actual
+Shell capture still applies unique-key, owner/session and fresh-model admission.
+History is captured once into the existing boxed payload; fresh replacement
+controls have no owned history to copy while their keys are counted. A single oversized edit
+cannot retain its local Undo snapshot; its current draft still stays intact.
+Local history retains explicit unconfirmed input ownership even after memory
+or count eviction, or Undo exhaustion, so empty history never falls through to
+Clip Undo. Coalescing requires uninterrupted text/caret/selection endpoints;
+Undo/Redo, discrete clipboard/IME edits and restored models break coalescing.
+Redo restores the actual caret and reverse selection that existed before Undo
+in one step, without synthetic tip entries.
+
+History contains only local text and grapheme coordinates. An admitted numeric
+inspection snapshot preserves its bounded Undo/Redo branch and ownership under
+the existing exact baseline/schema/session gate. Fresh callbacks are always
+used. Canonical baseline changes refuse the entire draft and history, while
+programmatic single-line synchronization resets them without author dispatch.
+Numeric Enter confirms at most one current value and clears local history;
+Escape discards it without author history. A pristine or confirmed NumberInput
+permits author Undo through the existing Router; an unfinished interaction owns
+local Undo even if the draft text has returned to its baseline.
+
+TextInput's existing `on_change` contract still dispatches every resulting text
+change through its fresh callback, including local Undo/Redo. Transactional
+`on_commit` text and numeric draft changes remain local until confirmation.
+This history never mutates an author document or copies author transactions.
+
+Exact primary Copy/Cut belongs to an enabled, focused text control even when
+there is no selection. Its keyboard result is an owned no-op, menu availability
+remains false, and no parent/global rebinding receives that text chord. Readonly
+multiline controls retain Copy and owned no-op mutation commands; disabled or
+unfocused controls do not gain shortcut ownership. Word Backspace/Delete uses
+Control on Windows/Linux and Option on macOS with no secondary modifier or
+Shift, gives an existing selection precedence, and otherwise uses the existing
+Unicode word/grapheme boundaries. Multiline deletion at a line boundary joins
+only that adjacent newline. Each deletion is one local reversible edit.
+
+### Complete text layout and viewport output
+
+Single-line input geometry obtains complete line width, logical UTF-8 caret position and pointer hit from one advanced cosmic-text layout per query, using the shared widget font owner. It no longer reshapes every grapheme prefix to find a mouse caret. Draft text, kerning, ligatures and bidirectional shaping context remain complete. Layout scratch is proportional to the active complete line and released after each query; this slice does not claim viewport-only shaping or a persistent layout cache.
+
+Text resolution tracks the command stream's nested clip and translation semantics and tests actual glyph ink bounds before atlas allocation/upload and image emission. An empty effective clip skips shaping. Off-viewport ink is omitted without substring reflow; only visible ink can force an atlas page reset. Swash image cache misses still rasterize off-viewport glyphs to obtain exact ink bounds, and `glyphs_requested` retains that complete request count. This slice bounds alpha copying, atlas allocation/uploads and draw commands, not all rasterization or full-line shaping. Public direct layout/render without a clip keeps its full-output contract.
+
+The compatible vendored HarfRust 0.5.2 backports upstream PR 397's 32-bit matched sequence index fix, with exact source/license provenance. It supports complete long lines without disabling overflow checking, downgrading advanced shaping or truncating drafts.
+
+
+### Complete single-line selection geometry
+
+TextInput paints selected visual advance spans and anchors IME preedit at the
+caret from one complete advanced cosmic-text layout query. Its paint snapshot
+carries only typed pixel spans and the complete caret position; it no longer
+reshapes a selected prefix or substring. A logical range can produce disjoint
+BiDi rectangles. Partial clusters use the same equal-grapheme advance convention
+as cosmic-text caret geometry, with each glyph's own BiDi direction. Contiguous
+advances coalesce before allocating per-span output, including long selections.
+The existing shared widget font owner and text renderer remain the sole shaping
+path. Public selection requests refuse malformed/out-of-range byte boundaries
+and invalid font sizes before shaping; empty selections yield no rectangles.
+
+Selection and caret movement preserve the existing callback/Undo boundary:
+navigation creates no text edit or history entry, text replacement creates one
+local entry, and Undo restores the original caret and reverse anchor. Ordinary
+live TextInput Undo still dispatches the resulting text through its existing
+fresh on_change callback; transactional numeric/commit inputs remain local until
+confirmation. This slice covers single-line geometry, not full visual BiDi
+keyboard traversal, native macOS IME qualification or multiline interaction.
+
+
+### Associated visual single-line carets
+
+Single-line caret and selection endpoints carry a logical grapheme offset plus
+the adjacent logical cluster supplying the visual position. This typed UI
+position replaces bare grapheme offsets in local Undo and numeric inspection;
+it contains no font, layout pixels, native handle or author timeline state.
+Fresh draft/history admission validates both offset and edge association before
+copying bounded snapshots. Canonical model replacement still refuses old input.
+
+The sole complete advanced cosmic layout projects streaming visual grapheme
+cells from its shaped cluster advances and glyph BiDi levels. Pointer hit,
+caret, selected spans and visual navigation share this projection, including
+partial ligatures, combining/ZWJ graphemes and zero advances. No independent
+prefix shape, paragraph-direction arrow flip or retained all-caret vector is
+used. Adjacent glyphs belonging to one logical cluster share its advance cell;
+ligature subdivision follows the existing equal-grapheme advance convention.
+Plain arrows traverse one visual cell; unshifted arrows collapse a selected
+range at its actual visual edge without another character step. Shift retains
+the original associated anchor. Home/End retain logical line boundaries,
+including portable Mac Command-arrow classification; word arrows apply the
+existing whitespace boundary policy in visual order using a fixed number of
+streaming scans. Backspace/Delete remain logical grapheme/word editing.
+
+Logical association survives local replacement Undo/Redo and admitted numeric
+draft refresh through the existing typed inspection seam. Navigation and
+selection alone dispatch no text callback/history entry. Existing live
+on_change and numeric Enter/Escape transaction boundaries remain authoritative.
+Insertion and removal derive the resulting caret from the complete text's
+grapheme boundaries at the changed byte endpoint, snapping forward when a
+combining mark/ZWJ joins neighboring graphemes. Fragment grapheme counts never
+advance the cursor independently of the complete result.
+Typed geometry admission rejects nonrepresentable line-height metrics before
+font initialization and refuses nonfinite complete output geometry. Complete
+shaping scratch remains proportional to the full line; this does not claim
+viewport-only shaping, native macOS IME/AT or multiline qualification.
+
+### Exact source ingress and single-line visual projection
+
+Programmatic TextInput `with_text`/`set_text` synchronization preserves exact
+authoritative model bytes, including line separators. The definition's single-line
+mode is a display/input contract, not permission to normalize an authored value.
+Focus baselines, Escape, local Undo and unchanged confirmation retain raw source;
+programmatic synchronization resets local history without a user callback.
+User typing/IME commits/paste keep the existing edit policy: CR/LF, CRLF and
+Unicode line/paragraph separators become spaces, while tabs/NBSP are retained.
+
+The sole SingleLineTextProjection borrows original source and derives complete
+one-line display content, mapping only separator length contractions. Rendering
+geometry shapes that entire display once and derives its VisualCells against the
+original source EGC intervals. Caret/selection/hit/navigation endpoints therefore
+remain original source bytes and BiDi association, including CRLF and distinct
+source combining/ZWJ stops joined only by display projection. Actual TextInput
+paint uses the same projector; other layout modes are unaffected. There is no
+prefix shaping, secondary navigation fallback or second author text authority.
+
+This corrects the earlier canonical programmatic-ingress premise. Full Inspector
+qualification exposed legitimate native single-line author values with newlines;
+the original long-text and Unicode word-navigation contracts remain unchanged.
+Numeric inspection DTO/history admission remains strictly canonical before copy;
+it never normalizes untrusted raw text and guesses saved positions. Projection
+scratch is proportional to display content plus length-changing separators; normal
+single-line text remains borrowed. Full shaping, native IME and assistive technology
+qualification remain the existing separate limits.
+
+### Owned Timeline and Inspector status localization
+
+Timeline and Inspector empty/invalid model fields retain the existing typed
+AppMessage identity and arguments rather than formatted strings. Actual panel
+construction resolves them through the current Localizer, so a retained model
+can be painted in another UI locale without author mutation or stale-language
+copy. Empty sequences remain editable add-track canvases; absent/invalid
+sequences retain their disabled behavior. Invalid display context wraps the
+existing typed core error projection; opaque diagnostic arguments, user clip
+labels, title contents and sequence names remain unchanged. Catalog-presence
+tests cover the requested ZhCn, EnUs and Pseudo bundles without treating fallback
+as translation coverage; actual draw-command tests cover titles and guidance.
+
+TimelineView paints an explicit status when its body is empty or when the
+timeline is unavailable despite retained tracks. For the latter it covers the
+unavailable fallback grid with the existing semantic body surface before painting
+the localized title/reason. Track models and IDs remain intact; input availability
+is unchanged. A valid populated canvas never displays empty guidance, and a
+disabled canvas without an explicit message retains its ordinary clip paint.
+Actual paint regressions cover the nonempty invalid display in all three locales
+and both available/disabled positive controls.
+
+### Rack scalar author interactions
+
+Audio Processor Rack scalar controls now carry an explicit fresh author session
+and Sequence lease, exact instance definition/parameter schema, and the existing
+canonical Rack or selected Scope component occurrence. A pure Sequence-only Rack
+projection has no author lease and cannot produce a scalar edit. Ambiguous Scope
+materializations require explicit selection; a single binding follows the same
+implicit occurrence contract as the existing Inspector projection.
+
+The shared numeric adapter recognizes the closed SetAudioScalar scalar intent
+and lowers pointer Begin/Update/Finish/Cancel through the existing parameter
+interaction protocol. Keyboard nudges and confirmed NumberInput text are discrete
+scalar intents. Widget refresh keeps fresh callbacks; inspection never carries
+these author callbacks, values, lease or pointer capture onto another control.
+The action closure captures one scalar target rather than cloning complete Racks,
+route menus, native input observations or automation curves.
+
+The App checks current session/Sequence, selected occurrence, canonical Rack lock
+admission, processor definition and exact parameter schema before a scalar intent
+can enter the sole Timeline mutation. A late queued start cannot seal another
+gesture or author a replacement owner. Regression tests exercise the
+real AppUiHost/EventRouter path; execution receipts qualify the result separately. Native
+accessibility names, domain values and assistive action delivery remain separate
+work; this interaction change does not claim physical AT qualification.
+
+
+### Coupled scalar readouts during active gestures
+
+Inspector/Mixer numeric pairs reuse the existing Slider and NumberInput as two
+logical children in one private typed compound control. The existing Router
+`after_child_event` hook synchronizes the adjacent presentation immediately;
+layout and form confirmation use the same synchronization. Numeric entry uses
+its sole NumberInputModel for hard-range admission and exact formatting.
+
+The shared scalar is current UI intent, not evidence of author success. The
+fresh typed callback and canonical author session still validate every command;
+a refused/stale intent triggers the existing Host fresh projection. Pointer
+capture, local draft, IME, callbacks and local/author histories are never restored
+from that UI scalar. Unfocused NumberInput synchronization publishes no callback;
+same baseline is a strict no-op, and a focused editing session is not overwritten.
+External author changes continue through fresh model/draft admission.
+
+Every drag captures its exact current scalar origin, including values outside
+its Slider soft range. Cancel restores that origin for either the canonical
+ParameterGesture adapter or non-Parameter callbacks. No second author history is
+created. Accessible numeric names/units and native assistive-technology action
+adapters remain independent follow-up work; a synchronized Text node is evidence
+of the actual NumberInput readout, not a native AT qualification claim.
+
+
+### Numeric semantic inspection
+
+`AccessibilityValue::Number` stores Float64 and `Integer` retains exact signed
+64-bit values. Generic Slider and DockSplitter coordinate ranges promote their
+Float32 coordinates without rounding; concrete numeric pairs explicitly expose
+their current declared scalar with the same admitted NumberInput hard range.
+The presentation pair reads `committed_value()` and `range()` directly from the
+sole numeric model. Formatted text is not parsed to invent an author baseline.
+
+The numeric Slider's fresh pure value adapter follows the same live scalar used
+by its actual adjacent readout. NumberInput continues to expose its real raw
+Text draft and existing disabled, confirmation, cancellation, selection and IME
+contracts. That UI scalar is pending presentation intent; canonical author
+transactions and exact owner/session admission still determine author success.
+
+Rack scalar parameter names come from the same localized parameter label and
+unit painted by the current row. Sidechain level uses its current localized
+label and declared dB unit for both paint and numeric semantic names. Labels,
+value adapters and callbacks are fresh projection data and are not restored by
+focus or numeric draft inspection. Other numeric rows still require explicit
+name adoption; this stage does not claim complete application accessibility.
+
+These are platform-neutral AccessibilityNode contracts only. Native assistive
+technology publication, numeric range/action delivery and physical screen
+reader qualification remain separate unfinished adapters.
+
+
+### Closed audio scalar control owners
+
+Processor parameters, Channel input Trim, static Fader, ordinary Route level and
+processor sidechain level use one `SetAudioScalar` intent and the same continuous
+parameter interaction protocol. The closed owner enum carries only each field's
+actual authority: a processor parameter owns its exact definition and one
+schema; Trim/Fader own a Channel Strip address; routes own exact endpoints; a
+processor sidechain also owns its exact inspected occurrence, definition and bus.
+No fake parameter schema, arbitrary nested edit or compatibility alias is used.
+
+Concrete App projections bind a current author session/Sequence lease to their
+explicit source Sequence. Pure Sequence projections cannot authorize edits.
+Absent leases, locked owners and automated scalar values disable the appropriate
+controls. Factories capture only the closed target rather than whole Channels,
+Racks, source menus or runtime observations. Target identity and control role
+form the semantic focus/draft key; current values, captions and list order do not.
+
+The adjacent numeric pair still follows its actual typed scalar and sole
+NumberInputModel. Mixer Trim/Fader/Route and Sidechain controls adopt the same
+current localized painted dB label for their neutral semantic names. Native AT
+publication and range/action delivery remain separate unfinished adapters.
+
+Begin/Update/Finish/Cancel enter the existing canonical author Session. A complete
+drag seals one Undo entry; Cancel restores the current gesture origin without
+adding author history. Session/Sequence replacement, endpoint/definition/schema
+rebind, automation and lock/delete boundaries refuse stale owners before author
+mutation. Discrete keyboard nudges and confirmed numeric text remain separate
+scalar commands. Host regression receipts, rather than this source description,
+qualify the actual Router/capture/author behavior.
+
+
+### Numeric keyboard adjustments and pointer coordinates
+
+A numeric Slider/Input pair routes focused numeric keys through its actual
+NumberInputModel and exact `T` storage. Arrow keys use the declared domain step,
+Shift multiplies that step, Page uses the existing numeric Page increment and
+Home/End select admitted hard endpoints. A legal baseline outside the pointer
+soft range and wide integers never roundtrip through normalized Float32 geometry
+to calculate a keyboard successor. Focused numeric text retains Left/Right and
+Home/End text navigation, draft/IME/selection and commit/cancel behavior. Generic
+Sliders without a numeric pair still edit their own coordinate model.
+
+The existing Router `before_child_event` seam also offers KeyDown to ancestors
+of the actual focus target, stopping at the active modal scope. A numeric pair
+accepts only classified numeric keys while enabled and while `ctx.focus` owns its
+exact Slider; modifiers and other keys continue their normal route. No cloned
+numeric model, second focus manager or restored callback is introduced. An
+active pointer edit seals through its existing Finish before a distinct keyboard
+command; Escape continues the pointer Cancel route. A hard-bound no-op remains
+owned and adds no author history. Fresh typed callbacks still enter the sole
+author Session, which rejects stale, locked, deleted and rebound owners.
+
+Pointer edits retain the soft-range ratio/snapping path, and the existing peer
+synchronization publishes actual typed UI values/readouts. UI intent is not
+author success; Host acceptance/refusal still rebuilds from canonical state.
+Actual Host and Router regression receipts qualify the behavior. This design
+does not claim native AT action delivery or general Inspector focus retention.
+
+### Localized rack ownership captions
+
+Rack and mixer captions preserve author-provided bus names and typed owner addresses. Fluent interpolations retain Unicode directional isolation, including mixed Arabic and Latin names. Tests compare the rendered captions with the isolating marks present; translations never rewrite the author name or replace the owner identity.
+
+
+### Native audio cleanup hold projection
+
+App playback observes the existing Playback Engine ticket through
+`native_audio_control_hold_ticket` before allowing queued PCM reprime. Native
+control completion finalizes that same ticket through the existing Media result
+path; the UI does not construct a replacement hold, Runtime owner, or authoring
+transaction.
+
+## Native visual Question presentation
+
+The generic Inspector control subtree owns a private GUI presence claim. Selection
+metadata or a copied panel model cannot create it. Question dialogs reuse the
+shell's modal focus/Tab scope, theme tokens, localization and existing event
+router. Local Button activation callbacks use the existing enabled/pointer/key
+activation path and do not encode Yes/No in a serializable author Action. Full
+plugin text is shown in a scroll view. Only the actual Window surface-presented
+receipt for the painted current dialog marks human waiting. A constructed dialog,
+paint-only or skipped surface does not. Escape/dismissal is Failed, never a fake No.
+
+### Native audio editor author delivery and product controls
+
+The audio Rack native Open/Close row uses semantic widgets and existing Localizer catalogs. Product-owned capability, opening, pending and refusal labels are translated; external plug-in and parameter names remain their native metadata. The selected exact processor occurrence is carried with the sole Session/sequence/schema and an explicit TimelineTime owner domain. UI metadata locates work but cannot issue an installed native-owner lease.
+
+ResolveAndOpen runs through the existing Media worker and resolves/revalidates the actual current Hosted object rather than allocating a full UI inventory or opening a second controller. App accepts native callback proposals through the existing native Session gesture once. It retains accepted work across compilation, preparation and Ack retries, shares the already-issued author snapshot, and updates author metadata with the actual Plan/registered-claim swap. A callback proposal is not author success; stale owner/schema/session/time and failed resource admission remain typed pending/refusal states.
+
+Nonterminal Value batches can be auditioned after exact same-live Plan install/Ack. Begin and timestamp GroupFinish are not whole-gesture stop gates. The actual attachment target is kept separately from the current author target so Value batches do not orphan a queued Close. Terminal opaque peer synchronization, complete native Undo/save/reopen and physical GUI presentation remain qualification gaps; no window or unsupported capability alone establishes complete interaction support.
+
+## Actual native Question Window qualification
+
+The `validation` feature exposes `mondrian --validate-native-question request.json`
+on the normal product executable. Its existing internal worker dispatch remains
+the native child entry. The request names a real `.mdp`, native bundle and exact
+Sequence/Clip/Effect at the project playhead; these addresses grant no GUI or
+author capability. The existing Inspector section lifetime, active Dock panel,
+current Preview EditorRefresh work and sole Effects bank must admit the Question.
+
+The driver observes the original opaque cell only after the actual Window
+`render_draw_commands` result passes the existing Host surface gate, including
+the atlas follow-up. It never calls `presented`, `answer`, Dialog/child `event`,
+manual focus setters or a second renderer. One typed event per bounded Window
+tick enters the same `WinitUiRuntime`/`EventRouter` and ordinary action-drain seam
+as native input. Tab and Shift-Tab must visit the three actual modal controls;
+background pointer input cannot mutate the canonical author Session/history.
+The No pointer point comes from the exact original Button layout, not separately
+measured coordinates. Keyboard Yes, pointer No and Escape are separate real runs.
+
+The original cell retains its actual terminal reply for read-only observation;
+service sampling remains Unavailable after finish. A matching current feedback
+receipt must preserve work scope, preparation, provider revision, parent owner,
+supervised PID, native owner and Render invocation. A later service cannot satisfy
+that match. Window/App/EventLoop owners are consumed through the existing return
+and shutdown seams on success and operation failure. Timeout/setup failure never
+counts as native or physical qualification. Rust-owner shutdown does not assert
+OS compositor/process termination.
+
+This gate proves an actual surface-admitted Question, routed local input and
+matching native completion metadata. It does **not** prove the resulting Float
+working pixels, GPU readback, monitor precision or full native authoring. Those
+remain their independently pinned native/render gates; no shadow render or second
+pixel interpretation is introduced. The two portable observer/layout controls
+are new API contracts, not OLD behavioral RED or physical GUI acceptance.
+
+### Native Question saved fixture and first UI admission
+
+Host startup constructs an inert pending Preview projection when a Sequence is
+open. It does not Render before constructing the actual control subtree. The
+first Window Preview request synchronizes that root's real native effect section
+presence and active Inspector panel, using the existing registry. Ordinary startup
+and the validation driver share this ordering; selecting an effect or naming an
+author target cannot create a GUI claim. Workspace startup marks its pending
+Preview dirty so the ordinary first Window event admits output. Transport tests
+settle this real first refresh before measuring later action-only Render counts
+or Ready-to-Loading transitions; constructor state is not rendered evidence.
+
+With `validation`, the normal product command
+`--prepare-native-question-fixture absolute-request.json` uses public supervised
+OpenFX inspect/register, the sole App authoring Session, the existing AddToClip
+product action, and canonical App save/open. It creates a five-second generated
+SolidColor Clip at exact time zero and a registered owned SessionProbe occurrence
+in a new `.mdp`. Its qualification compares the complete saved/reopened Clip,
+effect/schema and Sequence settings, checks clean paused state, writes three typed
+requests, then consumes the actual App owners. It never writes project JSON/ZIP,
+creates a native Render/GUI capability, or answers a Question.
+
+The creator is setup and durable persistence evidence, not Window/native GUI
+acceptance. Fresh matching product and SessionProbe artifacts must execute the
+three real Window runs. Their actual surface/router/original native completion
+oracles remain required. Generated color media is a real Timeline source but does
+not qualify an external FFmpeg video decoder. Float pixel/readback acceptance and
+physical OS termination remain separate gates.
+
+### Inspector values after native reference removal
+
+An audio parameter with no host automation reference projects `static_value=None`
+and no automation plot. Inspector displays the localized plugin-controlled state,
+not the schema default as a current native value. Current native plain-value
+observations are ephemeral UI facts; unavailable observations remain unavailable.
+An explicit Reset action may deliberately bind the definition default through
+the existing author transaction. Parameter definitions and stable targets remain
+available, and native parameter/state changes still require the sole installed
+owner and Session admission.
+
+### Question operation and consuming Window shutdown budgets
+
+The real Question driver has an operation deadline for modal input and the
+original native completion. Expiry remains a failed operation. At consuming
+Window exit, one separate product shutdown deadline is frozen and shared by
+GPU retirement, Host services, Tokio and the returned App owner. The private
+validation handback carries that actual Instant; no component renews it. The
+surface-reopen driver's caller-owned external consuming deadline retains its
+existing exact meaning, including honest expiry. Setup failures and abnormal
+handbacks remain explicit failures rather than successful native completion.
+
+Validation records at most sixteen distinct read-only surface observations,
+retaining the final one: actual Window/adapter, whether an opaque Question was
+painted, its numeric owner/service coordinates, state before/after the unchanged
+surface gate, and actual renderer upload/resource diagnostics. These observations
+do not grant Presented, routed input, GUI authority, or float pixel acceptance;
+missing glyphs are not repaired with fabricated fallback acceptance.
+
+The startup ownership qualification keeps its twenty-six fault routes, opaque
+payload refusal, and two normal routes, but each actual App/Host lifecycle runs
+in a private validation-only non-inlined helper. The aggregate driver retains
+only reports. It neither increases the process stack nor changes product Host
+construction. Source extraction alone is not stack or native qualification.
+# Native Question validation observations
+
+## Same-view native audio attachment refresh
+
+The existing observation completion can refresh a visible native editor's
+current author target while retaining its original queued Close address. The
+attachment observation identifies the actual object and process but grants no
+author permission. An outstanding handoff retains its admitted target; after
+the exact acknowledgement clears that work, a repeated observation can refresh
+the same view without reopening it. Replacement clears the visible attachment
+and never implicitly opens a new native editor. Pending local processors expose
+their actual local epoch without an invented DSP coordinate.
+
+
+The validation Window records a bounded, read-only snapshot of actual Viewer
+geometry, current demand, section lifetime, Preview admission counters and
+worker callback evidence around each physical paint. Sampling does not issue
+work, bind a native GUI, renew a ticket, answer a Question or relax the product
+presentation gate. An absent native Question must be diagnosed before input
+or surface acceptance can be claimed.
+
+## Complete CPU composition and Viewer output
+
+The Adjustment Normal selector means effect strength (`Mix`), while Normal on
+ordinary Clips means source-over. App lowering carries the sole compiler's typed
+policy through both ordinary and heterogeneous Viewer layers; it never infers a
+second blend rule. Identity Mix can be omitted, while an explicit Blend over an
+identity effect remains an observable composite.
+
+A CPU-only Adjustment consumes the complete composited root through the existing
+serial CPU Preview owner. The same renderer compositor and compiled effect graphs
+execute that work; the Window never runs plugin Render or a second composition.
+The request explicitly selects either an encoded CPU raster or a working Float32
+result. A working result preserves its RGB, alpha association and color identity,
+then enters the ordinary GPU Viewer output and monitor stages. Fixed sRGB raster
+fallback still refuses unsupported monitor policies.
+
+Both CPU result kinds enter the sole playback Frame Store under the exact semantic
+output key and shared Viewer byte budget. Working admission charges actual Vec
+capacity, and immutable frame clones share the existing Arc pixels. Results are
+accepted only for the exact pending generation, epoch and output key. Cancelled,
+stale and unfunded results cannot become current presentation or loop as false
+successful residency. No additional cache, worker or effect interpretation is
+introduced. Source implementation does not by itself qualify a GPU submission,
+native plugin, physical display or performance deadline.
+
+## Shared native opaque state completion
+
+Native author handoff observes Preserved versus StateEntryRequired from the real
+Runtime. For state entry the App waits for Media output retirement, finalizes the
+real clock anchor, and commits through the existing author Snapshot and Source
+guards. The same issued Snapshot Arc is shared; no UI cursor or owner is minted.
+The accepted renderer Arc remains reusable only while its issued author fence,
+Sequence and presentation execution still match. Meter publisher metadata is
+swapped outside final guards and read on Main without the DSP/native mutex.
+
+An acknowledged state entry closes the old native attachment presentation. It
+does not report GUI acceptance, cancellation/Undo native reseed, physical device
+delivery or first-Play preservation as tested. Those have independent gates.
+
+### Exact CPU Working completion and its GPU continuation
+
+The production whole-root CPU compositor uses the existing single pending slot
+and result channel. One attempt captures the semantic key, issued output nonce,
+generation, epoch, complete playback intent, output target and candidate identity.
+Ready/failure publication must match that exact attempt. For an uncacheable graph,
+the completed Float32 result is detached once from the sole Playback Frame Store;
+a later request executes the graph again. A reusable result may stay resident.
+No second pixel holding map or native result cache is introduced.
+
+The ordinary identity upload preserves the scalar feedback from the matching
+actual CPU completion. It does not replace owner/progress/warning facts with an
+empty retirement view. New speculative work does not rebind current UI feedback.
+Generation invalidation retires the single pending completion and any unconsumed
+uncacheable record. Wrong/stale completions cannot publish feedback or pixels.
+
+The original immutable Float32 Arc and its Store-issued byte lease travel in the
+existing GPU candidate. Direct persisted working-cache hits also require Viewer
+admission before upload. Program Output and nondefault monitor adaptation remain
+the existing GPU contracts. Raster requests validate their output contract before
+scratch admission or compositor/processor entry. CPU Adjustment still executes
+the sole complete timeline compositor; neither a shadow render nor RGBA8 detour
+is used. The original GPU/device and physical Window acceptance gates remain
+required; source replay and portable ownership tests do not supply that evidence.
+
+WorkingGpu completion carries no output-transform diagnostic because that
+transform has not run yet; Raster completion carries the actual transform
+diagnostic. Absence is not a fabricated zero-work backend receipt.
+
+Working CPU pixels remain charged through the exact GPU submission owner and
+retire when its completion owner drops. The current published GPU texture keeps
+only its existing GPU output lease. A cached working frame may then be evicted
+before the next reservation. Under a one-frame Viewer grant, a still-live prior
+submission produces honest backpressure; its completion retirement restores
+headroom for the next exact frame. UHD 3840 by 2160 Float32 RGBA occupies
+132,710,400 bytes (126.5625 MiB) before metadata/capacity growth, so one fits a
+128 MiB pixel grant and two do not. No budget is enlarged from observed usage.
+The sequential portable control exercises real CPU callbacks and candidates
+through the existing submission lifecycle's controlled completion port; it does
+not claim a physical device callback or Window acceptance.
+Its authored preview scale is explicitly full resolution, and its first actual
+candidate extent is checked before enforcing the one-frame pixel grant. A
+logical Sequence resolution alone does not determine resolved preview residency.
+
+Request and completion structs place their work/resource lease after all payload
+fields, so ordinary Rust field retirement drops pixel owners before their charge.
+A refused actual-capacity completion keeps its work lease while explicitly
+retiring frame/cache/execution payloads, then releases the charge before sending
+cold failure metadata. Stale, cancellation, Busy and disconnect retirement must
+follow these same owners. The existing device-loss/timeout quarantine path is
+separate safety retirement; it is not successful callback/presentation evidence.
+
+GPU candidate preparation retains its `PreviewOwnedWorkingFrame` intact across
+every fallible output-boundary and layer-preparation branch. A layer only shares
+the original immutable pixel Arc. The successfully constructed candidate shares
+the same resource lease before the preparation owner retires; failed preparation
+drops layer payloads and then that owner's pixels before its charge. No detached
+pixel/lease local pair may create an uncharged early-return lifetime.
+
+### Timeline audio submitted-window continuity
+
+The Timeline PCM Adapter maps Media's generation into the sole Audio entry and
+retains generation protocol checks. Audio Delivery owns the submitted-window
+cursor; App has no second sample cursor or DSP continuity controller. Its common
+whole-root native preflight precedes exact signed-window validation, so a queued
+later window remains a typed native hold while the first window awaits cleanup
+or canonical author acceptance. Failed independent admitted windows retain the
+same-duration silence policy; stateful failures retain the sole Session poison
+policy. Same-live parameter handoff preserves the submitted cursor; an actual
+state-entry replacement clears it and requires a fresh generation entry.
+
+Native inspection interaction fixtures retain one boxed Host throughout their
+construction and split sidechain and Mixer setup into separate functions. This
+keeps large Host return values off nested test frames while exercising the same
+Host actions and Undo history on the default test-thread stack.
+
+Asset relink completion fixtures supply explicit default machine preferences
+and a unique preferences path, so installed plugin restoration is a separate
+workflow. A test-owned complete memory probe runs in the same resource observer,
+inventory, cadence, classifier, and slot allocator as the product. The relink
+controls retain real import, helper preparation, SQLite publication, terminal
+refresh, and the ten-second completion deadline. Critical pressure retains the
+queued request and original Asset path; a later observed Nominal sample admits
+that same request and publishes its Completed result.

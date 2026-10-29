@@ -831,6 +831,7 @@ pub struct TimelineView {
     transition_resize_drag: Option<TimelineTransitionResizeDrag>,
     scrollbar_drag: Option<TimelineScrollbarDrag>,
     pointer_capture_active: bool,
+    accessible_name: Option<String>,
     context_menu: Option<ContextMenu>,
     horizontal_scrollbar_hovered: bool,
     vertical_scrollbar_hovered: bool,
@@ -938,6 +939,13 @@ struct TimelineScrollbarDrag {
 }
 
 impl TimelineView {
+    /// Supply an application-localized semantic name without changing input.
+    pub fn with_accessible_name(mut self, name: impl Into<String>) -> Self {
+        let name = name.into();
+        self.accessible_name = (!name.is_empty()).then_some(name);
+        self
+    }
+
     /// Create a timeline view with the provided tracks.
     pub fn new(tracks: Vec<TimelineTrack>) -> Self {
         let metrics = TimelineMetrics::current();
@@ -990,6 +998,7 @@ impl TimelineView {
             transition_resize_drag: None,
             scrollbar_drag: None,
             pointer_capture_active: false,
+            accessible_name: None,
             context_menu: None,
             horizontal_scrollbar_hovered: false,
             vertical_scrollbar_hovered: false,
@@ -1209,7 +1218,11 @@ impl TimelineView {
         self
     }
 
-    /// Set the message shown in the timeline body when there are no tracks.
+    /// Set guidance for an empty body or an explicitly unavailable timeline.
+    ///
+    /// A disabled timeline with retained tracks shows this status over its body;
+    /// an available populated timeline does not show empty guidance. Supplying a
+    /// message does not change input availability or retained track identities.
     pub fn with_empty_message(mut self, message: impl Into<String>) -> Self {
         self.empty_message = Some(message.into());
         self
@@ -3155,7 +3168,8 @@ impl TimelineView {
         if items.iter().all(|item| !item.is_activatable()) {
             return EventResult::Ignored;
         }
-        let mut menu = ContextMenu::new(position, items);
+        let mut menu = ContextMenu::new(position, items)
+            .with_accessible_name(self.accessible_name.as_deref().unwrap_or(""));
         menu.layout(self.bounds);
         self.context_menu = Some(menu);
         ctx.request_repaint();
@@ -3831,8 +3845,8 @@ impl TimelineView {
         self.paint_asset_drop_indicator(ctx);
     }
 
-    fn paint_empty_state(&self, ctx: &mut PaintContext) {
-        if !self.tracks.is_empty() {
+    fn paint_status_message(&self, ctx: &mut PaintContext) {
+        if !self.tracks.is_empty() && self.enabled {
             return;
         }
         let Some(message) = self
@@ -3855,6 +3869,12 @@ impl TimelineView {
             message.split_once('\n').map_or((message, ""), |(title, description)| {
                 (title.trim(), description.trim())
             });
+        if !self.tracks.is_empty() {
+            // The retained model is still authoritative, but an unavailable
+            // time-display contract cannot present its fallback grid as valid.
+            // Use the semantic body surface so guidance cannot overlap clips.
+            ctx.encoder.draw_rect(self.body_rect, ctx.theme.colors.background, 0.0);
+        }
         let x = self.body_rect.x + 16.0;
         let y = self.body_rect.y + (self.body_rect.height * 0.28).max(20.0);
         ctx.encoder.draw_text_box(
@@ -5331,7 +5351,7 @@ impl Widget for TimelineView {
             self.body_rect.height,
         ));
         self.paint_tracks(ctx);
-        self.paint_empty_state(ctx);
+        self.paint_status_message(ctx);
         ctx.pop_clip();
 
         ctx.push_clip(Rect::new(
@@ -5367,6 +5387,20 @@ impl Widget for TimelineView {
         self.enabled
     }
 
+    fn visit_accessibility_nodes(&self, visitor: &mut dyn FnMut(AccessibilityNode)) {
+        if let Some(node) = self.accessibility() {
+            visitor(node);
+        }
+        if let Some(menu) = &self.context_menu {
+            menu.visit_accessibility_nodes(&mut |mut node| {
+                if node.widget_id == menu.id() {
+                    node.parent_id = Some(self.id);
+                }
+                visitor(node);
+            });
+        }
+    }
+
     fn accessibility(&self) -> Option<AccessibilityNode> {
         let track_count = self.tracks.len();
         let clip_count = self.tracks.iter().map(|track| track.clips.len()).sum();
@@ -5399,7 +5433,7 @@ impl Widget for TimelineView {
 
         Some(
             AccessibilityNode::new(self.id, AccessibilityRole::Timeline)
-                .with_name("Timeline")
+                .with_name(self.accessible_name.as_deref().unwrap_or(""))
                 .with_state(AccessibilityState {
                     focusable: self.enabled,
                     focused: self.focused,
@@ -5481,14 +5515,14 @@ mod tests {
 
     #[test]
     fn timeline_accessibility_exposes_playhead_counts_selection_and_state() {
-        let mut view = timeline().with_playhead(12);
+        let mut view = timeline().with_accessible_name("时间线").with_playhead(12);
         view.focused = true;
         view.selected_clip = Some(TimelineClipRef { track_index: 0, clip_index: 1 });
 
         let node = view.accessibility().expect("timeline should expose accessibility metadata");
 
         assert_eq!(node.role, AccessibilityRole::Timeline);
-        assert_eq!(node.name.as_deref(), Some("Timeline"));
+        assert_eq!(node.name.as_deref(), Some("时间线"));
         assert!(node.state.focusable);
         assert!(node.state.focused);
         assert!(!node.state.disabled);
@@ -10073,6 +10107,13 @@ mod tests {
             EventResult::Handled
         );
         assert!(view.selected_clip().is_none());
+        assert_eq!(
+            view.event(
+                &UiEvent::KeyDown { key: KeyCode::Down, modifiers: Modifiers::none() },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
         assert_eq!(
             view.event(
                 &UiEvent::KeyDown { key: KeyCode::Enter, modifiers: Modifiers::none() },

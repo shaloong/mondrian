@@ -4,6 +4,7 @@
 
 mod model;
 
+use crate::ValueEdit;
 use model::{SliderGeometry, SliderModel};
 use mondrian_editor_state::Action;
 use mondrian_ui_core::types::*;
@@ -18,9 +19,17 @@ use std::cell::Cell;
 /// Adapter that maps the current slider value to an editor [`Action`].
 pub type SliderChangeAction = dyn Fn(f32) -> Option<Action>;
 
+/// Adapter for value changes and explicit pointer interaction boundaries.
+pub type SliderEditAction = dyn Fn(ValueEdit, f32) -> Option<Action>;
+
+/// Pure, fresh model projection for a slider's declared domain value.
+/// This presentation adapter must not dispatch or mutate author state.
+pub type SliderAccessibleValue = dyn Fn() -> AccessibilityValue;
+
 /// Slider Widget —— 拖拽滑块控制数值
 pub struct Slider {
     id: WidgetId,
+    inspection_identity: crate::control_inspection::ControlInspectionIdentity,
     model: SliderModel,
     bounds: Rect,
     enabled: bool,
@@ -29,6 +38,11 @@ pub struct Slider {
     focus_visible: bool,
     geometry: Cell<SliderGeometry>,
     on_change: Option<Box<SliderChangeAction>>,
+    on_edit: Option<Box<SliderEditAction>>,
+    accessible_name: Option<String>,
+    accessible_value: Option<Box<SliderAccessibleValue>>,
+    gesture: Option<mondrian_core::AuthoringGestureId>,
+    drag_start: Option<f32>,
     visual: Cell<SliderVisualTokens>,
 }
 
@@ -75,10 +89,17 @@ impl Default for SliderVisualTokens {
 }
 
 impl Slider {
+    /// Address this control independently of labels, ordering and current value.
+    pub fn with_control_inspection_key(mut self, key: Option<String>) -> Self {
+        self.inspection_identity.set_key(key);
+        self
+    }
+
     /// Create a slider with a clamped initial value.
     pub fn new(value: f32, min: f32, max: f32) -> Self {
         Self {
             id: WidgetId::new(),
+            inspection_identity: crate::control_inspection::ControlInspectionIdentity::default(),
             model: SliderModel::new(value, min, max),
             bounds: Rect::ZERO,
             enabled: true,
@@ -87,8 +108,26 @@ impl Slider {
             focus_visible: false,
             geometry: Cell::new(SliderVisualTokens::default().geometry()),
             on_change: None,
+            on_edit: None,
+            accessible_name: None,
+            accessible_value: None,
+            gesture: None,
+            drag_start: None,
             visual: Cell::new(SliderVisualTokens::default()),
         }
+    }
+
+    /// Supply the current value in the declared domain for semantic inspection.
+    ///
+    /// Without this adapter the slider reports its own coordinate and range.
+    /// The adapter belongs to the fresh widget and is never carried across a
+    /// model/owner replacement by focus or draft inspection.
+    pub fn with_accessible_value(
+        mut self,
+        value: impl Fn() -> AccessibilityValue + 'static,
+    ) -> Self {
+        self.accessible_value = Some(Box::new(value));
+        self
     }
 
     /// Return the current value.
@@ -102,7 +141,21 @@ impl Slider {
         F: Fn(f32) -> R + 'static,
         R: Into<Option<Action>>,
     {
+        self.on_edit = None;
         self.on_change = Some(Box::new(move |value| action(value).into()));
+        self
+    }
+
+    /// Dispatch explicit edit boundaries instead of isolated value callbacks.
+    /// Each drag gets a fresh identity; begin precedes updates and finish is
+    /// emitted once on release/focus loss. This replaces the value-only callback.
+    pub fn on_edit<F, R>(mut self, action: F) -> Self
+    where
+        F: Fn(ValueEdit, f32) -> R + 'static,
+        R: Into<Option<Action>>,
+    {
+        self.on_change = None;
+        self.on_edit = Some(Box::new(move |phase, value| action(phase, value).into()));
         self
     }
 
@@ -153,7 +206,11 @@ impl Slider {
         self.geometry.get().thumb_rect(self.bounds, self.ratio())
     }
 
-    fn set_value(&mut self, value: f32) -> bool {
+    /// Synchronize the coordinate from a fresh model without dispatching an edit.
+    ///
+    /// Existing pointer capture and the current drag origin are unchanged. This
+    /// setter is presentation only; author changes still enter through callbacks.
+    pub fn set_value(&mut self, value: f32) -> bool {
         self.model.set_value(value)
     }
 
@@ -167,11 +224,60 @@ impl Slider {
     }
 
     fn dispatch_change(&self, ctx: &mut EventContext) {
+        if self.on_edit.is_some() {
+            self.dispatch_edit(
+                self.gesture.map_or(ValueEdit::Single, ValueEdit::Update),
+                ctx,
+            );
+            return;
+        }
         if let Some(action) = &self.on_change
             && let Some(action) = action(self.value())
         {
             (ctx.dispatch)(action);
         }
+    }
+
+    fn dispatch_edit(&self, phase: ValueEdit, ctx: &mut EventContext) {
+        if let Some(callback) = &self.on_edit
+            && let Some(action) = callback(phase, self.value())
+        {
+            (ctx.dispatch)(action);
+        }
+    }
+
+    /// Seal an active pointer edit before a distinct numeric keyboard command.
+    ///
+    /// This emits its existing Finish once, releases capture and retains focus.
+    /// It dispatches no new value and leaves an idle Slider unchanged.
+    pub fn finish_pointer_edit(&mut self, ctx: &mut EventContext) -> bool {
+        if !self.dragging {
+            return false;
+        }
+        self.finish_edit(ctx);
+        self.dragging = false;
+        ctx.release_pointer_capture(self.id);
+        ctx.request_repaint();
+        true
+    }
+
+    fn finish_edit(&mut self, ctx: &mut EventContext) {
+        if let Some(gesture) = self.gesture.take() {
+            self.dispatch_edit(ValueEdit::Finish(gesture), ctx);
+        }
+        self.drag_start = None;
+    }
+
+    fn cancel_edit(&mut self, ctx: &mut EventContext) {
+        let changed = self.drag_start.take().is_some_and(|origin| self.model.restore_value(origin));
+        if let Some(gesture) = self.gesture.take() {
+            self.dispatch_edit(ValueEdit::Cancel(gesture), ctx);
+        } else if changed {
+            self.dispatch_change(ctx);
+        }
+        self.dragging = false;
+        ctx.release_pointer_capture(self.id);
+        ctx.request_repaint();
     }
 
     fn keyboard_step(&self, modifiers: Modifiers) -> f32 {
@@ -210,6 +316,7 @@ impl Widget for Slider {
     fn event(&mut self, event: &UiEvent, ctx: &mut EventContext) -> EventResult {
         if !self.enabled {
             if self.dragging {
+                self.finish_edit(ctx);
                 ctx.release_pointer_capture(self.id);
             }
             self.dragging = false;
@@ -225,7 +332,19 @@ impl Widget for Slider {
                 self.focused = true;
                 self.focus_visible = false;
                 ctx.request_pointer_capture(self.id);
-                self.update_value(position, ctx);
+                if self.on_edit.is_some() {
+                    self.finish_edit(ctx);
+                    self.drag_start = Some(self.value());
+                    let gesture = mondrian_core::AuthoringGestureId::new();
+                    self.gesture = Some(gesture);
+                    let ratio = self.geometry.get().ratio_at_position(self.bounds, *position);
+                    self.set_value(self.model.value_at_ratio(ratio));
+                    self.dispatch_edit(ValueEdit::Begin(gesture), ctx);
+                    ctx.request_repaint();
+                } else {
+                    self.drag_start = Some(self.value());
+                    self.update_value(position, ctx);
+                }
                 EventResult::Handled
             }
             UiEvent::MouseMove { position, .. } if self.dragging => {
@@ -233,6 +352,7 @@ impl Widget for Slider {
                 EventResult::Handled
             }
             UiEvent::MouseUp { button: MouseButton::Left, .. } if self.dragging => {
+                self.finish_edit(ctx);
                 self.dragging = false;
                 ctx.release_pointer_capture(self.id);
                 EventResult::Handled
@@ -248,6 +368,7 @@ impl Widget for Slider {
                 self.focus_visible = false;
                 self.dragging = false;
                 if was_dragging {
+                    self.finish_edit(ctx);
                     ctx.release_pointer_capture(self.id);
                 }
                 EventResult::Handled
@@ -262,6 +383,27 @@ impl Widget for Slider {
             UiEvent::KeyDown { key, modifiers } if self.focused => {
                 if modifiers.ctrl || modifiers.alt || modifiers.meta {
                     return EventResult::Ignored;
+                }
+                if self.dragging && *key == KeyCode::Escape {
+                    self.cancel_edit(ctx);
+                    return EventResult::Handled;
+                }
+                if self.dragging
+                    && matches!(
+                        key,
+                        KeyCode::Left
+                            | KeyCode::Right
+                            | KeyCode::Up
+                            | KeyCode::Down
+                            | KeyCode::PageUp
+                            | KeyCode::PageDown
+                            | KeyCode::Home
+                            | KeyCode::End
+                    )
+                {
+                    self.finish_edit(ctx);
+                    self.dragging = false;
+                    ctx.release_pointer_capture(self.id);
                 }
                 let step = self.keyboard_step(*modifiers);
                 match key {
@@ -338,25 +480,69 @@ impl Widget for Slider {
         self.bounds.contains(point)
     }
 
+    fn has_active_pointer_interaction(&self) -> bool {
+        self.dragging
+    }
+
     fn can_focus(&self) -> bool {
         self.enabled
+    }
+
+    fn set_control_inspection_key(&mut self, key: Option<String>) -> bool {
+        self.inspection_identity.set_key(key);
+        true
+    }
+
+    fn control_inspection_state(&self) -> Option<mondrian_ui_core::ControlInspectionState> {
+        self.inspection_identity.inspect(
+            self.id,
+            AccessibilityRole::Slider,
+            self.focused,
+            self.focus_visible,
+            self.enabled && !self.dragging && self.gesture.is_none(),
+        )
+    }
+
+    fn restore_control_inspection_state(
+        &mut self,
+        state: &mondrian_ui_core::ControlInspectionState,
+    ) -> bool {
+        let Some((id, focused, focus_visible)) = self.inspection_identity.restore(
+            state,
+            AccessibilityRole::Slider,
+            self.enabled && !self.dragging && self.gesture.is_none(),
+        ) else {
+            return false;
+        };
+        self.id = id;
+        self.focused = focused;
+        self.focus_visible = focus_visible;
+        true
+    }
+
+    fn set_accessible_name(&mut self, name: Option<String>) -> bool {
+        self.accessible_name = name.filter(|name| !name.is_empty());
+        true
     }
 
     fn accessibility(&self) -> Option<AccessibilityNode> {
         Some(
             AccessibilityNode::new(self.id, AccessibilityRole::Slider)
-                .with_name("Slider")
+                .with_name(self.accessible_name.as_deref().unwrap_or("Slider"))
                 .with_state(AccessibilityState {
                     focusable: self.enabled,
                     focused: self.focused,
                     disabled: !self.enabled,
                     ..AccessibilityState::default()
                 })
-                .with_value(AccessibilityValue::Number {
-                    value: self.value(),
-                    min: self.model.min(),
-                    max: self.model.max(),
-                }),
+                .with_value(self.accessible_value.as_ref().map_or_else(
+                    || AccessibilityValue::Number {
+                        value: f64::from(self.value()),
+                        min: f64::from(self.model.min()),
+                        max: f64::from(self.model.max()),
+                    },
+                    |value| value(),
+                )),
         )
     }
 
@@ -515,6 +701,161 @@ mod tests {
         );
 
         assert_close(s.value(), 50.0);
+    }
+
+    #[test]
+    fn slider_escape_cancels_gesture_once_and_restores_unquantized_start() {
+        use std::rc::Rc;
+        let phases = Rc::new(RefCell::new(Vec::new()));
+        let recorded = Rc::clone(&phases);
+        let mut slider =
+            Slider::new(0.23, 0.0, 1.0).with_step(0.25).on_edit(move |phase, value| {
+                recorded.borrow_mut().push((phase, value));
+                None::<Action>
+            });
+        slider.layout(Rect::new(0.0, 0.0, 200.0, 20.0));
+        let mut ctx = event_ctx();
+        slider.event(
+            &UiEvent::MouseDown {
+                position: Point::new(0.0, 10.0),
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        slider.event(
+            &UiEvent::MouseMove {
+                position: Point::new(100.0, 10.0),
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        assert_eq!(slider.value(), 0.5);
+        let mut modified = Modifiers::none();
+        modified.ctrl = true;
+        assert_eq!(
+            slider.event(
+                &UiEvent::KeyDown { key: KeyCode::Escape, modifiers: modified },
+                &mut ctx
+            ),
+            EventResult::Ignored
+        );
+        assert!(slider.dragging);
+        assert_eq!(
+            slider.event(
+                &UiEvent::KeyDown { key: KeyCode::Escape, modifiers: Modifiers::none() },
+                &mut ctx
+            ),
+            EventResult::Handled
+        );
+        assert_eq!(slider.value(), 0.23);
+        assert!(!slider.dragging);
+        for event in [
+            UiEvent::MouseMove {
+                position: Point::new(180.0, 10.0),
+                modifiers: Modifiers::none(),
+            },
+            UiEvent::MouseUp {
+                position: Point::new(180.0, 10.0),
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            UiEvent::FocusLost,
+        ] {
+            slider.event(&event, &mut ctx);
+        }
+        let phases = phases.borrow();
+        assert_eq!(phases.len(), 3);
+        let ValueEdit::Begin(id) = phases[0].0 else {
+            panic!("begin");
+        };
+        assert_eq!(phases[1].0, ValueEdit::Update(id));
+        assert_eq!(phases[2], (ValueEdit::Cancel(id), 0.23));
+    }
+
+    #[test]
+    fn slider_escape_restores_value_only_form_draft_without_quantizing_it() {
+        let actions = RefCell::new(Vec::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut ctx = make_event_ctx(&mut focus, &mut shortcut, &mut tooltip, &dispatch);
+        let mut slider = Slider::new(0.23, 0.0, 1.0).with_step(0.25).on_change(value_action);
+        slider.layout(Rect::new(0.0, 0.0, 200.0, 20.0));
+        slider.event(
+            &UiEvent::MouseDown {
+                position: Point::new(100.0, 10.0),
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        slider.event(
+            &UiEvent::KeyDown { key: KeyCode::Escape, modifiers: Modifiers::none() },
+            &mut ctx,
+        );
+        assert_eq!(slider.value(), 0.23);
+        assert_eq!(
+            *actions.borrow(),
+            vec![value_action(0.5), value_action(0.23)]
+        );
+    }
+
+    #[test]
+    fn slider_explicit_edits_include_unchanged_begin_and_finish_once_with_fresh_identity() {
+        use std::rc::Rc;
+        let phases = Rc::new(RefCell::new(Vec::new()));
+        let recorded = Rc::clone(&phases);
+        let mut slider = Slider::new(0.0, 0.0, 100.0).on_edit(move |phase, value| {
+            recorded.borrow_mut().push((phase, value));
+            None::<Action>
+        });
+        slider.layout(Rect::new(0.0, 0.0, 200.0, 20.0));
+        let mut ctx = event_ctx();
+        for finish in [
+            UiEvent::MouseUp {
+                position: Point::new(100.0, 10.0),
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            UiEvent::FocusLost,
+        ] {
+            slider.event(
+                &UiEvent::MouseDown {
+                    position: Point::new(0.0, 10.0),
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            );
+            slider.event(
+                &UiEvent::MouseMove {
+                    position: Point::new(100.0, 10.0),
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            );
+            slider.event(&finish, &mut ctx);
+            slider.event(&UiEvent::FocusLost, &mut ctx);
+        }
+        let phases = phases.borrow();
+        assert_eq!(phases.len(), 6);
+        let ValueEdit::Begin(first) = phases[0].0 else {
+            panic!("begin");
+        };
+        let ValueEdit::Begin(second) = phases[3].0 else {
+            panic!("fresh begin");
+        };
+        assert_ne!(first, second);
+        assert_eq!(
+            phases[0].1, 0.0,
+            "unchanged pointer down still opens a gesture"
+        );
+        assert_eq!(phases[1].0, ValueEdit::Update(first));
+        assert_eq!(phases[2].0, ValueEdit::Finish(first));
+        assert_eq!(phases[4].0, ValueEdit::Update(second));
+        assert_eq!(phases[5].0, ValueEdit::Finish(second));
     }
 
     #[test]
@@ -730,7 +1071,7 @@ mod tests {
             ctx.requests.pointer_capture,
             Some(PointerCaptureRequest::Release(s.id()))
         );
-        assert!(!s.dragging);
+        assert!(!s.has_active_pointer_interaction());
     }
 
     #[test]
@@ -1034,5 +1375,92 @@ mod tests {
             )
         );
         assert_eq!(encoder.rect_colors[2].a, visual.focus_halo_alpha);
+    }
+
+    #[test]
+    fn numeric_accessibility_generic_slider_retains_exact_coordinate_contract() {
+        let value = 0.12345679_f32;
+        let min = -0.1_f32;
+        let max = 0.9_f32;
+        let slider = Slider::new(value, min, max).disabled();
+        let node = slider.accessibility().expect("coordinate semantics");
+        assert_eq!(
+            node.value,
+            Some(AccessibilityValue::Number {
+                value: f64::from(value),
+                min: f64::from(min),
+                max: f64::from(max)
+            })
+        );
+        assert!(node.state.disabled && !node.state.focusable);
+    }
+
+    #[test]
+    fn numeric_accessibility_slider_reprojection_uses_fresh_domain_name_value_and_callback() {
+        use std::rc::Rc;
+        let old_calls = Rc::new(Cell::new(0));
+        let new_calls = Rc::new(Cell::new(0));
+        let old_value = Rc::new(Cell::new(12.123456789012344_f64));
+        let new_value = Rc::new(Cell::new(-42.123456789012344_f64));
+        let old_read = Rc::clone(&old_value);
+        let old_edits = Rc::clone(&old_calls);
+        let mut old = Slider::new(0.25, 0.0, 1.0)
+            .with_accessible_value(move || AccessibilityValue::Number {
+                value: old_read.get(),
+                min: -100.0,
+                max: 100.0,
+            })
+            .on_change(move |_| {
+                old_edits.set(old_edits.get() + 1);
+                None::<Action>
+            });
+        old.set_control_inspection_key(Some("same-scalar-owner".to_owned()));
+        old.set_accessible_name(Some("Gain (dB)".to_owned()));
+        let mut ctx = event_ctx();
+        old.event(&UiEvent::focus_gained_keyboard(), &mut ctx);
+        let state = old.control_inspection_state().expect("focus inspection");
+        let fresh_read = Rc::clone(&new_value);
+        let fresh_edits = Rc::clone(&new_calls);
+        let mut fresh = Slider::new(0.75, 0.0, 1.0)
+            .with_accessible_value(move || AccessibilityValue::Number {
+                value: fresh_read.get(),
+                min: -100.0,
+                max: 100.0,
+            })
+            .on_change(move |_| {
+                fresh_edits.set(fresh_edits.get() + 1);
+                None::<Action>
+            });
+        fresh.set_control_inspection_key(Some("same-scalar-owner".to_owned()));
+        fresh.set_accessible_name(Some("增益 (dB)".to_owned()));
+        assert!(fresh.restore_control_inspection_state(&state));
+        assert_eq!(
+            fresh.value(),
+            0.75,
+            "focus inspection never replaces current presentation coordinate"
+        );
+        for value in [-42.123456789012344_f64, 99.12345678901234] {
+            new_value.set(value);
+            old_value.set(-88.0);
+            let node = fresh.accessibility().expect("fresh semantics");
+            assert_eq!(node.name.as_deref(), Some("增益 (dB)"));
+            let Some(AccessibilityValue::Number { value: announced, min, max }) = node.value else {
+                panic!("domain Float64")
+            };
+            assert_eq!(announced.to_bits(), value.to_bits());
+            assert_eq!((min, max), (-100.0, 100.0));
+        }
+        fresh.event(
+            &UiEvent::KeyDown { key: KeyCode::Left, modifiers: Modifiers::none() },
+            &mut ctx,
+        );
+        assert_eq!(old_calls.get(), 0);
+        assert_eq!(new_calls.get(), 1);
+        let mut different = Slider::new(0.5, 0.0, 1.0);
+        different.set_control_inspection_key(Some("different-owner".to_owned()));
+        assert!(!different.restore_control_inspection_state(&state));
+        let mut disabled = Slider::new(0.5, 0.0, 1.0).disabled();
+        disabled.set_control_inspection_key(Some("same-scalar-owner".to_owned()));
+        assert!(!disabled.restore_control_inspection_state(&state));
     }
 }

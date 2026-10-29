@@ -146,6 +146,7 @@ fn generate_layer(
             false,
             ColorEngine::mondrian_standard(),
         ),
+        mondrian_core::ImageSampling::UNIT_SQUARE,
         &mut color_session,
     )
     .expect("perf input transform");
@@ -212,6 +213,8 @@ fn compose_frame_layers_with_diagnostics(
                 transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
                 effect_graph: Arc::clone(identity_effect_graph),
                 frame_seed: frame_idx as i64,
+
+                processor_input_plan: None,
             })
         })
         .collect::<Vec<_>>();
@@ -223,8 +226,10 @@ fn compose_frame_layers_with_diagnostics(
         TimelineEffectColorRuntime::new(
             &ColorEngine::mondrian_standard(),
             WorkingColorSpace::LinearRec709,
+            mondrian_core::ImageSampling::UNIT_SQUARE,
         ),
         scratch,
+        &mut mondrian_effects::EffectProcessorControl::uncancelled(),
     )
     .expect("composite export simulation frame");
     // This gate measures real pixel execution, not just diagnostic control

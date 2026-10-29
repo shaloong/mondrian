@@ -5,6 +5,9 @@
 /// 间距 Token 集合 —— 所有间隙、内边距、外边距
 #[derive(Debug, Clone, PartialEq)]
 pub struct SpacingTokens {
+    /// Width reserved for absolute author value labels in temporal curves.
+    pub curve_value_ruler_width: f32,
+
     // 基础间距阶梯
     pub xs: f32,
     pub sm: f32,
@@ -161,6 +164,7 @@ impl SpacingTokens {
 impl Default for SpacingTokens {
     fn default() -> Self {
         Self {
+            curve_value_ruler_width: 48.0,
             xs: 4.0,
             sm: 6.0,
             md: 10.0,

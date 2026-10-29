@@ -1,0 +1,49 @@
+{
+  "schema": 1,
+  "status": "INTEGRATED_FORMATTED_ORIGINAL_SOURCE_NOT_COMPILED_OR_NATIVE_QUALIFIED",
+  "license": "MIT",
+  "sourceOrigin": "Original Mondrian contributor facts-only CLAP ABI fixture; not adapted from third-party plugin code",
+  "files": [
+    {
+      "path": "crates/mondrian-audio/tests/fixtures/clap-note-metadata/Cargo.toml",
+      "bytes": 237,
+      "sha256": "CDFB58EFBE21BB378489A75195826CEA91102A8735F68445A490307D077514C7"
+    },
+    {
+      "path": "crates/mondrian-audio/tests/fixtures/clap-note-metadata/src/lib.rs",
+      "bytes": 10851,
+      "sha256": "18DAA655E35FF7F1252FA5374DD0B07EC1C282B1EFE391901F8669271469FB56"
+    },
+    {
+      "path": "crates/mondrian-audio/tests/fixtures/clap-note-metadata/README.md",
+      "bytes": 2373,
+      "sha256": "502C007A778735DA6F246E0DACBC61E1C2D9AA76A9FFEFBFF6B4E9ECD5F6767D"
+    },
+    {
+      "path": "crates/mondrian-audio/tests/fixtures/clap-note-metadata/LICENSE-MIT",
+      "bytes": 1078,
+      "sha256": "2113A82440111EC198197B7300BAB28BADA697B16F4941BDFBCBE5985007E4FB"
+    },
+    {
+      "path": "crates/mondrian-audio/tests/fixtures/clap-note-metadata/Cargo.lock",
+      "bytes": 260,
+      "sha256": "E738864073382614712B588B199D530A3E50F902C23FBBD8C981B38C466E96C0"
+    }
+  ],
+  "dependency": {
+    "name": "clap-sys",
+    "path": "vendor/clap-sys",
+    "version": "0.5.0",
+    "officialABI": "CLAP1.2.10",
+    "license": "MIT AND (MIT OR Apache-2.0)",
+    "cargoTomlSHA256": "25CDCF2D4308706E355616A8F94AA11C8F16D39CBF159799831CD9DAA2B1CE23",
+    "provenanceSHA256": "4BB8ADD92BC3B5131B14C1C29B7650F1729A8FD6888BC497A139ACA1A5BBE224",
+    "generatedABISHA256": "0300511CA69490436738C05D6E5051DE6745524A95029A78BA95CE2F43B74CA8"
+  },
+  "cargoLockGenerated": true,
+  "compilerProducer": null,
+  "dllSHA256": null,
+  "nativeExecuted": false,
+  "claimBoundary": "Metadata facts and refusal oracle only; no audio/note processing/RT/instrument/third-party result",
+  "historicalCandidateReceiptSHA256": "89BFEEF9051D3F7141F907CB8DA242C0E73E560D708F0744DB74F57169DADBDD"
+}

@@ -29,6 +29,10 @@ pub use tree::{TreeWalker, WidgetTree};
 pub use types::*;
 pub use widget::{
     collect_accessibility_nodes, AccessibilityNode, AccessibilityRole, AccessibilityState,
-    AccessibilityValue, AccessibilityVirtualNode, CursorRequest, DrawCommandEncoder, EventContext,
-    EventRequests, EyedropperRequest, PaintContext, Widget,
+    AccessibilityValue, AccessibilityVirtualNode, ControlInspectionState, CursorRequest,
+    DrawCommandEncoder, EventContext, EventRequests, EyedropperRequest, KeyboardActivationKey,
+    KeyboardActivationLease, NumericInputInspectionContract, NumericInputInspectionState,
+    NumericInputInspectionValue, PaintContext, TextCaretAffinity, TextInputCaretPosition,
+    TextInputDraftInspectionState, TextInputHistoryInspectionEntry,
+    TextInputHistoryInspectionState, Widget,
 };

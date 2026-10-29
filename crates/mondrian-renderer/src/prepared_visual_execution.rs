@@ -97,6 +97,15 @@ pub fn execute_prepared_visual_closure<T, A>(
 where
     A: PreparedVisualExecutionAdapter<T>,
 {
+    // Validate the entire closure before any child DSP. An omitted producer
+    // binding must never turn a stripped temporal graph into a silent bypass.
+    for node in closure.nodes() {
+        if node.evaluation().has_unbound_temporal_media() {
+            return Err(PreparedVisualExecutionError::Structure(
+                PreparedVisualExecutionStructureError::UnboundTemporalMedia { node: node.id() },
+            ));
+        }
+    }
     let schedule = PreparedVisualExecutionSchedule::prepare(closure)
         .map_err(PreparedVisualExecutionError::Structure)?;
     let mut outputs = std::iter::repeat_with(|| None)
@@ -252,6 +261,11 @@ impl PreparedVisualFrameNodeId {
 /// Structural failure detected before or during the shared execution walk.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PreparedVisualExecutionStructureError {
+    /// A file-backed temporal input has no producer-selected pixel domain.
+    UnboundTemporalMedia {
+        /// Node whose Media input preparation is incomplete.
+        node: PreparedVisualFrameNodeId,
+    },
     /// A valid prepared closure must contain one root.
     EmptyClosure,
     /// A node ID did not resolve inside its closure.
@@ -310,6 +324,12 @@ pub enum PreparedVisualExecutionStructureError {
 impl fmt::Display for PreparedVisualExecutionStructureError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::UnboundTemporalMedia { node } => {
+                write!(
+                    formatter,
+                    "node {node:?} has unbound temporal Media image domains"
+                )
+            }
             Self::EmptyClosure => write!(formatter, "prepared visual execution closure is empty"),
             Self::MissingNode { node } => write!(
                 formatter,

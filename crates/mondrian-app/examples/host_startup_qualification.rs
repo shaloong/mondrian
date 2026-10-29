@@ -5,6 +5,12 @@ mod tests {
     #[test]
     #[ignore = "explicitly starts the packaged product worker and every Host service"]
     fn product_host_retains_app_and_all_partial_service_owners() {
+        eprintln!(
+            "startup diagnostic: AppState={} bytes, AppUiHost={} bytes, qualifier={:p}",
+            std::mem::size_of::<mondrian_app::app::AppState>(),
+            std::mem::size_of::<mondrian_app::app_ui::host::AppUiHost>(),
+            mondrian_app::app_ui::host::qualify_app_ui_host_startup_ownership as *const (),
+        );
         let report = mondrian_app::app_ui::host::qualify_app_ui_host_startup_ownership()
             .expect("production-linked Host startup qualification");
         assert_eq!(report.schema_version, 1);

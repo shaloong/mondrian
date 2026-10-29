@@ -22,6 +22,11 @@ pub type EffectGraphValue = EffectGraphNodeId;
 #[derive(Debug, Clone)]
 pub enum EffectGraphNodeKind {
     Source,
+    /// Zero-input image producer; its format and domain describe output staging.
+    CustomSource {
+        op: EffectRenderOp,
+        domain_contract: EffectColorDomainContract,
+    },
     UnaryEffect {
         input: EffectGraphNodeId,
         op: EffectRenderOp,
@@ -93,7 +98,7 @@ pub struct EffectGraphNode {
 impl EffectGraphNode {
     pub fn input_ids(&self) -> Vec<EffectGraphNodeId> {
         match self.kind {
-            EffectGraphNodeKind::Source => Vec::new(),
+            EffectGraphNodeKind::Source | EffectGraphNodeKind::CustomSource { .. } => Vec::new(),
             EffectGraphNodeKind::UnaryEffect { input, .. }
             | EffectGraphNodeKind::DomainEffect { input, .. } => vec![input],
             EffectGraphNodeKind::Blend { base, overlay, .. } => vec![base, overlay],
@@ -135,6 +140,14 @@ impl EffectGraphIdentity {
             match &node.kind {
                 EffectGraphNodeKind::Source => {
                     0u8.hash(&mut writer);
+                }
+                EffectGraphNodeKind::CustomSource { op, domain_contract } => {
+                    // Version source-containing identities for staging selected
+                    // from the source declaration rather than external alpha.
+                    // Ordinary image-processing graph identities stay unchanged.
+                    12u8.hash(&mut writer);
+                    domain_contract.hash(&mut writer);
+                    hash_render_op(op, &mut writer);
                 }
                 EffectGraphNodeKind::UnaryEffect { input, op } => {
                     1u8.hash(&mut writer);
@@ -292,7 +305,8 @@ impl EffectRenderGraph {
             .iter()
             .map(|node| match &node.kind {
                 EffectGraphNodeKind::UnaryEffect { op, .. }
-                | EffectGraphNodeKind::DomainEffect { op, .. } => {
+                | EffectGraphNodeKind::DomainEffect { op, .. }
+                | EffectGraphNodeKind::CustomSource { op, .. } => {
                     render_op_retained_bytes_estimate(op)
                 }
                 EffectGraphNodeKind::MaskSource {
@@ -354,6 +368,28 @@ pub struct CompiledEffectStageBinding {
     input_value: EffectGraphValue,
     output_value: EffectGraphValue,
     emitted_nodes: Arc<[EffectGraphNodeId]>,
+    origin: Option<EffectStageOrigin>,
+    origin_proof: Option<Arc<()>>,
+}
+
+/// Compiler provenance, not another instance or author identity. A shared grade
+/// may appear more than once in one program, so its assignment is significant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum EffectStageOrigin {
+    Stack {
+        index: usize,
+    },
+    GradeLocal {
+        node: mondrian_core::GradeGraphNodeId,
+    },
+    BeforeGrade {
+        assignment: usize,
+        node: mondrian_core::GradeGraphNodeId,
+    },
+    AfterGrade {
+        assignment: usize,
+        node: mondrian_core::GradeGraphNodeId,
+    },
 }
 
 impl CompiledEffectStageBinding {
@@ -370,7 +406,47 @@ impl CompiledEffectStageBinding {
             input_value,
             output_value,
             emitted_nodes: emitted_nodes.into(),
+            origin: None,
+            origin_proof: None,
         }
+    }
+
+    pub(crate) fn with_origin(mut self, origin: Option<EffectStageOrigin>) -> Self {
+        self.origin = origin;
+        self.origin_proof = None;
+        self
+    }
+
+    pub(crate) fn origin(&self) -> Option<EffectStageOrigin> {
+        self.origin
+    }
+
+    pub(crate) fn seal_origin(&mut self, proof: &Arc<()>) {
+        self.origin_proof = self.origin.map(|_| Arc::clone(proof));
+    }
+
+    pub(crate) fn reuse_origin(&mut self, original: &Self) {
+        debug_assert_eq!(self.origin(), original.origin());
+        self.origin_proof = original.origin_proof.clone();
+    }
+
+    pub(crate) fn shares_origin(&self, other: &Self) -> bool {
+        self.origin.is_some()
+            && self.origin == other.origin
+            && matches!((&self.origin_proof, &other.origin_proof), (Some(a), Some(b)) if Arc::ptr_eq(a, b))
+    }
+
+    /// Conservative controlled immutable metadata. Origin is inline; the one
+    /// shared program proof is charged even when shared. Not allocator/RSS.
+    pub(crate) fn heap_bytes_estimate(&self) -> usize {
+        self.emitted_nodes
+            .len()
+            .saturating_mul(std::mem::size_of::<EffectGraphNodeId>())
+            .saturating_add(if self.origin_proof.is_some() {
+                2 * std::mem::size_of::<usize>()
+            } else {
+                0
+            })
     }
 
     /// Definition-stage index in [`EffectExecutionEnvelope::stages`].
@@ -422,12 +498,52 @@ pub struct CompiledEffectGraph {
     /// Exact modes implemented and Definition-admitted for each reachable
     /// executable node.
     node_execution_modes: HashMap<EffectGraphNodeId, EffectExecutionModes>,
+    /// Exact implementation/provider association admission retained by the sole IR.
+    node_alpha_contracts: HashMap<EffectGraphNodeId, crate::EffectAlphaContract>,
+    /// Aggregate of frozen providers in the reachable execution schedule.
+    image_scale_requirement: crate::EffectImageScaleRequirement,
 }
 
 impl CompiledEffectGraph {
     /// Immutable render graph owned by this compiled IR.
     pub const fn graph(&self) -> &EffectRenderGraph {
         &self.graph
+    }
+
+    /// Whether a reachable, sealed direct-input processor requests a host source
+    /// service. Legacy current-frame callbacks do not acquire hidden dependencies.
+    pub fn requires_processor_input_service(&self) -> bool {
+        self.schedule.ordered_nodes.iter().any(|node| {
+            self.processor_input_stage(*node).is_some()
+                && self.graph.node(*node).is_some_and(|node| match &node.kind {
+                    EffectGraphNodeKind::UnaryEffect {
+                        op: EffectRenderOp::Custom { processor: Some(binding), .. },
+                        ..
+                    }
+                    | EffectGraphNodeKind::DomainEffect {
+                        op: EffectRenderOp::Custom { processor: Some(binding), .. },
+                        ..
+                    } => binding.requires_input_service(),
+                    _ => false,
+                })
+        })
+    }
+
+    /// Select only a Custom node that directly consumes its Definition input.
+    pub(crate) fn processor_input_stage(
+        &self,
+        node: EffectGraphNodeId,
+    ) -> Option<&CompiledEffectStageBinding> {
+        let input = match &self.graph.node(node)?.kind {
+            EffectGraphNodeKind::UnaryEffect { input, op: EffectRenderOp::Custom { .. } }
+            | EffectGraphNodeKind::DomainEffect {
+                input, op: EffectRenderOp::Custom { .. }, ..
+            } => *input,
+            _ => return None,
+        };
+        self.stage_bindings
+            .iter()
+            .find(|stage| stage.emitted_nodes().contains(&node) && stage.input_value() == input)
     }
 
     pub(crate) const fn identity(&self) -> &EffectGraphIdentity {
@@ -463,6 +579,12 @@ impl CompiledEffectGraph {
     /// Conservative cross-call reuse contract for the complete output.
     pub const fn output_cache_policy(&self) -> EffectCachePolicy {
         self.output_cache_policy
+    }
+
+    /// Render-scale restriction of the reachable frozen providers.
+    /// Dead or disabled effects do not contribute to this requirement.
+    pub const fn image_scale_requirement(&self) -> crate::EffectImageScaleRequirement {
+        self.image_scale_requirement
     }
 
     /// Compiler-estimated relative output cost.
@@ -503,16 +625,19 @@ impl CompiledEffectGraph {
         self.node_execution_modes.get(&node_id).copied()
     }
 
+    /// Complete provider alpha declaration for one reachable compiled value.
+    pub fn node_alpha_contract(
+        &self,
+        node: EffectGraphNodeId,
+    ) -> Option<crate::EffectAlphaContract> {
+        self.node_alpha_contracts.get(&node).copied()
+    }
+
     pub(crate) fn retained_bytes_estimate(&self) -> usize {
         let binding_nodes = self
             .stage_bindings
             .iter()
-            .map(|binding| {
-                binding
-                    .emitted_nodes
-                    .len()
-                    .saturating_mul(std::mem::size_of::<EffectGraphNodeId>())
-            })
+            .map(CompiledEffectStageBinding::heap_bytes_estimate)
             .fold(0_usize, usize::saturating_add);
         std::mem::size_of::<Self>()
             .saturating_add(self.graph.retained_bytes_estimate())
@@ -564,6 +689,9 @@ impl CompiledEffectGraph {
                     .saturating_mul(std::mem::size_of::<CompiledEffectStageBinding>()),
             )
             .saturating_add(binding_nodes)
+            .saturating_add(self.node_alpha_contracts.capacity().saturating_mul(
+                std::mem::size_of::<(EffectGraphNodeId, crate::EffectAlphaContract)>(),
+            ))
             .saturating_add(
                 self.node_execution_modes
                     .capacity()
@@ -618,6 +746,10 @@ struct EffectGraphShape {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum EffectGraphNodeShape {
+    CustomSource {
+        id: EffectGraphNodeId,
+        domain_contract: EffectColorDomainContract,
+    },
     Source {
         id: EffectGraphNodeId,
     },
@@ -762,6 +894,8 @@ impl PreparedEffectGraphTopology {
         constrain_cache_profiles_by_execution_envelope(&mut node_profiles, &execution_envelope);
         let (output_cache_policy, estimated_cost, output_cache_enabled) =
             compiled_effect_graph_cache_profile(&graph, &node_profiles)?;
+        let (node_alpha_contracts, image_scale_requirement) =
+            compile_node_alpha_contracts(&graph, &self.schedule)?;
         let identity = graph.semantic_identity();
         Some(Arc::new(CompiledEffectGraph {
             signature_hash: identity.diagnostic_hash(),
@@ -777,6 +911,8 @@ impl PreparedEffectGraphTopology {
             execution_envelope,
             stage_bindings,
             node_execution_modes,
+            node_alpha_contracts,
+            image_scale_requirement,
         }))
     }
 }
@@ -935,6 +1071,7 @@ fn derive_implementation_requirements<'a>(
     for node in nodes {
         let derived = match &node.kind {
             EffectGraphNodeKind::Source => EffectImplementationRequirements::IDENTITY,
+            EffectGraphNodeKind::CustomSource { op, .. } => render_op_requirements(op),
             EffectGraphNodeKind::UnaryEffect { input, op }
             | EffectGraphNodeKind::DomainEffect { input, op, .. } => {
                 requirement_for(*input, &requirements).compose_node(render_op_requirements(op))
@@ -1029,7 +1166,8 @@ fn raw_node_implementation_requirements(
     match &node.kind {
         EffectGraphNodeKind::Source => None,
         EffectGraphNodeKind::UnaryEffect { op, .. }
-        | EffectGraphNodeKind::DomainEffect { op, .. } => {
+        | EffectGraphNodeKind::DomainEffect { op, .. }
+        | EffectGraphNodeKind::CustomSource { op, .. } => {
             Some(raw_render_op_execution_requirements(op))
         }
         EffectGraphNodeKind::Blend { .. } => Some(gpu_blend_node_requirements()),
@@ -1167,11 +1305,17 @@ impl EffectGraphBuilderState {
         &mut self,
         checkpoint: EffectGraphBuilderCheckpoint,
         effect_key: &str,
+        occurrence_id: mondrian_core::EffectId,
         definition_registry_revision: u64,
-        contract: Option<&crate::EffectPluginContract>,
+        contract: Option<&crate::EffectExtensionContract>,
+        project_geometry: Option<crate::EffectProjectGeometry>,
     ) {
         for node in self.graph.nodes.iter_mut().skip(checkpoint.node_count) {
             let (EffectGraphNodeKind::UnaryEffect {
+                op: EffectRenderOp::Custom { processor, .. },
+                ..
+            }
+            | EffectGraphNodeKind::CustomSource {
                 op: EffectRenderOp::Custom { processor, .. },
                 ..
             }
@@ -1183,8 +1327,13 @@ impl EffectGraphBuilderState {
                 continue;
             };
             if let Some(binding) = processor {
-                *binding =
-                    binding.with_runtime_owner(effect_key, definition_registry_revision, contract);
+                *binding = binding.with_runtime_owner(
+                    effect_key,
+                    occurrence_id,
+                    definition_registry_revision,
+                    contract,
+                    project_geometry,
+                );
             }
         }
     }
@@ -1270,6 +1419,20 @@ impl EffectGraphBuilderState {
         domain_contract: EffectColorDomainContract,
     ) {
         self.active_domain_contract = domain_contract;
+    }
+
+    /// Append a genuine zero-input producer, retaining the active output domain.
+    pub fn append_custom_source(&mut self, op: EffectRenderOp) -> EffectGraphNodeId {
+        let id = self.alloc_id();
+        self.graph.nodes.push(EffectGraphNode {
+            id,
+            kind: EffectGraphNodeKind::CustomSource {
+                op,
+                domain_contract: self.active_domain_contract,
+            },
+        });
+        self.current_output = id;
+        id
     }
 
     pub fn append_unary(&mut self, op: EffectRenderOp) -> EffectGraphNodeId {
@@ -1717,6 +1880,7 @@ pub(crate) fn compile_effect_domain_plan(
         let node = graph.node(*node_id)?;
         let output_domain = match &node.kind {
             EffectGraphNodeKind::Source => EffectColorDomain::SceneLinearRgb,
+            EffectGraphNodeKind::CustomSource { domain_contract, .. } => domain_contract.output,
             EffectGraphNodeKind::UnaryEffect { input, .. } => {
                 let input_domain = *plan.node_output_domains.get(input)?;
                 plan_domain_edge(
@@ -1877,6 +2041,64 @@ pub fn compile_reference_effect_graph_in_domain(
     compile_scheduled_render_graph(graph)
 }
 
+fn compile_node_alpha_contracts(
+    graph: &EffectRenderGraph,
+    schedule: &EffectExecutionSchedule,
+) -> Option<(
+    HashMap<EffectGraphNodeId, crate::EffectAlphaContract>,
+    crate::EffectImageScaleRequirement,
+)> {
+    let mut image_scale_requirement = crate::EffectImageScaleRequirement::Any;
+    let contracts = schedule
+        .ordered_nodes
+        .iter()
+        .map(|id| {
+            let node = graph.node(*id)?;
+            let contract = match &node.kind {
+                EffectGraphNodeKind::Source => crate::EffectAlphaContract::IDENTITY,
+                EffectGraphNodeKind::CustomSource {
+                    op: EffectRenderOp::Custom { processor: Some(binding), .. },
+                    ..
+                } => {
+                    if binding.input_role() != crate::EffectFloatProcessorInputRole::NoImage
+                        || binding.float32_factory().is_none()
+                        || !binding.alpha_contract().is_valid_source()
+                    {
+                        return None;
+                    }
+                    if binding.image_scale_requirement() == crate::EffectImageScaleRequirement::Unit
+                    {
+                        image_scale_requirement = crate::EffectImageScaleRequirement::Unit;
+                    }
+                    return Some((*id, binding.alpha_contract()));
+                }
+                EffectGraphNodeKind::CustomSource { .. } => return None,
+                EffectGraphNodeKind::UnaryEffect {
+                    op: EffectRenderOp::Custom { processor: Some(binding), .. },
+                    ..
+                }
+                | EffectGraphNodeKind::DomainEffect {
+                    op: EffectRenderOp::Custom { processor: Some(binding), .. },
+                    ..
+                } => {
+                    if binding.image_scale_requirement() == crate::EffectImageScaleRequirement::Unit
+                    {
+                        image_scale_requirement = crate::EffectImageScaleRequirement::Unit;
+                    }
+                    binding.alpha_contract()
+                }
+                EffectGraphNodeKind::Blend { blend_mode: BlendMode::Normal, .. }
+                | EffectGraphNodeKind::MultiInput { blend_mode: BlendMode::Normal, .. } => {
+                    crate::EffectAlphaContract::NORMAL_OVER
+                }
+                _ => crate::EffectAlphaContract::COVERAGE_OPERATION,
+            };
+            contract.is_valid().then_some((*id, contract))
+        })
+        .collect::<Option<HashMap<_, _>>>()?;
+    Some((contracts, image_scale_requirement))
+}
+
 fn compile_scheduled_render_graph(graph: EffectRenderGraph) -> Option<CompiledEffectGraph> {
     let schedule = schedule_effect_render_graph(&graph)?;
     if !reachable_custom_processor_snapshots_are_complete(&graph, &schedule) {
@@ -1891,6 +2113,8 @@ fn compile_scheduled_render_graph(graph: EffectRenderGraph) -> Option<CompiledEf
     constrain_cache_profiles_by_execution_envelope(&mut node_profiles, &execution_envelope);
     let (output_cache_policy, estimated_cost, output_cache_enabled) =
         compiled_effect_graph_cache_profile(&graph, &node_profiles)?;
+    let (node_alpha_contracts, image_scale_requirement) =
+        compile_node_alpha_contracts(&graph, &schedule)?;
     let identity = graph.semantic_identity();
     Some(CompiledEffectGraph {
         node_use_counts: effect_graph_node_use_counts(&graph),
@@ -1904,6 +2128,8 @@ fn compile_scheduled_render_graph(graph: EffectRenderGraph) -> Option<CompiledEf
         execution_envelope,
         stage_bindings,
         node_execution_modes,
+        node_alpha_contracts,
+        image_scale_requirement,
         graph,
         schedule,
     })
@@ -1955,10 +2181,23 @@ fn reachable_custom_processor_snapshots_are_complete(
                 op: EffectRenderOp::Custom { processor, .. },
                 ..
             }
+            | EffectGraphNodeKind::CustomSource {
+                op: EffectRenderOp::Custom { processor, .. },
+                ..
+            }
             | EffectGraphNodeKind::DomainEffect {
                 op: EffectRenderOp::Custom { processor, .. },
                 ..
-            } => processor.is_some(),
+            } => processor.as_ref().is_some_and(|binding| {
+                let source = matches!(node.kind, EffectGraphNodeKind::CustomSource { .. });
+                binding.factory_contract_matches()
+                    && binding.input_role()
+                        == if source {
+                            crate::EffectFloatProcessorInputRole::NoImage
+                        } else {
+                            crate::EffectFloatProcessorInputRole::SingleImage
+                        }
+            }),
             _ => true,
         })
     })
@@ -1993,6 +2232,12 @@ fn effect_graph_shape(graph: &EffectRenderGraph) -> Option<EffectGraphShape> {
         .iter()
         .map(|node| match &node.kind {
             EffectGraphNodeKind::Source => EffectGraphNodeShape::Source { id: node.id },
+            EffectGraphNodeKind::CustomSource { domain_contract, .. } => {
+                EffectGraphNodeShape::CustomSource {
+                    id: node.id,
+                    domain_contract: *domain_contract,
+                }
+            }
             EffectGraphNodeKind::UnaryEffect { input, .. } => {
                 EffectGraphNodeShape::Unary { id: node.id, input: *input }
             }
@@ -2153,6 +2398,18 @@ pub(crate) fn compile_effect_node_profiles(
                     subtree_signature: hasher.finish(),
                     cache_policy: EffectCachePolicy::Deterministic,
                     estimated_cost: 0,
+                    output_cache_enabled: false,
+                }
+            }
+            EffectGraphNodeKind::CustomSource { op, domain_contract } => {
+                let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                11u8.hash(&mut hasher);
+                domain_contract.hash(&mut hasher);
+                op.hash_signature(&mut hasher);
+                CompiledEffectNodeProfile {
+                    subtree_signature: hasher.finish(),
+                    cache_policy: EffectCachePolicy::Uncacheable,
+                    estimated_cost: op.estimated_cost(),
                     output_cache_enabled: false,
                 }
             }
@@ -2478,6 +2735,49 @@ mod tests {
         assert_ne!(
             first.semantic_fingerprint(),
             different_topology.semantic_fingerprint()
+        );
+    }
+
+    #[test]
+    fn project_geometry_participates_in_complete_and_subtree_graph_identity() {
+        let processor = crate::CustomEffectProcessorBinding::new(Arc::new(
+            |_buffer, _width, _height, _params, _seed| Ok(()),
+        ));
+        let occurrence = mondrian_core::EffectId::new();
+        let graph = |width| {
+            let geometry = crate::EffectProjectGeometry::new(
+                width,
+                7,
+                mondrian_core::SampleAspectRatio::new(2, 1).unwrap(),
+            )
+            .unwrap();
+            compile_scheduled_effect_graph(&EffectRenderPlan {
+                ops: vec![EffectRenderOp::Custom {
+                    key: "test.project-geometry".to_owned(),
+                    params: serde_json::json!({}),
+                    cache_key: Some("same-provider".to_owned()),
+                    cache_policy: EffectCachePolicy::Deterministic,
+                    processor: Some(processor.with_runtime_owner(
+                        "test.project-geometry",
+                        occurrence,
+                        1,
+                        None,
+                        Some(geometry),
+                    )),
+                }],
+            })
+            .expect("bound graph")
+        };
+        let first = graph(10);
+        let unchanged = graph(10);
+        let changed = graph(11);
+        assert_eq!(first.identity(), unchanged.identity());
+        assert_ne!(first.identity(), changed.identity());
+        assert_ne!(first.semantic_fingerprint(), changed.semantic_fingerprint());
+        let output = first.graph().output.expect("output");
+        assert_ne!(
+            first.node_profiles()[&output].subtree_signature,
+            changed.node_profiles()[&output].subtree_signature
         );
     }
 

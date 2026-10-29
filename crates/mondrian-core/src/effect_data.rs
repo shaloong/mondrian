@@ -34,7 +34,11 @@ pub enum EffectType {
     Grain,
     ChromaKey,
     LumaKey,
-    Plugin(String),
+    /// Externally registered effect definition, including native-format adapters.
+    /// This is a domain definition reference, not an Extension package identity.
+    /// The serde name preserves the existing project wire representation.
+    #[serde(rename = "Plugin")]
+    External(String),
 }
 
 impl EffectType {
@@ -59,7 +63,7 @@ impl EffectType {
             Self::Grain => "builtin.grain".to_string(),
             Self::ChromaKey => "builtin.chroma_key".to_string(),
             Self::LumaKey => "builtin.luma_key".to_string(),
-            Self::Plugin(key) => key.clone(),
+            Self::External(key) => key.clone(),
         }
     }
 
@@ -84,7 +88,7 @@ impl EffectType {
             "builtin.grain" => Self::Grain,
             "builtin.chroma_key" => Self::ChromaKey,
             "builtin.luma_key" => Self::LumaKey,
-            other => Self::Plugin(other.to_string()),
+            other => Self::External(other.to_string()),
         }
     }
 
@@ -109,7 +113,7 @@ impl EffectType {
             Self::Grain => "颗粒",
             Self::ChromaKey => "色度抠像",
             Self::LumaKey => "亮度抠像",
-            Self::Plugin(name) => name,
+            Self::External(name) => name,
         }
     }
 
@@ -129,7 +133,7 @@ impl EffectType {
             Self::GaussianBlur | Self::Sharpen => vec!["颜色", "模糊与锐化"],
             Self::Vignette | Self::ChromaticAberration | Self::Grain => vec!["颜色", "风格化"],
             Self::Qualifier | Self::ChromaKey | Self::LumaKey => vec!["抠像"],
-            Self::Plugin(_) => vec!["插件"],
+            Self::External(_) => vec!["外部效果"],
         }
     }
 
@@ -154,7 +158,7 @@ impl EffectType {
             Self::Grain => "grain".to_string(),
             Self::ChromaKey => "chroma_key".to_string(),
             Self::LumaKey => "luma_key".to_string(),
-            Self::Plugin(key) => key.clone(),
+            Self::External(key) => key.clone(),
         }
     }
 
@@ -419,7 +423,7 @@ impl crate::AuthoringFootprint for EffectType {
         collector: &mut crate::AuthoringFootprintCollector,
     ) -> std::result::Result<(), crate::AuthoringFootprintError> {
         match self {
-            Self::Plugin(key) => collector.collect(key),
+            Self::External(key) => collector.collect(key),
             Self::BasicCorrection
             | Self::WhiteBalance
             | Self::Lut3D
@@ -464,6 +468,21 @@ impl crate::AuthoringFootprint for EffectNode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn external_effect_preserves_project_wire_and_definition_identity() {
+        let wire = serde_json::json!({ "Plugin": "plugin.saved.effect" });
+        let effect_type: EffectType = serde_json::from_value(wire.clone()).expect("read effect");
+        assert_eq!(
+            effect_type,
+            EffectType::External("plugin.saved.effect".to_owned())
+        );
+        assert_eq!(effect_type.key(), "plugin.saved.effect");
+        assert_eq!(
+            serde_json::to_value(&effect_type).expect("write effect"),
+            wire
+        );
+    }
 
     #[test]
     fn parse_effect_id_from_property_path_extracts_valid_uuid() {

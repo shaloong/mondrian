@@ -3,6 +3,8 @@ use mondrian_renderer::{analyze_shot_match_frame, solve_shot_match, CpuColorFram
 
 fn frame(data: Vec<[f32; 4]>) -> CpuColorFrame {
     CpuColorFrame::working(WorkingRgbaF32Frame {
+        sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
+        alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
         width: u32::try_from(data.len()).expect("fixture width"),
         height: 1,
         data,

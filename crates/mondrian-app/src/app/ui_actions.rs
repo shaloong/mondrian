@@ -33,13 +33,13 @@ pub use super::product_action::{
     AssetImportFilesPayload, AssetLibraryMovePayload, AssetLibrarySelectionPayload,
     AssetRelinkPayload, AssetRenameFolderPayload, AssetRenamePayload,
     AssetSetInterpretationPayload, AssetSetProxyModePayload, AssetTargetPayload,
-    ClipCurveEditPayload, ClipEditNumericCurvePayload, ClipHoldFramePayload,
-    ClipNormalizedCurvePointPayload, ClipParameterValueWrite, ClipSetBlendModePayload,
-    ClipSetEnabledPayload, ClipSetRatePayload, ClipSetSolidColorPayload,
+    ClipCurveAuthorPoint, ClipCurveEditPayload, ClipEditNumericCurvePayload, ClipHoldFramePayload,
+    ClipSetBlendModePayload, ClipSetEnabledPayload, ClipSetRatePayload, ClipSetSolidColorPayload,
     ClipWriteParameterValuesPayload, ExportDraftEdit, GalleryApplyShotMatchPayload,
     GalleryCaptureStillPayload, GalleryRenameStillPayload, GallerySetComparisonPayload,
-    GalleryStillTargetPayload, ProjectCreateWithSettingsPayload, ProjectRecoverFromAutosavePayload,
-    ProjectUpdateColorEnvironmentPayload, ProjectUpdateNewSequenceDefaultsPayload,
+    GalleryStillTargetPayload, ParameterValueWrite, ProjectCreateWithSettingsPayload,
+    ProjectRecoverFromAutosavePayload, ProjectUpdateColorEnvironmentPayload,
+    ProjectUpdateNewSequenceDefaultsPayload, SequenceSetMusicalTimeReferencePayload,
     SequenceTargetPayload, SequenceUpdateSettingsPayload, TimelineClipSelectionModePayload,
     TimelineDropAssetPayload, TimelineDropFilePayload, TimelineInOutPointKind,
     TimelineInsertAssetPayload, TimelineMoveClipPayload, TimelinePrecomposeSelectionPayload,
@@ -165,6 +165,19 @@ pub const APP_SHELL_ABOUT: &str = "about";
 pub const APP_SHELL_PREFERENCES: &str = "preferences";
 /// App-shell request to show the active sequence settings dialog.
 pub const APP_SHELL_SEQUENCE_SETTINGS: &str = "sequence_settings";
+/// Open a local musical-time draft for the active Sequence.
+pub const APP_SHELL_MUSICAL_TIME: &str = "musical_time";
+pub const APP_SHELL_MUSICAL_TIME_DRAFT_CHANGED: &str = "musical_time_draft_changed";
+pub const APP_SHELL_CONFIRM_MUSICAL_TIME: &str = "confirm_musical_time";
+
+/// Shell text updates never mutate the canonical Sequence until Apply.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum MusicalTimeDraftUpdate {
+    Enabled(bool),
+    Tempo(String),
+    Origin(String),
+    Signature(String),
+}
 /// App-shell request to update one app UI sequence-settings draft field.
 pub const APP_SHELL_SEQUENCE_SETTINGS_DRAFT_CHANGED: &str = "sequence_settings_draft_changed";
 /// App-shell request to apply the active sequence settings dialog.
@@ -1304,6 +1317,14 @@ pub fn sequence_update_settings_action(payload: SequenceUpdateSettingsPayload) -
         .into_external_action()
 }
 
+/// Build an exact musical-reference edit for one stable Sequence owner.
+pub fn sequence_set_musical_time_reference_action(
+    payload: SequenceSetMusicalTimeReferencePayload,
+) -> Action {
+    ProductAction::Sequence(SequenceProductAction::SetMusicalTimeReference(payload))
+        .into_external_action()
+}
+
 /// Build an app-shell request for creating a new project.
 pub fn app_shell_new_project_dialog_action() -> Action {
     custom_app_shell_action(APP_SHELL_NEW_PROJECT_DIALOG)
@@ -1408,6 +1429,24 @@ pub fn app_shell_install_openfx_bundle_dialog_action() -> Action {
     custom_app_shell_action(APP_SHELL_INSTALL_OPENFX_BUNDLE_DIALOG)
 }
 
+/// Context chosen by the Graphics menu before opening the native picker.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OpenFxInstallDialogPayload {
+    #[serde(default)]
+    pub context: crate::openfx_host::OpenFxContext,
+}
+
+/// Install Generator effects into the existing visual Effect catalog.
+pub fn app_shell_install_openfx_generator_dialog_action() -> Action {
+    custom_app_shell_action_with_payload(
+        APP_SHELL_INSTALL_OPENFX_BUNDLE_DIALOG,
+        OpenFxInstallDialogPayload {
+            context: crate::openfx_host::OpenFxContext::Generator,
+        },
+    )
+}
+
 /// Build an app-shell request for importing media files into a target folder.
 pub fn app_shell_import_media_dialog_action_with_target(
     payload: ImportMediaDialogPayload,
@@ -1494,6 +1533,18 @@ pub fn app_shell_preferences_action() -> Action {
 /// Build an app-shell request for editing the active sequence settings.
 pub fn app_shell_sequence_settings_action() -> Action {
     custom_app_shell_action(APP_SHELL_SEQUENCE_SETTINGS)
+}
+
+pub fn app_shell_musical_time_action() -> Action {
+    custom_app_shell_action(APP_SHELL_MUSICAL_TIME)
+}
+
+pub fn app_shell_musical_time_draft_changed_action(payload: MusicalTimeDraftUpdate) -> Action {
+    custom_app_shell_action_with_payload(APP_SHELL_MUSICAL_TIME_DRAFT_CHANGED, payload)
+}
+
+pub fn app_shell_confirm_musical_time_action() -> Action {
+    custom_app_shell_action(APP_SHELL_CONFIRM_MUSICAL_TIME)
 }
 
 /// Build an app-shell request for changing one sequence-settings draft field.

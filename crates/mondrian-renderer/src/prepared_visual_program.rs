@@ -18,7 +18,7 @@ use mondrian_core::{
 };
 use mondrian_effects::{
     effect_registry_revision, prepare_temporal_frame_execution, CompiledEffectGraph,
-    EffectExecutionEnvelope, EffectExecutionSession, EffectFrameContext,
+    EffectExecutionEnvelope, EffectExecutionSession, EffectFrameContext, EffectProjectGeometry,
     EffectTemporalExecutionRequest, EffectTemporalSpan, LutPreparationCache,
     LutPreparationCacheConfig, PreparedEffectProgram, PreparedEffectTemporalExecution,
     PreparedGradeGraph,
@@ -100,8 +100,9 @@ fn hierarchical_clip_author_fingerprint(
     Ok(hasher.finalize().into())
 }
 
-fn visual_frame_seed(sequence_time: TimelineTime, rate: Rational) -> i64 {
-    if let Ok(position) = sequence_time.to_frame_position(rate, FrameRounding::Nearest)
+fn visual_frame_seed(sequence_time: TimelineTime, time_base: Rational) -> i64 {
+    let frame_rate = Rational::new(time_base.den, time_base.num);
+    if let Ok(position) = sequence_time.to_frame_position(frame_rate, FrameRounding::Nearest)
         && TimelineTime::from_frame_position(position).ok() == Some(sequence_time)
     {
         return position.frame;
@@ -110,8 +111,10 @@ fn visual_frame_seed(sequence_time: TimelineTime, rate: Rational) -> i64 {
     hasher.update(b"mondrian.visual-off-grid-frame-seed.v1");
     hasher.update(sequence_time.numerator().to_le_bytes());
     hasher.update(sequence_time.denominator().to_le_bytes());
-    hasher.update(rate.num.to_le_bytes());
-    hasher.update(rate.den.to_le_bytes());
+    // Preserve the existing off-grid identity; only frame-grid conversion
+    // needs the reciprocal rate rather than seconds-per-frame.
+    hasher.update(time_base.num.to_le_bytes());
+    hasher.update(time_base.den.to_le_bytes());
     let digest = hasher.finalize();
     i64::from_le_bytes([
         digest[0], digest[1], digest[2], digest[3], digest[4], digest[5], digest[6], digest[7],
@@ -380,11 +383,29 @@ pub struct PreparedVisualProgramDiagnostics {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PreparedVisualMaterializationContract {
     author_resolution: Resolution,
+    sample_aspect_ratio: mondrian_core::SampleAspectRatio,
     authored_preview_resolution_scale: f32,
     title_safe_margin: f32,
 }
 
 impl PreparedVisualMaterializationContract {
+    /// Exact sample shape of this frozen Sequence owner.
+    pub const fn sample_aspect_ratio(self) -> mondrian_core::SampleAspectRatio {
+        self.sample_aspect_ratio
+    }
+
+    /// Sampling of this owner canvas at its actual materialized extent.
+    pub fn image_sampling(
+        self,
+        sampled: Resolution,
+    ) -> std::result::Result<mondrian_core::ImageSampling, mondrian_core::ImageSamplingError> {
+        mondrian_core::ImageSampling::from_full_raster(
+            self.sample_aspect_ratio,
+            self.author_resolution,
+            sampled,
+        )
+    }
+
     /// Sequence's authored logical raster.
     pub const fn author_resolution(self) -> Resolution {
         self.author_resolution
@@ -577,12 +598,14 @@ impl PreparedVisualProgram {
                     let context = TimelineTimeRange::new(clip.clip_time_in, clip.duration)
                         .map_err(|error| error.to_string())
                         .and_then(|range| {
-                            EffectFrameContext::new(
-                                sequence.settings.frame_rate,
+                            let geometry = EffectProjectGeometry::new(
+                                sequence.settings.resolution.width,
+                                sequence.settings.resolution.height,
                                 pixel_aspect_ratio,
-                                range,
                             )
-                            .map_err(|error| error.to_string())
+                            .map_err(|error| error.to_string())?;
+                            EffectFrameContext::new(sequence.settings.frame_rate, geometry, range)
+                                .map_err(|error| error.to_string())
                         });
                     match context {
                         Ok(context) => Some(context),
@@ -692,7 +715,7 @@ impl PreparedVisualProgram {
                         "Cross Dissolve carries unsupported definition state",
                     ))
                 }
-                VideoTransitionType::Plugin { definition_id } => {
+                VideoTransitionType::External { definition_id } => {
                     blocked_transitions += 1;
                     PreparedVisualTransition::Blocked(Arc::from(format!(
                         "requires unavailable definition `{definition_id}`"
@@ -726,6 +749,7 @@ impl PreparedVisualProgram {
             key,
             materialization: PreparedVisualMaterializationContract {
                 author_resolution: sequence.settings.resolution,
+                sample_aspect_ratio: pixel_aspect_ratio,
                 authored_preview_resolution_scale: sequence.settings.preview.resolution_scale,
                 title_safe_margin: sequence.settings.title_safe_margin,
             },
@@ -788,12 +812,30 @@ impl PreparedVisualProgram {
         &self,
         placement: TimelineClipExecutionRef,
         request: &EffectTemporalExecutionRequest,
+        grid: Rational,
     ) -> Result<PreparedEffectTemporalExecution> {
         let effect_program = self.temporal_effect_program(placement, request)?;
         prepare_temporal_frame_execution(effect_program, request, |clip_time| {
-            self.temporal_frame_seed(placement, clip_time)
+            self.temporal_frame_seed_on_grid(placement, clip_time, grid)
         })
         .map_err(|error| self.temporal_preparation_error(placement.clip_id, error))
+    }
+
+    /// Freeze time dependencies before a Media pixel domain is available.
+    pub(crate) fn prepare_clip_temporal_program(
+        &self,
+        placement: TimelineClipExecutionRef,
+        request: &EffectTemporalExecutionRequest,
+        grid: Rational,
+        session: Option<&mut EffectExecutionSession>,
+    ) -> Result<mondrian_effects::PreparedEffectTemporalProgram> {
+        let effect_program = self.temporal_effect_program(placement, request)?;
+        let seed = |clip_time| self.temporal_frame_seed_on_grid(placement, clip_time, grid);
+        let prepared = match session {
+            Some(session) => session.prepare_temporal_frame_program(effect_program, request, seed),
+            None => mondrian_effects::prepare_temporal_frame_program(effect_program, request, seed),
+        };
+        prepared.map_err(|error| self.temporal_preparation_error(placement.clip_id, error))
     }
 
     /// Freeze one Clip's time-expanded execution while sharing bounded dynamic
@@ -802,12 +844,69 @@ impl PreparedVisualProgram {
         &self,
         placement: TimelineClipExecutionRef,
         request: &EffectTemporalExecutionRequest,
+        grid: Rational,
         session: &mut EffectExecutionSession,
     ) -> Result<PreparedEffectTemporalExecution> {
         let effect_program = self.temporal_effect_program(placement, request)?;
         session
             .prepare_temporal_frame_execution(effect_program, request, |clip_time| {
-                self.temporal_frame_seed(placement, clip_time)
+                self.temporal_frame_seed_on_grid(placement, clip_time, grid)
+            })
+            .map_err(|error| self.temporal_preparation_error(placement.clip_id, error))
+    }
+
+    pub(crate) fn prepare_clip_processor_input_execution(
+        &self,
+        placement: TimelineClipExecutionRef,
+        graph: &CompiledEffectGraph,
+        node: mondrian_effects::EffectGraphNodeId,
+        request: &EffectTemporalExecutionRequest,
+    ) -> Result<PreparedEffectTemporalExecution> {
+        self.prepare_clip_input_execution(
+            placement,
+            request,
+            self.evaluation_time_base(),
+            |program| program.input_for_processor(graph, node),
+        )
+    }
+
+    pub(crate) fn prepare_clip_bound_input_execution(
+        &self,
+        placement: TimelineClipExecutionRef,
+        stage: &mondrian_effects::CompiledEffectStageBinding,
+        request: &EffectTemporalExecutionRequest,
+        grid: Rational,
+    ) -> Result<PreparedEffectTemporalExecution> {
+        self.prepare_clip_input_execution(placement, request, grid, |program| {
+            program.input_for_stage(stage)
+        })
+    }
+
+    fn prepare_clip_input_execution(
+        &self,
+        placement: TimelineClipExecutionRef,
+        request: &EffectTemporalExecutionRequest,
+        grid: Rational,
+        select: impl FnOnce(&PreparedEffectProgram) -> Option<mondrian_effects::PreparedEffectInput>,
+    ) -> Result<PreparedEffectTemporalExecution> {
+        self.schedule.clip_content(placement)?;
+        let program = self.clip_effect_program(placement)?;
+        let input = select(program).ok_or_else(|| MondrianError::EffectGraphEvaluationFailed {
+            reason: format!(
+                "Clip {} processor has no direct input in this prepared program",
+                placement.clip_id
+            ),
+        })?;
+        // The original source admission supplies actual input extent/sampling.
+        // A Clip processor runs before placement compositing: neither density
+        // nor Source PAR can be inferred from the Sequence/project canvas.
+        let request = request.clone().with_output_frame_seed(
+            self.temporal_frame_seed_on_grid(placement, request.output_time(), grid)
+                .map_err(|reason| MondrianError::EffectGraphEvaluationFailed { reason })?,
+        );
+        input
+            .prepare_execution(&request, |time| {
+                self.temporal_frame_seed_on_grid(placement, time, grid)
             })
             .map_err(|error| self.temporal_preparation_error(placement.clip_id, error))
     }
@@ -827,6 +926,13 @@ impl PreparedVisualProgram {
                 ),
             });
         }
+        self.clip_effect_program(placement)
+    }
+
+    fn clip_effect_program(
+        &self,
+        placement: TimelineClipExecutionRef,
+    ) -> Result<&PreparedEffectProgram> {
         let effect_program = match self.clip_effects.get(&placement.clip_id) {
             Some(PreparedClipEffects::Ready { program, .. }) => program,
             Some(PreparedClipEffects::Blocked { reason, .. }) => {
@@ -849,19 +955,17 @@ impl PreparedVisualProgram {
         Ok(effect_program)
     }
 
-    fn temporal_frame_seed(
+    pub(crate) fn temporal_frame_seed_on_grid(
         &self,
         placement: TimelineClipExecutionRef,
         clip_time: TimelineTime,
+        grid: Rational,
     ) -> std::result::Result<i64, String> {
         let sequence_time = self
             .schedule
             .clip_to_sequence_time(placement, clip_time)
             .map_err(|error| error.to_string())?;
-        Ok(visual_frame_seed(
-            sequence_time,
-            self.evaluation_time_base(),
-        ))
+        Ok(visual_frame_seed(sequence_time, grid))
     }
 
     fn temporal_preparation_error(
@@ -1344,7 +1448,7 @@ impl PreparedVisualProgramBinding {
         sequence: &Sequence,
         program: Arc<PreparedVisualProgram>,
     ) -> std::result::Result<Self, PreparedVisualProgramBindingError> {
-        validate_program_identity(sequence, &program, true, false)?;
+        validate_program_identity(sequence, &program, true)?;
         Ok(Self { author_snapshot: None, program })
     }
 
@@ -1353,7 +1457,11 @@ impl PreparedVisualProgramBinding {
         sequence: &Sequence,
         program: Arc<PreparedVisualProgram>,
     ) -> std::result::Result<Self, PreparedVisualProgramBindingError> {
-        validate_program_identity(sequence, &program, false, true)?;
+        // The cache admits a Program prepared at one coherent registry revision.
+        // A later registration cannot revoke its immutable definitions between
+        // preparation and binding. The next cache lookup and dependency observer
+        // still detect the new revision, just as they do after a cache hit.
+        validate_program_identity(sequence, &program, false)?;
         Ok(Self { author_snapshot: Some(author_snapshot), program })
     }
 
@@ -1371,7 +1479,7 @@ impl PreparedVisualProgramBinding {
         &self,
         sequence: &Sequence,
     ) -> std::result::Result<(), PreparedVisualProgramBindingError> {
-        validate_program_identity(sequence, &self.program, false, false)
+        validate_program_identity(sequence, &self.program, false)
     }
 }
 
@@ -1389,7 +1497,6 @@ fn validate_program_identity(
     sequence: &Sequence,
     program: &PreparedVisualProgram,
     validate_author_fingerprint: bool,
-    validate_current_effect_registry: bool,
 ) -> std::result::Result<(), PreparedVisualProgramBindingError> {
     if program.sequence_id() != sequence.id || program.sequence_revision() != sequence.revision {
         return Err(PreparedVisualProgramBindingError {
@@ -1400,18 +1507,6 @@ fn validate_program_identity(
                 sequence.revision,
                 program.sequence_id(),
                 program.sequence_revision()
-            ),
-        });
-    }
-    if validate_current_effect_registry
-        && program.effect_registry_revision() != effect_registry_revision()
-    {
-        return Err(PreparedVisualProgramBindingError {
-            sequence_id: sequence.id,
-            reason: format!(
-                "Effect registry revision changed (Program {}, current {})",
-                program.effect_registry_revision(),
-                effect_registry_revision()
             ),
         });
     }
@@ -2176,6 +2271,32 @@ mod tests {
     }
 
     #[test]
+    fn author_snapshot_binding_preserves_program_captured_before_registry_update() {
+        let sequence = single_solid_sequence(None);
+        let snapshot = PreparedVisualAuthorSnapshotIdentity::new(19);
+        let mut cache = PreparedVisualProgramCache::new(4);
+        let program = with_stable_effect_registry(|| cache.prepare(&sequence).ok());
+        let captured_revision = program.effect_registry_revision();
+
+        let _ = identity_effect_with_contract("binding registry race", cpu_float_contract());
+        assert_ne!(effect_registry_revision(), captured_revision);
+        let binding =
+            PreparedVisualProgramBinding::from_prepared(snapshot, &sequence, Arc::clone(&program))
+                .expect(
+                    "registration after preparation cannot revoke the captured immutable Program",
+                );
+        assert!(Arc::ptr_eq(binding.program(), &program));
+        assert_eq!(binding.author_snapshot(), Some(snapshot));
+        binding.validate_for_sequence(&sequence).expect("same author identity");
+        assert!(program.dependency_refresh_required().expect("dependency check"));
+
+        let next =
+            with_stable_effect_registry(|| cache.bind_author_snapshot(snapshot, &sequence).ok());
+        assert_ne!(next.program().effect_registry_revision(), captured_revision);
+        assert!(!Arc::ptr_eq(next.program(), &program));
+    }
+
+    #[test]
     fn program_freezes_materialization_contract_with_author_fingerprint() {
         let mut sequence = Sequence::new("materialization contract");
         sequence.settings.resolution = Resolution { width: 4096, height: 1716 };
@@ -2301,7 +2422,7 @@ mod tests {
     fn identity_effect_with_contract(label: &str, contract: EffectExecutionContract) -> EffectNode {
         static NEXT_DEFINITION: AtomicU64 = AtomicU64::new(1);
         let suffix = NEXT_DEFINITION.fetch_add(1, Ordering::Relaxed);
-        let effect_type = EffectType::Plugin(format!("test.visual.preflight.{label}.{suffix}"));
+        let effect_type = EffectType::External(format!("test.visual.preflight.{label}.{suffix}"));
         register_effect_definition(
             EffectDefinition::new(
                 effect_type.key(),
@@ -2478,7 +2599,7 @@ mod tests {
         let mut sequence = single_solid_sequence(None);
         let rate = sequence.time_base();
         let blocked_effect =
-            EffectNode::new(EffectType::Plugin("missing.preview.effect".to_owned()));
+            EffectNode::new(EffectType::External("missing.preview.effect".to_owned()));
         let mut blocked =
             Clip::new_solid_color(AssetId::new(), Color::WHITE, tt(20, rate), tt(20, rate))
                 .expect("blocked Clip");
@@ -2509,7 +2630,7 @@ mod tests {
     #[test]
     fn negative_preflight_time_is_not_silently_clamped_to_frame_zero() {
         let blocked_effect =
-            EffectNode::new(EffectType::Plugin("missing.frame-zero.effect".to_owned()));
+            EffectNode::new(EffectType::External("missing.frame-zero.effect".to_owned()));
         let program = prepare_stable(&single_solid_sequence(Some(blocked_effect)));
 
         assert!(
@@ -2541,7 +2662,7 @@ mod tests {
             right_id,
             TimelineTimeRange::new(tt(8, rate), tt(4, rate)).expect("Transition range"),
         );
-        transition.transition_type = VideoTransitionType::Plugin {
+        transition.transition_type = VideoTransitionType::External {
             definition_id: "vendor.missing.transition".to_owned(),
         };
         let transition_id = transition.id;
@@ -2783,9 +2904,16 @@ mod tests {
                 panic!("keyer must remain attached to the solid Clip");
             };
             let output = mondrian_effects::apply_compiled_effect_graph_rgba_f32(
-                &[keyed_pixel],
-                1,
-                1,
+                mondrian_effects::EffectFloatFrameView::new(
+                    mondrian_effects::EffectFrameExtent::new(1, 1),
+                    mondrian_effects::EffectValueFormat::new(
+                        mondrian_effects::EffectWorkingPrecision::Float32,
+                        mondrian_effects::EffectColorDomain::SceneLinearRgb,
+                        mondrian_core::ColorFrameAlpha::StraightCoverage,
+                    ),
+                    mondrian_core::ImageSampling::UNIT_SQUARE,
+                    &[keyed_pixel],
+                ),
                 &solid.effect_graph,
                 solid.frame_seed,
             )
@@ -2999,6 +3127,26 @@ mod tests {
             PreparedClipEffects::Blocked { reason, .. } => panic!("blocked clip: {reason}"),
         };
         assert_eq!(aspect_context.pixel_aspect_ratio().to_f64(), 4.0 / 3.0);
+
+        sequence.settings.resolution = Resolution { width: 10, height: 7 };
+        sequence.revision = sequence.revision.checked_next().expect("project window revision");
+        let changed_window = cache.prepare(&sequence).expect("new project window program");
+        assert_eq!(changed_window.diagnostics().reused_clips, 0);
+        let window_context = match changed_window.clip_effects.get(&clip_id).expect("clip program")
+        {
+            PreparedClipEffects::Ready { program, .. } => program.frame_context().expect("context"),
+            PreparedClipEffects::Blocked { reason, .. } => panic!("blocked clip: {reason}"),
+        };
+        assert_eq!(window_context.project_geometry().width(), 10);
+        assert_eq!(window_context.project_geometry().height(), 7);
+        assert_eq!(window_context.frame_rate(), aspect_context.frame_rate());
+        assert_eq!(
+            window_context.pixel_aspect_ratio(),
+            aspect_context.pixel_aspect_ratio()
+        );
+        sequence.revision = sequence.revision.checked_next().expect("unchanged window revision");
+        let unchanged_window = cache.prepare(&sequence).expect("same project window program");
+        assert_eq!(unchanged_window.diagnostics().reused_clips, 1);
     }
 
     #[test]
@@ -3032,7 +3180,7 @@ mod tests {
             .set_static_value_by_parameter(
                 &path_id,
                 PropertyValue::Resource(ParameterResourceReference::ExternalFile {
-                    path: missing_path,
+                    path: missing_path.into(),
                 }),
             )
             .expect("set missing LUT path");
@@ -3081,7 +3229,7 @@ mod tests {
                 .set_static_value_by_parameter(
                     &path_id,
                     PropertyValue::Resource(ParameterResourceReference::ExternalFile {
-                        path: path.clone(),
+                        path: path.clone().into(),
                     }),
                 )
                 .expect("set LUT path");

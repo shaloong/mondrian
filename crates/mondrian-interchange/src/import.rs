@@ -311,7 +311,9 @@ fn materialize_static_grade(
         let resource = if lut.uri.contains("://") {
             ParameterResourceReference::Uri { uri: lut.uri.clone() }
         } else {
-            ParameterResourceReference::ExternalFile { path: std::path::PathBuf::from(&lut.uri) }
+            ParameterResourceReference::ExternalFile {
+                path: std::path::PathBuf::from(&lut.uri).into(),
+            }
         };
         for (name, value) in [
             ("path", PropertyValue::Resource(resource)),

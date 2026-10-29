@@ -1,10 +1,12 @@
 [workspace]
 resolver = "3"
+exclude = ["vendor/vst3-host", "vendor/vst3-sdk", "vendor/vst3-sdk/com-scrape-types", "vendor/harfrust", "vendor/clack", "vendor/clap-sys", "vendor/clack/common", "vendor/clack/host", "vendor/clack/plugin", "vendor/clack/extensions", "vendor/crossbeam-queue"]
 members = [
     "crates/mondrian-storage",
     "crates/mondrian-validation-launcher",
     "crates/mondrian-core",
     "crates/mondrian-media",
+    "crates/mondrian-audio-scheduling",
     "crates/mondrian-timeline",
     "crates/mondrian-interchange",
     "crates/mondrian-renderer",
@@ -47,6 +49,7 @@ mondrian-storage  = { path = "crates/mondrian-storage" }
 mondrian-validation-launcher = { path = "crates/mondrian-validation-launcher" }
 mondrian-core     = { path = "crates/mondrian-core" }
 mondrian-media    = { path = "crates/mondrian-media" }
+mondrian-audio-scheduling = { path = "crates/mondrian-audio-scheduling" }
 mondrian-timeline = { path = "crates/mondrian-timeline" }
 mondrian-interchange = { path = "crates/mondrian-interchange" }
 mondrian-renderer = { path = "crates/mondrian-renderer" }
@@ -75,7 +78,7 @@ mondrian-ui-widgets   = { path = "crates/mondrian-ui-widgets" }
 mondrian-ui-tooltip   = { path = "crates/mondrian-ui-tooltip" }
 
 # ---- 异步运行时 ----
-tokio            = { version = "1",    features = ["full"] }
+tokio            = { version = "1.53.3", features = ["full"] }
 async-trait      = "0.1"
 futures          = "0.3"
 
@@ -85,8 +88,9 @@ thiserror        = "1"
 
 # ---- 序列化 ----
 serde            = { version = "1",    features = ["derive"] }
-serde_json       = "1"
+serde_json       = { version = "1", features = ["float_roundtrip"] }
 fluent-bundle    = "0.16"
+fluent-syntax    = "0.12"
 unic-langid      = "0.9.6"
 sys-locale       = "0.3"
 toml             = "0.8"
@@ -110,7 +114,7 @@ usvg             = { version = "0.45", default-features = false }
 
 # ---- 并发 / 消息 ----
 crossbeam-channel = "0.5"
-crossbeam-queue = "0.3"
+crossbeam-queue = { path = "vendor/crossbeam-queue" }
 parking_lot       = "0.12"
 dashmap           = "6"
 pulp              = "0.22"
@@ -169,25 +173,28 @@ walkdir          = "2"
 tempfile         = "3"
 libloading       = "0.8.9"
 memmap2          = "0.9.11"
-clack-host       = { git = "https://github.com/prokopyl/clack.git", rev = "27ca28391b57a61bad4bb5099288a7bf9247350d" }
-clack-plugin     = { git = "https://github.com/prokopyl/clack.git", rev = "27ca28391b57a61bad4bb5099288a7bf9247350d" }
-clack-extensions = { git = "https://github.com/prokopyl/clack.git", rev = "27ca28391b57a61bad4bb5099288a7bf9247350d", features = ["clack-host", "audio-ports", "latency", "tail", "state", "params"] }
-vst3-host = { git = "https://github.com/HelgeSverre/rust-vst3-host.git", rev = "49fc189177c72cf799d5034fcca81d8aacc3d7a6", default-features = false }
+clap-sys = { path = "vendor/clap-sys" }
+clack-host       = { path = "vendor/clack/host" }
+clack-plugin     = { path = "vendor/clack/plugin" }
+clack-extensions = { path = "vendor/clack/extensions", features = ["clack-host", "audio-ports", "audio-ports-config", "note-ports", "latency", "tail", "state", "params", "render", "thread-check", "log", "gui", "timer"] }
+# Canonical ABI package; the root patch pins its immutable source.
+vst3 = { path = "vendor/vst3-sdk" }
+vst3-host = { path = "vendor/vst3-host", default-features = false }
 
 # ---- 颜色管理 ----
-ocio-rs          = { git = "https://github.com/shaloong/ocio-rs.git", rev = "0138069a25b9c3b80da5c487cd9617a4270ff5a0", features = ["bundled"] }
+ocio-rs          = { git = "https://github.com/shaloong/ocio-rs.git", rev = "61a557330d49b7e494eb18beebca0c7b47907680", features = ["bundled", "v2_5"] }
 
 # ---- 图像 ----
 image            = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 base64           = "0.22"
 roxmltree        = "0.20"
 sha1             = "0.10"
-zip              = "0.6"
-zstd             = "0.11"
+# Preserve the archive codec set instead of enabling new ZIP defaults implicitly.
+zip              = { version = "9.1.3", default-features = false, features = ["aes-crypto", "bzip2", "deflate-flate2-zlib-rs", "time", "zstd"] }
+zstd             = "0.14.3"
 
 [patch.crates-io]
-clap-sys = { git = "https://github.com/micahrj/clap-sys.git", rev = "25d7f53fdb6363ad63fbd80049cb7a42a97ac156" }
-vst3 = { git = "https://github.com/coupler-rs/vst3-rs.git", rev = "b2a45f2d40e602eff5a224b41613735388868590" }
+harfrust = { path = "vendor/harfrust" }
 
 [profile.dev]
 opt-level = 1          # 适度优化，加快媒体解码调试体验

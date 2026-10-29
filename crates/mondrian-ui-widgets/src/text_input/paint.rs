@@ -14,8 +14,8 @@ pub(super) struct TextInputPaintSnapshot<'a> {
     pub(super) has_selection: bool,
     pub(super) text: &'a str,
     pub(super) placeholder: &'a str,
-    pub(super) selection_byte_range: Option<(usize, usize)>,
-    pub(super) cursor_prefix_byte: usize,
+    pub(super) selection_spans: &'a [mondrian_ui_text::SingleLineTextSelectionSpan],
+    pub(super) caret_text_x: f32,
     pub(super) preedit: Option<&'a str>,
 }
 
@@ -49,15 +49,16 @@ pub(super) fn paint_text_input(ctx: &mut PaintContext, snapshot: TextInputPaintS
     let text_x = snapshot.geometry.text_origin.x;
     let text_y = snapshot.geometry.text_origin.y;
 
-    if snapshot.enabled
-        && let Some((byte_start, byte_end)) = snapshot.selection_byte_range
-    {
-        let sel_x = text_x + measure_text_width(&snapshot.text[..byte_start], font_size);
-        let sel_w = measure_text_width(&snapshot.text[byte_start..byte_end], font_size);
+    if snapshot.enabled {
         let sel_h = font_size * 1.3;
         let sel_y = snapshot.bounds.y + (snapshot.bounds.height - sel_h).max(0.0) * 0.5;
-        ctx.encoder
-            .draw_rect(Rect::new(sel_x, sel_y, sel_w, sel_h), tokens.primary, 0.0);
+        for span in snapshot.selection_spans {
+            ctx.encoder.draw_rect(
+                Rect::new(text_x + span.x, sel_y, span.width, sel_h),
+                tokens.primary,
+                0.0,
+            );
+        }
     }
 
     if !snapshot.text.is_empty() {
@@ -82,8 +83,7 @@ pub(super) fn paint_text_input(ctx: &mut PaintContext, snapshot: TextInputPaintS
 
     if snapshot.enabled && snapshot.focused {
         if let Some(preedit) = snapshot.preedit {
-            let preedit_x = text_x
-                + measure_text_width(&snapshot.text[..snapshot.cursor_prefix_byte], font_size);
+            let preedit_x = text_x + snapshot.caret_text_x;
             ctx.encoder.draw_text(
                 preedit,
                 font_size,
@@ -189,8 +189,8 @@ mod tests {
             has_selection: false,
             text,
             placeholder,
-            selection_byte_range: None,
-            cursor_prefix_byte: text.len(),
+            selection_spans: &[],
+            caret_text_x: 14.0,
             preedit: None,
         }
     }
@@ -233,7 +233,7 @@ mod tests {
     #[test]
     fn paint_preedit_underlines_before_cursor() {
         let mut snapshot = paint_snapshot(true, true, false, "ab", "ph");
-        snapshot.cursor_prefix_byte = 1;
+        snapshot.caret_text_x = 7.0;
         snapshot.preedit = Some("你");
 
         let encoder = with_paint(snapshot);
@@ -248,7 +248,8 @@ mod tests {
     #[test]
     fn disabled_input_omits_selection_preedit_and_cursor_chrome() {
         let mut snapshot = paint_snapshot(false, true, true, "abc", "ph");
-        snapshot.selection_byte_range = Some((0, 1));
+        let spans = [mondrian_ui_text::SingleLineTextSelectionSpan { x: 0.0, width: 8.0 }];
+        snapshot.selection_spans = &spans;
         snapshot.has_selection = true;
         snapshot.preedit = Some("x");
 

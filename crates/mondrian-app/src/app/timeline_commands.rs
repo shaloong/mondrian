@@ -1,4 +1,12 @@
+use super::timeline_position::lower_nearest_sequence_frame;
 use super::*;
+use crate::app::AppMessage;
+
+enum AuthoringAudioPolicy {
+    ReconcileAudibleClosure,
+    NativeParameterHandoff,
+    HostOutputFaderRetained,
+}
 
 fn sequence_time_from_frame(
     frame: i64,
@@ -7,13 +15,6 @@ fn sequence_time_from_frame(
     Ok(TimelineTime::from_frame_position(FramePosition::new(
         frame, time_base,
     ))?)
-}
-
-fn sequence_frame_from_time(
-    time: TimelineTime,
-    frame_rate: Rational,
-) -> mondrian_core::Result<i64> {
-    Ok(time.to_frame_position(frame_rate, FrameRounding::Nearest)?.frame)
 }
 
 /// Estimate the Clip's total source extent on the Sequence evaluation grid
@@ -66,6 +67,60 @@ fn sequence_is_nested_reference(sequences: &[Sequence], sequence_id: SequenceId)
             .any(|clip| clip.nested_sequence_id() == Some(sequence_id))
     })
 }
+/// Mutate only an unpublished Sequence candidate. The existing authoring
+/// transaction discards all changes if any owned instance cannot migrate.
+fn apply_sequence_settings_with_effect_defaults(
+    sequence: &mut Sequence,
+    settings: SequenceSettings,
+) -> mondrian_core::Result<()> {
+    let step = "update_sequence_effect_project_defaults";
+    let previous = super::animation_state::effect_project_geometry(&sequence.settings, step)?;
+    let next = super::animation_state::effect_project_geometry(&settings, step)?;
+    if previous != next {
+        let revision = mondrian_effects::effect_registry_revision();
+        let invalid = |reason: String| mondrian_core::MondrianError::WorkflowStepFailed {
+            step_id: step.into(),
+            reason,
+        };
+        let rebind = |effect: &mut mondrian_effects::EffectNode| {
+            mondrian_effects::rebind_effect_project_geometry(effect, previous, next)
+                .map(|_| ())
+                .map_err(|error| invalid(error.to_string()))
+        };
+        // Placement effects, including those on nested Clips, belong here.
+        // Referenced child Sequences have independent settings and are not visited.
+        for track in sequence.video_tracks.iter_mut().chain(sequence.audio_tracks.iter_mut()) {
+            for clip in &mut track.clips {
+                for effect in &mut clip.effects {
+                    rebind(effect)?;
+                }
+            }
+        }
+        // Inactive versions and disabled effects retain valid future author state.
+        for definition in &mut sequence.grade_definitions {
+            for version in &mut definition.versions {
+                for node in &mut version.graph.nodes {
+                    if let mondrian_core::GradeGraphNodeKind::Effect { effect, .. } = &mut node.kind
+                    {
+                        rebind(effect)?;
+                    }
+                }
+            }
+        }
+        let after = mondrian_effects::effect_registry_revision();
+        if revision != after {
+            return Err(invalid(
+                mondrian_effects::EffectGraphBuildError::DefinitionRegistryChanged {
+                    before: revision,
+                    after,
+                }
+                .to_string(),
+            ));
+        }
+    }
+    sequence.apply_settings(settings)
+}
+
 impl AppState {
     pub fn sequence_by_id(&self, id: SequenceId) -> Option<&Sequence> {
         self.authoring.as_ref().and_then(|session| session.sequence(id))
@@ -335,7 +390,7 @@ impl AppState {
         })?;
         self.stop()?;
         self.commit_sequence_edit(sequence_id, "修改序列设置", move |sequence| {
-            sequence.apply_settings(settings)
+            apply_sequence_settings_with_effect_defaults(sequence, settings)
         })?;
         Ok(())
     }
@@ -363,7 +418,7 @@ impl AppState {
         }
         self.commit_sequence_edit(sequence_id, "修改序列设置", move |sequence| {
             sequence.name = name;
-            sequence.apply_settings(settings)
+            apply_sequence_settings_with_effect_defaults(sequence, settings)
         })?;
         if active {
             self.settle_preview_access_source();
@@ -377,14 +432,71 @@ impl AppState {
         description: impl Into<String>,
         edit: impl FnOnce(&mut Sequence) -> mondrian_core::Result<T>,
     ) -> mondrian_core::Result<T> {
-        let (value, commit) = self
-            .authoring
-            .as_mut()
-            .ok_or_else(|| mondrian_core::MondrianError::WorkflowStepFailed {
+        let replacement_refusal = if self.parameter_gesture_command.is_none() {
+            self.validate_audio_source_replacement_admission(
+                "authoring_commit",
+                "audio Source replacement",
+            )
+            .err()
+        } else {
+            None
+        };
+        let session = self.authoring.as_mut().ok_or_else(|| {
+            mondrian_core::MondrianError::WorkflowStepFailed {
                 step_id: "commit_sequence_edit".to_owned(),
                 reason: "当前没有打开的项目".to_owned(),
-            })?
-            .edit_sequence(sequence_id, description, edit)?;
+            }
+        })?;
+        let (value, commit) = if let Some(command) = self.parameter_gesture_command {
+            use super::parameter_gesture::ParameterGestureCommand;
+            match command {
+                ParameterGestureCommand::Current(gesture) => {
+                    session.edit_sequence_in_gesture(gesture, sequence_id, description, edit)?
+                }
+                ParameterGestureCommand::CurveOrigin(gesture) => session
+                    .edit_sequence_from_gesture_origin(gesture, sequence_id, description, edit)?,
+            }
+        } else {
+            let (value, prepared) =
+                session.prepare_sequence_edit(sequence_id, description, edit)?;
+            let commit = if let Some(prepared) = prepared {
+                if let Some((renderer, binding)) =
+                    self.prepare_playing_host_output_fader(prepared.candidate_sequences())?
+                {
+                    let commit =
+                        self.publish_prepared_host_output_fader(prepared, renderer, binding)?;
+                    // Keep original events, targeting and real Engine revision/
+                    // clock synchronization. Only generic Source rebuilding is
+                    // skipped after the actual retained publication succeeded.
+                    self.consume_authoring_commit_with_audio_policy(
+                        commit,
+                        AuthoringAudioPolicy::HostOutputFaderRetained,
+                    )
+                    .inspect_err(|error| {
+                        tracing::error!(
+                            %error,
+                            "Host fader Source and author state committed; Playback binding failed"
+                        );
+                    })?;
+                    return Ok(value);
+                }
+                if let Some(refusal) = replacement_refusal {
+                    self.validate_audio_authoring_candidate(
+                        prepared.candidate_sequences(),
+                        refusal,
+                    )?;
+                }
+                Some(
+                    self.authoring
+                        .as_mut()
+                        .expect("prepared edit retains its exclusive Authoring Session")
+                        .install_prepared_sequence_edit(prepared),
+                )
+            } else {
+                None
+            };
+            (value, commit)
+        };
         if let Some(commit) = commit {
             self.consume_authoring_commit(commit)?;
         }
@@ -396,18 +508,13 @@ impl AppState {
         description: impl Into<String>,
         edit: impl FnOnce(&mut Sequence) -> mondrian_core::Result<T>,
     ) -> mondrian_core::Result<T> {
-        let (value, commit) = self
-            .authoring
-            .as_mut()
-            .ok_or_else(|| mondrian_core::MondrianError::WorkflowStepFailed {
+        let sequence_id = self.active_sequence_id().ok_or_else(|| {
+            mondrian_core::MondrianError::WorkflowStepFailed {
                 step_id: "commit_active_sequence_edit".to_owned(),
                 reason: "当前没有打开的项目".to_owned(),
-            })?
-            .edit_active_sequence(description, edit)?;
-        if let Some(commit) = commit {
-            self.consume_authoring_commit(commit)?;
-        }
-        Ok(value)
+            }
+        })?;
+        self.commit_sequence_edit(sequence_id, description, edit)
     }
 
     pub(super) fn commit_project_snapshot_command(
@@ -434,11 +541,32 @@ impl AppState {
         &mut self,
         commit: mondrian_editor_state::AuthoringCommit,
     ) -> mondrian_core::Result<()> {
+        self.consume_authoring_commit_with_audio_policy(
+            commit,
+            AuthoringAudioPolicy::ReconcileAudibleClosure,
+        )
+    }
+
+    /// The captured native renderer installs this transaction on its existing
+    /// serial handoff queue. Generic PCM replacement would retire that owner
+    /// before the accepted native proposal can reach it.
+    pub(super) fn consume_native_audio_authoring_commit(
+        &mut self,
+        commit: mondrian_editor_state::AuthoringCommit,
+    ) -> mondrian_core::Result<()> {
+        self.consume_authoring_commit_with_audio_policy(
+            commit,
+            AuthoringAudioPolicy::NativeParameterHandoff,
+        )
+    }
+
+    fn consume_authoring_commit_with_audio_policy(
+        &mut self,
+        commit: mondrian_editor_state::AuthoringCommit,
+        audio_policy: AuthoringAudioPolicy,
+    ) -> mondrian_core::Result<()> {
         if !commit.undo_retained {
-            self.set_status_hint(
-                "编辑已提交但未保留撤销记录；此前撤销段已清除以避免跨越未记录状态",
-                true,
-            );
+            self.set_status_hint(AppMessage::new("status-history-retired"), true);
         }
 
         let mut invalidated_sequence_ids =
@@ -451,21 +579,66 @@ impl AppState {
         }
         self.synchronize_audio_idle_warmup_binding();
         self.reconcile_timeline_targeting();
-        self.synchronize_playback_authoring_binding()?;
-        self.reconcile_audio_after_authoring_commit();
-        Ok(())
+        let playback_result = self.synchronize_playback_authoring_binding();
+        if matches!(audio_policy, AuthoringAudioPolicy::ReconcileAudibleClosure) {
+            self.reconcile_audio_after_authoring_commit();
+        }
+        playback_result
+    }
+
+    /// Rebind restored navigation through the sole Playback seek seam.
+    fn rebind_history_playback(
+        &mut self,
+        previous_owner: Option<SequenceId>,
+        previous_position: FramePosition,
+    ) -> mondrian_core::Result<()> {
+        let sequence = self.active_sequence().ok_or_else(|| {
+            mondrian_core::MondrianError::WorkflowStepFailed {
+                step_id: "history_playback_rebind".to_owned(),
+                reason: "History restored without an active Sequence".to_owned(),
+            }
+        })?;
+        let frame = if previous_owner == Some(sequence.id) {
+            lower_nearest_sequence_frame(sequence, previous_position, "history_playback_rebind")?
+        } else {
+            // A removed owner cannot transfer its clock coordinate to another
+            // Sequence. Use navigation authored in the restored owner domain.
+            sequence
+                .playhead
+                .to_frame_position(sequence.settings.frame_rate, FrameRounding::Nearest)?
+                .frame
+        };
+        self.seek_with_source(frame, TimelineSeekSource::Settled)
+    }
+
+    fn validate_history_restore_admission(&self, action: &str) -> mondrian_core::Result<()> {
+        if self.project_lifecycle_blocks_actions() {
+            return Err(mondrian_core::MondrianError::ActionNotExecuted {
+                action: action.to_owned(),
+                reason: "Project lifecycle must settle before history restore".to_owned(),
+            });
+        }
+        self.validate_audio_source_replacement_admission(action, "history restore")
     }
 
     pub fn undo_timeline(&mut self) -> mondrian_core::Result<bool> {
         if !self.can_undo_action() {
             return Ok(false);
         }
-        self.stop()?;
+        self.validate_history_restore_admission("undo_timeline")?;
+        self.pause()?;
+        let previous_owner = self.active_sequence_id();
+        let previous_position = self.playback_engine.snapshot().position;
         let commit = self.authoring.as_mut().map(AuthoringSession::undo).transpose()?.flatten();
         let Some(commit) = commit else {
             return Ok(false);
         };
-        self.consume_authoring_commit(commit)?;
+        let playback_result = self.rebind_history_playback(previous_owner, previous_position);
+        // Author restore already committed; publish its receipt even if an
+        // independent runtime binding fails.
+        let authoring_result = self.consume_authoring_commit(commit);
+        playback_result?;
+        authoring_result?;
         self.settle_preview_access_source();
         Ok(true)
     }
@@ -474,12 +647,20 @@ impl AppState {
         if !self.can_redo_action() {
             return Ok(false);
         }
-        self.stop()?;
+        self.validate_history_restore_admission("redo_timeline")?;
+        self.pause()?;
+        let previous_owner = self.active_sequence_id();
+        let previous_position = self.playback_engine.snapshot().position;
         let commit = self.authoring.as_mut().map(AuthoringSession::redo).transpose()?.flatten();
         let Some(commit) = commit else {
             return Ok(false);
         };
-        self.consume_authoring_commit(commit)?;
+        let playback_result = self.rebind_history_playback(previous_owner, previous_position);
+        // Author restore already committed; publish its receipt even if an
+        // independent runtime binding fails.
+        let authoring_result = self.consume_authoring_commit(commit);
+        playback_result?;
+        authoring_result?;
         self.settle_preview_access_source();
         Ok(true)
     }
@@ -488,10 +669,11 @@ impl AppState {
         if self.project_lifecycle_blocks_actions() {
             anyhow::bail!("Project close is already active or fail-closed");
         }
-        self.stop().map_err(|error| anyhow::anyhow!(error.to_string()))?;
-        self.prepare_project_session_close()?;
-        self.finalize_project_close_state()
-            .map_err(|error| anyhow::anyhow!(error.to_string()))
+        // Keep the public synchronous Close's original active-Sequence contract.
+        if self.active_sequence().is_none() {
+            self.stop()?;
+        }
+        self.close_project_until(Instant::now() + Duration::from_secs(300))
     }
 
     /// Remove the already-quiesced Authoring Session and invalidate every
@@ -586,7 +768,10 @@ impl AppState {
             }
         })?;
         let folder_id = library.create_folder(name, parent_id)?;
-        self.set_status_hint(format!("已新建文件夹：{}", name), false);
+        self.set_status_hint(
+            AppMessage::new("status-folder-created").with_text("name", name),
+            false,
+        );
         Ok(folder_id)
     }
 
@@ -711,7 +896,10 @@ impl AppState {
         self.event_bus
             .publish(mondrian_core::events::AppEvent::AssetImported { asset_id });
         if announce {
-            self.set_status_hint(format!("已新建：{}", asset_name), false);
+            self.set_status_hint(
+                AppMessage::new("status-asset-created").with_text("name", asset_name.clone()),
+                false,
+            );
         }
         Ok((asset_id, asset_name))
     }
@@ -768,7 +956,10 @@ impl AppState {
             .unwrap_or_else(|| "纯色层".to_string());
         self.event_bus
             .publish(mondrian_core::events::AppEvent::AssetImported { asset_id });
-        self.set_status_hint(format!("已新建：{}", asset_name), false);
+        self.set_status_hint(
+            AppMessage::new("status-asset-created").with_text("name", asset_name.clone()),
+            false,
+        );
         Ok(asset_id)
     }
 
@@ -795,7 +986,10 @@ impl AppState {
         );
         let clip_id =
             self.drop_dragging_asset_to_video_track_with_mode(track_id, start_frame, overlap_mode)?;
-        self.set_status_hint(format!("已创建调整图层：{}", asset_name), false);
+        self.set_status_hint(
+            AppMessage::new("status-adjustment-created").with_text("name", asset_name.clone()),
+            false,
+        );
         Ok(clip_id)
     }
 
@@ -867,7 +1061,10 @@ impl AppState {
                 Ok((sequence_id, clip_id))
             })?;
 
-        self.set_status_hint(format!("已创建纯色层: {}", asset_name), false);
+        self.set_status_hint(
+            AppMessage::new("status-solid-created").with_text("name", asset_name.clone()),
+            false,
+        );
         Ok(clip_id)
     }
 
@@ -1339,8 +1536,7 @@ impl AppState {
             return Ok(0);
         };
 
-        let end = seq.total_duration()?;
-        Ok((sequence_frame_from_time(end, seq.settings.frame_rate)? - 1).max(0))
+        seq.last_content_frame()
     }
 
     pub fn jump_to_start_frame(&mut self) -> mondrian_core::Result<()> {

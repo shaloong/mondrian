@@ -1,5 +1,7 @@
 use super::request_scheduler::{FutureMediaWindowCache, MediaPreviewRequestAdmission};
 use super::*;
+#[path = "temporal_plugin_tests.rs"]
+mod temporal_plugin_tests;
 use crate::app::preview_access_mode::{
     MediaPreviewJobQueueReceive, MediaPreviewJobQueueWait, MediaPreviewRequestIntent,
 };
@@ -47,6 +49,332 @@ fn tt(frame: i64, time_base: mondrian_core::Rational) -> mondrian_core::Timeline
     mondrian_core::TimelineTime::new(numerator, time_base.den).expect("valid test time")
 }
 
+fn pending_preparation_fixture(
+    frame: i64,
+) -> (
+    FrameEvaluationKey,
+    Box<crate::app::preview_timeline_execution::PreviewTimelinePreparation>,
+) {
+    use crate::app::preview_timeline_execution::*;
+    ensure_test_ocio_loaded();
+    let mut sequence = Sequence::new("pending source ownership");
+    sequence.settings.resolution = Resolution { width: 2, height: 1 };
+    let duration = tt(48, sequence.time_base());
+    sequence.video_tracks[0]
+        .add_clip(Clip::new(AssetId::new(), mondrian_core::TimelineTime::ZERO, duration).unwrap())
+        .unwrap();
+    let key = FrameEvaluationKey {
+        sequence_id: sequence.id,
+        sequence_revision: sequence.revision,
+        author_generation: 0,
+        frame,
+        width: 2,
+        height: 1,
+        runtime_scale: mondrian_playback::PreviewResolutionScale::Full,
+        raster_requirement: PreviewRasterRequirement::Viewer,
+        display_color_space: ColorSpace::Srgb,
+        display_contract_identity: None,
+    };
+    let color = sequence
+        .settings
+        .root_program_color_context(&mondrian_core::ProjectColorEnvironment::default())
+        .unwrap();
+    let PreviewTimelineResolution::Pending { preparation, .. } = resolve_preview_timeline(
+        &sequence,
+        &[],
+        frame,
+        sequence.settings.resolution,
+        key.runtime_scale,
+        color,
+        &mut |_| PreviewTimelineMediaFrame::Pending { wait: PreviewTimelineMediaWait::Producer },
+        &mut |_| panic!("media only"),
+    ) else {
+        panic!("pending original preparation")
+    };
+    (key, preparation)
+}
+
+#[test]
+fn preparation_exact_wakeup_keeps_owner_and_complete_dependencies() {
+    let (key, preparation) = pending_preparation_fixture(4);
+    let owner = preparation.as_ref() as *const _;
+    let ready_key = test_media_key(4);
+    let pending_key = test_media_key(5);
+    let dependencies: Arc<[EvaluationDependency]> = Arc::from([
+        EvaluationDependency::MediaProducer(ready_key.clone()),
+        EvaluationDependency::MediaProducer(pending_key.clone()),
+    ]);
+    let mut set = EvaluationWorkingSet::new();
+    set.insert_preparing(
+        key,
+        MediaPreviewRequestPriority::Current,
+        dependencies.clone(),
+        Arc::from([EvaluationDependency::MediaProducer(pending_key.clone())]),
+        true,
+        preparation,
+        1,
+    );
+    assert_eq!(
+        set.waiting_for(key, MediaPreviewRequestPriority::Current).unwrap().as_ref(),
+        &[EvaluationDependency::MediaProducer(pending_key.clone())]
+    );
+    assert!(
+        !set.invalidate_for_media_key(&ready_key),
+        "ready input is already frozen"
+    );
+    assert!(set.invalidate_for_media_key(&pending_key));
+    assert!(
+        !set.invalidate_for_media_key(&pending_key),
+        "completion edge is idempotent"
+    );
+    assert!(set.waiting_for(key, MediaPreviewRequestPriority::Current).is_none());
+    let (resumed, observed) = set.take_preparation(key).expect("same owner survives wakeup");
+    assert_eq!(resumed.as_ref() as *const _, owner);
+    assert_eq!(observed, dependencies);
+    assert!(
+        set.take_preparation(key).is_none(),
+        "unique move into resolver"
+    );
+}
+
+#[test]
+fn preparation_owners_share_ready_capacity_and_retire_with_work() {
+    for retirement in 0..3 {
+        let mut set = EvaluationWorkingSet::new();
+        let mut keys = Vec::new();
+        for frame in 0..5 {
+            let (key, preparation) = pending_preparation_fixture(frame);
+            keys.push(key);
+            set.insert_preparing(
+                key,
+                if frame == 0 {
+                    MediaPreviewRequestPriority::Prefetch
+                } else {
+                    MediaPreviewRequestPriority::Current
+                },
+                Arc::from([]),
+                Arc::from([]),
+                false,
+                preparation,
+                frame as u64,
+            );
+        }
+        assert!(
+            set.take_preparation(keys[0]).is_none(),
+            "speculative owner evicted first"
+        );
+        let ready_key = FrameEvaluationKey { frame: 20, ..keys[1] };
+        let ready = Arc::new(ResolvedFrameEvaluation {
+            key: ready_key,
+            cpu_materialization_active_bytes: 0,
+            output_key: PreviewOutputKey::new(
+                ready_key.sequence_id,
+                2,
+                1,
+                test_preview_semantic_identity(201),
+            ),
+            elements: Arc::from([]),
+            color_context: test_color_context(ColorSpace::Srgb),
+            resolved_quality: ResolvedFrameQuality::Full,
+            reuse_policy: EvaluationReusePolicy::Reusable,
+            dependencies: Arc::from([]),
+            render_cache_identity: None,
+            sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
+        });
+        set.insert(ready_key, ready, 10);
+        assert!(
+            set.take_preparation(keys[1]).is_none(),
+            "Ready and preparing share four slots"
+        );
+        assert!(set.get(ready_key, 11).is_some());
+        match retirement {
+            0 => set.retire_generation_work(),
+            1 => set.retire_media_work(),
+            _ => set.clear(),
+        }
+        assert!(
+            keys.into_iter().all(|key| set.take_preparation(key).is_none()),
+            "retirement releases every partial-input owner"
+        );
+    }
+    let (key, preparation) = pending_preparation_fixture(4);
+    let cancel = preparation.request().cancellation().clone();
+    let mut set = EvaluationWorkingSet::new();
+    set.insert_preparing(
+        key,
+        MediaPreviewRequestPriority::Current,
+        Arc::from([]),
+        Arc::from([]),
+        false,
+        preparation,
+        1,
+    );
+    cancel.cancel();
+    set.discard_incompatible_preparation(
+        key,
+        0,
+        None,
+        mondrian_effects::EffectGraphExecutionBudget::new(
+            64 * 1024 * 1024,
+            64 * 1024 * 1024,
+            64 * 1024 * 1024,
+            64,
+            192,
+        ),
+    );
+    assert!(
+        set.take_preparation(key).is_none(),
+        "canceled attempt cannot be revived"
+    );
+}
+
+#[test]
+fn preparation_actual_title_worker_progresses_under_cache_pressure() {
+    ensure_test_ocio_loaded();
+    let mut state = AppState::new();
+    let mut sequence = Sequence::new("three asynchronous title sources");
+    sequence.settings.resolution = Resolution { width: 512, height: 128 };
+    let duration = tt(24, sequence.time_base());
+    for (index, text) in ["A", "B", "C"].into_iter().enumerate() {
+        sequence.video_tracks[index]
+            .add_clip(
+                Clip::new_basic_title(
+                    text,
+                    mondrian_core::default_basic_title_font_family(),
+                    mondrian_core::TimelineTime::ZERO,
+                    duration,
+                )
+                .unwrap(),
+            )
+            .unwrap();
+    }
+    state.test_set_sequence(Some(sequence));
+    state.seek(4).expect("seek title frame");
+    let runtime = PreviewProductionRuntime::<()>::new_without_workers_for_test();
+    runtime.synchronize_transport_intent(state.preview_transport_intent());
+    runtime.title_task.borrow_mut().set_cache_byte_budget(1);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let snapshot = state.preview_execution_snapshot(Instant::now());
+    let authoring = snapshot.authoring().unwrap();
+    let sequence = state.active_sequence().unwrap();
+    let key = FrameEvaluationKey {
+        sequence_id: sequence.id,
+        sequence_revision: sequence.revision,
+        author_generation: authoring.author_generation(),
+        frame: 4,
+        width: 512,
+        height: 128,
+        runtime_scale: mondrian_playback::PreviewResolutionScale::Full,
+        raster_requirement: PreviewRasterRequirement::Viewer,
+        display_color_space: ColorSpace::Srgb,
+        display_contract_identity: None,
+    };
+    let color = sequence
+        .settings
+        .root_program_color_context(state.project_color_environment())
+        .unwrap();
+    let mut last_pending = None;
+    let mut attempts = 0;
+    let evaluation = loop {
+        assert!(
+            Instant::now() < deadline,
+            "title preparation starved under result-cache pressure after {attempts} acquisitions; last dependency: {last_pending:?}"
+        );
+        attempts += 1;
+        match runtime.acquire_frame_evaluation(
+            &snapshot,
+            &state,
+            sequence,
+            4,
+            512,
+            128,
+            color.clone(),
+            key,
+        ) {
+            FrameResolutionOutcome::Ready(ready) => break ready,
+            FrameResolutionOutcome::Pending(dependency) => {
+                last_pending = Some(dependency);
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            _ => panic!("actual title preparation failed"),
+        }
+    };
+    assert_eq!(evaluation.elements.len(), 3);
+    for element in evaluation.elements.iter() {
+        let ResolvedPreviewElement::Media { frame, .. } = element else {
+            panic!("title source")
+        };
+        assert!(frame.working_frame().unwrap().frame.rgba_f32().data.iter().any(|p| p[3] > 0.0));
+    }
+    let resolves = evaluation_resolve_count(&runtime);
+    let FrameResolutionOutcome::Ready(reused) =
+        runtime.acquire_frame_evaluation(&snapshot, &state, sequence, 4, 512, 128, color, key)
+    else {
+        panic!("completed original evaluation")
+    };
+    assert!(Arc::ptr_eq(&evaluation, &reused));
+    assert_eq!(evaluation_resolve_count(&runtime), resolves);
+    runtime.shutdown_and_wait();
+}
+
+#[test]
+#[ignore = "five explicit real system-font/raster lifecycles under result-cache pressure; each retains the ordinary10-second deadline"]
+fn preparation_actual_title_worker_repeated_lifecycles_preserve_cache_progress() {
+    for round in 0..5 {
+        println!("title cache-pressure lifecycle {round}");
+        preparation_actual_title_worker_progresses_under_cache_pressure();
+    }
+}
+
+#[test]
+fn preparation_resource_policy_retires_only_replaced_active_grants() {
+    use crate::app::execution_resource_coordination::{
+        ExecutionResourceCoordinator, MachineResourceProfile,
+    };
+    let runtime = PreviewProductionRuntime::<()>::new_without_workers_for_test();
+    let coordinator = ExecutionResourceCoordinator::new(MachineResourceProfile::from_capacity(
+        Some(16 * 1024 * 1024 * 1024),
+        8,
+    ));
+    let mut decision = coordinator.decision().preview;
+    runtime.apply_resource_decision(&decision);
+    let (key, preparation) = pending_preparation_fixture(4);
+    let pointer = preparation.as_ref() as *const _;
+    runtime.evaluation_working_set.borrow_mut().insert_preparing(
+        key,
+        MediaPreviewRequestPriority::Current,
+        Arc::from([]),
+        Arc::from([]),
+        false,
+        preparation,
+        1,
+    );
+    runtime.apply_resource_decision(&decision);
+    decision.title_cache_budget_bytes = 1;
+    runtime.apply_resource_decision(&decision);
+    let (preparation, _) = runtime
+        .evaluation_working_set
+        .borrow_mut()
+        .take_preparation(key)
+        .expect("optional cache changes preserve active input ownership");
+    assert_eq!(preparation.as_ref() as *const _, pointer);
+    runtime.evaluation_working_set.borrow_mut().insert_preparing(
+        key,
+        MediaPreviewRequestPriority::Current,
+        Arc::from([]),
+        Arc::from([]),
+        false,
+        preparation,
+        2,
+    );
+    decision.cpu_composite_working_set.max_active_bytes -= 1;
+    runtime.apply_resource_decision(&decision);
+    assert!(
+        runtime.evaluation_working_set.borrow_mut().take_preparation(key).is_none(),
+        "changed active grant releases partial input ownership immediately"
+    );
+}
+
 fn register_test_window_preview_output(
     service: &WindowPreviewAdapter,
     frame: &PreviewGpuFrame,
@@ -65,6 +393,103 @@ fn register_test_window_preview_output(
     service.register_gpu_output(frame.output_key.clone(), output);
     service.try_release_settled_transport_media_residency();
     true
+}
+
+#[test]
+fn app_and_preview_share_authored_note_last_occupied_frame() {
+    use mondrian_core::{
+        AudioNoteId, AudioNoteLaneId, AudioProcessorInstanceId, AuthoringList, TimelineTime,
+    };
+    use mondrian_timeline::{
+        AudioNote, AudioNoteLane, AudioNoteTarget, AudioProcessorDefinitionRef,
+        AudioProcessorInstance,
+    };
+    ensure_test_ocio_loaded();
+    let mut state = AppState::new();
+    assert_eq!(state.last_content_frame().unwrap(), 0);
+    for (rate, end, expected) in [
+        (
+            mondrian_core::Rational::FPS_25,
+            TimelineTime::new(1, 100).unwrap(),
+            0,
+        ),
+        (
+            mondrian_core::Rational::FPS_25,
+            TimelineTime::new(41, 1000).unwrap(),
+            1,
+        ),
+        (
+            mondrian_core::Rational::FPS_25,
+            TimelineTime::new(2, 25).unwrap(),
+            1,
+        ),
+        (
+            mondrian_core::Rational::FPS_2997,
+            TimelineTime::new(2003, 30000).unwrap(),
+            2,
+        ),
+    ] {
+        let mut sequence = Sequence::new("Note author frame projection");
+        sequence.settings.frame_rate = rate;
+        let track_id = sequence.audio_tracks[0].id;
+        let processor_id = AudioProcessorInstanceId::new();
+        sequence
+            .audio_program
+            .track_channels
+            .get_mut(&track_id)
+            .expect("channel")
+            .strip
+            .pre_fader
+            .processors
+            .push(AudioProcessorInstance {
+                id: processor_id,
+                definition: AudioProcessorDefinitionRef::Clap {
+                    plugin_id: "test.mondrian.unavailable-extent-author".to_owned(),
+                    schema_version: 1,
+                    binary_sha256: None,
+                },
+                bypassed: true,
+                parameters: Default::default(),
+                opaque_state: None,
+            });
+        sequence.audio_tracks[0].is_muted = true;
+        sequence.audio_program.note_lanes.push(AudioNoteLane {
+            schema_version: 1,
+            id: AudioNoteLaneId::new(),
+            target: AudioNoteTarget {
+                track_id,
+                processor_id,
+                input_port_key: "notes.0".to_owned(),
+            },
+            notes: AuthoringList::from(vec![AudioNote {
+                id: AudioNoteId::new(),
+                start: TimelineTime::ZERO,
+                end,
+                channel: 0,
+                key: 60,
+                on_velocity: 0.5,
+                off_velocity: 0.0,
+            }]),
+        });
+        // Explicit export marks do not replace the author's content extent.
+        sequence.mark_out(TimelineTime::new(100, 1).unwrap());
+        state.test_set_sequence(Some(sequence));
+        assert_eq!(state.last_content_frame().unwrap(), expected);
+        let snapshot = state.preview_execution_snapshot(Instant::now());
+        assert_eq!(
+            snapshot.authoring().expect("open author").last_content_frame(),
+            Some(expected)
+        );
+    }
+    // Error projection is still fallible: Preview does not silently saturate.
+    let sequence = state.active_sequence_mut_uncommitted().expect("author");
+    sequence.audio_program.note_lanes[0].notes[0].end = TimelineTime::new(i64::MAX, 1).unwrap();
+    assert!(state.last_content_frame().is_err());
+    let snapshot = state.preview_execution_snapshot(Instant::now());
+    assert_eq!(
+        snapshot.authoring().expect("open author").last_content_frame(),
+        None
+    );
 }
 
 #[test]
@@ -500,6 +925,95 @@ fn cpu_fallback_rejects_non_default_display_policy_instead_of_showing_srgb() {
 }
 
 #[test]
+fn cpu_working_adjustment_reaches_gpu_candidate_with_exact_monitor_policy() {
+    let mut sequence = Sequence::new("CPU adjustment GPU output");
+    let tb = sequence.time_base();
+    sequence.video_tracks[0]
+        .add_clip(
+            Clip::new_solid_color(
+                AssetId::new(),
+                Color::from_hex(0x244C7A),
+                tt(0, tb),
+                tt(24, tb),
+            )
+            .expect("solid"),
+        )
+        .expect("source track");
+    let mut adjustment =
+        Clip::new_adjustment_layer(AssetId::new(), tt(0, tb), tt(24, tb)).expect("adjustment");
+    let mut blur: mondrian_effects::EffectNode =
+        mondrian_effects::EffectNodeExt::with_defaults(mondrian_effects::EffectType::GaussianBlur);
+    blur.set_static_value_by_parameter(
+        &mondrian_effects::EffectType::GaussianBlur
+            .parameter_id("radius")
+            .expect("radius"),
+        mondrian_core::automation::PropertyValue::Float(1.0),
+    )
+    .expect("CPU blur radius");
+    adjustment.add_effect_node(blur);
+    let mut track = Track::new_video("Adjustment");
+    track.add_clip(adjustment).expect("adjustment track");
+    sequence.video_tracks.push(track);
+    ensure_test_ocio_loaded();
+    let mut state = AppState::new();
+    state.test_set_sequence(Some(sequence));
+    state.seek(4).expect("seek");
+    pin_standard_execution_resources(&mut state);
+    state.set_viewer_display_management(
+        mondrian_core::DisplayManagementPolicy::default()
+            .with_monitor_output(mondrian_core::MonitorOutputIntent::ColorSpace(
+                ColorSpace::DisplayP3,
+            ))
+            .expect("P3"),
+    );
+    let runtime = PreviewProductionRuntime::<()>::new_without_workers_for_test();
+    runtime.synchronize_transport_intent(state.preview_transport_intent());
+    assert!(matches!(
+        execute_gpu_preview_for_test_app(&runtime, &state),
+        PreviewGpuFrameState::Loading
+    ));
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let frame = loop {
+        runtime.pump_cpu_fallback_results();
+        match execute_gpu_preview_for_test_app(&runtime, &state) {
+            PreviewGpuFrameState::Ready(frame) => break frame,
+            PreviewGpuFrameState::Loading | PreviewGpuFrameState::Prepared => {}
+            PreviewGpuFrameState::Unavailable(reason) => {
+                panic!("CPU adjustment unavailable: {}", reason.detail())
+            }
+            _ => panic!("CPU adjustment bypassed its GPU upload candidate"),
+        }
+        assert!(
+            Instant::now() < deadline,
+            "CPU adjustment completion deadline"
+        );
+        std::thread::yield_now();
+    };
+    assert!(!runtime.viewer_cpu_fallback_active.get());
+    assert_eq!(
+        frame.monitor_adaptation.monitor_color_space(),
+        ColorSpace::DisplayP3
+    );
+    let PreviewGpuWorkingInput::GpuComposite { layers } = &frame.working_input;
+    assert_eq!(layers.len(), 1);
+    let Some(ViewerGpuSourceLayer::Media { frame: Some(working), .. }) =
+        viewer_gpu_source_layer(&layers[0])
+    else {
+        panic!("expected exact post-composite Float32 upload");
+    };
+    let retained = runtime
+        .frame_store
+        .borrow_mut()
+        .viewer_working_frame(&frame.output_key)
+        .expect("bounded working residency");
+    assert!(retained.shares_storage_with(working));
+    assert_eq!(
+        runtime.diagnostics().composite_color_path_summary().legacy_rgba8_composites,
+        0
+    );
+}
+
+#[test]
 fn resource_scale_change_re_resolves_across_generation_rollover() {
     let mut state = state_with_solid_color_clip(Color::from_hex(0x244C7A));
     state.execution_resources =
@@ -612,6 +1126,7 @@ fn evaluation_working_set_invalidates_only_the_exact_media_sample() {
 
     // A Ready evaluation retains the same exact dependency.
     let ready = Arc::new(ResolvedFrameEvaluation {
+        sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
         cpu_materialization_active_bytes: 0,
         key,
         output_key: PreviewOutputKey::new(
@@ -669,6 +1184,7 @@ fn completed_gpu_evaluation_release_is_exact_and_preserves_other_owners() {
     );
     let dependency = test_media_key(961);
     let current = Arc::new(ResolvedFrameEvaluation {
+        sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
         cpu_materialization_active_bytes: 0,
         key: current_key,
         output_key: output.clone(),
@@ -684,6 +1200,7 @@ fn completed_gpu_evaluation_release_is_exact_and_preserves_other_owners() {
     set.insert(
         successor_key,
         Arc::new(ResolvedFrameEvaluation {
+            sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
             cpu_materialization_active_bytes: 0,
             key: successor_key,
             output_key: output.clone(),
@@ -769,6 +1286,7 @@ fn completed_gpu_evaluation_release_is_exact_and_preserves_other_owners() {
         set.insert(
             current_key,
             Arc::new(ResolvedFrameEvaluation {
+                sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
                 cpu_materialization_active_bytes: 0,
                 key: current_key,
                 output_key: output.clone(),
@@ -838,7 +1356,7 @@ fn completed_cpu_evaluation_releases_prefetch_headroom_without_clearing_store() 
             blend_mode: BlendMode::Normal,
             transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
             effect_graph: mondrian_effects::identity_compiled_effect_graph().expect("identity"),
-            prepared_heterogeneous_route: None,
+            prepared_effect_route: None,
             frame_seed: 0,
         })
         .collect::<Vec<_>>();
@@ -846,6 +1364,7 @@ fn completed_cpu_evaluation_releases_prefetch_headroom_without_clearing_store() 
     set.insert(
         key,
         Arc::new(ResolvedFrameEvaluation {
+            sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
             cpu_materialization_active_bytes: 0,
             key,
             output_key: output.clone(),
@@ -934,6 +1453,7 @@ fn evaluation_working_set_retires_native_decoder_resource_owners() {
         PreviewDecodeExecutionSummary::default(),
     );
     let evaluation = Arc::new(ResolvedFrameEvaluation {
+        sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
         cpu_materialization_active_bytes: 0,
         key,
         output_key: PreviewOutputKey::new(
@@ -949,7 +1469,7 @@ fn evaluation_working_set_retires_native_decoder_resource_owners() {
             transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
             effect_graph: mondrian_effects::identity_compiled_effect_graph()
                 .expect("identity graph"),
-            prepared_heterogeneous_route: None,
+            prepared_effect_route: None,
             frame_seed: 0,
         }]),
         color_context: test_color_context(ColorSpace::Srgb),
@@ -1012,6 +1532,7 @@ fn evaluation_working_set_retires_native_decoder_resource_owners() {
     set.insert(
         key,
         Arc::new(ResolvedFrameEvaluation {
+            sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
             cpu_materialization_active_bytes: 0,
             key,
             output_key: output.clone(),
@@ -1022,7 +1543,7 @@ fn evaluation_working_set_retires_native_decoder_resource_owners() {
                 transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
                 effect_graph: mondrian_effects::identity_compiled_effect_graph()
                     .expect("identity graph"),
-                prepared_heterogeneous_route: None,
+                prepared_effect_route: None,
                 frame_seed: 0,
             }]),
             color_context: test_color_context(ColorSpace::Srgb),
@@ -1197,7 +1718,7 @@ fn custom_u8_effect_graph(
     static NEXT_DEFINITION: AtomicU64 = AtomicU64::new(1);
     let suffix = NEXT_DEFINITION.fetch_add(1, Ordering::Relaxed);
     let effect_type =
-        mondrian_effects::EffectType::Plugin(format!("test.preview.custom.{label}.{suffix}"));
+        mondrian_effects::EffectType::External(format!("test.preview.custom.{label}.{suffix}"));
     let determinism = match cache_policy {
         EffectCachePolicy::Deterministic => mondrian_effects::EffectDeterminism::Deterministic,
         EffectCachePolicy::FrameDependent => mondrian_effects::EffectDeterminism::FrameSeeded,
@@ -1430,6 +1951,7 @@ fn visual_program_cache_does_not_cross_equal_author_state_between_open_sessions(
                     .settings
                     .root_program_color_context(state.project_color_environment())
                     .expect("valid test context"),
+                None,
             ) {
                 PreviewTimelineResolution::Ready(resolved) => return resolved,
                 PreviewTimelineResolution::Empty => {
@@ -1698,8 +2220,41 @@ fn authoring_session_rotation_clears_decoded_media_residency() {
 }
 
 fn unique_preview_test_root(name: &str) -> PathBuf {
-    crate::app::test_fixture::create_root(&std::env::temp_dir(), name)
-        .expect("claim isolated Preview fixture root")
+    preview_test_root_in(&std::env::temp_dir(), name)
+}
+
+fn preview_test_root_in(parent: &std::path::Path, name: &str) -> PathBuf {
+    let root = crate::app::test_fixture::create_root(parent, name)
+        .expect("claim isolated Preview fixture root");
+    // Asset import resolves directory aliases. Build source/proxy expectations
+    // in that same namespace while retaining the Preview owner's lifetime.
+    mondrian_assets::canonical_native_path(&root).expect("canonical Preview fixture root")
+}
+
+#[test]
+fn preview_fixture_paths_share_the_asset_identity_namespace_through_parent_aliases() {
+    let parent = tempfile::tempdir().expect("owned Preview fixture parent");
+    let transit = parent.path().join("transit");
+    std::fs::create_dir(&transit).expect("create directory alias traversal");
+    let alias_parent = transit.join("..");
+    let root = preview_test_root_in(&alias_parent, "mondrian-preview-aliased-parent");
+    let media = root.join("source.mp4");
+    std::fs::write(&media, b"fixture identity only").expect("create fixture media");
+
+    assert_eq!(
+        mondrian_assets::canonical_asset_file_path(&media).expect("canonical asset identity"),
+        media,
+        "Preview expectations and Asset Library identity must share one native namespace"
+    );
+    let aliased_media = alias_parent
+        .join(root.file_name().expect("owned fixture directory name"))
+        .join("source.mp4");
+    assert_eq!(
+        mondrian_assets::canonical_asset_file_path(&aliased_media)
+            .expect("resolve aliased fixture media"),
+        media
+    );
+    assert!(root.is_dir(), "the fixture owner retains its directory");
 }
 
 fn rec709_video_media_info(file_size: u64) -> MediaInfo {
@@ -2107,13 +2662,23 @@ fn cpu_raster_preview_retains_program_output_before_srgb_adaptation() {
             transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
             effect_graph,
             frame_seed: 0,
+
+            processor_input_plan: None,
         },
     )];
     let color_context = test_color_context(ColorSpace::Rec709);
     let mut scratch = TimelineCompositeScratch::default();
 
-    let output = composite_resolved_preview(2, 2, &resolved, &color_context, &mut scratch)
-        .expect("CPU raster Program Output and monitor adaptation");
+    let output = composite_resolved_preview(
+        2,
+        2,
+        &resolved,
+        &color_context,
+        mondrian_core::ImageSampling::UNIT_SQUARE,
+        &mut scratch,
+        &mut mondrian_effects::EffectProcessorControl::uncancelled(),
+    )
+    .expect("CPU raster Program Output and monitor adaptation");
 
     assert_eq!(
         output.color_diagnostics.output.color_space,
@@ -2770,7 +3335,7 @@ fn gpu_composite_layers_accept_transformed_media_frame() {
         blend_mode: BlendMode::Normal,
         transform,
         effect_graph,
-        prepared_heterogeneous_route: None,
+        prepared_effect_route: None,
         frame_seed: 7,
     }];
 
@@ -2801,7 +3366,7 @@ fn gpu_viewer_lowering_reuses_the_preview_owned_effect_session() {
         blend_mode: BlendMode::Normal,
         transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
         effect_graph,
-        prepared_heterogeneous_route: None,
+        prepared_effect_route: None,
         frame_seed: 7,
     }];
     let mut scratch = TimelineCompositeScratch::default();
@@ -2844,7 +3409,7 @@ fn gpu_composite_layers_lower_cross_dissolve_as_typed_two_input_node() {
             blend_mode: BlendMode::Normal,
             transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
             effect_graph: Arc::clone(&effect_graph),
-            prepared_heterogeneous_route: None,
+            prepared_effect_route: None,
             frame_seed: 7,
         }),
         right: Box::new(ResolvedPreviewTransitionInput::SolidColor(
@@ -2855,6 +3420,8 @@ fn gpu_composite_layers_lower_cross_dissolve_as_typed_two_input_node() {
                 transform: [0.75, 0.0, 0.125, 0.0, 0.75, 0.125],
                 effect_graph,
                 frame_seed: 8,
+
+                processor_input_plan: None,
             },
         )),
         progress: 0.25,
@@ -2925,7 +3492,7 @@ fn gpu_composite_layers_lower_supported_working_effects() {
         blend_mode: BlendMode::Normal,
         transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
         effect_graph,
-        prepared_heterogeneous_route: None,
+        prepared_effect_route: None,
         frame_seed: 19,
     }];
 
@@ -2960,11 +3527,13 @@ fn gpu_composite_layers_lower_solid_and_adjustment_effects() {
             transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
             effect_graph: Arc::clone(&effect_graph),
             frame_seed: 11,
+
+            processor_input_plan: None,
         }),
         ResolvedPreviewElement::Adjustment(TimelineAdjustmentLayer {
             effect_graph,
             opacity: 0.6,
-            blend_mode: None,
+            blend_policy: mondrian_effects::EffectPassBlendPolicy::Mix,
             frame_seed: 13,
         }),
     ];
@@ -2980,10 +3549,10 @@ fn gpu_composite_layers_lower_solid_and_adjustment_effects() {
         _ => panic!("expected solid layer"),
     }
     match &layers[1] {
-        ViewerGpuExecutionLayer::Adjustment { effect_plan, opacity, blend_mode, frame_seed } => {
+        ViewerGpuExecutionLayer::Adjustment { effect_plan, opacity, blend_policy, frame_seed } => {
             assert_eq!(effect_plan.operations().len(), 1);
             assert_eq!(*opacity, 0.6);
-            assert_eq!(*blend_mode, BlendMode::Normal);
+            assert_eq!(*blend_policy, mondrian_effects::EffectPassBlendPolicy::Mix);
             assert_eq!(*frame_seed, 13);
         }
         _ => panic!("expected adjustment layer"),
@@ -3001,7 +3570,7 @@ fn gpu_composite_layers_skip_leading_adjustment_before_layer_limit() {
             ResolvedPreviewElement::Adjustment(TimelineAdjustmentLayer {
                 effect_graph: Arc::clone(&effect_graph),
                 opacity: 1.0,
-                blend_mode: None,
+                blend_policy: mondrian_effects::EffectPassBlendPolicy::Mix,
                 frame_seed: seed,
             })
         })
@@ -3015,6 +3584,8 @@ fn gpu_composite_layers_skip_leading_adjustment_before_layer_limit() {
             effect_graph: mondrian_effects::identity_compiled_effect_graph()
                 .expect("identity compiled graph"),
             frame_seed: 0,
+
+            processor_input_plan: None,
         },
     ));
 
@@ -3054,7 +3625,7 @@ fn gpu_composite_layers_accept_source_only_media_frame() {
         blend_mode: BlendMode::Normal,
         transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
         effect_graph,
-        prepared_heterogeneous_route: None,
+        prepared_effect_route: None,
         frame_seed: 7,
     }];
 
@@ -3091,7 +3662,7 @@ fn gpu_composite_layers_preserve_native_source_only_media_frame() {
         blend_mode: BlendMode::Normal,
         transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
         effect_graph,
-        prepared_heterogeneous_route: None,
+        prepared_effect_route: None,
         frame_seed: 7,
     }];
 
@@ -3163,7 +3734,7 @@ fn gpu_composite_layers_materialize_native_video_at_projected_preview_density() 
         blend_mode: BlendMode::Normal,
         transform: [0.25, 0.0, 0.0, 0.0, 0.25, 0.0],
         effect_graph,
-        prepared_heterogeneous_route: None,
+        prepared_effect_route: None,
         frame_seed: 7,
     }];
 
@@ -3208,7 +3779,7 @@ fn gpu_composite_layers_keep_native_source_density_for_preview_zoom() {
         blend_mode: BlendMode::Normal,
         transform: [1.0, 0.0, -1440.0, 0.0, 1.0, -810.0],
         effect_graph: mondrian_effects::identity_compiled_effect_graph().expect("identity graph"),
-        prepared_heterogeneous_route: None,
+        prepared_effect_route: None,
         frame_seed: 7,
     }];
 
@@ -3261,7 +3832,7 @@ fn gpu_composite_layers_reject_singular_media_transform() {
         blend_mode: BlendMode::Normal,
         transform: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
         effect_graph,
-        prepared_heterogeneous_route: None,
+        prepared_effect_route: None,
         frame_seed: 7,
     }];
 
@@ -3898,6 +4469,7 @@ fn generation_rotation_retires_transient_evaluations_and_preserves_exact_reuse()
         EvaluationReusePolicy::Reusable,
     ] {
         let evaluation = Arc::new(ResolvedFrameEvaluation {
+            sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
             cpu_materialization_active_bytes: 0,
             key,
             output_key: PreviewOutputKey::new(
@@ -11256,8 +11828,20 @@ fn nested_solid_color_sequence_returns_preview_frame() {
     state.seek(3).expect("seek");
 
     let service = WindowPreviewAdapter::new();
-    let frame = service.viewer_preview_for_state(&state);
-    let frame = ready_frame(frame);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let frame = loop {
+        service.poll_playback_work(None, state.preview_transport_intent());
+        match service.viewer_preview_for_state(&state) {
+            ready @ ViewerPreviewState::Ready(_) => break ready_frame(ready),
+            ViewerPreviewState::Loading | ViewerPreviewState::Stale(_) => {}
+            other => panic!("nested preview failed: {other:?}"),
+        }
+        assert!(
+            Instant::now() < deadline,
+            "nested preview did not complete its original work"
+        );
+        std::thread::sleep(Duration::from_millis(1));
+    };
 
     assert_eq!(frame.width, 960);
     assert_eq!(frame.height, 540);
@@ -11321,6 +11905,56 @@ fn empty_root_timeline_is_a_transparent_presentation_and_breaks_stale_reuse() {
 
 #[test]
 fn transparent_timeline_presentation_completes_the_exact_playback_demand() {
+    assert_transparent_playback_delivery(
+        TransparentPresentationTime::Anchor,
+        mondrian_playback::FrameDeliveryKind::Ready,
+    );
+}
+
+#[test]
+fn transparent_timeline_presentation_before_deadline_is_ready() {
+    assert_transparent_playback_delivery(
+        TransparentPresentationTime::BeforeDeadline,
+        mondrian_playback::FrameDeliveryKind::Ready,
+    );
+}
+
+#[test]
+fn transparent_timeline_presentation_at_deadline_is_degraded() {
+    assert_transparent_playback_delivery(
+        TransparentPresentationTime::Deadline,
+        mondrian_playback::FrameDeliveryKind::Degraded,
+    );
+}
+
+#[test]
+fn transparent_timeline_presentation_at_grace_end_is_degraded() {
+    assert_transparent_playback_delivery(
+        TransparentPresentationTime::GraceEnd,
+        mondrian_playback::FrameDeliveryKind::Degraded,
+    );
+}
+
+#[test]
+fn transparent_timeline_presentation_after_grace_end_is_late() {
+    assert_transparent_playback_delivery(
+        TransparentPresentationTime::AfterGraceEnd,
+        mondrian_playback::FrameDeliveryKind::Late,
+    );
+}
+
+enum TransparentPresentationTime {
+    Anchor,
+    BeforeDeadline,
+    Deadline,
+    GraceEnd,
+    AfterGraceEnd,
+}
+
+fn assert_transparent_playback_delivery(
+    observed_time: TransparentPresentationTime,
+    expected: mondrian_playback::FrameDeliveryKind,
+) {
     let service = WindowPreviewAdapter::new();
     let mut state = state_with_solid_color_clip(Color::from_rgba8(24, 80, 160, 255));
     let sequence = state.active_sequence_mut_uncommitted().expect("sequence");
@@ -11330,10 +11964,11 @@ fn transparent_timeline_presentation_completes_the_exact_playback_demand() {
     state.play().expect("play");
     let demand = state.pending_playback_frame_demand_identity().expect("playback demand");
 
-    assert!(matches!(
-        service.viewer_preview_for_state(&state),
-        ViewerPreviewState::Transparent
-    ));
+    let preview = service.viewer_preview_for_state(&state);
+    assert!(
+        matches!(preview, ViewerPreviewState::Transparent),
+        "{preview:?}"
+    );
     assert_eq!(
         ViewerPlaybackFeedback::from_preview_state(&ViewerPreviewState::Transparent),
         ViewerPlaybackFeedback::Ready
@@ -11341,15 +11976,51 @@ fn transparent_timeline_presentation_completes_the_exact_playback_demand() {
     let ticket = playback_presentation_ticket_for_state(&service, &state)
         .expect("transparent canvas presentation ticket");
     assert_eq!(ticket.identity(), demand);
-    let completion = state
-        .complete_frame_presentation(ticket, Instant::now())
-        .expect("accepted transparent presentation");
-    assert_eq!(
-        completion.delivery().kind(),
-        mondrian_playback::FrameDeliveryKind::Ready
+    // Observe the real presentation seam at explicit policy time. CPU scheduling
+    // delays must not decide whether this functional test asserts Ready or Late.
+    let deadline_elapsed = ticket
+        .deadline()
+        .expect("priming deadline")
+        .duration_since_origin()
+        .checked_sub(state.playback_observation_time_anchor.duration_since_origin())
+        .expect("deadline follows observation anchor");
+    let grace = Duration::from_nanos(
+        state
+            .playback_engine
+            .pending_frame_demand()
+            .expect("pending demand")
+            .late_presentation_grace_ns,
     );
+    let elapsed = match observed_time {
+        TransparentPresentationTime::Anchor => Duration::ZERO,
+        TransparentPresentationTime::BeforeDeadline => deadline_elapsed
+            .checked_sub(Duration::from_nanos(1))
+            .expect("positive deadline"),
+        TransparentPresentationTime::Deadline => deadline_elapsed,
+        TransparentPresentationTime::GraceEnd => deadline_elapsed + grace,
+        TransparentPresentationTime::AfterGraceEnd => {
+            deadline_elapsed + grace + Duration::from_nanos(1)
+        }
+    };
+    let completed_at = state.playback_observation_instant_anchor + elapsed;
+    let completion = state
+        .complete_frame_presentation(ticket, completed_at)
+        .expect("accepted transparent presentation");
+    assert_eq!(completion.delivery().kind(), expected);
     assert!(state.pending_playback_frame_demand_identity().is_none());
-    assert_eq!(state.playback_evidence_report().deliveries.ready, 1);
+    let deliveries = state.playback_evidence_report().deliveries;
+    assert_eq!(
+        deliveries.ready,
+        u64::from(expected == mondrian_playback::FrameDeliveryKind::Ready)
+    );
+    assert_eq!(
+        deliveries.degraded,
+        u64::from(expected == mondrian_playback::FrameDeliveryKind::Degraded)
+    );
+    assert_eq!(
+        deliveries.late,
+        u64::from(expected == mondrian_playback::FrameDeliveryKind::Late)
+    );
 }
 
 #[test]
@@ -11467,7 +12138,7 @@ fn resolved_media_preview_cache_key_includes_media_frame_identity() {
             blend_mode: BlendMode::Normal,
             transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
             effect_graph: Arc::clone(&effect_graph),
-            prepared_heterogeneous_route: None,
+            prepared_effect_route: None,
             frame_seed: 12,
         }]
     };
@@ -11480,6 +12151,7 @@ fn resolved_media_preview_cache_key_includes_media_frame_identity() {
         180,
         &make_plan(100),
         &color_context,
+        mondrian_core::ImageSampling::UNIT_SQUARE,
     );
     let second = viewer_preview_cache_key_for_resolved_plan(
         sequence_id,
@@ -11487,6 +12159,7 @@ fn resolved_media_preview_cache_key_includes_media_frame_identity() {
         180,
         &make_plan(200),
         &color_context,
+        mondrian_core::ImageSampling::UNIT_SQUARE,
     );
 
     assert_ne!(first, second);
@@ -11507,6 +12180,8 @@ fn uncacheable_effect_retains_semantic_identity_without_admitting_viewer_reuse()
             transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
             effect_graph,
             frame_seed: 12,
+
+            processor_input_plan: None,
         },
     )];
     let sequence_id = SequenceId::new();
@@ -11518,6 +12193,7 @@ fn uncacheable_effect_retains_semantic_identity_without_admitting_viewer_reuse()
         180,
         &resolved,
         &color_context,
+        mondrian_core::ImageSampling::UNIT_SQUARE,
     );
     let second = viewer_preview_cache_key_for_resolved_plan(
         sequence_id,
@@ -11525,6 +12201,7 @@ fn uncacheable_effect_retains_semantic_identity_without_admitting_viewer_reuse()
         180,
         &resolved,
         &color_context,
+        mondrian_core::ImageSampling::UNIT_SQUARE,
     );
 
     assert_eq!(first, second, "semantic identity remains available");
@@ -11585,7 +12262,7 @@ fn stable_parameter_value_changes_compiled_graph_and_viewer_cache_identity() {
             blend_mode: BlendMode::Normal,
             transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
             effect_graph,
-            prepared_heterogeneous_route: None,
+            prepared_effect_route: None,
             frame_seed: 12,
         }]
     };
@@ -11597,6 +12274,7 @@ fn stable_parameter_value_changes_compiled_graph_and_viewer_cache_identity() {
         180,
         &make_plan(first_graph),
         &color_context,
+        mondrian_core::ImageSampling::UNIT_SQUARE,
     );
     let second = viewer_preview_cache_key_for_resolved_plan(
         sequence_id,
@@ -11604,6 +12282,7 @@ fn stable_parameter_value_changes_compiled_graph_and_viewer_cache_identity() {
         180,
         &make_plan(second_graph),
         &color_context,
+        mondrian_core::ImageSampling::UNIT_SQUARE,
     );
     assert_ne!(first, second);
 }
@@ -11618,17 +12297,29 @@ fn resolved_media_preview_cache_key_includes_color_context() {
         blend_mode: BlendMode::Normal,
         transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
         effect_graph,
-        prepared_heterogeneous_route: None,
+        prepared_effect_route: None,
         frame_seed: 12,
     }];
     let sequence_id = SequenceId::new();
 
     let rec709 = test_color_context(ColorSpace::Rec709);
     let srgb = test_color_context(ColorSpace::Srgb);
-    let first =
-        viewer_preview_cache_key_for_resolved_plan(sequence_id, 320, 180, &resolved, &rec709);
-    let second =
-        viewer_preview_cache_key_for_resolved_plan(sequence_id, 320, 180, &resolved, &srgb);
+    let first = viewer_preview_cache_key_for_resolved_plan(
+        sequence_id,
+        320,
+        180,
+        &resolved,
+        &rec709,
+        mondrian_core::ImageSampling::UNIT_SQUARE,
+    );
+    let second = viewer_preview_cache_key_for_resolved_plan(
+        sequence_id,
+        320,
+        180,
+        &resolved,
+        &srgb,
+        mondrian_core::ImageSampling::UNIT_SQUARE,
+    );
 
     assert_ne!(first, second);
 }
@@ -11643,15 +12334,29 @@ fn resolved_media_preview_cache_key_includes_resolved_display_color_space() {
         blend_mode: BlendMode::Normal,
         transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
         effect_graph,
-        prepared_heterogeneous_route: None,
+        prepared_effect_route: None,
         frame_seed: 12,
     }];
     let sequence_id = SequenceId::new();
 
     let sdr = test_color_context(ColorSpace::Rec709);
     let p3 = test_color_context(ColorSpace::DisplayP3);
-    let first = viewer_preview_cache_key_for_resolved_plan(sequence_id, 320, 180, &resolved, &sdr);
-    let second = viewer_preview_cache_key_for_resolved_plan(sequence_id, 320, 180, &resolved, &p3);
+    let first = viewer_preview_cache_key_for_resolved_plan(
+        sequence_id,
+        320,
+        180,
+        &resolved,
+        &sdr,
+        mondrian_core::ImageSampling::UNIT_SQUARE,
+    );
+    let second = viewer_preview_cache_key_for_resolved_plan(
+        sequence_id,
+        320,
+        180,
+        &resolved,
+        &p3,
+        mondrian_core::ImageSampling::UNIT_SQUARE,
+    );
 
     assert_ne!(first, second);
 }
@@ -11666,7 +12371,7 @@ fn resolved_media_preview_cache_key_includes_versioned_output_transform_intent()
         blend_mode: BlendMode::Normal,
         transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
         effect_graph,
-        prepared_heterogeneous_route: None,
+        prepared_effect_route: None,
         frame_seed: 12,
     }];
     let sequence_id = SequenceId::new();
@@ -11678,10 +12383,22 @@ fn resolved_media_preview_cache_key_includes_versioned_output_transform_intent()
             package: mondrian_core::MondrianStandardPackageIdentity::V2,
         },
     );
-    let first =
-        viewer_preview_cache_key_for_resolved_plan(sequence_id, 320, 180, &resolved, &current);
-    let second =
-        viewer_preview_cache_key_for_resolved_plan(sequence_id, 320, 180, &resolved, &legacy);
+    let first = viewer_preview_cache_key_for_resolved_plan(
+        sequence_id,
+        320,
+        180,
+        &resolved,
+        &current,
+        mondrian_core::ImageSampling::UNIT_SQUARE,
+    );
+    let second = viewer_preview_cache_key_for_resolved_plan(
+        sequence_id,
+        320,
+        180,
+        &resolved,
+        &legacy,
+        mondrian_core::ImageSampling::UNIT_SQUARE,
+    );
 
     assert_ne!(first, second);
 }
@@ -11696,17 +12413,29 @@ fn resolved_media_preview_cache_key_includes_output_transform_intent() {
         blend_mode: BlendMode::Normal,
         transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
         effect_graph,
-        prepared_heterogeneous_route: None,
+        prepared_effect_route: None,
         frame_seed: 12,
     }];
     let sequence_id = SequenceId::new();
 
     let standard = test_color_context(ColorSpace::Rec709);
     let colorimetric = test_colorimetric_context(ColorSpace::Rec709);
-    let first =
-        viewer_preview_cache_key_for_resolved_plan(sequence_id, 320, 180, &resolved, &standard);
-    let second =
-        viewer_preview_cache_key_for_resolved_plan(sequence_id, 320, 180, &resolved, &colorimetric);
+    let first = viewer_preview_cache_key_for_resolved_plan(
+        sequence_id,
+        320,
+        180,
+        &resolved,
+        &standard,
+        mondrian_core::ImageSampling::UNIT_SQUARE,
+    );
+    let second = viewer_preview_cache_key_for_resolved_plan(
+        sequence_id,
+        320,
+        180,
+        &resolved,
+        &colorimetric,
+        mondrian_core::ImageSampling::UNIT_SQUARE,
+    );
 
     assert_ne!(first, second);
 }
@@ -11721,7 +12450,7 @@ fn resolved_media_preview_cache_key_includes_exact_standard_package() {
         blend_mode: BlendMode::Normal,
         transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
         effect_graph,
-        prepared_heterogeneous_route: None,
+        prepared_effect_route: None,
         frame_seed: 12,
     }];
     let sequence_id = SequenceId::new();
@@ -11732,10 +12461,22 @@ fn resolved_media_preview_cache_key_includes_exact_standard_package() {
         ColorEngine::MondrianStandard { package: legacy_package },
     );
 
-    let current_key =
-        viewer_preview_cache_key_for_resolved_plan(sequence_id, 320, 180, &resolved, &current);
-    let legacy_key =
-        viewer_preview_cache_key_for_resolved_plan(sequence_id, 320, 180, &resolved, &legacy);
+    let current_key = viewer_preview_cache_key_for_resolved_plan(
+        sequence_id,
+        320,
+        180,
+        &resolved,
+        &current,
+        mondrian_core::ImageSampling::UNIT_SQUARE,
+    );
+    let legacy_key = viewer_preview_cache_key_for_resolved_plan(
+        sequence_id,
+        320,
+        180,
+        &resolved,
+        &legacy,
+        mondrian_core::ImageSampling::UNIT_SQUARE,
+    );
 
     assert_ne!(current_key, legacy_key);
 }
@@ -11745,8 +12486,16 @@ fn preview_working_composite_boundary_uses_resolved_display_view() {
     let color_context = test_color_context(ColorSpace::Rec709);
     let mut scratch = TimelineCompositeScratch::default();
 
-    let _output = composite_resolved_preview_working(2, 2, &[], &color_context, &mut scratch)
-        .expect("empty preview composite");
+    let _output = composite_resolved_preview_working(
+        2,
+        2,
+        &[],
+        &color_context,
+        mondrian_core::ImageSampling::UNIT_SQUARE,
+        &mut scratch,
+        &mut mondrian_effects::EffectProcessorControl::uncancelled(),
+    )
+    .expect("empty preview composite");
 
     let boundary =
         output_boundary_from_color_context(&color_context).expect("encoded preview output");
@@ -12613,13 +13362,21 @@ fn preview_single_media_color_output_matches_export_composite_contract() {
         blend_mode: BlendMode::Normal,
         transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
         effect_graph: Arc::clone(&effect_graph),
-        prepared_heterogeneous_route: None,
+        prepared_effect_route: None,
         frame_seed: 0,
     }];
     let mut preview_scratch = TimelineCompositeScratch::default();
     let preview_service = WindowPreviewAdapter::new();
-    let preview = composite_resolved_preview(1, 1, &resolved, &color_context, &mut preview_scratch)
-        .expect("preview color composite");
+    let preview = composite_resolved_preview(
+        1,
+        1,
+        &resolved,
+        &color_context,
+        mondrian_core::ImageSampling::UNIT_SQUARE,
+        &mut preview_scratch,
+        &mut mondrian_effects::EffectProcessorControl::uncancelled(),
+    )
+    .expect("preview color composite");
     preview_service.record_cpu_execution_evidence(&preview);
     assert_eq!(
         preview.color_diagnostics.output.domain,
@@ -12637,6 +13394,8 @@ fn preview_single_media_color_output_matches_export_composite_contract() {
         transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
         effect_graph,
         frame_seed: 0,
+
+        processor_input_plan: None,
     })];
     let mut export_scratch = TimelineCompositeScratch::default();
     let expected_frame = mondrian_renderer::composite_timeline_elements_color_frame(
@@ -12647,8 +13406,10 @@ fn preview_single_media_color_output_matches_export_composite_contract() {
         TimelineEffectColorRuntime::new(
             color_context.engine(),
             color_context.working_color_space(),
+            mondrian_core::ImageSampling::UNIT_SQUARE,
         ),
         &mut export_scratch,
+        &mut mondrian_effects::EffectProcessorControl::uncancelled(),
     )
     .expect("composite expected export frame");
     assert_eq!(
@@ -12716,19 +13477,28 @@ fn preview_camera_log_input_matches_export_frame_hash() {
         blend_mode: BlendMode::Normal,
         transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
         effect_graph: Arc::clone(&effect_graph),
-        prepared_heterogeneous_route: None,
+        prepared_effect_route: None,
         frame_seed: 3_003,
     }];
     let preview_service = WindowPreviewAdapter::new();
     let mut preview_scratch = TimelineCompositeScratch::default();
-    let preview = composite_resolved_preview(2, 2, &resolved, &color_context, &mut preview_scratch)
-        .expect("preview camera-log composite");
+    let preview = composite_resolved_preview(
+        2,
+        2,
+        &resolved,
+        &color_context,
+        mondrian_core::ImageSampling::UNIT_SQUARE,
+        &mut preview_scratch,
+        &mut mondrian_effects::EffectProcessorControl::uncancelled(),
+    )
+    .expect("preview camera-log composite");
     preview_service.record_cpu_execution_evidence(&preview);
 
     let mut export_color_session = RenderCpuColorExecutionSession::default();
     let export_input = SourceColorModule::execute_cpu_with_intent(
         &CpuSourceColorFrame::from(source.clone()),
         &input_transform,
+        mondrian_core::ImageSampling::UNIT_SQUARE,
         &mut export_color_session,
     )
     .expect("export camera-log input transform");
@@ -12739,6 +13509,8 @@ fn preview_camera_log_input_matches_export_frame_hash() {
         transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
         effect_graph,
         frame_seed: 3_003,
+
+        processor_input_plan: None,
     })];
     let mut export_scratch = TimelineCompositeScratch::default();
     let export_working = mondrian_renderer::composite_timeline_elements_color_frame(
@@ -12749,8 +13521,10 @@ fn preview_camera_log_input_matches_export_frame_hash() {
         TimelineEffectColorRuntime::new(
             color_context.engine(),
             color_context.working_color_space(),
+            mondrian_core::ImageSampling::UNIT_SQUARE,
         ),
         &mut export_scratch,
+        &mut mondrian_effects::EffectProcessorControl::uncancelled(),
     )
     .expect("composite camera-log export frame");
     let export_boundary = ProgramOutputBoundary::from_intent(
@@ -12807,6 +13581,7 @@ fn preview_multilayer_color_output_matches_export_frame_hash() {
             false,
             ColorEngine::mondrian_standard(),
         ),
+        mondrian_core::ImageSampling::UNIT_SQUARE,
         &mut source_color_session,
     )
     .expect("media input transform")
@@ -12829,6 +13604,8 @@ fn preview_multilayer_color_output_matches_export_frame_hash() {
         transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
         effect_graph: Arc::clone(&effect_graph),
         frame_seed: 14,
+
+        processor_input_plan: None,
     };
     let color_context =
         test_color_context_in_working(ColorSpace::Srgb, WorkingColorSpace::LinearRec2020);
@@ -12840,15 +13617,23 @@ fn preview_multilayer_color_output_matches_export_frame_hash() {
             blend_mode: BlendMode::Multiply,
             transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
             effect_graph: Arc::clone(&effect_graph),
-            prepared_heterogeneous_route: None,
+            prepared_effect_route: None,
             frame_seed: 7,
         },
         ResolvedPreviewElement::SolidColor(solid.clone()),
     ];
     let mut preview_scratch = TimelineCompositeScratch::default();
     let preview_service = WindowPreviewAdapter::new();
-    let preview = composite_resolved_preview(2, 2, &resolved, &color_context, &mut preview_scratch)
-        .expect("preview multilayer composite");
+    let preview = composite_resolved_preview(
+        2,
+        2,
+        &resolved,
+        &color_context,
+        mondrian_core::ImageSampling::UNIT_SQUARE,
+        &mut preview_scratch,
+        &mut mondrian_effects::EffectProcessorControl::uncancelled(),
+    )
+    .expect("preview multilayer composite");
     preview_service.record_cpu_execution_evidence(&preview);
 
     let export_media_working = media.working_frame().expect("export media working frame");
@@ -12860,6 +13645,8 @@ fn preview_multilayer_color_output_matches_export_frame_hash() {
             transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
             effect_graph,
             frame_seed: 7,
+
+            processor_input_plan: None,
         }),
         TimelineCompositeElement::SolidColor(solid),
     ];
@@ -12873,8 +13660,10 @@ fn preview_multilayer_color_output_matches_export_frame_hash() {
             TimelineEffectColorRuntime::new(
                 color_context.engine(),
                 color_context.working_color_space(),
+                mondrian_core::ImageSampling::UNIT_SQUARE,
             ),
             &mut export_scratch,
+            &mut mondrian_effects::EffectProcessorControl::uncancelled(),
         )
         .expect("composite multilayer export frame");
     let export_boundary = ProgramOutputBoundary::from_intent(
@@ -15302,6 +16091,7 @@ fn current_media_grant_rejection_is_blocked_without_phantom_pending_work() {
         height: sequence.settings.resolution.height,
     };
     let request = crate::app::preview_timeline_execution::PreviewTimelineMediaRequest {
+        image_scale_requirement: mondrian_effects::EffectImageScaleRequirement::Any,
         asset_id,
         color_space_override: None,
         alpha_interpretation: AlphaInterpretation::Straight,
@@ -18718,7 +19508,7 @@ fn retired_transport_releases_cpu_evaluation_guards_without_clearing_store() {
             blend_mode: BlendMode::Normal,
             transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
             effect_graph: mondrian_effects::identity_compiled_effect_graph().expect("identity"),
-            prepared_heterogeneous_route: None,
+            prepared_effect_route: None,
             frame_seed: 0,
         })
         .collect::<Vec<_>>();
@@ -18726,6 +19516,7 @@ fn retired_transport_releases_cpu_evaluation_guards_without_clearing_store() {
     set.insert(
         key,
         Arc::new(ResolvedFrameEvaluation {
+            sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
             cpu_materialization_active_bytes: 0,
             key,
             output_key: output.clone(),
@@ -18792,7 +19583,7 @@ fn ticketless_gpu_inputs_retain_physical_residency_without_current_protection() 
         blend_mode: BlendMode::Normal,
         transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
         effect_graph: mondrian_effects::identity_compiled_effect_graph().expect("identity"),
-        prepared_heterogeneous_route: None,
+        prepared_effect_route: None,
         frame_seed: 0,
     }];
     let gpu_guards = resolved_preview_media_residency(&elements);
@@ -18812,6 +19603,384 @@ fn ticketless_gpu_inputs_retain_physical_residency_without_current_protection() 
     assert!(
         store.media_frame(&key).is_some(),
         "GPU completion does not clear cached media"
+    );
+}
+
+fn uncacheable_cpu_adjustment_fixture() -> (AppState, Arc<std::sync::atomic::AtomicUsize>) {
+    use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+    static NEXT_TYPE: AtomicU64 = AtomicU64::new(1);
+    let effect_type = mondrian_effects::EffectType::External(format!(
+        "test.preview.cpu-working-once.{}",
+        NEXT_TYPE.fetch_add(1, Ordering::Relaxed)
+    ));
+    let calls = Arc::new(AtomicUsize::new(0));
+    let processor_calls = Arc::clone(&calls);
+    mondrian_effects::register_effect_definition(
+        mondrian_effects::EffectDefinition::new(
+            effect_type.key(),
+            "CPU working once",
+            Default::default(),
+            mondrian_effects::EffectColorDomainContract::SCENE_LINEAR,
+        )
+        .with_execution_contract(mondrian_effects::EffectExecutionContract {
+            execution_modes: mondrian_effects::EffectExecutionModes::CPU_F32,
+            determinism: mondrian_effects::EffectDeterminism::Nondeterministic,
+            state_model: mondrian_effects::EffectStateModel::Stateless,
+            temporal_input: mondrian_effects::EffectTemporalInputExtent::CURRENT_FRAME,
+            roi_propagation: mondrian_effects::EffectRoiPropagation::UnknownRequiresFullFrame,
+            resource_lifetime: mondrian_effects::EffectResourceLifetime::Frame,
+            topology: mondrian_effects::EffectGraphTopology::LinearChain,
+        })
+        .with_custom_float_render_backend(
+            Arc::new(|_, _| Ok(Some(serde_json::json!({})))),
+            None,
+            EffectCachePolicy::Uncacheable,
+            Arc::new(move |pixels, _, _| {
+                let invocation = processor_calls.fetch_add(1, Ordering::SeqCst) + 1;
+                for pixel in pixels {
+                    *pixel = [invocation as f32, 0.25, 0.5, 1.0];
+                }
+                Ok(())
+            }),
+        ),
+    )
+    .expect("register actual uncacheable CPU processor");
+    ensure_test_ocio_loaded();
+    let mut sequence = Sequence::new("CPU single completion");
+    sequence.settings = sequence.settings.with_resolution(4, 4);
+    sequence.settings.preview.resolution_scale = 1.0;
+    let tb = sequence.time_base();
+    sequence.video_tracks[0]
+        .add_clip(
+            Clip::new_solid_color(
+                AssetId::new(),
+                Color::from_hex(0x244C7A),
+                tt(0, tb),
+                tt(24, tb),
+            )
+            .expect("solid"),
+        )
+        .expect("solid track");
+    let mut adjustment =
+        Clip::new_adjustment_layer(AssetId::new(), tt(0, tb), tt(24, tb)).expect("adjustment");
+    adjustment.add_effect_node(mondrian_effects::EffectNode::new(effect_type));
+    let mut track = Track::new_video("CPU Adjustment");
+    track.add_clip(adjustment).expect("CPU adjustment track");
+    sequence.video_tracks.push(track);
+    let mut state = AppState::new();
+    state.test_set_sequence(Some(sequence));
+    state.seek(4).expect("seek exact frame");
+    pin_standard_execution_resources(&mut state);
+    (state, calls)
+}
+
+struct CpuWorkingCandidateObservation {
+    frame: Box<PreviewGpuFrame>,
+    completed_scope:
+        Option<super::super::preview_processor_feedback::PreviewProcessorFeedbackScope>,
+    completed_feedback:
+        Option<super::super::preview_processor_feedback::PreviewProcessorFeedbackUpdate>,
+}
+
+fn await_cpu_working_candidate(
+    runtime: &PreviewProductionRuntime<()>,
+    state: &AppState,
+) -> CpuWorkingCandidateObservation {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        runtime.pump_cpu_fallback_results();
+        let scope = runtime.current_processor_feedback_scope.get();
+        let feedback = runtime.pending_processor_feedback.borrow().clone();
+        match execute_gpu_preview_for_test_app(runtime, state) {
+            PreviewGpuFrameState::Ready(frame) => {
+                return CpuWorkingCandidateObservation {
+                    frame,
+                    completed_scope: scope,
+                    completed_feedback: feedback,
+                }
+            }
+            PreviewGpuFrameState::Loading | PreviewGpuFrameState::Prepared => {}
+            PreviewGpuFrameState::Unavailable(reason) => {
+                panic!("CPU working unavailable: {}", reason.detail())
+            }
+            _ => panic!("uncacheable CPU completion bypassed GPU candidate"),
+        }
+        assert!(
+            Instant::now() < deadline,
+            "actual CPU working completion deadline"
+        );
+        std::thread::yield_now();
+    }
+}
+
+fn cpu_candidate_red(frame: &PreviewGpuFrame) -> f32 {
+    let PreviewGpuWorkingInput::GpuComposite { layers } = &frame.working_input;
+    assert_eq!(
+        layers.len(),
+        1,
+        "whole CPU compositor must supply one working upload"
+    );
+    let Some(ViewerGpuSourceLayer::Media { frame: Some(working), .. }) =
+        viewer_gpu_source_layer(&layers[0])
+    else {
+        panic!("actual working upload missing");
+    };
+    assert_eq!(
+        working.rgba_f32().data.len(),
+        frame.width as usize * frame.height as usize
+    );
+    let red = working.rgba_f32().data[0][0];
+    assert!(working.rgba_f32().data.iter().all(|pixel| pixel[0] == red));
+    red
+}
+
+#[test]
+fn cpu_working_uncacheable_completion_executes_each_exact_attempt_once() {
+    use std::sync::atomic::Ordering;
+    let (state, calls) = uncacheable_cpu_adjustment_fixture();
+    let runtime = PreviewProductionRuntime::<()>::new_without_workers_for_test();
+    runtime.synchronize_transport_intent(state.preview_transport_intent());
+    let first = await_cpu_working_candidate(&runtime, &state).frame;
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        1,
+        "first actual CPU invocation"
+    );
+    assert_eq!(cpu_candidate_red(&first), 1.0, "first actual CPU pixels");
+    let first_key = first.output_key.clone();
+    drop(first);
+    let second = await_cpu_working_candidate(&runtime, &state).frame;
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        2,
+        "uncacheable CPU completion must not be reused by a later execution attempt"
+    );
+    assert_eq!(cpu_candidate_red(&second), 2.0, "second actual CPU pixels");
+    assert_ne!(
+        second.output_key, first_key,
+        "independent attempts require exact output identities"
+    );
+}
+
+#[test]
+fn cpu_working_gpu_upload_preserves_exact_completed_scalar_feedback_scope() {
+    use std::sync::atomic::Ordering;
+    let (state, calls) = uncacheable_cpu_adjustment_fixture();
+    let runtime = PreviewProductionRuntime::<()>::new_without_workers_for_test();
+    runtime.synchronize_transport_intent(state.preview_transport_intent());
+    let CpuWorkingCandidateObservation { frame, completed_scope, completed_feedback } =
+        await_cpu_working_candidate(&runtime, &state);
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        1,
+        "actual complete CPU callback"
+    );
+    assert_eq!(cpu_candidate_red(&frame), 1.0);
+    let scope = completed_scope.expect("actual CPU completion scope");
+    assert!(matches!(
+        scope.key,
+        Some(super::super::preview_processor_feedback::PreviewProcessorWorkKey::Scalar { .. })
+    ));
+    assert_eq!(
+        completed_feedback.as_ref().map(|update| update.scope),
+        Some(scope)
+    );
+    assert_eq!(
+        runtime.current_processor_feedback_scope.get(),
+        Some(scope),
+        "identity GPU upload must retain the actual completed scalar feedback scope"
+    );
+    assert_eq!(
+        *runtime.pending_processor_feedback.borrow(),
+        completed_feedback,
+        "GPU upload must not replace completed native feedback with a retired empty view"
+    );
+}
+
+#[test]
+fn cpu_working_candidate_owns_pixels_after_exact_single_use_detachment() {
+    let (state, _) = uncacheable_cpu_adjustment_fixture();
+    let runtime = PreviewProductionRuntime::<()>::new_without_workers_for_test();
+    runtime.synchronize_transport_intent(state.preview_transport_intent());
+    let frame = await_cpu_working_candidate(&runtime, &state).frame;
+    let bytes = frame.width as usize * frame.height as usize * std::mem::size_of::<[f32; 4]>();
+    assert!(
+        runtime
+            .frame_store
+            .borrow_mut()
+            .viewer_working_frame(&frame.output_key)
+            .is_none(),
+        "an uncacheable CPU result is consumed once by its exact GPU candidate"
+    );
+    assert_eq!(
+        runtime.frame_store.borrow().diagnostics().viewer_aggregate_reserved_bytes,
+        bytes
+    );
+    runtime.frame_store.borrow_mut().clear_viewer_frames();
+    assert_eq!(
+        runtime.frame_store.borrow().diagnostics().viewer_aggregate_reserved_bytes,
+        bytes,
+        "clearing cache records cannot release candidate-owned working pixels"
+    );
+    assert_eq!(cpu_candidate_red(&frame), 1.0);
+    drop(frame);
+    assert_eq!(
+        runtime.frame_store.borrow().diagnostics().viewer_aggregate_reserved_bytes,
+        0
+    );
+}
+
+#[test]
+fn raster_transition_retires_scalar_feedback_without_releasing_candidate_pixels_early() {
+    let (state, _) = uncacheable_cpu_adjustment_fixture();
+    let runtime = PreviewProductionRuntime::<()>::new_without_workers_for_test();
+    runtime.synchronize_transport_intent(state.preview_transport_intent());
+    let snapshot = state.preview_execution_snapshot(Instant::now());
+    let frame = await_cpu_working_candidate(&runtime, &state).frame;
+    let bytes = frame.width as usize * frame.height as usize * std::mem::size_of::<[f32; 4]>();
+    let previous_scope = runtime.current_processor_feedback_scope.get().expect("scalar scope");
+    assert!(runtime.set_raster_requirement(PreviewRasterRequirement::CanonicalProgram));
+    let retired_scope = runtime.current_processor_feedback_scope.get().expect("retired view");
+    assert_ne!(retired_scope, previous_scope);
+    assert!(retired_scope.key.is_none());
+    assert_eq!(
+        runtime.frame_store.borrow().diagnostics().viewer_aggregate_reserved_bytes,
+        bytes,
+        "raster generation retirement must retain the candidate's physical pixel charge"
+    );
+    assert_eq!(cpu_candidate_red(&frame), 1.0);
+    assert!(
+        runtime.bind_staged_gpu_frame_for_current(frame, &snapshot).is_none(),
+        "equal raster extents cannot authorize an old CPU generation"
+    );
+    assert_eq!(
+        runtime.frame_store.borrow().diagnostics().viewer_aggregate_reserved_bytes,
+        0,
+        "the charge retires only after the exact candidate owner is dropped"
+    );
+}
+
+#[test]
+fn cpu_working_sequential_frames_resume_after_exact_submission_owner_retirement() {
+    use super::super::viewer_gpu_submission::{
+        ViewerGpuSubmissionLifecycle, ViewerGpuSubmissionPoll,
+    };
+    use std::sync::atomic::Ordering;
+    let (mut state, calls) = uncacheable_cpu_adjustment_fixture();
+    let runtime = PreviewProductionRuntime::<()>::new_without_workers_for_test();
+    let bytes = 4 * 4 * std::mem::size_of::<[f32; 4]>();
+    runtime
+        .frame_store
+        .borrow_mut()
+        .reconfigure(mondrian_playback::PreviewFrameStoreConfig {
+            viewer_byte_budget: bytes,
+            ..Default::default()
+        });
+    runtime.synchronize_transport_intent(state.preview_transport_intent());
+    let first = await_cpu_working_candidate(&runtime, &state).frame;
+    assert_eq!((first.width, first.height), (4, 4));
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert_eq!(cpu_candidate_red(&first), 1.0);
+    let first_key = first.output_key.clone();
+    let mut submissions = ViewerGpuSubmissionLifecycle::<Box<PreviewGpuFrame>, ()>::new();
+    let mut callback = None;
+    let now = Instant::now();
+    let first_submission = submissions.reserve().expect("one actual owner slot").commit(
+        first,
+        now + Duration::from_secs(10),
+        |registered| callback = Some(registered),
+        || {},
+    );
+    state.seek(5).expect("next exact Sequence frame");
+    runtime.synchronize_transport_intent(state.preview_transport_intent());
+    let blocked_deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        runtime.pump_cpu_fallback_results();
+        match execute_gpu_preview_for_test_app(&runtime, &state) {
+            PreviewGpuFrameState::Unavailable(reason) => {
+                assert_eq!(
+                    reason.detail(),
+                    "Viewer working pixels exceed their shared live residency grant",
+                    "only the exact current live pixel grant may reject this successor"
+                );
+                break;
+            }
+            PreviewGpuFrameState::Loading | PreviewGpuFrameState::Prepared => {
+                assert_eq!(
+                    calls.load(Ordering::SeqCst),
+                    1,
+                    "pending evaluation grants no second CPU callback"
+                );
+                assert_eq!(
+                    runtime.frame_store.borrow().diagnostics().viewer_aggregate_reserved_bytes,
+                    bytes,
+                    "the actual submitted owner retains exactly one frame"
+                );
+            }
+            PreviewGpuFrameState::Ready(_) => {
+                panic!("second frame was allocated before actual submission owner retirement")
+            }
+            PreviewGpuFrameState::Current(_) => {
+                panic!("new exact frame was mistaken for current output")
+            }
+            PreviewGpuFrameState::Transparent(_) => {
+                panic!("live pixel admission produced substitute transparency")
+            }
+        }
+        assert!(
+            Instant::now() < blocked_deadline,
+            "next exact attempt never reached its real live residency refusal; loading={:?}",
+            runtime.last_gpu_loading_reason.get()
+        );
+        std::thread::yield_now();
+    }
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        1,
+        "no unadmitted CPU callback"
+    );
+    assert_eq!(
+        runtime.frame_store.borrow().diagnostics().viewer_aggregate_reserved_bytes,
+        bytes
+    );
+    assert!(matches!(
+        submissions.poll(now),
+        ViewerGpuSubmissionPoll::Pending { .. }
+    ));
+    callback.take().expect("same submission completion channel")(());
+    let completed = match submissions.poll(Instant::now()) {
+        ViewerGpuSubmissionPoll::Completed(completed) => completed,
+        _ => panic!("exact completion must return its retained owner"),
+    };
+    assert_eq!(completed.submission_id, first_submission);
+    assert!(completed.quarantine_reason.is_none());
+    assert_eq!(
+        runtime.frame_store.borrow().diagnostics().viewer_aggregate_reserved_bytes,
+        bytes,
+        "polling completion is not the retirement of the returned owner"
+    );
+    drop(completed);
+    assert_eq!(
+        runtime.frame_store.borrow().diagnostics().viewer_aggregate_reserved_bytes,
+        0
+    );
+    let second = await_cpu_working_candidate(&runtime, &state).frame;
+    assert_eq!(second.frame, 5);
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        2,
+        "the next frame executes after exact retirement"
+    );
+    assert_eq!(cpu_candidate_red(&second), 2.0);
+    assert_ne!(second.output_key, first_key);
+    assert_eq!(
+        runtime.frame_store.borrow().diagnostics().viewer_aggregate_reserved_bytes,
+        bytes
+    );
+    drop(second);
+    assert_eq!(
+        runtime.frame_store.borrow().diagnostics().viewer_aggregate_reserved_bytes,
+        0
     );
 }
 
@@ -19112,29 +20281,59 @@ fn canonical_program_raster_preserves_nested_canvases_with_equal_root_extent() {
         .settings
         .root_program_color_context(state.project_color_environment())
         .expect("Program context");
-    let PreviewTimelineResolution::Ready(viewer) =
-        runtime.resolve_timeline_for_test(&snapshot, &state, sequence, 4, 64, 32, context.clone())
-    else {
-        panic!("nested Viewer must resolve");
+    let resolve = |context: ProgramColorContext| {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut preparation = None;
+        loop {
+            runtime.poll_playback_work(None, snapshot.transport().intent());
+            match runtime.resolve_timeline_for_test(
+                &snapshot,
+                &state,
+                sequence,
+                4,
+                64,
+                32,
+                context.clone(),
+                preparation.take(),
+            ) {
+                PreviewTimelineResolution::Ready(ready) => break ready,
+                PreviewTimelineResolution::Pending { preparation: pending, .. } => {
+                    preparation = Some(pending)
+                }
+                other => panic!("nested raster preparation failed: {other:?}"),
+            }
+            assert!(
+                Instant::now() < deadline,
+                "nested raster did not finish its original preparation"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
     };
+    let viewer = resolve(context.clone());
     assert_eq!(
         viewer.semantic_trace.nodes[1].execution_resolution,
         Resolution { width: 8, height: 4 }
     );
-    let PreviewGpuFrameState::Ready(staged) = execute_gpu_preview_for_test_app(&runtime, &state)
-    else {
-        panic!("nested Viewer candidate must resolve");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let staged = loop {
+        runtime.poll_playback_work(None, snapshot.transport().intent());
+        match execute_gpu_preview_for_test_app(&runtime, &state) {
+            PreviewGpuFrameState::Ready(staged) => break staged,
+            PreviewGpuFrameState::Loading => {}
+            _ => panic!("nested Viewer candidate must resolve to Ready"),
+        }
+        assert!(
+            Instant::now() < deadline,
+            "nested GPU candidate did not resolve"
+        );
+        std::thread::sleep(Duration::from_millis(1));
     };
     runtime.set_raster_requirement(PreviewRasterRequirement::CanonicalProgram);
     assert!(
         runtime.bind_staged_gpu_frame_for_current(staged, &snapshot).is_none(),
         "equal root extents cannot authorize a reduced nested canvas"
     );
-    let PreviewTimelineResolution::Ready(program) =
-        runtime.resolve_timeline_for_test(&snapshot, &state, sequence, 4, 64, 32, context)
-    else {
-        panic!("nested canonical Program must resolve");
-    };
+    let program = resolve(context);
     assert_eq!(
         program.semantic_trace.nodes[0].execution_resolution,
         Resolution { width: 64, height: 32 }
@@ -19199,3 +20398,614 @@ fn canonical_program_raster_uses_full_source_in_current_and_future_media() {
     drop(state);
     std::fs::remove_dir_all(root).expect("remove fixture");
 }
+
+#[test]
+fn preview_empty_output_preserves_owner_sampling_and_separates_memory_identity() {
+    let context = test_color_context(ColorSpace::Rec709);
+    let sampling = mondrian_core::ImageSampling::from_full_raster(
+        mondrian_core::SampleAspectRatio::new(4, 3).unwrap(),
+        mondrian_core::Resolution { width: 7, height: 9 },
+        mondrian_core::Resolution { width: 3, height: 5 },
+    )
+    .unwrap();
+    let sequence = SequenceId::new();
+    let key = viewer_preview_cache_key_for_resolved_plan(sequence, 3, 5, &[], &context, sampling);
+    let other = viewer_preview_cache_key_for_resolved_plan(
+        sequence,
+        3,
+        5,
+        &[],
+        &context,
+        mondrian_core::ImageSampling::UNIT_SQUARE,
+    );
+    assert_ne!(
+        key, other,
+        "same empty canvas cannot reuse a different sampling contract"
+    );
+    let output = composite_resolved_preview_working(
+        3,
+        5,
+        &[],
+        &context,
+        sampling,
+        &mut TimelineCompositeScratch::default(),
+        &mut mondrian_effects::EffectProcessorControl::uncancelled(),
+    )
+    .unwrap();
+    let actual = output.frame.rgba_f32();
+    assert_eq!(actual.sampling, sampling);
+    assert_eq!((actual.width, actual.height), (3, 5));
+    assert_eq!(actual.data, vec![[0.0, 0.0, 0.0, 0.0]; 15]);
+}
+
+#[test]
+fn unit_media_requests_use_original_full_cpu_without_changing_any_clip_quality() {
+    use crate::app::preview_timeline_execution::{
+        collect_preview_timeline_media_demands, unit_scale_test_effect,
+    };
+    use mondrian_effects::EffectImageScaleRequirement;
+    let (mut state, asset, root) = state_with_invalid_video_asset_for_cpu_rgb(true);
+    // The shared CPU-RGB helper retains Limited probe levels. This proxy
+    // identity fixture explicitly interprets the RGB source as Full range.
+    let library = state.asset_library().unwrap();
+    let mut interpretation = library.get_asset(asset).unwrap().unwrap().interpretation;
+    interpretation.range = mondrian_core::timeline_data::MediaRangeInterpretation::Override {
+        range: mondrian_core::timeline_data::MediaSignalRange::Full,
+    };
+    library.set_asset_interpretation(asset, interpretation).unwrap();
+    let mut sequence = Sequence::new("Unit and Any media");
+    let tb = sequence.time_base();
+    let mut unit = Clip::new(asset, tt(0, tb), tt(24, tb)).unwrap();
+    unit.media_interpretation_mut().unwrap().field_order_override =
+        Some(mondrian_core::timeline_data::FieldOrder::Progressive);
+    unit.add_effect_node(unit_scale_test_effect());
+    let left_id = unit.id;
+    let mut any = Clip::new(asset, tt(24, tb), tt(24, tb)).unwrap();
+    // The transition starts one frame before this Clip's visible in-edge.
+    any.set_source_origin(tt(1, tb)).unwrap();
+    any.media_interpretation_mut().unwrap().field_order_override =
+        Some(mondrian_core::timeline_data::FieldOrder::Progressive);
+    let right_id = any.id;
+    sequence.video_tracks[0].add_clip(unit).unwrap();
+    sequence.video_tracks[0].add_clip(any).unwrap();
+    sequence
+        .video_transitions
+        .push(mondrian_timeline::VideoTransition::cross_dissolve(
+            left_id,
+            right_id,
+            mondrian_core::TimelineTimeRange::new(tt(23, tb), tt(2, tb)).unwrap(),
+        ));
+    state.test_set_sequence(Some(sequence));
+    let document = state.authoring.as_mut().unwrap().document_mut_for_test_fixture();
+    document.settings.proxy_enabled = true;
+    document.settings.cache_dir = Some(root.join("cache"));
+    document.proxy_mode_assets.insert(asset);
+    let runtime = PreviewProductionRuntime::<()>::new_without_workers_for_test();
+    let sequence = state.active_sequence().unwrap();
+    let snapshot = state.preview_execution_snapshot(Instant::now());
+    let context = sequence
+        .settings
+        .root_program_color_context(state.project_color_environment())
+        .unwrap();
+    let target = Resolution { width: 3, height: 2 };
+    let quality = mondrian_media::PreviewRepresentationQuality::Reduced {
+        divisor: std::num::NonZeroU32::new(4).unwrap(),
+    };
+    for frame in [0, 1, 23, 24, 25] {
+        let requests = collect_preview_timeline_media_demands(
+            sequence,
+            &[],
+            frame,
+            target,
+            mondrian_playback::PreviewResolutionScale::Quarter,
+            context.clone(),
+        )
+        .unwrap();
+        assert!(!requests.is_empty());
+        for request in requests {
+            let key = runtime
+                .media_preview_key_for_timeline_request(
+                    &snapshot,
+                    &state,
+                    &request,
+                    quality,
+                    false,
+                    request.image_scale_requirement == EffectImageScaleRequirement::Unit,
+                )
+                .unwrap();
+            assert_eq!(request.target_resolution, target);
+            assert_eq!(key.decode.source().path(), root.join("source.mp4"));
+            match request.image_scale_requirement {
+                EffectImageScaleRequirement::Unit => {
+                    assert_eq!(
+                        key.decode.representation(),
+                        mondrian_media::PreviewDecodeRepresentation::NativeCpu
+                    );
+                    assert!(request.cpu_working_required);
+                }
+                EffectImageScaleRequirement::Any => {
+                    assert_eq!(
+                        key.decode.representation(),
+                        mondrian_media::PreviewDecodeRepresentation::Reduced {
+                            divisor: std::num::NonZeroU32::new(4).unwrap()
+                        }
+                    );
+                }
+            }
+        }
+    }
+    // Install the same closed fresh-proxy manifest used by source-resolution
+    // tests. No decoder runs in this identity/admission regression.
+    let author = snapshot.authoring().unwrap();
+    let asset_record = author.asset_library().get_asset(asset).unwrap().unwrap();
+    let proxy_color = crate::app::proxy_generation::resolve_asset_proxy_color_contract(
+        &asset_record,
+        &context.media_input(false),
+    )
+    .unwrap();
+    assert_eq!(proxy_color.source_range(), DecodedVideoRange::Full);
+    assert_eq!(
+        proxy_color.source_matrix(),
+        mondrian_media::DecodedVideoMatrix::Rgb
+    );
+    let generator = mondrian_media::ProxyGenerator::new(author.proxy().config().clone());
+    let source_path = root.join("source.mp4");
+    let proxy_path = generator.proxy_path(&source_path, proxy_color).unwrap();
+    std::fs::create_dir_all(proxy_path.parent().unwrap()).unwrap();
+    std::fs::write(&proxy_path, b"closed proxy identity fixture").unwrap();
+    std::fs::write(
+        mondrian_media::ProxyGenerator::manifest_path(&proxy_path),
+        serde_json::to_vec(&generator.expected_manifest(&source_path, proxy_color).unwrap())
+            .unwrap(),
+    )
+    .unwrap();
+    for frame in [1, 25] {
+        let requests = collect_preview_timeline_media_demands(
+            sequence,
+            &[],
+            frame,
+            target,
+            mondrian_playback::PreviewResolutionScale::Quarter,
+            context.clone(),
+        )
+        .unwrap();
+        let key = runtime
+            .media_preview_key_for_timeline_request(
+                &snapshot,
+                &state,
+                &requests[0],
+                quality,
+                false,
+                true,
+            )
+            .unwrap();
+        if frame == 1 {
+            assert_eq!(key.decode.source().path(), source_path.as_path());
+            assert_eq!(
+                key.decode.representation(),
+                mondrian_media::PreviewDecodeRepresentation::NativeCpu
+            );
+        } else {
+            assert_eq!(key.decode.source().path(), proxy_path.as_path());
+            // Proxy selects the source artifact; Quarter independently selects
+            // the decode representation within that artifact's own raster.
+            let source_extent = Resolution { width: 1280, height: 720 };
+            assert_eq!(key.decode.source().source_extent(), source_extent);
+            assert_eq!(key.decode.source().video_stream_index(), 0);
+            assert_eq!(
+                key.decode.representation(),
+                mondrian_media::PreviewDecodeRepresentation::ReducedCompactCpuYuv {
+                    divisor: std::num::NonZeroU32::new(4).unwrap()
+                }
+            );
+            assert_eq!(
+                key.decode.representation().extent_for_source(source_extent),
+                Resolution { width: 320, height: 180 }
+            );
+        }
+    }
+    // The same request resolver serves current and lookahead demand identity.
+    let future = runtime
+        .future_media_frame_keys_at_scale_for_test(
+            &snapshot,
+            &state,
+            sequence,
+            1,
+            mondrian_playback::PreviewResolutionScale::Quarter,
+            target,
+            context.clone(),
+        )
+        .unwrap();
+    assert!(!future.is_empty());
+    assert!(future
+        .iter()
+        .all(|key| key.decode.representation()
+            == mondrian_media::PreviewDecodeRepresentation::NativeCpu));
+    // The lookahead seam resolves one exact frame, including both transition
+    // endpoints. Its keys must match Current for Unit and ordinary proxy input.
+    for frame in [23, 24, 25] {
+        let requests = collect_preview_timeline_media_demands(
+            sequence,
+            &[],
+            frame,
+            target,
+            mondrian_playback::PreviewResolutionScale::Quarter,
+            context.clone(),
+        )
+        .unwrap();
+        let current: std::collections::HashSet<_> = requests
+            .iter()
+            .map(|request| {
+                runtime
+                    .media_preview_key_for_timeline_request(
+                        &snapshot, &state, request, quality, false, false,
+                    )
+                    .unwrap()
+            })
+            .collect();
+        let future = runtime
+            .future_media_frame_keys_at_scale_for_test(
+                &snapshot,
+                &state,
+                sequence,
+                frame,
+                mondrian_playback::PreviewResolutionScale::Quarter,
+                target,
+                context.clone(),
+            )
+            .unwrap();
+        assert_eq!(
+            future.len(),
+            requests.len(),
+            "frame {frame} demand cardinality"
+        );
+        assert_eq!(
+            future.into_iter().collect::<std::collections::HashSet<_>>(),
+            current,
+            "frame {frame} Current and lookahead must preserve the same source requirements"
+        );
+    }
+    runtime.shutdown();
+    drop(state);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+#[ignore = "requires current Product and owned SessionProbe image_sampling_media mode"]
+fn openfx_unit_media_original_decode_reaches_native_before_preview_downscale() {
+    use crate::app::preview_timeline_execution::{
+        resolve_preview_timeline_with_programs, PreviewTimelineMediaFrame,
+    };
+    use crate::openfx_effect::register_selected_openfx_filter;
+    use mondrian_core::timeline_data::PixelAspectRatio;
+    use mondrian_core::{PropertyValue, SampleAspectRatio};
+    use mondrian_effects::{
+        instantiate_effect_node, EffectImageScaleRequirement, EffectProcessorControl,
+        EffectProcessorExecutionOrigin, EffectProcessorStopReason, EffectProjectGeometry,
+    };
+    const TEST: &str = "app::preview_runtime::tests::openfx_unit_media_original_decode_reaches_native_before_preview_downscale";
+    if !crate::openfx_host::shared_frame_tests::qualification_child(
+        TEST,
+        &[("MONDRIAN_OPENFX_SESSION_PROBE_MODE", "image_sampling_media")],
+    ) {
+        return;
+    }
+    ensure_test_ocio_loaded();
+    let helper =
+        PathBuf::from(std::env::var_os("MONDRIAN_OPENFX_TEST_HELPER").expect("pinned Product"));
+    let binary = PathBuf::from(
+        std::env::var_os("MONDRIAN_OPENFX_SESSION_PROBE_BINARY").expect("owned SessionProbe"),
+    );
+    let inspection = crate::openfx_adapter::inspect_openfx_binary(&helper, &binary).unwrap();
+    let identifier = "uk.co.thefoundry.BasicGainPlugin";
+    let description =
+        crate::openfx_host::describe_openfx_filter(&helper, &inspection, identifier).unwrap();
+    let scale_label = &description.parameters.iter().find(|row| row.name == "scale").unwrap().label;
+    let kind = register_selected_openfx_filter(&helper, &inspection, identifier).unwrap();
+    let mut effect = instantiate_effect_node(kind.clone()).unwrap();
+    let scale = effect
+        .properties
+        .iter()
+        .find(|(_, row)| row.descriptor.display_name == *scale_label)
+        .unwrap()
+        .1
+        .descriptor
+        .parameter_id()
+        .clone();
+    effect
+        .set_static_value_by_parameter(&scale, PropertyValue::Double(0.5))
+        .unwrap();
+    let initial_status = mondrian_effects::effect_extension_runtime_status(&kind.key()).unwrap();
+    assert!(!initial_status.disabled);
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("native-original.ppm");
+    let mut ppm = b"P6\n3 5\n255\n".to_vec();
+    ppm.extend_from_slice(&[255, 0, 0].repeat(15));
+    std::fs::write(&path, ppm).unwrap();
+    let source = path.canonicalize().unwrap();
+    // Keep the real PPM probe untouched. PAR is a public Clip interpretation,
+    // independent of both this file's metadata and the Sequence owner window.
+    let info = mondrian_media::probe_media_info(&source).unwrap();
+    let stream = info.primary_video().unwrap();
+    assert_eq!((stream.width, stream.height), (3, 5));
+    let library = AssetLibrary::open(root.path().join("library")).unwrap();
+    let asset = commit_preview_test_media(&library, source.clone(), info);
+    let registered_source = library
+        .get_asset(asset)
+        .unwrap()
+        .unwrap()
+        .file_path()
+        .expect("registered original file")
+        .to_path_buf();
+    // Asset Library persists ordinary Windows paths; canonical I/O may use
+    // a verbatim prefix. Both spellings must still identify the original file.
+    assert_eq!(registered_source.canonicalize().unwrap(), source);
+    let mut state = AppState::new();
+    pin_standard_execution_resources(&mut state);
+    *state.test_project_color_environment_mut() =
+        mondrian_core::ProjectColorEnvironment::new(mondrian_core::ColorEngine::Aces {
+            preset: mondrian_core::AcesConfigPreset::StudioV4Aces2Ocio25,
+        });
+    state.test_set_asset_library(Some(library));
+    let mut sequence = Sequence::new("Original media through native before Preview scale");
+    let owner_extent = Resolution { width: 10, height: 7 };
+    sequence.settings.resolution = owner_extent;
+    sequence.settings.pixel_aspect_ratio = PixelAspectRatio::Anamorphic2x;
+    sequence.settings.color.working_color_space = WorkingColorSpace::LinearRec709;
+    let tb = sequence.time_base();
+    let mut clip = mondrian_timeline::clip::Clip::new(asset, tt(0, tb), tt(24, tb)).unwrap();
+    let interpretation = clip.media_interpretation_mut().unwrap();
+    interpretation.pixel_aspect_ratio_override = Some(PixelAspectRatio::HdAnamorphic1080);
+    interpretation.field_order_override =
+        Some(mondrian_core::timeline_data::FieldOrder::Progressive);
+    interpretation.color_space_override = Some(ColorSpace::LinearRec709);
+    // Source canonical width is 3 * 4/3 = 4. This authored transform fills
+    // the 10x7 raster before the real 2x2 then 3x2 Preview projections,
+    // without changing the author affine or adding a fit shim.
+    clip.transform.set_scale(glam::Vec2::new(2.5, 1.4));
+    clip.add_effect_node(effect);
+    sequence.video_tracks[0].add_clip(clip).unwrap();
+    state.test_set_sequence(Some(sequence));
+    let document = state.authoring.as_mut().unwrap().document_mut_for_test_fixture();
+    document.settings.proxy_enabled = true;
+    document.settings.cache_dir = Some(root.path().join("cache"));
+    document.proxy_mode_assets.insert(asset);
+    let runtime = PreviewProductionRuntime::<()>::new_without_workers_for_test();
+    let mut decoder = mondrian_media::PreviewDecodeSessionContext::new();
+    let programs = RefCell::new(mondrian_renderer::PreparedVisualProgramCache::default());
+    let scratch = RefCell::new(TimelineCompositeScratch::default());
+    let cancellation = mondrian_core::ExecutionCancellationToken::new();
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let sequence = state.active_sequence().unwrap();
+        let snapshot = state.preview_execution_snapshot(Instant::now());
+        let author = state.authoring.as_ref().unwrap();
+        let document_before = serde_json::to_value(author.document()).unwrap();
+        let history_before = author.history().diagnostics();
+        let generation_before = author.author_generation();
+        let mut native_identity = None;
+        let mut total_decoded = 0;
+        for (target, scales, pixel_count, invocation) in [
+            (
+                Resolution { width: 2, height: 2 },
+                [Rational::new(1, 5), Rational::new(2, 7)],
+                4,
+                1,
+            ),
+            (
+                Resolution { width: 3, height: 2 },
+                [Rational::new(3, 10), Rational::new(2, 7)],
+                6,
+                2,
+            ),
+        ] {
+            let context = sequence
+                .settings
+                .root_program_color_context(state.project_color_environment())
+                .unwrap();
+            let mut decoded_count = 0;
+            let resolved = resolve_preview_timeline_with_programs(
+                sequence,
+                &[],
+                0,
+                target,
+                mondrian_playback::PreviewResolutionScale::Quarter,
+                context,
+                &mut |request| {
+                    assert_eq!(
+                        request.image_scale_requirement,
+                        EffectImageScaleRequirement::Unit
+                    );
+                    assert!(request.cpu_working_required);
+                    assert_eq!(request.target_resolution, target);
+                    let key = runtime
+                        .media_preview_key_for_timeline_request(
+                            &snapshot,
+                            &state,
+                            &request,
+                            mondrian_media::PreviewRepresentationQuality::Reduced {
+                                divisor: std::num::NonZeroU32::new(4).unwrap(),
+                            },
+                            false,
+                            true,
+                        )
+                        .unwrap();
+                    assert_eq!(key.decode.source().path(), registered_source);
+                    assert_eq!(
+                        key.decode.representation(),
+                        mondrian_media::PreviewDecodeRepresentation::NativeCpu
+                    );
+                    assert_eq!(key.source_resolution, Resolution { width: 3, height: 5 });
+                    assert_eq!(
+                        key.picture_geometry.sample_aspect_ratio(),
+                        SampleAspectRatio::new(4, 3).unwrap()
+                    );
+                    let token = cancellation.clone();
+                    let decoded = crate::app::preview_media_task::decode_media_preview_with_context(
+                        MediaPreviewJob {
+                            key,
+                            generation: 0,
+                            priority: MediaPreviewRequestPriority::Current,
+                            access_mode: PreviewDecodeAccessMode::RandomAccessStillFrame,
+                            adaptive_hints: PreviewDecodeAdaptiveHints::default(),
+                            hardware_decode_request: PreviewHardwareDecodeRequest::Auto,
+                            hardware_decode_device_selector: None,
+                            enqueued_at: Instant::now(),
+                            deadline_at: None,
+                            demand_identity: None,
+                            execution_id: None,
+                            residency_work: None,
+                        },
+                        0,
+                        &mut decoder,
+                        move || token.is_canceled(),
+                    );
+                    assert!(!decoded.canceled);
+                    assert!(
+                        decoded.error.is_none(),
+                        "actual media decode: {:?}",
+                        decoded.error
+                    );
+                    let media = decoded.frame.expect("real decoded/prepared CPU source");
+                    assert_eq!((media.width(), media.height()), (3, 5));
+                    assert_eq!(
+                        media.logical_resolution(),
+                        Resolution { width: 3, height: 5 }
+                    );
+                    decoded_count += 1;
+                    total_decoded += 1;
+                    PreviewTimelineMediaFrame::Ready(media)
+                },
+                &mut |_| panic!("media-only qualification"),
+                &programs,
+                &scratch,
+            );
+            assert_eq!(decoded_count, 1);
+            let PreviewTimelineResolution::Ready(resolved) = resolved else {
+                panic!("original source must reach the complete CPU Clip route")
+            };
+            assert!(matches!(
+                resolved.plan.elements.as_slice(),
+                [
+                    crate::app::preview_viewer_plan::ResolvedPreviewElement::Media {
+                        prepared_effect_route: None,
+                        ..
+                    }
+                ]
+            ));
+            let expected_sampling =
+                mondrian_core::ImageSampling::new(SampleAspectRatio::new(2, 1).unwrap(), scales)
+                    .unwrap();
+            assert_eq!(resolved.plan.sampling, expected_sampling);
+            let mut checkpoint =
+                || cancellation.is_canceled().then_some(EffectProcessorStopReason::Canceled);
+            let mut control = EffectProcessorControl::new(&mut checkpoint);
+            let output = composite_resolved_preview_working(
+                target.width,
+                target.height,
+                &resolved.plan.elements,
+                &resolved.plan.color_context,
+                resolved.plan.sampling,
+                &mut scratch.borrow_mut(),
+                &mut control,
+            )
+            .unwrap();
+            let actual = output.frame.rgba_f32();
+            assert_eq!((actual.width, actual.height), (target.width, target.height));
+            assert_eq!(actual.sampling, expected_sampling);
+            assert_eq!(actual.data.len(), pixel_count);
+            // Real Basic gain .5 yields [.5,0,0,.5]. The independent Probe adds
+            // owner [20/64,7/64] and actual image PAR/16 = 1/12 to RGB.
+            // TimelineCompositeOptions::default() uses Transparent. Normal over
+            // zero coverage preserves straight RGB; the authored affine fills the
+            // target, yielding [.8125,.109375,1/12,.5] at every sample.
+            for pixel in &actual.data {
+                for (actual, expected) in pixel.iter().zip([0.8125_f32, 0.109375, 1.0 / 12.0, 0.5])
+                {
+                    assert!(
+                        (*actual - expected).abs() < 2.0e-6,
+                        "native→spatial literal: {actual} vs {expected}"
+                    );
+                }
+            }
+            let batch = control.take_feedback().unwrap();
+            assert_eq!(batch.len(), 1);
+            let receipt = batch.iter().next().unwrap();
+            assert_eq!(
+                (receipt.preparation.width, receipt.preparation.height),
+                (3, 5)
+            );
+            assert_eq!(
+                receipt.preparation.project_geometry,
+                Some(
+                    EffectProjectGeometry::new(10, 7, SampleAspectRatio::new(2, 1).unwrap())
+                        .unwrap()
+                )
+            );
+            assert!(matches!(
+                receipt.feedback.origin,
+                EffectProcessorExecutionOrigin::SupervisedChild { .. }
+            ));
+            assert_ne!(receipt.feedback.snapshot.native_owner(), 0);
+            assert_eq!(receipt.feedback.snapshot.invocation(), invocation);
+            let identity = (
+                receipt.effect_id,
+                receipt.preparation,
+                receipt.provider_revision,
+                receipt.feedback.owner,
+                receipt.feedback.origin,
+                receipt.feedback.snapshot.native_owner(),
+            );
+            if let Some(previous) = native_identity {
+                assert_eq!(
+                    identity, previous,
+                    "target raster changes retain the same original-source native owner"
+                );
+            }
+            native_identity = Some(identity);
+            assert_eq!(
+                scratch.borrow().effect_execution_diagnostics().processor_instances,
+                1
+            );
+            assert_eq!(
+                mondrian_effects::effect_extension_runtime_status(&kind.key()).unwrap(),
+                initial_status
+            );
+            assert_eq!(sequence.settings.resolution, owner_extent);
+            assert_eq!(
+                sequence.settings.pixel_aspect_ratio,
+                PixelAspectRatio::Anamorphic2x
+            );
+            assert_eq!(
+                serde_json::to_value(author.document()).unwrap(),
+                document_before
+            );
+            assert_eq!(author.history().diagnostics(), history_before);
+            assert_eq!(author.author_generation(), generation_before);
+        }
+        assert_eq!(
+            total_decoded, 2,
+            "both target rasters resolve through the actual decoder seam"
+        );
+    }));
+    // Retire the same bank synchronously and consume every Runtime owner even
+    // when an assertion unwinds. Preserve the original failure before cleanup assertions.
+    cancellation.cancel();
+    decoder.clear();
+    scratch
+        .borrow_mut()
+        .reconfigure_effect_execution(EffectExecutionSessionConfig::uncached(0));
+    let retired = scratch.borrow().effect_execution_diagnostics().processor_instances == 0;
+    drop(scratch);
+    drop(programs);
+    let shutdown = runtime.shutdown_and_wait();
+    drop(state);
+    if let Err(failure) = result {
+        std::panic::resume_unwind(failure);
+    }
+    assert!(retired);
+    assert!(shutdown.all_workers_terminated());
+    root.close().unwrap();
+}
+
+#[path = "../../../tests/protocol/preview_processor_sources.rs"]
+mod processor_source_tests;

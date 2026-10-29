@@ -30,6 +30,8 @@ use super::project_runtime::{
     ProjectRuntimeLease,
 };
 use super::*;
+#[cfg(any(test, feature = "validation"))]
+use crate::app::AppMessage;
 use anyhow::Context;
 #[cfg(test)]
 use mondrian_project::load_project_archive;
@@ -153,11 +155,16 @@ enum ProjectOpenPoll {
     Faulted(String),
 }
 
-/// App-owned pending close operation over one exact persistence generation.
+/// One exact Session's close, ordered through Audio before persistence.
 pub(super) struct PendingProjectClose {
     session_id: AuthoringSessionId,
-    ticket: ProjectPersistencePauseTicket,
+    phase: PendingProjectClosePhase,
     required_manual_save: Option<ProjectPersistenceRequestId>,
+}
+
+enum PendingProjectClosePhase {
+    AwaitingAudio(mondrian_media::AudioPcmSourceCloseTicket),
+    Quiescing(ProjectPersistencePauseTicket),
 }
 
 /// Retained fail-closed authority after Project Session Handoff failure.
@@ -171,12 +178,15 @@ pub(super) struct ProjectCloseFault {
 pub(crate) enum ProjectClosePoll {
     /// No asynchronous close operation exists.
     Inactive,
-    /// Earlier persistence work still owns the FIFO barrier.
+    /// Earlier Audio or persistence work still owns its serial barrier.
     Pending,
     /// The exact Session was quiesced, retired, and removed from AppState.
     Closed,
     /// The Project was closed but Reference Output release was not proven.
     ClosedWithTeardownFailure(String),
+    /// Native author obligations remain. The Source and editable Session stay
+    /// installed; no persistence pause has been admitted.
+    AudioRejected(String),
     /// A required manual save was not durable, so admission was resumed and
     /// the still-open Project may be corrected or retried.
     SaveRejected(String),
@@ -204,7 +214,6 @@ impl AppState {
         let source_session_id = self.authoring.as_ref().map(AuthoringSession::session_id);
         let phase = match source_session_id {
             Some(session_id) => {
-                self.stop().map_err(|error| anyhow::anyhow!(error.to_string()))?;
                 let ticket = self.begin_project_lifecycle_pause(session_id)?;
                 PendingProjectOpenPhase::Quiescing { path, ticket }
             }
@@ -218,7 +227,7 @@ impl AppState {
             phase,
             close_after_cancel: false,
         });
-        self.set_status_hint("正在打开并验证项目…", false);
+        self.set_status_hint(AppMessage::new("status-open-preparing"), false);
         Ok(())
     }
 
@@ -226,16 +235,8 @@ impl AppState {
         &mut self,
         session_id: AuthoringSessionId,
     ) -> anyhow::Result<ProjectPersistencePauseTicket> {
-        match self.project_persistence.begin_pause_and_quiesce(session_id) {
-            Ok(ticket) => Ok(ticket),
-            Err(reason) => {
-                // Even failed queue admission can poison persistence authority.
-                // The old Session remains readable, but only explicit fault
-                // discard may detach it; another author action cannot bypass it.
-                self.retain_project_close_fault(session_id, reason.clone());
-                Err(anyhow::Error::msg(reason))
-            }
-        }
+        self.prepare_project_audio_handoff()?;
+        self.begin_project_persistence_pause(session_id)
     }
 
     fn submit_project_open_preparation(
@@ -311,10 +312,16 @@ impl AppState {
             if let Some(session_id) = source_session_id {
                 self.retain_project_close_fault(session_id, reason.clone());
             }
-            self.set_status_hint(format!("打开项目失败：{reason}"), true);
+            self.set_status_hint(
+                AppMessage::new("status-open-failed").with_text("reason", reason.clone()),
+                true,
+            );
             return ProjectOpenPoll::Faulted(reason);
         }
-        self.set_status_hint(format!("打开项目失败：{reason}"), true);
+        self.set_status_hint(
+            AppMessage::new("status-open-failed").with_text("reason", reason.clone()),
+            true,
+        );
         ProjectOpenPoll::Rejected(reason)
     }
 
@@ -322,6 +329,13 @@ impl AppState {
         &mut self,
         mut handoff: Option<ProjectPersistencePauseToken>,
     ) -> ProjectOpenPoll {
+        if let Err(error) = self.validate_project_audio_detached() {
+            return self.finish_project_open_error(
+                self.authoring.as_ref().map(AuthoringSession::session_id),
+                handoff,
+                error.to_string(),
+            );
+        }
         if let Err(reason) = self.retire_project_session_handoff(&mut handoff) {
             if let Some(session_id) = self.authoring.as_ref().map(AuthoringSession::session_id) {
                 self.retain_project_close_fault(session_id, reason.clone());
@@ -348,7 +362,10 @@ impl AppState {
             if let Some(session_id) = pending.source_session_id {
                 self.retain_project_close_fault(session_id, reason.clone());
             }
-            self.set_status_hint(format!("打开项目失败：{reason}"), true);
+            self.set_status_hint(
+                AppMessage::new("status-open-failed").with_text("reason", reason.clone()),
+                true,
+            );
             return ProjectOpenPoll::Faulted(reason);
         }
         match pending.phase {
@@ -384,7 +401,11 @@ impl AppState {
                         if let Some(session_id) = pending.source_session_id {
                             self.retain_project_close_fault(session_id, reason.clone());
                         }
-                        self.set_status_hint(format!("打开项目失败：{reason}"), true);
+                        self.set_status_hint(
+                            AppMessage::new("status-open-failed")
+                                .with_text("reason", reason.clone()),
+                            true,
+                        );
                         ProjectOpenPoll::Faulted(reason)
                     }
                 }
@@ -409,7 +430,7 @@ impl AppState {
                         });
                         match result {
                             Ok(()) => {
-                                self.set_status_hint("项目已打开", false);
+                                self.set_status_hint(AppMessage::new("status-opened"), false);
                                 ProjectOpenPoll::Opened
                             }
                             Err(error) => self.finish_project_open_error(
@@ -607,7 +628,11 @@ impl AppState {
             }
             for completion in completions {
                 if let Err(error) = self.apply_persistence_completion(completion) {
-                    self.set_status_hint(format!("项目持久化完成失败：{error}"), true);
+                    self.set_status_hint(
+                        AppMessage::new("status-persistence-failed")
+                            .with_text("error", error.to_string()),
+                        true,
+                    );
                 }
             }
         }
@@ -648,13 +673,6 @@ impl AppState {
         }
     }
 
-    pub(super) fn prepare_project_session_close(&mut self) -> anyhow::Result<()> {
-        let mut handoff = self.begin_project_session_handoff()?;
-        self.retire_project_session_handoff(&mut handoff).map_err(anyhow::Error::msg)?;
-        self.retain_current_project_library_generation();
-        Ok(())
-    }
-
     /// Start closing the current Project without waiting for durable work on
     /// the caller's thread.
     ///
@@ -685,7 +703,7 @@ impl AppState {
             );
         }
         if self.pending_project_close.is_some() {
-            anyhow::bail!("Project close is already waiting for persistence quiescence");
+            anyhow::bail!("Project close is already waiting for lifecycle quiescence");
         }
         if let Some(pending) = &mut self.pending_project_open {
             if required_manual_save.is_some() {
@@ -695,18 +713,99 @@ impl AppState {
             if let PendingProjectOpenPhase::Preparing { ticket, .. } = &pending.phase {
                 ticket.cancel();
             }
-            self.set_status_hint("正在取消打开并安全关闭项目…", false);
+            self.set_status_hint(AppMessage::new("status-open-cancel-closing"), false);
             return Ok(true);
         }
         let Some(session_id) = self.authoring.as_ref().map(AuthoringSession::session_id) else {
             return Ok(false);
         };
-        self.stop().map_err(|error| anyhow::anyhow!(error.to_string()))?;
-        let ticket = self.begin_project_lifecycle_pause(session_id)?;
+        let phase = match self.begin_project_audio_close()? {
+            Some(ticket) => PendingProjectClosePhase::AwaitingAudio(ticket),
+            None => PendingProjectClosePhase::Quiescing(
+                self.begin_project_persistence_pause(session_id)?,
+            ),
+        };
         self.pending_project_close =
-            Some(PendingProjectClose { session_id, ticket, required_manual_save });
-        self.set_status_hint("正在完成后台保存并安全关闭项目…", false);
+            Some(PendingProjectClose { session_id, phase, required_manual_save });
+        self.set_status_hint(AppMessage::new("status-closing"), false);
         Ok(true)
+    }
+
+    fn begin_project_persistence_pause(
+        &mut self,
+        session_id: AuthoringSessionId,
+    ) -> anyhow::Result<ProjectPersistencePauseTicket> {
+        self.project_persistence.begin_pause_and_quiesce(session_id).map_err(|reason| {
+            self.retain_project_close_fault(session_id, reason.clone());
+            anyhow::Error::msg(reason)
+        })
+    }
+
+    pub(super) fn project_close_awaiting_audio(&self) -> bool {
+        self.pending_project_close.as_ref().is_some_and(|pending| {
+            matches!(pending.phase, PendingProjectClosePhase::AwaitingAudio(_))
+        })
+    }
+
+    fn reject_project_audio_close(
+        &mut self,
+        session_id: AuthoringSessionId,
+        ticket: &mondrian_media::AudioPcmSourceCloseTicket,
+        reason: String,
+    ) -> ProjectClosePoll {
+        if let Err(error) = self.audio_playback.cancel_source_close(ticket) {
+            let reason = format!("{reason}; failed to cancel audio close admission: {error}");
+            self.retain_project_close_fault(session_id, reason.clone());
+            self.set_status_hint(
+                AppMessage::new("status-close-failed").with_text("reason", reason.clone()),
+                true,
+            );
+            return ProjectClosePoll::Faulted(reason);
+        }
+        if !self.project_audio_source_is_current() {
+            let reason = format!(
+                "{reason}; original audio Source ownership could not be proven during close admission"
+            );
+            self.retain_project_close_fault(session_id, reason.clone());
+            self.set_status_hint(
+                AppMessage::new("status-close-failed").with_text("reason", reason.clone()),
+                true,
+            );
+            return ProjectClosePoll::Faulted(reason);
+        }
+        self.set_status_hint(
+            AppMessage::new("status-close-failed").with_text("reason", reason.clone()),
+            true,
+        );
+        ProjectClosePoll::AudioRejected(reason)
+    }
+
+    /// Synchronous callers drive the same admitted operation and one absolute
+    /// deadline, rather than starting a second persistence wait after Audio.
+    pub(super) fn close_project_until(&mut self, deadline: Instant) -> anyhow::Result<()> {
+        if !self.begin_project_close()? {
+            anyhow::bail!("no Project was open for close");
+        }
+        loop {
+            match self.poll_project_close() {
+                ProjectClosePoll::Pending if Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                ProjectClosePoll::Pending => {
+                    // Preserve the admitted ticket/Session for bounded cleanup;
+                    // a caller timeout never certifies ownership retirement.
+                    anyhow::bail!("Project close exceeded its shared handoff deadline");
+                }
+                ProjectClosePoll::Closed => return Ok(()),
+                ProjectClosePoll::Inactive => {
+                    anyhow::bail!("Project close became inactive before completion")
+                }
+                ProjectClosePoll::AudioRejected(reason)
+                | ProjectClosePoll::SaveRejected(reason)
+                | ProjectClosePoll::Faulted(reason)
+                | ProjectClosePoll::ClosedWithTeardownFailure(reason) => anyhow::bail!(reason),
+            }
+        }
     }
 
     /// Whether the current Project is frozen behind an Open/Close handoff
@@ -722,19 +821,20 @@ impl AppState {
         self.project_close_fault.is_some()
     }
 
-    /// Abandon a failed persistence handoff without claiming quiescence.
+    /// Abandon a failed Project handoff without claiming persistence quiescence.
     ///
     /// The worker retains its own payload/lease ownership. Retiring admission
     /// makes every eventual completion stale before author state is removed.
     pub(crate) fn force_close_project_after_fault(&mut self) -> anyhow::Result<()> {
         let fault = self
             .project_close_fault
-            .take()
+            .as_ref()
             .ok_or_else(|| anyhow::anyhow!("Project close has no retained lifecycle fault"))?;
         if self.authoring.as_ref().map(AuthoringSession::session_id) != Some(fault.session_id) {
-            self.project_close_fault = Some(fault);
             anyhow::bail!("failed Project close authority belongs to another Authoring Session");
         }
+        self.prepare_project_audio_handoff()?;
+        let fault = self.project_close_fault.take().expect("validated lifecycle fault");
         if let Err(reason) = self.project_persistence.abandon_session(fault.session_id) {
             self.project_close_fault = Some(fault);
             anyhow::bail!(reason);
@@ -745,6 +845,7 @@ impl AppState {
     }
 
     fn retain_project_close_fault(&mut self, session_id: AuthoringSessionId, reason: String) {
+        self.project_persistence.poison_session_after_lifecycle_failure(session_id);
         self.project_close_fault = Some(ProjectCloseFault { session_id, reason });
     }
 
@@ -768,19 +869,75 @@ impl AppState {
                 ProjectOpenPoll::Rejected(reason) => ProjectClosePoll::SaveRejected(reason),
             };
         }
-        let Some(pending) = self.pending_project_close.take() else {
+        let Some(mut pending) = self.pending_project_close.take() else {
             return ProjectClosePoll::Inactive;
         };
         if self.authoring.as_ref().map(AuthoringSession::session_id) != Some(pending.session_id) {
-            self.project_persistence.poison_pause_ticket(&pending.ticket);
-            let reason =
+            let mut reason =
                 "active Authoring Session changed while Project close was quiescing".to_owned();
+            match &pending.phase {
+                PendingProjectClosePhase::Quiescing(ticket) => {
+                    self.project_persistence.poison_pause_ticket(ticket)
+                }
+                PendingProjectClosePhase::AwaitingAudio(ticket) => {
+                    if let Err(error) = self.audio_playback.cancel_source_close(ticket) {
+                        reason.push_str(&format!(
+                            "; failed to cancel old audio close admission: {error}"
+                        ));
+                    }
+                }
+            }
             self.retain_project_close_fault(pending.session_id, reason.clone());
-            self.set_status_hint(format!("项目关闭失败：{reason}"), true);
+            self.set_status_hint(
+                AppMessage::new("status-close-failed").with_text("reason", reason.clone()),
+                true,
+            );
             return ProjectClosePoll::Faulted(reason);
         }
 
-        match self.project_persistence.poll_pause_and_quiesce(&pending.ticket) {
+        if let PendingProjectClosePhase::AwaitingAudio(ticket) = &pending.phase {
+            if let Err(error) = self.poll_project_audio_close_queue() {
+                return self.reject_project_audio_close(
+                    pending.session_id,
+                    ticket,
+                    error.to_string(),
+                );
+            }
+            match self.audio_playback.source_close_status(ticket) {
+                Ok(mondrian_media::AudioPcmSourceCloseStatus::Pending) => {
+                    self.pending_project_close = Some(pending);
+                    return ProjectClosePoll::Pending;
+                }
+                Ok(mondrian_media::AudioPcmSourceCloseStatus::Refused(error)) => {
+                    let reason = error.to_string();
+                    return self.reject_project_audio_close(pending.session_id, ticket, reason);
+                }
+                Ok(mondrian_media::AudioPcmSourceCloseStatus::Closed) => {}
+                Err(error) => {
+                    return self.reject_project_audio_close(
+                        pending.session_id,
+                        ticket,
+                        error.to_string(),
+                    );
+                }
+            }
+            if let Err(error) = self.finish_project_audio_close(ticket) {
+                return self.reject_project_audio_close(
+                    pending.session_id,
+                    ticket,
+                    error.to_string(),
+                );
+            }
+            let ticket = match self.begin_project_persistence_pause(pending.session_id) {
+                Ok(ticket) => ticket,
+                Err(error) => return ProjectClosePoll::Faulted(error.to_string()),
+            };
+            pending.phase = PendingProjectClosePhase::Quiescing(ticket);
+        }
+        let PendingProjectClosePhase::Quiescing(ticket) = &pending.phase else {
+            unreachable!("audio close completed before persistence admission")
+        };
+        match self.project_persistence.poll_pause_and_quiesce(ticket) {
             Ok(None) => {
                 self.pending_project_close = Some(pending);
                 ProjectClosePoll::Pending
@@ -806,16 +963,27 @@ impl AppState {
                                 "{reason}; additionally failed to resume persistence admission: {resume_error}"
                             );
                             self.retain_project_close_fault(pending.session_id, combined.clone());
-                            self.set_status_hint(format!("项目关闭失败：{combined}"), true);
+                            self.set_status_hint(
+                                AppMessage::new("status-close-failed")
+                                    .with_text("reason", combined.to_string()),
+                                true,
+                            );
                             return ProjectClosePoll::Faulted(combined);
                         }
-                        self.set_status_hint(format!("保存后关闭已取消：{reason}"), true);
+                        self.set_status_hint(
+                            AppMessage::new("status-close-save-canceled")
+                                .with_text("reason", reason.clone()),
+                            true,
+                        );
                         return ProjectClosePoll::SaveRejected(reason);
                     }
                 }
                 if let Err(reason) = self.project_persistence.retire(token) {
                     self.retain_project_close_fault(pending.session_id, reason.clone());
-                    self.set_status_hint(format!("项目关闭失败：{reason}"), true);
+                    self.set_status_hint(
+                        AppMessage::new("status-close-failed").with_text("reason", reason.clone()),
+                        true,
+                    );
                     return ProjectClosePoll::Faulted(reason);
                 }
                 self.retain_current_project_library_generation();
@@ -826,7 +994,10 @@ impl AppState {
             }
             Err(reason) => {
                 self.retain_project_close_fault(pending.session_id, reason.clone());
-                self.set_status_hint(format!("项目关闭失败：{reason}"), true);
+                self.set_status_hint(
+                    AppMessage::new("status-close-failed").with_text("reason", reason.clone()),
+                    true,
+                );
                 ProjectClosePoll::Faulted(reason)
             }
         }
@@ -944,7 +1115,7 @@ impl AppState {
         project_file: PathBuf,
         archive_handle: &mut fs::File,
         install_policy: ProjectArchiveInstallPolicy,
-        package_bindings: Option<&std::collections::BTreeMap<PathBuf, PathBuf>>,
+        package_bindings: Option<&std::collections::BTreeMap<mondrian_core::NativePath, PathBuf>>,
         handoff: &mut Option<ProjectPersistencePauseToken>,
     ) -> anyhow::Result<()> {
         let prepared = PreparedProjectArchive::from_open_file(
@@ -982,7 +1153,7 @@ impl AppState {
         project_file: PathBuf,
         prepared: PreparedProjectArchive<'_>,
         install_policy: ProjectArchiveInstallPolicy,
-        package_bindings: Option<&std::collections::BTreeMap<PathBuf, PathBuf>>,
+        package_bindings: Option<&std::collections::BTreeMap<mondrian_core::NativePath, PathBuf>>,
         runtime_lease: Arc<ProjectRuntimeLease>,
         handoff: &mut Option<ProjectPersistencePauseToken>,
     ) -> anyhow::Result<()> {
@@ -1338,13 +1509,11 @@ impl AppState {
                     ProjectPersistencePurpose::Manual { .. },
                     Ok(PersistenceCompletionDisposition::Applied),
                 ) => {
-                    self.set_status_hint("项目已耐久保存", false);
+                    self.set_status_hint(AppMessage::new("status-saved"), false);
                     self.notifications.publish(
                         notification_key,
                         super::notifications::AppNotificationSeverity::Success,
-                        super::notifications::AppNotificationMessage::new(
-                            "notification-save-complete",
-                        ),
+                        super::AppMessage::new("notification-save-complete"),
                     );
                 }
                 (
@@ -1352,16 +1521,15 @@ impl AppState {
                     Ok(PersistenceCompletionDisposition::AppliedWithRecoveryWarning { reason }),
                 ) => {
                     self.set_status_hint(
-                        format!("项目已耐久保存，但恢复点清理失败：{reason}"),
+                        AppMessage::new("status-saved-cleanup-failed")
+                            .with_text("reason", reason.clone()),
                         true,
                     );
                     self.notifications.publish(
                         notification_key,
                         super::notifications::AppNotificationSeverity::Warning,
-                        super::notifications::AppNotificationMessage::new(
-                            "notification-save-warning",
-                        )
-                        .with_text("reason", reason),
+                        super::AppMessage::new("notification-save-warning")
+                            .with_text("reason", reason),
                     );
                 }
                 (
@@ -1376,38 +1544,40 @@ impl AppState {
                     Ok(PersistenceCompletionDisposition::AppliedWithRecoveryWarning { reason }),
                 ) => {
                     self.set_status_hint(
-                        format!("自动保存完成，但恢复点清理状态异常：{reason}"),
+                        AppMessage::new("status-autosaved-cleanup-failed")
+                            .with_text("reason", reason.clone()),
                         true,
                     );
                     self.notifications.publish(
                         autosave_notification_key,
                         super::notifications::AppNotificationSeverity::Warning,
-                        super::notifications::AppNotificationMessage::new(
-                            "notification-autosave-warning",
-                        )
-                        .with_text("reason", reason),
+                        super::AppMessage::new("notification-autosave-warning")
+                            .with_text("reason", reason),
                     );
                 }
                 (ProjectPersistencePurpose::Manual { .. }, Err(error)) => {
-                    self.set_status_hint(format!("保存项目失败：{error}"), true);
+                    self.set_status_hint(
+                        AppMessage::new("status-save-failed").with_text("error", error.to_string()),
+                        true,
+                    );
                     self.notifications.publish(
                         notification_key,
                         super::notifications::AppNotificationSeverity::Error,
-                        super::notifications::AppNotificationMessage::new(
-                            "notification-save-failed",
-                        )
-                        .with_text("reason", error.to_string()),
+                        super::AppMessage::new("notification-save-failed")
+                            .with_text("reason", error.to_string()),
                     );
                 }
                 (ProjectPersistencePurpose::Autosave { .. }, Err(error)) => {
-                    self.set_status_hint(format!("自动保存失败：{error}"), true);
+                    self.set_status_hint(
+                        AppMessage::new("status-autosave-failed")
+                            .with_text("error", error.to_string()),
+                        true,
+                    );
                     self.notifications.publish(
                         autosave_notification_key,
                         super::notifications::AppNotificationSeverity::Error,
-                        super::notifications::AppNotificationMessage::new(
-                            "notification-autosave-failed",
-                        )
-                        .with_text("reason", error.to_string()),
+                        super::AppMessage::new("notification-autosave-failed")
+                            .with_text("reason", error.to_string()),
                     );
                 }
             }
@@ -1597,7 +1767,11 @@ impl AppState {
         match self.submit_autosave(10, 7) {
             Ok(_) => true,
             Err(error) => {
-                self.set_status_hint(format!("无法启动自动保存：{error}"), true);
+                self.set_status_hint(
+                    AppMessage::new("status-autosave-start-failed")
+                        .with_text("error", error.to_string()),
+                    true,
+                );
                 true
             }
         }
@@ -1620,23 +1794,25 @@ impl AppState {
         deadline: Instant,
     ) -> anyhow::Result<()> {
         let completion = self.wait_for_persistence_completion_until(request_id, deadline)?;
-        let result = match self
-            .apply_persistence_completion(completion)
-            .map_err(anyhow::Error::msg)?
-        {
-            PersistenceCompletionDisposition::Applied => Ok(()),
-            PersistenceCompletionDisposition::AppliedWithRecoveryWarning { reason } => {
-                self.set_status_hint(format!("项目已耐久保存，但恢复点清理失败：{reason}"), true);
-                Ok(())
-            }
-            PersistenceCompletionDisposition::SatisfiedByNewerPublication => Ok(()),
-            PersistenceCompletionDisposition::IgnoredSupersededDestination => {
-                anyhow::bail!("项目耐久保存目标在完成前已被较新的 Save As 请求取代")
-            }
-            PersistenceCompletionDisposition::IgnoredStaleSession => {
-                anyhow::bail!("项目持久化完成不再属于当前会话代际")
-            }
-        };
+        let result =
+            match self.apply_persistence_completion(completion).map_err(anyhow::Error::msg)? {
+                PersistenceCompletionDisposition::Applied => Ok(()),
+                PersistenceCompletionDisposition::AppliedWithRecoveryWarning { reason } => {
+                    self.set_status_hint(
+                        AppMessage::new("status-saved-cleanup-failed")
+                            .with_text("reason", reason.clone()),
+                        true,
+                    );
+                    Ok(())
+                }
+                PersistenceCompletionDisposition::SatisfiedByNewerPublication => Ok(()),
+                PersistenceCompletionDisposition::IgnoredSupersededDestination => {
+                    anyhow::bail!("项目耐久保存目标在完成前已被较新的 Save As 请求取代")
+                }
+                PersistenceCompletionDisposition::IgnoredStaleSession => {
+                    anyhow::bail!("项目持久化完成不再属于当前会话代际")
+                }
+            };
         anyhow::ensure!(
             Instant::now() < deadline,
             "project persistence completed after its original deadline"
@@ -2088,7 +2264,8 @@ mod persistence_lifecycle_tests {
     use super::super::project_runtime::project_runtime_root_for_project;
     use super::*;
     use crate::app::project_runtime::{
-        claim_project_runtime_lease_for_test, TEST_PROJECT_RUNTIME_NAMESPACE_ENV,
+        claim_project_runtime_lease_for_test, test_project_runtime_namespace,
+        TEST_PROJECT_RUNTIME_NAMESPACE_ENV,
     };
     use mondrian_project::save_project_archive;
     use std::collections::BTreeSet;
@@ -2205,6 +2382,31 @@ mod persistence_lifecycle_tests {
         state.authoring = Some(session);
         state.project_runtime_lease = Some(lease);
         state
+    }
+
+    #[test]
+    fn lifecycle_and_proxy_status_messages_resolve_with_opaque_details() {
+        use crate::app_ui::localization::{AppUiLocale, Localizer};
+
+        let detail = "status-open-failed / native.detail 用户🙂";
+        let messages = [
+            AppMessage::new("status-open-preparing"),
+            AppMessage::new("status-open-cancel-closing"),
+            AppMessage::new("status-opened"),
+            AppMessage::new("status-open-failed").with_text("reason", detail),
+            AppMessage::new("status-proxy-binding-failed").with_text("error", detail),
+        ];
+        for locale in [AppUiLocale::ZhCn, AppUiLocale::EnUs, AppUiLocale::Pseudo] {
+            let localizer = Localizer::new(locale).expect("status catalog");
+            for message in &messages {
+                let text = localizer.message(message);
+                assert_ne!(text, message.id, "unresolved status for {locale:?}");
+                assert!(!text.is_empty());
+                if !message.args.is_empty() {
+                    assert!(text.contains(detail), "opaque status detail lost: {text}");
+                }
+            }
+        }
     }
 
     #[test]
@@ -2730,7 +2932,7 @@ mod persistence_lifecycle_tests {
             .env(CRASH_HELPER_STAGE_ENV, stage.to_string())
             .env(
                 TEST_PROJECT_RUNTIME_NAMESPACE_ENV,
-                std::process::id().to_string(),
+                test_project_runtime_namespace().expect("parent test runtime namespace"),
             );
         if let Some(previous_name) = previous_name {
             command.env(CRASH_HELPER_PREVIOUS_NAME_ENV, previous_name);

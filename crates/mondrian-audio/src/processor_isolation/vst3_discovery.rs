@@ -1,10 +1,16 @@
 //! Deadline-bound inspection of a user-selected VST3 binary.
 
-use super::vst3_worker::{fingerprint, parameter_descriptors, MAX_STATE_BYTES};
-use super::{Vst3ParameterDescriptor, Vst3PluginRegistration};
+use super::protocol::{auxiliary_from_wire, auxiliary_to_wire, AuxiliaryBusWire};
+use super::vst3_worker::{
+    fingerprint, parameter_descriptors, prepare_audio_inputs, validate_main_audio_output_count,
+    visit_parameter_inventory, MAX_STATE_BYTES,
+};
+use super::{
+    Vst3EventBusContractV1, Vst3MainAudioInput, Vst3ParameterDescriptor, Vst3PluginRegistration,
+};
 use crate::{
-    AudioProcessingMode, AudioProcessorExecutionContract, AudioProcessorHostError,
-    AudioProcessorTail, AudioRenderContract,
+    AudioProcessingMode, AudioProcessorAuxiliaryInputContract, AudioProcessorExecutionContract,
+    AudioProcessorHostError, AudioProcessorInputName, AudioProcessorTail, AudioRenderContract,
 };
 use mondrian_core::AudioChannelLayout;
 use serde::{Deserialize, Serialize};
@@ -26,6 +32,7 @@ const DEADLINE: Duration = Duration::from_secs(10);
 const MAX_REQUEST_BYTES: u64 = 512 * 1024;
 const MAX_RESPONSE_BYTES: u64 = 512 * 1024;
 const MAX_DESCRIPTORS: usize = 4096;
+const DISCOVERY_VERSION: u32 = 7;
 
 /// One audio-effect class exported by an installed VST3 library.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -43,39 +50,56 @@ pub struct Vst3PluginDescriptor {
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct DiscoveryRequest {
+    schema_version: u32,
     binary_path: PathBuf,
     operation: DiscoveryOperation,
 }
 
 #[derive(Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum DiscoveryOperation {
-    List,
+    List {},
     Probe {
         class_id: String,
         sample_rate: u32,
         channel_layout: AudioChannelLayout,
         max_block_frames: usize,
         offline: bool,
+        #[serde(default, with = "super::vst3_state_json")]
         state: Option<Vec<u8>>,
         capture_default_state: bool,
     },
 }
 
 #[derive(Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-enum DiscoveryResponse {
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "cold-path bounded metadata stays inline below 1 KiB to avoid another heap owner; this enum never enters DSP"
+)]
+pub(super) enum DiscoveryResponse {
+    #[serde(rename = "list_v7")]
     List {
+        schema_version: u32,
         descriptors: Vec<Vst3PluginDescriptor>,
     },
+    #[serde(rename = "probe_v7")]
     Probe {
+        schema_version: u32,
+        main_audio_input: Vst3MainAudioInput,
+        audio_output_count: u8,
+        main_audio_output_count: u8,
+        event_bus_contract: Vst3EventBusContractV1,
         class_id: String,
         vendor: Option<String>,
         latency_frames: u32,
         tail_frames: u32,
         parameters: Vec<Vst3ParameterDescriptor>,
         current_values: Vec<(u32, f64)>,
+        #[serde(default, with = "super::vst3_state_json")]
         captured_state: Option<Vec<u8>>,
+        auxiliary_buses: Vec<AuxiliaryBusWire>,
+        input_names: Vec<AudioProcessorInputName>,
     },
 }
 
@@ -85,13 +109,13 @@ pub fn scan_vst3_binary_descriptors(
     binary_path: &Path,
 ) -> Result<Vec<Vst3PluginDescriptor>, AudioProcessorHostError> {
     let (path, before) = canonical_binary(binary_path)?;
-    let response = request(helper_executable, &path, DiscoveryOperation::List)?;
+    let response = request(helper_executable, &path, DiscoveryOperation::List {}, None)?;
     if fingerprint(&path)? != before {
         return Err(unavailable(
             "VST3 binary changed during descriptor discovery",
         ));
     }
-    let DiscoveryResponse::List { descriptors } = response else {
+    let DiscoveryResponse::List { descriptors, .. } = response else {
         return Err(invalid("VST3 discovery returned the wrong response type"));
     };
     if descriptors.len() > MAX_DESCRIPTORS {
@@ -132,6 +156,7 @@ pub fn probe_vst3_plugin_registration(
 
 pub(super) struct Vst3Probe {
     pub(super) registration: Vst3PluginRegistration,
+    pub(super) input_names: Vec<AudioProcessorInputName>,
     pub(super) current_values: Vec<(u32, f64)>,
     pub(super) captured_state: Option<Vec<u8>>,
 }
@@ -143,6 +168,26 @@ pub(super) fn probe_vst3_plugin_registration_with_state(
     render: AudioRenderContract,
     state: Option<&[u8]>,
     capture_default_state: bool,
+) -> Result<Vst3Probe, AudioProcessorHostError> {
+    probe_vst3_plugin_registration_with_state_and_settlement(
+        helper_executable,
+        binary_path,
+        class_id,
+        render,
+        state,
+        capture_default_state,
+        None,
+    )
+}
+
+pub(super) fn probe_vst3_plugin_registration_with_state_and_settlement(
+    helper_executable: &Path,
+    binary_path: &Path,
+    class_id: &str,
+    render: AudioRenderContract,
+    state: Option<&[u8]>,
+    capture_default_state: bool,
+    native_child_settlement: Option<&mondrian_core::NativeChildSettlementRegistrar>,
 ) -> Result<Vst3Probe, AudioProcessorHostError> {
     if class_id.len() != 32 || !class_id.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return Err(invalid("VST3 class ID must be 32 hexadecimal characters"));
@@ -163,6 +208,7 @@ pub(super) fn probe_vst3_plugin_registration_with_state(
             state: state.map(ToOwned::to_owned),
             capture_default_state,
         },
+        native_child_settlement,
     )?;
     if fingerprint(&path)? != before {
         return Err(unavailable("VST3 binary changed during contract probing"));
@@ -175,6 +221,13 @@ pub(super) fn probe_vst3_plugin_registration_with_state(
         parameters,
         current_values,
         captured_state,
+        auxiliary_buses,
+        input_names,
+        event_bus_contract,
+        main_audio_input,
+        audio_output_count,
+        main_audio_output_count,
+        ..
     } = response
     else {
         return Err(invalid("VST3 probe returned the wrong response type"));
@@ -205,15 +258,44 @@ pub(super) fn probe_vst3_plugin_registration_with_state(
         render.processing_mode == AudioProcessingMode::Offline,
         0,
     )?;
+    let auxiliary_inputs =
+        decode_probe_inputs(auxiliary_buses, &input_names, render.channel_layout)?;
+    main_audio_input.validate_auxiliary(&auxiliary_inputs)?;
     let registration = Vst3PluginRegistration {
         class_id: actual_id,
         vendor,
         binary_path: path,
         binary_sha256: before,
         execution_contract: contract,
+        main_audio_input,
+        audio_output_count,
+        main_audio_output_count,
+        auxiliary_inputs,
         parameters,
+        event_bus_contract,
     };
-    Ok(Vst3Probe { registration, current_values, captured_state })
+    Ok(Vst3Probe {
+        registration,
+        input_names,
+        current_values,
+        captured_state,
+    })
+}
+
+// Names are an optional presentation snapshot keyed by the admitted buses. Their
+// transport order is not a second routing identity; preserve the actual snapshot.
+fn decode_probe_inputs(
+    auxiliary_buses: Vec<AuxiliaryBusWire>,
+    input_names: &[AudioProcessorInputName],
+    layout: AudioChannelLayout,
+) -> Result<AudioProcessorAuxiliaryInputContract, AudioProcessorHostError> {
+    if auxiliary_buses.len() > 31 {
+        return Err(invalid("VST3 probe returned excessive auxiliary ports"));
+    }
+    let auxiliary_inputs = auxiliary_from_wire(auxiliary_buses);
+    auxiliary_inputs.validate(layout)?;
+    AudioProcessorInputName::validate_all(input_names, &auxiliary_inputs)?;
+    Ok(auxiliary_inputs)
 }
 
 /// Execute VST3 discovery before application or device initialization.
@@ -232,8 +314,7 @@ pub fn run_vst3_discovery_worker() -> Result<(), AudioProcessorHostError> {
         .map(PathBuf::from)
         .ok_or_else(|| invalid("VST3 discovery response path is missing"))?;
     let bytes = read_bounded(&request_path, MAX_REQUEST_BYTES)?;
-    let request: DiscoveryRequest = serde_json::from_slice(&bytes)
-        .map_err(|error| invalid(format!("VST3 discovery request is invalid: {error}")))?;
+    let request = decode_request(&bytes)?;
     let path = fs::canonicalize(&request.binary_path)
         .map_err(|error| unavailable(format!("VST3 binary is unavailable: {error}")))?;
     if !path.is_file() || path != request.binary_path {
@@ -242,7 +323,7 @@ pub fn run_vst3_discovery_worker() -> Result<(), AudioProcessorHostError> {
         ));
     }
     let response = match request.operation {
-        DiscoveryOperation::List => list_loaded(&path)?,
+        DiscoveryOperation::List {} => list_loaded(&path)?,
         DiscoveryOperation::Probe {
             class_id,
             sample_rate,
@@ -262,7 +343,7 @@ pub fn run_vst3_discovery_worker() -> Result<(), AudioProcessorHostError> {
             capture_default_state,
         )?,
     };
-    let bytes = serde_json::to_vec(&response)
+    let bytes = super::encode_native_configuration_payload(&response)
         .map_err(|error| invalid(format!("VST3 discovery response encoding failed: {error}")))?;
     if bytes.len() as u64 > MAX_RESPONSE_BYTES {
         return Err(invalid(
@@ -288,7 +369,7 @@ fn list_loaded(path: &Path) -> Result<DiscoveryResponse, AudioProcessorHostError
             version: (!class.version.is_empty()).then_some(class.version),
         })
         .collect();
-    Ok(DiscoveryResponse::List { descriptors })
+    Ok(DiscoveryResponse::List { schema_version: DISCOVERY_VERSION, descriptors })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -313,7 +394,14 @@ fn probe_loaded(
     if state.is_some_and(|state| state.len() > MAX_STATE_BYTES) {
         return Err(invalid("VST3 probe state exceeds the limit"));
     }
+    let mode = if offline {
+        ProcessMode::Offline
+    } else {
+        ProcessMode::Realtime
+    };
     let mut host = Vst3Host::builder()
+        .plugin_interfaces(super::vst3_worker::product_plugin_interfaces())
+        .initial_process_mode(mode)
         .sample_rate(f64::from(sample_rate))
         .block_size(max_block_frames)
         .input_channels(channels)
@@ -332,33 +420,17 @@ fn probe_loaded(
             .map_err(|error| unavailable(format!("VST3 probe state restore failed: {error}")))?;
     }
     plugin
-        .set_process_mode(if offline {
-            ProcessMode::Offline
-        } else {
-            ProcessMode::Realtime
-        })
+        .set_process_mode(mode)
         .map_err(|error| invalid(format!("VST3 probe mode is unsupported: {error}")))?;
-    let buses = plugin
-        .audio_bus_layout()
-        .map_err(|error| invalid(format!("VST3 probe bus query failed: {error}")))?;
-    if buses.inputs.len() != 1
-        || buses.outputs.len() != 1
-        || !buses.inputs[0].active
-        || !buses.outputs[0].active
-        || buses.inputs[0].channel_count != channels
-        || buses.outputs[0].channel_count != channels
-    {
-        return Err(invalid(
-            "VST3 probe requires one active matching main input/output bus",
-        ));
-    }
+    let (main_audio_input, audio_inputs, audio_output_count, main_audio_output_count) =
+        prepare_audio_inputs(&mut plugin, layout)?;
+    let event_bus_contract = Vst3EventBusContractV1::observe(&plugin)?;
     let parameters = parameter_descriptors(&plugin)?;
-    let current_values = plugin
-        .get_parameters()
-        .map_err(|error| invalid(format!("VST3 probe parameter query failed: {error}")))?
-        .into_iter()
-        .map(|parameter| (parameter.id, parameter.value))
-        .collect();
+    let mut current_values = Vec::new();
+    visit_parameter_inventory(&plugin, &mut |_, parameter| {
+        current_values.push((parameter.id(), parameter.normalized()));
+    })
+    .map_err(|error| invalid(format!("VST3 probe parameter query failed: {error}")))?;
     let captured_state = if capture_default_state {
         let state = plugin
             .save_state()
@@ -371,6 +443,11 @@ fn probe_loaded(
         None
     };
     Ok(DiscoveryResponse::Probe {
+        schema_version: DISCOVERY_VERSION,
+        main_audio_input,
+        audio_output_count,
+        main_audio_output_count,
+        event_bus_contract,
         class_id: plugin.info().uid.clone(),
         vendor: (!plugin.info().vendor.is_empty()).then(|| plugin.info().vendor.clone()),
         latency_frames: plugin.latency_samples(),
@@ -378,6 +455,8 @@ fn probe_loaded(
         parameters,
         current_values,
         captured_state,
+        auxiliary_buses: auxiliary_to_wire(&audio_inputs.contract),
+        input_names: audio_inputs.names,
     })
 }
 
@@ -466,6 +545,7 @@ fn request(
     helper_executable: &Path,
     binary_path: &Path,
     operation: DiscoveryOperation,
+    native_child_settlement: Option<&mondrian_core::NativeChildSettlementRegistrar>,
 ) -> Result<DiscoveryResponse, AudioProcessorHostError> {
     if !helper_executable.is_absolute() {
         return Err(invalid("VST3 discovery helper path must be absolute"));
@@ -474,26 +554,54 @@ fn request(
         .map_err(|error| unavailable(format!("VST3 discovery staging failed: {error}")))?;
     let request_path = temp.path().join("request.json");
     let response_path = temp.path().join("response.json");
-    let bytes =
-        serde_json::to_vec(&DiscoveryRequest { binary_path: binary_path.to_path_buf(), operation })
-            .map_err(|error| invalid(format!("VST3 discovery request encoding failed: {error}")))?;
+    let bytes = super::encode_native_configuration_payload(&DiscoveryRequest {
+        schema_version: DISCOVERY_VERSION,
+        binary_path: binary_path.to_path_buf(),
+        operation,
+    })
+    .map_err(|error| invalid(format!("VST3 discovery request encoding failed: {error}")))?;
     if bytes.len() as u64 > MAX_REQUEST_BYTES {
         return Err(invalid("VST3 discovery request exceeds the metadata limit"));
     }
     fs::write(&request_path, bytes)
         .map_err(|error| unavailable(format!("VST3 discovery request write failed: {error}")))?;
-    let mut child = Command::new(helper_executable)
-        .arg(VST3_DISCOVERY_WORKER_ARGUMENT)
-        .env(REQUEST_ENV, &request_path)
-        .env(RESPONSE_ENV, &response_path)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .map_err(|error| unavailable(format!("VST3 discovery worker failed to start: {error}")))?;
+    let mut process = {
+        let mut command = Command::new(helper_executable);
+        command
+            .arg(VST3_DISCOVERY_WORKER_ARGUMENT)
+            .env(REQUEST_ENV, &request_path)
+            .env(RESPONSE_ENV, &response_path)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        #[cfg(windows)]
+        super::supervisor::configure_background_worker_start(&mut command);
+        // Own Child and its staging immediately. No fallible post-spawn step may
+        // release a bare child or delete files while termination is unconfirmed.
+        super::supervisor::ProcessOwner::with_staging(
+            command.spawn().map_err(|error| {
+                unavailable(format!("VST3 discovery worker failed to start: {error}"))
+            })?,
+            temp,
+        )
+    };
+    if let Some(registrar) = native_child_settlement {
+        // Observation failure is sticky in this domain, never a new discovery
+        // refusal. The same original owner retains Child and staging throughout.
+        let _ = process.bind_native_child_settlement(registrar);
+    }
+    finish_discovery_request(process, &response_path)
+}
+
+// One real production consumer and the owned-child controls share this exact
+// wait/read/decode scope. The owner retains staging until complete response use.
+pub(super) fn finish_discovery_request(
+    mut process: super::supervisor::ProcessOwner,
+    response_path: &Path,
+) -> Result<DiscoveryResponse, AudioProcessorHostError> {
     let deadline = Instant::now() + DEADLINE;
     loop {
-        match child.try_wait() {
+        match process.try_wait() {
             Ok(Some(status)) if status.success() => break,
             Ok(Some(status)) => {
                 return Err(unavailable(format!(
@@ -502,24 +610,63 @@ fn request(
             }
             Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(10)),
             Ok(None) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(AudioProcessorHostError::WorkerDeadlineExceeded {
-                    operation: "VST3 discovery",
-                });
+                return Err(retire_discovery_failure(
+                    &mut process,
+                    AudioProcessorHostError::WorkerDeadlineExceeded { operation: "VST3 discovery" },
+                ));
             }
             Err(error) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(unavailable(format!(
-                    "VST3 discovery worker wait failed: {error}"
-                )));
+                return Err(retire_discovery_failure(
+                    &mut process,
+                    unavailable(format!("VST3 discovery worker wait failed: {error}")),
+                ));
             }
         }
     }
-    let bytes = read_bounded(&response_path, MAX_RESPONSE_BYTES)?;
-    serde_json::from_slice(&bytes)
-        .map_err(|error| invalid(format!("VST3 discovery response is invalid: {error}")))
+    let bytes = read_bounded(response_path, MAX_RESPONSE_BYTES)?;
+    decode_response(&bytes)
+}
+
+fn decode_request(bytes: &[u8]) -> Result<DiscoveryRequest, AudioProcessorHostError> {
+    if bytes.len() as u64 > MAX_REQUEST_BYTES {
+        return Err(invalid("VST3 discovery request exceeds the metadata limit"));
+    }
+    let request: DiscoveryRequest = serde_json::from_slice(bytes)
+        .map_err(|error| invalid(format!("VST3 discovery request is invalid: {error}")))?;
+    if request.schema_version != DISCOVERY_VERSION {
+        return Err(invalid("unsupported VST3 discovery request version"));
+    }
+    Ok(request)
+}
+
+fn decode_response(bytes: &[u8]) -> Result<DiscoveryResponse, AudioProcessorHostError> {
+    if bytes.len() as u64 > MAX_RESPONSE_BYTES {
+        return Err(invalid(
+            "VST3 discovery response exceeds the metadata limit",
+        ));
+    }
+    let response: DiscoveryResponse = serde_json::from_slice(bytes)
+        .map_err(|error| invalid(format!("VST3 discovery response is invalid: {error}")))?;
+    let version = match &response {
+        DiscoveryResponse::List { schema_version, .. }
+        | DiscoveryResponse::Probe { schema_version, .. } => *schema_version,
+    };
+    if version != DISCOVERY_VERSION {
+        return Err(invalid("unsupported VST3 discovery response version"));
+    }
+    if let DiscoveryResponse::Probe { audio_output_count, main_audio_output_count, .. } = &response
+    {
+        validate_main_audio_output_count(*audio_output_count, *main_audio_output_count)?;
+    }
+    Ok(response)
+}
+
+pub(super) fn retire_discovery_failure(
+    process: &mut super::supervisor::ProcessOwner,
+    primary: AudioProcessorHostError,
+) -> AudioProcessorHostError {
+    process.terminate_reported("VST3 discovery failure");
+    primary
 }
 
 fn read_bounded(path: &Path, limit: u64) -> Result<Vec<u8>, AudioProcessorHostError> {
@@ -583,5 +730,520 @@ mod bundle_tests {
         let bundle = temp.path().join("Missing.vst3");
         fs::create_dir_all(&bundle).expect("empty bundle");
         assert!(canonical_binary(&bundle).is_err());
+    }
+}
+
+#[cfg(test)]
+mod version_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn discovery_state_bytes_use_bounded_base64_in_both_directions() {
+        for state in [
+            None,
+            Some(vec![]),
+            Some(vec![0, 255, 128]),
+            Some(vec![255; MAX_STATE_BYTES]),
+        ] {
+            let request = DiscoveryRequest {
+                schema_version: DISCOVERY_VERSION,
+                binary_path: PathBuf::from("never-opened.vst3"),
+                operation: DiscoveryOperation::Probe {
+                    class_id: "0123456789ABCDEF0123456789ABCDEF".into(),
+                    sample_rate: 48_000,
+                    channel_layout: AudioChannelLayout::Stereo,
+                    max_block_frames: 256,
+                    offline: true,
+                    state: state.clone(),
+                    capture_default_state: false,
+                },
+            };
+            let bytes = super::super::encode_native_configuration_payload(&request).unwrap();
+            let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            let wire = &value["operation"]["state"];
+            match state.as_deref() {
+                None => assert!(wire.is_null()),
+                Some([]) => assert_eq!(wire, ""),
+                Some([0, 255, 128]) => assert_eq!(wire, "AP+A"),
+                Some(_) => {
+                    let encoded = wire.as_str().expect("bounded state is a base64 string");
+                    assert_eq!(encoded.len(), 174_764);
+                    assert!(encoded.ends_with("//8="));
+                }
+            }
+            for invalid in [
+                json!([0, 255, 128]),
+                json!("AB=="),
+                json!("AA"),
+                json!({"base64":"AP+A"}),
+            ] {
+                let mut bad = value.clone();
+                bad["operation"]["state"] = invalid;
+                assert!(decode_request(&serde_json::to_vec(&bad).unwrap()).is_err());
+            }
+            let DiscoveryOperation::Probe { state: decoded, .. } =
+                decode_request(&bytes).unwrap().operation
+            else {
+                panic!("probe round trip changed operation");
+            };
+            assert_eq!(decoded, state);
+            let response = DiscoveryResponse::Probe {
+                schema_version: DISCOVERY_VERSION,
+                main_audio_input: Vst3MainAudioInput::Present,
+                audio_output_count: 1,
+                main_audio_output_count: 1,
+                event_bus_contract: Vst3EventBusContractV1::empty(),
+                class_id: "0123456789ABCDEF0123456789ABCDEF".into(),
+                vendor: None,
+                latency_frames: 0,
+                tail_frames: 0,
+                parameters: vec![],
+                current_values: vec![],
+                captured_state: state.clone(),
+                auxiliary_buses: vec![],
+                input_names: vec![],
+            };
+            let bytes = super::super::encode_native_configuration_payload(&response).unwrap();
+            let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(&value["captured_state"], wire);
+            let DiscoveryResponse::Probe { captured_state, .. } = decode_response(&bytes).unwrap()
+            else {
+                panic!("probe round trip changed response");
+            };
+            assert_eq!(captured_state, state);
+            for invalid in [
+                json!([0, 255, 128]),
+                json!("AP+A="),
+                json!("AP-A"),
+                json!("AB=="),
+                json!("AA"),
+                json!(false),
+                json!({"base64":"AP+A"}),
+            ] {
+                let mut bad = value.clone();
+                bad["captured_state"] = invalid;
+                assert!(decode_response(&serde_json::to_vec(&bad).unwrap()).is_err());
+            }
+        }
+    }
+    #[test]
+    fn discovery_complete_packet_limit_is_measured_before_output_allocation() {
+        let request = DiscoveryRequest {
+            schema_version: DISCOVERY_VERSION,
+            binary_path: PathBuf::from("x".repeat(MAX_REQUEST_BYTES as usize)),
+            operation: DiscoveryOperation::List {},
+        };
+        let mut allocated = false;
+        assert!(
+            super::super::encode_native_configuration_payload_observed(&request, &mut |_| {
+                allocated = true
+            })
+            .is_err()
+        );
+        assert!(!allocated);
+        let mut response = DiscoveryResponse::Probe {
+            schema_version: DISCOVERY_VERSION,
+            main_audio_input: Vst3MainAudioInput::Present,
+            audio_output_count: 1,
+            main_audio_output_count: 1,
+            event_bus_contract: Vst3EventBusContractV1::empty(),
+            class_id: "0123456789ABCDEF0123456789ABCDEF".into(),
+            vendor: Some(String::new()),
+            latency_frames: 0,
+            tail_frames: 0,
+            parameters: vec![],
+            current_values: vec![],
+            captured_state: Some(vec![255; MAX_STATE_BYTES]),
+            auxiliary_buses: vec![],
+            input_names: vec![],
+        };
+        let base = super::super::encode_native_configuration_payload(&response).unwrap().len();
+        if let DiscoveryResponse::Probe { vendor, .. } = &mut response {
+            *vendor = Some("x".repeat(MAX_RESPONSE_BYTES as usize - base));
+        }
+        let exact =
+            super::super::encode_native_configuration_payload_observed(&response, &mut |_| {
+                allocated = true
+            })
+            .unwrap();
+        assert!(allocated);
+        assert_eq!(exact.len(), MAX_RESPONSE_BYTES as usize);
+        assert!(decode_response(&exact).is_ok());
+        drop(exact);
+        if let DiscoveryResponse::Probe { vendor, .. } = &mut response {
+            vendor.as_mut().unwrap().push('x');
+        }
+        allocated = false;
+        assert!(
+            super::super::encode_native_configuration_payload_observed(&response, &mut |_| {
+                allocated = true
+            })
+            .is_err()
+        );
+        assert!(!allocated, "one extra byte is refused during measurement");
+        let oversized = vec![b' '; MAX_RESPONSE_BYTES as usize + 1];
+        assert!(decode_request(&oversized).err().unwrap().to_string().contains("metadata limit"));
+        assert!(decode_response(&oversized)
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("metadata limit"));
+    }
+    #[test]
+    fn discovery_v7_refuses_legacy_missing_unknown_and_wrong_versions_in_both_directions() {
+        // Frozen legacy request/response discriminators: the old request denied
+        // unknown fields and the old response only recognized list/probe.
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct LegacyRequest {
+            binary_path: PathBuf,
+            operation: DiscoveryOperation,
+        }
+        #[derive(Deserialize)]
+        #[serde(tag = "kind")]
+        enum LegacyResponse {
+            #[serde(rename = "list")]
+            List {},
+            #[serde(rename = "probe")]
+            Probe {},
+        }
+        #[derive(Deserialize)]
+        #[serde(tag = "kind")]
+        enum PreviousResponse {
+            #[serde(rename = "list_v2")]
+            List {},
+            #[serde(rename = "probe_v2")]
+            Probe {},
+        }
+        #[derive(Deserialize)]
+        #[serde(tag = "kind")]
+        enum PreviousV3Response {
+            #[serde(rename = "list_v3")]
+            List {},
+            #[serde(rename = "probe_v3")]
+            Probe {},
+        }
+        #[derive(Deserialize)]
+        #[serde(tag = "kind")]
+        enum PreviousV4Response {
+            #[serde(rename = "list_v4")]
+            List {},
+            #[serde(rename = "probe_v4")]
+            Probe {},
+        }
+        let legacy_request = json!({"binary_path":"legacy.vst3", "operation":{"kind":"list"}});
+        let old: LegacyRequest = serde_json::from_value(legacy_request.clone()).unwrap();
+        assert_eq!(old.binary_path, PathBuf::from("legacy.vst3"));
+        assert!(matches!(old.operation, DiscoveryOperation::List {}));
+        assert!(decode_request(&serde_json::to_vec(&legacy_request).unwrap()).is_err());
+        let request = serde_json::to_value(DiscoveryRequest {
+            schema_version: DISCOVERY_VERSION,
+            binary_path: PathBuf::from("current.vst3"),
+            operation: DiscoveryOperation::List {},
+        })
+        .unwrap();
+        assert!(decode_request(&serde_json::to_vec(&request).unwrap()).is_ok());
+        assert!(serde_json::from_value::<LegacyRequest>(request.clone()).is_err());
+        for (field, value) in [
+            ("schema_version", json!(1)),
+            ("schema_version", json!(2)),
+            ("schema_version", json!(3)),
+            ("schema_version", json!(4)),
+            ("schema_version", json!(5)),
+            ("schema_version", json!(6)),
+            ("schema_version", json!(8)),
+            ("unexpected", json!(true)),
+        ] {
+            let mut bad = request.clone();
+            bad[field] = value;
+            assert!(decode_request(&serde_json::to_vec(&bad).unwrap()).is_err());
+        }
+        let mut bad = request.clone();
+        bad["operation"]["unexpected"] = json!(true);
+        assert!(decode_request(&serde_json::to_vec(&bad).unwrap()).is_err());
+        for (old_kind, new_kind) in [("list", "list_v7"), ("probe", "probe_v7")] {
+            let mut current = if old_kind == "list" {
+                json!({"kind":new_kind,"schema_version":7,"descriptors":[]})
+            } else {
+                json!({"kind":new_kind,"schema_version":7,"class_id":"0123456789ABCDEF0123456789ABCDEF","vendor":null,"latency_frames":0,"tail_frames":0,"parameters":[],"current_values":[],"captured_state":null,"auxiliary_buses":[],"input_names":[],"main_audio_input":"present","audio_output_count":1,"main_audio_output_count":1,"event_bus_contract":{"schema_version":1,"inputs":[],"outputs":[]}})
+            };
+            assert!(decode_response(&serde_json::to_vec(&current).unwrap()).is_ok());
+            assert!(serde_json::from_value::<LegacyResponse>(current.clone()).is_err());
+            assert!(serde_json::from_value::<PreviousResponse>(current.clone()).is_err());
+            assert!(serde_json::from_value::<PreviousV3Response>(current.clone()).is_err());
+            assert!(serde_json::from_value::<PreviousV4Response>(current.clone()).is_err());
+            let mut previous_v6 = current.clone();
+            previous_v6["kind"] = json!(format!("{old_kind}_v6"));
+            previous_v6["schema_version"] = json!(6);
+            assert!(decode_response(&serde_json::to_vec(&previous_v6).unwrap()).is_err());
+            let mut previous_v5 = current.clone();
+            previous_v5["kind"] = json!(format!("{old_kind}_v5"));
+            previous_v5["schema_version"] = json!(5);
+            previous_v5.as_object_mut().unwrap().remove("main_audio_output_count");
+            assert!(decode_response(&serde_json::to_vec(&previous_v5).unwrap()).is_err());
+            let mut previous_v4 = current.clone();
+            previous_v4.as_object_mut().unwrap().remove("main_audio_output_count");
+            previous_v4["kind"] = json!(format!("{old_kind}_v4"));
+            previous_v4["schema_version"] = json!(4);
+            previous_v4.as_object_mut().unwrap().remove("audio_output_count");
+            assert!(serde_json::from_value::<PreviousV4Response>(previous_v4.clone()).is_ok());
+            assert!(decode_response(&serde_json::to_vec(&previous_v4).unwrap()).is_err());
+            let mut previous_v3 = current.clone();
+            previous_v3["kind"] = json!(format!("{old_kind}_v3"));
+            previous_v3["schema_version"] = json!(3);
+            previous_v3.as_object_mut().unwrap().remove("main_audio_input");
+            assert!(serde_json::from_value::<PreviousV3Response>(previous_v3.clone()).is_ok());
+            assert!(decode_response(&serde_json::to_vec(&previous_v3).unwrap()).is_err());
+            let mut previous = current.clone();
+            previous["kind"] = json!(format!("{old_kind}_v2"));
+            previous["schema_version"] = json!(2);
+            previous.as_object_mut().unwrap().remove("input_names");
+            assert!(serde_json::from_value::<PreviousResponse>(previous.clone()).is_ok());
+            assert!(decode_response(&serde_json::to_vec(&previous).unwrap()).is_err());
+            let mut legacy = current.clone();
+            legacy["kind"] = json!(old_kind);
+            legacy.as_object_mut().unwrap().remove("schema_version");
+            legacy.as_object_mut().unwrap().remove("event_bus_contract");
+            assert!(serde_json::from_value::<LegacyResponse>(legacy.clone()).is_ok());
+            assert!(decode_response(&serde_json::to_vec(&legacy).unwrap()).is_err());
+            for (field, value) in [
+                ("schema_version", json!(1)),
+                ("schema_version", json!(2)),
+                ("schema_version", json!(3)),
+                ("schema_version", json!(4)),
+                ("schema_version", json!(5)),
+                ("schema_version", json!(6)),
+                ("schema_version", json!(8)),
+                ("unexpected", json!(true)),
+            ] {
+                let mut bad = current.clone();
+                bad[field] = value;
+                assert!(decode_response(&serde_json::to_vec(&bad).unwrap()).is_err());
+            }
+            if old_kind == "probe" {
+                for field in [
+                    "event_bus_contract",
+                    "input_names",
+                    "main_audio_input",
+                    "audio_output_count",
+                    "main_audio_output_count",
+                ] {
+                    let mut missing = current.clone();
+                    missing.as_object_mut().unwrap().remove(field);
+                    assert!(decode_response(&serde_json::to_vec(&missing).unwrap()).is_err());
+                }
+                for count in [json!(0), json!(33), json!(256), json!(null), json!("1")] {
+                    let mut bad = current.clone();
+                    bad["audio_output_count"] = count;
+                    assert!(decode_response(&serde_json::to_vec(&bad).unwrap()).is_err());
+                }
+                for count in [1, 3, 32] {
+                    let mut valid = current.clone();
+                    valid["audio_output_count"] = json!(count);
+                    assert!(decode_response(&serde_json::to_vec(&valid).unwrap()).is_ok());
+                }
+                for prefix in [
+                    json!(0),
+                    json!(2),
+                    json!(33),
+                    json!(256),
+                    json!(null),
+                    json!("1"),
+                ] {
+                    let mut bad = current.clone();
+                    bad["main_audio_output_count"] = prefix;
+                    assert!(decode_response(&serde_json::to_vec(&bad).unwrap()).is_err());
+                }
+                for (total, main) in [(1, 1), (3, 1), (3, 2), (3, 3), (32, 32)] {
+                    let mut valid = current.clone();
+                    valid["audio_output_count"] = json!(total);
+                    valid["main_audio_output_count"] = json!(main);
+                    assert!(decode_response(&serde_json::to_vec(&valid).unwrap()).is_ok());
+                }
+                for shape in [json!(null), json!(false), json!("unknown")] {
+                    let mut bad = current.clone();
+                    bad["main_audio_input"] = shape;
+                    assert!(decode_response(&serde_json::to_vec(&bad).unwrap()).is_err());
+                }
+                let mut null_names = current.clone();
+                null_names["input_names"] = serde_json::Value::Null;
+                assert!(decode_response(&serde_json::to_vec(&null_names).unwrap()).is_err());
+                let mut unknown_name_field = current.clone();
+                unknown_name_field["input_names"] = json!([{
+                    "bus_key":"vst3.audio-input.1", "name":"Sidechain", "unexpected":true
+                }]);
+                assert!(
+                    decode_response(&serde_json::to_vec(&unknown_name_field).unwrap()).is_err()
+                );
+            }
+            current.as_object_mut().unwrap().remove("schema_version");
+            assert!(decode_response(&serde_json::to_vec(&current).unwrap()).is_err());
+        }
+    }
+
+    #[test]
+    fn probe_input_names_accept_empty_and_reordered_snapshots_without_changing_bus_identity() {
+        let buses = || {
+            ["vst3.audio-input.1", "vst3.audio-input.2"]
+                .map(|bus_key| AuxiliaryBusWire {
+                    bus_key: bus_key.to_owned(),
+                    channel_layout: AudioChannelLayout::Stereo,
+                })
+                .to_vec()
+        };
+        let expected = auxiliary_from_wire(buses());
+        assert_eq!(
+            decode_probe_inputs(buses(), &[], AudioChannelLayout::Stereo).unwrap(),
+            expected
+        );
+        let names = vec![
+            AudioProcessorInputName {
+                bus_key: "vst3.audio-input.2".to_owned(),
+                name: "Second native input".to_owned(),
+            },
+            AudioProcessorInputName {
+                bus_key: "vst3.audio-input.1".to_owned(),
+                name: "First native input".to_owned(),
+            },
+        ];
+        let snapshot = serde_json::to_value(&names).unwrap();
+        assert_eq!(
+            decode_probe_inputs(buses(), &names, AudioChannelLayout::Stereo).unwrap(),
+            expected
+        );
+        assert_eq!(serde_json::to_value(&names).unwrap(), snapshot);
+    }
+
+    #[test]
+    fn probe_input_metadata_accepts_31_auxiliary_ports_and_refuses_32_before_conversion() {
+        let buses = |count| {
+            (1..=count)
+                .map(|index| AuxiliaryBusWire {
+                    bus_key: format!("vst3.audio-input.{index}"),
+                    channel_layout: AudioChannelLayout::Stereo,
+                })
+                .collect()
+        };
+        let contract = decode_probe_inputs(buses(31), &[], AudioChannelLayout::Stereo)
+            .expect("31 admitted auxiliary ports");
+        assert_eq!(contract.buses.len(), 31);
+        assert!(matches!(
+            decode_probe_inputs(buses(32), &[], AudioChannelLayout::Stereo),
+            Err(AudioProcessorHostError::InvalidContract(detail))
+                if detail == "VST3 probe returned excessive auxiliary ports"
+        ));
+    }
+
+    #[test]
+    fn probe_input_names_refuse_duplicate_unknown_keys_and_invalid_native_text() {
+        let buses = || {
+            ["vst3.audio-input.1", "vst3.audio-input.2"]
+                .map(|bus_key| AuxiliaryBusWire {
+                    bus_key: bus_key.to_owned(),
+                    channel_layout: AudioChannelLayout::Stereo,
+                })
+                .to_vec()
+        };
+        let name = |bus_key: &str, text: &str| AudioProcessorInputName {
+            bus_key: bus_key.to_owned(),
+            name: text.to_owned(),
+        };
+        for names in [
+            vec![
+                name("vst3.audio-input.1", "A"),
+                name("vst3.audio-input.1", "B"),
+            ],
+            vec![name("vst3.audio-input.3", "Unknown")],
+            vec![name("vst3.audio-input.1", "")],
+            vec![name("vst3.audio-input.1", "line\nbreak")],
+            vec![name("vst3.audio-input.1", &"x".repeat(1025))],
+        ] {
+            assert!(matches!(
+                decode_probe_inputs(buses(), &names, AudioChannelLayout::Stereo),
+                Err(AudioProcessorHostError::InvalidContract(_))
+            ));
+        }
+    }
+}
+
+#[cfg(all(test, windows))]
+mod cold_settlement_probe_controls {
+    use super::super::clap_discovery::cold_settlement_probe_controls::Recorder;
+    use super::*;
+
+    #[test]
+    #[ignore = "current normal Product and the existing owned stateful VST3 Gain DLL"]
+    fn observed_vst3_fresh_probe_reports_original_child_settled() {
+        let helper = PathBuf::from(
+            std::env::var_os("MONDRIAN_VST3_TEST_HELPER").expect("current normal Product helper"),
+        );
+        let plugin = PathBuf::from(
+            std::env::var_os("MONDRIAN_VST3_STATEFUL_TEST_PLUGIN")
+                .expect("existing owned stateful VST3 Gain DLL"),
+        );
+        assert!(helper.is_absolute() && fs::metadata(&helper).unwrap().is_file());
+        let render = AudioRenderContract {
+            sample_rate: 48_000,
+            channel_layout: AudioChannelLayout::Stereo,
+            max_block_frames: 4,
+            processing_mode: AudioProcessingMode::Realtime,
+            processor_session_scratch_budget_bytes: 1024 * 1024,
+            public_output_lookahead_budget_frames: 1024,
+            compensation_delay_scratch_budget_bytes: 1024 * 1024,
+        };
+        let mut component = Vec::from(*b"MSG1");
+        component.extend_from_slice(&1_u32.to_le_bytes());
+        component.extend_from_slice(&0.5_f64.to_le_bytes());
+        let mut state = Vec::from(*b"VST3HOST_STATE\0\0");
+        state.extend_from_slice(&1_u32.to_le_bytes());
+        state.extend_from_slice(&(component.len() as u32).to_le_bytes());
+        state.extend_from_slice(&(component.len() as u32).to_le_bytes());
+        state.extend_from_slice(&component);
+        state.extend_from_slice(&component);
+        let (recorder, registrar) = Recorder::registrar(false);
+        let probe = probe_vst3_plugin_registration_with_state_and_settlement(
+            &helper,
+            &plugin,
+            "AE4C8B1910234F819CA26D315F8702A1",
+            render,
+            Some(&state),
+            true,
+            Some(&registrar),
+        )
+        .expect("actual observed Discovery4 fresh probe");
+        assert_eq!(
+            probe.registration.class_id,
+            "AE4C8B1910234F819CA26D315F8702A1"
+        );
+        assert_eq!(
+            probe.registration.binary_sha256,
+            fingerprint(&plugin).unwrap()
+        );
+        assert_eq!(
+            probe.registration.main_audio_input,
+            Vst3MainAudioInput::Present
+        );
+        assert!(probe.registration.auxiliary_inputs.buses.is_empty());
+        assert!(probe.input_names.is_empty());
+        assert_eq!(probe.captured_state.as_deref(), Some(state.as_slice()));
+        assert_eq!(probe.current_values, [(0, 0.5)]);
+        assert_eq!(probe.registration.parameters.len(), 1);
+        let parameter = &probe.registration.parameters[0];
+        assert_eq!((parameter.id, parameter.name.as_str()), (0, "Gain"));
+        assert_eq!(parameter.default_normalized, 1.0);
+        assert_eq!(parameter.step_count, 0);
+        assert!(parameter.can_automate && !parameter.read_only);
+        assert_eq!(
+            probe.registration.execution_contract.algorithmic_latency_frames(),
+            0
+        );
+        assert_eq!(
+            probe.registration.execution_contract.tail(),
+            AudioProcessorTail::None
+        );
+        assert!(probe.registration.execution_contract.realtime_capable());
+        drop(registrar);
+        recorder.assert_finished(false);
     }
 }

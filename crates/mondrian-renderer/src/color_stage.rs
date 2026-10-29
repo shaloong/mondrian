@@ -56,7 +56,7 @@ pub enum RenderColorStage {
         /// GPU descriptor produced by the upload.
         output: ColorFrameDescriptor,
     },
-    /// Execute a CPU source/import -> working-space transform.
+    /// Execute a CPU input identity -> working-space transform.
     CpuInputTransform {
         /// Input descriptor.
         input: ColorFrameDescriptor,
@@ -1485,7 +1485,7 @@ impl RenderGpuOutputBoundaryRuntime {
                     &base,
                     &processed,
                     layer.opacity,
-                    layer.blend_mode,
+                    layer.blend_policy,
                     layer.frame_seed,
                     request.working_color_space,
                 )
@@ -1536,7 +1536,9 @@ impl RenderGpuOutputBoundaryRuntime {
             scheduled.push(GpuCompositeLayer {
                 source: GpuCompositeLayerSource::GpuFrame(base),
                 opacity: 1.0,
-                blend_mode: mondrian_core::types::BlendMode::Normal,
+                blend_policy: mondrian_effects::EffectPassBlendPolicy::Blend(
+                    mondrian_core::types::BlendMode::Normal,
+                ),
                 transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
                 effect_plan: None,
                 frame_seed: 0,
@@ -4347,10 +4349,37 @@ pub enum RenderGpuColorPassExecutionError {
 }
 
 impl CpuRenderColorStageExecutor {
+    /// Execute the exact planned CPU input-identity to working-identity stage.
+    pub fn working_to_working_with_session(
+        frame: &CpuColorFrame,
+        plan: &RenderColorStagePlan,
+        session: &mut crate::RenderCpuColorExecutionSession,
+    ) -> Result<RenderColorStageExecution<RenderInputTransformResult>, RenderColorTransformError>
+    {
+        let [RenderColorStage::CpuInputTransform { input, output, transform }] =
+            plan.stages.as_slice()
+        else {
+            return Err(RenderColorTransformError::UnsupportedStagePlan {
+                reason: "working conversion requires exactly one CPU input-identity stage",
+            });
+        };
+        validate_descriptor(*input, frame.descriptor())?;
+        let result = CpuColorTransformExecutor::working_to_working_with_session(
+            frame,
+            transform.working_color_space,
+            &transform.engine,
+            session,
+        )?;
+        validate_descriptor(*output, result.frame.descriptor())?;
+        validate_descriptor(plan.final_descriptor, result.frame.descriptor())?;
+        Ok(RenderColorStageExecution { result, stage_diagnostics: plan.diagnostics() })
+    }
+
     /// Execute an encoded-float source/import -> working-space stage plan.
     pub fn input_encoded_float_to_working_with_session(
         frame: &CpuEncodedFloatColorFrame,
         plan: &RenderColorStagePlan,
+        sampling: mondrian_core::ImageSampling,
         session: &mut crate::RenderCpuColorExecutionSession,
     ) -> Result<RenderColorStageExecution<RenderInputTransformResult>, RenderColorTransformError>
     {
@@ -4366,7 +4395,7 @@ impl CpuRenderColorStageExecutor {
         };
         validate_descriptor(*input, frame.descriptor())?;
         let result = CpuColorTransformExecutor::input_encoded_float_to_working_with_session(
-            frame, transform, session,
+            frame, transform, sampling, session,
         )?;
         validate_descriptor(*output, result.frame.descriptor())?;
         validate_descriptor(plan.final_descriptor, result.frame.descriptor())?;
@@ -4377,16 +4406,18 @@ impl CpuRenderColorStageExecutor {
     pub fn input_to_working(
         frame: &CpuEncodedColorFrame,
         plan: &RenderColorStagePlan,
+        sampling: mondrian_core::ImageSampling,
     ) -> Result<RenderColorStageExecution<RenderInputTransformResult>, RenderColorTransformError>
     {
         let mut session = crate::RenderCpuColorExecutionSession::new(0);
-        Self::input_to_working_with_session(frame, plan, &mut session)
+        Self::input_to_working_with_session(frame, plan, sampling, &mut session)
     }
 
     /// Execute a CPU source/import stage through an explicit color Session.
     pub fn input_to_working_with_session(
         frame: &CpuEncodedColorFrame,
         plan: &RenderColorStagePlan,
+        sampling: mondrian_core::ImageSampling,
         session: &mut crate::RenderCpuColorExecutionSession,
     ) -> Result<RenderColorStageExecution<RenderInputTransformResult>, RenderColorTransformError>
     {
@@ -4401,8 +4432,9 @@ impl CpuRenderColorStageExecutor {
             });
         };
         validate_descriptor(*input, frame.descriptor())?;
-        let result =
-            CpuColorTransformExecutor::input_to_working_with_session(frame, transform, session)?;
+        let result = CpuColorTransformExecutor::input_to_working_with_session(
+            frame, transform, sampling, session,
+        )?;
         validate_descriptor(*output, result.frame.descriptor())?;
         validate_descriptor(plan.final_descriptor, result.frame.descriptor())?;
         Ok(RenderColorStageExecution { result, stage_diagnostics: plan.diagnostics() })
@@ -4491,16 +4523,18 @@ impl CpuRenderColorStageExecutor {
     pub fn input_to_working_float(
         frame: &LinearFloatSource,
         plan: &RenderColorStagePlan,
+        sampling: mondrian_core::ImageSampling,
     ) -> Result<RenderColorStageExecution<RenderInputTransformResult>, RenderColorTransformError>
     {
         let mut session = crate::RenderCpuColorExecutionSession::new(0);
-        Self::input_to_working_float_with_session(frame, plan, &mut session)
+        Self::input_to_working_float_with_session(frame, plan, sampling, &mut session)
     }
 
     /// Execute a float source/import stage through an explicit color Session.
     pub fn input_to_working_float_with_session(
         frame: &LinearFloatSource,
         plan: &RenderColorStagePlan,
+        sampling: mondrian_core::ImageSampling,
         session: &mut crate::RenderCpuColorExecutionSession,
     ) -> Result<RenderColorStageExecution<RenderInputTransformResult>, RenderColorTransformError>
     {
@@ -4516,7 +4550,7 @@ impl CpuRenderColorStageExecutor {
         };
         validate_descriptor(*input, frame.descriptor())?;
         let result = CpuColorTransformExecutor::input_to_working_float_with_session(
-            frame, transform, session,
+            frame, transform, sampling, session,
         )?;
         validate_descriptor(*output, result.frame.descriptor())?;
         validate_descriptor(plan.final_descriptor, result.frame.descriptor())?;
@@ -4528,20 +4562,22 @@ impl CpuRenderColorStageExecutor {
 pub fn execute_cpu_input_stage(
     frame: &CpuEncodedColorFrame,
     transform: &RenderInputTransform,
+    sampling: mondrian_core::ImageSampling,
 ) -> Result<RenderColorStageExecution<RenderInputTransformResult>, RenderColorTransformError> {
     let mut session = crate::RenderCpuColorExecutionSession::new(0);
-    execute_cpu_input_stage_with_session(frame, transform, &mut session)
+    execute_cpu_input_stage_with_session(frame, transform, sampling, &mut session)
 }
 
 /// Plan and execute a CPU source/import stage through an explicit color Session.
 pub fn execute_cpu_input_stage_with_session(
     frame: &CpuEncodedColorFrame,
     transform: &RenderInputTransform,
+    sampling: mondrian_core::ImageSampling,
     session: &mut crate::RenderCpuColorExecutionSession,
 ) -> Result<RenderColorStageExecution<RenderInputTransformResult>, RenderColorTransformError> {
     let mut planner = RenderColorStagePlanner::cpu_only();
     let plan = planner.plan_input_to_working(frame.descriptor(), transform)?;
-    CpuRenderColorStageExecutor::input_to_working_with_session(frame, &plan, session)
+    CpuRenderColorStageExecutor::input_to_working_with_session(frame, &plan, sampling, session)
 }
 
 /// Plan and execute a CPU input stage from a linear float source, bypassing
@@ -4549,40 +4585,46 @@ pub fn execute_cpu_input_stage_with_session(
 pub fn execute_cpu_input_stage_float(
     frame: &LinearFloatSource,
     transform: &RenderInputTransform,
+    sampling: mondrian_core::ImageSampling,
 ) -> Result<RenderColorStageExecution<RenderInputTransformResult>, RenderColorTransformError> {
     let mut session = crate::RenderCpuColorExecutionSession::new(0);
-    execute_cpu_input_stage_float_with_session(frame, transform, &mut session)
+    execute_cpu_input_stage_float_with_session(frame, transform, sampling, &mut session)
 }
 
 /// Plan and execute a float CPU input stage through an explicit color Session.
 pub fn execute_cpu_input_stage_float_with_session(
     frame: &LinearFloatSource,
     transform: &RenderInputTransform,
+    sampling: mondrian_core::ImageSampling,
     session: &mut crate::RenderCpuColorExecutionSession,
 ) -> Result<RenderColorStageExecution<RenderInputTransformResult>, RenderColorTransformError> {
     let mut planner = RenderColorStagePlanner::cpu_only();
     let plan = planner.plan_input_to_working(frame.descriptor(), transform)?;
-    CpuRenderColorStageExecutor::input_to_working_float_with_session(frame, &plan, session)
+    CpuRenderColorStageExecutor::input_to_working_float_with_session(
+        frame, &plan, sampling, session,
+    )
 }
 
 /// Plan and execute the CPU fallback for any supported decoded source payload.
 pub fn execute_cpu_source_input_stage(
     frame: &CpuSourceColorFrame,
     transform: &RenderInputTransform,
+    sampling: mondrian_core::ImageSampling,
 ) -> Result<RenderColorStageExecution<RenderInputTransformResult>, RenderColorTransformError> {
     let mut session = crate::RenderCpuColorExecutionSession::new(0);
-    execute_cpu_source_input_stage_with_session(frame, transform, &mut session)
+    execute_cpu_source_input_stage_with_session(frame, transform, sampling, &mut session)
 }
 
 /// Execute any supported decoded source payload through an explicit color Session.
 pub fn execute_cpu_source_input_stage_with_session(
     frame: &CpuSourceColorFrame,
     transform: &RenderInputTransform,
+    sampling: mondrian_core::ImageSampling,
     session: &mut crate::RenderCpuColorExecutionSession,
 ) -> Result<RenderColorStageExecution<RenderInputTransformResult>, RenderColorTransformError> {
     match frame {
         CpuSourceColorFrame::EncodedRgba8(frame) => {
-            execute_cpu_input_stage_with_session(frame, transform, session)
+            execute_cpu_input_stage_with_session(frame, transform, sampling, session)
         }
         CpuSourceColorFrame::EncodedUnorm16(frame) => {
             let descriptor = frame.descriptor();
@@ -4607,7 +4649,7 @@ pub fn execute_cpu_source_input_stage_with_session(
             float.set_alpha_contract(descriptor.alpha);
             let mut result =
                 CpuColorTransformExecutor::input_encoded_float_to_working_with_session(
-                    &float, transform, session,
+                    &float, transform, sampling, session,
                 )
                 .map_err(|error| match error {
                     RenderColorTransformError::ExecutionFailed(mut failure) => {
@@ -4623,11 +4665,11 @@ pub fn execute_cpu_source_input_stage_with_session(
             let mut planner = RenderColorStagePlanner::cpu_only();
             let plan = planner.plan_input_to_working(frame.descriptor(), transform)?;
             CpuRenderColorStageExecutor::input_encoded_float_to_working_with_session(
-                frame, &plan, session,
+                frame, &plan, sampling, session,
             )
         }
         CpuSourceColorFrame::LinearFloat(frame) => {
-            execute_cpu_input_stage_float_with_session(frame, transform, session)
+            execute_cpu_input_stage_float_with_session(frame, transform, sampling, session)
         }
     }
 }
@@ -4649,17 +4691,9 @@ pub fn execute_cpu_working_transform_with_session(
     engine: ColorEngine,
     session: &mut crate::RenderCpuColorExecutionSession,
 ) -> Result<RenderColorStageExecution<RenderInputTransformResult>, RenderColorTransformError> {
-    let descriptor = frame.descriptor();
-    let source = descriptor.color_space.working().ok_or(
-        RenderColorTransformError::UnsupportedWorkingIdentity { identity: descriptor.color_space },
-    )?;
-    let data = frame.rgba_f32().data.iter().flat_map(|pixel| pixel.iter().copied()).collect();
-    let source = LinearFloatSource::new(descriptor.width, descriptor.height, source, data);
-    execute_cpu_input_stage_float_with_session(
-        &source,
-        &RenderInputTransform::to_working(destination, false, engine),
-        session,
-    )
+    let planner = RenderColorStagePlanner::cpu_only();
+    let plan = planner.plan_cpu_working_to_working(frame.descriptor(), destination, engine)?;
+    CpuRenderColorStageExecutor::working_to_working_with_session(frame, &plan, session)
 }
 
 /// Plan and execute a CPU working-space -> display/export color stage.
@@ -5110,6 +5144,42 @@ fn quantize_encoded_float_frame_rgba8(frame: &crate::CpuEncodedFloatColorFrame) 
 }
 
 impl<'a> RenderColorStagePlanner<'a> {
+    /// Plan one CPU working-identity conversion with explicit alpha admission.
+    ///
+    /// This is a CPU complete-value consumer. GPU planning continues to require
+    /// its concrete normalized-straight format before any GPU processor runs.
+    pub fn plan_cpu_working_to_working(
+        &self,
+        input: ColorFrameDescriptor,
+        destination: WorkingColorSpace,
+        engine: ColorEngine,
+    ) -> Result<RenderColorStagePlan, RenderColorTransformError> {
+        if input.domain != ColorFrameDomain::Working {
+            return Err(RenderColorTransformError::UnsupportedInputDomain { domain: input.domain });
+        }
+        let source = input.color_space.working().ok_or(
+            RenderColorTransformError::UnsupportedWorkingIdentity { identity: input.color_space },
+        )?;
+        if input.residency != ColorFrameResidency::Cpu
+            || input.encoding != ColorFrameEncoding::LinearFloat
+        {
+            return Err(RenderColorTransformError::UnsupportedStagePlan {
+                reason: "CPU working conversion requires a CPU LinearFloat value",
+            });
+        }
+        let alpha = if source == destination || input.alpha == crate::ColorFrameAlpha::Opaque {
+            input.alpha
+        } else {
+            crate::ColorFrameAlpha::StraightCoverage
+        };
+        let output = ColorFrameDescriptor { color_space: destination.into(), alpha, ..input };
+        let transform = RenderInputTransform::to_working(destination, false, engine);
+        Ok(RenderColorStagePlan {
+            stages: vec![RenderColorStage::CpuInputTransform { input, output, transform }],
+            final_descriptor: output,
+        })
+    }
+
     /// Create a planner that always schedules CPU color transforms.
     pub fn cpu_only() -> Self {
         Self {
@@ -5160,7 +5230,9 @@ impl<'a> RenderColorStagePlanner<'a> {
         if input.domain != ColorFrameDomain::Working {
             return Err(RenderColorTransformError::UnsupportedInputDomain { domain: input.domain });
         }
-        crate::color_transform::require_straight_compatible_color_alpha(input)?;
+        if self.mode == RenderColorStageMode::PreferGpu {
+            crate::color_transform::require_straight_compatible_color_alpha(input)?;
+        }
 
         match self.mode {
             RenderColorStageMode::CpuOnly => Ok(self.cpu_output_stage(input, transform)),
@@ -5181,7 +5253,9 @@ impl<'a> RenderColorStagePlanner<'a> {
         if input.domain != ColorFrameDomain::Working {
             return Err(RenderColorTransformError::UnsupportedInputDomain { domain: input.domain });
         }
-        crate::color_transform::require_straight_compatible_color_alpha(input)?;
+        if self.mode == RenderColorStageMode::PreferGpu {
+            crate::color_transform::require_straight_compatible_color_alpha(input)?;
+        }
 
         match self.mode {
             RenderColorStageMode::CpuOnly => Ok(self.cpu_output_stage_with_encoding(
@@ -5255,7 +5329,11 @@ impl<'a> RenderColorStagePlanner<'a> {
             domain: transform.output_domain,
             encoding,
             residency: ColorFrameResidency::Cpu,
-            alpha: input.alpha,
+            alpha: if input.alpha == crate::ColorFrameAlpha::Opaque {
+                input.alpha
+            } else {
+                crate::ColorFrameAlpha::StraightCoverage
+            },
         };
         RenderColorStagePlan {
             stages: vec![RenderColorStage::CpuOutputTransform {
@@ -6034,8 +6112,12 @@ mod tests {
             .plan_input_to_working(source.descriptor(), &transform)
             .expect("CPU input plan");
 
-        let result = CpuRenderColorStageExecutor::input_to_working(&source, &plan)
-            .expect("execute CPU input plan");
+        let result = CpuRenderColorStageExecutor::input_to_working(
+            &source,
+            &plan,
+            mondrian_core::ImageSampling::UNIT_SQUARE,
+        )
+        .expect("execute CPU input plan");
 
         assert_eq!(result.result.frame.descriptor(), plan.final_descriptor);
         assert_eq!(result.result.diagnostics.input, source.descriptor());
@@ -6066,8 +6148,12 @@ mod tests {
             .plan_input_to_working(source.descriptor(), &transform)
             .expect("GPU input plan");
 
-        let err = CpuRenderColorStageExecutor::input_to_working(&source, &plan)
-            .expect_err("CPU executor must reject GPU plans");
+        let err = CpuRenderColorStageExecutor::input_to_working(
+            &source,
+            &plan,
+            mondrian_core::ImageSampling::UNIT_SQUARE,
+        )
+        .expect_err("CPU executor must reject GPU plans");
 
         assert!(matches!(
             err,
@@ -6078,6 +6164,8 @@ mod tests {
     #[test]
     fn cpu_stage_executor_runs_output_plan_and_validates_descriptors() {
         let frame = CpuColorFrame::working(WorkingRgbaF32Frame {
+            sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
+            alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
             width: 1920,
             height: 1080,
             data: vec![[0.25, 0.5, 0.75, 1.0]; 1920 * 1080],
@@ -6111,8 +6199,12 @@ mod tests {
             false,
             ColorEngine::mondrian_standard(),
         );
-        let working = execute_cpu_input_stage(&source, &input_transform)
-            .expect("helper should execute input stage");
+        let working = execute_cpu_input_stage(
+            &source,
+            &input_transform,
+            mondrian_core::ImageSampling::UNIT_SQUARE,
+        )
+        .expect("helper should execute input stage");
         assert_eq!(
             working.result.frame.descriptor().domain,
             ColorFrameDomain::Working
@@ -6577,10 +6669,14 @@ mod tests {
                 false,
                 ColorEngine::mondrian_standard(),
             );
-            let expected = execute_cpu_source_input_stage(&source, &transform)
-                .expect("CPU reference")
-                .result
-                .frame;
+            let expected = execute_cpu_source_input_stage(
+                &source,
+                &transform,
+                mondrian_core::ImageSampling::UNIT_SQUARE,
+            )
+            .expect("CPU reference")
+            .result
+            .frame;
             // The float control uses the exact CPU normalization of the same
             // sixteen-bit fixture, isolating texture conversion from OCIO math.
             let float_control =
@@ -6845,7 +6941,9 @@ mod tests {
             let layers = [crate::GpuCompositeLayer {
                 source: crate::GpuCompositeLayerSource::GpuFrame(&media_handle),
                 opacity: 1.0,
-                blend_mode: mondrian_core::types::BlendMode::Normal,
+                blend_policy: mondrian_effects::EffectPassBlendPolicy::Blend(
+                    mondrian_core::types::BlendMode::Normal,
+                ),
                 transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
                 effect_plan: Some(&effect_plan),
                 frame_seed: frame,
@@ -6905,7 +7003,9 @@ mod tests {
         let layer = crate::GpuCompositeLayer {
             source: crate::GpuCompositeLayerSource::SolidColor(mondrian_core::types::Color::WHITE),
             opacity: 1.0,
-            blend_mode: mondrian_core::types::BlendMode::Normal,
+            blend_policy: mondrian_effects::EffectPassBlendPolicy::Blend(
+                mondrian_core::types::BlendMode::Normal,
+            ),
             transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
             effect_plan: Some(&effect_plan),
             frame_seed: 0,
@@ -6942,7 +7042,9 @@ mod tests {
         }
 
         let fallback_layer = crate::GpuCompositeLayer {
-            blend_mode: mondrian_core::types::BlendMode::Multiply,
+            blend_policy: mondrian_effects::EffectPassBlendPolicy::Blend(
+                mondrian_core::types::BlendMode::Multiply,
+            ),
             ..layer
         };
         let mut encoder = context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -8843,6 +8945,8 @@ mod tests {
 
     fn cpu_working_frame() -> CpuColorFrame {
         CpuColorFrame::working(WorkingRgbaF32Frame {
+            sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
+            alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
             width: 4,
             height: 2,
             data: vec![[0.25, 0.5, 0.75, 1.0]; 8],
@@ -8867,6 +8971,8 @@ mod tests {
         // Standard target, including SDR; the original precision budgets apply.
         data.extend_from_slice(&pq_accuracy_working_frame().rgba_f32().data);
         CpuColorFrame::working(WorkingRgbaF32Frame {
+            sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
+            alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
             width: u32::try_from(data.len()).expect("parity corpus width"),
             height: 1,
             data,
@@ -8903,6 +9009,8 @@ mod tests {
             data.push(pixel);
         }
         CpuColorFrame::working(WorkingRgbaF32Frame {
+            sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
+            alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
             width: WIDTH,
             height: HEIGHT,
             data,
@@ -9257,7 +9365,9 @@ mod tests {
             GpuCompositeLayer {
                 source: GpuCompositeLayerSource::GpuFrame(&input),
                 opacity: 1.0,
-                blend_mode: mondrian_core::types::BlendMode::Normal,
+                blend_policy: mondrian_effects::EffectPassBlendPolicy::Blend(
+                    mondrian_core::types::BlendMode::Normal,
+                ),
                 transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
                 effect_plan: None,
                 frame_seed: 0,
@@ -9265,7 +9375,9 @@ mod tests {
             GpuCompositeLayer {
                 source: GpuCompositeLayerSource::Adjustment,
                 opacity,
-                blend_mode: mondrian_core::types::BlendMode::Normal,
+                blend_policy: mondrian_effects::EffectPassBlendPolicy::Blend(
+                    mondrian_core::types::BlendMode::Normal,
+                ),
                 transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
                 effect_plan: Some(&plan),
                 frame_seed: 19,
@@ -9958,7 +10070,9 @@ mod tests {
             GpuCompositeLayer {
                 source: GpuCompositeLayerSource::GpuFrame(&input),
                 opacity: 1.0,
-                blend_mode: mondrian_core::types::BlendMode::Normal,
+                blend_policy: mondrian_effects::EffectPassBlendPolicy::Blend(
+                    mondrian_core::types::BlendMode::Normal,
+                ),
                 transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
                 effect_plan: None,
                 frame_seed: 0,
@@ -9966,7 +10080,9 @@ mod tests {
             GpuCompositeLayer {
                 source: GpuCompositeLayerSource::Adjustment,
                 opacity: 0.0,
-                blend_mode: mondrian_core::types::BlendMode::Normal,
+                blend_policy: mondrian_effects::EffectPassBlendPolicy::Blend(
+                    mondrian_core::types::BlendMode::Normal,
+                ),
                 transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
                 effect_plan: Some(&plan),
                 frame_seed: 19,

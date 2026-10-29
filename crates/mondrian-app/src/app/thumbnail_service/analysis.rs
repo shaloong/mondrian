@@ -77,6 +77,8 @@ pub(super) fn thumbnail_worker(
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
 pub(super) struct ThumbnailColorContract {
     pub(super) video_stream_index: u32,
+    #[serde(serialize_with = "serialize_picture_geometry")]
+    pub(super) picture_geometry: mondrian_core::ResolvedPictureGeometry,
     pub(super) source_color_space: ColorSpace,
     pub(super) source_range: DecodedVideoRangeContract,
     pub(super) yuv_matrix_fallback: Option<DecodedVideoMatrix>,
@@ -88,6 +90,21 @@ pub(super) struct ThumbnailColorContract {
     pub(super) engine: ColorEngine,
     pub(super) output_transform: OutputTransformIntent,
     pub(super) camera_raw: Option<mondrian_media::CameraRawDecodeIntent>,
+}
+
+// Hash the frozen checked geometry through its public semantic projections;
+// the Core value intentionally does not expose a reconstructible wire model.
+fn serialize_picture_geometry<S: serde::Serializer>(
+    geometry: &mondrian_core::ResolvedPictureGeometry,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    (
+        geometry.encoded_resolution(),
+        geometry.sample_aspect_ratio(),
+        geometry.orientation(),
+        geometry.scan(),
+    )
+        .serialize(serializer)
 }
 
 impl ThumbnailColorContract {
@@ -168,6 +185,21 @@ impl ThumbnailColorContract {
             .transpose()?;
         Ok(Self {
             video_stream_index: primary_video.index,
+            picture_geometry: mondrian_core::ResolvedPictureGeometry::resolve(
+                mondrian_core::Resolution {
+                    width: primary_video.width,
+                    height: primary_video.height,
+                },
+                primary_video.picture,
+                None,
+                None,
+            )
+            .map_err(|error| {
+                failure(
+                    ThumbnailFailureReason::InvalidRasterPayload,
+                    error.to_string(),
+                )
+            })?,
             source_color_space,
             source_range,
             yuv_matrix_fallback: SourceColorModule::decode_contract(
@@ -369,14 +401,26 @@ fn color_manage_rgba_with_session(
         color.source_color_space,
         rgba,
     ));
-    let working =
-        SourceColorModule::execute_cpu(&source, &color.media_input_context(), color_session)
+    let working = SourceColorModule::execute_cpu(
+        &source,
+        &color.media_input_context(),
+        color
+            .picture_geometry
+            .image_sampling(mondrian_core::Resolution { width, height })
             .map_err(|error| {
                 failure(
-                    ThumbnailFailureReason::InputTransformFailed,
-                    format!("thumbnail input transform failed: {error}"),
+                    ThumbnailFailureReason::InvalidRasterPayload,
+                    error.to_string(),
                 )
-            })?;
+            })?,
+        color_session,
+    )
+    .map_err(|error| {
+        failure(
+            ThumbnailFailureReason::InputTransformFailed,
+            format!("thumbnail input transform failed: {error}"),
+        )
+    })?;
     ProgramOutputModule::execute_cpu_rgba8(
         working.frame(),
         &color.output_boundary()?,
@@ -419,14 +463,26 @@ fn color_manage_float_with_session(
                 ));
             }
         };
-    let working =
-        SourceColorModule::execute_cpu(&source, &color.media_input_context(), color_session)
+    let working = SourceColorModule::execute_cpu(
+        &source,
+        &color.media_input_context(),
+        color
+            .picture_geometry
+            .image_sampling(mondrian_core::Resolution { width, height })
             .map_err(|error| {
                 failure(
-                    ThumbnailFailureReason::InputTransformFailed,
-                    format!("thumbnail float input transform failed: {error}"),
+                    ThumbnailFailureReason::InvalidRasterPayload,
+                    error.to_string(),
                 )
-            })?;
+            })?,
+        color_session,
+    )
+    .map_err(|error| {
+        failure(
+            ThumbnailFailureReason::InputTransformFailed,
+            format!("thumbnail float input transform failed: {error}"),
+        )
+    })?;
     ProgramOutputModule::execute_cpu_rgba8(
         working.frame(),
         &color.output_boundary()?,

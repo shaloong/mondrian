@@ -238,3 +238,45 @@ fn copy_paste_animation_keyframes_reassigns_ids_and_updates_selection() {
         .collect::<std::collections::HashSet<_>>();
     assert_eq!(selected_times, pasted_times.into_iter().collect());
 }
+
+#[test]
+fn selected_animation_ease_mode_and_available_presets_follow_authored_sides() {
+    let presets = [
+        InterpolationType::Linear,
+        InterpolationType::Bezier,
+        InterpolationType::EaseIn,
+        InterpolationType::EaseOut,
+    ];
+    for mode in [InterpolationType::EaseIn, InterpolationType::EaseOut] {
+        let (mut state, track_id, clip_ids, tb) = create_state_with_video_clips(1);
+        let selection = clip_ref(track_id, clip_ids[0]);
+        for frame in [0, 10] {
+            state
+                .mutate_clip_property(
+                    selection,
+                    PropertyMutation::SetKeyframe {
+                        path: Transform2D::OPACITY_PATH.to_owned(),
+                        keyframe: Keyframe::from_preset(
+                            tt(frame, tb),
+                            PropertyValue::Float(0.2 + frame as f32 * 0.05),
+                            mode,
+                        ),
+                    },
+                    "seed ease preset",
+                )
+                .expect("seed");
+        }
+        state.set_animation_keyframe_selection(vec![
+            key_selection(&state, clip_ids[0], Transform2D::OPACITY_PATH, tt(0, tb)),
+            key_selection(&state, clip_ids[0], Transform2D::OPACITY_PATH, tt(10, tb)),
+        ]);
+        assert_eq!(
+            state.selected_animation_interpolation_mode(selection),
+            Some(mode)
+        );
+        assert_eq!(
+            state.available_animation_interpolation_presets(selection, &presets),
+            presets.into_iter().filter(|preset| *preset != mode).collect::<Vec<_>>()
+        );
+    }
+}

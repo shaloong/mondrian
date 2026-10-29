@@ -7,7 +7,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-const CACHE_NAMESPACE: &str = "timeline-render-v2";
+const CACHE_NAMESPACE: &str = "timeline-render-v3";
 const ARTIFACT_EXTENSION: &str = "mrc";
 
 #[derive(Debug, thiserror::Error)]
@@ -326,10 +326,12 @@ mod tests {
         TimelineRenderCacheFrame::new(
             TimelineRenderCacheIdentity::from_digest([identity_byte; 32]),
             WorkingRgbaF32Frame {
+                sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
                 width: 8,
                 height: 8,
                 data: vec![[value; 4]; 64],
                 color_space: WorkingColorSpace::LinearRec709,
+                alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
             },
         )
         .expect("valid frame")

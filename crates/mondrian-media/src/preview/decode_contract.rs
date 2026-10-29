@@ -773,6 +773,19 @@ pub struct PreviewDecodeKey {
     camera_raw: Option<CameraRawDecodeIntent>,
 }
 
+fn validate_source_sample(sample: SourceSampleTarget) -> Result<(), PreviewDecodeContractError> {
+    if sample.time().is_negative() {
+        return Err(PreviewDecodeContractError::NegativeSourceTime { source_time: sample.time() });
+    }
+    if sample.time().is_zero() && sample.boundary() == SourceSamplingBoundary::StrictPredecessor {
+        return Err(PreviewDecodeContractError::SourceSampleBeforeOrigin {
+            source_time: sample.time(),
+            boundary: sample.boundary(),
+        });
+    }
+    Ok(())
+}
+
 impl PreviewDecodeKey {
     /// Build a validated exact physical Preview decode key.
     pub fn new(
@@ -781,19 +794,7 @@ impl PreviewDecodeKey {
         representation: PreviewDecodeRepresentation,
         source_color: PreviewSourceColorContract,
     ) -> Result<Self, PreviewDecodeContractError> {
-        if source_sample.time().is_negative() {
-            return Err(PreviewDecodeContractError::NegativeSourceTime {
-                source_time: source_sample.time(),
-            });
-        }
-        if source_sample.time().is_zero()
-            && source_sample.boundary() == SourceSamplingBoundary::StrictPredecessor
-        {
-            return Err(PreviewDecodeContractError::SourceSampleBeforeOrigin {
-                source_time: source_sample.time(),
-                boundary: source_sample.boundary(),
-            });
-        }
+        validate_source_sample(source_sample)?;
         validate_representation_for_source(representation, &source, source_color)?;
         Ok(Self {
             source,
@@ -835,6 +836,21 @@ impl PreviewDecodeKey {
     /// Exact media-source-local target.
     pub const fn source_sample(&self) -> SourceSampleTarget {
         self.source_sample
+    }
+
+    /// Retarget the same frozen physical source without reopening project state.
+    /// Scan processing, RAW interpretation, representation and color remain
+    /// exactly those admitted for the originating execution.
+    pub fn at_source_sample(
+        &self,
+        source_sample: SourceSampleTarget,
+    ) -> Result<Self, PreviewDecodeContractError> {
+        // Keep validation identical to the public constructor. In particular,
+        // strict predecessor of the origin is not an image at time zero.
+        validate_source_sample(source_sample)?;
+        let mut next = self.clone();
+        next.source_sample = source_sample;
+        Ok(next)
     }
 
     /// Compare the complete decode contract except its exact sampling target.
@@ -1321,6 +1337,52 @@ mod tests {
 
     fn source_color() -> PreviewSourceColorContract {
         PreviewSourceColorContract::automatic(ColorSpace::Rec709, DecodedVideoRange::Limited)
+    }
+
+    #[test]
+    fn retarget_preserves_frozen_file_stream_representation_color_and_scan_contract() {
+        let source = PreviewDecodeSource::from_probed_stream(
+            absolute_test_path("media/original.mov"),
+            exact_fingerprint(314),
+            &video_stream(3, PixelFormat::Nv12, true),
+        )
+        .unwrap();
+        let original = PreviewDecodeKey::new(
+            source,
+            SourceSampleTarget::covering(TimelineTime::new(7, 3).unwrap()),
+            PreviewDecodeRepresentation::NativeCpu,
+            source_color(),
+        )
+        .unwrap()
+        .with_field_processing(
+            super::super::PreviewSourceFieldProcessing::MotionAdaptiveFieldRate {
+                dominance: mondrian_core::PictureFieldDominance::TopFirst,
+            },
+        )
+        .unwrap();
+        let sample = SourceSampleTarget::covering(TimelineTime::new(13, 24).unwrap());
+        let next = original.at_source_sample(sample).unwrap();
+        assert_eq!(next.source_sample(), sample);
+        assert_eq!(
+            original.source_sample().time(),
+            TimelineTime::new(7, 3).unwrap()
+        );
+        assert!(original.same_configuration(&next));
+        assert_eq!(next.source(), original.source());
+        assert_eq!(next.field_processing(), original.field_processing());
+        assert_eq!(next.source_color(), original.source_color());
+        assert_eq!(next.representation(), original.representation());
+        assert!(matches!(
+            original.at_source_sample(SourceSampleTarget::covering(
+                TimelineTime::new(-1, 24).unwrap()
+            )),
+            Err(PreviewDecodeContractError::NegativeSourceTime { .. })
+        ));
+        let before_origin = SourceSampleTarget::strict_predecessor(TimelineTime::ZERO);
+        assert!(matches!(
+            original.at_source_sample(before_origin),
+            Err(PreviewDecodeContractError::SourceSampleBeforeOrigin { .. })
+        ));
     }
 
     #[test]
@@ -2377,6 +2439,22 @@ mod tests {
 
         assert_ne!(base, raised);
         assert_eq!(base.camera_raw(), Some(base_intent));
+        let historical = base
+            .at_source_sample(SourceSampleTarget::covering(
+                TimelineTime::new(1, 2).unwrap(),
+            ))
+            .unwrap();
+        assert!(historical.same_configuration(&base));
+        assert_eq!(historical.camera_raw(), Some(base_intent));
+        assert_eq!(
+            super::super::PreviewDecodeRequest::from_key(
+                &historical,
+                super::super::PreviewDecodeAccessMode::RandomAccessStillFrame
+            )
+            .camera_raw,
+            Some(base_intent)
+        );
+
         assert_eq!(
             super::super::PreviewDecodeRequest::from_key(
                 &base,

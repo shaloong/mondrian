@@ -739,14 +739,17 @@ pub(super) const TEST_PROJECT_RUNTIME_NAMESPACE_ENV: &str =
     "MONDRIAN_TEST_PROJECT_RUNTIME_NAMESPACE";
 
 #[cfg(test)]
-fn test_project_runtime_namespace() -> Result<String, String> {
+pub(super) fn test_project_runtime_namespace() -> Result<String, String> {
+    static PROCESS_NAMESPACE: OnceLock<String> = OnceLock::new();
+    // PIDs are recycled while recovery fixtures intentionally survive process exit.
+    // A fresh process must never adopt an earlier test process's directory.
     let namespace = std::env::var(TEST_PROJECT_RUNTIME_NAMESPACE_ENV)
-        .unwrap_or_else(|_| std::process::id().to_string());
+        .unwrap_or_else(|_| PROCESS_NAMESPACE.get_or_init(|| ProjectId::new().to_string()).clone());
     if namespace.is_empty()
-        || namespace.len() > 20
-        || !namespace.bytes().all(|byte| byte.is_ascii_digit())
+        || namespace.len() > 36
+        || !namespace.bytes().all(|byte| byte.is_ascii_hexdigit() || byte == b'-')
     {
-        return Err("test Project runtime namespace must contain 1..=20 ASCII digits".to_owned());
+        return Err("test Project runtime namespace must contain 1..=36 ASCII hexadecimal digits or hyphens".to_owned());
     }
     Ok(namespace)
 }
@@ -1560,8 +1563,7 @@ fn ensure_runtime_parent_marker(
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             if !allow_initial_publication {
                 return Err(
-                    "existing Project runtime parent has no durable ownership marker; it remains inert"
-                        .to_owned(),
+                    format!("existing Project runtime parent {} has no durable ownership marker; it remains inert", runtime_parent.display()),
                 );
             }
         }

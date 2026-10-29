@@ -58,6 +58,15 @@ pub(super) fn try_decode_with_external_ffmpeg_cpu_rgba(
     decoded_color_range: ffmpeg::util::color::Range,
     should_cancel: &(dyn Fn() -> bool + Send + Sync),
 ) -> Option<Result<Option<RgbaFrame>>> {
+    // This optional helper publishes only RGBA8. Linear signal and physical
+    // float storage must retain the strict in-process materialization path.
+    if source_color.is_scene_linear()
+        || source_format.descriptor().is_some_and(|descriptor| unsafe {
+            (*descriptor.as_ptr()).flags & ffmpeg::ffi::AV_PIX_FMT_FLAG_FLOAT as u64 != 0
+        })
+    {
+        return None;
+    }
     if width == 0 || height == 0 {
         return None;
     }
@@ -232,7 +241,10 @@ pub(super) fn run_external_decode_command_cancellable(
     }
 }
 
-pub(super) fn fit_target_size(
+/// Exact CPU full-source raster selected by the decoder's bounding-box policy.
+/// Consumers may plan against this size, but must still validate the decoded
+/// image: stream metadata alone cannot prove a variable-resolution sample.
+pub fn fit_target_size(
     src_width: u32,
     src_height: u32,
     max_width: Option<u32>,
@@ -244,6 +256,12 @@ pub(super) fn fit_target_size(
     let Some(max_h) = max_height.filter(|v| *v > 0) else {
         return (src_width, src_height);
     };
+
+    // Full-source RGBA materialization supports odd dimensions. Preserve its
+    // exact grid when no downscale is requested; even sizing applies only below.
+    if src_width <= max_w && src_height <= max_h {
+        return (src_width, src_height);
+    }
 
     let src_w = src_width as f64;
     let src_h = src_height as f64;

@@ -18,8 +18,17 @@ pub fn overlay_hit_test_deepest(tree: &dyn WidgetTree, position: Point) -> Optio
 /// 返回从根到最深命中 Widget 的完整路径
 pub fn hit_test_path(tree: &dyn WidgetTree, position: Point) -> Vec<WidgetId> {
     let overlay_path = overlay_hit_test_recursive(tree, tree.root_id(), position);
-    if !overlay_path.is_empty() {
-        return overlay_path;
+    if let Some(scope) = overlay_path.last().copied() {
+        // The winning overlay owns this region. Its ordinary descendants still
+        // need direct routing so pointer focus and capture belong to the leaf.
+        let content_path = hit_test_recursive(tree, scope, position);
+        if content_path.is_empty() {
+            return overlay_path;
+        }
+        let mut path = overlay_path;
+        path.pop();
+        path.extend(content_path);
+        return path;
     }
     hit_test_recursive(tree, tree.root_id(), position)
 }
@@ -145,6 +154,89 @@ mod tests {
                 .map(|w| w.children.iter().map(|c| c.id()).collect())
                 .unwrap_or_default()
         }
+    }
+
+    #[test]
+    fn overlay_scope_routes_normal_content_and_retains_outside_and_clip_barriers() {
+        use mondrian_ui_core::tree::WidgetTreeView;
+        let root_id = WidgetId::new();
+        let scope_id = WidgetId::new();
+        let input_id = WidgetId::new();
+        let input = HitWidget {
+            id: input_id,
+            bounds: Rect::new(30.0, 30.0, 40.0, 20.0),
+            overlay_hit: false,
+            child_clip: None,
+            children: vec![],
+        };
+        let scope = HitWidget {
+            id: scope_id,
+            bounds: Rect::new(20.0, 20.0, 100.0, 100.0),
+            overlay_hit: true,
+            child_clip: None,
+            children: vec![Box::new(input)],
+        };
+        let mut root = HitWidget {
+            id: root_id,
+            bounds: Rect::new(0.0, 0.0, 400.0, 300.0),
+            overlay_hit: false,
+            child_clip: None,
+            children: vec![Box::new(scope)],
+        };
+        {
+            let tree = WidgetTreeView::new(&mut root);
+            let point = Point::new(35.0, 35.0);
+            assert_eq!(overlay_hit_test_deepest(&tree, point), Some(scope_id));
+            assert_eq!(hit_test_deepest(&tree, point), Some(input_id));
+            assert_eq!(
+                hit_test_path(&tree, point),
+                vec![root_id, scope_id, input_id]
+            );
+            assert_eq!(
+                hit_test_deepest(&tree, Point::new(250.0, 250.0)),
+                Some(scope_id),
+                "outside-close layer must keep its own target"
+            );
+        }
+        let mut clipped = HitWidget {
+            id: scope_id,
+            bounds: Rect::new(20.0, 20.0, 100.0, 100.0),
+            overlay_hit: true,
+            child_clip: Some(Rect::new(20.0, 20.0, 10.0, 10.0)),
+            children: vec![Box::new(HitWidget {
+                id: input_id,
+                bounds: Rect::new(30.0, 30.0, 40.0, 20.0),
+                overlay_hit: false,
+                child_clip: None,
+                children: vec![],
+            })],
+        };
+        {
+            let tree = WidgetTreeView::new(&mut clipped);
+            assert_eq!(
+                hit_test_deepest(&tree, Point::new(35.0, 35.0)),
+                Some(scope_id),
+                "ordinary children must respect their scope's content clip"
+            );
+        }
+        let popup_id = WidgetId::new();
+        clipped.children.push(Box::new(HitWidget {
+            id: popup_id,
+            bounds: Rect::new(200.0, 200.0, 80.0, 40.0),
+            overlay_hit: true,
+            child_clip: None,
+            children: vec![],
+        }));
+        let tree = WidgetTreeView::new(&mut clipped);
+        assert_eq!(
+            overlay_hit_test_deepest(&tree, Point::new(210.0, 210.0)),
+            Some(popup_id)
+        );
+        assert_eq!(
+            hit_test_deepest(&tree, Point::new(210.0, 210.0)),
+            Some(popup_id),
+            "nested popup must win beyond ordinary content clip"
+        );
     }
 
     #[test]

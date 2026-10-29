@@ -1,5 +1,5 @@
 {
-  "schema_version": 27,
+  "schema_version": 32,
   "project_id": "97f12455-ec34-4b5d-a696-3da93cd914d7",
   "document_revision": 1,
   "meta": {
@@ -168,12 +168,12 @@
                   },
                   "is_animatable": true,
                   "unit": "normalized",
-                  "numeric": {
+                  "numeric": [{
                     "hard_range": { "min": 0.0, "max": 1.0 },
                     "soft_range": { "min": 0.0, "max": 1.0 },
                     "step": 0.01,
                     "invalid_value_policy": "reject"
-                  },
+                  }],
                   "allowed_interpolations": [
                     "Hold", "Linear", "Bezier"
                   ],
@@ -222,12 +222,12 @@
                   },
                   "is_animatable": true,
                   "unit": "normalized",
-                  "numeric": {
+                  "numeric": [{
                     "hard_range": { "min": 0.0, "max": 1.0 },
                     "soft_range": { "min": 0.0, "max": 1.0 },
                     "step": 0.01,
                     "invalid_value_policy": "reject"
-                  },
+                  }],
                   "allowed_interpolations": [
                     "Hold", "Linear", "Bezier"
                   ],
@@ -276,12 +276,12 @@
                   },
                   "is_animatable": true,
                   "unit": "normalized",
-                  "numeric": {
+                  "numeric": [{
                     "hard_range": { "min": 0.0, "max": 1.0 },
                     "soft_range": { "min": 0.0, "max": 1.0 },
                     "step": 0.01,
                     "invalid_value_policy": "reject"
-                  },
+                  }],
                   "allowed_interpolations": [
                     "Hold", "Linear", "Bezier"
                   ],
@@ -338,12 +338,12 @@
                   },
                   "is_animatable": true,
                   "unit": "normalized",
-                  "numeric": {
+                  "numeric": [{
                     "hard_range": { "min": 0.0, "max": 1.0 },
                     "soft_range": { "min": 0.0, "max": 1.0 },
                     "step": 0.01,
                     "invalid_value_policy": "reject"
-                  },
+                  }],
                   "allowed_interpolations": [
                     "Hold", "Linear", "Bezier"
                   ],
@@ -392,12 +392,12 @@
                   },
                   "is_animatable": true,
                   "unit": "normalized",
-                  "numeric": {
+                  "numeric": [{
                     "hard_range": { "min": 0.0, "max": 1.0 },
                     "soft_range": { "min": 0.0, "max": 1.0 },
                     "step": 0.01,
                     "invalid_value_policy": "reject"
-                  },
+                  }],
                   "allowed_interpolations": [
                     "Hold", "Linear", "Bezier"
                   ],
@@ -446,12 +446,12 @@
                   },
                   "is_animatable": true,
                   "unit": "normalized",
-                  "numeric": {
+                  "numeric": [{
                     "hard_range": { "min": 0.0, "max": 1.0 },
                     "soft_range": { "min": 0.0, "max": 1.0 },
                     "step": 0.01,
                     "invalid_value_policy": "reject"
-                  },
+                  }],
                   "allowed_interpolations": [
                     "Hold", "Linear", "Bezier"
                   ],

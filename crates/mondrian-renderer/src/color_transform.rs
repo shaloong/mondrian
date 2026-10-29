@@ -556,19 +556,105 @@ impl RenderCpuColorExecutionSession {
 pub struct CpuColorTransformExecutor;
 
 impl CpuColorTransformExecutor {
+    /// Convert a complete CPU working value through the shared OCIO Session.
+    ///
+    /// The one output allocation retains the actual association. A genuine
+    /// working-identity change requires normalized independent RGB at this
+    /// consumer; an identity request keeps emission and extended alpha intact.
+    pub fn working_to_working_with_session(
+        frame: &CpuColorFrame,
+        destination: WorkingColorSpace,
+        engine: &ColorEngine,
+        session: &mut RenderCpuColorExecutionSession,
+    ) -> Result<RenderInputTransformResult, RenderColorTransformError> {
+        let descriptor = frame.descriptor();
+        if descriptor.domain != ColorFrameDomain::Working {
+            return Err(RenderColorTransformError::UnsupportedInputDomain {
+                domain: descriptor.domain,
+            });
+        }
+        let source = descriptor.color_space.working().ok_or(
+            RenderColorTransformError::UnsupportedWorkingIdentity {
+                identity: descriptor.color_space,
+            },
+        )?;
+        let extent = mondrian_effects::EffectFrameExtent::new(descriptor.width, descriptor.height);
+        let format = mondrian_effects::EffectValueFormat::new(
+            mondrian_effects::EffectWorkingPrecision::Float32,
+            mondrian_effects::EffectColorDomain::SceneLinearRgb,
+            descriptor.alpha,
+        );
+        let output = mondrian_effects::EffectFloatFrame::from_pixels(
+            extent,
+            format,
+            frame.rgba_f32().sampling,
+            frame.rgba_f32().data.clone(),
+        )?;
+        let mut output = if source == destination {
+            output
+        } else {
+            mondrian_effects::materialize_straight_coverage(
+                output,
+                mondrian_effects::EffectAlphaConsumer::ColorDomainTransition,
+            )?
+        };
+        let output_descriptor = ColorFrameDescriptor {
+            color_space: destination.into(),
+            alpha: output.alpha(),
+            ..descriptor
+        };
+        session
+            .convert_identity_float_for_renderer(
+                engine,
+                output.pixels_mut().as_flattened_mut(),
+                OcioColorSpaceIdentity::Working(source),
+                OcioColorSpaceIdentity::Working(destination),
+            )
+            .map_err(|reason| {
+                RenderColorTransformError::execution_failed(
+                    RenderColorTransformDirection::Intermediate,
+                    descriptor,
+                    output_descriptor,
+                    reason,
+                )
+            })?;
+        output.validate()?;
+        let output_frame = CpuColorFrame::working(WorkingRgbaF32Frame {
+            sampling: frame.rgba_f32().sampling,
+            width: descriptor.width,
+            height: descriptor.height,
+            alpha: output.alpha(),
+            data: output.into_parts().3,
+            color_space: destination,
+        });
+        Ok(RenderInputTransformResult {
+            frame: output_frame,
+            diagnostics: RenderColorTransformDiagnostics {
+                backend: RenderColorTransformBackend::CpuOcioFloat,
+                direction: RenderColorTransformDirection::Intermediate,
+                input: descriptor,
+                output: output_descriptor,
+                pixel_count: descriptor.pixel_count(),
+                used_rgba8_boundary: false,
+            },
+        })
+    }
+
     /// Apply a source/import transform from transfer-encoded float samples.
     pub fn input_encoded_float_to_working(
         frame: &CpuEncodedFloatColorFrame,
         transform: &RenderInputTransform,
+        sampling: mondrian_core::ImageSampling,
     ) -> Result<RenderInputTransformResult, RenderColorTransformError> {
         let mut session = RenderCpuColorExecutionSession::new(0);
-        Self::input_encoded_float_to_working_with_session(frame, transform, &mut session)
+        Self::input_encoded_float_to_working_with_session(frame, transform, sampling, &mut session)
     }
 
     /// Apply an encoded-float input transform through an explicit execution Session.
     pub fn input_encoded_float_to_working_with_session(
         frame: &CpuEncodedFloatColorFrame,
         transform: &RenderInputTransform,
+        sampling: mondrian_core::ImageSampling,
         session: &mut RenderCpuColorExecutionSession,
     ) -> Result<RenderInputTransformResult, RenderColorTransformError> {
         let descriptor = frame.descriptor();
@@ -604,11 +690,20 @@ impl CpuColorTransformExecutor {
             )
         })?;
 
-        let mut pixels = frame.rgba_f32().data.clone();
+        let mut pixels = mondrian_effects::EffectFloatFrame::from_pixels(
+            mondrian_effects::EffectFrameExtent::new(descriptor.width, descriptor.height),
+            mondrian_effects::EffectValueFormat::new(
+                mondrian_effects::EffectWorkingPrecision::Float32,
+                mondrian_effects::EffectColorDomain::DisplayEncodedRgb { color_space: source },
+                descriptor.alpha,
+            ),
+            sampling,
+            frame.rgba_f32().data.clone(),
+        )?;
         session
             .convert_identity_float_for_renderer(
                 &transform.engine,
-                pixels.as_flattened_mut(),
+                pixels.pixels_mut().as_flattened_mut(),
                 OcioColorSpaceIdentity::Color(source),
                 OcioColorSpaceIdentity::Working(transform.working_color_space),
             )
@@ -621,13 +716,15 @@ impl CpuColorTransformExecutor {
                 )
             })?;
 
-        let mut frame = CpuColorFrame::working(WorkingRgbaF32Frame {
+        // Core checks finite output and leaves alpha/extent unchanged.
+        let frame = CpuColorFrame::working(WorkingRgbaF32Frame {
+            sampling,
             width: descriptor.width,
             height: descriptor.height,
-            data: pixels,
+            alpha: pixels.alpha(),
+            data: pixels.into_parts().3,
             color_space: transform.working_color_space,
         });
-        frame.set_alpha_contract(descriptor.alpha);
         let diagnostics = RenderColorTransformDiagnostics {
             backend: transform.backend,
             direction: RenderColorTransformDirection::InputToWorking,
@@ -645,15 +742,17 @@ impl CpuColorTransformExecutor {
     pub fn input_to_working_float(
         frame: &LinearFloatSource,
         transform: &RenderInputTransform,
+        sampling: mondrian_core::ImageSampling,
     ) -> Result<RenderInputTransformResult, RenderColorTransformError> {
         let mut session = RenderCpuColorExecutionSession::new(0);
-        Self::input_to_working_float_with_session(frame, transform, &mut session)
+        Self::input_to_working_float_with_session(frame, transform, sampling, &mut session)
     }
 
     /// Apply a source/import float transform through an explicit execution Session.
     pub fn input_to_working_float_with_session(
         frame: &LinearFloatSource,
         transform: &RenderInputTransform,
+        sampling: mondrian_core::ImageSampling,
         session: &mut RenderCpuColorExecutionSession,
     ) -> Result<RenderInputTransformResult, RenderColorTransformError> {
         let descriptor = frame.descriptor();
@@ -690,7 +789,6 @@ impl CpuColorTransformExecutor {
             alpha: descriptor.alpha,
         };
 
-        let mut data = frame.data().to_vec();
         let source_identity = match descriptor.color_space {
             ColorFrameSpace::Color(source) => OcioColorSpaceIdentity::Color(source),
             ColorFrameSpace::Working(source) => OcioColorSpaceIdentity::Working(source),
@@ -711,10 +809,29 @@ impl CpuColorTransformExecutor {
                 ));
             }
         };
+        let samples = frame.data().chunks_exact(4);
+        if !samples.remainder().is_empty() {
+            return Err(RenderColorTransformError::execution_failed(
+                RenderColorTransformDirection::InputToWorking,
+                descriptor,
+                output_descriptor,
+                "linear Float source storage contains an incomplete RGBA sample",
+            ));
+        }
+        let mut pixels = mondrian_effects::EffectFloatFrame::from_samples(
+            mondrian_effects::EffectFrameExtent::new(descriptor.width, descriptor.height),
+            mondrian_effects::EffectValueFormat::new(
+                mondrian_effects::EffectWorkingPrecision::Float32,
+                mondrian_effects::EffectColorDomain::SceneLinearRgb,
+                descriptor.alpha,
+            ),
+            sampling,
+            samples.map(|pixel| [pixel[0], pixel[1], pixel[2], pixel[3]]),
+        )?;
         session
             .convert_identity_float_for_renderer(
                 &transform.engine,
-                &mut data,
+                pixels.pixels_mut().as_flattened_mut(),
                 source_identity,
                 transform.working_color_space.into(),
             )
@@ -727,16 +844,16 @@ impl CpuColorTransformExecutor {
                 )
             })?;
 
-        // Re-pack flat f32 into the typed working-frame payload.
-        let pixels: Vec<[f32; 4]> =
-            data.chunks_exact(4).map(|c| [c[0], c[1], c[2], c[3]]).collect();
-        let mut frame = CpuColorFrame::working(WorkingRgbaF32Frame {
+        // The complete staging raster is the sole output allocation.
+        // Core checks finite output and preserves its alpha/extent.
+        let frame = CpuColorFrame::working(WorkingRgbaF32Frame {
+            sampling,
             width: descriptor.width,
             height: descriptor.height,
-            data: pixels,
+            alpha: pixels.alpha(),
+            data: pixels.into_parts().3,
             color_space: transform.working_color_space,
         });
-        frame.set_alpha_contract(descriptor.alpha);
         let diagnostics = RenderColorTransformDiagnostics {
             backend: transform.backend,
             direction: RenderColorTransformDirection::InputToWorking,
@@ -753,15 +870,17 @@ impl CpuColorTransformExecutor {
     pub fn input_to_working(
         frame: &CpuEncodedColorFrame,
         transform: &RenderInputTransform,
+        sampling: mondrian_core::ImageSampling,
     ) -> Result<RenderInputTransformResult, RenderColorTransformError> {
         let mut session = RenderCpuColorExecutionSession::new(0);
-        Self::input_to_working_with_session(frame, transform, &mut session)
+        Self::input_to_working_with_session(frame, transform, sampling, &mut session)
     }
 
     /// Apply a source/import transform through an explicit execution Session.
     pub fn input_to_working_with_session(
         frame: &CpuEncodedColorFrame,
         transform: &RenderInputTransform,
+        sampling: mondrian_core::ImageSampling,
         session: &mut RenderCpuColorExecutionSession,
     ) -> Result<RenderInputTransformResult, RenderColorTransformError> {
         let descriptor = frame.descriptor();
@@ -815,6 +934,8 @@ impl CpuColorTransformExecutor {
             .map(|pixel| [pixel[0], pixel[1], pixel[2], pixel[3]])
             .collect();
         let mut frame = CpuColorFrame::working(WorkingRgbaF32Frame {
+            sampling,
+            alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
             width: descriptor.width,
             height: descriptor.height,
             data: pixels,
@@ -854,7 +975,8 @@ impl CpuColorTransformExecutor {
                 domain: descriptor.domain,
             });
         }
-        require_straight_compatible_color_alpha(descriptor)?;
+        let encoded_float = Self::transform_float_with_session(frame, transform, session)?;
+        let output_alpha = encoded_float.frame.descriptor().alpha;
         let output_descriptor = ColorFrameDescriptor {
             width: descriptor.width,
             height: descriptor.height,
@@ -862,10 +984,9 @@ impl CpuColorTransformExecutor {
             domain: transform.output_domain,
             encoding: ColorFrameEncoding::EncodedRgba8,
             residency: ColorFrameResidency::Cpu,
-            alpha: descriptor.alpha,
+            alpha: output_alpha,
         };
 
-        let encoded_float = Self::transform_float_with_session(frame, transform, session)?;
         let rgba = crate::cpu_quantization::quantize_rgba8(&encoded_float.frame.rgba_f32().data);
 
         let mut frame = CpuEncodedColorFrame::rgba8(
@@ -875,7 +996,7 @@ impl CpuColorTransformExecutor {
             transform.output_domain,
             rgba,
         );
-        frame.set_alpha_contract(descriptor.alpha);
+        frame.set_alpha_contract(output_alpha);
         let diagnostics = RenderColorTransformDiagnostics {
             backend: transform.backend,
             direction: RenderColorTransformDirection::WorkingToOutput,
@@ -915,7 +1036,27 @@ impl CpuColorTransformExecutor {
                 domain: descriptor.domain,
             });
         }
-        require_straight_compatible_color_alpha(descriptor)?;
+        // Clone directly into the sole typed output allocation. The ordinary
+        // Basic/native route can materialize normalized straight values here;
+        // zero-alpha emission or extended alpha requires an earlier explicit
+        // opaque composite and returns a typed consumer refusal otherwise.
+        let extent = mondrian_effects::EffectFrameExtent::new(descriptor.width, descriptor.height);
+        let format = mondrian_effects::EffectValueFormat::new(
+            mondrian_effects::EffectWorkingPrecision::Float32,
+            mondrian_effects::EffectColorDomain::SceneLinearRgb,
+            descriptor.alpha,
+        );
+        let output = mondrian_effects::EffectFloatFrame::from_pixels(
+            extent,
+            format,
+            frame.rgba_f32().sampling,
+            frame.rgba_f32().data.clone(),
+        )?;
+        let mut output = mondrian_effects::materialize_straight_coverage(
+            output,
+            mondrian_effects::EffectAlphaConsumer::OutputEncoding,
+        )?;
+        let output_alpha = output.alpha();
 
         let output_descriptor = ColorFrameDescriptor {
             width: descriptor.width,
@@ -924,15 +1065,14 @@ impl CpuColorTransformExecutor {
             domain: transform.output_domain,
             encoding: ColorFrameEncoding::EncodedFloat,
             residency: ColorFrameResidency::Cpu,
-            alpha: descriptor.alpha,
+            alpha: output_alpha,
         };
 
         // Clone once into the owned output payload, then expose that contiguous
         // array storage to OCIO. Flattening into Vec<f32> and repacking into a
         // second Vec<[f32; 4]> doubled full-frame allocation/copy traffic on
         // every Preview and Export output boundary.
-        let mut pixels = frame.rgba_f32().data.clone();
-        let flat = pixels.as_flattened_mut();
+        let flat = output.pixels_mut().as_flattened_mut();
         let working = descriptor.color_space.working().ok_or_else(|| {
             RenderColorTransformError::execution_failed(
                 RenderColorTransformDirection::WorkingToOutput,
@@ -976,16 +1116,17 @@ impl CpuColorTransformExecutor {
                 })?;
         }
 
+        output.validate()?;
         let mut out_frame = CpuEncodedFloatColorFrame::new(
             EncodedRgbaF32Frame {
                 width: descriptor.width,
                 height: descriptor.height,
-                data: pixels,
+                data: output.into_parts().3,
                 color_space: transform.output_color_space,
             },
             transform.output_domain,
         );
-        out_frame.set_alpha_contract(descriptor.alpha);
+        out_frame.set_alpha_contract(output_alpha);
         let diagnostics = RenderColorTransformDiagnostics {
             backend: RenderColorTransformBackend::CpuOcioFloat,
             direction: RenderColorTransformDirection::WorkingToOutput,
@@ -1077,11 +1218,12 @@ impl CpuColorTransformExecutor {
         }
 
         let mut encoded = frame.into_rgba_f32();
-        let flat = encoded.data.as_flattened_mut();
+        let extent = mondrian_effects::EffectFrameExtent::new(descriptor.width, descriptor.height);
+        mondrian_effects::validate_float32_frame_storage(extent, descriptor.alpha, &encoded.data)?;
         session
             .convert_identity_float_for_renderer(
                 &adaptation.engine,
-                flat,
+                encoded.data.as_flattened_mut(),
                 OcioColorSpaceIdentity::Color(source),
                 OcioColorSpaceIdentity::Color(adaptation.monitor_color_space),
             )
@@ -1093,8 +1235,17 @@ impl CpuColorTransformExecutor {
                     reason,
                 )
             })?;
-        encoded.color_space = adaptation.monitor_color_space;
-        let mut frame = CpuEncodedFloatColorFrame::new(encoded, ColorFrameDomain::Display);
+        mondrian_effects::validate_float32_frame_storage(extent, descriptor.alpha, &encoded.data)?;
+        // The encoded signal boundary preserves the original alpha contract.
+        let mut frame = CpuEncodedFloatColorFrame::new(
+            EncodedRgbaF32Frame {
+                width: descriptor.width,
+                height: descriptor.height,
+                data: encoded.data,
+                color_space: adaptation.monitor_color_space,
+            },
+            ColorFrameDomain::Display,
+        );
         frame.set_alpha_contract(descriptor.alpha);
         Ok(RenderOutputTransformFloatResult {
             frame,
@@ -1331,7 +1482,7 @@ fn identity_frame_space(identity: OcioColorSpaceIdentity) -> ColorFrameSpace {
 pub(crate) fn require_straight_compatible_color_alpha(
     descriptor: ColorFrameDescriptor,
 ) -> Result<(), RenderColorTransformError> {
-    if descriptor.alpha.is_straight_compatible() {
+    if descriptor.alpha.is_straight_compatible() && descriptor.alpha.is_coverage() {
         Ok(())
     } else {
         Err(RenderColorTransformError::UnsupportedInputAlpha { alpha: descriptor.alpha })
@@ -1359,6 +1510,9 @@ pub struct RenderColorTransformExecutionFailure {
 /// Error returned by render color transform execution.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum RenderColorTransformError {
+    /// A complete Float value cannot enter this explicit color/output consumer.
+    #[error(transparent)]
+    FrameContract(#[from] mondrian_effects::EffectFloatFrameError),
     /// The executor was asked to transform a frame from an unsupported domain.
     #[error("unsupported render color transform input domain: {domain:?}")]
     UnsupportedInputDomain {
@@ -1372,7 +1526,7 @@ pub enum RenderColorTransformError {
         identity: crate::ColorFrameSpace,
     },
     /// OCIO and public effect/composite stages accept straight coverage only.
-    #[error("render color transform requires straight coverage alpha, got {alpha:?}")]
+    #[error("render color transform requires normalized straight or opaque alpha, got {alpha:?}")]
     UnsupportedInputAlpha {
         /// Rejected RGB/coverage association.
         alpha: crate::ColorFrameAlpha,
@@ -1466,6 +1620,8 @@ mod tests {
     #[test]
     fn cpu_transform_returns_typed_display_boundary_frame() {
         let source = CpuColorFrame::working(WorkingRgbaF32Frame {
+            sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
+            alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
             width: 1,
             height: 1,
             data: vec![[0.5, 0.25, 0.125, 1.0]],
@@ -1499,6 +1655,8 @@ mod tests {
     fn cpu_and_gpu_color_transforms_preserve_opaque_alpha_contract() {
         ensure_mondrian_default_ocio_loaded().expect("default OCIO config");
         let mut source = CpuColorFrame::working(WorkingRgbaF32Frame {
+            sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
+            alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
             width: 2,
             height: 1,
             data: vec![[0.5, 0.25, 0.125, 1.0], [0.0, 0.0, 0.0, 1.0]],
@@ -1534,6 +1692,8 @@ mod tests {
             .default_display_view()
             .expect("default display/view");
         let source = CpuColorFrame::working(WorkingRgbaF32Frame {
+            sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
+            alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
             width: 1,
             height: 1,
             data: vec![[0.25, 0.5, 0.75, 1.0]],
@@ -1568,8 +1728,12 @@ mod tests {
             ColorEngine::mondrian_standard(),
         );
 
-        let working = CpuColorTransformExecutor::input_to_working(&source, &transform)
-            .expect("input transform");
+        let working = CpuColorTransformExecutor::input_to_working(
+            &source,
+            &transform,
+            mondrian_core::ImageSampling::UNIT_SQUARE,
+        )
+        .expect("input transform");
 
         let descriptor = working.frame.descriptor();
         assert_eq!(descriptor.domain, ColorFrameDomain::Working);
@@ -1603,6 +1767,7 @@ mod tests {
         let first = CpuColorTransformExecutor::input_to_working_with_session(
             &source,
             &transform,
+            mondrian_core::ImageSampling::UNIT_SQUARE,
             &mut session,
         )
         .expect("first input transform");
@@ -1610,6 +1775,7 @@ mod tests {
         let second = CpuColorTransformExecutor::input_to_working_with_session(
             &source,
             &transform,
+            mondrian_core::ImageSampling::UNIT_SQUARE,
             &mut session,
         )
         .expect("second input transform");
@@ -1639,8 +1805,12 @@ mod tests {
             pinned_custom_engine(OcioConfigSource::Path { path: missing_path }),
         );
 
-        let err = CpuColorTransformExecutor::input_to_working(&source, &transform)
-            .expect_err("missing explicit OCIO source must fail");
+        let err = CpuColorTransformExecutor::input_to_working(
+            &source,
+            &transform,
+            mondrian_core::ImageSampling::UNIT_SQUARE,
+        )
+        .expect_err("missing explicit OCIO source must fail");
 
         match err {
             RenderColorTransformError::ExecutionFailed(failure) => {
@@ -1664,6 +1834,8 @@ mod tests {
     #[test]
     fn output_transform_failure_carries_boundary_descriptors() {
         let source = CpuColorFrame::working(WorkingRgbaF32Frame {
+            sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
+            alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
             width: 2,
             height: 2,
             data: vec![[0.5, 0.25, 0.125, 1.0]; 4],
@@ -1785,6 +1957,8 @@ mod tests {
     fn gpu_planner_builds_output_shader_plan_from_working_descriptor() {
         ensure_mondrian_default_ocio_loaded().expect("default OCIO config");
         let source = CpuColorFrame::working(WorkingRgbaF32Frame {
+            sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
+            alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
             width: 4,
             height: 5,
             data: vec![[0.5, 0.25, 0.125, 1.0]; 20],
@@ -2088,6 +2262,8 @@ mod tests {
             .default_display_view()
             .expect("default display/view");
         let source = CpuColorFrame::working(WorkingRgbaF32Frame {
+            sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
+            alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
             width: 4,
             height: 5,
             data: vec![[0.5, 0.25, 0.125, 1.0]; 20],
@@ -2128,6 +2304,8 @@ mod tests {
     fn gpu_planner_can_request_cpu_output_readback_boundary() {
         ensure_mondrian_default_ocio_loaded().expect("default OCIO config");
         let source = CpuColorFrame::working(WorkingRgbaF32Frame {
+            sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
+            alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
             width: 2,
             height: 2,
             data: vec![[0.5, 0.25, 0.125, 1.0]; 4],
@@ -2182,8 +2360,12 @@ mod tests {
             ColorEngine::mondrian_standard(),
         );
 
-        let result = CpuColorTransformExecutor::input_to_working_float(&source, &transform)
-            .expect("float input transform");
+        let result = CpuColorTransformExecutor::input_to_working_float(
+            &source,
+            &transform,
+            mondrian_core::ImageSampling::UNIT_SQUARE,
+        )
+        .expect("float input transform");
 
         assert_eq!(result.frame.descriptor().domain, ColorFrameDomain::Working);
         assert_eq!(
@@ -2215,8 +2397,12 @@ mod tests {
             ColorEngine::mondrian_standard(),
         );
 
-        let result = CpuColorTransformExecutor::input_encoded_float_to_working(&source, &transform)
-            .expect("encoded float input transform");
+        let result = CpuColorTransformExecutor::input_encoded_float_to_working(
+            &source,
+            &transform,
+            mondrian_core::ImageSampling::UNIT_SQUARE,
+        )
+        .expect("encoded float input transform");
 
         assert_eq!(result.frame.descriptor().domain, ColorFrameDomain::Working);
         assert!(!result.diagnostics.used_rgba8_boundary);
@@ -2229,6 +2415,8 @@ mod tests {
     fn float_output_transform_produces_float_frame() {
         ensure_mondrian_default_ocio_loaded().expect("default OCIO config");
         let source = CpuColorFrame::working(WorkingRgbaF32Frame {
+            sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
+            alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
             width: 2,
             height: 2,
             data: vec![
@@ -2286,8 +2474,12 @@ mod tests {
             ColorEngine::mondrian_standard(),
         );
 
-        let result = CpuColorTransformExecutor::input_to_working_float(&float_source, &transform)
-            .expect("float input");
+        let result = CpuColorTransformExecutor::input_to_working_float(
+            &float_source,
+            &transform,
+            mondrian_core::ImageSampling::UNIT_SQUARE,
+        )
+        .expect("float input");
 
         // Verify the float path produces a valid working frame without RGBA8 boundary.
         assert_eq!(
@@ -2327,6 +2519,8 @@ mod tests {
     fn delivery_view_float_path_dispatches_to_display_transform() {
         ensure_mondrian_default_ocio_loaded().expect("default OCIO config");
         let source = CpuColorFrame::working(WorkingRgbaF32Frame {
+            sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
+            alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
             width: 2,
             height: 2,
             data: vec![
@@ -2359,6 +2553,903 @@ mod tests {
         assert_eq!(
             result.diagnostics.backend,
             RenderColorTransformBackend::CpuOcioFloat
+        );
+    }
+
+    mod finite_ocio_boundary_tests {
+        use super::*;
+
+        struct MatrixFixture {
+            engine: ColorEngine,
+            path: std::path::PathBuf,
+        }
+
+        impl MatrixFixture {
+            fn new() -> Self {
+                const CONFIG: &str = r#"ocio_profile_version: 2.1
+search_path: .
+strictparsing: true
+roles:
+  default: Linear Rec.2020
+  scene_linear: Linear Rec.2020
+displays:
+  Test Display:
+    - !<View> {name: Test View, colorspace: sRGB Encoded Rec.709 (sRGB)}
+active_displays: [Test Display]
+active_views: [Test View]
+colorspaces:
+  - !<ColorSpace>
+    name: Linear Rec.2020
+    isdata: false
+  - !<ColorSpace>
+    name: Linear Rec.709 (sRGB)
+    isdata: false
+    to_scene_reference: !<MatrixTransform> {matrix: [2, 0, 0, 0, 0, 2, 0, 0, 0, 0, 2, 0, 0, 0, 0, 1]}
+  - !<ColorSpace>
+    name: Camera Rec.709
+    isdata: false
+    to_scene_reference: !<MatrixTransform> {matrix: [2, 0, 0, 0, 0, 2, 0, 0, 0, 0, 2, 0, 0, 0, 0, 1]}
+  - !<ColorSpace>
+    name: sRGB Encoded Rec.709 (sRGB)
+    isdata: false
+"#;
+                static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+                let stamp = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .expect("test clock follows the Unix epoch")
+                    .as_nanos();
+                let ordinal = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let path = std::env::temp_dir().join(format!(
+                    "mondrian-finite-color-matrix-{}-{stamp}-{ordinal}.ocio",
+                    std::process::id()
+                ));
+                std::fs::write(&path, CONFIG)
+                    .expect("write a finite, standards-valid matrix config");
+                let engine = ColorEngine::custom_ocio(
+                    OcioConfigSource::Path { path: path.clone() },
+                    WorkingColorSpace::LinearRec2020,
+                    ColorSpace::Srgb,
+                    "Test Display",
+                    "Test View",
+                )
+                .expect("pin the actual matrix config and display binding");
+                Self { engine, path }
+            }
+
+            fn input(&self) -> RenderInputTransform {
+                RenderInputTransform {
+                    working_color_space: WorkingColorSpace::LinearRec2020,
+                    tone_map: false,
+                    engine: self.engine.clone(),
+                    backend: RenderColorTransformBackend::CpuOcioFloat,
+                }
+            }
+
+            fn monitor(&self, destination: ColorSpace) -> RenderMonitorAdaptation {
+                RenderMonitorAdaptation::new(ColorSpace::Rec709, destination, self.engine.clone())
+                    .expect("valid same-range display identities")
+            }
+        }
+
+        impl Drop for MatrixFixture {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_file(&self.path);
+            }
+        }
+
+        fn encoded(
+            pixel: [f32; 4],
+            color_space: ColorSpace,
+            domain: ColorFrameDomain,
+        ) -> CpuEncodedFloatColorFrame {
+            CpuEncodedFloatColorFrame::new(
+                EncodedRgbaF32Frame {
+                    width: 1,
+                    height: 1,
+                    data: vec![pixel],
+                    color_space,
+                },
+                domain,
+            )
+        }
+
+        fn assert_failed(
+            result: Result<RenderInputTransformResult, RenderColorTransformError>,
+            context: &str,
+        ) {
+            assert!(result.is_err(), "{context}");
+        }
+
+        #[test]
+        fn ocio_finite_boundary_encoded_input_refuses_matrix_overflow_without_evicting_processor() {
+            let fixture = MatrixFixture::new();
+            let transform = fixture.input();
+            let mut session = RenderCpuColorExecutionSession::new(1);
+            let make = |value| {
+                encoded(
+                    [value, 0.125, -0.25, 0.5],
+                    ColorSpace::Rec709,
+                    ColorFrameDomain::Source,
+                )
+            };
+            let positive = CpuColorTransformExecutor::input_encoded_float_to_working_with_session(
+                &make(0.25),
+                &transform,
+                mondrian_core::ImageSampling::UNIT_SQUARE,
+                &mut session,
+            )
+            .expect("prove the requested matrix executes through this public input API");
+            assert_eq!(positive.frame.rgba_f32().data, vec![[0.5, 0.25, -0.5, 0.5]]);
+            assert_eq!(
+                positive.frame.descriptor().alpha,
+                crate::ColorFrameAlpha::StraightCoverage
+            );
+            assert_eq!(positive.diagnostics.output, positive.frame.descriptor());
+            let before = session.diagnostics();
+            let rejected = CpuColorTransformExecutor::input_encoded_float_to_working_with_session(
+                &make(f32::MAX),
+                &transform,
+                mondrian_core::ImageSampling::UNIT_SQUARE,
+                &mut session,
+            );
+            let recovered = CpuColorTransformExecutor::input_encoded_float_to_working_with_session(
+                &make(0.25),
+                &transform,
+                mondrian_core::ImageSampling::UNIT_SQUARE,
+                &mut session,
+            )
+            .expect("a consumer sample failure does not invalidate the valid processor");
+            assert_eq!(
+                recovered.frame.rgba_f32().data,
+                positive.frame.rgba_f32().data
+            );
+            assert_eq!(session.diagnostics().entries, before.entries);
+            assert_eq!(session.diagnostics().evictions, before.evictions);
+            assert_failed(rejected, "finite encoded input may overflow a valid matrix; do not publish nonfinite working pixels");
+        }
+
+        #[test]
+        fn ocio_finite_boundary_linear_input_refuses_matrix_overflow_without_evicting_processor() {
+            let fixture = MatrixFixture::new();
+            let transform = fixture.input();
+            let mut session = RenderCpuColorExecutionSession::new(1);
+            let make = |value| {
+                LinearFloatSource::new(
+                    1,
+                    1,
+                    ColorSpace::LinearRec709,
+                    vec![value, 0.125, -0.25, 0.5],
+                )
+            };
+            let positive = CpuColorTransformExecutor::input_to_working_float_with_session(
+                &make(0.25),
+                &transform,
+                mondrian_core::ImageSampling::UNIT_SQUARE,
+                &mut session,
+            )
+            .expect("prove the requested matrix executes through this public linear input API");
+            assert_eq!(positive.frame.rgba_f32().data, vec![[0.5, 0.25, -0.5, 0.5]]);
+            assert_eq!(
+                positive.frame.descriptor().alpha,
+                crate::ColorFrameAlpha::StraightCoverage
+            );
+            assert_eq!(positive.diagnostics.output, positive.frame.descriptor());
+            let before = session.diagnostics();
+            let rejected = CpuColorTransformExecutor::input_to_working_float_with_session(
+                &make(f32::MAX),
+                &transform,
+                mondrian_core::ImageSampling::UNIT_SQUARE,
+                &mut session,
+            );
+            let recovered = CpuColorTransformExecutor::input_to_working_float_with_session(
+                &make(0.25),
+                &transform,
+                mondrian_core::ImageSampling::UNIT_SQUARE,
+                &mut session,
+            )
+            .expect("a consumer sample failure does not invalidate the valid processor");
+            assert_eq!(
+                recovered.frame.rgba_f32().data,
+                positive.frame.rgba_f32().data
+            );
+            assert_eq!(session.diagnostics().entries, before.entries);
+            assert_eq!(session.diagnostics().evictions, before.evictions);
+            assert_failed(rejected, "finite linear input may overflow a valid matrix; do not publish nonfinite working pixels");
+        }
+
+        #[test]
+        fn ocio_finite_boundary_monitor_refuses_matrix_overflow_without_evicting_processor() {
+            let fixture = MatrixFixture::new();
+            let adaptation = fixture.monitor(ColorSpace::Srgb);
+            let mut session = RenderCpuColorExecutionSession::new(1);
+            let make = |value| {
+                encoded(
+                    [value, 0.125, -0.25, 0.5],
+                    ColorSpace::Rec709,
+                    ColorFrameDomain::Display,
+                )
+            };
+            let positive = CpuColorTransformExecutor::monitor_adaptation_float_owned_with_session(
+                make(0.25),
+                &adaptation,
+                &mut session,
+            )
+            .expect("prove the requested matrix executes through this public monitor API");
+            assert_eq!(positive.frame.rgba_f32().data, vec![[0.5, 0.25, -0.5, 0.5]]);
+            assert_eq!(
+                positive.frame.descriptor().alpha,
+                crate::ColorFrameAlpha::StraightCoverage
+            );
+            assert_eq!(positive.diagnostics.output, positive.frame.descriptor());
+            let before = session.diagnostics();
+            let rejected = CpuColorTransformExecutor::monitor_adaptation_float_owned_with_session(
+                make(f32::MAX),
+                &adaptation,
+                &mut session,
+            );
+            let recovered = CpuColorTransformExecutor::monitor_adaptation_float_owned_with_session(
+                make(0.25),
+                &adaptation,
+                &mut session,
+            )
+            .expect("a consumer sample failure does not invalidate the valid processor");
+            assert_eq!(
+                recovered.frame.rgba_f32().data,
+                positive.frame.rgba_f32().data
+            );
+            assert_eq!(session.diagnostics().entries, before.entries);
+            assert_eq!(session.diagnostics().evictions, before.evictions);
+            assert!(rejected.is_err(),
+                "finite Program Output may overflow a valid monitor matrix; do not publish nonfinite encoded pixels");
+        }
+
+        #[test]
+        fn ocio_finite_boundary_encoded_input_identity_refuses_nan_without_quantization() {
+            let fixture = MatrixFixture::new();
+            let transform = fixture.input();
+            let make = |value| {
+                encoded(
+                    [value, -0.0, 2.0, 0.5],
+                    ColorSpace::LinearRec2020,
+                    ColorFrameDomain::Source,
+                )
+            };
+            let positive = CpuColorTransformExecutor::input_encoded_float_to_working(
+                &make(f32::MAX),
+                &transform,
+                mondrian_core::ImageSampling::UNIT_SQUARE,
+            )
+            .expect("identical OCIO names retain a finite extended Float input");
+            assert_eq!(
+                positive.frame.rgba_f32().data[0].map(f32::to_bits),
+                [f32::MAX, -0.0, 2.0, 0.5].map(f32::to_bits)
+            );
+            assert_failed(
+                CpuColorTransformExecutor::input_encoded_float_to_working(
+                    &make(f32::NAN),
+                    &transform,
+                    mondrian_core::ImageSampling::UNIT_SQUARE,
+                ),
+                "an identity encoded import is still a finite Float publication boundary",
+            );
+        }
+
+        #[test]
+        fn ocio_finite_boundary_linear_input_identity_refuses_nan_without_quantization() {
+            let fixture = MatrixFixture::new();
+            let transform = fixture.input();
+            let make = |value| {
+                LinearFloatSource::new(
+                    1,
+                    1,
+                    WorkingColorSpace::LinearRec2020,
+                    vec![value, -0.0, 2.0, 0.5],
+                )
+            };
+            let positive = CpuColorTransformExecutor::input_to_working_float(
+                &make(f32::MAX),
+                &transform,
+                mondrian_core::ImageSampling::UNIT_SQUARE,
+            )
+            .expect("an identity working import retains finite extended samples");
+            assert_eq!(
+                positive.frame.rgba_f32().data[0].map(f32::to_bits),
+                [f32::MAX, -0.0, 2.0, 0.5].map(f32::to_bits)
+            );
+            assert_failed(
+                CpuColorTransformExecutor::input_to_working_float(
+                    &make(f32::NAN),
+                    &transform,
+                    mondrian_core::ImageSampling::UNIT_SQUARE,
+                ),
+                "a zero-pass linear import is still a finite Float publication boundary",
+            );
+        }
+
+        #[test]
+        fn ocio_finite_boundary_monitor_identity_refuses_nan_without_quantization() {
+            let fixture = MatrixFixture::new();
+            let adaptation = fixture.monitor(ColorSpace::Rec709);
+            let make = |value| {
+                encoded(
+                    [value, -0.0, 2.0, 0.5],
+                    ColorSpace::Rec709,
+                    ColorFrameDomain::Display,
+                )
+            };
+            let positive =
+                CpuColorTransformExecutor::monitor_adaptation_float(&make(f32::MAX), &adaptation)
+                    .expect("zero-pass monitor identity retains finite encoded Float samples");
+            assert_eq!(
+                positive.frame.rgba_f32().data[0].map(f32::to_bits),
+                [f32::MAX, -0.0, 2.0, 0.5].map(f32::to_bits)
+            );
+            assert!(
+                CpuColorTransformExecutor::monitor_adaptation_float(&make(f32::NAN), &adaptation)
+                    .is_err(),
+                "a zero-pass monitor identity still refuses nonfinite publication"
+            );
+        }
+
+        #[test]
+        fn ocio_frame_boundary_encoded_import_refuses_extent_and_actual_alpha_mismatch() {
+            let fixture = MatrixFixture::new();
+            let transform = fixture.input();
+            let mut session = RenderCpuColorExecutionSession::new(1);
+            let malformed = CpuEncodedFloatColorFrame::new(
+                EncodedRgbaF32Frame {
+                    width: 2,
+                    height: 1,
+                    data: vec![[0.25, 0.0, 0.0, 0.5]],
+                    color_space: ColorSpace::Rec709,
+                },
+                ColorFrameDomain::Source,
+            );
+            assert!(matches!(
+                CpuColorTransformExecutor::input_encoded_float_to_working_with_session(
+                    &malformed,
+                    &transform,
+                    mondrian_core::ImageSampling::UNIT_SQUARE,
+                    &mut session
+                ),
+                Err(RenderColorTransformError::FrameContract(
+                    mondrian_effects::EffectFloatFrameError::ExtentMismatch {
+                        expected: 2,
+                        actual: 1
+                    }
+                ))
+            ));
+            for (alpha, value) in [
+                (crate::ColorFrameAlpha::StraightCoverage, -0.5),
+                (crate::ColorFrameAlpha::StraightCoverage, 1.5),
+                (crate::ColorFrameAlpha::Opaque, 0.5),
+            ] {
+                let mut source = encoded(
+                    [0.25, 0.0, 0.0, value],
+                    ColorSpace::Rec709,
+                    ColorFrameDomain::Source,
+                );
+                source.set_alpha_contract(alpha);
+                assert!(matches!(
+                    CpuColorTransformExecutor::input_encoded_float_to_working_with_session(
+                        &source,
+                        &transform,
+                        mondrian_core::ImageSampling::UNIT_SQUARE,
+                        &mut session
+                    ),
+                    Err(RenderColorTransformError::FrameContract(
+                        mondrian_effects::EffectFloatFrameError::InvalidSample { .. }
+                    ))
+                ));
+            }
+            assert_eq!(
+                session.diagnostics().misses,
+                0,
+                "invalid frame contracts are refused before processor construction"
+            );
+            let mut opaque = encoded(
+                [0.25, 0.0, 0.0, 1.0],
+                ColorSpace::Rec709,
+                ColorFrameDomain::Source,
+            );
+            opaque.set_alpha_contract(crate::ColorFrameAlpha::Opaque);
+            let output = CpuColorTransformExecutor::input_encoded_float_to_working_with_session(
+                &opaque,
+                &transform,
+                mondrian_core::ImageSampling::UNIT_SQUARE,
+                &mut session,
+            )
+            .expect("actual Opaque remains Opaque through a valid input transform");
+            assert_eq!(
+                output.frame.descriptor().alpha,
+                crate::ColorFrameAlpha::Opaque
+            );
+            assert_eq!(
+                output.frame.rgba_f32().alpha,
+                crate::ColorFrameAlpha::Opaque
+            );
+            assert_eq!(output.frame.rgba_f32().data, vec![[0.5, 0.0, 0.0, 1.0]]);
+        }
+
+        #[test]
+        fn ocio_frame_boundary_linear_import_refuses_invalid_coverage_without_rgb_clamping() {
+            let fixture = MatrixFixture::new();
+            let transform = fixture.input();
+            let mut session = RenderCpuColorExecutionSession::new(1);
+            for alpha in [-0.5, 1.5] {
+                let source = LinearFloatSource::new(
+                    1,
+                    1,
+                    WorkingColorSpace::LinearRec2020,
+                    vec![7.0, -3.0, 11.0, alpha],
+                );
+                assert!(matches!(
+                    CpuColorTransformExecutor::input_to_working_float_with_session(
+                        &source,
+                        &transform,
+                        mondrian_core::ImageSampling::UNIT_SQUARE,
+                        &mut session
+                    ),
+                    Err(RenderColorTransformError::FrameContract(
+                        mondrian_effects::EffectFloatFrameError::InvalidSample { .. }
+                    ))
+                ));
+                assert_eq!(
+                    source.data(),
+                    [7.0, -3.0, 11.0, alpha],
+                    "borrowed author source stays unchanged"
+                );
+            }
+            assert_eq!(session.diagnostics().misses, 0);
+            let source = LinearFloatSource::new(
+                1,
+                1,
+                WorkingColorSpace::LinearRec2020,
+                vec![7.0, -3.0, 11.0, 0.5],
+            );
+            let output = CpuColorTransformExecutor::input_to_working_float_with_session(
+                &source,
+                &transform,
+                mondrian_core::ImageSampling::UNIT_SQUARE,
+                &mut session,
+            )
+            .expect("negative and HDR RGB are finite valid image signal");
+            assert_eq!(output.frame.rgba_f32().data, vec![[7.0, -3.0, 11.0, 0.5]]);
+        }
+
+        #[test]
+        fn ocio_frame_boundary_monitor_refuses_extent_and_actual_alpha_mismatch() {
+            let fixture = MatrixFixture::new();
+            let adaptation = fixture.monitor(ColorSpace::Rec709);
+            let mut session = RenderCpuColorExecutionSession::new(1);
+            let malformed = CpuEncodedFloatColorFrame::new(
+                EncodedRgbaF32Frame {
+                    width: 2,
+                    height: 1,
+                    data: vec![[0.25, 0.0, 0.0, 0.5]],
+                    color_space: ColorSpace::Rec709,
+                },
+                ColorFrameDomain::Display,
+            );
+            assert!(matches!(
+                CpuColorTransformExecutor::monitor_adaptation_float_owned_with_session(
+                    malformed,
+                    &adaptation,
+                    &mut session
+                ),
+                Err(RenderColorTransformError::FrameContract(
+                    mondrian_effects::EffectFloatFrameError::ExtentMismatch {
+                        expected: 2,
+                        actual: 1
+                    }
+                ))
+            ));
+            for (alpha, value) in [
+                (crate::ColorFrameAlpha::StraightCoverage, -0.5),
+                (crate::ColorFrameAlpha::StraightCoverage, 1.5),
+                (crate::ColorFrameAlpha::Opaque, 0.5),
+            ] {
+                let mut source = encoded(
+                    [7.0, -3.0, 11.0, value],
+                    ColorSpace::Rec709,
+                    ColorFrameDomain::Display,
+                );
+                source.set_alpha_contract(alpha);
+                assert!(matches!(
+                    CpuColorTransformExecutor::monitor_adaptation_float_owned_with_session(
+                        source,
+                        &adaptation,
+                        &mut session
+                    ),
+                    Err(RenderColorTransformError::FrameContract(
+                        mondrian_effects::EffectFloatFrameError::InvalidSample { .. }
+                    ))
+                ));
+            }
+            let mut opaque = encoded(
+                [7.0, -3.0, 11.0, 1.0],
+                ColorSpace::Rec709,
+                ColorFrameDomain::Display,
+            );
+            opaque.set_alpha_contract(crate::ColorFrameAlpha::Opaque);
+            let output = CpuColorTransformExecutor::monitor_adaptation_float_owned_with_session(
+                opaque,
+                &adaptation,
+                &mut session,
+            )
+            .expect("monitor identity preserves actual Opaque and unbounded finite RGB");
+            assert_eq!(
+                output.frame.descriptor().alpha,
+                crate::ColorFrameAlpha::Opaque
+            );
+            assert_eq!(output.frame.rgba_f32().data, vec![[7.0, -3.0, 11.0, 1.0]]);
+            assert_eq!(
+                session.diagnostics().misses,
+                0,
+                "zero-pass monitor never constructs a processor"
+            );
+        }
+
+        #[test]
+        fn ocio_frame_boundary_working_identity_preserves_extended_association_and_zero_alpha_emission(
+        ) {
+            let engine = ColorEngine::mondrian_standard();
+            engine.ensure_loaded().expect("stock engine available");
+            for alpha in [
+                crate::ColorFrameAlpha::StraightFloat,
+                crate::ColorFrameAlpha::PremultipliedFloat,
+            ] {
+                for pixel in [
+                    [7.0, -3.0, 11.0, 0.0],
+                    [7.0, -3.0, 11.0, -0.5],
+                    [7.0, -3.0, 11.0, 1.5],
+                ] {
+                    let source = CpuColorFrame::working(WorkingRgbaF32Frame {
+                        sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
+                        width: 1,
+                        height: 1,
+                        alpha,
+                        data: vec![pixel],
+                        color_space: WorkingColorSpace::LinearRec709,
+                    });
+                    let mut session = RenderCpuColorExecutionSession::new(1);
+                    let output = CpuColorTransformExecutor::working_to_working_with_session(&source, WorkingColorSpace::LinearRec709, &engine, &mut session)
+                        .expect("finite OCIO input admission must not add a coverage interpretation to a working identity");
+                    assert_eq!(output.frame.descriptor().alpha, alpha);
+                    assert_eq!(output.frame.rgba_f32().alpha, alpha);
+                    assert_eq!(
+                        output.frame.rgba_f32().data[0].map(f32::to_bits),
+                        pixel.map(f32::to_bits)
+                    );
+                    assert_eq!(output.diagnostics.input, source.descriptor());
+                    assert_eq!(output.diagnostics.output, output.frame.descriptor());
+                    assert_eq!(session.diagnostics().misses, 0);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn working_module_identity_preserves_actual_association_and_emission() {
+        use crate::color::working::WorkingColorModule;
+        for pixel in [[0.5, 0.0, 0.0, 0.5], [7.0, -3.0, 11.0, 0.0]] {
+            let mut source = CpuColorFrame::working(WorkingRgbaF32Frame {
+                sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
+                alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
+                width: 1,
+                height: 1,
+                data: vec![pixel],
+                color_space: WorkingColorSpace::LinearRec709,
+            });
+            source.set_alpha_contract(crate::ColorFrameAlpha::PremultipliedCoverage);
+            let actual = WorkingColorModule::execute_cpu(
+                &source,
+                WorkingColorSpace::LinearRec709,
+                ColorEngine::mondrian_standard(),
+                &mut RenderCpuColorExecutionSession::new(0),
+            )
+            .expect("same working identity retains the complete associated value");
+            assert_eq!(
+                actual.frame().descriptor().alpha,
+                crate::ColorFrameAlpha::PremultipliedCoverage
+            );
+            assert_eq!(actual.frame().rgba_f32().data, vec![pixel]);
+            assert_eq!(actual.transform_diagnostics().input, source.descriptor());
+            assert_eq!(
+                actual.transform_diagnostics().output,
+                actual.frame().descriptor()
+            );
+        }
+    }
+
+    #[test]
+    fn working_module_cross_identity_materializes_actual_association_before_ocio() {
+        use crate::color::working::WorkingColorModule;
+        let make = |pixel| {
+            CpuColorFrame::working(WorkingRgbaF32Frame {
+                sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
+                alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
+                width: 1,
+                height: 1,
+                data: vec![pixel],
+                color_space: WorkingColorSpace::LinearRec709,
+            })
+        };
+        let straight = make([1.0, -0.5, 0.25, 0.5]);
+        let mut associated = make([0.5, -0.25, 0.125, 0.5]);
+        associated.set_alpha_contract(crate::ColorFrameAlpha::PremultipliedCoverage);
+        let expected = WorkingColorModule::execute_cpu(
+            &straight,
+            WorkingColorSpace::LinearRec2020,
+            ColorEngine::mondrian_standard(),
+            &mut RenderCpuColorExecutionSession::new(0),
+        )
+        .expect("independent straight working conversion");
+        let actual = WorkingColorModule::execute_cpu(
+            &associated,
+            WorkingColorSpace::LinearRec2020,
+            ColorEngine::mondrian_standard(),
+            &mut RenderCpuColorExecutionSession::new(0),
+        )
+        .expect("representable association is materialized at the sole color consumer");
+        assert_eq!(actual.frame().descriptor(), expected.frame().descriptor());
+        assert_eq!(
+            actual.frame().rgba_f32().data,
+            expected.frame().rgba_f32().data
+        );
+        let mut emission = make([7.0, -3.0, 11.0, 0.0]);
+        emission.set_alpha_contract(crate::ColorFrameAlpha::PremultipliedCoverage);
+        assert!(
+            WorkingColorModule::execute_cpu(
+                &emission,
+                WorkingColorSpace::LinearRec2020,
+                ColorEngine::mondrian_standard(),
+                &mut RenderCpuColorExecutionSession::new(0)
+            )
+            .is_err(),
+            "a coverage-only OCIO conversion cannot erase associated zero-alpha emission"
+        );
+    }
+
+    #[test]
+    fn public_program_float_output_refuses_nonfinite_ocio_results() {
+        use crate::color::program_output::{ProgramOutputBoundary, ProgramOutputModule};
+        const CONFIG: &str = r#"ocio_profile_version: 2.1
+search_path: .
+strictparsing: true
+roles:
+  default: Linear Rec.2020
+  scene_linear: Linear Rec.2020
+displays:
+  Test Display:
+    - !<View> {name: Test View, colorspace: Matrix Output}
+active_displays: [Test Display]
+active_views: [Test View]
+colorspaces:
+  - !<ColorSpace>
+    name: Linear Rec.2020
+    isdata: false
+  - !<ColorSpace>
+    name: Matrix Output
+    isdata: false
+    from_scene_reference: !<MatrixTransform> {matrix: [2, 0, 0, 0, 0, 2, 0, 0, 0, 0, 2, 0, 0, 0, 0, 1]}
+"#;
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("test clock follows the Unix epoch")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "mondrian-float-output-matrix-{}-{stamp}.ocio",
+            std::process::id()
+        ));
+        std::fs::write(&path, CONFIG).expect("write a standards-valid finite Matrix OCIO config");
+        let engine = ColorEngine::custom_ocio(
+            OcioConfigSource::Path { path: path.clone() },
+            WorkingColorSpace::LinearRec2020,
+            ColorSpace::Rec709,
+            "Test Display",
+            "Test View",
+        )
+        .expect("pin the actual matrix config and authored display binding");
+        let boundary = ProgramOutputBoundary::export_view(
+            ColorSpace::Rec709,
+            "Test Display",
+            "Test View",
+            false,
+            engine,
+        );
+        let make = |value| {
+            CpuColorFrame::working(WorkingRgbaF32Frame {
+                sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
+                alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
+                width: 1,
+                height: 1,
+                data: vec![[value, 0.0, 0.0, 1.0]],
+                color_space: WorkingColorSpace::LinearRec2020,
+            })
+        };
+        let finite = ProgramOutputModule::execute_cpu_float(
+            &make(0.25),
+            &boundary,
+            &mut RenderCpuColorExecutionSession::new(0),
+        )
+        .expect("independently prove the authored matrix executes");
+        assert_eq!(finite.frame.rgba_f32().data, vec![[0.5, 0.0, 0.0, 1.0]]);
+        let rejected = ProgramOutputModule::execute_cpu_float(
+            &make(f32::MAX),
+            &boundary,
+            &mut RenderCpuColorExecutionSession::new(0),
+        );
+        std::fs::remove_file(path).expect("remove the owned test OCIO config");
+        assert!(rejected.is_err(), "finite Float inputs may overflow a valid OCIO matrix; encoded publication must refuse them");
+    }
+
+    #[test]
+    fn cpu_output_materializes_finite_native_coverage_in_the_existing_output_clone() {
+        ensure_mondrian_default_ocio_loaded().expect("stock OCIO");
+        let transform = RenderColorTransform::export(
+            ColorSpace::Rec709,
+            false,
+            ColorEngine::mondrian_standard(),
+        );
+        for (alpha, sample, expected) in [
+            (
+                crate::ColorFrameAlpha::StraightFloat,
+                [0.5_f32, 1.0, 1.5, 0.5],
+                [0.5, 1.0, 1.5, 0.5],
+            ),
+            (
+                crate::ColorFrameAlpha::PremultipliedFloat,
+                [0.25, 0.5, 0.75, 0.5],
+                [0.5, 1.0, 1.5, 0.5],
+            ),
+        ] {
+            let source = CpuColorFrame::working(WorkingRgbaF32Frame {
+                sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
+                width: 1,
+                height: 1,
+                alpha,
+                data: vec![sample],
+                color_space: WorkingColorSpace::LinearRec709,
+            });
+            let output = CpuColorTransformExecutor::transform_float(&source, &transform)
+                .expect("ordinary native coverage remains a usable output route");
+            assert_eq!(
+                source.rgba_f32().data,
+                [sample],
+                "borrowed program value must remain complete and unchanged"
+            );
+            assert_eq!(output.diagnostics.input.alpha, alpha);
+            assert_eq!(
+                output.frame.descriptor().alpha,
+                crate::ColorFrameAlpha::StraightCoverage
+            );
+            let oracle = CpuColorFrame::working(WorkingRgbaF32Frame {
+                sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
+                width: 1,
+                height: 1,
+                alpha: crate::ColorFrameAlpha::StraightCoverage,
+                data: vec![expected],
+                color_space: WorkingColorSpace::LinearRec709,
+            });
+            let expected_output = CpuColorTransformExecutor::transform_float(&oracle, &transform)
+                .expect("independent straight numerical oracle");
+            assert_eq!(
+                output.frame.rgba_f32().data,
+                expected_output.frame.rgba_f32().data
+            );
+        }
+    }
+
+    #[test]
+    fn cpu_output_refuses_unclosed_emission_extended_alpha_and_division_overflow() {
+        let transform = RenderColorTransform::export(
+            ColorSpace::Rec709,
+            false,
+            ColorEngine::mondrian_standard(),
+        );
+        for sample in [
+            [7.0_f32, -3.0, 11.0, 0.0],
+            [1.0, 2.0, 3.0, -0.5],
+            [1.0, 2.0, 3.0, 1.5],
+            [f32::MAX, 0.0, 0.0, f32::MIN_POSITIVE],
+        ] {
+            let source = CpuColorFrame::working(WorkingRgbaF32Frame {
+                sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
+                width: 1,
+                height: 1,
+                alpha: crate::ColorFrameAlpha::PremultipliedFloat,
+                data: vec![sample],
+                color_space: WorkingColorSpace::LinearRec709,
+            });
+            assert!(matches!(
+                CpuColorTransformExecutor::transform_float(&source, &transform),
+                Err(RenderColorTransformError::FrameContract(_))
+            ));
+            assert_eq!(source.rgba_f32().data, [sample]);
+        }
+    }
+
+    #[test]
+    fn public_program_output_admits_representable_native_float_coverage_at_one_owned_boundary() {
+        use crate::color::program_output::{ProgramOutputBoundary, ProgramOutputModule};
+        let boundary = ProgramOutputBoundary::export(
+            ColorSpace::Rec709,
+            false,
+            ColorEngine::mondrian_standard(),
+        );
+        let straight = CpuColorFrame::working(WorkingRgbaF32Frame {
+            sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
+            width: 1,
+            height: 1,
+            alpha: crate::ColorFrameAlpha::StraightCoverage,
+            data: vec![[1.0, -0.5, 0.25, 0.5]],
+            color_space: WorkingColorSpace::LinearRec709,
+        });
+        let expected = ProgramOutputModule::execute_cpu_float(
+            &straight,
+            &boundary,
+            &mut RenderCpuColorExecutionSession::new(0),
+        )
+        .expect("independent ordinary straight output");
+        for (alpha, pixel) in [
+            (
+                crate::ColorFrameAlpha::StraightFloat,
+                [1.0, -0.5, 0.25, 0.5],
+            ),
+            (
+                crate::ColorFrameAlpha::PremultipliedFloat,
+                [0.5, -0.25, 0.125, 0.5],
+            ),
+            (
+                crate::ColorFrameAlpha::PremultipliedCoverage,
+                [0.5, -0.25, 0.125, 0.5],
+            ),
+        ] {
+            let actual_source = CpuColorFrame::working(WorkingRgbaF32Frame {
+                sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
+                width: 1,
+                height: 1,
+                alpha,
+                data: vec![pixel],
+                color_space: WorkingColorSpace::LinearRec709,
+            });
+            let result = ProgramOutputModule::execute_cpu_float(
+                &actual_source,
+                &boundary,
+                &mut RenderCpuColorExecutionSession::new(0),
+            )
+            .expect("actual format is admitted at the CPU output materializer");
+            assert_eq!(result.frame.rgba_f32().data, expected.frame.rgba_f32().data);
+            assert_eq!(
+                result.output_descriptor.alpha,
+                crate::ColorFrameAlpha::StraightCoverage
+            );
+            assert_eq!(result.color_diagnostics.input, actual_source.descriptor());
+            assert_eq!(
+                actual_source.rgba_f32().data,
+                vec![pixel],
+                "the borrowed working frame is never rewritten"
+            );
+        }
+        let emission = CpuColorFrame::working(WorkingRgbaF32Frame {
+            sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
+            width: 1,
+            height: 1,
+            alpha: crate::ColorFrameAlpha::PremultipliedFloat,
+            data: vec![[7.0, -3.0, 11.0, 0.0]],
+            color_space: WorkingColorSpace::LinearRec709,
+        });
+        assert!(
+            matches!(
+                ProgramOutputModule::execute_cpu_float(
+                    &emission,
+                    &boundary,
+                    &mut RenderCpuColorExecutionSession::new(0)
+                ),
+                Err(RenderColorTransformError::FrameContract(_))
+            ),
+            "unrepresentable emission produces a typed consumer refusal before OCIO publication"
         );
     }
 }

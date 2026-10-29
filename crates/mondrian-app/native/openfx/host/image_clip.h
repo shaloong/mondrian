@@ -4,18 +4,13 @@
 #ifndef HOST_DEMO_CLIP_INSTANCE_H
 #define HOST_DEMO_CLIP_INSTANCE_H
 
-#include <vector>
+#include "frame_state.h"
+#include <mutex>
+
 
 
 namespace MondrianOpenFx {
-  extern int gWidth;
-  extern int gHeight;
-  extern double gFrame;
-  extern double gFrameRate;
-  extern double gFirstFrame;
-  extern double gLastFrame;
-  extern double gPixelAspectRatio;
-  extern std::vector<OfxRGBAColourF> gInput;
+
 
   // forward
   class FilterClipInstance;
@@ -24,11 +19,10 @@ namespace MondrianOpenFx {
   class FrameImage : public OFX::Host::ImageEffect::Image
   {
   protected :
-    OfxRGBAColourF   *_data; // where we are keeping our image data
+    const FrameState& _frame;
+    OfxRGBAColourF *_data; // Borrowed only for this legal action.
   public :
     explicit FrameImage(FilterClipInstance &clip, OfxTime t, int view = 0);
-    OfxRGBAColourF* pixel(int x, int y) const;
-    const OfxRGBAColourF* rawData() const { return _data; }
     ~FrameImage();
   };
 
@@ -36,13 +30,16 @@ namespace MondrianOpenFx {
   protected:
     FilterEffectInstance *_effect;
     std::string       _name;
-    FrameImage          *_outputImage; ///< only set for output clips
+    bool _outputFetched;
+    std::mutex _outputFetchMutex;
 
   public:
     FilterClipInstance(FilterEffectInstance* effect, OFX::Host::ImageEffect::ClipDescriptor* desc);
 
     virtual ~FilterClipInstance();
-    FrameImage* getOutputImage() { return _outputImage; }
+    bool outputFetched() const { return _outputFetched; }
+    const FrameState& frameState() const;
+    void beginFrame();
     bool isOutput() const { return _name == "Output"; }
 
     /// Get the Raw Unmapped Pixel Depth from the host

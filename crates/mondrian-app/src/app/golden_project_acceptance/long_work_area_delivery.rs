@@ -40,7 +40,7 @@ use super::workflow::GoldenProductWorkflowDriver;
 use super::{load_json, sequence_settings_from_contract, GoldenProjectContract};
 use crate::app::ui_actions::{
     clip_write_parameter_values_action, timeline_drop_asset_action, timeline_trim_clips_action,
-    ClipParameterValueWrite, ClipWriteParameterValuesPayload, TimelineDropAssetPayload,
+    ClipWriteParameterValuesPayload, ParameterValueWrite, TimelineDropAssetPayload,
     TimelineTrimClipsPayload, TimelineTrimPayloadEdge,
 };
 use crate::app::{AppState, ClipOverlapMode};
@@ -207,7 +207,7 @@ pub(super) fn execute_long_work_area_delivery(
     state.dispatch_action(clip_write_parameter_values_action(
         ClipWriteParameterValuesPayload {
             clip_id: solid_clip_id,
-            writes: vec![ClipParameterValueWrite {
+            writes: vec![ParameterValueWrite::Value {
                 parameter: opacity_parameter,
                 value: PropertyValue::Float(AUTHORED_OPACITY),
             }],
@@ -456,6 +456,7 @@ fn decode_sampled_frame(
     expected_center_rgba: [u8; 4],
 ) -> anyhow::Result<SampledFrameEvidence> {
     let request = crate::app::preview_timeline_execution::PreviewTimelineMediaRequest {
+        image_scale_requirement: mondrian_effects::EffectImageScaleRequirement::Any,
         asset_id: asset.id,
         color_space_override: None,
         alpha_interpretation: AlphaInterpretation::Ignore,

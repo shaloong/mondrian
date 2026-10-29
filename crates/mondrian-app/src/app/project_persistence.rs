@@ -945,6 +945,20 @@ impl ProjectPersistenceService {
         Ok(())
     }
 
+    /// Freeze one failed App lifecycle, including failures before the first
+    /// persistence request or pause. This invalidates admission and completion
+    /// authority, not worker ownership: admitted filesystem work may still run.
+    pub(super) fn poison_session_after_lifecycle_failure(
+        &mut self,
+        session_id: AuthoringSessionId,
+    ) {
+        let admission =
+            self.session_admission.entry(session_id).or_insert_with(SessionAdmission::open);
+        if admission.phase != SessionAdmissionPhase::Retired {
+            admission.phase = SessionAdmissionPhase::Poisoned;
+        }
+    }
+
     /// Irrevocably detach a failed lifecycle from one exact Session without
     /// claiming worker quiescence.
     ///
@@ -2735,6 +2749,128 @@ mod tests {
         drop(lease);
         drop(service);
         drop(other_service);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn lifecycle_fault_freezes_a_session_before_its_first_persistence_request() {
+        let root = unique_root("lifecycle-fault-unused-session");
+        let (authoring, lease) = session(&root);
+        let session_id = authoring.session_id();
+        let mut service = ProjectPersistenceService::new();
+        assert!(service.abandon_session(session_id).unwrap_err().contains("unknown"));
+
+        service.poison_session_after_lifecycle_failure(session_id);
+        assert_eq!(service.pending_requests(), 0);
+        assert_eq!(
+            service.session_admission[&session_id].phase,
+            SessionAdmissionPhase::Poisoned
+        );
+        assert!(service.begin_pause_and_quiesce(session_id).err().unwrap().contains("poisoned"));
+        assert!(service
+            .submit(
+                authoring.snapshot().unwrap(),
+                ProjectPersistencePurpose::Manual {
+                    destination: ManualProjectFileDestination::initial(
+                        session_id,
+                        root.join("must-reject.mdp"),
+                    )
+                    .unwrap(),
+                },
+                Arc::clone(&lease),
+            )
+            .unwrap_err()
+            .contains("poisoned"));
+        service.abandon_session(session_id).expect("explicit failed-close discard");
+        assert!(service.ensure_submit_admitted(session_id).unwrap_err().contains("retired"));
+        drop(authoring);
+        drop(lease);
+        drop(service);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn lifecycle_fault_rejects_open_session_completion_without_stopping_its_worker() {
+        let root = unique_root("lifecycle-fault-running-save");
+        let (authoring, lease) = session(&root);
+        let session_id = authoring.session_id();
+        let mut service = ProjectPersistenceService::new();
+        let gate = service.gate_next_request();
+        let request_id = service
+            .submit(
+                authoring.snapshot().unwrap(),
+                ProjectPersistencePurpose::Manual {
+                    destination: ManualProjectFileDestination::initial(
+                        session_id,
+                        root.join("admitted.mdp"),
+                    )
+                    .unwrap(),
+                },
+                Arc::clone(&lease),
+            )
+            .expect("real save admitted before the lifecycle fault");
+        gate.wait_until_running();
+        let admitted = service.session_admission[&session_id];
+        assert_eq!(admitted.phase, SessionAdmissionPhase::Open);
+        assert!(service.abandon_session(session_id).unwrap_err().contains("open"));
+
+        service.poison_session_after_lifecycle_failure(session_id);
+        let poisoned = service.session_admission[&session_id];
+        assert_eq!(poisoned.generation, admitted.generation);
+        assert_eq!(
+            poisoned.last_reserved_manual_document_revision,
+            admitted.last_reserved_manual_document_revision
+        );
+        assert_eq!(
+            service.pending_requests(),
+            1,
+            "the original worker still owns its save"
+        );
+        assert!(service.ensure_submit_admitted(session_id).unwrap_err().contains("poisoned"));
+        gate.release();
+        let completion = service.completion_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+        assert_eq!(completion.request_id, request_id);
+        completion
+            .result
+            .as_ref()
+            .expect("the admitted filesystem attempt still completes");
+        assert!(root.join("admitted.mdp").is_file());
+        assert!(!service.accepts_completion(&completion));
+        assert_eq!(service.pending_requests(), 0);
+        service.abandon_session(session_id).expect("explicit failed-close discard");
+        assert!(!service.accepts_completion(&completion));
+        drop(completion);
+        drop(authoring);
+        drop(lease);
+        drop(service);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn lifecycle_fault_invalidates_pause_tokens_without_reopening_retired_sessions() {
+        let root = unique_root("lifecycle-fault-paused-session");
+        let (authoring, lease) = session(&root);
+        let session_id = authoring.session_id();
+        let mut service = ProjectPersistenceService::new();
+        let token = service.pause_and_quiesce(session_id).unwrap();
+        let mut independent = ProjectPersistenceService::new();
+        let independent_token = independent.pause_and_quiesce(session_id).unwrap();
+
+        service.poison_session_after_lifecycle_failure(session_id);
+        assert!(service.resume(token).unwrap_err().contains("no longer active"));
+        assert!(service.retire(token).unwrap_err().contains("no longer active"));
+        independent
+            .resume(independent_token)
+            .expect("other service admission is unchanged");
+        service.abandon_session(session_id).unwrap();
+        let retired = service.session_admission[&session_id];
+        service.poison_session_after_lifecycle_failure(session_id);
+        assert_eq!(service.session_admission[&session_id], retired);
+        assert!(service.begin_pause_and_quiesce(session_id).err().unwrap().contains("retired"));
+        drop(authoring);
+        drop(lease);
+        drop(service);
+        drop(independent);
         let _ = std::fs::remove_dir_all(root);
     }
 

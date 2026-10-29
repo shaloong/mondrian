@@ -2,65 +2,55 @@
 
 use std::path::Path;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Deserialize)]
+struct AppManifest {
+    package: AppPackage,
+    #[serde(rename = "bin")]
+    bins: Vec<BinEntry>,
+}
+
+#[derive(serde::Deserialize)]
+struct AppPackage {
+    #[serde(rename = "default-run")]
+    default_run: String,
+}
+
+#[derive(serde::Deserialize)]
 struct BinEntry {
     name: String,
     path: String,
+    #[serde(default, rename = "required-features")]
+    required_features: Vec<String>,
+    #[serde(default = "enabled_by_default")]
+    test: bool,
+    #[serde(default = "enabled_by_default")]
+    bench: bool,
 }
 
-fn manifest_line_value(line: &str, key: &str) -> Option<String> {
-    let (actual_key, value) = line.split_once('=')?;
-    (actual_key.trim() == key)
-        .then(|| value.trim().trim_matches('"').to_owned())
-        .filter(|value| !value.is_empty())
+fn enabled_by_default() -> bool {
+    true
 }
 
-fn manifest_bins(manifest: &str) -> Vec<BinEntry> {
-    let mut bins = Vec::new();
-    let mut in_bin = false;
-    let mut name = None;
-    let mut path = None;
-
-    for line in manifest.lines() {
-        let trimmed = line.trim();
-        if trimmed == "[[bin]]" {
-            if let (Some(name), Some(path)) = (name.take(), path.take()) {
-                bins.push(BinEntry { name, path });
-            }
-            in_bin = true;
-            continue;
-        }
-        if trimmed.starts_with('[') && trimmed != "[[bin]]" {
-            if let (Some(name), Some(path)) = (name.take(), path.take()) {
-                bins.push(BinEntry { name, path });
-            }
-            in_bin = false;
-            continue;
-        }
-        if !in_bin {
-            continue;
-        }
-        name = manifest_line_value(trimmed, "name").or(name);
-        path = manifest_line_value(trimmed, "path").or(path);
-    }
-
-    if let (Some(name), Some(path)) = (name, path) {
-        bins.push(BinEntry { name, path });
-    }
-
-    bins
+fn assert_validation_only(bin: &BinEntry) {
+    assert_eq!(
+        bin.required_features,
+        ["validation"],
+        "{} must remain feature-gated",
+        bin.name
+    );
+    assert!(
+        !bin.test && !bin.bench,
+        "{} must remain outside product test/benchmark routes",
+        bin.name
+    );
 }
 
 #[test]
 fn product_default_run_targets_app_ui_main_binary() {
     let manifest = include_str!("../Cargo.toml");
-    let default_run = manifest
-        .lines()
-        .filter_map(|line| manifest_line_value(line.trim(), "default-run"))
-        .next();
-    assert_eq!(default_run.as_deref(), Some("mondrian"));
-
-    let bins = manifest_bins(manifest);
+    let manifest: AppManifest = toml::from_str(manifest).expect("valid application Cargo manifest");
+    assert_eq!(manifest.package.default_run, "mondrian");
+    let bins = manifest.bins;
     let product_bin = bins.iter().find(|bin| bin.name == "mondrian").expect("mondrian product bin");
     assert_eq!(product_bin.path, "src/main.rs");
     let golden_bin = bins
@@ -68,17 +58,7 @@ fn product_default_run_targets_app_ui_main_binary() {
         .find(|bin| bin.name == "mondrian-golden")
         .expect("Golden validation bin");
     assert_eq!(golden_bin.path, "src/bin/mondrian_golden.rs");
-    assert!(
-        manifest.contains(
-            r#"[[bin]]
-name = "mondrian-golden"
-path = "src/bin/mondrian_golden.rs"
-required-features = ["validation"]
-test = false
-bench = false"#,
-        ),
-        "Golden validation must remain feature-gated and outside product/test routes"
-    );
+    assert_validation_only(golden_bin);
     let surface_reopen_bin = bins
         .iter()
         .find(|bin| bin.name == "mondrian-surface-reopen")
@@ -87,33 +67,13 @@ bench = false"#,
         surface_reopen_bin.path,
         "src/bin/mondrian_surface_reopen.rs"
     );
-    assert!(
-        manifest.contains(
-            r#"[[bin]]
-name = "mondrian-surface-reopen"
-path = "src/bin/mondrian_surface_reopen.rs"
-required-features = ["validation"]
-test = false
-bench = false"#,
-        ),
-        "Surface reopen validation must remain feature-gated and outside product/test routes"
-    );
+    assert_validation_only(surface_reopen_bin);
     let endurance_bin = bins
         .iter()
         .find(|bin| bin.name == "mondrian-endurance")
         .expect("commercial endurance validation bin");
     assert_eq!(endurance_bin.path, "src/bin/mondrian_endurance.rs");
-    assert!(
-        manifest.contains(
-            r#"[[bin]]
-name = "mondrian-endurance"
-path = "src/bin/mondrian_endurance.rs"
-required-features = ["validation"]
-test = false
-bench = false"#,
-        ),
-        "commercial endurance validation must remain feature-gated and outside product/test routes"
-    );
+    assert_validation_only(endurance_bin);
 
     let allowed_bins = [
         "mondrian",
@@ -142,25 +102,92 @@ bench = false"#,
     }
 }
 
+fn product_ci_contract_is_complete(workflow: &serde_json::Value) -> bool {
+    let Some(steps) = workflow.pointer("/jobs/test/steps").and_then(serde_json::Value::as_array)
+    else {
+        return false;
+    };
+    [
+        ("cargo test -p mondrian-app --all-targets -j1", None),
+        (
+            "cargo build -p mondrian-app --features validation --bin mondrian-golden -j1",
+            Some("runner.os == 'Windows'"),
+        ),
+    ]
+    .into_iter()
+    .all(|(required, condition)| {
+        let required: Vec<_> = required.split_whitespace().collect();
+        steps.iter().any(|step| {
+            let Some(run) = step.get("run").and_then(serde_json::Value::as_str) else {
+                return false;
+            };
+            let run: Vec<_> = run.split_whitespace().collect();
+            let complete_run = run == required
+                || (condition.is_none()
+                    && run.starts_with(&required)
+                    && run[required.len()..] == ["--", "--test-threads=1"]);
+            complete_run
+                && step.pointer("/env/CARGO_INCREMENTAL").and_then(serde_json::Value::as_str)
+                    == Some("0")
+                && match condition {
+                    None => step.get("if").is_none(),
+                    Some(expected) => {
+                        step.get("if").and_then(serde_json::Value::as_str) == Some(expected)
+                    }
+                }
+        })
+    })
+}
+
 #[test]
 fn cross_platform_ci_covers_the_complete_app_and_windows_golden_entrypoint() {
     let workflow = include_str!("../../../.github/workflows/ci.yml");
-    for required in [
-        r#"- name: 测试完整 App 产品路径
-        env:
-          CARGO_INCREMENTAL: "0"
-        run: cargo test -p mondrian-app --all-targets -j1"#,
-        r#"- name: 编译 Golden 验证入口 (Windows)
-        if: runner.os == 'Windows'
-        env:
-          CARGO_INCREMENTAL: "0"
-        run: cargo build -p mondrian-app --features validation --bin mondrian-golden -j1"#,
+    let workflow: serde_json::Value = serde_saphyr::from_str(workflow).expect("valid CI workflow");
+    assert!(
+        product_ci_contract_is_complete(&workflow),
+        "CI must retain complete non-incremental App tests and Windows Golden compilation"
+    );
+}
+
+#[test]
+fn product_ci_contract_rejects_partial_conditional_and_incremental_routes() {
+    let workflow: serde_json::Value =
+        serde_saphyr::from_str(include_str!("../../../.github/workflows/ci.yml")).unwrap();
+    let steps = workflow.pointer("/jobs/test/steps").unwrap().as_array().unwrap();
+    let app = steps
+        .iter()
+        .position(|step| {
+            step["run"]
+                .as_str()
+                .is_some_and(|run| run.starts_with("cargo test -p mondrian-app"))
+        })
+        .expect("actual App test step");
+    for (key, value) in [
+        ("run", "cargo test -p mondrian-app --lib -j1"),
+        (
+            "run",
+            "cargo test -p mondrian-app --all-targets -j1 -- --exact smoke",
+        ),
+        ("if", "runner.os == 'Windows'"),
     ] {
+        let mut partial = workflow.clone();
+        partial["jobs"]["test"]["steps"][app][key] = serde_json::json!(value);
         assert!(
-            workflow.contains(required),
-            "cross-platform CI must retain required App contract: {required}"
+            !product_ci_contract_is_complete(&partial),
+            "accepted {key}={value}"
         );
     }
+    let mut incremental = workflow.clone();
+    incremental["jobs"]["test"]["steps"][app]["env"]["CARGO_INCREMENTAL"] = serde_json::json!("1");
+    assert!(!product_ci_contract_is_complete(&incremental));
+    let mut disabled = workflow.clone();
+    disabled["jobs"]["test"]["steps"][app]["if"] = serde_json::json!(false);
+    assert!(!product_ci_contract_is_complete(&disabled));
+    let mut missing_golden = workflow.clone();
+    missing_golden["jobs"]["test"]["steps"].as_array_mut().unwrap().retain(|step| {
+        !step["run"].as_str().is_some_and(|run| run.contains("--bin mondrian-golden"))
+    });
+    assert!(!product_ci_contract_is_complete(&missing_golden));
 }
 
 #[test]

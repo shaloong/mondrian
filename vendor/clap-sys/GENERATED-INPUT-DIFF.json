@@ -1,0 +1,12 @@
+{
+  "schema": 1,
+  "status": "ACTUAL_GENERATED_SOURCE_DIFF_VERIFIED_NOT_ABI_QUALIFIED",
+  "v2_raw_sha256": "dd57e325981f3dd51b9195ad1b75887fcc0fb5d769e6ae95cfbbc2686945d53d",
+  "v3_raw_sha256": "0300511ca69490436738c05d6e5051de6745524a95029a78ba95ce2f43b74ca8",
+  "only_removed_declaration": "unsafe extern \"C\" { pub static CLAP_COLOR_TRANSPARENT : clap_color_t ; }",
+  "normalization": "Whitespace only; no declarations or types are projected or substituted",
+  "v2_lock_sha256": "961d084912db85564c06f6cb2eff66c095872bd1afa53a0026ebb29d5889eca8",
+  "v3_lock_sha256": "961d084912db85564c06f6cb2eff66c095872bd1afa53a0026ebb29d5889eca8",
+  "v2_log_sha256": "c9e5a5d326420d4adfd1b52316d00ed2cca04984967abadfd1127aaf81c4c62f",
+  "v3_log_sha256": "576dfb3e230220e3f78587e7df44e211ac0b2349cd372c17342ff351c4f3940b"
+}

@@ -184,8 +184,8 @@ pub struct ColorTokens {
     pub effect_lut: Color,
     /// 抠像效果的强调色
     pub effect_key: Color,
-    /// 插件效果的强调色
-    pub effect_plugin: Color,
+    /// 外部效果的强调色
+    pub effect_external: Color,
     /// 默认效果节点强调色
     pub effect_default: Color,
     /// 节点图 source 节点强调色
@@ -307,7 +307,7 @@ impl ColorTokens {
             effect_filter: Color::from_hex(0x5DA7FF),
             effect_lut: Color::from_hex(0x22C55E),
             effect_key: Color::from_hex(0xF59E0B),
-            effect_plugin: Color::from_hex(0xD946EF),
+            effect_external: Color::from_hex(0xD946EF),
             effect_default: Color::from_hex(0x8B5CF6),
             node_source: Color::from_hex(0x4E8DF0),
             node_output: Color::from_hex(0x22C55E),
@@ -419,7 +419,7 @@ impl ColorTokens {
             effect_filter: Color::from_hex(0x2563EB),
             effect_lut: Color::from_hex(0x16A34A),
             effect_key: Color::from_hex(0xD97706),
-            effect_plugin: Color::from_hex(0xC026D3),
+            effect_external: Color::from_hex(0xC026D3),
             effect_default: Color::from_hex(0x7C3AED),
             node_source: Color::from_hex(0x2563EB),
             node_output: Color::from_hex(0x16A34A),

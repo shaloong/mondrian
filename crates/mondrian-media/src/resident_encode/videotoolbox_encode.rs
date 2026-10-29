@@ -339,7 +339,8 @@ impl NativeSession {
         root: MetalResidentEncodeDeviceRoot,
         config: ResidentVideoEncoderConfig,
     ) -> Result<Self, ResidentEncodeError> {
-        ffmpeg::init().map_err(|e| native_error("FFmpeg initialize", e))?;
+        crate::ffmpeg_runtime::initialize_ffmpeg()
+            .map_err(|e| native_error("FFmpeg initialize", e))?;
         let num = i32::try_from(config.frame_rate_num).map_err(|e| native_error("cadence", e))?;
         let den = i32::try_from(config.frame_rate_den).map_err(|e| native_error("cadence", e))?;
         let (primaries, transfer, matrix) = match config.colorimetry {

@@ -363,8 +363,8 @@ pub(crate) fn paint_open_menu_with_submenu(
             item.icon.as_ref(),
             reserve_icon_lane,
             MenuRowPaint {
-                enabled: item.enabled,
-                active: item.checked,
+                enabled: item.is_enabled(),
+                active: item.checked == Some(true),
                 hovered: hover_depth.is_some_and(|(d, idx)| d == 0 && idx == i)
                     || submenu_chain.first() == Some(&i),
             },
@@ -426,8 +426,8 @@ pub(crate) fn paint_open_menu_with_submenu(
                 child.icon.as_ref(),
                 false,
                 MenuRowPaint {
-                    enabled: child.enabled,
-                    active: child.checked,
+                    enabled: child.is_enabled(),
+                    active: child.checked == Some(true),
                     hovered,
                 },
             );

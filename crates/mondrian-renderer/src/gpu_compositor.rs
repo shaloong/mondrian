@@ -33,6 +33,7 @@ use mondrian_effects::{
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::OnceLock;
 
 const GPU_COMPOSITOR_UNIFORM_PAGE_SLOTS: usize = 128;
 const GPU_COMPOSITOR_SHADER: &str = r#"
@@ -567,10 +568,10 @@ fn sample_layer(src_center: vec2<f32>) -> vec4<f32> {
 
 fn source_inside(src_center: vec2<f32>) -> bool {
     let src_size = uniforms.geometry.zw;
-    return src_center.x >= 0.5 &&
-        src_center.y >= 0.5 &&
-        src_center.x < src_size.x + 0.5 &&
-        src_center.y < src_size.y + 0.5;
+    return src_center.x >= 0.0 &&
+        src_center.y >= 0.0 &&
+        src_center.x < src_size.x &&
+        src_center.y < src_size.y;
 }
 
 fn grain_noise(position: vec2<f32>) -> f32 {
@@ -954,6 +955,394 @@ fn apply_effects(input: vec4<f32>, position: vec2<f32>) -> vec4<f32> {
 }
 "#;
 
+// Exact Mix has its own module and a lazily owned pipeline. Ordinary Over
+// does not parse, validate or compile the fixed-width integer arithmetic.
+const GPU_ADJUSTMENT_MIX_SHADER: &str = r#"
+struct MixUniforms {
+    // The first Float32 member of the shared Rust GpuCompositeUniforms.
+    // The existing group layout and binding range remain authoritative.
+    opacity: f32,
+};
+
+@group(0) @binding(0) var layer_tex: texture_2d<f32>;
+@group(1) @binding(0) var accum_tex: texture_2d<f32>;
+@group(2) @binding(0) var<uniform> uniforms: MixUniforms;
+
+@vertex
+fn vs_main(@builtin(vertex_index) vertex_index: u32) -> @builtin(position) vec4<f32> {
+    var positions = array<vec2<f32>, 4>(
+        vec2<f32>(-1.0, -1.0),
+        vec2<f32>( 1.0, -1.0),
+        vec2<f32>(-1.0,  1.0),
+        vec2<f32>( 1.0,  1.0),
+    );
+    return vec4<f32>(positions[vertex_index], 0.0, 1.0);
+}
+
+// Exact bounded Mix of admitted StraightCoverage/Opaque texels. Each term
+// has at most three Float32 factors (72 significand bits). The minimum
+// quantum is 2^-447; |associated| < 2^130. Rounded quotient alignment and
+// its 24 trial bits fit 19 words (608 bits). The common <=128-bit case
+// runs the same arithmetic with four active words. No Float32 product,
+// rounded 1-amount, division, epsilon or coverage clamp defines this law.
+struct MixTerm {
+    words: vec3<u32>,
+    exponent: i32,
+    negative: bool,
+};
+
+struct MixUnsigned {
+    words: array<u32, 19>,
+    count: u32,
+};
+
+struct MixExact {
+    magnitude: MixUnsigned,
+    origin: i32,
+    negative: bool,
+};
+
+fn mix_float_term(value: f32) -> MixTerm {
+    let bits = bitcast<u32>(value);
+    let encoded = (bits >> 23u) & 255u;
+    var mantissa = bits & 0x007fffffu;
+    var exponent = -149;
+    if (encoded != 0u) {
+        mantissa = mantissa | 0x00800000u;
+        exponent = i32(encoded) - 150;
+    }
+    if (mantissa != 0u) {
+        let trailing = countTrailingZeros(mantissa);
+        mantissa = mantissa >> trailing;
+        exponent = exponent + i32(trailing);
+    }
+    return MixTerm(vec3<u32>(mantissa, 0u, 0u), exponent, (bits >> 31u) != 0u);
+}
+
+// Exact 32x32->64 multiplication using four 16-bit products. Each inner
+// sum is bounded by 0xfffeffff; only the intended low-word carry wraps.
+fn mix_multiply_word(left: u32, right: u32) -> vec2<u32> {
+    let left_low = left & 65535u;
+    let left_high = left >> 16u;
+    let right_low = right & 65535u;
+    let right_high = right >> 16u;
+    let bottom = left_low * right_low;
+    let middle = left_high * right_low + (bottom >> 16u);
+    let cross = left_low * right_high + (middle & 65535u);
+    return vec2<u32>(
+        (cross << 16u) | (bottom & 65535u),
+        left_high * right_high + (middle >> 16u) + (cross >> 16u),
+    );
+}
+
+fn mix_multiply_term(term: MixTerm, factor: MixTerm) -> MixTerm {
+    var result: MixTerm;
+    result.exponent = term.exponent + factor.exponent;
+    result.negative = term.negative != factor.negative;
+    var carry = 0u;
+    for (var index = 0u; index < 3u; index = index + 1u) {
+        let product = mix_multiply_word(term.words[index], factor.words.x);
+        let low = product.x + carry;
+        result.words[index] = low;
+        carry = product.y + select(0u, 1u, low < product.x);
+    }
+    return result;
+}
+
+fn mix_negate_term(term: MixTerm) -> MixTerm {
+    var result = term;
+    result.negative = !result.negative;
+    return result;
+}
+
+fn mix_term_bits(term: MixTerm) -> u32 {
+    for (var index = 2; index >= 0; index = index - 1) {
+        let word = term.words[u32(index)];
+        if (word != 0u) { return u32(index) * 32u + 32u - countLeadingZeros(word); }
+    }
+    return 0u;
+}
+
+fn mix_unsigned_bits(value: MixUnsigned) -> u32 {
+    var value_storage = value;
+    for (var index = i32(value_storage.count) - 1; index >= 0; index = index - 1) {
+        let word = value_storage.words[u32(index)];
+        if (word != 0u) { return u32(index) * 32u + 32u - countLeadingZeros(word); }
+    }
+    return 0u;
+}
+
+fn mix_unsigned_compare(left: MixUnsigned, right: MixUnsigned) -> i32 {
+    var left_storage = left;
+    var right_storage = right;
+    for (var index = i32(left_storage.count) - 1; index >= 0; index = index - 1) {
+        let a = left_storage.words[u32(index)];
+        let b = right_storage.words[u32(index)];
+        if (a < b) { return -1; }
+        if (a > b) { return 1; }
+    }
+    return 0;
+}
+
+fn mix_unsigned_add(left: MixUnsigned, right: MixUnsigned) -> MixUnsigned {
+    var left_storage = left;
+    var right_storage = right;
+    var result: MixUnsigned;
+    result.count = left_storage.count;
+    var carry = 0u;
+    for (var index = 0u; index < result.count; index = index + 1u) {
+        let partial = left_storage.words[index] + right_storage.words[index];
+        let complete = partial + carry;
+        carry = select(0u, 1u, partial < left_storage.words[index] || complete < partial);
+        result.words[index] = complete;
+    }
+    return result;
+}
+
+// The caller establishes left>=right before this exact magnitude subtraction.
+fn mix_unsigned_subtract(left: MixUnsigned, right: MixUnsigned) -> MixUnsigned {
+    var left_storage = left;
+    var right_storage = right;
+    var result: MixUnsigned;
+    result.count = left_storage.count;
+    var borrow = 0u;
+    for (var index = 0u; index < result.count; index = index + 1u) {
+        let partial = left_storage.words[index] - right_storage.words[index];
+        let complete = partial - borrow;
+        borrow = select(0u, 1u, left_storage.words[index] < right_storage.words[index] || partial < borrow);
+        result.words[index] = complete;
+    }
+    return result;
+}
+
+fn mix_unsigned_shift(value: MixUnsigned, shift: u32, count: u32) -> MixUnsigned {
+    var value_storage = value;
+    var result: MixUnsigned;
+    result.count = count;
+    let words = shift / 32u;
+    let offset = shift % 32u;
+    for (var index = 0u; index < value_storage.count; index = index + 1u) {
+        let word = value_storage.words[index];
+        if (word == 0u) { continue; }
+        result.words[index + words] = result.words[index + words] | (word << offset);
+        if (offset != 0u) {
+            let upper = word >> (32u - offset);
+            if (upper != 0u) {
+                result.words[index + words + 1u] = result.words[index + words + 1u] | upper;
+            }
+        }
+    }
+    return result;
+}
+
+fn mix_unsigned_term(term: MixTerm, origin: i32, count: u32) -> MixUnsigned {
+    var magnitude: MixUnsigned;
+    magnitude.count = 3u;
+    for (var index = 0u; index < 3u; index = index + 1u) {
+        magnitude.words[index] = term.words[index];
+    }
+    return mix_unsigned_shift(magnitude, u32(term.exponent - origin), count);
+}
+
+fn mix_exact_sum(first: MixTerm, second: MixTerm, third: MixTerm) -> MixExact {
+    var terms = array<MixTerm, 3>(first, second, third);
+    var origin = 1024;
+    for (var index = 0u; index < 3u; index = index + 1u) {
+        if (mix_term_bits(terms[index]) != 0u) { origin = min(origin, terms[index].exponent); }
+    }
+    var result: MixExact;
+    result.magnitude.count = 4u;
+    if (origin == 1024) { return result; }
+    result.origin = origin;
+    var required = 0u;
+    for (var index = 0u; index < 3u; index = index + 1u) {
+        let bits = mix_term_bits(terms[index]);
+        if (bits != 0u) { required = max(required, bits + u32(terms[index].exponent - origin) + 2u); }
+    }
+    result.magnitude.count = select(19u, 4u, required <= 128u);
+    for (var index = 0u; index < 3u; index = index + 1u) {
+        let term = terms[index];
+        if (mix_term_bits(term) == 0u) { continue; }
+        let magnitude = mix_unsigned_term(term, origin, result.magnitude.count);
+        if (result.negative == term.negative) {
+            result.magnitude = mix_unsigned_add(result.magnitude, magnitude);
+        } else if (mix_unsigned_compare(result.magnitude, magnitude) >= 0) {
+            result.magnitude = mix_unsigned_subtract(result.magnitude, magnitude);
+        } else {
+            result.magnitude = mix_unsigned_subtract(magnitude, result.magnitude);
+            result.negative = term.negative;
+        }
+    }
+    return result;
+}
+
+fn mix_unsigned_bit(value: MixUnsigned, index: u32) -> bool {
+    var value_storage = value;
+    if (index >= value_storage.count * 32u) { return false; }
+    return ((value_storage.words[index / 32u] >> (index % 32u)) & 1u) != 0u;
+}
+
+fn mix_unsigned_below(value: MixUnsigned, end: u32) -> bool {
+    var value_storage = value;
+    let full = min(end / 32u, value_storage.count);
+    for (var index = 0u; index < full; index = index + 1u) {
+        if (value_storage.words[index] != 0u) { return true; }
+    }
+    let offset = end % 32u;
+    return offset != 0u && full < value_storage.count &&
+        (value_storage.words[full] & ((1u << offset) - 1u)) != 0u;
+}
+
+fn mix_unsigned_low_after_shift(value: MixUnsigned, shift: u32) -> u32 {
+    var value_storage = value;
+    let word = shift / 32u;
+    let offset = shift % 32u;
+    if (word >= value_storage.count) { return 0u; }
+    var low = value_storage.words[word] >> offset;
+    if (offset != 0u && word + 1u < value_storage.count) {
+        low = low | (value_storage.words[word + 1u] << (32u - offset));
+    }
+    return low;
+}
+
+fn mix_round_dyadic(value: MixExact) -> f32 {
+    let bits = mix_unsigned_bits(value.magnitude);
+    if (bits == 0u) { return 0.0; }
+    let sign = select(0u, 0x80000000u, value.negative);
+    var exponent = value.origin + i32(bits) - 1;
+    if (exponent > 127) { return bitcast<f32>(sign | 0x7f800000u); }
+    if (exponent < -150) { return bitcast<f32>(sign); }
+    let subnormal = exponent < -126;
+    let quantum = select(exponent - 23, -149, subnormal);
+    let shift = quantum - value.origin;
+    var significand = 0u;
+    if (shift > 0) {
+        significand = mix_unsigned_low_after_shift(value.magnitude, u32(shift));
+        let guard = mix_unsigned_bit(value.magnitude, u32(shift - 1));
+        let sticky = mix_unsigned_below(value.magnitude, u32(shift - 1));
+        if (guard && (sticky || (significand & 1u) != 0u)) { significand = significand + 1u; }
+    } else {
+        significand = mix_unsigned_low_after_shift(value.magnitude, 0u) << u32(-shift);
+    }
+    if (subnormal) { return bitcast<f32>(sign | significand); }
+    if (significand == 0x01000000u) {
+        significand = significand >> 1u;
+        exponent = exponent + 1;
+    }
+    if (exponent > 127) { return bitcast<f32>(sign | 0x7f800000u); }
+    return bitcast<f32>(sign | (u32(exponent + 127) << 23u) | (significand & 0x007fffffu));
+}
+
+// Straight delivery rounds the exact quotient once. Associated numerator
+// and coverage denominator stay integer until final bitcast; neither tiny
+// alpha nor an intermediate association is rounded to zero first.
+fn mix_round_quotient(numerator: MixExact, denominator: MixExact) -> f32 {
+    let numerator_bits = mix_unsigned_bits(numerator.magnitude);
+    if (numerator_bits == 0u) { return 0.0; }
+    let denominator_bits = mix_unsigned_bits(denominator.magnitude);
+    let sign = select(0u, 0x80000000u, numerator.negative != denominator.negative);
+    var exponent = numerator.origin - denominator.origin + i32(numerator_bits) - i32(denominator_bits);
+    let left_shift = u32(max(0, i32(denominator_bits) - i32(numerator_bits)));
+    let right_shift = u32(max(0, i32(numerator_bits) - i32(denominator_bits)));
+    let leading_count = select(19u, 4u, max(numerator_bits, denominator_bits) <= 128u);
+    let leading_left = mix_unsigned_shift(numerator.magnitude, left_shift, leading_count);
+    let leading_right = mix_unsigned_shift(denominator.magnitude, right_shift, leading_count);
+    if (mix_unsigned_compare(leading_left, leading_right) < 0) { exponent = exponent - 1; }
+    if (exponent > 127) { return bitcast<f32>(sign | 0x7f800000u); }
+    if (exponent < -150) { return bitcast<f32>(sign); }
+    let subnormal = exponent < -126;
+    let quantum = select(exponent - 23, -149, subnormal);
+    let shift = numerator.origin - denominator.origin - quantum;
+    let numerator_shift = u32(max(0, shift));
+    let denominator_shift = u32(max(0, -shift));
+    let required = max(numerator_bits + numerator_shift, denominator_bits + denominator_shift + 23u);
+    let count = select(19u, 4u, required <= 128u);
+    var remainder = mix_unsigned_shift(numerator.magnitude, numerator_shift, count);
+    let divisor = mix_unsigned_shift(denominator.magnitude, denominator_shift, count);
+    var significand = 0u;
+    for (var bit = 23; bit >= 0; bit = bit - 1) {
+        let candidate = mix_unsigned_shift(divisor, u32(bit), count);
+        if (mix_unsigned_compare(remainder, candidate) >= 0) {
+            remainder = mix_unsigned_subtract(remainder, candidate);
+            significand = significand | (1u << u32(bit));
+        }
+    }
+    let complement = mix_unsigned_subtract(divisor, remainder);
+    let order = mix_unsigned_compare(remainder, complement);
+    if (order > 0 || (order == 0 && (significand & 1u) != 0u)) { significand = significand + 1u; }
+    if (subnormal) { return bitcast<f32>(sign | significand); }
+    if (significand == 0x01000000u) {
+        significand = significand >> 1u;
+        exponent = exponent + 1;
+    }
+    if (exponent > 127) { return bitcast<f32>(sign | 0x7f800000u); }
+    return bitcast<f32>(sign | (u32(exponent + 127) << 23u) | (significand & 0x007fffffu));
+}
+
+fn mix_adjustment_straight_alpha(
+    base_px: vec4<f32>,
+    processed_px: vec4<f32>,
+    opacity: f32,
+) -> vec4<f32> {
+    // Preserve an invalid intermediate signal for the sole completed-frame
+    // admission. Integer decoding must never reinterpret Inf/NaN as finite,
+    // or hide invalid coverage through cancellation. Upload validation still
+    // independently admits mutable host inputs before any GPU execution.
+    let base_bits = bitcast<vec4<u32>>(base_px);
+    let processed_bits = bitcast<vec4<u32>>(processed_px);
+    if (any((base_bits & vec4<u32>(0x7f800000u)) == vec4<u32>(0x7f800000u))) { return base_px; }
+    if (any((processed_bits & vec4<u32>(0x7f800000u)) == vec4<u32>(0x7f800000u))) { return processed_px; }
+    let base_alpha_bits = base_bits.a & 0x7fffffffu;
+    let source_alpha_bits = processed_bits.a & 0x7fffffffu;
+    if (base_alpha_bits > 0x3f800000u || (base_bits.a >> 31u != 0u && base_alpha_bits != 0u)) { return base_px; }
+    if (source_alpha_bits > 0x3f800000u || (processed_bits.a >> 31u != 0u && source_alpha_bits != 0u)) { return processed_px; }
+    let amount_bits = bitcast<u32>(opacity) & 0x7fffffffu;
+    if (amount_bits == 0u) { return base_px; }
+    if (amount_bits == 0x3f800000u) { return processed_px; }
+    // Numerical identity includes +0==-0. Canonicalize only comparison
+    // zero bits; do not use floating comparisons that can flush tiny texels.
+    // Returning the original left sample preserves its exact hidden signal.
+    let identity_base = select(base_bits, vec4<u32>(0u),
+        (base_bits & vec4<u32>(0x7fffffffu)) == vec4<u32>(0u));
+    let identity_processed = select(processed_bits, vec4<u32>(0u),
+        (processed_bits & vec4<u32>(0x7fffffffu)) == vec4<u32>(0u));
+    if (all(identity_base == identity_processed)) { return base_px; }
+    let base_a = mix_float_term(base_px.a);
+    let source_a = mix_float_term(processed_px.a);
+    let amount = mix_float_term(opacity);
+    let alpha = mix_exact_sum(
+        base_a,
+        mix_multiply_term(source_a, amount),
+        mix_negate_term(mix_multiply_term(base_a, amount)),
+    );
+    if (mix_unsigned_bits(alpha.magnitude) == 0u) { return vec4<f32>(0.0); }
+    var output: vec4<f32>;
+    output.a = mix_round_dyadic(alpha);
+    for (var channel = 0u; channel < 3u; channel = channel + 1u) {
+        let base = mix_multiply_term(mix_float_term(base_px[channel]), base_a);
+        let source = mix_multiply_term(mix_float_term(processed_px[channel]), source_a);
+        let associated = mix_exact_sum(
+            base,
+            mix_multiply_term(source, amount),
+            mix_negate_term(mix_multiply_term(base, amount)),
+        );
+        output[channel] = mix_round_quotient(associated, alpha);
+    }
+    return output;
+}
+
+@fragment
+fn fs_mix(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
+    // These matching-extent two inputs use their actual texel coordinates.
+    let coordinate = vec2<i32>(floor(position.xy));
+    return mix_adjustment_straight_alpha(
+        textureLoad(accum_tex, coordinate, 0),
+        textureLoad(layer_tex, coordinate, 0),
+        uniforms.opacity,
+    );
+}
+"#;
+
 const GPU_MATTE_MIX_SHADER: &str = r#"
 struct VsOut {
     @builtin(position) position: vec4<f32>,
@@ -1157,8 +1546,9 @@ pub struct GpuCompositeLayer<'a> {
     pub source: GpuCompositeLayerSource<'a>,
     /// Straight-alpha layer opacity.
     pub opacity: f32,
-    /// Canonical Timeline blend mode evaluated in scene-linear working space.
-    pub blend_mode: BlendMode,
+    /// Canonical scene-linear pass policy. Ordinary sources use `Blend`;
+    /// `Mix` is admitted only for an Adjustment of its original accumulator.
+    pub blend_policy: mondrian_effects::EffectPassBlendPolicy,
     /// Timeline affine transform. Media and solids accept invertible transforms.
     /// Adjustment layers require identity because they process the destination accumulator.
     pub transform: [f32; 6],
@@ -1273,9 +1663,22 @@ pub enum GpuCompositeError {
         /// Rejected RGB/coverage association.
         actual: crate::ColorFrameAlpha,
     },
-    /// An adjustment layer did not provide a non-identity GPU effect plan.
-    #[error("GPU adjustment layer requires a non-identity effect plan")]
+    /// An adjustment layer did not provide its declared GPU effect plan.
+    #[error("GPU adjustment layer requires an effect plan")]
     AdjustmentMissingEffectPlan,
+    /// A supplied pass weight is nonfinite or outside the normalized range.
+    #[error("GPU composite opacity is not finite and normalized (bits {bits:#010x})")]
+    InvalidOpacity {
+        /// Original Float32 representation, preserving NaN payload and sign.
+        bits: u32,
+    },
+    /// The compiled inline Mix did not own its required processed target.
+    #[error("GPU inline Adjustment Mix is missing its processed target")]
+    AdjustmentProcessedTargetMissing,
+    /// Mix can interpolate only a processed Adjustment and its original base.
+    #[error("GPU pass Mix requires an Adjustment source")]
+    MixRequiresAdjustment,
+
     /// An effect must be surrounded by renderer-owned OCIO passes before composition.
     #[error("GPU working compositor cannot execute effect domain {domain:?} inline")]
     EffectDomainRequiresExternalPass {
@@ -1336,6 +1739,8 @@ pub enum GpuCompositeError {
 /// Runtime for recording GPU working-space composites.
 pub struct GpuFrameCompositor {
     pipeline: wgpu::RenderPipeline,
+    pipeline_layout: wgpu::PipelineLayout,
+    adjustment_mix_pipeline: OnceLock<wgpu::RenderPipeline>,
     opaque_normal_pipeline: wgpu::RenderPipeline,
     matte_mix_pipeline: wgpu::RenderPipeline,
     matte_mix_texture_layout: wgpu::BindGroupLayout,
@@ -1660,6 +2065,8 @@ impl GpuFrameCompositor {
         });
         Ok(Self {
             pipeline,
+            pipeline_layout: layout,
+            adjustment_mix_pipeline: OnceLock::new(),
             opaque_normal_pipeline,
             matte_mix_pipeline,
             matte_mix_texture_layout,
@@ -1788,6 +2195,25 @@ impl GpuFrameCompositor {
             );
         }
 
+        let adjustment_processed = if execution.layers.iter().any(|execution| {
+            let layer = &request.layers[execution.input_index];
+            matches!(layer.source, GpuCompositeLayerSource::Adjustment)
+                && layer.blend_policy == mondrian_effects::EffectPassBlendPolicy::Mix
+        }) {
+            Some(create_working_resource(
+                device,
+                ids,
+                ColorFrameDescriptor {
+                    alpha: crate::ColorFrameAlpha::StraightCoverage,
+                    ..output_descriptor
+                },
+                "gpu-adjustment-processed",
+                resource_pool,
+            )?)
+        } else {
+            None
+        };
+
         let mut transient_uploads = Vec::new();
         let mut uploaded_cpu_layers = false;
         let mut data_texture_uploads = 0_u64;
@@ -1890,6 +2316,52 @@ impl GpuFrameCompositor {
                     &layer_execution.preserved_regions,
                 );
             }
+            let (layer_binding, effect_plan, pipeline) =
+                if matches!(layer.source, GpuCompositeLayerSource::Adjustment,)
+                    && layer.blend_policy == mondrian_effects::EffectPassBlendPolicy::Mix
+                {
+                    let processed = adjustment_processed
+                        .as_ref()
+                        .ok_or(GpuCompositeError::AdjustmentProcessedTargetMissing)?;
+                    self.record_layer_pass(
+                        device,
+                        queue,
+                        encoder,
+                        GpuCompositeTextureBinding::ProceduralDummy,
+                        &processed.resource().texture_view,
+                        GpuCompositeTextureBinding::Resource(accum.resource()),
+                        GpuCompositeUniforms {
+                            opacity: 1.0,
+                            source_kind: 3,
+                            effect_count: 0,
+                            blend_mode: gpu_blend_mode_id(BlendMode::Normal),
+                            frame_seed_lo: layer.frame_seed as u32,
+                            frame_seed_hi: (layer.frame_seed >> 32) as u32,
+                            mask_controls: [0; 2],
+                            solid_color: [0.0; 4],
+                            inv_transform0: [1.0, 0.0, 0.0, 0.0],
+                            inv_transform1: [1.0, 0.0, 0.0, 0.0],
+                            geometry: [width as f32, height as f32, width as f32, height as f32],
+                            effects: [GpuEffectUniform::zeroed(); MAX_FUSED_GPU_EFFECT_OPS],
+                        },
+                        layer.effect_plan,
+                    )?;
+                    (
+                        GpuCompositeTextureBinding::Resource(processed.resource()),
+                        None,
+                        self.adjustment_mix_pipeline(device),
+                    )
+                } else {
+                    (
+                        layer_binding,
+                        layer.effect_plan,
+                        if opaque_normal_accumulator {
+                            &self.opaque_normal_pipeline
+                        } else {
+                            &self.pipeline
+                        },
+                    )
+                };
             self.record_layer_pass_scheduled(
                 device,
                 queue,
@@ -1902,12 +2374,12 @@ impl GpuFrameCompositor {
                 &dst.resource().texture_view,
                 layer_binding,
                 GpuCompositeUniforms {
-                    opacity: layer.opacity.clamp(0.0, 1.0),
+                    opacity: layer.opacity,
                     source_kind,
                     effect_count: layer
                         .effect_plan
                         .map_or(0, |plan| plan.operations().len() as u32),
-                    blend_mode: gpu_blend_mode_id(layer.blend_mode),
+                    blend_mode: gpu_pass_policy_id(layer.blend_policy),
                     frame_seed_lo: layer.frame_seed as u32,
                     frame_seed_hi: (layer.frame_seed >> 32) as u32,
                     mask_controls: [0; 2],
@@ -1922,13 +2394,9 @@ impl GpuFrameCompositor {
                     geometry: [width as f32, height as f32, source_size[0], source_size[1]],
                     effects: [GpuEffectUniform::zeroed(); MAX_FUSED_GPU_EFFECT_OPS],
                 },
-                layer.effect_plan,
+                effect_plan,
                 layer_execution,
-                if opaque_normal_accumulator {
-                    &self.opaque_normal_pipeline
-                } else {
-                    &self.pipeline
-                },
+                pipeline,
                 opaque_normal_accumulator.then_some(if pass_index == 0 {
                     wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT)
                 } else {
@@ -1953,6 +2421,9 @@ impl GpuFrameCompositor {
                 Some(target_a),
             )
         };
+        if let Some(processed) = adjustment_processed {
+            table.insert(processed).map_err(GpuCompositeError::ResourceTable)?;
+        }
         let output = output_resource.handle().clone();
         if let Some(retained_resource) = retained_resource {
             table.insert(retained_resource).map_err(GpuCompositeError::ResourceTable)?;
@@ -2065,7 +2536,7 @@ impl GpuFrameCompositor {
             GpuCompositeLayer {
                 source: GpuCompositeLayerSource::GpuFrame(left),
                 opacity: 1.0,
-                blend_mode: BlendMode::Normal,
+                blend_policy: mondrian_effects::EffectPassBlendPolicy::Blend(BlendMode::Normal),
                 transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
                 effect_plan: None,
                 frame_seed: 0,
@@ -2073,7 +2544,7 @@ impl GpuFrameCompositor {
             GpuCompositeLayer {
                 source: GpuCompositeLayerSource::GpuFrame(right),
                 opacity: 1.0,
-                blend_mode: BlendMode::Normal,
+                blend_policy: mondrian_effects::EffectPassBlendPolicy::Blend(BlendMode::Normal),
                 transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
                 effect_plan: None,
                 frame_seed: 0,
@@ -2171,7 +2642,10 @@ impl GpuFrameCompositor {
         })
     }
 
-    /// Blend an already processed adjustment frame over its original accumulator.
+    /// Apply the canonical pass policy to a processed frame and its original accumulator.
+    ///
+    /// `Mix` interpolates associated scene-linear RGB and coverage. `Blend(mode)`
+    /// performs explicit compositing, including Normal Over for graph Blend nodes.
     ///
     /// Unlike a two-layer general composite, this graph node samples the base
     /// accumulator directly and therefore records one full-frame pass and one
@@ -2188,7 +2662,7 @@ impl GpuFrameCompositor {
         base: &GpuColorFrameHandle,
         processed: &GpuColorFrameHandle,
         opacity: f32,
-        blend_mode: BlendMode,
+        blend_policy: mondrian_effects::EffectPassBlendPolicy,
         frame_seed: i64,
         working_color_space: mondrian_core::WorkingColorSpace,
     ) -> Result<GpuCompositeRecord, GpuCompositeError> {
@@ -2196,7 +2670,7 @@ impl GpuFrameCompositor {
             GpuCompositeLayer {
                 source: GpuCompositeLayerSource::GpuFrame(base),
                 opacity: 1.0,
-                blend_mode: BlendMode::Normal,
+                blend_policy: mondrian_effects::EffectPassBlendPolicy::Blend(BlendMode::Normal),
                 transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
                 effect_plan: None,
                 frame_seed: 0,
@@ -2204,13 +2678,21 @@ impl GpuFrameCompositor {
             GpuCompositeLayer {
                 source: GpuCompositeLayerSource::GpuFrame(processed),
                 opacity,
-                blend_mode,
+                // These layers admit the two input descriptors, not pass semantics.
+                // The actual typed policy is consumed once by the shader below.
+                blend_policy: mondrian_effects::EffectPassBlendPolicy::Blend(BlendMode::Normal),
                 transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
                 effect_plan: None,
                 frame_seed: 0,
             },
         ];
-        let descriptor = base.descriptor();
+        let mut descriptor = base.descriptor();
+        descriptor.alpha = adjustment_output_alpha(
+            descriptor.alpha,
+            processed.descriptor().alpha,
+            opacity,
+            blend_policy,
+        );
         validate_request(&GpuCompositeRequest {
             width: descriptor.width,
             height: descriptor.height,
@@ -2226,7 +2708,7 @@ impl GpuFrameCompositor {
             "gpu-adjustment-blend-output",
             resource_pool,
         )?;
-        self.record_layer_pass(
+        self.record_layer_pass_with_pipeline(
             device,
             queue,
             encoder,
@@ -2234,10 +2716,10 @@ impl GpuFrameCompositor {
             &output_resource.resource().texture_view,
             GpuCompositeTextureBinding::Resource(processed_resource.resource()),
             GpuCompositeUniforms {
-                opacity: opacity.clamp(0.0, 1.0),
+                opacity,
                 source_kind: 0,
                 effect_count: 0,
-                blend_mode: gpu_blend_mode_id(blend_mode),
+                blend_mode: gpu_pass_policy_id(blend_policy),
                 frame_seed_lo: frame_seed as u32,
                 frame_seed_hi: (frame_seed >> 32) as u32,
                 mask_controls: [0; 2],
@@ -2253,6 +2735,12 @@ impl GpuFrameCompositor {
                 effects: [GpuEffectUniform::zeroed(); MAX_FUSED_GPU_EFFECT_OPS],
             },
             None,
+            match blend_policy {
+                mondrian_effects::EffectPassBlendPolicy::Mix => {
+                    self.adjustment_mix_pipeline(device)
+                }
+                mondrian_effects::EffectPassBlendPolicy::Blend(_) => &self.pipeline,
+            },
         )?;
         let output = output_resource.handle().clone();
         table.insert(output_resource).map_err(GpuCompositeError::ResourceTable)?;
@@ -2712,6 +3200,46 @@ impl GpuFrameCompositor {
         })
     }
 
+    fn adjustment_mix_pipeline(&self, device: &wgpu::Device) -> &wgpu::RenderPipeline {
+        self.adjustment_mix_pipeline.get_or_init(|| {
+            let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("mondrian_gpu_adjustment_mix_shader"),
+                source: wgpu::ShaderSource::Wgsl(GPU_ADJUSTMENT_MIX_SHADER.into()),
+            });
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("mondrian_gpu_adjustment_mix_pipeline"),
+                layout: Some(&self.pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &shader,
+                    entry_point: Some("vs_main"),
+                    buffers: &[],
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: Some("fs_mix"),
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: product_gpu_working_texture_format().to_wgpu(),
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleStrip,
+                    strip_index_format: None,
+                    front_face: wgpu::FrontFace::Ccw,
+                    cull_mode: None,
+                    ..wgpu::PrimitiveState::default()
+                },
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState::default(),
+                multiview_mask: None,
+                cache: None,
+            })
+        })
+    }
+
     fn record_layer_pass(
         &self,
         device: &wgpu::Device,
@@ -2722,6 +3250,32 @@ impl GpuFrameCompositor {
         layer_binding: GpuCompositeTextureBinding<'_>,
         uniforms: GpuCompositeUniforms,
         effect_plan: Option<&CompiledEffectGpuPlan>,
+    ) -> Result<(), GpuCompositeError> {
+        self.record_layer_pass_with_pipeline(
+            device,
+            queue,
+            encoder,
+            accum_binding,
+            dst_view,
+            layer_binding,
+            uniforms,
+            effect_plan,
+            &self.pipeline,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn record_layer_pass_with_pipeline(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
+        accum_binding: GpuCompositeTextureBinding<'_>,
+        dst_view: &wgpu::TextureView,
+        layer_binding: GpuCompositeTextureBinding<'_>,
+        uniforms: GpuCompositeUniforms,
+        effect_plan: Option<&CompiledEffectGpuPlan>,
+        pipeline: &wgpu::RenderPipeline,
     ) -> Result<(), GpuCompositeError> {
         let width = uniforms.geometry[0].max(0.0) as u32;
         let height = uniforms.geometry[1].max(0.0) as u32;
@@ -2744,7 +3298,7 @@ impl GpuFrameCompositor {
             uniforms,
             effect_plan,
             &execution,
-            &self.pipeline,
+            pipeline,
             None,
         )
     }
@@ -3230,7 +3784,7 @@ fn single_layer_gpu_passthrough<'a>(
     let descriptor = handle.descriptor();
     // Straight coverage must still composite over transparent black at exact zero alpha.
     let preserves_pixels = layer.opacity.clamp(0.0, 1.0) == 1.0
-        && layer.blend_mode == BlendMode::Normal
+        && layer.blend_policy == mondrian_effects::EffectPassBlendPolicy::Blend(BlendMode::Normal)
         && is_identity_transform(layer.transform)
         && layer.effect_plan.is_none_or(CompiledEffectGpuPlan::is_identity)
         && descriptor.alpha == ColorFrameAlpha::Opaque
@@ -3238,6 +3792,35 @@ fn single_layer_gpu_passthrough<'a>(
         && descriptor.height == request.height
         && handle.texture_format() == product_gpu_working_texture_format();
     preserves_pixels.then_some(handle)
+}
+
+fn adjustment_output_alpha(
+    base: crate::ColorFrameAlpha,
+    processed: crate::ColorFrameAlpha,
+    opacity: f32,
+    policy: mondrian_effects::EffectPassBlendPolicy,
+) -> crate::ColorFrameAlpha {
+    if opacity == 0.0 {
+        return base;
+    }
+    match policy {
+        mondrian_effects::EffectPassBlendPolicy::Mix if opacity == 1.0 => processed,
+        mondrian_effects::EffectPassBlendPolicy::Mix
+            if base == crate::ColorFrameAlpha::Opaque
+                && processed == crate::ColorFrameAlpha::Opaque =>
+        {
+            crate::ColorFrameAlpha::Opaque
+        }
+        mondrian_effects::EffectPassBlendPolicy::Mix => crate::ColorFrameAlpha::StraightCoverage,
+        mondrian_effects::EffectPassBlendPolicy::Blend(_) => base,
+    }
+}
+
+fn gpu_pass_policy_id(policy: mondrian_effects::EffectPassBlendPolicy) -> u32 {
+    match policy {
+        mondrian_effects::EffectPassBlendPolicy::Mix => 27,
+        mondrian_effects::EffectPassBlendPolicy::Blend(mode) => gpu_blend_mode_id(mode),
+    }
 }
 
 fn gpu_blend_mode_id(mode: BlendMode) -> u32 {
@@ -3469,6 +4052,13 @@ fn validate_request(request: &GpuCompositeRequest<'_>) -> Result<(), GpuComposit
             height: request.height,
         });
     }
+    // All request weights are admitted before inactive/identity elimination,
+    // source capability queries or any resource/pipeline allocation.
+    for layer in request.layers {
+        if !layer.opacity.is_finite() || !(0.0..=1.0).contains(&layer.opacity) {
+            return Err(GpuCompositeError::InvalidOpacity { bits: layer.opacity.to_bits() });
+        }
+    }
     let contributing_layers =
         request.layers.iter().filter(|layer| !layer_has_zero_contribution(layer));
     let capability = evaluate_gpu_compositing_capability(
@@ -3484,6 +4074,11 @@ fn validate_request(request: &GpuCompositeRequest<'_>) -> Result<(), GpuComposit
         return Err(GpuCompositeError::Blocked { reason });
     }
     for layer in request.layers {
+        if layer.blend_policy == mondrian_effects::EffectPassBlendPolicy::Mix
+            && !matches!(layer.source, GpuCompositeLayerSource::Adjustment)
+        {
+            return Err(GpuCompositeError::MixRequiresAdjustment);
+        }
         if layer_has_zero_contribution(layer) {
             continue;
         }
@@ -3494,7 +4089,7 @@ fn validate_request(request: &GpuCompositeRequest<'_>) -> Result<(), GpuComposit
             }
         }
         if matches!(layer.source, GpuCompositeLayerSource::Adjustment)
-            && layer.effect_plan.is_none_or(CompiledEffectGpuPlan::is_identity)
+            && layer.effect_plan.is_none()
         {
             return Err(GpuCompositeError::AdjustmentMissingEffectPlan);
         }
@@ -3539,7 +4134,7 @@ fn validate_request(request: &GpuCompositeRequest<'_>) -> Result<(), GpuComposit
 fn require_straight_compatible_alpha(
     alpha: crate::ColorFrameAlpha,
 ) -> Result<(), GpuCompositeError> {
-    if alpha.is_straight_compatible() {
+    if alpha.is_coverage() && alpha.is_straight_compatible() {
         Ok(())
     } else {
         Err(GpuCompositeError::InputNotStraightCompatibleAlpha { actual: alpha })
@@ -3548,6 +4143,12 @@ fn require_straight_compatible_alpha(
 
 fn layer_has_zero_contribution(layer: &GpuCompositeLayer<'_>) -> bool {
     if layer.opacity.clamp(0.0, 1.0) == 0.0 {
+        return true;
+    }
+    if matches!(layer.source, GpuCompositeLayerSource::Adjustment)
+        && layer.blend_policy == mondrian_effects::EffectPassBlendPolicy::Mix
+        && layer.effect_plan.is_some_and(CompiledEffectGpuPlan::is_identity)
+    {
         return true;
     }
 
@@ -3565,11 +4166,22 @@ fn layer_has_zero_contribution(layer: &GpuCompositeLayer<'_>) -> bool {
 }
 
 fn composite_output_alpha(request: &GpuCompositeRequest<'_>) -> crate::ColorFrameAlpha {
-    let has_opaque_canvas_base = request
-        .layers
-        .iter()
-        .any(|layer| layer_establishes_opaque_canvas(request.width, request.height, layer));
-    if has_opaque_canvas_base {
+    let mut opaque = false;
+    for layer in request.layers {
+        if layer_has_zero_contribution(layer) {
+            continue;
+        }
+        if matches!(layer.source, GpuCompositeLayerSource::Adjustment)
+            && layer.blend_policy == mondrian_effects::EffectPassBlendPolicy::Mix
+            && !effect_plan_preserves_full_coverage(layer.effect_plan)
+        {
+            // A processed Crop can lower coverage even over an opaque original.
+            opaque = false;
+        } else if layer_establishes_opaque_canvas(request.width, request.height, layer) {
+            opaque = true;
+        }
+    }
+    if opaque {
         crate::ColorFrameAlpha::Opaque
     } else {
         crate::ColorFrameAlpha::StraightCoverage
@@ -3590,7 +4202,7 @@ fn layer_establishes_opaque_canvas(
     layer: &GpuCompositeLayer<'_>,
 ) -> bool {
     if layer.opacity.clamp(0.0, 1.0) != 1.0
-        || layer.blend_mode != BlendMode::Normal
+        || layer.blend_policy != mondrian_effects::EffectPassBlendPolicy::Blend(BlendMode::Normal)
         || !is_identity_transform(layer.transform)
         || !effect_plan_preserves_full_coverage(layer.effect_plan)
     {
@@ -3635,7 +4247,7 @@ fn can_use_opaque_normal_accumulator(
         )
         && execution.layers.iter().all(|scheduled| {
             let layer = &request.layers[scheduled.input_index];
-            layer.blend_mode == BlendMode::Normal
+            layer.blend_policy == mondrian_effects::EffectPassBlendPolicy::Blend(BlendMode::Normal)
                 && !matches!(layer.source, GpuCompositeLayerSource::Adjustment)
         })
 }
@@ -3863,6 +4475,1320 @@ mod tests {
         NormalizedCurve, NormalizedCurvePoint, WorkingColorSpace, WorkingRgbaF32Frame,
     };
 
+    #[tokio::test]
+    #[ignore = "requires an actual wgpu adapter; root runs OLD and GREEN explicitly"]
+    async fn canonical_adjustment_default_opacity_preserves_coverage_on_actual_gpu() {
+        use mondrian_core::automation::{PropertyHost, PropertyMutation, PropertyValue};
+        use mondrian_core::{AssetId, FramePosition, Resolution, TimelineTime};
+        use mondrian_effects::{
+            lower_effect_graph_to_gpu_plan, EffectNode, EffectNodeExt, EffectType,
+        };
+        use mondrian_timeline::clip::Transform2D;
+        use mondrian_timeline::{Clip, Sequence};
+
+        let context = crate::GpuContext::new().await.expect("actual GPU adapter required");
+        let adapter_info = context.adapter.get_info();
+        eprintln!("GPU_ADJUSTMENT_NATIVE_PRIMARY: {adapter_info:?}");
+        assert!(
+            matches!(
+                adapter_info.device_type,
+                wgpu::DeviceType::DiscreteGpu | wgpu::DeviceType::IntegratedGpu
+            ),
+            "Adjustment GPU qualification requires actual hardware: {adapter_info:?}",
+        );
+        let mut sequence = Sequence::new("canonical Adjustment default GPU strength");
+        sequence.settings.resolution = Resolution { width: 4, height: 4 };
+        sequence.settings.color.working_color_space = WorkingColorSpace::LinearRec709;
+        let duration =
+            TimelineTime::from_frame_position(FramePosition::new(10, sequence.time_base()))
+                .expect("duration");
+        let solid = Clip::new_solid_color(
+            AssetId::new(),
+            Color { r: 2.0, g: -4.0, b: 8.0, a: 0.5 },
+            TimelineTime::ZERO,
+            duration,
+        )
+        .expect("solid");
+        sequence.video_tracks[0].add_clip(solid).expect("solid track");
+        let mut adjustment =
+            Clip::new_adjustment_layer(AssetId::new(), TimelineTime::ZERO, duration)
+                .expect("Adjustment");
+        adjustment
+            .transform
+            .apply_property_mutation(PropertyMutation::SetStaticValue {
+                path: Transform2D::OPACITY_PATH.to_owned(),
+                value: PropertyValue::Float(0.5),
+            })
+            .expect("Adjustment effect strength");
+        let mut correction = EffectNode::with_defaults(EffectType::BasicCorrection);
+        correction
+            .apply_property_mutation(PropertyMutation::SetStaticValue {
+                path: EffectType::BasicCorrection.property_path("exposure"),
+                value: PropertyValue::Float(1.0),
+            })
+            .expect("one-stop exposure");
+        adjustment.add_effect_node(correction);
+        sequence.video_tracks[1].add_clip(adjustment).expect("Adjustment track");
+        let program =
+            crate::PreparedVisualProgram::prepare(&sequence).expect("sole prepared program");
+        let plan = crate::evaluate_prepared_visual_program(
+            &program,
+            crate::TimelineEvaluationRequest::reference_output(FramePosition::new(
+                0,
+                sequence.time_base(),
+            )),
+        )
+        .expect("sole evaluated plan");
+        assert_eq!(plan.elements.len(), 2);
+        let crate::TimelineRenderPlanElement::SolidColor(solid) = &plan.elements[0] else {
+            panic!("canonical solid placement");
+        };
+        let crate::TimelineRenderPlanElement::Adjustment(adjustment) = &plan.elements[1] else {
+            panic!("canonical Adjustment placement");
+        };
+        let effect_plan =
+            lower_effect_graph_to_gpu_plan(&adjustment.effect_graph).expect("GPU correction");
+        let layers = [
+            GpuCompositeLayer {
+                source: GpuCompositeLayerSource::SolidColor(solid.color),
+                opacity: solid.opacity,
+                blend_policy: mondrian_effects::EffectPassBlendPolicy::Blend(solid.blend_mode),
+                transform: solid.transform,
+                effect_plan: None,
+                frame_seed: solid.frame_seed,
+            },
+            GpuCompositeLayer {
+                source: GpuCompositeLayerSource::Adjustment,
+                opacity: adjustment.opacity,
+                blend_policy: adjustment.blend_policy,
+                transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+                effect_plan: Some(&effect_plan),
+                frame_seed: adjustment.frame_seed,
+            },
+        ];
+        let actual = readback_test_composite(&context, &layers);
+        // Independently: exposure doubles RGB; half effect strength interpolates
+        // original/effected associated light without adding another coverage layer.
+        for pixel in actual {
+            for (component, expected) in pixel.into_iter().zip([3.0, -6.0, 12.0, 0.5]) {
+                assert!((component - expected).abs() <= 2.0e-5, "actual {pixel:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn gpu_mix_requires_the_original_adjustment_accumulator() {
+        let layer = GpuCompositeLayer {
+            source: GpuCompositeLayerSource::SolidColor(Color { r: 1.0, g: 0.0, b: 0.0, a: 1.0 }),
+            opacity: 0.5,
+            blend_policy: mondrian_effects::EffectPassBlendPolicy::Mix,
+            transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+            effect_plan: None,
+            frame_seed: 0,
+        };
+        assert_eq!(
+            validate_request(&GpuCompositeRequest {
+                width: 4,
+                height: 4,
+                working_color_space: WorkingColorSpace::LinearRec709,
+                layers: &[layer],
+            }),
+            Err(GpuCompositeError::MixRequiresAdjustment),
+        );
+    }
+
+    #[test]
+    fn gpu_adjustment_mix_revokes_opaque_coverage_after_crop_in_order() {
+        use mondrian_effects::{
+            compile_reference_render_graph, lower_effect_graph_to_gpu_plan,
+            EffectGraphBuilderState, EffectPassBlendPolicy, EffectRenderOp,
+        };
+        let mut builder = EffectGraphBuilderState::new();
+        builder.append_unary(EffectRenderOp::Crop { left: 0.5, top: 0.0, right: 0.0, bottom: 0.0 });
+        let graph = compile_reference_render_graph(builder.finish()).expect("crop graph");
+        let plan = lower_effect_graph_to_gpu_plan(&graph).expect("crop GPU plan");
+        let base = GpuCompositeLayer {
+            source: GpuCompositeLayerSource::SolidColor(Color { r: 2.0, g: -3.0, b: 4.0, a: 1.0 }),
+            opacity: 1.0,
+            blend_policy: EffectPassBlendPolicy::Blend(BlendMode::Normal),
+            transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+            effect_plan: None,
+            frame_seed: 0,
+        };
+        let mut adjustment = GpuCompositeLayer {
+            source: GpuCompositeLayerSource::Adjustment,
+            opacity: 0.5,
+            blend_policy: EffectPassBlendPolicy::Mix,
+            transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+            effect_plan: Some(&plan),
+            frame_seed: 0,
+        };
+        let output_alpha = |layers: &[GpuCompositeLayer<'_>]| {
+            composite_output_alpha(&GpuCompositeRequest {
+                width: 4,
+                height: 4,
+                working_color_space: WorkingColorSpace::LinearRec709,
+                layers,
+            })
+        };
+        assert_eq!(
+            output_alpha(&[base, adjustment]),
+            crate::ColorFrameAlpha::StraightCoverage
+        );
+        assert_eq!(
+            output_alpha(&[base, adjustment, base]),
+            crate::ColorFrameAlpha::Opaque
+        );
+        adjustment.blend_policy = EffectPassBlendPolicy::Blend(BlendMode::Normal);
+        assert_eq!(
+            output_alpha(&[base, adjustment]),
+            crate::ColorFrameAlpha::Opaque
+        );
+        adjustment.blend_policy = EffectPassBlendPolicy::Mix;
+        adjustment.opacity = 0.0;
+        assert_eq!(
+            output_alpha(&[base, adjustment]),
+            crate::ColorFrameAlpha::Opaque
+        );
+    }
+
+    #[test]
+    fn gpu_adjustment_direct_mix_alpha_metadata_uses_both_actual_inputs() {
+        use crate::ColorFrameAlpha::{Opaque, StraightCoverage};
+        use mondrian_effects::EffectPassBlendPolicy::{Blend, Mix};
+        assert_eq!(
+            adjustment_output_alpha(Opaque, StraightCoverage, 0.5, Mix),
+            StraightCoverage
+        );
+        assert_eq!(
+            adjustment_output_alpha(StraightCoverage, Opaque, 0.5, Mix),
+            StraightCoverage
+        );
+        assert_eq!(adjustment_output_alpha(Opaque, Opaque, 0.5, Mix), Opaque);
+        assert_eq!(
+            adjustment_output_alpha(Opaque, StraightCoverage, 0.0, Mix),
+            Opaque
+        );
+        assert_eq!(
+            adjustment_output_alpha(StraightCoverage, Opaque, 1.0, Mix),
+            Opaque
+        );
+        assert_eq!(
+            adjustment_output_alpha(Opaque, StraightCoverage, 0.5, Blend(BlendMode::Normal)),
+            Opaque
+        );
+        for mode in [
+            BlendMode::Normal,
+            BlendMode::Multiply,
+            BlendMode::Luminosity,
+        ] {
+            assert_ne!(gpu_pass_policy_id(Mix), gpu_pass_policy_id(Blend(mode)));
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires an actual wgpu adapter; root qualification runs this explicitly"]
+    async fn gpu_adjustment_mix_matches_independent_associated_pixel_oracles() {
+        use mondrian_effects::EffectPassBlendPolicy::{Blend, Mix};
+        let context = crate::GpuContext::new().await.expect("actual GPU adapter required");
+        let adapter_info = context.adapter.get_info();
+        eprintln!("GPU_ADJUSTMENT_NATIVE_PRIMARY: {adapter_info:?}");
+        assert!(
+            matches!(
+                adapter_info.device_type,
+                wgpu::DeviceType::DiscreteGpu | wgpu::DeviceType::IntegratedGpu
+            ),
+            "Adjustment GPU qualification requires actual hardware: {adapter_info:?}",
+        );
+        // Independently calculated rational cases. The identical-colour case
+        // distinguishes effect strength from duplicating alpha with Normal Over.
+        let cases = [
+            (
+                [2.0, -4.0, 8.0, 0.5],
+                [2.0, -4.0, 8.0, 0.5],
+                0.5,
+                Mix,
+                [2.0, -4.0, 8.0, 0.5],
+            ),
+            (
+                [2.0, -4.0, 8.0, 0.5],
+                [6.0, 8.0, -2.0, 0.25],
+                0.5,
+                Mix,
+                [10.0 / 3.0, 0.0, 14.0 / 3.0, 0.375],
+            ),
+            (
+                [2.0, -4.0, 8.0, 0.5],
+                [2.0, -4.0, 8.0, 0.5],
+                0.5,
+                Blend(BlendMode::Normal),
+                [2.0, -4.0, 8.0, 0.625],
+            ),
+            (
+                [7.0, -3.0, 11.0, 0.0],
+                [2.0, 4.0, 8.0, 0.5],
+                0.0,
+                Mix,
+                [7.0, -3.0, 11.0, 0.0],
+            ),
+            (
+                [2.0, 4.0, 8.0, 0.5],
+                [7.0, -3.0, 11.0, 0.0],
+                1.0,
+                Mix,
+                [7.0, -3.0, 11.0, 0.0],
+            ),
+            (
+                [7.0, -3.0, 11.0, 0.0],
+                [7.0, -3.0, 11.0, 0.0],
+                0.5,
+                Mix,
+                [7.0, -3.0, 11.0, 0.0],
+            ),
+            (
+                [7.0, -3.0, 11.0, 0.0],
+                [-5.0, 9.0, 2.0, 0.0],
+                0.5,
+                Mix,
+                [0.0; 4],
+            ),
+        ];
+        for (base, processed, opacity, policy, expected) in cases {
+            let compositor = GpuFrameCompositor::new(&context.device).expect("GPU compositor");
+            let mut ids = GpuColorFrameIdAllocator::new(1).expect("frame IDs");
+            let mut table = GpuColorFrameResourceTable::new();
+            let mut encoder =
+                context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("adjustment-associated-mix-independent-oracle"),
+                });
+            let mut materialize = |sample: [f32; 4]| {
+                compositor
+                    .record_solid_source_pass(
+                        &context.device,
+                        &context.queue,
+                        &mut encoder,
+                        &mut ids,
+                        &mut table,
+                        None,
+                        4,
+                        4,
+                        WorkingColorSpace::LinearRec709,
+                        Color {
+                            r: sample[0],
+                            g: sample[1],
+                            b: sample[2],
+                            a: sample[3],
+                        },
+                    )
+                    .expect("source materialization preserves actual straight samples")
+                    .output
+            };
+            let original = materialize(base);
+            let effected = materialize(processed);
+            let result = compositor
+                .record_adjustment_blend_pass(
+                    &context.device,
+                    &context.queue,
+                    &mut encoder,
+                    &mut ids,
+                    &mut table,
+                    None,
+                    &original,
+                    &effected,
+                    opacity,
+                    policy,
+                    0,
+                    WorkingColorSpace::LinearRec709,
+                )
+                .expect("typed adjustment pass");
+            assert_eq!(
+                result.output.descriptor().alpha,
+                crate::ColorFrameAlpha::StraightCoverage
+            );
+            let readback = context.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("adjustment-mix-readback"),
+                size: 256 * 4,
+                usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                mapped_at_creation: false,
+            });
+            let resource = table.get(&result.output).expect("output resource");
+            encoder.copy_texture_to_buffer(
+                wgpu::TexelCopyTextureInfo {
+                    texture: &resource.resource().texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                wgpu::TexelCopyBufferInfo {
+                    buffer: &readback,
+                    layout: wgpu::TexelCopyBufferLayout {
+                        offset: 0,
+                        bytes_per_row: Some(256),
+                        rows_per_image: Some(4),
+                    },
+                },
+                wgpu::Extent3d { width: 4, height: 4, depth_or_array_layers: 1 },
+            );
+            context.queue.submit(std::iter::once(encoder.finish()));
+            let mapped = map_test_readback(&context.device, &readback);
+            for row in mapped.chunks_exact(256).take(4) {
+                for pixel in bytemuck::cast_slice::<u8, f32>(&row[..64]).chunks_exact(4) {
+                    for (actual, wanted) in pixel.iter().zip(expected) {
+                        assert!(actual.is_finite());
+                        assert!(
+                            (*actual - wanted).abs() <= 2.0e-5,
+                            "{policy:?}, t={opacity}: {pixel:?} vs {expected:?}"
+                        );
+                    }
+                }
+            }
+            readback.unmap();
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires an actual wgpu adapter; root qualification runs this explicitly"]
+    async fn gpu_adjustment_crop_mix_lowers_coverage_and_identity_explicit_blend_remains_over() {
+        use mondrian_effects::{
+            compile_reference_render_graph, lower_effect_graph_to_gpu_plan,
+            EffectGraphBuilderState, EffectPassBlendPolicy, EffectRenderOp,
+        };
+        let context = crate::GpuContext::new().await.expect("actual GPU adapter required");
+        let adapter_info = context.adapter.get_info();
+        eprintln!("GPU_ADJUSTMENT_NATIVE_PRIMARY: {adapter_info:?}");
+        assert!(
+            matches!(
+                adapter_info.device_type,
+                wgpu::DeviceType::DiscreteGpu | wgpu::DeviceType::IntegratedGpu
+            ),
+            "Adjustment GPU qualification requires actual hardware: {adapter_info:?}",
+        );
+        let mut builder = EffectGraphBuilderState::new();
+        builder.append_unary(EffectRenderOp::Crop { left: 0.5, top: 0.0, right: 0.0, bottom: 0.0 });
+        let crop_graph = compile_reference_render_graph(builder.finish()).expect("crop graph");
+        let crop_plan = lower_effect_graph_to_gpu_plan(&crop_graph).expect("crop GPU plan");
+        let base = GpuCompositeLayer {
+            source: GpuCompositeLayerSource::SolidColor(Color { r: 2.0, g: -3.0, b: 4.0, a: 1.0 }),
+            opacity: 1.0,
+            blend_policy: EffectPassBlendPolicy::Blend(BlendMode::Normal),
+            transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+            effect_plan: None,
+            frame_seed: 0,
+        };
+        let crop = GpuCompositeLayer {
+            source: GpuCompositeLayerSource::Adjustment,
+            opacity: 0.5,
+            blend_policy: EffectPassBlendPolicy::Mix,
+            transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+            effect_plan: Some(&crop_plan),
+            frame_seed: 0,
+        };
+        let mixed = readback_test_composite(&context, &[base, crop]);
+        for (index, pixel) in mixed.iter().enumerate() {
+            let expected = [2.0, -3.0, 4.0, if index % 4 < 2 { 0.5 } else { 1.0 }];
+            for (actual, wanted) in pixel.iter().zip(expected) {
+                assert!(
+                    (*actual - wanted).abs() <= 2.0e-5,
+                    "crop pixel {index}: {pixel:?}"
+                );
+            }
+        }
+        let identity_graph =
+            compile_reference_render_graph(EffectGraphBuilderState::new().finish())
+                .expect("identity graph");
+        let identity_plan =
+            lower_effect_graph_to_gpu_plan(&identity_graph).expect("identity GPU plan");
+        let half_covered = GpuCompositeLayer {
+            source: GpuCompositeLayerSource::SolidColor(Color { r: 2.0, g: -3.0, b: 4.0, a: 0.5 }),
+            ..base
+        };
+        for (policy, expected_alpha) in [
+            (EffectPassBlendPolicy::Mix, 0.5),
+            (EffectPassBlendPolicy::Blend(BlendMode::Normal), 0.625),
+        ] {
+            let identity_adjustment = GpuCompositeLayer {
+                effect_plan: Some(&identity_plan),
+                blend_policy: policy,
+                ..crop
+            };
+            let actual = readback_test_composite(&context, &[half_covered, identity_adjustment]);
+            for pixel in actual {
+                let expected = [2.0, -3.0, 4.0, expected_alpha];
+                for (lane, wanted) in pixel.iter().zip(expected) {
+                    assert!(
+                        (*lane - wanted).abs() <= 2.0e-5,
+                        "identity {policy:?}: {pixel:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn gpu_adjustment_mix_refuses_unrestricted_alpha_before_shader_execution() {
+        use mondrian_core::ColorFrameAlpha::{PremultipliedFloat, StraightFloat};
+        use mondrian_effects::{
+            compile_reference_render_graph, lower_effect_graph_to_gpu_plan,
+            EffectGraphBuilderState, EffectPassBlendPolicy,
+        };
+        let graph = compile_reference_render_graph(EffectGraphBuilderState::new().finish())
+            .expect("identity graph");
+        let plan = lower_effect_graph_to_gpu_plan(&graph).expect("identity GPU plan");
+        for (alpha, sample) in [
+            (StraightFloat, [2.0, -4.0, 8.0, 1.5]),
+            (StraightFloat, [2.0, -4.0, 8.0, -0.5]),
+            (PremultipliedFloat, [7.0, -3.0, 11.0, 0.0]),
+        ] {
+            let frame = CpuColorFrame::working(WorkingRgbaF32Frame {
+                sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
+                width: 4,
+                height: 4,
+                alpha,
+                color_space: WorkingColorSpace::LinearRec709,
+                data: vec![sample; 16],
+            });
+            let layers = [
+                GpuCompositeLayer {
+                    source: GpuCompositeLayerSource::CpuFrame(&frame),
+                    opacity: 1.0,
+                    blend_policy: EffectPassBlendPolicy::Blend(BlendMode::Normal),
+                    transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+                    effect_plan: None,
+                    frame_seed: 0,
+                },
+                GpuCompositeLayer {
+                    source: GpuCompositeLayerSource::Adjustment,
+                    opacity: 0.5,
+                    blend_policy: EffectPassBlendPolicy::Mix,
+                    transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+                    effect_plan: Some(&plan),
+                    frame_seed: 0,
+                },
+            ];
+            assert_eq!(
+                validate_request(&GpuCompositeRequest {
+                    width: 4,
+                    height: 4,
+                    working_color_space: WorkingColorSpace::LinearRec709,
+                    layers: &layers,
+                }),
+                Err(GpuCompositeError::InputNotStraightCompatibleAlpha { actual: alpha }),
+            );
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires an actual hardware GPU; independent finite Coverage cancellation oracle"]
+    async fn gpu_mix_finite_coverage_cancellation_matches_exact_dyadic_oracle() {
+        let context = crate::GpuContext::new().await.expect("actual GPU adapter required");
+        let adapter_info = context.adapter.get_info();
+        eprintln!("GPU_ADJUSTMENT_NATIVE_PRIMARY: {adapter_info:?}");
+        assert!(
+            matches!(
+                adapter_info.device_type,
+                wgpu::DeviceType::DiscreteGpu | wgpu::DeviceType::IntegratedGpu
+            ),
+            "actual hardware GPU required: {adapter_info:?}"
+        );
+        assert_eq!(
+            product_gpu_working_texture_format(),
+            GpuColorFrameTextureFormat::Rgba32Float,
+            "this oracle requires the actual Float32 working route"
+        );
+        let rgb = f32::from_bits(0x6480_0000); // 2^74
+        let amount = f32::from_bits(0x1a00_0000); // 2^-75
+        let compositor = GpuFrameCompositor::new(&context.device).expect("GPU compositor");
+        let mut ids = GpuColorFrameIdAllocator::new(1).expect("frame IDs");
+        let mut table = GpuColorFrameResourceTable::new();
+        let mut encoder = context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("exact-associated-mix-two-input-textures"),
+        });
+        let left = compositor
+            .record_solid_source_pass(
+                &context.device,
+                &context.queue,
+                &mut encoder,
+                &mut ids,
+                &mut table,
+                None,
+                4,
+                4,
+                WorkingColorSpace::LinearRec709,
+                Color { r: rgb, g: rgb, b: rgb, a: amount },
+            )
+            .expect("actual original texture")
+            .output;
+        let right = compositor
+            .record_solid_source_pass(
+                &context.device,
+                &context.queue,
+                &mut encoder,
+                &mut ids,
+                &mut table,
+                None,
+                4,
+                4,
+                WorkingColorSpace::LinearRec709,
+                Color { r: -rgb, g: -rgb, b: -rgb, a: 1.0 },
+            )
+            .expect("actual processed texture")
+            .output;
+        let output = compositor
+            .record_adjustment_blend_pass(
+                &context.device,
+                &context.queue,
+                &mut encoder,
+                &mut ids,
+                &mut table,
+                None,
+                &left,
+                &right,
+                amount,
+                mondrian_core::EffectPassBlendPolicy::Mix,
+                0,
+                WorkingColorSpace::LinearRec709,
+            )
+            .expect("actual admitted finite coverage Mix")
+            .output;
+        assert_eq!(
+            output.descriptor().alpha,
+            crate::ColorFrameAlpha::StraightCoverage
+        );
+        let readback = context.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("exact-associated-mix-readback"),
+            size: 256 * 4,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let resource = table.get(&output).expect("actual output resource");
+        encoder.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo {
+                texture: &resource.resource().texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &readback,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(256),
+                    rows_per_image: Some(4),
+                },
+            },
+            wgpu::Extent3d { width: 4, height: 4, depth_or_array_layers: 1 },
+        );
+        context.queue.submit(std::iter::once(encoder.finish()));
+        let mapped = map_test_readback(&context.device, &readback);
+        // Exact Fraction arithmetic on the input Float32 values:
+        // associated = -2^-76; A = 2^-74 - 2^-150.
+        // One correct Float32 delivery is [-.25, -.25, -.25, 2^-74].
+        // No CPU mixer, converter, compositing or shader supplies this oracle.
+        let expected = [0xbe80_0000, 0xbe80_0000, 0xbe80_0000, 0x1a80_0000];
+        for (row_index, row) in mapped.chunks_exact(256).take(4).enumerate() {
+            for (column, pixel) in
+                bytemuck::cast_slice::<u8, f32>(&row[..64]).chunks_exact(4).enumerate()
+            {
+                for (lane, bits) in pixel.iter().zip(expected) {
+                    assert_eq!(
+                        lane.to_bits(),
+                        bits,
+                        "pixel ({column},{row_index}) exact cancellation: {pixel:?}"
+                    );
+                }
+            }
+        }
+        readback.unmap();
+    }
+
+    #[tokio::test]
+    #[ignore = "requires an actual hardware GPU; numerical identity preserves the exact left signed-zero texel"]
+    async fn gpu_mix_numerically_identical_hidden_rgb_keeps_signed_zero() {
+        let context = crate::GpuContext::new().await.expect("actual GPU adapter required");
+        let adapter_info = context.adapter.get_info();
+        eprintln!("GPU_ADJUSTMENT_NATIVE_PRIMARY: {adapter_info:?}");
+        assert!(
+            matches!(
+                adapter_info.device_type,
+                wgpu::DeviceType::DiscreteGpu | wgpu::DeviceType::IntegratedGpu
+            ),
+            "actual hardware GPU required: {adapter_info:?}"
+        );
+        assert_eq!(
+            product_gpu_working_texture_format(),
+            GpuColorFrameTextureFormat::Rgba32Float,
+            "this oracle requires the actual Float32 working route"
+        );
+        let amount = 0.5;
+        let compositor = GpuFrameCompositor::new(&context.device).expect("GPU compositor");
+        let mut ids = GpuColorFrameIdAllocator::new(1).expect("frame IDs");
+        let mut table = GpuColorFrameResourceTable::new();
+        let mut encoder = context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("exact-associated-mix-two-input-textures"),
+        });
+        let left = compositor
+            .record_solid_source_pass(
+                &context.device,
+                &context.queue,
+                &mut encoder,
+                &mut ids,
+                &mut table,
+                None,
+                4,
+                4,
+                WorkingColorSpace::LinearRec709,
+                Color {
+                    r: -1.0,
+                    g: 2.0,
+                    b: f32::from_bits(0x8000_0000),
+                    a: 0.0,
+                },
+            )
+            .expect("actual original texture")
+            .output;
+        let right = compositor
+            .record_solid_source_pass(
+                &context.device,
+                &context.queue,
+                &mut encoder,
+                &mut ids,
+                &mut table,
+                None,
+                4,
+                4,
+                WorkingColorSpace::LinearRec709,
+                Color { r: -1.0, g: 2.0, b: 0.0, a: 0.0 },
+            )
+            .expect("actual processed texture")
+            .output;
+        let output = compositor
+            .record_adjustment_blend_pass(
+                &context.device,
+                &context.queue,
+                &mut encoder,
+                &mut ids,
+                &mut table,
+                None,
+                &left,
+                &right,
+                amount,
+                mondrian_core::EffectPassBlendPolicy::Mix,
+                0,
+                WorkingColorSpace::LinearRec709,
+            )
+            .expect("actual admitted finite coverage Mix")
+            .output;
+        assert_eq!(
+            output.descriptor().alpha,
+            crate::ColorFrameAlpha::StraightCoverage
+        );
+        let readback = context.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("exact-associated-mix-readback"),
+            size: 256 * 4,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let resource = table.get(&output).expect("actual output resource");
+        encoder.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo {
+                texture: &resource.resource().texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &readback,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(256),
+                    rows_per_image: Some(4),
+                },
+            },
+            wgpu::Extent3d { width: 4, height: 4, depth_or_array_layers: 1 },
+        );
+        context.queue.submit(std::iter::once(encoder.finish()));
+        let mapped = map_test_readback(&context.device, &readback);
+        // +0 and -0 are numerically equal. Identical samples preserve
+        // the exact original input, including nonzero hidden RGB and -0.
+        // This expected left texel is independent from all mixing code.
+        let expected = [0xbf80_0000, 0x4000_0000, 0x8000_0000, 0x0000_0000];
+        for (row_index, row) in mapped.chunks_exact(256).take(4).enumerate() {
+            for (column, pixel) in
+                bytemuck::cast_slice::<u8, f32>(&row[..64]).chunks_exact(4).enumerate()
+            {
+                for (lane, bits) in pixel.iter().zip(expected) {
+                    assert_eq!(
+                        lane.to_bits(),
+                        bits,
+                        "pixel ({column},{row_index}) numerical identity: {pixel:?}"
+                    );
+                }
+            }
+        }
+        readback.unmap();
+    }
+
+    #[test]
+    fn ordinary_compositor_module_excludes_exact_adjustment_mix_arithmetic() {
+        let ordinary = naga::front::wgsl::parse_str(GPU_COMPOSITOR_SHADER)
+            .expect("ordinary composite shader parses");
+        naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::all(),
+        )
+        .validate(&ordinary)
+        .expect("ordinary composite shader validates");
+        assert!(!ordinary
+            .types
+            .iter()
+            .any(|(_, ty)| ty.name.as_deref().is_some_and(|name| name.starts_with("Mix"))));
+        assert!(!ordinary.functions.iter().any(|(_, function)| function
+            .name
+            .as_deref()
+            .is_some_and(|name| name.starts_with("mix_"))));
+        let mix = naga::front::wgsl::parse_str(GPU_ADJUSTMENT_MIX_SHADER)
+            .expect("dedicated Mix shader parses");
+        assert!(mix.types.iter().any(|(_, ty)| ty.name.as_deref() == Some("MixUnsigned")));
+        assert_eq!(
+            mix.entry_points
+                .iter()
+                .filter(|entry| entry.stage == naga::ShaderStage::Fragment)
+                .map(|entry| entry.name.as_str())
+                .collect::<Vec<_>>(),
+            ["fs_mix"]
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "actual hardware GPU; canonical inline Mix owner/lazy-pipeline qualification"]
+    async fn gpu_inline_mix_materializes_one_owned_processed_texture() {
+        use mondrian_effects::{
+            compile_reference_render_graph, lower_effect_graph_to_gpu_plan,
+            EffectGraphBuilderState, EffectPassBlendPolicy, EffectRenderOp,
+        };
+        let context = crate::GpuContext::new().await.expect("actual GPU adapter required");
+        let info = context.adapter.get_info();
+        eprintln!("GPU_ADJUSTMENT_NATIVE_PRIMARY: {info:?}");
+        assert!(matches!(
+            info.device_type,
+            wgpu::DeviceType::DiscreteGpu | wgpu::DeviceType::IntegratedGpu
+        ));
+        assert_eq!(
+            product_gpu_working_texture_format(),
+            GpuColorFrameTextureFormat::Rgba32Float
+        );
+        let compositor = GpuFrameCompositor::new(&context.device).expect("GPU compositor");
+        assert!(compositor.adjustment_mix_pipeline.get().is_none());
+        // The public record() path must independently skip identity Mix before
+        // allocation; the visual preparation shortcut alone cannot prove it.
+        let identity_graph =
+            compile_reference_render_graph(EffectGraphBuilderState::new().finish())
+                .expect("canonical identity graph");
+        let identity_plan = lower_effect_graph_to_gpu_plan(&identity_graph).expect("identity plan");
+        let identity_layers = [
+            GpuCompositeLayer {
+                source: GpuCompositeLayerSource::SolidColor(Color {
+                    r: 2.0,
+                    g: -3.0,
+                    b: 4.0,
+                    a: 1.0,
+                }),
+                opacity: 1.0,
+                blend_policy: EffectPassBlendPolicy::Blend(BlendMode::Normal),
+                transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+                effect_plan: None,
+                frame_seed: 0,
+            },
+            GpuCompositeLayer {
+                source: GpuCompositeLayerSource::Adjustment,
+                opacity: 0.5,
+                blend_policy: EffectPassBlendPolicy::Mix,
+                transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+                effect_plan: Some(&identity_plan),
+                frame_seed: 0,
+            },
+        ];
+        {
+            let mut ids = GpuColorFrameIdAllocator::new(1).expect("identity frame IDs");
+            let mut table = GpuColorFrameResourceTable::new();
+            let mut encoder =
+                context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("inline-identity-mix-does-not-allocate-processed"),
+                });
+            compositor
+                .record(
+                    &context.device,
+                    &context.queue,
+                    &mut encoder,
+                    &mut ids,
+                    &mut table,
+                    None,
+                    GpuCompositeRequest {
+                        width: 4,
+                        height: 4,
+                        working_color_space: WorkingColorSpace::LinearRec709,
+                        layers: &identity_layers,
+                    },
+                )
+                .expect("public identity record");
+            assert_eq!(table.len(), 1, "ordinary opaque accumulator only");
+            assert_eq!(table.logical_texture_bytes(), Some(4 * 4 * 16));
+            assert!(compositor.adjustment_mix_pipeline.get().is_none());
+            let submission = context.queue.submit(std::iter::once(encoder.finish()));
+            context
+                .device
+                .poll(wgpu::PollType::Wait {
+                    submission_index: Some(submission),
+                    timeout: Some(std::time::Duration::from_secs(10)),
+                })
+                .expect("bounded identity completion before owners drop");
+        }
+        let mut builder = EffectGraphBuilderState::new();
+        builder.append_unary(EffectRenderOp::Crop { left: 0.5, top: 0.0, right: 0.0, bottom: 0.0 });
+        let graph = compile_reference_render_graph(builder.finish()).expect("sole Crop graph");
+        let plan = lower_effect_graph_to_gpu_plan(&graph).expect("sole compiled GPU point plan");
+        let layers = [
+            GpuCompositeLayer {
+                source: GpuCompositeLayerSource::SolidColor(Color {
+                    r: 2.0,
+                    g: -3.0,
+                    b: 4.0,
+                    a: 1.0,
+                }),
+                opacity: 1.0,
+                blend_policy: EffectPassBlendPolicy::Blend(BlendMode::Normal),
+                transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+                effect_plan: None,
+                frame_seed: 0,
+            },
+            GpuCompositeLayer {
+                source: GpuCompositeLayerSource::Adjustment,
+                opacity: 0.5,
+                blend_policy: EffectPassBlendPolicy::Mix,
+                transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+                effect_plan: Some(&plan),
+                frame_seed: 0,
+            },
+        ];
+        let mut ids = GpuColorFrameIdAllocator::new(1).expect("frame IDs");
+        let mut table = GpuColorFrameResourceTable::new();
+        let mut encoder = context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("canonical-inline-mix-real-resource-owner"),
+        });
+        let record = compositor
+            .record(
+                &context.device,
+                &context.queue,
+                &mut encoder,
+                &mut ids,
+                &mut table,
+                None,
+                GpuCompositeRequest {
+                    width: 4,
+                    height: 4,
+                    working_color_space: WorkingColorSpace::LinearRec709,
+                    layers: &layers,
+                },
+            )
+            .expect("actual canonical inline Adjustment");
+        assert_eq!(
+            record.output.descriptor().alpha,
+            crate::ColorFrameAlpha::StraightCoverage
+        );
+        assert_eq!(
+            table.len(),
+            3,
+            "two accumulators plus one real processed owner"
+        );
+        assert_eq!(table.logical_texture_bytes(), Some(3 * 4 * 4 * 16));
+        assert!(compositor.adjustment_mix_pipeline.get().is_some());
+        let submission = context.queue.submit(std::iter::once(encoder.finish()));
+        context
+            .device
+            .poll(wgpu::PollType::Wait {
+                submission_index: Some(submission),
+                timeout: Some(std::time::Duration::from_secs(10)),
+            })
+            .expect("bounded command completion before resource owners are dropped");
+        // Pixel semantics are independently exercised by the unchanged canonical
+        // [3,-6,12,.5] and Crop/explicit-Blend hardware oracles, not this ledger test.
+    }
+
+    #[test]
+    fn inline_identity_mix_never_enters_processed_allocation_or_exact_pipeline() {
+        use mondrian_effects::{
+            compile_reference_render_graph, lower_effect_graph_to_gpu_plan,
+            EffectGraphBuilderState, EffectPassBlendPolicy,
+        };
+        let graph = compile_reference_render_graph(EffectGraphBuilderState::new().finish())
+            .expect("actual identity graph");
+        let plan = lower_effect_graph_to_gpu_plan(&graph).expect("actual identity point plan");
+        assert!(plan.is_identity());
+        let mut layer = GpuCompositeLayer {
+            source: GpuCompositeLayerSource::Adjustment,
+            opacity: 0.5,
+            blend_policy: EffectPassBlendPolicy::Mix,
+            transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+            effect_plan: Some(&plan),
+            frame_seed: 0,
+        };
+        assert!(layer_has_zero_contribution(&layer));
+        assert!(matches!(
+            composite_layer_footprint(4, 4, &layer),
+            GpuCompositeLayerFootprint::NoContribution
+        ));
+        layer.blend_policy = EffectPassBlendPolicy::Blend(BlendMode::Normal);
+        assert!(
+            !layer_has_zero_contribution(&layer),
+            "explicit Normal is still Over"
+        );
+        layer.opacity = 0.0;
+        assert!(
+            layer_has_zero_contribution(&layer),
+            "zero opacity is inactive for either policy"
+        );
+    }
+
+    #[test]
+    fn gpu_opacity_rejects_nonfinite_and_out_of_range_before_inactive_or_identity_elision() {
+        use mondrian_effects::{
+            compile_reference_render_graph, lower_effect_graph_to_gpu_plan,
+            EffectGraphBuilderState, EffectPassBlendPolicy,
+        };
+        let graph = compile_reference_render_graph(EffectGraphBuilderState::new().finish())
+            .expect("canonical identity graph");
+        let plan = lower_effect_graph_to_gpu_plan(&graph).expect("actual identity plan");
+        for opacity in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY, -0.1, 1.1] {
+            let ordinary = GpuCompositeLayer {
+                source: GpuCompositeLayerSource::SolidColor(Color {
+                    r: 1.0,
+                    g: -2.0,
+                    b: 3.0,
+                    a: 1.0,
+                }),
+                opacity,
+                blend_policy: EffectPassBlendPolicy::Blend(BlendMode::Normal),
+                transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+                effect_plan: None,
+                frame_seed: 0,
+            };
+            let identity = GpuCompositeLayer {
+                source: GpuCompositeLayerSource::Adjustment,
+                opacity,
+                blend_policy: EffectPassBlendPolicy::Mix,
+                transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+                effect_plan: Some(&plan),
+                frame_seed: 0,
+            };
+            for layer in [ordinary, identity] {
+                let result = validate_request(&GpuCompositeRequest {
+                    width: 4,
+                    height: 4,
+                    working_color_space: WorkingColorSpace::LinearRec709,
+                    layers: &[layer],
+                });
+                assert!(
+                    result.is_err(),
+                    "invalid opacity {:08x} was admitted",
+                    opacity.to_bits()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn gpu_opacity_refusal_retains_exact_bits_and_normalized_endpoints() {
+        use mondrian_effects::{
+            compile_reference_render_graph, lower_effect_graph_to_gpu_plan,
+            EffectGraphBuilderState, EffectPassBlendPolicy,
+        };
+        let graph = compile_reference_render_graph(EffectGraphBuilderState::new().finish())
+            .expect("canonical identity graph");
+        let plan = lower_effect_graph_to_gpu_plan(&graph).expect("actual identity plan");
+        for bits in [
+            0x7fc1_2345_u32,
+            0xffc1_2345,
+            0x7f80_0000,
+            0xff80_0000,
+            (-0.1_f32).to_bits(),
+            1.1_f32.to_bits(),
+        ] {
+            let layer = GpuCompositeLayer {
+                source: GpuCompositeLayerSource::Adjustment,
+                opacity: f32::from_bits(bits),
+                blend_policy: EffectPassBlendPolicy::Mix,
+                transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+                effect_plan: Some(&plan),
+                frame_seed: 0,
+            };
+            assert_eq!(
+                validate_request(&GpuCompositeRequest {
+                    width: 4,
+                    height: 4,
+                    working_color_space: WorkingColorSpace::LinearRec709,
+                    layers: &[layer],
+                }),
+                Err(GpuCompositeError::InvalidOpacity { bits })
+            );
+        }
+        for opacity in [-0.0_f32, 0.0, f32::from_bits(1), 0.5, 1.0] {
+            let layer = GpuCompositeLayer {
+                source: GpuCompositeLayerSource::Adjustment,
+                opacity,
+                blend_policy: EffectPassBlendPolicy::Mix,
+                transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+                effect_plan: Some(&plan),
+                frame_seed: 0,
+            };
+            assert_eq!(
+                validate_request(&GpuCompositeRequest {
+                    width: 4,
+                    height: 4,
+                    working_color_space: WorkingColorSpace::LinearRec709,
+                    layers: &[layer],
+                }),
+                Ok(())
+            );
+        }
+    }
+
+    #[test]
+    fn exact_adjustment_mix_shader_has_a_valid_typed_module() {
+        let module =
+            naga::front::wgsl::parse_str(GPU_ADJUSTMENT_MIX_SHADER).expect("GPU Mix shader parses");
+        naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::all(),
+        )
+        .validate(&module)
+        .expect("complete Mix shader type validation");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires an actual hardware GPU; exact Fraction-generated finite Coverage corpus"]
+    async fn gpu_mix_exact_coverage_dyadic_boundary_corpus() {
+        let context = crate::GpuContext::new().await.expect("actual GPU adapter required");
+        let adapter_info = context.adapter.get_info();
+        eprintln!("GPU_ADJUSTMENT_NATIVE_PRIMARY: {adapter_info:?}");
+        assert!(
+            matches!(
+                adapter_info.device_type,
+                wgpu::DeviceType::DiscreteGpu | wgpu::DeviceType::IntegratedGpu
+            ),
+            "actual hardware GPU required: {adapter_info:?}"
+        );
+        assert_eq!(
+            product_gpu_working_texture_format(),
+            GpuColorFrameTextureFormat::Rgba32Float
+        );
+        let compositor = GpuFrameCompositor::new(&context.device).expect("GPU compositor");
+        assert!(
+            compositor.adjustment_mix_pipeline.get().is_none(),
+            "Mix is not eager"
+        );
+        let mut owned_mix_pipeline = None;
+        let mut ids = GpuColorFrameIdAllocator::new(1).expect("frame IDs");
+        // Exact expected Float32 bits were generated by the independent
+        // Fraction/lattice-midpoint oracle, never the production shader or
+        // CPU mixer. This includes max finite HDR, minimum positive alpha,
+        // rounded-zero alpha with representable straight RGB, subnormal
+        // delivery, ties-even, chosen endpoints and hidden RGB identity.
+        // Background, processed, opacity and expected output bits.
+        type MixCase = ([u32; 4], [u32; 4], u32, [u32; 4]);
+        let cases: [MixCase; 15] = [
+            (
+                [0x64800000, 0x64800000, 0x64800000, 0x1a000000],
+                [0xe4800000, 0xe4800000, 0xe4800000, 0x3f800000],
+                0x1a000000,
+                [0xbe800000, 0xbe800000, 0xbe800000, 0x1a800000],
+            ),
+            (
+                [0x3f800000, 0x3f800000, 0x3f800000, 0x00000000],
+                [0x40000000, 0x40000000, 0x40000000, 0x00000001],
+                0x00000001,
+                [0x40000000, 0x40000000, 0x40000000, 0x00000000],
+            ),
+            (
+                [0x7f7fffff, 0x7f7fffff, 0x7f7fffff, 0x3f800000],
+                [0xff7fffff, 0xff7fffff, 0xff7fffff, 0x3f800000],
+                0x3f000000,
+                [0x00000000, 0x00000000, 0x00000000, 0x3f800000],
+            ),
+            (
+                [0x7f7fffff, 0x7f7fffff, 0x7f7fffff, 0x00000001],
+                [0xff7fffff, 0xff7fffff, 0xff7fffff, 0x3f800000],
+                0x00000001,
+                [0xb47fffff, 0xb47fffff, 0xb47fffff, 0x00000002],
+            ),
+            (
+                [0x7f7fffff, 0x7f7fffff, 0x7f7fffff, 0x00000001],
+                [0x7f7fffff, 0x7f7fffff, 0x7f7fffff, 0x3f800000],
+                0x00000001,
+                [0x7f7fffff, 0x7f7fffff, 0x7f7fffff, 0x00000002],
+            ),
+            (
+                [0x00000001, 0x00000001, 0x00000001, 0x3f800000],
+                [0x00000002, 0x00000002, 0x00000002, 0x3f800000],
+                0x3f000000,
+                [0x00000002, 0x00000002, 0x00000002, 0x3f800000],
+            ),
+            (
+                [0x00000002, 0x00000002, 0x00000002, 0x3f800000],
+                [0x00000003, 0x00000003, 0x00000003, 0x3f800000],
+                0x3f000000,
+                [0x00000002, 0x00000002, 0x00000002, 0x3f800000],
+            ),
+            (
+                [0x80000001, 0x80000001, 0x80000001, 0x3f800000],
+                [0x80000002, 0x80000002, 0x80000002, 0x3f800000],
+                0x3f000000,
+                [0x80000002, 0x80000002, 0x80000002, 0x3f800000],
+            ),
+            (
+                [0x3f800000, 0x3f800000, 0x3f800000, 0x3f800000],
+                [0x3f800001, 0x3f800001, 0x3f800001, 0x3f800000],
+                0x3f000000,
+                [0x3f800000, 0x3f800000, 0x3f800000, 0x3f800000],
+            ),
+            (
+                [0x3f800001, 0x3f800001, 0x3f800001, 0x3f800000],
+                [0x3f800002, 0x3f800002, 0x3f800002, 0x3f800000],
+                0x3f000000,
+                [0x3f800002, 0x3f800002, 0x3f800002, 0x3f800000],
+            ),
+            (
+                [0x7f7fffff, 0x7f7fffff, 0x7f7fffff, 0x3f800000],
+                [0xff7fffff, 0xff7fffff, 0xff7fffff, 0x3f800000],
+                0x3f7fffff,
+                [0xff7ffffd, 0xff7ffffd, 0xff7ffffd, 0x3f800000],
+            ),
+            (
+                [0x40e00000, 0xc0400000, 0x41300000, 0x00000000],
+                [0x3f800000, 0x3f800000, 0x3f800000, 0x00000001],
+                0x00000000,
+                [0x40e00000, 0xc0400000, 0x41300000, 0x00000000],
+            ),
+            (
+                [0x3f800000, 0x3f800000, 0x3f800000, 0x00000001],
+                [0x40e00000, 0xc0400000, 0x41300000, 0x00000000],
+                0x3f800000,
+                [0x40e00000, 0xc0400000, 0x41300000, 0x00000000],
+            ),
+            (
+                [0x40e00000, 0xc0400000, 0x41300000, 0x00000000],
+                [0x40e00000, 0xc0400000, 0x41300000, 0x00000000],
+                0x3f000000,
+                [0x40e00000, 0xc0400000, 0x41300000, 0x00000000],
+            ),
+            (
+                [0x40e00000, 0xc0400000, 0x41300000, 0x00000000],
+                [0x40000000, 0x40000000, 0x40000000, 0x00000000],
+                0x3f000000,
+                [0x00000000, 0x00000000, 0x00000000, 0x00000000],
+            ),
+        ];
+        for (case_index, (left, right, amount, expected)) in cases.into_iter().enumerate() {
+            let mut table = GpuColorFrameResourceTable::new();
+            let mut encoder =
+                context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("exact-mix-independent-corpus"),
+                });
+            let mut sources = Vec::new();
+            for input in [left, right] {
+                let input = input.map(f32::from_bits);
+                let record = compositor
+                    .record_solid_source_pass(
+                        &context.device,
+                        &context.queue,
+                        &mut encoder,
+                        &mut ids,
+                        &mut table,
+                        None,
+                        4,
+                        4,
+                        WorkingColorSpace::LinearRec709,
+                        Color { r: input[0], g: input[1], b: input[2], a: input[3] },
+                    )
+                    .expect("actual corpus input texture");
+                sources.push(record.output);
+            }
+            if owned_mix_pipeline.is_none() {
+                assert!(
+                    compositor.adjustment_mix_pipeline.get().is_none(),
+                    "ordinary source materialization must not compile Mix"
+                );
+            }
+            let output = compositor
+                .record_adjustment_blend_pass(
+                    &context.device,
+                    &context.queue,
+                    &mut encoder,
+                    &mut ids,
+                    &mut table,
+                    None,
+                    &sources[0],
+                    &sources[1],
+                    f32::from_bits(amount),
+                    mondrian_core::EffectPassBlendPolicy::Mix,
+                    0,
+                    WorkingColorSpace::LinearRec709,
+                )
+                .expect("admitted exact finite Coverage Mix")
+                .output;
+            let actual_pipeline = compositor
+                .adjustment_mix_pipeline
+                .get()
+                .expect("actual typed Mix initialized its own pipeline")
+                as *const _;
+            if let Some(original_pipeline) = owned_mix_pipeline {
+                assert_eq!(
+                    actual_pipeline, original_pipeline,
+                    "same compositor reuses Mix pipeline"
+                );
+            } else {
+                owned_mix_pipeline = Some(actual_pipeline);
+            }
+
+            let readback = context.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("exact-mix-corpus-readback"),
+                size: 256 * 4,
+                usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                mapped_at_creation: false,
+            });
+            let resource = table.get(&output).expect("actual output resource");
+            encoder.copy_texture_to_buffer(
+                wgpu::TexelCopyTextureInfo {
+                    texture: &resource.resource().texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                wgpu::TexelCopyBufferInfo {
+                    buffer: &readback,
+                    layout: wgpu::TexelCopyBufferLayout {
+                        offset: 0,
+                        bytes_per_row: Some(256),
+                        rows_per_image: Some(4),
+                    },
+                },
+                wgpu::Extent3d { width: 4, height: 4, depth_or_array_layers: 1 },
+            );
+            context.queue.submit(std::iter::once(encoder.finish()));
+            let mapped = map_test_readback(&context.device, &readback);
+            for (row_index, row) in mapped.chunks_exact(256).take(4).enumerate() {
+                for (column, pixel) in
+                    bytemuck::cast_slice::<u8, f32>(&row[..64]).chunks_exact(4).enumerate()
+                {
+                    for (lane, bits) in pixel.iter().zip(expected) {
+                        assert_eq!(lane.to_bits(), bits,
+                            "case {case_index}, pixel ({column},{row_index}), left={left:x?}, right={right:x?}, amount={amount:x}: {pixel:?}");
+                    }
+                }
+            }
+            readback.unmap();
+        }
+    }
+
     #[test]
     fn gpu_compositor_and_matte_mix_shaders_parse_as_wgsl() {
         naga::front::wgsl::parse_str(GPU_COMPOSITOR_SHADER)
@@ -3945,7 +5871,7 @@ mod tests {
         let layers = [GpuCompositeLayer {
             source: GpuCompositeLayerSource::SolidColor(Color { r: 4.0, g: -2.0, b: 1.0, a: 0.0 }),
             opacity: 1.0,
-            blend_mode: BlendMode::Normal,
+            blend_policy: mondrian_effects::EffectPassBlendPolicy::Blend(BlendMode::Normal),
             transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
             effect_plan: None,
             frame_seed: 0,
@@ -3988,7 +5914,7 @@ mod tests {
         let mut layer = GpuCompositeLayer {
             source: GpuCompositeLayerSource::GpuFrame(&handle),
             opacity: 1.0,
-            blend_mode: BlendMode::Normal,
+            blend_policy: mondrian_effects::EffectPassBlendPolicy::Blend(BlendMode::Normal),
             transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
             effect_plan: None,
             frame_seed: 0,
@@ -4146,7 +6072,7 @@ mod tests {
         let layer = GpuCompositeLayer {
             source: GpuCompositeLayerSource::Adjustment,
             opacity: 1.0,
-            blend_mode: BlendMode::Normal,
+            blend_policy: mondrian_effects::EffectPassBlendPolicy::Blend(BlendMode::Normal),
             transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
             effect_plan: None,
             frame_seed: 0,
@@ -4189,7 +6115,7 @@ mod tests {
         let layer = GpuCompositeLayer {
             source: GpuCompositeLayerSource::Adjustment,
             opacity: 1.0,
-            blend_mode: BlendMode::Normal,
+            blend_policy: mondrian_effects::EffectPassBlendPolicy::Blend(BlendMode::Normal),
             transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
             effect_plan: Some(&plan),
             frame_seed: 0,
@@ -4309,6 +6235,8 @@ mod tests {
             })
             .collect::<Vec<_>>();
         let frame = CpuColorFrame::working(WorkingRgbaF32Frame {
+            sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
+            alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
             width: 4,
             height: 4,
             color_space: WorkingColorSpace::LinearRec709,
@@ -4479,14 +6407,26 @@ mod tests {
         });
         let graph = compile_reference_render_graph(builder.finish()).expect("valid graph");
         let plan = lower_effect_graph_to_gpu_plan(&graph).expect("supported point effects");
-        let expected =
-            apply_compiled_effect_graph_rgba_f32(&frame.rgba_f32().data, 4, 4, &graph, 23)
-                .expect("CPU float reference");
+        let expected = apply_compiled_effect_graph_rgba_f32(
+            mondrian_effects::EffectFloatFrameView::new(
+                mondrian_effects::EffectFrameExtent::new(4, 4),
+                mondrian_effects::EffectValueFormat::new(
+                    mondrian_effects::EffectWorkingPrecision::Float32,
+                    mondrian_effects::EffectColorDomain::SceneLinearRgb,
+                    mondrian_core::ColorFrameAlpha::StraightCoverage,
+                ),
+                mondrian_core::ImageSampling::UNIT_SQUARE,
+                &frame.rgba_f32().data,
+            ),
+            &graph,
+            23,
+        )
+        .expect("CPU float reference");
 
         let media_layer = GpuCompositeLayer {
             source: GpuCompositeLayerSource::CpuFrame(&frame),
             opacity: 1.0,
-            blend_mode: BlendMode::Normal,
+            blend_policy: mondrian_effects::EffectPassBlendPolicy::Blend(BlendMode::Normal),
             transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
             effect_plan: Some(&plan),
             frame_seed: 23,
@@ -4507,19 +6447,26 @@ mod tests {
 
         let adjustment_opacity = 0.55;
         let expected_adjustment = apply_compiled_effect_graph_pass_rgba_f32(
-            &frame.rgba_f32().data,
-            4,
-            4,
+            mondrian_effects::EffectFloatFrameView::new(
+                mondrian_effects::EffectFrameExtent::new(4, 4),
+                mondrian_effects::EffectValueFormat::new(
+                    mondrian_effects::EffectWorkingPrecision::Float32,
+                    mondrian_effects::EffectColorDomain::SceneLinearRgb,
+                    mondrian_core::ColorFrameAlpha::StraightCoverage,
+                ),
+                mondrian_core::ImageSampling::UNIT_SQUARE,
+                &frame.rgba_f32().data,
+            ),
             &graph,
             adjustment_opacity,
-            None,
+            mondrian_effects::EffectPassBlendPolicy::Mix,
             23,
         )
         .expect("CPU float adjustment reference");
         let base_layer = GpuCompositeLayer {
             source: GpuCompositeLayerSource::CpuFrame(&frame),
             opacity: 1.0,
-            blend_mode: BlendMode::Normal,
+            blend_policy: mondrian_effects::EffectPassBlendPolicy::Blend(BlendMode::Normal),
             transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
             effect_plan: None,
             frame_seed: 0,
@@ -4527,7 +6474,7 @@ mod tests {
         let adjustment_layer = GpuCompositeLayer {
             source: GpuCompositeLayerSource::Adjustment,
             opacity: adjustment_opacity,
-            blend_mode: BlendMode::Normal,
+            blend_policy: mondrian_effects::EffectPassBlendPolicy::Mix,
             transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
             effect_plan: Some(&plan),
             frame_seed: 23,
@@ -4536,6 +6483,8 @@ mod tests {
         assert_test_pixels_accurate(&expected_adjustment, &actual_adjustment);
 
         let aces_frame = CpuColorFrame::working(WorkingRgbaF32Frame {
+            sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
+            alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
             width: 2,
             height: 2,
             color_space: WorkingColorSpace::AcesCg,
@@ -4558,13 +6507,25 @@ mod tests {
         let aces_graph =
             compile_reference_render_graph(aces_builder.finish()).expect("ACES grade graph");
         let aces_plan = lower_effect_graph_to_gpu_plan(&aces_graph).expect("ACES GPU point plan");
-        let aces_expected =
-            apply_compiled_effect_graph_rgba_f32(&aces_frame.rgba_f32().data, 2, 2, &aces_graph, 0)
-                .expect("ACES CPU reference");
+        let aces_expected = apply_compiled_effect_graph_rgba_f32(
+            mondrian_effects::EffectFloatFrameView::new(
+                mondrian_effects::EffectFrameExtent::new(2, 2),
+                mondrian_effects::EffectValueFormat::new(
+                    mondrian_effects::EffectWorkingPrecision::Float32,
+                    mondrian_effects::EffectColorDomain::SceneLinearRgb,
+                    mondrian_core::ColorFrameAlpha::StraightCoverage,
+                ),
+                mondrian_core::ImageSampling::UNIT_SQUARE,
+                &aces_frame.rgba_f32().data,
+            ),
+            &aces_graph,
+            0,
+        )
+        .expect("ACES CPU reference");
         let aces_layer = GpuCompositeLayer {
             source: GpuCompositeLayerSource::CpuFrame(&aces_frame),
             opacity: 1.0,
-            blend_mode: BlendMode::Normal,
+            blend_policy: mondrian_effects::EffectPassBlendPolicy::Blend(BlendMode::Normal),
             transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
             effect_plan: Some(&aces_plan),
             frame_seed: 0,
@@ -4664,7 +6625,7 @@ mod tests {
         let layer = GpuCompositeLayer {
             source: GpuCompositeLayerSource::GpuFrame(&input),
             opacity: 1.0,
-            blend_mode: BlendMode::Normal,
+            blend_policy: mondrian_effects::EffectPassBlendPolicy::Blend(BlendMode::Normal),
             transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
             effect_plan: Some(&plan),
             frame_seed: 0,
@@ -4753,12 +6714,16 @@ mod tests {
             [0.87, 0.13, 0.57, 0.73],
         ];
         let base = CpuColorFrame::working(WorkingRgbaF32Frame {
+            sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
+            alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
             width: 4,
             height: 4,
             color_space: WorkingColorSpace::LinearRec709,
             data: base_data.clone(),
         });
         let overlay = CpuColorFrame::working(WorkingRgbaF32Frame {
+            sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
+            alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
             width: 4,
             height: 4,
             color_space: WorkingColorSpace::LinearRec709,
@@ -4798,7 +6763,7 @@ mod tests {
             let base_layer = GpuCompositeLayer {
                 source: GpuCompositeLayerSource::CpuFrame(&base),
                 opacity: 1.0,
-                blend_mode: BlendMode::Normal,
+                blend_policy: mondrian_effects::EffectPassBlendPolicy::Blend(BlendMode::Normal),
                 transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
                 effect_plan: None,
                 frame_seed: 0,
@@ -4806,7 +6771,7 @@ mod tests {
             let overlay_layer = GpuCompositeLayer {
                 source: GpuCompositeLayerSource::CpuFrame(&overlay),
                 opacity: OPACITY,
-                blend_mode: mode,
+                blend_policy: mondrian_effects::EffectPassBlendPolicy::Blend(mode),
                 transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
                 effect_plan: None,
                 frame_seed: FRAME_SEED,
@@ -4848,6 +6813,8 @@ mod tests {
         };
         let edge = 1.0 / 65_535.0;
         let low_coverage = CpuColorFrame::working(WorkingRgbaF32Frame {
+            sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
+            alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
             width: 4,
             height: 4,
             color_space: WorkingColorSpace::LinearRec709,
@@ -4856,7 +6823,7 @@ mod tests {
         let low_coverage_layer = GpuCompositeLayer {
             source: GpuCompositeLayerSource::CpuFrame(&low_coverage),
             opacity: 1.0,
-            blend_mode: BlendMode::Normal,
+            blend_policy: mondrian_effects::EffectPassBlendPolicy::Blend(BlendMode::Normal),
             transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
             effect_plan: None,
             frame_seed: 0,
@@ -4869,12 +6836,16 @@ mod tests {
         let base_pixel = [0.1, 0.3, 0.7, 1.0];
         let source_pixel = [1.5, -0.5, 0.125, 1.0];
         let base = CpuColorFrame::working(WorkingRgbaF32Frame {
+            sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
+            alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
             width: 4,
             height: 4,
             color_space: WorkingColorSpace::LinearRec709,
             data: vec![base_pixel; 16],
         });
         let source = CpuColorFrame::working(WorkingRgbaF32Frame {
+            sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
+            alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
             width: 4,
             height: 4,
             color_space: WorkingColorSpace::LinearRec709,
@@ -4884,7 +6855,7 @@ mod tests {
             GpuCompositeLayer {
                 source: GpuCompositeLayerSource::CpuFrame(&base),
                 opacity: 1.0,
-                blend_mode: BlendMode::Normal,
+                blend_policy: mondrian_effects::EffectPassBlendPolicy::Blend(BlendMode::Normal),
                 transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
                 effect_plan: None,
                 frame_seed: 0,
@@ -4892,7 +6863,7 @@ mod tests {
             GpuCompositeLayer {
                 source: GpuCompositeLayerSource::CpuFrame(&source),
                 opacity: edge,
-                blend_mode: BlendMode::Normal,
+                blend_policy: mondrian_effects::EffectPassBlendPolicy::Blend(BlendMode::Normal),
                 transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
                 effect_plan: None,
                 frame_seed: 0,
@@ -4930,9 +6901,16 @@ mod tests {
             compile_reference_render_graph(builder.finish()).expect("valid procedural-solid graph");
         let plan = lower_effect_graph_to_gpu_plan(&graph).expect("GPU vignette plan");
         let effected_source = apply_compiled_effect_graph_rgba_f32(
-            &vec![[color.r, color.g, color.b, color.a]; 16],
-            4,
-            4,
+            mondrian_effects::EffectFloatFrameView::new(
+                mondrian_effects::EffectFrameExtent::new(4, 4),
+                mondrian_effects::EffectValueFormat::new(
+                    mondrian_effects::EffectWorkingPrecision::Float32,
+                    mondrian_effects::EffectColorDomain::SceneLinearRgb,
+                    mondrian_core::ColorFrameAlpha::StraightCoverage,
+                ),
+                mondrian_core::ImageSampling::UNIT_SQUARE,
+                &vec![[color.r, color.g, color.b, color.a]; 16],
+            ),
             &graph,
             17,
         )
@@ -4947,7 +6925,7 @@ mod tests {
         let layer = GpuCompositeLayer {
             source: GpuCompositeLayerSource::SolidColor(color),
             opacity: 1.0,
-            blend_mode: BlendMode::Normal,
+            blend_policy: mondrian_effects::EffectPassBlendPolicy::Blend(BlendMode::Normal),
             transform: [1.0, 0.0, 1.0, 0.0, 1.0, 0.0],
             effect_plan: Some(&plan),
             frame_seed: 17,
@@ -4973,12 +6951,16 @@ mod tests {
             return;
         };
         let base = CpuColorFrame::working(WorkingRgbaF32Frame {
+            sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
+            alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
             width: 4,
             height: 4,
             color_space: WorkingColorSpace::LinearRec709,
             data: vec![[0.0, 0.0, 1.0, 1.0]; 16],
         });
         let overlay = CpuColorFrame::working(WorkingRgbaF32Frame {
+            sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
+            alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
             width: 2,
             height: 2,
             color_space: WorkingColorSpace::LinearRec709,
@@ -4988,7 +6970,7 @@ mod tests {
             GpuCompositeLayer {
                 source: GpuCompositeLayerSource::CpuFrame(&base),
                 opacity: 1.0,
-                blend_mode: BlendMode::Normal,
+                blend_policy: mondrian_effects::EffectPassBlendPolicy::Blend(BlendMode::Normal),
                 transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
                 effect_plan: None,
                 frame_seed: 0,
@@ -4996,7 +6978,7 @@ mod tests {
             GpuCompositeLayer {
                 source: GpuCompositeLayerSource::CpuFrame(&overlay),
                 opacity: 1.0,
-                blend_mode: BlendMode::Normal,
+                blend_policy: mondrian_effects::EffectPassBlendPolicy::Blend(BlendMode::Normal),
                 transform: [1.0, 0.0, 1.0, 0.0, 1.0, 1.0],
                 effect_plan: None,
                 frame_seed: 0,
@@ -5355,7 +7337,7 @@ mod tests {
             let layer = |handle| GpuCompositeLayer {
                 source: GpuCompositeLayerSource::GpuFrame(handle),
                 opacity: 1.0,
-                blend_mode: BlendMode::Normal,
+                blend_policy: mondrian_effects::EffectPassBlendPolicy::Blend(BlendMode::Normal),
                 transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
                 effect_plan: None,
                 frame_seed: 0,
@@ -5544,6 +7526,221 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    #[ignore = "requires physical GPU; corner-space image coverage and Nearest readback"]
+    async fn physical_gpu_image_borders_use_corner_space_coverage() {
+        let context = crate::GpuContext::new().await.expect("actual GPU adapter required");
+        let adapter = context.adapter.get_info();
+        eprintln!("GPU_IMAGE_BORDER_NATIVE_PRIMARY: {adapter:?}");
+        assert!(
+            matches!(
+                adapter.device_type,
+                wgpu::DeviceType::DiscreteGpu | wgpu::DeviceType::IntegratedGpu
+            ),
+            "image-border qualification requires physical hardware: {adapter:?}"
+        );
+        assert_eq!(
+            product_gpu_working_texture_format(),
+            GpuColorFrameTextureFormat::Rgba32Float
+        );
+        let working = WorkingColorSpace::LinearRec709;
+        let mut failures = Vec::new();
+        let run = |label: &str,
+                   source: &CpuColorFrame,
+                   width: u32,
+                   height: u32,
+                   transform: [f32; 6],
+                   opaque_background: bool,
+                   expected: &[[f32; 4]],
+                   shaded_pixels: u64,
+                   failures: &mut Vec<String>| {
+            let mut layers = Vec::new();
+            if opaque_background {
+                // This exact opaque identity base selects fs_opaque_normal for
+                // the subsequent transformed source, rather than guessing from alpha.
+                layers.push(GpuCompositeLayer {
+                    source: GpuCompositeLayerSource::SolidColor(Color {
+                        r: 0.,
+                        g: 0.,
+                        b: 0.,
+                        a: 1.,
+                    }),
+                    opacity: 1.0,
+                    blend_policy: mondrian_effects::EffectPassBlendPolicy::Blend(BlendMode::Normal),
+                    transform: [1., 0., 0., 0., 1., 0.],
+                    effect_plan: None,
+                    frame_seed: 0,
+                });
+            }
+            layers.push(GpuCompositeLayer {
+                source: GpuCompositeLayerSource::CpuFrame(source),
+                opacity: 1.0,
+                blend_policy: mondrian_effects::EffectPassBlendPolicy::Blend(BlendMode::Normal),
+                transform,
+                effect_plan: None,
+                frame_seed: 0,
+            });
+            let (actual, diagnostics) =
+                readback_test_composite_with_diagnostics(&context, &layers, width, height, working);
+            assert_eq!(actual.len(), expected.len(), "{label}");
+            assert_eq!(diagnostics.gpu_passthrough_frames, 0, "{label}");
+            assert_eq!(diagnostics.gpu_with_upload_composites, 1, "{label}");
+            assert_eq!(diagnostics.cpu_fallback_composites, 0, "{label}");
+            assert_eq!(
+                diagnostics.gpu_composited_pixels,
+                u64::from(width) * u64::from(height),
+                "{label}"
+            );
+            assert_eq!(
+                diagnostics.opaque_normal_single_accumulator_composites,
+                u64::from(opaque_background),
+                "{label}: actual pipeline evidence"
+            );
+            assert_eq!(
+                diagnostics.execution.render_passes,
+                if opaque_background { 2 } else { 1 },
+                "{label}"
+            );
+            assert_eq!(
+                diagnostics.execution.tile_draws, diagnostics.execution.render_passes,
+                "{label}"
+            );
+            if diagnostics.execution.shaded_pixels != shaded_pixels {
+                failures.push(format!(
+                    "{label}: shaded {} expected {shaded_pixels}",
+                    diagnostics.execution.shaded_pixels
+                ));
+            }
+            for (index, (actual, expected)) in actual.iter().zip(expected).enumerate() {
+                for channel in 0..4 {
+                    if !actual[channel].is_finite()
+                        || (actual[channel] - expected[channel]).abs() > 1.0e-6
+                    {
+                        failures.push(format!(
+                            "{label}: pixel {index} channel {channel}: {} expected {}",
+                            actual[channel], expected[channel]
+                        ));
+                    }
+                }
+            }
+            eprintln!("GPU_IMAGE_BORDER_CASE: {label} {width}x{height} {diagnostics:?}");
+        };
+        // A 1x1 image occupies corner-space [0,1)^2. Inverse-mapped
+        // destination centers .25/.75 (2x) or .125/.375/.625/.875 (4x)
+        // all lie inside. Nearest samples the same literal texel everywhere.
+        for alpha in [0.5_f32, 1.0] {
+            let color = [0.25, 0.5, 0.75, alpha];
+            let source = CpuColorFrame::working(WorkingRgbaF32Frame {
+                width: 1,
+                height: 1,
+                color_space: working,
+                alpha: crate::ColorFrameAlpha::StraightCoverage,
+                sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
+                data: vec![color],
+            });
+            for size in [2_u32, 4] {
+                for opaque in [false, true] {
+                    let expected = if opaque {
+                        [color[0] * alpha, color[1] * alpha, color[2] * alpha, 1.0]
+                    } else {
+                        color
+                    };
+                    run(
+                        &format!("scale{size}-alpha{alpha}-opaque{opaque}"),
+                        &source,
+                        size,
+                        size,
+                        [size as f32, 0., 0., 0., size as f32, 0.],
+                        opaque,
+                        &vec![expected; (size * size) as usize],
+                        u64::from(size * size) * if opaque { 2 } else { 1 },
+                        &mut failures,
+                    );
+                }
+            }
+        }
+        let color = [0.25, 0.5, 0.75, 0.5];
+        let source = CpuColorFrame::working(WorkingRgbaF32Frame {
+            width: 1,
+            height: 1,
+            color_space: working,
+            alpha: crate::ColorFrameAlpha::StraightCoverage,
+            sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
+            data: vec![color],
+        });
+        for opaque in [false, true] {
+            let clear = if opaque { [0., 0., 0., 1.] } else { [0.; 4] };
+            let foreground = if opaque {
+                [0.125, 0.25, 0.375, 1.]
+            } else {
+                color
+            };
+            // The transformed source is [1,3)^2: exactly the central four
+            // pixel centers are covered, and the other twelve remain clear.
+            let expected = [
+                clear, clear, clear, clear, clear, foreground, foreground, clear, clear,
+                foreground, foreground, clear, clear, clear, clear, clear,
+            ];
+            run(
+                &format!("translated-alpha.5-opaque{opaque}"),
+                &source,
+                4,
+                4,
+                [2., 0., 1., 0., 2., 1.],
+                opaque,
+                &expected,
+                if opaque { 20 } else { 4 },
+                &mut failures,
+            );
+        }
+        // This diamond's AABB includes uncovered centers. Exact inverse
+        // coordinates are ((x+y-2)/4,(-x+y+2)/4): zero is inside and one is
+        // outside. ClampToEdge must not smear the texel over those exterior points.
+        let clear = [0.; 4];
+        let expected = [
+            clear, color, color, clear, color, color, color, color, clear, color, color, clear,
+            clear, clear, clear, clear,
+        ];
+        run(
+            "diamond-half-open-support",
+            &source,
+            4,
+            4,
+            [2., -2., 2., 2., 2., 0.],
+            false,
+            &expected,
+            16,
+            &mut failures,
+        );
+        let red = [1., 0., 0., 1.];
+        let green = [0., 1., 0., 1.];
+        let source = CpuColorFrame::working(WorkingRgbaF32Frame {
+            width: 2,
+            height: 1,
+            color_space: working,
+            alpha: crate::ColorFrameAlpha::StraightCoverage,
+            sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
+            data: vec![red, green],
+        });
+        // Preserve the existing Nearest policy: no interpolated middle color.
+        run(
+            "nearest-two-texel-control",
+            &source,
+            4,
+            2,
+            [2., 0., 0., 0., 2., 0.],
+            false,
+            &[red, red, green, green, red, red, green, green],
+            8,
+            &mut failures,
+        );
+        assert!(
+            failures.is_empty(),
+            "physical GPU image-border mismatches:\n{}",
+            failures.join("\n")
+        );
+    }
+
     fn readback_test_composite(
         context: &crate::GpuContext,
         layers: &[GpuCompositeLayer<'_>],
@@ -5647,7 +7844,7 @@ mod tests {
         let layer = GpuCompositeLayer {
             source: GpuCompositeLayerSource::SolidColor(Color { r: 1.0, g: 0.0, b: 0.0, a: 1.0 }),
             opacity: 1.0,
-            blend_mode: BlendMode::Multiply,
+            blend_policy: mondrian_effects::EffectPassBlendPolicy::Blend(BlendMode::Multiply),
             transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
             effect_plan: None,
             frame_seed: 0,
@@ -5667,7 +7864,7 @@ mod tests {
         let transparent_foreground = GpuCompositeLayer {
             source: GpuCompositeLayerSource::SolidColor(Color { r: 4.0, g: -2.0, b: 1.0, a: 0.0 }),
             opacity: 1.0,
-            blend_mode: BlendMode::Normal,
+            blend_policy: mondrian_effects::EffectPassBlendPolicy::Blend(BlendMode::Normal),
             transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
             effect_plan: None,
             frame_seed: 0,
@@ -5695,7 +7892,7 @@ mod tests {
         let partial_base = GpuCompositeLayer {
             source: GpuCompositeLayerSource::SolidColor(Color::BLACK),
             opacity: 1.0,
-            blend_mode: BlendMode::Normal,
+            blend_policy: mondrian_effects::EffectPassBlendPolicy::Blend(BlendMode::Normal),
             transform: [0.5, 0.0, 0.0, 0.0, 0.5, 0.0],
             effect_plan: None,
             frame_seed: 0,
@@ -5717,6 +7914,8 @@ mod tests {
     #[test]
     fn gpu_composite_request_accepts_media_extent_mismatch_with_affine_transform() {
         let frame = CpuColorFrame::working(WorkingRgbaF32Frame {
+            sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
+            alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
             width: 8,
             height: 8,
             color_space: WorkingColorSpace::LinearRec709,
@@ -5725,7 +7924,7 @@ mod tests {
         let layer = GpuCompositeLayer {
             source: GpuCompositeLayerSource::CpuFrame(&frame),
             opacity: 1.0,
-            blend_mode: BlendMode::Normal,
+            blend_policy: mondrian_effects::EffectPassBlendPolicy::Blend(BlendMode::Normal),
             transform: [2.0, 0.0, 0.0, 0.0, 2.0, 0.0],
             effect_plan: None,
             frame_seed: 0,
@@ -5750,7 +7949,7 @@ mod tests {
                 a: 0.75,
             }),
             opacity: 1.0,
-            blend_mode: BlendMode::Normal,
+            blend_policy: mondrian_effects::EffectPassBlendPolicy::Blend(BlendMode::Normal),
             transform: [0.75, 0.0, 1.0, 0.0, 0.75, 1.0],
             effect_plan: None,
             frame_seed: 0,
@@ -5779,7 +7978,7 @@ mod tests {
         let layer = GpuCompositeLayer {
             source: GpuCompositeLayerSource::GpuFrame(&handle),
             opacity: 1.0,
-            blend_mode: BlendMode::Normal,
+            blend_policy: mondrian_effects::EffectPassBlendPolicy::Blend(BlendMode::Normal),
             transform: [2.0, 0.0, 0.0, 0.0, 2.0, 0.0],
             effect_plan: None,
             frame_seed: 0,
@@ -5804,7 +8003,7 @@ mod tests {
         let opaque_layer = GpuCompositeLayer {
             source: GpuCompositeLayerSource::GpuFrame(&opaque),
             opacity: 1.0,
-            blend_mode: BlendMode::Normal,
+            blend_policy: mondrian_effects::EffectPassBlendPolicy::Blend(BlendMode::Normal),
             transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
             effect_plan: None,
             frame_seed: 0,
@@ -5846,7 +8045,7 @@ mod tests {
         let layer = GpuCompositeLayer {
             source: GpuCompositeLayerSource::GpuFrame(&handle),
             opacity: 1.0,
-            blend_mode: BlendMode::Normal,
+            blend_policy: mondrian_effects::EffectPassBlendPolicy::Blend(BlendMode::Normal),
             transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
             effect_plan: None,
             frame_seed: 0,
@@ -5870,6 +8069,8 @@ mod tests {
     #[test]
     fn gpu_composite_request_skips_zero_area_media_transform() {
         let frame = CpuColorFrame::working(WorkingRgbaF32Frame {
+            sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
+            alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
             width: 8,
             height: 8,
             color_space: WorkingColorSpace::LinearRec709,
@@ -5878,7 +8079,7 @@ mod tests {
         let layer = GpuCompositeLayer {
             source: GpuCompositeLayerSource::CpuFrame(&frame),
             opacity: 1.0,
-            blend_mode: BlendMode::Normal,
+            blend_policy: mondrian_effects::EffectPassBlendPolicy::Blend(BlendMode::Normal),
             transform: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
             effect_plan: None,
             frame_seed: 0,
@@ -5897,6 +8098,8 @@ mod tests {
     #[test]
     fn gpu_composite_request_rejects_source_color_space_mismatch() {
         let frame = CpuColorFrame::working(WorkingRgbaF32Frame {
+            sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
+            alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
             width: 8,
             height: 8,
             color_space: WorkingColorSpace::LinearP3D65,
@@ -5905,7 +8108,7 @@ mod tests {
         let layer = GpuCompositeLayer {
             source: GpuCompositeLayerSource::CpuFrame(&frame),
             opacity: 1.0,
-            blend_mode: BlendMode::Normal,
+            blend_policy: mondrian_effects::EffectPassBlendPolicy::Blend(BlendMode::Normal),
             transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
             effect_plan: None,
             frame_seed: 0,
@@ -5949,5 +8152,463 @@ mod tests {
             "test-gpu-working-layer",
         )
         .expect("test GPU handle")
+    }
+
+    #[tokio::test]
+    #[ignore = "actual hardware GPU; bounded 16/64 cost report, not realtime acceptance"]
+    async fn gpu_adjustment_mix_small_cost_qualification() {
+        use mondrian_effects::{
+            compile_reference_render_graph, lower_effect_graph_to_gpu_plan,
+            EffectGraphBuilderState, EffectPassBlendPolicy, EffectRenderOp,
+        };
+        use std::time::{Duration, Instant};
+
+        // Separate invocations are intentional: inspect the 16x16 report before
+        // explicitly requesting 64x64. This gate never expands to HD or UHD.
+        let size: u32 = std::env::var("MONDRIAN_GPU_MIX_COST_SIZE")
+            .expect("explicit bounded size required")
+            .parse()
+            .expect("integer size");
+        assert!(
+            matches!(size, 16 | 64),
+            "only the reviewed 16/64 cohorts are admitted"
+        );
+        let output_path = std::env::var_os("MONDRIAN_GPU_MIX_COST_OUTPUT")
+            .expect("fresh diagnostic output path required");
+        let context = crate::GpuContext::new().await.expect("actual default GPU context");
+        let adapter = context.adapter.get_info();
+        eprintln!("GPU_ADJUSTMENT_NATIVE_PRIMARY: {adapter:?}");
+        assert!(
+            matches!(
+                adapter.device_type,
+                wgpu::DeviceType::DiscreteGpu | wgpu::DeviceType::IntegratedGpu
+            ),
+            "software adapters are not this hardware cost gate: {adapter:?}"
+        );
+        assert_eq!(
+            product_gpu_working_texture_format(),
+            GpuColorFrameTextureFormat::Rgba32Float
+        );
+        let compositor_started = Instant::now();
+        let compositor = GpuFrameCompositor::new(&context.device).expect("ordinary compositor");
+        let compositor_create_ns = compositor_started.elapsed().as_nanos();
+        assert!(
+            compositor.adjustment_mix_pipeline.get().is_none(),
+            "Mix starts lazy"
+        );
+        let mut graph_builder = EffectGraphBuilderState::new();
+        graph_builder.append_unary(EffectRenderOp::ColorAdjust {
+            exposure: 1.0,
+            contrast: 1.0,
+            saturation: 1.0,
+            working_color_space: WorkingColorSpace::LinearRec709,
+        });
+        let compiled =
+            compile_reference_render_graph(graph_builder.finish()).expect("sole Exposure graph");
+        let point_plan = lower_effect_graph_to_gpu_plan(&compiled).expect("actual point plan");
+
+        #[derive(Clone, Copy)]
+        enum Cohort {
+            Over,
+            CanonicalMix,
+            AdversarialMix,
+        }
+        struct Sample {
+            ns: u128,
+            texture_bytes: u64,
+            textures: usize,
+        }
+        fn wait(context: &crate::GpuContext, submission: wgpu::SubmissionIndex) {
+            context
+                .device
+                .poll(wgpu::PollType::Wait {
+                    submission_index: Some(submission),
+                    timeout: Some(Duration::from_secs(10)),
+                })
+                .expect("proved bounded GPU completion; do not dispatch again after failure");
+        }
+        fn readback(
+            context: &crate::GpuContext,
+            table: &GpuColorFrameResourceTable<GpuColorFrameWgpuResource>,
+            output: &GpuColorFrameHandle,
+            size: u32,
+        ) -> Vec<[f32; 4]> {
+            let row_bytes = size * 16;
+            let stride = row_bytes.div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT)
+                * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+            let buffer = context.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("small-mix-cost-independent-readback"),
+                size: u64::from(stride) * u64::from(size),
+                usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                mapped_at_creation: false,
+            });
+            let mut encoder =
+                context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("small-mix-cost-readback-outside-timer"),
+                });
+            let actual = table.get(output).expect("same retained output owner");
+            encoder.copy_texture_to_buffer(
+                wgpu::TexelCopyTextureInfo {
+                    texture: &actual.resource().texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                wgpu::TexelCopyBufferInfo {
+                    buffer: &buffer,
+                    layout: wgpu::TexelCopyBufferLayout {
+                        offset: 0,
+                        bytes_per_row: Some(stride),
+                        rows_per_image: Some(size),
+                    },
+                },
+                wgpu::Extent3d {
+                    width: size,
+                    height: size,
+                    depth_or_array_layers: 1,
+                },
+            );
+            let submitted = context.queue.submit(std::iter::once(encoder.finish()));
+            let slice = buffer.slice(..);
+            let (sender, receiver) = std::sync::mpsc::channel();
+            slice.map_async(wgpu::MapMode::Read, move |mapped| {
+                let _ = sender.send(mapped);
+            });
+            context
+                .device
+                .poll(wgpu::PollType::Wait {
+                    submission_index: Some(submitted),
+                    timeout: Some(Duration::from_secs(10)),
+                })
+                .expect("bounded readback submission completion");
+            // Mapping is a separate asynchronous operation from submission.
+            // Drive all pending mapping callbacks, with its own finite bound.
+            context
+                .device
+                .poll(wgpu::PollType::Wait {
+                    submission_index: None,
+                    timeout: Some(Duration::from_secs(10)),
+                })
+                .expect("bounded mapping progress");
+            receiver
+                .recv_timeout(Duration::from_secs(2))
+                .expect("readback callback")
+                .expect("actual mapped output");
+            let mapped = slice.get_mapped_range().expect("mapped output bytes");
+            let pixels = mapped
+                .chunks_exact(stride as usize)
+                .take(size as usize)
+                .flat_map(|row| {
+                    bytemuck::cast_slice::<u8, f32>(&row[..row_bytes as usize])
+                        .chunks_exact(4)
+                        .map(|p| [p[0], p[1], p[2], p[3]])
+                })
+                .collect();
+            drop(mapped);
+            buffer.unmap();
+            pixels
+        }
+        fn execute(
+            context: &crate::GpuContext,
+            compositor: &GpuFrameCompositor,
+            plan: &mondrian_effects::CompiledEffectGpuPlan,
+            size: u32,
+            cohort: Cohort,
+            seed: u32,
+        ) -> Sample {
+            // Real changing textures, rather than a cached output or repeated
+            // empty submission. Source materialization finishes before timing.
+            let sign = if seed & 1 == 0 { 1.0 } else { -1.0 };
+            let scale = sign * if seed & 2 == 0 { 1.0 } else { 2.0 };
+            let (left_sample, right_sample, amount) = match cohort {
+                Cohort::Over | Cohort::CanonicalMix => (
+                    [2.0 * scale, -4.0 * scale, 8.0 * scale, 0.5],
+                    [4.0 * scale, -8.0 * scale, 16.0 * scale, 0.5],
+                    0.5,
+                ),
+                Cohort::AdversarialMix => {
+                    let rgb = sign * f32::from_bits(0x6480_0000);
+                    let tiny = f32::from_bits(0x1a00_0000);
+                    ([rgb, rgb, rgb, tiny], [-rgb, -rgb, -rgb, 1.0], tiny)
+                }
+            };
+            let mut ids = GpuColorFrameIdAllocator::new(1).expect("actual frame IDs");
+            let mut table = GpuColorFrameResourceTable::new();
+            let mut prepared =
+                context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("small-mix-cost-changing-inputs-excluded"),
+                });
+            let mut solid = |sample: [f32; 4]| {
+                compositor
+                    .record_solid_source_pass(
+                        &context.device,
+                        &context.queue,
+                        &mut prepared,
+                        &mut ids,
+                        &mut table,
+                        None,
+                        size,
+                        size,
+                        WorkingColorSpace::LinearRec709,
+                        Color {
+                            r: sample[0],
+                            g: sample[1],
+                            b: sample[2],
+                            a: sample[3],
+                        },
+                    )
+                    .expect("real source pixels")
+                    .output
+            };
+            let original = solid(left_sample);
+            let processed = match cohort {
+                Cohort::Over | Cohort::AdversarialMix => Some(solid(right_sample)),
+                Cohort::CanonicalMix => None,
+            };
+            wait(
+                context,
+                context.queue.submit(std::iter::once(prepared.finish())),
+            );
+            let mut encoder =
+                context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("small-mix-cost-public-record-submit-completion"),
+                });
+            let started = Instant::now();
+            let record = match cohort {
+                Cohort::Over => {
+                    let layers = [
+                        GpuCompositeLayer {
+                            source: GpuCompositeLayerSource::GpuFrame(&original),
+                            opacity: 1.0,
+                            blend_policy: EffectPassBlendPolicy::Blend(BlendMode::Normal),
+                            transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+                            effect_plan: None,
+                            frame_seed: 0,
+                        },
+                        GpuCompositeLayer {
+                            source: GpuCompositeLayerSource::GpuFrame(
+                                processed.as_ref().expect("Over input"),
+                            ),
+                            opacity: 1.0,
+                            blend_policy: EffectPassBlendPolicy::Blend(BlendMode::Normal),
+                            transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+                            effect_plan: None,
+                            frame_seed: 0,
+                        },
+                    ];
+                    compositor.record(
+                        &context.device,
+                        &context.queue,
+                        &mut encoder,
+                        &mut ids,
+                        &mut table,
+                        None,
+                        GpuCompositeRequest {
+                            width: size,
+                            height: size,
+                            working_color_space: WorkingColorSpace::LinearRec709,
+                            layers: &layers,
+                        },
+                    )
+                }
+                Cohort::CanonicalMix => {
+                    let layers = [
+                        GpuCompositeLayer {
+                            source: GpuCompositeLayerSource::GpuFrame(&original),
+                            opacity: 1.0,
+                            blend_policy: EffectPassBlendPolicy::Blend(BlendMode::Normal),
+                            transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+                            effect_plan: None,
+                            frame_seed: 0,
+                        },
+                        GpuCompositeLayer {
+                            source: GpuCompositeLayerSource::Adjustment,
+                            opacity: amount,
+                            blend_policy: EffectPassBlendPolicy::Mix,
+                            transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+                            effect_plan: Some(plan),
+                            frame_seed: 0,
+                        },
+                    ];
+                    compositor.record(
+                        &context.device,
+                        &context.queue,
+                        &mut encoder,
+                        &mut ids,
+                        &mut table,
+                        None,
+                        GpuCompositeRequest {
+                            width: size,
+                            height: size,
+                            working_color_space: WorkingColorSpace::LinearRec709,
+                            layers: &layers,
+                        },
+                    )
+                }
+                Cohort::AdversarialMix => compositor.record_adjustment_blend_pass(
+                    &context.device,
+                    &context.queue,
+                    &mut encoder,
+                    &mut ids,
+                    &mut table,
+                    None,
+                    &original,
+                    processed.as_ref().expect("independent processed texture"),
+                    amount,
+                    EffectPassBlendPolicy::Mix,
+                    0,
+                    WorkingColorSpace::LinearRec709,
+                ),
+            }
+            .expect("actual public production record");
+            let submission = context.queue.submit(std::iter::once(encoder.finish()));
+            wait(context, submission);
+            let ns = started.elapsed().as_nanos();
+            // Readback storage/mapping, independent pixel comparisons and
+            // completed owner destruction are outside this timer. Output
+            // allocation remains inside the public production record call.
+            assert_eq!(
+                record.output.descriptor().alpha,
+                crate::ColorFrameAlpha::StraightCoverage
+            );
+            let textures = table.len();
+            let texture_bytes = table.logical_texture_bytes().expect("known texture charge");
+            let pixels = readback(context, &table, &record.output, size);
+            assert_eq!(pixels.len(), (size * size) as usize);
+            for pixel in pixels {
+                match cohort {
+                    Cohort::AdversarialMix => {
+                        // Fixed exact rational oracle, not a CPU Mix result.
+                        let rgb_bits = if sign > 0.0 { 0xbe80_0000 } else { 0x3e80_0000 };
+                        assert_eq!(
+                            pixel.map(f32::to_bits),
+                            [rgb_bits, rgb_bits, rgb_bits, 0x1a80_0000]
+                        );
+                    }
+                    Cohort::CanonicalMix => {
+                        let expected = [3.0 * scale, -6.0 * scale, 12.0 * scale, 0.5];
+                        for (actual, wanted) in pixel.into_iter().zip(expected) {
+                            assert!(actual.is_finite());
+                            assert!(
+                                (actual - wanted).abs() <= 4.0e-6 * scale.abs(),
+                                "independent exposure/Mix oracle: {pixel:?} vs {expected:?}"
+                            );
+                        }
+                    }
+                    Cohort::Over => {
+                        let expected = [
+                            10.0 / 3.0 * scale,
+                            -20.0 / 3.0 * scale,
+                            40.0 / 3.0 * scale,
+                            0.75,
+                        ];
+                        for (actual, expected) in pixel.into_iter().zip(expected) {
+                            assert!(actual.is_finite());
+                            assert!(
+                                (actual - expected).abs() <= 4.0e-6 * scale.abs(),
+                                "independent ordinary Over oracle: {pixel:?} vs {expected}"
+                            );
+                        }
+                    }
+                }
+            }
+            Sample { ns, texture_bytes, textures }
+        }
+        fn cohort_report(
+            context: &crate::GpuContext,
+            compositor: &GpuFrameCompositor,
+            plan: &mondrian_effects::CompiledEffectGpuPlan,
+            size: u32,
+            cohort: Cohort,
+            label: &str,
+        ) -> serde_json::Value {
+            for seed in 0..2 {
+                let _ = execute(context, compositor, plan, size, cohort, seed);
+            }
+            let samples = (2..10)
+                .map(|seed| execute(context, compositor, plan, size, cohort, seed))
+                .collect::<Vec<_>>();
+            let ns = samples.iter().map(|sample| sample.ns).collect::<Vec<_>>();
+            let mut sorted = ns.clone();
+            sorted.sort_unstable();
+            let quantile = |numerator: usize, denominator: usize| {
+                sorted[(numerator * sorted.len()).div_ceil(denominator).saturating_sub(1)]
+            };
+            serde_json::json!({"cohort": label, "warmup": 2, "sample_count": samples.len(),
+                "record_submit_completion_ns": ns, "p50_ns": quantile(50, 100),
+                "p95_ns": quantile(95, 100), "max_ns": sorted[sorted.len() - 1],
+                "known_texture_bytes": samples.iter().map(|sample| sample.texture_bytes).collect::<Vec<_>>(),
+                "known_texture_owners": samples.iter().map(|sample| sample.textures).collect::<Vec<_>>()})
+        }
+
+        let before = cohort_report(
+            &context,
+            &compositor,
+            &point_plan,
+            size,
+            Cohort::Over,
+            "ordinary_over_before_mix",
+        );
+        assert!(
+            compositor.adjustment_mix_pipeline.get().is_none(),
+            "ordinary Over never builds exact Mix"
+        );
+        // This is the same production lazy initializer, timed independently.
+        // 'Cold' means first use for this compositor, not a cleared driver cache.
+        let pipeline_started = Instant::now();
+        let _ = compositor.adjustment_mix_pipeline(&context.device);
+        let first_mix_pipeline_create_ns = pipeline_started.elapsed().as_nanos();
+        let first = execute(
+            &context,
+            &compositor,
+            &point_plan,
+            size,
+            Cohort::CanonicalMix,
+            0,
+        );
+        let common = cohort_report(
+            &context,
+            &compositor,
+            &point_plan,
+            size,
+            Cohort::CanonicalMix,
+            "canonical_inline_mix_common",
+        );
+        let adversarial = cohort_report(
+            &context,
+            &compositor,
+            &point_plan,
+            size,
+            Cohort::AdversarialMix,
+            "direct_exact_mix_adversarial",
+        );
+        let after = cohort_report(
+            &context,
+            &compositor,
+            &point_plan,
+            size,
+            Cohort::Over,
+            "ordinary_over_after_mix",
+        );
+        let report = serde_json::json!({"schema": 1, "qualification": "small GPU diagnostic; no realtime or release throughput acceptance",
+            "host_profile": if cfg!(debug_assertions) { "test-debug" } else { "test-release" },
+            "size": [size, size], "adapter": format!("{adapter:?}"),
+            "production_context": "GpuContext::new/default compiler; no developer SDK override",
+            "native_static_compiler": "pinned mach-dxcompiler ReleaseFast archive; host profile does not change its build",
+            "compositor_create_ns": compositor_create_ns,
+            "first_mix_pipeline_create_ns": first_mix_pipeline_create_ns,
+            "first_canonical_mix_record_submit_completion_ns": first.ns,
+            "timer_scope": "public record + output allocation + queue submission + proved GPU completion",
+            "exclusions": ["changing source texture materialization and completion", "command encoder creation",
+                "compiled plan construction", "readback/map/oracles", "completed resource owner destruction", "App/IPC/full NLE"],
+            "known_texture_charge_is_not_driver_rss": true,
+            "reports": [before, common, adversarial, after]});
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(output_path)
+            .expect("new diagnostic report file");
+        serde_json::to_writer_pretty(&mut file, &report).expect("diagnostic JSON");
+        eprintln!("GPU_MIX_SMALL_COST_REPORT: {report}");
     }
 }

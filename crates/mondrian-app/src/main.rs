@@ -4,10 +4,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mode = std::env::args_os().nth(1);
     if mode.as_deref()
         == Some(std::ffi::OsStr::new(
+            mondrian_app::resource_inspection::RESOURCE_INSPECTION_WORKER_ARGUMENT,
+        ))
+    {
+        return mondrian_app::resource_inspection::run_resource_inspection_worker()
+            .map_err(Into::into);
+    }
+    if mode.as_deref()
+        == Some(std::ffi::OsStr::new(
             mondrian_app::openfx_adapter::OPENFX_DISCOVERY_WORKER_ARGUMENT,
         ))
     {
         return mondrian_app::openfx_adapter::run_openfx_discovery_worker().map_err(Into::into);
+    }
+    if mode.as_deref()
+        == Some(std::ffi::OsStr::new(
+            mondrian_app::openfx_host::OPENFX_CATALOG_DESCRIBE_WORKER_ARGUMENT,
+        ))
+    {
+        return mondrian_app::openfx_host::run_openfx_catalog_describe_worker().map_err(Into::into);
     }
     if mode.as_deref()
         == Some(std::ffi::OsStr::new(
@@ -18,10 +33,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     if mode.as_deref()
         == Some(std::ffi::OsStr::new(
-            mondrian_app::openfx_host::OPENFX_RENDER_WORKER_ARGUMENT,
+            mondrian_app::openfx_host::OPENFX_RESIDENT_WORKER_ARGUMENT,
         ))
     {
-        return mondrian_app::openfx_host::run_openfx_render_worker().map_err(Into::into);
+        return mondrian_app::openfx_host::run_openfx_resident_worker().map_err(Into::into);
     }
     if mode.as_deref()
         == Some(std::ffi::OsStr::new(
@@ -74,6 +89,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
     mondrian_platform::prepare_graphics_process()?;
+    #[cfg(feature = "validation")]
+    if mode.as_deref() == Some(std::ffi::OsStr::new("--prepare-native-question-fixture")) {
+        let path = std::env::args_os()
+            .nth(2)
+            .ok_or("fixture preparation requires one JSON request path")?;
+        if std::env::args_os().nth(3).is_some() {
+            return Err("unexpected fixture preparation argument".into());
+        }
+        return mondrian_app::app_ui::native_question_fixture::prepare_native_question_fixture_file(
+            std::path::Path::new(&path),
+        );
+    }
+    #[cfg(feature = "validation")]
+    if mode.as_deref() == Some(std::ffi::OsStr::new("--validate-native-question")) {
+        let path = std::env::args_os()
+            .nth(2)
+            .ok_or("Question validation requires one JSON request path")?;
+        if std::env::args_os().nth(3).is_some() {
+            return Err("unexpected Question validation argument".into());
+        }
+        return mondrian_app::app_ui::window::run_app_ui_native_question_validation_file(
+            std::path::Path::new(&path),
+        );
+    }
     mondrian_app::app_ui::window::run_app_ui()
 }
 

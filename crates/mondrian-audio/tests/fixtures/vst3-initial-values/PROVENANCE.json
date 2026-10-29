@@ -1,0 +1,17 @@
+{
+  "schema": 1,
+  "purpose": "Owned qualification fixture; no shipped third-party binary and no production plugin-name branch",
+  "adaptedFrom": {
+    "path": "crates/mondrian-audio/tests/fixtures/vst3-sidechain/src/lib.rs",
+    "checkpoint": "9ebc35c",
+    "sha256": "13CB003BA82A386C4744E04D7A28293B6BA34D3DF725FF621035524FC47FA21C",
+    "license": "MIT OR Apache-2.0"
+  },
+  "originalTemplate": "coupler-rs/vst3-rs Gain example, already adapted by the existing Mondrian fixture",
+  "sdkProvenancePath": "vendor/vst3-sdk/PROVENANCE.json",
+  "sdkProvenanceSha256": "23BCF83E52D9EBB924390CF750A421D8999A2CDBC066062B786486FF161637FD",
+  "generatedBindingSha256": "9CF5371FC7A883A857E4C74D8D4C9DE43CDD958E14A73E3158CB568FF6D23940",
+  "license": "MIT OR Apache-2.0",
+  "sdkBindingModified": false,
+  "nativeExecuted": false
+}

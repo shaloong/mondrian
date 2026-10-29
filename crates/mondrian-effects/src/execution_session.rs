@@ -33,14 +33,21 @@ pub struct EffectExecutionSessionConfig {
     pub max_cache_entries: usize,
     /// Maximum aggregate pixel/topology logical bytes retained by the Session.
     pub max_cache_bytes: usize,
-    /// Maximum active bytes admitted by one temporal/ROI scalar execution,
-    /// including retained source coverage and final output residency.
+    /// Maximum active bytes admitted by temporal/ROI or reusable-processor
+    /// execution, including source coverage, owned rasters, atomic staging and
+    /// every resident/active processor during that invocation.
     pub max_working_bytes: usize,
     /// Maximum GPU lowering plans or deterministic blockers retained by the
     /// Session.
     pub max_gpu_plan_entries: usize,
     /// Maximum conservatively estimated bytes retained by GPU planning.
     pub max_gpu_plan_bytes: usize,
+    /// Maximum reusable Float32 processor instances retained by this owner.
+    pub max_processor_instances: usize,
+    /// Optional logical backing still owned by reusable processors between calls.
+    /// Temporary and handed-off output owners consume active working admission,
+    /// not this retained ceiling.
+    pub max_processor_bytes: usize,
 }
 
 impl EffectExecutionSessionConfig {
@@ -53,6 +60,8 @@ impl EffectExecutionSessionConfig {
             max_working_bytes,
             max_gpu_plan_entries: 0,
             max_gpu_plan_bytes: 0,
+            max_processor_instances: 0,
+            max_processor_bytes: 0,
         }
     }
 }
@@ -65,6 +74,8 @@ impl Default for EffectExecutionSessionConfig {
             max_working_bytes: 384 * 1024 * 1024,
             max_gpu_plan_entries: 64,
             max_gpu_plan_bytes: 4 * 1024 * 1024,
+            max_processor_instances: 8,
+            max_processor_bytes: 256 * 1024 * 1024,
         }
     }
 }
@@ -102,6 +113,10 @@ pub struct EffectExecutionSessionDiagnostics {
     pub max_gpu_plan_entries: usize,
     /// Configured GPU-plan byte budget.
     pub max_gpu_plan_bytes: usize,
+    /// Number of execution-owned reusable processor instances.
+    pub processor_instances: usize,
+    /// Conservative bytes charged to reusable processor residency.
+    pub processor_bytes: usize,
 }
 
 /// Exclusive, instance-owned Effect execution state.
@@ -116,10 +131,12 @@ pub struct EffectExecutionSession {
     generation: Option<u64>,
     encoded_outputs: BoundedLru<EffectOutputCacheKey, Vec<u8>>,
     encoded_nodes: BoundedLru<EffectNodeOutputCacheKey, Vec<u8>>,
-    float_outputs: BoundedLru<EffectFloatOutputCacheKey, Vec<[f32; 4]>>,
+    float_outputs: BoundedLru<EffectFloatOutputCacheKey, crate::EffectFloatFrame>,
     temporal_outputs: BoundedLru<[u8; 32], EffectTemporalCachedOutput>,
     topologies: EffectTopologyCache,
     gpu_plans: EffectGpuPlanCache,
+    pub(crate) processors: crate::processor_residency::FloatProcessorResidency,
+    pub(crate) observation: crate::EffectProcessorObservation,
 }
 
 impl Default for EffectExecutionSession {
@@ -135,6 +152,8 @@ impl EffectExecutionSession {
         Self {
             config,
             generation: None,
+            processors: Default::default(),
+            observation: Default::default(),
             encoded_outputs: BoundedLru::new(
                 partitions.encoded_output_entries,
                 partitions.encoded_output_bytes,
@@ -148,7 +167,7 @@ impl EffectExecutionSession {
             float_outputs: BoundedLru::new(
                 partitions.float_output_entries,
                 partitions.float_output_bytes,
-                |frame| frame.len().saturating_mul(std::mem::size_of::<[f32; 4]>()),
+                crate::EffectFloatFrame::retained_bytes,
             ),
             temporal_outputs: BoundedLru::new(
                 partitions.temporal_output_entries,
@@ -166,11 +185,31 @@ impl EffectExecutionSession {
         }
     }
 
+    /// Bind only the exact current task's bounded observations. Clear it after
+    /// that task; it carries no graph, processor or author state.
+    pub fn bind_processor_observation(&mut self, observation: crate::EffectProcessorObservation) {
+        self.observation = observation;
+    }
+
+    /// Reborrow the current task's exact observer/deadline at an execution seam.
+    pub fn processor_observation(&self) -> crate::EffectProcessorObservation {
+        self.observation.clone()
+    }
+
+    /// Reconcile actual closed native GUIs on this Session's exclusive worker.
+    /// Returns retired owner count and publishes bounded idle-action metadata
+    /// through an existing GUI lifetime. This operation produces no pixels,
+    /// author edits, provider quarantine or fabricated frame completion.
+    pub fn reconcile_processor_guis(&mut self) -> usize {
+        self.processors.reconcile_gui(self.config.max_working_bytes)
+    }
+
     /// Apply a new product resource decision and trim synchronously.
     ///
     /// The working-set limit affects the next execution only; already-returned
     /// frames are caller-owned and cannot be revoked.
     pub fn reconfigure(&mut self, config: EffectExecutionSessionConfig) {
+        self.processors.trim(config.max_processor_instances, config.max_processor_bytes);
         self.config = config;
         let partitions = EffectCachePartitions::from_config(config);
         self.encoded_outputs.reconfigure(
@@ -207,7 +246,10 @@ impl EffectExecutionSession {
     /// functions of the graph shape, so a superseded generation's entries can
     /// never mislead the next generation. Retaining them is what keeps
     /// frame-by-frame scrubbing from re-lowering and re-compiling every graph
-    /// on every playhead position.
+    /// on every playhead position. Frame-independent processor resources also
+    /// survive: their keys include author occurrence, registration revision
+    /// and extent, and their contract forbids dependence on earlier calls.
+    /// Observed cancellation, faults and explicit retirement still evict them.
     pub fn bind_generation(&mut self, generation: u64) {
         if self.generation != Some(generation) {
             self.clear_pixel_caches();
@@ -224,10 +266,18 @@ impl EffectExecutionSession {
         self.temporal_outputs.clear();
     }
 
+    /// Retire reusable native processors when their execution owner stops.
+    /// Static plans and semantically valid pixel caches remain independently owned.
+    pub fn retire_processor_resources(&mut self) {
+        self.processors.clear();
+    }
+
     /// Current bounded-residency diagnostics.
     pub fn diagnostics(&self) -> EffectExecutionSessionDiagnostics {
         EffectExecutionSessionDiagnostics {
             generation: self.generation,
+            processor_instances: self.processors.counts().0,
+            processor_bytes: self.processors.counts().1,
             cache_entries: self
                 .encoded_outputs
                 .entries()
@@ -278,6 +328,24 @@ impl EffectExecutionSession {
         self.topologies.insert(topology);
     }
 
+    pub(crate) const fn processor_grant(&self) -> (usize, usize) {
+        (
+            self.config.max_processor_instances,
+            self.config.max_processor_bytes,
+        )
+    }
+
+    pub(crate) fn processor_execution(
+        &mut self,
+    ) -> crate::processor_residency::FloatProcessorExecution<'_> {
+        crate::processor_residency::FloatProcessorExecution {
+            working_bytes: self.config.max_working_bytes,
+            retention_limits: self.processor_grant(),
+            feedback_base_bytes: 0,
+            bank: &mut self.processors,
+        }
+    }
+
     pub(crate) const fn max_working_bytes(&self) -> usize {
         self.config.max_working_bytes
     }
@@ -301,14 +369,14 @@ impl EffectExecutionSession {
     pub(crate) fn get_float_output(
         &mut self,
         key: &EffectFloatOutputCacheKey,
-    ) -> Option<Vec<[f32; 4]>> {
+    ) -> Option<crate::EffectFloatFrame> {
         self.float_outputs.get(key)
     }
 
     pub(crate) fn put_float_output(
         &mut self,
         key: EffectFloatOutputCacheKey,
-        output: Vec<[f32; 4]>,
+        output: crate::EffectFloatFrame,
     ) {
         self.float_outputs.insert(key, output);
     }
@@ -563,6 +631,8 @@ mod tests {
     #[test]
     fn generation_rotation_and_reconfigure_trim_synchronously() {
         let mut session = EffectExecutionSession::new(EffectExecutionSessionConfig {
+            max_processor_instances: 0,
+            max_processor_bytes: 0,
             max_cache_entries: 4,
             max_cache_bytes: 160,
             max_working_bytes: 128,
@@ -581,6 +651,8 @@ mod tests {
             EffectTemporalCachedOutput { pixels: Arc::new(vec![[0.0; 4]; 2]), frame_seed: 0 },
         );
         session.reconfigure(EffectExecutionSessionConfig {
+            max_processor_instances: 0,
+            max_processor_bytes: 0,
             max_cache_entries: 0,
             max_cache_bytes: 0,
             max_working_bytes: 128,

@@ -18,6 +18,8 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PreviewUnavailabilityDisposition {
+    /// The owning execution was canceled or superseded before publication.
+    Stopped,
     /// The current authoring state intentionally contains no publishable image.
     NoContent,
     /// A known contract or dependency prevents a semantically correct output.
@@ -67,6 +69,11 @@ pub struct PreviewUnavailability {
 }
 
 impl PreviewUnavailability {
+    /// Construct an expected scheduler stop without reporting a runtime failure.
+    pub fn stopped(stage: PreviewOutputStage, detail: impl Into<String>) -> Self {
+        Self::new(PreviewUnavailabilityDisposition::Stopped, stage, detail)
+    }
+
     /// Construct an expected no-content result.
     pub fn no_content(stage: PreviewOutputStage, detail: impl Into<String>) -> Self {
         Self::new(PreviewUnavailabilityDisposition::NoContent, stage, detail)
@@ -123,6 +130,7 @@ impl PreviewUnavailability {
     /// Return the stable machine-readable classification code.
     pub const fn code(&self) -> &'static str {
         match (self.disposition, self.stage) {
+            (PreviewUnavailabilityDisposition::Stopped, _) => "preview.stopped",
             (PreviewUnavailabilityDisposition::NoContent, PreviewOutputStage::Project) => {
                 "preview.no_content.project"
             }
@@ -265,6 +273,8 @@ pub struct PreviewUnavailabilityEvidenceSnapshot {
     pub observations: u64,
     /// Expected no-content observations.
     pub no_content: u64,
+    /// Invocations stopped by the execution owner.
+    pub stopped: u64,
     /// Correctness/dependency blocker observations.
     pub blocked: u64,
     /// Failed production execution observations.
@@ -288,6 +298,9 @@ impl PreviewUnavailabilityEvidence {
     pub(crate) fn observe(&mut self, reason: &PreviewUnavailability) {
         self.snapshot.observations = self.snapshot.observations.saturating_add(1);
         match reason.disposition {
+            PreviewUnavailabilityDisposition::Stopped => {
+                self.snapshot.stopped = self.snapshot.stopped.saturating_add(1);
+            }
             PreviewUnavailabilityDisposition::NoContent => {
                 self.snapshot.no_content = self.snapshot.no_content.saturating_add(1);
             }
@@ -316,6 +329,18 @@ impl PreviewUnavailabilityEvidence {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scheduler_stop_is_expected_and_has_distinct_evidence() {
+        let reason =
+            PreviewUnavailability::stopped(PreviewOutputStage::TimelineComposite, "superseded");
+        assert_eq!(reason.code(), "preview.stopped");
+        let mut evidence = PreviewUnavailabilityEvidence::default();
+        evidence.observe(&reason);
+        assert_eq!(evidence.snapshot().stopped, 1);
+        assert_eq!(evidence.snapshot().failed, 0);
+        assert_eq!(evidence.snapshot().blocked, 0);
+    }
 
     #[test]
     fn evidence_keeps_disposition_stage_and_latest_detail_separate() {

@@ -6,7 +6,7 @@
 use std::collections::HashMap;
 
 use cosmic_text::{CacheKey, FontSystem, LayoutGlyph, SwashCache};
-use mondrian_ui_core::types::Rect;
+use mondrian_ui_core::types::{Point, Rect};
 use mondrian_ui_renderer::atlas::{TextureAtlas, TextureAtlasStats};
 
 /// 待上传到 GPU 的字形数据（单通道 alpha）
@@ -32,6 +32,7 @@ pub(crate) enum GlyphRasterizeOutcome {
     Resolved(Rect, u32, u32, i32, i32),
     Missing,
     PageReset,
+    Clipped,
 }
 
 impl GlyphAtlas {
@@ -66,10 +67,12 @@ impl GlyphAtlas {
                     GlyphRasterizeOutcome::Resolved(uv, width, height, top, left) => {
                         Some((uv, width, height, top, left))
                     }
-                    GlyphRasterizeOutcome::Missing | GlyphRasterizeOutcome::PageReset => None,
+                    GlyphRasterizeOutcome::Missing
+                    | GlyphRasterizeOutcome::PageReset
+                    | GlyphRasterizeOutcome::Clipped => None,
                 }
             }
-            GlyphRasterizeOutcome::Missing => None,
+            GlyphRasterizeOutcome::Missing | GlyphRasterizeOutcome::Clipped => None,
         }
     }
 
@@ -79,6 +82,28 @@ impl GlyphAtlas {
         glyph: &LayoutGlyph,
         allow_page_reset: bool,
     ) -> GlyphRasterizeOutcome {
+        self.get_or_rasterize_with_clip(font_system, glyph, allow_page_reset, Point::ZERO, None)
+    }
+
+    pub(crate) fn get_or_rasterize_with_clip(
+        &mut self,
+        font_system: &mut FontSystem,
+        glyph: &LayoutGlyph,
+        allow_page_reset: bool,
+        baseline: Point,
+        clip: Option<Rect>,
+    ) -> GlyphRasterizeOutcome {
+        let visible = |width: u32, height: u32, top: i32, left: i32| {
+            clip.is_none_or(|clip| {
+                Rect::new(
+                    baseline.x + glyph.x + left as f32,
+                    baseline.y - top as f32,
+                    width as f32,
+                    height as f32,
+                )
+                .intersects(&clip)
+            })
+        };
         // UI text atlas intentionally ignores subpixel bins (SubpixelBin).
         // We construct CacheKey with position (0,0) rather than going through
         // LayoutGlyph::physical(), because physical() encodes glyph.x.fract()
@@ -98,12 +123,26 @@ impl GlyphAtlas {
             glyph.cache_key_flags,
         );
         if let Some(&(uv, w, h, top, left)) = self.glyph_map.get(&cache_key) {
+            if !visible(w, h, top, left) {
+                return GlyphRasterizeOutcome::Clipped;
+            }
             return GlyphRasterizeOutcome::Resolved(uv, w, h, top, left);
         }
 
         let image = self.cache.get_image(font_system, cache_key);
         let (bmp_w, bmp_h, top, left, alpha) = match image {
-            Some(img) => swash_to_alpha(img),
+            Some(img) => {
+                let placement = img.placement;
+                if !visible(
+                    placement.width,
+                    placement.height,
+                    placement.top,
+                    placement.left,
+                ) {
+                    return GlyphRasterizeOutcome::Clipped;
+                }
+                swash_to_alpha(img)
+            }
             None => return GlyphRasterizeOutcome::Missing,
         };
         if bmp_w == 0 || bmp_h == 0 {

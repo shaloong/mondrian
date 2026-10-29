@@ -184,9 +184,18 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            ffmpeg libavcodec-dev libavformat-dev libavfilter-dev \
-            libavdevice-dev libswscale-dev libswresample-dev \
+            nasm libx264-dev libx265-dev libaom-dev libdav1d-dev \
+            libopenjp2-7-dev libfreetype-dev libharfbuzz-dev libfontconfig-dev \
+            libass-dev libssl-dev zlib1g-dev \
             libasound2-dev pkg-config patchelf pax-utils
+          ffmpeg_prefix="$RUNNER_TEMP/mondrian-ffmpeg"
+          bash scripts/build-linux-ffmpeg.sh "$RUNNER_TEMP/mondrian-ffmpeg-build" "$ffmpeg_prefix" 2
+          echo "MONDRIAN_FFMPEG_SOURCE_DIR=$ffmpeg_prefix/share/mondrian-ffmpeg-source" >> "$GITHUB_ENV"
+          echo "$ffmpeg_prefix/bin" >> "$GITHUB_PATH"
+          echo "FFMPEG_DIR=$ffmpeg_prefix" >> "$GITHUB_ENV"
+          echo "PKG_CONFIG_PATH=$ffmpeg_prefix/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}" >> "$GITHUB_ENV"
+          echo "RUSTFLAGS=-Lnative=$ffmpeg_prefix/lib${RUSTFLAGS:+ $RUSTFLAGS}" >> "$GITHUB_ENV"
+          echo "LD_LIBRARY_PATH=$ffmpeg_prefix/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" >> "$GITHUB_ENV"
 
       # ── macOS ──────────────────────────────────────────────────────────────
       - name: 安装 FFmpeg 与系统依赖 (macOS)
@@ -202,7 +211,9 @@ jobs:
           bash scripts/build-macos-ffmpeg.sh "$RUNNER_TEMP/mondrian-ffmpeg-build" "$ffmpeg_prefix" 2
           echo "MONDRIAN_FFMPEG_SOURCE_DIR=$ffmpeg_prefix/share/mondrian-ffmpeg-source" >> "$GITHUB_ENV"
           echo "$ffmpeg_prefix/bin" >> "$GITHUB_PATH"
+          echo "FFMPEG_DIR=$ffmpeg_prefix" >> "$GITHUB_ENV"
           echo "PKG_CONFIG_PATH=$ffmpeg_prefix/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}" >> "$GITHUB_ENV"
+          echo "RUSTFLAGS=-Lnative=$ffmpeg_prefix/lib${RUSTFLAGS:+ $RUSTFLAGS}" >> "$GITHUB_ENV"
           PKG_CONFIG_PATH="$ffmpeg_prefix/lib/pkgconfig" pkg-config --modversion libavcodec | grep -E '^62\.'
 
       # ── Windows ────────────────────────────────────────────────────────────
@@ -231,6 +242,25 @@ jobs:
             git -C C:\vcpkg checkout --detach FETCH_HEAD
           }
           & C:\vcpkg\bootstrap-vcpkg.bat -disableMetrics
+
+      - name: Activate MSVC x64 and verify static DXC prerequisites
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          . ./scripts/enter-windows-development.ps1 -MsvcOnly
+          foreach ($variableName in @('INCLUDE', 'LIB', 'LIBPATH', 'PATH',
+              'VCToolsInstallDir', 'VCToolsVersion', 'VSINSTALLDIR',
+              'VSCMD_ARG_TGT_ARCH', 'VSCMD_ARG_HOST_ARCH', 'WindowsSdkDir',
+              'WindowsSDKVersion', 'UniversalCRTSdkDir', 'UCRTVersion',
+              'CC', 'CXX', 'ASM')) {
+            $variableValue = [Environment]::GetEnvironmentVariable($variableName, 'Process')
+            if ([string]::IsNullOrWhiteSpace($variableValue) -or
+                $variableValue.Contains("`r") -or $variableValue.Contains("`n")) {
+              throw "Cannot publish the activated MSVC environment variable: $variableName"
+            }
+            "$variableName=$variableValue" | Out-File `
+              -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          }
 
       - name: 安装 FFmpeg (Windows, vcpkg)
         if: runner.os == 'Windows'
@@ -471,6 +501,7 @@ jobs:
           cp LICENSE "$stage_dir/LICENSE"
           cp -R LICENSES "$stage_dir/LICENSES"
           cp RELEASE_PROVENANCE.json "$stage_dir/RELEASE_PROVENANCE.json"
+          cp -R "$MONDRIAN_FFMPEG_SOURCE_DIR" "$stage_dir/FFMPEG_SOURCE"
 
           for executable in "$stage_dir/mondrian" "$stage_dir/ffmpeg" "$stage_dir/ffprobe"; do
             while IFS= read -r dependency; do
@@ -495,6 +526,7 @@ jobs:
           # host: it may silently satisfy an omitted private dependency from
           # /usr/lib. Prove that every non-baseline object in the recursive
           # closure resolves back into this staged package.
+          unset LD_LIBRARY_PATH LD_PRELOAD
           stage_root="$(realpath "$stage_dir")"
           for executable in "$stage_dir/mondrian" "$stage_dir/ffmpeg" "$stage_dir/ffprobe"; do
             if ldd "$executable" | grep -q 'not found'; then

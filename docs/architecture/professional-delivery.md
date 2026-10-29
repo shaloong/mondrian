@@ -436,3 +436,41 @@ generation and cancellation token. Canceling the old terminal identity cannot
 cancel the retry. This queue-level executor test is not media-artifact or physical
 delivery qualification; create-only publication and independent full decode/hash
 verification remain separate production boundaries.
+
+Export forwards reusable custom processors through its exclusive Effect Session.
+The frozen resource adapter explicitly grants zero processor residency pending
+coordinated native-worker grants; no definition-global plugin instance is used.
+
+Export's ordinary CPU compositor borrows ExportFrameRenderContext's existing
+job cancellation token, matching temporal/mixed native execution. It creates
+no mirrored token or cancellation thread. A stopped native render produces no
+working frame and is classified by the existing job cancellation authority.
+
+
+Export freezes explicit native Effect instance/byte residency alongside its
+active Effect working grant. Its single compositor-owned bank survives ordinary
+frame generations for independently evaluable processors; author occurrence,
+registration revision and extent prevent unrelated reuse. Stops, faults, extent
+changes and attempt shutdown retire workers. Optional retention never denies
+an otherwise admitted frame: oversized instances execute ephemerally, and idle
+siblings are evicted before active allocation.
+
+## Canonical Float association boundary
+
+The frozen visual Program retains the sole Timeline compiler's
+`EffectPassBlendPolicy` in both Export CPU and GPU consumers. Adjustment Normal
+means `Mix`: opacity interpolates original and processed associated linear RGB
+and coverage; Grade passes also use Mix. Other Adjustment modes carry explicit
+`Blend(mode)`, while ordinary source and graph Normal remain Over. Export does
+not infer a second policy during execution. The shared visual semantic epoch
+changes with this law so older composite artifacts cannot qualify as current.
+
+Export consumes the same complete typed Float graph values as Preview. Persistent working-frame artifacts preserve actual association. Explicit opaque delivery uses the sole Normal Over algebra before OCIO/quantization; temporal source tiles materialize their declared finite coverage contract during the existing required ROI copy and reject unrepresentable emission/extended alpha before DSP.
+
+## Heterogeneous visual completion admission
+
+Export consumes the sole prepared Effects route and its complete retained-byte
+frontier, including the single fixed processor-feedback container alongside all
+pixel boundary values. Invocation peaks reserve a second temporary container
+in Effects; Export does not substitute a pixel-only estimate or reinterpret the
+compiled route. The typed alpha-mask frontier control checks this complete sum.

@@ -415,8 +415,19 @@ default, and Project color changes build a complete new certificate. Sequence
 and Project change detection use
 their typed structural equality contracts rather than serializing JSON as a
 comparison mechanism. History admission plus candidate installation and
-generation publication then form one atomic operation. Runtime-only state must
-not leak into Project JSON unless it becomes an explicit Project contract.
+generation publication form one atomic operation. The actual Authoring Session
+takes its execution-publication writer before replacing any canonical document,
+History stack/pending command, revision, gesture or generation. All five real
+paths (prepared Sequence, Project, gesture cancel, Undo and Redo) use that gate.
+An old execution read guard therefore cannot install after authored state has
+already changed while the old generation remains visible. Detached validation,
+History cursor reservation and private footprint/cache preparation complete
+before the writer; the guarded region only moves prepared owners and publishes
+the existing canonical generation. Replaced document/certificate/History roots,
+diagnostic callbacks and logs retire after the writer is released. A poisoned
+execution gate still allows a validated author publication to complete, while
+refusing every execution admission. Runtime-only state must not leak into
+Project JSON unless it becomes an explicit Project contract.
 
 History stores typed before/after `AuthoringSnapshot` roots. The author model's
 copy-on-write allocations are shared between candidates and adjacent History
@@ -462,6 +473,34 @@ operations: the former records a validated parent return edge; the latter
 clears all nested ancestry. Project restore preserves the current target when
 it still belongs to the restored collection and otherwise uses that restored
 document's validated active fallback.
+
+## Floating author values in JSON
+
+The workspace JSON dependency enables exact floating round trips. Finite Double
+and Float parameter values retain their IEEE bit patterns through JSON text,
+including signed zero, subnormal values and finite limits. Actual `.mdp` archive
+save/reopen tests also bind audio gain bits. Approximate decimal parsing must not
+change author values, automation or processor signatures during persistence;
+individual fields do not compensate with tolerances or alternate JSON parsers.
+This changes JSON decoding only, not media sample/frame formats or DSP precision.
+A paired local Windows parser observation used 234,257 bytes containing 9,994
+assorted finite Double values, 200 decodes per run, and three old/precise pairs.
+Median time per decode was 0.502 ms versus 0.824 ms. This is parser CPU evidence,
+not realtime or cross-vendor qualification; audio sample transport and per-block
+Worker commands remain binary.
+
+## Test runtime isolation
+
+Media Asset mutation revision/publication tests bind the real missing-helper
+failure path explicitly, so worker state-machine evidence does not depend on
+FFmpeg helper discovery or external process startup latency. Production execution
+still discovers and invokes the packaged probe helper.
+
+App unit tests allocate a process-unique runtime namespace, independent of recycled
+operating-system PIDs. Recovery crash subprocesses explicitly inherit that namespace
+so they exercise the same durable authority as their parent. Existing unmarked
+runtime parents remain inert; test isolation never grants ownership to abandoned
+fixtures or weakens production directory validation.
 
 ## Asset Library
 
@@ -682,7 +721,7 @@ through a bounded reader directly into its typed Manifest or
 The value-based registry remains the explicit seam for future migrations
 without imposing its peak-memory cost on current Projects.
 
-Document schema v27 is the sole accepted Alpha author schema. It persists the
+Document schema v28 is the sole accepted Alpha author schema. It persists the
 Project-owned color environment and future-Sequence template, exact rational
 `TimelineTime`, canonical signal layouts and channel mappings, typed Routes and
 processor schemas, canonical proxy membership, closed `ClipContent`,
@@ -692,11 +731,10 @@ Title properties, a Clip-local visual author origin, closed Sequence `color`
 and `delivery` structures, and one tagged `ClipSourceTimeMap` whose constant
 variant persists exact origin, signed scale, and covering/strict-predecessor
 sampling boundary while deriving its terminal boundary from duration. Schema
-v27 additionally persists explicit Sequence-owned Dynamic HDR state (`Omit`
+v28 additionally persists explicit Sequence-owned Dynamic HDR state (`Omit`
 plus an empty Program catalog by default), bounded format-specific analyzed
 Program/Shot payloads, immutable analysis provenance, and strong Remake
-references. The 26-to-27 migration inserts that explicit empty state;
-deserialization does not use a hidden serde default. Schema v27 also persists
+references. Deserialization does not use a hidden serde default. Schema v28 also persists
 each media Clip's optional bounded editorial-source identity (reel,
 exact SMPTE source reference, and foreign item key) inside
 `MediaInterpretation`; it never promotes those interchange facts into Asset or
@@ -719,3 +757,159 @@ save/reopen tests.
 Checked current-document and pre-current SQLite fixtures must cover idempotent
 open, migration where supported, save, reopen, and semantic fingerprint
 retention.
+
+Continuous parameter interaction history belongs to AuthoringSession. Its
+Sequence/generation lease and independently bounded pending history command are
+ephemeral and are not serialized into .mdp files. Each live update commits
+canonical state independently, allowing saved snapshots to represent the exact
+current value. Pending history retains original and latest endpoints without
+altering completed Undo/Redo stacks. Finish admits one changed command using the
+ordinary retention policy; net-zero finish preserves the original Redo branch.
+
+Cancellation validates the current author source and restores the exact original
+Sequence with a fresh revision and author generation. It releases pending roots
+without changing completed history or eviction counters. An intervening command
+accepts the pending interaction atomically and invalidates its lease. Failed
+preparation, budget admission or validation leaves author state and both history
+ledgers unchanged. Disabled or insufficient Undo retention does not disable
+cancellation: pending origin admission has its own explicit byte budget.
+
+### Schema 30 and portable package version 2
+
+Schema 30 persists external processor resources as platform-tagged native units,
+complete ordered channel-contract lists and precise double/integer compound
+author values. Earlier
+alpha schemas, including scalar-contract schema 28, are rejected without migration.
+The Alpha document registry has no earlier-schema migration steps or plain-string
+resource aliases. Non-Unicode native filenames survive save/reopen exactly.
+Portable package version 2 uses the same representation for original source
+bindings; only the copied destination is a local safe relative package path.
+Resource rebinding matches original metadata without opening the original path.
+Media Library source coordinates and OCIO source metadata remain exact UTF-8;
+their boundary rejects ambiguous cross-platform text coordinates and excludes
+resource-only paths which have no exact Unicode representation. The Library
+transaction accepts source strings directly and opens only verified local
+bundled targets, preserving Asset identity and refreshing file fingerprints.
+
+Resource reference identity compares exact native spelling, including dotted
+components and separator spellings. Local `OsString` storage borrows a `Path`
+or transfers its existing buffer into `PathBuf` at the execution seam without
+copying filename units. Package inventory copies one canonical file while
+retaining every exact source coordinate for foreign-platform rebinding.
+
+
+Precise compound values retain their type, full component precision, defaults,
+parameter identities and authored keys through validated `.mdp` publication and
+fresh archive reads. Schema 30 rejects earlier alpha schemas without migration;
+portable package version 2 still uses the canonical project payload. The durable
+channel-contract integration test covers all six compound types, signed i32
+extremes and doubles that cannot be represented by Float32.
+
+Exact endurance fixture installation and its machine-plan imports share the
+same `test`/`validation` compilation boundary. Ordinary project lifecycle and
+the default `mondrian` product entrypoint do not depend on the optional
+qualification modules. The CI platform matrix builds that default entrypoint
+explicitly, independently of the validation binaries and test configuration.
+
+Visual property validation rejects nonfinite controls and normalized time controls
+on the wrong side or outside their segment before a document can execute or
+publish. The channel-contract integration test injects finite invalid serialized
+controls into an otherwise valid canonical document, then calls the real archive
+writer against an existing Unicode `.mdp`. Rejection preserves the original
+bytes, leaves no sibling temporary archive, and the original file still reopens
+with unchanged typed effect state and midpoint evaluation. This qualifies
+canonical document admission/publication, not plugin or LUT rendering.
+
+### Numeric curve control persistence
+
+Visual channels persist the same exact owner-time seconds and absolute
+parameter-value offsets as audio numeric controls. `DefaultBezier` persists flat
+one-third-span intent for unconnected endpoints. Project validation rejects
+wrong-side, over-span, nonfinite/unrepresentable, and forged constrained controls
+before archive publication. The alpha format has no old normalized handle
+compatibility layer. Canonical control coordinates, mode and key identity remain
+author data across durable save/reopen.
+
+### Read-only temporal control projections
+
+AnimatedProperty::channel_keyframe_handle resolves a typed control by canonical
+channel/key identity and temporal side; Linear/Hold or absent-neighbor sides have
+no visible handle. DefaultBezier retains its exact one-third-span flat intent.
+ExactAutomationCurve::keyframe_handle resolves the same stored/default control
+used by its segment evaluator. These methods do not create author state or add a
+second interpolation model. Product handle gestures retain ExactBezierHandle's
+owner-time and world-value coordinates; persisted curves and constrained tangent
+admission remain the existing canonical contracts.
+### Ordered temporal control reads
+
+TemporalBezierControl is an ephemeral read projection, with stable key identity,
+exact owner time, world value, neighbor time and canonical resolved handle. It
+is not persisted author data. AnimatedProperty::channel_keyframe_controls and
+ExactAutomationCurve::keyframe_controls visit keys once in time order, incoming
+before outgoing, using the same resolver as single-ID handle reads. Default
+control rounding and Hold/Linear suppression are unchanged. Neither path
+normalizes or mutates the author snapshot.
+
+
+### Schema 31: exact integer channel authorship
+
+Canonical channel keys now carry a discriminated Number(f64) or Integer(i64)
+author value. Integer Hold keys retain every bit through edits, archive snapshots,
+readback and prepared execution queries. The writer emits document schema 31;
+existing alpha rejection of earlier schemas remains, with no implicit migration
+or old scalar-value parser. The `.mdp` ZIP format and SQLite schema are unchanged.
+
+### Native audio author gesture boundary
+
+NativeAudioAuthorGesture is issued by the existing AuthoringSession and retains
+only exact session/sequence/group/owner/definition identities. Scope owners carry
+their concrete Component occurrence. Begin publishes no author change; updates
+use the native kind of the existing Sequence gesture and targeted Timeline operation; End and Cancel
+use the existing bounded history. Parameters and opaque state within one native
+group share one Undo/Redo restore point, and unrelated author commits invalidate
+late updates or cancellation. Save must settle the group before snapshotting.
+
+This handle is author admission only. It does not prove a child native object,
+callback origin, renderer/plan/epoch, ordered complete event source, or runtime
+installation lease. The product adapter must validate all those before applying
+callbacks. Explicit `Unkeyed` callbacks refuse existing keys; `AtOwnerTime`
+writes carry a qualified exact canonical domain and preserve the complete
+author curve through ordinary automation admission. Product origin proof,
+same-live canonical Plan handoff and exact native delivery acknowledgement
+remain required; committing author state alone does not update a live DSP Plan. This author layer introduces no editor window,
+controller copy, event queue, opaque replay checkpoint, or second history.
+
+
+## Native author completion barrier
+
+The sole Sequence gesture distinguishes an ordinary interactive edit from a
+native state whose terminal configuration is still pending. Live native values
+remain validated Session commits in the same bounded group. Ordinary Sequence
+or Project edits, Undo/Redo, gesture start/end, Sequence navigation and persistence
+snapshot admission refuse before running caller closures while that state is
+incomplete. The product must deliver a coherent control-side final configuration
+for the exact ordered native source/installed owner or explicitly cancel it.
+An unrelated action never invents an End or silently saves scalar edits with an
+older opaque seed. Read-only UI/execution observation still uses canonical state.
+
+Native updates require the existing prepared History candidate to retain this
+group's reversible origin before installation. A disabled/oversize history
+admission refuses atomically instead of accepting an unretained native edit and
+sealing an unretained command. Ordinary interactive history policy is unchanged.
+Final native completion atomically applies its mandatory opaque configuration
+with the current parameter endpoint, then seals one existing group. Cancel uses
+that same retained origin and does not create a second history or rollback an
+independent author change. Author handles still do not prove runtime ownership;
+exact native source/install admission and physical GUI qualification are separate.
+
+### Persisted native parameter reference absence
+
+The current audio parameter format requires the `automation` field. A curve
+object is a host reference; explicit JSON `null` is its absence. There is no
+compatibility parser for an omitted field or parallel persisted current value.
+Stable schemas and native opaque configuration remain in the same canonical
+processor. Native reference removal uses the existing bounded author group and
+history candidate; Undo/Redo restores its exact curve/absence and opaque seed.
+The ordinary coherent Session snapshot and durable `.mdp` publication preserve
+that distinction on reopening. An unsettled native-state group still blocks
+save admission.

@@ -3,7 +3,8 @@
 //! FFmpeg's encoder registry only proves that an implementation was compiled
 //! in. Mondrian admits a hardware backend only after it matches the active
 //! renderer adapter vendor and completes a bounded real encode using the exact
-//! codec profile and output pixel format. Generic Export feeds a CPU rawvideo
+//! codec profile, output pixel format, raster, cadence and coding structure.
+//! Generic Export feeds a CPU rawvideo
 //! pipe, so a selected hardware backend still performs one CPU-to-encoder
 //! upload. Platform resident routes publish separate same-device diagnostics.
 
@@ -208,21 +209,25 @@ impl From<&wgpu::AdapterInfo> for ActiveGraphicsAdapterIdentity {
 /// Resolve the preferred encoder. Hardware is an opportunistic acceleration,
 /// never an unproved alias for the software delivery contract.
 pub(crate) fn resolve_video_encoder(
-    codec: &VideoCodecConfig,
-    output_pixel_format: &str,
+    delivery: &crate::delivery::ResolvedExportDeliveryContract,
     adapter: Option<&ActiveGraphicsAdapterIdentity>,
     static_hdr_metadata: bool,
     cancellation: &ExecutionCancellationToken,
 ) -> mondrian_core::Result<ResolvedVideoEncoderSelection> {
+    let crate::delivery::ResolvedExportArtifactEncoding::MediaFile { video: codec, .. } =
+        &delivery.artifact
+    else {
+        return Err(mondrian_core::MondrianError::Other(anyhow::anyhow!(
+            "video encoder admission requires a media-file delivery"
+        )));
+    };
     resolve_video_encoder_with_probe(
         codec,
         adapter,
         static_hdr_metadata,
         cancellation,
         mondrian_media::ffmpeg_command,
-        |command, candidate| {
-            probe_encoder(command, candidate, codec, output_pixel_format, cancellation)
-        },
+        |command, candidate| probe_encoder(command, candidate, codec, delivery, cancellation),
     )
 }
 
@@ -480,34 +485,10 @@ fn probe_encoder(
     command: &mut Command,
     encoder: ResolvedVideoEncoder,
     codec: &VideoCodecConfig,
-    output_pixel_format: &str,
+    delivery: &crate::delivery::ResolvedExportDeliveryContract,
     cancellation: &ExecutionCancellationToken,
 ) -> mondrian_core::Result<()> {
-    command
-        .arg("-hide_banner")
-        .arg("-loglevel")
-        .arg("error")
-        .arg("-f")
-        .arg("lavfi")
-        .arg("-i")
-        .arg("color=c=black:s=256x256:r=30:d=0.1")
-        .arg("-frames:v")
-        .arg("1")
-        .arg("-an")
-        .arg("-pix_fmt")
-        .arg(output_pixel_format);
-    apply_video_encoder_args(
-        command,
-        codec,
-        ResolvedVideoCodingStructure::H26xLongGop {
-            keyframe_interval_frames: 60,
-            max_b_frames: 3,
-            closed_gop: true,
-            scene_cut: crate::video_encoding::VideoSceneCutPolicy::Disabled,
-        },
-        encoder,
-    );
-    command.arg("-f").arg("null").arg("-");
+    configure_encoder_probe(command, encoder, codec, delivery);
     let output = run_supervised_command(
         command,
         None,
@@ -531,6 +512,35 @@ fn probe_encoder(
             detail
         }
     )))
+}
+
+fn configure_encoder_probe(
+    command: &mut Command,
+    encoder: ResolvedVideoEncoder,
+    codec: &VideoCodecConfig,
+    delivery: &crate::delivery::ResolvedExportDeliveryContract,
+) {
+    command
+        .arg("-hide_banner")
+        .arg("-loglevel")
+        .arg("error")
+        .arg("-f")
+        .arg("lavfi")
+        .arg("-i")
+        .arg(format!(
+            "color=c=black:s={}x{}:r={}/{},trim=end_frame=1",
+            delivery.resolution.width,
+            delivery.resolution.height,
+            delivery.frame_rate.num,
+            delivery.frame_rate.den,
+        ))
+        .arg("-frames:v")
+        .arg("1")
+        .arg("-an")
+        .arg("-pix_fmt")
+        .arg(delivery.pixel_format);
+    apply_video_encoder_args(command, codec, delivery.video_coding, encoder);
+    command.arg("-f").arg("null").arg("-");
 }
 
 pub(crate) fn apply_video_encoder_args(
@@ -715,6 +725,63 @@ mod tests {
 
     fn prores_xq() -> VideoCodecConfig {
         VideoCodecConfig::ProRes { profile: ProResProfile::FourFourFourFourXq }
+    }
+
+    #[test]
+    fn probe_uses_frozen_raster_exact_cadence_and_coding_instead_of_a_reference_encode() {
+        for (width, height, rate, expected_source) in [
+            (
+                16,
+                16,
+                mondrian_core::Rational::FPS_25,
+                "color=c=black:s=16x16:r=25/1,trim=end_frame=1",
+            ),
+            (
+                1920,
+                1080,
+                mondrian_core::Rational::new(30_000, 1_001),
+                "color=c=black:s=1920x1080:r=30000/1001,trim=end_frame=1",
+            ),
+        ] {
+            let mut preset = crate::preset::ExportPreset::h264_aac_sdr_1080p();
+            preset.resolution = Some(crate::preset::Resolution { width, height });
+            preset.frame_rate = crate::preset::ExportParameter::Explicit(rate);
+            let mut delivery = crate::delivery::resolve_export_delivery(
+                &preset,
+                &mondrian_timeline::sequence::SequenceSettings::default(),
+                &mondrian_core::ProjectColorEnvironment::default(),
+            )
+            .unwrap();
+            delivery.video_coding = ResolvedVideoCodingStructure::H26xLongGop {
+                keyframe_interval_frames: 17,
+                max_b_frames: 1,
+                closed_gop: true,
+                scene_cut: crate::video_encoding::VideoSceneCutPolicy::Disabled,
+            };
+            let crate::delivery::ResolvedExportArtifactEncoding::MediaFile { video, .. } =
+                &delivery.artifact
+            else {
+                unreachable!()
+            };
+            let mut command = Command::new("protocol-only-not-spawned");
+            configure_encoder_probe(
+                &mut command,
+                ResolvedVideoEncoder::NvidiaNvenc,
+                video,
+                &delivery,
+            );
+            let args: Vec<_> =
+                command.get_args().map(|v| v.to_string_lossy().into_owned()).collect();
+            for pair in [
+                ["-i", expected_source],
+                ["-g", "17"],
+                ["-bf", "1"],
+                ["-pix_fmt", "yuv420p"],
+                ["-frames:v", "1"],
+            ] {
+                assert!(args.windows(2).any(|actual| actual == pair), "{args:?}");
+            }
+        }
     }
 
     #[test]
@@ -1007,9 +1074,18 @@ mod tests {
             .expect("active renderer adapter");
         let adapter = ActiveGraphicsAdapterIdentity::from(&context.adapter.get_info());
         let expected = hardware_candidate(&h264(), adapter.vendor);
+        let mut preset = crate::preset::ExportPreset::h264_aac_sdr_1080p();
+        preset.resolution = Some(crate::preset::Resolution { width: 256, height: 256 });
+        preset.frame_rate =
+            crate::preset::ExportParameter::Explicit(mondrian_core::Rational::FPS_30);
+        let delivery = crate::delivery::resolve_export_delivery(
+            &preset,
+            &mondrian_timeline::sequence::SequenceSettings::default(),
+            &mondrian_core::ProjectColorEnvironment::default(),
+        )
+        .unwrap();
         let selected = resolve_video_encoder(
-            &h264(),
-            "yuv420p",
+            &delivery,
             Some(&adapter),
             false,
             &ExecutionCancellationToken::new(),

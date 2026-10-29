@@ -1,0 +1,14 @@
+[package]
+name = "mondrian-vst3-initial-values-fixture"
+version = "0.0.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+vst3 = { path = "../../../../../vendor/vst3-sdk" }
+
+[workspace]

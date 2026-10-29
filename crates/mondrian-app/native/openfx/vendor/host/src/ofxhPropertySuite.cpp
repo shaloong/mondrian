@@ -180,6 +180,8 @@ namespace OFX {
         , _dimension(other._dimension)
         , _pluginReadOnly(other._pluginReadOnly)
         , _getHook(0)
+        , _maximumDimension(other._maximumDimension)
+        , _writeLimitExceeded(other._writeLimitExceeded)
       {
       }
 
@@ -199,9 +201,9 @@ namespace OFX {
 
       template<class T> PropertyTemplate<T>::PropertyTemplate(const std::string &name,
         int dimension,
-        bool /*pluginReadOnly*/,
+        bool pluginReadOnly,
         APIType defaultValue)
-        : Property(name, T::typeCode, dimension)
+        : Property(name, T::typeCode, dimension, pluginReadOnly)
       {
 
         if (dimension) {
@@ -231,6 +233,9 @@ namespace OFX {
       template<class T>
       const typename T::ReturnType PropertyTemplate<T>::getValue(int index) const
       {
+        // Raw storage and hooks must obey the same effective property extent.
+        // Validate before invoking a hook or touching the caller's output.
+        if (index < 0 || index >= getDimension()) throw Exception(kOfxStatErrBadIndex);
         if (_getHook) {
           return _getHook->getProperty<T>(_name, index);
         }
@@ -244,6 +249,8 @@ namespace OFX {
       // get multiple values
       template<class T>
       void PropertyTemplate<T>::getValueN(typename T::APIType *values, int count) const {
+        // Reject the entire request before a hook or raw prefix copy can write.
+        if (count < 0 || count > getDimension()) throw Exception(kOfxStatErrBadIndex);
         if (_getHook) {
           _getHook->getPropertyN<T>(_name, values, count);
         }
@@ -284,7 +291,11 @@ namespace OFX {
       /// set one value
       template<class T> void PropertyTemplate<T>::setValue(const typename T::Type &value, int index)
       {
-        if (index < 0 || ((size_t)index > _value.size() && _dimension)) {
+        if (_maximumDimension && index >= _maximumDimension) {
+          _writeLimitExceeded = true;
+          throw Exception(kOfxStatErrBadIndex);
+        }
+        if (index < 0 || (_dimension && index >= _dimension)) {
           throw Exception(kOfxStatErrBadIndex);
         }
 
@@ -299,10 +310,14 @@ namespace OFX {
       /// set multiple values
       template<class T> void PropertyTemplate<T>::setValueN(const typename T::APIType *value, int count)
       {
-        if (_dimension && ((size_t)count > _value.size())) {
+        if (_maximumDimension && count > _maximumDimension) {
+          _writeLimitExceeded = true;
           throw Exception(kOfxStatErrBadIndex);
         }
-        if (_value.size() != (size_t)count) {
+        if (count < 0 || (_dimension && count > _dimension)) {
+          throw Exception(kOfxStatErrBadIndex);
+        }
+        if (!_dimension && _value.size() != (size_t)count) {
           _value.resize(count);
         }
         for (int i=0;i<count;i++) {
@@ -781,6 +796,7 @@ namespace OFX {
 #           endif
             return kOfxStatErrUnknown;
           }
+          if (prop->getPluginReadOnly()) { return kOfxStatErrValue; }
           prop->setValue(value, index);
         } catch (const Exception& e) {
 #         ifdef OFX_DEBUG_PROPERTIES
@@ -829,6 +845,7 @@ namespace OFX {
 #           endif
             return kOfxStatErrUnknown;
           }
+          if (prop->getPluginReadOnly()) { return kOfxStatErrValue; }
           prop->setValueN(values, count);
         } catch (const Exception& e) {
 #         ifdef OFX_DEBUG_PROPERTIES
@@ -956,6 +973,7 @@ namespace OFX {
 #           endif
             return kOfxStatErrUnknown;
           }
+          if (prop->getPluginReadOnly()) { return kOfxStatErrValue; }
           prop->reset();
 #         ifdef OFX_DEBUG_PROPERTIES
           std::cout << ' ' << StatStr(kOfxStatOK) << std::endl;

@@ -347,7 +347,7 @@ fn default_config() -> Result<TimelineRenderCacheConfig, String> {
 mod tests {
     use super::*;
     use mondrian_core::{WorkingColorSpace, WorkingRgbaF32Frame};
-    use mondrian_render_cache::{TimelineRenderCacheAlpha, TimelineRenderCacheFormat};
+    use mondrian_render_cache::TimelineRenderCacheFormat;
     use std::time::{Duration, Instant};
 
     #[test]
@@ -424,11 +424,14 @@ mod tests {
             2,
             1,
             TimelineRenderCacheFormat::LosslessRgba32FloatZstd,
-            TimelineRenderCacheAlpha::StraightCoverage,
+            mondrian_core::ColorFrameAlphaFormats::ALL,
+            mondrian_core::ImageSampling::UNIT_SQUARE,
         );
         let frame = TimelineRenderCacheFrame::new(
             identity,
             WorkingRgbaF32Frame {
+                sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
+                alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
                 width: 2,
                 height: 1,
                 data: vec![[0.25, 0.5, 1.0, 1.0]; 2],

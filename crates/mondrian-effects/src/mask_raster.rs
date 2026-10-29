@@ -23,7 +23,7 @@ pub enum MaskRasterError {
     /// The generation or owner canceled preparation/raster work.
     #[error("mask rasterization was canceled")]
     Canceled,
-    /// Authored or plugin-emitted geometry is not finite or structurally valid.
+    /// Authored or extension-emitted geometry is not finite or structurally valid.
     #[error("mask geometry is invalid: {reason}")]
     InvalidGeometry {
         /// Stable failure reason.

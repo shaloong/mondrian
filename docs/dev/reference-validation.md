@@ -857,3 +857,12 @@ Undo/Redo, durable `.mdp` publication, and a fresh Authoring Session reopen.
 Because its one-byte source is never decoded or encoded, this gate is not
 evidence of picture, PCM, codec, or delivery correctness; those obligations
 remain with the fixed-corpus executable slices.
+
+## Modal, resource and LUT authoring qualification
+
+The 2026-10-05 clean `14bf284` snapshot passed a fresh complete Golden 3/3
+plus explicit native resource and saved-Redo/reopen qualification.
+[Modal, resource and LUT acceptance](modal-resource-lut-acceptance.md) records
+the product hash, report location, process supervision, pixel assertions and
+remaining physical/platform obligations. Filtered and ignored test counts are
+reported separately; these checks do not establish full plugin compatibility.

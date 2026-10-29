@@ -58,10 +58,10 @@ docs: clarify Windows setup
 ## Contribution agreement
 
 Contributions require the [CLA](legal/CLA.md). Read the
-[privacy notice](legal/CLA-PRIVACY.md) and follow the
-[signing instructions](legal/CLA-SERVICE.md). Contributors retain copyright;
+[privacy notice](legal/CLA-PRIVACY.md) and follow the agreement's signing
+instructions. Contributors retain copyright;
 the CLA includes commercial relicensing permission. Using Mondrian or publishing
-an independent plugin does not require signing it.
+an independent Extension does not require signing it.
 
 Keep private authorization records out of public issues and PRs. Contact
 **contact@shaloong.com** for signing or authorization questions.

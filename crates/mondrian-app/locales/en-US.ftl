@@ -42,6 +42,16 @@ project-settings-custom-detail =
 project-settings-cancel = Cancel
 project-settings-apply = Apply
 sequence-settings-title = Sequence settings
+command-file-musical_time = Musical Time...
+music-title = Musical time
+music-description = Set a constant tempo and the sequence time of its first beat. Decimal or fraction input is exact. Leave the time signature blank if unknown.
+music-enabled = Provide musical time to audio plug-ins
+music-tempo = Tempo (BPM)
+music-origin = First beat (seconds)
+music-signature = Time signature (e.g. 7/8)
+music-invalid-tempo = Enter a positive tempo within the supported exact time range.
+music-invalid-origin = Enter a valid first-beat time in seconds.
+music-invalid-signature = Enter a positive time signature, such as 7/8, or leave it blank.
 sequence-settings-description = Adjust the active sequence's timeline format and preview settings.
 sequence-tab-format = Format
 sequence-tab-color = Color
@@ -98,6 +108,7 @@ menu-help = Help
 menu-import = Import
 menu-import-folder = Folder...
 menu-install-openfx-filter = Install OpenFX Filter…
+menu-install-openfx-generator = Install OpenFX Generator Effects…
 menu-export = Export
 menu-export-settings = Export Settings...
 menu-workspace = Workspace
@@ -203,6 +214,7 @@ effect-category-stylize = Stylize
 effect-category-transform = Transform
 effect-category-keying = Keying
 effect-category-plugins = Plugins
+effect-category-external = External Effects
 effect-basic-correction = Basic Correction
 effect-white-balance = White Balance
 effect-lut-3d = 3D LUT
@@ -681,3 +693,972 @@ command-panel-inspector = Inspector Panel
 command-panel-effects = Effects Panel
 command-panel-node_graph = Node Graph Panel
 command-panel-export = Export Panel
+mask-section = Power Windows
+mask-add = Add
+mask-shape-rectangle = Rectangle
+mask-shape-ellipse = Ellipse
+mask-shape-path = Path
+mask-shape-bezier = Bézier
+mask-controls = Controls
+mask-enabled = Enabled
+mask-move-up = Up
+mask-move-up-tooltip = Move mask up
+mask-move-down = Down
+mask-move-down-tooltip = Move mask down
+mask-remove = Remove
+mask-remove-tooltip = Remove mask
+mask-lock = Lock
+mask-lock-editing = Lock editing
+mask-shape = Shape
+mask-shape-animation = Shape animation
+mask-keyframes = Keyframes
+mask-insert-point-hint = Alt-click a curve to insert a control point
+mask-track-object-forward = Object · Forward
+mask-track-object-backward = Object · Backward
+mask-track-object-both = Object · Both directions
+mask-track-planar-forward = Plane · Forward
+mask-track-planar-backward = Plane · Backward
+mask-track-planar-both = Plane · Both directions
+mask-tracking = Tracking
+mask-select-tracking = Choose model and direction…
+mask-tracking-status = Tracking status
+mask-tracking-controls = Tracking controls
+mask-cancel = Cancel
+mask-recompute = Recompute
+mask-status-generated = Generated · Ready to recompute
+mask-status-untracked = Not tracked
+mask-status-queued = Queued
+mask-status-analyzing = Analyzing { $completed }/{ $total }
+mask-status-canceling = Canceling
+mask-status-canceled = Canceled
+mask-status-completed = Complete · Ready to recompute
+mask-status-cache-hit = Cached result applied
+mask-status-stale = Result is stale
+mask-status-stale-detail = Stale · { $detail }
+mask-status-failed = Failed
+mask-status-failed-detail = Failed · { $detail }
+inspector-title = Inspector
+inspector-selected-clip = Selected clip
+inspector-no-clip-selected = No clip selected
+inspector-clip-style = Clip Style
+inspector-enabled = Enabled
+inspector-enable-effect = Enable effect
+inspector-opacity = Opacity
+inspector-color = Color
+inspector-basic-title = Basic Title
+inspector-transform = Transform
+inspector-position-x = Position X (px)
+inspector-position-y = Position Y (px)
+inspector-scale-x = Scale X (%)
+inspector-scale-y = Scale Y (%)
+inspector-anchor-x = Anchor X (px)
+inspector-anchor-y = Anchor Y (px)
+inspector-rotation = Rotation (°)
+inspector-timing = Timing
+inspector-speed = Speed (%)
+inspector-source-time = Source time
+inspector-hold = Hold
+inspector-resume-speed = Resume speed (%)
+inspector-place-playhead-in-clip = Place the playhead inside the clip first
+inspector-update-hold-frame = Update to playhead frame
+inspector-create-hold-frame = Freeze at playhead
+inspector-freeze-frame = Freeze frame
+inspector-audio-component = Audio Component
+inspector-audio-component-numbered = Audio Component { $number }
+inspector-audio-in-mix = Include in mix
+inspector-audio-volume = Volume (dB)
+inspector-audio-pan = Pan / Balance
+inspector-audio-volume-curve = Volume curve
+inspector-audio-pan-curve = Pan curve
+inspector-audio-logical-source = Logical source
+inspector-audio-reprobe-file = Reprobe current file…
+inspector-audio-stream-binding = Asset stream binding
+inspector-audio-fade-in = Fade in (s)
+inspector-audio-fade-in-curve = Fade in curve
+inspector-audio-fade-out = Fade out (s)
+inspector-audio-fade-out-curve = Fade out curve
+inspector-audio-fade-constant-gain = Constant Gain
+inspector-audio-fade-equal-power = Equal Power
+inspector-grade-graph = Grade Graph
+inspector-grade-clip = Clip
+inspector-grade-create = Create Clip Grade
+inspector-grade-group = Group
+inspector-grade-pre-post = Group Pre/Post
+inspector-grade-identity = Identity
+inspector-grade-timeline = Timeline
+inspector-grade-version-nodes = Version / Nodes
+inspector-grade-summary = { $version } · { $versions } versions · { $nodes } nodes
+inspector-grade-add-node = Add Node
+inspector-grade-add-node-placeholder = Add grade node…
+inspector-effect-controls = Controls
+inspector-effect-move-up = Up
+inspector-effect-move-up-tooltip = Move effect up
+inspector-effect-move-down = Down
+inspector-effect-move-down-tooltip = Move effect down
+inspector-effect-remove = Remove
+inspector-effect-remove-tooltip = Remove effect
+inspector-effect-curve = { $name } curve
+inspector-animation = Animation
+inspector-curve = Curve
+node-graph-title = Node Graph
+node-graph-select-clip = Select a clip to inspect its render chain
+node-graph-source = Source
+node-graph-output = Output
+node-graph-composite = Composite
+node-graph-adjustment = Adjustment
+node-graph-nested-sequence = Nested Sequence
+node-graph-solid-color = Solid Color
+node-graph-media-clip = Media Clip
+node-graph-clip-effects = { $clip } / { $count } effects
+export-no-sequence = No sequence
+export-hdr-select-sequence = Select a sequence to configure Dynamic HDR delivery
+export-anc-select-sequence = Select a sequence before attaching an ANC frame range
+export-status-select-sequence = Open or select a sequence before exporting
+export-status-no-presets = No export presets available
+export-status-incompatible = Incompatible delivery settings: { $error }
+export-status-anc-failed = ANC preflight failed: { $error }
+export-status-error = Error: { $error }
+export-status-select-output = Choose an output path to add this job to the queue
+export-status-ready = Ready
+export-hdr-omit = Omit Dynamic HDR
+export-hdr-preserve = Preserve { $family } byte for byte
+export-hdr-remake = Remake: { $program }
+export-hdr-missing-program = Remake: missing Program
+export-hdr-omit-readiness = Dynamic metadata is explicitly omitted; the sequence delivery policy controls static HDR independently
+export-hdr-preserve-readiness = Only a complete source-file copy with byte-for-byte preservation and a new probe of { $family } is allowed; edits, remuxing, and rendering do not fall back
+export-hdr-remake-readiness = { $standard } / { $shots } shots; requires qualified, authorized generation, independent verification, and human HDR/SDR QC adapters
+export-hdr-missing-readiness = The referenced Dynamic HDR Program is missing; delivery is blocked
+export-hdr-preserve-st2094 = Preserve ST 2094-40 App #4 byte for byte
+export-hdr-preserve-dolby = Preserve Dolby Vision metadata byte for byte
+export-hdr-open-sequence = { $readiness }; open this sequence to change its delivery intent
+export-job-pending = Pending
+export-job-rendering-progress = Rendering { $completed }/{ $total }
+export-job-cancelling = Cancelling
+export-job-completed = Completed
+export-job-failed = Failed: { $detail }
+export-job-cancelled = Cancelled
+export-job-preparing = Preparing
+export-job-rendering = Rendering
+export-job-encoding = Encoding
+export-job-packaging = Packaging
+export-job-validating = Validating
+export-job-publishing = Publishing
+export-preset-modified = (modified)
+export-image-sequence-directory = Image sequence directory
+export-no-video = No video
+export-follow-sequence-output = Follow sequence Program Output
+export-legal-rgb-range = Clamp to legal RGB signal range
+export-no-audio-image-sequence = No audio (image sequence)
+export-delivery-title = Delivery title
+export-issuer = Issuer
+export-creator-system = Creating system
+export-language = RFC 5646 language
+export-browse = Browse…
+export-output-path = Output path
+export-add-to-queue = Add to queue
+export-import-anc = Import ANC / captions…
+export-remove = Remove
+export-anc-none = No ANC / broadcast captions selected
+export-import-pse = Import PSE configuration…
+export-pse-none = No independent regulatory analyzer selected
+export-clear-finished = Clear finished
+export-no-exportable-sequence = No exportable sequence
+export-format = Format
+export-container = Container
+export-video-codec = Video codec
+export-resolution = Resolution
+export-frame-rate = Frame rate
+export-width = Width
+export-height = Height
+export-video-signal = Video signal
+export-bit-depth = Bit depth
+export-range = Range
+export-chroma = Chroma sampling
+export-color-output = Color output
+export-processing-mode = Processing mode
+export-target-space = Target space
+export-encoding-parameters = Encoding parameters
+export-max-bitrate = Max bitrate (kbps)
+export-closed-gop = Closed GOP
+export-scene-cut-keyframes = Insert keyframes at scene cuts
+export-keyframe-interval = Keyframe interval (seconds)
+export-max-b-frames = Maximum consecutive B frames
+export-scene-cut = Scene cut
+export-lookahead-frames = Lookahead frames
+export-palette-dither = Enable palette dithering
+export-palette-colors = Palette colors
+export-dither = Dither
+export-controls = Controls
+export-fixed-profile = Determined by the qualified fixed profile
+export-audio = Audio
+export-codec = Codec
+export-audio-bitrate = Bitrate (kbps)
+export-sample-depth = Sample depth
+export-queue = Queue
+export-jobs = Jobs
+export-no-jobs = No queued jobs
+export-queued-jobs = { $count } queued { $count ->
+    [one] job
+   *[other] jobs
+}
+export-preset = Preset
+export-details = Details
+export-delivery-metadata = Delivery metadata
+export-title = Title
+export-creator = Creator
+export-language-short = Language
+export-broadcast-anc = Broadcast ANC
+export-select = Select
+export-source = Source
+export-frame-range = Frame range
+export-frame-rate-packets = Frame rate / packets
+export-qualification = Qualification
+export-regulatory-pse = Regulatory PSE
+export-analyzer = Analyzer
+export-status = Status
+export-dynamic-hdr-delivery = Dynamic HDR delivery
+export-intent = Intent
+export-hdr-program-count = { $count } analyzed { $count ->
+    [one] Program
+   *[other] Programs
+}
+export-qualification-status = Qualification status
+export-input = Input
+export-sequence = Sequence
+export-summary = Summary
+export-output = Output
+export-path = Path
+export-cancel = Cancel
+export-job = Job
+export-anc-frame-range = 0…{ $last } · { $count } frames · source start { $start }
+export-anc-cadence = { $rate } fps · { $packets } packets
+export-anc-source-scc = SCC V1.0 · 608 Field 1
+export-anc-source-cdp = Raw CDP · ST334-2:2015
+export-anc-caption-readiness = { $format } · importer v{ $version } · 608 channel bitmap { $channels } · 708 services { $services }. Transport checks passed; publish after reading the delivered file back. Caption display and SDI hardware are not qualified.
+export-anc-structure-readiness = ST436 structure and export range verified; publish after reading the delivered file back. SDI hardware is not qualified.
+export-anc-guidance = AS-11: ANC JSON, SCC V1.0 (29.97→59.94 / Field 1), or raw CDP; up to 8 MiB / 100000 caption frames on VANC line 20. Align to the sequence start timecode and export range.
+export-pse-configured = Configuration frozen; verify analyzer identity on queueing and rescan the delivered file before determining the regulatory result
+export-pse-guidance = Import a JSON configuration for the provider and broadcast QC profile
+export-sequence-summary = Timeline render (V{ $video } / A{ $audio })
+export-follow-sequence = Follow sequence
+export-no-audio = No audio
+export-image-png8 = PNG 8-bit (lossless)
+export-image-png16 = PNG 16-bit (lossless)
+export-image-exr-half = OpenEXR Half (ZIP16)
+export-image-exr-float = OpenEXR Float32 (ZIP16)
+export-image-dpx16 = DPX 16-bit RGB
+export-image-tiff16 = TIFF 16-bit (Deflate)
+export-image-tiff-float = TIFF Float32 (lossless)
+export-alpha-flatten-black = Composite over black
+export-alpha-preserve = Preserve straight alpha
+export-color-follow-sequence = Follow sequence Program Output
+export-color-rendering-view = Project engine Rendering View
+export-color-colorimetric = Direct colorimetric transform
+export-range-in-out = Sequence In/Out
+export-range-entire = Entire sequence
+export-range-work-area = Work area
+export-directory-package = directory package
+export-op1a-mxf-file = OP1a MXF file
+export-summary-professional = { $resolution } / { $profile } / { $essence } / { $frame_rate } / PCM 24-bit 48 kHz stereo / { $layout } / .{ $extension }
+export-summary-audio-stems = Program Output stems / PCM 24-bit WAV / one file per output
+export-summary-image-sequence = { $resolution } / { $format } / { $color } / { $alpha } / { $frame_rate } / .{ $extension } directory
+export-summary-media = { $resolution } / { $codec } / { $bitrate } / { $color } / { $bit_depth } / { $range } / { $chroma } / { $alpha } / { $audio } / .{ $extension }
+export-fixed-profile-class = Fixed Profile/Class representation
+export-on = on
+export-off = off
+export-gif-rate-control = { $colors } colors / dither { $dither }
+export-rate-control-max = CRF { $crf } / max { $max } kbps
+export-rate-control = CRF { $crf }
+
+# Export diagnostic summaries retain provider codes as values.
+export-diagnostic-none = None
+export-diagnostic-pass = Passed
+export-diagnostic-warn = Warning
+export-diagnostic-fail = Failed
+export-diagnostic-complete = Complete
+export-diagnostic-incomplete = Incomplete
+export-diagnostic-warning-code = Warning: { $code }
+export-broadcast-qc-summary = Broadcast QC: { $profile }@{ $edition } / { $verdict } / { $frames } frames ({ $coverage }) / findings { $findings }, retained { $retained }, overflow { $overflow } / obligations { $obligations } / { $complete }
+export-color-assets-summary = assets { $count } / issues { $issues }
+export-color-health-summary = Color: { $verdict } / { $frames } frames / metadata { $metadata } / overrides { $overrides } / policy { $policy } / data { $data } / rejected { $rejected } / { $assets } / checks { $checks } / causes { $causes } / actions { $actions } / stages CPU input { $cpu_in }, CPU output { $cpu_out }, GPU { $gpu }, blockers { $blockers }, transfer { $transfer } / GPU blockers shader { $shader }, resource { $resource }, wrapper { $wrapper }, pipeline { $pipeline } / composites float { $float }, legacy { $legacy }, reasons { $reasons }
+
+# Runtime status bar and retained notification history
+status-ready = Ready
+status-history-title = Recent notifications · ↑/↓ · PgUp/PgDn · Home/End · Esc
+status-history-empty = No notifications
+status-history-accessibility = Recent notifications. Current status: { $status }
+status-export-pending = Export queued ({ $count })
+status-export-frames = Exporting frame { $completed }/{ $total } ({ $count } queued)
+status-export-phase = Export: { $phase } ({ $count } queued)
+status-export-cancelling = Cancelling export ({ $count } queued)
+status-export-active = Export in progress
+
+# Runtime status messages
+status-saving = Saving project…
+status-open-preparing = Opening and validating project…
+status-open-cancel-closing = Cancelling project open and safely closing project…
+status-open-failed = Could not open project: { $reason }
+status-opened = Project opened
+status-save-as-failed = Could not start Save As: { $reason }
+status-save-as-started = Saving project as { $path }…
+status-create-project-failed = Could not create project: { $reason }
+status-created-project = Project created: { $path }
+status-recovery-failed = Could not recover autosave: { $reason }
+status-recovered = Recovered autosave: { $path }
+status-import-failed = Import failed: { $reason }
+status-relink-failed = Could not relink asset: { $reason }
+status-relink-analyzing = Analyzing relinked media…
+status-audio-probe-failed = Could not probe audio components: { $reason }
+status-audio-probe-started = Refreshing available audio streams…
+status-audio-rebind-failed = Could not rebind audio component: { $reason }
+status-audio-rebind-started = Validating audio component binding…
+status-rename-asset-failed = Could not rename asset: { $reason }
+status-renamed-asset = Asset renamed: { $name }
+status-interpret-failed = Could not interpret asset: { $reason }
+status-interpreted = Asset interpretation updated: { $asset_name }
+status-rename-folder-failed = Could not rename folder: { $reason }
+status-renamed-folder = Folder renamed: { $name }
+status-proxy-mode-failed = Could not set proxy mode: { $reason }
+status-proxy-enable-failed = Could not enable proxy: { $reason }
+status-proxy-enabled = Proxy mode enabled: { $name }
+status-proxy-disabled = Proxy mode disabled: { $name }
+status-remove-assets-failed = Could not remove library selection: { $reason }
+status-removed-asset = Asset removed from library: { $name }
+status-removed-folder = Folder deleted: { $name }
+status-removed-selection = Removed { $assets } assets and deleted { $folders } folders
+status-move-assets-failed = Could not move library selection: { $reason }
+status-moved-asset = Asset moved: { $name } → { $target_name }
+status-moved-folder = Folder moved: { $name } → { $target_name }
+status-moved-selection = Moved { $assets } assets and { $folders } folders → { $target_name }
+status-cross-dissolve-created = Cross dissolve created
+status-cross-dissolve-failed = Could not create cross dissolve: { $error }
+status-transition-update-failed = Could not update video transition: { $error }
+status-preview-resolution = Preview resolution: { $scale }
+status-asset-prepare-failed = Could not prepare asset: { $reason }
+status-drag-ready = Ready to drag { $name } (drop onto { $lane })
+status-clap-installed = CLAP processors installed: { $count }
+status-vst3-installed = VST3 processors installed: { $count }
+status-title-created = Basic title created
+status-export-failed = Export failed: { $reason }
+status-export-queued = Added to export queue
+status-export-complete = Export completed: { $path }
+status-export-canceled = Export canceled
+status-relinked = Asset relinked: { $name } → { $path }
+status-audio-streams-refreshed = Audio streams refreshed: { $name }
+status-audio-rebound = Audio component of { $name } mapped to stream #{ $stream }
+status-proxy-failed = Proxy generation failed: { $detail }
+status-proxy-switch-failed = Could not switch proxy mode: { $error }
+status-proxy-binding-failed = Proxy mode changed, but playback binding failed: { $error }
+status-native-audio-unavailable = Native audio host unavailable; saved plugins could not be restored
+status-native-audio-restore-failed = Could not start native audio plugin restore: { $error }
+status-audio-restored-partial = Audio plugins restored: { $available } libraries available, { $failed } failed; select failed plugin files to retry
+status-audio-restored = Audio plugin libraries restored: { $count }
+status-openfx-scanning = Scanning the selected OpenFX effects…
+status-openfx-restore-failed = Could not start OpenFX restore: { $error }
+status-openfx-restore-queue-failed = Could not queue OpenFX restore
+status-openfx-installed = OpenFX effects installed: { $installed }
+status-openfx-installed-partial = Installed { $installed } OpenFX effects; { $unsupported } plugins do not support the selected type or current host contract
+status-openfx-install-failed = OpenFX installation failed: { $reason }
+status-openfx-restored-partial = OpenFX restored: { $available } filters available, { $failed } failed; select installation files to retry
+status-openfx-restored = OpenFX effects restored: { $count }
+status-openfx-scan-failed = OpenFX scan stopped unexpectedly; select the plugin again
+status-audio-prepare-failed = Could not prepare audio processing: { $error }
+status-persistence-failed = Could not finish project persistence: { $error }
+status-closing = Finishing save and safely closing project…
+status-close-failed = Could not close project: { $reason }
+status-close-save-canceled = Close after save canceled: { $reason }
+status-saved = Project saved
+status-saved-cleanup-failed = Project saved; recovery cleanup failed: { $reason }
+status-autosaved-cleanup-failed = Autosave completed; recovery cleanup failed: { $reason }
+status-save-failed = Could not save project: { $error }
+status-autosave-failed = Autosave failed: { $error }
+status-autosave-start-failed = Could not start autosave: { $error }
+status-packaging = Packaging project…
+status-package-canceling = Canceling project packaging…
+status-packaged = Project packaged: { $path }
+status-package-canceled = Project packaging canceled
+status-package-failed = Project packaging failed: { $reason }
+status-package-worker-failed = Project packaging worker stopped unexpectedly
+status-package-copying = Copying project resources… { $percent }%
+status-package-validating = Validating project resources… { $percent }%
+status-package-writing = Writing project snapshot…
+status-package-publishing = Publishing project package…
+status-package-analyzing = Analyzing project dependencies…
+status-drop-probing = Probing media dropped onto track…
+status-drop-placed = File imported into library and placed on track
+status-placement-failed = Could not place asset: { $error }
+status-asset-placed = Asset added to timeline
+status-history-retired = Edit committed without undo history; earlier history was cleared to avoid crossing an unrecorded edit
+status-folder-created = Folder created: { $name }
+status-asset-created = Asset created: { $name }
+status-adjustment-created = Adjustment layer created: { $name }
+status-solid-created = Solid color layer created: { $name }
+status-precomposed = Nested sequence created: “{ $name }”
+status-clips-linked = Selected clips linked
+status-clips-unlinked = Selected clips unlinked
+status-cross-dissolve-shortened = Cross dissolve shortened to available source handles
+status-transition-shortened = Video transition shortened to available source handles
+status-tracking-failed = Tracking failed: { $detail }
+status-tracking-cached = Tracking cache applied
+status-tracking-complete = Tracking completed
+status-plugin-preferences-failed = Plugin installed; restart recovery information could not be saved: { $error }
+status-reference-release-failed = Project closed; reference output device release could not be confirmed: { $reason }
+status-shell-action-failed = UI action failed: { $err }
+status-gallery-no-viewer = No project Viewer available to capture
+status-gallery-captured = Gallery still captured
+status-gallery-capture-failed = Could not capture gallery still: { $error }
+status-gallery-preparing = Preparing exact gallery still…
+status-workspace-save-failed = Could not save workspace preference: { $err }
+status-startup-action-failed = Startup action failed: { $err }
+status-action-failed = Action failed: { $err }
+status-recent-save-failed = Could not save recent projects: { $err }
+status-shortcut-preference-invalid = Shortcut preference is no longer valid
+status-shortcut-key-invalid = Shortcut key is no longer valid
+status-preferences-save-failed = Could not save preferences: { $err }
+status-preferences-action-failed = Preferences action failed: { $err }
+status-asset-browser-action-failed = Asset browser action failed: { $err }
+status-close-abandon-failed = Could not abandon failed project close: { $err }
+status-close-start-failed = Could not safely close project: { $err }
+status-import-started =
+    { $count ->
+        [one] Importing one media file…
+       *[other] Importing { $count } media files…
+    }
+status-import-canceled = Media import canceled
+status-import-progress = Importing media file { $completed }/{ $total }…
+status-drop-canceled = File placement canceled
+status-drop-failed = File placement failed: { $reason }
+
+status-proxy-generating = Proxy mode enabled: { $name } (generating in background)
+status-proxy-regenerating = Proxy mode enabled: { $name } (stale proxy; regenerating in background)
+status-audio-track = audio track
+status-video-track = video track
+status-import-summary =
+    { $imported ->
+        [one] Imported one media file
+       *[other] Imported { $imported } media files
+    }
+status-import-summary-proxies =
+    { status-import-summary }; { $proxies ->
+        [one] generating one proxy in background
+       *[other] generating { $proxies } proxies in background
+    }
+status-import-summary-partial =
+    { status-import-summary }; { $failed ->
+        [one] one failed
+       *[other] { $failed } failed
+    }
+status-import-summary-proxies-partial =
+    { status-import-summary-proxies }; { $failed ->
+        [one] one failed
+       *[other] { $failed } failed
+    }
+status-range-lifted = Lift complete: { $removed } clips removed, { $trimmed } trimmed, { $split } split, { $shifted } moved
+status-range-extracted = Extract complete: { $removed } clips removed, { $trimmed } trimmed, { $split } split, { $shifted } moved
+status-opaque-detail = { $detail }
+
+status-no-project = No project
+
+# Typed core failure projection
+error-media-open = Could not open media: { $path } — { $reason }
+error-decode-failed = Decode failed (asset { $asset_id }): { $reason }
+error-unsupported-format = Unsupported media format: { $format }
+error-proxy-generation = Proxy generation failed: { $reason }
+error-track-not-found = Track not found: { $track_id }
+error-clip-not-found = Clip not found: { $clip_id }
+error-time-out-of-range = Time position out of range: { $timecode }
+error-track-locked = Track is locked; editing is unavailable: { $track_id }
+error-action-not-executed = Action was not executed ({ $action }): { $reason }
+error-gpu-init = GPU initialization failed: { $reason }
+error-shader-compile = Shader compilation failed ({ $shader_name }): { $reason }
+error-texture-upload = Texture upload failed: { $reason }
+error-effect-evaluation = Effect graph evaluation failed: { $reason }
+error-asset-not-found = Asset not found: { $asset_id }
+error-asset-file-missing = Asset file moved or deleted; relink the media: { $path }
+error-asset-database = Asset library database error: { $reason }
+error-ai-provider = AI provider failed ({ $provider }): { $reason }
+error-ai-rate-limit = AI rate limit reached; retry later ({ $provider })
+error-workflow-step = Workflow step failed ({ $step_id }): { $reason }
+error-workflow-parse = Workflow parsing failed: { $reason }
+error-export = Export encoding failed: { $reason }
+error-hardware-encoder = Hardware encoder unavailable: { $encoder }
+error-source-revision-unavailable = Could not verify media file revision: { $path } — { $reason }
+error-source-revision-changed = Media file changed; refresh or relink the source: { $path }
+error-media-resource = Media execution resource unavailable ({ $operation }): { $source }
+error-media-resource-cleanup = Media execution resource unavailable ({ $operation }): { $source }; cleanup failed: { $cleanup }
+error-decode-timeout = Decode timed out (asset { $asset_id }, mode { $access_mode }, frame { $frame }, source { $secs } s, budget { $budget_ms } ms)
+error-decode-budget = Decode scan budget exhausted (asset { $asset_id }, mode { $access_mode }, decoded { $decoded_frames } frames, budget { $budget_frames } frames, target PTS { $target_pts })
+error-decode-temporal = Decoded frame does not cover requested time (asset { $asset_id }, mode { $access_mode }, requested PTS { $requested_pts }, frame PTS { $selected_pts }, duration { $selected_duration_pts })
+error-timeline-time = Invalid exact timeline time: { $reason }
+error-io = File I/O failed: { $reason }
+error-serialization = Data serialization failed: { $reason }
+error-canceled = Operation canceled
+error-other = Operation failed: { $reason }
+error-timestamp-unknown = not supplied
+
+error-context = { $context }: { $source }
+
+# Product admission and exact-time reasons
+reason-no-project-save-as = No project is available for Save As
+reason-empty-media-path = Choose a media file; the path is empty
+reason-library-disconnected = The project asset library is not connected
+reason-proxy-video-only = Proxy mode is available only for video assets
+reason-proxy-source-missing = Source media is missing; relink it before enabling proxies
+reason-proxy-project-disabled = Proxy workflow is disabled; enable it in Project Settings first
+reason-probe-evidence-missing = Media probe information is missing or stale; refresh or relink the asset
+reason-probe-duration-missing = A valid media duration could not be established; the clip cannot be placed
+reason-time-zero-denominator = Time denominator must not be zero
+reason-time-overflow = Time arithmetic exceeds the supported range
+reason-time-invalid-base = Invalid frame time base: { $numerator }/{ $denominator }
+reason-time-invalid-rate = Invalid frame rate: { $numerator }/{ $denominator }
+reason-time-domain-mismatch = Times belong to different domains; an explicit time mapping is required
+reason-time-non-invertible = Time mapping is not invertible
+reason-time-negative-duration = Time range duration must not be negative
+reason-time-non-finite = Time input must be finite
+
+reason-import-folder-missing = The destination asset folder does not exist: { $folder }
+reason-import-project-unavailable = Open a project before importing media
+reason-import-worker-unavailable = Media import workers are unavailable; restart the application and try again
+reason-import-empty-batch = Choose at least one media file
+reason-import-batch-capacity = Too many import batches are queued (limit: { $capacity }); wait for an import to finish or cancel one
+reason-import-batch-too-large = This import contains { $files } files; select no more than { $capacity } files per batch
+reason-import-file-capacity = This import needs { $files } file slots, but only { $available } are available; wait for an import to finish or select fewer files
+
+inspector-track-locked = The selected clip's track is locked
+inspector-audio-asset-unavailable = Component { $identity } (asset unavailable)
+inspector-audio-component-missing = Component { $identity } (missing from catalog)
+inspector-audio-output-unavailable = Nested output { $identity } (unavailable)
+inspector-audio-primary = Primary · { $label }
+inspector-audio-stream-rebind = Stream #{ $index } · { $layout } (rebind required)
+inspector-audio-stream-rebind-short = Stream #{ $index } (rebind required)
+inspector-audio-binding-unavailable = No valid physical mapping
+inspector-audio-stream = Stream #{ $index }
+inspector-audio-stream-default = Default
+inspector-audio-layout-unspecified = Unspecified { $count }ch
+inspector-audio-layout-unsupported = Unsupported named layout { $count }ch
+
+# Stable parameter presentation; author keys remain language-neutral.
+parameter-mondrian-title-text-label = Text
+parameter-mondrian-title-font-family-label = Font family
+parameter-mondrian-title-font-weight-label = Font weight
+parameter-mondrian-title-font-style-label = Font style
+parameter-mondrian-title-font-size-label = Font size
+parameter-mondrian-title-fill-label = Fill
+parameter-mondrian-title-tracking-label = Tracking
+parameter-mondrian-title-line-height-label = Line height
+parameter-mondrian-title-horizontal-align-label = Horizontal alignment
+parameter-mondrian-title-vertical-align-label = Vertical alignment
+parameter-mondrian-mask-feather-label = Feather
+parameter-mondrian-mask-opacity-label = Opacity
+parameter-mondrian-mask-expansion-label = Expansion
+parameter-mondrian-mask-invert-label = Invert
+parameter-mondrian-mask-operation-label = Operation
+parameter-mondrian-title-option-normal = Regular
+parameter-mondrian-title-option-italic = Italic
+parameter-mondrian-title-option-oblique = Oblique
+parameter-mondrian-title-option-left = Left
+parameter-mondrian-title-option-center = Center
+parameter-mondrian-title-option-right = Right
+parameter-mondrian-title-option-top = Top
+parameter-mondrian-title-option-bottom = Bottom
+parameter-mondrian-mask-operation-Add-label = Add
+parameter-mondrian-mask-operation-Subtract-label = Subtract
+parameter-mondrian-mask-operation-Intersect-label = Intersect
+parameter-mondrian-mask-operation-Difference-label = Difference
+parameter-mondrian-effect-curves-mode-rgb = RGB
+parameter-mondrian-effect-curves-mode-yrgb = YRGB
+parameter-mondrian-effect-qualifier-mode-hsl = HSL
+parameter-builtin-lut-3d-processing-space-unassigned = Unassigned
+parameter-builtin-lut-3d-processing-space-scene-linear = Scene linear
+parameter-builtin-lut-3d-processing-space-rec709 = Rec. 709
+parameter-builtin-lut-3d-processing-space-srgb = sRGB
+parameter-builtin-lut-3d-processing-space-rec2020 = Rec. 2020
+parameter-builtin-lut-3d-processing-space-display-p3 = Display P3
+parameter-builtin-lut-3d-processing-space-rec2100-hlg = Rec. 2100 HLG
+parameter-builtin-lut-3d-processing-space-rec2100-pq = Rec. 2100 PQ
+parameter-builtin-lut-3d-processing-space-aces-cct = ACEScct
+parameter-builtin-lut-3d-processing-space-apple-log-bt2020 = Apple Log / BT.2020
+parameter-builtin-lut-3d-processing-space-sony-slog2-sgamut = Sony S-Log2 / S-Gamut
+parameter-builtin-lut-3d-processing-space-sony-slog3-sgamut3 = Sony S-Log3 / S-Gamut3
+parameter-builtin-lut-3d-processing-space-sony-slog3-sgamut3-cine = Sony S-Log3 / S-Gamut3.Cine
+parameter-builtin-lut-3d-processing-space-arri-logc3-wide-gamut3 = ARRI LogC3 / Wide Gamut 3
+parameter-builtin-lut-3d-processing-space-arri-logc4-wide-gamut4 = ARRI LogC4 / Wide Gamut 4
+parameter-builtin-lut-3d-processing-space-canon-log2-cinema-gamut-d55 = Canon Log 2 / Cinema Gamut D55
+parameter-builtin-lut-3d-processing-space-canon-log3-cinema-gamut-d55 = Canon Log 3 / Cinema Gamut D55
+parameter-builtin-lut-3d-processing-space-panasonic-vlog-vgamut = Panasonic V-Log / V-Gamut
+parameter-builtin-lut-3d-processing-space-red-log3g10-wide-gamut-rgb = RED Log3G10 / Wide Gamut RGB
+parameter-builtin-lut-3d-processing-space-blackmagic-film-wide-gamut-gen5 = Blackmagic Film / Wide Gamut Gen 5
+parameter-builtin-lut-3d-processing-space-dji-dlog-dgamut = DJI D-Log / D-Gamut
+parameter-builtin-lut-3d-processing-space-davinci-intermediate-wide-gamut = DaVinci Intermediate / Wide Gamut
+parameter-mondrian-effect-builtin-asc-cdl-offset-label = Offset
+parameter-mondrian-effect-builtin-asc-cdl-power-label = Power
+parameter-mondrian-effect-builtin-asc-cdl-saturation-label = Saturation
+parameter-mondrian-effect-builtin-asc-cdl-slope-label = Slope
+parameter-mondrian-effect-builtin-basic-correction-contrast-label = Contrast
+parameter-mondrian-effect-builtin-basic-correction-exposure-label = Exposure
+parameter-mondrian-effect-builtin-basic-correction-saturation-label = Saturation
+parameter-mondrian-effect-builtin-chroma-key-blend-label = Edge blend
+parameter-mondrian-effect-builtin-chroma-key-invert-label = Keep key color
+parameter-mondrian-effect-builtin-chroma-key-key-color-label = Key color
+parameter-mondrian-effect-builtin-chroma-key-similarity-label = Similarity
+parameter-mondrian-effect-builtin-chromatic-aberration-amount-label = Chromatic aberration amount
+parameter-mondrian-effect-builtin-color-wheel-gain-label = Gain
+parameter-mondrian-effect-builtin-color-wheel-gamma-label = Gamma
+parameter-mondrian-effect-builtin-color-wheel-lift-label = Lift
+parameter-mondrian-effect-builtin-color-wheel-offset-label = Offset
+parameter-mondrian-effect-builtin-crop-bottom-label = Bottom
+parameter-mondrian-effect-builtin-crop-left-label = Left
+parameter-mondrian-effect-builtin-crop-right-label = Right
+parameter-mondrian-effect-builtin-crop-top-label = Top
+parameter-mondrian-effect-builtin-curves-blue-label = Blue
+parameter-mondrian-effect-builtin-curves-green-label = Green
+parameter-mondrian-effect-builtin-curves-hue-vs-hue-label = Hue vs Hue
+parameter-mondrian-effect-builtin-curves-hue-vs-luma-label = Hue vs Luma
+parameter-mondrian-effect-builtin-curves-hue-vs-saturation-label = Hue vs Saturation
+parameter-mondrian-effect-builtin-curves-luma-vs-saturation-label = Luma vs Saturation
+parameter-mondrian-effect-builtin-curves-master-label = Master
+parameter-mondrian-effect-builtin-curves-mode-label = Master mode
+parameter-mondrian-effect-builtin-curves-red-label = Red
+parameter-mondrian-effect-builtin-curves-saturation-vs-luma-label = Saturation vs Luma
+parameter-mondrian-effect-builtin-curves-saturation-vs-saturation-label = Saturation vs Saturation
+parameter-mondrian-effect-builtin-gamut-compression-amount-label = Amount
+parameter-mondrian-effect-builtin-gaussian-blur-radius-label = Blur radius
+parameter-mondrian-effect-builtin-grain-amount-label = Grain amount
+parameter-mondrian-effect-builtin-grain-size-label = Grain size
+parameter-mondrian-effect-builtin-hdr-grading-blacks-balance-label = Color balance
+parameter-mondrian-effect-builtin-hdr-grading-blacks-center-label = Center
+parameter-mondrian-effect-builtin-hdr-grading-blacks-exposure-label = Exposure
+parameter-mondrian-effect-builtin-hdr-grading-blacks-saturation-label = Saturation
+parameter-mondrian-effect-builtin-hdr-grading-blacks-width-label = Width
+parameter-mondrian-effect-builtin-hdr-grading-dark-balance-label = Color balance
+parameter-mondrian-effect-builtin-hdr-grading-dark-center-label = Center
+parameter-mondrian-effect-builtin-hdr-grading-dark-exposure-label = Exposure
+parameter-mondrian-effect-builtin-hdr-grading-dark-saturation-label = Saturation
+parameter-mondrian-effect-builtin-hdr-grading-dark-width-label = Width
+parameter-mondrian-effect-builtin-hdr-grading-global-balance-label = Color balance
+parameter-mondrian-effect-builtin-hdr-grading-global-exposure-label = Exposure
+parameter-mondrian-effect-builtin-hdr-grading-global-saturation-label = Saturation
+parameter-mondrian-effect-builtin-hdr-grading-highlights-balance-label = Color balance
+parameter-mondrian-effect-builtin-hdr-grading-highlights-center-label = Center
+parameter-mondrian-effect-builtin-hdr-grading-highlights-exposure-label = Exposure
+parameter-mondrian-effect-builtin-hdr-grading-highlights-saturation-label = Saturation
+parameter-mondrian-effect-builtin-hdr-grading-highlights-width-label = Width
+parameter-mondrian-effect-builtin-hdr-grading-light-balance-label = Color balance
+parameter-mondrian-effect-builtin-hdr-grading-light-center-label = Center
+parameter-mondrian-effect-builtin-hdr-grading-light-exposure-label = Exposure
+parameter-mondrian-effect-builtin-hdr-grading-light-saturation-label = Saturation
+parameter-mondrian-effect-builtin-hdr-grading-light-width-label = Width
+parameter-mondrian-effect-builtin-hdr-grading-shadows-balance-label = Color balance
+parameter-mondrian-effect-builtin-hdr-grading-shadows-center-label = Center
+parameter-mondrian-effect-builtin-hdr-grading-shadows-exposure-label = Exposure
+parameter-mondrian-effect-builtin-hdr-grading-shadows-saturation-label = Saturation
+parameter-mondrian-effect-builtin-hdr-grading-shadows-width-label = Width
+parameter-mondrian-effect-builtin-hdr-grading-specular-balance-label = Color balance
+parameter-mondrian-effect-builtin-hdr-grading-specular-center-label = Center
+parameter-mondrian-effect-builtin-hdr-grading-specular-exposure-label = Exposure
+parameter-mondrian-effect-builtin-hdr-grading-specular-saturation-label = Saturation
+parameter-mondrian-effect-builtin-hdr-grading-specular-width-label = Width
+parameter-mondrian-effect-builtin-highlight-recovery-rolloff-label = Rolloff width
+parameter-mondrian-effect-builtin-highlight-recovery-strength-label = Recovery strength
+parameter-mondrian-effect-builtin-highlight-recovery-threshold-label = Threshold
+parameter-mondrian-effect-builtin-hue-saturation-lightness-hue-label = Hue
+parameter-mondrian-effect-builtin-hue-saturation-lightness-lightness-label = Lightness
+parameter-mondrian-effect-builtin-hue-saturation-lightness-saturation-label = Saturation
+parameter-mondrian-effect-builtin-luma-key-invert-label = Preserve shadows
+parameter-mondrian-effect-builtin-luma-key-softness-label = Softness
+parameter-mondrian-effect-builtin-luma-key-threshold-label = Threshold
+parameter-mondrian-effect-builtin-lut-3d-intensity-label = LUT intensity
+parameter-mondrian-effect-builtin-lut-3d-path-label = LUT file
+parameter-mondrian-effect-builtin-lut-3d-processing-space-label = Processing color space
+parameter-mondrian-effect-builtin-qualifier-blur-radius-label = Matte feather
+parameter-mondrian-effect-builtin-qualifier-clean-black-label = Clean Black
+parameter-mondrian-effect-builtin-qualifier-clean-white-label = Clean White
+parameter-mondrian-effect-builtin-qualifier-denoise-radius-label = Denoise radius
+parameter-mondrian-effect-builtin-qualifier-hue-center-label = Hue center
+parameter-mondrian-effect-builtin-qualifier-hue-softness-label = Hue softness
+parameter-mondrian-effect-builtin-qualifier-hue-width-label = Hue width
+parameter-mondrian-effect-builtin-qualifier-invert-label = Invert matte
+parameter-mondrian-effect-builtin-qualifier-luminance-high-label = Luma high
+parameter-mondrian-effect-builtin-qualifier-luminance-low-label = Luma low
+parameter-mondrian-effect-builtin-qualifier-luminance-softness-label = Luma softness
+parameter-mondrian-effect-builtin-qualifier-matte-preview-label = Matte preview
+parameter-mondrian-effect-builtin-qualifier-mode-label = Selection mode
+parameter-mondrian-effect-builtin-qualifier-samples-label = Sampled colors
+parameter-mondrian-effect-builtin-qualifier-saturation-high-label = Saturation high
+parameter-mondrian-effect-builtin-qualifier-saturation-low-label = Saturation low
+parameter-mondrian-effect-builtin-qualifier-saturation-softness-label = Saturation softness
+parameter-mondrian-effect-builtin-qualifier-three-d-softness-label = 3D softness
+parameter-mondrian-effect-builtin-qualifier-three-d-tolerance-label = 3D tolerance
+parameter-mondrian-effect-builtin-sharpen-amount-label = Sharpen amount
+parameter-mondrian-effect-builtin-vignette-feather-label = Vignette feather
+parameter-mondrian-effect-builtin-vignette-intensity-label = Vignette intensity
+parameter-mondrian-effect-builtin-white-balance-temperature-label = Temperature
+parameter-mondrian-effect-builtin-white-balance-tint-label = Tint
+parameter-mondrian-effect-qualifier-mode-three-dimensional = 3D color
+parameter-group-asc-cdl = ASC CDL
+parameter-group-hdr-blacks = HDR · Blacks
+parameter-group-hdr-dark = HDR · Dark
+parameter-group-hdr-global = HDR · Global
+parameter-group-hdr-highlights = HDR · Highlights
+parameter-group-hdr-light = HDR · Light
+parameter-group-hdr-shadows = HDR · Shadows
+parameter-group-hdr-specular = HDR · Specular
+parameter-group-hsl = HSL
+parameter-group-lut = LUT
+parameter-group-primaries = Primaries
+parameter-group-qualifier = Qualifier
+parameter-group-qualifier-3d = Qualifier · 3D
+parameter-group-qualifier-matte = Qualifier · Matte
+parameter-group-luma-key = Luma key
+parameter-group-basic-correction = Basic correction
+parameter-group-chroma-key = Chroma key
+parameter-group-vignette = Vignette
+parameter-group-curves = Curves
+parameter-group-blur = Blur
+parameter-group-white-balance = White balance
+parameter-group-gamut-compression = Gamut compression
+parameter-group-chromatic-aberration = Chromatic aberration
+parameter-group-crop = Crop
+parameter-group-sharpen = Sharpen
+parameter-group-grain = Grain
+parameter-group-highlight-recovery = Highlight recovery
+
+# Qualifier sample editing
+inspector-qualifier-include = Include
+inspector-qualifier-exclude = Exclude
+inspector-qualifier-remove-sample = Remove
+inspector-qualifier-add-include = + Include
+inspector-qualifier-add-exclude = + Exclude
+
+resource-unbound = No resource
+resource-file = External file or folder
+resource-file-only = External file
+resource-folder-only = External folder
+resource-unavailable-asset = Unavailable asset
+resource-project-asset = Project asset
+resource-uri = URI
+resource-value = Resource value
+resource-search-assets = Search project assets
+resource-no-assets-match = No assets match this search.
+resource-select-asset = Select an asset
+resource-browse-file = Browse file…
+resource-browse-folder = Browse folder…
+resource-apply = Apply
+resource-cancel = Cancel
+resource-path-required = Choose or enter a file or folder path.
+resource-asset-required = Select a project asset.
+resource-asset-missing = This asset is no longer available. Select another asset.
+resource-uri-invalid = Enter an absolute URI with a scheme and no spaces or control characters.
+resource-browse-failed = The native picker could not open. You can enter a path or try again.
+resource-select-one-file = Select one file for this parameter.
+resource-not-admitted = This parameter does not accept this resource type, file extension, path format or path length.
+
+keyframe-interpolation-hold = Hold
+keyframe-interpolation-linear = Linear
+keyframe-interpolation-bezier = Bezier
+keyframe-interpolation-auto-bezier = Auto Bezier
+keyframe-interpolation-continuous-bezier = Continuous Bezier
+keyframe-interpolation-ease-in = Ease In
+keyframe-interpolation-ease-out = Ease Out
+
+resource-browse-existing-file = Browse existing…
+resource-path-existing = Enter an existing path
+resource-path-existing-or-new = Enter an existing or new path
+resource-path-checking = Checking this path… You can edit it or cancel.
+resource-path-timeout = Checking this path took too long. Verify its availability and try again.
+resource-path-confirm-again = Finish text input, then confirm the path again.
+resource-owner-unavailable = This parameter can no longer be edited.
+resource-path-missing = This path does not exist. Choose an existing file or folder.
+resource-path-wrong-kind = This path does not have the required file or folder type.
+resource-path-unavailable = This path cannot be checked. Verify its availability and permissions.
+
+resource-path-owner-required = Open or save a project before entering a relative resource path.
+resource-path-ambiguous = Enter a full path or a path relative to the project directory; drive-relative paths are ambiguous.
+curve-point-count-label = { $label } ({ $count }/{ $maximum })
+export-alpha = Alpha
+export-legalizer = Legalizer
+export-vbv-buffer = VBV buffer (kbit)
+export-depth-value = { $bits }-bit
+export-integer-depth = { $bits }-bit integer
+export-pcm-depth = PCM { $bits }-bit
+export-video-range-full = Full
+export-video-range-legal = Legal / Video
+export-container-imf = IMF package
+export-container-dcp = SMPTE DCP package
+export-professional-dcp-video = JPEG 2000 / ST 428-1 XYZ 12-bit
+export-professional-pcm = PCM 24-bit / 48 kHz / stereo
+export-essence-prores = ProRes 422 HQ 10-bit 4:2:2
+export-essence-avc = AVC High 4:2:2 10-bit intra
+export-essence-jpeg2000 = JPEG 2000 XYZ 12-bit
+
+curve-editor-name = Curve editor
+curve-editor-keyboard-help = Home/End: first/last point; Ctrl/Cmd + Left/Right: previous/next point; Alt + Left/Right: incoming/outgoing handle; Alt + Up: return to point; Left/Right: one frame; Shift + Left/Right: five frames; Up/Down: value; Shift + F10: interpolation menu. Ctrl/Cmd + wheel: time zoom; add Shift: value zoom; middle drag: pan; Ctrl/Cmd + PageUp/PageDown: zoom; add Shift: value zoom; Ctrl/Cmd + Shift + arrows: pan; Ctrl/Cmd + 0: reset view.
+curve-editor-shape-keyboard-help = Home/End: first/last point; Ctrl/Cmd + Left/Right: previous/next point; arrows: adjust; Shift + arrows: larger adjustment. Ctrl/Cmd + wheel: time zoom; add Shift: value zoom; middle drag: pan; Ctrl/Cmd + PageUp/PageDown: zoom; add Shift: value zoom; Ctrl/Cmd + Shift + arrows: pan; Ctrl/Cmd + 0: reset view.
+
+curve-editor-selection-keyboard-help = { curve-editor-keyboard-help } Shift or Ctrl/Cmd + click a key: toggle selection; Ctrl/Cmd + A: select authored keys; Delete/Backspace: delete selection in one Undo; Escape: clear selection. Left/Right: move selected keys by one frame (Shift: five frames). Up/Down: move selected values together by one increment (Shift: five), stopping together at limits. Right-click a selected key or Shift+F10: apply interpolation to the whole selection. Drag a selected key to move the whole group; Escape cancels the drag. Drag empty space: select keys; Shift: add; Ctrl/Cmd+Shift: toggle. Ctrl/Cmd+click empty space: insert a key. Escape restores the selection during a marquee.
+
+audio-rack-occurrence-row = Time reference
+audio-rack-occurrence-choose = Choose an audio component
+audio-rack-occurrence-option = Audio component { $index } · Start { $time } s
+
+# Focused curve clipboard
+error-curve-clipboard-owner-changed = The curve selection changed. Select the target curve again.
+error-curve-clipboard-parameter-missing = The target parameter changed. Select the curve again.
+error-curve-clipboard-not-animated = This parameter cannot contain keyframes.
+error-curve-clipboard-invalid-selection = The key selection changed. Select the complete key group again.
+error-curve-clipboard-incompatible = Copy keys from one compatible parameter before pasting into this curve.
+error-curve-clipboard-empty = The keyframe clipboard is empty.
+error-curve-clipboard-missing-playhead = Select a sequence and position the playhead before pasting.
+error-curve-clipboard-out-of-bounds = The whole key group must fit inside the target clip. Move the playhead or select fewer keys.
+
+curve-editor-clipboard-keyboard-help = { curve-editor-selection-keyboard-help } Ctrl/Cmd+C: copy the selected keys; Ctrl/Cmd+X: cut the selected keys in one Undo; Ctrl/Cmd+V: paste into this curve at the playhead in one Undo.
+
+curve-editor-read-only-keyboard-help = Read-only curve. Click to inspect points; Home/End and Ctrl/Cmd + Left/Right navigate. Ctrl/Cmd + wheel zooms; middle drag pans; Ctrl/Cmd + 0 resets the view.
+curve-editor-read-only-clipboard-keyboard-help = { curve-editor-read-only-keyboard-help } Shift or Ctrl/Cmd + click a key toggles selection; Ctrl/Cmd + A selects authored keys; Ctrl/Cmd + C copies. Editing is unavailable. Drag empty space to select; Shift adds, Ctrl/Cmd+Shift toggles; Escape restores the prior selection.
+status-history-accessibility-open = Recent notifications. Current status: { $status }. Showing { $first }–{ $last } of { $total }, newest first.
+    { $entries }
+    Up/Down: newer/older. Page Up/Down: previous/next page. Home/End: newest/oldest. Escape: close.
+status-history-accessibility-empty = Recent notifications. Current status: { $status }. No notifications. Escape: close.
+status-history-entry-error = Error: { $message }
+
+parameter-reset-to-default = Reset
+
+audio-input-row = Auxiliary inputs
+audio-input-status = Input status
+audio-input-query = Inspect inputs
+audio-input-requery = Refresh inputs
+audio-input-cancel = Cancel inspection
+audio-input-pending = Inspecting inputs…
+audio-input-none = This processor has no auxiliary inputs
+audio-input-ready = { $count ->
+    [one] One auxiliary input available
+   *[other] { $count } auxiliary inputs available
+    }
+audio-input-failed = Inputs unavailable: { $error }
+audio-input-not-inspected = Not inspected
+
+audio-sidechain-input = Auxiliary input · { $identity }
+audio-sidechain-bus = Bus · { $identity }
+audio-sidechain-add-source = Add source…
+audio-sidechain-level = Sidechain level
+audio-sidechain-level-curve = Sidechain level curve
+parameter-unit-samples = samples
+parameter-unit-stops = stops
+parameter-unit-nits = nits
+audio-sidechain-status = Sidechain status
+audio-sidechain-controls = Sidechain controls
+audio-sidechain-disconnect = Disconnect source
+audio-sidechain-missing-track = Missing track · { $identity }
+
+audio-sidechain-source = Source
+
+## Timeline / Inspector owned empty and invalid states
+timeline-empty-no-sequence = No active sequence
+    Open a project or create a sequence to start editing
+timeline-empty-no-tracks = This sequence has no tracks
+    Add a video or audio track to start editing
+timeline-invalid-display = Invalid sequence time display settings
+    { $reason }
+inspector-empty-selection = No clip selected
+    Select a clip, layer or effect to adjust its parameters here.
+notification-native-processor = Processor: { $message }
+
+# Authenticated native audio diagnostics, never lifecycle/author authority.
+notification-native-audio-warning = Native audio plugin warning ({ $instance }, { $process }): { $encoding ->
+        [hex] Native bytes (hex): { $detail }
+       *[text] { $detail }
+    } { $truncated ->
+        [yes] (Message truncated)
+       *[no] { "" }
+    } { $null ->
+        [yes] (Invalid null native message)
+       *[no] { "" }
+    }
+notification-native-audio-error = Native audio plugin error ({ $instance }, { $process }): { $encoding ->
+        [hex] Native bytes (hex): { $detail }
+       *[text] { $detail }
+    } { $truncated ->
+        [yes] (Message truncated)
+       *[no] { "" }
+    } { $null ->
+        [yes] (Invalid null native message)
+       *[no] { "" }
+    }
+notification-native-audio-fatal = Native audio plugin fatal diagnostic ({ $instance }, { $process }): { $encoding ->
+        [hex] Native bytes (hex): { $detail }
+       *[text] { $detail }
+    } { $truncated ->
+        [yes] (Message truncated)
+       *[no] { "" }
+    } { $null ->
+        [yes] (Invalid null native message)
+       *[no] { "" }
+    }
+notification-native-audio-host-misbehavior = Native audio plugin reports host misbehavior ({ $instance }, { $process }): { $encoding ->
+        [hex] Native bytes (hex): { $detail }
+       *[text] { $detail }
+    } { $truncated ->
+        [yes] (Message truncated)
+       *[no] { "" }
+    } { $null ->
+        [yes] (Invalid null native message)
+       *[no] { "" }
+    }
+notification-native-audio-plugin-misbehavior = Native audio plugin reports plugin misbehavior ({ $instance }, { $process }): { $encoding ->
+        [hex] Native bytes (hex): { $detail }
+       *[text] { $detail }
+    } { $truncated ->
+        [yes] (Message truncated)
+       *[no] { "" }
+    } { $null ->
+        [yes] (Invalid null native message)
+       *[no] { "" }
+    }
+notification-native-audio-unknown-severity = Native audio plugin reports unknown severity { $severity } ({ $instance }, { $process }): { $encoding ->
+        [hex] Native bytes (hex): { $detail }
+       *[text] { $detail }
+    } { $truncated ->
+        [yes] (Message truncated)
+       *[no] { "" }
+    } { $null ->
+        [yes] (Invalid null native message)
+       *[no] { "" }
+    }
+notification-native-audio-log-incomplete = Native audio diagnostics are incomplete ({ $instance }, { $process }). { $capacity ->
+        [yes] Queue capacity reached.
+       *[no] { "" }
+    } { $contention ->
+        [yes] Concurrent producers exhausted their bounded attempts.
+       *[no] { "" }
+    } { $exhausted ->
+        [yes] Native message sequence exhausted.
+       *[no] { "" }
+    }
+
+viewer-native-progress = { $message } · { $percent }%
+
+# Native replies are opaque local Widget callbacks, never authoring actions.
+native-visual-question-title = Plug-in question
+native-visual-question-yes = Yes
+native-visual-question-no = No
+native-visual-question-dismiss = Dismiss
+
+# Product-owned native editor status; plugin labels remain native metadata.
+native-editor-row = Native editor
+native-editor-open = Open editor
+native-editor-close = Close editor
+native-editor-opening = Native editor request queued
+native-editor-opened = Native editor opened
+native-editor-closed = Native editor closed
+native-editor-unavailable = Native editor is unavailable for this adapter
+native-editor-no-view = This processor has no native editor
+native-editor-control-pending = Native editor changes are pending
+native-editor-owner-changed = The native editor owner changed; reopen the editor
+native-editor-close-current = Close the current native editor first
+native-editor-cleanup-pending = Native editor cleanup is pending
+native-editor-failed = The native editor request failed
+
+audio-rack-native-controlled-parameter = Controlled by plugin
+audio-rack-adopt-displayed-value = Adopt displayed value
+audio-rack-query-native-parameter = Read current value
+native-parameter-query-unavailable = Current plugin value is unavailable

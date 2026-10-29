@@ -161,20 +161,20 @@ use mondrian_media::{
 use mondrian_renderer::{
     color::{ProgramOutputBoundary, ProgramOutputModule, SourceColorModule},
     evaluate_prepared_visual_program, CpuEncodedColorFrame, CpuSourceColorFrame,
-    GpuCompositingBlockerReason, GpuNativeDecodedFrameImportSource,
-    GpuNativeDecodedFrameTextureFormat, LinearFloatSource, PreparedVisualProgram,
-    RenderCpuColorExecutionSession, RenderInputTransform, TimelineAdjustmentLayer,
-    TimelineCompositeColorPath, TimelineCompositeElement, TimelineCompositeOptions,
-    TimelineEffectColorRuntime, TimelineEvaluationRequest, TimelineMediaLayer,
-    TimelineRenderPlanElement, TimelineSolidColorLayer, ViewerGpuExecutionLayer,
+    GpuNativeDecodedFrameImportSource, GpuNativeDecodedFrameTextureFormat, LinearFloatSource,
+    PreparedVisualProgram, RenderCpuColorExecutionSession, RenderInputTransform,
+    TimelineAdjustmentLayer, TimelineCompositeColorPath, TimelineCompositeElement,
+    TimelineCompositeOptions, TimelineEffectColorRuntime, TimelineEvaluationRequest,
+    TimelineMediaLayer, TimelineRenderPlanElement, TimelineSolidColorLayer,
+    ViewerGpuExecutionLayer,
 };
 use mondrian_renderer::{
     color::{RenderColorStageDiagnostics, RenderColorStageGpuBlockerBreakdown},
-    color_report_vocab, GpuCompositingDiagnostics, PreparedVisualProgramCacheDiagnostics,
-    RenderColorTransformDiagnostics, RenderColorTransformDirection, RenderMonitorAdaptation,
-    TimelineCompositeColorPathSummary, TimelineCompositeDiagnostics,
-    TimelineCompositeDomainBlockerBreakdown, TimelineCompositeLegacyBreakdown,
-    TimelineCompositeScratch, ViewerHeterogeneousGpuInput,
+    color_report_vocab, GpuCompositingBlockerReason, GpuCompositingDiagnostics,
+    PreparedVisualProgramCacheDiagnostics, RenderColorTransformDiagnostics,
+    RenderColorTransformDirection, RenderMonitorAdaptation, TimelineCompositeColorPathSummary,
+    TimelineCompositeDiagnostics, TimelineCompositeDomainBlockerBreakdown,
+    TimelineCompositeLegacyBreakdown, TimelineCompositeScratch, ViewerHeterogeneousGpuInput,
 };
 #[cfg(test)]
 use mondrian_timeline::sequence::ResolvedInputColor;
@@ -373,11 +373,24 @@ pub struct PreviewProductionRuntime<O: Clone> {
         mondrian_core::SignalMonitoringSettings,
     )>,
     cpu_fallback_in_flight:
-        RefCell<Option<(u64, mondrian_playback::PlaybackEpoch, PreviewOutputKey)>>,
-    cpu_fallback_failure: RefCell<Option<(PreviewOutputKey, String)>>,
+        RefCell<Option<super::preview_cpu_fallback_task::PreviewCpuFallbackPending>>,
+    cpu_fallback_failure: RefCell<Option<(PreviewOutputKey, VisualExecutionFailureView)>>,
     timeline_render_cache: RefCell<crate::app::preview_render_cache::PreviewTimelineRenderCache>,
     visual_ready: RefCell<HashMap<VisualExecutionTaskKey, VisualExecutionPrefixReady>>,
-    visual_failures: RefCell<HashMap<VisualExecutionTaskKey, String>>,
+    visual_failures: RefCell<HashMap<VisualExecutionTaskKey, VisualExecutionFailureView>>,
+    native_visual_gui_registry:
+        RefCell<Option<Arc<super::preview_native_gui::PreviewNativeGuiRegistry>>>,
+    native_visual_gui_revision: Cell<Option<u64>>,
+    pending_native_visual_gui_refresh: Cell<Option<u64>>,
+    pending_native_visual_question:
+        RefCell<Option<super::preview_native_gui::NativeVisualQuestionPresentation>>,
+    pending_native_visual_actions: RefCell<super::preview_native_gui::NativeVisualGuiActionBatch>,
+    pending_processor_sources:
+        RefCell<Vec<super::preview_processor_sources::PreviewProcessorSourceRequest>>,
+    current_processor_feedback_scope:
+        Cell<Option<super::preview_processor_feedback::PreviewProcessorFeedbackScope>>,
+    pending_processor_feedback:
+        RefCell<Option<super::preview_processor_feedback::PreviewProcessorFeedbackUpdate>>,
     media_execution_failures: RefCell<HashMap<MediaPreviewKey, (u64, MediaPreviewFailureReason)>>,
     media_worker_start_failure: Option<String>,
     media_worker_health_failed: Cell<bool>,
@@ -428,6 +441,103 @@ pub(crate) enum PreviewPresentationCarrier {
 }
 
 impl<O: Clone> PreviewProductionRuntime<O> {
+    /// A Root section-backed projection. This cannot manufacture native owners,
+    /// current author snapshots or a GUI claim from an author display address.
+    pub(crate) fn set_native_visual_gui_registry(
+        &self,
+        registry: Arc<super::preview_native_gui::PreviewNativeGuiRegistry>,
+        active_panel: bool,
+    ) {
+        registry.set_panel_active(active_panel);
+        let revision = registry.revision();
+        let changed_owner = self
+            .native_visual_gui_registry
+            .borrow()
+            .as_ref()
+            .is_none_or(|current| !Arc::ptr_eq(current, &registry));
+        let previous_revision = self.native_visual_gui_revision.replace(Some(revision));
+        let changed = changed_owner || previous_revision != Some(revision);
+        *self.native_visual_gui_registry.borrow_mut() = Some(registry);
+        if changed && let Some(task) = &self.visual_execution {
+            task.reconcile_native_guis();
+        }
+        if changed && !self.transport_playing.get() {
+            self.invalidate_preview_generation();
+            self.pending_native_visual_gui_refresh.set(active_panel.then_some(revision));
+            self.work_notifier.retry_became_actionable();
+        }
+    }
+
+    fn native_visual_gui_work(
+        &self,
+        snapshot: &PreviewExecutionSnapshot<'_>,
+        sequence: mondrian_core::SequenceId,
+        scope: super::preview_processor_feedback::PreviewProcessorFeedbackScope,
+    ) -> Option<super::preview_native_gui::PreviewNativeGuiWorkBatch> {
+        use super::preview_native_gui::{
+            NativeVisualGuiPlanningIdentity, NativeVisualGuiWorkPurpose,
+        };
+        let registry = self.native_visual_gui_registry.borrow();
+        let registry = registry.as_ref()?;
+        let authoring = snapshot.authoring()?;
+        let transport = snapshot.transport();
+        if transport.is_speculative_preparation() {
+            return None;
+        }
+        let purpose = if !transport.is_playing()
+            && self.pending_native_visual_gui_refresh.get() == Some(registry.revision())
+        {
+            NativeVisualGuiWorkPurpose::EditorRefresh
+        } else {
+            NativeVisualGuiWorkPurpose::Observe
+        };
+        registry.bind_work(
+            NativeVisualGuiPlanningIdentity {
+                session: authoring.session_id(),
+                author_generation: authoring.author_generation(),
+                sequence,
+            },
+            scope,
+            purpose,
+        )
+    }
+
+    fn observe_native_visual_question(
+        &self,
+        presentation: super::preview_native_gui::NativeVisualQuestionPresentation,
+        generation: u64,
+        epoch: Option<mondrian_playback::PlaybackEpoch>,
+    ) {
+        let scope = presentation.scope();
+        if self.current_processor_feedback_scope.get() != Some(scope)
+            || scope.generation != generation
+            || epoch != Some(scope.epoch)
+            || !presentation.is_current()
+        {
+            presentation.dismiss();
+            return;
+        }
+        let mut pending = self.pending_native_visual_question.borrow_mut();
+        if pending.as_ref().is_some_and(|current| current.is_current()) {
+            presentation.dismiss();
+        } else {
+            *pending = Some(presentation);
+        }
+    }
+
+    pub(crate) fn take_native_visual_question(
+        &self,
+    ) -> Option<super::preview_native_gui::NativeVisualQuestionPresentation> {
+        let presentation = self.pending_native_visual_question.borrow_mut().take()?;
+        if self.current_processor_feedback_scope.get() == Some(presentation.scope())
+            && presentation.is_current()
+        {
+            Some(presentation)
+        } else {
+            presentation.dismiss();
+            None
+        }
+    }
     /// Enter bounded CPU Viewer execution after a concrete Window GPU failure.
     /// The active semantic generation is retained; only the execution Adapter
     /// changes. Native decode admission is bypassed by media requests while
@@ -449,7 +559,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
     /// Leave CPU fallback after the Window rebuilt a healthy GPU generation.
     pub(crate) fn clear_viewer_cpu_fallback(&self) {
         if self.viewer_cpu_fallback_active.replace(false) {
-            self.cpu_fallback_in_flight.borrow_mut().take();
+            self.retire_cpu_fallback_pending();
             self.cpu_fallback_failure.borrow_mut().take();
             self.invalidate_preview_generation();
             self.work_notifier.retry_became_actionable();
@@ -470,6 +580,18 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         self.execution.borrow_mut().clear_output();
         self.work_notifier.retry_became_actionable();
         true
+    }
+
+    fn retire_cpu_fallback_pending(&self) {
+        let pending = self.cpu_fallback_in_flight.borrow_mut().take();
+        if let Some(pending) = pending
+            && pending.completed
+            && !pending.attempt.reusable
+        {
+            self.frame_store
+                .borrow_mut()
+                .detach_viewer_working_frame(&pending.attempt.output_key);
+        }
     }
 
     pub(crate) fn set_raster_requirement(&self, requirement: PreviewRasterRequirement) -> bool {
@@ -493,45 +615,68 @@ impl<O: Clone> PreviewProductionRuntime<O> {
 
     fn schedule_cpu_fallback(
         &self,
-        generation: u64,
-        epoch: mondrian_playback::PlaybackEpoch,
+        snapshot: &PreviewExecutionSnapshot<'_>,
         resolved: &ResolvedPlanView,
         width: u32,
         height: u32,
         preserve_current_output: bool,
+        target: super::preview_cpu_fallback_task::PreviewCpuOutputTarget,
     ) -> PreviewGpuFrameState {
-        if self.frame_store.borrow_mut().viewer_frame(&resolved.cpu_cache_key).is_some() {
+        use super::preview_cpu_fallback_task::{
+            PreviewCpuFallbackAttempt, PreviewCpuFallbackPending, PreviewCpuOutputTarget,
+        };
+        let semantic_key = match target {
+            PreviewCpuOutputTarget::Raster => &resolved.cpu_cache_key,
+            PreviewCpuOutputTarget::WorkingGpu => &resolved.cache_key,
+        };
+        let generation = self.execution.borrow().generation();
+        let epoch = snapshot.transport().epoch();
+        let intent = snapshot.transport().playback_intent();
+        if self.cpu_fallback_in_flight.borrow().as_ref().is_some_and(|pending| {
+            pending.attempt.generation == generation
+                && pending.attempt.epoch == epoch
+                && pending.attempt.semantic_key == *semantic_key
+                && pending.attempt.intent == intent
+                && pending.attempt.target == target
+        }) {
+            return PreviewGpuFrameState::Loading;
+        }
+        let ready = match target {
+            PreviewCpuOutputTarget::Raster => {
+                self.frame_store.borrow_mut().viewer_frame(semantic_key).is_some()
+            }
+            PreviewCpuOutputTarget::WorkingGpu => {
+                resolved.cache_reusable
+                    && self.frame_store.borrow_mut().viewer_working_frame(semantic_key).is_some()
+            }
+        };
+        if ready {
             return if preserve_current_output {
                 PreviewGpuFrameState::Prepared
             } else {
                 PreviewGpuFrameState::Loading
             };
         }
-        if self
+        if let Some((_, reason)) = self
             .cpu_fallback_failure
             .borrow()
             .as_ref()
-            .is_some_and(|(key, _)| key == &resolved.cpu_cache_key)
+            .filter(|(key, _)| key == semantic_key)
         {
-            let reason = self
-                .cpu_fallback_failure
-                .borrow()
-                .as_ref()
-                .map(|(_, reason)| reason.clone())
-                .unwrap_or_else(|| "Viewer CPU fallback failed".to_owned());
             return self.unavailable_gpu_candidate_with_retention(
-                PreviewUnavailability::failed(PreviewOutputStage::GpuComposite, reason),
+                if reason.blocked.is_some() {
+                    PreviewUnavailability::blocked(
+                        PreviewOutputStage::TimelineComposite,
+                        reason.detail.clone(),
+                    )
+                } else {
+                    PreviewUnavailability::failed(
+                        PreviewOutputStage::GpuComposite,
+                        reason.detail.clone(),
+                    )
+                },
                 preserve_current_output,
             );
-        }
-        if self.cpu_fallback_in_flight.borrow().as_ref().is_some_and(
-            |(active_generation, active_epoch, key)| {
-                *active_generation == generation
-                    && *active_epoch == epoch
-                    && key == &resolved.cpu_cache_key
-            },
-        ) {
-            return PreviewGpuFrameState::Loading;
         }
         let Some(task) = self.cpu_fallback_task.as_ref() else {
             return self.unavailable_gpu_candidate_with_retention(
@@ -545,8 +690,13 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             );
         };
         let cached_working = resolved
-            .render_cache_identity
-            .and_then(|identity| self.timeline_render_cache.borrow().ready_frame(identity));
+            .cache_reusable
+            .then(|| {
+                resolved
+                    .render_cache_identity
+                    .and_then(|identity| self.timeline_render_cache.borrow().ready_frame(identity))
+            })
+            .flatten();
         if let Err(error) = self.scratch.borrow().admit_cpu_active_working_set(
             resolved.cpu_materialization_active_bytes,
             mondrian_renderer::TimelineCpuCompositePrecision::Float32,
@@ -559,28 +709,108 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                 preserve_current_output,
             );
         }
-        let request = PreviewCpuFallbackRequest {
-            cpu_materialization_active_bytes: resolved.cpu_materialization_active_bytes,
-            cpu_working_set_grant: self.scratch.borrow().cpu_working_set_diagnostics().grant,
+        let working_reservation = if target == PreviewCpuOutputTarget::WorkingGpu {
+            let bytes = match &cached_working {
+                Some(frame) => {
+                    frame.rgba_f32().data.capacity().checked_mul(std::mem::size_of::<[f32; 4]>())
+                }
+                None => usize::try_from(width)
+                    .ok()
+                    .and_then(|width| {
+                        usize::try_from(height).ok().and_then(|height| width.checked_mul(height))
+                    })
+                    .and_then(|pixels| pixels.checked_mul(std::mem::size_of::<[f32; 4]>())),
+            };
+            let Some(work) =
+                bytes.and_then(|bytes| self.frame_store.borrow_mut().reserve_working_result(bytes))
+            else {
+                return self.unavailable_gpu_candidate_with_retention(
+                    PreviewUnavailability::blocked(
+                        PreviewOutputStage::TimelineComposite,
+                        "Viewer working pixels exceed their shared live residency grant",
+                    ),
+                    preserve_current_output,
+                );
+            };
+            Some(work)
+        } else {
+            None
+        };
+        let (output_key, candidate_id) = match target {
+            PreviewCpuOutputTarget::Raster => (semantic_key.clone(), None),
+            PreviewCpuOutputTarget::WorkingGpu => {
+                let id = self.execution.borrow_mut().issue_candidate_id();
+                let key = if resolved.cache_reusable {
+                    semantic_key.clone()
+                } else {
+                    semantic_key.with_execution_nonce(id)
+                };
+                (key, Some(id))
+            }
+        };
+        let scope = super::preview_processor_feedback::PreviewProcessorFeedbackScope::scalar(
+            &output_key,
             generation,
             epoch,
-            output_key: resolved.cpu_cache_key.clone(),
+        );
+        let attempt = PreviewCpuFallbackAttempt {
+            generation,
+            epoch,
+            semantic_key: semantic_key.clone(),
+            output_key: output_key.clone(),
+            intent,
+            target,
+            candidate_id,
+            reusable: resolved.cache_reusable,
+        };
+        let request = PreviewCpuFallbackRequest {
+            source_work: Some(
+                super::preview_processor_sources::PreviewProcessorSourceWork::from_elements(
+                    self.media_source_work_policy(snapshot),
+                    &resolved.elements,
+                ),
+            ),
+            attempt: Some(attempt.clone()),
+            working_reservation,
+            output_target: target,
+            native_gui_work: self.native_visual_gui_work(
+                snapshot,
+                resolved.cpu_cache_key.sequence_id,
+                scope,
+            ),
+            cancellation: self.execution.borrow().generation_cancellation(),
+            cpu_materialization_active_bytes: resolved.cpu_materialization_active_bytes,
+            cpu_working_set_grant: self.scratch.borrow().cpu_working_set_diagnostics().grant,
+            effect_session_config: self
+                .heterogeneous_effect_decision
+                .get()
+                .cpu_prefix_grant()
+                .effect_session(),
+            generation,
+            epoch,
+            output_key,
             width,
             height,
             elements: Arc::clone(&resolved.elements),
             color_context: resolved.color_context.clone(),
             render_cache_identity: resolved.render_cache_identity,
+            sampling: resolved.sampling,
             cached_working,
             monitoring_tap: self.viewer_signal_monitoring.get().0,
             monitoring_settings: self.viewer_signal_monitoring.get().1,
         };
         match task.submit(request) {
             PreviewCpuFallbackSubmission::Scheduled => {
-                self.cpu_fallback_in_flight.borrow_mut().replace((
-                    generation,
-                    epoch,
-                    resolved.cpu_cache_key.clone(),
-                ));
+                if !snapshot.transport().is_speculative_preparation() {
+                    self.bind_current_processor_feedback_scope(scope);
+                }
+                self.pending_native_visual_gui_refresh.set(None);
+                self.retire_cpu_fallback_pending();
+                self.cpu_fallback_in_flight.borrow_mut().replace(PreviewCpuFallbackPending {
+                    attempt,
+                    completed: false,
+                    completed_resource: None,
+                });
                 self.execution.borrow_mut().set_pending(true);
                 PreviewGpuFrameState::Loading
             }
@@ -830,6 +1060,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                 .then(|| transport.demand().map(PreviewFrameDemandSnapshot::identity))
                 .flatten(),
         );
+        let _ = self.pump_processor_source_requests();
         let preamble_us = app_duration_us(candidate_started.elapsed());
         observation.next("candidate-color-contract");
         self.execution.borrow_mut().set_pending(false);
@@ -1205,6 +1436,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                     );
                 }
                 ResolvedPlanView {
+                    sampling: evaluation.sampling,
                     cpu_materialization_active_bytes: evaluation.cpu_materialization_active_bytes,
                     elements: Arc::clone(&evaluation.elements),
                     cache_key,
@@ -1257,6 +1489,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                     crate::app::preview_timeline_execution::PreviewTimelinePendingDependency::Media { .. } => "timeline_media",
                     crate::app::preview_timeline_execution::PreviewTimelinePendingDependency::BasicTitle(_) => "timeline_basic_title",
                     crate::app::preview_timeline_execution::PreviewTimelinePendingDependency::Temporal { .. } => "timeline_temporal",
+                    crate::app::preview_timeline_execution::PreviewTimelinePendingDependency::Execution { .. } => "timeline_execution",
                 }));
                 self.schedule_media_prefetches(
                     snapshot,
@@ -1321,25 +1554,111 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                 ));
             }
             let state = self.schedule_cpu_fallback(
-                generation,
-                transport.epoch(),
+                snapshot,
                 &resolved,
                 width,
                 height,
                 transport.is_speculative_preparation(),
+                super::preview_cpu_fallback_task::PreviewCpuOutputTarget::Raster,
             );
             self.schedule_media_prefetches(snapshot, proxy_demands, sequence, frame, width, height);
             self.scheduler.prune_obsolete();
             return state;
         }
         let mut media_residency_guards = resolved_preview_media_residency(&resolved.elements);
-        let cached_working = resolved
-            .render_cache_identity
-            .and_then(|identity| self.timeline_render_cache.borrow().ready_frame(identity));
-        if cached_working.is_some() {
+        let completed_attempt = self
+            .cpu_fallback_in_flight
+            .borrow()
+            .as_ref()
+            .filter(|pending| {
+                pending.completed
+                    && pending.attempt.target
+                        == super::preview_cpu_fallback_task::PreviewCpuOutputTarget::WorkingGpu
+                    && pending.attempt.generation == generation
+                    && pending.attempt.epoch == transport.epoch()
+                    && pending.attempt.semantic_key == resolved.cache_key
+                    && pending.attempt.intent == playback_intent
+            })
+            .map(|pending| pending.attempt.clone());
+        let owned_working = if let Some(attempt) = &completed_attempt {
+            let frame = if attempt.reusable {
+                self.frame_store.borrow_mut().viewer_working_frame(&attempt.output_key)
+            } else {
+                self.frame_store.borrow_mut().detach_viewer_working_frame(&attempt.output_key)
+            };
+            self.cpu_fallback_in_flight.borrow_mut().take();
+            if frame.is_none() {
+                return self.unavailable_gpu_candidate_with_retention(
+                    PreviewUnavailability::failed(
+                        PreviewOutputStage::GpuComposite,
+                        "Exact CPU working completion was retired before GPU consumption",
+                    ),
+                    transport.is_speculative_preparation(),
+                );
+            }
+            frame
+        } else if resolved.cache_reusable {
+            self.frame_store.borrow_mut().viewer_working_frame(&resolved.cache_key)
+        } else {
+            None
+        };
+        let retains_cpu_feedback = completed_attempt.is_some()
+            || (owned_working.is_some()
+                && self.current_processor_feedback_scope.get()
+                    == Some(
+                        super::preview_processor_feedback::PreviewProcessorFeedbackScope::scalar(
+                            &resolved.cache_key,
+                            generation,
+                            transport.epoch(),
+                        ),
+                    ));
+        // Keep the pixel payload and its charge in one owner across every
+        // fallible output/layer preparation branch. Layer clones share its Arc.
+        let owned_working =
+            match owned_working {
+                Some(owned) => Some(owned),
+                None => {
+                    let disk_frame = resolved
+                        .cache_reusable
+                        .then(|| {
+                            resolved.render_cache_identity.and_then(|identity| {
+                                self.timeline_render_cache.borrow().ready_frame(identity)
+                            })
+                        })
+                        .flatten();
+                    if let Some(frame) = disk_frame {
+                        let bytes = frame
+                            .rgba_f32()
+                            .data
+                            .capacity()
+                            .checked_mul(std::mem::size_of::<[f32; 4]>());
+                        let resource = bytes.and_then(|bytes| {
+                            self.frame_store
+                                .borrow_mut()
+                                .reserve_working_result(bytes)
+                                .and_then(|work| work.finish(bytes).ok())
+                        });
+                        let Some(resource) = resource else {
+                            return self.unavailable_gpu_candidate_with_retention(
+                            PreviewUnavailability::blocked(PreviewOutputStage::TimelineComposite,
+                                "Cached working pixels exceed their shared live residency grant"),
+                            transport.is_speculative_preparation());
+                        };
+                        Some(super::preview_frame_store::PreviewOwnedWorkingFrame::new(
+                            frame, resource,
+                        ))
+                    } else {
+                        None
+                    }
+                }
+            };
+        if owned_working.is_some() {
             media_residency_guards.clear();
         }
-        let mut cache_key = resolved.cache_key.clone();
+        let mut cache_key = completed_attempt.as_ref().map_or_else(
+            || resolved.cache_key.clone(),
+            |attempt| attempt.output_key.clone(),
+        );
         let program_output_boundary =
             match output_boundary_from_color_context(&resolved.color_context) {
                 Ok(boundary) => boundary,
@@ -1352,13 +1671,14 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         let layer_preparation_started = Instant::now();
         let prepared_gpu_layers = {
             let mut scratch = self.scratch.borrow_mut();
-            match cached_working {
-                Some(frame) => gpu_layer_for_cached_working(frame, &mut scratch)
+            match owned_working.as_ref() {
+                Some(owned) => gpu_layer_for_cached_working((**owned).clone(), &mut scratch)
                     .map(|layer| PreparedPreviewViewerGpuLayers::Ordinary { layers: vec![layer] })
                     .map_err(|reason| (Some(reason), format!("cached working frame: {reason:?}"))),
                 None => prepare_gpu_composite_layers_with_heterogeneous_effects(
                     &resolved.elements,
                     resolved.color_context.working_color_space(),
+                    resolved.sampling,
                     &mut scratch,
                     heterogeneous_decision.cpu_prefix_grant(),
                 )
@@ -1375,6 +1695,26 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         };
         let prepared_gpu_layers = match prepared_gpu_layers {
             Ok(prepared) => prepared,
+            Err((Some(GpuCompositingBlockerReason::EffectRequiresCpu), _)) => {
+                let state = self.schedule_cpu_fallback(
+                    snapshot,
+                    &resolved,
+                    width,
+                    height,
+                    transport.is_speculative_preparation(),
+                    super::preview_cpu_fallback_task::PreviewCpuOutputTarget::WorkingGpu,
+                );
+                self.schedule_media_prefetches(
+                    snapshot,
+                    proxy_demands,
+                    sequence,
+                    frame,
+                    width,
+                    height,
+                );
+                self.scheduler.prune_obsolete();
+                return state;
+            }
             Err((blocker, detail)) => {
                 self.record_gpu_compositing(GpuCompositingDiagnostics {
                     first_blocker: blocker,
@@ -1398,7 +1738,12 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         let layer_preparation_us = app_duration_us(layer_preparation_started.elapsed());
 
         let (layers, heterogeneous_execution) = match prepared_gpu_layers {
-            PreparedPreviewViewerGpuLayers::Ordinary { layers } => (layers, None),
+            PreparedPreviewViewerGpuLayers::Ordinary { layers } => {
+                if !transport.is_speculative_preparation() && !retains_cpu_feedback {
+                    self.retire_processor_feedback_view();
+                }
+                (layers, None)
+            }
             PreparedPreviewViewerGpuLayers::Heterogeneous { layers, cpu_prefix, continuations } => {
                 let visual_fingerprint = if resolved.cache_reusable {
                     cache_key.plan_identity.semantic_fingerprint()
@@ -1416,6 +1761,19 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                 };
                 let visual_key =
                     VisualExecutionTaskKey::from_complete_semantic_fingerprint(visual_fingerprint);
+                let processor_scope =
+                    super::preview_processor_feedback::PreviewProcessorFeedbackScope {
+                        key: Some(
+                            super::preview_processor_feedback::PreviewProcessorWorkKey::Visual(
+                                visual_key,
+                            ),
+                        ),
+                        generation,
+                        epoch: transport.epoch(),
+                    };
+                if !transport.is_speculative_preparation() {
+                    self.bind_current_processor_feedback_scope(processor_scope);
+                }
                 if self.visual_execution_health_failed.get() {
                     self.schedule_media_prefetches(
                         snapshot,
@@ -1432,6 +1790,20 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                     ));
                 }
                 if let Some(failure) = self.visual_failures.borrow().get(&visual_key).cloned() {
+                    let is_user_blocked = failure.blocked.is_some();
+                    if !transport.is_speculative_preparation()
+                        && let Some(receipt) = failure.blocked
+                    {
+                        let mut feedback = mondrian_effects::EffectProcessorFeedbackBatch::new();
+                        if feedback.push((*receipt).clone()).is_ok() {
+                            *self.pending_processor_feedback.borrow_mut() = Some(
+                                super::preview_processor_feedback::PreviewProcessorFeedbackUpdate {
+                                    scope: processor_scope,
+                                    feedback,
+                                },
+                            );
+                        }
+                    }
                     self.schedule_media_prefetches(
                         snapshot,
                         proxy_demands,
@@ -1441,17 +1813,24 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                         height,
                     );
                     self.scheduler.prune_obsolete();
-                    return unavailable_gpu_candidate(PreviewUnavailability::failed(
-                        PreviewOutputStage::GpuComposite,
-                        failure,
-                    ));
+                    return unavailable_gpu_candidate(if is_user_blocked {
+                        PreviewUnavailability::blocked(
+                            PreviewOutputStage::GpuComposite,
+                            failure.detail,
+                        )
+                    } else {
+                        PreviewUnavailability::failed(
+                            PreviewOutputStage::GpuComposite,
+                            failure.detail,
+                        )
+                    });
                 }
 
                 let ready = self.visual_ready.borrow_mut().remove(&visual_key);
                 let ready = ready.filter(|ready| {
                     ready.generation() == generation && ready.epoch() == transport.epoch()
                 });
-                let Some(ready) = ready else {
+                let Some(mut ready) = ready else {
                     let decision = heterogeneous_decision;
                     let access_intent = media_preview_viewer_access_intent(
                         transport.is_playing(),
@@ -1515,25 +1894,38 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                     let deadline = demand
                         .and_then(|demand| demand.adapter_deadline())
                         .map(|deadline| task.project_adapter_deadline(deadline, sampled_at));
-                    let admission = VisualExecutionAdmission::new(
-                        visual_key,
-                        generation,
-                        if transport.is_speculative_preparation() {
-                            mondrian_playback::FrameWorkPriority::Prefetch
-                        } else {
-                            mondrian_playback::FrameWorkPriority::Current
-                        },
-                        work_class,
-                        demand.map(|demand| demand.identity()),
-                        deadline,
-                        VisualExecutionTaskPayload::heterogeneous_cpu_prefix_batch(
-                            transport.epoch(),
-                            cpu_prefix,
-                            gpu_grant,
-                            std::mem::take(&mut media_residency_guards),
-                        ),
-                    );
+                    let admission =
+                        VisualExecutionAdmission::new(
+                            visual_key,
+                            generation,
+                            if transport.is_speculative_preparation() {
+                                mondrian_playback::FrameWorkPriority::Prefetch
+                            } else {
+                                mondrian_playback::FrameWorkPriority::Current
+                            },
+                            work_class,
+                            demand.map(|demand| demand.identity()),
+                            deadline,
+                            VisualExecutionTaskPayload::heterogeneous_cpu_prefix_batch(
+                                transport.epoch(),
+                                cpu_prefix,
+                                gpu_grant,
+                                std::mem::take(&mut media_residency_guards),
+                            )
+                            .with_processor_sources(super::preview_processor_sources::PreviewProcessorSourceWork::from_elements(
+                                self.media_source_work_policy(snapshot), &resolved.elements))
+                            .with_native_gui_work(
+                                self.native_visual_gui_work(snapshot, sequence.id, processor_scope),
+                            ),
+                        );
                     let submission = task.submit(admission);
+                    if matches!(
+                        submission,
+                        mondrian_playback::FrameWorkSubmission::Queued { .. }
+                            | mondrian_playback::FrameWorkSubmission::UpdatedQueued { .. }
+                    ) {
+                        self.pending_native_visual_gui_refresh.set(None);
+                    }
                     self.execution.borrow_mut().set_pending(true);
                     self.schedule_media_prefetches(
                         snapshot,
@@ -1587,6 +1979,17 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                     };
                 };
 
+                if !transport.is_speculative_preparation()
+                    && ready.feedback_observation_is_active()
+                    && let Ok(feedback) = ready.take_processor_feedback()
+                {
+                    *self.pending_processor_feedback.borrow_mut() = Some(
+                        super::preview_processor_feedback::PreviewProcessorFeedbackUpdate {
+                            scope: processor_scope,
+                            feedback,
+                        },
+                    );
+                }
                 let (output, lease) = ready.into_parts();
                 let (output, gpu_grant, async_media_residency_guards) =
                     output.into_heterogeneous_cpu_prefix_batch();
@@ -1657,11 +2060,16 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             ..TimelineCompositeDiagnostics::default()
         });
         let working_input = PreviewGpuWorkingInput::GpuComposite { layers };
-        let candidate_id = match self
-            .execution
-            .borrow_mut()
-            .plan_candidate_with_reuse(Some(&cache_key), resolved.cache_reusable)
-        {
+        let candidate_decision = completed_attempt
+            .as_ref()
+            .and_then(|attempt| attempt.candidate_id)
+            .map(PreviewCandidateDecision::Execute)
+            .unwrap_or_else(|| {
+                self.execution
+                    .borrow_mut()
+                    .plan_candidate_with_reuse(Some(&cache_key), resolved.cache_reusable)
+            });
+        let candidate_id = match candidate_decision {
             PreviewCandidateDecision::Current => {
                 self.schedule_gpu_candidate_prefetches(
                     snapshot,
@@ -1686,7 +2094,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                 unreachable!("a resolved Viewer plan must select current output or execution")
             }
         };
-        if !resolved.cache_reusable {
+        if !resolved.cache_reusable && completed_attempt.is_none() {
             cache_key = cache_key.with_execution_nonce(candidate_id);
         }
         let prefetch_started = Instant::now();
@@ -1719,30 +2127,33 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             &self.metrics.gpu_preview_candidate_pixels,
             (width as u64).saturating_mul(height as u64),
         );
-        PreviewGpuFrameState::Ready(Box::new(PreviewGpuFrame::new(
-            cache_key,
-            sequence.id,
-            frame,
-            width,
-            height,
-            resolved.color_context.working_color_space(),
-            working_input,
-            program_output_boundary,
-            monitor_adaptation,
-            candidate_id,
-            generation,
-            if transport.is_speculative_preparation() {
-                crate::app::preview_execution::PreviewGpuFramePurpose::SuccessorPreparation
-            } else {
-                crate::app::preview_execution::PreviewGpuFramePurpose::Current
-            },
-            playback_intent,
-            self.execution.borrow().presentation_quality(),
-            self.playback_presentation_ticket(snapshot),
-            decode_execution,
-            heterogeneous_execution,
-            media_residency_guards,
-        )))
+        PreviewGpuFrameState::Ready(Box::new(
+            PreviewGpuFrame::new(
+                cache_key,
+                sequence.id,
+                frame,
+                width,
+                height,
+                resolved.color_context.working_color_space(),
+                working_input,
+                program_output_boundary,
+                monitor_adaptation,
+                candidate_id,
+                generation,
+                if transport.is_speculative_preparation() {
+                    crate::app::preview_execution::PreviewGpuFramePurpose::SuccessorPreparation
+                } else {
+                    crate::app::preview_execution::PreviewGpuFramePurpose::Current
+                },
+                playback_intent,
+                self.execution.borrow().presentation_quality(),
+                self.playback_presentation_ticket(snapshot),
+                decode_execution,
+                heterogeneous_execution,
+                media_residency_guards,
+            )
+            .retain_working_resource(owned_working.as_ref().map(|owned| owned.resource().clone())),
+        ))
     }
 
     /// Bind one exact speculative frame, or resume one held current candidate,
@@ -2130,6 +2541,44 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         }
     }
 
+    fn retire_processor_feedback_view(&self) {
+        if let Some(presentation) = self.pending_native_visual_question.borrow_mut().take() {
+            presentation.dismiss();
+        }
+        let Some(epoch) = self.transport_epoch.get() else {
+            self.current_processor_feedback_scope.set(None);
+            self.pending_processor_feedback.borrow_mut().take();
+            return;
+        };
+        let scope = super::preview_processor_feedback::PreviewProcessorFeedbackScope {
+            key: None,
+            generation: self.execution.borrow().generation(),
+            epoch,
+        };
+        self.current_processor_feedback_scope.set(Some(scope));
+        *self.pending_processor_feedback.borrow_mut() = Some(
+            super::preview_processor_feedback::PreviewProcessorFeedbackUpdate {
+                scope,
+                feedback: mondrian_effects::EffectProcessorFeedbackBatch::new(),
+            },
+        );
+    }
+
+    fn bind_current_processor_feedback_scope(
+        &self,
+        scope: super::preview_processor_feedback::PreviewProcessorFeedbackScope,
+    ) {
+        if self.current_processor_feedback_scope.get() != Some(scope) {
+            self.current_processor_feedback_scope.set(Some(scope));
+            *self.pending_processor_feedback.borrow_mut() = Some(
+                super::preview_processor_feedback::PreviewProcessorFeedbackUpdate {
+                    scope,
+                    feedback: mondrian_effects::EffectProcessorFeedbackBatch::new(),
+                },
+            );
+        }
+    }
+
     /// Drain the bounded visual worker handoff without blocking the caller.
     ///
     /// Ready CPU prefixes remain move-only and bounded by the Broker/result
@@ -2142,6 +2591,12 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         let Some(task) = self.visual_execution.as_ref() else {
             return PreviewWorkPoll::default();
         };
+        self.visual_ready
+            .borrow_mut()
+            .retain(|_, ready| ready.preparation_owner_is_active());
+        self.visual_failures
+            .borrow_mut()
+            .retain(|_, failure| failure.preparation_owner_is_active());
         let active_generation = self.execution.borrow().generation();
         let active_epoch = self.transport_epoch.get();
         let mut outcome = PreviewWorkPoll::default();
@@ -2158,9 +2613,52 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             };
             drained = drained.saturating_add(1);
             match result {
+                VisualExecutionTaskResult::SourceRequest(request) => {
+                    self.observe_processor_source_request(*request);
+                    outcome.needs_follow_up_poll = true;
+                }
+                VisualExecutionTaskResult::NativeGuiAction(action) => {
+                    // This is an idle bank-owned action, with no current frame
+                    // generation or fabricated completion scope. Main App
+                    // independently verifies current author and actual owner.
+                    let _ = self.pending_native_visual_actions.borrow_mut().push(action);
+                }
+                VisualExecutionTaskResult::NativeQuestion(presentation) => {
+                    self.observe_native_visual_question(
+                        presentation,
+                        active_generation,
+                        active_epoch,
+                    );
+                }
+                VisualExecutionTaskResult::Progress(update) => {
+                    if self.current_processor_feedback_scope.get() == Some(update.scope)
+                        && update.scope.generation == active_generation
+                        && active_epoch == Some(update.scope.epoch)
+                    {
+                        outcome.processor_progress = Some(update);
+                    }
+                }
                 VisualExecutionTaskResult::PrefixReady(ready) => {
+                    let scope = super::preview_processor_feedback::PreviewProcessorFeedbackScope {
+                        key: Some(
+                            super::preview_processor_feedback::PreviewProcessorWorkKey::Visual(
+                                ready.key(),
+                            ),
+                        ),
+                        generation: ready.generation(),
+                        epoch: ready.epoch(),
+                    };
+                    if self.current_processor_feedback_scope.get() == Some(scope) {
+                        outcome.processor_progress = Some(
+                            super::preview_processor_feedback::PreviewProcessorProgressUpdate {
+                                scope,
+                                receipt: None,
+                            },
+                        );
+                    }
                     if ready.generation() == active_generation
                         && active_epoch == Some(ready.epoch())
+                        && ready.preparation_owner_is_active()
                     {
                         self.visual_failures.borrow_mut().remove(&ready.key());
                         self.visual_ready.borrow_mut().insert(ready.key(), ready);
@@ -2170,6 +2668,26 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                     // unresolved Broker binding through RAII.
                 }
                 VisualExecutionTaskResult::Failed(failed) => {
+                    if !failed.preparation_owner_is_active() {
+                        continue;
+                    }
+                    let scope = super::preview_processor_feedback::PreviewProcessorFeedbackScope {
+                        key: Some(
+                            super::preview_processor_feedback::PreviewProcessorWorkKey::Visual(
+                                failed.key(),
+                            ),
+                        ),
+                        generation: failed.generation(),
+                        epoch: failed.epoch(),
+                    };
+                    if self.current_processor_feedback_scope.get() == Some(scope) {
+                        outcome.processor_progress = Some(
+                            super::preview_processor_feedback::PreviewProcessorProgressUpdate {
+                                scope,
+                                receipt: None,
+                            },
+                        );
+                    }
                     self.observe_visual_execution_failure(&failed, active_generation, active_epoch);
                     outcome.visible_change |= failed.generation() == active_generation
                         && active_epoch == Some(failed.epoch());
@@ -2179,7 +2697,110 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         // Reaching the exact bound cannot prove the channel is empty. Request
         // one more bounded turn even when every result was published before
         // the native event sampled its final work-watch revision.
-        outcome.needs_follow_up_poll = visual_execution_drain_needs_follow_up(drained);
+        outcome.needs_follow_up_poll |= visual_execution_drain_needs_follow_up(drained);
+        outcome
+    }
+
+    fn processor_source_scope_is_active(
+        &self,
+        request: &super::preview_processor_sources::PreviewProcessorSourceRequest,
+    ) -> bool {
+        let scope = request.scope();
+        // A live execution owns its Source reply independently of the current
+        // UI feedback view. Another same-generation candidate may replace that
+        // view while this serial worker is still waiting for admitted pixels.
+        // Generation/epoch retirement and the worker's wait owner remain the
+        // execution authority; output and feedback publication have their own
+        // stricter attempt checks.
+        request.is_active()
+            && scope.generation == self.execution.borrow().generation()
+            && self.transport_epoch.get() == Some(scope.epoch)
+    }
+
+    fn observe_processor_source_request(
+        &self,
+        request: super::preview_processor_sources::PreviewProcessorSourceRequest,
+    ) {
+        if !self.processor_source_scope_is_active(&request) {
+            return;
+        }
+        let mut pending = self.pending_processor_sources.borrow_mut();
+        pending.retain(|request| self.processor_source_scope_is_active(request));
+        // Each of the two existing serial CPU domains can have one live wait.
+        if pending.len() < 2 {
+            pending.push(request);
+        }
+    }
+
+    fn pump_processor_source_requests(&self) -> PreviewWorkPoll {
+        let mut outcome = PreviewWorkPoll::default();
+        // Admission can observe a producer failure and retire the generation.
+        // Never keep a queue borrow across that production callback.
+        let pending = std::mem::take(&mut *self.pending_processor_sources.borrow_mut());
+        for mut request in pending {
+            if !self.processor_source_scope_is_active(&request) {
+                continue;
+            }
+            let done = request
+                .poll(|key, policy| self.media_frame_for_frozen_key(key.clone(), policy, true));
+            if !done && self.processor_source_scope_is_active(&request) {
+                outcome.needs_follow_up_poll |= request.needs_admission_retry();
+                let mut queue = self.pending_processor_sources.borrow_mut();
+                if queue.len() < 2 {
+                    queue.push(request);
+                }
+            }
+        }
+        outcome
+    }
+
+    fn observe_cpu_fallback_stopped(
+        &self,
+        stopped: super::preview_cpu_fallback_task::PreviewCpuFallbackStopped,
+    ) -> PreviewWorkPoll {
+        let mut outcome = PreviewWorkPoll::default();
+        let is_current = stopped.generation == self.execution.borrow().generation()
+            && self.transport_epoch.get() == Some(stopped.epoch)
+            && self.cpu_fallback_in_flight.borrow().as_ref().is_some_and(|pending| {
+                stopped.attempt.as_ref() == Some(&pending.attempt)
+                    && pending.attempt.generation == stopped.generation
+                    && pending.attempt.epoch == stopped.epoch
+                    && pending.attempt.output_key == stopped.output_key
+            });
+        if !is_current {
+            return outcome;
+        }
+        let pending = self.cpu_fallback_in_flight.borrow_mut().take().unwrap();
+        let scope = super::preview_processor_feedback::PreviewProcessorFeedbackScope::scalar(
+            &stopped.output_key,
+            stopped.generation,
+            stopped.epoch,
+        );
+        if self.current_processor_feedback_scope.get() == Some(scope) {
+            outcome.processor_progress = Some(
+                super::preview_processor_feedback::PreviewProcessorProgressUpdate {
+                    scope,
+                    receipt: None,
+                },
+            );
+        }
+        if stopped.reason == mondrian_effects::EffectProcessorStopReason::DeadlineExpired
+            && let Some(identity) = stopped.demand_identity
+            && identity.epoch == pending.attempt.intent.epoch
+            && identity.quality_revision == pending.attempt.intent.quality_revision
+            && identity.target_frame == pending.attempt.intent.frame
+        {
+            outcome.frame_delivery_candidates.push(
+                mondrian_playback::FrameDeliveryCandidate::for_demand(
+                    identity,
+                    mondrian_playback::FrameDeliveryKind::Late,
+                ),
+            );
+        }
+        // A cooperative stop is not a persistent semantic failure. Playback
+        // alone decides whether this exact original demand can consume Late.
+        self.execution.borrow_mut().set_pending(false);
+        outcome.visible_change = true;
         outcome
     }
 
@@ -2192,16 +2813,77 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         let mut outcome = PreviewWorkPoll::default();
         while let Some(result) = task.try_poll() {
             match result {
-                PreviewCpuFallbackResult::Ready(mut ready) => {
-                    if let Some(frame) = ready.render_cache_frame.take() {
-                        self.timeline_render_cache.borrow_mut().publish(frame);
-                    }
-                    if ready.generation == active_generation
-                        && active_epoch == Some(ready.epoch)
-                        && self.viewer_cpu_fallback_active.get()
+                PreviewCpuFallbackResult::SourceRequest(request) => {
+                    self.observe_processor_source_request(*request);
+                    outcome.needs_follow_up_poll = true;
+                }
+                PreviewCpuFallbackResult::NativeGuiAction(action) => {
+                    // This is an idle bank-owned action, with no current frame
+                    // generation or fabricated completion scope. Main App
+                    // independently verifies current author and actual owner.
+                    let _ = self.pending_native_visual_actions.borrow_mut().push(action);
+                }
+                PreviewCpuFallbackResult::NativeQuestion(presentation) => {
+                    self.observe_native_visual_question(
+                        presentation,
+                        active_generation,
+                        active_epoch,
+                    );
+                }
+                PreviewCpuFallbackResult::Progress(update) => {
+                    if self.current_processor_feedback_scope.get() == Some(update.scope)
+                        && update.scope.generation == active_generation
+                        && active_epoch == Some(update.scope.epoch)
+                        && self.cpu_fallback_in_flight.borrow().as_ref().is_some_and(
+                            |pending| {
+                                super::preview_processor_feedback::PreviewProcessorFeedbackScope::scalar(
+                                    &pending.attempt.output_key, pending.attempt.generation, pending.attempt.epoch
+                                ) == update.scope
+                            },
+                        )
                     {
-                        self.cpu_fallback_in_flight.borrow_mut().take();
+                        outcome.processor_progress = Some(update);
+                    }
+                }
+                PreviewCpuFallbackResult::Ready(mut ready) => {
+                    let scope =
+                        super::preview_processor_feedback::PreviewProcessorFeedbackScope::scalar(
+                            &ready.output_key,
+                            ready.generation,
+                            ready.epoch,
+                        );
+                    let is_current = ready.generation == active_generation
+                        && active_epoch == Some(ready.epoch)
+                        && self.cpu_fallback_in_flight.borrow().as_ref().is_some_and(|pending| {
+                            ready.attempt.as_ref() == Some(&pending.attempt)
+                                && pending.attempt.generation == ready.generation
+                                && pending.attempt.epoch == ready.epoch
+                                && pending.attempt.output_key == ready.output_key
+                        });
+                    if is_current && self.current_processor_feedback_scope.get() == Some(scope) {
+                        outcome.processor_progress = Some(
+                            super::preview_processor_feedback::PreviewProcessorProgressUpdate {
+                                scope,
+                                receipt: None,
+                            },
+                        );
+                    }
+                    if is_current {
+                        if let Some(frame) = ready.render_cache_frame.take() {
+                            self.timeline_render_cache.borrow_mut().publish(frame);
+                        }
                         self.cpu_fallback_failure.borrow_mut().take();
+                        let scope = super::preview_processor_feedback::PreviewProcessorFeedbackScope::scalar(&ready.output_key, ready.generation, ready.epoch);
+                        if self.current_processor_feedback_scope.get() == Some(scope) {
+                            *self.pending_processor_feedback.borrow_mut() = Some(
+                                super::preview_processor_feedback::PreviewProcessorFeedbackUpdate {
+                                    scope,
+                                    feedback: std::mem::take(
+                                        &mut ready.execution.processor_feedback,
+                                    ),
+                                },
+                            );
+                        }
                         self.record_composite(ready.execution.composite_diagnostics);
                         for diagnostics in &ready.execution.input_color_diagnostics {
                             self.record_color_transform(*diagnostics);
@@ -2221,7 +2903,9 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                                 },
                             );
                         }
-                        self.record_color_transform(ready.execution.color_diagnostics);
+                        if let Some(diagnostics) = ready.execution.color_diagnostics {
+                            self.record_color_transform(diagnostics);
+                        }
                         if let Some(diagnostics) = ready.execution.monitor_color_diagnostics {
                             self.record_color_transform(diagnostics);
                         }
@@ -2238,22 +2922,104 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                                 ready.execution.execution_durations.cpu_output_boundary_us,
                             );
                         self.record_render_stage_durations(total_duration_us, stage_durations);
-                        self.frame_store
-                            .borrow_mut()
-                            .insert_viewer_frame(ready.output_key, ready.frame);
+                        let admitted = match ready.frame {
+                            super::preview_frame_store::PreviewViewerCpuFrame::Raster(frame) => {
+                                self.cpu_fallback_in_flight.borrow_mut().take();
+                                self.frame_store
+                                    .borrow_mut()
+                                    .insert_viewer_frame(ready.output_key.clone(), frame)
+                            }
+                            super::preview_frame_store::PreviewViewerCpuFrame::Working(frame) => {
+                                match ready.working_resource.take() {
+                                    Some(resource) => {
+                                        if let Some(pending) =
+                                            self.cpu_fallback_in_flight.borrow_mut().as_mut()
+                                        {
+                                            pending.completed = true;
+                                            pending.completed_resource = Some(resource.clone());
+                                        }
+                                        self.frame_store.borrow_mut().insert_admitted_working_frame(
+                                            ready.output_key.clone(),
+                                            frame,
+                                            resource,
+                                        )
+                                    }
+                                    None => false,
+                                }
+                            }
+                        };
+                        if !admitted {
+                            let semantic_key = self
+                                .cpu_fallback_in_flight
+                                .borrow_mut()
+                                .take()
+                                .map_or(ready.output_key, |pending| pending.attempt.semantic_key);
+                            self.cpu_fallback_failure.borrow_mut().replace((
+                                semantic_key,
+                                VisualExecutionFailureView {
+                                    detail: "Viewer CPU result exceeds its residency grant"
+                                        .to_owned(),
+                                    blocked: None,
+                                    preparation_interest: None,
+                                },
+                            ));
+                        }
                         self.execution.borrow_mut().set_pending(false);
                         outcome.visible_change = true;
                     }
                 }
+                PreviewCpuFallbackResult::Stopped(stopped) => {
+                    outcome.merge(self.observe_cpu_fallback_stopped(*stopped));
+                }
                 PreviewCpuFallbackResult::Failed(failed) => {
-                    if failed.generation == active_generation
+                    let scope =
+                        super::preview_processor_feedback::PreviewProcessorFeedbackScope::scalar(
+                            &failed.output_key,
+                            failed.generation,
+                            failed.epoch,
+                        );
+                    let is_current = failed.generation == active_generation
                         && active_epoch == Some(failed.epoch)
-                        && self.viewer_cpu_fallback_active.get()
-                    {
-                        self.cpu_fallback_in_flight.borrow_mut().take();
-                        self.cpu_fallback_failure
+                        && self.cpu_fallback_in_flight.borrow().as_ref().is_some_and(|pending| {
+                            failed.attempt.as_ref() == Some(&pending.attempt)
+                                && pending.attempt.generation == failed.generation
+                                && pending.attempt.epoch == failed.epoch
+                                && pending.attempt.output_key == failed.output_key
+                        });
+                    if is_current && self.current_processor_feedback_scope.get() == Some(scope) {
+                        outcome.processor_progress = Some(
+                            super::preview_processor_feedback::PreviewProcessorProgressUpdate {
+                                scope,
+                                receipt: None,
+                            },
+                        );
+                    }
+                    if is_current {
+                        let semantic_key = self
+                            .cpu_fallback_in_flight
                             .borrow_mut()
-                            .replace((failed.output_key, failed.reason));
+                            .take()
+                            .map_or(failed.output_key.clone(), |pending| {
+                                pending.attempt.semantic_key
+                            });
+                        self.cpu_fallback_failure.borrow_mut().replace((
+                            semantic_key,
+                            VisualExecutionFailureView {
+                                detail: failed.reason,
+                                blocked: failed.blocked.clone(),
+                                preparation_interest: None,
+                            },
+                        ));
+                        let scope = super::preview_processor_feedback::PreviewProcessorFeedbackScope::scalar(&failed.output_key, failed.generation, failed.epoch);
+                        if self.current_processor_feedback_scope.get() == Some(scope)
+                            && let Some(receipt) = failed.blocked
+                        {
+                            let mut feedback =
+                                mondrian_effects::EffectProcessorFeedbackBatch::new();
+                            if feedback.push((*receipt).clone()).is_ok() {
+                                *self.pending_processor_feedback.borrow_mut() = Some(super::preview_processor_feedback::PreviewProcessorFeedbackUpdate { scope, feedback });
+                            }
+                        }
                         self.execution.borrow_mut().set_pending(false);
                         outcome.visible_change = true;
                     }
@@ -2287,6 +3053,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         }
         self.visual_ready.borrow_mut().clear();
         self.visual_failures.borrow_mut().clear();
+        self.retire_processor_feedback_view();
         self.execution.borrow_mut().set_pending(false);
         if let Some(identity) = pending_demand {
             self.queue_visual_terminal_candidate(
@@ -2336,32 +3103,48 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         active_generation: u64,
         active_epoch: Option<mondrian_playback::PlaybackEpoch>,
     ) {
+        if !failed.preparation_owner_is_active() {
+            return;
+        }
         if failed.owns_terminal_binding()
-            && failed.terminal_evidence().is_some()
+            && (failed.terminal_evidence().is_some()
+                || failed.failure().processor_blocked().is_some())
             && failed.generation() == active_generation
             && active_epoch == Some(failed.epoch())
         {
-            self.visual_failures
-                .borrow_mut()
-                .insert(failed.key(), failed.failure().to_string());
+            self.visual_failures.borrow_mut().insert(
+                failed.key(),
+                VisualExecutionFailureView {
+                    detail: failed.failure().to_string(),
+                    blocked: failed.failure().processor_blocked().map(std::sync::Arc::clone),
+                    preparation_interest: failed.preparation_interest().cloned(),
+                },
+            );
         }
         let Some(identity) = failed.demand_identity() else {
             return;
         };
-        let kind = match failed.failure() {
-            VisualExecutionTaskFailure::BrokerCanceled {
-                evidence:
-                    mondrian_playback::FrameExecutionCancellationEvidence {
-                        cancellation:
-                            mondrian_playback::FrameExecutionCancellation::DeadlineExpired { .. },
-                        ..
-                    },
-            } => Some(mondrian_playback::FrameDeliveryKind::Late),
-            VisualExecutionTaskFailure::BrokerCanceled { .. } => None,
-            VisualExecutionTaskFailure::LeaseUnavailable
-            | VisualExecutionTaskFailure::RendererBatch(_)
-            | VisualExecutionTaskFailure::WorkerPanicked { .. } => {
-                Some(mondrian_playback::FrameDeliveryKind::Failed)
+        let kind = if failed.failure().processor_blocked().is_some() {
+            Some(mondrian_playback::FrameDeliveryKind::Blocked)
+        } else {
+            match failed.failure() {
+                VisualExecutionTaskFailure::BrokerCanceled {
+                    evidence:
+                        mondrian_playback::FrameExecutionCancellationEvidence {
+                            cancellation:
+                                mondrian_playback::FrameExecutionCancellation::DeadlineExpired {
+                                    ..
+                                },
+                            ..
+                        },
+                } => Some(mondrian_playback::FrameDeliveryKind::Late),
+                VisualExecutionTaskFailure::BrokerCanceled { .. } => None,
+                VisualExecutionTaskFailure::LeaseUnavailable
+                | VisualExecutionTaskFailure::PreparedTimeline { .. }
+                | VisualExecutionTaskFailure::RendererBatch(_)
+                | VisualExecutionTaskFailure::WorkerPanicked { .. } => {
+                    Some(mondrian_playback::FrameDeliveryKind::Failed)
+                }
             }
         };
         let Some(kind) = kind else {
@@ -2527,6 +3310,8 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             | PreviewGenerationBinding::Rotated(generation) => generation,
         };
         if matches!(binding, PreviewGenerationBinding::Rotated(_)) {
+            self.retire_cpu_fallback_pending();
+            self.cpu_fallback_failure.borrow_mut().take();
             self.evaluation_working_set.borrow_mut().retire_generation_work();
             self.frame_store.borrow_mut().retire_approximate_media_frames();
             self.decode_residency_waiting.set(None);
@@ -2537,8 +3322,10 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             if let Some(task) = &self.visual_execution {
                 task.prune_before(generation);
             }
+            self.pending_processor_sources.borrow_mut().clear();
             self.visual_ready.borrow_mut().clear();
             self.visual_failures.borrow_mut().clear();
+            self.retire_processor_feedback_view();
             self.media_execution_failures.borrow_mut().clear();
         }
         self.scratch.borrow_mut().bind_effect_execution_generation(generation);
@@ -2546,6 +3333,8 @@ impl<O: Clone> PreviewProductionRuntime<O> {
     }
 
     fn invalidate_preview_generation(&self) {
+        self.retire_cpu_fallback_pending();
+        self.cpu_fallback_failure.borrow_mut().take();
         self.evaluation_working_set.borrow_mut().retire_generation_work();
         self.frame_store.borrow_mut().retire_approximate_media_frames();
         self.decode_residency_waiting.set(None);
@@ -2558,8 +3347,12 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         if let Some(task) = &self.visual_execution {
             task.prune_before(generation);
         }
+        // Publish cancellation in both original execution domains before
+        // retiring their reply capabilities and partially acquired sources.
+        self.pending_processor_sources.borrow_mut().clear();
         self.visual_ready.borrow_mut().clear();
         self.visual_failures.borrow_mut().clear();
+        self.retire_processor_feedback_view();
         self.media_execution_failures.borrow_mut().clear();
         self.scratch.borrow_mut().bind_effect_execution_generation(generation);
     }
@@ -2642,6 +3435,7 @@ fn join_preview_workers_until(
 /// evaluation itself becomes the single authoritative construction point
 /// (output key, elements, color context, reuse policy).
 struct ResolvedPlanView {
+    sampling: mondrian_core::ImageSampling,
     cpu_materialization_active_bytes: u64,
     elements: Arc<[ResolvedPreviewElement]>,
     cache_key: PreviewOutputKey,
@@ -2802,6 +3596,7 @@ impl<O: Clone> PlaybackPreviewAdapter for PreviewProductionRuntime<O> {
         outcome.merge(self.pump_visual_execution_results(pending_demand));
         outcome.merge(self.pump_timeline_render_cache_results());
         outcome.merge(self.pump_cpu_fallback_results());
+        outcome.merge(self.pump_processor_source_requests());
         for candidate in self.take_visual_terminal_candidates(pending_demand) {
             if !outcome
                 .frame_delivery_candidates
@@ -2820,6 +3615,14 @@ impl<O: Clone> PlaybackPreviewAdapter for PreviewProductionRuntime<O> {
         }
         outcome.candidate_retry_required |= self.consume_decode_residency_candidate_retry();
         self.try_release_settled_transport_media_residency();
+        outcome.native_gui_actions =
+            std::mem::take(&mut *self.pending_native_visual_actions.borrow_mut());
+        outcome.processor_feedback =
+            self.pending_processor_feedback.borrow_mut().take().filter(|update| {
+                self.current_processor_feedback_scope.get() == Some(update.scope)
+                    && update.scope.generation == self.execution.borrow().generation()
+                    && self.transport_epoch.get() == Some(update.scope.epoch)
+            });
         outcome
     }
 
@@ -2872,7 +3675,17 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         if self.applied_resource_decision.get() == Some(*decision) {
             return;
         }
-        self.applied_resource_decision.set(Some(*decision));
+        let previous = self.applied_resource_decision.replace(Some(*decision));
+        if previous.is_none_or(|previous| {
+            previous.cpu_composite_working_set != decision.cpu_composite_working_set
+                || previous.heterogeneous_effects != decision.heterogeneous_effects
+                || previous.effect_cache.max_working_bytes
+                    != decision.effect_cache.max_working_bytes
+        }) {
+            // A pre-DSP attempt cannot retain inputs under a replaced active
+            // grant. Optional cache pressure alone does not change its authority.
+            self.evaluation_working_set.borrow_mut().retire_preparation_owners();
+        }
         bump(&self.metrics.resource_decision_reconfigurations);
         self.heterogeneous_effect_decision.set(decision.heterogeneous_effects);
         self.frame_store.borrow_mut().reconfigure(decision.frame_store);
@@ -2894,6 +3707,8 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                 max_working_bytes: decision.effect_cache.max_working_bytes,
                 max_gpu_plan_entries: decision.effect_cache.max_gpu_plan_entries,
                 max_gpu_plan_bytes: decision.effect_cache.max_gpu_plan_bytes,
+                max_processor_instances: decision.effect_cache.max_processor_instances,
+                max_processor_bytes: decision.effect_cache.max_processor_bytes,
             });
             scratch.reconfigure_cpu_working_set(decision.cpu_composite_working_set);
             scratch.reconfigure_color_execution(decision.cpu_color_processor_capacity);
@@ -3413,3 +4228,19 @@ mod worker_health_contract_tests {
 #[cfg(test)]
 #[path = "preview_runtime/tests.rs"]
 mod tests;
+
+#[derive(Clone)]
+struct VisualExecutionFailureView {
+    detail: String,
+    blocked: Option<std::sync::Arc<mondrian_effects::EffectProcessorFeedbackReceipt>>,
+    preparation_interest:
+        Option<std::sync::Weak<super::preview_timeline_execution::PreviewTimelineWorkInterest>>,
+}
+
+impl VisualExecutionFailureView {
+    fn preparation_owner_is_active(&self) -> bool {
+        self.preparation_interest
+            .as_ref()
+            .is_none_or(|interest| interest.upgrade().is_some())
+    }
+}

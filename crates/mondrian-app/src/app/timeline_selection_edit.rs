@@ -7,6 +7,7 @@
 
 use super::product_action::{TimelineSelectionEdit, TimelineTrimPayloadEdge};
 use super::selection::resolve_clip_selection;
+use crate::app::AppMessage;
 
 use super::AppState;
 use mondrian_core::{ClipId, FramePosition, MondrianError, TimelineTime};
@@ -116,8 +117,8 @@ impl AppState {
         self.replace_clip_selection(selections);
         self.set_status_hint(
             match kind {
-                ClipLinkEditKind::Link => "已链接所选剪辑",
-                ClipLinkEditKind::Unlink => "已取消所选剪辑链接",
+                ClipLinkEditKind::Link => AppMessage::new("status-clips-linked"),
+                ClipLinkEditKind::Unlink => AppMessage::new("status-clips-unlinked"),
             },
             false,
         );

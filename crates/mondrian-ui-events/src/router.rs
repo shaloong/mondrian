@@ -14,7 +14,8 @@ use mondrian_ui_core::types::{
     WidgetId,
 };
 use mondrian_ui_core::widget::{
-    CursorRequest, DragRequest, EventContext, EventRequests, EyedropperRequest, ImeRequest,
+    CursorRequest, DragRequest, EditCommand, EventContext, EventRequests, EyedropperRequest,
+    ImeRequest, MenuCommand, PointerCaptureRequest,
 };
 use mondrian_ui_core::{TreeWalker, Widget, WidgetTree};
 
@@ -63,6 +64,9 @@ pub struct EventRouter {
     root_widget_id: WidgetId,
     hovered: Option<WidgetId>,
     focused: Option<WidgetId>,
+    active_focus_scope: Option<WidgetId>,
+    suspended_focus: Option<WidgetId>,
+    suspended_command_focus: Option<WidgetId>,
     capture: PointerCaptureState,
     active_drag: Option<ActiveDrag>,
 
@@ -99,6 +103,9 @@ impl EventRouter {
             root_widget_id,
             hovered: None,
             focused: None,
+            active_focus_scope: None,
+            suspended_focus: None,
+            suspended_command_focus: None,
             capture: PointerCaptureState::default(),
             active_drag: None,
             focus_mgr: FocusManagerImpl::new(),
@@ -118,6 +125,9 @@ impl EventRouter {
             root_widget_id,
             hovered: None,
             focused: None,
+            active_focus_scope: None,
+            suspended_focus: None,
+            suspended_command_focus: None,
             capture: PointerCaptureState::default(),
             active_drag: None,
             focus_mgr: FocusManagerImpl::new(),
@@ -145,6 +155,9 @@ impl EventRouter {
             root_widget_id,
             hovered: None,
             focused: None,
+            active_focus_scope: None,
+            suspended_focus: None,
+            suspended_command_focus: None,
             capture: PointerCaptureState::default(),
             active_drag: None,
             focus_mgr: FocusManagerImpl::new(),
@@ -264,7 +277,25 @@ impl EventRouter {
         tree: &mut dyn WidgetTree,
         dispatch: &dyn Fn(Action),
     ) -> EventResult {
+        let command_menu_was_open = self
+            .capture
+            .owner()
+            .is_some_and(|id| tree.get(id).is_some_and(Widget::is_command_menu));
+        let result = self.route_event(event, tree, dispatch);
+        if command_menu_was_open && self.capture.is_idle() {
+            self.restore_command_focus(tree, dispatch);
+        }
+        result
+    }
+
+    fn route_event(
+        &mut self,
+        event: UiEvent,
+        tree: &mut dyn WidgetTree,
+        dispatch: &dyn Fn(Action),
+    ) -> EventResult {
         self.prune_stale_widget_state(tree, dispatch);
+        self.synchronize_focus_scope(tree, dispatch);
         if matches!(&event, UiEvent::FocusLost) {
             return self.route_window_focus_lost(tree, dispatch);
         }
@@ -296,12 +327,12 @@ impl EventRouter {
                             let mut ctx = self.make_event_context(dispatch, &mut requests);
                             old.event(&event, &mut ctx);
                         }
-                        self.apply_event_requests(requests);
+                        self.apply_event_requests(requests, tree, dispatch);
                     }
                     self.hovered = target;
                 }
                 if let Some(target_id) = target {
-                    if self.capture.is_idle()
+                    if self.allows_ancestor_pointer_event(tree)
                         && self.before_child_event(tree, target_id, &event, dispatch)
                     {
                         return EventResult::Handled;
@@ -315,7 +346,7 @@ impl EventRouter {
                                 widget.event(&event, &mut ctx)
                             };
                             self.sync_focus_from_manager();
-                            self.apply_event_requests(requests);
+                            self.apply_event_requests(requests, tree, dispatch);
                             normalize_focused_panel(&mut self.focus_mgr, tree);
                             match result {
                                 EventResult::Handled => {
@@ -339,6 +370,14 @@ impl EventRouter {
                     && let Some(reverse) = tab_traversal_reverse(*modifiers)
                 {
                     let current = self.focus_mgr.focused_widget();
+                    // IME composition and editors with an explicit Tab command
+                    // own the key before framework focus traversal.
+                    if let Some(focused) = current
+                        && self.dispatch_direct_event(tree, focused, &event, dispatch)
+                            == EventResult::Handled
+                    {
+                        return EventResult::Handled;
+                    }
                     let traversal_origin = current.unwrap_or_default();
                     let next = if reverse {
                         TreeWalker::focus_prev(tree, traversal_origin)
@@ -347,7 +386,11 @@ impl EventRouter {
                     };
                     if next.is_none() {
                         self.sync_focus_from_manager();
-                        return EventResult::Ignored;
+                        return if self.active_focus_scope.is_some() {
+                            EventResult::Handled
+                        } else {
+                            EventResult::Ignored
+                        };
                     }
                     if next == current {
                         self.sync_focus_from_manager();
@@ -382,11 +425,22 @@ impl EventRouter {
 
                 let target = if is_keyboard {
                     // Keyboard events go to the focused widget, not hit-tested
-                    self.focus_mgr.focused_widget()
+                    self.focus_mgr.focused_widget().or(self.active_focus_scope)
                 } else {
                     self.pointer_target(tree, position)
                 };
 
+                if target.is_some_and(|id| tree.get(id).is_some_and(Widget::is_command_menu)) {
+                    let owner = self.suspended_command_focus.or(self.focus_mgr.focused_widget());
+                    let availability = EditCommand::ALL.map(|command| {
+                        owner
+                            .and_then(|id| tree.get(id))
+                            .and_then(|widget| widget.edit_command_available(command))
+                    });
+                    if let Some(root) = tree.get_mut(tree.root_id()) {
+                        root.set_edit_command_availability(availability);
+                    }
+                }
                 if matches!(&event, UiEvent::MouseDown { .. }) {
                     let current_focused = self.focus_mgr.focused_widget();
                     let target_is_focusable =
@@ -418,14 +472,24 @@ impl EventRouter {
                 }
 
                 if let Some(target_id) = target {
-                    if self.capture.is_idle()
-                        && !is_keyboard
-                        && self.before_child_event(tree, target_id, &event, dispatch)
+                    let offer_ancestors = if is_keyboard {
+                        matches!(&event, UiEvent::KeyDown { .. })
+                    } else {
+                        self.allows_ancestor_pointer_event(tree)
+                    };
+                    if offer_ancestors && self.before_child_event(tree, target_id, &event, dispatch)
                     {
                         return EventResult::Handled;
                     }
                     let mut current = Some(target_id);
                     while let Some(id) = current {
+                        if is_keyboard
+                            && self
+                                .active_focus_scope
+                                .is_some_and(|scope| !self.is_ancestor_or_self(tree, scope, id))
+                        {
+                            break;
+                        }
                         if let Some(widget) = tree.get_mut(id) {
                             let mut requests = EventRequests::default();
                             let result = {
@@ -433,7 +497,7 @@ impl EventRouter {
                                 widget.event(&event, &mut ctx)
                             };
                             self.sync_focus_from_manager();
-                            self.apply_event_requests(requests);
+                            self.apply_event_requests(requests, tree, dispatch);
                             normalize_focused_panel(&mut self.focus_mgr, tree);
                             match result {
                                 EventResult::Handled => {
@@ -450,6 +514,9 @@ impl EventRouter {
                     }
                 }
 
+                if self.active_focus_scope.is_some() && is_keyboard {
+                    return EventResult::Handled;
+                }
                 if let UiEvent::KeyDown { key, modifiers } = &event {
                     let shortcut_context = ShortcutContext::new(
                         self.focus_mgr.focused_widget(),
@@ -464,7 +531,17 @@ impl EventRouter {
                         if let Some(action) =
                             self.shortcut_mgr.resolve(*key, *modifiers, shortcut_context)
                         {
-                            dispatch(action);
+                            let command = match action {
+                                Action::Cut => Some(EditCommand::Cut),
+                                Action::Copy => Some(EditCommand::Copy),
+                                Action::Paste => Some(EditCommand::Paste),
+                                _ => None,
+                            };
+                            if let Some(command) = command {
+                                self.dispatch_edit_command(command, tree, dispatch);
+                            } else {
+                                self.dispatch_confirmed_action(action, tree, dispatch);
+                            }
                             return EventResult::Handled;
                         } else if should_diagnose_unmatched_shortcut(*key, *modifiers) {
                             self.diagnostics.unmatched_shortcut_chords =
@@ -576,7 +653,7 @@ impl EventRouter {
             widget.event(event, &mut ctx)
         };
         self.sync_focus_from_manager();
-        self.apply_event_requests(requests);
+        self.apply_event_requests(requests, tree, dispatch);
         result
     }
 
@@ -616,11 +693,19 @@ impl EventRouter {
         }
     }
 
+    fn allows_ancestor_pointer_event(&self, tree: &dyn WidgetTree) -> bool {
+        self.capture.is_idle()
+            || self
+                .capture
+                .owner()
+                .is_some_and(|owner| tree.get(owner).is_some_and(Widget::is_command_menu))
+    }
+
     fn pointer_target(&mut self, tree: &dyn WidgetTree, position: Point) -> Option<WidgetId> {
-        let overlay_target = overlay_hit_test_deepest(tree, position);
         let Some(captured) = self.capture.owner() else {
-            return overlay_target.or_else(|| hit_test_deepest(tree, position));
+            return hit_test_deepest(tree, position);
         };
+        let overlay_target = overlay_hit_test_deepest(tree, position);
 
         match overlay_target {
             Some(overlay)
@@ -677,6 +762,40 @@ impl EventRouter {
         self.sync_focus_from_manager();
     }
 
+    fn synchronize_focus_scope(&mut self, tree: &mut dyn WidgetTree, dispatch: &dyn Fn(Action)) {
+        let scope = tree.get(tree.root_id()).and_then(|root| root.keyboard_focus_scope());
+        if scope != self.active_focus_scope {
+            if self.active_focus_scope.is_none() && scope.is_some() {
+                self.suspended_focus =
+                    self.suspended_command_focus.or(self.focus_mgr.focused_widget());
+            }
+            self.active_focus_scope = scope;
+            if scope.is_none() {
+                if let Some(previous) = self.suspended_focus.take()
+                    && tree.get(previous).is_some_and(|widget| widget.can_focus())
+                {
+                    self.move_focus_to(tree, previous, FocusSource::Keyboard, dispatch);
+                }
+                return;
+            }
+        }
+        if let Some(scope) = scope {
+            if self
+                .focus_mgr
+                .focused_widget()
+                .is_some_and(|focused| self.is_ancestor_or_self(tree, scope, focused))
+            {
+                return;
+            }
+            if let Some(next) = TreeWalker::focus_next(tree, WidgetId::default()) {
+                self.move_focus_to(tree, next, FocusSource::Keyboard, dispatch);
+            } else if let Some(focused) = self.focus_mgr.focused_widget() {
+                self.blur_focus(tree, focused, dispatch);
+                self.disable_ime_for_cleared_focus();
+            }
+        }
+    }
+
     fn move_focus_to(
         &mut self,
         tree: &mut dyn WidgetTree,
@@ -688,13 +807,105 @@ impl EventRouter {
             self.sync_focus_from_manager();
             return;
         }
+        let next_is_menu = tree.get(next).is_some_and(Widget::is_command_menu);
         if let Some(current) = self.focus_mgr.focused_widget() {
-            self.send_focus_lost(tree, current, dispatch);
+            let current_is_menu = tree.get(current).is_some_and(Widget::is_command_menu);
+            if next_is_menu && !current_is_menu {
+                if tree.get(current).is_some_and(Widget::has_active_pointer_interaction) {
+                    self.send_focus_lost(tree, current, dispatch);
+                }
+                if tree.get(current).is_some_and(Widget::accepts_text_input) {
+                    self.dispatch_direct_event(tree, current, &UiEvent::ImeCancel, dispatch);
+                }
+                self.suspended_command_focus = Some(current);
+            } else {
+                if !next_is_menu
+                    && let Some(original) = self.suspended_command_focus.take()
+                    && original != next
+                {
+                    self.send_focus_lost(tree, original, dispatch);
+                }
+                self.send_focus_lost(tree, current, dispatch);
+            }
+        }
+        if next_is_menu {
+            self.disable_ime_for_cleared_focus();
         }
         self.send_focus_gained(tree, next, source, dispatch);
         let panel = panel_kind_for_widget(tree, next).or_else(|| self.focus_mgr.focused_panel());
         self.focus_mgr.set_focused_widget(Some(next), panel);
         self.sync_focus_from_manager();
+    }
+
+    fn restore_command_focus(&mut self, tree: &mut dyn WidgetTree, dispatch: &dyn Fn(Action)) {
+        let Some(owner) = self.suspended_command_focus else {
+            return;
+        };
+        if tree.get(owner).is_some_and(Widget::can_focus)
+            && self
+                .active_focus_scope
+                .is_none_or(|scope| self.is_ancestor_or_self(tree, scope, owner))
+        {
+            self.move_focus_to(tree, owner, FocusSource::Keyboard, dispatch);
+        }
+    }
+
+    fn dispatch_confirmed_action(
+        &mut self,
+        action: Action,
+        tree: &mut dyn WidgetTree,
+        dispatch: &dyn Fn(Action),
+    ) {
+        let owner = self.suspended_command_focus.or(self.focus_mgr.focused_widget());
+        self.restore_command_focus(tree, dispatch);
+        if let Some(owner) = owner
+            && self
+                .active_focus_scope
+                .is_none_or(|scope| self.is_ancestor_or_self(tree, scope, owner))
+            && let Some(widget) = tree.get_mut(owner)
+        {
+            let mut requests = EventRequests::default();
+            {
+                let mut ctx = self.make_event_context(dispatch, &mut requests);
+                widget.commit_pending_input(&mut ctx);
+            }
+            self.apply_event_requests(requests, tree, dispatch);
+        }
+        dispatch(action);
+    }
+
+    fn dispatch_edit_command(
+        &mut self,
+        command: EditCommand,
+        tree: &mut dyn WidgetTree,
+        dispatch: &dyn Fn(Action),
+    ) {
+        let owner = self.suspended_command_focus.or(self.focus_mgr.focused_widget());
+        if let Some(owner) = owner {
+            if tree.get(owner).is_none()
+                || self
+                    .active_focus_scope
+                    .is_some_and(|scope| !self.is_ancestor_or_self(tree, scope, owner))
+            {
+                return;
+            }
+            self.restore_command_focus(tree, dispatch);
+            if let Some(widget) = tree.get_mut(owner) {
+                if widget.edit_command_available(command) == Some(false) {
+                    return;
+                }
+                let mut requests = EventRequests::default();
+                let result = {
+                    let mut ctx = self.make_event_context(dispatch, &mut requests);
+                    widget.edit_command(command, &mut ctx)
+                };
+                self.apply_event_requests(requests, tree, dispatch);
+                if result == EventResult::Handled {
+                    return;
+                }
+            }
+        }
+        dispatch(command.action().clone());
     }
 
     fn blur_focus(
@@ -713,6 +924,9 @@ impl EventRouter {
         tree: &mut dyn WidgetTree,
         dispatch: &dyn Fn(Action),
     ) {
+        if let Some(original) = self.suspended_command_focus.take() {
+            self.send_focus_lost(tree, original, dispatch);
+        }
         if let Some(focused) = self.focus_mgr.focused_widget() {
             self.send_focus_lost(tree, focused, dispatch);
         }
@@ -747,7 +961,7 @@ impl EventRouter {
                 let mut ctx = self.make_event_context(dispatch, &mut requests);
                 widget.event(&UiEvent::FocusLost, &mut ctx)
             };
-            self.apply_event_requests(requests);
+            self.apply_event_requests(requests, tree, dispatch);
             result
         } else {
             EventResult::Ignored
@@ -770,7 +984,7 @@ impl EventRouter {
                 let mut ctx = self.make_event_context(dispatch, &mut requests);
                 widget.event(&UiEvent::FocusGained { source }, &mut ctx);
             }
-            self.apply_event_requests(requests);
+            self.apply_event_requests(requests, tree, dispatch);
         }
     }
 
@@ -789,7 +1003,12 @@ impl EventRouter {
         }
     }
 
-    fn apply_event_requests(&mut self, requests: EventRequests) {
+    fn apply_event_requests(
+        &mut self,
+        requests: EventRequests,
+        tree: &mut dyn WidgetTree,
+        dispatch: &dyn Fn(Action),
+    ) {
         if let Some(ime) = requests.ime {
             self.last_ime_request = Some(ime);
         }
@@ -804,6 +1023,16 @@ impl EventRouter {
         }
         if let Some(request) = requests.pointer_capture {
             self.capture.apply_request(request);
+            if let PointerCaptureRequest::Capture(owner) = request
+                && tree
+                    .get(owner)
+                    .is_some_and(|widget| widget.is_command_menu() && widget.can_focus())
+                && self
+                    .active_focus_scope
+                    .is_none_or(|scope| self.is_ancestor_or_self(tree, scope, owner))
+            {
+                self.move_focus_to(tree, owner, FocusSource::Pointer, dispatch);
+            }
         }
         match requests.drag {
             Some(DragRequest::Begin(payload)) => {
@@ -815,6 +1044,13 @@ impl EventRouter {
                 self.active_drag = None;
                 self.capture.clear();
                 self.repaint_requested = true;
+            }
+            None => {}
+        }
+        match requests.menu_command {
+            Some(MenuCommand::Edit(command)) => self.dispatch_edit_command(command, tree, dispatch),
+            Some(MenuCommand::Action(action)) => {
+                self.dispatch_confirmed_action(action, tree, dispatch)
             }
             None => {}
         }
@@ -837,7 +1073,7 @@ impl EventRouter {
                     let _ = widget.after_child_event(event, &mut ctx);
                 }
                 self.sync_focus_from_manager();
-                self.apply_event_requests(requests);
+                self.apply_event_requests(requests, tree, dispatch);
             }
             current = parent_id;
         }
@@ -850,17 +1086,31 @@ impl EventRouter {
         event: &UiEvent,
         dispatch: &dyn Fn(Action),
     ) -> bool {
+        let captured_command_menu = self
+            .capture
+            .owner()
+            .is_some_and(|owner| tree.get(owner).is_some_and(Widget::is_command_menu));
         let mut current = tree.parent_id(child_id);
         while let Some(id) = current {
+            // Focused keyboard ancestors cannot escape the current modal scope.
+            if matches!(event, UiEvent::KeyDown { .. })
+                && self
+                    .active_focus_scope
+                    .is_some_and(|scope| !self.is_ancestor_or_self(tree, scope, id))
+            {
+                break;
+            }
             let parent_id = tree.parent_id(id);
-            if let Some(widget) = tree.get_mut(id) {
+            if let Some(widget) = tree.get_mut(id)
+                && (!captured_command_menu || widget.is_command_menu())
+            {
                 let mut requests = EventRequests::default();
                 let result = {
                     let mut ctx = self.make_event_context(dispatch, &mut requests);
                     widget.before_child_event(event, &mut ctx)
                 };
                 self.sync_focus_from_manager();
-                self.apply_event_requests(requests);
+                self.apply_event_requests(requests, tree, dispatch);
                 if result == EventResult::Handled {
                     return true;
                 }
@@ -1055,6 +1305,7 @@ mod tests {
         bounds: Rect,
         log: Rc<RefCell<Vec<String>>>,
         focusable: Rc<Cell<bool>>,
+        scope: Rc<Cell<Option<WidgetId>>>,
     }
 
     impl RecordingWidget {
@@ -1064,6 +1315,7 @@ mod tests {
                 bounds,
                 log,
                 focusable: Rc::new(Cell::new(true)),
+                scope: Rc::new(Cell::new(None)),
             }
         }
 
@@ -1072,11 +1324,20 @@ mod tests {
             log: Rc<RefCell<Vec<String>>>,
             focusable: Rc<Cell<bool>>,
         ) -> Self {
-            Self { id: WidgetId::new(), bounds, log, focusable }
+            Self {
+                id: WidgetId::new(),
+                bounds,
+                log,
+                focusable,
+                scope: Rc::new(Cell::new(None)),
+            }
         }
     }
 
     impl Widget for RecordingWidget {
+        fn keyboard_focus_scope(&self) -> Option<WidgetId> {
+            self.scope.get()
+        }
         fn id(&self) -> WidgetId {
             self.id
         }
@@ -1297,6 +1558,274 @@ mod tests {
         nodes: HashMap<WidgetId, Box<dyn Widget>>,
         parents: HashMap<WidgetId, WidgetId>,
         children: HashMap<WidgetId, Vec<WidgetId>>,
+    }
+
+    struct CommandFocusWidget {
+        id: WidgetId,
+        bounds: Rect,
+        menu: bool,
+        owns: bool,
+        enabled: Rc<Cell<bool>>,
+        log: Rc<RefCell<Vec<String>>>,
+    }
+
+    impl Widget for CommandFocusWidget {
+        fn id(&self) -> WidgetId {
+            self.id
+        }
+        fn measure(&self, _constraint: LayoutConstraint) -> Size {
+            Size::new(self.bounds.width, self.bounds.height)
+        }
+        fn layout(&mut self, bounds: Rect) {
+            self.bounds = bounds;
+        }
+        fn paint(&self, _ctx: &mut PaintContext) {}
+        fn hit_test(&self, point: Point) -> bool {
+            self.bounds.contains(point)
+        }
+        fn can_focus(&self) -> bool {
+            self.enabled.get()
+        }
+        fn is_command_menu(&self) -> bool {
+            self.menu
+        }
+        fn edit_command_available(&self, _command: EditCommand) -> Option<bool> {
+            self.owns.then(|| self.enabled.get())
+        }
+        fn edit_command(&mut self, command: EditCommand, _ctx: &mut EventContext) -> EventResult {
+            if !self.owns {
+                return EventResult::Ignored;
+            }
+            self.log.borrow_mut().push(format!("command:{command:?}"));
+            EventResult::Handled
+        }
+        fn event(&mut self, event: &UiEvent, ctx: &mut EventContext) -> EventResult {
+            match event {
+                UiEvent::MouseDown { .. } if self.menu => {
+                    ctx.request_pointer_capture(self.id);
+                    EventResult::Handled
+                }
+                UiEvent::MouseUp { .. } => EventResult::Handled,
+                UiEvent::KeyDown { key: KeyCode::Enter, .. } if self.menu => {
+                    ctx.release_pointer_capture(self.id);
+                    ctx.request_edit_command(EditCommand::Cut);
+                    EventResult::Handled
+                }
+                UiEvent::KeyDown { key: KeyCode::Escape, .. } if self.menu => {
+                    ctx.release_pointer_capture(self.id);
+                    EventResult::Handled
+                }
+                UiEvent::FocusLost => {
+                    self.log.borrow_mut().push("focus-lost".into());
+                    if self.menu {
+                        ctx.release_pointer_capture(self.id);
+                    }
+                    EventResult::Handled
+                }
+                _ => EventResult::Ignored,
+            }
+        }
+    }
+
+    #[test]
+    fn command_menu_preserves_editor_focus_and_refuses_missing_disabled_or_modal_owners() {
+        for case in [
+            "execute",
+            "cancel",
+            "missing",
+            "disabled",
+            "modal",
+            "window-loss",
+            "domain",
+        ] {
+            let original_log = Rc::new(RefCell::new(Vec::new()));
+            let root = RecordingWidget::with_focusable_flag(
+                Rect::new(0.0, 0.0, 300.0, 100.0),
+                Rc::new(RefCell::new(Vec::new())),
+                Rc::new(Cell::new(false)),
+            );
+            let scope = root.scope.clone();
+            let mut tree = TestTree::single(root);
+            let original = CommandFocusWidget {
+                id: WidgetId::new(),
+                bounds: Rect::new(0.0, 0.0, 100.0, 100.0),
+                menu: false,
+                owns: case != "domain",
+                enabled: Rc::new(Cell::new(true)),
+                log: original_log.clone(),
+            };
+            let original_id = original.id;
+            let enabled = original.enabled.clone();
+            let menu = CommandFocusWidget {
+                id: WidgetId::new(),
+                bounds: Rect::new(100.0, 0.0, 100.0, 100.0),
+                menu: true,
+                owns: false,
+                enabled: Rc::new(Cell::new(true)),
+                log: Rc::new(RefCell::new(Vec::new())),
+            };
+            let menu_id = menu.id;
+            tree.parents.insert(original_id, tree.root);
+            tree.parents.insert(menu_id, tree.root);
+            tree.children.insert(tree.root, vec![original_id, menu_id]);
+            tree.nodes.insert(original_id, Box::new(original));
+            tree.nodes.insert(menu_id, Box::new(menu));
+            let mut router = EventRouter::new(tree.root);
+            router.focus_manager_mut().set_focused_widget(Some(original_id), None);
+            let actions = RefCell::new(Vec::new());
+            let dispatch = |action| actions.borrow_mut().push(action);
+            router.route(
+                UiEvent::MouseDown {
+                    position: Point::new(150.0, 50.0),
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::none(),
+                },
+                &mut tree,
+                &dispatch,
+            );
+            assert_eq!(router.focus_manager().focused_widget(), Some(menu_id));
+            assert!(
+                original_log.borrow().is_empty(),
+                "{case}: menu focus must preserve the original selection/draft"
+            );
+            let mut event = UiEvent::KeyDown { key: KeyCode::Enter, modifiers: Modifiers::none() };
+            match case {
+                "cancel" => {
+                    event = UiEvent::KeyDown { key: KeyCode::Escape, modifiers: Modifiers::none() }
+                }
+                "missing" => {
+                    tree.nodes.remove(&original_id);
+                }
+                "disabled" => enabled.set(false),
+                "modal" => {
+                    let modal = RecordingWidget::new(
+                        Rect::new(200.0, 0.0, 100.0, 100.0),
+                        Rc::new(RefCell::new(Vec::new())),
+                    );
+                    let id = modal.id;
+                    tree.nodes.insert(id, Box::new(modal));
+                    tree.parents.insert(id, tree.root);
+                    tree.children.get_mut(&tree.root).expect("children").push(id);
+                    scope.set(Some(id));
+                }
+                "window-loss" => event = UiEvent::FocusLost,
+                _ => {}
+            }
+            router.route(event, &mut tree, &dispatch);
+            let executed = original_log
+                .borrow()
+                .iter()
+                .filter(|entry| entry.as_str() == "command:Cut")
+                .count();
+            assert_eq!(executed, usize::from(case == "execute"), "{case}");
+            assert_eq!(
+                actions.borrow().as_slice(),
+                if case == "domain" {
+                    &[Action::Cut][..]
+                } else {
+                    &[]
+                },
+                "{case}: owned refusals cannot cut Clips"
+            );
+            if matches!(case, "execute" | "cancel" | "domain") {
+                assert_eq!(router.focus_manager().focused_widget(), Some(original_id));
+                assert!(!original_log.borrow().iter().any(|entry| entry == "focus-lost"));
+            }
+            assert!(
+                router.capture.is_idle(),
+                "{case}: command chrome releases capture"
+            );
+        }
+    }
+
+    #[test]
+    fn modal_scope_blocks_shortcuts_and_handles_replacement_empty_and_removed_owners() {
+        use mondrian_ui_core::shortcut::ShortcutBinding;
+        for remove_background in [false, true] {
+            let log = Rc::new(RefCell::new(Vec::new()));
+            let bounds = Rect::new(0.0, 0.0, 100.0, 100.0);
+            let root = RecordingWidget::with_focusable_flag(
+                bounds,
+                log.clone(),
+                Rc::new(Cell::new(false)),
+            );
+            let scope = root.scope.clone();
+            let mut tree = TestTree::single(root);
+            let background = RecordingWidget::new(bounds, log.clone());
+            let background_id = background.id();
+            tree.parents.insert(background_id, tree.root);
+            tree.children.insert(tree.root, vec![background_id]);
+            tree.nodes.insert(background_id, Box::new(background));
+            let mut router = EventRouter::new(tree.root);
+            router.focus_manager_mut().set_focused_widget(Some(background_id), None);
+            router
+                .shortcut_manager_mut()
+                .register_global(ShortcutBinding::ctrl(KeyCode::S), Action::SaveProject);
+            let actions = RefCell::new(Vec::new());
+            let dispatch = |action| actions.borrow_mut().push(action);
+            for focusable in [true, false] {
+                let modal = RecordingWidget::with_focusable_flag(
+                    bounds,
+                    log.clone(),
+                    Rc::new(Cell::new(focusable)),
+                );
+                let modal_id = modal.id();
+                tree.parents.insert(modal_id, tree.root);
+                tree.children.get_mut(&tree.root).expect("root children").push(modal_id);
+                tree.nodes.insert(modal_id, Box::new(modal));
+                scope.set(Some(modal_id));
+                assert_eq!(
+                    router.route(
+                        UiEvent::KeyDown { key: KeyCode::S, modifiers: Modifiers::ctrl() },
+                        &mut tree,
+                        &dispatch
+                    ),
+                    EventResult::Handled
+                );
+                assert!(
+                    actions.borrow().is_empty(),
+                    "background Save shortcut must remain suspended"
+                );
+                assert_eq!(
+                    router.focus_manager().focused_widget(),
+                    focusable.then_some(modal_id)
+                );
+                for modifiers in [Modifiers::none(), Modifiers::shift()] {
+                    assert_eq!(
+                        router.route(
+                            UiEvent::KeyDown { key: KeyCode::Tab, modifiers },
+                            &mut tree,
+                            &dispatch
+                        ),
+                        EventResult::Handled
+                    );
+                    assert_eq!(
+                        router.focus_manager().focused_widget(),
+                        focusable.then_some(modal_id)
+                    );
+                }
+                tree.nodes.remove(&modal_id);
+                tree.children
+                    .get_mut(&tree.root)
+                    .expect("children")
+                    .retain(|id| *id != modal_id);
+                tree.parents.remove(&modal_id);
+            }
+            if remove_background {
+                tree.nodes.remove(&background_id);
+                tree.children.get_mut(&tree.root).expect("children").clear();
+            }
+            scope.set(None);
+            router.route(
+                UiEvent::KeyUp { key: KeyCode::Tab, modifiers: Modifiers::none() },
+                &mut tree,
+                &dispatch,
+            );
+            assert_eq!(
+                router.focus_manager().focused_widget(),
+                (!remove_background).then_some(background_id)
+            );
+        }
     }
 
     impl TestTree {
@@ -2962,6 +3491,57 @@ mod tests {
     }
 
     #[test]
+    fn captured_pointer_drafts_and_menus_refuse_unrelated_parent_preemption() {
+        for menu in [false, true] {
+            let log = Rc::new(RefCell::new(Vec::new()));
+            let child = CommandFocusWidget {
+                id: WidgetId::new(),
+                bounds: Rect::new(0.0, 0.0, 100.0, 100.0),
+                menu,
+                owns: false,
+                enabled: Rc::new(Cell::new(true)),
+                log: Rc::clone(&log),
+            };
+            let child_id = child.id;
+            let parent = ParentPostWidget {
+                id: WidgetId::new(),
+                bounds: Rect::new(0.0, 0.0, 300.0, 100.0),
+                child_id,
+                handle_before: true,
+                log: Rc::clone(&log),
+            };
+            let root = parent.id;
+            let mut tree = TestTree {
+                root,
+                nodes: HashMap::from([
+                    (root, Box::new(parent) as Box<dyn Widget>),
+                    (child_id, Box::new(child)),
+                ]),
+                parents: HashMap::from([(child_id, root)]),
+                children: HashMap::from([(root, vec![child_id])]),
+            };
+            let mut router = EventRouter::new(root);
+            router.capture.set_owner(Some(child_id));
+            router.focus_manager_mut().set_focused_widget(Some(child_id), None);
+            router.route(
+                UiEvent::MouseDown {
+                    position: Point::new(250.0, 50.0),
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::none(),
+                },
+                &mut tree,
+                &|_| {},
+            );
+            assert!(
+                !log.borrow().iter().any(|entry| entry == "parent-before"),
+                "captured {menu:?} interaction cannot become unrelated parent chrome input"
+            );
+            assert_eq!(router.captured(), Some(child_id));
+            assert_eq!(router.focused(), Some(child_id));
+        }
+    }
+
+    #[test]
     fn router_calls_parent_after_child_event() {
         let log = Rc::new(RefCell::new(Vec::new()));
         let child = RecordingWidget::new(Rect::new(0.0, 0.0, 100.0, 30.0), Rc::clone(&log));
@@ -3426,5 +4006,84 @@ mod tests {
         let ime = router.take_ime_request().expect("focus loss must disable IME");
         assert!(!ime.enabled);
         assert_eq!(ime.cursor_area, None);
+    }
+
+    #[test]
+    fn focused_keyboard_ancestor_admission_stops_at_modal_scope_and_skips_text_events() {
+        for modal in [false, true] {
+            let log = Rc::new(RefCell::new(Vec::new()));
+            let root_widget = RecordingWidget::with_focusable_flag(
+                Rect::new(0.0, 0.0, 400.0, 100.0),
+                Rc::new(RefCell::new(Vec::new())),
+                Rc::new(Cell::new(false)),
+            );
+            let root = root_widget.id;
+            let scope_flag = Rc::clone(&root_widget.scope);
+            let leaf = RecordingWidget::new(
+                Rect::new(0.0, 0.0, 100.0, 30.0),
+                Rc::new(RefCell::new(Vec::new())),
+            );
+            let leaf_id = leaf.id;
+            let scope = RecordingWidget::with_focusable_flag(
+                Rect::new(0.0, 0.0, 200.0, 60.0),
+                Rc::new(RefCell::new(Vec::new())),
+                Rc::new(Cell::new(false)),
+            );
+            let scope_id = scope.id;
+            let outer = ParentPostWidget {
+                id: WidgetId::new(),
+                bounds: Rect::new(0.0, 0.0, 300.0, 80.0),
+                child_id: scope_id,
+                handle_before: true,
+                log: Rc::clone(&log),
+            };
+            let outer_id = outer.id;
+            let mut tree = TestTree {
+                root,
+                nodes: HashMap::from([
+                    (root, Box::new(root_widget) as Box<dyn Widget>),
+                    (outer_id, Box::new(outer)),
+                    (scope_id, Box::new(scope)),
+                    (leaf_id, Box::new(leaf)),
+                ]),
+                parents: HashMap::from([
+                    (outer_id, root),
+                    (scope_id, outer_id),
+                    (leaf_id, scope_id),
+                ]),
+                children: HashMap::from([
+                    (root, vec![outer_id]),
+                    (outer_id, vec![scope_id]),
+                    (scope_id, vec![leaf_id]),
+                ]),
+            };
+            scope_flag.set(modal.then_some(scope_id));
+            let mut router = EventRouter::new(root);
+            router.focus_manager_mut().set_focused_widget(Some(leaf_id), None);
+            for event in [
+                UiEvent::TextInput("x".to_owned()),
+                UiEvent::KeyUp { key: KeyCode::Right, modifiers: Modifiers::none() },
+            ] {
+                router.route(event, &mut tree, &|_| {});
+                assert!(
+                    log.borrow().is_empty(),
+                    "text and key releases retain leaf ownership"
+                );
+            }
+            assert_eq!(
+                router.route(
+                    UiEvent::KeyDown { key: KeyCode::Right, modifiers: Modifiers::none() },
+                    &mut tree,
+                    &|_| {}
+                ),
+                EventResult::Handled
+            );
+            assert_eq!(
+                log.borrow().len(),
+                usize::from(!modal),
+                "an ancestor beyond the modal boundary cannot intercept the focused key"
+            );
+            assert_eq!(router.focused(), Some(leaf_id));
+        }
     }
 }

@@ -5,10 +5,12 @@
 #include <fstream>
 #include <cstdio>
 #include <cstring>
+#include <stdexcept>
 
 // ofx
 #include "ofxCore.h"
 #include "ofxImageEffect.h"
+#include "ofxGPURender.h"
 #include "ofxPixels.h"
 
 // ofx host
@@ -30,6 +32,40 @@
 
 namespace MondrianOpenFx
 {
+  // The exclusive SDK host lifetime lease covers load, callbacks and unload.
+  AuxSuite* activeAuxSuite() noexcept {
+    auto* host = dynamic_cast<Host*>(OFX::Host::ImageEffect::gImageEffectHost);
+    return host ? &host->auxiliary() : nullptr;
+  }
+
+  class AuxiliaryDescriptor final : public AuxRegistrationGuard,
+                                    public OFX::Host::ImageEffect::Descriptor {
+  public:
+    AuxiliaryDescriptor(AuxSuite& suite, OFX::Host::ImageEffect::ImageEffectPlugin* plugin)
+        : AuxRegistrationGuard(suite, false), OFX::Host::ImageEffect::Descriptor(plugin) {
+      bindAuxiliary(getHandle());
+    }
+    AuxiliaryDescriptor(AuxSuite& suite, const OFX::Host::ImageEffect::Descriptor& source,
+                        OFX::Host::ImageEffect::ImageEffectPlugin* plugin)
+        : AuxRegistrationGuard(suite, false), OFX::Host::ImageEffect::Descriptor(source, plugin) {
+      bindAuxiliary(getHandle());
+    }
+    AuxiliaryDescriptor(AuxSuite& suite, const std::string& bundle,
+                        OFX::Host::ImageEffect::ImageEffectPlugin* plugin)
+        : AuxRegistrationGuard(suite, false), OFX::Host::ImageEffect::Descriptor(bundle, plugin) {
+      bindAuxiliary(getHandle());
+    }
+  };
+
+  const void* Host::fetchSuite(const char* name, int version) {
+    if (name && (std::strcmp(name, kOfxMessageSuite) == 0 ||
+                 std::strcmp(name, kOfxProgressSuite) == 0 ||
+                 std::strcmp(name, kOfxTimeLineSuite) == 0)) {
+      return _aux.fetchSuite(name, version);
+    }
+    return OFX::Host::ImageEffect::Host::fetchSuite(name, version);
+  }
+
   Host::Host()
   {
     _properties.setIntProperty(kOfxPropAPIVersion, 1, 0);
@@ -41,21 +77,29 @@ namespace MondrianOpenFx
     _properties.setStringProperty(kOfxPropVersionLabel, "1.0");
     _properties.setIntProperty(kOfxImageEffectHostPropIsBackground, 0);
     _properties.setIntProperty(kOfxImageEffectPropSupportsOverlays, 0);
-    _properties.setIntProperty(kOfxImageEffectPropSupportsMultiResolution, 0);
+    _properties.setIntProperty(kOfxImageEffectPropSupportsMultiResolution, 1);
     _properties.setIntProperty(kOfxImageEffectPropSupportsTiles, false);
-    _properties.setIntProperty(kOfxImageEffectPropTemporalClipAccess, false);
+    // Source images are resolved inside the current invocation by the original
+    // graph owner. Output remains current-time and ordered effects are refused.
+    _properties.setIntProperty(kOfxImageEffectPropTemporalClipAccess, true);
     _properties.setStringProperty(kOfxImageEffectPropSupportedComponents, kOfxImageComponentRGBA, 0);
+    _properties.setStringProperty(kOfxImageEffectPropSupportedPixelDepths, kOfxBitDepthFloat, 0);
+    _properties.createProperty({kOfxImageEffectPropCPURenderSupported,
+                               OFX::Host::Property::eString, 1, true, "true"});
     _properties.setStringProperty(kOfxImageEffectPropSupportedContexts, kOfxImageEffectContextFilter, 0);
+    _properties.setStringProperty(kOfxImageEffectPropSupportedContexts, kOfxImageEffectContextGenerator, 1);
     _properties.setIntProperty(kOfxImageEffectPropSupportsMultipleClipDepths, 0);
     _properties.setIntProperty(kOfxImageEffectPropSupportsMultipleClipPARs, 0);
     _properties.setIntProperty(kOfxImageEffectPropSetableFrameRate, 0);
     _properties.setIntProperty(kOfxImageEffectPropSetableFielding, 0);
     _properties.setIntProperty(kOfxParamHostPropSupportsCustomInteract, 0 );
     _properties.setIntProperty(kOfxParamHostPropSupportsStringAnimation, 0 );
-    _properties.setIntProperty(kOfxParamHostPropSupportsChoiceAnimation, 0 );
-    _properties.setIntProperty(kOfxParamHostPropSupportsBooleanAnimation, 0 );
+    _properties.setIntProperty(kOfxParamHostPropSupportsChoiceAnimation, 1 );
+    _properties.setIntProperty(kOfxParamHostPropSupportsStrChoice, 1);
+    _properties.setIntProperty(kOfxParamHostPropSupportsStrChoiceAnimation, 0);
+    _properties.setIntProperty(kOfxParamHostPropSupportsBooleanAnimation, 1 );
     _properties.setIntProperty(kOfxParamHostPropSupportsCustomAnimation, 0 );
-    _properties.setIntProperty(kOfxParamHostPropMaxParameters, -1);
+    _properties.setIntProperty(kOfxParamHostPropMaxParameters, kMaxParameters);
     _properties.setIntProperty(kOfxParamHostPropMaxPages, 0);
     _properties.setIntProperty(kOfxParamHostPropPageRowColumnCount, 0, 0 );
     _properties.setIntProperty(kOfxParamHostPropPageRowColumnCount, 0, 1 );
@@ -66,13 +110,17 @@ namespace MondrianOpenFx
                                                       OFX::Host::ImageEffect::Descriptor& desc,
                                                       const std::string& context)
   {
-    return new FilterEffectInstance(plugin, desc, context);
+    if (!clientData) { throw std::invalid_argument("filter frame state is missing"); }
+    return new FilterEffectInstance(plugin, desc, context,
+        *static_cast<FrameState*>(clientData), _aux);
   }
 
   /// Override this to create a descriptor, this makes the 'root' descriptor
   OFX::Host::ImageEffect::Descriptor *Host::makeDescriptor(OFX::Host::ImageEffect::ImageEffectPlugin* plugin)
   {
-    OFX::Host::ImageEffect::Descriptor *desc = new OFX::Host::ImageEffect::Descriptor(plugin);
+    OFX::Host::ImageEffect::Descriptor *desc = new AuxiliaryDescriptor(_aux, plugin);
+    desc->getProps().createProperty({kOfxImageEffectPropCPURenderSupported,
+                                    OFX::Host::Property::eString, 1, false, "true"});
     return desc;
   }
 
@@ -80,7 +128,9 @@ namespace MondrianOpenFx
   OFX::Host::ImageEffect::Descriptor *Host::makeDescriptor(const OFX::Host::ImageEffect::Descriptor &rootContext,
                                                            OFX::Host::ImageEffect::ImageEffectPlugin *plugin)
   {
-    OFX::Host::ImageEffect::Descriptor *desc = new OFX::Host::ImageEffect::Descriptor(rootContext, plugin);
+    OFX::Host::ImageEffect::Descriptor *desc = new AuxiliaryDescriptor(_aux, rootContext, plugin);
+    desc->getProps().createProperty({kOfxImageEffectPropCPURenderSupported,
+                                    OFX::Host::Property::eString, 1, false, "true"});
     return desc;
   }
 
@@ -88,7 +138,9 @@ namespace MondrianOpenFx
   OFX::Host::ImageEffect::Descriptor *Host::makeDescriptor(const std::string &bundlePath,
                                                            OFX::Host::ImageEffect::ImageEffectPlugin *plugin)
   {
-    OFX::Host::ImageEffect::Descriptor *desc = new OFX::Host::ImageEffect::Descriptor(bundlePath, plugin);
+    OFX::Host::ImageEffect::Descriptor *desc = new AuxiliaryDescriptor(_aux, bundlePath, plugin);
+    desc->getProps().createProperty({kOfxImageEffectPropCPURenderSupported,
+                                    OFX::Host::Property::eString, 1, false, "true"});
     return desc;
   }
 
@@ -98,31 +150,7 @@ namespace MondrianOpenFx
                            const char* format,
                            va_list args)
   {
-    bool isQuestion = false;
-    const char *prefix = "Message : ";
-    if (std::strcmp(type, kOfxMessageLog) == 0) {
-      prefix = "Log : ";
-    }
-    else if(std::strcmp(type, kOfxMessageFatal) == 0 ||
-            std::strcmp(type, kOfxMessageError) == 0) {
-      prefix = "Error : ";
-    }
-    else if(std::strcmp(type, kOfxMessageQuestion) == 0)  {
-      prefix = "Question : ";
-      isQuestion = true;
-    }
-
-    // The isolated render worker has no interactive UI.
-    std::fputs(prefix, stdout);
-    std::vprintf(format, args);
-    std::printf("\n");
-
-    if(isQuestion) {
-      return kOfxStatReplyNo;
-    }
-    else {
-      return kOfxStatOK;
-    }
+    return _aux.message(nullptr, type, id, format, args);
   }
 
   OfxStatus Host::setPersistentMessage(const char* type,
@@ -130,11 +158,11 @@ namespace MondrianOpenFx
                                        const char* format,
                                        va_list args)
   {
-    return vmessage(type, id, format, args);
+    return _aux.persistent(nullptr, type, id, format, args);
   }
 
   OfxStatus Host::clearPersistentMessage()
   {
-    return kOfxStatOK;
+    return _aux.clear(nullptr);
   }
 }

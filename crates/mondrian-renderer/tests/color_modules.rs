@@ -24,8 +24,13 @@ fn four_color_modules_form_one_closed_cpu_product_path() {
     ));
     let mut session = RenderCpuColorExecutionSession::new(8);
 
-    let source_output = SourceColorModule::execute_cpu(&source, &media_context, &mut session)
-        .expect("source Module");
+    let source_output = SourceColorModule::execute_cpu(
+        &source,
+        &media_context,
+        mondrian_core::ImageSampling::UNIT_SQUARE,
+        &mut session,
+    )
+    .expect("source Module");
     assert_eq!(
         source_output.frame().descriptor().color_space.working(),
         Some(context.working_color_space())

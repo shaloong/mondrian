@@ -97,6 +97,7 @@ impl HeterogeneousGpuExecutionCapability {
         let format = EffectValueFormat::new(
             EffectWorkingPrecision::Float32,
             EffectColorDomain::SceneLinearRgb,
+            mondrian_core::ColorFrameAlpha::StraightCoverage,
         );
         EffectGraphExecutionRequest::new(
             frame_extent,
@@ -432,6 +433,17 @@ pub enum HeterogeneousGpuContinuationError {
     /// GPU suffix command recording failed.
     #[error("heterogeneous GPU suffix recording failed: {0}")]
     GpuRecord(#[from] GpuCompositeError),
+    /// The completed image could not acquire its exact CPU readback storage.
+    /// GPU completion is proven, so its healthy resources remain reusable.
+    #[error("heterogeneous GPU readback cannot allocate {required_bytes} CPU bytes")]
+    ReadbackAllocationUnavailable {
+        /// Exact raster allocation requested by the canonical materializer.
+        required_bytes: usize,
+    },
+    /// Completed GPU image samples cannot form the declared complete Float frame.
+    /// This is a frame refusal after observed completion, not a device failure.
+    #[error(transparent)]
+    FrameContract(#[from] mondrian_effects::EffectFloatFrameError),
     /// GPU output readback planning or recording failed.
     #[error("heterogeneous GPU readback failed: {0:?}")]
     Readback(GpuColorFrameReadbackError),
@@ -875,17 +887,30 @@ pub fn record_heterogeneous_gpu_continuation(
     let mut uploaded_handles = HashMap::with_capacity(boundary_values.len());
     let upload_result = (|| {
         for boundary in boundary_values {
-            let (transfer, pixels) = boundary.into_parts();
+            let (transfer, frame) = boundary.into_parts();
+            if frame.format() != transfer.format() {
+                return Err(HeterogeneousGpuContinuationError::InvalidPlan {
+                    reason: "frontier_actual_format_mismatch",
+                });
+            }
+            let (extent, format, sampling, pixels) = frame.into_parts();
             if uploaded_handles.contains_key(&transfer.gpu_materialization()) {
                 return Err(HeterogeneousGpuContinuationError::InvalidPlan {
                     reason: "gpu_frontier_materialization_reused",
                 });
             }
-            let width = binding.frame_extent().width();
-            let height = binding.frame_extent().height();
+            if extent != binding.frame_extent() {
+                return Err(HeterogeneousGpuContinuationError::InvalidPlan {
+                    reason: "frontier_actual_extent_mismatch",
+                });
+            }
+            let width = extent.width();
+            let height = extent.height();
             let upload_plan = match transfer.format().domain() {
                 EffectColorDomain::SceneLinearRgb => {
                     let frame = CpuColorFrame::working(WorkingRgbaF32Frame {
+                        sampling,
+                        alpha: format.alpha(),
                         width,
                         height,
                         color_space: binding.working_color_space(),
@@ -1116,7 +1141,7 @@ fn record_gpu_suffix(
                         base_handle,
                         overlay_handle,
                         *opacity,
-                        *blend_mode,
+                        mondrian_effects::EffectPassBlendPolicy::Blend(*blend_mode),
                         frame_seed,
                         working_color_space,
                     )?;
@@ -1400,7 +1425,7 @@ fn record_gpu_multi_input(
             &current,
             overlay,
             opacity,
-            blend_mode,
+            mondrian_effects::EffectPassBlendPolicy::Blend(blend_mode),
             frame_seed,
             working_color_space,
         ) {
@@ -1523,10 +1548,12 @@ impl HeterogeneousGpuContinuationRuntime {
         completion: PreparedHeterogeneousCpuCompletion,
         cancellation: &ExecutionCancellationToken,
         deadline: Instant,
+        sampling: mondrian_core::ImageSampling,
     ) -> Result<HeterogeneousGpuCompletedFrame, HeterogeneousGpuContinuationError> {
         if self.poisoned {
             return Err(HeterogeneousGpuContinuationError::RuntimePoisoned);
         }
+        validate_gpu_readback_sampling(&completion, sampling)?;
         if let Some(error) =
             heterogeneous_gpu_execution_stop(cancellation.is_canceled(), Instant::now(), deadline)
         {
@@ -1697,19 +1724,38 @@ impl HeterogeneousGpuContinuationRuntime {
                 return Err(error);
             }
         };
-        let pixels = match rgba_components_to_pixels(components) {
-            Ok(pixels) => pixels,
+        let binding = request.binding();
+        let admitted = match admit_gpu_readback_frame(
+            components,
+            binding.frame_extent(),
+            completed.output.descriptor().alpha,
+            sampling,
+        ) {
+            Ok(frame) => frame,
             Err(error) => {
                 drop(completed);
-                self.poison_after_submission(output_id, true);
+                if matches!(
+                    &error,
+                    HeterogeneousGpuContinuationError::FrameContract(_)
+                        | HeterogeneousGpuContinuationError::ReadbackAllocationUnavailable { .. }
+                ) {
+                    // Completion has been proved: these healthy resources may be
+                    // reused even though their image cannot be published.
+                    self.release_output(output_id);
+                    self.compositor.clear_frame_resources();
+                } else {
+                    self.poison_after_submission(output_id, true);
+                }
                 return Err(error);
             }
         };
-        let binding = request.binding();
+        let (extent, format, sampling, pixels) = admitted.into_parts();
         completed.evidence.readback_bytes = Some(readback_plan.buffer_size);
         let frame = CpuColorFrame::working(WorkingRgbaF32Frame {
-            width: binding.frame_extent().width(),
-            height: binding.frame_extent().height(),
+            sampling,
+            alpha: format.alpha(),
+            width: extent.width(),
+            height: extent.height(),
             color_space: binding.working_color_space(),
             data: pixels,
         });
@@ -1808,7 +1854,10 @@ fn validate_completion(
         plan.output_materialization() == gpu_suffix.output_materialization(),
         "gpu_output_materialization",
     )?;
-    require_plan(!gpu_suffix.node_ids().is_empty(), "empty_gpu_suffix")?;
+    require_plan(
+        !evidence.completed_cpu_nodes().is_empty(),
+        "empty_cpu_prefix",
+    )?;
     let expected_pixels = u64::from(binding.frame_extent().width())
         .checked_mul(u64::from(binding.frame_extent().height()))
         .ok_or(HeterogeneousGpuContinuationError::InvalidPlan { reason: "pixel_count_overflow" })?;
@@ -1971,7 +2020,14 @@ fn validate_token_chain(
                 let _ = signal;
             }
             EffectGraphExecutionStep::Transfer {
-                input, output, from, to, wait, signal, ..
+                input,
+                output,
+                from,
+                to,
+                wait,
+                signal,
+                alpha_admission,
+                ..
             } => {
                 let transfer = evidence.transfers().get(transfer_count).ok_or(
                     HeterogeneousGpuContinuationError::InvalidPlan {
@@ -1989,8 +2045,9 @@ fn validate_token_chain(
                     "transfer_signal_token",
                 )?;
                 require_plan(
-                    from.format() == transfer.format()
-                        && to.format() == transfer.format()
+                    from.format() == transfer.source_format()
+                        && to.format().exact_format() == Some(transfer.format())
+                        && *alpha_admission == transfer.alpha_admission()
                         && transfer.format().precision() == EffectWorkingPrecision::Float32,
                     "transfer_format",
                 )?;
@@ -2162,17 +2219,19 @@ fn validate_gpu_suffix_schedule(
                 let scene_linear = EffectValueFormat::new(
                     EffectWorkingPrecision::Float32,
                     EffectColorDomain::SceneLinearRgb,
+                    mondrian_core::ColorFrameAlpha::StraightCoverage,
                 );
                 let alpha_mask = EffectValueFormat::new(
                     EffectWorkingPrecision::Float32,
                     EffectColorDomain::AlphaMask,
+                    mondrian_core::ColorFrameAlpha::StraightCoverage,
                 );
                 require_plan(
                     input_value.completion() == waits[0]
                         && output_value.completion() == *signal
                         && output_value.value() == *node
-                        && input_value.residency().format() == scene_linear
-                        && output_value.residency().format() == alpha_mask,
+                        && input_value.residency().format().exact_format() == Some(scene_linear)
+                        && output_value.residency().format().exact_format() == Some(alpha_mask),
                     "gpu_qualifier_value_domain_or_token_mismatch",
                 )?;
                 require_plan(live.insert(*output), "gpu_qualifier_output_already_live")?;
@@ -2207,17 +2266,19 @@ fn validate_gpu_suffix_schedule(
                 let scene_linear = EffectValueFormat::new(
                     EffectWorkingPrecision::Float32,
                     EffectColorDomain::SceneLinearRgb,
+                    mondrian_core::ColorFrameAlpha::StraightCoverage,
                 );
                 let alpha_mask = EffectValueFormat::new(
                     EffectWorkingPrecision::Float32,
                     EffectColorDomain::AlphaMask,
+                    mondrian_core::ColorFrameAlpha::StraightCoverage,
                 );
                 require_plan(
                     input_value.completion() == waits[0]
                         && output_value.completion() == *signal
                         && output_value.value() == *node
-                        && input_value.residency().format() == alpha_mask
-                        && output_value.residency().format() == scene_linear,
+                        && input_value.residency().format().exact_format() == Some(alpha_mask)
+                        && output_value.residency().format().exact_format() == Some(scene_linear),
                     "gpu_matte_preview_value_domain_or_token_mismatch",
                 )?;
                 require_plan(
@@ -2336,19 +2397,21 @@ fn validate_gpu_suffix_schedule(
                 let scene_linear = EffectValueFormat::new(
                     EffectWorkingPrecision::Float32,
                     EffectColorDomain::SceneLinearRgb,
+                    mondrian_core::ColorFrameAlpha::StraightCoverage,
                 );
                 let alpha_mask = EffectValueFormat::new(
                     EffectWorkingPrecision::Float32,
                     EffectColorDomain::AlphaMask,
+                    mondrian_core::ColorFrameAlpha::StraightCoverage,
                 );
                 require_plan(
                     input_value.completion() == waits[0]
                         && mask_value.completion() == waits[1]
                         && output_value.completion() == *signal
                         && output_value.value() == *node
-                        && input_value.residency().format() == scene_linear
-                        && mask_value.residency().format() == alpha_mask
-                        && output_value.residency().format() == scene_linear,
+                        && input_value.residency().format().exact_format() == Some(scene_linear)
+                        && mask_value.residency().format().exact_format() == Some(alpha_mask)
+                        && output_value.residency().format().exact_format() == Some(scene_linear),
                     "gpu_mask_value_domain_or_token_mismatch",
                 )?;
                 require_plan(live.insert(*output), "gpu_mask_output_already_live")?;
@@ -2392,15 +2455,16 @@ fn validate_gpu_suffix_schedule(
                 let alpha_mask = EffectValueFormat::new(
                     EffectWorkingPrecision::Float32,
                     EffectColorDomain::AlphaMask,
+                    mondrian_core::ColorFrameAlpha::StraightCoverage,
                 );
                 require_plan(
                     left_value.completion() == waits[0]
                         && right_value.completion() == waits[1]
                         && output_value.completion() == *signal
                         && output_value.value() == *node
-                        && left_value.residency().format() == alpha_mask
-                        && right_value.residency().format() == alpha_mask
-                        && output_value.residency().format() == alpha_mask,
+                        && left_value.residency().format().exact_format() == Some(alpha_mask)
+                        && right_value.residency().format().exact_format() == Some(alpha_mask)
+                        && output_value.residency().format().exact_format() == Some(alpha_mask),
                     "gpu_mask_combine_value_domain_or_token_mismatch",
                 )?;
                 require_plan(live.insert(*output), "gpu_mask_combine_output_already_live")?;
@@ -2429,10 +2493,12 @@ fn validate_gpu_suffix_schedule(
                 let scene_linear = EffectValueFormat::new(
                     EffectWorkingPrecision::Float32,
                     EffectColorDomain::SceneLinearRgb,
+                    mondrian_core::ColorFrameAlpha::StraightCoverage,
                 );
                 let alpha_mask = EffectValueFormat::new(
                     EffectWorkingPrecision::Float32,
                     EffectColorDomain::AlphaMask,
+                    mondrian_core::ColorFrameAlpha::StraightCoverage,
                 );
                 for (index, (input, expected_format)) in [
                     (*base, scene_linear),
@@ -2449,7 +2515,7 @@ fn validate_gpu_suffix_schedule(
                     )?;
                     require_plan(
                         value.completion() == waits[index]
-                            && value.residency().format() == expected_format,
+                            && value.residency().format().exact_format() == Some(expected_format),
                         "gpu_matte_mix_input_domain_or_token_mismatch",
                     )?;
                 }
@@ -2461,7 +2527,7 @@ fn validate_gpu_suffix_schedule(
                 require_plan(
                     output_value.completion() == *signal
                         && output_value.value() == *node
-                        && output_value.residency().format() == scene_linear,
+                        && output_value.residency().format().exact_format() == Some(scene_linear),
                     "gpu_matte_mix_output_domain_or_token_mismatch",
                 )?;
                 require_plan(live.insert(*output), "gpu_matte_mix_output_already_live")?;
@@ -2583,23 +2649,63 @@ fn enforce_resource_grant(
     }
 }
 
-fn rgba_components_to_pixels(
+fn gpu_readback_frame_error(
+    error: mondrian_effects::EffectFloatFrameError,
+) -> HeterogeneousGpuContinuationError {
+    match error {
+        mondrian_effects::EffectFloatFrameError::AllocationUnavailable { required_bytes } => {
+            HeterogeneousGpuContinuationError::ReadbackAllocationUnavailable { required_bytes }
+        }
+        error => HeterogeneousGpuContinuationError::FrameContract(error),
+    }
+}
+
+// This readback route performs same-grid Effects. All CPU upload frontiers
+// must name the source grid declared by the caller, before any GPU submission.
+fn validate_gpu_readback_sampling(
+    completion: &PreparedHeterogeneousCpuCompletion,
+    sampling: mondrian_core::ImageSampling,
+) -> Result<(), HeterogeneousGpuContinuationError> {
+    if completion
+        .boundary_values()
+        .iter()
+        .any(|value| value.frame().sampling() != sampling)
+    {
+        return Err(HeterogeneousGpuContinuationError::InvalidPlan {
+            reason: "readback_source_sampling_mismatch",
+        });
+    }
+    Ok(())
+}
+
+fn admit_gpu_readback_frame(
     components: Vec<f32>,
-) -> Result<Vec<[f32; 4]>, HeterogeneousGpuContinuationError> {
-    let mut chunks = components.chunks_exact(4);
-    let pixels = chunks
-        .by_ref()
-        .map(|rgba| [rgba[0], rgba[1], rgba[2], rgba[3]])
-        .collect::<Vec<_>>();
-    if chunks.remainder().is_empty() {
-        Ok(pixels)
-    } else {
-        Err(
+    extent: EffectFrameExtent,
+    alpha: mondrian_core::ColorFrameAlpha,
+    sampling: mondrian_core::ImageSampling,
+) -> Result<mondrian_effects::EffectFloatFrame, HeterogeneousGpuContinuationError> {
+    let chunks = components.chunks_exact(4);
+    if !chunks.remainder().is_empty() {
+        return Err(
             HeterogeneousGpuContinuationError::InvalidReadbackComponents {
                 components: components.len(),
             },
-        )
+        );
     }
+    let format = EffectValueFormat::new(
+        EffectWorkingPrecision::Float32,
+        EffectColorDomain::SceneLinearRgb,
+        alpha,
+    );
+    // This is the existing scalar-to-pixel allocation. Complete-frame admission
+    // and finite/alpha checks run in that same collection pass, without cloning.
+    mondrian_effects::EffectFloatFrame::from_samples(
+        extent,
+        format,
+        sampling,
+        chunks.map(|rgba| [rgba[0], rgba[1], rgba[2], rgba[3]]),
+    )
+    .map_err(gpu_readback_frame_error)
 }
 
 #[cfg(test)]
@@ -2856,6 +2962,14 @@ mod tests {
         graph: Arc<CompiledEffectGraph>,
         input: &[[f32; 4]],
     ) -> PreparedHeterogeneousCpuCompletion {
+        cpu_completion_with_gpu_node_count(graph, input, 2)
+    }
+
+    fn cpu_completion_with_gpu_node_count(
+        graph: Arc<CompiledEffectGraph>,
+        input: &[[f32; 4]],
+        expected_gpu_nodes: usize,
+    ) -> PreparedHeterogeneousCpuCompletion {
         let capability =
             HeterogeneousGpuExecutionCapability::scene_linear_f32().expect("renderer capability");
         let prepared = PreparedHeterogeneousEffectWork::prepare(
@@ -2865,12 +2979,27 @@ mod tests {
         )
         .expect("prepare heterogeneous GPU work");
         assert_eq!(prepared.cpu_nodes().len(), 1);
-        assert_eq!(prepared.gpu_suffix().node_ids().len(), 2);
+        assert_eq!(prepared.gpu_suffix().node_ids().len(), expected_gpu_nodes);
         let mut session =
             EffectExecutionSession::new(EffectExecutionSessionConfig::uncached(8 * 1024 * 1024));
         session.bind_generation(GENERATION);
         prepared
-            .execute_cpu_prefix_uncancelled(&session, GENERATION, input, FRAME_SEED, WORKING_SPACE)
+            .execute_cpu_prefix_uncancelled(
+                &mut session,
+                GENERATION,
+                mondrian_effects::EffectFloatFrameView::new(
+                    EXTENT,
+                    mondrian_effects::EffectValueFormat::new(
+                        mondrian_effects::EffectWorkingPrecision::Float32,
+                        mondrian_effects::EffectColorDomain::SceneLinearRgb,
+                        mondrian_core::ColorFrameAlpha::StraightCoverage,
+                    ),
+                    mondrian_core::ImageSampling::UNIT_SQUARE,
+                    input,
+                ),
+                FRAME_SEED,
+                WORKING_SPACE,
+            )
             .expect("execute CPU prefix")
     }
 
@@ -2890,6 +3019,122 @@ mod tests {
         )
     }
 
+    fn cpu_only_graph() -> Arc<CompiledEffectGraph> {
+        let mut builder = EffectGraphBuilderState::new();
+        builder.append_unary(EffectRenderOp::GaussianBlur { radius: 1.0 });
+        compile_reference_render_graph(builder.finish()).expect("CPU-only graph")
+    }
+
+    #[test]
+    fn cpu_frontier_refuses_readback_sampling_relabel_before_gpu_execution() {
+        let graph = cpu_only_graph();
+        let completion = cpu_completion_with_gpu_node_count(graph, &test_input(), 0);
+        assert!(!completion.boundary_values().is_empty());
+        validate_gpu_readback_sampling(&completion, mondrian_core::ImageSampling::UNIT_SQUARE)
+            .unwrap();
+        let other = mondrian_core::ImageSampling::new(
+            mondrian_core::SampleAspectRatio::new(2, 1).unwrap(),
+            [
+                mondrian_core::Rational::new(1, 2),
+                mondrian_core::Rational::new(3, 4),
+            ],
+        )
+        .unwrap();
+        assert!(matches!(
+            validate_gpu_readback_sampling(&completion, other),
+            Err(HeterogeneousGpuContinuationError::InvalidPlan {
+                reason: "readback_source_sampling_mismatch"
+            })
+        ));
+        assert!(completion
+            .boundary_values()
+            .iter()
+            .all(|value| value.frame().sampling() == mondrian_core::ImageSampling::UNIT_SQUARE));
+    }
+
+    #[test]
+    fn cpu_only_upload_keeps_exact_tokens_and_resource_admission() {
+        let graph = cpu_only_graph();
+        let input = test_input();
+        let completion = cpu_completion_with_gpu_node_count(Arc::clone(&graph), &input, 0);
+        assert!(completion.gpu_suffix().steps().is_empty());
+        validate_completion(request(&graph, generous_gpu_grant()), &completion)
+            .expect("the actual output upload is a complete GPU continuation");
+        let demand =
+            gpu_recording_device_demand(completion.execution_plan(), completion.gpu_suffix())
+                .expect("one uploaded output texture");
+        let bytes = u64::from(EXTENT.width()) * u64::from(EXTENT.height()) * 16;
+        assert_eq!(demand.bytes, bytes);
+        assert_eq!(demand.materializations, 1);
+        for (grant, expected_kind) in [
+            (
+                HeterogeneousGpuResourceGrant::new(bytes - 1, bytes, 1, 0),
+                HeterogeneousGpuResourceKind::UploadBytes,
+            ),
+            (
+                HeterogeneousGpuResourceGrant::new(bytes, bytes - 1, 1, 0),
+                HeterogeneousGpuResourceKind::DeviceBytes,
+            ),
+            (
+                HeterogeneousGpuResourceGrant::new(bytes, bytes, 0, 0),
+                HeterogeneousGpuResourceKind::DeviceMaterializations,
+            ),
+        ] {
+            assert!(
+                matches!(validate_completion(request(&graph, grant), &completion),
+                Err(HeterogeneousGpuContinuationError::ResourceGrantExceeded { kind, .. }) if kind == expected_kind)
+            );
+        }
+        let stale = HeterogeneousGpuContinuationRequest::new(
+            HeterogeneousGpuContinuationBinding::new(
+                graph.semantic_fingerprint(),
+                GENERATION + 1,
+                EXTENT,
+                FRAME_SEED,
+                WORKING_SPACE,
+            ),
+            generous_gpu_grant(),
+        );
+        assert!(matches!(
+            validate_completion(stale, &completion),
+            Err(HeterogeneousGpuContinuationError::BindingMismatch { field: "generation" })
+        ));
+    }
+
+    #[tokio::test]
+    #[ignore = "explicit qualification requires a real GPU adapter and Float32 readback"]
+    async fn real_wgpu_cpu_only_output_upload_preserves_pixels_without_extra_effect() {
+        let context = GpuContext::new().await.expect("real GPU adapter required");
+        eprintln!("CPU-only upload adapter: {:?}", context.adapter.get_info());
+        let graph = cpu_only_graph();
+        let input = test_input();
+        let completion = cpu_completion_with_gpu_node_count(Arc::clone(&graph), &input, 0);
+        let expected = completion.boundary_values()[0].pixels().to_vec();
+        let output_token = completion.evidence().pending_output_token();
+        let mut runtime = HeterogeneousGpuContinuationRuntime::new(
+            context,
+            GpuColorFrameWgpuResourcePoolOptions::default(),
+        )
+        .expect("GPU runtime");
+        let output = runtime
+            .execute_to_cpu(
+                request(&graph, generous_gpu_grant()),
+                completion,
+                &ExecutionCancellationToken::new(),
+                gpu_test_deadline(),
+                mondrian_core::ImageSampling::UNIT_SQUARE,
+            )
+            .expect("actual upload and readback");
+        assert_eq!(output.frame().rgba_f32().data, expected);
+        assert_eq!(output.evidence().completed_output_token(), output_token);
+        assert!(output.evidence().readback_bytes().is_some());
+        assert!(
+            runtime.table.is_empty(),
+            "upload/readback returns every owned texture"
+        );
+        assert!(!runtime.is_poisoned());
+    }
+
     #[test]
     fn capability_owns_exact_cpu_to_gpu_scene_linear_route() {
         let capability =
@@ -2897,11 +3142,12 @@ mod tests {
         let graph_request = capability.request(EXTENT, generous_graph_budget());
         assert_eq!(graph_request.frame_extent(), EXTENT);
         assert_eq!(
-            graph_request.input_residency().format(),
-            EffectValueFormat::new(
+            graph_request.input_residency().format().exact_format(),
+            Some(EffectValueFormat::new(
                 EffectWorkingPrecision::Float32,
                 EffectColorDomain::SceneLinearRgb,
-            )
+                mondrian_core::ColorFrameAlpha::StraightCoverage
+            ))
         );
         assert_eq!(
             graph_request.output_residency().format(),
@@ -2999,7 +3245,22 @@ mod tests {
             EffectExecutionSession::new(EffectExecutionSessionConfig::uncached(8 * 1024 * 1024));
         session.bind_generation(GENERATION);
         let completion = prepared
-            .execute_cpu_prefix_uncancelled(&session, GENERATION, &input, FRAME_SEED, WORKING_SPACE)
+            .execute_cpu_prefix_uncancelled(
+                &mut session,
+                GENERATION,
+                mondrian_effects::EffectFloatFrameView::new(
+                    EXTENT,
+                    mondrian_effects::EffectValueFormat::new(
+                        mondrian_effects::EffectWorkingPrecision::Float32,
+                        mondrian_effects::EffectColorDomain::SceneLinearRgb,
+                        mondrian_core::ColorFrameAlpha::StraightCoverage,
+                    ),
+                    mondrian_core::ImageSampling::UNIT_SQUARE,
+                    &input,
+                ),
+                FRAME_SEED,
+                WORKING_SPACE,
+            )
             .expect("execute DAG CPU prefix");
         let abstract_peak_bytes = completion.execution_plan().peak_device_bytes();
         let abstract_peak_materializations =
@@ -3041,6 +3302,124 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "explicit qualification requires a real GPU adapter and Float32 readback"]
+    async fn real_wgpu_float_readback_refuses_nonfinite_image_without_poisoning_device() {
+        let context = GpuContext::new()
+            .await
+            .expect("explicit GPU qualification must have a real adapter");
+        eprintln!(
+            "explicit Float32 readback adapter: {:?}",
+            context.adapter.get_info()
+        );
+        let mut builder = EffectGraphBuilderState::new();
+        let source = builder.source();
+        let prefix = builder.add_unary_from(source, EffectRenderOp::GaussianBlur { radius: 1.0 });
+        let output = builder.add_unary_from(
+            prefix,
+            EffectRenderOp::ColorAdjust {
+                exposure: 4.0,
+                contrast: 1.0,
+                saturation: 1.0,
+                working_color_space: WORKING_SPACE,
+            },
+        );
+        builder.set_current_output(output);
+        let graph = compile_reference_render_graph(builder.finish())
+            .expect("compile CPU blur followed by GPU exposure");
+        let mut runtime = HeterogeneousGpuContinuationRuntime::new(
+            context,
+            GpuColorFrameWgpuResourcePoolOptions::default(),
+        )
+        .expect("GPU continuation runtime");
+        let cancellation = ExecutionCancellationToken::new();
+        let pixels = EXTENT.width() as usize * EXTENT.height() as usize;
+        let positive = vec![[0.25, 0.25, 0.25, 1.0]; pixels];
+        let completion = cpu_completion_with_gpu_node_count(Arc::clone(&graph), &positive, 1);
+        assert_eq!(
+            completion.evidence().transfers().len(),
+            1,
+            "exercise a concrete CPU-to-GPU frontier"
+        );
+        assert_eq!(
+            completion.gpu_suffix().node_ids().len(),
+            1,
+            "the exposure runs on the actual GPU suffix"
+        );
+        let accepted = runtime
+            .execute_to_cpu(
+                request(&graph, generous_gpu_grant()),
+                completion,
+                &cancellation,
+                gpu_test_deadline(),
+                mondrian_core::ImageSampling::UNIT_SQUARE,
+            )
+            .expect(
+                "finite positive control must execute and read back before the overflow oracle",
+            );
+        assert!(accepted
+            .frame()
+            .rgba_f32()
+            .data
+            .iter()
+            .all(|pixel| pixel.iter().all(|value| value.is_finite())));
+        assert!(
+            accepted.frame().rgba_f32().data.iter().all(|pixel| pixel[0] > 1.0),
+            "positive control proves the GPU exposure executed"
+        );
+        assert!(accepted.evidence().readback_bytes().is_some());
+
+        // Blur remains below MAX; the legal +4-stop GPU exposure overflows.
+        let large = vec![[f32::MAX / 4.0, f32::MAX / 4.0, f32::MAX / 4.0, 1.0]; pixels];
+        assert!(large.iter().all(|pixel| pixel.iter().all(|value| value.is_finite())));
+        let completion = cpu_completion_with_gpu_node_count(Arc::clone(&graph), &large, 1);
+        assert_eq!(completion.gpu_suffix().node_ids().len(), 1);
+        let rejected = runtime.execute_to_cpu(
+            request(&graph, generous_gpu_grant()),
+            completion,
+            &cancellation,
+            gpu_test_deadline(),
+            mondrian_core::ImageSampling::UNIT_SQUARE,
+        );
+        assert!(
+            !runtime.is_poisoned(),
+            "invalid image samples after observed completion are not a device failure"
+        );
+        assert!(
+            runtime.table.is_empty(),
+            "failed image publication releases owned output/uploads"
+        );
+        let recovered = runtime
+            .execute_to_cpu(
+                request(&graph, generous_gpu_grant()),
+                cpu_completion_with_gpu_node_count(Arc::clone(&graph), &positive, 1),
+                &cancellation,
+                gpu_test_deadline(),
+                mondrian_core::ImageSampling::UNIT_SQUARE,
+            )
+            .expect("the same healthy GPU runtime must accept the next finite frame");
+        assert!(recovered
+            .frame()
+            .rgba_f32()
+            .data
+            .iter()
+            .all(|pixel| pixel.iter().all(|value| value.is_finite())));
+        assert!(runtime.table.is_empty());
+        assert!(
+            rejected.is_err(),
+            "GPU arithmetic overflow must refuse complete CPU-frame publication"
+        );
+        assert!(
+            matches!(
+                rejected,
+                Err(HeterogeneousGpuContinuationError::FrameContract(
+                    mondrian_effects::EffectFloatFrameError::InvalidSample { .. }
+                ))
+            ),
+            "the completed overflow is an image contract refusal, not a transport/device error"
+        );
+    }
+
+    #[tokio::test]
     async fn real_wgpu_continuation_matches_complete_cpu_graph_and_proves_readback() {
         let Ok(context) = GpuContext::new().await else {
             eprintln!("skipping heterogeneous GPU continuation test: no GPU adapter available");
@@ -3049,9 +3428,16 @@ mod tests {
         let graph = tracer_graph();
         let input = test_input();
         let expected = apply_compiled_effect_graph_rgba_f32(
-            &input,
-            EXTENT.width(),
-            EXTENT.height(),
+            mondrian_effects::EffectFloatFrameView::new(
+                mondrian_effects::EffectFrameExtent::new(EXTENT.width(), EXTENT.height()),
+                mondrian_effects::EffectValueFormat::new(
+                    mondrian_effects::EffectWorkingPrecision::Float32,
+                    mondrian_effects::EffectColorDomain::SceneLinearRgb,
+                    mondrian_core::ColorFrameAlpha::StraightCoverage,
+                ),
+                mondrian_core::ImageSampling::UNIT_SQUARE,
+                &input,
+            ),
             &graph,
             FRAME_SEED,
         )
@@ -3075,6 +3461,7 @@ mod tests {
                     completion,
                     &cancellation,
                     gpu_test_deadline(),
+                    mondrian_core::ImageSampling::UNIT_SQUARE,
                 )
                 .expect("execute and read back heterogeneous GPU continuation");
 
@@ -3115,9 +3502,16 @@ mod tests {
         let graph = gpu_dag_graph();
         let input = test_input();
         let expected = apply_compiled_effect_graph_rgba_f32(
-            &input,
-            EXTENT.width(),
-            EXTENT.height(),
+            mondrian_effects::EffectFloatFrameView::new(
+                mondrian_effects::EffectFrameExtent::new(EXTENT.width(), EXTENT.height()),
+                mondrian_effects::EffectValueFormat::new(
+                    mondrian_effects::EffectWorkingPrecision::Float32,
+                    mondrian_effects::EffectColorDomain::SceneLinearRgb,
+                    mondrian_core::ColorFrameAlpha::StraightCoverage,
+                ),
+                mondrian_core::ImageSampling::UNIT_SQUARE,
+                &input,
+            ),
             &graph,
             FRAME_SEED,
         )
@@ -3136,7 +3530,22 @@ mod tests {
             EffectExecutionSession::new(EffectExecutionSessionConfig::uncached(8 * 1024 * 1024));
         session.bind_generation(GENERATION);
         let completion = prepared
-            .execute_cpu_prefix_uncancelled(&session, GENERATION, &input, FRAME_SEED, WORKING_SPACE)
+            .execute_cpu_prefix_uncancelled(
+                &mut session,
+                GENERATION,
+                mondrian_effects::EffectFloatFrameView::new(
+                    EXTENT,
+                    mondrian_effects::EffectValueFormat::new(
+                        mondrian_effects::EffectWorkingPrecision::Float32,
+                        mondrian_effects::EffectColorDomain::SceneLinearRgb,
+                        mondrian_core::ColorFrameAlpha::StraightCoverage,
+                    ),
+                    mondrian_core::ImageSampling::UNIT_SQUARE,
+                    &input,
+                ),
+                FRAME_SEED,
+                WORKING_SPACE,
+            )
             .expect("execute DAG CPU prefix");
         let pool = Arc::new(GpuColorFrameWgpuResourcePool::new(
             GpuColorFrameWgpuResourcePoolOptions::default(),
@@ -3150,6 +3559,7 @@ mod tests {
                 completion,
                 &ExecutionCancellationToken::new(),
                 gpu_test_deadline(),
+                mondrian_core::ImageSampling::UNIT_SQUARE,
             )
             .expect("execute GPU DAG and read back");
         assert!(
@@ -3185,9 +3595,16 @@ mod tests {
         let graph = gpu_multi_input_graph();
         let input = test_input();
         let expected = apply_compiled_effect_graph_rgba_f32(
-            &input,
-            EXTENT.width(),
-            EXTENT.height(),
+            mondrian_effects::EffectFloatFrameView::new(
+                mondrian_effects::EffectFrameExtent::new(EXTENT.width(), EXTENT.height()),
+                mondrian_effects::EffectValueFormat::new(
+                    mondrian_effects::EffectWorkingPrecision::Float32,
+                    mondrian_effects::EffectColorDomain::SceneLinearRgb,
+                    mondrian_core::ColorFrameAlpha::StraightCoverage,
+                ),
+                mondrian_core::ImageSampling::UNIT_SQUARE,
+                &input,
+            ),
             &graph,
             FRAME_SEED,
         )
@@ -3230,7 +3647,22 @@ mod tests {
             EffectExecutionSession::new(EffectExecutionSessionConfig::uncached(8 * 1024 * 1024));
         session.bind_generation(GENERATION);
         let completion = prepared
-            .execute_cpu_prefix_uncancelled(&session, GENERATION, &input, FRAME_SEED, WORKING_SPACE)
+            .execute_cpu_prefix_uncancelled(
+                &mut session,
+                GENERATION,
+                mondrian_effects::EffectFloatFrameView::new(
+                    EXTENT,
+                    mondrian_effects::EffectValueFormat::new(
+                        mondrian_effects::EffectWorkingPrecision::Float32,
+                        mondrian_effects::EffectColorDomain::SceneLinearRgb,
+                        mondrian_core::ColorFrameAlpha::StraightCoverage,
+                    ),
+                    mondrian_core::ImageSampling::UNIT_SQUARE,
+                    &input,
+                ),
+                FRAME_SEED,
+                WORKING_SPACE,
+            )
             .expect("execute MultiInput CPU prefix");
         let pool = Arc::new(GpuColorFrameWgpuResourcePool::new(
             GpuColorFrameWgpuResourcePoolOptions::default(),
@@ -3244,6 +3676,7 @@ mod tests {
                 completion,
                 &ExecutionCancellationToken::new(),
                 gpu_test_deadline(),
+                mondrian_core::ImageSampling::UNIT_SQUARE,
             )
             .expect("execute GPU MultiInput and read back");
         assert_eq!(
@@ -3277,9 +3710,16 @@ mod tests {
         let graph = gpu_identity_copy_graph();
         let input = test_input();
         let expected = apply_compiled_effect_graph_rgba_f32(
-            &input,
-            EXTENT.width(),
-            EXTENT.height(),
+            mondrian_effects::EffectFloatFrameView::new(
+                mondrian_effects::EffectFrameExtent::new(EXTENT.width(), EXTENT.height()),
+                mondrian_effects::EffectValueFormat::new(
+                    mondrian_effects::EffectWorkingPrecision::Float32,
+                    mondrian_effects::EffectColorDomain::SceneLinearRgb,
+                    mondrian_core::ColorFrameAlpha::StraightCoverage,
+                ),
+                mondrian_core::ImageSampling::UNIT_SQUARE,
+                &input,
+            ),
             &graph,
             FRAME_SEED,
         )
@@ -3312,7 +3752,22 @@ mod tests {
             EffectExecutionSession::new(EffectExecutionSessionConfig::uncached(8 * 1024 * 1024));
         session.bind_generation(GENERATION);
         let completion = prepared
-            .execute_cpu_prefix_uncancelled(&session, GENERATION, &input, FRAME_SEED, WORKING_SPACE)
+            .execute_cpu_prefix_uncancelled(
+                &mut session,
+                GENERATION,
+                mondrian_effects::EffectFloatFrameView::new(
+                    EXTENT,
+                    mondrian_effects::EffectValueFormat::new(
+                        mondrian_effects::EffectWorkingPrecision::Float32,
+                        mondrian_effects::EffectColorDomain::SceneLinearRgb,
+                        mondrian_core::ColorFrameAlpha::StraightCoverage,
+                    ),
+                    mondrian_core::ImageSampling::UNIT_SQUARE,
+                    &input,
+                ),
+                FRAME_SEED,
+                WORKING_SPACE,
+            )
             .expect("execute identity-copy CPU prefix");
         let mut runtime = HeterogeneousGpuContinuationRuntime::new(
             context,
@@ -3325,6 +3780,7 @@ mod tests {
                 completion,
                 &ExecutionCancellationToken::new(),
                 gpu_test_deadline(),
+                mondrian_core::ImageSampling::UNIT_SQUARE,
             )
             .expect("execute GPU identity copy and read back");
         assert_eq!(
@@ -3347,9 +3803,16 @@ mod tests {
         let graph = gpu_two_value_frontier_graph();
         let input = test_input();
         let expected = apply_compiled_effect_graph_rgba_f32(
-            &input,
-            EXTENT.width(),
-            EXTENT.height(),
+            mondrian_effects::EffectFloatFrameView::new(
+                mondrian_effects::EffectFrameExtent::new(EXTENT.width(), EXTENT.height()),
+                mondrian_effects::EffectValueFormat::new(
+                    mondrian_effects::EffectWorkingPrecision::Float32,
+                    mondrian_effects::EffectColorDomain::SceneLinearRgb,
+                    mondrian_core::ColorFrameAlpha::StraightCoverage,
+                ),
+                mondrian_core::ImageSampling::UNIT_SQUARE,
+                &input,
+            ),
             &graph,
             FRAME_SEED,
         )
@@ -3392,7 +3855,22 @@ mod tests {
             EffectExecutionSession::new(EffectExecutionSessionConfig::uncached(8 * 1024 * 1024));
         session.bind_generation(GENERATION);
         let completion = prepared
-            .execute_cpu_prefix_uncancelled(&session, GENERATION, &input, FRAME_SEED, WORKING_SPACE)
+            .execute_cpu_prefix_uncancelled(
+                &mut session,
+                GENERATION,
+                mondrian_effects::EffectFloatFrameView::new(
+                    EXTENT,
+                    mondrian_effects::EffectValueFormat::new(
+                        mondrian_effects::EffectWorkingPrecision::Float32,
+                        mondrian_effects::EffectColorDomain::SceneLinearRgb,
+                        mondrian_core::ColorFrameAlpha::StraightCoverage,
+                    ),
+                    mondrian_core::ImageSampling::UNIT_SQUARE,
+                    &input,
+                ),
+                FRAME_SEED,
+                WORKING_SPACE,
+            )
             .expect("execute two-value CPU frontier");
         assert_eq!(completion.boundary_values().len(), 2);
         let mut runtime = HeterogeneousGpuContinuationRuntime::new(
@@ -3406,6 +3884,7 @@ mod tests {
                 completion,
                 &ExecutionCancellationToken::new(),
                 gpu_test_deadline(),
+                mondrian_core::ImageSampling::UNIT_SQUARE,
             )
             .expect("execute multi-frontier GPU join and read back");
         assert_eq!(completed.evidence().completed_uploads().len(), 2);
@@ -3453,9 +3932,16 @@ mod tests {
             for invert in [false, true] {
                 let graph = gpu_mask_graph(invert, mask_op);
                 let expected = apply_compiled_effect_graph_rgba_f32(
-                    &input,
-                    EXTENT.width(),
-                    EXTENT.height(),
+                    mondrian_effects::EffectFloatFrameView::new(
+                        mondrian_effects::EffectFrameExtent::new(EXTENT.width(), EXTENT.height()),
+                        mondrian_effects::EffectValueFormat::new(
+                            mondrian_effects::EffectWorkingPrecision::Float32,
+                            mondrian_effects::EffectColorDomain::SceneLinearRgb,
+                            mondrian_core::ColorFrameAlpha::StraightCoverage,
+                        ),
+                        mondrian_core::ImageSampling::UNIT_SQUARE,
+                        &input,
+                    ),
                     &graph,
                     FRAME_SEED,
                 )
@@ -3509,9 +3995,18 @@ mod tests {
                 session.bind_generation(GENERATION);
                 let completion = prepared
                     .execute_cpu_prefix_uncancelled(
-                        &session,
+                        &mut session,
                         GENERATION,
-                        &input,
+                        mondrian_effects::EffectFloatFrameView::new(
+                            EXTENT,
+                            mondrian_effects::EffectValueFormat::new(
+                                mondrian_effects::EffectWorkingPrecision::Float32,
+                                mondrian_effects::EffectColorDomain::SceneLinearRgb,
+                                mondrian_core::ColorFrameAlpha::StraightCoverage,
+                            ),
+                            mondrian_core::ImageSampling::UNIT_SQUARE,
+                            &input,
+                        ),
                         FRAME_SEED,
                         WORKING_SPACE,
                     )
@@ -3525,6 +4020,7 @@ mod tests {
                         completion,
                         &ExecutionCancellationToken::new(),
                         gpu_test_deadline(),
+                        mondrian_core::ImageSampling::UNIT_SQUARE,
                     )
                     .expect("execute GPU Mask and read back");
                 assert_eq!(completed.evidence().completed_uploads().len(), 2);
@@ -3641,9 +4137,16 @@ mod tests {
         let graph = gpu_power_window_graph();
         let input = test_input();
         let expected = apply_compiled_effect_graph_rgba_f32(
-            &input,
-            EXTENT.width(),
-            EXTENT.height(),
+            mondrian_effects::EffectFloatFrameView::new(
+                mondrian_effects::EffectFrameExtent::new(EXTENT.width(), EXTENT.height()),
+                mondrian_effects::EffectValueFormat::new(
+                    mondrian_effects::EffectWorkingPrecision::Float32,
+                    mondrian_effects::EffectColorDomain::SceneLinearRgb,
+                    mondrian_core::ColorFrameAlpha::StraightCoverage,
+                ),
+                mondrian_core::ImageSampling::UNIT_SQUARE,
+                &input,
+            ),
             &graph,
             FRAME_SEED,
         )
@@ -3665,7 +4168,22 @@ mod tests {
             EffectExecutionSession::new(EffectExecutionSessionConfig::uncached(8 * 1024 * 1024));
         session.bind_generation(GENERATION);
         let completion = prepared
-            .execute_cpu_prefix_uncancelled(&session, GENERATION, &input, FRAME_SEED, WORKING_SPACE)
+            .execute_cpu_prefix_uncancelled(
+                &mut session,
+                GENERATION,
+                mondrian_effects::EffectFloatFrameView::new(
+                    EXTENT,
+                    mondrian_effects::EffectValueFormat::new(
+                        mondrian_effects::EffectWorkingPrecision::Float32,
+                        mondrian_effects::EffectColorDomain::SceneLinearRgb,
+                        mondrian_core::ColorFrameAlpha::StraightCoverage,
+                    ),
+                    mondrian_core::ImageSampling::UNIT_SQUARE,
+                    &input,
+                ),
+                FRAME_SEED,
+                WORKING_SPACE,
+            )
             .expect("execute Power Window CPU frontier");
         assert_eq!(completion.evidence().transfers().len(), 3);
         assert_eq!(
@@ -3688,6 +4206,7 @@ mod tests {
                 completion,
                 &ExecutionCancellationToken::new(),
                 gpu_test_deadline(),
+                mondrian_core::ImageSampling::UNIT_SQUARE,
             )
             .expect("execute GPU Power Window and read back");
         assert_eq!(
@@ -3742,9 +4261,16 @@ mod tests {
         for (mode, matte_preview, invert, denoise_radius, blur_radius, qualifier_passes) in cases {
             let graph = qualifier_graph(mode, matte_preview, invert, denoise_radius, blur_radius);
             let expected = apply_compiled_effect_graph_rgba_f32(
-                &input,
-                EXTENT.width(),
-                EXTENT.height(),
+                mondrian_effects::EffectFloatFrameView::new(
+                    mondrian_effects::EffectFrameExtent::new(EXTENT.width(), EXTENT.height()),
+                    mondrian_effects::EffectValueFormat::new(
+                        mondrian_effects::EffectWorkingPrecision::Float32,
+                        mondrian_effects::EffectColorDomain::SceneLinearRgb,
+                        mondrian_core::ColorFrameAlpha::StraightCoverage,
+                    ),
+                    mondrian_core::ImageSampling::UNIT_SQUARE,
+                    &input,
+                ),
                 &graph,
                 FRAME_SEED,
             )
@@ -3819,9 +4345,18 @@ mod tests {
             session.bind_generation(GENERATION);
             let completion = prepared
                 .execute_cpu_prefix_uncancelled(
-                    &session,
+                    &mut session,
                     GENERATION,
-                    &input,
+                    mondrian_effects::EffectFloatFrameView::new(
+                        EXTENT,
+                        mondrian_effects::EffectValueFormat::new(
+                            mondrian_effects::EffectWorkingPrecision::Float32,
+                            mondrian_effects::EffectColorDomain::SceneLinearRgb,
+                            mondrian_core::ColorFrameAlpha::StraightCoverage,
+                        ),
+                        mondrian_core::ImageSampling::UNIT_SQUARE,
+                        &input,
+                    ),
                     FRAME_SEED,
                     WORKING_SPACE,
                 )
@@ -3832,6 +4367,7 @@ mod tests {
                     completion,
                     &ExecutionCancellationToken::new(),
                     gpu_test_deadline(),
+                    mondrian_core::ImageSampling::UNIT_SQUARE,
                 )
                 .expect("execute GPU Qualifier and read back");
             assert_eq!(
@@ -3888,6 +4424,7 @@ mod tests {
             cpu_completion(Arc::clone(&graph), &input),
             &cancellation,
             gpu_test_deadline(),
+            mondrian_core::ImageSampling::UNIT_SQUARE,
         ) {
             Ok(_) => panic!("readback grant must fail before submission"),
             Err(error) => error,
@@ -3908,6 +4445,7 @@ mod tests {
             cpu_completion(Arc::clone(&graph), &input),
             &cancellation,
             gpu_test_deadline(),
+            mondrian_core::ImageSampling::UNIT_SQUARE,
         ) {
             Ok(_) => panic!("repeated readback grant must fail before submission"),
             Err(error) => error,
@@ -3927,5 +4465,100 @@ mod tests {
             after_first.retained_resources
         );
         assert_eq!(after_second.retained_bytes, after_first.retained_bytes);
+    }
+
+    #[test]
+    fn gpu_float_readback_contract_preserves_exact_samples_and_actual_alpha() {
+        for (alpha, sample) in [
+            (
+                mondrian_core::ColorFrameAlpha::Opaque,
+                [f32::MAX, -f32::MAX, -0.0, 1.0],
+            ),
+            (
+                mondrian_core::ColorFrameAlpha::StraightCoverage,
+                [16.0, -2.0, -0.0, 0.5],
+            ),
+            (
+                mondrian_core::ColorFrameAlpha::StraightFloat,
+                [16.0, -2.0, -0.0, 1.5],
+            ),
+            (
+                mondrian_core::ColorFrameAlpha::PremultipliedFloat,
+                [1.0, -2.0, -0.0, 0.0],
+            ),
+        ] {
+            let frame = admit_gpu_readback_frame(
+                sample.to_vec(),
+                EffectFrameExtent::new(1, 1),
+                alpha,
+                mondrian_core::ImageSampling::UNIT_SQUARE,
+            )
+            .expect("complete readback materializes its actual finite association");
+            assert_eq!(frame.alpha(), alpha);
+            assert_eq!(
+                frame.pixels()[0].map(f32::to_bits),
+                sample.map(f32::to_bits)
+            );
+        }
+    }
+
+    #[test]
+    fn gpu_float_readback_contract_nonfinite_and_alpha_refusals_are_frame_errors() {
+        let alpha = mondrian_core::ColorFrameAlpha::StraightCoverage;
+        for lane in 0..4 {
+            for value in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+                let mut sample = [0.25, 0.5, 0.75, 0.5];
+                sample[lane] = value;
+                assert!(
+                    matches!(admit_gpu_readback_frame(sample.to_vec(), EffectFrameExtent::new(1, 1), alpha, mondrian_core::ImageSampling::UNIT_SQUARE),
+                    Err(HeterogeneousGpuContinuationError::FrameContract(mondrian_effects::EffectFloatFrameError::InvalidSample { index: 0, alpha: actual })) if actual == alpha)
+                );
+            }
+        }
+        for (alpha, value) in [
+            (mondrian_core::ColorFrameAlpha::Opaque, 0.5),
+            (mondrian_core::ColorFrameAlpha::StraightCoverage, 1.5),
+        ] {
+            assert!(
+                matches!(admit_gpu_readback_frame(vec![0.25, 0.5, 0.75, value], EffectFrameExtent::new(1, 1), alpha, mondrian_core::ImageSampling::UNIT_SQUARE),
+                Err(HeterogeneousGpuContinuationError::FrameContract(mondrian_effects::EffectFloatFrameError::InvalidSample { index: 0, alpha: actual })) if actual == alpha)
+            );
+        }
+    }
+
+    #[test]
+    fn gpu_float_readback_contract_distinguishes_frame_extent_from_transport_remainder() {
+        let alpha = mondrian_core::ColorFrameAlpha::StraightCoverage;
+        assert!(matches!(
+            admit_gpu_readback_frame(
+                vec![0.25, 0.5, 0.75, 0.5],
+                EffectFrameExtent::new(2, 1),
+                alpha,
+                mondrian_core::ImageSampling::UNIT_SQUARE
+            ),
+            Err(HeterogeneousGpuContinuationError::FrameContract(
+                mondrian_effects::EffectFloatFrameError::ExtentMismatch { expected: 2, actual: 1 }
+            ))
+        ));
+        assert!(matches!(
+            admit_gpu_readback_frame(
+                vec![0.25; 5],
+                EffectFrameExtent::new(1, 1),
+                alpha,
+                mondrian_core::ImageSampling::UNIT_SQUARE
+            ),
+            Err(HeterogeneousGpuContinuationError::InvalidReadbackComponents { components: 5 })
+        ));
+    }
+
+    #[test]
+    fn gpu_float_readback_contract_allocation_refusal_remains_a_resource_error() {
+        let error = gpu_readback_frame_error(
+            mondrian_effects::EffectFloatFrameError::AllocationUnavailable {
+                required_bytes: 16_384,
+            },
+        );
+        assert!(matches!(error, HeterogeneousGpuContinuationError::ReadbackAllocationUnavailable { required_bytes: 16_384 }),
+            "valid image storage unavailable after GPU completion is not an invalid sample or device error");
     }
 }

@@ -3,10 +3,14 @@
 
 #include <iostream>
 #include <fstream>
+#include <stdexcept>
+#include <cmath>
+#include <cstring>
 
 // ofx
 #include "ofxCore.h"
 #include "ofxImageEffect.h"
+#include "ofxGPURender.h"
 #include "ofxPixels.h"
 
 // ofx host
@@ -26,15 +30,166 @@
 #include "effect_instance.h"
 #include "image_clip.h"
 #include "parameter_instance.h"
+#include "image_domain.h"
 
 // Filter instance implementation
 namespace MondrianOpenFx {
 
   FilterEffectInstance::FilterEffectInstance(OFX::Host::ImageEffect::ImageEffectPlugin* plugin,
                                      OFX::Host::ImageEffect::Descriptor& desc,
-                                     const std::string& context)
-                                     : OFX::Host::ImageEffect::Instance(plugin,desc,context,false)
+                                     const std::string& context, FrameState& frameState, AuxSuite& auxiliary)
+                                     : AuxRegistrationGuard(auxiliary, true), OFX::Host::ImageEffect::Instance(plugin,desc,context,false), _frameState(frameState)
   {
+    bindAuxiliary(getHandle());
+    if (auxiliary.bindTimeline(getHandle(), frameState.info.frame, frameState.info.first_frame, frameState.info.last_frame) != kOfxStatOK) {
+      throw std::runtime_error("OpenFX auxiliary initial timeline could not be bound");
+    }
+    // An instance starts with its descriptor's capability. Plugin changes must
+    // remain instance-local rather than changing the chained descriptor.
+    const auto& cpu = desc.getProps().getStringProperty(kOfxImageEffectPropCPURenderSupported);
+    getProps().createProperty({kOfxImageEffectPropCPURenderSupported,
+                              OFX::Host::Property::eString, 1, false, cpu.c_str()});
+  }
+
+  FilterEffectInstance::~FilterEffectInstance() {
+    closeInterface();
+  }
+
+  void FilterEffectInstance::setCustomOutArgs(const std::string& action, OFX::Host::Property::Set& outArgs) {
+    OFX::Host::ImageEffect::Instance::setCustomOutArgs(action, outArgs);
+    if (action == kOfxImageEffectActionGetRegionOfDefinition) {
+      // HostSupport initializes this to zero; the specification requires the
+      // context default even when a handled action writes only some components.
+      const auto rod = calcDefaultRegionOfDefinition(_frameState.info.frame, OfxPointD{1, 1});
+      outArgs.setDoublePropertyN(kOfxImageEffectPropRegionOfDefinition, &rod.x1, 4);
+      return;
+    }
+    if (action != kOfxImageEffectActionGetClipPreferences) { return; }
+    // The single-PAR host supplies the actual connected grid, including a
+    // Generator's output grid, rather than substituting project geometry.
+    for (const auto& entry : _clips) {
+      const auto* clip = entry.second;
+      if (!clip->getConnected()) { continue; }
+      outArgs.setDoubleProperty("OfxImageClipPropPAR_" + entry.first, clip->getAspectRatio());
+    }
+  }
+
+  OfxRectD FilterEffectInstance::outputRegionOfDefinition(OfxTime time) {
+    if (!std::isfinite(time) || time != _frameState.info.frame) {
+      throw OFX::Host::Property::Exception(kOfxStatErrUnsupported);
+    }
+    if (_frameState.outputRodReady) { return _frameState.outputCanonicalRod; }
+    // Never block a plugin callback thread waiting on another plugin action.
+    // Recursive Output queries from the RoD action cannot define their own RoD.
+    if (_frameState.queryingOutputRod.exchange(true)) {
+      throw OFX::Host::Property::Exception(kOfxStatErrUnsupported);
+    }
+    struct QueryScope {
+      std::atomic<bool>& flag;
+      ~QueryScope() { flag.store(false); }
+    } scope{_frameState.queryingOutputRod};
+    OfxRectD rod{};
+    const auto status = getRegionOfDefinitionAction(time, OfxPointD{1, 1}, rod);
+    if (status != kOfxStatOK && status != kOfxStatReplyDefault) {
+      throw OFX::Host::Property::Exception(status);
+    }
+    OfxRectI pixels{}; size_t count = 0;
+    if (!pixelRegionOfDefinition(rod, _frameState.info.pixel_aspect_ratio, pixels, count)) {
+      throw OFX::Host::Property::Exception(kOfxStatErrUnsupported);
+    }
+    return rod;
+  }
+
+  OfxStatus FilterEffectInstance::mainEntry(const char* action, const void* handle,
+                                           OFX::Host::Property::Set* inArgs,
+                                           OFX::Host::Property::Set* outArgs) {
+    const bool rendering = std::strcmp(action, kOfxImageEffectActionRender) == 0;
+    const bool changing = std::strcmp(action, kOfxActionInstanceChanged) == 0 ||
+        std::strcmp(action, kOfxActionEndInstanceChanged) == 0;
+    const bool userEdited = changing && inArgs &&
+        inArgs->getStringProperty(kOfxPropChangeReason) == kOfxChangeUserEdited;
+    // The serialized invocation lends storage; each dispatched action can only
+    // narrow that loan. In particular a recursive RoD/preferences action must
+    // not inherit its enclosing UserEdited action's image access.
+    ImageAccess images(_frameState,
+        _frameState.imagesAvailable.load() && (rendering || userEdited),
+        _frameState.outputAvailable.load() && rendering);
+    const OfxStatus status = OFX::Host::ImageEffect::Instance::mainEntry(action, handle, inArgs, outArgs);
+    // ReplyDefault's residual outArgs do not request preference changes.
+    if (status != kOfxStatOK || !outArgs || std::strcmp(action, kOfxImageEffectActionGetClipPreferences) != 0) {
+      return status;
+    }
+    // SetableFrameRate is false: frame-based output keeps the current
+    // invocation's rate rather than accepting a preference-only remapping.
+    if (outArgs->getDimension(kOfxImageEffectPropFrameRate) != 1) { return kOfxStatFailed; }
+    const double outputRate = outArgs->getDoubleProperty(kOfxImageEffectPropFrameRate);
+    if (!std::isfinite(outputRate) || outputRate <= 0.0 || outputRate != getFrameRate()) {
+      return kOfxStatFailed;
+    }
+    // SetableFielding is false: the actual clip, image and Render raster are
+    // progressive. Refuse a handled request that cannot preserve that contract.
+    if (outArgs->getDimension(kOfxImageClipPropFieldOrder) != 1 ||
+        outArgs->getStringProperty(kOfxImageClipPropFieldOrder) != kOfxImageFieldNone) {
+      return kOfxStatFailed;
+    }
+    // This host cannot remap a connected clip's sampling. Reject before the
+    // SDK consumes the preferences and before the native Render action.
+    for (const auto& entry : _clips) {
+      const auto* clip = entry.second;
+      if (!clip->getConnected()) { continue; }
+      const std::string property = "OfxImageClipPropPAR_" + entry.first;
+      if (outArgs->getDimension(property) != 1) { return kOfxStatFailed; }
+      const double par = outArgs->getDoubleProperty(property);
+      if (!std::isfinite(par) || par <= 0.0 || par != clip->getAspectRatio()) {
+        return kOfxStatFailed;
+      }
+    }
+    return status;
+  }
+
+  OfxStatus FilterEffectInstance::setInterfaceOpen(bool open) {
+    if (!open) { return closeInterface(); }
+    if (_interfaceOpen) { return kOfxStatOK; }
+    // The caller has already bound the current parent-controlled invocation.
+    // This does not grant local-only author mutation: C2 must own that bridge.
+    if (!auxiliary().hasInteractiveControl()) { return kOfxStatFailed; }
+    _frameState.readOnlyInteractive = true;
+    OFX::Host::ImageEffect::Instance::_interactive = true;
+    getProps().setIntProperty(kOfxPropIsInteractive, 1);
+    if (auxiliary().bindInteractive(getHandle(), true) != kOfxStatOK) {
+      OFX::Host::ImageEffect::Instance::_interactive = false;
+      _frameState.readOnlyInteractive = false;
+      getProps().setIntProperty(kOfxPropIsInteractive, 0);
+      return kOfxStatFailed;
+    }
+    // The host generic editor is genuinely open before Begin. This records
+    // the host lifecycle, not success of the plugin-private UI setup. The
+    // published Begin postcondition and End precondition depend on Begin
+    // being called, not on an OK reply; Failed keeps this host editor open.
+    _interfaceOpen = true;
+    const OfxStatus status = beginInstanceEditAction();
+    return status;
+  }
+
+  OfxStatus FilterEffectInstance::closeInterface() noexcept {
+    if (!_interfaceOpen) { return kOfxStatOK; }
+    _interfaceOpen = false;
+    try {
+      // The last real GUI has closed before End enters plugin code. Questions
+      // during End may fail honestly; they cannot keep a closed view alive.
+      OFX::Host::ImageEffect::Instance::_interactive = false;
+      getProps().setIntProperty(kOfxPropIsInteractive, 0);
+      if (auxiliary().bindInteractive(getHandle(), false) != kOfxStatOK) {
+        std::terminate();
+      }
+      const OfxStatus status = endInstanceEditAction();
+      _frameState.readOnlyInteractive = false;
+      return status;
+    } catch (...) {
+      // No C++ exception can escape a destruction callback, leaving lifetime
+      // bookkeeping live after this supervised native owner has gone away.
+      std::terminate();
+    }
   }
 
   // class member function implementation
@@ -62,9 +217,7 @@ namespace MondrianOpenFx {
                                        const char* format,
                                        va_list args)
   {
-    printf("%s %s ",type,id);
-    vprintf(format,args);
-    return kOfxStatOK;
+    return auxiliary().message(getHandle(), type, id, format, args);
   }
 
   OfxStatus FilterEffectInstance::setPersistentMessage(const char* type,
@@ -72,18 +225,18 @@ namespace MondrianOpenFx {
                                                    const char* format,
                                                    va_list args)
   {
-    return vmessage(type, id, format, args);
+    return auxiliary().persistent(getHandle(), type, id, format, args);
   }
 
   OfxStatus FilterEffectInstance::clearPersistentMessage()
   {
-    return kOfxStatOK;
+    return auxiliary().clear(getHandle());
   }
 
   void FilterEffectInstance::getProjectSize(double& xSize, double& ySize) const
   {
-    xSize = gWidth;
-    ySize = gHeight;
+    xSize = static_cast<double>(_frameState.info.project_width) * _frameState.info.project_pixel_aspect_ratio;
+    ySize = _frameState.info.project_height;
   }
 
   // get the project offset in CANONICAL pixels, we are at 0,0
@@ -95,31 +248,31 @@ namespace MondrianOpenFx {
 
   void FilterEffectInstance::getProjectExtent(double& xSize, double& ySize) const
   {
-    xSize = gWidth;
-    ySize = gHeight;
+    xSize = static_cast<double>(_frameState.info.project_width) * _frameState.info.project_pixel_aspect_ratio;
+    ySize = _frameState.info.project_height;
   }
 
   double FilterEffectInstance::getProjectPixelAspectRatio() const
   {
-    return gPixelAspectRatio;
+    return _frameState.info.project_pixel_aspect_ratio;
   }
 
   // we are only 25 frames
   double FilterEffectInstance::getEffectDuration() const
   {
-    return gLastFrame - gFirstFrame;
+    return _frameState.info.last_frame - _frameState.info.first_frame;
   }
 
   double FilterEffectInstance::getFrameRate() const
   {
-    return gFrameRate;
+    return _frameState.info.frame_rate;
   }
 
   /// This is called whenever a param is changed by the plugin so that
   /// the recursive instanceChangedAction will be fed the correct frame
   double FilterEffectInstance::getFrameRecursive() const
   {
-    return gFrame;
+    return _frameState.info.frame;
   }
 
   /// This is called whenever a param is changed by the plugin so that
@@ -141,14 +294,22 @@ namespace MondrianOpenFx {
       return new BooleanParameter(this,name,descriptor);
     else if(descriptor.getType()==kOfxParamTypeChoice)
       return new ChoiceParameter(this,name,descriptor);
+    else if(descriptor.getType()==kOfxParamTypeStrChoice)
+      return new StrChoiceParameter(this,descriptor);
+    else if(descriptor.getType()==kOfxParamTypeString)
+      return new StringParameter(this,descriptor);
     else if(descriptor.getType()==kOfxParamTypeRGBA)
-      return new RgbaParameter(this,name,descriptor);
+      return new NumericTupleParameter<OFX::Host::Param::RGBAInstance, double, 4>(this,descriptor);
     else if(descriptor.getType()==kOfxParamTypeRGB)
-      return new RgbParameter(this,name,descriptor);
+      return new NumericTupleParameter<OFX::Host::Param::RGBInstance, double, 3>(this,descriptor);
     else if(descriptor.getType()==kOfxParamTypeDouble2D)
-      return new Double2DParameter(this,name,descriptor);
+      return new NumericTupleParameter<OFX::Host::Param::Double2DInstance, double, 2>(this,descriptor);
     else if(descriptor.getType()==kOfxParamTypeInteger2D)
-      return new Integer2DParameter(this,name,descriptor);
+      return new NumericTupleParameter<OFX::Host::Param::Integer2DInstance, int, 2>(this,descriptor);
+    else if(descriptor.getType()==kOfxParamTypeDouble3D)
+      return new NumericTupleParameter<OFX::Host::Param::Double3DInstance, double, 3>(this,descriptor);
+    else if(descriptor.getType()==kOfxParamTypeInteger3D)
+      return new NumericTupleParameter<OFX::Host::Param::Integer3DInstance, int, 3>(this,descriptor);
     else if(descriptor.getType()==kOfxParamTypePushButton)
       return new PushbuttonParameter(this,name,descriptor);
     else if(descriptor.getType()==kOfxParamTypeGroup)
@@ -171,18 +332,20 @@ namespace MondrianOpenFx {
   /// Start doing progress.
   void  FilterEffectInstance::progressStart(const std::string &message, const std::string &messageid)
   {
+    auxiliary().progressStart(getHandle(), message.c_str(), messageid.c_str());
   }
 
   /// finish yer progress
   void  FilterEffectInstance::progressEnd()
   {
+    auxiliary().progressEnd(getHandle());
   }
 
   /// set the progress to some level of completion, returns
   /// false if you should abandon processing, true to continue
   bool  FilterEffectInstance::progressUpdate(double t)
   {
-    return true;
+    return auxiliary().progressUpdate(getHandle(), t) == kOfxStatOK;
   }
 
 
@@ -190,19 +353,21 @@ namespace MondrianOpenFx {
   /// time as being passed to an action (eg render)
   double  FilterEffectInstance::timeLineGetTime()
   {
-    return gFrame;
+    double time = 0.0;
+    auxiliary().timelineTime(getHandle(), &time);
+    return time;
   }
 
   /// set the timeline to a specific time
   void  FilterEffectInstance::timeLineGotoTime(double t)
   {
+    auxiliary().timelineGoto(getHandle(), t);
   }
 
   /// get the first and last times available on the effect's timeline
   void  FilterEffectInstance::timeLineGetBounds(double &t1, double &t2)
   {
-    t1 = gFirstFrame;
-    t2 = gLastFrame;
+    auxiliary().timelineBounds(getHandle(), &t1, &t2);
   }
 
 }

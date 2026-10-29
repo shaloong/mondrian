@@ -30,92 +30,86 @@
 #include "image_clip.h"
 
 namespace MondrianOpenFx {
-  int gWidth = 0;
-  int gHeight = 0;
-  double gFrame = 0.0;
-  double gFrameRate = 24.0;
-  double gFirstFrame = 0.0;
-  double gLastFrame = 0.0;
-  double gPixelAspectRatio = 1.0;
-  std::vector<OfxRGBAColourF> gInput;
-
   FrameImage::FrameImage(FilterClipInstance &clip, OfxTime time, int view)
     : OFX::Host::ImageEffect::Image(clip) /// this ctor will set basic props on the image
+    , _frame(clip.frameState())
     , _data(NULL)
   {
-    // make some memory
-    _data = new OfxRGBAColourF[gWidth * gHeight];
-    std::fill(_data, _data + gWidth * gHeight, OfxRGBAColourF{0, 0, 0, 0});
-    if (!clip.isOutput()) {
-      std::copy(gInput.begin(), gInput.end(), _data);
+    const auto& state = clip.frameState();
+    SourceFrameView source{};
+    size_t sourceIndex = 0;
+    if (!clip.isOutput() && (!state.sourceFrame(time, source, sourceIndex) || !source.pixels)) {
+      throw OFX::Host::Property::Exception(kOfxStatErrUnsupported);
     }
+    const OfxRectI bounds = clip.isOutput() ? state.outputPixelRod :
+        OfxRectI{source.x, source.y, source.x + source.width, source.y + source.height};
+    const int width = bounds.x2 - bounds.x1;
+    const int height = bounds.y2 - bounds.y1;
+    // Each fetch owns an independent property handle; both clips borrow the
+    // active frame mapping, which outlives every legal action-scoped handle.
+    _data = clip.isOutput() ? state.output : const_cast<OfxRGBAColourF*>(source.pixels);
+
+    // Image-owned metadata identifies this binding, not its reusable address.
+    if (clip.isOutput()) { setStringProperty(kOfxImagePropUniqueIdentifier, state.outputIdentifier); }
+    else if (sourceIndex == 0) { setStringProperty(kOfxImagePropUniqueIdentifier, state.sourceIdentifier); }
+    else { setStringProperty(kOfxImagePropUniqueIdentifier, state.sourceIdentifier + ":set:" +
+        std::to_string(state.sourceBindingRevision) + ":sample:" + std::to_string(sourceIndex)); }
+    setStringProperty(kOfxImagePropField, kOfxImageFieldNone);
 
     // render scale x and y of 1.0
     setDoubleProperty(kOfxImageEffectPropRenderScale, 1.0, 0);
     setDoubleProperty(kOfxImageEffectPropRenderScale, 1.0, 1);
 
     // data ptr
-    setPointerProperty(kOfxImagePropData, _data + (gHeight - 1) * gWidth);
+    setPointerProperty(kOfxImagePropData, _data + (height - 1) * width);
 
     // bounds and rod
-    setIntProperty(kOfxImagePropBounds, 0, 0);
-    setIntProperty(kOfxImagePropBounds, 0, 1);
-    setIntProperty(kOfxImagePropBounds, gWidth, 2);
-    setIntProperty(kOfxImagePropBounds, gHeight, 3);
-
-    setIntProperty(kOfxImagePropRegionOfDefinition, 0, 0);
-    setIntProperty(kOfxImagePropRegionOfDefinition, 0, 1);
-    setIntProperty(kOfxImagePropRegionOfDefinition, gWidth, 2);
-    setIntProperty(kOfxImagePropRegionOfDefinition, gHeight, 3);
+    setIntPropertyN(kOfxImagePropBounds, &bounds.x1, 4);
+    setIntPropertyN(kOfxImagePropRegionOfDefinition, &bounds.x1, 4);
 
     // row bytes
-    setIntProperty(kOfxImagePropRowBytes, -gWidth * sizeof(OfxRGBAColourF));
+    setIntProperty(kOfxImagePropRowBytes, -width * sizeof(OfxRGBAColourF));
+    _frame.imageHandles.fetch_add(1);
   }
 
-  OfxRGBAColourF* FrameImage::pixel(int x, int y) const
-  {
-    OfxRectI bounds = getBounds();
-    if ((x >= bounds.x1) && ( x< bounds.x2) && ( y >= bounds.y1) && ( y < bounds.y2) )
-    {
-      int rowBytes = getIntProperty(kOfxImagePropRowBytes);
-      int offset = (y - bounds.y1) * rowBytes + (x - bounds.x1) * sizeof(OfxRGBAColourF);
-      char* bottomRow = reinterpret_cast<char*>(_data + (gHeight - 1) * gWidth);
-      return reinterpret_cast<OfxRGBAColourF*>(bottomRow + offset);
-    }
-    return 0;
-  }
-
-  FrameImage::~FrameImage()
-  {
-    delete[] _data;
-  }
+  FrameImage::~FrameImage() { _frame.imageHandles.fetch_sub(1); }
 
   FilterClipInstance::FilterClipInstance(FilterEffectInstance* effect, OFX::Host::ImageEffect::ClipDescriptor *desc)
     : OFX::Host::ImageEffect::ClipInstance(effect, *desc)
     , _effect(effect)
     , _name(desc->getName())
-    , _outputImage(NULL)
+    , _outputFetched(false)
   {
   }
 
-  FilterClipInstance::~FilterClipInstance()
+  const FrameState& FilterClipInstance::frameState() const
   {
-    if(_outputImage)
-      _outputImage->releaseReference();
+    return _effect->frameState();
   }
 
-  /// Float32 is the only admitted image depth.
+  void FilterClipInstance::beginFrame()
+  {
+    _outputFetched = false;
+    // The caller supplied a new Output address for this frame. No image
+    // wrapper or native raster survives an action or owns mapped storage.
+  }
+
+  FilterClipInstance::~FilterClipInstance() = default;
+
+  /// Connected clips admit Float32; disconnected clips have no source depth.
   const std::string &FilterClipInstance::getUnmappedBitDepth() const
   {
-    static const std::string v(kOfxBitDepthFloat);
-    return v;
+    static const std::string connected(kOfxBitDepthFloat);
+    static const std::string disconnected(kOfxBitDepthNone);
+    return getConnected() ? connected : disconnected;
   }
 
-  /// RGBA is the only admitted component layout.
+  /// Connected clips admit RGBA; disconnected clips have no source components.
   const std::string &FilterClipInstance::getUnmappedComponents() const
   {
-    static const std::string v(kOfxImageComponentRGBA);
-    return v;
+    static const std::string connected(kOfxImageComponentRGBA);
+    static const std::string disconnected(kOfxImageComponentNone);
+    return getConnected() ? connected : disconnected;
   }
 
   // PreMultiplication -
@@ -125,8 +119,15 @@ namespace MondrianOpenFx {
   //  kOfxImageUnPreMultiplied - the image is unpremultiplied
   const std::string &FilterClipInstance::getPremult() const
   {
-    static const std::string v(kOfxImageUnPreMultiplied);
-    return v;
+    if (isOutput()) { return _effect->getOutputPreMultiplication(); }
+    static const std::string straight(kOfxImageUnPreMultiplied);
+    static const std::string associated(kOfxImagePreMultiplied);
+    static const std::string opaque(kOfxImageOpaque);
+    switch (frameState().info.source_alpha) {
+      case 1: return associated;
+      case 2: return opaque;
+      default: return straight; // loadFrame admitted exactly one known ABI value.
+    }
   }
 
   // Pixel Aspect Ratio -
@@ -134,13 +135,13 @@ namespace MondrianOpenFx {
   //  The pixel aspect ratio of a clip or image.
   double FilterClipInstance::getAspectRatio() const
   {
-    return gPixelAspectRatio;
+    return frameState().info.pixel_aspect_ratio;
   }
 
   // Frame Rate -
   double FilterClipInstance::getFrameRate() const
   {
-    return gFrameRate;
+    return frameState().info.frame_rate;
   }
 
   // Frame Range (startFrame, endFrame) -
@@ -148,8 +149,8 @@ namespace MondrianOpenFx {
   //  The frame range over which a clip has images.
   void FilterClipInstance::getFrameRange(double &startFrame, double &endFrame) const
   {
-    startFrame = gFirstFrame;
-    endFrame = gLastFrame;
+    startFrame = frameState().info.first_frame;
+    endFrame = frameState().info.last_frame;
   }
 
   /// Field Order - Which spatial field occurs temporally first in a frame.
@@ -168,7 +169,11 @@ namespace MondrianOpenFx {
   //  Says whether the clip is actually connected at the moment.
   bool FilterClipInstance::getConnected() const
   {
-    return _name == "Source" || _name == "Output";
+    // Connection belongs to the selected owner context, not a transient frame
+    // borrow. Generator inputs remain disconnected even when named Source.
+    return _name == kOfxImageEffectOutputClipName ||
+        (_name == kOfxImageEffectSimpleSourceClipName &&
+         _effect->getContext() == kOfxImageEffectContextFilter);
   }
 
   // Unmapped Frame Rate -
@@ -176,7 +181,7 @@ namespace MondrianOpenFx {
   //  The unmaped frame range over which an output clip has images.
   double FilterClipInstance::getUnmappedFrameRate() const
   {
-    return gFrameRate;
+    return frameState().info.frame_rate;
   }
 
   // Unmapped Frame Range -
@@ -185,8 +190,8 @@ namespace MondrianOpenFx {
   // this is applicable only to hosts and plugins that allow a plugin to change frame rates
   void FilterClipInstance::getUnmappedFrameRange(double &unmappedStartFrame, double &unmappedEndFrame) const
   {
-    unmappedStartFrame = gFirstFrame;
-    unmappedEndFrame = gLastFrame;
+    unmappedStartFrame = frameState().info.first_frame;
+    unmappedEndFrame = frameState().info.last_frame;
   }
 
   // Continuous Samples -
@@ -202,11 +207,22 @@ namespace MondrianOpenFx {
   /// override this to return the rod on the clip canonical coords!
   OfxRectD FilterClipInstance::getRegionOfDefinition(OfxTime time) const
   {
-    OfxRectD v;
-    v.x1 = v.y1 = 0;
-    v.x2 = gWidth * gPixelAspectRatio;
-    v.y2 = gHeight;
-    return v;
+    if (isOutput()) { return _effect->outputRegionOfDefinition(time); }
+    // This input has no image outside its declared temporal domain. Its RoD is
+    // known to be empty; no Source fetch or pixel/time substitution is needed.
+    // Preserve failures for unknown in-range inputs, invalid time and memory.
+    if (getConnected() && std::isfinite(time) &&
+        (time < frameState().info.first_frame || time > frameState().info.last_frame)) {
+      return OfxRectD{0, 0, 0, 0};
+    }
+    SourceFrameView source{};
+    size_t index = 0;
+    int failure = kOfxStatFailed;
+    if (!getConnected() || !frameState().sourceFrame(time, source, index, &failure)) {
+      throw OFX::Host::Property::Exception(failure);
+    }
+    return OfxRectD{source.x * source.pixelAspectRatio, static_cast<double>(source.y),
+        (source.x + source.width) * source.pixelAspectRatio, static_cast<double>(source.y + source.height)};
   }
 
   /// override this to fill in the image at the given time.
@@ -217,32 +233,41 @@ namespace MondrianOpenFx {
   /// If bounds is not null, fetch the indicated section of the canonical image plane.
   OFX::Host::ImageEffect::Image* FilterClipInstance::getImage(OfxTime time, const OfxRectD *optionalBounds)
   {
-    if (!getConnected() || !std::isfinite(time) || time != gFrame) { return nullptr; }
-    if(_name == "Output") {
-      if(!_outputImage) {
-        // make a new ref counted image
-        _outputImage = new FrameImage(*this, 0);
-      }
-
-      // add another reference to the member image for this fetch
-      // as we have a ref count of 1 due to construction, this will
-      // cause the output image never to delete by the plugin
-      // when it releases the image
-      _outputImage->addReference();
-
-      // return it
-      return _outputImage;
+    const auto& frame = frameState();
+    if (!getConnected() || !frame.imagesAvailable || (!isOutput() && !frame.input) ||
+        (isOutput() && (!frame.output || !frame.outputAvailable || !frame.outputRodReady || frame.outputPixelCount == 0 || time != frame.info.frame)) || !std::isfinite(time)) {
+      return nullptr;
     }
-    else {
-      // Fetch on demand for the input clip.
-      // It does get deleted after the plugin is done with it as we
-      // have not incremented the auto ref
-      //
-      // You should do somewhat more sophisticated image management
-      // than this.
-      FrameImage *image = new FrameImage(*this, time);
+    if (!isOutput() && time != frame.info.frame &&
+        (!_effect->temporalAccess() || !temporalAccess())) { return nullptr; }
+    if (!isOutput()) {
+      SourceFrameView source{};
+      size_t index = 0;
+      int failure = kOfxStatFailed;
+      if (!frame.sourceFrame(time, source, index, &failure) || !source.pixels) {
+        if (failure == kOfxStatErrMemory) { throw OFX::Host::Property::Exception(failure); }
+        return nullptr;
+      }
+    }
+    if (isOutput()) {
+      std::lock_guard<std::mutex> lock(_outputFetchMutex);
+      auto* image = new FrameImage(*this, time);
+      // Initialize only when the current render actually requests Output.
+      // An unfetched/denied frame never writes the caller's staging buffer.
+      if (!_outputFetched) {
+        auto* diagnostic = frame.renderDiagnostic;
+        const auto started = diagnostic ? DiagnosticClock::now() : DiagnosticClock::time_point{};
+        std::fill(frame.output, frame.output + frame.outputPixelCount, OfxRGBAColourF{0, 0, 0, 0});
+        if (diagnostic) {
+          diagnostic->output_clear_calls = 1;
+          diagnostic->output_clear_bytes = frame.outputPixelCount * sizeof(OfxRGBAColourF);
+          if (!diagnosticNanoseconds(started, diagnostic->output_clear_ns)) { diagnostic->counter_overflowed = 1; }
+        }
+        _outputFetched = true;
+      }
       return image;
     }
+    return new FrameImage(*this, time);
   }
 
 } // MondrianOpenFx

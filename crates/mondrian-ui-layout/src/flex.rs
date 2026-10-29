@@ -77,6 +77,54 @@ impl FlexLayout {
         }
     }
 
+    /// Measure content at the available width, including wrapping after row
+    /// flex allocation. Fixed children retain their preferred main-axis size;
+    /// flexible row children share growth and shrink to fit the remaining lane.
+    pub fn measure_with_flex(
+        &self,
+        constraint: LayoutConstraint,
+        children: &[&dyn Widget],
+        flex_grows: &[f32],
+    ) -> Size {
+        assert_eq!(
+            children.len(),
+            flex_grows.len(),
+            "flex_grows must match children count"
+        );
+        let is_row = matches!(self.direction, FlexDirection::Row);
+        let width = (constraint.max.width - self.padding.left - self.padding.right).max(0.0);
+        let height = (constraint.max.height - self.padding.top - self.padding.bottom).max(0.0);
+        let child_constraint = LayoutConstraint { min: Size::ZERO, max: Size::new(width, height) };
+        let mut measured: Vec<Size> =
+            children.iter().map(|child| child.measure(child_constraint)).collect();
+        let gap = self.gap * children.len().saturating_sub(1) as f32;
+        if is_row {
+            let sizes = allocate_main_sizes(&measured, flex_grows, width, gap, true);
+            for ((child, size), measured) in children.iter().zip(sizes).zip(&mut measured) {
+                *measured = child
+                    .measure(LayoutConstraint { min: Size::ZERO, max: Size::new(size, height) });
+                measured.width = size;
+            }
+        }
+        let main: f32 =
+            measured.iter().map(|size| if is_row { size.width } else { size.height }).sum();
+        let cross = measured
+            .iter()
+            .map(|size| if is_row { size.height } else { size.width })
+            .fold(0.0, f32::max);
+        constraint.constrain(if is_row {
+            Size::new(
+                main + gap + self.padding.left + self.padding.right,
+                cross + self.padding.top + self.padding.bottom,
+            )
+        } else {
+            Size::new(
+                cross + self.padding.left + self.padding.right,
+                main + gap + self.padding.top + self.padding.bottom,
+            )
+        })
+    }
+
     /// 给定父 bounds 和子 widget 列表，计算每个子的 Rect。
     /// 所有子等权重分配剩余空间（flex_grow = 1.0）。
     pub fn compute(&self, parent: Rect, children: &[&dyn Widget]) -> Vec<Rect> {
@@ -126,25 +174,20 @@ impl FlexLayout {
             min: Size::ZERO,
             max: Size::new(inner.width.max(0.0), inner.height.max(0.0)),
         };
-        let measured: Vec<Size> = children.iter().map(|c| c.measure(child_constraint)).collect();
+        let mut measured: Vec<Size> =
+            children.iter().map(|c| c.measure(child_constraint)).collect();
 
         // ── Step 2: Main axis allocation ──
         let main_size = if is_row { inner.width } else { inner.height };
         let total_gap = self.gap * (n as f32 - 1.0).max(0.0);
-        let total_preferred: f32 =
-            measured.iter().map(|s| if is_row { s.width } else { s.height }).sum();
-        let remaining = (main_size - total_preferred - total_gap).max(0.0);
-        let total_flex: f32 = flex_grows.iter().sum();
-
-        let mut main_sizes: Vec<f32> = Vec::with_capacity(n);
-        for (i, m) in measured.iter().enumerate() {
-            let preferred = if is_row { m.width } else { m.height };
-            let flex_share = if total_flex > 0.0 {
-                remaining * flex_grows[i] / total_flex
-            } else {
-                0.0
-            };
-            main_sizes.push(preferred + flex_share);
+        let main_sizes = allocate_main_sizes(&measured, flex_grows, main_size, total_gap, is_row);
+        if is_row {
+            for ((child, width), size) in children.iter().zip(&main_sizes).zip(&mut measured) {
+                *size = child.measure(LayoutConstraint {
+                    min: Size::ZERO,
+                    max: Size::new(*width, inner.height.max(0.0)),
+                });
+            }
         }
 
         // ── Step 3: Cross axis ──
@@ -207,6 +250,55 @@ impl FlexLayout {
 
         rects
     }
+}
+
+fn allocate_main_sizes(
+    measured: &[Size],
+    grows: &[f32],
+    available: f32,
+    gap: f32,
+    is_row: bool,
+) -> Vec<f32> {
+    let preferred: Vec<f32> = measured
+        .iter()
+        .map(|size| if is_row { size.width } else { size.height })
+        .collect();
+    let total: f32 = preferred.iter().sum();
+    let available = if available.is_finite() && available < f32::MAX {
+        available
+    } else {
+        total + gap
+    };
+    let remaining = (available - total - gap).max(0.0);
+    let total_grow: f32 = grows.iter().sum();
+    let flexible_basis: f32 = preferred
+        .iter()
+        .zip(grows)
+        .filter(|(_, grow)| **grow > 0.0)
+        .map(|(size, _)| *size)
+        .sum();
+    let deficit = if is_row {
+        (total + gap - available).max(0.0).min(flexible_basis)
+    } else {
+        0.0
+    };
+    preferred
+        .iter()
+        .zip(grows)
+        .map(|(size, grow)| {
+            let growth = if total_grow > 0.0 {
+                remaining * grow / total_grow
+            } else {
+                0.0
+            };
+            let shrink = if *grow > 0.0 && flexible_basis > 0.0 {
+                deficit * size / flexible_basis
+            } else {
+                0.0
+            };
+            (size + growth - shrink).max(0.0)
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -491,6 +583,27 @@ mod tests {
             rects[0].height > rects[1].height,
             "flex_grow=2 should get more space than flex_grow=1"
         );
+    }
+
+    #[test]
+    fn row_shrinks_flexible_content_while_preserving_fixed_controls_and_gap() {
+        let text = TestWidget {
+            id: WidgetId::new(),
+            preferred: Size::new(300.0, 40.0),
+        };
+        let button = TestWidget {
+            id: WidgetId::new(),
+            preferred: Size::new(60.0, 24.0),
+        };
+        let mut layout = FlexLayout::row();
+        layout.gap = 8.0;
+        let children: Vec<&dyn Widget> = vec![&text, &button];
+        let rects =
+            layout.compute_with_flex(Rect::new(0.0, 0.0, 200.0, 100.0), &children, &[1.0, 0.0]);
+        assert_eq!(rects[0].width, 132.0);
+        assert_eq!(rects[1].width, 60.0);
+        assert_eq!(rects[1].x, 140.0);
+        assert_eq!(rects[1].x + rects[1].width, 200.0);
     }
 
     #[test]

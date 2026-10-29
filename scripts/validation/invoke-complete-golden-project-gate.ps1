@@ -186,15 +186,16 @@ $gateWorkRoot = Join-Path $runDirectory "work"
 $assetReportPath = Join-Path $runDirectory "reference-assets.json"
 $buildLogPath = Join-Path $runDirectory "build.log"
 $aggregateReportPath = Join-Path $runDirectory "complete-golden-consecutive-report.json"
-$targetDirectory = Resolve-CargoTargetDirectory $repositoryRoot
+$cargoTargetDirectory = Resolve-CargoTargetDirectory -RepositoryRoot $repositoryRoot
 $executableSuffix = if ($IsWindows) { ".exe" } else { "" }
-$productExecutable = Join-Path $targetDirectory "debug/mondrian$executableSuffix"
-$goldenExecutable = Join-Path $targetDirectory "debug/mondrian-golden$executableSuffix"
+$productExecutable = Join-Path $cargoTargetDirectory "debug/mondrian$executableSuffix"
+$goldenExecutable = Join-Path $cargoTargetDirectory "debug/mondrian-golden$executableSuffix"
 $buildArguments = @(
     "build",
     "--locked",
     "-p", "mondrian-app",
     "--features", "validation",
+    "--target-dir", $cargoTargetDirectory,
     "--bin", "mondrian",
     "--bin", "mondrian-golden",
     "-j", "1"
@@ -238,6 +239,29 @@ try {
         -OutputPath $assetReportPath
     if ($LASTEXITCODE -ne 0) {
         throw "Golden reference validation failed with exit code $LASTEXITCODE."
+    }
+
+    $failurePhase = "required-fixture-preflight"
+    $assetEvidence = Get-Content -LiteralPath $assetReportPath -Raw | ConvertFrom-Json
+    $missingFixtures = @()
+    foreach ($role in @($contract.required_fixture_roles | Where-Object { $_.required })) {
+        if ([string]::IsNullOrWhiteSpace($role.fixture_id)) {
+            throw "Required Golden fixture role is unresolved: $($role.role)"
+        }
+        $entries = @($assetEvidence.assets | Where-Object { $_.fixture_id -eq $role.fixture_id })
+        if ($entries.Count -ne 1) {
+            throw "Required Golden fixture role must resolve to one validated asset: $($role.role)"
+        }
+        # Reuse the All-scope validator's path, presence and attestation evidence.
+        # Golden requires these assets even when the generic Pr tier does not.
+        if (-not $entries[0].present) {
+            $missingFixtures += "$($role.fixture_id): $($entries[0].path)"
+        } elseif ($entries[0].availability -eq "generated" -and -not $entries[0].attested) {
+            throw "Required Golden fixture has no validated generation attestation: $($role.fixture_id)"
+        }
+    }
+    if ($missingFixtures.Count -gt 0) {
+        throw "Required Golden fixtures are absent; generate their corpus recipes: $($missingFixtures -join '; ')"
     }
 
     $failurePhase = "validation-binary-build"
@@ -297,7 +321,7 @@ try {
             throw "Complete Golden pass $index exceeded its external deadline."
         }
         if (-not $processResult.terminal_report_observed) {
-            throw "Complete Golden pass $index exited without a terminal report."
+            throw "Complete Golden pass $index exited without a terminal report (exit code $($processResult.exit_code), elapsed $($processResult.elapsed_ms) ms; log: $logPath)."
         }
 
         $report = Get-Content -LiteralPath $reportPath -Raw | ConvertFrom-Json

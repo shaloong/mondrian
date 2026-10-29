@@ -3,7 +3,7 @@
 use sha2::{Digest, Sha256};
 use std::fmt;
 
-const RESOLVED_VISUAL_SEMANTICS_EPOCH: u16 = 1;
+const RESOLVED_VISUAL_SEMANTICS_EPOCH: u16 = 3;
 
 /// Adapter-owned canonical identity of every materialized element in one node.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -35,6 +35,11 @@ impl ResolvedVisualFrameIdentity {
     pub fn from_materialization(identity: ResolvedVisualNodeMaterializationIdentity) -> Self {
         let mut hasher = Sha256::new();
         hasher.update(b"mondrian.resolved-visual.standalone-frame.v1");
+        field(
+            &mut hasher,
+            b"semantics-epoch",
+            &RESOLVED_VISUAL_SEMANTICS_EPOCH.to_le_bytes(),
+        );
         hasher.update(identity.digest());
         Self(hasher.finalize().into())
     }

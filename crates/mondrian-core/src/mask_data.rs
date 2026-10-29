@@ -420,6 +420,7 @@ impl MaskComponent {
                         .map(|key| {
                             ParameterEnumOption::new(
                                 key,
+                                key,
                                 format!("mondrian.mask.operation.{key}.label"),
                             )
                         })

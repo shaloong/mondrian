@@ -1,0 +1,22 @@
+{
+  "schema": 1,
+  "status": "EXACT_LOCAL_OWNER_FORMAT_REPLAY_NOT_RUNTIME_QUALIFICATION",
+  "rustfmt_version": "rustfmt 1.9.0-stable (8bab26f4f6 2026-07-14)",
+  "rustfmt_sha256_raw": "84abd1fa0d8e9e0dd4c2bce3544e650b4137ee87ec8179e8e16dbb974af11db0",
+  "config_sha256_raw": "ae0e2fdc45675c43da74f94099a9a97910ccc2ac3cb4aca6e35116f3db14745e",
+  "command": "rustfmt --config-path rustfmt.toml --config skip_children=true <class.rs> <lib.rs>",
+  "files": [
+    {
+      "path": "com-scrape-types/src/class.rs",
+      "preimage_sha256_raw": "87ac22635bb23560f50c72267ade97cd63ec5e84136fb3557c1c1e267e026a3b",
+      "shipped_sha256_raw": "3a09bea443a721115a128ccabe70c9dd22a238fa0e6023d1d540913680a008fc"
+    },
+    {
+      "path": "com-scrape-types/src/lib.rs",
+      "preimage_sha256_raw": "7ae900ccc2705588399a907c91acd1086e9c146bc1a5039167995b1ba26bcf15",
+      "shipped_sha256_raw": "7bfdd1d37a9ef8ddd3bff723901c2feb18df9254c6ffeabcd087b64242317172"
+    }
+  ],
+  "generated_abi_bytes_unchanged": true,
+  "previous_formatting_receipt_unchanged": true
+}

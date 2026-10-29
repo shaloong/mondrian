@@ -3,6 +3,7 @@
 //! Developer binaries own native window setup and event-loop plumbing. This
 //! module owns the reusable root widget composition above the dock/panel layer.
 
+use crate::app::AppMessage;
 use mondrian_editor_state::state::{PanelKind, WorkspacePreset};
 use mondrian_editor_state::{Action, AuthoringSessionId};
 use mondrian_export::queue::{ExportProgressDetail, ExportProgressPhase, JobStatus};
@@ -65,7 +66,7 @@ use crate::app_ui::audio_device_catalog::AudioOutputDeviceCatalogState;
 use crate::app_ui::interpret_asset_dialog::AppUiInterpretAssetDraft;
 #[cfg(test)]
 use crate::app_ui::localization::AppUiLocale;
-use crate::app_ui::localization::Localizer;
+use crate::app_ui::localization::{export_progress_phase_message_id, Localizer};
 use crate::app_ui::menu_bar::MenuBar;
 use crate::app_ui::modal::ShellModal;
 use crate::app_ui::new_project_dialog::{default_project_file_name, AppUiNewProjectDraft};
@@ -197,11 +198,14 @@ impl Default for StatusBarModel {
     }
 }
 
+const STATUS_HISTORY_PAGE_SIZE: usize = 8;
+
 struct StatusBar {
     id: WidgetId,
     bounds: Rect,
     model: StatusBarModel,
     history: Vec<StatusLogEntry>,
+    localizer: Localizer,
     history_open: bool,
     history_offset: usize,
     notifications: NotificationOverlay,
@@ -212,11 +216,60 @@ impl StatusBar {
         self.model = model;
     }
 
+    fn history_entry_text(&self, entry: &StatusLogEntry) -> String {
+        self.localizer.message(&entry.message)
+    }
+
     fn sync_history(&mut self, history: &[StatusLogEntry]) {
         if self.history != history {
             self.history = history.to_vec();
-            self.history_offset = self.history_offset.min(self.history.len().saturating_sub(8));
+            self.history_offset = self
+                .history_offset
+                .min(self.history.len().saturating_sub(STATUS_HISTORY_PAGE_SIZE));
         }
+    }
+
+    fn accessible_history_name(&self) -> String {
+        if !self.history_open {
+            return self.localizer.format_text(
+                "status-history-accessibility",
+                "status",
+                &self.model.message,
+            );
+        }
+        let mut message = AppMessage::new(if self.history.is_empty() {
+            "status-history-accessibility-empty"
+        } else {
+            "status-history-accessibility-open"
+        })
+        .with_text("status", &self.model.message);
+        if !self.history.is_empty() {
+            let entries = self
+                .history
+                .iter()
+                .rev()
+                .skip(self.history_offset)
+                .take(STATUS_HISTORY_PAGE_SIZE)
+                .map(|entry| {
+                    let body = self.history_entry_text(entry);
+                    if entry.is_error {
+                        self.localizer.format_text("status-history-entry-error", "message", &body)
+                    } else {
+                        body
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            message = message
+                .with_count("first", self.history_offset + 1)
+                .with_count(
+                    "last",
+                    (self.history_offset + STATUS_HISTORY_PAGE_SIZE).min(self.history.len()),
+                )
+                .with_count("total", self.history.len())
+                .with_text("entries", entries);
+        }
+        self.localizer.message(&message)
     }
 
     fn expire_notifications(&mut self, now: std::time::Instant) -> bool {
@@ -228,7 +281,7 @@ impl StatusBar {
     }
 
     fn history_rect(&self) -> Rect {
-        let rows = self.history.len().clamp(1, 8);
+        let rows = self.history.len().clamp(1, STATUS_HISTORY_PAGE_SIZE);
         let height = 34.0 + rows as f32 * 26.0;
         let width = (self.bounds.width - 24.0).clamp(0.0, 520.0);
         Rect::new(
@@ -266,6 +319,7 @@ impl Widget for StatusBar {
                 ctx.focus.request_focus(self.id);
                 self.history_open = !self.history_open;
                 self.history_offset = 0;
+                ctx.request_repaint();
                 EventResult::Handled
             }
             UiEvent::KeyDown { key: KeyCode::Enter | KeyCode::Space, modifiers }
@@ -274,6 +328,39 @@ impl Widget for StatusBar {
             {
                 self.history_open = !self.history_open;
                 self.history_offset = 0;
+                ctx.request_repaint();
+                EventResult::Handled
+            }
+            UiEvent::KeyDown { key, modifiers }
+                if self.history_open
+                    && ctx.focus.focused_widget() == Some(self.id)
+                    && *modifiers == Modifiers::none()
+                    && matches!(
+                        key,
+                        KeyCode::Up
+                            | KeyCode::Down
+                            | KeyCode::PageUp
+                            | KeyCode::PageDown
+                            | KeyCode::Home
+                            | KeyCode::End
+                    ) =>
+            {
+                let previous = self.history_offset;
+                let maximum = self.history.len().saturating_sub(STATUS_HISTORY_PAGE_SIZE);
+                self.history_offset = match key {
+                    KeyCode::Down => previous.saturating_add(1).min(maximum),
+                    KeyCode::Up => previous.saturating_sub(1),
+                    KeyCode::PageDown => {
+                        previous.saturating_add(STATUS_HISTORY_PAGE_SIZE).min(maximum)
+                    }
+                    KeyCode::PageUp => previous.saturating_sub(STATUS_HISTORY_PAGE_SIZE),
+                    KeyCode::Home => 0,
+                    KeyCode::End => maximum,
+                    _ => previous,
+                };
+                if self.history_offset != previous {
+                    ctx.request_repaint();
+                }
                 EventResult::Handled
             }
             UiEvent::MouseDown { position, .. }
@@ -288,21 +375,29 @@ impl Widget for StatusBar {
             }
             UiEvent::MouseDown { .. } if self.history_open => {
                 self.history_open = false;
+                ctx.request_repaint();
                 EventResult::Ignored
             }
             UiEvent::MouseWheel { position, delta, .. }
                 if self.history_open && self.history_rect().contains(*position) =>
             {
-                let max_offset = self.history.len().saturating_sub(8);
+                let previous = self.history_offset;
+                let max_offset = self.history.len().saturating_sub(STATUS_HISTORY_PAGE_SIZE);
                 if *delta > 0.0 {
                     self.history_offset = self.history_offset.saturating_add(1).min(max_offset);
                 } else if *delta < 0.0 {
                     self.history_offset = self.history_offset.saturating_sub(1);
                 }
+                if self.history_offset != previous {
+                    ctx.request_repaint();
+                }
                 EventResult::Handled
             }
-            UiEvent::KeyDown { key: KeyCode::Escape, .. } if self.history_open => {
+            UiEvent::KeyDown { key: KeyCode::Escape, .. } | UiEvent::FocusLost
+                if self.history_open =>
+            {
                 self.history_open = false;
+                ctx.request_repaint();
                 EventResult::Handled
             }
             _ => EventResult::Ignored,
@@ -374,29 +469,49 @@ impl Widget for StatusBar {
             if panel.width < 48.0 {
                 return;
             }
-            ctx.encoder.draw_rect(panel, colors.popover, 8.0);
+            let padding_x = ctx.theme.spacing.panel_inner_margin.0;
+            let available_width = (panel.width - padding_x * 2.0).max(0.0);
+            ctx.push_clip(panel);
+            ctx.encoder.draw_rect(panel, colors.popover, ctx.theme.spacing.radius_md);
             ctx.encoder.draw_text(
-                "最近通知",
+                &elide_text_to_width(
+                    &self.localizer.text("status-history-title"),
+                    font_size,
+                    available_width,
+                ),
                 font_size,
-                Point::new(panel.x + 12.0, panel.y + 10.0),
+                Point::new(panel.x + padding_x, panel.y + ctx.theme.spacing.md),
                 colors.popover_foreground,
             );
             if self.history.is_empty() {
                 ctx.encoder.draw_text(
-                    "暂无通知",
+                    &elide_text_to_width(
+                        &self.localizer.text("status-history-empty"),
+                        font_size,
+                        available_width,
+                    ),
                     font_size,
-                    Point::new(panel.x + 12.0, panel.y + 36.0),
+                    Point::new(panel.x + padding_x, panel.y + 36.0),
                     colors.muted_foreground,
                 );
             } else {
-                for (index, entry) in
-                    self.history.iter().rev().skip(self.history_offset).take(8).enumerate()
+                for (index, entry) in self
+                    .history
+                    .iter()
+                    .rev()
+                    .skip(self.history_offset)
+                    .take(STATUS_HISTORY_PAGE_SIZE)
+                    .enumerate()
                 {
-                    let text = elide_text_to_width(&entry.message, font_size, panel.width - 24.0);
+                    let text = elide_text_to_width(
+                        &self.history_entry_text(entry),
+                        font_size,
+                        available_width,
+                    );
                     ctx.encoder.draw_text(
                         &text,
                         font_size,
-                        Point::new(panel.x + 12.0, panel.y + 36.0 + index as f32 * 26.0),
+                        Point::new(panel.x + padding_x, panel.y + 36.0 + index as f32 * 26.0),
                         if entry.is_error {
                             colors.destructive_foreground
                         } else {
@@ -405,6 +520,7 @@ impl Widget for StatusBar {
                     );
                 }
             }
+            ctx.pop_clip();
         }
         if !self.history_open {
             self.notifications.paint(ctx, self.bounds);
@@ -424,7 +540,7 @@ impl Widget for StatusBar {
     fn accessibility(&self) -> Option<AccessibilityNode> {
         Some(
             AccessibilityNode::new(self.id, AccessibilityRole::Button)
-                .with_name(format!("最近通知，当前状态：{}", self.model.message))
+                .with_name(self.accessible_history_name())
                 .with_state(AccessibilityState {
                     focusable: true,
                     pressed: Some(self.history_open),
@@ -463,40 +579,24 @@ pub(super) fn elide_text_to_width(text: &str, font_size: f32, max_width: f32) ->
     format!("{out}{suffix}")
 }
 
-fn status_bar_model(state: &AppState) -> StatusBarModel {
+fn status_bar_model(state: &AppState, localizer: &Localizer) -> StatusBarModel {
     let jobs = state.export_jobs_snapshot();
     let active_jobs = jobs.iter().filter(|job| !job.status.is_terminal()).collect::<Vec<_>>();
 
-    let (message, is_error, is_busy) = if let Some((message, true)) = &state.status_hint {
-        (message.clone(), true, false)
+    let (message, is_error, is_busy) = if let Some((message, true)) = state.status_hint() {
+        (localizer.message(message), true, false)
     } else if let Some(job) = active_jobs.first() {
-        let message = match &job.status {
-            JobStatus::Pending => format!("导出队列处理中（{}）", active_jobs.len()),
-            JobStatus::Running { phase } => match job.progress.detail {
-                ExportProgressDetail::Frames { completed, total }
-                    if *phase == ExportProgressPhase::Rendering =>
-                {
-                    format!(
-                        "正在导出帧 {completed}/{total}（队列 {}）",
-                        active_jobs.len()
-                    )
-                }
-                _ => format!(
-                    "{}（队列 {}）",
-                    export_phase_status_message(*phase),
-                    active_jobs.len()
-                ),
-            },
-            JobStatus::Cancelling { .. } => {
-                format!("正在取消导出（队列 {}）", active_jobs.len())
-            }
-            _ => "导出处理中".to_owned(),
-        };
+        let message = active_export_status_text(
+            &job.status,
+            &job.progress.detail,
+            active_jobs.len(),
+            localizer,
+        );
         (message, false, true)
-    } else if let Some((message, is_error)) = &state.status_hint {
-        (message.clone(), *is_error, false)
+    } else if let Some((message, is_error)) = state.status_hint() {
+        (localizer.message(message), *is_error, false)
     } else {
-        ("就绪".to_owned(), false, false)
+        (localizer.text("status-ready"), false, false)
     };
     let context = state
         .active_sequence()
@@ -507,20 +607,41 @@ fn status_bar_model(state: &AppState) -> StatusBarModel {
                 .and_then(|path| path.file_stem())
                 .map(|stem| stem.to_string_lossy().into_owned())
         })
-        .unwrap_or_else(|| "没有项目".to_owned());
+        .unwrap_or_else(|| localizer.text("status-no-project"));
 
     StatusBarModel { message, is_error, is_busy, context }
 }
 
-fn export_phase_status_message(phase: ExportProgressPhase) -> &'static str {
-    match phase {
-        ExportProgressPhase::Preparing => "正在准备导出",
-        ExportProgressPhase::Rendering => "正在渲染",
-        ExportProgressPhase::Encoding => "正在编码",
-        ExportProgressPhase::Packaging => "正在封装交付包",
-        ExportProgressPhase::Validating => "正在验证成品",
-        ExportProgressPhase::Publishing => "正在发布成品",
-    }
+fn active_export_status_text(
+    status: &JobStatus,
+    detail: &ExportProgressDetail,
+    count: usize,
+    localizer: &Localizer,
+) -> String {
+    let mut args = fluent_bundle::FluentArgs::new();
+    args.set("count", count as f64);
+    let message = match status {
+        JobStatus::Pending => "status-export-pending",
+        JobStatus::Running { phase } => match detail {
+            ExportProgressDetail::Frames { completed, total }
+                if *phase == ExportProgressPhase::Rendering =>
+            {
+                args.set("completed", completed.to_string());
+                args.set("total", total.to_string());
+                "status-export-frames"
+            }
+            _ => {
+                args.set(
+                    "phase",
+                    localizer.text(export_progress_phase_message_id(*phase)),
+                );
+                "status-export-phase"
+            }
+        },
+        JobStatus::Cancelling { .. } => "status-export-cancelling",
+        _ => "status-export-active",
+    };
+    localizer.format(message, Some(&args))
 }
 
 /// File dialog filter for timeline export output commands.
@@ -699,17 +820,23 @@ pub fn try_resolve_app_shell_action(
                 .into_external_action()
             }))
         }
-        Action::Custom { namespace, name, .. }
+        Action::Custom { namespace, name, payload }
             if namespace == APP_SHELL_NAMESPACE
                 && name == APP_SHELL_INSTALL_OPENFX_BUNDLE_DIALOG =>
         {
+            let selection = if payload.is_null() {
+                crate::app::ui_actions::OpenFxInstallDialogPayload::default()
+            } else {
+                serde_json::from_value(payload)
+                    .map_err(|error| app_shell_action_error(&name, error))?
+            };
             let selected = platform
                 .open_folder_dialog(&localizer.text("file-dialog-install-openfx-bundle"))
                 .map_err(|error| native_shell_error(&name, error))?
                 .into_selection();
             Ok(selected.map(|path| {
                 ProductAction::VisualEffect(VisualEffectProductAction::InstallOpenFxBundle(
-                    VisualEffectInstallOpenFxBundlePayload { path },
+                    VisualEffectInstallOpenFxBundlePayload { path, context: selection.context },
                 ))
                 .into_external_action()
             }))
@@ -1008,6 +1135,7 @@ fn apply_viewer_zoom_mode_to_model(model: &mut ViewerPanelModel, mode: ViewerZoo
 
 /// Root widget for the app UI editor window.
 pub struct AppUiAppRoot {
+    native_visual_gui: std::sync::Arc<crate::app::preview_native_gui::PreviewNativeGuiRegistry>,
     id: WidgetId,
     title_bar: TitleBar,
     dock: DockSplitter,
@@ -1029,7 +1157,298 @@ pub struct AppUiAppRoot {
     bounds: Rect,
 }
 
+fn resource_asset_catalog_revision(
+    state: &AppState,
+) -> Result<Option<crate::app_ui::resource_dialog::ResourceAssetCatalogRevision>> {
+    state
+        .asset_library_handle()
+        .map(|library| {
+            Ok(
+                crate::app_ui::resource_dialog::ResourceAssetCatalogRevision {
+                    library: std::sync::Arc::downgrade(&library),
+                    revision: library.database_revision()?,
+                },
+            )
+        })
+        .transpose()
+}
+
+fn resource_asset_choices(
+    state: &AppState,
+) -> Result<Vec<crate::app_ui::resource_dialog::ResourceAssetChoice>> {
+    let mut assets = state
+        .asset_library()
+        .map(|library| library.list_assets())
+        .transpose()?
+        .unwrap_or_default()
+        .into_iter()
+        .map(
+            |asset| crate::app_ui::resource_dialog::ResourceAssetChoice {
+                id: asset.id,
+                label: asset.file_path().map_or_else(
+                    || asset.name.clone(),
+                    |path| format!("{} · {}", asset.name, path.display()),
+                ),
+            },
+        )
+        .collect::<Vec<_>>();
+    assets.sort_by(|a, b| a.label.cmp(&b.label).then_with(|| a.id.cmp(&b.id)));
+    Ok(assets)
+}
+
 impl AppUiAppRoot {
+    /// Route typed resource drafts before ordinary author actions.
+    pub(crate) fn try_handle_resource_action(
+        &mut self,
+        action: &Action,
+        state: &AppState,
+        platform: &dyn PlatformService,
+    ) -> Result<crate::app_ui::resource_dialog::ResourceActionOutcome> {
+        use crate::app_ui::resource_dialog::{
+            ResourceActionOutcome, ResourceDialog, ResourceDraft, ResourceEditorAction,
+            RESOURCE_EDITOR,
+        };
+        let Action::Custom { namespace, name, payload } = action else {
+            return Ok(ResourceActionOutcome::Unhandled);
+        };
+        if namespace != APP_SHELL_NAMESPACE || name != RESOURCE_EDITOR {
+            return Ok(ResourceActionOutcome::Unhandled);
+        }
+        let event: ResourceEditorAction = serde_json::from_value(payload.clone())
+            .map_err(|error| app_shell_action_error(name, error))?;
+        // A failed presentation read must not prevent editing or cancelling a
+        // local draft. Open and changed-asset Confirm still require fresh reads.
+        if let Err(error) = self.synchronize_resource_draft(state) {
+            tracing::warn!(%error, "failed to refresh resource asset catalog before draft event");
+        }
+        let refreshed = matches!(
+            &event,
+            ResourceEditorAction::Open { .. } | ResourceEditorAction::Confirm { .. }
+        )
+        .then(|| {
+            crate::app_ui::panels::InspectorPanelModel::from_app_state(state, &self.localizer)
+        });
+        let model = refreshed.as_ref().unwrap_or(&self.models.inspector);
+        if let ResourceEditorAction::Open { clip_id, target } = event {
+            let Some(property) = target.property(clip_id, model) else {
+                return Ok(ResourceActionOutcome::Handled(None));
+            };
+            let mondrian_core::PropertyValue::Resource(reference) = &property.value else {
+                return Ok(ResourceActionOutcome::Handled(None));
+            };
+            let draft = ResourceDraft::new(
+                clip_id,
+                target,
+                reference.clone(),
+                property.schema.clone(),
+                state.authoring_session_id(),
+                state.active_sequence_id(),
+                state.current_project_path().map(Path::to_path_buf),
+            );
+            let (catalog_revision, assets) =
+                if draft.allows_kind(crate::app_ui::resource_dialog::ResourceKind::ProjectAsset) {
+                    (
+                        resource_asset_catalog_revision(state)?,
+                        resource_asset_choices(state)?,
+                    )
+                } else {
+                    (None, Vec::new())
+                };
+            self.show_modal(ShellModal::Resource(Box::new(ResourceDialog::new(
+                draft,
+                property.label.clone(),
+                assets,
+                catalog_revision,
+                self.localizer.locale(),
+            ))));
+            self.layout(self.bounds);
+            return Ok(ResourceActionOutcome::Handled(None));
+        }
+        let Some(dialog) = self.modal.as_mut().and_then(ShellModal::as_resource_mut) else {
+            return Ok(ResourceActionOutcome::Handled(None));
+        };
+        if event.id() != Some(dialog.draft.id) {
+            return Ok(ResourceActionOutcome::Handled(None));
+        }
+        if dialog.draft.session != state.authoring_session_id()
+            || dialog.draft.sequence != state.active_sequence_id()
+            || !dialog.draft.matches_state(state)
+            || !dialog.draft.matches_model(model)
+        {
+            self.modal = None;
+            return Ok(ResourceActionOutcome::Handled(None));
+        }
+        match event {
+            ResourceEditorAction::Update { update, .. } => dialog.apply_update(update),
+            ResourceEditorAction::Browse { folder, .. } => {
+                if !dialog.draft.allows_browse(folder) || dialog.is_composing() {
+                    return Ok(ResourceActionOutcome::Handled(None));
+                }
+                dialog.clear_inspection();
+                let filters = dialog
+                    .draft
+                    .schema
+                    .resource
+                    .as_ref()
+                    .filter(|contract| !contract.file_extensions.is_empty())
+                    .map_or_else(Vec::new, |contract| {
+                        vec![FileFilter::new(
+                            self.localizer.text("resource-file-only"),
+                            contract.file_extensions.clone(),
+                        )]
+                    });
+                let selection = if folder {
+                    platform
+                        .open_folder_dialog(&self.localizer.text("resource-browse-folder"))
+                        .map(|outcome| outcome.into_selection())
+                } else {
+                    platform
+                        .open_file_dialog(
+                            &self.localizer.text(dialog.draft.file_browse_message()),
+                            &filters,
+                        )
+                        .map(|outcome| {
+                            outcome.into_selection().and_then(|mut paths| {
+                                if paths.len() == 1 {
+                                    paths.pop()
+                                } else {
+                                    if !paths.is_empty() {
+                                        dialog.set_error("resource-select-one-file");
+                                    }
+                                    None
+                                }
+                            })
+                        })
+                };
+                match selection {
+                    Ok(Some(path)) => dialog.selected_path(path),
+                    Ok(None) => {}
+                    Err(error) => {
+                        tracing::warn!(%error, "resource picker failed");
+                        dialog.set_error("resource-browse-failed");
+                    }
+                }
+            }
+            ResourceEditorAction::Confirm { .. } => {
+                if dialog.is_composing() || dialog.pending_inspection.is_some() {
+                    return Ok(ResourceActionOutcome::Handled(None));
+                }
+                let value = match dialog.draft.confirmed_value() {
+                    Ok(Some(value)) => value,
+                    Ok(None) => {
+                        self.modal = None;
+                        return Ok(ResourceActionOutcome::Handled(None));
+                    }
+                    Err(key) => {
+                        dialog.set_error(key);
+                        return Ok(ResourceActionOutcome::Handled(None));
+                    }
+                };
+                if let mondrian_core::ParameterResourceReference::ExternalFile { path } = &value
+                    && dialog
+                        .draft
+                        .schema
+                        .resource
+                        .as_ref()
+                        .and_then(|contract| contract.path)
+                        .is_some_and(|contract| {
+                            contract.selection != mondrian_core::ResourcePathSelection::Reference
+                        })
+                {
+                    let path = path
+                        .native_path()
+                        .map_err(|error| mondrian_core::MondrianError::WorkflowStepFailed {
+                            step_id: "resource_inspection".into(),
+                            reason: error.to_string(),
+                        })?
+                        .to_path_buf();
+                    let ticket = crate::resource_inspection::InspectionTicket::new();
+                    dialog.begin_inspection(ticket);
+                    return Ok(ResourceActionOutcome::Inspect(
+                        crate::app_ui::resource_dialog::ResourceInspectionRequest { ticket, path },
+                    ));
+                }
+                if let mondrian_core::ParameterResourceReference::ProjectAsset { asset_id } = value
+                {
+                    let current = state
+                        .asset_library()
+                        .map(|library| library.get_asset(asset_id))
+                        .transpose()?
+                        .flatten();
+                    if current.as_ref().is_none_or(|asset| asset.membership.is_retired()) {
+                        dialog.set_error("resource-asset-missing");
+                        return Ok(ResourceActionOutcome::Handled(None));
+                    }
+                }
+                let author = dialog.draft.author_action(value);
+                self.modal = None;
+                return Ok(ResourceActionOutcome::Handled(author));
+            }
+            ResourceEditorAction::Cancel { .. } => self.modal = None,
+            ResourceEditorAction::Open { .. } => {}
+        }
+        Ok(ResourceActionOutcome::Handled(None))
+    }
+
+    pub(crate) fn resource_inspection_ticket(
+        &self,
+        state: &AppState,
+    ) -> Option<crate::resource_inspection::InspectionTicket> {
+        self.modal
+            .as_ref()
+            .and_then(ShellModal::as_resource)
+            .filter(|dialog| {
+                dialog.draft.matches_state(state) && !state.project_lifecycle_blocks_actions()
+            })
+            .and_then(|dialog| dialog.pending_inspection)
+    }
+
+    pub(crate) fn finish_resource_inspection(
+        &mut self,
+        ticket: crate::resource_inspection::InspectionTicket,
+        outcome: crate::resource_inspection::PathInspectionOutcome,
+        state: &AppState,
+    ) -> Option<Action> {
+        let dialog = self.modal.as_mut().and_then(ShellModal::as_resource_mut)?;
+        if dialog.pending_inspection != Some(ticket) {
+            return None;
+        }
+        dialog.clear_inspection();
+        if !dialog.draft.matches_state(state) || state.project_lifecycle_blocks_actions() {
+            self.modal = None;
+            return None;
+        }
+        let value = match dialog.draft.confirmed_value() {
+            Ok(Some(value)) => value,
+            Ok(None) => {
+                self.modal = None;
+                return None;
+            }
+            Err(key) => {
+                dialog.set_error(key);
+                return None;
+            }
+        };
+        let contract = dialog.draft.schema.resource.as_ref().and_then(|contract| contract.path)?;
+        if let Err(key) = outcome.validate(contract) {
+            dialog.set_error(key);
+            return None;
+        }
+        if dialog.is_composing() {
+            dialog.set_error("resource-path-confirm-again");
+            return None;
+        }
+        let action = dialog.draft.author_action(value);
+        if action.as_ref().is_some_and(|action| {
+            !crate::app_ui::action_availability::app_state_action_enabled(action, state)
+        }) {
+            dialog.set_error("resource-owner-unavailable");
+            return None;
+        }
+        self.modal = None;
+        action
+    }
+
     /// Build a root widget from the current application state snapshot.
     pub fn from_app_state(state: &AppState) -> Self {
         Self::from_app_state_with_preferences(state, &AppUiPreferences::default())
@@ -1104,15 +1523,19 @@ impl AppUiAppRoot {
         let mut menu_bar =
             MenuBar::for_app_state_with_shortcut_overrides(state, &preferences.shortcut_overrides);
         menu_bar.set_locale(preferences_model.locale);
+        let status_model = status_bar_model(
+            state,
+            &Localizer::new(preferences_model.locale).expect("bundled UI catalogs must be valid"),
+        );
         let mut root = Self::new_with_preferences(
             TitleBar::new(window_title_for_app_state(state), menu_bar),
             models,
             preferences_model,
             preferences.workspace_preset,
             preferences.custom_workspace_layout.clone(),
-            status_bar_model(state),
+            status_model,
         );
-        root.status_bar.sync_history(&state.status_log);
+        root.status_bar.sync_history(state.status_log());
         root.status_bar.notifications =
             NotificationOverlay::from_existing(&state.notifications, root.preferences_model.locale);
         root.notification_session_id = state.authoring_session_id();
@@ -1168,6 +1591,10 @@ impl AppUiAppRoot {
     ) -> Self {
         let viewer_zoom_mode = ViewerZoomMode::Fit;
         apply_viewer_zoom_mode(&mut models, viewer_zoom_mode);
+        let native_visual_gui = std::sync::Arc::new(
+            crate::app::preview_native_gui::PreviewNativeGuiRegistry::default(),
+        );
+        bind_native_visual_gui_models(&mut models, &native_visual_gui);
         let dock = build_dock_tree_for_workspace(
             models.clone(),
             workspace_preset,
@@ -1177,6 +1604,7 @@ impl AppUiAppRoot {
         let localizer =
             Localizer::new(preferences_model.locale).expect("bundled UI catalogs must be valid");
         let mut root = Self {
+            native_visual_gui,
             id: WidgetId::new(),
             title_bar,
             dock,
@@ -1185,6 +1613,8 @@ impl AppUiAppRoot {
                 bounds: Rect::ZERO,
                 model: status_bar_model,
                 history: Vec::new(),
+                localizer: Localizer::new(preferences_model.locale)
+                    .expect("bundled UI catalogs must be valid"),
                 history_open: false,
                 history_offset: 0,
                 notifications: NotificationOverlay::from_existing(
@@ -1236,6 +1666,12 @@ impl AppUiAppRoot {
         Some(layout)
     }
 
+    pub(crate) fn native_visual_gui_registry(
+        &self,
+    ) -> std::sync::Arc<crate::app::preview_native_gui::PreviewNativeGuiRegistry> {
+        std::sync::Arc::clone(&self.native_visual_gui)
+    }
+
     /// Whether `panel` is the active visible tab, without allocating a layout snapshot.
     pub fn is_panel_active(&self, panel: PanelKind) -> bool {
         is_panel_active_in_widget(&self.dock, panel)
@@ -1283,9 +1719,64 @@ impl AppUiAppRoot {
         self.asset_folder_id = folder_id;
     }
 
+    /// Admit an opaque delivery into the one existing modal/focus owner.
+    /// Other modals keep their lifetime; unavailable native UI returns Failed.
+    pub(crate) fn show_native_visual_question(
+        &mut self,
+        presentation: crate::app::preview_native_gui::NativeVisualQuestionPresentation,
+    ) -> bool {
+        self.retire_stale_native_visual_question();
+        if self.modal.is_some() || !presentation.is_current() {
+            presentation.dismiss();
+            return false;
+        }
+        self.show_modal(ShellModal::native_visual_question(
+            presentation,
+            self.preferences_model.locale,
+        ));
+        true
+    }
+
+    pub(crate) fn retire_stale_native_visual_question(&mut self) -> bool {
+        if self
+            .modal
+            .as_ref()
+            .and_then(ShellModal::as_native_visual_question)
+            .is_some_and(|dialog| !dialog.is_current())
+        {
+            self.modal = None;
+            return true;
+        }
+        false
+    }
+
+    #[cfg(feature = "validation")]
+    pub(crate) fn validation_native_question_controls(
+        &self,
+    ) -> Option<super::native_question_validation::NativeQuestionValidationControls> {
+        self.modal
+            .as_ref()
+            .and_then(ShellModal::as_native_visual_question)
+            .and_then(|dialog| dialog.validation_controls())
+    }
+
+    pub(crate) fn painted_native_visual_question(
+        &self,
+    ) -> Option<crate::app::preview_native_gui::NativeVisualQuestionPresentation> {
+        self.modal
+            .as_ref()
+            .and_then(ShellModal::as_native_visual_question)
+            .and_then(|dialog| dialog.painted_delivery())
+    }
+
+    fn show_modal(&mut self, modal: ShellModal) {
+        cancel_keyboard_activations(self);
+        self.modal = Some(modal);
+    }
+
     /// Show the pending-close confirmation modal.
     pub fn show_pending_close_dialog(&mut self, action: PendingCloseDialogAction) {
-        self.modal = Some(ShellModal::pending_close(
+        self.show_modal(ShellModal::pending_close(
             action,
             self.preferences_model.locale,
         ));
@@ -1328,9 +1819,61 @@ impl AppUiAppRoot {
         self.title_bar.id()
     }
 
+    /// Validate the draft owner and reconcile changed library presentation before input deferral.
+    pub(crate) fn synchronize_resource_draft(&mut self, state: &AppState) -> Result<()> {
+        if self
+            .modal
+            .as_ref()
+            .and_then(ShellModal::as_resource)
+            .is_some_and(|dialog| !dialog.draft.matches_state(state))
+        {
+            self.modal = None;
+        }
+        let Some(dialog) = self.modal.as_mut().and_then(ShellModal::as_resource_mut) else {
+            return Ok(());
+        };
+        if !dialog
+            .draft
+            .allows_kind(crate::app_ui::resource_dialog::ResourceKind::ProjectAsset)
+        {
+            return Ok(());
+        }
+        let revision = resource_asset_catalog_revision(state)?;
+        if dialog.asset_catalog_revision != revision {
+            // Capture the revision before reading rows. A concurrent later commit
+            // then causes another refresh, rather than marking older rows current.
+            dialog.replace_asset_catalog(revision, resource_asset_choices(state)?);
+        }
+        Ok(())
+    }
+
     /// Replace panel contents from a fresh model snapshot while preserving the
     /// root widget id and menu state.
-    pub fn set_models(&mut self, models: AppUiPanelModels) {
+    pub fn set_models(&mut self, mut models: AppUiPanelModels) {
+        bind_native_visual_gui_models(&mut models, &self.native_visual_gui);
+        if self
+            .modal
+            .as_ref()
+            .and_then(ShellModal::as_resource)
+            .is_some_and(|dialog| !dialog.draft.matches_model(&models.inspector))
+        {
+            self.modal = None;
+        }
+
+        let curve_states = if self.models.author_control_scope.is_some()
+            && self.models.author_control_scope == models.author_control_scope
+        {
+            collect_curve_view_state(&self.dock)
+        } else {
+            Vec::new()
+        };
+        let control_states = if self.models.author_control_scope.is_some()
+            && self.models.author_control_scope == models.author_control_scope
+        {
+            collect_control_inspection_state(&self.dock)
+        } else {
+            Vec::new()
+        };
         let layout = self.dock.layout_snapshot();
         let dock_panel_state = collect_dock_panel_state(&self.dock);
         let asset_grid_state = collect_asset_grid_state(&self.dock);
@@ -1345,6 +1888,8 @@ impl AppUiAppRoot {
             self.custom_workspace_layout.as_ref(),
         );
         self.dock.restore_layout(&layout);
+        restore_curve_view_state(&mut self.dock, &curve_states);
+        restore_control_inspection_state(&mut self.dock, &control_states);
         restore_dock_panel_state(&mut self.dock, &dock_panel_state);
         restore_asset_grid_state(&mut self.dock, &asset_grid_state);
         restore_panel_list_state(&mut self.dock, &panel_list_state);
@@ -1389,8 +1934,8 @@ impl AppUiAppRoot {
         preview: Option<&dyn ViewerPreviewSource>,
     ) -> bool {
         let frame = state.current_frame().max(0);
-        self.status_bar.set_model(status_bar_model(state));
-        self.status_bar.sync_history(&state.status_log);
+        self.status_bar.set_model(status_bar_model(state, &self.localizer));
+        self.status_bar.sync_history(state.status_log());
         self.sync_notifications(state, self.preferences_model.locale);
         let mut viewer = ViewerPanelModel::from_app_state_with_preview_and_locale(
             state,
@@ -1474,9 +2019,12 @@ impl AppUiAppRoot {
         self.title_bar
             .menu_bar_mut()
             .refresh_for_app_state_with_shortcut_overrides(state, &preferences.shortcut_overrides);
-        self.status_bar.set_model(status_bar_model(state));
-        self.status_bar.sync_history(&state.status_log);
+        self.status_bar.sync_history(state.status_log());
         self.active_sequence = state.active_sequence().cloned();
+        if let Err(error) = self.synchronize_resource_draft(state) {
+            tracing::warn!(%error, "failed to refresh resource asset catalog");
+        }
+
         self.project_color_environment = state.project_color_environment().clone();
         self.new_sequence_defaults = state.new_sequence_defaults().clone();
         self.project_sequence_color_contracts = project_sequence_color_contracts(state);
@@ -1486,6 +2034,11 @@ impl AppUiAppRoot {
             preferences.locale_preference.resolve(sys_locale::get_locale().as_deref())
         };
         let localizer = Localizer::new(locale).expect("bundled UI catalogs must be valid");
+        self.status_bar.set_model(status_bar_model(state, &localizer));
+        if self.status_bar.localizer.locale() != locale {
+            self.status_bar.localizer =
+                Localizer::new(locale).expect("bundled UI catalogs must be valid");
+        }
         let mut models =
             AppUiPanelModels::from_app_state_with_asset_folder_thumbnails_preview_and_locale(
                 state,
@@ -1501,6 +2054,12 @@ impl AppUiAppRoot {
         apply_viewer_zoom_mode(&mut models, self.viewer_zoom_mode);
         self.localizer = localizer;
         self.set_models(models);
+        if let Some(dialog) = self.modal.as_mut().and_then(ShellModal::as_resource_mut)
+            && let Some(property) =
+                dialog.draft.target.property(dialog.draft.clip_id, &self.models.inspector)
+        {
+            dialog.set_locale(locale, property.label.clone());
+        }
         let preferences_model =
             AppUiPreferencesModel::from_app_state_with_shortcut_overrides_and_audio_output(
                 state,
@@ -1545,6 +2104,10 @@ impl AppUiAppRoot {
         locale: crate::app_ui::localization::AppUiLocale,
     ) {
         if self.notification_session_id != state.authoring_session_id() {
+            if self.modal.as_ref().and_then(ShellModal::as_resource).is_some() {
+                self.modal = None;
+            }
+
             self.notification_session_id = state.authoring_session_id();
             self.status_bar.notifications =
                 NotificationOverlay::from_existing(&state.notifications, locale);
@@ -1801,7 +2364,7 @@ impl AppUiAppRoot {
             Action::Custom { namespace, name, .. }
                 if namespace == APP_SHELL_NAMESPACE && name == APP_SHELL_NEW_PROJECT_DIALOG =>
             {
-                self.modal = Some(ShellModal::new_project_with_locale(
+                self.show_modal(ShellModal::new_project_with_locale(
                     AppUiNewProjectDraft::for_locale(self.preferences_model.locale),
                     self.preferences_model.locale,
                 ));
@@ -1874,7 +2437,7 @@ impl AppUiAppRoot {
             Action::Custom { namespace, name, .. }
                 if namespace == APP_SHELL_NAMESPACE && name == APP_SHELL_PROJECT_SETTINGS =>
             {
-                self.modal = Some(ShellModal::project_settings_with_locale(
+                self.show_modal(ShellModal::project_settings_with_locale(
                     AppUiProjectSettingsDraft::new(
                         self.project_color_environment.engine().clone(),
                         self.project_sequence_color_contracts.clone(),
@@ -1921,7 +2484,7 @@ impl AppUiAppRoot {
             Action::Custom { namespace, name, .. }
                 if namespace == APP_SHELL_NAMESPACE && name == APP_SHELL_ABOUT =>
             {
-                self.modal = Some(ShellModal::about(self.localizer.locale()));
+                self.show_modal(ShellModal::about(self.localizer.locale()));
                 if self.bounds.width > 0.0 && self.bounds.height > 0.0 {
                     self.layout(self.bounds);
                 }
@@ -1930,7 +2493,7 @@ impl AppUiAppRoot {
             Action::Custom { namespace, name, .. }
                 if namespace == APP_SHELL_NAMESPACE && name == APP_SHELL_PREFERENCES =>
             {
-                self.modal = Some(ShellModal::preferences(self.preferences_model()));
+                self.show_modal(ShellModal::preferences(self.preferences_model()));
                 if self.bounds.width > 0.0 && self.bounds.height > 0.0 {
                     self.layout(self.bounds);
                 }
@@ -1977,7 +2540,7 @@ impl AppUiAppRoot {
                     payload.auto_interpretation,
                 )
                 .with_input_diagnostics(payload.video_signal, payload.input_pipeline);
-                self.modal = Some(ShellModal::interpret_asset(draft, self.localizer.locale()));
+                self.show_modal(ShellModal::interpret_asset(draft, self.localizer.locale()));
                 if self.bounds.width > 0.0 && self.bounds.height > 0.0 {
                     self.layout(self.bounds);
                 }
@@ -2021,7 +2584,7 @@ impl AppUiAppRoot {
                     )
                 });
                 if let Some(draft) = draft {
-                    self.modal = Some(ShellModal::sequence_settings_with_locale(
+                    self.show_modal(ShellModal::sequence_settings_with_locale(
                         draft,
                         self.preferences_model.locale,
                     ));
@@ -2030,6 +2593,53 @@ impl AppUiAppRoot {
                     }
                 }
                 Ok(None)
+            }
+            Action::Custom { namespace, name, .. }
+                if namespace == APP_SHELL_NAMESPACE
+                    && name == crate::app::ui_actions::APP_SHELL_MUSICAL_TIME =>
+            {
+                if let Some(sequence) = self.active_sequence.as_ref() {
+                    let draft = crate::app_ui::musical_time_dialog::MusicalTimeDraft::from_sequence(
+                        sequence,
+                    );
+                    self.show_modal(ShellModal::MusicalTime(Box::new(
+                        crate::app_ui::musical_time_dialog::MusicalTimeDialog::new(
+                            draft,
+                            self.preferences_model.locale,
+                        ),
+                    )));
+                    if self.bounds.width > 0.0 && self.bounds.height > 0.0 {
+                        self.layout(self.bounds);
+                    }
+                }
+                Ok(None)
+            }
+            Action::Custom { namespace, name, payload }
+                if namespace == APP_SHELL_NAMESPACE
+                    && name == crate::app::ui_actions::APP_SHELL_MUSICAL_TIME_DRAFT_CHANGED =>
+            {
+                let update = serde_json::from_value(payload)
+                    .map_err(|err| app_shell_action_error(&name, err))?;
+                if let Some(dialog) = self.modal.as_mut().and_then(ShellModal::as_musical_time_mut)
+                {
+                    dialog.apply_update(update);
+                }
+                Ok(None)
+            }
+            Action::Custom { namespace, name, .. }
+                if namespace == APP_SHELL_NAMESPACE
+                    && name == crate::app::ui_actions::APP_SHELL_CONFIRM_MUSICAL_TIME =>
+            {
+                let Some(dialog) = self.modal.as_ref().and_then(ShellModal::as_musical_time) else {
+                    return Ok(None);
+                };
+                let Some(payload) = dialog.payload() else {
+                    return Ok(None);
+                };
+                self.modal = None;
+                Ok(Some(
+                    crate::app::ui_actions::sequence_set_musical_time_reference_action(payload),
+                ))
             }
             Action::Custom { namespace, name, payload }
                 if namespace == APP_SHELL_NAMESPACE
@@ -2090,7 +2700,7 @@ impl AppUiAppRoot {
                 if let Some(dialog) = self.modal.as_mut().and_then(ShellModal::as_preferences_mut) {
                     dialog.set_active_tab(tab);
                 } else {
-                    self.modal = Some(ShellModal::preferences_with_tab(
+                    self.show_modal(ShellModal::preferences_with_tab(
                         self.preferences_model(),
                         tab,
                     ));
@@ -2326,6 +2936,149 @@ fn restore_dock_panel_state(widget: &mut dyn Widget, states: &[DockPanelState]) 
     }
 }
 
+fn cancel_keyboard_activations(widget: &mut dyn Widget) {
+    widget.cancel_keyboard_activation();
+    for index in 0..widget.child_count() {
+        if let Some(child) = widget.child_mut(index) {
+            cancel_keyboard_activations(child);
+        }
+    }
+}
+
+fn collect_control_inspection_state(
+    widget: &dyn Widget,
+) -> Vec<(PanelKind, mondrian_ui_core::ControlInspectionState)> {
+    fn visit(
+        widget: &dyn Widget,
+        panel: Option<PanelKind>,
+        states: &mut Vec<(PanelKind, mondrian_ui_core::ControlInspectionState)>,
+    ) {
+        let panel = widget.panel_kind().or(panel);
+        if let Some(panel) = panel
+            && let Some(state) = widget.control_inspection_state()
+        {
+            states.push((panel, state));
+        }
+        for index in 0..widget.child_count() {
+            if let Some(child) = widget.child(index) {
+                visit(child, panel, states);
+            }
+        }
+    }
+    let mut states = Vec::new();
+    visit(widget, None, &mut states);
+    states
+}
+
+fn restore_control_inspection_state(
+    widget: &mut dyn Widget,
+    states: &[(PanelKind, mondrian_ui_core::ControlInspectionState)],
+) {
+    fn counts(
+        states: &[(PanelKind, mondrian_ui_core::ControlInspectionState)],
+    ) -> std::collections::HashMap<(PanelKind, &str), usize> {
+        let mut counts = std::collections::HashMap::new();
+        for (panel, state) in states {
+            *counts.entry((*panel, state.key.as_str())).or_insert(0) += 1;
+        }
+        counts
+    }
+    let replacements = collect_control_inspection_state(widget);
+    let previous_counts = counts(states);
+    let replacement_counts = counts(&replacements);
+    let unambiguous = states
+        .iter()
+        .filter_map(|(panel, state)| {
+            let key = (*panel, state.key.as_str());
+            (previous_counts.get(&key) == Some(&1) && replacement_counts.get(&key) == Some(&1))
+                .then_some((key, state))
+        })
+        .collect::<std::collections::HashMap<_, _>>();
+    fn visit(
+        widget: &mut dyn Widget,
+        panel: Option<PanelKind>,
+        states: &std::collections::HashMap<
+            (PanelKind, &str),
+            &mondrian_ui_core::ControlInspectionState,
+        >,
+    ) {
+        let panel = widget.panel_kind().or(panel);
+        if let Some(panel) = panel
+            && let Some(current) = widget.control_inspection_state()
+            && let Some(state) = states.get(&(panel, current.key.as_str()))
+        {
+            widget.restore_control_inspection_state(state);
+        }
+        for index in 0..widget.child_count() {
+            if let Some(child) = widget.child_mut(index) {
+                visit(child, panel, states);
+            }
+        }
+    }
+    visit(widget, None, &unambiguous);
+}
+
+fn collect_curve_view_state(
+    widget: &dyn Widget,
+) -> Vec<(PanelKind, mondrian_ui_widgets::CurveEditorViewState)> {
+    fn visit(
+        widget: &dyn Widget,
+        panel: Option<PanelKind>,
+        states: &mut Vec<(PanelKind, mondrian_ui_widgets::CurveEditorViewState)>,
+    ) {
+        let panel = widget.panel_kind().or(panel);
+        if let Some(panel) = panel
+            && let Some(curve) = widget
+                .as_any()
+                .and_then(|any| any.downcast_ref::<mondrian_ui_widgets::CurveEditor>())
+            && let Some(state) = curve.view_state()
+        {
+            states.push((panel, state));
+        }
+        for index in 0..widget.child_count() {
+            if let Some(child) = widget.child(index) {
+                visit(child, panel, states);
+            }
+        }
+    }
+    let mut states = Vec::new();
+    visit(widget, None, &mut states);
+    states
+}
+
+fn restore_curve_view_state(
+    widget: &mut dyn Widget,
+    states: &[(PanelKind, mondrian_ui_widgets::CurveEditorViewState)],
+) {
+    fn visit(
+        widget: &mut dyn Widget,
+        panel: Option<PanelKind>,
+        states: &[(PanelKind, mondrian_ui_widgets::CurveEditorViewState)],
+        consumed: &mut std::collections::HashSet<usize>,
+    ) {
+        let panel = widget.panel_kind().or(panel);
+        if let Some(panel) = panel
+            && let Some(curve) = widget
+                .as_any_mut()
+                .and_then(|any| any.downcast_mut::<mondrian_ui_widgets::CurveEditor>())
+        {
+            for (index, (owner, state)) in states.iter().enumerate() {
+                if *owner == panel && !consumed.contains(&index) && curve.restore_view_state(state)
+                {
+                    consumed.insert(index);
+                    break;
+                }
+            }
+        }
+        for index in 0..widget.child_count() {
+            if let Some(child) = widget.child_mut(index) {
+                visit(child, panel, states, consumed);
+            }
+        }
+    }
+    visit(widget, None, states, &mut std::collections::HashSet::new());
+}
+
 fn collect_asset_grid_state(widget: &dyn Widget) -> Vec<AssetGridLocalState> {
     let mut states = Vec::new();
     collect_asset_grid_state_into(widget, None, &mut states);
@@ -2533,6 +3286,10 @@ fn restore_panel_scroll_state_into(
 }
 
 impl Widget for AppUiAppRoot {
+    fn keyboard_focus_scope(&self) -> Option<WidgetId> {
+        self.modal.as_ref().map(Widget::id)
+    }
+
     fn id(&self) -> WidgetId {
         self.id
     }
@@ -2617,6 +3374,23 @@ impl Widget for AppUiAppRoot {
             3 => self.modal.as_mut().map(|modal| modal as &mut dyn Widget),
             _ => None,
         }
+    }
+}
+
+fn bind_native_visual_gui_models(
+    models: &mut AppUiPanelModels,
+    registry: &crate::app::preview_native_gui::PreviewNativeGuiRegistry,
+) {
+    let views = models
+        .inspector
+        .effects
+        .iter()
+        .filter_map(|effect| effect.native_author_view.clone())
+        .collect::<Vec<_>>();
+    registry.reconcile_views(&views);
+    for effect in &mut models.inspector.effects {
+        effect.native_gui_controller =
+            effect.native_author_view.as_ref().and_then(|view| registry.controller(view));
     }
 }
 
@@ -2738,6 +3512,8 @@ mod tests {
         revealed_paths: Mutex<Vec<PathBuf>>,
         dialog_titles: Mutex<Vec<String>>,
         dialog_default_names: Mutex<Vec<String>>,
+        dialog_filters: Mutex<Vec<Vec<FileFilter>>>,
+        dialog_error: bool,
     }
 
     impl PlatformService for FakePlatform {
@@ -2752,9 +3528,13 @@ mod tests {
         fn open_file_dialog(
             &self,
             title: &str,
-            _filters: &[FileFilter],
+            filters: &[FileFilter],
         ) -> Result<FileDialogOutcome<Vec<PathBuf>>, FileDialogError> {
             self.dialog_titles.lock().expect("dialog titles lock").push(title.to_owned());
+            self.dialog_filters.lock().expect("filter lock").push(filters.to_vec());
+            if self.dialog_error {
+                return Err(FileDialogError::Unavailable);
+            }
             Ok(match self.open_paths.clone() {
                 Some(paths) => FileDialogOutcome::Selected(paths),
                 None => FileDialogOutcome::Cancelled,
@@ -2766,6 +3546,9 @@ mod tests {
             title: &str,
         ) -> Result<FileDialogOutcome<PathBuf>, FileDialogError> {
             self.dialog_titles.lock().expect("dialog titles lock").push(title.to_owned());
+            if self.dialog_error {
+                return Err(FileDialogError::Unavailable);
+            }
             Ok(match self.open_folder.clone() {
                 Some(path) => FileDialogOutcome::Selected(path),
                 None => FileDialogOutcome::Cancelled,
@@ -3475,8 +4258,8 @@ mod tests {
     #[test]
     fn packaging_phase_has_a_product_status_message() {
         assert_eq!(
-            export_phase_status_message(ExportProgressPhase::Packaging),
-            "正在封装交付包"
+            export_progress_phase_message_id(ExportProgressPhase::Packaging),
+            "export-job-packaging"
         );
     }
 
@@ -4283,6 +5066,185 @@ mod tests {
     }
 
     #[test]
+    fn musical_time_dialog_drafts_then_dispatches_one_undoable_sequence_transaction() {
+        use crate::app::ui_actions::{
+            app_shell_confirm_musical_time_action, app_shell_musical_time_action,
+            app_shell_musical_time_draft_changed_action, MusicalTimeDraftUpdate,
+        };
+        let platform = FakePlatform::default();
+        let mut state = AppState::new();
+        state.test_set_sequence(Some(Sequence::new("Music UI")));
+        let generation = state.project_author_generation();
+        let before = serde_json::to_value(state.active_sequence().unwrap()).unwrap();
+        let mut root = AppUiAppRoot::from_app_state(&state);
+        root.layout(Rect::new(0.0, 0.0, 1280.0, 720.0));
+        assert!(
+            crate::app_ui::action_availability::app_state_action_enabled(
+                &app_shell_musical_time_action(),
+                &state
+            )
+        );
+        assert_eq!(
+            root.handle_shell_action(app_shell_musical_time_action(), &platform, None),
+            None
+        );
+        for update in [
+            MusicalTimeDraftUpdate::Enabled(true),
+            MusicalTimeDraftUpdate::Tempo("80/".into()),
+            MusicalTimeDraftUpdate::Origin("-1/3".into()),
+            MusicalTimeDraftUpdate::Signature("7/8".into()),
+        ] {
+            assert_eq!(
+                root.handle_shell_action(
+                    app_shell_musical_time_draft_changed_action(update),
+                    &platform,
+                    None
+                ),
+                None
+            );
+        }
+        assert_eq!(
+            root.handle_shell_action(app_shell_confirm_musical_time_action(), &platform, None),
+            None
+        );
+        assert!(root.modal.as_ref().and_then(ShellModal::as_musical_time).is_some());
+        assert_eq!(state.project_author_generation(), generation);
+        assert_eq!(
+            serde_json::to_value(state.active_sequence().unwrap()).unwrap(),
+            before
+        );
+        root.handle_shell_action(
+            app_shell_musical_time_draft_changed_action(MusicalTimeDraftUpdate::Tempo(
+                "80.1".into(),
+            )),
+            &platform,
+            None,
+        );
+        let action = root
+            .handle_shell_action(app_shell_confirm_musical_time_action(), &platform, None)
+            .expect("one forwarded public Action");
+        assert!(root.modal.is_none());
+        state.dispatch_action(action).unwrap();
+        assert_eq!(state.project_author_generation(), generation + 1);
+        let reference =
+            state.active_sequence().unwrap().audio_program.musical_time_reference.unwrap();
+        assert_eq!(
+            reference.quarter_note_duration(),
+            mondrian_core::TimelineTime::new(200, 267).unwrap()
+        );
+        assert_eq!(
+            reference.quarter_note_zero(),
+            mondrian_core::TimelineTime::new(-1, 3).unwrap()
+        );
+        assert_eq!(
+            reference.time_signature(),
+            Some(mondrian_core::MusicalTimeSignature::new(7, 8).unwrap())
+        );
+        assert!(state.undo_timeline().unwrap());
+        assert_eq!(
+            state.active_sequence().unwrap().audio_program.musical_time_reference,
+            None
+        );
+        assert!(state.redo_timeline().unwrap());
+        assert_eq!(
+            state.active_sequence().unwrap().audio_program.musical_time_reference,
+            Some(reference)
+        );
+    }
+
+    #[test]
+    fn musical_time_menu_cancel_and_disabled_state_do_not_author_defaults() {
+        use crate::app::ui_actions::{
+            app_shell_musical_time_action, app_shell_musical_time_draft_changed_action,
+            MusicalTimeDraftUpdate,
+        };
+        let platform = FakePlatform::default();
+        let mut state = AppState::new();
+        assert!(
+            !crate::app_ui::action_availability::app_state_action_enabled(
+                &app_shell_musical_time_action(),
+                &state
+            )
+        );
+        state.test_set_sequence(Some(Sequence::new("Cancel music")));
+        let generation = state.project_author_generation();
+        let mut root = AppUiAppRoot::from_app_state(&state);
+        root.layout(Rect::new(0.0, 0.0, 1280.0, 720.0));
+        let command = crate::app_ui::commands::command_by_id("file.musical_time").unwrap();
+        root.handle_shell_action(command.action(), &platform, None);
+        assert_eq!(
+            root.modal
+                .as_ref()
+                .unwrap()
+                .as_musical_time()
+                .unwrap()
+                .payload()
+                .unwrap()
+                .reference,
+            None
+        );
+        root.handle_shell_action(
+            app_shell_musical_time_draft_changed_action(MusicalTimeDraftUpdate::Enabled(true)),
+            &platform,
+            None,
+        );
+        root.handle_shell_action(
+            crate::app::ui_actions::app_shell_close_modal_action(),
+            &platform,
+            None,
+        );
+        assert!(root.modal.is_none());
+        assert_eq!(state.project_author_generation(), generation);
+        assert_eq!(
+            state.active_sequence().unwrap().audio_program.musical_time_reference,
+            None
+        );
+    }
+
+    #[test]
+    fn musical_time_modal_paints_localized_real_controls_and_keeps_exact_reopen_values() {
+        use crate::app::ui_actions::app_shell_musical_time_action;
+        let platform = FakePlatform::default();
+        let mut sequence = Sequence::new("Paint music");
+        let reference = mondrian_core::MusicalTimeReference::new(
+            mondrian_core::TimelineTime::new(-13, 8).unwrap(),
+            mondrian_core::TimelineTime::new(1, i64::MAX).unwrap(),
+        )
+        .unwrap();
+        sequence.audio_program.musical_time_reference = Some(reference);
+        let mut state = AppState::new();
+        state.test_set_sequence(Some(sequence));
+        for locale in [AppUiLocale::ZhCn, AppUiLocale::EnUs, AppUiLocale::Pseudo] {
+            let mut root = AppUiAppRoot::from_app_state(&state);
+            root.preferences_model.locale = locale;
+            let bounds = Rect::new(0.0, 0.0, 960.0, 640.0);
+            root.layout(bounds);
+            root.handle_shell_action(app_shell_musical_time_action(), &platform, None);
+            let mut encoder = PaintOrderRecorder::default();
+            root.modal.as_ref().unwrap().paint(&mut PaintContext {
+                pixels_per_point: 1.0,
+                encoder: &mut encoder,
+                theme: &ThemePreset::Dark.build(),
+                clip_rect: bounds,
+            });
+            let localizer = Localizer::new(locale).unwrap();
+            assert!(encoder.texts.iter().any(|text| text == &localizer.text("music-title")));
+            assert!(encoder.texts.iter().any(|text| text == "-13/8"));
+            assert_eq!(
+                root.modal
+                    .as_ref()
+                    .unwrap()
+                    .as_musical_time()
+                    .unwrap()
+                    .payload()
+                    .unwrap()
+                    .reference,
+                Some(reference)
+            );
+        }
+    }
+
+    #[test]
     fn invalid_sequence_name_keeps_modal_and_explains_rejection() {
         let platform = FakePlatform::default();
         let mut state = AppState::new();
@@ -4520,15 +5482,203 @@ mod tests {
     }
 
     #[test]
+    fn export_status_uses_selected_locale_and_preserves_exact_frame_counts() {
+        let english = Localizer::new(AppUiLocale::EnUs).expect("English");
+        let chinese = Localizer::new(AppUiLocale::ZhCn).expect("Chinese");
+        for (phase, text) in [
+            (ExportProgressPhase::Preparing, "Preparing"),
+            (ExportProgressPhase::Rendering, "Rendering"),
+            (ExportProgressPhase::Encoding, "Encoding"),
+            (ExportProgressPhase::Packaging, "Packaging"),
+            (ExportProgressPhase::Validating, "Validating"),
+            (ExportProgressPhase::Publishing, "Publishing"),
+        ] {
+            let status = JobStatus::Running { phase };
+            let formatted =
+                active_export_status_text(&status, &ExportProgressDetail::None, 2, &english);
+            assert!(formatted.contains(text), "{formatted}");
+            assert!(formatted.contains('2'), "{formatted}");
+            assert_ne!(
+                formatted,
+                active_export_status_text(&status, &ExportProgressDetail::None, 2, &chinese)
+            );
+        }
+        let completed = u64::MAX - 1;
+        let total = u64::MAX;
+        let detail = ExportProgressDetail::Frames { completed, total };
+        let rendered = active_export_status_text(
+            &JobStatus::Running { phase: ExportProgressPhase::Rendering },
+            &detail,
+            2,
+            &english,
+        );
+        assert!(rendered.contains(&completed.to_string()), "{rendered}");
+        assert!(rendered.contains(&total.to_string()), "{rendered}");
+        let encoding = active_export_status_text(
+            &JobStatus::Running { phase: ExportProgressPhase::Encoding },
+            &detail,
+            2,
+            &english,
+        );
+        assert!(encoding.contains("Encoding"));
+        assert!(
+            !encoding.contains(&completed.to_string()),
+            "stale frame units must not describe encoding"
+        );
+        assert!(active_export_status_text(
+            &JobStatus::Pending,
+            &ExportProgressDetail::None,
+            2,
+            &english
+        )
+        .contains("Export queued"));
+        assert!(active_export_status_text(
+            &JobStatus::Cancelling { phase: ExportProgressPhase::Rendering },
+            &detail,
+            2,
+            &english
+        )
+        .contains("Cancelling export"));
+    }
+
+    #[test]
+    fn status_locale_refresh_preserves_history_viewport_and_widget_identity() {
+        use crate::app_ui::localization::AppUiLocalePreference;
+        let mut state = AppState::new();
+        for index in 0..12 {
+            state.set_status_hint(
+                AppMessage::new("status-clap-installed").with_count("count", index),
+                false,
+            );
+        }
+        state.clear_status_hint();
+        let mut preferences = AppUiPreferences {
+            locale_preference: AppUiLocalePreference::ZhCn,
+            ..Default::default()
+        };
+        let mut root = AppUiAppRoot::from_app_state_with_preferences(&state, &preferences);
+        root.status_bar.history_open = true;
+        root.status_bar.history_offset = 3;
+        let widget_id = root.status_bar.id;
+        let history = root.status_bar.history.clone();
+        for (preference, locale) in [
+            (AppUiLocalePreference::EnUs, AppUiLocale::EnUs),
+            (AppUiLocalePreference::Pseudo, AppUiLocale::Pseudo),
+            (AppUiLocalePreference::ZhCn, AppUiLocale::ZhCn),
+        ] {
+            preferences.locale_preference = preference;
+            root.refresh_from_app_state_with_preferences(&state, &preferences);
+            assert_eq!(root.status_bar.id, widget_id);
+            assert_eq!(root.status_bar.history, history);
+            let entry = &root.status_bar.history[5];
+            let body = root.status_bar.history_entry_text(entry);
+            assert_eq!(body, root.localizer.message(&entry.message));
+            let initial =
+                Localizer::new(AppUiLocale::ZhCn).expect("Chinese").message(&entry.message);
+            if locale != AppUiLocale::ZhCn {
+                assert_ne!(body, initial);
+            }
+            assert!(root.status_bar.history_open);
+            assert_eq!(root.status_bar.history_offset, 3);
+            assert_eq!(root.status_bar.localizer.locale(), locale);
+            assert_eq!(
+                root.status_bar.model.message,
+                root.localizer.text("status-ready")
+            );
+            let name = root
+                .status_bar
+                .accessibility()
+                .expect("status button")
+                .name
+                .expect("accessible name");
+            assert!(name.contains(&root.status_bar.model.message));
+            if locale == AppUiLocale::EnUs {
+                assert!(name.contains("Recent notifications"));
+                assert_eq!(root.status_bar.model.message, "Ready");
+            }
+            root.refresh_playback_frame_from_app_state(&state, None);
+            assert_eq!(
+                root.status_bar.model.message,
+                root.localizer.text("status-ready")
+            );
+        }
+    }
+
+    #[test]
+    fn locale_switch_reformats_current_error_and_retained_success_without_author_edits() {
+        use crate::app_ui::localization::AppUiLocalePreference;
+        let mut state = AppState::new();
+        state.test_set_sequence(Some(Sequence::new("Cut 01")));
+        let path = "E:/项目/Mixed Case/{clip}.mdp";
+        state.set_status_hint(
+            AppMessage::new("status-packaged").with_text("path", path),
+            false,
+        );
+        state.set_status_hint(
+            AppMessage::new("status-save-failed").with_text("error", "disk full"),
+            true,
+        );
+        let generation = state.project_author_generation();
+        let hint = state.status_hint().cloned();
+        let history = state.status_log().to_vec();
+        let mut preferences = AppUiPreferences::default();
+        let mut root = AppUiAppRoot::from_app_state_with_preferences(&state, &preferences);
+        root.status_bar.history_open = true;
+        let widget_id = root.status_bar.id;
+        for (preference, locale) in [
+            (AppUiLocalePreference::EnUs, AppUiLocale::EnUs),
+            (AppUiLocalePreference::Pseudo, AppUiLocale::Pseudo),
+            (AppUiLocalePreference::ZhCn, AppUiLocale::ZhCn),
+        ] {
+            preferences.locale_preference = preference;
+            root.refresh_from_app_state_with_preferences(&state, &preferences);
+            let localizer = Localizer::new(locale).expect("catalog");
+            let current = &hint.as_ref().expect("error fact").0;
+            assert_eq!(root.status_bar.model.message, localizer.message(current));
+            assert!(root.status_bar.model.is_error);
+            assert!(!root.status_bar.model.is_busy);
+            let first = &root.status_bar.history[0];
+            assert_eq!(
+                root.status_bar.history_entry_text(first),
+                localizer.message(&first.message)
+            );
+            assert!(root.status_bar.history_entry_text(first).contains(path));
+            if locale == AppUiLocale::EnUs {
+                assert!(root.status_bar.model.message.contains("Could not save project"));
+                assert!(root.status_bar.history_entry_text(first).contains("Project packaged"));
+            }
+            assert_eq!(state.project_author_generation(), generation);
+            assert_eq!(state.status_hint(), hint.as_ref());
+            assert_eq!(state.status_log(), history);
+            assert_eq!(root.status_bar.history, history);
+            assert_eq!(root.status_bar.id, widget_id);
+            assert!(root.status_bar.history_open);
+            root.refresh_playback_frame_from_app_state(&state, None);
+            assert_eq!(root.status_bar.model.message, localizer.message(current));
+        }
+    }
+
+    #[test]
     fn status_bar_model_prefers_active_sequence_context() {
         let mut state = AppState::new();
         state.test_set_project_path(PathBuf::from("E:/projects/rough-cut.mdp"));
         state.test_set_sequence(Some(mondrian_timeline::sequence::Sequence::new("Cut 01")));
-        state.set_status_hint("Project saved", false);
+        state.set_status_hint(
+            AppMessage::new("status-opaque-detail").with_text("detail", "Project saved"),
+            false,
+        );
 
-        let model = status_bar_model(&state);
+        let model = status_bar_model(
+            &state,
+            &Localizer::new(AppUiLocale::ZhCn).expect("Chinese catalog"),
+        );
 
-        assert_eq!(model.message, "Project saved");
+        assert_eq!(
+            model.message,
+            crate::app_ui::localization::chinese_product_message(
+                &state.status_hint().expect("status").0
+            )
+        );
         assert!(!model.is_error);
         assert!(!model.is_busy);
         assert_eq!(model.context, "Cut 01");
@@ -4773,7 +5923,11 @@ mod tests {
     fn status_history_opens_scrolls_and_closes_without_blocking_editing() {
         let mut state = AppState::new();
         for index in 0..12 {
-            state.set_status_hint(format!("Activity {index}"), index == 11);
+            state.set_status_hint(
+                AppMessage::new("status-opaque-detail")
+                    .with_text("detail", format!("Activity {index}")),
+                index == 11,
+            );
         }
         let mut root = AppUiAppRoot::from_app_state(&state);
         root.layout(Rect::new(0.0, 0.0, 1280.0, 720.0));
@@ -4839,12 +5993,240 @@ mod tests {
     }
 
     #[test]
+    fn status_history_actual_router_navigates_keyboard_pages_and_reads_full_localized_entries() {
+        use crate::app_ui::localization::AppUiLocalePreference;
+        use mondrian_ui_core::FocusManager;
+        use mondrian_ui_events::EventRouter;
+        let _guard = crate::app_ui::test_utils::theme_test_guard();
+        for locale_preference in [
+            AppUiLocalePreference::EnUs,
+            AppUiLocalePreference::ZhCn,
+            AppUiLocalePreference::Pseudo,
+        ] {
+            let mut state = AppState::new();
+            for index in 0..20 {
+                state.set_status_hint(
+                    AppMessage::new("status-opaque-detail").with_text(
+                        "detail",
+                        format!("Activity {index:02} · E:/项目/完整消息🙂.mdp"),
+                    ),
+                    index == 0,
+                );
+            }
+            let mut root = AppUiAppRoot::from_app_state_with_preferences(
+                &state,
+                &AppUiPreferences { locale_preference, ..Default::default() },
+            );
+            root.layout(Rect::new(0.0, 0.0, 1280.0, 720.0));
+            let id = root.status_bar.id;
+            let history = root.status_bar.history.clone();
+            let generation = state.project_author_generation();
+            let actions = std::cell::RefCell::new(Vec::new());
+            let dispatch = |action| actions.borrow_mut().push(action);
+            let mut router = EventRouter::new(root.id());
+            router.focus_manager_mut().set_focused_widget(Some(id), None);
+            for (key, expected) in [
+                (KeyCode::Enter, 0),
+                (KeyCode::Down, 1),
+                (KeyCode::PageDown, 9),
+                (KeyCode::End, 12),
+                (KeyCode::Down, 12),
+                (KeyCode::Up, 11),
+                (KeyCode::PageUp, 3),
+                (KeyCode::Home, 0),
+                (KeyCode::Up, 0),
+            ] {
+                router.route(
+                    UiEvent::KeyDown { key, modifiers: Modifiers::none() },
+                    &mut WidgetTreeView::new(&mut root),
+                    &dispatch,
+                );
+                assert!(root.status_bar.history_open);
+                assert_eq!(root.status_bar.history_offset, expected, "{key:?}");
+                assert_eq!(router.focus_manager().focused_widget(), Some(id));
+                let name =
+                    root.status_bar.accessibility().expect("history access").name.expect("name");
+                for entry in history.iter().rev().skip(expected).take(8) {
+                    let body = root.localizer.message(&entry.message);
+                    assert!(
+                        name.contains(&body),
+                        "accessible history retains full entry: {name}"
+                    );
+                }
+                assert!(name.contains("E:/项目/完整消息🙂.mdp"));
+                if expected == 12 {
+                    let severity = match locale_preference {
+                        AppUiLocalePreference::EnUs => "Error:",
+                        AppUiLocalePreference::ZhCn => "错误：",
+                        AppUiLocalePreference::Pseudo => "错·误·",
+                        _ => panic!("explicit test locale"),
+                    };
+                    assert!(
+                        name.contains(severity),
+                        "error severity is accessible: {name}"
+                    );
+                }
+                assert_eq!(root.status_bar.history, history);
+                assert!(
+                    actions.borrow().is_empty(),
+                    "history inspection never dispatches editor actions"
+                );
+                assert_eq!(state.project_author_generation(), generation);
+            }
+            router.route(
+                UiEvent::KeyDown { key: KeyCode::PageUp, modifiers: Modifiers::ctrl() },
+                &mut WidgetTreeView::new(&mut root),
+                &dispatch,
+            );
+            assert_eq!(
+                root.status_bar.history_offset, 0,
+                "modified navigation is not history input"
+            );
+            router.route(
+                UiEvent::FocusLost,
+                &mut WidgetTreeView::new(&mut root),
+                &dispatch,
+            );
+            assert!(!root.status_bar.history_open, "unfocused popup closes");
+        }
+    }
+
+    #[test]
+    fn status_history_keyboard_handles_empty_short_and_replaced_history() {
+        use crate::app_ui::localization::AppUiLocalePreference;
+        use mondrian_ui_core::FocusManager;
+        use mondrian_ui_events::EventRouter;
+        let _guard = crate::app_ui::test_utils::theme_test_guard();
+        let preferences = AppUiPreferences {
+            locale_preference: AppUiLocalePreference::EnUs,
+            ..Default::default()
+        };
+        for (count, oldest_offset) in [(0, 0), (1, 0), (9, 1)] {
+            let mut state = AppState::new();
+            for index in 0..count {
+                state.set_status_hint(
+                    AppMessage::new("status-opaque-detail")
+                        .with_text("detail", format!("Entry {index}")),
+                    false,
+                );
+            }
+            let mut root = AppUiAppRoot::from_app_state_with_preferences(&state, &preferences);
+            root.layout(Rect::new(0.0, 0.0, 1280.0, 720.0));
+            let id = root.status_bar.id;
+            let mut router = EventRouter::new(root.id());
+            router.focus_manager_mut().set_focused_widget(Some(id), None);
+            let dispatch = |_| panic!("notification history cannot author");
+            for key in [
+                KeyCode::Space,
+                KeyCode::End,
+                KeyCode::PageDown,
+                KeyCode::Down,
+            ] {
+                router.route(
+                    UiEvent::KeyDown { key, modifiers: Modifiers::none() },
+                    &mut WidgetTreeView::new(&mut root),
+                    &dispatch,
+                );
+            }
+            assert!(root.status_bar.history_open);
+            assert_eq!(root.status_bar.history_offset, oldest_offset);
+            assert_eq!(router.focus_manager().focused_widget(), Some(id));
+            let name = root.status_bar.accessibility().expect("history access").name.expect("name");
+            if count == 0 {
+                assert!(name.contains("No notifications"));
+            } else {
+                assert!(name.contains("Entry 0"), "oldest entry is inspectable");
+            }
+            let empty_state = AppState::new();
+            root.refresh_from_app_state_with_preferences(&empty_state, &preferences);
+            assert_eq!(root.status_bar.id, id);
+            assert_eq!(router.focus_manager().focused_widget(), Some(id));
+            assert_eq!(root.status_bar.history_offset, 0);
+            assert!(root.status_bar.history.is_empty());
+            assert!(root
+                .status_bar
+                .accessibility()
+                .expect("history access")
+                .name
+                .expect("name")
+                .contains("No notifications"));
+            router.route(
+                UiEvent::KeyDown { key: KeyCode::Escape, modifiers: Modifiers::none() },
+                &mut WidgetTreeView::new(&mut root),
+                &dispatch,
+            );
+            assert!(!root.status_bar.history_open);
+        }
+    }
+
+    #[test]
+    fn status_history_paint_clips_localized_text_using_theme_padding_without_truncating_accessibility(
+    ) {
+        use crate::app_ui::localization::AppUiLocalePreference;
+        let _guard = crate::app_ui::test_utils::theme_test_guard();
+        let detail = "E:/项目/需要保留的完整诊断🙂/".repeat(12);
+        for populated in [false, true] {
+            let mut state = AppState::new();
+            if populated {
+                state.set_status_hint(
+                    AppMessage::new("status-opaque-detail").with_text("detail", &detail),
+                    true,
+                );
+            }
+            let mut root = AppUiAppRoot::from_app_state_with_preferences(
+                &state,
+                &AppUiPreferences {
+                    locale_preference: AppUiLocalePreference::Pseudo,
+                    ..Default::default()
+                },
+            );
+            root.layout(Rect::new(0.0, 0.0, 220.0, 720.0));
+            root.status_bar.history_open = true;
+            root.status_bar.model.context.clear();
+            let mut theme = ThemePreset::Dark.build();
+            theme.spacing.panel_inner_margin.0 = 36.0;
+            let available = root.status_bar.history_rect().width - 72.0;
+            let mut encoder = PaintOrderRecorder::default();
+            root.status_bar.paint(&mut PaintContext {
+                encoder: &mut encoder,
+                theme: &theme,
+                clip_rect: root.bounds,
+                pixels_per_point: 1.0,
+            });
+            assert_eq!(
+                encoder.texts.len(),
+                3,
+                "status, history title, history body"
+            );
+            for text in encoder.texts.iter().skip(1) {
+                assert!(
+                    estimate_text_width(text, theme.typography.metadata.font_size) <= available
+                );
+            }
+            assert!(
+                encoder.texts[1].ends_with("..."),
+                "expanded title elides within themed content"
+            );
+            if populated {
+                assert!(encoder.texts[2].ends_with("..."));
+                assert!(root
+                    .status_bar
+                    .accessibility()
+                    .expect("access")
+                    .name
+                    .expect("name")
+                    .contains(&detail));
+            }
+        }
+    }
+
+    #[test]
     fn root_projects_only_new_terminal_notifications_and_expires_them() {
         let mut state = AppState::new();
         state.notifications.publish(
             "save:before-root",
             crate::app::notifications::AppNotificationSeverity::Success,
-            crate::app::notifications::AppNotificationMessage::new("notification-save-complete"),
+            AppMessage::new("notification-save-complete"),
         );
         let mut root = AppUiAppRoot::from_app_state(&state);
         assert!(root.next_notification_deadline().is_none());
@@ -4852,7 +6234,7 @@ mod tests {
         state.notifications.publish(
             "save:after-root",
             crate::app::notifications::AppNotificationSeverity::Success,
-            crate::app::notifications::AppNotificationMessage::new("notification-save-complete"),
+            AppMessage::new("notification-save-complete"),
         );
         root.refresh_from_app_state(&state);
         let deadline = root.next_notification_deadline().expect("visible terminal toast");
@@ -4868,7 +6250,7 @@ mod tests {
         state.notifications.publish(
             "save:first-session",
             crate::app::notifications::AppNotificationSeverity::Success,
-            crate::app::notifications::AppNotificationMessage::new("notification-save-complete"),
+            AppMessage::new("notification-save-complete"),
         );
         root.refresh_from_app_state(&state);
         assert!(root.next_notification_deadline().is_some());
@@ -4884,7 +6266,10 @@ mod tests {
         let mut state = AppState::new();
         state.test_set_sequence(Some(mondrian_timeline::Sequence::new("rough-cut")));
         state.test_set_project_path(PathBuf::from("E:/projects/rough-cut.mdp"));
-        state.set_status_hint("Import failed", true);
+        state.set_status_hint(
+            AppMessage::new("status-opaque-detail").with_text("detail", "Import failed"),
+            true,
+        );
 
         root.refresh_from_app_state(&state);
         root.layout(Rect::new(0.0, 0.0, 1280.0, 720.0));
@@ -4997,6 +6382,1990 @@ mod tests {
     }
 
     #[test]
+    fn app_root_modal_router_contains_tabs_and_restores_background_focus() {
+        use mondrian_ui_core::{FocusManager, TreeWalker, WidgetTree};
+        use mondrian_ui_events::EventRouter;
+        let _guard = crate::app_ui::test_utils::theme_test_guard();
+        let platform = FakePlatform::default();
+        let mut root = AppUiAppRoot::demo();
+        root.layout(Rect::new(0.0, 0.0, 1280.0, 720.0));
+        let background = {
+            let tree = WidgetTreeView::new(&mut root);
+            TreeWalker::focus_next(&tree, WidgetId::default()).expect("background control")
+        };
+        let mut router = EventRouter::new(root.id());
+        router.focus_manager_mut().set_focused_widget(Some(background), None);
+        root.handle_shell_action(app_shell_about_action(), &platform, None);
+        root.layout(Rect::new(0.0, 0.0, 1280.0, 720.0));
+        let modal = root.keyboard_focus_scope().expect("modal scope");
+        let actions = std::cell::RefCell::new(Vec::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        {
+            let mut tree = WidgetTreeView::new(&mut root);
+            router.route(
+                UiEvent::TextInput("背景不能收到".to_owned()),
+                &mut tree,
+                &dispatch,
+            );
+            let first = router.focus_manager().focused_widget().expect("modal initial focus");
+            assert_ne!(first, background);
+            for modifiers in [Modifiers::none(), Modifiers::shift()] {
+                for _ in 0..24 {
+                    router.route(
+                        UiEvent::KeyDown { key: KeyCode::Tab, modifiers },
+                        &mut tree,
+                        &dispatch,
+                    );
+                    let mut current = router.focus_manager().focused_widget();
+                    while current.is_some() && current != Some(modal) {
+                        current = current.and_then(|id| tree.parent_id(id));
+                    }
+                    assert_eq!(current, Some(modal));
+                }
+            }
+        }
+        assert!(
+            actions.borrow().is_empty(),
+            "typing and traversing must not author background actions"
+        );
+        root.modal = None;
+        {
+            let mut tree = WidgetTreeView::new(&mut root);
+            router.route(
+                UiEvent::KeyUp { key: KeyCode::Tab, modifiers: Modifiers::none() },
+                &mut tree,
+                &dispatch,
+            );
+        }
+        assert_eq!(router.focus_manager().focused_widget(), Some(background));
+    }
+
+    fn async_resource_fixture() -> (
+        AppState,
+        mondrian_core::ClipId,
+        crate::app_ui::resource_dialog::InspectorPropertyTarget,
+    ) {
+        use mondrian_core::{
+            ParameterResourceContract, ParameterResourceReference, PropertyDescriptor,
+            PropertyValue, ResourcePathKind, ResourcePathSelection, TimelineTime,
+        };
+        use mondrian_effects::*;
+        let kind = EffectType::External(format!("test.resource.async.{}", uuid::Uuid::new_v4()));
+        let builder = EffectExtensionDefinitionBuilder::new(
+            kind.key(),
+            "Async resource",
+            EffectColorDomainContract::SCENE_LINEAR,
+        )
+        .with_execution_contract(EffectExecutionContract {
+            execution_modes: EffectExecutionModes::CPU_F32,
+            determinism: EffectDeterminism::Deterministic,
+            state_model: EffectStateModel::Stateless,
+            temporal_input: EffectTemporalInputExtent::CURRENT_FRAME,
+            roi_propagation: EffectRoiPropagation::UnknownRequiresFullFrame,
+            resource_lifetime: EffectResourceLifetime::Frame,
+            topology: EffectGraphTopology::LinearChain,
+        })
+        .with_branching_graph(|_, _, graph| {
+            graph.apply(EffectRenderOp::Sharpen { amount: 0.0 });
+        })
+        .property(
+            PropertyDescriptor::new(
+                "path",
+                "Path",
+                PropertyValue::Resource(ParameterResourceReference::Unbound),
+            )
+            .with_parameter_id(kind.parameter_id("path").expect("parameter"))
+            .with_resource_contract(ParameterResourceContract::external_path(
+                ResourcePathKind::File,
+                ResourcePathSelection::ExistingOrNew,
+            )),
+        );
+        register_effect_definition(builder.build()).expect("definition");
+        let effect = instantiate_effect_node(kind).expect("effect");
+        let target = crate::app_ui::resource_dialog::InspectorPropertyTarget::Effect {
+            effect_id: effect.id,
+            parameter: effect.properties.property("path").expect("path").address(),
+        };
+        let mut clip = mondrian_timeline::Clip::new_basic_title(
+            "Title",
+            "Arial",
+            TimelineTime::ZERO,
+            TimelineTime::new(1, 1).expect("duration"),
+        )
+        .expect("clip");
+        let id = clip.id;
+        clip.add_effect_node(effect);
+        let mut sequence = mondrian_timeline::Sequence::new("Async resource");
+        sequence.video_tracks[0].add_clip(clip).expect("clip");
+        let mut state = AppState::new();
+        state.test_set_sequence(Some(sequence));
+        state.select_clip_by_id(id).expect("selection");
+        (state, id, target)
+    }
+
+    #[test]
+    fn relative_resource_inspection_and_authoring_use_the_project_directory() {
+        use crate::app_ui::panels::InspectorPanelModel;
+        use crate::app_ui::resource_dialog::{
+            ResourceActionOutcome, ResourceEditorAction, ResourceKind, ResourceUpdate,
+        };
+        use crate::resource_inspection::PathInspectionOutcome;
+        use mondrian_core::{ParameterResourceReference, PropertyValue};
+        let _guard = crate::app_ui::test_utils::theme_test_guard();
+        let (mut state, clip_id, target) = async_resource_fixture();
+        let project_directory = state
+            .current_project_path()
+            .expect("saved authoring owner")
+            .parent()
+            .expect("project directory")
+            .to_path_buf();
+        let relative = PathBuf::from("relative-resources").join("output.cube");
+        let expected = project_directory.join(&relative);
+        let mut root = AppUiAppRoot::from_app_state(&state);
+        let platform = FakePlatform::default();
+        root.try_handle_resource_action(
+            &ResourceEditorAction::Open { clip_id, target: target.clone() }.action(),
+            &state,
+            &platform,
+        )
+        .expect("open");
+        let id = root.modal.as_ref().and_then(ShellModal::as_resource).expect("draft").draft.id;
+        for update in [
+            ResourceUpdate::Kind(ResourceKind::ExternalFile),
+            ResourceUpdate::Text(relative.to_string_lossy().into_owned()),
+        ] {
+            root.try_handle_resource_action(
+                &ResourceEditorAction::Update { id, update }.action(),
+                &state,
+                &platform,
+            )
+            .expect("update");
+        }
+        let ResourceActionOutcome::Inspect(request) = root
+            .try_handle_resource_action(
+                &ResourceEditorAction::Confirm { id }.action(),
+                &state,
+                &platform,
+            )
+            .expect("confirm")
+        else {
+            panic!("new external path requires inspection");
+        };
+        assert_eq!(
+            request.path, expected,
+            "inspection must not depend on child CWD"
+        );
+        assert!(!state.can_undo_action(), "inspection is not an edit");
+        let action = root
+            .finish_resource_inspection(request.ticket, PathInspectionOutcome::Missing, &state)
+            .expect("accepted new path");
+        state.dispatch_action(action).expect("one author transaction");
+        let property = target
+            .property(
+                clip_id,
+                &InspectorPanelModel::from_app_state(&state, &root.localizer),
+            )
+            .expect("resource property")
+            .value
+            .clone();
+        assert_eq!(
+            property,
+            PropertyValue::Resource(ParameterResourceReference::ExternalFile {
+                path: expected.into()
+            }),
+            "saved author value must refer to the same inspected resource",
+        );
+        state.dispatch_action(Action::Undo).expect("Undo");
+        assert!(
+            !state.can_undo_action(),
+            "one confirmation creates one history entry"
+        );
+        state.dispatch_action(Action::Redo).expect("Redo");
+        assert_eq!(
+            target
+                .property(
+                    clip_id,
+                    &InspectorPanelModel::from_app_state(&state, &root.localizer)
+                )
+                .expect("resource after Redo")
+                .value,
+            property,
+        );
+        let direct_relative = PathBuf::from("direct-author").join("resource.cube");
+        state
+            .dispatch_action(target.write_action(clip_id, |parameter| {
+                mondrian_core::automation::ParameterValueWrite::Value {
+                    parameter,
+                    value: PropertyValue::Resource(ParameterResourceReference::ExternalFile {
+                        path: direct_relative.clone().into(),
+                    }),
+                }
+            }))
+            .expect("direct typed author action uses the same owner");
+        assert_eq!(
+            target
+                .property(
+                    clip_id,
+                    &InspectorPanelModel::from_app_state(&state, &root.localizer)
+                )
+                .expect("direct resource")
+                .value,
+            PropertyValue::Resource(ParameterResourceReference::ExternalFile {
+                path: project_directory.join(direct_relative).into(),
+            }),
+        );
+    }
+
+    #[test]
+    fn resource_inspection_does_not_commit_against_a_new_save_as_directory() {
+        use crate::app_ui::resource_dialog::{
+            ResourceActionOutcome, ResourceEditorAction, ResourceKind, ResourceUpdate,
+        };
+        use crate::resource_inspection::PathInspectionOutcome;
+        let _guard = crate::app_ui::test_utils::theme_test_guard();
+        let (mut state, clip_id, target) = async_resource_fixture();
+        let session = state.authoring_session_id();
+        let mut root = AppUiAppRoot::from_app_state(&state);
+        let platform = FakePlatform::default();
+        root.try_handle_resource_action(
+            &ResourceEditorAction::Open { clip_id, target }.action(),
+            &state,
+            &platform,
+        )
+        .expect("open");
+        let id = root.modal.as_ref().and_then(ShellModal::as_resource).expect("draft").draft.id;
+        for update in [
+            ResourceUpdate::Kind(ResourceKind::ExternalFile),
+            ResourceUpdate::Text("pending-resource.cube".into()),
+        ] {
+            root.try_handle_resource_action(
+                &ResourceEditorAction::Update { id, update }.action(),
+                &state,
+                &platform,
+            )
+            .expect("update");
+        }
+        let ResourceActionOutcome::Inspect(request) = root
+            .try_handle_resource_action(
+                &ResourceEditorAction::Confirm { id }.action(),
+                &state,
+                &platform,
+            )
+            .expect("inspect")
+        else {
+            panic!("expected inspection");
+        };
+        let destination = tempfile::tempdir().expect("new project directory");
+        let project_file = destination.path().join("saved-as.mdp");
+        let save = state.request_project_save_as(project_file.clone()).expect("Save As");
+        state.wait_for_persistence_request(save).expect("durable Save As");
+        assert_eq!(state.current_project_path(), Some(project_file.as_path()));
+        assert_eq!(
+            state.authoring_session_id(),
+            session,
+            "Save As preserves Session identity"
+        );
+        assert!(root.resource_inspection_ticket(&state).is_none());
+        assert!(root
+            .finish_resource_inspection(request.ticket, PathInspectionOutcome::Missing, &state)
+            .is_none());
+        assert!(root.modal.is_none());
+        assert!(
+            !state.can_undo_action(),
+            "stale inspection creates no author history"
+        );
+        state.close_project().expect("release saved project and destination");
+    }
+
+    #[test]
+    fn pending_resource_modal_routes_tabs_after_apply_is_disabled_and_restores_focus() {
+        use crate::app_ui::resource_dialog::{
+            ResourceActionOutcome, ResourceEditorAction, ResourceKind, ResourceUpdate,
+        };
+        use crate::resource_inspection::PathInspectionOutcome;
+        use mondrian_ui_core::{FocusManager, TreeWalker, WidgetTree};
+        use mondrian_ui_events::EventRouter;
+        let _guard = crate::app_ui::test_utils::theme_test_guard();
+        let (state, clip_id, target) = async_resource_fixture();
+        let revision = state.active_sequence().expect("sequence").revision;
+        let mut root = AppUiAppRoot::from_app_state(&state);
+        let bounds = Rect::new(0.0, 0.0, 1280.0, 720.0);
+        root.layout(bounds);
+        let background = {
+            let tree = WidgetTreeView::new(&mut root);
+            TreeWalker::focus_next(&tree, WidgetId::default()).expect("background focus")
+        };
+        let mut router = EventRouter::new(root.id());
+        router.focus_manager_mut().set_focused_widget(Some(background), None);
+        let platform = FakePlatform::default();
+        root.try_handle_resource_action(
+            &ResourceEditorAction::Open { clip_id, target }.action(),
+            &state,
+            &platform,
+        )
+        .expect("open resource");
+        let id = root.modal.as_ref().and_then(ShellModal::as_resource).expect("dialog").draft.id;
+        for update in [
+            ResourceUpdate::Kind(ResourceKind::ExternalFile),
+            ResourceUpdate::Text("pending-output.cube".into()),
+        ] {
+            root.try_handle_resource_action(
+                &ResourceEditorAction::Update { id, update }.action(),
+                &state,
+                &platform,
+            )
+            .expect("update draft");
+        }
+        root.layout(bounds);
+        let scope = root.keyboard_focus_scope().expect("modal scope");
+        let apply = root
+            .modal
+            .as_ref()
+            .and_then(ShellModal::as_resource)
+            .expect("dialog")
+            .child(8)
+            .expect("apply")
+            .id();
+        let actions = std::cell::RefCell::new(Vec::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        // Reach Apply through actual traversal so the router suspends background focus.
+        for _ in 0..24 {
+            router.route(
+                UiEvent::KeyDown { key: KeyCode::Tab, modifiers: Modifiers::none() },
+                &mut WidgetTreeView::new(&mut root),
+                &dispatch,
+            );
+            if router.focus_manager().focused_widget() == Some(apply) {
+                break;
+            }
+        }
+        assert_eq!(router.focus_manager().focused_widget(), Some(apply));
+        let ResourceActionOutcome::Inspect(request) = root
+            .try_handle_resource_action(
+                &ResourceEditorAction::Confirm { id }.action(),
+                &state,
+                &platform,
+            )
+            .expect("confirm")
+        else {
+            panic!("inspection required");
+        };
+        assert!(!root
+            .modal
+            .as_ref()
+            .and_then(ShellModal::as_resource)
+            .expect("pending dialog")
+            .child(8)
+            .expect("disabled apply")
+            .can_focus());
+        for modifiers in [Modifiers::none(), Modifiers::shift()] {
+            for _ in 0..24 {
+                let mut tree = WidgetTreeView::new(&mut root);
+                assert_eq!(
+                    router.route(
+                        UiEvent::KeyDown { key: KeyCode::Tab, modifiers },
+                        &mut tree,
+                        &dispatch,
+                    ),
+                    EventResult::Handled
+                );
+                let focused = router.focus_manager().focused_widget().expect("modal focus");
+                assert_ne!(
+                    focused, apply,
+                    "pending confirmation must leave the focus order"
+                );
+                assert!(tree.get(focused).expect("live focus").can_focus());
+                let mut ancestor = Some(focused);
+                while ancestor.is_some() && ancestor != Some(scope) {
+                    ancestor = ancestor.and_then(|widget| tree.parent_id(widget));
+                }
+                assert_eq!(ancestor, Some(scope), "pending Tab escaped the modal");
+            }
+        }
+        assert!(
+            actions.borrow().is_empty(),
+            "traversal must not dispatch resource edits"
+        );
+        assert_eq!(
+            state.active_sequence().expect("sequence").revision,
+            revision
+        );
+        assert!(!state.can_undo_action());
+        assert!(root
+            .finish_resource_inspection(request.ticket, PathInspectionOutcome::TimedOut, &state,)
+            .is_none());
+        assert!(root
+            .modal
+            .as_ref()
+            .and_then(ShellModal::as_resource)
+            .expect("retryable dialog")
+            .child(8)
+            .expect("apply")
+            .can_focus());
+        for _ in 0..24 {
+            router.route(
+                UiEvent::KeyDown { key: KeyCode::Tab, modifiers: Modifiers::shift() },
+                &mut WidgetTreeView::new(&mut root),
+                &dispatch,
+            );
+            if router.focus_manager().focused_widget() == Some(apply) {
+                break;
+            }
+        }
+        assert_eq!(
+            router.focus_manager().focused_widget(),
+            Some(apply),
+            "timeout must permit retry"
+        );
+        root.try_handle_resource_action(
+            &ResourceEditorAction::Cancel { id }.action(),
+            &state,
+            &platform,
+        )
+        .expect("cancel pending draft");
+        router.route(
+            UiEvent::KeyUp { key: KeyCode::Tab, modifiers: Modifiers::none() },
+            &mut WidgetTreeView::new(&mut root),
+            &dispatch,
+        );
+        assert_eq!(router.focus_manager().focused_widget(), Some(background));
+        assert!(!state.can_undo_action());
+        assert!(actions.borrow().is_empty());
+    }
+
+    #[test]
+    fn resource_inspection_rejects_edited_cancelled_locked_and_replaced_drafts() {
+        use crate::app_ui::resource_dialog::{
+            ResourceActionOutcome, ResourceEditorAction, ResourceKind, ResourceUpdate,
+        };
+        use crate::resource_inspection::PathInspectionOutcome;
+        let _guard = crate::app_ui::test_utils::theme_test_guard();
+        let (mut state, clip_id, target) = async_resource_fixture();
+        let mut root = AppUiAppRoot::from_app_state(&state);
+        root.layout(Rect::new(0.0, 0.0, 1280.0, 720.0));
+        let platform = FakePlatform::default();
+        let open = ResourceEditorAction::Open { clip_id, target };
+        let prepare = |root: &mut AppUiAppRoot, state: &AppState| {
+            root.try_handle_resource_action(&open.clone().action(), state, &platform)
+                .expect("open");
+            let id =
+                root.modal.as_ref().and_then(ShellModal::as_resource).expect("dialog").draft.id;
+            for update in [
+                ResourceUpdate::Kind(ResourceKind::ExternalFile),
+                ResourceUpdate::Text("未创建/输出🙂.cube".to_owned()),
+            ] {
+                root.try_handle_resource_action(
+                    &ResourceEditorAction::Update { id, update }.action(),
+                    state,
+                    &platform,
+                )
+                .expect("update");
+            }
+            id
+        };
+        let confirm = |root: &mut AppUiAppRoot, state: &AppState, id| match root
+            .try_handle_resource_action(
+                &ResourceEditorAction::Confirm { id }.action(),
+                state,
+                &platform,
+            )
+            .expect("confirm")
+        {
+            ResourceActionOutcome::Inspect(request) => request.ticket,
+            _ => panic!("new path requires inspection"),
+        };
+        let id = prepare(&mut root, &state);
+        let first = confirm(&mut root, &state, id);
+        assert!(!root
+            .modal
+            .as_ref()
+            .and_then(ShellModal::as_resource)
+            .expect("dialog")
+            .child(8)
+            .expect("apply")
+            .can_focus());
+        assert!(root
+            .modal
+            .as_ref()
+            .and_then(ShellModal::as_resource)
+            .expect("dialog")
+            .child(7)
+            .expect("cancel")
+            .can_focus());
+        assert!(!state.can_undo_action());
+        assert!(matches!(
+            root.try_handle_resource_action(
+                &ResourceEditorAction::Confirm { id }.action(),
+                &state,
+                &platform
+            )
+            .expect("duplicate"),
+            ResourceActionOutcome::Handled(None)
+        ));
+        for text in ["another.cube", "未创建/输出🙂.cube"] {
+            root.try_handle_resource_action(
+                &ResourceEditorAction::Update { id, update: ResourceUpdate::Text(text.into()) }
+                    .action(),
+                &state,
+                &platform,
+            )
+            .expect("edit");
+        }
+        assert!(root
+            .finish_resource_inspection(first, PathInspectionOutcome::File, &state)
+            .is_none());
+        assert!(root
+            .modal
+            .as_ref()
+            .and_then(ShellModal::as_resource)
+            .expect("dialog")
+            .child(8)
+            .expect("apply")
+            .can_focus());
+        assert!(root.modal.is_some());
+        let browsed = confirm(&mut root, &state, id);
+        root.try_handle_resource_action(
+            &ResourceEditorAction::Browse { id, folder: false }.action(),
+            &state,
+            &platform,
+        )
+        .expect("cancelled picker");
+        let dialog = root.modal.as_ref().and_then(ShellModal::as_resource).expect("retained draft");
+        assert!(dialog.pending_inspection.is_none());
+        assert!(dialog.child(8).expect("apply").can_focus());
+        assert!(!state.can_undo_action());
+        assert!(root
+            .finish_resource_inspection(browsed, PathInspectionOutcome::File, &state)
+            .is_none());
+        let second = confirm(&mut root, &state, id);
+        assert!(root
+            .finish_resource_inspection(second, PathInspectionOutcome::TimedOut, &state)
+            .is_none());
+        assert!(root.modal.is_some());
+        assert!(!state.can_undo_action());
+        let third = confirm(&mut root, &state, id);
+        let action = root
+            .finish_resource_inspection(third, PathInspectionOutcome::Missing, &state)
+            .expect("one commit");
+        state.dispatch_action(action).expect("author commit");
+        assert!(root.modal.is_none());
+        assert!(state.undo_timeline().expect("undo"));
+        assert!(!state.can_undo_action());
+        let id = prepare(&mut root, &state);
+        let cancelled = confirm(&mut root, &state, id);
+        root.try_handle_resource_action(
+            &ResourceEditorAction::Cancel { id }.action(),
+            &state,
+            &platform,
+        )
+        .expect("cancel");
+        let id = prepare(&mut root, &state);
+        assert!(root
+            .finish_resource_inspection(cancelled, PathInspectionOutcome::File, &state)
+            .is_none());
+        let locked = confirm(&mut root, &state, id);
+        state.active_sequence_mut_uncommitted().expect("sequence").video_tracks[0].is_locked = true;
+        assert_eq!(root.resource_inspection_ticket(&state), None);
+        assert!(root
+            .finish_resource_inspection(locked, PathInspectionOutcome::File, &state)
+            .is_none());
+        assert!(root.modal.is_none());
+        assert!(!state.can_undo_action());
+        state.active_sequence_mut_uncommitted().expect("sequence").video_tracks[0].is_locked =
+            false;
+        let id = prepare(&mut root, &state);
+        let replaced = confirm(&mut root, &state, id);
+        state.clear_selection();
+        assert!(root
+            .finish_resource_inspection(replaced, PathInspectionOutcome::File, &state)
+            .is_none());
+        assert!(root.modal.is_none());
+        assert!(!state.can_undo_action());
+    }
+
+    #[test]
+    #[ignore = "requires a rebuilt MONDRIAN_RESOURCE_INSPECTION_HELPER product executable"]
+    fn resource_inspection_actual_host_commits_only_after_the_owned_helper_finishes() {
+        use crate::app_ui::action_queue::PendingUiActions;
+        use crate::app_ui::host::AppUiHost;
+        use crate::app_ui::resource_dialog::{ResourceEditorAction, ResourceKind, ResourceUpdate};
+        let _guard = crate::app_ui::test_utils::theme_test_guard();
+        let (state, clip_id, target) = async_resource_fixture();
+        let temp = tempfile::tempdir().expect("workspace");
+        let destination = temp.path().join("新目录").join("输出🙂.cube");
+        let helper =
+            std::env::var_os("MONDRIAN_RESOURCE_INSPECTION_HELPER").expect("rebuilt helper");
+        let mut host = AppUiHost::new_with_preferences_path(
+            state,
+            AppUiPreferences::default(),
+            temp.path().join("prefs.json"),
+        );
+        host.set_resource_inspection_helper_for_test(helper.into());
+        let pending = PendingUiActions::default();
+        let bounds = Rect::new(0.0, 0.0, 1280.0, 720.0);
+        let platform = FakePlatform::default();
+        pending.push(ResourceEditorAction::Open { clip_id, target }.action());
+        host.drain_pending_actions(&pending, bounds, &platform);
+        let id = host
+            .root()
+            .modal
+            .as_ref()
+            .and_then(ShellModal::as_resource)
+            .expect("dialog")
+            .draft
+            .id;
+        for update in [
+            ResourceUpdate::Kind(ResourceKind::ExternalFile),
+            ResourceUpdate::Text(destination.to_str().expect("path").into()),
+        ] {
+            pending.push(ResourceEditorAction::Update { id, update }.action());
+        }
+        pending.push(ResourceEditorAction::Confirm { id }.action());
+        host.drain_pending_actions(&pending, bounds, &platform);
+        assert!(!host.app_state().can_undo_action());
+        assert!(host.root().modal.is_some());
+        assert!(host.resource_inspection_next_wake_delay().is_some());
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while host.root().modal.is_some() {
+            host.poll_background_tasks(bounds);
+            assert!(
+                std::time::Instant::now() < deadline,
+                "resource helper did not complete"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(host.app_state().can_undo_action());
+        assert_eq!(host.resource_inspection_next_wake_delay(), None);
+        assert!(!destination.parent().expect("parent").exists());
+        drop(host);
+    }
+
+    #[test]
+    fn resource_catalog_refreshes_during_ime_without_replacing_draft_controls() {
+        use crate::app_ui::action_queue::PendingUiActions;
+        use crate::app_ui::host::AppUiHost;
+        use crate::app_ui::resource_dialog::{
+            InspectorPropertyTarget, ResourceEditorAction, ResourceUpdate,
+        };
+        use mondrian_core::automation::PropertyDescriptor;
+        use mondrian_core::{ParameterResourceReference, PropertyValue, TimelineTime};
+        use mondrian_effects::{
+            instantiate_effect_node, register_effect_definition, EffectColorDomainContract,
+            EffectDeterminism, EffectExecutionContract, EffectExecutionModes,
+            EffectExtensionDefinitionBuilder, EffectGraphTopology, EffectRenderOp,
+            EffectResourceLifetime, EffectRoiPropagation, EffectStateModel,
+            EffectTemporalInputExtent, EffectType,
+        };
+        use mondrian_ui_core::{FocusManager, TreeWalker};
+        use mondrian_ui_events::EventRouter;
+        let _guard = crate::app_ui::test_utils::theme_test_guard();
+        let mut state = AppState::new();
+        state.test_set_sequence(Some(mondrian_timeline::Sequence::new("Catalog acceptance")));
+        let selected = state
+            .asset_library()
+            .expect("library")
+            .create_solid_color_asset(Some("Film selected"))
+            .expect("selected asset");
+        let other = state
+            .asset_library()
+            .expect("library")
+            .create_solid_color_asset(Some("Film other"))
+            .expect("other asset");
+        let kind = EffectType::External("test.resource.live-catalog".to_owned());
+        let builder = EffectExtensionDefinitionBuilder::new(
+            kind.key(),
+            "Live resource catalog",
+            EffectColorDomainContract::SCENE_LINEAR,
+        )
+        .with_execution_contract(EffectExecutionContract {
+            execution_modes: EffectExecutionModes::CPU_F32,
+            determinism: EffectDeterminism::Deterministic,
+            state_model: EffectStateModel::Stateless,
+            temporal_input: EffectTemporalInputExtent::CURRENT_FRAME,
+            roi_propagation: EffectRoiPropagation::UnknownRequiresFullFrame,
+            resource_lifetime: EffectResourceLifetime::Frame,
+            topology: EffectGraphTopology::LinearChain,
+        })
+        .with_branching_graph(|_, _, graph| {
+            graph.apply(EffectRenderOp::Sharpen { amount: 0.0 });
+        })
+        .property(
+            PropertyDescriptor::new(
+                "asset",
+                "Asset",
+                PropertyValue::Resource(ParameterResourceReference::ProjectAsset {
+                    asset_id: selected,
+                }),
+            )
+            .with_parameter_id(kind.parameter_id("asset").expect("parameter")),
+        );
+        register_effect_definition(builder.build()).expect("definition");
+        let effect = instantiate_effect_node(kind).expect("effect");
+        let target = InspectorPropertyTarget::Effect {
+            effect_id: effect.id,
+            parameter: effect.properties.property("asset").expect("resource").address(),
+        };
+        let mut clip = mondrian_timeline::Clip::new_basic_title(
+            "Title",
+            "Arial",
+            TimelineTime::ZERO,
+            TimelineTime::new(1, 1).expect("duration"),
+        )
+        .expect("clip");
+        let clip_id = clip.id;
+        clip.add_effect_node(effect);
+        state.active_sequence_mut_uncommitted().expect("sequence").video_tracks[0]
+            .add_clip(clip)
+            .expect("add clip");
+        state.select_clip_by_id(clip_id).expect("select clip");
+        let preferences =
+            std::env::temp_dir().join(format!("catalog-{}.json", uuid::Uuid::new_v4()));
+        let mut host =
+            AppUiHost::new_with_preferences_path(state, AppUiPreferences::default(), preferences);
+        let bounds = Rect::new(0.0, 0.0, 1280.0, 720.0);
+        TreeWalker::layout(host.active_root_mut(), bounds);
+        let pending = PendingUiActions::default();
+        let platform = FakePlatform::default();
+        pending.push(ResourceEditorAction::Open { clip_id, target }.action());
+        host.drain_pending_actions(&pending, bounds, &platform);
+        let (draft_id, input, point) = {
+            let dialog =
+                host.root().modal.as_ref().and_then(ShellModal::as_resource).expect("dialog");
+            let input = dialog.child(2).expect("search input");
+            let point = (0..720)
+                .step_by(4)
+                .find_map(|y| {
+                    (0..1280).step_by(4).find_map(|x| {
+                        let point = Point::new(x as f32, y as f32);
+                        input.hit_test(point).then_some(point)
+                    })
+                })
+                .expect("input point");
+            (dialog.draft.id, input.id(), point)
+        };
+        let history = host.app_state().authoring_history().expect("history").diagnostics();
+        let mut router = EventRouter::new(host.active_root().id());
+        {
+            let mut tree = WidgetTreeView::new(host.active_root_mut());
+            let dispatch = |action| pending.push(action);
+            for event in [
+                UiEvent::MouseDown {
+                    position: point,
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::none(),
+                },
+                UiEvent::MouseUp {
+                    position: point,
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::none(),
+                },
+                UiEvent::TextInput("Film".to_owned()),
+                UiEvent::ImePreedit("候选".to_owned()),
+            ] {
+                router.route(event, &mut tree, &dispatch);
+            }
+        }
+        host.drain_pending_actions(&pending, bounds, &platform);
+        let choices = host
+            .root()
+            .modal
+            .as_ref()
+            .and_then(ShellModal::as_resource)
+            .expect("dialog")
+            .child(3)
+            .expect("choices")
+            .id();
+        let added = {
+            let state = host.app_state();
+            let library = state.asset_library().expect("library");
+            library.rename_asset(selected, "Film renamed").expect("rename");
+            library.retire_assets(&[other]).expect("retire other");
+            library.create_solid_color_asset(Some("Film new")).expect("new asset")
+        };
+        host.mark_dirty();
+        host.refresh_if_dirty(bounds);
+        let dialog = host
+            .root()
+            .modal
+            .as_ref()
+            .and_then(ShellModal::as_resource)
+            .expect("retained dialog");
+        assert_eq!(dialog.draft.id, draft_id);
+        assert_eq!(dialog.child(2).expect("search").id(), input);
+        assert_eq!(router.focus_manager().focused_widget(), Some(input));
+        assert!(dialog.is_composing(), "library refresh must preserve IME");
+        assert_eq!(dialog.child(3).expect("choices").id(), choices);
+        assert_eq!(
+            dialog.child(3).expect("choices").accessibility().expect("choice caption").name,
+            Some("Film renamed".to_owned()),
+            "live chooser must reflect authoritative asset rename"
+        );
+        assert_eq!(
+            host.app_state().authoring_history().expect("history").diagnostics(),
+            history
+        );
+        {
+            let mut tree = WidgetTreeView::new(host.active_root_mut());
+            let dispatch = |action| pending.push(action);
+            for event in [
+                UiEvent::ImeCancel,
+                UiEvent::KeyDown { key: KeyCode::Tab, modifiers: Modifiers::none() },
+                UiEvent::KeyDown { key: KeyCode::Space, modifiers: Modifiers::none() },
+                UiEvent::KeyDown { key: KeyCode::Enter, modifiers: Modifiers::none() },
+            ] {
+                router.route(event, &mut tree, &dispatch);
+            }
+        }
+        let actions = pending.take_all();
+        assert_eq!(
+            actions.len(),
+            1,
+            "keyboard selection emits one local draft update"
+        );
+        let Action::Custom { payload, .. } = &actions[0] else {
+            panic!("resource action")
+        };
+        let ResourceEditorAction::Update { id, update: ResourceUpdate::Asset(chosen) } =
+            serde_json::from_value(payload.clone()).expect("selection")
+        else {
+            panic!("asset update")
+        };
+        assert_eq!(id, draft_id);
+        assert_eq!(
+            chosen, added,
+            "fresh imported asset must be the first matching choice"
+        );
+        pending.push(actions[0].clone());
+        host.drain_pending_actions(&pending, bounds, &platform);
+        // An unchanged revision must not reset an open menu's keyboard row.
+        {
+            let mut tree = WidgetTreeView::new(host.active_root_mut());
+            let dispatch = |action| pending.push(action);
+            for key in [KeyCode::Space, KeyCode::Down] {
+                router.route(
+                    UiEvent::KeyDown { key, modifiers: Modifiers::none() },
+                    &mut tree,
+                    &dispatch,
+                );
+            }
+        }
+        host.mark_dirty();
+        host.refresh_if_dirty(bounds);
+        {
+            let mut tree = WidgetTreeView::new(host.active_root_mut());
+            router.route(
+                UiEvent::KeyDown { key: KeyCode::Enter, modifiers: Modifiers::none() },
+                &mut tree,
+                &|action| pending.push(action),
+            );
+        }
+        let actions = pending.take_all();
+        assert_eq!(
+            actions.len(),
+            1,
+            "unchanged library must preserve the highlighted row"
+        );
+        let Action::Custom { payload, .. } = &actions[0] else {
+            panic!("resource action")
+        };
+        let ResourceEditorAction::Update { update: ResourceUpdate::Asset(chosen), .. } =
+            serde_json::from_value(payload.clone()).expect("selection")
+        else {
+            panic!("asset update")
+        };
+        assert_eq!(chosen, selected);
+        // Delayed selection of a retired row cannot author a new binding.
+        pending.push(
+            ResourceEditorAction::Update { id: draft_id, update: ResourceUpdate::Asset(other) }
+                .action(),
+        );
+        pending.push(ResourceEditorAction::Confirm { id: draft_id }.action());
+        host.drain_pending_actions(&pending, bounds, &platform);
+        assert!(host.root().modal.as_ref().and_then(ShellModal::as_resource).is_some());
+        assert_eq!(
+            host.app_state().authoring_history().expect("history").diagnostics(),
+            history
+        );
+    }
+
+    #[test]
+    #[ignore = "requires rebuilt product and SessionProbe in compound_author mode"]
+    fn native_compound_author_edits_undo_and_archive_preserve_actual_pixels() {
+        use crate::app::ui_actions::{
+            visual_effect_set_parameter_value_action, VisualEffectSetParameterValuePayload,
+        };
+        use mondrian_core::automation::ParameterValueWrite;
+        use mondrian_core::{PropertyValue, TimelineTime};
+        use mondrian_effects::{EffectFrameContext, LutPreparationCache, PreparedEffectProgram};
+        let _guard = crate::app_ui::test_utils::theme_test_guard();
+        assert_eq!(
+            std::env::var("MONDRIAN_OPENFX_SESSION_PROBE_MODE").expect("mode"),
+            "compound_author"
+        );
+        let helper =
+            PathBuf::from(std::env::var_os("MONDRIAN_OPENFX_PRODUCT_BINARY").expect("product"));
+        let binary =
+            PathBuf::from(std::env::var_os("MONDRIAN_OPENFX_SESSION_PROBE_BINARY").expect("probe"));
+        let inspection = crate::openfx_adapter::inspect_openfx_binary(&helper, &binary)
+            .expect("inspect actual SDK binary");
+        let kind = crate::openfx_effect::register_selected_openfx_filter(
+            &helper,
+            &inspection,
+            "uk.co.thefoundry.BasicGainPlugin",
+        )
+        .expect("describe and register compound controls");
+        let effect =
+            mondrian_effects::instantiate_effect_node(kind).expect("native compound effect");
+        let defaults = [
+            (
+                "point2",
+                PropertyValue::DoubleVec2([0.12500000000000003, 10.000000000000002]),
+            ),
+            (
+                "point3",
+                PropertyValue::DoubleVec3([
+                    -0.5000000000000001,
+                    1.0000000000000002,
+                    2.0000000000000004,
+                ]),
+            ),
+            (
+                "rgb",
+                PropertyValue::DoubleRgb([
+                    0.10000000000000002,
+                    0.20000000000000004,
+                    0.30000000000000004,
+                ]),
+            ),
+            (
+                "rgba",
+                PropertyValue::DoubleColor([
+                    0.12500000000000003,
+                    0.25000000000000006,
+                    0.5000000000000001,
+                    0.7500000000000001,
+                ]),
+            ),
+            ("integer2", PropertyValue::IntVec2([-123456789, 123456789])),
+            ("integer3", PropertyValue::IntVec3([i32::MIN, 0, i32::MAX])),
+        ];
+        let effect_id = effect.id;
+        let addresses = defaults
+            .iter()
+            .map(|(name, expected)| {
+                let property = effect
+                    .properties
+                    .iter()
+                    .find(|(_, property)| property.descriptor.display_name == *name)
+                    .expect("typed native author property")
+                    .1;
+                assert_eq!(property.static_value(), expected);
+                property.address()
+            })
+            .collect::<Vec<_>>();
+        let mut clip = mondrian_timeline::Clip::new_basic_title(
+            "Tuple",
+            "Arial",
+            TimelineTime::ZERO,
+            TimelineTime::new(1, 1).expect("duration"),
+        )
+        .expect("clip");
+        let clip_id = clip.id;
+        clip.add_effect_node(effect);
+        let mut sequence = mondrian_timeline::Sequence::new("Compound author workflow");
+        sequence.video_tracks[0].add_clip(clip).expect("insert clip");
+        let mut state = AppState::new();
+        state.test_set_sequence(Some(sequence));
+        let execute = |state: &AppState| {
+            let clip = state.active_sequence().expect("sequence").find_clip(clip_id).expect("clip");
+            let range = mondrian_core::TimelineTimeRange::new(
+                TimelineTime::ZERO,
+                TimelineTime::new(1, 1).expect("end"),
+            )
+            .expect("range");
+            let context = EffectFrameContext::new(
+                mondrian_core::Rational::FPS_24,
+                mondrian_effects::EffectProjectGeometry::new(
+                    state.active_sequence().unwrap().settings.resolution.width,
+                    state.active_sequence().unwrap().settings.resolution.height,
+                    mondrian_core::SampleAspectRatio::SQUARE,
+                )
+                .expect("explicit owner project geometry"),
+                range,
+            )
+            .expect("context");
+            let program = PreparedEffectProgram::prepare_hierarchical_with_frame_context(
+                &clip.effects,
+                &[],
+                &[],
+                &[],
+                mondrian_core::WorkingColorSpace::LinearRec709,
+                context,
+                &LutPreparationCache::uncached(),
+            )
+            .expect("compile native compound graph");
+            let graph = program.evaluate(TimelineTime::ZERO).expect("evaluate graph");
+            let input = [[0.1, 0.2, 0.3, 0.05]; 4];
+            let output = mondrian_effects::apply_compiled_effect_graph_rgba_f32(
+                mondrian_effects::EffectFloatFrameView::new(
+                    mondrian_effects::EffectFrameExtent::new(2, 2),
+                    mondrian_effects::EffectValueFormat::new(
+                        mondrian_effects::EffectWorkingPrecision::Float32,
+                        mondrian_effects::EffectColorDomain::SceneLinearRgb,
+                        mondrian_core::ColorFrameAlpha::StraightCoverage,
+                    ),
+                    mondrian_core::ImageSampling::UNIT_SQUARE,
+                    &input,
+                ),
+                &graph,
+                1415,
+            )
+            .expect("execute actual supervised product SDK pixels");
+            let mut multiplier = 1.0;
+            for (index, (name, default)) in defaults.iter().enumerate() {
+                let actual = clip.effects[0]
+                    .properties
+                    .iter()
+                    .find(|(_, property)| property.descriptor.display_name == *name)
+                    .expect("author property")
+                    .1
+                    .static_value()
+                    .to_channel_values();
+                for (channel, (actual, original)) in
+                    actual.iter().zip(default.to_channel_values()).enumerate()
+                {
+                    multiplier +=
+                        (actual - original) * (index + 1) as f64 * (channel + 1) as f64 / 128.0;
+                }
+            }
+            for (actual, original) in output.iter().zip(&input) {
+                for channel in 0..4 {
+                    assert!(
+                        (actual[channel] - original[channel] * multiplier as f32).abs() < 1e-6,
+                        "each precise author component must reach SDK pixel execution"
+                    );
+                }
+            }
+            output
+        };
+        let initial_pixels = execute(&state);
+        assert_eq!(
+            initial_pixels.format().alpha(),
+            mondrian_core::ColorFrameAlpha::StraightCoverage
+        );
+        assert_eq!(initial_pixels.pixels(), &[[0.1, 0.2, 0.3, 0.05]; 4]);
+        for (index, (_, original)) in defaults.iter().enumerate() {
+            let before = execute(&state);
+            let mut channels = original.to_channel_values();
+            let last = channels.len() - 1;
+            channels[last] += if index < 4 { 0.125 } else { -1.0 };
+            let changed =
+                PropertyValue::from_channel_values(original.value_type(), &channels, original);
+            state
+                .dispatch_action(visual_effect_set_parameter_value_action(
+                    VisualEffectSetParameterValuePayload {
+                        clip_id,
+                        effect_id,
+                        write: ParameterValueWrite::Value {
+                            parameter: addresses[index].clone(),
+                            value: changed.clone(),
+                        },
+                    },
+                ))
+                .expect("commit precise native author edit");
+            let after = execute(&state);
+            assert_ne!(after, before, "every tuple kind must change native output");
+            assert!(state.undo_timeline().expect("undo tuple"));
+            assert_eq!(execute(&state), before);
+            assert!(state.redo_timeline().expect("redo tuple"));
+            assert_eq!(execute(&state), after);
+            let clip = state.active_sequence().expect("sequence").find_clip(clip_id).expect("clip");
+            assert_eq!(
+                clip.effects[0]
+                    .properties
+                    .iter()
+                    .find(|(_, property)| property.descriptor.display_name == defaults[index].0)
+                    .expect("edited tuple")
+                    .1
+                    .static_value(),
+                &changed
+            );
+        }
+        let before_save = execute(&state);
+        let properties = state
+            .active_sequence()
+            .expect("sequence")
+            .find_clip(clip_id)
+            .expect("clip")
+            .effects[0]
+            .properties
+            .clone();
+        let workspace = tempfile::tempdir().expect("project folder");
+        let project = workspace.path().join("复合参数🙂.mdp");
+        state
+            .save_project_file_as(project.clone())
+            .expect("durably save actual project");
+        drop(state);
+        let mut reopened = AppState::new();
+        reopened.open_project_file(project).expect("reopen actual container");
+        let clip = reopened
+            .active_sequence()
+            .expect("sequence")
+            .find_clip(clip_id)
+            .expect("reopened clip");
+        assert_eq!(clip.effects[0].id, effect_id);
+        assert_eq!(clip.effects[0].properties, properties);
+        assert_eq!(execute(&reopened), before_save);
+        assert_eq!(
+            reopened.asset_library().expect("library").list_assets().expect("assets").len(),
+            0
+        );
+        drop(reopened);
+    }
+
+    #[test]
+    #[ignore = "set MONDRIAN_OPENFX_PRODUCT_BINARY, SESSION_PROBE_BINARY and probe mode strings_paths"]
+    fn native_path_resource_draft_cancel_undo_save_reopen_preserves_output_pixels() {
+        use crate::app_ui::resource_dialog::{
+            InspectorPropertyTarget, ResourceActionOutcome, ResourceEditorAction, ResourceKind,
+            ResourceUpdate,
+        };
+        use mondrian_core::{ParameterResourceReference, PropertyValue, TimelineTime};
+        let _guard = crate::app_ui::test_utils::theme_test_guard();
+        assert_eq!(
+            std::env::var("MONDRIAN_OPENFX_SESSION_PROBE_MODE").expect("mode"),
+            "strings_paths"
+        );
+        let helper = PathBuf::from(
+            std::env::var_os("MONDRIAN_OPENFX_PRODUCT_BINARY").expect("product worker"),
+        );
+        let binary =
+            PathBuf::from(std::env::var_os("MONDRIAN_OPENFX_SESSION_PROBE_BINARY").expect("probe"));
+        let inspection =
+            crate::openfx_adapter::inspect_openfx_binary(&helper, &binary).expect("inspect");
+        let kind = crate::openfx_effect::register_selected_openfx_filter(
+            &helper,
+            &inspection,
+            "uk.co.thefoundry.BasicGainPlugin",
+        )
+        .expect("register native path controls");
+        let temp = tempfile::tempdir().expect("workspace");
+        let destination = temp.path().join("尚未创建").join("输出🙂.cube");
+        let existing = temp.path().join("已有🙂.cube");
+        std::fs::write(&existing, b"existing input").expect("existing file");
+        let effect = mondrian_effects::instantiate_effect_node(kind).expect("native effect");
+        for (name, kind, selection) in [
+            (
+                "existingFile",
+                mondrian_core::ResourcePathKind::File,
+                mondrian_core::ResourcePathSelection::Existing,
+            ),
+            (
+                "newFile",
+                mondrian_core::ResourcePathKind::File,
+                mondrian_core::ResourcePathSelection::ExistingOrNew,
+            ),
+            (
+                "existingDirectory",
+                mondrian_core::ResourcePathKind::Directory,
+                mondrian_core::ResourcePathSelection::Existing,
+            ),
+            (
+                "newDirectory",
+                mondrian_core::ResourcePathKind::Directory,
+                mondrian_core::ResourcePathSelection::ExistingOrNew,
+            ),
+        ] {
+            let schema = &effect
+                .properties
+                .iter()
+                .find(|(_, p)| p.descriptor.display_name == name)
+                .expect("native path")
+                .1
+                .descriptor
+                .schema;
+            let contract = schema.resource.as_ref().expect("Resource");
+            assert_eq!(
+                contract.allowed_kinds,
+                vec![mondrian_core::ParameterResourceKind::ExternalFile]
+            );
+            let path = contract.path.expect("path");
+            assert_eq!(path.kind, kind);
+            assert_eq!(path.selection, selection);
+            assert_eq!(
+                path.max_utf8_bytes,
+                Some(crate::openfx_host::OPENFX_MAX_STRING_BYTES)
+            );
+        }
+        let effect_id = effect.id;
+        let parameter = effect
+            .properties
+            .iter()
+            .find(|(_, property)| property.descriptor.display_name == "newFile")
+            .expect("destination")
+            .1
+            .address();
+        let original = effect
+            .properties
+            .property_by_address(&parameter)
+            .expect("path")
+            .1
+            .static_value()
+            .clone();
+        let mut clip = mondrian_timeline::Clip::new_basic_title(
+            "Title",
+            "Arial",
+            TimelineTime::ZERO,
+            TimelineTime::new(1, 1).expect("duration"),
+        )
+        .expect("clip");
+        let clip_id = clip.id;
+        clip.add_effect_node(effect);
+        let mut sequence = mondrian_timeline::Sequence::new("Native paths");
+        sequence.video_tracks[0].add_clip(clip).expect("add");
+        let mut state = AppState::new();
+        state.test_set_sequence(Some(sequence));
+        state.select_clip_by_id(clip_id).expect("select");
+        let mut root = AppUiAppRoot::from_app_state(&state);
+        root.layout(Rect::new(0.0, 0.0, 1280.0, 720.0));
+        let open = ResourceEditorAction::Open {
+            clip_id,
+            target: InspectorPropertyTarget::Effect { effect_id, parameter: parameter.clone() },
+        };
+        let route = |root: &mut AppUiAppRoot,
+                     state: &AppState,
+                     event: ResourceEditorAction,
+                     platform: &FakePlatform| {
+            match root
+                .try_handle_resource_action(&event.action(), state, platform)
+                .expect("route")
+            {
+                ResourceActionOutcome::Handled(action) => action,
+                ResourceActionOutcome::Inspect(request) => {
+                    let mut inspector =
+                        crate::resource_inspection::PathInspectionService::new(helper.clone());
+                    inspector.submit(request.ticket, request.path);
+                    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+                    loop {
+                        if let Some((ticket, outcome)) = inspector.poll() {
+                            break root.finish_resource_inspection(ticket, outcome, state);
+                        }
+                        assert!(
+                            std::time::Instant::now() < deadline,
+                            "actual resource inspector did not finish"
+                        );
+                        std::thread::sleep(std::time::Duration::from_millis(5));
+                    }
+                }
+                ResourceActionOutcome::Unhandled => panic!("typed path event"),
+            }
+        };
+        let picker = FakePlatform {
+            save_path: Some(temp.path().join("wrong-save-picker.cube")),
+            open_paths: Some(vec![existing.clone()]),
+            ..FakePlatform::default()
+        };
+        let revision = state.active_sequence().expect("sequence").revision;
+        assert!(route(&mut root, &state, open.clone(), &picker).is_none());
+        let id = root.modal.as_ref().and_then(ShellModal::as_resource).expect("draft").draft.id;
+        assert!(route(
+            &mut root,
+            &state,
+            ResourceEditorAction::Browse { id, folder: false },
+            &picker
+        )
+        .is_none());
+        assert!(picker.dialog_default_names.lock().expect("names").is_empty());
+        assert!(route(
+            &mut root,
+            &state,
+            ResourceEditorAction::Browse { id, folder: false },
+            &FakePlatform::default()
+        )
+        .is_none());
+        assert_eq!(
+            root.modal
+                .as_ref()
+                .and_then(ShellModal::as_resource)
+                .expect("draft")
+                .draft
+                .value()
+                .expect("selected"),
+            ParameterResourceReference::ExternalFile { path: existing.clone().into() }
+        );
+        assert!(route(
+            &mut root,
+            &state,
+            ResourceEditorAction::Update {
+                id,
+                update: ResourceUpdate::Text(destination.to_str().expect("UTF-8").to_owned())
+            },
+            &picker
+        )
+        .is_none());
+        assert!(route(
+            &mut root,
+            &state,
+            ResourceEditorAction::Cancel { id },
+            &picker
+        )
+        .is_none());
+        assert!(!state.can_undo_action());
+        assert_eq!(
+            state.active_sequence().expect("sequence").revision,
+            revision
+        );
+        assert!(!destination.exists());
+        assert!(!destination.parent().expect("parent").exists());
+        assert!(route(&mut root, &state, open, &picker).is_none());
+        let id = root.modal.as_ref().and_then(ShellModal::as_resource).expect("draft").draft.id;
+        assert!(route(
+            &mut root,
+            &state,
+            ResourceEditorAction::Update {
+                id,
+                update: ResourceUpdate::Kind(ResourceKind::ExternalFile)
+            },
+            &picker
+        )
+        .is_none());
+        assert!(route(
+            &mut root,
+            &state,
+            ResourceEditorAction::Browse { id, folder: false },
+            &picker
+        )
+        .is_none());
+        assert!(route(
+            &mut root,
+            &state,
+            ResourceEditorAction::Update {
+                id,
+                update: ResourceUpdate::Text(destination.to_str().expect("UTF-8").to_owned())
+            },
+            &picker
+        )
+        .is_none());
+        let action = route(
+            &mut root,
+            &state,
+            ResourceEditorAction::Confirm { id },
+            &picker,
+        )
+        .expect("one author action");
+        state.dispatch_action(action).expect("atomic commit");
+        let resource = |state: &AppState| {
+            state
+                .active_sequence()
+                .expect("sequence")
+                .find_clip(clip_id)
+                .expect("clip")
+                .effects
+                .iter()
+                .find(|effect| effect.id == effect_id)
+                .expect("effect")
+                .properties
+                .property_by_address(&parameter)
+                .expect("path")
+                .1
+                .static_value()
+                .clone()
+        };
+        let bound = PropertyValue::Resource(ParameterResourceReference::ExternalFile {
+            path: destination.clone().into(),
+        });
+        assert_eq!(resource(&state), bound);
+        assert!(state.undo_timeline().expect("undo"));
+        assert_eq!(resource(&state), original);
+        assert!(!state.can_undo_action());
+        assert!(state.redo_timeline().expect("redo"));
+        assert_eq!(resource(&state), bound);
+        let execute = |state: &AppState| {
+            use mondrian_core::{
+                Rational, SampleAspectRatio, TimelineTimeRange, WorkingColorSpace,
+            };
+            use mondrian_effects::{
+                EffectFrameContext, LutPreparationCache, PreparedEffectProgram,
+            };
+            let clip = state.active_sequence().expect("sequence").find_clip(clip_id).expect("clip");
+            let bytes: usize = clip.effects[0]
+                .properties
+                .iter()
+                .map(|(_, p)| match p.static_value() {
+                    PropertyValue::Text(text) => text.len(),
+                    PropertyValue::Resource(ParameterResourceReference::ExternalFile { path }) => {
+                        path.utf8_text().expect("UTF-8").len()
+                    }
+                    _ => 0,
+                })
+                .sum();
+            let range =
+                TimelineTimeRange::new(TimelineTime::ZERO, TimelineTime::new(1, 1).expect("end"))
+                    .expect("range");
+            let context = EffectFrameContext::new(
+                Rational::FPS_24,
+                mondrian_effects::EffectProjectGeometry::new(
+                    state.active_sequence().unwrap().settings.resolution.width,
+                    state.active_sequence().unwrap().settings.resolution.height,
+                    SampleAspectRatio::SQUARE,
+                )
+                .expect("explicit owner project geometry"),
+                range,
+            )
+            .expect("context");
+            let program = PreparedEffectProgram::prepare_hierarchical_with_frame_context(
+                &clip.effects,
+                &[],
+                &[],
+                &[],
+                WorkingColorSpace::LinearRec709,
+                context,
+                &LutPreparationCache::uncached(),
+            )
+            .expect("compile native paths");
+            let graph = program.evaluate(TimelineTime::ZERO).expect("evaluate");
+            let input = vec![[0.1, 0.2, 0.3, 0.05]; 4];
+            let pixels = mondrian_effects::apply_compiled_effect_graph_rgba_f32(
+                mondrian_effects::EffectFloatFrameView::new(
+                    mondrian_effects::EffectFrameExtent::new(2, 2),
+                    mondrian_effects::EffectValueFormat::new(
+                        mondrian_effects::EffectWorkingPrecision::Float32,
+                        mondrian_effects::EffectColorDomain::SceneLinearRgb,
+                        mondrian_core::ColorFrameAlpha::StraightCoverage,
+                    ),
+                    mondrian_core::ImageSampling::UNIT_SQUARE,
+                    &input,
+                ),
+                &graph,
+                1193,
+            )
+            .expect("actual native pixels");
+            let gain = 1.0 + (bytes % 11) as f32 / 10.0;
+            for (actual, original) in pixels.iter().zip(&input) {
+                for channel in 0..4 {
+                    assert!((actual[channel] - original[channel] * gain).abs() < 1e-6);
+                }
+            }
+            pixels
+        };
+        let before = execute(&state);
+        assert_eq!(
+            state.asset_library().expect("library").list_assets().expect("assets").len(),
+            0
+        );
+        let project = temp.path().join("验收.mdp");
+        state.save_project_file_as(project.clone()).expect("durable save");
+        drop(root);
+        drop(state);
+        let mut reopened = AppState::new();
+        reopened.open_project_file(project).expect("reopen");
+        assert_eq!(resource(&reopened), bound);
+        assert_eq!(execute(&reopened), before);
+        assert_eq!(
+            std::fs::read(&existing).expect("existing input"),
+            b"existing input"
+        );
+        reopened.select_clip_by_id(clip_id).expect("select reopened clip");
+        let mut root = AppUiAppRoot::from_app_state(&reopened);
+        root.layout(Rect::new(0.0, 0.0, 1280.0, 720.0));
+        let open = ResourceEditorAction::Open {
+            clip_id,
+            target: InspectorPropertyTarget::Effect { effect_id, parameter: parameter.clone() },
+        };
+        assert!(route(&mut root, &reopened, open, &picker).is_none());
+        let id = root.modal.as_ref().and_then(ShellModal::as_resource).expect("draft").draft.id;
+        assert!(route(
+            &mut root,
+            &reopened,
+            ResourceEditorAction::Update {
+                id,
+                update: ResourceUpdate::Kind(ResourceKind::Unbound)
+            },
+            &picker
+        )
+        .is_none());
+        let action = route(
+            &mut root,
+            &reopened,
+            ResourceEditorAction::Confirm { id },
+            &picker,
+        )
+        .expect("clear author action");
+        reopened.dispatch_action(action).expect("clear");
+        assert_eq!(
+            resource(&reopened),
+            PropertyValue::Resource(ParameterResourceReference::Unbound)
+        );
+        execute(&reopened);
+        assert!(reopened.undo_timeline().expect("undo clear"));
+        assert_eq!(resource(&reopened), bound);
+        assert_eq!(execute(&reopened), before);
+        assert!(!destination.exists());
+        assert!(!destination.parent().expect("parent").exists());
+    }
+
+    #[test]
+    fn resource_lut_draft_commit_undo_save_reopen_executes_real_cube() {
+        use crate::app_ui::resource_dialog::{
+            InspectorPropertyTarget, ResourceActionOutcome, ResourceEditorAction, ResourceUpdate,
+        };
+        use mondrian_core::{
+            ParameterResourceReference, PropertyValue, TimelineTime, WorkingColorSpace,
+        };
+        use mondrian_effects::EffectType;
+        use mondrian_ui_core::{FocusManager, TreeWalker, WidgetTree};
+        use mondrian_ui_events::EventRouter;
+        let _guard = crate::app_ui::test_utils::theme_test_guard();
+        let directory = std::env::temp_dir().join(format!(
+            "mondrian-resource-workflow-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&directory).expect("test directory");
+        let cube = directory.join("蓝色 映射.cube");
+        std::fs::write(
+            &cube,
+            "LUT_3D_SIZE 2\n0 0 0\n0 0 1\n0 1 0\n0 1 1\n1 0 0\n1 0 1\n1 1 0\n1 1 1\n",
+        )
+        .expect("real cube file");
+        let mut sequence = mondrian_timeline::Sequence::new("Resource acceptance");
+        let mut clip = mondrian_timeline::Clip::new_basic_title(
+            "Title",
+            "Arial",
+            TimelineTime::ZERO,
+            TimelineTime::new(1, 1).expect("duration"),
+        )
+        .expect("generated clip");
+        let clip_id = clip.id;
+        let mut effect = mondrian_effects::instantiate_effect_node(EffectType::Lut3D).expect("LUT");
+        let effect_id = effect.id;
+        effect
+            .set_static_value_by_parameter(
+                &EffectType::Lut3D.parameter_id("processing_space").expect("space"),
+                PropertyValue::Enum("scene_linear".to_owned()),
+            )
+            .expect("explicit color space");
+        let path = EffectType::Lut3D.property_path("path");
+        let parameter = effect.properties.property(&path).expect("path property").address();
+        clip.add_effect_node(effect);
+        sequence.video_tracks[0].add_clip(clip).expect("add generated clip");
+        let mut state = AppState::new();
+        state.test_set_sequence(Some(sequence));
+        state.select_clip_by_id(clip_id).expect("select clip");
+        let mut root = AppUiAppRoot::from_app_state(&state);
+        root.layout(Rect::new(0.0, 0.0, 1280.0, 720.0));
+        let background = {
+            let tree = WidgetTreeView::new(&mut root);
+            TreeWalker::focus_next(&tree, WidgetId::default()).expect("background focus")
+        };
+        let mut router = EventRouter::new(root.id());
+        router.focus_manager_mut().set_focused_widget(Some(background), None);
+        let target = InspectorPropertyTarget::Effect { effect_id, parameter: parameter.clone() };
+        let platform = FakePlatform {
+            open_paths: Some(vec![cube.clone()]),
+            ..FakePlatform::default()
+        };
+        let open = ResourceEditorAction::Open { clip_id, target: target.clone() };
+        let route =
+            |root: &mut AppUiAppRoot, state: &AppState, event: ResourceEditorAction| match root
+                .try_handle_resource_action(&event.action(), state, &platform)
+                .expect("shell resource event")
+            {
+                ResourceActionOutcome::Handled(action) => action,
+                ResourceActionOutcome::Inspect(_) => {
+                    panic!("reference-only LUT paths do not inspect the filesystem")
+                }
+                ResourceActionOutcome::Unhandled => panic!("typed resource event must be handled"),
+            };
+        let revision = state.active_sequence().expect("sequence").revision;
+        assert!(route(&mut root, &state, open.clone()).is_none());
+        let cancelled =
+            root.modal.as_ref().and_then(ShellModal::as_resource).expect("draft").draft.id;
+        assert!(route(
+            &mut root,
+            &state,
+            ResourceEditorAction::Update {
+                id: cancelled,
+                update: ResourceUpdate::Kind(
+                    crate::app_ui::resource_dialog::ResourceKind::ExternalFile
+                )
+            }
+        )
+        .is_none());
+        assert!(route(
+            &mut root,
+            &state,
+            ResourceEditorAction::Browse { id: cancelled, folder: false }
+        )
+        .is_none());
+        let scope = root.keyboard_focus_scope().expect("resource modal scope");
+        let keyboard_actions = std::cell::RefCell::new(Vec::new());
+        let dispatch = |action| keyboard_actions.borrow_mut().push(action);
+        {
+            let mut tree = WidgetTreeView::new(&mut root);
+            let mut visited = std::collections::HashSet::new();
+            for modifiers in [Modifiers::none(), Modifiers::shift()] {
+                for _ in 0..24 {
+                    assert_eq!(
+                        router.route(
+                            UiEvent::KeyDown { key: KeyCode::Tab, modifiers },
+                            &mut tree,
+                            &dispatch,
+                        ),
+                        EventResult::Handled
+                    );
+                    let focused = router.focus_manager().focused_widget().expect("modal focus");
+                    visited.insert(focused);
+                    let mut ancestor = Some(focused);
+                    while ancestor.is_some() && ancestor != Some(scope) {
+                        ancestor = ancestor.and_then(|id| tree.parent_id(id));
+                    }
+                    assert_eq!(ancestor, Some(scope), "resource Tab escaped the modal");
+                    assert_ne!(focused, background);
+                }
+            }
+            assert!(
+                visited.len() >= 4,
+                "Tab must reach input, browse and confirmation controls"
+            );
+        }
+        assert!(
+            keyboard_actions.borrow().is_empty(),
+            "Tab must not confirm or edit a resource"
+        );
+        assert!(route(
+            &mut root,
+            &state,
+            ResourceEditorAction::Cancel { id: cancelled }
+        )
+        .is_none());
+        {
+            let mut tree = WidgetTreeView::new(&mut root);
+            router.route(
+                UiEvent::KeyUp { key: KeyCode::Tab, modifiers: Modifiers::none() },
+                &mut tree,
+                &dispatch,
+            );
+        }
+        assert_eq!(router.focus_manager().focused_widget(), Some(background));
+        assert_eq!(
+            state.active_sequence().expect("sequence").revision,
+            revision
+        );
+        assert!(!state.can_undo_action());
+        assert!(route(&mut root, &state, open.clone()).is_none());
+        let unchanged =
+            root.modal.as_ref().and_then(ShellModal::as_resource).expect("draft").draft.id;
+        assert!(route(
+            &mut root,
+            &state,
+            ResourceEditorAction::Confirm { id: unchanged }
+        )
+        .is_none());
+        assert!(!state.can_undo_action());
+        assert!(route(&mut root, &state, open.clone()).is_none());
+        let id = root.modal.as_ref().and_then(ShellModal::as_resource).expect("draft").draft.id;
+        assert!(route(
+            &mut root,
+            &state,
+            ResourceEditorAction::Cancel { id: cancelled }
+        )
+        .is_none());
+        assert!(
+            root.modal.is_some(),
+            "stale cancellation cannot close a newer draft"
+        );
+        assert!(route(
+            &mut root,
+            &state,
+            ResourceEditorAction::Update {
+                id,
+                update: ResourceUpdate::Kind(
+                    crate::app_ui::resource_dialog::ResourceKind::ExternalFile
+                )
+            }
+        )
+        .is_none());
+        assert!(route(
+            &mut root,
+            &state,
+            ResourceEditorAction::Browse { id, folder: false }
+        )
+        .is_none());
+        let selected = root
+            .modal
+            .as_ref()
+            .and_then(ShellModal::as_resource)
+            .expect("draft")
+            .draft
+            .value()
+            .expect("selected cube");
+        for picker in [
+            FakePlatform::default(),
+            FakePlatform { dialog_error: true, ..FakePlatform::default() },
+            FakePlatform {
+                open_paths: Some(vec![cube.clone(), cube.clone()]),
+                ..FakePlatform::default()
+            },
+        ] {
+            assert!(matches!(
+                root.try_handle_resource_action(
+                    &ResourceEditorAction::Browse { id, folder: false }.action(),
+                    &state,
+                    &picker
+                )
+                .expect("picker result"),
+                ResourceActionOutcome::Handled(None)
+            ));
+            assert_eq!(
+                root.modal
+                    .as_ref()
+                    .and_then(ShellModal::as_resource)
+                    .expect("preserved draft")
+                    .draft
+                    .value()
+                    .expect("preserved value"),
+                selected
+            );
+            let filters = picker.dialog_filters.lock().expect("filters");
+            assert_eq!(filters[0][0].extensions, vec!["cube".to_owned()]);
+        }
+        let folder_picker = FakePlatform {
+            open_folder: Some(directory.clone()),
+            ..FakePlatform::default()
+        };
+        assert!(matches!(
+            root.try_handle_resource_action(
+                &ResourceEditorAction::Browse { id, folder: true }.action(),
+                &state,
+                &folder_picker
+            )
+            .expect("disallowed folder"),
+            ResourceActionOutcome::Handled(None)
+        ));
+        assert!(
+            folder_picker.dialog_titles.lock().expect("titles").is_empty(),
+            "File-only schema must not open a folder picker"
+        );
+        assert!(route(
+            &mut root,
+            &state,
+            ResourceEditorAction::Update {
+                id,
+                update: ResourceUpdate::Text("wrong.txt".to_owned())
+            }
+        )
+        .is_none());
+        assert!(route(&mut root, &state, ResourceEditorAction::Confirm { id }).is_none());
+        assert!(
+            root.modal.is_some(),
+            "invalid confirmation retains the recoverable draft"
+        );
+        assert!(route(
+            &mut root,
+            &state,
+            ResourceEditorAction::Update {
+                id,
+                update: ResourceUpdate::Text(cube.to_string_lossy().into_owned())
+            }
+        )
+        .is_none());
+        assert_eq!(
+            state.active_sequence().expect("sequence").revision,
+            revision
+        );
+        let action = route(&mut root, &state, ResourceEditorAction::Confirm { id })
+            .expect("one author action");
+        assert!(root.modal.is_none());
+        state.dispatch_action(action).expect("atomic author commit");
+        let resource = |state: &AppState| {
+            state
+                .active_sequence()
+                .expect("sequence")
+                .find_clip(clip_id)
+                .expect("clip")
+                .effects
+                .iter()
+                .find(|effect| effect.id == effect_id)
+                .expect("effect")
+                .properties
+                .property_by_address(&parameter)
+                .expect("path")
+                .1
+                .static_value()
+                .clone()
+        };
+        let bound = PropertyValue::Resource(ParameterResourceReference::ExternalFile {
+            path: cube.clone().into(),
+        });
+        assert_eq!(resource(&state), bound);
+        assert!(state.undo_timeline().expect("undo binding"));
+        assert_eq!(
+            resource(&state),
+            PropertyValue::Resource(ParameterResourceReference::Unbound)
+        );
+        assert!(
+            !state.can_undo_action(),
+            "the confirmed binding is exactly one history entry"
+        );
+        assert!(state.redo_timeline().expect("redo binding"));
+        assert_eq!(resource(&state), bound);
+        let execute_lut = |state: &AppState| {
+            let sequence = state.active_sequence().expect("sequence");
+            let clip = sequence.find_clip(clip_id).expect("clip");
+            let graph = mondrian_effects::compile_clip_effect_graph(
+                &clip.effects,
+                &[],
+                TimelineTime::ZERO,
+                WorkingColorSpace::LinearRec709,
+            )
+            .expect("compile authored LUT");
+            mondrian_effects::apply_compiled_effect_graph_rgba_f32(
+                mondrian_effects::EffectFloatFrameView::new(
+                    mondrian_effects::EffectFrameExtent::new(3, 2),
+                    mondrian_effects::EffectValueFormat::new(
+                        mondrian_effects::EffectWorkingPrecision::Float32,
+                        mondrian_effects::EffectColorDomain::SceneLinearRgb,
+                        mondrian_core::ColorFrameAlpha::StraightCoverage,
+                    ),
+                    mondrian_core::ImageSampling::UNIT_SQUARE,
+                    &[
+                        [1.0, 0.0, 0.0, 0.375],
+                        [0.125, 0.25, 0.75, 1.0],
+                        [0.75, 0.5, 0.125, 0.0],
+                        [0.125, 0.25, 0.75, 1.0 / 65_535.0],
+                        [1.0, 1.0, 1.0, 1.0],
+                        [0.5, 0.5, 0.5, 0.25],
+                    ],
+                ),
+                &graph,
+                0,
+            )
+            .expect("execute real LUT pixels")
+        };
+        let before_save = execute_lut(&state);
+        assert_eq!(
+            before_save.format().alpha(),
+            mondrian_core::ColorFrameAlpha::StraightCoverage
+        );
+        assert_eq!(
+            before_save.pixels(),
+            &[
+                [0.0, 0.0, 1.0, 0.375],
+                [0.75, 0.25, 0.125, 1.0],
+                [0.75, 0.5, 0.125, 0.0],
+                [0.75, 0.25, 0.125, 1.0 / 65_535.0],
+                [1.0, 1.0, 1.0, 1.0],
+                [0.5, 0.5, 0.5, 0.25],
+            ],
+            "LUT must transform every positive-alpha sample, preserve alpha and retain zero-alpha hidden RGB"
+        );
+        assert_eq!(
+            state.asset_library().expect("library").list_assets().expect("assets").len(),
+            0,
+            "binding a LUT must not import library media"
+        );
+        assert!(state.undo_timeline().expect("Undo before save"));
+        let assert_unbound_lut = |state: &AppState| {
+            let clip = state.active_sequence().expect("sequence").find_clip(clip_id).expect("clip");
+            let error = mondrian_effects::compile_clip_effect_graph(
+                &clip.effects,
+                &[],
+                TimelineTime::ZERO,
+                WorkingColorSpace::LinearRec709,
+            )
+            .expect_err("an unbound LUT must not reuse the previous compiled resource");
+            assert!(
+                matches!(error, mondrian_effects::EffectGraphBuildError::ResourceUnavailable {
+                effect_id: owner, parameter_id: ref parameter, recovery: mondrian_effects::EffectResourceRecovery::AuthorEdit, ..
+            } if owner == effect_id && parameter == &EffectType::Lut3D.parameter_id("path").expect("path parameter"))
+            );
+        };
+        assert_unbound_lut(&state);
+        let undone_project = directory.join("撤销状态.mdp");
+        state
+            .save_project_file_as(undone_project.clone())
+            .expect("save undone author state");
+        assert!(
+            state.can_redo_action(),
+            "saving must preserve the live Redo branch"
+        );
+        let mut undone_reopened = AppState::new();
+        undone_reopened
+            .open_project_file(undone_project)
+            .expect("reopen undone snapshot");
+        assert_eq!(
+            resource(&undone_reopened),
+            PropertyValue::Resource(ParameterResourceReference::Unbound)
+        );
+        assert_unbound_lut(&undone_reopened);
+        assert!(!undone_reopened.can_undo_action());
+        assert!(
+            !undone_reopened.can_redo_action(),
+            "a fresh Session must not resurrect old history"
+        );
+        drop(undone_reopened);
+        assert!(state.redo_timeline().expect("Redo after durable save"));
+        assert_eq!(
+            execute_lut(&state),
+            before_save,
+            "Redo must restore the resource and exact pixels after saving an undone snapshot"
+        );
+        root.refresh_from_app_state(&state);
+        assert!(route(&mut root, &state, open).is_none());
+        state.active_sequence_mut_uncommitted().expect("sequence").video_tracks[0].is_locked = true;
+        root.refresh_from_app_state(&state);
+        assert!(root.modal.is_none(), "locking the owner cancels the draft");
+        state.active_sequence_mut_uncommitted().expect("sequence").video_tracks[0].is_locked =
+            false;
+        let project = directory.join("验收.mdp");
+        state.save_project_file_as(project.clone()).expect("durable save");
+        drop(root);
+        drop(state);
+        let mut reopened = AppState::new();
+        reopened.open_project_file(project).expect("reopen actual container");
+        assert_eq!(resource(&reopened), bound);
+        assert_eq!(
+            execute_lut(&reopened),
+            before_save,
+            "durable reopen must preserve exact output"
+        );
+        let clip = reopened
+            .active_sequence()
+            .expect("reopened sequence")
+            .find_clip(clip_id)
+            .expect("persisted clip");
+        let graph = mondrian_effects::compile_clip_effect_graph(
+            &clip.effects,
+            &[],
+            TimelineTime::ZERO,
+            WorkingColorSpace::LinearRec709,
+        )
+        .expect("compile persisted LUT");
+        let output = mondrian_effects::apply_compiled_effect_graph_rgba_f32(
+            mondrian_effects::EffectFloatFrameView::new(
+                mondrian_effects::EffectFrameExtent::new(1, 1),
+                mondrian_effects::EffectValueFormat::new(
+                    mondrian_effects::EffectWorkingPrecision::Float32,
+                    mondrian_effects::EffectColorDomain::SceneLinearRgb,
+                    mondrian_core::ColorFrameAlpha::StraightCoverage,
+                ),
+                mondrian_core::ImageSampling::UNIT_SQUARE,
+                &[[1.0, 0.0, 0.0, 0.375]],
+            ),
+            &graph,
+            0,
+        )
+        .expect("execute compiled LUT");
+        assert_eq!(
+            output.pixels(),
+            vec![[0.0, 0.0, 1.0, 0.375]],
+            "real cube must swap red and blue without changing alpha"
+        );
+        drop(reopened);
+        std::fs::remove_dir_all(&directory).expect("remove test-owned directory");
+    }
+
+    #[test]
     fn resolve_app_shell_import_dialog_returns_import_action() {
         let paths = vec![
             PathBuf::from("E:/media/a.mov"),
@@ -5089,10 +8458,53 @@ mod tests {
             ProductAction::decode_external(&action).expect("decode"),
             Some(ProductAction::VisualEffect(
                 VisualEffectProductAction::InstallOpenFxBundle(
-                    VisualEffectInstallOpenFxBundlePayload { path },
+                    VisualEffectInstallOpenFxBundlePayload {
+                        path,
+                        context: crate::openfx_host::OpenFxContext::Filter
+                    },
                 ),
             ))
         );
+    }
+
+    #[test]
+    fn openfx_generator_picker_preserves_explicit_context_and_refuses_unknown_requests() {
+        let request = crate::app::ui_actions::app_shell_install_openfx_generator_dialog_action();
+        assert!(
+            resolve_app_shell_action(request.clone(), &FakePlatform::default(), None).is_none()
+        );
+        let path = PathBuf::from("E:/plugins/Generator.ofx.bundle");
+        let platform = FakePlatform {
+            open_folder: Some(path.clone()),
+            ..FakePlatform::default()
+        };
+        let action = resolve_app_shell_action(request, &platform, None).unwrap();
+        assert_eq!(
+            ProductAction::decode_external(&action).unwrap(),
+            Some(ProductAction::VisualEffect(
+                VisualEffectProductAction::InstallOpenFxBundle(
+                    VisualEffectInstallOpenFxBundlePayload {
+                        path,
+                        context: crate::openfx_host::OpenFxContext::Generator
+                    },
+                )
+            ))
+        );
+        for payload in [
+            serde_json::json!({"context":"retimer"}),
+            serde_json::json!({"context":"generator","unknown":true}),
+        ] {
+            assert!(resolve_app_shell_action(
+                Action::Custom {
+                    namespace: APP_SHELL_NAMESPACE.to_owned(),
+                    name: APP_SHELL_INSTALL_OPENFX_BUNDLE_DIALOG.to_owned(),
+                    payload,
+                },
+                &platform,
+                None
+            )
+            .is_none());
+        }
     }
 
     #[test]

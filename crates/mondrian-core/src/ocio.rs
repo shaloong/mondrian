@@ -3042,24 +3042,33 @@ impl OcioGpuShaderBundle {
         shader_text: String,
         desc: &GpuShaderDesc,
         cache_id: Option<String>,
-    ) -> Self {
-        Self {
+    ) -> Result<Self, String> {
+        let textures_2d = ocio_texture_2d_bindings(desc)?;
+        let textures_3d = ocio_texture_3d_bindings(desc)?;
+        let uniforms = ocio_uniform_bindings(desc)?;
+        Ok(Self {
             src_color_space: ocio_color_space_identity_name(src).to_string(),
             dst_color_space: ocio_color_space_identity_name(dst).to_string(),
             language,
             shader_text,
-            descriptor_set_index: desc.descriptor_set_index(),
-            texture_binding_start: desc.texture_binding_start(),
+            descriptor_set_index: desc
+                .try_descriptor_set_index()
+                .map_err(|err| format!("OCIO GPU descriptor set index: {err}"))?,
+            texture_binding_start: desc
+                .try_texture_binding_start()
+                .map_err(|err| format!("OCIO GPU texture binding start: {err}"))?,
             uniform_buffer_binding: 0,
-            uniform_buffer_size: desc.uniform_buffer_size(),
-            texture_2d_count: desc.num_textures(),
-            texture_3d_count: desc.num_3d_textures(),
-            uniform_count: desc.num_uniforms(),
-            textures_2d: ocio_texture_2d_bindings(desc),
-            textures_3d: ocio_texture_3d_bindings(desc),
-            uniforms: ocio_uniform_bindings(desc),
+            uniform_buffer_size: desc
+                .try_uniform_buffer_size()
+                .map_err(|err| format!("OCIO GPU uniform buffer size: {err}"))?,
+            texture_2d_count: textures_2d.len() as u32,
+            texture_3d_count: textures_3d.len() as u32,
+            uniform_count: uniforms.len() as u32,
+            textures_2d,
+            textures_3d,
+            uniforms,
             cache_id,
-        }
+        })
     }
 
     fn for_display(
@@ -3070,62 +3079,113 @@ impl OcioGpuShaderBundle {
         shader_text: String,
         desc: &GpuShaderDesc,
         cache_id: Option<String>,
-    ) -> Self {
-        Self {
+    ) -> Result<Self, String> {
+        let textures_2d = ocio_texture_2d_bindings(desc)?;
+        let textures_3d = ocio_texture_3d_bindings(desc)?;
+        let uniforms = ocio_uniform_bindings(desc)?;
+        Ok(Self {
             src_color_space: ocio_color_space_identity_name(src).to_string(),
             dst_color_space: format!("{display}/{view}"),
             language,
             shader_text,
-            descriptor_set_index: desc.descriptor_set_index(),
-            texture_binding_start: desc.texture_binding_start(),
+            descriptor_set_index: desc
+                .try_descriptor_set_index()
+                .map_err(|err| format!("OCIO GPU descriptor set index: {err}"))?,
+            texture_binding_start: desc
+                .try_texture_binding_start()
+                .map_err(|err| format!("OCIO GPU texture binding start: {err}"))?,
             uniform_buffer_binding: 0,
-            uniform_buffer_size: desc.uniform_buffer_size(),
-            texture_2d_count: desc.num_textures(),
-            texture_3d_count: desc.num_3d_textures(),
-            uniform_count: desc.num_uniforms(),
-            textures_2d: ocio_texture_2d_bindings(desc),
-            textures_3d: ocio_texture_3d_bindings(desc),
-            uniforms: ocio_uniform_bindings(desc),
+            uniform_buffer_size: desc
+                .try_uniform_buffer_size()
+                .map_err(|err| format!("OCIO GPU uniform buffer size: {err}"))?,
+            texture_2d_count: textures_2d.len() as u32,
+            texture_3d_count: textures_3d.len() as u32,
+            uniform_count: uniforms.len() as u32,
+            textures_2d,
+            textures_3d,
+            uniforms,
             cache_id,
-        }
+        })
     }
 }
 
-fn ocio_texture_2d_bindings(desc: &GpuShaderDesc) -> Vec<OcioGpuTexture2DBinding> {
-    desc.textures_2d()
-        .into_iter()
-        .enumerate()
-        .map(|(index, texture)| OcioGpuTexture2DBinding {
-            index: index as u32,
-            texture_name: texture.texture_name,
-            sampler_name: texture.sampler_name,
-            binding_index: texture.binding_index,
-            channel: ocio_texture_channel(texture.channel),
-            dimensions: ocio_texture_dimensions(texture.dimensions),
-            interpolation: ocio_texture_interpolation(texture.interpolation),
-            width: texture.width,
-            height: texture.height,
-            value_count: texture.values.len(),
-            values: texture.values,
+fn ocio_texture_2d_bindings(desc: &GpuShaderDesc) -> Result<Vec<OcioGpuTexture2DBinding>, String> {
+    let count = desc
+        .try_num_textures()
+        .map_err(|err| format!("OCIO GPU 1D/2D texture count: {err}"))?;
+    (0..count)
+        .map(|index| {
+            let texture = desc
+                .try_texture_2d(index)
+                .map_err(|err| format!("OCIO GPU 1D/2D texture {index}: {err}"))?
+                .ok_or_else(|| format!("OCIO GPU 1D/2D texture {index} is missing"))?;
+            ocio_texture_2d_binding(index, texture)
         })
         .collect()
 }
 
-fn ocio_texture_3d_bindings(desc: &GpuShaderDesc) -> Vec<OcioGpuTexture3DBinding> {
-    desc.textures_3d()
-        .into_iter()
-        .enumerate()
-        .map(|(index, texture)| OcioGpuTexture3DBinding {
-            index: index as u32,
-            texture_name: texture.texture_name,
-            sampler_name: texture.sampler_name,
-            binding_index: texture.binding_index,
-            interpolation: ocio_texture_interpolation(texture.interpolation),
-            edge_len: texture.edge_len,
-            value_count: texture.values.len(),
-            values: texture.values,
+fn ocio_texture_2d_binding(
+    index: u32,
+    texture: ocio_rs::GpuTexture2D,
+) -> Result<OcioGpuTexture2DBinding, String> {
+    let binding_index = texture.binding_index.ok_or_else(|| {
+        format!(
+            "OCIO GPU 1D/2D texture '{}' (index {index}) is missing a shader binding index; \
+             Mondrian requires OpenColorIO 2.5.1 or newer",
+            texture.texture_name
+        )
+    })?;
+    Ok(OcioGpuTexture2DBinding {
+        index,
+        texture_name: texture.texture_name,
+        sampler_name: texture.sampler_name,
+        binding_index,
+        channel: ocio_texture_channel(texture.channel),
+        dimensions: ocio_texture_dimensions(texture.dimensions),
+        interpolation: ocio_texture_interpolation(texture.interpolation),
+        width: texture.width,
+        height: texture.height,
+        value_count: texture.values.len(),
+        values: texture.values,
+    })
+}
+
+fn ocio_texture_3d_bindings(desc: &GpuShaderDesc) -> Result<Vec<OcioGpuTexture3DBinding>, String> {
+    let count = desc
+        .try_num_3d_textures()
+        .map_err(|err| format!("OCIO GPU 3D texture count: {err}"))?;
+    (0..count)
+        .map(|index| {
+            let texture = desc
+                .try_texture_3d(index)
+                .map_err(|err| format!("OCIO GPU 3D texture {index}: {err}"))?
+                .ok_or_else(|| format!("OCIO GPU 3D texture {index} is missing"))?;
+            ocio_texture_3d_binding(index, texture)
         })
         .collect()
+}
+
+fn ocio_texture_3d_binding(
+    index: u32,
+    texture: ocio_rs::GpuTexture3D,
+) -> Result<OcioGpuTexture3DBinding, String> {
+    let binding_index = texture.binding_index.ok_or_else(|| {
+        format!(
+            "OCIO GPU 3D texture '{}' (index {index}) is missing a shader binding index; \
+             Mondrian requires OpenColorIO 2.5.1 or newer",
+            texture.texture_name
+        )
+    })?;
+    Ok(OcioGpuTexture3DBinding {
+        index,
+        texture_name: texture.texture_name,
+        sampler_name: texture.sampler_name,
+        binding_index,
+        interpolation: ocio_texture_interpolation(texture.interpolation),
+        edge_len: texture.edge_len,
+        value_count: texture.values.len(),
+        values: texture.values,
+    })
 }
 
 fn ocio_texture_channel(channel: OcioRsGpuTextureChannel) -> OcioGpuTextureChannel {
@@ -3154,19 +3214,40 @@ fn ocio_texture_interpolation(interpolation: OcioRsInterpolation) -> OcioGpuText
     }
 }
 
-fn ocio_uniform_bindings(desc: &GpuShaderDesc) -> Vec<OcioGpuUniformBinding> {
-    desc.uniforms()
-        .into_iter()
-        .enumerate()
-        .map(|(index, uniform)| OcioGpuUniformBinding {
-            index: index as u32,
-            name: uniform.name,
-            uniform_type: ocio_uniform_type(uniform.uniform_type),
-            buffer_offset: uniform.buffer_offset,
-            value_count: uniform.value_count,
-            value: ocio_uniform_value(uniform.value),
+fn ocio_uniform_bindings(desc: &GpuShaderDesc) -> Result<Vec<OcioGpuUniformBinding>, String> {
+    let count = desc
+        .try_num_uniforms()
+        .map_err(|err| format!("OCIO GPU uniform count: {err}"))?;
+    (0..count)
+        .map(|index| {
+            let uniform = desc
+                .try_uniform(index)
+                .map_err(|err| format!("OCIO GPU uniform {index}: {err}"))?
+                .ok_or_else(|| format!("OCIO GPU uniform {index} is missing"))?;
+            ocio_uniform_binding(index, uniform)
         })
         .collect()
+}
+
+fn ocio_uniform_binding(
+    index: u32,
+    uniform: ocio_rs::GpuUniform,
+) -> Result<OcioGpuUniformBinding, String> {
+    let buffer_offset = uniform.buffer_offset.ok_or_else(|| {
+        format!(
+            "OCIO GPU uniform '{}' (index {index}) is missing a uniform buffer offset; \
+             Mondrian requires OpenColorIO 2.5.1 or newer",
+            uniform.name
+        )
+    })?;
+    Ok(OcioGpuUniformBinding {
+        index,
+        name: uniform.name,
+        uniform_type: ocio_uniform_type(uniform.uniform_type),
+        buffer_offset,
+        value_count: uniform.value_count,
+        value: ocio_uniform_value(uniform.value),
+    })
 }
 
 fn ocio_uniform_type(uniform_type: OcioRsGpuUniformType) -> OcioGpuUniformType {
@@ -3679,6 +3760,12 @@ impl OcioCpuProcessorSession {
     }
 
     /// Apply a color-space processor through this Session.
+    ///
+    /// `data` must contain complete RGBA pixels (four components per pixel).
+    /// Every supplied and produced component must be finite, including alpha
+    /// and identity conversions. A failed output check can leave `data` modified;
+    /// callers must publish pixels only after success. Invalid samples do not
+    /// invalidate the processor or change the caller's alpha interpretation.
     pub fn convert_identity_float(
         &mut self,
         engine: &ColorEngine,
@@ -3688,7 +3775,7 @@ impl OcioCpuProcessorSession {
     ) -> Result<(), String> {
         validate_engine_working_identities(engine, &[src, dst])?;
         if data.is_empty() || src == dst {
-            return Ok(());
+            return validate_ocio_float_buffer(data, "input");
         }
         self.apply(
             engine,
@@ -3698,6 +3785,9 @@ impl OcioCpuProcessorSession {
     }
 
     /// Apply a display/view processor through this Session.
+    ///
+    /// Input and output buffers have the same complete-RGBA and finite-component contract as
+    /// [`Self::convert_identity_float`]; this does not interpret alpha coverage.
     pub fn display_transform_identity_float(
         &mut self,
         engine: &ColorEngine,
@@ -3759,6 +3849,7 @@ impl OcioCpuProcessorSession {
         request: OcioStaticProcessorRequest,
         data: &mut [f32],
     ) -> Result<(), String> {
+        validate_ocio_float_buffer(data, "input")?;
         // Dynamic-property payloads mutate the owner-thread CPUProcessor and do
         // not alter the config or processor graph. Excluding them from this key
         // preserves the expensive processor while still applying the current
@@ -3771,7 +3862,7 @@ impl OcioCpuProcessorSession {
             self.hits = self.hits.saturating_add(1);
             apply_engine_dynamic_properties_to_cpu(engine, processor)?;
             apply_cpu_processor_float(processor, data);
-            return Ok(());
+            return validate_ocio_float_buffer(data, "output");
         }
 
         let (processor, shared_hit) = cpu_processor_from_static(engine, &request)?;
@@ -3784,7 +3875,7 @@ impl OcioCpuProcessorSession {
         let Some(cache) = &mut self.cache else {
             apply_engine_dynamic_properties_to_cpu(engine, &processor)?;
             apply_cpu_processor_float(&processor, data);
-            return Ok(());
+            return validate_ocio_float_buffer(data, "output");
         };
         if cache.len() == self.capacity {
             self.evictions = self.evictions.saturating_add(1);
@@ -3795,8 +3886,21 @@ impl OcioCpuProcessorSession {
             .ok_or_else(|| "OCIO CPU processor Session lost a selected processor".to_owned())?;
         apply_engine_dynamic_properties_to_cpu(engine, processor)?;
         apply_cpu_processor_float(processor, data);
-        Ok(())
+        validate_ocio_float_buffer(data, "output")
     }
+}
+
+fn validate_ocio_float_buffer(data: &[f32], boundary: &str) -> Result<(), String> {
+    if !data.len().is_multiple_of(4) {
+        return Err(format!(
+            "OCIO {boundary} buffer must contain complete RGBA pixels, got {} components",
+            data.len()
+        ));
+    }
+    if let Some(index) = data.iter().position(|value| !value.is_finite()) {
+        return Err(format!("OCIO {boundary} component {index} must be finite"));
+    }
+    Ok(())
 }
 
 fn apply_uncached_cpu_processor(
@@ -3804,10 +3908,11 @@ fn apply_uncached_cpu_processor(
     request: OcioStaticProcessorRequest,
     data: &mut [f32],
 ) -> Result<(), String> {
+    validate_ocio_float_buffer(data, "input")?;
     let (processor, _shared_hit) = cpu_processor_from_static(engine, &request)?;
     apply_engine_dynamic_properties_to_cpu(engine, &processor)?;
     apply_cpu_processor_float(&processor, data);
-    Ok(())
+    validate_ocio_float_buffer(data, "output")
 }
 
 fn validate_engine_display_view_selection(
@@ -3883,7 +3988,7 @@ pub(crate) fn apply_ocio_identity_float(
 ) -> Result<(), String> {
     validate_engine_working_identities(engine, &[src, dst])?;
     if data.is_empty() || src == dst {
-        return Ok(());
+        return validate_ocio_float_buffer(data, "input");
     }
     apply_uncached_cpu_processor(
         engine,
@@ -3991,14 +4096,7 @@ fn extract_ocio_identity_gpu_shader_bundle_from_processor(
     apply_engine_dynamic_properties_to_gpu_desc(engine, &desc)?;
     let shader_text = extracted_shader_text(&desc)?;
 
-    Ok(OcioGpuShaderBundle::for_color_space(
-        src,
-        dst,
-        language,
-        shader_text,
-        &desc,
-        cache_id,
-    ))
+    OcioGpuShaderBundle::for_color_space(src, dst, language, shader_text, &desc, cache_id)
 }
 
 /// Extract an engine-qualified display/view GPU shader from a shared static graph.
@@ -4050,15 +4148,7 @@ fn extract_ocio_display_identity_gpu_shader_bundle_from_processor(
     apply_engine_dynamic_properties_to_gpu_desc(engine, &desc)?;
     let shader_text = extracted_shader_text(&desc)?;
 
-    Ok(OcioGpuShaderBundle::for_display(
-        src,
-        display,
-        view,
-        language,
-        shader_text,
-        &desc,
-        cache_id,
-    ))
+    OcioGpuShaderBundle::for_display(src, display, view, language, shader_text, &desc, cache_id)
 }
 
 fn configured_gpu_shader_desc(language: GpuLanguage) -> Result<GpuShaderDesc, String> {
@@ -4381,6 +4471,80 @@ mod cpu_apply_tests;
 mod tests {
     use super::*;
     use std::sync::{Mutex, OnceLock};
+
+    #[test]
+    fn gpu_texture_2d_metadata_requires_binding_index_and_preserves_zero() {
+        let texture = |binding_index| ocio_rs::GpuTexture2D {
+            texture_name: "tone_lut".to_owned(),
+            sampler_name: "tone_sampler".to_owned(),
+            width: 2,
+            height: 1,
+            channel: OcioRsGpuTextureChannel::Red,
+            dimensions: OcioRsGpuTextureDimensions::Texture1D,
+            interpolation: OcioRsInterpolation::Linear,
+            binding_index,
+            values: vec![0.0, 1.0],
+        };
+        for binding_index in [0, 7] {
+            let binding = ocio_texture_2d_binding(2, texture(Some(binding_index)))
+                .expect("reported binding index");
+            assert_eq!(binding.binding_index, binding_index);
+            assert_eq!(binding.index, 2);
+            assert_eq!(binding.values, [0.0, 1.0]);
+        }
+        let error = ocio_texture_2d_binding(2, texture(None)).expect_err("missing binding index");
+        assert!(
+            error.contains("1D/2D texture 'tone_lut' (index 2)"),
+            "{error}"
+        );
+        assert!(error.contains("missing a shader binding index"), "{error}");
+    }
+
+    #[test]
+    fn gpu_texture_3d_metadata_requires_binding_index_and_preserves_zero() {
+        let texture = |binding_index| ocio_rs::GpuTexture3D {
+            texture_name: "gamut_lut".to_owned(),
+            sampler_name: "gamut_sampler".to_owned(),
+            edge_len: 2,
+            interpolation: OcioRsInterpolation::Tetrahedral,
+            binding_index,
+            values: vec![0.25; 24],
+        };
+        for binding_index in [0, 11] {
+            let binding = ocio_texture_3d_binding(3, texture(Some(binding_index)))
+                .expect("reported binding index");
+            assert_eq!(binding.binding_index, binding_index);
+            assert_eq!(binding.index, 3);
+            assert_eq!(binding.values, vec![0.25; 24]);
+        }
+        let error = ocio_texture_3d_binding(3, texture(None)).expect_err("missing binding index");
+        assert!(
+            error.contains("3D texture 'gamut_lut' (index 3)"),
+            "{error}"
+        );
+        assert!(error.contains("missing a shader binding index"), "{error}");
+    }
+
+    #[test]
+    fn gpu_uniform_metadata_requires_buffer_offset_and_preserves_zero() {
+        let uniform = |buffer_offset| ocio_rs::GpuUniform {
+            name: "exposure".to_owned(),
+            uniform_type: OcioRsGpuUniformType::Double,
+            buffer_offset,
+            value_count: 1,
+            value: OcioRsGpuUniformValue::F32(vec![1.25]),
+        };
+        for buffer_offset in [0, 16] {
+            let binding = ocio_uniform_binding(4, uniform(Some(buffer_offset)))
+                .expect("reported uniform buffer offset");
+            assert_eq!(binding.buffer_offset, buffer_offset);
+            assert_eq!(binding.index, 4);
+            assert_eq!(binding.value, OcioGpuUniformValue::F32(vec![1.25]));
+        }
+        let error = ocio_uniform_binding(4, uniform(None)).expect_err("missing buffer offset");
+        assert!(error.contains("uniform 'exposure' (index 4)"), "{error}");
+        assert!(error.contains("missing a uniform buffer offset"), "{error}");
+    }
 
     fn ocio_env_test_lock() -> std::sync::MutexGuard<'static, ()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -6274,5 +6438,158 @@ colorspaces:
             error.contains("does not expose required dynamic property"),
             "{error}"
         );
+    }
+
+    mod rgba_shape_boundary_tests {
+        use super::*;
+
+        fn identity() -> OcioColorSpaceIdentity {
+            OcioColorSpaceIdentity::Working(WorkingColorSpace::LinearRec709)
+        }
+
+        fn malformed_buffers() -> impl Iterator<Item = Vec<f32>> {
+            [1, 2, 3, 5, 6, 7, 4097].into_iter().map(|length| vec![0.25; length])
+        }
+
+        fn bits(data: &[f32]) -> Vec<u32> {
+            data.iter().map(|value| value.to_bits()).collect()
+        }
+
+        #[test]
+        fn ocio_rgba_shape_session_identity_refuses_partial_pixels_without_mutation() {
+            let engine = ColorEngine::mondrian_standard();
+            let mut session = OcioCpuProcessorSession::new(1);
+            let mut empty = [];
+            session
+                .convert_identity_float(&engine, &mut empty, identity(), identity())
+                .expect("empty complete raster is valid");
+            let mut positive = [f32::MAX, -0.0, -f32::MAX, -3.0];
+            let before = bits(&positive);
+            session
+                .convert_identity_float(&engine, &mut positive, identity(), identity())
+                .expect("all finite raw RGBA lanes are valid without interpreting alpha");
+            assert_eq!(bits(&positive), before);
+            for mut data in malformed_buffers() {
+                let before = bits(&data);
+                assert!(session.convert_identity_float(&engine, &mut data, identity(), identity()).is_err(),
+                    "a Session identity conversion must reject an incomplete RGBA pixel at length {}", data.len());
+                assert_eq!(
+                    bits(&data),
+                    before,
+                    "input refusal happens before any transform"
+                );
+            }
+            assert_eq!(session.diagnostics().misses, 0);
+            assert_eq!(session.diagnostics().entries, 0);
+        }
+
+        #[test]
+        fn ocio_rgba_shape_engine_identity_refuses_partial_pixels_without_mutation() {
+            let engine = ColorEngine::mondrian_standard();
+            let mut positive = [f32::MAX, -0.0, -f32::MAX, -3.0];
+            let before = bits(&positive);
+            engine
+                .convert_identity_float(&mut positive, identity(), identity())
+                .expect("public engine identity admits one complete finite pixel");
+            assert_eq!(bits(&positive), before);
+            for mut data in malformed_buffers() {
+                let before = bits(&data);
+                assert!(engine.convert_identity_float(&mut data, identity(), identity()).is_err(),
+                    "an engine identity conversion must reject an incomplete RGBA pixel at length {}", data.len());
+                assert_eq!(bits(&data), before);
+            }
+        }
+
+        #[test]
+        fn ocio_rgba_shape_session_transform_refuses_partial_pixels_without_cache_changes() {
+            let engine = ColorEngine::mondrian_standard();
+            engine.ensure_loaded().expect("stock engine available");
+            let destination = OcioColorSpaceIdentity::Working(WorkingColorSpace::LinearRec2020);
+            for capacity in [0, 1] {
+                let mut session = OcioCpuProcessorSession::new(capacity);
+                let mut positive = [0.25, 0.5, 0.75, -3.0];
+                session
+                    .convert_identity_float(&engine, &mut positive, identity(), destination)
+                    .expect("a complete finite pixel executes the native nonidentity transform");
+                assert!(positive.iter().all(|value| value.is_finite()));
+                assert_eq!(positive[3].to_bits(), (-3.0_f32).to_bits());
+                for mut data in malformed_buffers() {
+                    let before = bits(&data);
+                    let cache = session.diagnostics();
+                    assert!(session.convert_identity_float(&engine, &mut data, identity(), destination).is_err(),
+                        "cached and unretained Session transforms must reject partial RGBA at length {}", data.len());
+                    assert_eq!(bits(&data), before);
+                    assert_eq!(
+                        session.diagnostics(),
+                        cache,
+                        "invalid storage does not acquire or access a processor"
+                    );
+                }
+                let mut recovered = [0.25, 0.5, 0.75, -3.0];
+                session
+                    .convert_identity_float(&engine, &mut recovered, identity(), destination)
+                    .expect("the same processor Session remains usable after input refusal");
+                assert!(recovered.iter().all(|value| value.is_finite()));
+            }
+        }
+
+        #[test]
+        fn ocio_rgba_shape_engine_transform_refuses_partial_pixels_without_mutation() {
+            let engine = ColorEngine::mondrian_standard();
+            engine.ensure_loaded().expect("stock engine available");
+            let destination = OcioColorSpaceIdentity::Working(WorkingColorSpace::LinearRec2020);
+            let mut positive = [0.25, 0.5, 0.75, -3.0];
+            engine
+                .convert_identity_float(&mut positive, identity(), destination)
+                .expect("uncached public engine transform executes one complete finite pixel");
+            assert!(positive.iter().all(|value| value.is_finite()));
+            for mut data in malformed_buffers() {
+                let before = bits(&data);
+                assert!(
+                    engine.convert_identity_float(&mut data, identity(), destination).is_err(),
+                    "an uncached engine transform must reject partial RGBA at length {}",
+                    data.len()
+                );
+                assert_eq!(bits(&data), before);
+            }
+        }
+    }
+
+    #[test]
+    fn cpu_float_finite_boundary_identity_and_uncached_admit_all_lanes_without_alpha_interpretation(
+    ) {
+        let engine = ColorEngine::mondrian_standard();
+        engine.ensure_loaded().expect("stock engine available");
+        let identity = OcioColorSpaceIdentity::Working(WorkingColorSpace::LinearRec709);
+        let original = [f32::MAX, -0.0, -f32::MAX, -3.0];
+        let mut session = OcioCpuProcessorSession::new(1);
+        let mut positive = original;
+        session
+            .convert_identity_float(&engine, &mut positive, identity, identity)
+            .expect("Core admits finite raw Float lanes without a coverage policy");
+        assert_eq!(positive.map(f32::to_bits), original.map(f32::to_bits));
+        engine
+            .convert_identity_float(&mut positive, identity, identity)
+            .expect("uncached raw identity has the same finite-only contract");
+        assert_eq!(positive.map(f32::to_bits), original.map(f32::to_bits));
+        for lane in 0..4 {
+            for invalid in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+                let mut data = original;
+                data[lane] = invalid;
+                let before = data.map(f32::to_bits);
+                assert!(session
+                    .convert_identity_float(&engine, &mut data, identity, identity)
+                    .is_err());
+                assert_eq!(
+                    data.map(f32::to_bits),
+                    before,
+                    "refused input is not processed"
+                );
+                assert!(engine.convert_identity_float(&mut data, identity, identity).is_err());
+                assert_eq!(data.map(f32::to_bits), before);
+            }
+        }
+        assert_eq!(session.diagnostics().misses, 0);
+        assert_eq!(session.diagnostics().entries, 0);
     }
 }

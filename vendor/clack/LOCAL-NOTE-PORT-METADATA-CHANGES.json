@@ -1,0 +1,22 @@
+{
+  "schema": 1,
+  "status": "ADDITIVE_SOURCE_CANDIDATE_UNCOMPILED_NOT_NATIVE_QUALIFIED",
+  "upstreamRepository": "https://github.com/prokopyl/clack",
+  "upstreamCommit": "27ca28391b57a61bad4bb5099288a7bf9247350d",
+  "sourceReceiptSHA256": "1DCA0019A173C69CE5644ABE6B91DDC6D4C4FCC5A323DC89B564A7FF39E5E9D7",
+  "path": "extensions/src/note_ports/host.rs",
+  "beforeSHA256": "2d71c1c0eb5ee98f7c44d88c573a295eebddf5dc6f918560f512e499d6cdb011",
+  "afterSHA256": "644b22be7fa1f375a3fbf92f298a8d61617a0be33dbd57a1ded6e95f8c7cf41b",
+  "afterBytes": 5172,
+  "accessors": [
+    "count_raw distinguishes missing count from Some(0)",
+    "has_get distinguishes missing get for zero-input extension",
+    "get_raw returns owned pointer-free ABI POD with fresh zero buffer"
+  ],
+  "consumer": "mondrian-audio clap_note_input_metadata::inspect_inputs",
+  "typedAPIUnchanged": true,
+  "officialHeadersGeneratedABIUnchanged": true,
+  "cargoExecuted": false,
+  "nativeExecuted": false,
+  "legacyFormattingReceiptUnchanged": true
+}

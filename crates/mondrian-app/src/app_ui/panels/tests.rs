@@ -1,10 +1,302 @@
 use super::*;
 use crate::app::preview_unavailability::PreviewOutputStage;
 use crate::app::product_action::TimelineSelectionEdit;
+use crate::app::AppMessage;
+use mondrian_core::automation::{ParameterInvalidValuePolicy, ParameterNumericContract};
 use mondrian_export::queue::{ExportFailure, ExportFailureReason};
+use mondrian_ui_widgets::CurvePointTarget;
+
+fn numeric_target(model: &InspectorCurveModel, index: usize) -> CurvePointTarget {
+    model.keys[index].keyframe_id.map_or(
+        CurvePointTarget::VirtualBoundary(if model.keys[index].point.x == 0.0 {
+            mondrian_ui_widgets::CurveBoundary::Start
+        } else {
+            mondrian_ui_widgets::CurveBoundary::End
+        }),
+        CurvePointTarget::Keyframe,
+    )
+}
 
 fn chinese_localizer() -> Localizer {
     Localizer::new(AppUiLocale::ZhCn).expect("bundled Chinese catalog")
+}
+
+#[test]
+fn parameter_reset_audio_menu_routes_keyboard_without_a_key_selection() {
+    use mondrian_timeline::{
+        AudioAutomationEdit, AudioAutomationEditRequest, AudioAutomationTarget,
+        AudioChannelStripOwner,
+    };
+    for locale in [AppUiLocale::EnUs, AppUiLocale::ZhCn, AppUiLocale::Pseudo] {
+        let localizer = Localizer::new(locale).expect("catalog");
+        let mut sequence = mondrian_timeline::Sequence::new("Audio reset menu");
+        let track_id = sequence.audio_tracks[0].id;
+        let target = AudioAutomationTarget::ChannelFader {
+            owner: AudioChannelStripOwner::Track { track_id },
+        };
+        sequence.video_tracks[0]
+            .add_clip(
+                mondrian_timeline::Clip::new_basic_title(
+                    "Menu",
+                    "Arial",
+                    TimelineTime::ZERO,
+                    TimelineTime::ONE,
+                )
+                .expect("title"),
+            )
+            .expect("viewport clip");
+        mondrian_timeline::apply_audio_automation_edit(
+            &mut sequence,
+            &AudioAutomationEditRequest {
+                target: target.clone(),
+                edit: AudioAutomationEdit::UpsertKeyframe {
+                    keyframe: mondrian_core::ExactAutomationKeyframe::linear(
+                        TimelineTime::ZERO,
+                        -6.0,
+                    ),
+                },
+            },
+        )
+        .expect("authored curve");
+        let original = sequence.clone();
+        let mut state = AppState::new();
+        state.test_set_sequence(Some(sequence));
+        let mixer = AudioMixerPanelModel::from_app_state(&state, &localizer);
+        let model = mixer
+            .channels
+            .iter()
+            .find(|channel| channel.owner == AudioChannelStripOwner::Track { track_id })
+            .and_then(|channel| channel.fader_automation.as_ref())
+            .expect("fader projection");
+        let mut widget = audio_automation_curve_control(model, &localizer);
+        widget.layout(Rect::new(0.0, 0.0, 320.0, 120.0));
+        let actions = RefCell::new(Vec::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut router = EventRouter::new(widget.id());
+        {
+            let mut tree = WidgetTreeView::new(widget.as_mut());
+            router.route(
+                UiEvent::KeyDown { key: KeyCode::Tab, modifiers: Modifiers::none() },
+                &mut tree,
+                &dispatch,
+            );
+            router.route(
+                UiEvent::KeyDown { key: KeyCode::F10, modifiers: Modifiers::shift() },
+                &mut tree,
+                &dispatch,
+            );
+        }
+        assert_eq!(
+            widget.accessibility().expect("curve").state.expanded,
+            Some(true)
+        );
+        let nodes = mondrian_ui_core::widget::collect_accessibility_nodes(widget.as_ref());
+        let reset = nodes
+            .iter()
+            .find(|node| {
+                node.name.as_deref() == Some(localizer.text("parameter-reset-to-default").as_str())
+            })
+            .expect("localized reset menu item");
+        assert_eq!(
+            reset.role,
+            mondrian_ui_core::widget::AccessibilityRole::MenuItem
+        );
+        assert!(reset.parent_id.is_some());
+        assert!(reset.focus_order.is_none());
+        assert!(
+            actions.borrow().is_empty(),
+            "inspection must not dispatch an edit"
+        );
+
+        {
+            let mut tree = WidgetTreeView::new(widget.as_mut());
+            for key in [KeyCode::End, KeyCode::Enter] {
+                router.route(
+                    UiEvent::KeyDown { key, modifiers: Modifiers::none() },
+                    &mut tree,
+                    &dispatch,
+                );
+            }
+        }
+        assert_eq!(actions.borrow().len(), 1);
+        let action = actions.borrow_mut().remove(0);
+        assert_eq!(
+            ProductAction::decode_external(&action).expect("codec"),
+            Some(ProductAction::Audio(
+                crate::app::product_action::AudioProductAction::EditAutomation(
+                    AudioAutomationEditRequest {
+                        target: target.clone(),
+                        edit: AudioAutomationEdit::ResetToDefault,
+                    }
+                ),
+            ))
+        );
+        state.dispatch_action(action).expect("reset from keyboard menu");
+        let inspection = mondrian_timeline::inspect_audio_automation(
+            state.active_sequence().expect("sequence"),
+            &target,
+        )
+        .expect("target");
+        assert!(inspection.curve().is_none());
+        assert_eq!(inspection.default_value(), 0.0);
+        let mixer = AudioMixerPanelModel::from_app_state(&state, &localizer);
+        let model = mixer
+            .channels
+            .iter()
+            .find(|channel| channel.owner == AudioChannelStripOwner::Track { track_id })
+            .and_then(|channel| channel.fader_automation.as_ref())
+            .expect("default projection");
+        assert!(crate::app_ui::audio_automation::audio_parameter_reset_action(model).is_none());
+        assert!(state.undo_timeline().expect("one Undo"));
+        assert!(state
+            .active_sequence()
+            .expect("restored")
+            .author_state_eq_ignoring_revision(&original));
+    }
+}
+
+#[test]
+fn parameter_reset_inspector_routes_localized_keyboard_and_disables_default_or_locked_state() {
+    use mondrian_ui_core::tree::WidgetTreeView;
+    use mondrian_ui_events::EventRouter;
+    fn find_button<'a>(widget: &'a dyn Widget, name: &str) -> Option<&'a dyn Widget> {
+        if widget.accessibility().is_some_and(|node| node.name.as_deref() == Some(name)) {
+            return Some(widget);
+        }
+        (0..widget.child_count()).find_map(|index| find_button(widget.child(index)?, name))
+    }
+    for locale in [AppUiLocale::EnUs, AppUiLocale::ZhCn, AppUiLocale::Pseudo] {
+        let localizer = Localizer::new(locale).expect("catalog");
+        let mut authored = mondrian_core::automation::AnimatedProperty::from_descriptor(
+            mondrian_core::automation::PropertyDescriptor::new(
+                "parameter",
+                "Parameter",
+                PropertyValue::Float(1.0),
+            ),
+        );
+        let selection = SelectedClipRef {
+            clip_id: ClipId::new(),
+            track_id: TrackId::new(),
+            is_video_track: true,
+        };
+        for changed in [false, true] {
+            authored
+                .set_static_value(PropertyValue::Float(if changed { 0.5 } else { 1.0 }))
+                .expect("static");
+            let model =
+                inspector_property_model("parameter", &authored, TimelineTime::ZERO, &localizer);
+            assert_eq!(model.can_reset, changed);
+            for can_edit in [false, true] {
+                for target in [
+                    InspectorPropertyTarget::Clip { parameter: authored.address() },
+                    InspectorPropertyTarget::Effect {
+                        effect_id: EffectId::new(),
+                        parameter: authored.address(),
+                    },
+                    InspectorPropertyTarget::Mask {
+                        mask_id: MaskId::new(),
+                        parameter: authored.address(),
+                    },
+                ] {
+                    let row = inspector_property_row(
+                        &localizer,
+                        &model,
+                        can_edit,
+                        Some(selection),
+                        target.clone(),
+                    );
+                    let mut panel = PropertyPanel::new("Inspector")
+                        .with_section(PropertySection::new("Parameter").with_row(row));
+                    panel.layout(Rect::new(0.0, 0.0, 420.0, 120.0));
+                    let reset = find_button(&panel, &localizer.text("parameter-reset-to-default"))
+                        .expect("reset button");
+                    assert_eq!(
+                        reset.accessibility().expect("button").state.disabled,
+                        !changed || !can_edit
+                    );
+                    let id = reset.id();
+                    let actions = RefCell::new(Vec::new());
+                    let dispatch = |action| actions.borrow_mut().push(action);
+                    let mut router = EventRouter::new(panel.id());
+                    router.focus_manager_mut().set_focused_widget(Some(id), None);
+                    let mut tree = WidgetTreeView::new(&mut panel);
+                    router.route(
+                        UiEvent::KeyDown { key: KeyCode::Enter, modifiers: Modifiers::none() },
+                        &mut tree,
+                        &dispatch,
+                    );
+                    let actions = actions.borrow();
+                    assert_eq!(actions.len(), usize::from(changed && can_edit));
+                    if let Some(action) = actions.first() {
+                        let decoded = ProductAction::decode_external(action)
+                            .expect("codec")
+                            .expect("typed action");
+                        let write = match (target, decoded) {
+                            (InspectorPropertyTarget::Clip { .. }, ProductAction::Clip(crate::app::product_action::ClipProductAction::WriteParameterValues(payload))) => {
+                                assert_eq!(payload.clip_id, selection.clip_id);
+                                assert_eq!(payload.writes.len(), 1);
+                                payload.writes[0].clone()
+                            }
+                            (InspectorPropertyTarget::Effect { effect_id, .. }, ProductAction::VisualEffect(crate::app::product_action::VisualEffectProductAction::SetParameterValue(payload))) => {
+                                assert_eq!(payload.clip_id, selection.clip_id);
+                                assert_eq!(payload.effect_id, effect_id);
+                                payload.write
+                            }
+                            (InspectorPropertyTarget::Mask { mask_id, .. }, ProductAction::VisualMask(crate::app::product_action::VisualMaskProductAction::SetParameterValue(payload))) => {
+                                assert_eq!(payload.clip_id, selection.clip_id);
+                                assert_eq!(payload.mask_id, mask_id);
+                                payload.write
+                            }
+                            _ => panic!("reset must retain owner identity"),
+                        };
+                        assert_eq!(
+                            write,
+                            ParameterValueWrite::ResetToDefault { parameter: authored.address() }
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn mask_shape_and_tracking_status_follow_locale_without_label_based_branching() {
+    let chinese = chinese_localizer();
+    let english = Localizer::new(AppUiLocale::EnUs).expect("bundled English catalog");
+    let mut mask = InspectorMaskModel {
+        mask_id: MaskId::new(),
+        label: "Mask 1".to_owned(),
+        enabled: true,
+        locked: false,
+        shape_animation_enabled: true,
+        shape_kind: InspectorMaskShapeKind::Path,
+        tracking_status: None,
+        has_tracking_recipe: false,
+        properties: Vec::new(),
+    };
+    assert_eq!(chinese.text(mask.shape_kind.message_id()), "路径");
+    assert_eq!(english.text(mask.shape_kind.message_id()), "Path");
+    assert_eq!(
+        inspector_tracking_status_label(&mask, &english),
+        "Not tracked"
+    );
+    mask.tracking_status = Some(crate::app::visual_tracking::VisualTrackingStatus {
+        tracking_id: mondrian_core::types::TrackingId::new(),
+        phase: crate::app::visual_tracking::VisualTrackingPhase::Analyzing,
+        completed_pairs: 2,
+        total_pairs: 5,
+        detail: None,
+    });
+    let visible = |text: String| text.replace(['\u{2068}', '\u{2069}'], "");
+    assert_eq!(
+        visible(inspector_tracking_status_label(&mask, &chinese)),
+        "分析中 2/5"
+    );
+    assert_eq!(
+        visible(inspector_tracking_status_label(&mask, &english)),
+        "Analyzing 2/5"
+    );
 }
 
 #[test]
@@ -311,6 +603,94 @@ fn inspector_model_projects_asset_components_and_physical_binding_separately() {
     assert_eq!(model.audio_processor_racks[0].processors.len(), 1);
     assert_eq!(model.audio_processor_racks[0].processors[0].label, "增益");
 
+    let english = Localizer::new(AppUiLocale::EnUs).expect("English catalog");
+    let author_before = state.active_sequence().expect("sequence").clone();
+    let generation_before = state.project_author_generation();
+    let english_model = InspectorPanelModel::from_app_state(&state, &english);
+    let english_component = &english_model.audio_components[0];
+    let visible = |text: &str| text.replace(['\u{2068}', '\u{2069}'], "");
+    assert!(visible(&component.source_label).starts_with("主音频流 · 流 #3"));
+    assert!(visible(&english_component.source_label).starts_with("Primary · Stream #3"));
+    assert!(english_component.source_label.contains("jpn"));
+    assert!(english_component.source_label.contains("Default"));
+    assert!(
+        visible(&english_component.binding.as_ref().expect("binding").label)
+            .starts_with("Stream #3")
+    );
+    let selections = |component: &InspectorAudioComponentModel| {
+        component
+            .source_options
+            .iter()
+            .map(|option| (option.source.clone(), option.selected, option.selectable))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(selections(component), selections(english_component));
+    assert_eq!(
+        english_component.channel_mapping.mapping,
+        component.channel_mapping.mapping
+    );
+    assert_eq!(
+        english_component.channel_mapping.observed_source_layout,
+        component.channel_mapping.observed_source_layout
+    );
+    assert_eq!(
+        english_component.channel_mapping.destination_layout,
+        component.channel_mapping.destination_layout
+    );
+    assert_eq!(
+        english_component.channel_mapping.review_matrix,
+        component.channel_mapping.review_matrix
+    );
+    assert_eq!(
+        english_component.channel_mapping.matrix_is_explicit,
+        component.channel_mapping.matrix_is_explicit
+    );
+    assert_eq!(state.active_sequence().expect("sequence"), &author_before);
+    assert_eq!(state.project_author_generation(), generation_before);
+
+    let asset = state
+        .asset_library()
+        .expect("library")
+        .get_asset(asset_id)
+        .expect("lookup")
+        .expect("asset");
+    let mut named_stream = asset.media_probe().expect("probe").audio_streams[0].clone();
+    named_stream.title = Some("Commentary / 注释".to_owned());
+    let named_label = audio_stream_label(&named_stream, &english);
+    assert!(named_label.contains("Commentary / 注释"));
+    assert!(named_label.contains("eng"));
+    let missing_id = AudioSourceComponentId::new();
+    assert!(
+        asset_audio_component_label(&asset, missing_id, &english).contains("missing from catalog")
+    );
+    assert_eq!(
+        asset_audio_binding_label(&asset, missing_id, &english),
+        "No valid physical mapping"
+    );
+    let mut stale = asset.clone();
+    stale
+        .audio_components
+        .components
+        .iter_mut()
+        .find(|component| component.id == AudioSourceComponentId::primary())
+        .expect("primary")
+        .binding
+        .stream_index = 255;
+    assert!(
+        asset_audio_component_label(&stale, AudioSourceComponentId::primary(), &english)
+            .contains("rebind required")
+    );
+    assert!(
+        asset_audio_binding_label(&stale, AudioSourceComponentId::primary(), &english)
+            .contains("rebind required")
+    );
+    assert!(asset_audio_binding_label(
+        &stale,
+        AudioSourceComponentId::primary(),
+        &chinese_localizer()
+    )
+    .contains("需重绑定"));
+    drop(english_model);
     drop(model);
     drop(state);
     let _ = std::fs::remove_dir_all(root);
@@ -508,6 +888,289 @@ fn inspector_source_timing_actions_use_exact_typed_author_commands() {
 }
 
 #[test]
+fn inspector_parameter_label_uses_declared_message_address_and_vendor_fallback() {
+    use mondrian_core::automation::{AnimatedProperty, PropertyDescriptor};
+    let mut descriptor =
+        PropertyDescriptor::new("vendor.amount", "Vendor amount", PropertyValue::Float(0.5))
+            .with_parameter_id(mondrian_core::ParameterId::new_static(
+                "vendor.test.caption.amount",
+            ));
+    descriptor.schema.message_id = "inspector-opacity".to_owned();
+    let mut property = AnimatedProperty::from_descriptor(descriptor);
+    property.validate().expect("valid declared schema");
+    for locale in [AppUiLocale::EnUs, AppUiLocale::ZhCn, AppUiLocale::Pseudo] {
+        let localizer = Localizer::new(locale).expect("catalog");
+        let model =
+            inspector_property_model("vendor.amount", &property, TimelineTime::ZERO, &localizer);
+        assert_eq!(model.label, localizer.text("inspector-opacity"));
+        assert_eq!(model.schema, property.descriptor.schema);
+        assert_eq!(
+            model.address.parameter_id,
+            property.descriptor.schema.parameter_id
+        );
+        assert_eq!(model.value, PropertyValue::Float(0.5));
+    }
+    property.descriptor.schema.message_id = "vendor.missing.caption".to_owned();
+    let model = inspector_property_model(
+        "vendor.amount",
+        &property,
+        TimelineTime::ZERO,
+        &Localizer::new(AppUiLocale::EnUs).expect("catalog"),
+    );
+    assert_eq!(model.label, "Vendor amount");
+}
+
+#[test]
+fn inspector_blend_choices_resolve_declared_catalog_addresses() {
+    use mondrian_core::automation::PropertyHost;
+    let clip = Clip::new(AssetId::new(), TimelineTime::ZERO, TimelineTime::ONE).expect("Clip");
+    let bag = clip.property_bag().expect("Clip properties");
+    let property = bag.property(Clip::BLEND_MODE_PATH).expect("blend mode");
+    let options = mondrian_core::display_labels::blend_mode_options();
+    assert_eq!(property.descriptor.schema.enum_options.len(), options.len());
+    for locale in [AppUiLocale::EnUs, AppUiLocale::ZhCn, AppUiLocale::Pseudo] {
+        let localizer = Localizer::new(locale).expect("catalog");
+        let model = inspector_property_model(
+            Clip::BLEND_MODE_PATH,
+            property,
+            TimelineTime::ZERO,
+            &localizer,
+        );
+        assert_eq!(model.schema, property.descriptor.schema);
+        assert_eq!(model.value, PropertyValue::Enum("inherit".to_owned()));
+        for (choice, option) in model.schema.enum_options.iter().zip(options) {
+            assert_eq!(choice.key, option.value);
+            let message = format!("blend-mode-{}", option.value.to_ascii_lowercase());
+            assert_eq!(choice.message_id, message);
+            assert_eq!(model.enum_labels[&choice.key], localizer.text(&message));
+        }
+        assert_eq!(
+            model.enum_labels["inherit"],
+            localizer.text("blend-mode-inherit")
+        );
+    }
+}
+
+#[test]
+fn inspector_vendor_choice_caption_keeps_canonical_dispatch_across_locales() {
+    use mondrian_core::automation::{AnimatedProperty, ParameterEnumOption, PropertyDescriptor};
+    for ranked in [false, true] {
+        let mut descriptor = PropertyDescriptor::new(
+            "vendor.mode",
+            "Mode",
+            PropertyValue::Enum("vendor:43".to_owned()),
+        )
+        .with_enum_options(vec![
+            ParameterEnumOption::new("vendor:42", "Écho / 回声", "vendor.mode.echo"),
+            ParameterEnumOption::new("vendor:43", "Écho / 回声", "vendor.mode.echo.second"),
+        ]);
+        if ranked {
+            descriptor.schema.enum_options[0].display_rank = Some(i32::MAX);
+            descriptor.schema.enum_options[1].display_rank = Some(i32::MIN);
+        }
+        descriptor.validate().expect("declared vendor captions");
+        let property = AnimatedProperty::from_descriptor(descriptor);
+        let selection = SelectedClipRef {
+            track_id: TrackId::new(),
+            is_video_track: true,
+            clip_id: ClipId::new(),
+        };
+        for locale in [AppUiLocale::EnUs, AppUiLocale::ZhCn, AppUiLocale::Pseudo] {
+            let localizer = Localizer::new(locale).expect("catalog");
+            let model =
+                inspector_property_model("vendor.mode", &property, TimelineTime::ZERO, &localizer);
+            assert_eq!(model.schema, property.descriptor.schema);
+            assert_eq!(model.value, PropertyValue::Enum("vendor:43".to_owned()));
+            assert_eq!(model.enum_labels["vendor:42"], "Écho / 回声");
+            assert_eq!(model.enum_labels["vendor:43"], "Écho / 回声");
+            let mut widget = inspector_property_value_widget(
+                &localizer,
+                &model,
+                true,
+                Some(selection),
+                InspectorPropertyTarget::Clip { parameter: model.address.clone() },
+            );
+            assert_eq!(
+                widget.accessibility().expect("choice").name.as_deref(),
+                Some("Écho / 回声")
+            );
+            widget.layout(Rect::new(0.0, 0.0, 220.0, 28.0));
+            let actions = RefCell::new(Vec::new());
+            let dispatch = |action| actions.borrow_mut().push(action);
+            let mut focus = DummyFocus;
+            let mut shortcut = DummyShortcut;
+            let mut tooltip = DummyTooltip;
+            let mut requests = EventRequests::default();
+            let mut ctx = event_ctx(
+                &mut focus,
+                &mut shortcut,
+                &mut tooltip,
+                &mut requests,
+                &dispatch,
+            );
+            widget.event(
+                &UiEvent::MouseDown {
+                    position: Point::new(20.0, 14.0),
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            );
+            widget.event(
+                &UiEvent::KeyDown { key: KeyCode::Enter, modifiers: Modifiers::none() },
+                &mut ctx,
+            );
+            let actions = actions.borrow();
+            assert_eq!(actions.len(), 1);
+            let Action::Custom { payload, .. } = &actions[0] else {
+                panic!("parameter action");
+            };
+            let payload: ClipWriteParameterValuesPayload =
+                serde_json::from_value(payload.clone()).expect("typed parameter write");
+            assert_eq!(
+                payload.writes,
+                vec![ParameterValueWrite::Value {
+                    parameter: model.address.clone(),
+                    value: PropertyValue::Enum(
+                        if ranked { "vendor:43" } else { "vendor:42" }.to_owned()
+                    )
+                }]
+            );
+            let mut declared = property.clone();
+            declared.descriptor.schema.enum_options[0].message_id = "inspector-opacity".to_owned();
+            let translated =
+                inspector_property_model("vendor.mode", &declared, TimelineTime::ZERO, &localizer);
+            assert_eq!(
+                translated.enum_labels["vendor:42"],
+                localizer.text("inspector-opacity")
+            );
+            assert_eq!(translated.enum_labels["vendor:43"], "Écho / 回声");
+        }
+    }
+}
+
+#[test]
+fn inspector_parameter_locale_preserves_title_author_keys_and_history() {
+    let mut sequence = Sequence::new("Localized Title");
+    let track_id = sequence.video_tracks[0].id;
+    let clip = Clip::new_basic_title(
+        "Title",
+        mondrian_core::default_basic_title_font_family(),
+        TimelineTime::ZERO,
+        tt(25, sequence.time_base()),
+    )
+    .expect("title");
+    let clip_id = clip.id;
+    sequence.video_tracks[0].add_clip(clip).expect("placement");
+    let mut state = AppState::new();
+    state.test_set_sequence(Some(sequence));
+    let selection = SelectedClipRef { track_id, is_video_track: true, clip_id };
+    state.selection.selected_clips = vec![selection];
+    let before = state.active_sequence().expect("Sequence").clone();
+    let generation = state.project_author_generation();
+    let english = Localizer::new(AppUiLocale::EnUs).expect("English");
+    let model = InspectorPanelModel::from_app_state(&state, &english);
+    assert_eq!(
+        model
+            .clip_properties
+            .iter()
+            .map(|property| property.label.as_str())
+            .collect::<Vec<_>>(),
+        [
+            "Text",
+            "Font family",
+            "Font weight",
+            "Font style",
+            "Font size",
+            "Fill",
+            "Tracking",
+            "Line height",
+            "Horizontal alignment",
+            "Vertical alignment"
+        ]
+    );
+    let chinese = InspectorPanelModel::from_app_state(&state, &chinese_localizer());
+    let pseudo = InspectorPanelModel::from_app_state(
+        &state,
+        &Localizer::new(AppUiLocale::Pseudo).expect("pseudo"),
+    );
+    for ((en, zh), pseudo) in model
+        .clip_properties
+        .iter()
+        .zip(&chinese.clip_properties)
+        .zip(&pseudo.clip_properties)
+    {
+        assert_eq!(en.schema, zh.schema);
+        assert_eq!(en.address, zh.address);
+        assert_eq!(en.value, zh.value);
+        assert_eq!(en.schema, pseudo.schema);
+        assert_eq!(en.address, pseudo.address);
+        assert_eq!(en.value, pseudo.value);
+        assert_ne!(en.label, pseudo.label);
+    }
+    let property = &model.clip_properties[8];
+    let mut widget = inspector_property_value_widget(
+        &english,
+        property,
+        true,
+        Some(selection),
+        InspectorPropertyTarget::Clip { parameter: property.address.clone() },
+    );
+    assert_eq!(
+        widget.accessibility().expect("dropdown").name.as_deref(),
+        Some("Center")
+    );
+    widget.layout(Rect::new(0.0, 0.0, 220.0, 28.0));
+    let actions = RefCell::new(Vec::new());
+    let dispatch = |action| actions.borrow_mut().push(action);
+    let mut focus = DummyFocus;
+    let mut shortcut = DummyShortcut;
+    let mut tooltip = DummyTooltip;
+    let mut requests = EventRequests::default();
+    let mut ctx = event_ctx(
+        &mut focus,
+        &mut shortcut,
+        &mut tooltip,
+        &mut requests,
+        &dispatch,
+    );
+    widget.event(
+        &UiEvent::MouseDown {
+            position: Point::new(20.0, 14.0),
+            button: MouseButton::Left,
+            modifiers: Modifiers::none(),
+        },
+        &mut ctx,
+    );
+    widget.event(
+        &UiEvent::KeyDown { key: KeyCode::Enter, modifiers: Modifiers::none() },
+        &mut ctx,
+    );
+    assert_eq!(state.active_sequence().expect("Sequence"), &before);
+    assert_eq!(state.project_author_generation(), generation);
+    let actions = actions.borrow();
+    assert_eq!(actions.len(), 1);
+    let Action::Custom { payload, .. } = &actions[0] else {
+        panic!("author action");
+    };
+    let payload: ClipWriteParameterValuesPayload =
+        serde_json::from_value(payload.clone()).expect("parameter write");
+    assert_eq!(
+        payload.writes,
+        vec![ParameterValueWrite::Value {
+            parameter: property.address.clone(),
+            value: PropertyValue::Enum("left".to_owned())
+        }]
+    );
+    state.dispatch_action(actions[0].clone()).expect("apply stable enum key");
+    assert!(state.undo_timeline().expect("undo"));
+    assert_eq!(
+        state.active_sequence().expect("Sequence").video_tracks[0].clips[0].content,
+        before.video_tracks[0].clips[0].content
+    );
+}
+
+#[test]
 fn inspector_model_exposes_basic_title_properties_in_canonical_order() {
     let mut sequence = Sequence::new("Inspector Basic Title");
     let track_id = sequence.video_tracks[0].id;
@@ -621,7 +1284,7 @@ fn inspector_blend_menu_keeps_typed_order_groups_and_locale() {
         .iter()
         .find(|item| item.label == "Inherit Track")
         .expect("inherit row");
-    assert!(inherit.checked);
+    assert_eq!(inherit.checked, Some(true));
     assert!(!inherit.enabled);
     let multiply = dropdown
         .items()
@@ -799,10 +1462,19 @@ fn app_state_models_are_safe_without_an_open_project() {
     assert_eq!(models.timeline.playhead_frame, 0);
     assert!(!models.timeline.enabled);
     assert_eq!(
-        models.timeline.empty_message.as_deref(),
+        models
+            .timeline
+            .empty_message
+            .as_ref()
+            .map(|message| chinese_localizer().message(message))
+            .as_deref(),
         Some("未载入序列\n打开项目或创建序列以开始编辑")
     );
-    assert!(!timeline_panel(&models.timeline).can_focus());
+    assert!(!timeline_panel(
+        &models.timeline,
+        &Localizer::new(AppUiLocale::ZhCn).expect("catalog")
+    )
+    .can_focus());
     assert_eq!(models.assets.items[0].title, "没有项目素材库");
     assert!(models.assets.items[0].icon.is_some());
     assert!(models.assets.items[0].disabled);
@@ -817,7 +1489,12 @@ fn app_state_models_are_safe_without_an_open_project() {
     assert_eq!(models.viewer.preview_quality_label, "1/1");
     assert_eq!(models.inspector.selected_clip, None);
     assert_eq!(
-        models.inspector.empty_message.as_deref(),
+        models
+            .inspector
+            .empty_message
+            .as_ref()
+            .map(|message| chinese_localizer().message(message))
+            .as_deref(),
         Some("未选择剪辑\n选择剪辑、图层或效果后，可在这里调整参数。")
     );
     assert!(!models.inspector.is_editable);
@@ -835,6 +1512,19 @@ fn app_state_models_are_safe_without_an_open_project() {
 }
 
 #[test]
+fn timeline_accessibility_uses_current_catalog_in_all_product_locales() {
+    let sequence = Sequence::new("Vendor🙂 sequence");
+    let model = TimelinePanelModel::from_sequence(&sequence, &[], &[]);
+    for locale in [AppUiLocale::EnUs, AppUiLocale::ZhCn, AppUiLocale::Pseudo] {
+        let localizer = Localizer::new(locale).expect("catalog");
+        let panel = timeline_panel(&model, &localizer);
+        let nodes = mondrian_ui_core::widget::collect_accessibility_nodes(&panel);
+        assert_eq!(nodes[0].name, Some(localizer.text("panel-timeline")));
+        assert_eq!(nodes[0].focus_order, Some(0));
+    }
+}
+
+#[test]
 fn sequence_backed_empty_timeline_keeps_add_track_entrypoints_enabled() {
     let mut sequence = Sequence::new("empty edit");
     sequence.video_tracks.clear();
@@ -846,10 +1536,16 @@ fn sequence_backed_empty_timeline_keeps_add_track_entrypoints_enabled() {
     assert!(model.enabled);
     assert!(model.tracks.is_empty());
     assert_eq!(
-        model.empty_message.as_deref(),
+        model
+            .empty_message
+            .as_ref()
+            .map(|message| chinese_localizer().message(message))
+            .as_deref(),
         Some("当前序列没有轨道\n添加视频轨道或音频轨道后开始编辑")
     );
-    assert!(timeline_panel(&model).can_focus());
+    assert!(
+        timeline_panel(&model, &Localizer::new(AppUiLocale::ZhCn).expect("catalog")).can_focus()
+    );
 }
 
 #[test]
@@ -859,7 +1555,11 @@ fn empty_inspector_panel_shows_status_only_and_does_not_dispatch_clip_controls()
     panel.layout(Rect::new(0.0, 0.0, 320.0, 220.0));
 
     assert_eq!(
-        model.empty_message.as_deref(),
+        model
+            .empty_message
+            .as_ref()
+            .map(|message| chinese_localizer().message(message))
+            .as_deref(),
         Some("未选择剪辑\n选择剪辑、图层或效果后，可在这里调整参数。")
     );
     assert_eq!(panel.section_count(), 0);
@@ -906,6 +1606,14 @@ fn node_graph_without_clip_selection_uses_disabled_empty_state() {
     let panel = node_graph_panel(&model);
     assert!(!panel.is_enabled());
     assert!(!panel.can_focus());
+
+    let english = Localizer::new(AppUiLocale::EnUs).expect("bundled English catalog");
+    let english_model = NodeGraphPanelModel::from_app_state_with_localizer(&state, &english);
+    assert_eq!(english_model.title, "Node Graph");
+    assert_eq!(
+        english_model.subtitle,
+        "Select a clip to inspect its render chain"
+    );
 }
 
 #[test]
@@ -1025,7 +1733,10 @@ fn export_panel_model_reads_app_export_draft() {
     state.set_export_draft_sequence_id(Some(sequence_id));
     state.set_export_draft_range(TimelineExportRange::EntireSequence);
     state.set_export_draft_output_path("E:/renders/deliverable.mp4");
-    state.set_status_hint("Ready to export", false);
+    state.set_status_hint(
+        AppMessage::new("status-opaque-detail").with_text("detail", "Ready to export"),
+        false,
+    );
 
     let model = ExportPanelModel::from_app_state(&state);
 
@@ -1048,6 +1759,56 @@ fn export_panel_model_reads_app_export_draft() {
     );
     assert_eq!(payload.preset, BuiltinExportPreset::HevcMain10Aac.preset());
     assert!(!model.preset_customized);
+}
+
+#[test]
+fn export_projection_uses_locale_without_changing_authoring_state() {
+    let mut state = AppState::new();
+    let sequence = Sequence::new("Delivery");
+    let sequence_id = sequence.id;
+    state.test_set_sequence(Some(sequence));
+    state.set_export_draft_sequence_id(Some(sequence_id));
+    let english = Localizer::new(AppUiLocale::EnUs).expect("English catalog");
+    let chinese = Localizer::new(AppUiLocale::ZhCn).expect("Chinese catalog");
+
+    let en_model = ExportPanelModel::from_app_state_with_localizer(&state, &english);
+    let zh_model = ExportPanelModel::from_app_state_with_localizer(&state, &chinese);
+    assert_eq!(
+        en_model.readiness_status(),
+        "Choose an output path to add this job to the queue"
+    );
+    assert_eq!(zh_model.readiness_status(), "选择输出路径后即可加入队列");
+    assert_eq!(en_model.dynamic_hdr.intent_label, "Omit Dynamic HDR");
+    assert_eq!(zh_model.dynamic_hdr.intent_label, "省略 Dynamic HDR");
+    assert_eq!(en_model.selected_sequence_id, zh_model.selected_sequence_id);
+    assert_eq!(en_model.preset, zh_model.preset);
+}
+
+#[test]
+fn export_image_sequence_summary_names_the_selected_format_in_both_locales() {
+    let chinese = Localizer::new(AppUiLocale::ZhCn).expect("Chinese catalog");
+    let english = Localizer::new(AppUiLocale::EnUs).expect("English catalog");
+    let preset = ExportPreset::open_exr_half_sequence();
+
+    let zh_summary = export_preset_summary(Some(&preset), &chinese);
+    let en_summary = export_preset_summary(Some(&preset), &english);
+    assert!(zh_summary.contains("OpenEXR Half"));
+    assert!(en_summary.contains("OpenEXR Half"));
+    assert!(!zh_summary.contains("PNG"));
+    assert!(!en_summary.contains("PNG"));
+    assert!(!zh_summary.contains("sRGB"));
+    assert!(!en_summary.contains("sRGB"));
+    let stems_summary = export_preset_summary(Some(&ExportPreset::audio_stems_pcm24()), &english);
+    assert!(stems_summary.contains("Program Output stems"));
+    assert!(!stems_summary.contains("image sequence"));
+    assert_eq!(
+        export_range_label(TimelineExportRange::EntireSequence, &english),
+        "Entire sequence"
+    );
+    assert_eq!(
+        export_range_label(TimelineExportRange::EntireSequence, &chinese),
+        "整个序列"
+    );
 }
 
 #[test]
@@ -1377,7 +2138,11 @@ fn export_panel_rejects_incompatible_delivery_before_building_an_action() {
     state.set_export_draft_preset(incompatible);
     state.set_export_draft_sequence_id(Some(sequence_id));
     state.set_export_draft_output_path("E:/renders/hdr.mp4");
-    state.set_status_hint("stale success must not hide the blocker", false);
+    state.set_status_hint(
+        AppMessage::new("status-opaque-detail")
+            .with_text("detail", "stale success must not hide the blocker"),
+        false,
+    );
 
     let model = ExportPanelModel::from_app_state(&state);
 
@@ -1420,7 +2185,8 @@ fn export_panel_preserves_professional_metadata_and_reports_the_physical_artifac
 
     let model = ExportPanelModel::from_app_state(&state);
     assert!(model.can_enqueue());
-    let summary = export_preset_summary(Some(&model.preset));
+    let english = Localizer::new(AppUiLocale::EnUs).expect("English catalog");
+    let summary = export_preset_summary(Some(&model.preset), &english);
     assert!(summary.contains("IMF RDD 45"));
     assert!(summary.contains("ProRes 422 HQ 10-bit 4:2:2"));
     assert!(summary.contains("PCM 24-bit 48 kHz stereo"));
@@ -1488,10 +2254,12 @@ fn export_panel_formats_structured_queue_status_and_diagnostics() {
         fraction: 0.82,
         detail: ExportProgressDetail::None,
     };
+    let localizer = Localizer::new(AppUiLocale::EnUs).expect("bundled English catalog");
     assert_eq!(
         export_job_status_label(
             &JobStatus::Running { phase: ExportProgressPhase::Encoding },
             progress,
+            &localizer,
         ),
         "Encoding"
     );
@@ -1503,6 +2271,7 @@ fn export_panel_formats_structured_queue_status_and_diagnostics() {
                 fraction: 0.9,
                 detail: ExportProgressDetail::None,
             },
+            &localizer,
         ),
         "Packaging"
     );
@@ -1513,21 +2282,30 @@ fn export_panel_formats_structured_queue_status_and_diagnostics() {
                 detail: "disk full".to_owned(),
             }),
             progress,
+            &localizer,
         ),
-        "Failed: disk full"
+        "Failed: \u{2068}disk full\u{2069}"
     );
-    let color_diagnostics =
-        export_job_color_diagnostics_label(diagnostics).expect("encoding color diagnostics");
-    assert!(color_diagnostics.contains("metadata 1 / override 1 / policy 0 / data 0 / reject 0"));
+    let color_diagnostics = export_job_color_diagnostics_label(diagnostics, &localizer)
+        .expect("encoding color diagnostics")
+        .replace(['\u{2068}', '\u{2069}'], "");
+    assert!(color_diagnostics.contains("metadata 1 / overrides 1 / policy 0 / data 0 / rejected 0"));
     assert!(color_diagnostics.contains("assets 2 / issues warn 2 missing-cicp 1 decoder 1"));
-    assert!(color_diagnostics.contains("report Fail"));
-    assert!(color_diagnostics.contains("warn:asset_color_diagnostics_warning"));
+    assert!(color_diagnostics.contains("Color: Failed"));
+    let chinese = Localizer::new(AppUiLocale::ZhCn).expect("Chinese catalog");
+    let chinese_diagnostics = export_job_color_diagnostics_label(diagnostics, &chinese)
+        .expect("Chinese diagnostic summary");
+    assert!(chinese_diagnostics.contains("色彩："));
+    assert!(chinese_diagnostics.contains("失败"));
+    assert!(chinese_diagnostics.contains("asset_color_diagnostics_warning"));
+
+    assert!(color_diagnostics.contains("Warning: asset_color_diagnostics_warning"));
     assert!(color_diagnostics.contains("export_gpu_color_stage_blocked"));
     assert!(color_diagnostics.contains("actions inspect_asset_color_warning_evidence"));
-    assert!(color_diagnostics.contains("gpu blockers shader 0 resource 0 wrapper 0 pipeline 1"));
+    assert!(color_diagnostics.contains("GPU blockers shader 0, resource 0, wrapper 0, pipeline 1"));
 
-    let broadcast_qc =
-        export_job_broadcast_qc_label(Some(&mondrian_broadcast::BroadcastQcReport {
+    let broadcast_qc = export_job_broadcast_qc_label(
+        Some(&mondrian_broadcast::BroadcastQcReport {
             schema_version: 1,
             profile_id: "network-x".to_owned(),
             profile_edition: "2026-01".to_owned(),
@@ -1546,10 +2324,13 @@ fn export_panel_formats_structured_queue_status_and_diagnostics() {
                 detail: "external rescan required".to_owned(),
             }],
             evidence_sha256: [2; 32],
-        }))
-        .expect("broadcast QC summary");
-    assert!(broadcast_qc.contains("network-x@2026-01 / Warn / 240 帧 (100..=339)"));
-    assert!(broadcast_qc.contains("findings 2 retained 0 overflow 0 / obligations 1 / complete"));
+        }),
+        &localizer,
+    )
+    .expect("broadcast QC summary")
+    .replace(['\u{2068}', '\u{2069}'], "");
+    assert!(broadcast_qc.contains("network-x@2026-01 / Warning / 240 frames (100..=339)"));
+    assert!(broadcast_qc.contains("findings 2, retained 0, overflow 0 / obligations 1 / Complete"));
 }
 
 #[test]
@@ -1877,6 +2658,13 @@ fn assets_panel_context_menu_dispatches_import_from_grid_overlay() {
         EventResult::Handled
     );
     assert!(grid.overlay_hit_test(Point::new(640.0, 480.0)));
+    assert_eq!(
+        grid.event(
+            &UiEvent::KeyDown { key: KeyCode::Down, modifiers: Modifiers::none() },
+            &mut ctx,
+        ),
+        EventResult::Handled
+    );
     assert_eq!(
         grid.event(
             &UiEvent::KeyDown { key: KeyCode::Enter, modifiers: Modifiers::none() },
@@ -2313,6 +3101,13 @@ fn assets_panel_multi_selection_context_menu_dispatches_delete_selection() {
                 button: MouseButton::Right,
                 modifiers: Modifiers::none(),
             },
+            &mut ctx,
+        ),
+        EventResult::Handled
+    );
+    assert_eq!(
+        grid.event(
+            &UiEvent::KeyDown { key: KeyCode::Down, modifiers: Modifiers::none() },
             &mut ctx,
         ),
         EventResult::Handled
@@ -2795,54 +3590,85 @@ fn timeline_model_maps_asset_drop_payload_to_stable_track_id() {
 
 #[test]
 fn timeline_panel_context_menu_add_track_emits_typed_timeline_actions() {
-    let model = demo_timeline_model();
-    let actions = RefCell::new(Vec::<Action>::new());
-    let dispatch = |action| actions.borrow_mut().push(action);
-    let mut panel = timeline_panel(&model);
-    panel.layout(mondrian_ui_core::types::Rect::new(0.0, 0.0, 520.0, 180.0));
+    for kind in [TrackAddKind::Video, TrackAddKind::Audio] {
+        let model = demo_timeline_model();
+        let actions = RefCell::new(Vec::<Action>::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut panel =
+            timeline_panel(&model, &Localizer::new(AppUiLocale::ZhCn).expect("catalog"));
+        panel.layout(mondrian_ui_core::types::Rect::new(0.0, 0.0, 520.0, 180.0));
 
-    let mut focus = DummyFocus;
-    let mut shortcut = DummyShortcut;
-    let mut tooltip = DummyTooltip;
-    let mut requests = EventRequests::default();
-    let mut ctx = event_ctx(
-        &mut focus,
-        &mut shortcut,
-        &mut tooltip,
-        &mut requests,
-        &dispatch,
-    );
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let mut ctx = event_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
 
-    let result = panel.event(
-        &UiEvent::MouseDown {
-            position: Point::new(500.0, 42.0),
-            button: MouseButton::Right,
-            modifiers: Modifiers::none(),
-        },
-        &mut ctx,
-    );
-
-    assert_eq!(result, EventResult::Handled);
-    assert!(panel.overlay_hit_test(Point::new(900.0, 900.0)));
-    actions.borrow_mut().clear();
-    assert_eq!(
-        panel.event(
-            &UiEvent::KeyDown { key: KeyCode::Enter, modifiers: Modifiers::none() },
+        let result = panel.event(
+            &UiEvent::MouseDown {
+                position: Point::new(500.0, 42.0),
+                button: MouseButton::Right,
+                modifiers: Modifiers::none(),
+            },
             &mut ctx,
-        ),
-        EventResult::Handled
-    );
+        );
 
-    let recorded = actions.borrow();
-    assert_eq!(recorded.len(), 1);
-    let Action::Custom { namespace, name, payload } = &recorded[0] else {
-        panic!("expected custom add-track action");
-    };
-    assert_eq!(namespace, TRACK_NAMESPACE);
-    assert_eq!(name, TRACK_ADD);
-    let payload: TrackAddPayload =
-        serde_json::from_value(payload.clone()).expect("add track payload");
-    assert_eq!(payload.kind, TrackAddKind::Video);
+        assert_eq!(result, EventResult::Handled);
+        assert!(panel.overlay_hit_test(Point::new(900.0, 900.0)));
+        actions.borrow_mut().clear();
+        assert_eq!(
+            panel.event(
+                &UiEvent::KeyDown { key: KeyCode::Down, modifiers: Modifiers::none() },
+                &mut ctx
+            ),
+            EventResult::Handled
+        );
+
+        assert_eq!(
+            panel.event(
+                &UiEvent::KeyDown { key: KeyCode::Enter, modifiers: Modifiers::none() },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+
+        assert!(
+            actions.borrow().is_empty(),
+            "parent submenu entry is not an AddTrack author action"
+        );
+        if kind == TrackAddKind::Audio {
+            assert_eq!(
+                panel.event(
+                    &UiEvent::KeyDown { key: KeyCode::Down, modifiers: Modifiers::none() },
+                    &mut ctx
+                ),
+                EventResult::Handled
+            );
+        }
+        assert_eq!(
+            panel.event(
+                &UiEvent::KeyDown { key: KeyCode::Enter, modifiers: Modifiers::none() },
+                &mut ctx
+            ),
+            EventResult::Handled
+        );
+        let recorded = actions.borrow();
+        assert_eq!(recorded.len(), 1);
+        let Action::Custom { namespace, name, payload } = &recorded[0] else {
+            panic!("expected custom add-track action");
+        };
+        assert_eq!(namespace, TRACK_NAMESPACE);
+        assert_eq!(name, TRACK_ADD);
+        let payload: TrackAddPayload =
+            serde_json::from_value(payload.clone()).expect("add track payload");
+        assert_eq!(payload.kind, kind);
+    }
 }
 
 #[test]
@@ -2852,7 +3678,7 @@ fn timeline_panel_track_header_drag_emits_typed_move_track_action() {
     let anchor = model.track_identity(TimelineTrackRef { track_index: 0 }).expect("anchor");
     let actions = RefCell::new(Vec::<Action>::new());
     let dispatch = |action| actions.borrow_mut().push(action);
-    let mut panel = timeline_panel(&model);
+    let mut panel = timeline_panel(&model, &Localizer::new(AppUiLocale::ZhCn).expect("catalog"));
     panel.layout(mondrian_ui_core::types::Rect::new(0.0, 0.0, 520.0, 220.0));
 
     let mut focus = DummyFocus;
@@ -2928,7 +3754,7 @@ fn timeline_panel_disabled_clip_still_selects_for_inspection() {
 
     let actions = RefCell::new(Vec::<Action>::new());
     let dispatch = |action| actions.borrow_mut().push(action);
-    let mut panel = timeline_panel(&model);
+    let mut panel = timeline_panel(&model, &Localizer::new(AppUiLocale::ZhCn).expect("catalog"));
     panel.layout(mondrian_ui_core::types::Rect::new(0.0, 0.0, 520.0, 180.0));
 
     let mut focus = DummyFocus;
@@ -2974,7 +3800,7 @@ fn timeline_panel_asset_drop_emits_typed_drop_asset_action() {
     let asset_id = AssetId::new();
     let actions = RefCell::new(Vec::<Action>::new());
     let dispatch = |action| actions.borrow_mut().push(action);
-    let mut panel = timeline_panel(&model);
+    let mut panel = timeline_panel(&model, &Localizer::new(AppUiLocale::ZhCn).expect("catalog"));
     panel.layout(mondrian_ui_core::types::Rect::new(0.0, 0.0, 520.0, 220.0));
 
     let mut focus = DummyFocus;
@@ -3031,7 +3857,7 @@ fn router_drags_asset_grid_card_to_timeline_drop_action() {
                 .with_drag_payload(DragPayload::Asset(asset_id)),
         ],
     );
-    let timeline = timeline_panel(&model);
+    let timeline = timeline_panel(&model, &Localizer::new(AppUiLocale::ZhCn).expect("catalog"));
     let mut root = AssetTimelineDragHarness::new(assets, timeline);
     root.layout(Rect::new(0.0, 0.0, 840.0, 240.0));
     let asset_card = root.assets.card_rect_for_index(0).expect("asset card");
@@ -3117,7 +3943,7 @@ fn timeline_panel_delete_key_emits_shared_delete_selection_action() {
     let model = demo_timeline_model();
     let actions = RefCell::new(Vec::<Action>::new());
     let dispatch = |action| actions.borrow_mut().push(action);
-    let mut panel = timeline_panel(&model);
+    let mut panel = timeline_panel(&model, &Localizer::new(AppUiLocale::ZhCn).expect("catalog"));
     panel.layout(mondrian_ui_core::types::Rect::new(0.0, 0.0, 520.0, 180.0));
 
     let mut focus = DummyFocus;
@@ -3150,7 +3976,7 @@ fn timeline_panel_shift_delete_key_emits_shared_ripple_delete_action() {
     let model = demo_timeline_model();
     let actions = RefCell::new(Vec::<Action>::new());
     let dispatch = |action| actions.borrow_mut().push(action);
-    let mut panel = timeline_panel(&model);
+    let mut panel = timeline_panel(&model, &Localizer::new(AppUiLocale::ZhCn).expect("catalog"));
     panel.layout(mondrian_ui_core::types::Rect::new(0.0, 0.0, 520.0, 180.0));
 
     let mut focus = DummyFocus;
@@ -3186,7 +4012,7 @@ fn timeline_panel_clipboard_keys_emit_shared_edit_actions() {
     let model = demo_timeline_model();
     let actions = RefCell::new(Vec::<Action>::new());
     let dispatch = |action| actions.borrow_mut().push(action);
-    let mut panel = timeline_panel(&model);
+    let mut panel = timeline_panel(&model, &Localizer::new(AppUiLocale::ZhCn).expect("catalog"));
     panel.layout(mondrian_ui_core::types::Rect::new(0.0, 0.0, 520.0, 180.0));
 
     let mut focus = DummyFocus;
@@ -3229,7 +4055,7 @@ fn timeline_panel_ctrl_b_emits_shared_split_action() {
     let model = demo_timeline_model();
     let actions = RefCell::new(Vec::<Action>::new());
     let dispatch = |action| actions.borrow_mut().push(action);
-    let mut panel = timeline_panel(&model);
+    let mut panel = timeline_panel(&model, &Localizer::new(AppUiLocale::ZhCn).expect("catalog"));
     panel.layout(mondrian_ui_core::types::Rect::new(0.0, 0.0, 520.0, 180.0));
 
     let mut focus = DummyFocus;
@@ -3259,7 +4085,7 @@ fn timeline_panel_i_o_emit_shared_mark_actions() {
     let model = demo_timeline_model();
     let actions = RefCell::new(Vec::<Action>::new());
     let dispatch = |action| actions.borrow_mut().push(action);
-    let mut panel = timeline_panel(&model);
+    let mut panel = timeline_panel(&model, &Localizer::new(AppUiLocale::ZhCn).expect("catalog"));
     panel.layout(mondrian_ui_core::types::Rect::new(0.0, 0.0, 520.0, 180.0));
 
     let mut focus = DummyFocus;
@@ -3299,7 +4125,7 @@ fn timeline_panel_dragged_in_marker_emits_typed_range_payload() {
     model.out_point_frame = Some(30);
     let actions = RefCell::new(Vec::<Action>::new());
     let dispatch = |action| actions.borrow_mut().push(action);
-    let mut panel = timeline_panel(&model);
+    let mut panel = timeline_panel(&model, &Localizer::new(AppUiLocale::ZhCn).expect("catalog"));
     panel.layout(mondrian_ui_core::types::Rect::new(0.0, 0.0, 520.0, 180.0));
 
     let mut focus = DummyFocus;
@@ -3621,10 +4447,7 @@ fn app_state_models_map_sequence_selection_and_basic_inspector_values() {
         "mondrian.effect.builtin.gaussian_blur.radius.label"
     );
     assert!(blur_property.path.contains(&effect_id.to_string()));
-    assert_eq!(
-        models.inspector.effects[0].label,
-        effect_display_name(&EffectType::GaussianBlur)
-    );
+    assert_eq!(models.inspector.effects[0].label, "高斯模糊");
     assert!(!models.inspector.effects[0].enabled);
     assert_eq!(
         models.node_graph.selected_clip,
@@ -3660,10 +4483,7 @@ fn app_state_models_map_sequence_selection_and_basic_inspector_values() {
             },
         ]
     );
-    assert_eq!(
-        models.node_graph.nodes[1].title,
-        effect_display_name(&EffectType::GaussianBlur)
-    );
+    assert_eq!(models.node_graph.nodes[1].title, "高斯模糊");
     assert!(models.node_graph.nodes[1].disabled);
     assert_eq!(models.node_graph.nodes[2].id, "output");
     assert_eq!(models.node_graph.nodes[2].accent, Some(colors.node_output));
@@ -4726,7 +5546,7 @@ fn effect_panel_localizes_labels_while_preserving_tree_and_action_identity() {
         .collect();
     assert!(
         root_categories.starts_with(&["Color", "Transform", "Keying"]),
-        "built-in roots must retain their order when plugin tests register extra roots: {root_categories:?}"
+        "built-in roots must retain their order when extension tests register extra roots: {root_categories:?}"
     );
     let color = model
         .items
@@ -4982,14 +5802,14 @@ fn primary_grade_catalog_and_inspector_are_typed_animatable_and_undoable() {
     }));
 
     let primaries = &models.inspector.effects[1];
-    assert_eq!(primaries.label, "Primaries");
+    assert_eq!(primaries.label, "主色轮");
     assert_eq!(
         primaries
             .properties
             .iter()
             .map(|property| property.label.as_str())
             .collect::<Vec<_>>(),
-        ["Offset", "Lift", "Gamma", "Gain"]
+        ["偏移", "暗部（Lift）", "中间调（Gamma）", "亮部（Gain）"]
     );
     assert!(primaries.properties.iter().all(|property| {
         property.is_animatable && matches!(property.value, PropertyValue::Vec3(_))
@@ -5002,7 +5822,7 @@ fn primary_grade_catalog_and_inspector_are_typed_animatable_and_undoable() {
             .iter()
             .map(|property| property.label.as_str())
             .collect::<Vec<_>>(),
-        ["Slope", "Offset", "Power", "Saturation"]
+        ["斜率", "偏移", "幂", "饱和度"]
     );
     assert!(cdl.properties.iter().all(|property| property.is_animatable));
     let slope = &cdl.properties[0];
@@ -5103,7 +5923,7 @@ fn inspector_exposes_grouped_typed_hdr_grading_and_supports_undo() {
 
     let models = AppUiPanelModels::from_app_state(&state);
     let hdr = &models.inspector.effects[0];
-    assert_eq!(hdr.label, "HDR Grading");
+    assert_eq!(hdr.label, "HDR 调色");
     assert_eq!(hdr.properties.len(), 33);
     let groups = hdr
         .properties
@@ -5269,6 +6089,24 @@ fn node_graph_model_preserves_selected_effect_after_reorder() {
 }
 
 #[test]
+fn precise_compound_inspector_rows_reserve_every_component() {
+    for value in [
+        PropertyValue::DoubleVec2([0.0; 2]),
+        PropertyValue::DoubleVec3([0.0; 3]),
+        PropertyValue::DoubleRgb([0.0; 3]),
+        PropertyValue::DoubleColor([0.0; 4]),
+        PropertyValue::IntVec2([0; 2]),
+        PropertyValue::IntVec3([0; 3]),
+    ] {
+        let count = value.channel_count();
+        assert_eq!(
+            effect_property_row_height(&value),
+            Some(count as f32 * 30.0 + (count - 1) as f32 * 4.0)
+        );
+    }
+}
+
+#[test]
 fn inspector_effect_vector_property_rows_get_multi_component_height() {
     assert_eq!(
         effect_property_row_height(&PropertyValue::Vec2(glam::Vec2::ZERO)),
@@ -5287,6 +6125,7 @@ fn inspector_effect_vector_property_rows_get_multi_component_height() {
 
 #[test]
 fn inspector_qualifier_sample_editor_preserves_typed_stable_address_and_validity() {
+    let _theme_guard = crate::app_ui::test_utils::theme_test_guard();
     let effect_id = EffectId::new();
     let selection = SelectedClipRef {
         track_id: TrackId::new(),
@@ -5309,12 +6148,15 @@ fn inspector_qualifier_sample_editor_preserves_typed_stable_address_and_validity
         path: path.clone(),
         label: "Samples".to_owned(),
         group_name: None,
+        group_label: None,
+        enum_labels: BTreeMap::new(),
         value: PropertyValue::QualifierSamples(samples.clone()),
         min: None,
         max: None,
         hard_min: None,
         hard_max: None,
         step: None,
+        can_reset: true,
         is_animatable: false,
         numeric_curve: None,
     };
@@ -5323,10 +6165,101 @@ fn inspector_qualifier_sample_editor_preserves_typed_stable_address_and_validity
         Some(102.0),
         "two samples plus the add row own their full inspector height"
     );
-    let mut widget =
-        effect_property_value_widget(&property, true, Some(selection), effect_id, path.clone());
-    widget.layout(Rect::new(0.0, 0.0, 220.0, 102.0));
-    assert_eq!(widget.child_count(), 3);
+    for locale in [AppUiLocale::EnUs, AppUiLocale::ZhCn, AppUiLocale::Pseudo] {
+        let localizer = Localizer::new(locale).expect("catalog");
+        let mut widget =
+            effect_property_value_widget(&localizer, &property, true, Some(selection), effect_id);
+        widget.layout(Rect::new(0.0, 0.0, 220.0, 102.0));
+        assert_eq!(widget.child_count(), 3);
+        for (index, message_id) in ["inspector-qualifier-include", "inspector-qualifier-exclude"]
+            .into_iter()
+            .enumerate()
+        {
+            let row = widget.child(index).expect("sample row");
+            assert_eq!(
+                row.child(1).expect("operation").accessibility().expect("dropdown").name,
+                Some(localizer.text(message_id))
+            );
+            assert_eq!(
+                row.child(2).expect("remove").accessibility().expect("button").name,
+                Some(localizer.text("inspector-qualifier-remove-sample"))
+            );
+        }
+        let add_row = widget.child(2).expect("add row");
+        for (index, message_id) in [
+            "inspector-qualifier-add-include",
+            "inspector-qualifier-add-exclude",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            assert_eq!(
+                add_row.child(index).expect("add").accessibility().expect("button").name,
+                Some(localizer.text(message_id))
+            );
+        }
+        if locale == AppUiLocale::EnUs {
+            assert_eq!(localizer.text("inspector-qualifier-include"), "Include");
+        }
+        let actions = RefCell::new(Vec::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let mut ctx = event_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+        let add_exclude = widget.child_mut(2).expect("add row").child_mut(1).expect("add exclude");
+        let click = Point::new(180.0, 90.0);
+        assert!(
+            add_exclude.hit_test(click),
+            "the add action must be visible in its row"
+        );
+        add_exclude.event(
+            &UiEvent::MouseDown {
+                position: click,
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        add_exclude.event(
+            &UiEvent::MouseUp {
+                position: click,
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        let recorded = actions.borrow();
+        assert_eq!(recorded.len(), 1);
+        let Action::Custom { payload, .. } = &recorded[0] else {
+            panic!("author action");
+        };
+        let payload: VisualEffectSetParameterValuePayload =
+            serde_json::from_value(payload.clone()).expect("sample action");
+        assert_eq!(payload.clip_id, selection.clip_id);
+        assert_eq!(payload.effect_id, effect_id);
+        let ParameterValueWrite::Value {
+            parameter: written_parameter,
+            value: PropertyValue::QualifierSamples(changed),
+        } = payload.write
+        else {
+            panic!("typed sample write");
+        };
+        assert_eq!(written_parameter, parameter);
+        assert_eq!(changed.samples().len(), 3);
+        assert_eq!(&changed.samples()[..2], samples.samples());
+        assert_eq!(
+            changed.samples()[2].operation,
+            QualifierSampleOperation::Exclude
+        );
+    }
 
     let mut changed = samples.samples().to_vec();
     changed[0].rgb = [0.1, 0.8, 0.2];
@@ -5337,7 +6270,6 @@ fn inspector_qualifier_sample_editor_preserves_typed_stable_address_and_validity
     let Some(Action::Custom { namespace, name, payload }) = qualifier_sample_set_action(
         Some(selection),
         InspectorPropertyTarget::Effect { effect_id, parameter: parameter.clone() },
-        &path,
         changed.clone(),
     ) else {
         panic!("valid Qualifier edit must dispatch");
@@ -5346,11 +6278,14 @@ fn inspector_qualifier_sample_editor_preserves_typed_stable_address_and_validity
     assert_eq!(name, VISUAL_EFFECT_SET_PARAMETER_VALUE);
     let payload: VisualEffectSetParameterValuePayload =
         serde_json::from_value(payload).expect("Qualifier action payload");
+    let ParameterValueWrite::Value { parameter: written_parameter, value } = payload.write else {
+        panic!("expected complete property write");
+    };
     assert_eq!(payload.clip_id, selection.clip_id);
     assert_eq!(payload.effect_id, effect_id);
-    assert_eq!(payload.parameter, parameter);
+    assert_eq!(written_parameter, parameter);
     assert_eq!(
-        payload.value,
+        value,
         PropertyValue::QualifierSamples(
             QualifierSampleSet::new(changed).expect("same valid sample payload")
         )
@@ -5362,7 +6297,6 @@ fn inspector_qualifier_sample_editor_preserves_typed_stable_address_and_validity
             effect_id,
             parameter: test_parameter_address("mondrian.effect.builtin.qualifier.samples"),
         },
-        &path,
         vec![QualifierSample::new(
             [1.0, 0.0, 0.0],
             QualifierSampleOperation::Exclude,
@@ -5375,7 +6309,6 @@ fn inspector_qualifier_sample_editor_preserves_typed_stable_address_and_validity
             effect_id,
             parameter: test_parameter_address("mondrian.effect.builtin.qualifier.samples"),
         },
-        &path,
         Vec::new(),
     )
     .is_none());
@@ -5398,21 +6331,24 @@ fn inspector_effect_curve_editor_dispatches_structured_curve_value() {
         path: "curves.master".to_string(),
         label: "Master".to_string(),
         group_name: None,
+        group_label: None,
+        enum_labels: BTreeMap::new(),
         value: PropertyValue::Curve(NormalizedCurve::identity()),
         min: None,
         max: None,
         hard_min: None,
         hard_max: None,
         step: None,
+        can_reset: true,
         is_animatable: false,
         numeric_curve: None,
     };
     let mut widget = effect_property_value_widget(
+        &chinese_localizer(),
         &property,
         true,
         Some(selection),
         effect_id,
-        property.path.clone(),
     );
     widget.layout(Rect::new(0.0, 0.0, 220.0, 150.0));
     let actions = RefCell::new(Vec::new());
@@ -5441,25 +6377,64 @@ fn inspector_effect_curve_editor_dispatches_structured_curve_value() {
         EventResult::Handled
     );
 
+    use crate::app::parameter_gesture::{ParameterGestureAction, ParameterGestureEdit};
     let recorded = actions.borrow();
-    assert_eq!(recorded.len(), 1);
-    let Action::Custom { namespace, name, payload } = &recorded[0] else {
-        panic!("expected inspector curve action, got {:?}", recorded[0]);
+    assert_eq!(
+        recorded.len(),
+        2,
+        "insertion starts an author lease before changing values"
+    );
+    let Some(ParameterGestureAction::Begin {
+        gesture_id,
+        edit: ParameterGestureEdit::Effect(begin),
+    }) = ParameterGestureAction::decode(&recorded[0]).expect("typed Begin")
+    else {
+        panic!("expected initial effect value author lease");
     };
-    assert_eq!(namespace, VISUAL_EFFECT_NAMESPACE);
-    assert_eq!(name, VISUAL_EFFECT_SET_PARAMETER_VALUE);
-    let payload: VisualEffectSetParameterValuePayload =
-        serde_json::from_value(payload.clone()).expect("curve property payload");
+    assert_eq!(begin.clip_id, selection.clip_id);
+    assert_eq!(begin.effect_id, effect_id);
+    assert_eq!(
+        begin.write,
+        ParameterValueWrite::Value {
+            parameter: property.address.clone(),
+            value: property.value.clone(),
+        }
+    );
+    let Some(ParameterGestureAction::Update {
+        gesture_id: update_id,
+        edit: ParameterGestureEdit::Effect(payload),
+    }) = ParameterGestureAction::decode(&recorded[1]).expect("typed Update")
+    else {
+        panic!("expected complete live curve value");
+    };
+    assert_eq!(update_id, gesture_id);
+    let ParameterValueWrite::Value { parameter, value } = payload.write else {
+        panic!("expected complete property write");
+    };
     assert_eq!(payload.clip_id, selection.clip_id);
     assert_eq!(payload.effect_id, effect_id);
-    assert_eq!(payload.parameter, property.address);
-    let PropertyValue::Curve(curve) = payload.value else {
+    assert_eq!(parameter, property.address);
+    let PropertyValue::Curve(curve) = value else {
         panic!("expected structured Curve payload");
     };
     assert_eq!(curve.points().len(), 3);
     assert_eq!(curve.points()[0], NormalizedCurvePoint::new(0.0, 0.0));
     assert_eq!(curve.points()[2], NormalizedCurvePoint::new(1.0, 1.0));
     assert!(curve.points()[1].x > 0.4 && curve.points()[1].x < 0.6);
+    drop(recorded);
+    widget.event(
+        &UiEvent::MouseUp {
+            position: Point::new(110.0, 75.0),
+            button: MouseButton::Left,
+            modifiers: Modifiers::none(),
+        },
+        &mut ctx,
+    );
+    assert_eq!(actions.borrow().len(), 3);
+    assert!(matches!(
+        ParameterGestureAction::decode(&actions.borrow()[2]).expect("typed Finish"),
+        Some(ParameterGestureAction::Finish { gesture_id: finish_id }) if finish_id == gesture_id
+    ));
 }
 
 #[test]
@@ -5479,21 +6454,24 @@ fn inspector_effect_vec3_property_widget_dispatches_component_change() {
         path: "lighting.direction".to_string(),
         label: "Direction".to_string(),
         group_name: None,
+        group_label: None,
+        enum_labels: BTreeMap::new(),
         value: PropertyValue::Vec3(glam::Vec3::new(0.1, 0.2, 0.3)),
         min: Some(0.0),
         max: Some(1.0),
         hard_min: None,
         hard_max: None,
         step: Some(0.01),
+        can_reset: true,
         is_animatable: true,
         numeric_curve: None,
     };
     let mut widget = effect_property_value_widget(
+        &chinese_localizer(),
         &property,
         true,
         Some(selection),
         effect_id,
-        property.path.clone(),
     );
     widget.layout(Rect::new(0.0, 0.0, 220.0, 94.0));
 
@@ -5523,29 +6501,625 @@ fn inspector_effect_vec3_property_widget_dispatches_component_change() {
     assert_eq!(result, EventResult::Handled);
     let recorded = actions.borrow();
     assert_eq!(recorded.len(), 1);
-    let Action::Custom { namespace, name, payload } = &recorded[0] else {
-        panic!("expected inspector custom action, got {:?}", recorded[0]);
+    let Some(crate::app::parameter_gesture::ParameterGestureAction::Begin {
+        edit: crate::app::parameter_gesture::ParameterGestureEdit::Effect(payload),
+        ..
+    }) = crate::app::parameter_gesture::ParameterGestureAction::decode(&recorded[0])
+        .expect("valid gesture envelope")
+    else {
+        panic!("expected effect gesture begin, got {:?}", recorded[0]);
     };
-    assert_eq!(namespace, VISUAL_EFFECT_NAMESPACE);
-    assert_eq!(name, VISUAL_EFFECT_SET_PARAMETER_VALUE);
-    let payload: VisualEffectSetParameterValuePayload =
-        serde_json::from_value(payload.clone()).expect("set effect property payload");
     assert_eq!(payload.clip_id, selection.clip_id);
     assert_eq!(payload.effect_id, effect_id);
-    assert_eq!(payload.parameter, property.address);
-    let PropertyValue::Vec3(value) = payload.value else {
-        panic!("expected Vec3 payload");
+    let ParameterValueWrite::Channels { parameter, channel_values } = payload.write else {
+        panic!("expected sparse component write");
     };
-    assert_eq!(value.x, 0.1);
-    assert_eq!(value.y, 0.2);
+    assert_eq!(parameter, property.address);
+    assert_eq!(channel_values.len(), 1);
+    assert_eq!(channel_values[0].0, 2);
+    assert!(channel_values[0].1 > 0.3, "third slider should change z");
+}
+
+#[test]
+fn inspector_numeric_slider_keeps_decimal_endpoint_in_author_precision() {
+    let _theme_guard = crate::app_ui::test_utils::theme_test_guard();
+    for (value, component, y, animatable) in [
+        (PropertyValue::Vec3(glam::Vec3::splat(0.125)), 2, 75.0, true),
+        (PropertyValue::Float(0.125), 0, 12.0, true),
+        (
+            PropertyValue::Vec3(glam::Vec3::splat(0.125)),
+            2,
+            75.0,
+            false,
+        ),
+        (PropertyValue::Float(0.125), 0, 12.0, false),
+    ] {
+        let effect_id = EffectId::new();
+        let selection = SelectedClipRef {
+            track_id: TrackId::new(),
+            is_video_track: true,
+            clip_id: ClipId::new(),
+        };
+        let descriptor =
+            mondrian_core::automation::PropertyDescriptor::new("point", "Point", value)
+                .with_animatable(animatable)
+                .with_numeric_contract(
+                    mondrian_core::automation::ParameterUnit::Normalized,
+                    mondrian_core::automation::ParameterNumericContract::closed(
+                        0.0,
+                        0.2,
+                        Some(0.01),
+                        mondrian_core::automation::ParameterInvalidValuePolicy::Reject,
+                    )
+                    .expect("exact range"),
+                );
+        let mut authored = mondrian_core::automation::AnimatedProperty::from_descriptor(descriptor);
+        authored.validate().expect("canonical author");
+        let property =
+            inspector_property_model("point", &authored, TimelineTime::ZERO, &chinese_localizer());
+        let mut widget = effect_property_value_widget(
+            &chinese_localizer(),
+            &property,
+            true,
+            Some(selection),
+            effect_id,
+        );
+        widget.layout(Rect::new(0.0, 0.0, 220.0, 94.0));
+        let actions = RefCell::new(Vec::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut router = mondrian_ui_events::EventRouter::new(widget.id());
+        let mut tree = mondrian_ui_core::tree::WidgetTreeView::new(widget.as_mut());
+        assert_eq!(
+            router.route(
+                UiEvent::MouseDown {
+                    position: Point::new(80.0, y),
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::none(),
+                },
+                &mut tree,
+                &dispatch
+            ),
+            EventResult::Handled
+        );
+        router.route(
+            UiEvent::MouseMove {
+                position: Point::new(500.0, y),
+                modifiers: Modifiers::none(),
+            },
+            &mut tree,
+            &dispatch,
+        );
+        router.route(
+            UiEvent::MouseUp {
+                position: Point::new(500.0, y),
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut tree,
+            &dispatch,
+        );
+        let payload = actions
+            .borrow()
+            .iter()
+            .rev()
+            .find_map(
+                |action| match crate::app::parameter_gesture::ParameterGestureAction::decode(action)
+                    .expect("typed gesture")
+                {
+                    Some(crate::app::parameter_gesture::ParameterGestureAction::Update {
+                        edit: crate::app::parameter_gesture::ParameterGestureEdit::Effect(payload),
+                        ..
+                    }) => Some(payload),
+                    _ => None,
+                },
+            )
+            .expect("captured slider update");
+        assert_eq!(payload.clip_id, selection.clip_id);
+        assert_eq!(payload.effect_id, effect_id);
+        let ParameterValueWrite::Channels { parameter, channel_values } = payload.write else {
+            panic!("expected component write");
+        };
+        assert_eq!(parameter, property.address);
+        assert_eq!(
+            channel_values,
+            vec![(component, 0.2)],
+            "exact endpoint with animatable={animatable}"
+        );
+        authored
+            .write_channels(
+                TimelineTime::ZERO,
+                &channel_values,
+                InterpolationType::Linear,
+            )
+            .expect("Reject admits UI endpoint");
+        authored.validate().expect("physical value stays within exact bounds");
+        if !animatable {
+            assert_eq!(authored.channel_count(), 0);
+        }
+    }
+}
+
+#[test]
+fn inspector_vector_slider_uses_its_own_channel_contract() {
+    let effect_id = EffectId::new();
+    let selection = SelectedClipRef {
+        track_id: TrackId::new(),
+        is_video_track: true,
+        clip_id: ClipId::new(),
+    };
+    let property = InspectorEffectPropertyModel {
+        schema: ParameterSchema::v1(
+            mondrian_core::ParameterId::new_static("mondrian.test.lighting_direction"),
+            PropertyValue::Vec3(glam::Vec3::new(0.1, 20.0, -20.0)),
+        )
+        .with_channel_numeric_contracts(
+            mondrian_core::automation::ParameterUnit::Unitless,
+            [(0.0, 1.0, 0.01), (10.0, 30.0, 0.1), (-30.0, -10.0, 1.0)]
+                .into_iter()
+                .map(|(min, max, step)| {
+                    mondrian_core::automation::ParameterNumericContract::closed(
+                        min,
+                        max,
+                        Some(step),
+                        mondrian_core::automation::ParameterInvalidValuePolicy::Reject,
+                    )
+                    .expect("channel contract")
+                })
+                .collect::<Vec<_>>(),
+        ),
+        address: test_parameter_address("mondrian.test.lighting_direction"),
+        path: "lighting.direction".to_string(),
+        label: "Direction".to_string(),
+        group_name: None,
+        group_label: None,
+        enum_labels: BTreeMap::new(),
+        value: PropertyValue::Vec3(glam::Vec3::new(0.1, 20.0, -20.0)),
+        min: Some(0.0),
+        max: Some(1.0),
+        hard_min: None,
+        hard_max: None,
+        step: Some(0.01),
+        can_reset: true,
+        is_animatable: true,
+        numeric_curve: None,
+    };
+    let mut widget = effect_property_value_widget(
+        &chinese_localizer(),
+        &property,
+        true,
+        Some(selection),
+        effect_id,
+    );
+    let size =
+        widget.measure(LayoutConstraint { min: Size::ZERO, max: Size::new(220.0, f32::MAX) });
+    widget.layout(Rect::new(0.0, 0.0, 220.0, size.height));
+
+    fn slider_bounds(widget: &dyn mondrian_ui_core::widget::Widget, bounds: &mut Vec<Rect>) {
+        if widget
+            .accessibility()
+            .is_some_and(|node| node.role == mondrian_ui_core::AccessibilityRole::Slider)
+        {
+            bounds.push(widget.accessibility_bounds().expect("laid-out slider bounds"));
+        }
+        for index in 0..widget.child_count() {
+            slider_bounds(widget.child(index).expect("declared child"), bounds);
+        }
+    }
+    let mut bounds = Vec::new();
+    slider_bounds(widget.as_ref(), &mut bounds);
+    assert_eq!(bounds.len(), 3, "one slider for each Vec3 channel");
+    let z = bounds[2];
+    // Select a value away from the current midpoint using the actual layout,
+    // independent of platform font metrics and numeric-input width.
+    let position = Point::new(z.x + z.width * 0.8, z.y + z.height * 0.5);
+
+    let actions = RefCell::new(Vec::new());
+    let dispatch = |action| actions.borrow_mut().push(action);
+    let mut focus = DummyFocus;
+    let mut shortcut = DummyShortcut;
+    let mut tooltip = DummyTooltip;
+    let mut requests = EventRequests::default();
+    let mut ctx = event_ctx(
+        &mut focus,
+        &mut shortcut,
+        &mut tooltip,
+        &mut requests,
+        &dispatch,
+    );
+
+    let result = widget.event(
+        &UiEvent::MouseDown {
+            position,
+            button: MouseButton::Left,
+            modifiers: Modifiers::none(),
+        },
+        &mut ctx,
+    );
+
+    assert_eq!(result, EventResult::Handled);
+    let recorded = actions.borrow();
+    assert_eq!(recorded.len(), 1);
+    let Some(crate::app::parameter_gesture::ParameterGestureAction::Begin {
+        edit: crate::app::parameter_gesture::ParameterGestureEdit::Effect(payload),
+        ..
+    }) = crate::app::parameter_gesture::ParameterGestureAction::decode(&recorded[0])
+        .expect("valid gesture envelope")
+    else {
+        panic!("expected effect gesture begin, got {:?}", recorded[0]);
+    };
+    assert_eq!(payload.clip_id, selection.clip_id);
+    assert_eq!(payload.effect_id, effect_id);
+    let ParameterValueWrite::Channels { parameter, channel_values } = payload.write else {
+        panic!("expected sparse component write");
+    };
+    assert_eq!(parameter, property.address);
+    assert_eq!(channel_values.len(), 1);
+    assert_eq!(channel_values[0].0, 2);
     assert!(
-        value.z > 0.3,
-        "clicking the third component slider should update z, got {value:?}"
+        (-30.0..=-10.0).contains(&channel_values[0].1),
+        "Z must use its negative range, not X or model scalar hints"
+    );
+    assert_eq!(
+        channel_values[0].1.fract(),
+        0.0,
+        "Z uses its own integer step"
+    );
+    assert_ne!(
+        channel_values[0].1, -20.0,
+        "pointer changes the selected component"
     );
 }
 
 #[test]
-fn inspector_effect_float_property_number_input_honors_descriptor_step() {
+fn numeric_draft_cancel_preserves_automation_and_history() {
+    use mondrian_core::automation::{Keyframe, PropertyHost, PropertyMutation};
+    let mut sequence = Sequence::new("Draft Cancellation");
+    sequence.settings.frame_rate = Rational::FPS_24;
+    let track_id = sequence.video_tracks[0].id;
+    let mut clip = Clip::new(AssetId::new(), TimelineTime::ZERO, TimelineTime::ONE).expect("clip");
+    for (time, value) in [(TimelineTime::ZERO, 0.25), (TimelineTime::ONE, 0.75)] {
+        clip.apply_property_mutation(PropertyMutation::SetKeyframe {
+            path: Transform2D::OPACITY_PATH.to_owned(),
+            keyframe: Keyframe::linear(time, PropertyValue::Float(value)),
+        })
+        .expect("seed opacity curve");
+    }
+    let clip_id = clip.id;
+    sequence.video_tracks[0].add_clip(clip).expect("clip");
+    let mut state = AppState::new();
+    state.test_set_sequence(Some(sequence));
+    state
+        .dispatch_action(crate::app::ui_actions::timeline_seek_action(
+            FramePosition::new(1, Rational::new(1, 2)),
+        ))
+        .expect("seek between keys");
+    assert_eq!(
+        state.current_timeline_time().expect("time"),
+        Some(TimelineTime::new(1, 2).expect("half"))
+    );
+    let selection = Some(SelectedClipRef { track_id, is_video_track: true, clip_id });
+    let snapshot = |state: &AppState| {
+        state
+            .active_sequence()
+            .expect("sequence")
+            .find_clip(clip_id)
+            .expect("clip")
+            .intrinsic_parameter_bag()
+    };
+    let before = snapshot(&state);
+    let address = before.address_for_path(Transform2D::OPACITY_PATH).expect("opacity");
+    let mut widget =
+        numeric_slider_input_control(50.0_f32, 0.0, 100.0, Some(1.0), 0, true, move |value| {
+            inspector_parameter_action(
+                selection,
+                Some(address.clone()),
+                PropertyValue::Float(value / 100.0),
+            )
+        });
+    widget.layout(Rect::new(0.0, 0.0, 220.0, 28.0));
+    let actions = RefCell::new(Vec::new());
+    let dispatch = |action| actions.borrow_mut().push(action);
+    let mut focus = DummyFocus;
+    let mut shortcut = DummyShortcut;
+    let mut tooltip = DummyTooltip;
+    let mut requests = EventRequests::default();
+    let mut ctx = event_ctx(
+        &mut focus,
+        &mut shortcut,
+        &mut tooltip,
+        &mut requests,
+        &dispatch,
+    );
+    widget.event(
+        &UiEvent::MouseDown {
+            position: Point::new(190.0, 14.0),
+            button: MouseButton::Left,
+            modifiers: Modifiers::none(),
+        },
+        &mut ctx,
+    );
+    widget.event(
+        &UiEvent::KeyDown {
+            key: KeyCode::A,
+            modifiers: crate::app_ui::test_utils::primary_text_modifiers(),
+        },
+        &mut ctx,
+    );
+    widget.event(&UiEvent::TextInput("75".to_owned()), &mut ctx);
+    widget.event(
+        &UiEvent::KeyDown { key: KeyCode::Escape, modifiers: Modifiers::none() },
+        &mut ctx,
+    );
+    for action in actions.borrow().iter() {
+        state.dispatch_action(action.clone()).expect("numeric action");
+    }
+    let after = snapshot(&state);
+    assert_eq!(
+        after, before,
+        "cancel must retain original curve and key identities"
+    );
+    assert!(
+        !state.undo_timeline().expect("undo"),
+        "canceled drafts must create no history"
+    );
+    assert!(
+        actions.borrow().is_empty(),
+        "uncommitted numeric text must not publish author actions"
+    );
+}
+
+#[test]
+fn precise_inspector_entry_commits_and_undoes_exact_integer_and_double_values() {
+    use mondrian_core::automation::PropertyDescriptor;
+    use mondrian_effects::{
+        instantiate_effect_node, register_effect_definition, EffectColorDomainContract,
+        EffectDeterminism, EffectExecutionContract, EffectExecutionModes,
+        EffectExtensionDefinitionBuilder, EffectGraphTopology, EffectRenderOp,
+        EffectResourceLifetime, EffectRoiPropagation, EffectStateModel, EffectTemporalInputExtent,
+    };
+    let kind = EffectType::External("plugin.test.precise_inspector".to_owned());
+    let cases = [
+        (
+            "float",
+            PropertyValue::Float(0.12345679),
+            "16777220",
+            PropertyValue::Float(16777220.0),
+        ),
+        (
+            "integer",
+            PropertyValue::Int(9_007_199_254_740_993),
+            "9223372036854775806",
+            PropertyValue::Int(i64::MAX - 1),
+        ),
+        (
+            "double",
+            PropertyValue::Double(0.12345678901234568),
+            "0.23456789012345678",
+            PropertyValue::Double(0.23456789012345678),
+        ),
+        (
+            "double_vec2",
+            PropertyValue::DoubleVec2([0.12345678901234568, 0.12500000000000003]),
+            "0.23456789012345678",
+            PropertyValue::DoubleVec2([0.12345678901234568, 0.23456789012345678]),
+        ),
+        (
+            "double_vec3",
+            PropertyValue::DoubleVec3([
+                0.12345678901234568,
+                0.12500000000000003,
+                0.12500000000000003,
+            ]),
+            "0.23456789012345678",
+            PropertyValue::DoubleVec3([
+                0.12345678901234568,
+                0.12500000000000003,
+                0.23456789012345678,
+            ]),
+        ),
+        (
+            "double_rgb",
+            PropertyValue::DoubleRgb([
+                0.12345678901234568,
+                0.12500000000000003,
+                0.12500000000000003,
+            ]),
+            "0.23456789012345678",
+            PropertyValue::DoubleRgb([
+                0.12345678901234568,
+                0.12500000000000003,
+                0.23456789012345678,
+            ]),
+        ),
+        (
+            "double_color",
+            PropertyValue::DoubleColor([
+                0.12345678901234568,
+                0.12500000000000003,
+                0.12500000000000003,
+                0.12500000000000003,
+            ]),
+            "0.23456789012345678",
+            PropertyValue::DoubleColor([
+                0.12345678901234568,
+                0.12500000000000003,
+                0.12500000000000003,
+                0.23456789012345678,
+            ]),
+        ),
+        (
+            "int_vec2",
+            PropertyValue::IntVec2([0, i32::MIN]),
+            "2147483647",
+            PropertyValue::IntVec2([0, i32::MAX]),
+        ),
+        (
+            "int_vec3",
+            PropertyValue::IntVec3([0, i32::MIN, i32::MAX]),
+            "-2147483648",
+            PropertyValue::IntVec3([0, i32::MIN, i32::MIN]),
+        ),
+    ];
+    let mut builder = EffectExtensionDefinitionBuilder::new(
+        kind.key(),
+        "Precise Inspector",
+        EffectColorDomainContract::SCENE_LINEAR,
+    )
+    .with_execution_contract(EffectExecutionContract {
+        execution_modes: EffectExecutionModes::CPU_F32,
+        determinism: EffectDeterminism::Deterministic,
+        state_model: EffectStateModel::Stateless,
+        temporal_input: EffectTemporalInputExtent::CURRENT_FRAME,
+        roi_propagation: EffectRoiPropagation::UnknownRequiresFullFrame,
+        resource_lifetime: EffectResourceLifetime::Frame,
+        topology: EffectGraphTopology::LinearChain,
+    })
+    .with_branching_graph(|_, _, graph| {
+        graph.apply(EffectRenderOp::Sharpen { amount: 0.0 });
+    });
+    for (name, initial, _, _) in &cases {
+        builder = builder.property(
+            PropertyDescriptor::new(
+                format!("plugin.test.precise_inspector.{name}"),
+                *name,
+                initial.clone(),
+            )
+            .with_parameter_id(kind.parameter_id(name).expect("parameter")),
+        );
+    }
+    register_effect_definition(builder.build()).expect("definition");
+    let effect = instantiate_effect_node(kind.clone()).expect("effect");
+    let effect_id = effect.id;
+    let mut sequence = Sequence::new("Precision");
+    let track_id = sequence.video_tracks[0].id;
+    let mut clip = Clip::new(
+        AssetId::new(),
+        TimelineTime::ZERO,
+        TimelineTime::new(1, 1).expect("duration"),
+    )
+    .expect("clip");
+    let clip_id = clip.id;
+    clip.add_effect_node(effect);
+    sequence.video_tracks[0].add_clip(clip).expect("add clip");
+    let mut state = crate::app::AppState::new();
+    state.test_set_sequence(Some(sequence));
+    let selection = SelectedClipRef { track_id, is_video_track: true, clip_id };
+    for (name, initial, text, expected) in cases {
+        let parameter_id = kind.parameter_id(name).expect("parameter");
+        let owned = state
+            .active_sequence()
+            .expect("sequence")
+            .find_clip(clip_id)
+            .expect("clip")
+            .effects[0]
+            .properties
+            .iter()
+            .map(|(_, property)| property)
+            .find(|property| property.descriptor.schema.parameter_id == parameter_id)
+            .expect("property")
+            .clone();
+        let path = owned.descriptor.path.clone();
+        let property = InspectorEffectPropertyModel {
+            schema: owned.descriptor.schema.clone(),
+            address: owned.address(),
+            path: path.clone(),
+            label: name.to_owned(),
+            group_name: None,
+            group_label: None,
+            enum_labels: BTreeMap::new(),
+            value: initial.clone(),
+            min: None,
+            max: None,
+            hard_min: None,
+            hard_max: None,
+            step: (name == "double").then_some(0.1),
+            can_reset: true,
+            is_animatable: true,
+            numeric_curve: None,
+        };
+        let mut widget = effect_property_value_widget(
+            &chinese_localizer(),
+            &property,
+            true,
+            Some(selection),
+            effect_id,
+        );
+        let component = initial.channel_count().saturating_sub(1);
+        let height = effect_property_row_height(&initial).unwrap_or(28.0);
+        widget.layout(Rect::new(0.0, 0.0, 220.0, height));
+        let actions = RefCell::new(Vec::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let mut ctx = event_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+        widget.event(
+            &UiEvent::MouseDown {
+                position: Point::new(190.0, component as f32 * 34.0 + 14.0),
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        widget.event(
+            &UiEvent::KeyDown {
+                key: KeyCode::A,
+                modifiers: crate::app_ui::test_utils::primary_text_modifiers(),
+            },
+            &mut ctx,
+        );
+        widget.event(&UiEvent::TextInput(text.to_owned()), &mut ctx);
+        assert!(actions.borrow().is_empty());
+        widget.event(
+            &UiEvent::KeyDown { key: KeyCode::Enter, modifiers: Modifiers::none() },
+            &mut ctx,
+        );
+        assert_eq!(actions.borrow().len(), 1);
+        state.dispatch_action(actions.borrow()[0].clone()).expect("author value");
+        let snapshot = |state: &crate::app::AppState| {
+            state
+                .active_sequence()
+                .expect("sequence")
+                .find_clip(clip_id)
+                .expect("clip")
+                .effects[0]
+                .properties
+                .property(&path)
+                .expect("property")
+                .static_value()
+                .clone()
+        };
+        assert_eq!(snapshot(&state), expected);
+        assert!(state.undo_timeline().expect("undo"));
+        assert_eq!(snapshot(&state), initial);
+        assert!(state.redo_timeline().expect("redo"));
+        assert_eq!(snapshot(&state), expected);
+        widget.event(
+            &UiEvent::KeyDown {
+                key: KeyCode::A,
+                modifiers: crate::app_ui::test_utils::primary_text_modifiers(),
+            },
+            &mut ctx,
+        );
+        widget.event(&UiEvent::TextInput("0".to_owned()), &mut ctx);
+        widget.event(
+            &UiEvent::KeyDown { key: KeyCode::Escape, modifiers: Modifiers::none() },
+            &mut ctx,
+        );
+        assert_eq!(actions.borrow().len(), 1);
+        assert_eq!(snapshot(&state), expected);
+    }
+}
+
+#[test]
+fn inspector_effect_float_property_text_input_preserves_value_between_steps() {
     let effect_id = EffectId::new();
     let selection = SelectedClipRef {
         track_id: TrackId::new(),
@@ -5561,21 +7135,24 @@ fn inspector_effect_float_property_number_input_honors_descriptor_step() {
         path: "color.exposure".to_string(),
         label: "Exposure".to_string(),
         group_name: None,
+        group_label: None,
+        enum_labels: BTreeMap::new(),
         value: PropertyValue::Float(0.2),
         min: Some(0.0),
         max: Some(1.0),
         hard_min: None,
         hard_max: None,
         step: Some(0.25),
+        can_reset: true,
         is_animatable: true,
         numeric_curve: None,
     };
     let mut widget = effect_property_value_widget(
+        &chinese_localizer(),
         &property,
         true,
         Some(selection),
         effect_id,
-        property.path.clone(),
     );
     widget.layout(Rect::new(0.0, 0.0, 220.0, 28.0));
     let actions = RefCell::new(Vec::new());
@@ -5605,7 +7182,10 @@ fn inspector_effect_float_property_number_input_honors_descriptor_step() {
     );
     assert_eq!(
         widget.event(
-            &UiEvent::KeyDown { key: KeyCode::A, modifiers: Modifiers::primary() },
+            &UiEvent::KeyDown {
+                key: KeyCode::A,
+                modifiers: crate::app_ui::test_utils::primary_text_modifiers()
+            },
             &mut ctx,
         ),
         EventResult::Handled
@@ -5614,6 +7194,11 @@ fn inspector_effect_float_property_number_input_honors_descriptor_step() {
         widget.event(&UiEvent::TextInput("0.62".to_string()), &mut ctx),
         EventResult::Handled
     );
+    assert!(actions.borrow().is_empty());
+    widget.event(
+        &UiEvent::KeyDown { key: KeyCode::Enter, modifiers: Modifiers::none() },
+        &mut ctx,
+    );
     let recorded = actions.borrow();
     assert_eq!(recorded.len(), 1);
     let Action::Custom { payload, .. } = &recorded[0] else {
@@ -5621,13 +7206,16 @@ fn inspector_effect_float_property_number_input_honors_descriptor_step() {
     };
     let payload: VisualEffectSetParameterValuePayload =
         serde_json::from_value(payload.clone()).expect("set effect property payload");
-    assert_eq!(payload.parameter, property.address);
-    let PropertyValue::Float(value) = payload.value else {
-        panic!("expected Float payload");
+    let ParameterValueWrite::Channels { parameter, channel_values } = payload.write else {
+        panic!("expected precise Float channel write");
     };
+    assert_eq!(channel_values.len(), 1);
+    assert_eq!(channel_values[0].0, 0);
+    let value = channel_values[0].1;
+    assert_eq!(parameter, property.address);
     assert!(
-        (value - 0.5).abs() <= 0.0001,
-        "expected stepped value 0.5 from typed 0.62, got {value}"
+        (value - 0.62).abs() <= 0.0001,
+        "expected exact typed value 0.62, got {value}"
     );
 }
 
@@ -5648,16 +7236,21 @@ fn inspector_disabled_effect_property_row_remains_editable_for_unlocked_clip() {
         path: "blur.radius".to_string(),
         label: "Radius".to_string(),
         group_name: None,
+        group_label: None,
+        enum_labels: BTreeMap::new(),
         value: PropertyValue::Float(0.2),
         min: Some(0.0),
         max: Some(1.0),
         hard_min: None,
         hard_max: None,
         step: Some(0.1),
+        can_reset: true,
         is_animatable: true,
         numeric_curve: None,
     };
     let disabled_effect = InspectorEffectModel {
+        native_author_view: None,
+        native_gui_controller: None,
         effect_id,
         label: "Gaussian Blur".to_string(),
         enabled: false,
@@ -5669,11 +7262,11 @@ fn inspector_disabled_effect_property_row_remains_editable_for_unlocked_clip() {
     );
 
     let mut widget = effect_property_value_widget(
+        &chinese_localizer(),
         &property,
         true,
         Some(selection),
         effect_id,
-        property.path.clone(),
     );
     widget.layout(Rect::new(0.0, 0.0, 220.0, 28.0));
     let actions = RefCell::new(Vec::new());
@@ -5704,19 +7297,23 @@ fn inspector_disabled_effect_property_row_remains_editable_for_unlocked_clip() {
 
     let recorded = actions.borrow();
     assert_eq!(recorded.len(), 1);
-    let Action::Custom { namespace, name, payload } = &recorded[0] else {
-        panic!("expected inspector custom action, got {:?}", recorded[0]);
+    let Some(crate::app::parameter_gesture::ParameterGestureAction::Begin {
+        edit: crate::app::parameter_gesture::ParameterGestureEdit::Effect(payload),
+        ..
+    }) = crate::app::parameter_gesture::ParameterGestureAction::decode(&recorded[0])
+        .expect("valid gesture envelope")
+    else {
+        panic!("expected effect gesture begin, got {:?}", recorded[0]);
     };
-    assert_eq!(namespace, VISUAL_EFFECT_NAMESPACE);
-    assert_eq!(name, VISUAL_EFFECT_SET_PARAMETER_VALUE);
-    let payload: VisualEffectSetParameterValuePayload =
-        serde_json::from_value(payload.clone()).expect("set effect property payload");
+    let ParameterValueWrite::Channels { parameter, channel_values } = payload.write else {
+        panic!("expected precise Float channel write");
+    };
+    assert_eq!(channel_values.len(), 1);
+    assert_eq!(channel_values[0].0, 0);
+    let value = channel_values[0].1;
     assert_eq!(payload.clip_id, selection.clip_id);
     assert_eq!(payload.effect_id, effect_id);
-    assert_eq!(payload.parameter, property.address);
-    let PropertyValue::Float(value) = payload.value else {
-        panic!("expected Float payload");
-    };
+    assert_eq!(parameter, property.address);
     assert!(
         value > 0.2,
         "clicking the enabled property row should update a disabled effect's property, got {value}"
@@ -5740,21 +7337,24 @@ fn inspector_effect_float_property_keyboard_nudge_sanitizes_descriptor_bounds() 
         path: "color.exposure".to_string(),
         label: "Exposure".to_string(),
         group_name: None,
+        group_label: None,
+        enum_labels: BTreeMap::new(),
         value: PropertyValue::Float(0.2),
         min: Some(f64::NAN),
         max: Some(f64::INFINITY),
         hard_min: None,
         hard_max: None,
         step: Some(0.25),
+        can_reset: true,
         is_animatable: true,
         numeric_curve: None,
     };
     let mut widget = effect_property_value_widget(
+        &chinese_localizer(),
         &property,
         true,
         Some(selection),
         effect_id,
-        property.path.clone(),
     );
     widget.layout(Rect::new(0.0, 0.0, 220.0, 28.0));
     let actions = RefCell::new(Vec::new());
@@ -5797,12 +7397,15 @@ fn inspector_effect_float_property_keyboard_nudge_sanitizes_descriptor_bounds() 
     };
     let payload: VisualEffectSetParameterValuePayload =
         serde_json::from_value(payload.clone()).expect("set effect property payload");
-    assert_eq!(payload.parameter, property.address);
-    let PropertyValue::Float(value) = payload.value else {
-        panic!("expected Float payload");
+    let ParameterValueWrite::Channels { parameter, channel_values } = payload.write else {
+        panic!("expected precise Float channel write");
     };
+    assert_eq!(channel_values.len(), 1);
+    assert_eq!(channel_values[0].0, 0);
+    let value = channel_values[0].1;
+    assert_eq!(parameter, property.address);
     assert!(
-        (value - 0.5).abs() <= 0.0001,
+        (value - 0.45).abs() <= 0.0001,
         "expected finite stepped nudge, got {value}"
     );
 }
@@ -5824,21 +7427,24 @@ fn inspector_effect_int_property_number_input_defaults_to_unit_step() {
         path: "levels.iterations".to_string(),
         label: "Iterations".to_string(),
         group_name: None,
+        group_label: None,
+        enum_labels: BTreeMap::new(),
         value: PropertyValue::Int(10),
         min: Some(0.0),
         max: Some(1000.0),
         hard_min: None,
         hard_max: None,
         step: None,
+        can_reset: true,
         is_animatable: false,
         numeric_curve: None,
     };
     let mut widget = effect_property_value_widget(
+        &chinese_localizer(),
         &property,
         true,
         Some(selection),
         effect_id,
-        property.path.clone(),
     );
     widget.layout(Rect::new(0.0, 0.0, 220.0, 28.0));
     let actions = RefCell::new(Vec::new());
@@ -5868,14 +7474,21 @@ fn inspector_effect_int_property_number_input_defaults_to_unit_step() {
     );
     assert_eq!(
         widget.event(
-            &UiEvent::KeyDown { key: KeyCode::A, modifiers: Modifiers::primary() },
+            &UiEvent::KeyDown {
+                key: KeyCode::A,
+                modifiers: crate::app_ui::test_utils::primary_text_modifiers()
+            },
             &mut ctx,
         ),
         EventResult::Handled
     );
     assert_eq!(
-        widget.event(&UiEvent::TextInput("12.4".to_string()), &mut ctx),
+        widget.event(&UiEvent::TextInput("12".to_string()), &mut ctx),
         EventResult::Handled
+    );
+    widget.event(
+        &UiEvent::KeyDown { key: KeyCode::Up, modifiers: Modifiers::none() },
+        &mut ctx,
     );
     let recorded = actions.borrow();
     assert_eq!(recorded.len(), 1);
@@ -5884,8 +7497,11 @@ fn inspector_effect_int_property_number_input_defaults_to_unit_step() {
     };
     let payload: VisualEffectSetParameterValuePayload =
         serde_json::from_value(payload.clone()).expect("set effect property payload");
-    assert_eq!(payload.parameter, property.address);
-    assert_eq!(payload.value, PropertyValue::Int(12));
+    let ParameterValueWrite::Value { parameter, value } = payload.write else {
+        panic!("expected complete property write");
+    };
+    assert_eq!(parameter, property.address);
+    assert_eq!(value, PropertyValue::Int(13));
 }
 
 #[test]
@@ -5912,13 +7528,658 @@ fn inspector_effect_color_property_action_uses_typed_payload() {
     assert_eq!(name, VISUAL_EFFECT_SET_PARAMETER_VALUE);
     let payload: VisualEffectSetParameterValuePayload =
         serde_json::from_value(payload).expect("set effect property payload");
+    let ParameterValueWrite::Value { parameter, value } = payload.write else {
+        panic!("expected complete property write");
+    };
     assert_eq!(payload.clip_id, selection.clip_id);
     assert_eq!(payload.effect_id, effect_id);
     assert_eq!(
-        payload.parameter.parameter_id,
+        parameter.parameter_id,
         mondrian_core::ParameterId::new_static("mondrian.test.key_color")
     );
-    assert_eq!(payload.value, PropertyValue::Color(color));
+    assert_eq!(value, PropertyValue::Color(color));
+}
+
+#[test]
+fn effect_long_text_controls_confirm_or_cancel_without_partial_author_writes() {
+    use mondrian_core::automation::PropertyDescriptor;
+    use mondrian_effects::{
+        instantiate_effect_node, register_effect_definition, EffectColorDomainContract,
+        EffectDeterminism, EffectExecutionContract, EffectExecutionModes,
+        EffectExtensionDefinitionBuilder, EffectGraphTopology, EffectRenderOp,
+        EffectResourceLifetime, EffectRoiPropagation, EffectStateModel, EffectTemporalInputExtent,
+    };
+    let _theme_guard = crate::app_ui::test_utils::theme_test_guard();
+    let kind = EffectType::External("plugin.test.long_text_controls".to_owned());
+    let cases = [
+        (
+            "long",
+            "插件文本默认内容".repeat(20),
+            "Changed Unicode 文本".to_owned(),
+        ),
+        (
+            "multiline",
+            format!("First line\n{}", "第二行参数".repeat(20)),
+            "Changed\n第二行".to_owned(),
+        ),
+        ("empty_multiline", String::new(), "New\n第二行".to_owned()),
+        (
+            "single_multiline_value",
+            "First\nsecond".to_owned(),
+            "Changed".to_owned(),
+        ),
+    ];
+    let mut builder = EffectExtensionDefinitionBuilder::new(
+        kind.key(),
+        "Text controls",
+        EffectColorDomainContract::SCENE_LINEAR,
+    )
+    .with_execution_contract(EffectExecutionContract {
+        execution_modes: EffectExecutionModes::CPU_F32,
+        determinism: EffectDeterminism::Deterministic,
+        state_model: EffectStateModel::Stateless,
+        temporal_input: EffectTemporalInputExtent::CURRENT_FRAME,
+        roi_propagation: EffectRoiPropagation::UnknownRequiresFullFrame,
+        resource_lifetime: EffectResourceLifetime::Frame,
+        topology: EffectGraphTopology::LinearChain,
+    })
+    .with_branching_graph(|_, _, graph| {
+        graph.apply(EffectRenderOp::Sharpen { amount: 0.0 });
+    });
+    for (name, initial, _) in &cases {
+        builder = builder.property(
+            PropertyDescriptor::new(*name, "Vendor text", PropertyValue::Text(initial.clone()))
+                .with_parameter_id(kind.parameter_id(name).expect("parameter"))
+                .with_animatable(false)
+                .with_text_mode(if matches!(*name, "multiline" | "empty_multiline") {
+                    mondrian_core::ParameterTextMode::MultiLine
+                } else {
+                    mondrian_core::ParameterTextMode::SingleLine
+                }),
+        );
+    }
+    register_effect_definition(builder.build()).expect("definition");
+    let effect = instantiate_effect_node(kind.clone()).expect("effect");
+    let effect_id = effect.id;
+    let mut sequence = Sequence::new("Text controls");
+    let track_id = sequence.video_tracks[0].id;
+    let mut clip = Clip::new(
+        AssetId::new(),
+        TimelineTime::ZERO,
+        tt(25, sequence.time_base()),
+    )
+    .expect("clip");
+    let clip_id = clip.id;
+    clip.add_effect_node(effect);
+    sequence.video_tracks[0].add_clip(clip).expect("placement");
+    let mut state = AppState::new();
+    state.test_set_sequence(Some(sequence));
+    let selection = SelectedClipRef { track_id, is_video_track: true, clip_id };
+    state.selection.selected_clips = vec![selection];
+    for (name, initial, changed) in &cases {
+        let model = InspectorPanelModel::from_app_state(&state, &chinese_localizer());
+        let property = model.effects[0]
+            .properties
+            .iter()
+            .find(|property| {
+                property.address.parameter_id == kind.parameter_id(name).expect("parameter")
+            })
+            .expect("property");
+        assert_eq!(property.label, "Vendor text");
+        let multiline = matches!(*name, "multiline" | "empty_multiline");
+        let size = effect_property_value_widget(
+            &chinese_localizer(),
+            property,
+            true,
+            Some(selection),
+            effect_id,
+        )
+        .measure(LayoutConstraint { min: Size::ZERO, max: Size::new(280.0, f32::MAX) });
+        if multiline {
+            assert!(
+                size.height > 60.0,
+                "declared multiline must keep its text area even when empty"
+            );
+        } else {
+            assert!(
+                size.height < 60.0,
+                "single-line mode must not change with authored line breaks"
+            );
+        }
+        if multiline {
+            let constraint = LayoutConstraint { min: Size::ZERO, max: Size::new(280.0, f32::MAX) };
+            let required_height = effect_property_value_widget(
+                &chinese_localizer(),
+                property,
+                true,
+                Some(selection),
+                effect_id,
+            )
+            .measure(constraint)
+            .height;
+            let mut panel = PropertyPanel::new("").with_embedded_panel_chrome().with_section(
+                PropertySection::new("")
+                    .with_row(effect_property_row(
+                        &chinese_localizer(),
+                        property,
+                        true,
+                        Some(selection),
+                        effect_id,
+                    ))
+                    .with_row(PropertyRow::new(
+                        "After text",
+                        Box::new(Button::new("After")),
+                    )),
+            );
+            let size = panel.measure(constraint);
+            panel.layout(Rect::new(0.0, 0.0, size.width, size.height));
+            let text_control = panel.child(0).expect("multiline control");
+            let following_control = panel.child(1).expect("following control");
+            let lane_x = size.width - 24.0;
+            let top = (0..size.height.ceil() as usize)
+                .find(|y| text_control.hit_test(Point::new(lane_x, *y as f32)))
+                .expect("the multiline control must have an editable lane")
+                as f32;
+            assert!(
+                text_control.hit_test(Point::new(lane_x, top + required_height - 1.0)),
+                "the actual Inspector row must fit all three editable text lines"
+            );
+            assert!(
+                (0..size.height.ceil() as usize).all(|y| {
+                    let point = Point::new(lane_x, y as f32);
+                    !text_control.hit_test(point) || !following_control.hit_test(point)
+                }),
+                "the next property must not overlap multiline text"
+            );
+        }
+        assert!(!effect_property_value_widget(
+            &chinese_localizer(),
+            property,
+            false,
+            Some(selection),
+            effect_id
+        )
+        .can_focus());
+        for confirm in [false, true] {
+            let before = state.active_sequence().expect("Sequence").clone();
+            let generation = state.project_author_generation();
+            let mut widget = effect_property_value_widget(
+                &chinese_localizer(),
+                property,
+                true,
+                Some(selection),
+                effect_id,
+            );
+            assert!(widget.can_focus(), "long plugin text must remain editable");
+            assert_eq!(
+                widget.accessibility().expect("text input").value,
+                Some(mondrian_ui_core::AccessibilityValue::Text(initial.clone())),
+                "the value must be real editable text, not a placeholder"
+            );
+            widget.layout(Rect::new(0.0, 0.0, 260.0, 100.0));
+            let actions = RefCell::new(Vec::new());
+            let dispatch = |action| actions.borrow_mut().push(action);
+            let mut focus = DummyFocus;
+            let mut shortcut = DummyShortcut;
+            let mut tooltip = DummyTooltip;
+            let mut requests = EventRequests::default();
+            let mut ctx = event_ctx(
+                &mut focus,
+                &mut shortcut,
+                &mut tooltip,
+                &mut requests,
+                &dispatch,
+            );
+            widget.event(
+                &UiEvent::FocusGained {
+                    source: mondrian_ui_core::types::FocusSource::Keyboard,
+                },
+                &mut ctx,
+            );
+            assert!(
+                !widget.commit_pending_input(&mut ctx),
+                "unchanged input must be a no-op"
+            );
+            let primary = Modifiers {
+                ctrl: !cfg!(target_os = "macos"),
+                meta: cfg!(target_os = "macos"),
+                ..Modifiers::none()
+            };
+            widget.event(
+                &UiEvent::KeyDown { key: KeyCode::A, modifiers: primary },
+                &mut ctx,
+            );
+            widget.event(&UiEvent::TextInput(changed.clone()), &mut ctx);
+            assert!(
+                actions.borrow().is_empty(),
+                "draft must not produce author history"
+            );
+            assert_eq!(state.active_sequence().expect("Sequence"), &before);
+            assert_eq!(state.project_author_generation(), generation);
+            if confirm {
+                assert!(widget.commit_pending_input(&mut ctx));
+                assert!(
+                    !widget.commit_pending_input(&mut ctx),
+                    "submit must not duplicate a write"
+                );
+                let recorded = actions.borrow();
+                assert_eq!(recorded.len(), 1);
+                let Action::Custom { payload, .. } = &recorded[0] else {
+                    panic!("author action");
+                };
+                let payload: VisualEffectSetParameterValuePayload =
+                    serde_json::from_value(payload.clone()).expect("text write");
+                assert_eq!(
+                    payload.write,
+                    ParameterValueWrite::Value {
+                        parameter: property.address.clone(),
+                        value: PropertyValue::Text(changed.clone())
+                    }
+                );
+                state.dispatch_action(recorded[0].clone()).expect("commit text");
+                assert!(state.undo_timeline().expect("undo"));
+                assert_eq!(
+                    state.active_sequence().expect("Sequence").video_tracks[0].clips[0].effects,
+                    before.video_tracks[0].clips[0].effects
+                );
+            } else {
+                widget.event(
+                    &UiEvent::KeyDown { key: KeyCode::Escape, modifiers: Modifiers::none() },
+                    &mut ctx,
+                );
+                widget.event(&UiEvent::FocusLost, &mut ctx);
+                assert!(actions.borrow().is_empty());
+                assert_eq!(
+                    widget.accessibility().expect("restored text").value,
+                    Some(mondrian_ui_core::AccessibilityValue::Text(initial.clone()))
+                );
+                assert_eq!(state.active_sequence().expect("Sequence"), &before);
+                assert_eq!(state.project_author_generation(), generation);
+            }
+        }
+    }
+}
+
+#[test]
+fn effect_vector_controls_preserve_current_siblings_keys_and_exact_history() {
+    use mondrian_core::automation::PropertyDescriptor;
+    use mondrian_effects::{
+        instantiate_effect_node, register_effect_definition, EffectColorDomainContract,
+        EffectDeterminism, EffectExecutionContract, EffectExecutionModes,
+        EffectExtensionDefinitionBuilder, EffectGraphTopology, EffectRenderOp,
+        EffectResourceLifetime, EffectRoiPropagation, EffectStateModel, EffectTemporalInputExtent,
+    };
+    let _theme_guard = crate::app_ui::test_utils::theme_test_guard();
+    let kind = EffectType::External("plugin.test.sparse_vector_controls".to_owned());
+    let initial = [
+        PropertyValue::Vec2(glam::Vec2::new(f32::from_bits(0x3f800001), 0.75)),
+        PropertyValue::Vec3(glam::Vec3::new(f32::from_bits(0x3f800001), 0.75, 0.5)),
+        PropertyValue::Vec4([f32::from_bits(0x3f800001), 0.75, 0.5, 0.25]),
+    ];
+    let mut builder = EffectExtensionDefinitionBuilder::new(
+        kind.key(),
+        "Sparse vector controls",
+        EffectColorDomainContract::SCENE_LINEAR,
+    )
+    .with_execution_contract(EffectExecutionContract {
+        execution_modes: EffectExecutionModes::CPU_F32,
+        determinism: EffectDeterminism::Deterministic,
+        state_model: EffectStateModel::Stateless,
+        temporal_input: EffectTemporalInputExtent::CURRENT_FRAME,
+        roi_propagation: EffectRoiPropagation::UnknownRequiresFullFrame,
+        resource_lifetime: EffectResourceLifetime::Frame,
+        topology: EffectGraphTopology::LinearChain,
+    })
+    .with_branching_graph(|_, _, graph| {
+        graph.apply(EffectRenderOp::Sharpen { amount: 0.0 });
+    });
+    for (index, value) in initial.iter().enumerate() {
+        let name = format!("vector{index}");
+        builder = builder.property(
+            PropertyDescriptor::new(name.clone(), name.clone(), value.clone())
+                .with_parameter_id(kind.parameter_id(&name).expect("parameter")),
+        );
+    }
+    register_effect_definition(builder.build()).expect("definition");
+    let author_time = TimelineTime::new(3, 25).expect("Clip-local time");
+    for (dimension, initial) in initial.into_iter().enumerate() {
+        let count = dimension + 2;
+        let path = format!("vector{dimension}");
+        for animated in [false, true] {
+            for index in 0..count {
+                let mut effect = instantiate_effect_node(kind.clone()).expect("effect");
+                let effect_id = effect.id;
+                if animated {
+                    effect
+                        .apply_property_mutation(PropertyMutation::EnableAnimation {
+                            path: path.clone(),
+                            time: TimelineTime::ZERO,
+                        })
+                        .expect("enable animation");
+                    effect
+                        .apply_property_mutation(PropertyMutation::WriteChannels {
+                            path: path.clone(),
+                            time: author_time,
+                            channel_values: initial
+                                .to_channel_values()
+                                .into_iter()
+                                .enumerate()
+                                .collect(),
+                            interpolation: mondrian_core::automation::InterpolationType::Linear,
+                        })
+                        .expect("seed independent keys");
+                }
+                let owned = effect.properties.property(&path).expect("property").clone();
+                let mut sequence = Sequence::new("Vector controls");
+                sequence.settings.frame_rate = Rational::new(25, 1);
+                let track_id = sequence.video_tracks[0].id;
+                let mut clip = Clip::new(
+                    AssetId::new(),
+                    TimelineTime::new(2, 5).expect("offset"),
+                    TimelineTime::new(4, 5).expect("duration"),
+                )
+                .expect("clip");
+                let clip_id = clip.id;
+                clip.add_effect_node(effect);
+                sequence.video_tracks[0].add_clip(clip).expect("add clip");
+                let mut state = AppState::new();
+                state.test_set_sequence(Some(sequence));
+                state.seek(13).expect("seek inside offset Clip");
+                let selection = SelectedClipRef { track_id, is_video_track: true, clip_id };
+                let model = InspectorEffectPropertyModel {
+                    schema: owned.descriptor.schema.clone(),
+                    address: owned.address(),
+                    path: path.clone(),
+                    label: path.clone(),
+                    group_name: None,
+                    group_label: None,
+                    enum_labels: BTreeMap::new(),
+                    value: initial.clone(),
+                    min: None,
+                    max: None,
+                    hard_min: None,
+                    hard_max: None,
+                    step: None,
+                    can_reset: true,
+                    is_animatable: true,
+                    numeric_curve: None,
+                };
+                // Build the actual widget before an independent author edit.
+                let mut widget = effect_property_value_widget(
+                    &chinese_localizer(),
+                    &model,
+                    true,
+                    Some(selection),
+                    effect_id,
+                );
+                let sibling = (index + 1) % count;
+                let sibling_value = f32::from_bits(0x3fc00001);
+                let component_action = |index, value| {
+                    visual_effect_set_parameter_value_action(VisualEffectSetParameterValuePayload {
+                        clip_id,
+                        effect_id,
+                        write: ParameterValueWrite::Channels {
+                            parameter: owned.address(),
+                            channel_values: vec![(index, value)],
+                        },
+                    })
+                };
+                state
+                    .dispatch_action(component_action(sibling, f64::from(sibling_value)))
+                    .expect("concurrent sibling write");
+                let before = state.active_sequence().expect("sequence").clone();
+                let before_property = before.find_clip(clip_id).expect("clip").effects[0]
+                    .properties
+                    .property_by_address(&owned.address())
+                    .expect("stable property")
+                    .1
+                    .clone();
+                let row = widget.child_mut(index).expect("component row");
+                row.layout(Rect::new(0.0, 0.0, 220.0, 28.0));
+                let actions = RefCell::new(Vec::new());
+                let dispatch = |action| actions.borrow_mut().push(action);
+                let mut focus = DummyFocus;
+                let mut shortcut = DummyShortcut;
+                let mut tooltip = DummyTooltip;
+                let mut requests = EventRequests::default();
+                let mut ctx = event_ctx(
+                    &mut focus,
+                    &mut shortcut,
+                    &mut tooltip,
+                    &mut requests,
+                    &dispatch,
+                );
+                row.event(
+                    &UiEvent::MouseDown {
+                        position: Point::new(190.0, 14.0),
+                        button: MouseButton::Left,
+                        modifiers: Modifiers::none(),
+                    },
+                    &mut ctx,
+                );
+                row.event(
+                    &UiEvent::KeyDown {
+                        key: KeyCode::A,
+                        modifiers: crate::app_ui::test_utils::primary_text_modifiers(),
+                    },
+                    &mut ctx,
+                );
+                row.event(&UiEvent::TextInput("0.625".to_owned()), &mut ctx);
+                assert!(actions.borrow().is_empty(), "draft must not write");
+                row.event(
+                    &UiEvent::KeyDown { key: KeyCode::Enter, modifiers: Modifiers::none() },
+                    &mut ctx,
+                );
+                assert_eq!(actions.borrow().len(), 1);
+                state.dispatch_action(actions.borrow()[0].clone()).expect("commit component");
+                let after = state.active_sequence().expect("sequence").clone();
+                let property = after.find_clip(clip_id).expect("clip").effects[0]
+                    .properties
+                    .property_by_address(&owned.address())
+                    .expect("stable property")
+                    .1;
+                let values = property.evaluate(author_time).to_channel_values();
+                assert_eq!(values[index], f64::from(0.625_f32));
+                assert_eq!(values[sibling], f64::from(sibling_value));
+                for other in 0..count {
+                    if other != index {
+                        assert_eq!(property.channel(other), before_property.channel(other));
+                    }
+                }
+                if animated {
+                    let old_key = before_property
+                        .channel(index)
+                        .expect("channel")
+                        .keyframes()
+                        .last()
+                        .expect("key");
+                    let key =
+                        property.channel(index).expect("channel").keyframes().last().expect("key");
+                    assert_eq!(key.id, old_key.id);
+                    assert_eq!(key.time, author_time);
+                    assert_eq!(key.interp_in, old_key.interp_in);
+                    assert_eq!(key.interp_out, old_key.interp_out);
+                    assert_eq!(key.temporal_flags, old_key.temporal_flags);
+                }
+                assert!(state.undo_timeline().expect("undo component"));
+                assert_eq!(
+                    state.current_timeline_time().expect("current time"),
+                    Some(TimelineTime::new(13, 25).expect("timeline time")),
+                    "undo must preserve the edit cursor",
+                );
+                let undone = state.active_sequence().expect("sequence");
+                assert_eq!(undone.revision.get(), after.revision.get() + 1);
+                let mut expected = before;
+                expected.revision = undone.revision;
+                assert_eq!(undone, &expected);
+                assert!(state.redo_timeline().expect("redo component"));
+                assert_eq!(
+                    state.current_timeline_time().expect("current time"),
+                    Some(TimelineTime::new(13, 25).expect("timeline time")),
+                    "redo must preserve the edit cursor",
+                );
+                let redone = state.active_sequence().expect("sequence");
+                assert_eq!(redone.revision.get(), after.revision.get() + 2);
+                let mut expected = after;
+                expected.revision = redone.revision;
+                assert_eq!(redone, &expected);
+                // Canonical no-op is disabled and must not advance the author generation.
+                let noop = component_action(index, f64::from(0.625_f32));
+                assert!(!app_state_action_enabled(&noop, &state));
+                assert!(matches!(
+                    state.dispatch_action(noop),
+                    Err(mondrian_core::MondrianError::ActionNotExecuted { .. })
+                ));
+                assert_eq!(state.active_sequence().expect("sequence"), &expected);
+                let invalid = visual_effect_set_parameter_value_action(
+                    VisualEffectSetParameterValuePayload {
+                        clip_id,
+                        effect_id,
+                        write: ParameterValueWrite::Channels {
+                            parameter: owned.address(),
+                            channel_values: vec![(index, 0.7), (index, 0.8)],
+                        },
+                    },
+                );
+                assert!(!app_state_action_enabled(&invalid, &state));
+                assert!(state.dispatch_action(invalid).is_err());
+                assert_eq!(state.active_sequence().expect("sequence"), &expected);
+            }
+        }
+    }
+}
+
+#[test]
+fn inspector_axis_controls_preserve_concurrent_siblings_and_canonical_percent_bits() {
+    let _theme_guard = crate::app_ui::test_utils::theme_test_guard();
+    for (row, path, index, text, expected) in [
+        (2, Transform2D::POSITION_PATH, 0, "42.25", 42.25_f32),
+        (3, Transform2D::POSITION_PATH, 1, "42.25", 42.25_f32),
+        (4, Transform2D::SCALE_PATH, 0, "125", 1.25_f32),
+        (5, Transform2D::SCALE_PATH, 1, "125", 1.25_f32),
+        (6, Transform2D::ANCHOR_POINT_PATH, 0, "42.25", 42.25_f32),
+        (7, Transform2D::ANCHOR_POINT_PATH, 1, "42.25", 42.25_f32),
+    ] {
+        let original = glam::Vec2::new(f32::from_bits(0x3f800003), f32::from_bits(0x3f800001));
+        let opacity = f32::from_bits(0x3e800001);
+        let mut sequence = Sequence::new("component edits");
+        let mut clip = Clip::new_solid_color(
+            AssetId::new(),
+            Color::WHITE,
+            TimelineTime::ZERO,
+            TimelineTime::ONE,
+        )
+        .expect("clip");
+        clip.transform.set_position(original);
+        clip.transform.set_scale(original);
+        clip.transform.set_anchor_point(original);
+        clip.apply_property_mutation(PropertyMutation::SetStaticValue {
+            path: Transform2D::OPACITY_PATH.to_owned(),
+            value: PropertyValue::Float(opacity),
+        })
+        .expect("opacity");
+        let clip_id = clip.id;
+        let track_id = sequence.video_tracks[0].id;
+        sequence.video_tracks[0].add_clip(clip).expect("clip");
+        let mut state = AppState::new();
+        state.test_set_sequence(Some(sequence));
+        state.selection.selected_clips =
+            vec![SelectedClipRef { track_id, is_video_track: true, clip_id }];
+        let mut model = AppUiPanelModels::from_app_state(&state).inspector;
+        assert_eq!(
+            ((model.opacity / 100.0) as f32).to_bits(),
+            opacity.to_bits()
+        );
+        assert_eq!(
+            ((model.scale_x_percent / 100.0) as f32).to_bits(),
+            original.x.to_bits()
+        );
+        assert_eq!(
+            ((model.scale_y_percent / 100.0) as f32).to_bits(),
+            original.y.to_bits()
+        );
+        // Keep the two style rows and real transform controls; omit optional menus.
+        model.shows_tint = false;
+        model.blend_mode = None;
+        let parameter = state
+            .active_sequence()
+            .expect("sequence")
+            .find_clip(clip_id)
+            .expect("clip")
+            .intrinsic_parameter_bag()
+            .address_for_path(path)
+            .expect("address");
+        let mut panel = inspector_panel(&model, &chinese_localizer());
+        let sibling = f32::from_bits(0x40400001);
+        state
+            .dispatch_action(
+                inspector_parameter_channel_action(
+                    model.selected_clip,
+                    Some(parameter.clone()),
+                    1 - index,
+                    f64::from(sibling),
+                )
+                .expect("sibling action"),
+            )
+            .expect("concurrent sibling edit");
+        let mut before = state.active_sequence().expect("sequence").clone();
+        let widget = panel.child_mut(row).expect("transform control");
+        widget.layout(Rect::new(0.0, 0.0, 220.0, 28.0));
+        let actions = RefCell::new(Vec::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let mut ctx = event_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+        widget.event(
+            &UiEvent::MouseDown {
+                position: Point::new(190.0, 14.0),
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        widget.event(
+            &UiEvent::KeyDown {
+                key: KeyCode::A,
+                modifiers: crate::app_ui::test_utils::primary_text_modifiers(),
+            },
+            &mut ctx,
+        );
+        widget.event(&UiEvent::TextInput(text.to_owned()), &mut ctx);
+        assert!(actions.borrow().is_empty());
+        widget.event(
+            &UiEvent::KeyDown { key: KeyCode::Enter, modifiers: Modifiers::none() },
+            &mut ctx,
+        );
+        assert_eq!(actions.borrow().len(), 1);
+        state.dispatch_action(actions.borrow()[0].clone()).expect("commit axis");
+        let value = state
+            .active_sequence()
+            .expect("sequence")
+            .find_clip(clip_id)
+            .expect("clip")
+            .intrinsic_parameter_bag()
+            .evaluate(path, TimelineTime::ZERO)
+            .expect("value");
+        let PropertyValue::Vec2(value) = value else {
+            panic!("vector");
+        };
+        assert_eq!(value[index].to_bits(), expected.to_bits());
+        assert_eq!(value[1 - index].to_bits(), sibling.to_bits());
+        assert!(state.undo_timeline().expect("undo axis"));
+        let undone = state.active_sequence().expect("sequence");
+        assert_eq!(undone.revision.get(), before.revision.get() + 2);
+        before.revision = undone.revision;
+        assert_eq!(state.active_sequence().expect("sequence"), &before);
+    }
 }
 
 #[test]
@@ -5967,7 +8228,10 @@ fn numeric_slider_input_control_text_input_dispatches_typed_transform_action() {
     );
     assert_eq!(
         widget.event(
-            &UiEvent::KeyDown { key: KeyCode::A, modifiers: Modifiers::primary() },
+            &UiEvent::KeyDown {
+                key: KeyCode::A,
+                modifiers: crate::app_ui::test_utils::primary_text_modifiers()
+            },
             &mut ctx,
         ),
         EventResult::Handled
@@ -5977,6 +8241,11 @@ fn numeric_slider_input_control_text_input_dispatches_typed_transform_action() {
         EventResult::Handled
     );
 
+    assert!(actions.borrow().is_empty());
+    widget.event(
+        &UiEvent::KeyDown { key: KeyCode::Enter, modifiers: Modifiers::none() },
+        &mut ctx,
+    );
     let recorded = actions.borrow();
     assert_eq!(recorded.len(), 1);
     let Action::Custom { namespace, name, payload } = &recorded[0] else {
@@ -5988,8 +8257,9 @@ fn numeric_slider_input_control_text_input_dispatches_typed_transform_action() {
         serde_json::from_value(payload.clone()).expect("transform payload");
     assert_eq!(payload.clip_id, selection.clip_id);
     assert_eq!(payload.writes.len(), 1);
-    assert_eq!(payload.writes[0].parameter, expected_parameter);
-    let PropertyValue::Float(value) = payload.writes[0].value else {
+    assert_eq!(*payload.writes[0].parameter(), expected_parameter);
+    let ParameterValueWrite::Value { value: PropertyValue::Float(value), .. } = payload.writes[0]
+    else {
         panic!("rotation payload must remain Float");
     };
     assert!((value - 45.6).abs() < 0.0001);
@@ -6062,6 +8332,17 @@ fn app_state_models_disable_effect_actions_for_locked_selected_track() {
         clip_id,
     });
 
+    let english = Localizer::new(AppUiLocale::EnUs).expect("English catalog");
+    let english_model = InspectorPanelModel::from_app_state(&state, &english);
+    assert_eq!(
+        english_model.edit_disabled_reason.as_deref(),
+        Some("The selected clip's track is locked")
+    );
+    let chinese_model = InspectorPanelModel::from_app_state(&state, &chinese_localizer());
+    assert_eq!(
+        chinese_model.edit_disabled_reason.as_deref(),
+        Some("所选剪辑所在轨道已锁定")
+    );
     let models = AppUiPanelModels::from_app_state(&state);
 
     assert!(models.effects.subtitle.is_empty());
@@ -6263,8 +8544,8 @@ fn panel_domain_accents_use_theme_tokens() {
         colors.media_solid
     );
     assert_eq!(
-        effect_node_accent(&EffectType::Plugin("demo.plugin".to_owned())),
-        colors.effect_plugin
+        effect_node_accent(&EffectType::External("extension.demo".to_owned())),
+        colors.effect_external
     );
     assert_eq!(
         effect_node_accent(&EffectType::GaussianBlur),
@@ -6287,6 +8568,368 @@ fn panel_domain_accents_use_theme_tokens() {
 }
 
 #[test]
+fn live_visual_curve_samples_equal_real_author_results() {
+    use crate::app::product_action::{ClipCurveEditPayload, ClipEditNumericCurvePayload};
+    for interpolation in [
+        InterpolationType::Hold,
+        InterpolationType::Linear,
+        InterpolationType::Bezier,
+        InterpolationType::AutoBezier,
+        InterpolationType::ContinuousBezier,
+    ] {
+        for nonzero_handles in [false, true] {
+            if nonzero_handles
+                && !matches!(
+                    interpolation,
+                    InterpolationType::Bezier | InterpolationType::ContinuousBezier
+                )
+            {
+                continue;
+            }
+            for operation in 0..3 {
+                let mut sequence = mondrian_timeline::Sequence::new("Visual sample acceptance");
+                let clip =
+                    Clip::new_basic_title("Title", "Arial", TimelineTime::ZERO, TimelineTime::ONE)
+                        .unwrap();
+                let clip_id = clip.id;
+                let selection = SelectedClipRef {
+                    track_id: sequence.video_tracks[0].id,
+                    is_video_track: true,
+                    clip_id,
+                };
+                sequence.video_tracks[0].add_clip(clip).unwrap();
+                let mut state = crate::app::AppState::new();
+                state.test_set_sequence(Some(sequence));
+                state.select_clip_by_id(clip_id).unwrap();
+                let initial = opacity_curve_model_for_clip(
+                    state.active_sequence().unwrap().find_clip(clip_id).unwrap(),
+                    mondrian_core::Rational::new(1, 30),
+                    state
+                        .active_sequence()
+                        .expect("sequence")
+                        .find_clip(clip_id)
+                        .expect("clip")
+                        .clip_time_in,
+                )
+                .unwrap();
+                for (x, y) in [(0.0, 0.2), (0.5, 0.8), (1.0, 0.4)] {
+                    let keyframe_id = KeyframeId::new();
+                    state
+                        .dispatch_action(
+                            inspector_curve_edit_action(
+                                Some(selection),
+                                &initial,
+                                CurveEdit::Insert {
+                                    keyframe_id,
+                                    index: 1,
+                                    point: CurvePoint::new(x, y),
+                                },
+                            )
+                            .unwrap(),
+                        )
+                        .unwrap();
+                    let current = opacity_curve_model_for_clip(
+                        state.active_sequence().unwrap().find_clip(clip_id).unwrap(),
+                        mondrian_core::Rational::new(1, 30),
+                        state
+                            .active_sequence()
+                            .expect("sequence")
+                            .find_clip(clip_id)
+                            .expect("clip")
+                            .clip_time_in,
+                    )
+                    .unwrap();
+                    if current
+                        .keys
+                        .iter()
+                        .find(|key| key.keyframe_id == Some(keyframe_id))
+                        .unwrap()
+                        .interpolation
+                        != Some(interpolation)
+                    {
+                        state
+                            .dispatch_action(clip_edit_numeric_curve_action(
+                                ClipEditNumericCurvePayload {
+                                    clip_id,
+                                    parameter: initial.property.clone(),
+                                    edit: ClipCurveEditPayload::SetInterpolation {
+                                        keyframe_id,
+                                        interpolation,
+                                    },
+                                },
+                            ))
+                            .unwrap();
+                    }
+                }
+                if nonzero_handles {
+                    state.active_sequence_mut_uncommitted().unwrap().find_clip_mut(clip_id).unwrap()
+                    .transform.apply_property_mutation(mondrian_core::automation::PropertyMutation::UpdateChannelKeyframeHandles {
+                        path: Transform2D::OPACITY_PATH.to_owned(),
+                        time: TimelineTime::new(1, 2).unwrap(),
+                        channel_index: 0,
+                        interp_in: mondrian_core::automation::KeyframeInterpolation::Bezier(mondrian_core::automation::ExactBezierHandle {
+                            time_offset: TimelineTime::new(-1, 4).unwrap(),
+                            value_offset: -1.0 / 3.0,
+                        }),
+                        interp_out: mondrian_core::automation::KeyframeInterpolation::Bezier(mondrian_core::automation::ExactBezierHandle {
+                            time_offset: TimelineTime::new(1, 4).unwrap(),
+                            value_offset: -1.0 / 2.0,
+                        }),
+                    }).unwrap();
+                }
+                let model = opacity_curve_model_for_clip(
+                    state.active_sequence().unwrap().find_clip(clip_id).unwrap(),
+                    mondrian_core::Rational::new(1, 30),
+                    state
+                        .active_sequence()
+                        .expect("sequence")
+                        .find_clip(clip_id)
+                        .expect("clip")
+                        .clip_time_in,
+                )
+                .unwrap();
+                assert_eq!(model.keys[1].interpolation, Some(interpolation));
+                if nonzero_handles {
+                    let key = model
+                        .curve_source
+                        .keyframe_by_id(model.keys[1].keyframe_id.unwrap())
+                        .unwrap();
+                    for handle in [key.interp_in, key.interp_out] {
+                        assert!(
+                            matches!(handle, mondrian_core::automation::KeyframeInterpolation::Bezier(handle) if handle.value_offset != 0.0),
+                            "the nonzero control fixture must retain authored handles"
+                        );
+                    }
+                }
+                let mut preview_source = model.curve_source.clone();
+                if operation == 0 {
+                    let intermediate = CurveEdit::Move {
+                        target: numeric_target(&model, 1),
+                        point: CurvePoint::new(0.55, 0.65),
+                    };
+                    let predicted = property_panels::preview_numeric_curve_points(
+                        &model,
+                        &mut preview_source,
+                        intermediate.clone(),
+                    )
+                    .unwrap();
+                    state
+                        .dispatch_action(
+                            inspector_curve_edit_action(Some(selection), &model, intermediate)
+                                .unwrap(),
+                        )
+                        .unwrap();
+                    let current = opacity_curve_model_for_clip(
+                        state.active_sequence().unwrap().find_clip(clip_id).unwrap(),
+                        mondrian_core::Rational::new(1, 30),
+                        state
+                            .active_sequence()
+                            .expect("sequence")
+                            .find_clip(clip_id)
+                            .expect("clip")
+                            .clip_time_in,
+                    )
+                    .unwrap();
+                    assert_eq!(
+                        predicted, current.display_points,
+                        "intermediate preview must match author state"
+                    );
+                }
+                let edit = match operation {
+                    0 => CurveEdit::Move {
+                        target: numeric_target(&model, 1),
+                        point: CurvePoint::new(0.6, 0.7),
+                    },
+                    1 => CurveEdit::Insert {
+                        keyframe_id: KeyframeId::new(),
+                        index: 1,
+                        point: CurvePoint::new(0.25, 0.3),
+                    },
+                    _ => CurveEdit::Delete { target: numeric_target(&model, 1) },
+                };
+                let display = property_panels::preview_numeric_curve_points(
+                    &model,
+                    &mut preview_source,
+                    edit.clone(),
+                )
+                .unwrap();
+                state
+                    .dispatch_action(
+                        inspector_curve_edit_action(Some(selection), &model, edit.clone()).unwrap(),
+                    )
+                    .unwrap();
+                let authored = opacity_curve_model_for_clip(
+                    state.active_sequence().unwrap().find_clip(clip_id).unwrap(),
+                    mondrian_core::Rational::new(1, 30),
+                    state
+                        .active_sequence()
+                        .expect("sequence")
+                        .find_clip(clip_id)
+                        .expect("clip")
+                        .clip_time_in,
+                )
+                .unwrap();
+                assert_eq!(
+                display, authored.display_points,
+                "canonical sample mismatch for {interpolation:?}/{edit:?}, nonzero handles: {nonzero_handles}"
+            );
+            }
+        }
+    }
+}
+
+#[test]
+fn live_visual_curve_return_to_origin_restores_exact_author_coordinates() {
+    use crate::app::parameter_gesture::{
+        ParameterCurveGestureTarget, ParameterGestureAction, ParameterGestureEdit,
+    };
+    use mondrian_core::automation::{
+        ExactBezierHandle, Keyframe, KeyframeInterpolation, PropertyMutation,
+    };
+    let mut sequence = mondrian_timeline::Sequence::new("Exact curve gesture origin");
+    let mut clip =
+        Clip::new_basic_title("Title", "Arial", TimelineTime::ZERO, TimelineTime::ONE).unwrap();
+    let clip_id = clip.id;
+    let mut key = Keyframe::linear(TimelineTime::new(1, 3).unwrap(), PropertyValue::Float(0.8));
+    key.interp_in = KeyframeInterpolation::Bezier(ExactBezierHandle {
+        time_offset: TimelineTime::new(-1, 4).unwrap(),
+        value_offset: -0.1,
+    });
+    key.interp_out = KeyframeInterpolation::Bezier(ExactBezierHandle {
+        time_offset: TimelineTime::new(1, 4).unwrap(),
+        value_offset: 0.1,
+    });
+    let key_id = key.id;
+    for seeded in [
+        Keyframe::linear(TimelineTime::ZERO, PropertyValue::Float(0.0)),
+        key.clone(),
+        Keyframe::linear(TimelineTime::ONE, PropertyValue::Float(1.0)),
+    ] {
+        clip.transform
+            .apply_property_mutation(PropertyMutation::SetKeyframe {
+                path: Transform2D::OPACITY_PATH.to_owned(),
+                keyframe: seeded,
+            })
+            .unwrap();
+    }
+    let selection = SelectedClipRef {
+        track_id: sequence.video_tracks[0].id,
+        is_video_track: true,
+        clip_id,
+    };
+    sequence.video_tracks[0].add_clip(clip).unwrap();
+    let mut state = crate::app::AppState::new();
+    state.test_set_sequence(Some(sequence));
+    state.select_clip_by_id(clip_id).unwrap();
+    let original = state.active_sequence().unwrap().clone();
+    let model = opacity_curve_model_for_clip(
+        state.active_sequence().unwrap().find_clip(clip_id).unwrap(),
+        mondrian_core::Rational::new(1, 30),
+        state
+            .active_sequence()
+            .expect("sequence")
+            .find_clip(clip_id)
+            .expect("clip")
+            .clip_time_in,
+    )
+    .unwrap();
+    let index = model
+        .keys
+        .iter()
+        .position(|candidate| candidate.keyframe_id == Some(key_id))
+        .unwrap();
+    let gesture_id = mondrian_core::AuthoringGestureId::new();
+    state
+        .dispatch_action(
+            ParameterGestureAction::BeginCurve {
+                gesture_id,
+                target: ParameterCurveGestureTarget::Clip {
+                    clip_id,
+                    parameter: model.property.clone(),
+                },
+            }
+            .action(),
+        )
+        .unwrap();
+    let mut preview_source = model.curve_source.clone();
+    for point in [
+        CurvePoint::new(0.9, 0.7),
+        CurvePoint::new(0.6, 0.9),
+        model.keys[index].point,
+    ] {
+        preview_source = model.curve_source.clone();
+        let action = inspector_curve_edit_action(
+            Some(selection),
+            &model,
+            CurveEdit::Move { target: numeric_target(&model, index), point },
+        )
+        .expect("canonical action");
+        let ParameterGestureEdit::ClipCurve(payload) =
+            ParameterGestureEdit::from_action(&action).expect("canonical curve action")
+        else {
+            panic!("Clip curve expected")
+        };
+        crate::app::preview_numeric_curve_edit(&preview_source, model.owner_range, &payload.edit)
+            .expect("absolute author candidate admission");
+        preview_numeric_curve_points(
+            &model,
+            &mut preview_source,
+            CurveEdit::Move { target: numeric_target(&model, index), point },
+        )
+        .expect("canonical curve preview");
+
+        state
+            .dispatch_action(
+                ParameterGestureAction::Update {
+                    gesture_id,
+                    edit: ParameterGestureEdit::from_action(&action).unwrap(),
+                }
+                .action(),
+            )
+            .unwrap();
+    }
+    let restored = state
+        .active_sequence()
+        .unwrap()
+        .find_clip(clip_id)
+        .unwrap()
+        .transform
+        .to_property_bag()
+        .property(Transform2D::OPACITY_PATH)
+        .unwrap()
+        .keyframe_by_id(key_id)
+        .unwrap();
+    assert_eq!(
+        restored.time, key.time,
+        "returning to the grab point must restore the exact one-third-second author time"
+    );
+    assert_eq!(
+        restored.value, key.value,
+        "returning to the grab point must restore the original value"
+    );
+    assert_eq!(
+        restored.interp_in, key.interp_in,
+        "restore incoming world control"
+    );
+    assert_eq!(
+        restored.interp_out, key.interp_out,
+        "restore outgoing world control after span shortening"
+    );
+    assert_eq!(
+        preview_source, model.curve_source,
+        "preview must restore complete original geometry"
+    );
+    state
+        .dispatch_action(ParameterGestureAction::Finish { gesture_id }.action())
+        .unwrap();
+    assert!(state.active_sequence().unwrap().author_state_eq_ignoring_revision(&original));
+    assert!(
+        !state.undo_timeline().unwrap(),
+        "a gesture returning to its origin must leave no Undo entry"
+    );
+}
+
+#[test]
 fn inspector_curve_edit_action_uses_stable_typed_payload_for_selected_clip() {
     let selection = SelectedClipRef {
         track_id: TrackId::new(),
@@ -6298,7 +8941,38 @@ fn inspector_curve_edit_action_uses_stable_typed_payload_for_selected_clip() {
         animation_track_id: mondrian_core::types::AnimationTrackId::new(),
         parameter_id: mondrian_core::ParameterId::new_static("mondrian.transform.opacity"),
     };
+    let mut source_clip =
+        Clip::new(AssetId::new(), TimelineTime::ZERO, TimelineTime::ONE).expect("source clip");
+    let mut key = Keyframe::linear(
+        TimelineTime::new(1, 2).expect("middle time"),
+        PropertyValue::Float(0.5),
+    );
+    key.id = keyframe_id;
+    source_clip
+        .apply_property_mutation(PropertyMutation::SetKeyframe {
+            path: Transform2D::OPACITY_PATH.to_owned(),
+            keyframe: key,
+        })
+        .expect("canonical source key");
     let model = InspectorCurveModel {
+        selected_keyframe_ids: Vec::new(),
+        author_time: TimelineTime::ZERO,
+        frame_time_step: TimelineTime::new(1, 30).expect("fixture grid"),
+        curve_source: std::sync::Arc::new(
+            source_clip
+                .intrinsic_parameter_bag()
+                .property(Transform2D::OPACITY_PATH)
+                .expect("fixture property")
+                .clone(),
+        ),
+        owner_range: mondrian_core::TimelineTimeRange::new(TimelineTime::ZERO, TimelineTime::ONE)
+            .expect("fixture owner interval"),
+        value_axis: mondrian_ui_widgets::CurveValueAxis::new(
+            mondrian_core::automation::ParameterNumericRange::new(0.0, 1.0).expect("soft"),
+            mondrian_core::automation::ParameterNumericRange::new(0.0, 1.0).expect("hard"),
+            None,
+        )
+        .expect("axis"),
         property: property.clone(),
         keys: vec![
             InspectorCurveKeyModel {
@@ -6322,7 +8996,10 @@ fn inspector_curve_edit_action_uses_stable_typed_payload_for_selected_clip() {
     let action = inspector_curve_edit_action(
         Some(selection),
         &model,
-        CurveEdit::Move { index: 1, point: CurvePoint::new(0.6, 0.7) },
+        CurveEdit::Move {
+            target: numeric_target(&model, 1),
+            point: CurvePoint::new(0.6, 0.7),
+        },
     );
 
     match action {
@@ -6335,12 +9012,12 @@ fn inspector_curve_edit_action_uses_stable_typed_payload_for_selected_clip() {
             assert_eq!(payload.parameter, property);
             assert_eq!(
                 payload.edit,
-                ClipCurveEditPayload::Upsert {
-                    keyframe_id: Some(keyframe_id),
-                    point: ClipNormalizedCurvePointPayload {
-                        time_ratio: f64::from(0.6_f32),
-                        value_ratio: f64::from(0.7_f32),
-                    },
+                ClipCurveEditPayload::Move {
+                    keyframe_id,
+                    time: Some(TimelineTime::new(3, 5).unwrap()),
+                    value: Some(mondrian_core::automation::AnimationChannelValue::Number(
+                        f64::from(0.7_f32)
+                    )),
                 }
             );
         }
@@ -6349,6 +9026,24 @@ fn inspector_curve_edit_action_uses_stable_typed_payload_for_selected_clip() {
 
     let boundary_keyframe_id = KeyframeId::new();
     let boundary_model = InspectorCurveModel {
+        selected_keyframe_ids: Vec::new(),
+        author_time: TimelineTime::ZERO,
+        frame_time_step: TimelineTime::new(1, 30).expect("fixture grid"),
+        curve_source: std::sync::Arc::new(
+            Transform2D::identity()
+                .to_property_bag()
+                .property(Transform2D::OPACITY_PATH)
+                .expect("fixture property")
+                .clone(),
+        ),
+        owner_range: mondrian_core::TimelineTimeRange::new(TimelineTime::ZERO, TimelineTime::ONE)
+            .expect("fixture owner interval"),
+        value_axis: mondrian_ui_widgets::CurveValueAxis::new(
+            mondrian_core::automation::ParameterNumericRange::new(0.0, 1.0).expect("soft"),
+            mondrian_core::automation::ParameterNumericRange::new(0.0, 1.0).expect("hard"),
+            None,
+        )
+        .expect("axis"),
         property: property.clone(),
         keys: vec![
             InspectorCurveKeyModel {
@@ -6367,7 +9062,7 @@ fn inspector_curve_edit_action_uses_stable_typed_payload_for_selected_clip() {
     let boundary_delete = inspector_curve_edit_action(
         Some(selection),
         &boundary_model,
-        CurveEdit::Delete { index: 0 },
+        CurveEdit::Delete { target: numeric_target(&boundary_model, 0) },
     );
     let Some(Action::Custom { payload, .. }) = boundary_delete else {
         panic!("expected boundary keyframe removal action");
@@ -6377,6 +9072,1825 @@ fn inspector_curve_edit_action_uses_stable_typed_payload_for_selected_clip() {
     assert_eq!(
         payload.edit,
         ClipCurveEditPayload::Remove { keyframe_id: boundary_keyframe_id }
+    );
+}
+
+#[test]
+fn visual_curve_single_axis_drag_preserves_exact_untouched_author_coordinate() {
+    for horizontal in [true, false] {
+        let mut state = AppState::new();
+        let mut sequence = Sequence::new("Exact curve axes");
+        let mut clip =
+            Clip::new(AssetId::new(), TimelineTime::ZERO, TimelineTime::ONE).expect("clip");
+        let clip_id = clip.id;
+        let track_id = sequence.video_tracks[0].id;
+        let time = TimelineTime::new(1, 3).expect("exact third");
+        let value = PropertyValue::Float(0.123_456_79);
+        let keyframe = Keyframe::linear(time, value.clone());
+        let keyframe_id = keyframe.id;
+        clip.apply_property_mutation(PropertyMutation::SetKeyframe {
+            path: Transform2D::OPACITY_PATH.to_owned(),
+            keyframe,
+        })
+        .expect("exact key");
+        sequence.video_tracks[0].add_clip(clip).expect("add clip");
+        state.test_set_sequence(Some(sequence));
+        state.select_clip_by_id(clip_id).expect("select");
+        let model = AppUiPanelModels::from_app_state(&state)
+            .inspector
+            .opacity_curve
+            .expect("projected curve");
+        let index = model
+            .keys
+            .iter()
+            .position(|key| key.keyframe_id == Some(keyframe_id))
+            .expect("stable projected key");
+        let origin = model.keys[index].point;
+        let point = if horizontal {
+            CurvePoint { x: origin.x + 0.1, y: origin.y }
+        } else {
+            CurvePoint { x: origin.x, y: origin.y + 0.1 }
+        };
+        let before = state.active_sequence().expect("before").clone();
+        state
+            .dispatch_action(
+                inspector_curve_edit_action(
+                    Some(SelectedClipRef { track_id, clip_id, is_video_track: true }),
+                    &model,
+                    CurveEdit::Move { target: numeric_target(&model, index), point },
+                )
+                .expect("real curve action"),
+            )
+            .expect("author edit");
+        let after = state.active_sequence().expect("after").clone();
+        let bag = after.find_clip(clip_id).expect("clip").intrinsic_parameter_bag();
+        let (_, property) = bag.property_by_address(&model.property).expect("property");
+        let key = property.keyframe_by_id(keyframe_id).expect("same stable key");
+        if horizontal {
+            assert_eq!(
+                key.value, value,
+                "horizontal drag must retain exact author value"
+            );
+            assert_ne!(key.time, time);
+        } else {
+            assert_eq!(
+                key.time, time,
+                "vertical drag must retain exact author time"
+            );
+            assert_ne!(key.value, value);
+        }
+        assert!(state.undo_timeline().expect("Undo"));
+        assert!(state
+            .active_sequence()
+            .expect("Undo state")
+            .author_state_eq_ignoring_revision(&before));
+        assert!(state.redo_timeline().expect("Redo"));
+        assert!(state
+            .active_sequence()
+            .expect("Redo state")
+            .author_state_eq_ignoring_revision(&after));
+    }
+}
+
+#[test]
+fn effect_curve_axis_drag_preserves_double_value_and_exact_time() {
+    effect_curve_axis_contract(
+        "precision",
+        ParameterNumericContract::closed(0.0, 1.0, None, ParameterInvalidValuePolicy::Reject)
+            .expect("contract"),
+        0.12345678901234568,
+    );
+}
+
+#[test]
+fn effect_curve_supports_full_finite_double_range() {
+    effect_curve_axis_contract(
+        "full_finite",
+        ParameterNumericContract::closed(
+            -f64::MAX,
+            f64::MAX,
+            None,
+            ParameterInvalidValuePolicy::Reject,
+        )
+        .expect("contract"),
+        0.12345678901234568,
+    );
+}
+
+#[test]
+fn effect_curve_fixed_value_range_retains_time_editing() {
+    effect_curve_axis_contract(
+        "fixed",
+        ParameterNumericContract::closed(
+            0.12345678901234568,
+            0.12345678901234568,
+            None,
+            ParameterInvalidValuePolicy::Reject,
+        )
+        .expect("fixed contract"),
+        0.12345678901234568,
+    );
+}
+
+#[test]
+fn effect_curve_author_values_beyond_soft_range_preserve_exact_axes_and_history() {
+    let numeric = ParameterNumericContract::new(
+        mondrian_core::automation::ParameterNumericRange::new(-2.0, 2.0).expect("hard"),
+        mondrian_core::automation::ParameterNumericRange::new(0.0, 1.0).expect("soft"),
+        None,
+        ParameterInvalidValuePolicy::Reject,
+    )
+    .expect("contract");
+    effect_curve_axis_contract("beyond_soft", numeric, 1.5000000000000002);
+}
+
+#[test]
+fn effect_curve_value_nudges_preserve_full_integer_precision_and_history() {
+    let numeric = ParameterNumericContract::closed(
+        i64::MIN as f64,
+        i64::MAX as f64,
+        Some(1.0),
+        ParameterInvalidValuePolicy::Reject,
+    )
+    .expect("integer domain");
+    for (case, value, delta, expected) in [
+        ("integer_max", i64::MAX, -1.0, i64::MAX - 1),
+        ("integer_min", i64::MIN, 1.0, i64::MIN + 1),
+        (
+            "integer_precise",
+            9_007_199_254_740_993,
+            1.0,
+            9_007_199_254_740_994,
+        ),
+    ] {
+        effect_curve_author_contract(
+            case,
+            numeric,
+            PropertyValue::Int(value),
+            Some((delta, PropertyValue::Int(expected))),
+            None,
+        );
+    }
+}
+
+#[test]
+fn inspector_dense_curve_reordering_preserves_exact_steps_and_durable_history() {
+    use mondrian_ui_core::tree::{WidgetTree, WidgetTreeView};
+    let _guard = crate::app_ui::test_utils::theme_test_guard();
+    fn editor(widget: &dyn Widget) -> &CurveEditor {
+        widget
+            .as_any()
+            .and_then(|any| any.downcast_ref::<CurveEditor>())
+            .expect("curve")
+    }
+    fn find_curve(widget: &dyn Widget) -> Option<WidgetId> {
+        if widget
+            .as_any()
+            .and_then(|any| any.downcast_ref::<CurveEditor>())
+            .is_some_and(|curve| {
+                curve.points().len() == 5 && curve.points().iter().all(|point| point.y == 0.5)
+            })
+        {
+            return Some(widget.id());
+        }
+        (0..widget.child_count()).find_map(|i| widget.child(i).and_then(find_curve))
+    }
+    for (interpolation, collapsed) in [
+        (InterpolationType::AutoBezier, false),
+        (InterpolationType::ContinuousBezier, false),
+        (InterpolationType::AutoBezier, true),
+        (InterpolationType::ContinuousBezier, true),
+    ] {
+        let (duration, times) = if collapsed {
+            let origin = TimelineTime::new(16_777_216, 1).expect("wide owner time");
+            (
+                TimelineTime::new(33_554_432, 1).expect("wide interval"),
+                [
+                    origin
+                        .checked_sub(TimelineTime::new(1, 10).expect("previous offset"))
+                        .expect("previous"),
+                    origin,
+                    origin
+                        .checked_add(TimelineTime::new(1, 50).expect("next offset"))
+                        .expect("next"),
+                ],
+            )
+        } else {
+            (
+                TimelineTime::new(600, 1).expect("duration"),
+                [
+                    TimelineTime::new(2997, 10).expect("previous"),
+                    TimelineTime::new(300, 1).expect("middle"),
+                    TimelineTime::new(3003, 10).expect("next"),
+                ],
+            )
+        };
+        let mut clip = Clip::new_basic_title("Dense keys", "Arial", TimelineTime::ZERO, duration)
+            .expect("title");
+        let clip_id = clip.id;
+        let mut ids = Vec::new();
+        for time in times {
+            let key = Keyframe::from_preset(time, PropertyValue::Float(0.5), interpolation);
+            ids.push(key.id);
+            clip.apply_property_mutation(PropertyMutation::SetKeyframe {
+                path: Transform2D::OPACITY_PATH.into(),
+                keyframe: key,
+            })
+            .expect("seed canonical key");
+        }
+        let mut sequence = Sequence::new("Dense temporal authoring");
+        sequence.video_tracks[0].add_clip(clip).expect("place title");
+        let mut state = AppState::new();
+        state.test_set_sequence(Some(sequence));
+        state.select_clip_by_id(clip_id).expect("selection");
+        let original = state.active_sequence().expect("origin").clone();
+        let models = AppUiPanelModels::from_app_state(&state);
+        let frame = models.inspector.opacity_curve.as_ref().expect("model").frame_time_step;
+        let mut panel = inspector_panel(&models.inspector, &chinese_localizer());
+        let id = find_curve(&panel).expect("actual dense Inspector");
+        let mut tree = WidgetTreeView::new(&mut panel);
+        let curve = tree.get_mut(id).expect("curve");
+        curve.layout(Rect::new(0.0, 0.0, 220.0, 104.0));
+        let plot = curve
+            .as_any()
+            .and_then(|any| any.downcast_ref::<mondrian_ui_widgets::CurveEditor>())
+            .expect("curve")
+            .plot_bounds();
+        let screen = |x: f32, y: f32| {
+            Point::new(
+                plot.x + plot.width * (x - 10.0) / 200.0,
+                plot.y + plot.height * (y - 10.0) / 84.0,
+            )
+        };
+        let actions = RefCell::new(Vec::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let mut ctx = event_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+        let center = screen(110.0, 52.0);
+        if collapsed {
+            assert!(
+                editor(curve).points()[1..4].iter().all(|point| point.x == 0.5),
+                "the exact author times genuinely share one projected coordinate"
+            );
+            curve
+                .as_any_mut()
+                .and_then(|any| any.downcast_mut::<CurveEditor>())
+                .expect("curve")
+                .select(Some(2));
+        } else {
+            for _ in 0..3 {
+                curve.event(
+                    &UiEvent::MouseWheel {
+                        position: center,
+                        delta: -200.0,
+                        modifiers: Modifiers::ctrl(),
+                    },
+                    &mut ctx,
+                );
+            }
+            assert!(actions.borrow().is_empty(), "zoom never authors keys");
+            curve.event(
+                &UiEvent::MouseDown {
+                    position: center,
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            );
+            assert_eq!(
+                editor(curve).point_target(editor(curve).selected_index().expect("selected")),
+                Some(CurvePointTarget::Keyframe(ids[1]))
+            );
+            let destination = Point::new(120.0, 52.0);
+            curve.event(
+                &UiEvent::MouseMove {
+                    position: destination,
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            );
+            curve.event(
+                &UiEvent::MouseUp {
+                    position: destination,
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            );
+            for action in actions.borrow_mut().drain(..) {
+                state.dispatch_action(action).expect("dense pointer gesture");
+            }
+            let dragged = state.active_sequence().expect("dragged").clone();
+            assert!(!dragged.author_state_eq_ignoring_revision(&original));
+        }
+        let key_time = |state: &AppState| {
+            state
+                .active_sequence()
+                .expect("sequence")
+                .find_clip(clip_id)
+                .expect("clip")
+                .intrinsic_parameter_bag()
+                .property(Transform2D::OPACITY_PATH)
+                .expect("opacity")
+                .keyframe_by_id(ids[1])
+                .expect("stable middle")
+                .time
+        };
+        let mut snapshots = vec![original.clone()];
+        if !collapsed {
+            snapshots.push(state.active_sequence().expect("dragged").clone());
+        }
+        while key_time(&state) <= times[2] {
+            assert!(snapshots.len() < 32, "bounded frame crossing");
+            let previous = key_time(&state);
+            curve.event(
+                &UiEvent::KeyDown { key: KeyCode::Right, modifiers: Modifiers::shift() },
+                &mut ctx,
+            );
+            for action in actions.borrow_mut().drain(..) {
+                state.dispatch_action(action).expect("exact frame intent");
+            }
+            assert_eq!(
+                key_time(&state),
+                previous
+                    .checked_add(
+                        frame
+                            .checked_scale(TimeScale::new(5, 1).expect("steps"))
+                            .expect("exact delta")
+                    )
+                    .expect("exact owner time")
+            );
+            snapshots.push(state.active_sequence().expect("step").clone());
+        }
+        assert!(
+            editor(curve).points().windows(2).all(|pair| pair[0].x <= pair[1].x),
+            "canonical time crossing must reorder local points"
+        );
+        let selected = editor(curve).selected_index().expect("same selected key");
+        assert_eq!(
+            editor(curve).point_target(selected),
+            Some(CurvePointTarget::Keyframe(ids[1]))
+        );
+        let displayed_ids = (0..editor(curve).points().len())
+            .filter_map(|index| match editor(curve).point_target(index) {
+                Some(CurvePointTarget::Keyframe(id)) => Some(id),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let bag = state
+            .active_sequence()
+            .expect("sequence")
+            .find_clip(clip_id)
+            .expect("clip")
+            .intrinsic_parameter_bag();
+        let canonical_ids = bag.property(Transform2D::OPACITY_PATH).expect("opacity").channels()[0]
+            .keyframes()
+            .iter()
+            .map(|key| key.id)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            displayed_ids, canonical_ids,
+            "exact canonical order survives collapsed screen coordinates"
+        );
+        let final_state = snapshots.last().expect("final").clone();
+        for expected in snapshots[..snapshots.len() - 1].iter().rev() {
+            assert!(state.undo_timeline().expect("one edit Undo"));
+            assert!(state
+                .active_sequence()
+                .expect("Undo state")
+                .author_state_eq_ignoring_revision(expected));
+        }
+        assert!(!state.can_undo_action());
+        let directory = tempfile::tempdir().expect("archives");
+        let undone_path = directory.path().join("密集撤销😀.mdp");
+        state.save_project_file_as(undone_path.clone()).expect("save undone");
+        assert!(state.can_redo_action());
+        {
+            let mut reopened = AppState::new();
+            reopened.open_project_file(undone_path).expect("fresh undone reopen");
+            assert!(reopened
+                .active_sequence()
+                .expect("saved origin")
+                .author_state_eq_ignoring_revision(&original));
+            assert!(!reopened.can_undo_action() && !reopened.can_redo_action());
+        }
+        for expected in &snapshots[1..] {
+            assert!(state.redo_timeline().expect("one edit Redo"));
+            assert!(state
+                .active_sequence()
+                .expect("Redo state")
+                .author_state_eq_ignoring_revision(expected));
+        }
+        let redone_path = directory.path().join("密集编辑😀.mdp");
+        state.save_project_file_as(redone_path.clone()).expect("save redone");
+        let mut reopened = AppState::new();
+        reopened.open_project_file(redone_path).expect("fresh redone reopen");
+        assert!(reopened
+            .active_sequence()
+            .expect("saved edits")
+            .author_state_eq_ignoring_revision(&final_state));
+        assert!(!reopened.can_undo_action() && !reopened.can_redo_action());
+    }
+}
+
+#[test]
+fn inspector_crossed_curve_escape_restores_author_and_projected_identity_order() {
+    use mondrian_ui_core::tree::{WidgetTree, WidgetTreeView};
+    let _guard = crate::app_ui::test_utils::theme_test_guard();
+    fn editor(widget: &dyn Widget) -> &CurveEditor {
+        widget
+            .as_any()
+            .and_then(|any| any.downcast_ref::<CurveEditor>())
+            .expect("curve")
+    }
+    fn find_curve(widget: &dyn Widget) -> Option<WidgetId> {
+        if widget
+            .as_any()
+            .and_then(|any| any.downcast_ref::<CurveEditor>())
+            .is_some_and(|curve| curve.points().len() == 5 && curve.points()[2].y == 0.5)
+        {
+            return Some(widget.id());
+        }
+        (0..widget.child_count()).find_map(|i| widget.child(i).and_then(find_curve))
+    }
+    for (interpolation, collapsed, collision) in [
+        (InterpolationType::AutoBezier, false, false),
+        (InterpolationType::ContinuousBezier, false, false),
+        (InterpolationType::AutoBezier, true, false),
+        (InterpolationType::ContinuousBezier, true, false),
+        (InterpolationType::AutoBezier, false, true),
+        (InterpolationType::ContinuousBezier, false, true),
+    ] {
+        let (duration, times) = if collision {
+            (
+                TimelineTime::ONE,
+                [
+                    TimelineTime::new(1, 4).expect("previous"),
+                    TimelineTime::new(1, 2).expect("middle"),
+                    TimelineTime::new(3, 4).expect("next"),
+                ],
+            )
+        } else if collapsed {
+            let origin = TimelineTime::new(16_777_216, 1).expect("wide owner time");
+            (
+                TimelineTime::new(33_554_432, 1).expect("wide interval"),
+                [
+                    origin
+                        .checked_sub(TimelineTime::new(1, 10).expect("previous offset"))
+                        .expect("previous"),
+                    origin,
+                    origin
+                        .checked_add(TimelineTime::new(1, 50).expect("next offset"))
+                        .expect("next"),
+                ],
+            )
+        } else {
+            (
+                TimelineTime::new(600, 1).expect("duration"),
+                [
+                    TimelineTime::new(2997, 10).expect("previous"),
+                    TimelineTime::new(300, 1).expect("middle"),
+                    TimelineTime::new(3003, 10).expect("next"),
+                ],
+            )
+        };
+        let mut clip = Clip::new_basic_title("Dense keys", "Arial", TimelineTime::ZERO, duration)
+            .expect("title");
+        let clip_id = clip.id;
+        let mut ids = Vec::new();
+        for (key_index, time) in times.into_iter().enumerate() {
+            let key = Keyframe::from_preset(
+                time,
+                PropertyValue::Float((key_index + 1) as f32 * 0.25),
+                interpolation,
+            );
+            ids.push(key.id);
+            clip.apply_property_mutation(PropertyMutation::SetKeyframe {
+                path: Transform2D::OPACITY_PATH.into(),
+                keyframe: key,
+            })
+            .expect("seed canonical key");
+        }
+        let mut sequence = Sequence::new("Dense temporal authoring");
+        sequence.video_tracks[0].add_clip(clip).expect("place title");
+        let mut state = AppState::new();
+        state.test_set_sequence(Some(sequence));
+        state.select_clip_by_id(clip_id).expect("selection");
+        let original = state.active_sequence().expect("origin").clone();
+        let mut redo_key = state
+            .active_sequence()
+            .expect("origin")
+            .find_clip(clip_id)
+            .expect("clip")
+            .intrinsic_parameter_bag()
+            .property(Transform2D::OPACITY_PATH)
+            .expect("opacity")
+            .keyframe_by_id(ids[1])
+            .expect("middle key");
+        redo_key.value = PropertyValue::Float(0.625);
+        state
+            .mutate_clip_property(
+                state.selected_clips()[0],
+                PropertyMutation::SetKeyframe {
+                    path: Transform2D::OPACITY_PATH.into(),
+                    keyframe: redo_key,
+                },
+                "Seed previous Redo",
+            )
+            .expect("seed reversible author edit");
+        let redo_state = state.active_sequence().expect("seeded Redo").clone();
+        assert!(state.undo_timeline().expect("retain previous Redo"));
+        assert!(state
+            .active_sequence()
+            .expect("origin")
+            .author_state_eq_ignoring_revision(&original));
+        assert!(state.can_redo_action());
+        let models = AppUiPanelModels::from_app_state(&state);
+        let mut panel = inspector_panel(&models.inspector, &chinese_localizer());
+        let id = find_curve(&panel).expect("actual dense Inspector");
+        let mut tree = WidgetTreeView::new(&mut panel);
+        let curve = tree.get_mut(id).expect("curve");
+        curve.layout(Rect::new(0.0, 0.0, 220.0, 104.0));
+        let plot = curve
+            .as_any()
+            .and_then(|any| any.downcast_ref::<mondrian_ui_widgets::CurveEditor>())
+            .expect("curve")
+            .plot_bounds();
+        let screen = |x: f32, y: f32| {
+            Point::new(
+                plot.x + plot.width * (x - 10.0) / 200.0,
+                plot.y + plot.height * (y - 10.0) / 84.0,
+            )
+        };
+        let actions = RefCell::new(Vec::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let mut ctx = event_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+        let center = screen(110.0, 52.0);
+        let destination = screen(if collision { 185.0 } else { 130.0 }, 52.0);
+        let origin_points = editor(curve).points().to_vec();
+        let targets = |curve: &dyn Widget| {
+            (0..editor(curve).points().len())
+                .map(|index| editor(curve).point_target(index))
+                .collect::<Vec<_>>()
+        };
+        let origin_targets = targets(curve);
+        if collapsed {
+            assert!(editor(curve).points()[1..4].iter().all(|point| point.x == 0.5));
+        }
+        curve.event(
+            &UiEvent::MouseDown {
+                position: center,
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        assert_eq!(
+            editor(curve).point_target(editor(curve).selected_index().expect("selected")),
+            Some(CurvePointTarget::Keyframe(ids[1]))
+        );
+        curve.event(
+            &UiEvent::MouseMove {
+                position: destination,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        for action in actions.borrow_mut().drain(..) {
+            state.dispatch_action(action).expect("crossed pointer candidate");
+        }
+        assert!(!state
+            .active_sequence()
+            .expect("draft")
+            .author_state_eq_ignoring_revision(&original));
+        let selected = editor(curve).selected_index().expect("captured key");
+        assert_eq!(
+            editor(curve).point_target(selected),
+            Some(CurvePointTarget::Keyframe(ids[1]))
+        );
+        assert_eq!(selected, 3, "middle key has crossed the right neighbor");
+        assert!(curve.has_active_pointer_interaction());
+        if collision {
+            let admitted = state.active_sequence().expect("admitted").clone();
+            let admitted_points = editor(curve).points().to_vec();
+            let admitted_targets = targets(curve);
+            curve.event(
+                &UiEvent::MouseMove {
+                    position: screen(160.0, 52.0),
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            );
+            assert!(
+                actions.borrow().is_empty(),
+                "exact neighbor collision cannot dispatch author mutation"
+            );
+            assert!(state
+                .active_sequence()
+                .expect("rejected")
+                .author_state_eq_ignoring_revision(&admitted));
+            assert_eq!(editor(curve).points(), admitted_points);
+            assert_eq!(targets(curve), admitted_targets);
+            assert!(
+                curve.has_active_pointer_interaction(),
+                "refusal permits recovery"
+            );
+            curve.event(
+                &UiEvent::MouseMove {
+                    position: screen(170.0, 52.0),
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            );
+            for action in actions.borrow_mut().drain(..) {
+                state.dispatch_action(action).expect("recover from collision");
+            }
+            assert!(!state
+                .active_sequence()
+                .expect("recovered")
+                .author_state_eq_ignoring_revision(&admitted));
+            assert_eq!(
+                editor(curve)
+                    .point_target(editor(curve).selected_index().expect("stable selection")),
+                Some(CurvePointTarget::Keyframe(ids[1]))
+            );
+            assert!(curve.has_active_pointer_interaction());
+        }
+        curve.event(
+            &UiEvent::KeyDown { key: KeyCode::Escape, modifiers: Modifiers::none() },
+            &mut ctx,
+        );
+        for action in actions.borrow_mut().drain(..) {
+            state.dispatch_action(action).expect("cancel crossed author gesture");
+        }
+        assert!(state
+            .active_sequence()
+            .expect("cancelled")
+            .author_state_eq_ignoring_revision(&original));
+        assert!(!state.can_undo_action());
+        assert!(!curve.has_active_pointer_interaction());
+        assert_eq!(
+            targets(curve),
+            origin_targets,
+            "cancel restores exact origin identity order"
+        );
+        assert_eq!(
+            editor(curve).points(),
+            origin_points,
+            "cancel restores projected origin"
+        );
+        assert_eq!(editor(curve).selected_index(), Some(2));
+        assert!(state.can_redo_action(), "cancel preserves previous Redo");
+        // A finished excursion returning to the exact origin is also a no-op.
+        curve.event(
+            &UiEvent::MouseDown {
+                position: center,
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        for position in [destination, center] {
+            curve.event(
+                &UiEvent::MouseMove { position, modifiers: Modifiers::none() },
+                &mut ctx,
+            );
+            for action in actions.borrow_mut().drain(..) {
+                state.dispatch_action(action).expect("return to exact origin");
+            }
+        }
+        curve.event(
+            &UiEvent::MouseUp {
+                position: center,
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        for action in actions.borrow_mut().drain(..) {
+            state.dispatch_action(action).expect("finish origin no-op");
+        }
+        assert!(state
+            .active_sequence()
+            .expect("origin")
+            .author_state_eq_ignoring_revision(&original));
+        assert_eq!(targets(curve), origin_targets);
+        assert_eq!(editor(curve).points(), origin_points);
+        assert!(!state.can_undo_action());
+        assert!(state.can_redo_action());
+        assert!(state.redo_timeline().expect("previous Redo still executes"));
+        assert!(state
+            .active_sequence()
+            .expect("Redone")
+            .author_state_eq_ignoring_revision(&redo_state));
+    }
+}
+
+#[test]
+fn inspector_boundary_key_preview_matches_canonical_owner_model() {
+    use mondrian_ui_core::tree::{WidgetTree, WidgetTreeView};
+    let _guard = crate::app_ui::test_utils::theme_test_guard();
+    fn editor(widget: &dyn Widget) -> &CurveEditor {
+        widget
+            .as_any()
+            .and_then(|any| any.downcast_ref::<CurveEditor>())
+            .expect("curve")
+    }
+    fn find_curve(widget: &dyn Widget) -> Option<WidgetId> {
+        if widget
+            .as_any()
+            .and_then(|any| any.downcast_ref::<CurveEditor>())
+            .is_some_and(|curve| curve.points().len() == 5 && curve.points()[2].y == 0.5)
+        {
+            return Some(widget.id());
+        }
+        (0..widget.child_count()).find_map(|i| widget.child(i).and_then(find_curve))
+    }
+    for (interpolation, at_end) in [
+        (InterpolationType::AutoBezier, false),
+        (InterpolationType::ContinuousBezier, false),
+        (InterpolationType::AutoBezier, true),
+        (InterpolationType::ContinuousBezier, true),
+    ] {
+        let duration = TimelineTime::ONE;
+        let times = [
+            TimelineTime::new(1, 4).expect("previous"),
+            TimelineTime::new(1, 2).expect("middle"),
+            TimelineTime::new(3, 4).expect("next"),
+        ];
+        let mut clip = Clip::new_basic_title("Dense keys", "Arial", TimelineTime::ZERO, duration)
+            .expect("title");
+        let clip_id = clip.id;
+        let mut ids = Vec::new();
+        for (key_index, time) in times.into_iter().enumerate() {
+            let key = Keyframe::from_preset(
+                time,
+                PropertyValue::Float((key_index + 1) as f32 * 0.25),
+                interpolation,
+            );
+            ids.push(key.id);
+            clip.apply_property_mutation(PropertyMutation::SetKeyframe {
+                path: Transform2D::OPACITY_PATH.into(),
+                keyframe: key,
+            })
+            .expect("seed canonical key");
+        }
+        let mut sequence = Sequence::new("Dense temporal authoring");
+        sequence.video_tracks[0].add_clip(clip).expect("place title");
+        let mut state = AppState::new();
+        state.test_set_sequence(Some(sequence));
+        state.select_clip_by_id(clip_id).expect("selection");
+        let original = state.active_sequence().expect("origin").clone();
+        let models = AppUiPanelModels::from_app_state(&state);
+        let mut panel = inspector_panel(&models.inspector, &chinese_localizer());
+        let id = find_curve(&panel).expect("actual Inspector curve");
+        let mut tree = WidgetTreeView::new(&mut panel);
+        let curve = tree.get_mut(id).expect("curve");
+        curve.layout(Rect::new(0.0, 0.0, 220.0, 104.0));
+        let plot = curve
+            .as_any()
+            .and_then(|any| any.downcast_ref::<mondrian_ui_widgets::CurveEditor>())
+            .expect("curve")
+            .plot_bounds();
+        let screen = |x: f32, y: f32| {
+            Point::new(
+                plot.x + plot.width * (x - 10.0) / 200.0,
+                plot.y + plot.height * (y - 10.0) / 84.0,
+            )
+        };
+        let actions = RefCell::new(Vec::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let mut ctx = event_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+        let center = screen(110.0, 52.0);
+        curve.event(
+            &UiEvent::MouseDown {
+                position: center,
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        curve.event(
+            &UiEvent::MouseMove {
+                position: screen(if at_end { 210.0 } else { 10.0 }, 52.0),
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        for action in actions.borrow_mut().drain(..) {
+            state.dispatch_action(action).expect("move real key to owner boundary");
+        }
+        let current = AppUiPanelModels::from_app_state(&state);
+        let model = current.inspector.opacity_curve.as_ref().expect("canonical moved curve");
+        let moved = model.curve_source.keyframe_by_id(ids[1]).expect("same middle key");
+        assert_eq!(
+            moved.time,
+            if at_end {
+                TimelineTime::ONE
+            } else {
+                TimelineTime::ZERO
+            }
+        );
+        assert_eq!(
+            editor(curve).points(),
+            model.keys.iter().map(|key| key.point).collect::<Vec<_>>(),
+            "live point projection must equal canonical owner, including virtual boundaries"
+        );
+        let displayed_ids = (0..editor(curve).points().len())
+            .filter_map(|i| match editor(curve).point_target(i) {
+                Some(CurvePointTarget::Keyframe(id)) => Some(id),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            displayed_ids,
+            model.keys.iter().filter_map(|key| key.keyframe_id).collect::<Vec<_>>()
+        );
+        assert!(curve.has_active_pointer_interaction());
+        curve.event(
+            &UiEvent::MouseMove { position: center, modifiers: Modifiers::none() },
+            &mut ctx,
+        );
+        for action in actions.borrow_mut().drain(..) {
+            state.dispatch_action(action).expect("move away from boundary");
+        }
+        assert!(state
+            .active_sequence()
+            .expect("origin draft")
+            .author_state_eq_ignoring_revision(&original));
+        assert_eq!(
+            editor(curve).points(),
+            models
+                .inspector
+                .opacity_curve
+                .as_ref()
+                .expect("origin")
+                .keys
+                .iter()
+                .map(|key| key.point)
+                .collect::<Vec<_>>()
+        );
+        curve.event(
+            &UiEvent::MouseMove {
+                position: screen(if at_end { 210.0 } else { 10.0 }, 52.0),
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        for action in actions.borrow_mut().drain(..) {
+            state.dispatch_action(action).expect("boundary retry");
+        }
+        curve.event(
+            &UiEvent::KeyDown { key: KeyCode::Escape, modifiers: Modifiers::none() },
+            &mut ctx,
+        );
+        for action in actions.borrow_mut().drain(..) {
+            state.dispatch_action(action).expect("cancel boundary edit");
+        }
+        assert!(state
+            .active_sequence()
+            .expect("cancelled")
+            .author_state_eq_ignoring_revision(&original));
+        assert_eq!(
+            editor(curve).points(),
+            models
+                .inspector
+                .opacity_curve
+                .as_ref()
+                .expect("origin")
+                .keys
+                .iter()
+                .map(|key| key.point)
+                .collect::<Vec<_>>()
+        );
+        assert!(!state.can_undo_action());
+    }
+}
+
+#[test]
+fn effect_curve_rejected_native_float_preview_preserves_geometry_and_author_history() {
+    use mondrian_core::automation::{ParameterUnit, PropertyDescriptor, PropertyMutation};
+    use mondrian_effects::{
+        instantiate_effect_node, register_effect_definition, EffectColorDomainContract,
+        EffectDeterminism, EffectExecutionContract, EffectExecutionModes,
+        EffectExtensionDefinitionBuilder, EffectGraphTopology, EffectRenderOp,
+        EffectResourceLifetime, EffectRoiPropagation, EffectStateModel, EffectTemporalInputExtent,
+    };
+    use mondrian_ui_core::tree::{WidgetTree, WidgetTreeView};
+    let _guard = crate::app_ui::test_utils::theme_test_guard();
+    let kind = EffectType::External("plugin.test.rejected_float_preview".into());
+    let path = "plugin.test.rejected_float_preview.value";
+    let parameter_id = kind.parameter_id("value").expect("parameter");
+    let numeric = ParameterNumericContract::closed(
+        -f64::MAX,
+        f64::MAX,
+        None,
+        ParameterInvalidValuePolicy::Reject,
+    )
+    .expect("declared bounds");
+    register_effect_definition(
+        EffectExtensionDefinitionBuilder::new(
+            kind.key(),
+            "Float preview",
+            EffectColorDomainContract::SCENE_LINEAR,
+        )
+        .with_execution_contract(EffectExecutionContract {
+            execution_modes: EffectExecutionModes::CPU_F32,
+            determinism: EffectDeterminism::Deterministic,
+            state_model: EffectStateModel::Stateless,
+            temporal_input: EffectTemporalInputExtent::CURRENT_FRAME,
+            roi_propagation: EffectRoiPropagation::UnknownRequiresFullFrame,
+            resource_lifetime: EffectResourceLifetime::Frame,
+            topology: EffectGraphTopology::LinearChain,
+        })
+        .with_branching_graph(|_, _, graph| {
+            graph.apply(EffectRenderOp::Sharpen { amount: 0.0 });
+        })
+        .property(
+            PropertyDescriptor::new(path, "Float", PropertyValue::Float(0.5))
+                .with_parameter_id(parameter_id.clone())
+                .with_animatable(true)
+                .with_numeric_contract(ParameterUnit::Unitless, numeric),
+        )
+        .build(),
+    )
+    .expect("definition");
+    let mut effect = instantiate_effect_node(kind).expect("effect");
+    let effect_id = effect.id;
+    let key = Keyframe::linear(
+        TimelineTime::new(1, 2).expect("time"),
+        PropertyValue::Float(0.5),
+    );
+    let key_id = key.id;
+    effect
+        .properties
+        .apply_mutation(PropertyMutation::SetKeyframe { path: path.into(), keyframe: key })
+        .expect("seed");
+    let mut clip = Clip::new_basic_title("Preview", "Arial", TimelineTime::ZERO, TimelineTime::ONE)
+        .expect("title");
+    let clip_id = clip.id;
+    clip.add_effect_node(effect);
+    let mut sequence = Sequence::new("Rejected Float preview");
+    sequence.video_tracks[0].add_clip(clip).expect("placement");
+    let mut state = AppState::new();
+    state.test_set_sequence(Some(sequence));
+    state.select_clip_by_id(clip_id).expect("selection");
+    let original = state.active_sequence().expect("origin").clone();
+    let models = AppUiPanelModels::from_app_state(&state);
+    fn find_curve(widget: &dyn Widget) -> Option<WidgetId> {
+        if widget
+            .as_any()
+            .and_then(|value| value.downcast_ref::<CurveEditor>())
+            .is_some_and(|curve| {
+                curve.points().len() == 3 && curve.points().iter().all(|point| point.y == 0.5)
+            })
+        {
+            return Some(widget.id());
+        }
+        (0..widget.child_count()).find_map(|index| widget.child(index).and_then(find_curve))
+    }
+    fn points(widget: &dyn Widget) -> Vec<CurvePoint> {
+        widget
+            .as_any()
+            .and_then(|value| value.downcast_ref::<CurveEditor>())
+            .expect("curve")
+            .points()
+            .to_vec()
+    }
+    let mut panel = inspector_panel(&models.inspector, &chinese_localizer());
+    let id = find_curve(&panel).expect("actual Float Inspector curve");
+    let mut tree = WidgetTreeView::new(&mut panel);
+    let curve = tree.get_mut(id).expect("curve");
+    curve.layout(Rect::new(0.0, 0.0, 220.0, 104.0));
+    let plot = curve
+        .as_any()
+        .and_then(|any| any.downcast_ref::<mondrian_ui_widgets::CurveEditor>())
+        .expect("curve")
+        .plot_bounds();
+    let screen = |x: f32, y: f32| {
+        Point::new(
+            plot.x + plot.width * (x - 10.0) / 200.0,
+            plot.y + plot.height * (y - 10.0) / 84.0,
+        )
+    };
+    let actions = RefCell::new(Vec::new());
+    let dispatch = |action| actions.borrow_mut().push(action);
+    let mut focus = DummyFocus;
+    let mut shortcut = DummyShortcut;
+    let mut tooltip = DummyTooltip;
+    let mut requests = EventRequests::default();
+    let mut ctx = event_ctx(
+        &mut focus,
+        &mut shortcut,
+        &mut tooltip,
+        &mut requests,
+        &dispatch,
+    );
+    let start = screen(110.0, 52.0);
+    curve.event(
+        &UiEvent::MouseDown {
+            position: start,
+            button: MouseButton::Left,
+            modifiers: Modifiers::none(),
+        },
+        &mut ctx,
+    );
+    curve.event(
+        &UiEvent::MouseMove {
+            position: screen(120.0, 52.0),
+            modifiers: Modifiers::none(),
+        },
+        &mut ctx,
+    );
+    for action in actions.borrow_mut().drain(..) {
+        state.dispatch_action(action).expect("admitted author update");
+    }
+    let admitted_points = points(curve);
+    let admitted = state.active_sequence().expect("admitted").clone();
+    assert!(!admitted.author_state_eq_ignoring_revision(&original));
+    curve.event(
+        &UiEvent::MouseMove {
+            position: screen(120.0, 42.0),
+            modifiers: Modifiers::none(),
+        },
+        &mut ctx,
+    );
+    assert!(
+        actions.borrow().is_empty(),
+        "finite editor value outside Float primitive range is rejected before author dispatch"
+    );
+    assert_eq!(
+        points(curve),
+        admitted_points,
+        "real canonical rejection cannot leave ghost geometry"
+    );
+    assert!(curve.has_active_pointer_interaction());
+    assert!(state
+        .active_sequence()
+        .expect("after rejection")
+        .author_state_eq_ignoring_revision(&admitted));
+    curve.event(
+        &UiEvent::MouseUp {
+            position: screen(120.0, 42.0),
+            button: MouseButton::Left,
+            modifiers: Modifiers::none(),
+        },
+        &mut ctx,
+    );
+    for action in actions.borrow_mut().drain(..) {
+        state.dispatch_action(action).expect("finish valid draft");
+    }
+    assert!(state.undo_timeline().expect("single Undo"));
+    assert!(state
+        .active_sequence()
+        .expect("Undo")
+        .author_state_eq_ignoring_revision(&original));
+    assert!(!state.can_undo_action());
+    assert!(state.redo_timeline().expect("Redo"));
+    assert!(state
+        .active_sequence()
+        .expect("Redo")
+        .author_state_eq_ignoring_revision(&admitted));
+    let property = &state
+        .active_sequence()
+        .expect("sequence")
+        .find_clip(clip_id)
+        .expect("clip")
+        .effects
+        .iter()
+        .find(|effect| effect.id == effect_id)
+        .expect("effect")
+        .properties
+        .iter()
+        .find(|(_, property)| property.descriptor.schema.parameter_id == parameter_id)
+        .expect("same stable parameter")
+        .1;
+    assert_eq!(
+        property.keyframe_by_id(key_id).expect("stable key").value,
+        PropertyValue::Float(0.5)
+    );
+}
+
+#[test]
+fn effect_curve_time_only_edits_preserve_raw_float_channel_precision() {
+    let numeric =
+        ParameterNumericContract::closed(0.1, 0.2, None, ParameterInvalidValuePolicy::Reject)
+            .expect("float hard bounds");
+    effect_curve_author_contract(
+        "float_raw_endpoint",
+        numeric,
+        PropertyValue::Float(0.2_f32.next_down()),
+        None,
+        Some(0.2),
+    );
+}
+
+fn effect_curve_axis_contract(case: &str, numeric: ParameterNumericContract, author_value: f64) {
+    effect_curve_author_contract(
+        case,
+        numeric,
+        PropertyValue::Double(author_value),
+        None,
+        None,
+    );
+}
+
+fn effect_curve_author_contract(
+    case: &str,
+    numeric: ParameterNumericContract,
+    value: PropertyValue,
+    nudge: Option<(f64, PropertyValue)>,
+    raw_author_value: Option<f64>,
+) {
+    use mondrian_core::automation::{ParameterUnit, PropertyDescriptor};
+    use mondrian_effects::{
+        instantiate_effect_node, register_effect_definition, EffectColorDomainContract,
+        EffectDeterminism, EffectExecutionContract, EffectExecutionModes,
+        EffectExtensionDefinitionBuilder, EffectGraphTopology, EffectRenderOp,
+        EffectResourceLifetime, EffectRoiPropagation, EffectStateModel, EffectTemporalInputExtent,
+    };
+    let kind = EffectType::External(format!("plugin.test.curve_axis_{case}"));
+    let parameter_id = kind.parameter_id("value").expect("parameter");
+    let (min, max) = (numeric.hard_range.min, numeric.hard_range.max);
+    let path = format!("plugin.test.curve_axis_{case}.value");
+    let descriptor = PropertyDescriptor::new(&path, "Precise value", value.clone())
+        .with_parameter_id(parameter_id.clone())
+        .with_animatable(true)
+        .with_numeric_contract(ParameterUnit::Normalized, numeric);
+    register_effect_definition(
+        EffectExtensionDefinitionBuilder::new(
+            kind.key(),
+            "Curve precision",
+            EffectColorDomainContract::SCENE_LINEAR,
+        )
+        .with_execution_contract(EffectExecutionContract {
+            execution_modes: EffectExecutionModes::CPU_F32,
+            determinism: EffectDeterminism::Deterministic,
+            state_model: EffectStateModel::Stateless,
+            temporal_input: EffectTemporalInputExtent::CURRENT_FRAME,
+            roi_propagation: EffectRoiPropagation::UnknownRequiresFullFrame,
+            resource_lifetime: EffectResourceLifetime::Frame,
+            topology: EffectGraphTopology::LinearChain,
+        })
+        .with_branching_graph(|_, _, graph| {
+            graph.apply(EffectRenderOp::Sharpen { amount: 0.0 });
+        })
+        .property(descriptor)
+        .build(),
+    )
+    .expect("canonical definition");
+    let axes: &[bool] = if raw_author_value.is_some() {
+        &[true]
+    } else if nudge.is_some() {
+        &[false]
+    } else if min == max {
+        &[true]
+    } else {
+        &[true, false]
+    };
+    for &horizontal in axes {
+        let time = TimelineTime::new(1, 3).expect("exact third");
+        let mut effect = instantiate_effect_node(kind.clone()).expect("effect");
+        let effect_id = effect.id;
+        let keyframe = Keyframe::from_preset(
+            time,
+            value.clone(),
+            if matches!(value, PropertyValue::Int(_)) {
+                InterpolationType::Hold
+            } else {
+                InterpolationType::Linear
+            },
+        );
+        let keyframe_id = keyframe.id;
+        effect
+            .properties
+            .apply_mutation(PropertyMutation::SetKeyframe { path: path.to_owned(), keyframe })
+            .expect("key");
+        if let Some(raw_value) = raw_author_value {
+            effect
+                .properties
+                .apply_mutation(PropertyMutation::UpdateChannelKeyframeValue {
+                    path: path.to_owned(),
+                    time,
+                    channel_index: 0,
+                    value: raw_value,
+                })
+                .expect("exact float author endpoint");
+        }
+        let mut clip = if nudge.is_some() || raw_author_value.is_some() {
+            Clip::new_basic_title("Precision", "Arial", TimelineTime::ZERO, TimelineTime::ONE)
+                .expect("synthetic owner")
+        } else {
+            Clip::new(AssetId::new(), TimelineTime::ZERO, TimelineTime::ONE).expect("clip")
+        };
+        let clip_id = clip.id;
+        clip.add_effect_node(effect);
+        let mut sequence = Sequence::new("Exact effect axes");
+        let track_id = sequence.video_tracks[0].id;
+        sequence.video_tracks[0].add_clip(clip).expect("clip placement");
+        let mut state = AppState::new();
+        state.test_set_sequence(Some(sequence));
+        state.select_clip_by_id(clip_id).expect("select");
+        let models = AppUiPanelModels::from_app_state(&state);
+        if min == max {
+            assert_fixed_curve_input_constraint(&models.inspector);
+        }
+        let model = &models
+            .inspector
+            .effects
+            .iter()
+            .find(|effect| effect.effect_id == effect_id)
+            .expect("same Effect")
+            .properties
+            .iter()
+            .find(|property| property.schema.parameter_id == parameter_id)
+            .expect("effect property")
+            .numeric_curve
+            .as_ref()
+            .expect("effect curve")
+            .curve;
+        let index = model
+            .keys
+            .iter()
+            .position(|key| key.keyframe_id == Some(keyframe_id))
+            .expect("stable key");
+        let origin = model.keys[index].point;
+        let point = if horizontal {
+            CurvePoint { x: origin.x + 0.1, y: origin.y }
+        } else {
+            CurvePoint { x: origin.x, y: origin.y + 0.1 }
+        };
+        let before = state.active_sequence().expect("before").clone();
+        state
+            .dispatch_action(
+                effect_curve_edit_action(
+                    Some(SelectedClipRef { track_id, clip_id, is_video_track: true }),
+                    effect_id,
+                    model,
+                    nudge.as_ref().map_or_else(
+                        || CurveEdit::Move { target: numeric_target(model, index), point },
+                        |(delta, _)| CurveEdit::NudgeValue { keyframe_id, delta: *delta, steps: 1 },
+                    ),
+                )
+                .expect("effect curve action"),
+            )
+            .expect("canonical edit");
+        let after = state.active_sequence().expect("after").clone();
+        let property = after
+            .find_clip(clip_id)
+            .expect("clip")
+            .effects
+            .iter()
+            .find(|effect| effect.id == effect_id)
+            .expect("same Effect")
+            .properties
+            .property_by_address(&model.property)
+            .expect("same parameter")
+            .1;
+        let key = property.keyframe_by_id(keyframe_id).expect("same key");
+        if let Some((_, expected)) = &nudge {
+            assert_eq!(&key.value, expected, "canonical integer increment");
+            assert_eq!(key.time, time, "retain exact owner time");
+            assert_eq!(
+                key.interp_out,
+                mondrian_core::automation::KeyframeInterpolation::Hold
+            );
+        } else if horizontal {
+            assert_eq!(
+                key.value, value,
+                "horizontal effect drag retains every double bit"
+            );
+            assert_ne!(key.time, time);
+        } else {
+            assert_eq!(key.time, time, "vertical effect drag retains exact third");
+            assert_ne!(key.value, value);
+        }
+        if let Some(raw_value) = raw_author_value {
+            let raw_key = property
+                .channel(0)
+                .expect("channel")
+                .keyframes()
+                .iter()
+                .find(|key| key.id == keyframe_id)
+                .expect("same author key")
+                .value;
+            assert_eq!(
+                raw_key.projection().to_bits(),
+                raw_value.to_bits(),
+                "retain raw author bits"
+            );
+        }
+        assert!(state.undo_timeline().expect("Undo"));
+        assert!(state
+            .active_sequence()
+            .expect("Undo state")
+            .author_state_eq_ignoring_revision(&before));
+        if raw_author_value.is_some() {
+            use crate::app::parameter_gesture::{
+                ParameterCurveGestureTarget, ParameterGestureAction, ParameterGestureEdit,
+            };
+            for cancel in [false, true] {
+                assert!(state.can_redo_action());
+                let gesture_id = mondrian_core::AuthoringGestureId::new();
+                state
+                    .dispatch_action(
+                        ParameterGestureAction::BeginCurve {
+                            gesture_id,
+                            target: ParameterCurveGestureTarget::Effect {
+                                clip_id,
+                                effect_id,
+                                parameter: model.property.clone(),
+                            },
+                        }
+                        .action(),
+                    )
+                    .expect("begin exact Float gesture");
+                let candidates = if cancel {
+                    vec![CurvePoint { x: origin.x + 0.1, y: 0.18 }]
+                } else {
+                    vec![
+                        CurvePoint { x: origin.x + 0.1, y: 0.18 },
+                        CurvePoint { x: origin.x + 0.2, y: 0.16 },
+                        origin,
+                    ]
+                };
+                for candidate in candidates {
+                    let action = effect_curve_edit_action(
+                        Some(SelectedClipRef { track_id, clip_id, is_video_track: true }),
+                        effect_id,
+                        model,
+                        CurveEdit::Move {
+                            target: numeric_target(model, index),
+                            point: candidate,
+                        },
+                    )
+                    .expect("absolute Float candidate");
+                    let edit =
+                        ParameterGestureEdit::from_action(&action).expect("curve gesture edit");
+                    state
+                        .dispatch_action(
+                            ParameterGestureAction::Update { gesture_id, edit }.action(),
+                        )
+                        .expect("update exact Float gesture");
+                }
+                let end = if cancel {
+                    ParameterGestureAction::Cancel { gesture_id }
+                } else {
+                    ParameterGestureAction::Finish { gesture_id }
+                };
+                state.dispatch_action(end.action()).expect("end exact Float gesture");
+                assert!(state
+                    .active_sequence()
+                    .expect("restored sequence")
+                    .author_state_eq_ignoring_revision(&before));
+                assert!(
+                    state.can_redo_action(),
+                    "exact Float no-op retains previous Redo"
+                );
+            }
+        }
+        let archive_directory = (nudge.is_some() || raw_author_value.is_some())
+            .then(|| tempfile::tempdir().expect("archive directory"));
+        if let Some(directory) = &archive_directory {
+            let path = directory.path().join("撤销😀.mdp");
+            state.save_project_file_as(path.clone()).expect("save undone exact keys");
+            assert!(state.can_redo_action(), "saving preserves live Redo");
+            let mut reopened = AppState::new();
+            reopened.open_project_file(path).expect("fresh undone reopen");
+            assert!(reopened
+                .active_sequence()
+                .expect("reopened sequence")
+                .author_state_eq_ignoring_revision(&before));
+            assert!(!reopened.can_undo_action() && !reopened.can_redo_action());
+        }
+        assert!(state.redo_timeline().expect("Redo"));
+        assert!(state
+            .active_sequence()
+            .expect("Redo state")
+            .author_state_eq_ignoring_revision(&after));
+        if let Some(directory) = &archive_directory {
+            let path = directory.path().join("编辑😀.mdp");
+            state.save_project_file_as(path.clone()).expect("save edited exact keys");
+            let mut reopened = AppState::new();
+            reopened.open_project_file(path).expect("fresh edited reopen");
+            assert!(reopened
+                .active_sequence()
+                .expect("reopened sequence")
+                .author_state_eq_ignoring_revision(&after));
+            assert!(!reopened.can_undo_action() && !reopened.can_redo_action());
+        }
+    }
+}
+
+fn assert_fixed_curve_input_constraint(model: &InspectorPanelModel) {
+    use mondrian_ui_core::tree::{WidgetTree, WidgetTreeView};
+    fn editor(widget: &dyn Widget) -> &CurveEditor {
+        widget
+            .as_any()
+            .and_then(|value| value.downcast_ref::<CurveEditor>())
+            .expect("curve control")
+    }
+    fn find_curve(widget: &dyn Widget) -> Option<WidgetId> {
+        if widget
+            .as_any()
+            .and_then(|value| value.downcast_ref::<CurveEditor>())
+            .is_some_and(|curve| {
+                curve.points().len() == 3
+                    && curve.points().iter().all(|point| point.y == curve.points()[0].y)
+            })
+        {
+            return Some(widget.id());
+        }
+        (0..widget.child_count()).find_map(|index| widget.child(index).and_then(find_curve))
+    }
+    let _guard = crate::app_ui::test_utils::theme_test_guard();
+    for input in 0..3 {
+        let mut panel = inspector_panel(model, &chinese_localizer());
+        let id = find_curve(&panel).expect("actual fixed-value Effect curve");
+        let mut tree = WidgetTreeView::new(&mut panel);
+        let curve = tree.get_mut(id).expect("fixed curve route");
+        curve.layout(Rect::new(0.0, 0.0, 220.0, 104.0));
+        let plot = curve
+            .as_any()
+            .and_then(|any| any.downcast_ref::<mondrian_ui_widgets::CurveEditor>())
+            .expect("curve")
+            .plot_bounds();
+        let screen = |x: f32, y: f32| {
+            Point::new(
+                plot.x + plot.width * (x - 10.0) / 200.0,
+                plot.y + plot.height * (y - 10.0) / 84.0,
+            )
+        };
+        let actions = RefCell::new(Vec::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let mut ctx = event_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+        let origin = editor(curve).points()[1];
+        let grab = screen(10.0 + 200.0 * origin.x, 52.0);
+        match input {
+            0 => {
+                curve.event(
+                    &UiEvent::MouseDown {
+                        position: grab,
+                        button: MouseButton::Left,
+                        modifiers: Modifiers::none(),
+                    },
+                    &mut ctx,
+                );
+                assert_eq!(editor(curve).selected_index(), Some(1));
+                curve.event(
+                    &UiEvent::MouseMove {
+                        position: Point::new(grab.x, 27.0),
+                        modifiers: Modifiers::none(),
+                    },
+                    &mut ctx,
+                );
+                assert_eq!(
+                    editor(curve).points()[1],
+                    origin,
+                    "fixed-value pointer movement must not produce an impossible visible draft"
+                );
+            }
+            1 => {
+                curve.event(
+                    &UiEvent::MouseDown {
+                        position: grab,
+                        button: MouseButton::Left,
+                        modifiers: Modifiers::none(),
+                    },
+                    &mut ctx,
+                );
+                curve.event(
+                    &UiEvent::MouseUp {
+                        position: grab,
+                        button: MouseButton::Left,
+                        modifiers: Modifiers::none(),
+                    },
+                    &mut ctx,
+                );
+                actions.borrow_mut().clear();
+                curve.event(
+                    &UiEvent::KeyDown { key: KeyCode::Up, modifiers: Modifiers::none() },
+                    &mut ctx,
+                );
+                assert_eq!(
+                    editor(curve).points()[1],
+                    origin,
+                    "fixed-value keyboard movement must not alter the draft"
+                );
+                assert!(
+                    actions.borrow().is_empty(),
+                    "blocked value movement publishes no edit"
+                );
+            }
+            _ => {
+                curve.event(
+                    &UiEvent::MouseDown {
+                        position: screen(160.0, 27.0),
+                        button: MouseButton::Left,
+                        modifiers: Modifiers::ctrl(),
+                    },
+                    &mut ctx,
+                );
+                assert_eq!(
+                    editor(curve).points().len(),
+                    4,
+                    "fixed value still supports key insertion"
+                );
+                assert!(
+                    editor(curve).points().iter().all(|point| point.y == origin.y),
+                    "insertion must respect the fixed value before release"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn audio_rack_numeric_widget_preserves_double_and_rejects_fractional_integer_input() {
+    use mondrian_timeline::audio::{
+        AudioProcessorInstance, BUILTIN_GAIN_DEFINITION_ID, BUILTIN_SAMPLE_DELAY_DEFINITION_ID,
+    };
+    let mut sequence = Sequence::new("Precise Rack");
+    let track_id = sequence.audio_tracks[0].id;
+    let clip = Clip::new(AssetId::new(), TimelineTime::ZERO, TimelineTime::ONE).expect("clip");
+    let clip_id = clip.id;
+    sequence
+        .add_media_audio_clip(track_id, clip, AudioSourceComponentId::primary())
+        .expect("audio clip");
+    let scope_id = sequence.audio_tracks[0].clips[0].audio_components[0].processing.scope_id;
+    let scope = sequence
+        .audio_program
+        .processing_scopes
+        .iter_mut()
+        .find(|scope| scope.id == scope_id)
+        .expect("scope");
+    for definition in [
+        BUILTIN_GAIN_DEFINITION_ID,
+        BUILTIN_SAMPLE_DELAY_DEFINITION_ID,
+    ] {
+        scope
+            .processors
+            .processors
+            .push(AudioProcessorInstance::built_in(definition, 1));
+    }
+    let mut state = AppState::new();
+    state.test_set_sequence(Some(sequence));
+    state.select_clip_by_id(clip_id).expect("select exact scalar owner");
+    for (index, text, expected) in [
+        (0, "-6.123456789123456", -6.123456789123456_f64),
+        (1, "192000", 192000.0),
+    ] {
+        let model = InspectorPanelModel::from_app_state(&state, &chinese_localizer());
+        let rack = &model.audio_processor_racks[0];
+        let processor = &rack.processors[index];
+        let parameter = &processor.parameters[0];
+        let target = crate::app_ui::audio_processor_rack::static_parameter_target(
+            rack, processor, parameter,
+        )
+        .expect("fresh parameter owner");
+        let mut widget = audio_processor_static_parameter_control(
+            rack,
+            processor,
+            parameter,
+            parameter
+                .schema
+                .numeric
+                .as_ref()
+                .and_then(|contracts| contracts.first())
+                .copied()
+                .expect("numeric"),
+            true,
+            &chinese_localizer(),
+        );
+        widget.layout(Rect::new(0.0, 0.0, 220.0, 28.0));
+        let actions = RefCell::new(Vec::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let mut ctx = event_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+        widget.event(
+            &UiEvent::MouseDown {
+                position: Point::new(190.0, 14.0),
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        if index == 1 {
+            widget.event(
+                &UiEvent::KeyDown {
+                    key: KeyCode::A,
+                    modifiers: crate::app_ui::test_utils::primary_text_modifiers(),
+                },
+                &mut ctx,
+            );
+            widget.event(&UiEvent::TextInput("12.4".to_owned()), &mut ctx);
+            assert!(actions.borrow().is_empty());
+            assert!(audio_processor_set_static_parameter_action(&target, 12.4).is_none());
+            assert!(audio_processor_set_static_parameter_action(&target, f64::INFINITY).is_none());
+        }
+        widget.event(
+            &UiEvent::KeyDown {
+                key: KeyCode::A,
+                modifiers: crate::app_ui::test_utils::primary_text_modifiers(),
+            },
+            &mut ctx,
+        );
+        widget.event(&UiEvent::TextInput(text.to_owned()), &mut ctx);
+        assert!(actions.borrow().is_empty());
+        widget.event(
+            &UiEvent::KeyDown { key: KeyCode::Enter, modifiers: Modifiers::none() },
+            &mut ctx,
+        );
+        assert_eq!(actions.borrow().len(), 1);
+        state.dispatch_action(actions.borrow()[0].clone()).expect("author parameter");
+        let snapshot = |state: &AppState| {
+            let sequence = state.active_sequence().expect("sequence");
+            clip_processing_scope_racks(
+                sequence,
+                sequence.find_clip(clip_id).expect("clip"),
+                &chinese_localizer(),
+                crate::app_ui::audio_automation::AudioAutomationTimeContext::at_sequence_time(
+                    sequence,
+                    sequence.playhead,
+                ),
+                |_| None,
+            )[0]
+            .processors[index]
+                .parameters[0]
+                .static_value
+        };
+        assert_eq!(snapshot(&state), Some(expected));
+        assert!(state.undo_timeline().expect("undo"));
+        assert_eq!(snapshot(&state), parameter.static_value);
+        assert!(state.redo_timeline().expect("redo"));
+        assert_eq!(snapshot(&state), Some(expected));
+    }
+}
+
+#[test]
+fn audio_unit_controls_cancel_to_exact_canonical_baseline() {
+    let selection = Some(SelectedClipRef {
+        track_id: TrackId::new(),
+        is_video_track: false,
+        clip_id: ClipId::new(),
+    });
+    let edit_id = AudioComponentEditId::new();
+    let pan = 0.0006999300069993001_f64;
+    assert_ne!((pan * 100.0) / 100.0, pan);
+    for (baseline, _expected, mut widget) in [
+        (
+            pan * 100.0,
+            AudioComponentMutation::SetPan { value: pan },
+            numeric_slider_input_control(
+                pan * 100.0,
+                -100.0,
+                100.0,
+                Some(1.0),
+                0,
+                true,
+                move |value| inspector_audio_pan_action(selection, edit_id, pan, value),
+            ),
+        ),
+        {
+            let fade = AudioFade {
+                duration: TimelineTime::new(23, 48000).expect("sample duration"),
+                curve: AudioFadeCurve::ConstantGain,
+            };
+            (
+                fade.duration.to_f64(),
+                AudioComponentMutation::SetFadeIn { value: Some(fade) },
+                numeric_slider_input_control(
+                    fade.duration.to_f64(),
+                    0.0,
+                    1.0,
+                    Some(0.01),
+                    3,
+                    true,
+                    move |value| {
+                        inspector_audio_fade_duration_action(
+                            selection,
+                            edit_id,
+                            true,
+                            value,
+                            Some(fade),
+                        )
+                    },
+                ),
+            )
+        },
+    ] {
+        widget.layout(Rect::new(0.0, 0.0, 220.0, 28.0));
+        let actions = RefCell::new(Vec::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let mut ctx = event_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+        widget.event(
+            &UiEvent::MouseDown {
+                position: Point::new(190.0, 14.0),
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        widget.event(
+            &UiEvent::KeyDown {
+                key: KeyCode::A,
+                modifiers: crate::app_ui::test_utils::primary_text_modifiers(),
+            },
+            &mut ctx,
+        );
+        widget.event(&UiEvent::TextInput("0.5".to_owned()), &mut ctx);
+        widget.event(
+            &UiEvent::KeyDown { key: KeyCode::Escape, modifiers: Modifiers::none() },
+            &mut ctx,
+        );
+        assert!(actions.borrow().is_empty(), "baseline {baseline}");
+    }
+}
+
+#[test]
+fn long_audio_fade_input_preserves_the_declared_millisecond_grid() {
+    let selection = SelectedClipRef {
+        track_id: TrackId::new(),
+        is_video_track: false,
+        clip_id: ClipId::new(),
+    };
+    let action = inspector_audio_fade_duration_action(
+        Some(selection),
+        AudioComponentEditId::new(),
+        true,
+        86400.001,
+        None,
+    )
+    .expect("fade action");
+    let Action::Custom { payload, .. } = action else {
+        panic!("component action");
+    };
+    let request: mondrian_timeline::AudioComponentEditRequest =
+        serde_json::from_value(payload).expect("decode");
+    let AudioComponentMutation::SetFadeIn { value: Some(fade) } = request.mutation else {
+        panic!("fade");
+    };
+    assert_eq!(
+        fade.duration,
+        TimelineTime::new(86_400_001, 1000).expect("exact duration")
     );
 }
 
@@ -6430,13 +10944,8 @@ fn inspector_audio_actions_keep_logical_selection_separate_from_asset_rebind() {
         AudioComponentMutation::SetVolumeDb { value: -3.5 }
     );
 
-    let zero_fade_action = inspector_audio_fade_duration_action(
-        Some(selection),
-        edit_id,
-        true,
-        0.0,
-        AudioFadeCurve::EqualPower,
-    );
+    let zero_fade_action =
+        inspector_audio_fade_duration_action(Some(selection), edit_id, true, 0.0, None);
     let Some(Action::Custom { payload, .. }) = zero_fade_action else {
         panic!("expected typed zero-fade action");
     };
@@ -6545,6 +11054,24 @@ fn inspector_actions_without_selection_produce_no_command() {
         None
     );
     let curve_model = InspectorCurveModel {
+        selected_keyframe_ids: Vec::new(),
+        author_time: TimelineTime::ZERO,
+        frame_time_step: TimelineTime::new(1, 30).expect("fixture grid"),
+        curve_source: std::sync::Arc::new(
+            Transform2D::identity()
+                .to_property_bag()
+                .property(Transform2D::OPACITY_PATH)
+                .expect("fixture property")
+                .clone(),
+        ),
+        owner_range: mondrian_core::TimelineTimeRange::new(TimelineTime::ZERO, TimelineTime::ONE)
+            .expect("fixture owner interval"),
+        value_axis: mondrian_ui_widgets::CurveValueAxis::new(
+            mondrian_core::automation::ParameterNumericRange::new(0.0, 1.0).expect("soft"),
+            mondrian_core::automation::ParameterNumericRange::new(0.0, 1.0).expect("hard"),
+            None,
+        )
+        .expect("axis"),
         property: AnimationParameterAddress {
             animation_track_id: mondrian_core::types::AnimationTrackId::new(),
             parameter_id: mondrian_core::ParameterId::new_static("mondrian.transform.opacity"),
@@ -6556,7 +11083,11 @@ fn inspector_actions_without_selection_produce_no_command() {
         inspector_curve_edit_action(
             None,
             &curve_model,
-            CurveEdit::Insert { index: 0, point: CurvePoint::new(0.0, 1.0) },
+            CurveEdit::Insert {
+                keyframe_id: mondrian_core::KeyframeId::new(),
+                index: 0,
+                point: CurvePoint::new(0.0, 1.0)
+            },
         ),
         None
     );
@@ -6919,8 +11450,8 @@ fn viewer_anchor_gesture_emits_one_atomic_stable_address_action() {
         serde_json::from_value(payload.clone()).expect("transform payload");
     assert_eq!(payload.clip_id, clip_id);
     assert_eq!(payload.writes.len(), 2);
-    assert_eq!(payload.writes[0].parameter, expected.anchor);
-    assert_eq!(payload.writes[1].parameter, expected.position);
+    assert_eq!(*payload.writes[0].parameter(), expected.anchor);
+    assert_eq!(*payload.writes[1].parameter(), expected.position);
 }
 
 #[test]
@@ -6990,6 +11521,8 @@ fn inspector_effect_section_header_selects_effect_for_graph_sync() {
         audio_processor_racks: Vec::new(),
         clip_properties: Vec::new(),
         effects: vec![InspectorEffectModel {
+            native_author_view: None,
+            native_gui_controller: None,
             effect_id,
             label: "Gaussian Blur".to_owned(),
             enabled: true,
@@ -7573,4 +12106,2609 @@ fn assert_assets_action(action: Option<&Action>, name: &str) {
         }
         other => panic!("expected assets action, got {other:?}"),
     }
+}
+
+#[test]
+fn sequence_form_confirms_numeric_draft_before_submission_and_cancel_discards_it() {
+    use crate::app::ui_actions::{
+        SequenceSettingsDraftUpdatePayload, APP_SHELL_CLOSE_MODAL,
+        APP_SHELL_CONFIRM_SEQUENCE_SETTINGS, APP_SHELL_SEQUENCE_SETTINGS_DRAFT_CHANGED,
+    };
+    use crate::app_ui::sequence_settings_dialog::{
+        AppUiSequenceSettingsDraft, SequenceSettingsDialog,
+    };
+    for cancel in [false, true] {
+        let sequence = Sequence::new("Form draft");
+        let mut dialog = SequenceSettingsDialog::with_locale(
+            AppUiSequenceSettingsDraft::from_sequence(&sequence),
+            AppUiLocale::EnUs,
+        );
+        let actions = RefCell::new(Vec::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let mut ctx = event_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+        let width = dialog.child_mut(16).expect("width field");
+        width.event(
+            &UiEvent::FocusGained {
+                source: mondrian_ui_core::types::FocusSource::Keyboard,
+            },
+            &mut ctx,
+        );
+        width.event(
+            &UiEvent::KeyDown {
+                key: KeyCode::A,
+                modifiers: crate::app_ui::test_utils::primary_text_modifiers(),
+            },
+            &mut ctx,
+        );
+        width.event(&UiEvent::TextInput("2560".to_owned()), &mut ctx);
+        assert!(actions.borrow().is_empty());
+        dialog.event(
+            &UiEvent::KeyDown {
+                key: if cancel {
+                    KeyCode::Escape
+                } else {
+                    KeyCode::Enter
+                },
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        let actions = actions.borrow();
+        assert_eq!(actions.len(), if cancel { 1 } else { 2 });
+        let Action::Custom { name, .. } = actions.last().expect("form command") else {
+            panic!("form command must use shell protocol");
+        };
+        assert_eq!(
+            name,
+            if cancel {
+                APP_SHELL_CLOSE_MODAL
+            } else {
+                APP_SHELL_CONFIRM_SEQUENCE_SETTINGS
+            }
+        );
+        if !cancel {
+            let Action::Custom { name, payload, .. } = &actions[0] else {
+                panic!("numeric draft command");
+            };
+            assert_eq!(name, APP_SHELL_SEQUENCE_SETTINGS_DRAFT_CHANGED);
+            let update: SequenceSettingsDraftUpdatePayload =
+                serde_json::from_value(payload.clone()).expect("draft update");
+            assert!(matches!(
+                update,
+                SequenceSettingsDraftUpdatePayload::ResolutionWidth(2560)
+            ));
+        }
+    }
+}
+
+#[test]
+fn native_audio_layout_labels_follow_locale_and_retain_exact_layout_names() {
+    let english = Localizer::new(AppUiLocale::EnUs).expect("English catalog");
+    let chinese = chinese_localizer();
+    let visible = |text: String| text.replace(['\u{2068}', '\u{2069}'], "");
+    assert_eq!(
+        native_audio_layout_label(&ChannelLayout::Mono, &english),
+        "Mono"
+    );
+    assert_eq!(
+        native_audio_layout_label(&ChannelLayout::Stereo, &chinese),
+        "立体声"
+    );
+    for count in [0, 1, 255] {
+        assert_eq!(
+            visible(native_audio_layout_label(
+                &ChannelLayout::Unspecified(count),
+                &english
+            )),
+            format!("Unspecified {count}ch")
+        );
+        assert_eq!(
+            visible(native_audio_layout_label(
+                &ChannelLayout::Unsupported(count),
+                &chinese
+            )),
+            format!("不支持的命名布局 {count}ch")
+        );
+    }
+    let surround = ChannelLayout::Exact(AudioChannelLayout::Surround51Side);
+    assert_eq!(
+        native_audio_layout_label(&surround, &english),
+        native_audio_layout_label(&surround, &chinese)
+    );
+}
+
+#[test]
+fn audio_scope_occurrence_dropdown_routes_navigation_and_atomic_delete_through_reopen() {
+    use crate::app::product_action::{
+        AudioProductAction, AudioScopeOccurrencePayload, ProductAction,
+    };
+    use mondrian_core::{AudioProcessingScopeId, ExactAutomationKeyframe, SequenceId};
+    use mondrian_timeline::{
+        apply_audio_automation_edit, inspect_audio_automation, AudioAutomationEdit,
+        AudioAutomationEditRequest, AudioAutomationTarget, AudioComponentAddress,
+    };
+    let _guard = crate::app_ui::test_utils::theme_test_guard();
+    let mut sequence = Sequence::new("Shared Scope navigation");
+    let track_id = sequence.audio_tracks[0].id;
+    let clip = Clip::new(AssetId::new(), TimelineTime::ZERO, TimelineTime::ONE).expect("clip");
+    let clip_id = clip.id;
+    sequence
+        .add_media_audio_clip(track_id, clip, AudioSourceComponentId::primary())
+        .expect("audio");
+    let clip = &mut sequence.audio_tracks[0].clips[0];
+    let scope_id = clip.audio_components[0].processing.scope_id;
+    clip.audio_components[0].processing.scope_in = TimelineTime::new(7, 1).expect("first origin");
+    let mut second = mondrian_timeline::audio::AudioComponentEdit::media(
+        AudioSourceComponentId::new(),
+        scope_id,
+    );
+    second.processing.scope_in = TimelineTime::new(9, 1).expect("second origin");
+    let address = AudioComponentAddress { track_id, clip_id, edit_id: second.id };
+    clip.audio_components.push(second);
+    let target = AudioAutomationTarget::ProcessingScopeInputGain { scope_id };
+    for (time, value) in [(7, -24.0), (9, -6.0), (10, -18.0)] {
+        apply_audio_automation_edit(
+            &mut sequence,
+            &AudioAutomationEditRequest {
+                target: target.clone(),
+                edit: AudioAutomationEdit::UpsertKeyframe {
+                    keyframe: ExactAutomationKeyframe::linear(
+                        TimelineTime::new(time, 1).expect("time"),
+                        value,
+                    ),
+                },
+            },
+        )
+        .expect("seed canonical curve");
+    }
+    let mut state = AppState::new();
+    state.test_set_sequence(Some(sequence));
+    state.select_clip_by_id(clip_id).expect("inspect clip");
+    let original = state.active_sequence().expect("sequence").clone();
+    let chinese = chinese_localizer();
+    let english = Localizer::new(AppUiLocale::EnUs).expect("English");
+    let initial = InspectorPanelModel::from_app_state(&state, &english);
+    let rack = &initial.audio_processor_racks[0];
+    assert!(rack
+        .scope_input_gain_automation
+        .as_ref()
+        .expect("curve")
+        .current_author_time
+        .is_err());
+    let selector = rack.scope_occurrence_selector.as_ref().expect("ambiguous selector");
+    assert_eq!(selector.options.len(), 2);
+    assert!(selector.options[1].label.contains("9"));
+    let translated = InspectorPanelModel::from_app_state(&state, &chinese);
+    let translated = translated.audio_processor_racks[0]
+        .scope_occurrence_selector
+        .as_ref()
+        .expect("Chinese selector");
+    assert_ne!(selector.options[1].label, translated.options[1].label);
+    assert_eq!(selector.options[1].intent, translated.options[1].intent);
+    let mut dropdown = audio_scope_occurrence_control(selector);
+    dropdown.layout(Rect::new(0.0, 0.0, 320.0, 28.0));
+    let mut router = EventRouter::new(dropdown.id());
+    let actions = RefCell::new(Vec::new());
+    let dispatch = |action| actions.borrow_mut().push(action);
+    {
+        let mut tree = WidgetTreeView::new(&mut dropdown);
+        for key in [KeyCode::Tab, KeyCode::Enter, KeyCode::Down, KeyCode::Enter] {
+            router.route(
+                UiEvent::KeyDown { key, modifiers: Modifiers::none() },
+                &mut tree,
+                &dispatch,
+            );
+        }
+    }
+    assert_eq!(actions.borrow().len(), 1, "one explicit navigation action");
+    let action = actions.borrow_mut().remove(0);
+    let expected = AudioScopeOccurrencePayload { sequence_id: original.id, scope_id, address };
+    assert_eq!(
+        ProductAction::decode_external(&action).expect("codec"),
+        Some(ProductAction::Audio(
+            AudioProductAction::SelectScopeOccurrence(expected)
+        ))
+    );
+    state.dispatch_action(action).expect("navigate second occurrence");
+    assert!(state
+        .active_sequence()
+        .expect("sequence")
+        .author_state_eq_ignoring_revision(&original));
+    assert_eq!(
+        state.active_sequence().expect("navigation revision").revision,
+        original.revision
+    );
+    assert!(!state.can_undo_action());
+    assert_eq!(
+        state.selection.audio_scope_occurrences.get(&(original.id, scope_id)),
+        Some(&address)
+    );
+    for rejected in [
+        AudioScopeOccurrencePayload { sequence_id: SequenceId::new(), ..expected },
+        AudioScopeOccurrencePayload {
+            scope_id: AudioProcessingScopeId::new(),
+            ..expected
+        },
+        AudioScopeOccurrencePayload {
+            address: AudioComponentAddress {
+                edit_id: mondrian_core::AudioComponentEditId::new(),
+                ..address
+            },
+            ..expected
+        },
+    ] {
+        assert!(state
+            .dispatch_action(
+                ProductAction::Audio(AudioProductAction::SelectScopeOccurrence(rejected))
+                    .into_external_action()
+            )
+            .is_err());
+        assert!(state
+            .active_sequence()
+            .expect("unchanged")
+            .author_state_eq_ignoring_revision(&original));
+        assert_eq!(
+            state.active_sequence().expect("rejection revision").revision,
+            original.revision
+        );
+        assert_eq!(state.selection.audio_scope_occurrences.len(), 1);
+        assert!(!state.can_undo_action());
+    }
+    state.active_sequence_mut_uncommitted().expect("lock fixture").audio_tracks[0].is_locked = true;
+    state
+        .dispatch_action(
+            ProductAction::Audio(AudioProductAction::SelectScopeOccurrence(expected))
+                .into_external_action(),
+        )
+        .expect("read-only navigation on locked Track");
+    let locked = InspectorPanelModel::from_app_state(&state, &english);
+    let locked_curve = locked.audio_processor_racks[0]
+        .scope_input_gain_automation
+        .as_ref()
+        .expect("locked curve");
+    assert!(!locked_curve.is_editable);
+    assert!(
+        locked_curve.current_author_time.is_ok(),
+        "navigation remains readable"
+    );
+    let mut disabled = audio_automation_curve_control(locked_curve, &english);
+    disabled.layout(Rect::new(0.0, 0.0, 320.0, 104.0));
+    let mut locked_router = EventRouter::new(disabled.id());
+    {
+        let mut tree = WidgetTreeView::new(disabled.as_mut());
+        for (key, modifiers) in [
+            (KeyCode::Tab, Modifiers::none()),
+            (KeyCode::A, Modifiers::ctrl()),
+            (KeyCode::Delete, Modifiers::none()),
+        ] {
+            locked_router.route(UiEvent::KeyDown { key, modifiers }, &mut tree, &dispatch);
+        }
+    }
+    assert!(
+        actions.borrow().is_empty(),
+        "locked curve cannot publish any author edit"
+    );
+    assert!(!state.can_undo_action());
+    state.active_sequence_mut_uncommitted().expect("unlock fixture").audio_tracks[0].is_locked =
+        false;
+    let refreshed = InspectorPanelModel::from_app_state(&state, &english);
+    let model = refreshed.audio_processor_racks[0]
+        .scope_input_gain_automation
+        .as_ref()
+        .expect("current curve");
+    assert_eq!(
+        model.current_author_time.as_ref().expect("selected coordinate").time,
+        TimelineTime::new(9, 1).expect("second origin")
+    );
+    let mut curve = audio_automation_curve_control(model, &english);
+    curve.layout(Rect::new(0.0, 0.0, 320.0, 104.0));
+    let mut router = EventRouter::new(curve.id());
+    {
+        let mut tree = WidgetTreeView::new(curve.as_mut());
+        for (key, modifiers) in [
+            (KeyCode::Tab, Modifiers::none()),
+            (KeyCode::A, Modifiers::ctrl()),
+            (KeyCode::Delete, Modifiers::none()),
+        ] {
+            router.route(UiEvent::KeyDown { key, modifiers }, &mut tree, &dispatch);
+        }
+    }
+    let edits = actions.borrow_mut().drain(..).collect::<Vec<_>>();
+    assert!(!edits.is_empty(), "actual curve must publish author edit");
+    for edit in edits {
+        state.dispatch_action(edit).expect("canonical delete");
+    }
+    let inspect = inspect_audio_automation(state.active_sequence().expect("sequence"), &target)
+        .expect("Scope");
+    assert!(inspect.curve().is_none());
+    assert_eq!(
+        inspect.default_value(),
+        -6.0,
+        "retain second occurrence, never first's -24"
+    );
+    let accepted = state.active_sequence().expect("accepted").clone();
+    assert!(state.undo_timeline().expect("Undo"));
+    assert!(state
+        .active_sequence()
+        .expect("restored")
+        .author_state_eq_ignoring_revision(&original));
+    assert!(
+        !state.can_undo_action(),
+        "navigation must not be in author history"
+    );
+    assert!(state.redo_timeline().expect("Redo"));
+    assert!(state
+        .active_sequence()
+        .expect("redo")
+        .author_state_eq_ignoring_revision(&accepted));
+    let directory =
+        std::env::temp_dir().join(format!("mondrian-scope-choice-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&directory).expect("directory");
+    let project = directory.join("共享实例🙂.mdp");
+    state.save_project_file_as(project.clone()).expect("save");
+    let mut reopened = AppState::new();
+    reopened.open_project_file(project).expect("fresh reopen");
+    assert!(reopened
+        .active_sequence()
+        .expect("reopened")
+        .author_state_eq_ignoring_revision(&accepted));
+    assert!(
+        reopened.selection.audio_scope_occurrences.is_empty(),
+        "navigation is Session-only"
+    );
+    assert!(!reopened.can_undo_action());
+    state.clear_selection();
+    assert!(state.selection.audio_scope_occurrences.is_empty());
+}
+
+#[test]
+fn audio_scope_occurrence_view_survives_track_move_but_not_instance_switch() {
+    use crate::app::product_action::{
+        AudioProductAction, AudioScopeOccurrencePayload, ProductAction,
+    };
+    use mondrian_core::ExactAutomationKeyframe;
+    use mondrian_timeline::{
+        apply_audio_automation_edit, AudioAutomationEdit, AudioAutomationEditRequest,
+        AudioAutomationTarget, AudioComponentAddress,
+    };
+    let _guard = crate::app_ui::test_utils::theme_test_guard();
+    let mut sequence = Sequence::new("Occurrence view identity");
+    let track_id = sequence.audio_tracks[0].id;
+    let clip = Clip::new(AssetId::new(), TimelineTime::ZERO, TimelineTime::ONE).expect("clip");
+    let clip_id = clip.id;
+    sequence
+        .add_media_audio_clip(track_id, clip, AudioSourceComponentId::primary())
+        .expect("audio");
+    let scope_id = sequence.audio_tracks[0].clips[0].audio_components[0].processing.scope_id;
+    let first = AudioComponentAddress {
+        track_id,
+        clip_id,
+        edit_id: sequence.audio_tracks[0].clips[0].audio_components[0].id,
+    };
+    let component = mondrian_timeline::audio::AudioComponentEdit::media(
+        AudioSourceComponentId::new(),
+        scope_id,
+    );
+    let second = AudioComponentAddress { edit_id: component.id, ..first };
+    sequence.audio_tracks[0].clips[0].audio_components.push(component);
+    for (time, value) in [
+        (TimelineTime::ZERO, -24.0),
+        (TimelineTime::new(1, 2).expect("middle"), -6.0),
+        (TimelineTime::ONE, -18.0),
+    ] {
+        apply_audio_automation_edit(
+            &mut sequence,
+            &AudioAutomationEditRequest {
+                target: AudioAutomationTarget::ProcessingScopeInputGain { scope_id },
+                edit: AudioAutomationEdit::UpsertKeyframe {
+                    keyframe: ExactAutomationKeyframe::linear(time, value),
+                },
+            },
+        )
+        .expect("seed curve");
+    }
+    let mut state = AppState::new();
+    state.test_set_sequence(Some(sequence));
+    state.select_clip_by_id(clip_id).expect("inspect");
+    let sequence_id = state.active_sequence().expect("sequence").id;
+    state
+        .dispatch_action(
+            ProductAction::Audio(AudioProductAction::SelectScopeOccurrence(
+                AudioScopeOccurrencePayload { sequence_id, scope_id, address: second },
+            ))
+            .into_external_action(),
+        )
+        .expect("select second");
+    let locale = chinese_localizer();
+    let before = InspectorPanelModel::from_app_state(&state, &locale);
+    let mut widget = audio_automation_curve_control(
+        before.audio_processor_racks[0]
+            .scope_input_gain_automation
+            .as_ref()
+            .expect("curve"),
+        &locale,
+    );
+    widget.layout(Rect::new(0.0, 0.0, 320.0, 104.0));
+    let mut router = EventRouter::new(widget.id());
+    let actions = RefCell::new(Vec::new());
+    let dispatch = |action| actions.borrow_mut().push(action);
+    {
+        let mut tree = WidgetTreeView::new(widget.as_mut());
+        for (key, modifiers) in [
+            (KeyCode::Tab, Modifiers::none()),
+            (KeyCode::A, Modifiers::ctrl()),
+        ] {
+            router.route(UiEvent::KeyDown { key, modifiers }, &mut tree, &dispatch);
+        }
+    }
+    let editor = widget
+        .as_any()
+        .and_then(|any| any.downcast_ref::<mondrian_ui_widgets::CurveEditor>())
+        .expect("editor");
+    let selected = editor.selected_keyframe_ids();
+    assert_eq!(selected.len(), 3);
+    let snapshot = editor.view_state().expect("inactive selected view");
+    let mut moved = state.active_sequence().expect("sequence").clone();
+    let new_track_id = moved.add_audio_track();
+    let destination = moved
+        .audio_tracks
+        .iter()
+        .position(|track| track.id == new_track_id)
+        .expect("destination");
+    assert!(moved.move_clip_to_track_at_time(false, clip_id, destination, TimelineTime::ZERO));
+    state.test_set_sequence(Some(moved));
+    let after = InspectorPanelModel::from_app_state(&state, &locale);
+    let model = after.audio_processor_racks[0]
+        .scope_input_gain_automation
+        .as_ref()
+        .expect("moved curve");
+    assert_eq!(
+        model.time_context.scope_occurrence,
+        Some(AudioComponentAddress { track_id: new_track_id, ..second })
+    );
+    let mut replacement = audio_automation_curve_control(model, &locale);
+    let editor = replacement
+        .as_any_mut()
+        .and_then(|any| any.downcast_mut::<mondrian_ui_widgets::CurveEditor>())
+        .expect("replacement");
+    assert!(
+        editor.restore_view_state(&snapshot),
+        "same occurrence survives Track locator change"
+    );
+    assert_eq!(editor.selected_keyframe_ids(), selected);
+    state
+        .dispatch_action(
+            ProductAction::Audio(AudioProductAction::SelectScopeOccurrence(
+                AudioScopeOccurrencePayload {
+                    sequence_id,
+                    scope_id,
+                    address: AudioComponentAddress { track_id: new_track_id, ..first },
+                },
+            ))
+            .into_external_action(),
+        )
+        .expect("switch occurrence");
+    let switched = InspectorPanelModel::from_app_state(&state, &locale);
+    let mut replacement = audio_automation_curve_control(
+        switched.audio_processor_racks[0]
+            .scope_input_gain_automation
+            .as_ref()
+            .expect("other occurrence"),
+        &locale,
+    );
+    let editor = replacement
+        .as_any_mut()
+        .and_then(|any| any.downcast_mut::<mondrian_ui_widgets::CurveEditor>())
+        .expect("other editor");
+    assert!(
+        !editor.restore_view_state(&snapshot),
+        "different occurrence must not inherit selection"
+    );
+    assert!(editor.selected_keyframe_ids().is_empty());
+    assert!(actions.borrow().is_empty());
+    assert!(!state.can_undo_action());
+}
+
+#[test]
+fn selected_key_time_keyboard_routes_one_transaction_and_preserves_saved_redo() {
+    use mondrian_ui_core::tree::{WidgetTree, WidgetTreeView};
+    let _guard = crate::app_ui::test_utils::theme_test_guard();
+    fn find_curve(widget: &dyn Widget, id: KeyframeId) -> Option<WidgetId> {
+        if widget
+            .as_any()
+            .and_then(|any| any.downcast_ref::<CurveEditor>())
+            .is_some_and(|curve| {
+                (0..curve.points().len())
+                    .any(|index| curve.point_target(index) == Some(CurvePointTarget::Keyframe(id)))
+            })
+        {
+            return Some(widget.id());
+        }
+        (0..widget.child_count())
+            .find_map(|index| widget.child(index).and_then(|child| find_curve(child, id)))
+    }
+    for mode in [
+        InterpolationType::AutoBezier,
+        InterpolationType::ContinuousBezier,
+    ] {
+        let mut sequence = Sequence::new("Selected temporal keys");
+        let frame =
+            TimelineTime::new(sequence.time_base().num, sequence.time_base().den).expect("frame");
+        let mut clip =
+            Clip::new_basic_title("Group", "Arial", TimelineTime::ZERO, TimelineTime::ONE)
+                .expect("title");
+        let clip_id = clip.id;
+        let mut ids = Vec::new();
+        for count in [5, 6, 24] {
+            let key = Keyframe::from_preset(
+                frame
+                    .checked_scale(TimeScale::new(count, 1).expect("frame count"))
+                    .expect("time"),
+                PropertyValue::Float(0.5),
+                mode,
+            );
+            ids.push(key.id);
+            clip.apply_property_mutation(PropertyMutation::SetKeyframe {
+                path: Transform2D::OPACITY_PATH.into(),
+                keyframe: key,
+            })
+            .expect("seed canonical curve");
+        }
+        sequence.video_tracks[0].add_clip(clip).expect("place");
+        let mut state = AppState::new();
+        state.test_set_sequence(Some(sequence));
+        state.select_clip_by_id(clip_id).expect("select");
+        let original = state.active_sequence().expect("origin").clone();
+        assert!(!state.can_undo_action());
+        let models = AppUiPanelModels::from_app_state(&state);
+        let mut panel = inspector_panel(&models.inspector, &chinese_localizer());
+        let curve_id = find_curve(&panel, ids[0]).expect("actual Inspector curve");
+        let mut panel_tree = WidgetTreeView::new(&mut panel);
+        let widget = panel_tree.get_mut(curve_id).expect("curve");
+        widget.layout(Rect::new(0.0, 0.0, 320.0, 104.0));
+        let mut router = EventRouter::new(curve_id);
+        let actions = RefCell::new(Vec::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        {
+            let mut tree = WidgetTreeView::new(widget);
+            for (key, modifiers) in [
+                (KeyCode::Tab, Modifiers::none()),
+                (KeyCode::A, Modifiers::ctrl()),
+                (KeyCode::Right, Modifiers::none()),
+            ] {
+                router.route(UiEvent::KeyDown { key, modifiers }, &mut tree, &dispatch);
+            }
+        }
+        assert_eq!(actions.borrow().len(), 1, "one closed group author action");
+        state
+            .dispatch_action(actions.borrow_mut().remove(0))
+            .expect("translate adjacent selected keys together");
+        let moved = state.active_sequence().expect("moved").clone();
+        let bag = moved.find_clip(clip_id).expect("clip").intrinsic_parameter_bag();
+        let property = bag.property(Transform2D::OPACITY_PATH).expect("opacity");
+        for id in &ids {
+            let before = original
+                .find_clip(clip_id)
+                .expect("clip")
+                .intrinsic_parameter_bag()
+                .property(Transform2D::OPACITY_PATH)
+                .expect("opacity")
+                .keyframe_by_id(*id)
+                .expect("origin key");
+            let after = property.keyframe_by_id(*id).expect("stable shifted key");
+            assert_eq!(
+                after.time,
+                before.time.checked_add(frame).expect("one frame")
+            );
+            assert_eq!(after.value, before.value);
+            assert_eq!(after.temporal_flags, before.temporal_flags);
+        }
+        property.validate().expect("constrained topology");
+        let points = widget
+            .as_any()
+            .and_then(|any| any.downcast_ref::<CurveEditor>())
+            .expect("curve")
+            .points()
+            .to_vec();
+        let generation = state.project_author_generation();
+        let history = state.authoring_history().expect("history").diagnostics();
+        {
+            let mut tree = WidgetTreeView::new(widget);
+            router.route(
+                UiEvent::KeyDown { key: KeyCode::Right, modifiers: Modifiers::shift() },
+                &mut tree,
+                &dispatch,
+            );
+        }
+        assert!(
+            actions.borrow().is_empty(),
+            "one key beyond the owner interval rejects the whole group"
+        );
+        assert_eq!(
+            widget
+                .as_any()
+                .and_then(|any| any.downcast_ref::<CurveEditor>())
+                .expect("curve")
+                .points(),
+            points
+        );
+        assert_eq!(state.project_author_generation(), generation);
+        assert_eq!(
+            state.authoring_history().expect("history").diagnostics(),
+            history
+        );
+        assert!(state.undo_timeline().expect("single undo"));
+        assert!(state
+            .active_sequence()
+            .expect("undone")
+            .author_state_eq_ignoring_revision(&original));
+        assert!(!state.can_undo_action() && state.can_redo_action());
+        let directory = tempfile::tempdir().expect("archives");
+        let path = directory.path().join("整组时间🙂.mdp");
+        state.save_project_file_as(path.clone()).expect("save undone");
+        assert!(state.can_redo_action(), "save cannot consume group redo");
+        let mut reopened = AppState::new();
+        reopened.open_project_file(path).expect("fresh saved reopen");
+        assert!(reopened
+            .active_sequence()
+            .expect("reopened")
+            .author_state_eq_ignoring_revision(&original));
+        assert!(!reopened.can_undo_action() && !reopened.can_redo_action());
+        assert!(state.redo_timeline().expect("single redo"));
+        assert!(state
+            .active_sequence()
+            .expect("redone")
+            .author_state_eq_ignoring_revision(&moved));
+    }
+}
+
+#[test]
+fn selected_audio_key_time_keyboard_preserves_owner_domain_and_saved_redo() {
+    use mondrian_core::ExactAutomationKeyframe;
+    use mondrian_timeline::{
+        apply_audio_automation_edit, inspect_audio_automation, AudioAutomationEdit,
+        AudioAutomationEditRequest, AudioAutomationTarget,
+    };
+    let _guard = crate::app_ui::test_utils::theme_test_guard();
+    for scope in [false, true] {
+        let mut sequence = Sequence::new("Audio group time");
+        let frame =
+            TimelineTime::new(sequence.time_base().num, sequence.time_base().den).expect("frame");
+        let track_id = sequence.audio_tracks[0].id;
+        let clip = Clip::new(
+            AssetId::new(),
+            TimelineTime::new(3, 1).expect("placement"),
+            TimelineTime::ONE,
+        )
+        .expect("clip");
+        let clip_id = clip.id;
+        sequence
+            .add_media_audio_clip(track_id, clip, AudioSourceComponentId::primary())
+            .expect("audio placement");
+        let component = &mut sequence.audio_tracks[0].clips[0].audio_components[0];
+        component.processing.scope_in = TimelineTime::new(7, 1).expect("Scope origin");
+        component.local_time_in = TimelineTime::new(11, 1).expect("Component origin");
+        let target = if scope {
+            AudioAutomationTarget::ProcessingScopeInputGain {
+                scope_id: component.processing.scope_id,
+            }
+        } else {
+            AudioAutomationTarget::ComponentVolume { track_id, clip_id, edit_id: component.id }
+        };
+        let origin = if scope {
+            component.processing.scope_in
+        } else {
+            component.local_time_in
+        };
+        let mut ids = Vec::new();
+        for (count, value) in [(5, -24.0), (6, -23.0), (24, -18.0)] {
+            let keyframe = ExactAutomationKeyframe::linear(
+                origin
+                    .checked_add(
+                        frame
+                            .checked_scale(TimeScale::new(count, 1).expect("count"))
+                            .expect("offset"),
+                    )
+                    .expect("owner time"),
+                value,
+            );
+            ids.push(keyframe.id);
+            apply_audio_automation_edit(
+                &mut sequence,
+                &AudioAutomationEditRequest {
+                    target: target.clone(),
+                    edit: AudioAutomationEdit::UpsertKeyframe { keyframe },
+                },
+            )
+            .expect("seed curve");
+        }
+        for keyframe_id in &ids {
+            apply_audio_automation_edit(
+                &mut sequence,
+                &AudioAutomationEditRequest {
+                    target: target.clone(),
+                    edit: AudioAutomationEdit::SetInterpolation {
+                        keyframe_id: *keyframe_id,
+                        interpolation: if scope {
+                            InterpolationType::AutoBezier
+                        } else {
+                            InterpolationType::ContinuousBezier
+                        },
+                    },
+                },
+            )
+            .expect("seed constrained mode");
+        }
+        let mut state = AppState::new();
+        state.test_set_sequence(Some(sequence));
+        state.select_clip_by_id(clip_id).expect("inspect");
+        let original = state.active_sequence().expect("original").clone();
+        let locale = chinese_localizer();
+        let inspector = InspectorPanelModel::from_app_state(&state, &locale);
+        let model = if scope {
+            inspector.audio_processor_racks[0]
+                .scope_input_gain_automation
+                .as_ref()
+                .expect("Scope curve")
+        } else {
+            inspector.audio_components[0]
+                .volume_automation
+                .as_ref()
+                .expect("Component curve")
+        };
+        assert_eq!(model.viewport.range.start, origin);
+        assert!(model.current_author_time.is_ok());
+        let mut widget = audio_automation_curve_control(model, &locale);
+        widget.layout(Rect::new(0.0, 0.0, 320.0, 104.0));
+        let mut router = EventRouter::new(widget.id());
+        let actions = RefCell::new(Vec::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        {
+            let mut tree = WidgetTreeView::new(widget.as_mut());
+            for (key, modifiers) in [
+                (KeyCode::Tab, Modifiers::none()),
+                (KeyCode::A, Modifiers::ctrl()),
+                (KeyCode::Right, Modifiers::none()),
+            ] {
+                router.route(UiEvent::KeyDown { key, modifiers }, &mut tree, &dispatch);
+            }
+        }
+        assert_eq!(actions.borrow().len(), 1, "one complete group intent");
+        state
+            .dispatch_action(actions.borrow_mut().remove(0))
+            .expect("canonical group shift");
+        let moved = state.active_sequence().expect("moved").clone();
+        let before = inspect_audio_automation(&original, &target).expect("original owner");
+        let after = inspect_audio_automation(&moved, &target).expect("shifted owner");
+        assert_eq!(before.time_domain(), after.time_domain());
+        for (before, after) in before
+            .curve()
+            .expect("original curve")
+            .keyframes
+            .iter()
+            .zip(&after.curve().expect("moved curve").keyframes)
+        {
+            assert_eq!(before.id, after.id);
+            assert_eq!(
+                after.time,
+                before.time.checked_add(frame).expect("exact delta")
+            );
+            assert_eq!(after.value, before.value);
+            assert_eq!(after.tangent_mode, before.tangent_mode);
+        }
+        after.curve().expect("moved curve").validate().expect("constraints");
+        let generation = state.project_author_generation();
+        let history = state.authoring_history().expect("history").diagnostics();
+        {
+            let mut tree = WidgetTreeView::new(widget.as_mut());
+            router.route(
+                UiEvent::KeyDown { key: KeyCode::Right, modifiers: Modifiers::shift() },
+                &mut tree,
+                &dispatch,
+            );
+        }
+        if scope {
+            assert_eq!(
+                actions.borrow().len(),
+                1,
+                "Scope movement beyond the viewport is one group intent"
+            );
+            state
+                .dispatch_action(actions.borrow_mut().remove(0))
+                .expect("shared owner author admission");
+            let outside =
+                inspect_audio_automation(state.active_sequence().expect("outside view"), &target)
+                    .expect("shared owner");
+            let shift =
+                frame.checked_scale(TimeScale::new(5, 1).expect("five frames")).expect("shift");
+            for (before, after) in after
+                .curve()
+                .expect("previous curve")
+                .keyframes
+                .iter()
+                .zip(&outside.curve().expect("outside curve").keyframes)
+            {
+                assert_eq!(after.id, before.id);
+                assert_eq!(
+                    after.time,
+                    before.time.checked_add(shift).expect("exact shared time")
+                );
+                assert_eq!(after.value, before.value);
+                assert_eq!(after.tangent_mode, before.tangent_mode);
+                let editor = widget
+                    .as_any()
+                    .and_then(|any| any.downcast_ref::<mondrian_ui_widgets::CurveEditor>())
+                    .expect("actual shared curve widget");
+                let point = editor
+                    .points()
+                    .iter()
+                    .enumerate()
+                    .find_map(|(index, point)| {
+                        (editor.point_target(index)
+                            == Some(mondrian_ui_widgets::CurvePointTarget::Keyframe(after.id)))
+                        .then_some(*point)
+                    })
+                    .expect("moving selected keys retains stable projected identities");
+                let elapsed =
+                    after.time.checked_sub(model.viewport.range.start).expect("owner offset");
+                assert_eq!(
+                    point,
+                    mondrian_ui_widgets::CurvePoint {
+                        x: (elapsed.to_f64() / model.viewport.range.duration.to_f64()) as f32,
+                        y: after.value,
+                    },
+                    "out-of-view key projection must follow canonical owner time"
+                );
+            }
+            assert!(
+                outside.curve().expect("curve").keyframes.last().expect("last key").time
+                    > model.viewport.range.end().expect("visible end")
+            );
+            assert_eq!(state.project_author_generation(), generation + 1);
+            assert_eq!(
+                state
+                    .authoring_history()
+                    .expect("one additional group")
+                    .diagnostics()
+                    .undo_entries,
+                history.undo_entries + 1
+            );
+            assert!(state.undo_timeline().expect("Undo shared extension"));
+            assert!(state
+                .active_sequence()
+                .expect("previous group")
+                .author_state_eq_ignoring_revision(&moved));
+        } else {
+            assert!(
+                actions.borrow().is_empty(),
+                "Component boundary refusal is whole-set"
+            );
+            assert_eq!(state.project_author_generation(), generation);
+            assert_eq!(
+                state.authoring_history().expect("history").diagnostics(),
+                history
+            );
+        }
+        assert!(state.undo_timeline().expect("one Undo"));
+        assert!(state
+            .active_sequence()
+            .expect("Undo state")
+            .author_state_eq_ignoring_revision(&original));
+        assert!(!state.can_undo_action() && state.can_redo_action());
+        let directory = tempfile::tempdir().expect("archives");
+        let path = directory.path().join("音频整组时间🙂.mdp");
+        state.save_project_file_as(path.clone()).expect("save undone");
+        assert!(state.can_redo_action(), "save retains live Redo");
+        let mut reopened = AppState::new();
+        reopened.open_project_file(path).expect("fresh reopen");
+        assert!(reopened
+            .active_sequence()
+            .expect("reopened")
+            .author_state_eq_ignoring_revision(&original));
+        assert!(!reopened.can_undo_action() && !reopened.can_redo_action());
+        assert!(state.redo_timeline().expect("one Redo"));
+        assert!(state
+            .active_sequence()
+            .expect("Redo state")
+            .author_state_eq_ignoring_revision(&moved));
+    }
+}
+
+#[test]
+fn audio_group_crossing_widget_refuses_invalid_controls_and_keeps_legal_crossing_undoable() {
+    use crate::app_ui::audio_automation::{
+        project_audio_automation, sequence_automation_viewport, AudioAutomationTimeContext,
+    };
+    use mondrian_core::ExactAutomationKeyframe;
+    use mondrian_timeline::{
+        apply_audio_automation_edit, inspect_audio_automation, AudioAutomationEdit,
+        AudioAutomationEditRequest, AudioAutomationTarget, AudioChannelStripOwner,
+    };
+    let _guard = crate::app_ui::test_utils::theme_test_guard();
+    for invalid in [true, false] {
+        let mut sequence = Sequence::new("Crossing controls");
+        let target = AudioAutomationTarget::ChannelFader {
+            owner: AudioChannelStripOwner::Track { track_id: sequence.audio_tracks[0].id },
+        };
+        let mut ids = Vec::new();
+        for (num, den, value) in [
+            (1, 5, if invalid { 12.0 } else { 0.0 }),
+            (6, 25, if invalid { -60.0 } else { -6.0 }),
+            (37, 100, if invalid { -60.0 } else { -6.0 }),
+        ] {
+            let keyframe =
+                ExactAutomationKeyframe::linear(TimelineTime::new(num, den).expect("time"), value);
+            ids.push(keyframe.id);
+            apply_audio_automation_edit(
+                &mut sequence,
+                &AudioAutomationEditRequest {
+                    target: target.clone(),
+                    edit: AudioAutomationEdit::UpsertKeyframe { keyframe },
+                },
+            )
+            .expect("seed");
+        }
+        apply_audio_automation_edit(
+            &mut sequence,
+            &AudioAutomationEditRequest {
+                target: target.clone(),
+                edit: AudioAutomationEdit::SetInterpolation {
+                    keyframe_id: ids[0],
+                    interpolation: InterpolationType::ContinuousBezier,
+                },
+            },
+        )
+        .expect("legal original constraint");
+        let mut state = AppState::new();
+        state.test_set_sequence(Some(sequence));
+        let original = state.active_sequence().expect("sequence").clone();
+        let model = project_audio_automation(
+            &original,
+            target.clone(),
+            sequence_automation_viewport(&original).expect("viewport"),
+            AudioAutomationTimeContext::at_sequence_time(&original, TimelineTime::ZERO),
+        )
+        .expect("actual model");
+        let mut widget = audio_automation_curve_control(&model, &chinese_localizer());
+        widget.layout(Rect::new(0.0, 0.0, 480.0, 160.0));
+        let positions = {
+            let curve = widget
+                .as_any()
+                .and_then(|any| any.downcast_ref::<CurveEditor>())
+                .expect("curve");
+            model
+                .keys
+                .iter()
+                .filter(|key| key.keyframe.as_ref().is_some_and(|key| ids[..2].contains(&key.id)))
+                .map(|key| curve.point_position(key.point))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(positions.len(), 2);
+        let mut router = EventRouter::new(widget.id());
+        let actions = RefCell::new(Vec::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        {
+            let mut tree = WidgetTreeView::new(widget.as_mut());
+            router.route(
+                UiEvent::KeyDown { key: KeyCode::Tab, modifiers: Modifiers::none() },
+                &mut tree,
+                &dispatch,
+            );
+            for position in positions {
+                router.route(
+                    UiEvent::MouseDown {
+                        position,
+                        button: MouseButton::Left,
+                        modifiers: Modifiers::shift(),
+                    },
+                    &mut tree,
+                    &dispatch,
+                );
+                router.route(
+                    UiEvent::MouseUp {
+                        position,
+                        button: MouseButton::Left,
+                        modifiers: Modifiers::shift(),
+                    },
+                    &mut tree,
+                    &dispatch,
+                );
+            }
+        }
+        let points = {
+            let curve = widget
+                .as_any()
+                .and_then(|any| any.downcast_ref::<CurveEditor>())
+                .expect("curve");
+            assert_eq!(curve.selected_keyframe_ids(), ids[..2]);
+            curve.points().to_vec()
+        };
+        assert!(actions.borrow().is_empty());
+        assert!(router.captured().is_none());
+        let generation = state.project_author_generation();
+        {
+            let mut tree = WidgetTreeView::new(widget.as_mut());
+            router.route(
+                UiEvent::KeyDown { key: KeyCode::Right, modifiers: Modifiers::shift() },
+                &mut tree,
+                &dispatch,
+            );
+        }
+        if invalid {
+            assert!(
+                actions.borrow().is_empty(),
+                "illegal new incoming control cannot publish an action"
+            );
+            let curve = widget
+                .as_any()
+                .and_then(|any| any.downcast_ref::<CurveEditor>())
+                .expect("curve");
+            assert_eq!(curve.points(), points);
+            assert_eq!(curve.selected_keyframe_ids(), ids[..2]);
+            assert_eq!(state.project_author_generation(), generation);
+            assert!(!state.can_undo_action());
+            assert!(state
+                .active_sequence()
+                .expect("unchanged")
+                .author_state_eq_ignoring_revision(&original));
+        } else {
+            assert_eq!(actions.borrow().len(), 1);
+            state.dispatch_action(actions.borrow_mut().remove(0)).expect("legal crossing");
+            assert_eq!(state.project_author_generation(), generation + 1);
+            let moved = state.active_sequence().expect("moved").clone();
+            let curve = inspect_audio_automation(&moved, &target)
+                .expect("owner")
+                .curve()
+                .expect("curve")
+                .clone();
+            assert_eq!(
+                curve.keyframes.iter().map(|key| key.id).collect::<Vec<_>>(),
+                [ids[2], ids[0], ids[1]]
+            );
+            assert_eq!(
+                curve.keyframes[1].time,
+                TimelineTime::new(2, 5).expect("shifted first")
+            );
+            assert!(
+                curve.keyframes[1].in_handle.is_some(),
+                "new opposite handle admitted"
+            );
+            assert!(state.undo_timeline().expect("single Undo"));
+            assert!(!state.can_undo_action() && state.can_redo_action());
+            assert!(state
+                .active_sequence()
+                .expect("undone")
+                .author_state_eq_ignoring_revision(&original));
+            let directory = tempfile::tempdir().expect("archives");
+            let path = directory.path().join("跨键控制🙂.mdp");
+            state.save_project_file_as(path.clone()).expect("save undone");
+            assert!(state.can_redo_action());
+            let mut reopened = AppState::new();
+            reopened.open_project_file(path).expect("fresh reopen");
+            assert!(reopened
+                .active_sequence()
+                .expect("reopened")
+                .author_state_eq_ignoring_revision(&original));
+            assert!(!reopened.can_undo_action() && !reopened.can_redo_action());
+            assert!(state.redo_timeline().expect("single Redo"));
+            assert!(state
+                .active_sequence()
+                .expect("redone")
+                .author_state_eq_ignoring_revision(&moved));
+        }
+    }
+}
+
+#[test]
+fn group_value_keyboard_commits_once_and_roundtrips_both_history_states() {
+    use crate::app_ui::audio_automation::{
+        project_audio_automation, sequence_automation_viewport, AudioAutomationTimeContext,
+    };
+    use mondrian_core::ExactAutomationKeyframe;
+    use mondrian_timeline::{
+        apply_audio_automation_edit, inspect_audio_automation, AudioAutomationEdit,
+        AudioAutomationEditRequest, AudioAutomationTarget, AudioChannelStripOwner,
+    };
+    use mondrian_ui_core::tree::{WidgetTree, WidgetTreeView};
+    fn find_curve(widget: &dyn Widget, ids: &[KeyframeId]) -> Option<WidgetId> {
+        if widget
+            .as_any()
+            .and_then(|any| any.downcast_ref::<CurveEditor>())
+            .is_some_and(|curve| {
+                let actual = (0..curve.points().len())
+                    .filter_map(|index| match curve.point_target(index) {
+                        Some(CurvePointTarget::Keyframe(id)) => Some(id),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
+                actual == ids
+            })
+        {
+            return Some(widget.id());
+        }
+        (0..widget.child_count())
+            .find_map(|index| widget.child(index).and_then(|child| find_curve(child, ids)))
+    }
+    fn values(
+        sequence: &Sequence,
+        clip_id: Option<ClipId>,
+        audio: Option<&AudioAutomationTarget>,
+    ) -> Vec<(KeyframeId, TimelineTime, f64)> {
+        if let Some(target) = audio {
+            inspect_audio_automation(sequence, target)
+                .expect("audio owner")
+                .curve()
+                .expect("audio curve")
+                .keyframes
+                .iter()
+                .map(|key| (key.id, key.time, key.value))
+                .collect()
+        } else {
+            let bag = sequence
+                .find_clip(clip_id.expect("visual owner"))
+                .expect("Clip")
+                .intrinsic_parameter_bag();
+            bag.property(Transform2D::OPACITY_PATH)
+                .expect("opacity")
+                .channel(0)
+                .expect("channel")
+                .keyframes()
+                .iter()
+                .map(|key| (key.id, key.time, key.value.projection()))
+                .collect()
+        }
+    }
+    let _guard = crate::app_ui::test_utils::theme_test_guard();
+    for audio in [false, true] {
+        for mode in [
+            InterpolationType::AutoBezier,
+            InterpolationType::ContinuousBezier,
+        ] {
+            let mut sequence = Sequence::new("Group value keyboard");
+            let mut ids = Vec::new();
+            let (clip_id, target) = if audio {
+                let target = AudioAutomationTarget::ChannelFader {
+                    owner: AudioChannelStripOwner::Track { track_id: sequence.audio_tracks[0].id },
+                };
+                for (time, value) in [
+                    (1, -6.0),
+                    (3, mondrian_timeline::audio::AUDIO_GAIN_DB_MAX - 0.1),
+                ] {
+                    let keyframe = ExactAutomationKeyframe::linear(
+                        TimelineTime::new(time, 4).expect("exact time"),
+                        value,
+                    );
+                    ids.push(keyframe.id);
+                    apply_audio_automation_edit(
+                        &mut sequence,
+                        &AudioAutomationEditRequest {
+                            target: target.clone(),
+                            edit: AudioAutomationEdit::UpsertKeyframe { keyframe },
+                        },
+                    )
+                    .expect("seed audio");
+                }
+                for id in &ids {
+                    apply_audio_automation_edit(
+                        &mut sequence,
+                        &AudioAutomationEditRequest {
+                            target: target.clone(),
+                            edit: AudioAutomationEdit::SetInterpolation {
+                                keyframe_id: *id,
+                                interpolation: mode,
+                            },
+                        },
+                    )
+                    .expect("audio mode");
+                }
+                (None, Some(target))
+            } else {
+                let mut clip = Clip::new_basic_title(
+                    "Group values",
+                    "Arial",
+                    TimelineTime::ZERO,
+                    TimelineTime::ONE,
+                )
+                .expect("title");
+                let clip_id = clip.id;
+                for (time, value) in [(1, 0.2), (3, 0.98)] {
+                    let keyframe = Keyframe::linear(
+                        TimelineTime::new(time, 4).expect("exact time"),
+                        PropertyValue::Float(value),
+                    );
+                    ids.push(keyframe.id);
+                    clip.apply_property_mutation(PropertyMutation::SetKeyframe {
+                        path: Transform2D::OPACITY_PATH.into(),
+                        keyframe,
+                    })
+                    .expect("seed visual");
+                }
+                for time in [1, 3] {
+                    clip.apply_property_mutation(PropertyMutation::UpdateKeyframeInterpolation {
+                        path: Transform2D::OPACITY_PATH.into(),
+                        time: TimelineTime::new(time, 4).expect("time"),
+                        interpolation: mode,
+                    })
+                    .expect("visual mode");
+                }
+                sequence.video_tracks[0].add_clip(clip).expect("place title");
+                (Some(clip_id), None)
+            };
+            let mut state = AppState::new();
+            state.test_set_sequence(Some(sequence));
+            if let Some(id) = clip_id {
+                state.select_clip_by_id(id).expect("select Clip");
+            }
+            let original = state.active_sequence().expect("origin").clone();
+            let original_values = values(&original, clip_id, target.as_ref());
+            let mut widget: Box<dyn Widget> = if let Some(target) = &target {
+                let model = project_audio_automation(
+                    &original,
+                    target.clone(),
+                    sequence_automation_viewport(&original).expect("viewport"),
+                    AudioAutomationTimeContext::at_sequence_time(&original, TimelineTime::ZERO),
+                )
+                .expect("audio model");
+                audio_automation_curve_control(&model, &chinese_localizer())
+            } else {
+                let models = AppUiPanelModels::from_app_state(&state);
+                Box::new(inspector_panel(&models.inspector, &chinese_localizer()))
+            };
+            let curve_id = find_curve(widget.as_ref(), &ids).expect("actual product curve");
+            let mut panel_tree = WidgetTreeView::new(widget.as_mut());
+            let curve = panel_tree.get_mut(curve_id).expect("curve");
+            curve.layout(Rect::new(0.0, 0.0, 480.0, 160.0));
+            let mut router = EventRouter::new(curve_id);
+            let actions = RefCell::new(Vec::new());
+            let dispatch = |action| actions.borrow_mut().push(action);
+            {
+                let mut tree = WidgetTreeView::new(curve);
+                router.route(
+                    UiEvent::KeyDown { key: KeyCode::Tab, modifiers: Modifiers::none() },
+                    &mut tree,
+                    &dispatch,
+                );
+                router.route(
+                    UiEvent::KeyDown { key: KeyCode::A, modifiers: Modifiers::ctrl() },
+                    &mut tree,
+                    &dispatch,
+                );
+            }
+            let editor = curve
+                .as_any()
+                .and_then(|any| any.downcast_ref::<CurveEditor>())
+                .expect("curve editor");
+            assert_eq!(editor.selected_keyframe_ids(), ids);
+            let generation = state.project_author_generation();
+            {
+                let mut tree = WidgetTreeView::new(curve);
+                router.route(
+                    UiEvent::KeyDown { key: KeyCode::Up, modifiers: Modifiers::shift() },
+                    &mut tree,
+                    &dispatch,
+                );
+            }
+            assert_eq!(actions.borrow().len(), 1, "one group intent");
+            state.dispatch_action(actions.borrow_mut().remove(0)).expect("author group");
+            assert_eq!(state.project_author_generation(), generation + 1);
+            if let Some(clip_id) = clip_id {
+                assert_eq!(
+                    state
+                        .selected_animation_keyframes_for_clip(clip_id)
+                        .iter()
+                        .map(|selection| selection.keyframe_id)
+                        .collect::<std::collections::BTreeSet<_>>(),
+                    ids.iter().copied().collect(),
+                    "committed value batch retains the complete visual selection"
+                );
+            }
+            let moved = state.active_sequence().expect("moved").clone();
+            let moved_values = values(&moved, clip_id, target.as_ref());
+            let upper = if audio {
+                mondrian_timeline::audio::AUDIO_GAIN_DB_MAX
+            } else {
+                1.0
+            };
+            assert_eq!(moved_values[1].2, upper, "group stops at shared boundary");
+            let displacement = upper - original_values[1].2;
+            assert!((moved_values[0].2 - original_values[0].2 - displacement).abs() < 1e-12);
+            for (old, new) in original_values.iter().zip(&moved_values) {
+                assert_eq!(old.0, new.0);
+                assert_eq!(old.1, new.1);
+            }
+            assert_eq!(
+                curve
+                    .as_any()
+                    .and_then(|any| any.downcast_ref::<CurveEditor>())
+                    .expect("editor")
+                    .selected_keyframe_ids(),
+                ids
+            );
+            let unchanged_generation = state.project_author_generation();
+            {
+                let mut tree = WidgetTreeView::new(curve);
+                router.route(
+                    UiEvent::KeyDown { key: KeyCode::Up, modifiers: Modifiers::shift() },
+                    &mut tree,
+                    &dispatch,
+                );
+            }
+            assert!(
+                actions.borrow().is_empty(),
+                "boundary no-op cannot emit an unexecuted action"
+            );
+            assert_eq!(state.project_author_generation(), unchanged_generation);
+            assert!(state
+                .active_sequence()
+                .expect("no-op")
+                .author_state_eq_ignoring_revision(&moved));
+            assert!(state.undo_timeline().expect("single group Undo"));
+            assert!(!state.can_undo_action() && state.can_redo_action());
+            assert!(state
+                .active_sequence()
+                .expect("undone")
+                .author_state_eq_ignoring_revision(&original));
+            let directory = tempfile::tempdir().expect("archives");
+            let undone_path = directory.path().join("共同数值撤销🙂.mdp");
+            state.save_project_file_as(undone_path.clone()).expect("save origin");
+            assert!(state.can_redo_action());
+            {
+                let mut reopened = AppState::new();
+                reopened.open_project_file(undone_path).expect("fresh origin reopen");
+                assert!(reopened
+                    .active_sequence()
+                    .expect("origin")
+                    .author_state_eq_ignoring_revision(&original));
+                assert!(!reopened.can_undo_action() && !reopened.can_redo_action());
+            }
+            assert!(state.redo_timeline().expect("single group Redo"));
+            assert!(state
+                .active_sequence()
+                .expect("redone")
+                .author_state_eq_ignoring_revision(&moved));
+            let edited_path = directory.path().join("共同数值重做🙂.mdp");
+            state.save_project_file_as(edited_path.clone()).expect("save group");
+            let mut reopened = AppState::new();
+            reopened.open_project_file(edited_path).expect("fresh group reopen");
+            assert!(reopened
+                .active_sequence()
+                .expect("group")
+                .author_state_eq_ignoring_revision(&moved));
+            assert_eq!(
+                values(
+                    reopened.active_sequence().expect("reopened"),
+                    clip_id,
+                    target.as_ref()
+                ),
+                moved_values
+            );
+            assert!(!reopened.can_undo_action() && !reopened.can_redo_action());
+        }
+    }
+}
+
+#[test]
+fn group_interpolation_menu_commits_once_and_roundtrips_both_history_states() {
+    use crate::app_ui::audio_automation::{
+        project_audio_automation, sequence_automation_viewport, AudioAutomationTimeContext,
+    };
+    use mondrian_core::ExactAutomationKeyframe;
+    use mondrian_timeline::{
+        apply_audio_automation_edit, inspect_audio_automation, AudioAutomationEdit,
+        AudioAutomationEditRequest, AudioAutomationTarget, AudioChannelStripOwner,
+    };
+    use mondrian_ui_core::tree::{WidgetTree, WidgetTreeView};
+    fn find_curve(widget: &dyn Widget, ids: &[KeyframeId]) -> Option<WidgetId> {
+        if widget
+            .as_any()
+            .and_then(|any| any.downcast_ref::<CurveEditor>())
+            .is_some_and(|curve| {
+                (0..curve.points().len())
+                    .filter_map(|index| match curve.point_target(index) {
+                        Some(CurvePointTarget::Keyframe(id)) => Some(id),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    == ids
+            })
+        {
+            return Some(widget.id());
+        }
+        (0..widget.child_count())
+            .find_map(|index| widget.child(index).and_then(|child| find_curve(child, ids)))
+    }
+    let _guard = crate::app_ui::test_utils::theme_test_guard();
+    for audio in [false, true] {
+        for mode in [
+            InterpolationType::AutoBezier,
+            InterpolationType::ContinuousBezier,
+        ] {
+            let mut sequence = Sequence::new("Group interpolation menu");
+            let mut ids = Vec::new();
+            let (clip_id, target) = if audio {
+                let target = AudioAutomationTarget::ChannelFader {
+                    owner: AudioChannelStripOwner::Track { track_id: sequence.audio_tracks[0].id },
+                };
+                for (time, value) in [(1, -6.0), (3, -3.0)] {
+                    let keyframe = ExactAutomationKeyframe::linear(
+                        TimelineTime::new(time, 4).expect("time"),
+                        value,
+                    );
+                    ids.push(keyframe.id);
+                    apply_audio_automation_edit(
+                        &mut sequence,
+                        &AudioAutomationEditRequest {
+                            target: target.clone(),
+                            edit: AudioAutomationEdit::UpsertKeyframe { keyframe },
+                        },
+                    )
+                    .expect("seed");
+                }
+                apply_audio_automation_edit(
+                    &mut sequence,
+                    &AudioAutomationEditRequest {
+                        target: target.clone(),
+                        edit: AudioAutomationEdit::SetInterpolation {
+                            keyframe_id: ids[0],
+                            interpolation: InterpolationType::Hold,
+                        },
+                    },
+                )
+                .expect("mixed mode");
+                (None, Some(target))
+            } else {
+                let mut clip = Clip::new_basic_title(
+                    "Presets",
+                    "Arial",
+                    TimelineTime::ZERO,
+                    TimelineTime::ONE,
+                )
+                .expect("title");
+                let id = clip.id;
+                for (time, value, interpolation) in [
+                    (1, 0.2, InterpolationType::Hold),
+                    (3, 0.7, InterpolationType::Linear),
+                ] {
+                    let keyframe = Keyframe::from_preset(
+                        TimelineTime::new(time, 4).expect("time"),
+                        PropertyValue::Float(value),
+                        interpolation,
+                    );
+                    ids.push(keyframe.id);
+                    clip.apply_property_mutation(PropertyMutation::SetKeyframe {
+                        path: Transform2D::OPACITY_PATH.into(),
+                        keyframe,
+                    })
+                    .expect("seed");
+                }
+                sequence.video_tracks[0].add_clip(clip).expect("place");
+                (Some(id), None)
+            };
+            let mut state = AppState::new();
+            state.test_set_sequence(Some(sequence));
+            if let Some(id) = clip_id {
+                state.select_clip_by_id(id).expect("select");
+            }
+            let original = state.active_sequence().expect("origin").clone();
+            let mut widget: Box<dyn Widget> = if let Some(target) = &target {
+                let model = project_audio_automation(
+                    &original,
+                    target.clone(),
+                    sequence_automation_viewport(&original).expect("viewport"),
+                    AudioAutomationTimeContext::at_sequence_time(&original, TimelineTime::ZERO),
+                )
+                .expect("model");
+                audio_automation_curve_control(&model, &chinese_localizer())
+            } else {
+                let models = AppUiPanelModels::from_app_state(&state);
+                Box::new(inspector_panel(&models.inspector, &chinese_localizer()))
+            };
+            let curve_id = find_curve(widget.as_ref(), &ids).expect("actual product curve");
+            let mut panel_tree = WidgetTreeView::new(widget.as_mut());
+            let curve = panel_tree.get_mut(curve_id).expect("curve");
+            curve.layout(Rect::new(0.0, 0.0, 480.0, 160.0));
+            let actions = RefCell::new(Vec::new());
+            let dispatch = |action| actions.borrow_mut().push(action);
+            let mut router = EventRouter::new(curve_id);
+            let generation = state.project_author_generation();
+            {
+                let mut tree = WidgetTreeView::new(curve);
+                for event in [
+                    UiEvent::KeyDown { key: KeyCode::Tab, modifiers: Modifiers::none() },
+                    UiEvent::KeyDown { key: KeyCode::A, modifiers: Modifiers::ctrl() },
+                    UiEvent::KeyDown { key: KeyCode::F10, modifiers: Modifiers::shift() },
+                ] {
+                    router.route(event, &mut tree, &dispatch);
+                }
+                assert!(
+                    actions.borrow().is_empty(),
+                    "opening a menu is not an author edit"
+                );
+                let choice = if mode == InterpolationType::AutoBezier {
+                    3
+                } else {
+                    4
+                };
+                for _ in 0..choice {
+                    router.route(
+                        UiEvent::KeyDown { key: KeyCode::Down, modifiers: Modifiers::none() },
+                        &mut tree,
+                        &dispatch,
+                    );
+                }
+                router.route(
+                    UiEvent::KeyDown { key: KeyCode::Enter, modifiers: Modifiers::none() },
+                    &mut tree,
+                    &dispatch,
+                );
+            }
+            assert_eq!(actions.borrow().len(), 1, "one complete selection request");
+            let action = actions.borrow_mut().remove(0);
+            for lock_owner in [true, false] {
+                let mut refused_sequence = original.clone();
+                if lock_owner {
+                    if audio {
+                        refused_sequence.audio_tracks[0].is_locked = true;
+                    } else {
+                        refused_sequence.video_tracks[0].is_locked = true;
+                    }
+                } else if let Some(target) = &target {
+                    apply_audio_automation_edit(
+                        &mut refused_sequence,
+                        &AudioAutomationEditRequest {
+                            target: target.clone(),
+                            edit: AudioAutomationEdit::RemoveKeyframe { keyframe_id: ids[1] },
+                        },
+                    )
+                    .expect("late key removal");
+                } else {
+                    refused_sequence.video_tracks[0].clips[0]
+                        .apply_property_mutation(PropertyMutation::RemoveKeyframe {
+                            path: Transform2D::OPACITY_PATH.into(),
+                            time: TimelineTime::new(3, 4).expect("time"),
+                        })
+                        .expect("late key removal");
+                }
+                let before_refusal = refused_sequence.clone();
+                let mut refused = AppState::new();
+                refused.test_set_sequence(Some(refused_sequence));
+                if let Some(id) = clip_id {
+                    refused.select_clip_by_id(id).expect("select refused owner");
+                }
+                let refused_generation = refused.project_author_generation();
+                assert!(
+                    refused.dispatch_action(action.clone()).is_err(),
+                    "late lock or missing key refuses entire menu intent"
+                );
+                assert_eq!(refused.project_author_generation(), refused_generation);
+                assert!(refused
+                    .active_sequence()
+                    .expect("refused")
+                    .author_state_eq_ignoring_revision(&before_refusal));
+                assert!(!refused.can_undo_action() && !refused.can_redo_action());
+            }
+            state.dispatch_action(action).expect("publish preset");
+            assert_eq!(state.project_author_generation(), generation + 1);
+            if let Some(clip_id) = clip_id {
+                assert_eq!(
+                    state
+                        .selected_animation_keyframes_for_clip(clip_id)
+                        .iter()
+                        .map(|selection| selection.keyframe_id)
+                        .collect::<std::collections::BTreeSet<_>>(),
+                    ids.iter().copied().collect(),
+                    "committed interpolation batch retains the complete visual selection"
+                );
+            }
+            assert_eq!(
+                curve
+                    .as_any()
+                    .and_then(|any| any.downcast_ref::<CurveEditor>())
+                    .expect("editor")
+                    .selected_keyframe_ids(),
+                ids
+            );
+            let edited = state.active_sequence().expect("edited").clone();
+            if let Some(target) = &target {
+                let old = inspect_audio_automation(&original, target).expect("before");
+                let new = inspect_audio_automation(&edited, target).expect("after");
+                for (old, new) in old
+                    .curve()
+                    .expect("oldcurve")
+                    .keyframes
+                    .iter()
+                    .zip(&new.curve().expect("newcurve").keyframes)
+                {
+                    assert_eq!(new.id, old.id);
+                    assert_eq!(new.time, old.time);
+                    assert_eq!(new.value.to_bits(), old.value.to_bits());
+                    assert_eq!(
+                        crate::app_ui::audio_automation::audio_keyframe_interpolation(new),
+                        mode
+                    );
+                }
+                let model = project_audio_automation(
+                    &edited,
+                    target.clone(),
+                    sequence_automation_viewport(&edited).expect("viewport"),
+                    AudioAutomationTimeContext::at_sequence_time(&edited, TimelineTime::ZERO),
+                )
+                .expect("refreshed model");
+                assert!(
+                    crate::app_ui::audio_automation::audio_automation_interpolations_action(
+                        &model, &ids, mode
+                    )
+                    .is_none(),
+                    "current complete preset cannot emit a no-op action"
+                );
+            } else {
+                let old = original
+                    .find_clip(clip_id.expect("owner"))
+                    .expect("clip")
+                    .intrinsic_parameter_bag();
+                let new = edited
+                    .find_clip(clip_id.expect("owner"))
+                    .expect("clip")
+                    .intrinsic_parameter_bag();
+                let old = old.property(Transform2D::OPACITY_PATH).expect("before");
+                let new = new.property(Transform2D::OPACITY_PATH).expect("after");
+                for (old, new) in old
+                    .channel(0)
+                    .expect("channel")
+                    .keyframes()
+                    .iter()
+                    .zip(new.channel(0).expect("channel").keyframes())
+                {
+                    assert_eq!(new.id, old.id);
+                    assert_eq!(new.time, old.time);
+                    assert_eq!(new.value, old.value);
+                    assert_eq!(
+                        mondrian_core::automation::interpolation_mode_from_keyframe(
+                            new.interp_in,
+                            new.interp_out,
+                            new.temporal_flags
+                        ),
+                        mode
+                    );
+                }
+            }
+            assert!(state.undo_timeline().expect("one Undo"));
+            assert!(!state.can_undo_action() && state.can_redo_action());
+            assert!(state
+                .active_sequence()
+                .expect("undone")
+                .author_state_eq_ignoring_revision(&original));
+            let directory = tempfile::tempdir().expect("archives");
+            let undone_path = directory.path().join("整组选区撤销🙂.mdp");
+            state.save_project_file_as(undone_path.clone()).expect("save undone");
+            assert!(state.can_redo_action());
+            {
+                let mut reopened = AppState::new();
+                reopened.open_project_file(undone_path).expect("fresh undone");
+                assert!(reopened
+                    .active_sequence()
+                    .expect("reopen")
+                    .author_state_eq_ignoring_revision(&original));
+                assert!(!reopened.can_undo_action() && !reopened.can_redo_action());
+            }
+            assert!(state.redo_timeline().expect("one Redo"));
+            assert!(state
+                .active_sequence()
+                .expect("redone")
+                .author_state_eq_ignoring_revision(&edited));
+            let path = directory.path().join("整组选区重做🙂.mdp");
+            state.save_project_file_as(path.clone()).expect("save edited");
+            let mut reopened = AppState::new();
+            reopened.open_project_file(path).expect("fresh edited");
+            assert!(reopened
+                .active_sequence()
+                .expect("reopen")
+                .author_state_eq_ignoring_revision(&edited));
+            assert!(!reopened.can_undo_action() && !reopened.can_redo_action());
+        }
+    }
+}
+
+#[derive(Default)]
+struct OwnedPanelStatusPaintEncoder {
+    texts: Vec<String>,
+}
+
+impl mondrian_ui_core::DrawCommandEncoder for OwnedPanelStatusPaintEncoder {
+    fn push_clip(&mut self, _bounds: Rect) {}
+    fn pop_clip(&mut self) {}
+    fn draw_rect(&mut self, _bounds: Rect, _color: Color, _corner_radius: f32) {}
+    fn draw_line(&mut self, _start: Point, _end: Point, _width: f32, _color: Color) {}
+    fn draw_text(&mut self, text: &str, _size: f32, _position: Point, _color: Color) {
+        self.texts.push(text.to_owned());
+    }
+    fn push_translate(&mut self, _offset: glam::Vec2) {}
+    fn pop_transform(&mut self) {}
+}
+
+pub(super) fn owned_panel_status_painted_text(widget: &mut dyn Widget) -> Vec<String> {
+    let bounds = Rect::new(0.0, 0.0, 720.0, 420.0);
+    widget.layout(bounds);
+    let theme = mondrian_ui_theme::ThemePreset::Dark.build();
+    let mut encoder = OwnedPanelStatusPaintEncoder::default();
+    widget.paint(&mut PaintContext {
+        pixels_per_point: 1.0,
+        encoder: &mut encoder,
+        theme: &theme,
+        clip_rect: bounds,
+    });
+    encoder.texts
+}
+
+fn assert_owned_panel_status_painted(widget: &mut dyn Widget, message: &str) {
+    let painted = owned_panel_status_painted_text(widget);
+    let (title, description) = message.split_once('\n').expect("title and guidance");
+    assert!(
+        painted.iter().any(|text| text == title),
+        "actual title {title:?} missing from {painted:?}"
+    );
+    assert!(
+        painted.iter().any(|text| text == description),
+        "actual guidance {description:?} missing from {painted:?}"
+    );
+}
+
+#[test]
+fn owned_panel_status_no_sequence_and_inspector_empty_use_current_locale_in_actual_paint() {
+    let _theme_guard = crate::app_ui::test_utils::theme_test_guard();
+    let state = AppState::new();
+    let models = AppUiPanelModels::from_app_state(&state);
+    assert!(models.timeline.tracks.is_empty());
+    for locale in [AppUiLocale::EnUs, AppUiLocale::ZhCn, AppUiLocale::Pseudo] {
+        let localizer = Localizer::new(locale).expect("catalog");
+        let timeline_message = localizer.text("timeline-empty-no-sequence");
+        let inspector_message = localizer.text("inspector-empty-selection");
+        match locale {
+            AppUiLocale::EnUs => {
+                assert_eq!(
+                    timeline_message,
+                    "No active sequence\nOpen a project or create a sequence to start editing"
+                );
+                assert_eq!(inspector_message, "No clip selected\nSelect a clip, layer or effect to adjust its parameters here.");
+            }
+            AppUiLocale::ZhCn => {
+                assert_eq!(timeline_message, "未载入序列\n打开项目或创建序列以开始编辑");
+                assert_eq!(
+                    inspector_message,
+                    "未选择剪辑\n选择剪辑、图层或效果后，可在这里调整参数。"
+                );
+            }
+            AppUiLocale::Pseudo => {
+                assert_ne!(timeline_message, "timeline-empty-no-sequence");
+                assert_ne!(timeline_message, "未载入序列\n打开项目或创建序列以开始编辑");
+                assert_ne!(inspector_message, "inspector-empty-selection");
+            }
+        }
+        let mut timeline = timeline_panel(&models.timeline, &localizer);
+        assert!(!timeline.can_focus());
+        assert_owned_panel_status_painted(&mut timeline, &timeline_message);
+        let mut inspector = inspector_panel(&models.inspector, &localizer);
+        assert_eq!(inspector.section_count(), 0);
+        assert_owned_panel_status_painted(&mut inspector, &inspector_message);
+    }
+    assert!(
+        !state.can_undo_action(),
+        "repainting retained model in another locale never authors an edit"
+    );
+}
+
+#[test]
+fn owned_panel_status_empty_tracks_localizes_real_canvas_and_keeps_track_entrypoints() {
+    let _theme_guard = crate::app_ui::test_utils::theme_test_guard();
+    let mut sequence = Sequence::new("User sequence 示例🙂");
+    sequence.video_tracks.clear();
+    sequence.audio_tracks.clear();
+    sequence.audio_program = mondrian_timeline::AudioProgram::for_tracks([]);
+    let original = sequence.clone();
+    let model = TimelinePanelModel::from_sequence(&sequence, &[], &[]);
+    assert!(model.enabled);
+    assert!(model.tracks.is_empty());
+    for locale in [AppUiLocale::EnUs, AppUiLocale::ZhCn, AppUiLocale::Pseudo] {
+        let localizer = Localizer::new(locale).expect("catalog");
+        let mut timeline = timeline_panel(&model, &localizer);
+        assert!(
+            timeline.can_focus(),
+            "zero tracks is an editable canvas, not an invalid sequence"
+        );
+        assert_owned_panel_status_painted(
+            &mut timeline,
+            &localizer.text("timeline-empty-no-tracks"),
+        );
+    }
+    assert!(sequence.author_state_eq_ignoring_revision(&original));
+    assert_eq!(sequence.name, "User sequence 示例🙂");
+}
+
+#[test]
+fn owned_panel_status_invalid_display_localizes_owned_context_and_preserves_typed_reason() {
+    let _theme_guard = crate::app_ui::test_utils::theme_test_guard();
+    let mut sequence = Sequence::new("User invalid display");
+    sequence.video_tracks.clear();
+    sequence.audio_tracks.clear();
+    sequence.audio_program = mondrian_timeline::AudioProgram::for_tracks([]);
+    sequence.settings.timeline_display =
+        TimelineDisplaySettings::timecode(SmpteCountingMode::DropFrame, 0);
+    let error = sequence
+        .settings
+        .timeline_display_contract()
+        .expect_err("25fps cannot count drop-frame");
+    let reason = AppMessage::from_error(&error);
+    let expected =
+        AppMessage::new("timeline-invalid-display").with_message("reason", reason.clone());
+    let original = sequence.clone();
+    let model = TimelinePanelModel::from_sequence(&sequence, &[], &[]);
+    assert!(!model.enabled);
+    for locale in [AppUiLocale::EnUs, AppUiLocale::ZhCn, AppUiLocale::Pseudo] {
+        let localizer = Localizer::new(locale).expect("catalog");
+        let mut timeline = timeline_panel(&model, &localizer);
+        assert!(!timeline.can_focus());
+        let text = localizer.message(&expected);
+        assert!(text.contains(&localizer.message(&reason)));
+        assert_owned_panel_status_painted(&mut timeline, &text);
+    }
+    assert!(sequence.author_state_eq_ignoring_revision(&original));
+}
+
+#[test]
+fn owned_panel_status_real_locale_projection_does_not_translate_user_clip_or_sequence_content() {
+    let _theme_guard = crate::app_ui::test_utils::theme_test_guard();
+    let mut state = AppState::new();
+    let sequence_name = "User: No active sequence / 用户🙂";
+    let clip_text = "Vendor🙂 未选择剪辑 / No clip selected";
+    let mut sequence = Sequence::new(sequence_name);
+    let mut clip = Clip::new_basic_title(clip_text, "Arial", TimelineTime::ZERO, TimelineTime::ONE)
+        .expect("title");
+    clip.label = Some(clip_text.to_owned());
+    let clip_id = clip.id;
+    sequence.video_tracks[0].add_clip(clip).expect("clip");
+    let original = sequence.clone();
+    state.test_set_sequence(Some(sequence));
+    for locale in [AppUiLocale::EnUs, AppUiLocale::ZhCn, AppUiLocale::Pseudo] {
+        let localizer = Localizer::new(locale).expect("catalog");
+        let models =
+            AppUiPanelModels::from_app_state_with_asset_folder_thumbnails_preview_and_locale(
+                &state,
+                None,
+                None,
+                None,
+                Some(&localizer),
+            );
+        let mut timeline = timeline_panel(&models.timeline, &localizer);
+        let painted = owned_panel_status_painted_text(&mut timeline);
+        assert!(
+            painted.iter().any(|text| text == clip_text),
+            "clip content is opaque to the locale projector: {painted:?}"
+        );
+        let sequence = state.active_sequence().expect("sequence");
+        assert_eq!(sequence.name, sequence_name);
+        assert_eq!(sequence.video_tracks[0].clips[0].id, clip_id);
+        assert!(sequence.author_state_eq_ignoring_revision(&original));
+    }
+    assert!(!state.can_undo_action());
+}
+
+#[test]
+fn owned_panel_status_nonempty_invalid_display_paints_actionable_reason_over_retained_tracks() {
+    let _theme_guard = crate::app_ui::test_utils::theme_test_guard();
+    let mut sequence = Sequence::new("Nonempty invalid display");
+    sequence.settings.timeline_display =
+        TimelineDisplaySettings::timecode(SmpteCountingMode::DropFrame, 0);
+    let error = sequence.settings.timeline_display_contract().expect_err("invalid display");
+    let expected = AppMessage::new("timeline-invalid-display")
+        .with_message("reason", AppMessage::from_error(&error));
+    let model = TimelinePanelModel::from_sequence(&sequence, &[], &[]);
+    assert!(
+        !model.tracks.is_empty(),
+        "the retained tracks must not hide the actionable display failure"
+    );
+    assert!(!model.enabled);
+    for locale in [AppUiLocale::EnUs, AppUiLocale::ZhCn, AppUiLocale::Pseudo] {
+        let localizer = Localizer::new(locale).expect("catalog");
+        let mut timeline = timeline_panel(&model, &localizer);
+        assert_owned_panel_status_painted(&mut timeline, &localizer.message(&expected));
+    }
+}
+
+#[test]
+fn owned_panel_status_valid_nonempty_timeline_does_not_paint_empty_guidance() {
+    let _theme_guard = crate::app_ui::test_utils::theme_test_guard();
+    let mut sequence = Sequence::new("Visible valid timeline");
+    let mut clip = Clip::new_basic_title(
+        "Retained valid clip",
+        "Arial",
+        TimelineTime::ZERO,
+        TimelineTime::new(10, 1).expect("duration"),
+    )
+    .expect("clip");
+    clip.label = Some("Retained valid clip".to_owned());
+    sequence.video_tracks[0].add_clip(clip).expect("clip track");
+    let model = TimelinePanelModel::from_sequence(&sequence, &[], &[]);
+    assert!(model.enabled && !model.tracks.is_empty());
+    let mut widget = timeline_panel(&model, &chinese_localizer()).with_empty_message(
+        "Empty guidance must stay hidden\nA valid populated canvas is available",
+    );
+    let painted = owned_panel_status_painted_text(&mut widget);
+    assert!(painted.iter().any(|text| text == "Retained valid clip"));
+    assert!(!painted.iter().any(|text| text == "Empty guidance must stay hidden"));
+}
+
+#[test]
+fn owned_panel_status_disabled_nonempty_timeline_without_message_keeps_retained_clip_paint() {
+    let _theme_guard = crate::app_ui::test_utils::theme_test_guard();
+    let mut sequence = Sequence::new("Disabled inspection without status");
+    let mut clip = Clip::new_basic_title(
+        "Retained disabled clip",
+        "Arial",
+        TimelineTime::ZERO,
+        TimelineTime::new(10, 1).expect("duration"),
+    )
+    .expect("clip");
+    clip.label = Some("Retained disabled clip".to_owned());
+    sequence.video_tracks[0].add_clip(clip).expect("clip track");
+    let model = TimelinePanelModel::from_sequence(&sequence, &[], &[]);
+    let mut widget = timeline_panel(&model, &chinese_localizer()).disabled();
+    let painted = owned_panel_status_painted_text(&mut widget);
+    assert!(painted.iter().any(|text| text == "Retained disabled clip"));
+    assert!(!painted.iter().any(|text| text == "序列时间显示设置无效"));
+}
+
+fn typed_static_parameter_widget_fixture() -> (
+    AppState,
+    mondrian_core::ClipId,
+    mondrian_core::AudioProcessingScopeId,
+) {
+    let mut sequence = Sequence::new("Scalar control author lease");
+    let track_id = sequence.audio_tracks[0].id;
+    let clip = Clip::new(AssetId::new(), TimelineTime::ZERO, TimelineTime::ONE).expect("Clip");
+    let clip_id = clip.id;
+    sequence
+        .add_media_audio_clip(track_id, clip, AudioSourceComponentId::primary())
+        .expect("audio Clip");
+    let scope_id = sequence.audio_tracks[0].clips[0].audio_components[0].processing.scope_id;
+    sequence
+        .audio_program
+        .processing_scopes
+        .iter_mut()
+        .find(|scope| scope.id == scope_id)
+        .expect("Scope")
+        .processors
+        .processors
+        .push(mondrian_timeline::audio::AudioProcessorInstance::built_in(
+            mondrian_timeline::audio::BUILTIN_GAIN_DEFINITION_ID,
+            1,
+        ));
+    let mut state = AppState::new();
+    state.test_set_sequence(Some(sequence));
+    state.select_clip_by_id(clip_id).expect("selected scalar owner");
+    (state, clip_id, scope_id)
+}
+
+fn typed_static_parameter_widget_for_rack(rack: &AudioProcessorRackModel) -> Box<dyn Widget> {
+    let processor = &rack.processors[0];
+    let parameter = &processor.parameters[0];
+    audio_processor_static_parameter_control(
+        rack,
+        processor,
+        parameter,
+        parameter
+            .schema
+            .numeric
+            .as_ref()
+            .and_then(|contracts| contracts.first())
+            .copied()
+            .expect("scalar contract"),
+        true,
+        &chinese_localizer(),
+    )
+}
+
+#[test]
+fn typed_static_parameter_widget_without_app_lease_is_disabled_and_has_no_author_callbacks() {
+    use mondrian_ui_core::tree::WidgetTreeView;
+    let (state, clip_id, _) = typed_static_parameter_widget_fixture();
+    let sequence = state.active_sequence().expect("Sequence");
+    let racks = clip_processing_scope_racks(
+        sequence,
+        sequence.find_clip(clip_id).expect("Clip"),
+        &chinese_localizer(),
+        crate::app_ui::audio_automation::AudioAutomationTimeContext::at_sequence_time(
+            sequence,
+            sequence.playhead,
+        ),
+        |_| None,
+    );
+    assert!(
+        racks[0].is_editable,
+        "Timeline author admission alone is not a concrete control lifetime"
+    );
+    assert!(racks[0].scalar_author_lease.is_none());
+    let mut wrong_source = racks.clone();
+    wrong_source[0].source_sequence_id = mondrian_core::SequenceId::new();
+    crate::app_ui::audio_processor_rack::bind_audio_scalar_author_lease(&mut wrong_source, &state);
+    assert!(
+        wrong_source[0].scalar_author_lease.is_none(),
+        "a Rack projected from another Sequence cannot be stamped with the current App lease"
+    );
+    let mut control = typed_static_parameter_widget_for_rack(&racks[0]);
+    control.layout(Rect::new(0.0, 0.0, 220.0, 28.0));
+    let nodes = mondrian_ui_core::widget::collect_accessibility_nodes(control.as_ref());
+    for role in [
+        mondrian_ui_core::AccessibilityRole::Slider,
+        mondrian_ui_core::AccessibilityRole::TextInput,
+    ] {
+        let node = nodes
+            .iter()
+            .find(|node| node.role == role)
+            .expect("numeric control remains readable");
+        assert!(
+            node.state.disabled && !node.state.focusable,
+            "missing lease disables both input adapters"
+        );
+    }
+    let actions = RefCell::new(Vec::new());
+    let mut router = mondrian_ui_events::EventRouter::new(control.id());
+    for event in [
+        UiEvent::KeyDown { key: KeyCode::Tab, modifiers: Modifiers::none() },
+        UiEvent::KeyDown { key: KeyCode::Right, modifiers: Modifiers::none() },
+        UiEvent::MouseDown {
+            position: Point::new(40.0, 14.0),
+            button: MouseButton::Left,
+            modifiers: Modifiers::none(),
+        },
+        UiEvent::MouseMove {
+            position: Point::new(100.0, 14.0),
+            modifiers: Modifiers::none(),
+        },
+        UiEvent::MouseUp {
+            position: Point::new(100.0, 14.0),
+            button: MouseButton::Left,
+            modifiers: Modifiers::none(),
+        },
+        UiEvent::TextInput("-12".to_owned()),
+        UiEvent::KeyDown { key: KeyCode::Enter, modifiers: Modifiers::none() },
+    ] {
+        router.route(
+            event,
+            &mut WidgetTreeView::new(control.as_mut()),
+            &|action| actions.borrow_mut().push(action),
+        );
+    }
+    assert!(actions.borrow().is_empty());
+    assert!(router.captured().is_none());
+    let fresh = InspectorPanelModel::from_app_state(&state, &chinese_localizer());
+    let mut wrong_bound = fresh.audio_processor_racks[0].clone();
+    wrong_bound.source_sequence_id = mondrian_core::SequenceId::new();
+    let wrong_processor = &wrong_bound.processors[0];
+    assert!(crate::app_ui::audio_processor_rack::static_parameter_target(&wrong_bound,wrong_processor,&wrong_processor.parameters[0]).is_none(),"target construction validates the explicit source/lease relation even if a malformed model carries Some lease");
+    let valid = typed_static_parameter_widget_for_rack(&fresh.audio_processor_racks[0]);
+    assert!(
+        mondrian_ui_core::widget::collect_accessibility_nodes(valid.as_ref())
+            .iter()
+            .filter(|node| matches!(
+                node.role,
+                mondrian_ui_core::AccessibilityRole::Slider
+                    | mondrian_ui_core::AccessibilityRole::TextInput
+            ))
+            .all(|node| !node.state.disabled && node.state.focusable),
+        "same author value in a real App lifetime enables both adapters"
+    );
+    assert!(!state.can_undo_action());
+}
+
+#[test]
+fn typed_static_parameter_widget_ambiguous_scope_requires_choice_and_uses_fresh_occurrence() {
+    use mondrian_ui_core::tree::WidgetTreeView;
+    let (mut state, clip_id, scope_id) = typed_static_parameter_widget_fixture();
+    let second_address = {
+        let sequence = state.active_sequence_mut_uncommitted().expect("Sequence");
+        let track_id = sequence.audio_tracks[0].id;
+        let second = mondrian_timeline::audio::AudioComponentEdit::media(
+            AudioSourceComponentId::new(),
+            scope_id,
+        );
+        let address =
+            mondrian_timeline::AudioComponentAddress { track_id, clip_id, edit_id: second.id };
+        sequence.find_clip_mut(clip_id).expect("Clip").audio_components.push(second);
+        address
+    };
+    let model = InspectorPanelModel::from_app_state(&state, &chinese_localizer());
+    let rack = &model.audio_processor_racks[0];
+    assert!(rack.scalar_author_lease.is_some());
+    assert!(
+        rack.input_inspection_target.is_none(),
+        "two materializations require explicit choice"
+    );
+    let disabled = typed_static_parameter_widget_for_rack(rack);
+    assert!(
+        mondrian_ui_core::widget::collect_accessibility_nodes(disabled.as_ref())
+            .iter()
+            .filter(|node| matches!(
+                node.role,
+                mondrian_ui_core::AccessibilityRole::Slider
+                    | mondrian_ui_core::AccessibilityRole::TextInput
+            ))
+            .all(|node| node.state.disabled && !node.state.focusable)
+    );
+    let sequence_id = state.active_sequence().expect("Sequence").id;
+    let before = state.active_sequence().expect("before").clone();
+    state
+        .dispatch_action(
+            ProductAction::Audio(
+                crate::app::product_action::AudioProductAction::SelectScopeOccurrence(
+                    crate::app::product_action::AudioScopeOccurrencePayload {
+                        sequence_id,
+                        scope_id,
+                        address: second_address,
+                    },
+                ),
+            )
+            .into_external_action(),
+        )
+        .expect("explicit navigation choice");
+    assert!(
+        !state.can_undo_action(),
+        "occurrence navigation has no author history"
+    );
+    let fresh = InspectorPanelModel::from_app_state(&state, &chinese_localizer());
+    let mut control = typed_static_parameter_widget_for_rack(&fresh.audio_processor_racks[0]);
+    control.layout(Rect::new(0.0, 0.0, 220.0, 28.0));
+    let actions = RefCell::new(Vec::new());
+    let mut router = mondrian_ui_events::EventRouter::new(control.id());
+    for event in [
+        UiEvent::KeyDown { key: KeyCode::Tab, modifiers: Modifiers::none() },
+        UiEvent::KeyDown { key: KeyCode::Tab, modifiers: Modifiers::none() },
+        UiEvent::KeyDown {
+            key: KeyCode::A,
+            modifiers: crate::app_ui::test_utils::primary_text_modifiers(),
+        },
+        UiEvent::TextInput("-12.123456789123456".to_owned()),
+        UiEvent::KeyDown { key: KeyCode::Enter, modifiers: Modifiers::none() },
+    ] {
+        router.route(
+            event,
+            &mut WidgetTreeView::new(control.as_mut()),
+            &|action| actions.borrow_mut().push(action),
+        );
+    }
+    assert_eq!(
+        actions.borrow().len(),
+        1,
+        "fresh confirmed input emits one scalar intent"
+    );
+    let action = actions.borrow_mut().remove(0);
+    let Some(crate::app::parameter_gesture::ParameterGestureAction::SetAudioScalar { edit }) =
+        crate::app::parameter_gesture::ParameterGestureAction::decode(&action)
+            .expect("typed scalar")
+    else {
+        panic!("Set scalar")
+    };
+    let crate::app::parameter_gesture::AudioScalarOwner::Parameter { owner, .. } =
+        &edit.target.owner
+    else {
+        panic!("exact processor parameter owner")
+    };
+    assert_eq!(
+        *owner,
+        mondrian_audio::AudioProcessorInputInspectionTarget::ProcessingScope {
+            scope_id,
+            occurrence: second_address
+        }
+    );
+    assert_eq!(edit.value.to_bits(), (-12.123456789123456_f64).to_bits());
+    state.dispatch_action(action).expect("canonical scalar confirmation");
+    assert_eq!(
+        state.authoring_history().expect("history").diagnostics().undo_entries,
+        1
+    );
+    assert!(state.undo_timeline().expect("one Undo"));
+    assert!(state
+        .active_sequence()
+        .expect("restored")
+        .author_state_eq_ignoring_revision(&before));
+}
+
+#[test]
+fn numeric_peer_fallback_second_drag_cancel_restores_current_exact_scalar_origin() {
+    let _guard = crate::app_ui::test_utils::theme_test_guard();
+    let values = Rc::new(RefCell::new(Vec::<f64>::new()));
+    let observed = Rc::clone(&values);
+    let mut widget = numeric_slider_input_control_with_hard_range(
+        0.12345678901234568_f64,
+        0.0,
+        1.0,
+        -10.0,
+        10.0,
+        None,
+        2,
+        true,
+        move |value| {
+            observed.borrow_mut().push(value);
+            Some(Action::ToggleFullscreen)
+        },
+    );
+    widget.layout(Rect::new(0.0, 0.0, 280.0, 28.0));
+    let slider = widget.child(0).expect("paired Slider").id();
+    let dispatch = |_: Action| {};
+    let mut router = EventRouter::new(widget.id());
+    for event in [
+        UiEvent::MouseDown {
+            position: Point::new(100.0, 14.0),
+            button: MouseButton::Left,
+            modifiers: Modifiers::none(),
+        },
+        UiEvent::MouseMove {
+            position: Point::new(140.0, 14.0),
+            modifiers: Modifiers::none(),
+        },
+        UiEvent::MouseUp {
+            position: Point::new(140.0, 14.0),
+            button: MouseButton::Left,
+            modifiers: Modifiers::none(),
+        },
+    ] {
+        assert_eq!(
+            router.route(event, &mut WidgetTreeView::new(widget.as_mut()), &dispatch),
+            EventResult::Handled
+        );
+    }
+    let first = *values.borrow().last().expect("first drag callback");
+    assert_ne!(first.to_bits(), 0.12345678901234568_f64.to_bits());
+    for event in [
+        UiEvent::MouseDown {
+            position: Point::new(40.0, 14.0),
+            button: MouseButton::Left,
+            modifiers: Modifiers::none(),
+        },
+        UiEvent::MouseMove {
+            position: Point::new(70.0, 14.0),
+            modifiers: Modifiers::none(),
+        },
+    ] {
+        assert_eq!(
+            router.route(event, &mut WidgetTreeView::new(widget.as_mut()), &dispatch),
+            EventResult::Handled
+        );
+        assert_eq!(router.captured(), Some(slider));
+    }
+    assert_ne!(
+        values.borrow().last().expect("second live callback").to_bits(),
+        first.to_bits()
+    );
+    assert_eq!(
+        router.route(
+            UiEvent::KeyDown { key: KeyCode::Escape, modifiers: Modifiers::none() },
+            &mut WidgetTreeView::new(widget.as_mut()),
+            &dispatch
+        ),
+        EventResult::Handled
+    );
+    assert!(router.captured().is_none());
+    assert_eq!(values.borrow().last().expect("Cancel callback").to_bits(), first.to_bits(),
+        "non-Parameter callbacks cancel to this drag's exact scalar origin, not construction baseline");
+}
+
+#[test]
+fn numeric_peer_outside_soft_range_drag_cancel_preserves_exact_entry_baseline() {
+    let _guard = crate::app_ui::test_utils::theme_test_guard();
+    let baseline = 42.123456789012344_f64;
+    let values = Rc::new(RefCell::new(Vec::<f64>::new()));
+    let observed = Rc::clone(&values);
+    let mut widget = numeric_slider_input_control_with_hard_range(
+        baseline,
+        0.0,
+        1.0,
+        -100.0,
+        100.0,
+        None,
+        2,
+        true,
+        move |value| {
+            observed.borrow_mut().push(value);
+            Some(Action::ToggleFullscreen)
+        },
+    );
+    widget.layout(Rect::new(0.0, 0.0, 280.0, 28.0));
+    let dispatch = |_: Action| {};
+    let mut router = EventRouter::new(widget.id());
+    let text_value = |widget: &dyn Widget| {
+        let Some(mondrian_ui_core::AccessibilityValue::Text(text)) = widget
+            .child(1)
+            .expect("NumberInput peer")
+            .accessibility()
+            .expect("peer node")
+            .value
+        else {
+            panic!("numeric Text")
+        };
+        text.parse::<f64>().expect("exact numeric peer")
+    };
+    assert_eq!(text_value(widget.as_ref()).to_bits(), baseline.to_bits());
+    router.route(
+        UiEvent::MouseDown {
+            position: Point::new(70.0, 14.0),
+            button: MouseButton::Left,
+            modifiers: Modifiers::none(),
+        },
+        &mut WidgetTreeView::new(widget.as_mut()),
+        &dispatch,
+    );
+    let live = *values.borrow().last().expect("live callback");
+    assert!((0.0..=1.0).contains(&live));
+    assert_eq!(
+        text_value(widget.as_ref()).to_bits(),
+        live.to_bits(),
+        "peer must show live scalar, not original outside-soft-range value"
+    );
+    router.route(
+        UiEvent::KeyDown { key: KeyCode::Escape, modifiers: Modifiers::none() },
+        &mut WidgetTreeView::new(widget.as_mut()),
+        &dispatch,
+    );
+    assert_eq!(
+        values.borrow().last().expect("Cancel callback").to_bits(),
+        baseline.to_bits()
+    );
+    assert_eq!(
+        text_value(widget.as_ref()).to_bits(),
+        baseline.to_bits(),
+        "Cancel retains the exact author baseline even beyond slider's soft range"
+    );
+    assert!(router.captured().is_none());
+}
+
+#[test]
+fn numeric_accessibility_integer_pair_confirms_exact_values_beyond_float64_precision() {
+    let _guard = crate::app_ui::test_utils::theme_test_guard();
+    let values = Rc::new(RefCell::new(Vec::<i64>::new()));
+    let observed = Rc::clone(&values);
+    let initial = 9_007_199_254_740_993_i64;
+    let mut widget = numeric_slider_input_control_with_hard_range(
+        initial,
+        -10_i64,
+        10_i64,
+        i64::MIN,
+        i64::MAX,
+        Some(1_i64),
+        0,
+        true,
+        move |value| {
+            observed.borrow_mut().push(value);
+            None::<Action>
+        },
+    );
+    widget.layout(Rect::new(0.0, 0.0, 280.0, 28.0));
+    let slider_value = |widget: &dyn Widget| {
+        widget
+            .child(0)
+            .expect("paired Slider")
+            .accessibility()
+            .expect("numeric Slider")
+            .value
+            .expect("declared integer")
+    };
+    let text_value = |widget: &dyn Widget| {
+        let Some(mondrian_ui_core::AccessibilityValue::Text(text)) = widget
+            .child(1)
+            .expect("NumberInput")
+            .accessibility()
+            .expect("entry semantics")
+            .value
+        else {
+            panic!("real numeric Text")
+        };
+        text.parse::<i64>().expect("exact entry")
+    };
+    assert_eq!(
+        slider_value(widget.as_ref()),
+        mondrian_ui_core::AccessibilityValue::Integer {
+            value: initial,
+            min: i64::MIN,
+            max: i64::MAX
+        }
+    );
+    assert_eq!(text_value(widget.as_ref()), initial);
+    let mut router = EventRouter::new(widget.id());
+    let dispatch = |_: Action| {};
+    for _ in 0..2 {
+        router.route(
+            UiEvent::KeyDown { key: KeyCode::Tab, modifiers: Modifiers::none() },
+            &mut WidgetTreeView::new(widget.as_mut()),
+            &dispatch,
+        );
+    }
+    assert_eq!(router.focused(), Some(widget.child(1).expect("entry").id()));
+    for exact in [i64::MIN, i64::MAX] {
+        for event in [
+            UiEvent::KeyDown {
+                key: KeyCode::A,
+                modifiers: crate::app_ui::test_utils::primary_text_modifiers(),
+            },
+            UiEvent::TextInput(exact.to_string()),
+        ] {
+            router.route(event, &mut WidgetTreeView::new(widget.as_mut()), &dispatch);
+        }
+        // A live text draft keeps its scalar peer at the admitted baseline.
+        let expected_before = values.borrow().last().copied().unwrap_or(initial);
+        assert_eq!(
+            slider_value(widget.as_ref()),
+            mondrian_ui_core::AccessibilityValue::Integer {
+                value: expected_before,
+                min: i64::MIN,
+                max: i64::MAX
+            }
+        );
+        assert_eq!(text_value(widget.as_ref()), exact);
+        router.route(
+            UiEvent::KeyDown { key: KeyCode::Enter, modifiers: Modifiers::none() },
+            &mut WidgetTreeView::new(widget.as_mut()),
+            &dispatch,
+        );
+        assert_eq!(
+            slider_value(widget.as_ref()),
+            mondrian_ui_core::AccessibilityValue::Integer {
+                value: exact,
+                min: i64::MIN,
+                max: i64::MAX
+            }
+        );
+        assert_eq!(text_value(widget.as_ref()), exact);
+    }
+    assert_eq!(
+        &*values.borrow(),
+        &[i64::MIN, i64::MAX],
+        "only confirmation emits the two exact UI intents; no author f64 conversion"
+    );
+}
+
+#[test]
+fn numeric_accessibility_disabled_pair_reports_admitted_hard_range_and_real_entry() {
+    let _guard = crate::app_ui::test_utils::theme_test_guard();
+    let values = Rc::new(RefCell::new(Vec::<f64>::new()));
+    let observed = Rc::clone(&values);
+    let mut widget = numeric_slider_input_control_with_hard_range(
+        1000.0_f64,
+        0.0,
+        1.0,
+        10.0,
+        -10.0,
+        None,
+        2,
+        false,
+        move |value| {
+            observed.borrow_mut().push(value);
+            None::<Action>
+        },
+    );
+    widget.layout(Rect::new(0.0, 0.0, 280.0, 28.0));
+    for index in [0, 1] {
+        let node = widget.child(index).expect("peer").accessibility().expect("numeric semantics");
+        assert!(node.state.disabled && !node.state.focusable && !node.state.focused);
+    }
+    assert_eq!(
+        widget
+            .child(0)
+            .expect("Slider")
+            .accessibility()
+            .expect("scalar semantics")
+            .value,
+        Some(mondrian_ui_core::AccessibilityValue::Number { value: 10.0, min: -10.0, max: 10.0 })
+    );
+    assert_eq!(
+        widget.child(1).expect("NumberInput").accessibility().expect("raw Text").value,
+        Some(mondrian_ui_core::AccessibilityValue::Text(
+            "10.00".to_owned()
+        ))
+    );
+    let mut router = EventRouter::new(widget.id());
+    let dispatch = |_: Action| {};
+    for event in [
+        UiEvent::MouseDown {
+            position: Point::new(80.0, 14.0),
+            button: MouseButton::Left,
+            modifiers: Modifiers::none(),
+        },
+        UiEvent::KeyDown { key: KeyCode::Tab, modifiers: Modifiers::none() },
+        UiEvent::KeyDown { key: KeyCode::Right, modifiers: Modifiers::none() },
+        UiEvent::TextInput("7".to_owned()),
+    ] {
+        router.route(event, &mut WidgetTreeView::new(widget.as_mut()), &dispatch);
+    }
+    assert!(router.focused().is_none() && router.captured().is_none());
+    assert!(values.borrow().is_empty());
+}
+
+#[test]
+fn typed_audio_scalar_mixer_missing_or_mismatched_lease_disables_real_numeric_adapters() {
+    let _guard = crate::app_ui::test_utils::theme_test_guard();
+    let mut state = AppState::new();
+    state.test_set_sequence(Some(mondrian_timeline::Sequence::new(
+        "Explicit Mixer lease",
+    )));
+    let localizer = Localizer::new(AppUiLocale::EnUs).expect("catalog");
+    let model = AudioMixerPanelModel::from_app_state(&state, &localizer);
+    let names = ["mixer-input-trim", "mixer-fader", "mixer-level"]
+        .map(|key| format!("{} (dB)", localizer.text(key)));
+    for wrong_source in [false, true] {
+        let mut missing = model.clone();
+        missing.channels.truncate(1);
+        let channel = &mut missing.channels[0];
+        assert!(channel.is_editable && channel.scalar_author_lease.is_some());
+        if wrong_source {
+            channel.source_sequence_id = mondrian_core::SequenceId::new();
+        } else {
+            channel.scalar_author_lease = None;
+        }
+        for route in &mut channel.outbound_routes {
+            assert!(route.scalar_author_lease.is_some());
+            if wrong_source {
+                route.source_sequence_id = mondrian_core::SequenceId::new();
+            } else {
+                route.scalar_author_lease = None;
+            }
+        }
+        assert!(crate::app_ui::audio_mixer::input_trim_target(channel).is_none());
+        assert!(crate::app_ui::audio_mixer::fader_target(channel).is_none());
+        assert!(channel
+            .outbound_routes
+            .iter()
+            .all(|route| crate::app_ui::audio_mixer::route_gain_target(route).is_none()));
+        let mut panel = audio_mixer_panel(&missing, &localizer);
+        panel.layout(Rect::new(0.0, 0.0, 640.0, 2000.0));
+        let nodes = mondrian_ui_core::widget::collect_accessibility_nodes(&panel);
+        for name in &names {
+            for role in [
+                mondrian_ui_core::AccessibilityRole::Slider,
+                mondrian_ui_core::AccessibilityRole::TextInput,
+            ] {
+                let numeric = nodes
+                    .iter()
+                    .find(|node| node.role == role && node.name.as_deref() == Some(name.as_str()))
+                    .expect("actual named numeric adapter");
+                assert!(
+                    numeric.state.disabled && !numeric.state.focusable,
+                    "explicit missing or mismatched projection lifetime disables both adapters"
+                );
+                assert!(
+                    numeric.value.is_some(),
+                    "disabled author controls retain a readable admitted value"
+                );
+            }
+        }
+    }
+    let panel = audio_mixer_panel(&model, &localizer);
+    let nodes = mondrian_ui_core::widget::collect_accessibility_nodes(&panel);
+    for name in &names {
+        for role in [
+            mondrian_ui_core::AccessibilityRole::Slider,
+            mondrian_ui_core::AccessibilityRole::TextInput,
+        ] {
+            let numeric = nodes
+                .iter()
+                .find(|node| node.role == role && node.name.as_deref() == Some(name.as_str()))
+                .expect("actual current numeric adapter");
+            assert!(
+                !numeric.state.disabled && numeric.state.focusable,
+                "a genuine current App lease enables both adapters"
+            );
+        }
+    }
+    assert!(
+        !state.can_undo_action(),
+        "projection admission itself cannot mutate author history"
+    );
 }

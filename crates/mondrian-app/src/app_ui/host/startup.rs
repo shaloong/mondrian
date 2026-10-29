@@ -42,8 +42,8 @@ pub enum AppUiHostStartupStage {
     PreviewConfigured,
     /// Shared execution-resource policy was applied.
     ResourcePolicyApplied,
-    /// The initial Preview projection was resolved.
-    InitialPreviewResolved,
+    /// The initial output projection is pending UI admission, or has no Project.
+    InitialPreviewPrepared,
     /// The inert device-catalog Adapter is owned.
     CatalogPrepared,
     /// Required native catalog startup returned success or ordinary failure.
@@ -458,7 +458,7 @@ impl AppUiHostStartupOwner {
         self.checkpoint(AppUiHostStartupStage::WaveformConfigured);
 
         let preview = self.start_preview()?;
-        self.preview = Some(PreviewStartupHostOwner::Complete(Box::new(preview)));
+        self.preview = Some(PreviewStartupHostOwner::Complete(preview));
         self.checkpoint(AppUiHostStartupStage::PreviewStarted);
         let preview_transport_intent =
             self.app_state.as_ref().expect("App installed").preview_transport_intent();
@@ -478,10 +478,16 @@ impl AppUiHostStartupOwner {
             );
         }
         self.checkpoint(AppUiHostStartupStage::ResourcePolicyApplied);
-        let window_preview_state = self
-            .complete_preview()
-            .viewer_preview_for_state(self.app_state.as_ref().expect("App installed"));
-        self.checkpoint(AppUiHostStartupStage::InitialPreviewResolved);
+        // Build the actual control subtree before admitting any project Render.
+        // Its native section presence and actual active panel are synchronized
+        // by the first Window preview request. No metadata/UI claim is forged.
+        let app = self.app_state.as_ref().expect("App installed");
+        let window_preview_state = if app.active_sequence().is_some() {
+            ViewerPreviewState::Loading
+        } else {
+            self.complete_preview().viewer_preview_for_state(app)
+        };
+        self.checkpoint(AppUiHostStartupStage::InitialPreviewPrepared);
 
         self.catalog = Some(AudioOutputDeviceCatalogAdapter::prepare());
         self.catalog_startup = Some(AudioDeviceCatalogStartupState::Prepared);
@@ -549,7 +555,7 @@ impl AppUiHostStartupOwner {
             WaveformStartupOwner::Partial(_) => unreachable!("partial Waveform cannot publish"),
         };
         let preview_service = match self.preview.take().expect("Preview installed") {
-            PreviewStartupHostOwner::Complete(preview) => *preview,
+            PreviewStartupHostOwner::Complete(preview) => preview,
             PreviewStartupHostOwner::Partial(_) => unreachable!("partial Preview cannot publish"),
         };
         let audio_device_catalog = self.catalog.take().expect("catalog installed");
@@ -562,6 +568,7 @@ impl AppUiHostStartupOwner {
             recovery_candidates,
             asset_thumbnails,
             audio_device_catalog,
+            resource_inspector: None,
             waveform_service,
             preview_service,
             window_preview_state: RefCell::new(window_preview_state),
@@ -570,7 +577,8 @@ impl AppUiHostStartupOwner {
             mode,
             system_theme_preset,
             ui_dirty: Cell::new(false),
-            preview_dirty: Cell::new(false),
+            force_model_refresh: Cell::new(false),
+            preview_dirty: Cell::new(mode == AppUiMode::Workspace),
             pending_close_action: None,
             quiescing_close_action: None,
             pending_gallery_capture_name: RefCell::new(None),
@@ -619,10 +627,10 @@ impl AppUiHostStartupOwner {
         }
     }
 
-    fn start_preview(&mut self) -> Result<WindowPreviewAdapter, AppUiHostStartupDiagnostic> {
+    fn start_preview(&mut self) -> Result<Box<WindowPreviewAdapter>, AppUiHostStartupDiagnostic> {
         #[cfg(any(test, feature = "validation"))]
         let result = self.fault.and_then(preview_fault_checkpoint).map_or_else(
-            WindowPreviewAdapter::try_new,
+            WindowPreviewAdapter::try_new_boxed,
             |target| {
                 WindowPreviewAdapter::try_start_with_checkpoint_for_host(move |actual| {
                     if actual == target {
@@ -632,7 +640,7 @@ impl AppUiHostStartupOwner {
             },
         );
         #[cfg(not(any(test, feature = "validation")))]
-        let result = WindowPreviewAdapter::try_new();
+        let result = WindowPreviewAdapter::try_new_boxed();
         match result {
             Ok(preview) => Ok(preview),
             Err(failure) => {
@@ -865,7 +873,6 @@ impl AppUiHost {
 #[cfg(feature = "validation")]
 pub fn qualify_app_ui_host_startup_ownership(
 ) -> Result<AppUiHostStartupQualificationReport, AppUiHostStartupQualificationError> {
-    const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
     const HOST_STAGES: [AppUiHostStartupStage; 18] = [
         AppUiHostStartupStage::AppOwned,
         AppUiHostStartupStage::PreferencesLoaded,
@@ -878,7 +885,7 @@ pub fn qualify_app_ui_host_startup_ownership(
         AppUiHostStartupStage::PreviewStarted,
         AppUiHostStartupStage::PreviewConfigured,
         AppUiHostStartupStage::ResourcePolicyApplied,
-        AppUiHostStartupStage::InitialPreviewResolved,
+        AppUiHostStartupStage::InitialPreviewPrepared,
         AppUiHostStartupStage::CatalogPrepared,
         AppUiHostStartupStage::CatalogAttempted,
         AppUiHostStartupStage::RootBuilt,
@@ -899,55 +906,92 @@ pub fn qualify_app_ui_host_startup_ownership(
 
     let mut failed_start_cases = Vec::with_capacity(HOST_STAGES.len() + SERVICE_FAULTS.len());
     for fault in HOST_STAGES.into_iter().map(AppUiHostStartupFault::Host).chain(SERVICE_FAULTS) {
-        let fault_label = format!("{fault:?}");
-        let marker = format!("Host owning-startup identity: {fault_label}");
-        let mut app_state = AppState::new();
-        app_state.set_status_hint(marker.clone(), false);
-        let original_event_bus = Arc::clone(&app_state.event_bus);
-        let path = std::env::temp_dir().join(format!(
-            "mondrian-host-startup-{}.json",
-            uuid::Uuid::new_v4()
-        ));
-        let failure = match AppUiHost::try_new_with_startup_fault(
-            app_state,
-            AppUiPreferences::default(),
-            path,
-            fault,
-        ) {
-            Ok(host) => {
-                let (_app_state, receipt) =
-                    host.into_app_state_until(Instant::now() + SHUTDOWN_TIMEOUT);
-                return Err(AppUiHostStartupQualificationError {
-                    detail: format!(
-                        "{fault_label} unexpectedly published a Host; cleanup_clean={}",
-                        receipt.all_resources_released()
-                    ),
-                });
-            }
-            Err(failure) => failure,
-        };
-        let closed = failure.shutdown_until(Instant::now() + SHUTDOWN_TIMEOUT);
-        let identity_preserved = Arc::ptr_eq(&original_event_bus, &closed.app_state.event_bus)
-            && closed.app_state.status_hint.as_ref() == Some(&(marker, false));
-        if !identity_preserved || !closed.shutdown.all_created_resources_released() {
+        failed_start_cases.push(qualify_one_host_startup_fault(fault)?);
+    }
+    let opaque_payload_fail_closed = qualify_host_startup_opaque_payload()?;
+    let mut successful_routes = 0_u32;
+    for explicit in [false, true] {
+        qualify_one_host_startup_success(explicit)?;
+        successful_routes = successful_routes.saturating_add(1);
+    }
+    Ok(AppUiHostStartupQualificationReport {
+        schema_version: 1,
+        successful_routes,
+        failed_start_cases,
+        opaque_payload_fail_closed,
+    })
+}
+
+// Keep each actual by-value App/Host ownership route in its own validation-only
+// frame. The aggregate driver retains only the small reports, not all route
+// temporaries; product constructors and the process stack size are unchanged.
+#[cfg(feature = "validation")]
+#[inline(never)]
+fn qualify_one_host_startup_fault(
+    fault: AppUiHostStartupFault,
+) -> Result<AppUiHostStartupQualificationCase, AppUiHostStartupQualificationError> {
+    const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
+    let fault_label = format!("{fault:?}");
+    let marker = format!("Host owning-startup identity: {fault_label}");
+    let mut app_state = AppState::new();
+    let marker = crate::app::AppMessage::new("status-opaque-detail").with_text("detail", marker);
+    app_state.set_status_hint(marker.clone(), false);
+    let original_event_bus = Arc::clone(&app_state.event_bus);
+    let path = std::env::temp_dir().join(format!(
+        "mondrian-host-startup-{}.json",
+        uuid::Uuid::new_v4()
+    ));
+    let failure = match AppUiHost::try_new_with_startup_fault(
+        app_state,
+        AppUiPreferences::default(),
+        path,
+        fault,
+    ) {
+        Ok(host) => {
+            let (_app_state, receipt) =
+                host.into_app_state_until(Instant::now() + SHUTDOWN_TIMEOUT);
             return Err(AppUiHostStartupQualificationError {
                 detail: format!(
-                    "{fault_label} did not preserve identity or close its exact inventory; identity_preserved={identity_preserved}; shutdown={:?}",
-                    closed.shutdown
+                    "{fault_label} unexpectedly published a Host; cleanup_clean={}",
+                    receipt.all_resources_released()
                 ),
             });
         }
-        failed_start_cases.push(AppUiHostStartupQualificationCase {
-            fault: fault_label,
-            diagnostic: closed.diagnostic,
-            shutdown: closed.shutdown,
+        Err(failure) => failure,
+    };
+    let closed = failure.shutdown_until(Instant::now() + SHUTDOWN_TIMEOUT);
+    let identity_preserved = Arc::ptr_eq(&original_event_bus, &closed.app_state.event_bus)
+        && closed.app_state.status_hint() == Some(&(marker, false));
+    if !identity_preserved || !closed.shutdown.all_created_resources_released() {
+        return Err(AppUiHostStartupQualificationError {
+            detail: format!(
+                "{fault_label} did not preserve identity or close its exact inventory; identity_preserved={identity_preserved}; shutdown={:?}",
+                closed.shutdown
+            ),
         });
     }
+    Ok(AppUiHostStartupQualificationCase {
+        fault: fault_label,
+        diagnostic: closed.diagnostic,
+        shutdown: closed.shutdown,
+    })
+}
 
+// Keep each actual by-value App/Host ownership route in its own validation-only
+// frame. The aggregate driver retains only the small reports, not all route
+// temporaries; product constructors and the process stack size are unchanged.
+#[cfg(feature = "validation")]
+#[inline(never)]
+fn qualify_host_startup_opaque_payload() -> Result<bool, AppUiHostStartupQualificationError> {
+    const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
     let opaque_drops_before =
         HOST_OPAQUE_QUALIFICATION_DROPS.load(std::sync::atomic::Ordering::SeqCst);
     let mut opaque_app = AppState::new();
-    opaque_app.set_status_hint("Host opaque startup identity", false);
+    opaque_app.set_status_hint(
+        crate::app::AppMessage::new("status-opaque-detail")
+            .with_text("detail", "Host opaque startup identity"),
+        false,
+    );
     let opaque_event_bus = Arc::clone(&opaque_app.event_bus);
     let opaque_failure = match AppUiHost::try_new_with_startup_fault(
         opaque_app,
@@ -986,50 +1030,50 @@ pub fn qualify_app_ui_host_startup_ownership(
         });
     }
 
-    let mut successful_routes = 0_u32;
-    for explicit in [false, true] {
-        let result = if explicit {
-            AppUiHost::try_new_with_preferences_path(
-                AppState::new(),
-                AppUiPreferences::default(),
-                std::env::temp_dir().join(format!(
-                    "mondrian-host-startup-success-{}.json",
-                    uuid::Uuid::new_v4()
-                )),
-            )
-        } else {
-            AppUiHost::try_new(AppState::new())
-        };
-        let host = match result {
-            Ok(host) => host,
-            Err(failure) => {
-                let diagnostic = failure.diagnostic().clone();
-                let closed = failure.shutdown_until(Instant::now() + SHUTDOWN_TIMEOUT);
-                return Err(AppUiHostStartupQualificationError {
-                    detail: format!(
-                        "normal route explicit={explicit} failed: {diagnostic}; shutdown={:?}",
-                        closed.shutdown
-                    ),
-                });
-            }
-        };
-        let (_app_state, receipt) = host.into_app_state_until(Instant::now() + SHUTDOWN_TIMEOUT);
-        if !receipt.all_resources_released() {
+    Ok(opaque_payload_fail_closed)
+}
+
+// Keep each actual by-value App/Host ownership route in its own validation-only
+// frame. The aggregate driver retains only the small reports, not all route
+// temporaries; product constructors and the process stack size are unchanged.
+#[cfg(feature = "validation")]
+#[inline(never)]
+fn qualify_one_host_startup_success(
+    explicit: bool,
+) -> Result<(), AppUiHostStartupQualificationError> {
+    const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
+    let result = if explicit {
+        AppUiHost::try_new_with_preferences_path(
+            AppState::new(),
+            AppUiPreferences::default(),
+            std::env::temp_dir().join(format!(
+                "mondrian-host-startup-success-{}.json",
+                uuid::Uuid::new_v4()
+            )),
+        )
+    } else {
+        AppUiHost::try_new(AppState::new())
+    };
+    let host = match result {
+        Ok(host) => host,
+        Err(failure) => {
+            let diagnostic = failure.diagnostic().clone();
+            let closed = failure.shutdown_until(Instant::now() + SHUTDOWN_TIMEOUT);
             return Err(AppUiHostStartupQualificationError {
                 detail: format!(
-                    "normal route explicit={explicit} did not close cleanly: {receipt:?}"
+                    "normal route explicit={explicit} failed: {diagnostic}; shutdown={:?}",
+                    closed.shutdown
                 ),
             });
         }
-        successful_routes = successful_routes.saturating_add(1);
+    };
+    let (_app_state, receipt) = host.into_app_state_until(Instant::now() + SHUTDOWN_TIMEOUT);
+    if !receipt.all_resources_released() {
+        return Err(AppUiHostStartupQualificationError {
+            detail: format!("normal route explicit={explicit} did not close cleanly: {receipt:?}"),
+        });
     }
-
-    Ok(AppUiHostStartupQualificationReport {
-        schema_version: 1,
-        successful_routes,
-        failed_start_cases,
-        opaque_payload_fail_closed,
-    })
+    Ok(())
 }
 
 #[cfg(any(test, feature = "validation"))]

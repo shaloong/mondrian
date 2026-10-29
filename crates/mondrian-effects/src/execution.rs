@@ -1,5 +1,5 @@
 use crate::adjustment::{
-    apply_custom_render_op_f32, apply_render_op, apply_render_op_f32, blend_adjustment_result,
+    apply_custom_render_op_f32, apply_render_op, blend_adjustment_result,
     blend_rgba_f32_pixel_seeded, blend_rgba_pixel_seeded, unit_to_u8, EffectRasterRegion,
 };
 #[cfg(test)]
@@ -26,7 +26,7 @@ pub type CustomEffectRenderProcessor = Arc<
 
 /// A Float32 custom visual processor, with straight alpha in the graph's color domain.
 pub type CustomEffectFloatRenderProcessor = Arc<
-    dyn Fn(&mut Vec<[f32; 4]>, u32, u32, &serde_json::Value, i64) -> MondrianResult<()>
+    dyn Fn(&mut crate::EffectFloatFrame, &serde_json::Value, i64) -> MondrianResult<()>
         + Send
         + Sync,
 >;
@@ -59,6 +59,17 @@ impl EffectDomainProcessorCacheKey {
 /// effect graph's color-domain contract.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum EffectExecutionError {
+    /// A requested upstream image could not be delivered. This is distinct
+    /// from an absent media value and never publishes a substitute black frame.
+    #[error("effect input delivery failed: {reason}")]
+    InputUnavailable { reason: String },
+    /// Original typed failure from a time-expanded upstream graph. A waiting
+    /// custom processor must not be quarantined for this dependency's failure.
+    #[error("upstream temporal graph failed: {source}")]
+    TemporalInput {
+        #[source]
+        source: Box<crate::EffectTemporalExecutionError>,
+    },
     /// The graph requires renderer-owned stock-OCIO RGB transitions.
     #[error("effect graph requires {transitions} unresolved RGB color-domain transition(s)")]
     ColorDomainConversionRequired {
@@ -88,9 +99,59 @@ pub enum EffectExecutionError {
     /// A custom processor required by the compiled graph is not registered.
     #[error("custom effect processor `{key}` is unavailable")]
     CustomProcessorUnavailable { key: String },
+    /// The actual image sampling does not meet the frozen provider capability.
+    /// No processor work or runtime quarantine is performed for this refusal.
+    #[error("effect image scale {actual_sampling:?} does not meet {requirement:?}")]
+    ImageScaleNotAdmitted {
+        /// Immutable requirement of the work that would execute.
+        requirement: crate::EffectImageScaleRequirement,
+        /// Sampling carried by the actual input or explicit output staging.
+        actual_sampling: mondrian_core::ImageSampling,
+    },
     /// A custom processor returned an error or panicked without committing its staged pixels.
     #[error("custom effect processor `{key}` failed: {reason}")]
     CustomProcessorFailed { key: String, reason: String },
+    /// The invocation could not acquire its working grant; the plugin remains available.
+    #[error(
+        "custom effect processor `{key}` requires {required_bytes} bytes; grant is {budget_bytes}"
+    )]
+    CustomProcessorBudgetExceeded {
+        /// Exact compiled processor definition.
+        key: String,
+        /// Bytes required at the rejected working admission stage.
+        required_bytes: usize,
+        /// Applicable caller-owned byte grant for that admission stage.
+        budget_bytes: usize,
+    },
+    /// An admitted processor could not acquire host storage before execution.
+    /// Its definition is available, and this exact invocation is not replayed.
+    #[error("custom effect processor `{key}`: {receipt}")]
+    ProcessorHostResourceRefused {
+        /// Exact compiler-bound processor definition.
+        key: String,
+        /// Actual resource refusal and canonical residency decision.
+        receipt: crate::EffectProcessorHostResourceRefusalReceipt,
+    },
+    /// The owning scheduler stopped a custom invocation without quarantining it.
+    #[error("custom effect processor invocation stopped: {reason:?}")]
+    CustomProcessorStopped {
+        /// Authoritative scheduler cancellation/deadline reason.
+        reason: crate::EffectProcessorStopReason,
+    },
+    /// Feedback policy refused another occurrence before its DSP callback.
+    #[error("processor feedback occurrence capacity {limit} is exhausted")]
+    ProcessorFeedbackCapacityExceeded {
+        /// Declared maximum occurrences in this actual work.
+        limit: usize,
+    },
+    /// A legal processor requires authored repair; no pixels were published.
+    #[error("custom effect processor `{key}` is blocked: {receipt}")]
+    ProcessorUserBlocked {
+        /// Compiler-bound provider key, never supplied by a native message.
+        key: String,
+        /// Actual occurrence, owner, feedback and bank retention decision.
+        receipt: std::sync::Arc<crate::EffectProcessorFeedbackReceipt>,
+    },
     /// A finite temporal operation entered an executor that owns only one
     /// current frame.
     #[error("effect operation requires an exact temporal frame provider")]
@@ -104,25 +165,61 @@ pub enum EffectExecutionError {
         #[source]
         source: crate::MaskRasterError,
     },
+    /// A complete Float value cannot enter the declared consumer materialization.
+    #[error(transparent)]
+    FrameContract(#[from] crate::EffectFloatFrameError),
     /// The definition-bound program cannot enter this single-frame executor.
     #[error(transparent)]
     ExecutionContract(#[from] EffectExecutionAdmissionError),
 }
 
+impl EffectExecutionError {
+    /// A recoverable actual processor receipt, without pixel completion evidence.
+    pub fn processor_blocked(
+        &self,
+    ) -> Option<&std::sync::Arc<crate::EffectProcessorFeedbackReceipt>> {
+        match self {
+            Self::ProcessorUserBlocked { receipt, .. } => Some(receipt),
+            _ => None,
+        }
+    }
+}
+
+/// Admit only render scale; PAR and window geometry retain their own authorities.
+pub(crate) fn admit_image_scale(
+    requirement: crate::EffectImageScaleRequirement,
+    actual_sampling: mondrian_core::ImageSampling,
+) -> Result<(), EffectExecutionError> {
+    if requirement == crate::EffectImageScaleRequirement::Unit && !actual_sampling.is_unit_scale() {
+        return Err(EffectExecutionError::ImageScaleNotAdmitted { requirement, actual_sampling });
+    }
+    Ok(())
+}
+
+pub(crate) fn admit_render_op_image_scale(
+    op: &EffectRenderOp,
+    actual_sampling: mondrian_core::ImageSampling,
+) -> Result<(), EffectExecutionError> {
+    if let EffectRenderOp::Custom { processor: Some(binding), .. } = op {
+        admit_image_scale(binding.image_scale_requirement(), actual_sampling)?;
+    }
+    Ok(())
+}
+
 /// Error returned when an effect graph cannot execute on the float/linear CPU path.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EffectFloatExecutionError {
+    /// A complete image value violates its exact association/materialization contract.
+    FrameContract(crate::EffectFloatFrameError),
+    /// The owning scheduler canceled the frame or expired its deadline.
+    Stopped {
+        /// Exact observed scheduler reason, never a plugin runtime fault.
+        reason: crate::EffectProcessorStopReason,
+    },
     /// The definition-bound program cannot enter this single-frame executor.
     ExecutionContract(EffectExecutionAdmissionError),
     /// A bound custom Float32 processor failed without publishing staged pixels.
     CustomProcessor(EffectExecutionError),
-    /// Input pixel count does not match the requested extent.
-    InputSizeMismatch {
-        /// Expected number of RGBA pixels.
-        expected: usize,
-        /// Actual number of RGBA pixels.
-        actual: usize,
-    },
     /// The graph contains a node shape or render op that cannot execute in float.
     UnsupportedNode {
         /// Unsupported node id.
@@ -142,6 +239,12 @@ pub enum EffectFloatExecutionError {
         /// Typed raster failure.
         source: crate::MaskRasterError,
     },
+}
+
+impl From<crate::EffectFloatFrameError> for EffectFloatExecutionError {
+    fn from(error: crate::EffectFloatFrameError) -> Self {
+        Self::FrameContract(error)
+    }
 }
 
 /// Reason an effect graph cannot use the float/linear CPU path yet.
@@ -195,6 +298,8 @@ pub(crate) struct EffectFloatOutputCacheKey {
     height: u32,
     frame_seed: Option<i64>,
     domain_cache_key: Option<EffectDomainProcessorCacheKey>,
+    input_format: crate::EffectValueFormat,
+    sampling: mondrian_core::ImageSampling,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -288,6 +393,11 @@ fn execute_effect_graph(
                 let mut frame = take_execution_buffer(&mut buffer_pool, required_len);
                 frame.copy_from_slice(input);
                 outputs.insert(node.id, frame);
+            }
+            EffectGraphNodeKind::CustomSource { .. } => {
+                return Err(EffectExecutionError::CustomProcessorUnavailable {
+                    key: "float_source".to_owned(),
+                });
             }
             EffectGraphNodeKind::UnaryEffect { input: input_id, op }
             | EffectGraphNodeKind::DomainEffect { input: input_id, op, .. } => {
@@ -711,15 +821,18 @@ pub fn compiled_effect_graph_has_resolvable_rgba_f32_domain(
 /// ABI; unsupported processors return structured errors so callers can make a
 /// diagnosed fallback decision.
 pub fn apply_compiled_effect_graph_rgba_f32(
-    input: &[[f32; 4]],
-    width: u32,
-    height: u32,
+    input: crate::EffectFloatFrameView<'_>,
     compiled: &CompiledEffectGraph,
     frame_seed: i64,
-) -> Result<Vec<[f32; 4]>, EffectFloatExecutionError> {
+) -> Result<crate::EffectFloatFrame, EffectFloatExecutionError> {
     let mut session =
         EffectExecutionSession::new(EffectExecutionSessionConfig::uncached(usize::MAX));
-    session.apply_compiled_rgba_f32(input, width, height, compiled, frame_seed)
+    session.apply_compiled_rgba_f32(
+        input,
+        compiled,
+        frame_seed,
+        &mut crate::EffectProcessorControl::uncancelled(),
+    )
 }
 
 /// Execute a compiled float graph with renderer-owned color-domain processors.
@@ -730,14 +843,12 @@ pub fn apply_compiled_effect_graph_rgba_f32(
 /// bit-equivalent processing; a truncated hash or process generation is
 /// invalid.
 pub fn apply_compiled_effect_graph_rgba_f32_with_domain_processor<F>(
-    input: &[[f32; 4]],
-    width: u32,
-    height: u32,
+    input: crate::EffectFloatFrameView<'_>,
     compiled: &CompiledEffectGraph,
     frame_seed: i64,
     domain_cache_key: EffectDomainProcessorCacheKey,
     mut processor: F,
-) -> Result<Vec<[f32; 4]>, EffectFloatExecutionError>
+) -> Result<crate::EffectFloatFrame, EffectFloatExecutionError>
 where
     F: FnMut(&mut [[f32; 4]], EffectDomainTransition) -> Result<(), String>,
 {
@@ -745,56 +856,363 @@ where
         EffectExecutionSession::new(EffectExecutionSessionConfig::uncached(usize::MAX));
     session.apply_compiled_rgba_f32_with_domain_processor(
         input,
-        width,
-        height,
         compiled,
         frame_seed,
         domain_cache_key,
         &mut processor,
+        &mut crate::EffectProcessorControl::uncancelled(),
     )
 }
 
 type EffectDomainProcessor<'a> =
     dyn FnMut(&mut [[f32; 4]], EffectDomainTransition) -> Result<(), String> + 'a;
 
-fn apply_compiled_effect_graph_rgba_f32_inner(
-    session: &mut EffectExecutionSession,
-    input: &[[f32; 4]],
+/// Cold admission and per-node pixel reservations for the scalar buffer pool.
+fn scalar_processor_reservations(
+    compiled: &CompiledEffectGraph,
     width: u32,
     height: u32,
+    budget: usize,
+    has_resident_processors: bool,
+    control: &mut crate::EffectProcessorControl<'_>,
+) -> Result<Option<Vec<usize>>, EffectFloatExecutionError> {
+    let has_factory = compiled.schedule().ordered_nodes.iter().any(|id| {
+        compiled.graph().node(*id).is_some_and(|node| matches!(&node.kind,
+            EffectGraphNodeKind::UnaryEffect { op: EffectRenderOp::Custom { processor: Some(binding), .. }, .. }
+            | EffectGraphNodeKind::DomainEffect { op: EffectRenderOp::Custom { processor: Some(binding), .. }, .. }
+            | EffectGraphNodeKind::CustomSource { op: EffectRenderOp::Custom { processor: Some(binding), .. }, .. }
+            if binding.float32_factory().is_some()))
+    });
+    if !has_factory && !has_resident_processors {
+        return Ok(None);
+    }
+    // The entire route is checked before its first stateful callback. Slot or
+    // metadata refusal must never execute a prefix and then replay it elsewhere.
+    let requirements = crate::EffectProcessorFeedbackRequirements::for_compiled_graph(compiled);
+    let feedback_count = control.feedback_count().saturating_add(requirements.occurrences());
+    if feedback_count > crate::EFFECT_PROCESSOR_FEEDBACK_SLOTS {
+        return Err(EffectFloatExecutionError::CustomProcessor(
+            EffectExecutionError::ProcessorFeedbackCapacityExceeded {
+                limit: crate::EFFECT_PROCESSOR_FEEDBACK_SLOTS,
+            },
+        ));
+    }
+    let feedback_route_bytes =
+        control.feedback_route_bytes(requirements.maximum_owned_bytes(), feedback_count != 0);
+    let frame_bytes = (width as usize)
+        .saturating_mul(height as usize)
+        .saturating_mul(std::mem::size_of::<[f32; 4]>());
+    let mut remaining = compiled.node_use_counts().clone();
+    let mut pooled = 0usize;
+    let mut allocated = 0usize;
+    let mut reservations = Vec::with_capacity(compiled.schedule().ordered_nodes.len());
+    for id in &compiled.schedule().ordered_nodes {
+        scalar_checkpoint(control)?;
+        let node = compiled
+            .graph()
+            .node(*id)
+            .ok_or(EffectFloatExecutionError::MissingOutput { node_id: *id })?;
+        let inputs = node.input_ids();
+        let sequential_overlays = matches!(node.kind, EffectGraphNodeKind::MultiInput { .. });
+        for (index, input) in inputs.iter().enumerate() {
+            let uses = remaining
+                .get_mut(input)
+                .ok_or(EffectFloatExecutionError::MissingOutput { node_id: *input })?;
+            *uses = uses
+                .checked_sub(1)
+                .ok_or(EffectFloatExecutionError::MissingOutput { node_id: *input })?;
+            if *uses > 0 {
+                if pooled > 0 {
+                    pooled -= 1;
+                } else {
+                    allocated = allocated.saturating_add(1);
+                }
+            }
+            // The executor releases each multi-input overlay immediately.
+            if sequential_overlays && index > 0 {
+                pooled = pooled.saturating_add(1);
+            }
+        }
+        let (scratch_frames, processor_bytes, key) = match &node.kind {
+            EffectGraphNodeKind::Source => {
+                if pooled > 0 {
+                    pooled -= 1;
+                } else {
+                    allocated = allocated.saturating_add(1);
+                }
+                (0, 0, "source")
+            }
+            EffectGraphNodeKind::CustomSource { op, .. } => {
+                if pooled > 0 {
+                    pooled -= 1;
+                } else {
+                    allocated = allocated.saturating_add(1);
+                }
+                let bytes = crate::processor_residency::frame_processor_charge(op, width, height)
+                    .map_err(EffectFloatExecutionError::CustomProcessor)?;
+                let key = match op {
+                    EffectRenderOp::Custom { key, .. } => key.as_str(),
+                    _ => "invalid_source",
+                };
+                (0, bytes, key)
+            }
+            EffectGraphNodeKind::MaskSource { .. } => {
+                allocated = allocated.saturating_add(1);
+                (0, 0, "mask")
+            }
+            EffectGraphNodeKind::UnaryEffect { op, .. }
+            | EffectGraphNodeKind::DomainEffect { op, .. } => {
+                let bytes = crate::processor_residency::frame_processor_charge(op, width, height)
+                    .map_err(EffectFloatExecutionError::CustomProcessor)?;
+                let key = match op {
+                    EffectRenderOp::Custom { key, .. } => key.as_str(),
+                    _ => "builtin",
+                };
+                (
+                    crate::adjustment::render_op_f32_scratch_frames(op),
+                    bytes,
+                    key,
+                )
+            }
+            _ => (0, 0, "join"),
+        };
+        let mask_bytes = if matches!(node.kind, EffectGraphNodeKind::MaskSource { .. }) {
+            // Only this raster lives during scalar mask evaluation. The set
+            // estimate bounds its geometry and row workspace without allocation.
+            let estimate = || -> Result<usize, crate::MaskRasterError> {
+                Ok(
+                    crate::mask_raster::PreparedMaskRasterSet::required_retained_bytes(
+                        compiled.graph(),
+                    )?
+                    .saturating_add(
+                        crate::mask_raster::PreparedMaskRasterSet::required_max_scratch_bytes(
+                            compiled.graph(),
+                        )?,
+                    ),
+                )
+            };
+            estimate().map_err(|source| EffectFloatExecutionError::MaskRasterFailed {
+                node_id: *id,
+                source,
+            })?
+        } else {
+            0
+        };
+        let occupied = allocated
+            .saturating_add(scratch_frames)
+            .saturating_mul(frame_bytes)
+            .saturating_add(mask_bytes);
+        let required =
+            occupied.saturating_add(processor_bytes).saturating_add(feedback_route_bytes);
+        if has_factory && required > budget {
+            return Err(EffectFloatExecutionError::CustomProcessor(
+                EffectExecutionError::CustomProcessorBudgetExceeded {
+                    key: key.to_owned(),
+                    required_bytes: required,
+                    budget_bytes: budget,
+                },
+            ));
+        }
+        reservations.push(occupied);
+        if inputs.len() > 1 && !sequential_overlays {
+            pooled = pooled.saturating_add(inputs.len() - 1);
+        }
+    }
+    Ok(Some(reservations))
+}
+
+fn scalar_checkpoint(
+    control: &mut crate::EffectProcessorControl<'_>,
+) -> Result<(), EffectFloatExecutionError> {
+    control
+        .checkpoint()
+        .map_err(|reason| EffectFloatExecutionError::Stopped { reason })
+}
+
+fn scalar_mask_error(
+    node_id: EffectGraphNodeId,
+    error: crate::mask_raster::ControlledMaskRasterError<EffectFloatExecutionError>,
+) -> EffectFloatExecutionError {
+    match error {
+        crate::mask_raster::ControlledMaskRasterError::Raster(source) => {
+            EffectFloatExecutionError::MaskRasterFailed { node_id, source }
+        }
+        crate::mask_raster::ControlledMaskRasterError::Checkpoint(error) => error,
+    }
+}
+
+fn finish_scalar_attempt(
+    session: &mut EffectExecutionSession,
+    control: &mut crate::EffectProcessorControl<'_>,
+    result: Result<crate::EffectFloatFrame, EffectFloatExecutionError>,
+) -> Result<crate::EffectFloatFrame, EffectFloatExecutionError> {
+    // Do not overwrite a completed plugin fault with a later owner stop.
+    // Successful output still needs its last publication checkpoint.
+    let stopped = if result.is_ok() {
+        control.checkpoint().err()
+    } else {
+        control.stop_reason()
+    };
+    if let Some(reason) = stopped {
+        session.processors.clear();
+        return Err(EffectFloatExecutionError::Stopped { reason });
+    }
+    result
+}
+
+// A zero-input node has no incoming alpha association. In an image-processing
+// graph its staging request comes from its own retained declaration, not the
+// unrelated external Source. Prefer the native Float associations without
+// converting any pixels; the provider must still report a valid actual output.
+// The explicit source-free generate entry instead keeps the caller's exact
+// requested representation and rejects it before provider work if unsupported.
+fn source_staging_format(
+    compiled: &CompiledEffectGraph,
+    node_id: EffectGraphNodeId,
+    target: crate::EffectValueFormat,
+    has_external_input: bool,
+) -> Result<crate::EffectValueFormat, EffectFloatExecutionError> {
+    use mondrian_core::ColorFrameAlpha;
+    let contract = compiled.node_alpha_contract(node_id);
+    let requested = if has_external_input {
+        [
+            ColorFrameAlpha::StraightFloat,
+            ColorFrameAlpha::PremultipliedFloat,
+            ColorFrameAlpha::Opaque,
+            ColorFrameAlpha::StraightCoverage,
+            ColorFrameAlpha::PremultipliedCoverage,
+        ]
+        .into_iter()
+        .find(|alpha| contract.is_some_and(|contract| contract.admits_source_output(*alpha)))
+    } else {
+        Some(target.alpha())
+            .filter(|alpha| contract.is_some_and(|contract| contract.admits_source_output(*alpha)))
+    };
+    requested
+        .map(|alpha| target.with_alpha(alpha))
+        .ok_or_else(|| unsupported_float_graph_node(node_id, "source_output_format_not_admitted"))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn apply_compiled_effect_graph_rgba_f32_inner(
+    session: &mut EffectExecutionSession,
+    input: Option<crate::EffectFloatFrameView<'_>>,
+    extent: crate::EffectFrameExtent,
+    format: crate::EffectValueFormat,
+    sampling: mondrian_core::ImageSampling,
     compiled: &CompiledEffectGraph,
     frame_seed: i64,
     domain_cache_key: Option<EffectDomainProcessorCacheKey>,
     mut processor: Option<&mut EffectDomainProcessor<'_>>,
-) -> Result<Vec<[f32; 4]>, EffectFloatExecutionError> {
-    let required_len = width as usize * height as usize;
-    if input.len() != required_len {
-        return Err(EffectFloatExecutionError::InputSizeMismatch {
-            expected: required_len,
-            actual: input.len(),
-        });
+    control: &mut crate::EffectProcessorControl<'_>,
+) -> Result<crate::EffectFloatFrame, EffectFloatExecutionError> {
+    let width = extent.width();
+    let height = extent.height();
+    if let Some(input) = input {
+        input.validate_controlled(&mut || scalar_checkpoint(control))?;
+    }
+    scalar_checkpoint(control)?;
+    if format.precision() != crate::EffectWorkingPrecision::Float32 {
+        return Err(
+            crate::EffectFloatFrameError::WrongPrecision { precision: format.precision() }.into(),
+        );
+    }
+    let required_len = (width as usize)
+        .checked_mul(height as usize)
+        .ok_or_else(|| unsupported_float_graph_node(EffectGraphNodeId(0), "extent_overflow"))?;
+    required_len
+        .checked_mul(std::mem::size_of::<[f32; 4]>())
+        .ok_or(crate::EffectFloatFrameError::ExtentOverflow)?;
+    for id in &compiled.schedule().ordered_nodes {
+        if compiled
+            .graph()
+            .node(*id)
+            .is_some_and(|node| matches!(node.kind, EffectGraphNodeKind::CustomSource { .. }))
+        {
+            source_staging_format(compiled, *id, format, input.is_some())?;
+        }
+    }
+    let external_source = compiled.schedule().ordered_nodes.iter().find_map(|id| {
+        compiled
+            .graph()
+            .node(*id)
+            .filter(|node| matches!(node.kind, EffectGraphNodeKind::Source))
+            .map(|node| node.id)
+    });
+    if let Some(id) = external_source {
+        let source = input
+            .ok_or_else(|| unsupported_float_graph_node(id, "external_source_requires_image"))?;
+        if source.format().domain() != crate::EffectColorDomain::SceneLinearRgb {
+            return Err(EffectFloatExecutionError::FrameContract(
+                crate::EffectFloatFrameError::FormatMismatch {
+                    expected: source.format().with_domain(crate::EffectColorDomain::SceneLinearRgb),
+                    actual: source.format(),
+                },
+            ));
+        }
     }
     validate_float_effect_graph(compiled, processor.is_some())?;
-    if compiled.graph().is_identity() || input.is_empty() || width == 0 || height == 0 {
-        return Ok(input.to_vec());
+    if required_len == 0 {
+        // Empty unary behavior stays a copy; zero-input native extents reject.
+        return input
+            .ok_or_else(|| {
+                unsupported_float_graph_node(EffectGraphNodeId(0), "empty_source_extent")
+            })?
+            .to_owned()
+            .map_err(EffectFloatExecutionError::FrameContract);
     }
-    if let Some(cached) = get_cached_effect_output_f32(
-        session,
-        input,
+    admit_image_scale(compiled.image_scale_requirement(), sampling)
+        .map_err(EffectFloatExecutionError::CustomProcessor)?;
+    let reservations = scalar_processor_reservations(
+        compiled,
         width,
         height,
-        compiled,
-        frame_seed,
-        domain_cache_key,
-    ) {
+        session.max_working_bytes(),
+        session.processors.counts().0 != 0,
+        control,
+    )?;
+    if let Some(reservations) = &reservations {
+        // Shared owner resources may serve another clip later in this frame.
+        // Keep only the siblings that fit beside this graph's cold pixel peak,
+        // including identity/cache copies. Optional retention cannot deny a
+        // built-in-only invocation that has no native admission requirement.
+        let occupied = reservations.iter().copied().max().unwrap_or(0);
+        session
+            .processors
+            .trim_working(session.max_working_bytes().saturating_sub(occupied));
+    }
+    if compiled.graph().is_identity() {
+        let input = input.ok_or_else(|| {
+            unsupported_float_graph_node(EffectGraphNodeId(0), "identity_requires_image")
+        })?;
+        let output = crate::EffectFloatFrame::from_validated_parts(
+            input.extent(),
+            input.format(),
+            input.sampling(),
+            input.pixels().to_vec(),
+        );
+        scalar_checkpoint(control)?;
+        return Ok(output);
+    }
+    if let Some(cached) = input.filter(|_| !control.uses_input_service()).and_then(|input| {
+        get_cached_effect_output_f32(session, input, compiled, frame_seed, domain_cache_key)
+    }) {
+        scalar_checkpoint(control)?;
         return Ok(cached);
     }
 
-    let mut outputs =
-        HashMap::<EffectGraphNodeId, Vec<[f32; 4]>>::with_capacity(compiled.graph().nodes.len());
+    let mut outputs = HashMap::<EffectGraphNodeId, crate::EffectFloatFrame>::with_capacity(
+        compiled.graph().nodes.len(),
+    );
     let mut remaining_uses = compiled.node_use_counts().clone();
     let mut buffer_pool = Vec::<Vec<[f32; 4]>>::new();
-    for node_id in &compiled.schedule().ordered_nodes {
+    for (step, node_id) in compiled.schedule().ordered_nodes.iter().enumerate() {
+        scalar_checkpoint(control)?;
+        if let Some(reservations) = &reservations {
+            session
+                .processors
+                .trim_working(session.max_working_bytes().saturating_sub(reservations[step]));
+        }
         let Some(node) = compiled.graph().node(*node_id) else {
             return Err(EffectFloatExecutionError::UnsupportedNode {
                 node_id: *node_id,
@@ -803,9 +1221,68 @@ fn apply_compiled_effect_graph_rgba_f32_inner(
         };
         match &node.kind {
             EffectGraphNodeKind::Source => {
+                let input = input.ok_or_else(|| {
+                    unsupported_float_graph_node(node.id, "external_source_requires_image")
+                })?;
                 let mut frame = take_float_execution_buffer(&mut buffer_pool, required_len);
-                frame.copy_from_slice(input);
-                outputs.insert(node.id, frame);
+                frame.copy_from_slice(input.pixels());
+                outputs.insert(
+                    node.id,
+                    crate::EffectFloatFrame::from_validated_parts(
+                        input.extent(),
+                        input.format(),
+                        input.sampling(),
+                        frame,
+                    ),
+                );
+            }
+            EffectGraphNodeKind::CustomSource { op, domain_contract } => {
+                // Cold sizing precedes this allocation. Reuse the scalar pool,
+                // then charge its actual capacity together with all siblings
+                // before the bank can prepare or invoke the provider.
+                let mut frame = buffer_pool.pop().unwrap_or_default();
+                let required_bytes = required_len
+                    .checked_mul(std::mem::size_of::<[f32; 4]>())
+                    .ok_or(crate::EffectFloatFrameError::ExtentOverflow)?;
+                frame.try_reserve_exact(required_len.saturating_sub(frame.len())).map_err(
+                    |_| crate::EffectFloatFrameError::AllocationUnavailable { required_bytes },
+                )?;
+                frame.truncate(required_len);
+                while frame.len() < required_len {
+                    scalar_checkpoint(control)?;
+                    frame.resize(required_len.min(frame.len().saturating_add(4096)), [0.; 4]);
+                }
+                let mut output = crate::EffectFloatFrame::from_validated_parts(
+                    extent,
+                    source_staging_format(compiled, node.id, format, input.is_some())?
+                        .with_domain(domain_contract.output),
+                    sampling,
+                    frame,
+                );
+                let caller_owned_bytes = outputs
+                    .values()
+                    .chain(std::iter::once(&output))
+                    .fold(0usize, |bytes, frame| {
+                        bytes.saturating_add(frame.retained_bytes())
+                    })
+                    .saturating_add(buffer_pool.iter().fold(0usize, |bytes, frame| {
+                        bytes.saturating_add(
+                            frame.capacity().saturating_mul(std::mem::size_of::<[f32; 4]>()),
+                        )
+                    }));
+                control
+                    .with_input_stage(None, |control| {
+                        crate::adjustment::apply_custom_source_op_f32(
+                            &mut output,
+                            op,
+                            frame_seed,
+                            session,
+                            caller_owned_bytes,
+                            control,
+                        )
+                    })
+                    .map_err(EffectFloatExecutionError::CustomProcessor)?;
+                outputs.insert(node.id, output);
             }
             EffectGraphNodeKind::UnaryEffect { input: input_id, op }
             | EffectGraphNodeKind::DomainEffect { input: input_id, op, .. } => {
@@ -818,19 +1295,58 @@ fn apply_compiled_effect_graph_rgba_f32_inner(
                 ) else {
                     return Err(EffectFloatExecutionError::MissingOutput { node_id: *input_id });
                 };
-                apply_effect_domain_transition(
+                source = apply_effect_domain_transition(
                     compiled,
                     Some(node.id),
                     *input_id,
-                    &mut source,
+                    source,
                     &mut processor,
                 )?;
                 let supported = if matches!(op, EffectRenderOp::Custom { .. }) {
-                    apply_custom_render_op_f32(&mut source, width, height, op, frame_seed)
+                    let caller_owned_bytes = outputs
+                        .values()
+                        .chain(std::iter::once(&source))
+                        .fold(0usize, |bytes, frame| {
+                            bytes.saturating_add(frame.retained_bytes())
+                        })
+                        .saturating_add(buffer_pool.iter().fold(0usize, |bytes, buffer| {
+                            bytes.saturating_add(
+                                buffer.capacity().saturating_mul(std::mem::size_of::<[f32; 4]>()),
+                            )
+                        }));
+                    let input_stage = control.input_stage_for(compiled, node.id);
+                    control
+                        .with_input_stage(input_stage, |control| {
+                            apply_custom_render_op_f32(
+                                &mut source,
+                                op,
+                                frame_seed,
+                                Some(session),
+                                caller_owned_bytes,
+                                control,
+                            )
+                        })
                         .map_err(EffectFloatExecutionError::CustomProcessor)?;
                     true
                 } else {
-                    apply_render_op_f32(&mut source, width, height, op, frame_seed)
+                    source = crate::materialize_straight_coverage(
+                        source,
+                        crate::EffectAlphaConsumer::StraightCoverageOperation,
+                    )
+                    .map_err(EffectFloatExecutionError::FrameContract)?;
+                    source.set_format_after_write(
+                        source
+                            .format()
+                            .with_alpha(mondrian_core::ColorFrameAlpha::StraightCoverage),
+                    );
+                    crate::adjustment::apply_render_op_f32_controlled(
+                        source.allocation_mut(),
+                        width,
+                        height,
+                        op,
+                        frame_seed,
+                        &mut || scalar_checkpoint(control),
+                    )?
                 };
                 if !supported {
                     return Err(EffectFloatExecutionError::UnsupportedNode {
@@ -840,6 +1356,7 @@ fn apply_compiled_effect_graph_rgba_f32_inner(
                         },
                     });
                 }
+                source.validate().map_err(EffectFloatExecutionError::FrameContract)?;
                 outputs.insert(node.id, source);
             }
             EffectGraphNodeKind::Blend { base, overlay, blend_mode, opacity } => {
@@ -861,53 +1378,61 @@ fn apply_compiled_effect_graph_rgba_f32_inner(
                 ) else {
                     return Err(EffectFloatExecutionError::MissingOutput { node_id: *overlay });
                 };
-                apply_effect_domain_transition(
+                overlay_frame = apply_effect_domain_transition(
                     compiled,
                     Some(node.id),
                     *overlay,
-                    &mut overlay_frame,
+                    overlay_frame,
                     &mut processor,
                 )?;
-                blend_rgba_f32_in_place(
+                crate::blend_float_frames_in_place(
                     &mut base_frame,
-                    &overlay_frame,
+                    overlay_frame.view(),
                     *opacity,
                     *blend_mode,
                     frame_seed,
-                );
+                )
+                .map_err(EffectFloatExecutionError::FrameContract)?;
                 release_float_execution_buffer(&mut buffer_pool, overlay_frame);
                 outputs.insert(node.id, base_frame);
             }
             EffectGraphNodeKind::MaskSource { shape, feather, expansion, opacity, invert } => {
-                let cancellation = ExecutionCancellationToken::new();
-                let raster = crate::PreparedMaskRaster::prepare(
+                let raster = crate::PreparedMaskRaster::prepare_controlled(
                     shape,
                     crate::EffectFrameExtent::new(width, height),
                     *feather,
                     *expansion,
                     *opacity,
-                    &cancellation,
+                    &mut || scalar_checkpoint(control),
                 )
-                .map_err(|error| EffectFloatExecutionError::MaskRasterFailed {
-                    node_id: node.id,
-                    source: error,
-                })?;
+                .map_err(|error| scalar_mask_error(node.id, error))?;
                 let mut rgba = raster
-                    .rasterize_rgba_f32(
+                    .rasterize_rgba_f32_controlled(
                         crate::EffectPixelRoi::new(0, 0, width, height),
-                        &cancellation,
+                        &mut || scalar_checkpoint(control),
                     )
-                    .map_err(|error| EffectFloatExecutionError::MaskRasterFailed {
-                        node_id: node.id,
-                        source: error,
-                    })?;
+                    .map_err(|error| scalar_mask_error(node.id, error))?;
                 if *invert {
                     invert_alpha_mask_f32_in_place(&mut rgba);
                 }
-                outputs.insert(node.id, rgba);
+                let format = crate::EffectValueFormat::new(
+                    EffectWorkingPrecision::Float32,
+                    crate::EffectColorDomain::AlphaMask,
+                    mondrian_core::ColorFrameAlpha::StraightCoverage,
+                );
+                outputs.insert(
+                    node.id,
+                    crate::EffectFloatFrame::from_pixels(
+                        crate::EffectFrameExtent::new(width, height),
+                        format,
+                        sampling,
+                        rgba,
+                    )
+                    .map_err(EffectFloatExecutionError::FrameContract)?,
+                );
             }
             EffectGraphNodeKind::Mask { input: input_id, mask, invert, mask_op } => {
-                let Some(mut source) = take_float_graph_input(
+                let Some(source) = take_float_graph_input(
                     &mut outputs,
                     &mut remaining_uses,
                     &mut buffer_pool,
@@ -925,12 +1450,26 @@ fn apply_compiled_effect_graph_rgba_f32_inner(
                 ) else {
                     return Err(EffectFloatExecutionError::MissingOutput { node_id: *mask });
                 };
+                let mut source = crate::materialize_straight_coverage(
+                    source,
+                    crate::EffectAlphaConsumer::AlphaMask,
+                )
+                .map_err(EffectFloatExecutionError::FrameContract)?;
+                let mask_frame = crate::materialize_straight_coverage(
+                    mask_frame,
+                    crate::EffectAlphaConsumer::AlphaMask,
+                )
+                .map_err(EffectFloatExecutionError::FrameContract)?;
+                source.set_format_after_write(
+                    source.format().with_alpha(mondrian_core::ColorFrameAlpha::StraightCoverage),
+                );
+                source.ensure_same_sampling(mask_frame.sampling())?;
                 apply_alpha_mask_f32_in_place(&mut source, &mask_frame, *invert, *mask_op);
                 release_float_execution_buffer(&mut buffer_pool, mask_frame);
                 outputs.insert(node.id, source);
             }
             EffectGraphNodeKind::MaskCombine { left, right, mask_op } => {
-                let Some(mut left_frame) = take_float_graph_input(
+                let Some(left_frame) = take_float_graph_input(
                     &mut outputs,
                     &mut remaining_uses,
                     &mut buffer_pool,
@@ -948,12 +1487,28 @@ fn apply_compiled_effect_graph_rgba_f32_inner(
                 ) else {
                     return Err(EffectFloatExecutionError::MissingOutput { node_id: *right });
                 };
+                let mut left_frame = crate::materialize_straight_coverage(
+                    left_frame,
+                    crate::EffectAlphaConsumer::AlphaMask,
+                )
+                .map_err(EffectFloatExecutionError::FrameContract)?;
+                let right_frame = crate::materialize_straight_coverage(
+                    right_frame,
+                    crate::EffectAlphaConsumer::AlphaMask,
+                )
+                .map_err(EffectFloatExecutionError::FrameContract)?;
+                left_frame.set_format_after_write(
+                    left_frame
+                        .format()
+                        .with_alpha(mondrian_core::ColorFrameAlpha::StraightCoverage),
+                );
+                left_frame.ensure_same_sampling(right_frame.sampling())?;
                 combine_alpha_masks_f32_in_place(&mut left_frame, &right_frame, *mask_op);
                 release_float_execution_buffer(&mut buffer_pool, right_frame);
                 outputs.insert(node.id, left_frame);
             }
             EffectGraphNodeKind::MatteMix { base, graded, matte } => {
-                let Some(mut base_frame) = take_float_graph_input(
+                let Some(base_frame) = take_float_graph_input(
                     &mut outputs,
                     &mut remaining_uses,
                     &mut buffer_pool,
@@ -980,6 +1535,28 @@ fn apply_compiled_effect_graph_rgba_f32_inner(
                 ) else {
                     return Err(EffectFloatExecutionError::MissingOutput { node_id: *matte });
                 };
+                let mut base_frame = crate::materialize_straight_coverage(
+                    base_frame,
+                    crate::EffectAlphaConsumer::AlphaMask,
+                )
+                .map_err(EffectFloatExecutionError::FrameContract)?;
+                let graded_frame = crate::materialize_straight_coverage(
+                    graded_frame,
+                    crate::EffectAlphaConsumer::AlphaMask,
+                )
+                .map_err(EffectFloatExecutionError::FrameContract)?;
+                let matte_frame = crate::materialize_straight_coverage(
+                    matte_frame,
+                    crate::EffectAlphaConsumer::AlphaMask,
+                )
+                .map_err(EffectFloatExecutionError::FrameContract)?;
+                base_frame.set_format_after_write(
+                    base_frame
+                        .format()
+                        .with_alpha(mondrian_core::ColorFrameAlpha::StraightCoverage),
+                );
+                base_frame.ensure_same_sampling(graded_frame.sampling())?;
+                base_frame.ensure_same_sampling(matte_frame.sampling())?;
                 matte_mix_f32_in_place(&mut base_frame, &graded_frame, &matte_frame);
                 release_float_execution_buffer(&mut buffer_pool, graded_frame);
                 release_float_execution_buffer(&mut buffer_pool, matte_frame);
@@ -1010,20 +1587,21 @@ fn apply_compiled_effect_graph_rgba_f32_inner(
                             node_id: *overlay_id,
                         });
                     };
-                    apply_effect_domain_transition(
+                    overlay = apply_effect_domain_transition(
                         compiled,
                         Some(node.id),
                         *overlay_id,
-                        &mut overlay,
+                        overlay,
                         &mut processor,
                     )?;
-                    blend_rgba_f32_in_place(
+                    crate::blend_float_frames_in_place(
                         &mut result,
-                        &overlay,
+                        overlay.view(),
                         *opacity,
                         *blend_mode,
                         frame_seed,
-                    );
+                    )
+                    .map_err(EffectFloatExecutionError::FrameContract)?;
                     release_float_execution_buffer(&mut buffer_pool, overlay);
                 }
                 outputs.insert(node.id, result);
@@ -1032,66 +1610,105 @@ fn apply_compiled_effect_graph_rgba_f32_inner(
     }
 
     let Some(output_id) = compiled.graph().output else {
-        return Ok(input.to_vec());
+        let input = input
+            .ok_or_else(|| unsupported_float_graph_node(EffectGraphNodeId(0), "missing_output"))?;
+        let output = crate::EffectFloatFrame::from_validated_parts(
+            input.extent(),
+            input.format(),
+            input.sampling(),
+            input.pixels().to_vec(),
+        );
+        scalar_checkpoint(control)?;
+        return Ok(output);
     };
     let mut output = outputs
         .remove(&output_id)
         .ok_or(EffectFloatExecutionError::MissingOutput { node_id: output_id })?;
-    apply_effect_domain_transition(compiled, None, output_id, &mut output, &mut processor)?;
-    put_cached_effect_output_f32(
-        session,
-        input,
-        width,
-        height,
-        compiled,
-        frame_seed,
-        domain_cache_key,
-        &output,
-    );
+    output = apply_effect_domain_transition(compiled, None, output_id, output, &mut processor)?;
+    output.validate().map_err(EffectFloatExecutionError::FrameContract)?;
+    scalar_checkpoint(control)?;
+    if let Some(input) = input.filter(|_| !control.uses_input_service()) {
+        put_cached_effect_output_f32(
+            session,
+            input,
+            compiled,
+            frame_seed,
+            domain_cache_key,
+            &output,
+        );
+    }
     Ok(output)
 }
 
 impl EffectExecutionSession {
+    /// Execute a zero-input current-frame graph into explicit output staging.
+    /// Reachable external Source values reject before invoking any provider.
+    pub fn generate_compiled_rgba_f32(
+        &mut self,
+        extent: crate::EffectFrameExtent,
+        format: crate::EffectValueFormat,
+        sampling: mondrian_core::ImageSampling,
+        compiled: &CompiledEffectGraph,
+        frame_seed: i64,
+        control: &mut crate::EffectProcessorControl<'_>,
+    ) -> Result<crate::EffectFloatFrame, EffectFloatExecutionError> {
+        let result = apply_compiled_effect_graph_rgba_f32_inner(
+            self, None, extent, format, sampling, compiled, frame_seed, None, None, control,
+        );
+        finish_scalar_attempt(self, control, result)
+    }
+
     /// Execute one current-frame compiled graph over scene-linear Float32
     /// pixels.
     pub fn apply_compiled_rgba_f32(
         &mut self,
-        input: &[[f32; 4]],
-        width: u32,
-        height: u32,
+        input: crate::EffectFloatFrameView<'_>,
         compiled: &CompiledEffectGraph,
         frame_seed: i64,
-    ) -> Result<Vec<[f32; 4]>, EffectFloatExecutionError> {
-        apply_compiled_effect_graph_rgba_f32_inner(
-            self, input, width, height, compiled, frame_seed, None, None,
-        )
+        control: &mut crate::EffectProcessorControl<'_>,
+    ) -> Result<crate::EffectFloatFrame, EffectFloatExecutionError> {
+        let result = apply_compiled_effect_graph_rgba_f32_inner(
+            self,
+            Some(input),
+            input.extent(),
+            input.format(),
+            input.sampling(),
+            compiled,
+            frame_seed,
+            None,
+            None,
+            control,
+        );
+        finish_scalar_attempt(self, control, result)
     }
 
     /// Execute one current-frame Float32 graph while resolving explicit RGB
     /// processing-domain transitions through the caller's color Adapter.
     pub fn apply_compiled_rgba_f32_with_domain_processor<F>(
         &mut self,
-        input: &[[f32; 4]],
-        width: u32,
-        height: u32,
+        input: crate::EffectFloatFrameView<'_>,
         compiled: &CompiledEffectGraph,
         frame_seed: i64,
         domain_cache_key: EffectDomainProcessorCacheKey,
         mut processor: F,
-    ) -> Result<Vec<[f32; 4]>, EffectFloatExecutionError>
+        control: &mut crate::EffectProcessorControl<'_>,
+    ) -> Result<crate::EffectFloatFrame, EffectFloatExecutionError>
     where
         F: FnMut(&mut [[f32; 4]], EffectDomainTransition) -> Result<(), String>,
     {
-        apply_compiled_effect_graph_rgba_f32_inner(
+        let result = apply_compiled_effect_graph_rgba_f32_inner(
             self,
-            input,
-            width,
-            height,
+            Some(input),
+            input.extent(),
+            input.format(),
+            input.sampling(),
             compiled,
             frame_seed,
             Some(domain_cache_key),
             Some(&mut processor),
-        )
+            control,
+        );
+        finish_scalar_attempt(self, control, result)
     }
 }
 
@@ -1099,9 +1716,9 @@ fn apply_effect_domain_transition(
     compiled: &CompiledEffectGraph,
     consumer: Option<EffectGraphNodeId>,
     input: EffectGraphNodeId,
-    pixels: &mut [[f32; 4]],
+    mut frame: crate::EffectFloatFrame,
     processor: &mut Option<&mut EffectDomainProcessor<'_>>,
-) -> Result<(), EffectFloatExecutionError> {
+) -> Result<crate::EffectFloatFrame, EffectFloatExecutionError> {
     let Some(transition) = compiled
         .domain_plan()
         .transitions
@@ -1109,8 +1726,28 @@ fn apply_effect_domain_transition(
         .find(|transition| transition.consumer == consumer && transition.input == input)
         .copied()
     else {
-        return Ok(());
+        return Ok(frame);
     };
+    let expected = frame.format().with_domain(transition.from);
+    if frame.format() != expected {
+        return Err(EffectFloatExecutionError::FrameContract(
+            crate::EffectFloatFrameError::FormatMismatch { expected, actual: frame.format() },
+        ));
+    }
+    // A nonlinear stock-OCIO processor consumes independent RGB. Every nonzero
+    // alpha is used directly at Float32 execution precision; zero-alpha emission
+    // refuses this materialization instead of transforming associated channels.
+    // Division and reassociation do not promise bit-reversible pixel values.
+    let straight = if frame.alpha().is_coverage() {
+        if frame.alpha() == mondrian_core::ColorFrameAlpha::Opaque {
+            mondrian_core::ColorFrameAlpha::Opaque
+        } else {
+            mondrian_core::ColorFrameAlpha::StraightCoverage
+        }
+    } else {
+        mondrian_core::ColorFrameAlpha::StraightFloat
+    };
+    frame = frame.into_alpha(straight).map_err(EffectFloatExecutionError::FrameContract)?;
     let Some(processor) = processor.as_deref_mut() else {
         return Err(EffectFloatExecutionError::UnsupportedNode {
             node_id: consumer.unwrap_or(input),
@@ -1119,30 +1756,38 @@ fn apply_effect_domain_transition(
             },
         });
     };
-    processor(pixels, transition).map_err(|reason| EffectFloatExecutionError::UnsupportedNode {
-        node_id: consumer.unwrap_or(input),
-        reason: EffectFloatUnsupportedReason::ColorDomainTransitionFailed {
-            from: transition.from,
-            to: transition.to,
-            reason,
-        },
-    })
+    processor(frame.pixels_mut(), transition).map_err(|reason| {
+        EffectFloatExecutionError::UnsupportedNode {
+            node_id: consumer.unwrap_or(input),
+            reason: EffectFloatUnsupportedReason::ColorDomainTransitionFailed {
+                from: transition.from,
+                to: transition.to,
+                reason,
+            },
+        }
+    })?;
+    frame.set_format_after_write(frame.format().with_domain(transition.to));
+    frame.validate().map_err(EffectFloatExecutionError::FrameContract)?;
+    Ok(frame)
 }
 
 /// Execute a compiled adjustment graph and blend the result over a float base frame.
 pub fn apply_compiled_effect_graph_pass_rgba_f32(
-    base: &[[f32; 4]],
-    width: u32,
-    height: u32,
+    base: crate::EffectFloatFrameView<'_>,
     compiled: &CompiledEffectGraph,
     opacity: f32,
-    blend_mode: Option<BlendMode>,
+    blend_policy: mondrian_core::EffectPassBlendPolicy,
     frame_seed: i64,
-) -> Result<Vec<[f32; 4]>, EffectFloatExecutionError> {
+) -> Result<crate::EffectFloatFrame, EffectFloatExecutionError> {
     let mut session =
         EffectExecutionSession::new(EffectExecutionSessionConfig::uncached(usize::MAX));
     session.apply_compiled_pass_rgba_f32(
-        base, width, height, compiled, opacity, blend_mode, frame_seed,
+        base,
+        compiled,
+        opacity,
+        blend_policy,
+        frame_seed,
+        &mut crate::EffectProcessorControl::uncancelled(),
     )
 }
 
@@ -1151,29 +1796,26 @@ impl EffectExecutionSession {
     #[allow(clippy::too_many_arguments)]
     pub fn apply_compiled_pass_rgba_f32(
         &mut self,
-        base: &[[f32; 4]],
-        width: u32,
-        height: u32,
+        base: crate::EffectFloatFrameView<'_>,
         compiled: &CompiledEffectGraph,
         opacity: f32,
-        blend_mode: Option<BlendMode>,
+        blend_policy: mondrian_core::EffectPassBlendPolicy,
         frame_seed: i64,
-    ) -> Result<Vec<[f32; 4]>, EffectFloatExecutionError> {
-        let required_len = width as usize * height as usize;
-        if base.len() != required_len {
-            return Err(EffectFloatExecutionError::InputSizeMismatch {
-                expected: required_len,
-                actual: base.len(),
-            });
+        control: &mut crate::EffectProcessorControl<'_>,
+    ) -> Result<crate::EffectFloatFrame, EffectFloatExecutionError> {
+        if let Err(error) = base.validate_controlled(&mut || scalar_checkpoint(control)) {
+            return finish_scalar_attempt(self, control, Err(error));
+        }
+        if let Err(error) = scalar_checkpoint(control) {
+            return finish_scalar_attempt(self, control, Err(error));
         }
         self.apply_compiled_pass_rgba_f32_owned(
-            base.to_vec(),
-            width,
-            height,
+            base.to_owned().map_err(EffectFloatExecutionError::FrameContract)?,
             compiled,
             opacity,
-            blend_mode,
+            blend_policy,
             frame_seed,
+            control,
         )
     }
 
@@ -1185,20 +1827,18 @@ impl EffectExecutionSession {
     #[allow(clippy::too_many_arguments)]
     pub fn apply_compiled_pass_rgba_f32_owned(
         &mut self,
-        mut base: Vec<[f32; 4]>,
-        width: u32,
-        height: u32,
+        mut base: crate::EffectFloatFrame,
         compiled: &CompiledEffectGraph,
         opacity: f32,
-        blend_mode: Option<BlendMode>,
+        blend_policy: mondrian_core::EffectPassBlendPolicy,
         frame_seed: i64,
-    ) -> Result<Vec<[f32; 4]>, EffectFloatExecutionError> {
-        let required_len = width as usize * height as usize;
-        if base.len() != required_len {
-            return Err(EffectFloatExecutionError::InputSizeMismatch {
-                expected: required_len,
-                actual: base.len(),
-            });
+        control: &mut crate::EffectProcessorControl<'_>,
+    ) -> Result<crate::EffectFloatFrame, EffectFloatExecutionError> {
+        if let Err(error) = base.view().validate_controlled(&mut || scalar_checkpoint(control)) {
+            return finish_scalar_attempt(self, control, Err(error));
+        }
+        if let Err(error) = scalar_checkpoint(control) {
+            return finish_scalar_attempt(self, control, Err(error));
         }
         admit_single_frame_execution(
             compiled,
@@ -1206,33 +1846,54 @@ impl EffectExecutionSession {
             EffectWorkingPrecision::Float32,
         )
         .map_err(EffectFloatExecutionError::ExecutionContract)?;
-        if required_len == 0 {
+        if base.is_empty() {
             return Ok(base);
         }
-        let mode = blend_mode.unwrap_or(BlendMode::Normal);
-        let opacity = opacity.clamp(0.0, 1.0);
-        if !has_positive_coverage(opacity) || compiled.graph().is_identity() {
+        let policy = blend_policy;
+        if !opacity.is_finite() || !(0.0..=1.0).contains(&opacity) {
+            return Err(EffectFloatExecutionError::FrameContract(
+                crate::EffectFloatFrameError::InvalidOpacity,
+            ));
+        }
+        if !has_positive_coverage(opacity)
+            || (policy == crate::EffectPassBlendPolicy::Mix && compiled.graph().is_identity())
+        {
             return Ok(base);
         }
 
-        let processed = self.apply_compiled_rgba_f32(&base, width, height, compiled, frame_seed)?;
-        blend_rgba_f32_in_place(&mut base, &processed, opacity, mode, frame_seed);
-        Ok(base)
+        let processed = self.apply_compiled_rgba_f32(base.view(), compiled, frame_seed, control)?;
+        let blend_result = match policy {
+            crate::EffectPassBlendPolicy::Mix => crate::mix_float_frames_controlled(
+                &mut base,
+                processed.view(),
+                opacity,
+                &mut || scalar_checkpoint(control),
+            ),
+            crate::EffectPassBlendPolicy::Blend(mode) => crate::blend_float_frames_controlled(
+                &mut base,
+                processed.view(),
+                opacity,
+                mode,
+                frame_seed,
+                &mut || scalar_checkpoint(control),
+            ),
+        };
+
+        let result = blend_result.and_then(|()| scalar_checkpoint(control)).map(|()| base);
+        finish_scalar_attempt(self, control, result)
     }
 }
 
 /// Execute and blend a float adjustment graph with renderer-owned domain processors.
 pub fn apply_compiled_effect_graph_pass_rgba_f32_with_domain_processor<F>(
-    base: &[[f32; 4]],
-    width: u32,
-    height: u32,
+    base: crate::EffectFloatFrameView<'_>,
     compiled: &CompiledEffectGraph,
     opacity: f32,
-    blend_mode: Option<BlendMode>,
+    blend_policy: mondrian_core::EffectPassBlendPolicy,
     frame_seed: i64,
     domain_cache_key: EffectDomainProcessorCacheKey,
     processor: F,
-) -> Result<Vec<[f32; 4]>, EffectFloatExecutionError>
+) -> Result<crate::EffectFloatFrame, EffectFloatExecutionError>
 where
     F: FnMut(&mut [[f32; 4]], EffectDomainTransition) -> Result<(), String>,
 {
@@ -1240,14 +1901,13 @@ where
         EffectExecutionSession::new(EffectExecutionSessionConfig::uncached(usize::MAX));
     session.apply_compiled_pass_rgba_f32_with_domain_processor(
         base,
-        width,
-        height,
         compiled,
         opacity,
-        blend_mode,
+        blend_policy,
         frame_seed,
         domain_cache_key,
         processor,
+        &mut crate::EffectProcessorControl::uncancelled(),
     )
 }
 
@@ -1257,36 +1917,33 @@ impl EffectExecutionSession {
     #[allow(clippy::too_many_arguments)]
     pub fn apply_compiled_pass_rgba_f32_with_domain_processor<F>(
         &mut self,
-        base: &[[f32; 4]],
-        width: u32,
-        height: u32,
+        base: crate::EffectFloatFrameView<'_>,
         compiled: &CompiledEffectGraph,
         opacity: f32,
-        blend_mode: Option<BlendMode>,
+        blend_policy: mondrian_core::EffectPassBlendPolicy,
         frame_seed: i64,
         domain_cache_key: EffectDomainProcessorCacheKey,
         processor: F,
-    ) -> Result<Vec<[f32; 4]>, EffectFloatExecutionError>
+        control: &mut crate::EffectProcessorControl<'_>,
+    ) -> Result<crate::EffectFloatFrame, EffectFloatExecutionError>
     where
         F: FnMut(&mut [[f32; 4]], EffectDomainTransition) -> Result<(), String>,
     {
-        let required_len = width as usize * height as usize;
-        if base.len() != required_len {
-            return Err(EffectFloatExecutionError::InputSizeMismatch {
-                expected: required_len,
-                actual: base.len(),
-            });
+        if let Err(error) = base.validate_controlled(&mut || scalar_checkpoint(control)) {
+            return finish_scalar_attempt(self, control, Err(error));
+        }
+        if let Err(error) = scalar_checkpoint(control) {
+            return finish_scalar_attempt(self, control, Err(error));
         }
         self.apply_compiled_pass_rgba_f32_owned_with_domain_processor(
-            base.to_vec(),
-            width,
-            height,
+            base.to_owned().map_err(EffectFloatExecutionError::FrameContract)?,
             compiled,
             opacity,
-            blend_mode,
+            blend_policy,
             frame_seed,
             domain_cache_key,
             processor,
+            control,
         )
     }
 
@@ -1298,25 +1955,23 @@ impl EffectExecutionSession {
     #[allow(clippy::too_many_arguments)]
     pub fn apply_compiled_pass_rgba_f32_owned_with_domain_processor<F>(
         &mut self,
-        mut base: Vec<[f32; 4]>,
-        width: u32,
-        height: u32,
+        mut base: crate::EffectFloatFrame,
         compiled: &CompiledEffectGraph,
         opacity: f32,
-        blend_mode: Option<BlendMode>,
+        blend_policy: mondrian_core::EffectPassBlendPolicy,
         frame_seed: i64,
         domain_cache_key: EffectDomainProcessorCacheKey,
         processor: F,
-    ) -> Result<Vec<[f32; 4]>, EffectFloatExecutionError>
+        control: &mut crate::EffectProcessorControl<'_>,
+    ) -> Result<crate::EffectFloatFrame, EffectFloatExecutionError>
     where
         F: FnMut(&mut [[f32; 4]], EffectDomainTransition) -> Result<(), String>,
     {
-        let required_len = width as usize * height as usize;
-        if base.len() != required_len {
-            return Err(EffectFloatExecutionError::InputSizeMismatch {
-                expected: required_len,
-                actual: base.len(),
-            });
+        if let Err(error) = base.view().validate_controlled(&mut || scalar_checkpoint(control)) {
+            return finish_scalar_attempt(self, control, Err(error));
+        }
+        if let Err(error) = scalar_checkpoint(control) {
+            return finish_scalar_attempt(self, control, Err(error));
         }
         admit_single_frame_execution(
             compiled,
@@ -1324,26 +1979,48 @@ impl EffectExecutionSession {
             EffectWorkingPrecision::Float32,
         )
         .map_err(EffectFloatExecutionError::ExecutionContract)?;
-        if required_len == 0 {
+        if base.is_empty() {
             return Ok(base);
         }
-        let mode = blend_mode.unwrap_or(BlendMode::Normal);
-        let opacity = opacity.clamp(0.0, 1.0);
-        if !has_positive_coverage(opacity) || compiled.graph().is_identity() {
+        let policy = blend_policy;
+        if !opacity.is_finite() || !(0.0..=1.0).contains(&opacity) {
+            return Err(EffectFloatExecutionError::FrameContract(
+                crate::EffectFloatFrameError::InvalidOpacity,
+            ));
+        }
+        if !has_positive_coverage(opacity)
+            || (policy == crate::EffectPassBlendPolicy::Mix && compiled.graph().is_identity())
+        {
             return Ok(base);
         }
 
         let processed = self.apply_compiled_rgba_f32_with_domain_processor(
-            &base,
-            width,
-            height,
+            base.view(),
             compiled,
             frame_seed,
             domain_cache_key,
             processor,
+            control,
         )?;
-        blend_rgba_f32_in_place(&mut base, &processed, opacity, mode, frame_seed);
-        Ok(base)
+        let blend_result = match policy {
+            crate::EffectPassBlendPolicy::Mix => crate::mix_float_frames_controlled(
+                &mut base,
+                processed.view(),
+                opacity,
+                &mut || scalar_checkpoint(control),
+            ),
+            crate::EffectPassBlendPolicy::Blend(mode) => crate::blend_float_frames_controlled(
+                &mut base,
+                processed.view(),
+                opacity,
+                mode,
+                frame_seed,
+                &mut || scalar_checkpoint(control),
+            ),
+        };
+
+        let result = blend_result.and_then(|()| scalar_checkpoint(control)).map(|()| base);
+        finish_scalar_attempt(self, control, result)
     }
 }
 
@@ -1354,14 +2031,21 @@ pub fn apply_compiled_effect_graph_pass(
     height: u32,
     compiled: &CompiledEffectGraph,
     opacity: f32,
-    blend_mode: Option<BlendMode>,
+    blend_policy: mondrian_core::EffectPassBlendPolicy,
     frame_seed: i64,
     out: &mut Vec<u8>,
 ) -> std::result::Result<(), EffectExecutionError> {
     let mut session =
         EffectExecutionSession::new(EffectExecutionSessionConfig::uncached(usize::MAX));
     session.apply_compiled_pass_rgba8(
-        base, width, height, compiled, opacity, blend_mode, frame_seed, out,
+        base,
+        width,
+        height,
+        compiled,
+        opacity,
+        blend_policy,
+        frame_seed,
+        out,
     )
 }
 
@@ -1375,7 +2059,7 @@ impl EffectExecutionSession {
         height: u32,
         compiled: &CompiledEffectGraph,
         opacity: f32,
-        blend_mode: Option<BlendMode>,
+        blend_policy: mondrian_core::EffectPassBlendPolicy,
         frame_seed: i64,
         out: &mut Vec<u8>,
     ) -> std::result::Result<(), EffectExecutionError> {
@@ -1392,13 +2076,15 @@ impl EffectExecutionSession {
             out.clear();
             return Ok(());
         }
-        if !has_positive_coverage(opacity.clamp(0.0, 1.0)) || compiled.graph().is_identity() {
+        if !has_positive_coverage(opacity.clamp(0.0, 1.0))
+            || (blend_policy == crate::EffectPassBlendPolicy::Mix && compiled.graph().is_identity())
+        {
             out.copy_from_slice(base);
             return Ok(());
         }
 
         let processed = self.apply_compiled_rgba8(base, width, height, compiled, frame_seed)?;
-        blend_adjustment_result(base, &processed, width, height, opacity, blend_mode, out);
+        blend_adjustment_result(base, &processed, width, height, opacity, blend_policy, out);
         Ok(())
     }
 }
@@ -1457,57 +2143,46 @@ fn effect_output_cache_key(
 
 fn get_cached_effect_output_f32(
     session: &mut EffectExecutionSession,
-    input: &[[f32; 4]],
-    width: u32,
-    height: u32,
+    input: crate::EffectFloatFrameView<'_>,
     compiled: &CompiledEffectGraph,
     frame_seed: i64,
     domain_cache_key: Option<EffectDomainProcessorCacheKey>,
-) -> Option<Vec<[f32; 4]>> {
-    let key =
-        effect_output_cache_key_f32(input, width, height, compiled, frame_seed, domain_cache_key)?;
+) -> Option<crate::EffectFloatFrame> {
+    let key = effect_output_cache_key_f32(input, compiled, frame_seed, domain_cache_key)?;
     session.get_float_output(&key)
 }
 
 fn put_cached_effect_output_f32(
     session: &mut EffectExecutionSession,
-    input: &[[f32; 4]],
-    width: u32,
-    height: u32,
+    input: crate::EffectFloatFrameView<'_>,
     compiled: &CompiledEffectGraph,
     frame_seed: i64,
     domain_cache_key: Option<EffectDomainProcessorCacheKey>,
-    output: &[[f32; 4]],
+    output: &crate::EffectFloatFrame,
 ) {
-    let Some(key) =
-        effect_output_cache_key_f32(input, width, height, compiled, frame_seed, domain_cache_key)
+    let Some(key) = effect_output_cache_key_f32(input, compiled, frame_seed, domain_cache_key)
     else {
         return;
     };
-    session.put_float_output(key, output.to_vec());
+    session.put_float_output(key, output.clone());
 }
 
 fn effect_output_cache_key_f32(
-    input: &[[f32; 4]],
-    width: u32,
-    height: u32,
+    input: crate::EffectFloatFrameView<'_>,
     compiled: &CompiledEffectGraph,
     frame_seed: i64,
     domain_cache_key: Option<EffectDomainProcessorCacheKey>,
 ) -> Option<EffectFloatOutputCacheKey> {
-    if !effect_output_cache_enabled_f32(compiled, domain_cache_key.is_some())
-        || input.is_empty()
-        || width == 0
-        || height == 0
-    {
+    if !effect_output_cache_enabled_f32(compiled, domain_cache_key.is_some()) || input.is_empty() {
         return None;
     }
-
     Some(EffectFloatOutputCacheKey {
         graph_identity: compiled.identity().clone(),
-        input_fingerprint: frame_buffer_fingerprint_f32(input),
-        width,
-        height,
+        input_fingerprint: frame_buffer_fingerprint_f32(input.pixels()),
+        width: input.extent().width(),
+        height: input.extent().height(),
+        input_format: input.format(),
+        sampling: input.sampling(),
         frame_seed: compiled.output_cache_policy().requires_frame_seed().then_some(frame_seed),
         domain_cache_key,
     })
@@ -1570,7 +2245,8 @@ fn validate_float_effect_graph_shape(
         };
         match &node.kind {
             EffectGraphNodeKind::Source => {}
-            EffectGraphNodeKind::UnaryEffect { op, .. }
+            EffectGraphNodeKind::CustomSource { op, .. }
+            | EffectGraphNodeKind::UnaryEffect { op, .. }
             | EffectGraphNodeKind::DomainEffect { op, .. } => {
                 if !effect_render_op_supports_rgba_f32(op) {
                     return Err(EffectFloatExecutionError::UnsupportedNode {
@@ -1603,7 +2279,7 @@ fn admit_single_frame_execution(
 fn effect_render_op_supports_rgba_f32(op: &EffectRenderOp) -> bool {
     match op {
         EffectRenderOp::Custom { processor, .. } => {
-            processor.as_ref().is_some_and(|binding| binding.float32_processor().is_some())
+            processor.as_ref().is_some_and(|binding| binding.supports_float32())
         }
         EffectRenderOp::TemporalFrameBlend { .. } => false,
         _ => true,
@@ -1786,12 +2462,12 @@ fn take_execution_buffer(buffer_pool: &mut Vec<Vec<u8>>, required_len: usize) ->
 }
 
 fn take_float_graph_input(
-    outputs: &mut HashMap<EffectGraphNodeId, Vec<[f32; 4]>>,
+    outputs: &mut HashMap<EffectGraphNodeId, crate::EffectFloatFrame>,
     remaining_uses: &mut HashMap<EffectGraphNodeId, usize>,
     buffer_pool: &mut Vec<Vec<[f32; 4]>>,
     node_id: EffectGraphNodeId,
     required_len: usize,
-) -> Option<Vec<[f32; 4]>> {
+) -> Option<crate::EffectFloatFrame> {
     let remaining = remaining_uses.get_mut(&node_id)?;
     if *remaining == 0 {
         return None;
@@ -1800,11 +2476,15 @@ fn take_float_graph_input(
     if *remaining == 0 {
         return outputs.remove(&node_id);
     }
-
     let source = outputs.get(&node_id)?;
-    let mut cloned = take_float_execution_buffer(buffer_pool, required_len);
-    cloned.copy_from_slice(source);
-    Some(cloned)
+    let mut storage = take_float_execution_buffer(buffer_pool, required_len);
+    storage.copy_from_slice(source.pixels());
+    Some(crate::EffectFloatFrame::from_validated_parts(
+        source.extent(),
+        source.format(),
+        source.sampling(),
+        storage,
+    ))
 }
 
 fn take_float_execution_buffer(
@@ -1820,9 +2500,13 @@ fn take_float_execution_buffer(
     vec![[0.0; 4]; required_len]
 }
 
-fn release_float_execution_buffer(buffer_pool: &mut Vec<Vec<[f32; 4]>>, mut buffer: Vec<[f32; 4]>) {
-    buffer.clear();
-    buffer_pool.push(buffer);
+fn release_float_execution_buffer(
+    buffer_pool: &mut Vec<Vec<[f32; 4]>>,
+    buffer: crate::EffectFloatFrame,
+) {
+    let mut storage = buffer.into_parts().3;
+    storage.clear();
+    buffer_pool.push(storage);
 }
 
 fn release_execution_buffer(buffer_pool: &mut Vec<Vec<u8>>, mut buffer: Vec<u8>) {
@@ -1848,29 +2532,6 @@ fn blend_graph_inputs_in_place(
             effect_graph_dither_seed(i as u32, frame_seed),
         );
         base_px.copy_from_slice(&blended);
-    }
-}
-
-fn blend_rgba_f32_in_place(
-    base: &mut [[f32; 4]],
-    overlay: &[[f32; 4]],
-    opacity: f32,
-    blend_mode: BlendMode,
-    frame_seed: i64,
-) {
-    let opacity = opacity.clamp(0.0, 1.0);
-    if !has_positive_coverage(opacity) {
-        return;
-    }
-
-    for (index, (base_px, overlay_px)) in base.iter_mut().zip(overlay.iter()).enumerate() {
-        *base_px = blend_rgba_f32_pixel_seeded(
-            *base_px,
-            *overlay_px,
-            opacity,
-            blend_mode,
-            effect_graph_dither_seed(index as u32, frame_seed),
-        );
     }
 }
 
@@ -1923,7 +2584,7 @@ pub(crate) fn blend_rgba_f32_region_controlled<E>(
     Ok(true)
 }
 
-fn effect_graph_dither_seed(pixel_index: u32, frame_seed: i64) -> u32 {
+pub(crate) fn effect_graph_dither_seed(pixel_index: u32, frame_seed: i64) -> u32 {
     pixel_index ^ (frame_seed as u32).rotate_left(13) ^ ((frame_seed >> 32) as u32).rotate_right(7)
 }
 
@@ -2094,6 +2755,86 @@ pub(crate) fn apply_alpha_mask_f32_region_controlled<E>(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn scalar_owner_stop_blocks_empty_identity_and_cached_output() {
+        use crate::{EffectProcessorControl, EffectProcessorStopReason};
+        let graph = crate::compile_reference_effect_graph(&crate::EffectRenderPlan {
+            ops: vec![crate::EffectRenderOp::ColorAdjust {
+                exposure: 1.0,
+                contrast: 1.0,
+                saturation: 1.0,
+                working_color_space: mondrian_core::WorkingColorSpace::LinearRec709,
+            }],
+        })
+        .expect("graph");
+        let mut session = crate::EffectExecutionSession::default();
+        let input = [[0.25, 0.5, 1.5, 0.5]];
+        session
+            .apply_compiled_rgba_f32(
+                crate::EffectFloatFrameView::new(
+                    crate::EffectFrameExtent::new(1, 1),
+                    crate::EffectValueFormat::new(
+                        crate::EffectWorkingPrecision::Float32,
+                        crate::EffectColorDomain::SceneLinearRgb,
+                        mondrian_core::ColorFrameAlpha::StraightCoverage,
+                    ),
+                    mondrian_core::ImageSampling::UNIT_SQUARE,
+                    &input,
+                ),
+                &graph,
+                0,
+                &mut EffectProcessorControl::uncancelled(),
+            )
+            .expect("populate");
+        let mut checkpoint = || Some(EffectProcessorStopReason::Canceled);
+        assert_eq!(
+            session.apply_compiled_rgba_f32(
+                crate::EffectFloatFrameView::new(
+                    crate::EffectFrameExtent::new(1, 1),
+                    crate::EffectValueFormat::new(
+                        crate::EffectWorkingPrecision::Float32,
+                        crate::EffectColorDomain::SceneLinearRgb,
+                        mondrian_core::ColorFrameAlpha::StraightCoverage
+                    ),
+                    mondrian_core::ImageSampling::UNIT_SQUARE,
+                    &input
+                ),
+                &graph,
+                0,
+                &mut EffectProcessorControl::new(&mut checkpoint)
+            ),
+            Err(super::EffectFloatExecutionError::Stopped {
+                reason: EffectProcessorStopReason::Canceled
+            })
+        );
+        let identity = crate::compile_reference_effect_graph(&crate::EffectRenderPlan::default())
+            .expect("identity");
+        for (pixels, width, height) in [(&input[..], 1, 1), (&[][..], 0, 0)] {
+            let mut checkpoint = || Some(EffectProcessorStopReason::DeadlineExpired);
+            assert_eq!(
+                session.apply_compiled_rgba_f32(
+                    crate::EffectFloatFrameView::new(
+                        crate::EffectFrameExtent::new(width, height),
+                        crate::EffectValueFormat::new(
+                            crate::EffectWorkingPrecision::Float32,
+                            crate::EffectColorDomain::SceneLinearRgb,
+                            mondrian_core::ColorFrameAlpha::StraightCoverage
+                        ),
+                        mondrian_core::ImageSampling::UNIT_SQUARE,
+                        pixels
+                    ),
+                    &identity,
+                    0,
+                    &mut EffectProcessorControl::new(&mut checkpoint)
+                ),
+                Err(super::EffectFloatExecutionError::Stopped {
+                    reason: EffectProcessorStopReason::DeadlineExpired
+                })
+            );
+        }
+        assert_eq!(input, [[0.25, 0.5, 1.5, 0.5]]);
+    }
+
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -2122,6 +2863,104 @@ mod tests {
         assert_eq!(result, Err(()));
         assert_eq!(checkpoints, 2);
     }
+
+    fn assert_scalar_admission_stops_before_invalid_tail(entry: u8) {
+        let extent = crate::EffectFrameExtent::new(65_537, 1);
+        let format = crate::EffectValueFormat::new(
+            crate::EffectWorkingPrecision::Float32,
+            crate::EffectColorDomain::SceneLinearRgb,
+            mondrian_core::ColorFrameAlpha::StraightCoverage,
+        );
+        let mut input = crate::EffectFloatFrame::from_pixels(
+            extent,
+            format,
+            mondrian_core::ImageSampling::UNIT_SQUARE,
+            vec![[0.25, -2.0, 8.0, 0.5]; 65_537],
+        )
+        .expect("complete initial owner");
+        input.pixels_mut()[65_536][0] = f32::NAN;
+        let graph =
+            compile_reference_effect_graph(&EffectRenderPlan::default()).expect("identity graph");
+        let mut session = EffectExecutionSession::default();
+        let mut calls = 0;
+        let mut owner = || {
+            calls += 1;
+            (calls == 2).then_some(crate::EffectProcessorStopReason::DeadlineExpired)
+        };
+        let mut control = crate::EffectProcessorControl::new(&mut owner);
+        let result = match entry {
+            0 => session.apply_compiled_rgba_f32(input.view(), &graph, 0, &mut control),
+            1 => session.apply_compiled_pass_rgba_f32(
+                input.view(),
+                &graph,
+                1.0,
+                mondrian_core::EffectPassBlendPolicy::Mix,
+                0,
+                &mut control,
+            ),
+            2 => session.apply_compiled_pass_rgba_f32_owned(
+                input,
+                &graph,
+                1.0,
+                mondrian_core::EffectPassBlendPolicy::Mix,
+                0,
+                &mut control,
+            ),
+            3 => session.apply_compiled_pass_rgba_f32_with_domain_processor(
+                input.view(),
+                &graph,
+                1.0,
+                mondrian_core::EffectPassBlendPolicy::Mix,
+                0,
+                domain_cache_key(0),
+                |_, _| Ok(()),
+                &mut control,
+            ),
+            4 => session.apply_compiled_pass_rgba_f32_owned_with_domain_processor(
+                input,
+                &graph,
+                1.0,
+                mondrian_core::EffectPassBlendPolicy::Mix,
+                0,
+                domain_cache_key(0),
+                |_, _| Ok(()),
+                &mut control,
+            ),
+            _ => unreachable!("owned test entry"),
+        };
+        let error =
+            result.expect_err("owner stop prevents publication and examining the next block");
+        assert_eq!(
+            error,
+            EffectFloatExecutionError::Stopped {
+                reason: crate::EffectProcessorStopReason::DeadlineExpired,
+            }
+        );
+        assert_eq!(
+            calls, 2,
+            "the second bounded block is the exact owner frontier"
+        );
+    }
+
+    macro_rules! scalar_admission_control {
+        ($name:ident, $entry:expr) => {
+            #[test]
+            fn $name() {
+                assert_scalar_admission_stops_before_invalid_tail($entry);
+            }
+        };
+    }
+    scalar_admission_control!(scalar_admission_borrowed_graph_stops_before_invalid_tail, 0);
+    scalar_admission_control!(scalar_admission_borrowed_pass_stops_before_invalid_tail, 1);
+    scalar_admission_control!(scalar_admission_owned_pass_stops_before_invalid_tail, 2);
+    scalar_admission_control!(
+        scalar_admission_borrowed_domain_pass_stops_before_invalid_tail,
+        3
+    );
+    scalar_admission_control!(
+        scalar_admission_owned_domain_pass_stops_before_invalid_tail,
+        4
+    );
 
     fn color_adjust(exposure: f32, contrast: f32, saturation: f32) -> EffectRenderOp {
         EffectRenderOp::ColorAdjust {
@@ -2166,12 +3005,12 @@ mod tests {
         }
     }
 
-    fn prepare_custom_u8_plugin(
+    fn prepare_custom_u8_extension(
         key: &str,
         determinism: crate::EffectDeterminism,
         processor: CustomEffectRenderProcessor,
     ) -> Arc<CompiledEffectGraph> {
-        let effect_type = mondrian_core::effect_data::EffectType::Plugin(key.to_owned());
+        let effect_type = mondrian_core::effect_data::EffectType::External(key.to_owned());
         let params_builder: crate::EffectRenderParamsBuilder =
             Arc::new(|_, _| Ok(Some(serde_json::json!({}))));
         crate::register_effect_definition(
@@ -2189,22 +3028,22 @@ mod tests {
                 processor,
             ),
         )
-        .expect("register legal test plugin");
+        .expect("register legal test extension");
         crate::PreparedEffectProgram::prepare(
             &[crate::EffectNode::new(effect_type)],
             &[],
             mondrian_core::WorkingColorSpace::LinearRec709,
         )
-        .expect("prepare legal test plugin")
+        .expect("prepare legal test extension")
         .evaluate(mondrian_core::TimelineTime::ZERO)
-        .expect("evaluate legal test plugin")
+        .expect("evaluate legal test extension")
     }
 
     #[test]
     fn definition_frame_seed_contract_constrains_deterministic_custom_cache_keys() {
         let calls = Arc::new(AtomicUsize::new(0));
         let calls_for_processor = Arc::clone(&calls);
-        let compiled = prepare_custom_u8_plugin(
+        let compiled = prepare_custom_u8_extension(
             "test.cache.definition-frame-seeded",
             crate::EffectDeterminism::FrameSeeded,
             Arc::new(move |pixels, _, _, _, frame_seed| {
@@ -2250,7 +3089,7 @@ mod tests {
     fn definition_nondeterministic_contract_disables_all_compiled_caches() {
         let calls = Arc::new(AtomicUsize::new(0));
         let calls_for_processor = Arc::clone(&calls);
-        let compiled = prepare_custom_u8_plugin(
+        let compiled = prepare_custom_u8_extension(
             "test.cache.definition-nondeterministic",
             crate::EffectDeterminism::Nondeterministic,
             Arc::new(move |pixels, _, _, _, _| {
@@ -2287,7 +3126,7 @@ mod tests {
 
     #[test]
     fn compiled_cpu_executors_admit_contract_before_identity_fast_paths() {
-        let effect_type = mondrian_core::effect_data::EffectType::Plugin(
+        let effect_type = mondrian_core::effect_data::EffectType::External(
             "test.execution.identity-stateful".to_owned(),
         );
         crate::register_effect_definition(
@@ -2343,39 +3182,66 @@ mod tests {
                 1,
                 &compiled,
                 0.0,
-                None,
+                mondrian_core::EffectPassBlendPolicy::Mix,
                 0,
                 &mut encoded_out,
             ),
             Err(EffectExecutionError::ExecutionContract(expected))
         );
         assert_eq!(
-            apply_compiled_effect_graph_rgba_f32(&[[0.0, 0.0, 0.0, 1.0]], 1, 1, &compiled, 0,),
+            apply_compiled_effect_graph_rgba_f32(
+                crate::EffectFloatFrameView::new(
+                    crate::EffectFrameExtent::new(1, 1),
+                    crate::EffectValueFormat::new(
+                        crate::EffectWorkingPrecision::Float32,
+                        crate::EffectColorDomain::SceneLinearRgb,
+                        mondrian_core::ColorFrameAlpha::StraightCoverage
+                    ),
+                    mondrian_core::ImageSampling::UNIT_SQUARE,
+                    &[[0.0, 0.0, 0.0, 1.0]]
+                ),
+                &compiled,
+                0
+            ),
             Err(EffectFloatExecutionError::ExecutionContract(expected))
         );
         assert_eq!(
             apply_compiled_effect_graph_pass_rgba_f32(
-                &[[0.0, 0.0, 0.0, 1.0]],
-                1,
-                1,
+                crate::EffectFloatFrameView::new(
+                    crate::EffectFrameExtent::new(1, 1),
+                    crate::EffectValueFormat::new(
+                        crate::EffectWorkingPrecision::Float32,
+                        crate::EffectColorDomain::SceneLinearRgb,
+                        mondrian_core::ColorFrameAlpha::StraightCoverage
+                    ),
+                    mondrian_core::ImageSampling::UNIT_SQUARE,
+                    &[[0.0, 0.0, 0.0, 1.0]]
+                ),
                 &compiled,
                 0.0,
-                None,
-                0,
+                mondrian_core::EffectPassBlendPolicy::Mix,
+                0
             ),
             Err(EffectFloatExecutionError::ExecutionContract(expected))
         );
         assert_eq!(
             apply_compiled_effect_graph_pass_rgba_f32_with_domain_processor(
-                &[[0.0, 0.0, 0.0, 1.0]],
-                1,
-                1,
+                crate::EffectFloatFrameView::new(
+                    crate::EffectFrameExtent::new(1, 1),
+                    crate::EffectValueFormat::new(
+                        crate::EffectWorkingPrecision::Float32,
+                        crate::EffectColorDomain::SceneLinearRgb,
+                        mondrian_core::ColorFrameAlpha::StraightCoverage
+                    ),
+                    mondrian_core::ImageSampling::UNIT_SQUARE,
+                    &[[0.0, 0.0, 0.0, 1.0]]
+                ),
                 &compiled,
                 0.0,
-                None,
+                mondrian_core::EffectPassBlendPolicy::Mix,
                 0,
                 domain_cache_key(1),
-                |_, _| Ok(()),
+                |_, _| Ok(())
             ),
             Err(EffectFloatExecutionError::ExecutionContract(expected))
         );
@@ -2403,7 +3269,20 @@ mod tests {
         ));
         assert!(!compiled_effect_graph_supports_rgba_f32(&compiled));
         assert_eq!(
-            apply_compiled_effect_graph_rgba_f32(&[[0.18, 0.18, 0.18, 1.0]], 1, 1, &compiled, 0,),
+            apply_compiled_effect_graph_rgba_f32(
+                crate::EffectFloatFrameView::new(
+                    crate::EffectFrameExtent::new(1, 1),
+                    crate::EffectValueFormat::new(
+                        crate::EffectWorkingPrecision::Float32,
+                        crate::EffectColorDomain::SceneLinearRgb,
+                        mondrian_core::ColorFrameAlpha::StraightCoverage
+                    ),
+                    mondrian_core::ImageSampling::UNIT_SQUARE,
+                    &[[0.18, 0.18, 0.18, 1.0]]
+                ),
+                &compiled,
+                0
+            ),
             Err(EffectFloatExecutionError::UnsupportedNode {
                 node_id: EffectGraphNodeId(1),
                 reason: EffectFloatUnsupportedReason::ColorDomainConversionRequired {
@@ -2428,11 +3307,26 @@ mod tests {
         )
         .expect("valid display-domain graph");
         let mut transitions = Vec::new();
+        let sampling = mondrian_core::ImageSampling::new(
+            mondrian_core::SampleAspectRatio::new(3, 2).unwrap(),
+            [
+                mondrian_core::Rational::new(1, 2),
+                mondrian_core::Rational::new(2, 3),
+            ],
+        )
+        .unwrap();
 
         let output = apply_compiled_effect_graph_rgba_f32_with_domain_processor(
-            &[[0.4, 0.2, 0.1, 0.75]],
-            1,
-            1,
+            crate::EffectFloatFrameView::new(
+                crate::EffectFrameExtent::new(1, 1),
+                crate::EffectValueFormat::new(
+                    crate::EffectWorkingPrecision::Float32,
+                    crate::EffectColorDomain::SceneLinearRgb,
+                    mondrian_core::ColorFrameAlpha::StraightCoverage,
+                ),
+                sampling,
+                &[[0.4, 0.2, 0.1, 0.75]],
+            ),
             &compiled,
             0,
             domain_cache_key(7),
@@ -2453,6 +3347,7 @@ mod tests {
         )
         .expect("execute graph with resolved domains");
 
+        assert_eq!(output.sampling(), sampling);
         assert_eq!(transitions, compiled.domain_plan().transitions);
         for (actual, expected) in output[0].iter().zip([0.4, 0.2, 0.1, 0.75]) {
             assert!((actual - expected).abs() < 1.0e-6);
@@ -2471,9 +3366,16 @@ mod tests {
         .expect("valid display-domain graph");
 
         let error = apply_compiled_effect_graph_rgba_f32_with_domain_processor(
-            &[[0.4, 0.2, 0.1, 0.75]],
-            1,
-            1,
+            crate::EffectFloatFrameView::new(
+                crate::EffectFrameExtent::new(1, 1),
+                crate::EffectValueFormat::new(
+                    crate::EffectWorkingPrecision::Float32,
+                    crate::EffectColorDomain::SceneLinearRgb,
+                    mondrian_core::ColorFrameAlpha::StraightCoverage,
+                ),
+                mondrian_core::ImageSampling::UNIT_SQUARE,
+                &[[0.4, 0.2, 0.1, 0.75]],
+            ),
             &compiled,
             0,
             domain_cache_key(9_001),
@@ -2519,9 +3421,16 @@ mod tests {
         for cache_key in [91_001, 91_001, 91_002] {
             session
                 .apply_compiled_rgba_f32_with_domain_processor(
-                    &input,
-                    1,
-                    1,
+                    crate::EffectFloatFrameView::new(
+                        crate::EffectFrameExtent::new(1, 1),
+                        crate::EffectValueFormat::new(
+                            crate::EffectWorkingPrecision::Float32,
+                            crate::EffectColorDomain::SceneLinearRgb,
+                            mondrian_core::ColorFrameAlpha::StraightCoverage,
+                        ),
+                        mondrian_core::ImageSampling::UNIT_SQUARE,
+                        &input,
+                    ),
                     &compiled,
                     0,
                     domain_cache_key(cache_key),
@@ -2529,6 +3438,7 @@ mod tests {
                         processor_calls += 1;
                         Ok(())
                     },
+                    &mut crate::EffectProcessorControl::uncancelled(),
                 )
                 .expect("execute cacheable domain graph");
         }
@@ -2546,9 +3456,21 @@ mod tests {
         })
         .expect("compile color adjust graph");
 
-        let output =
-            apply_compiled_effect_graph_rgba_f32(&[[1.25, 0.25, 0.125, 1.0]], 1, 1, &compiled, 0)
-                .expect("float color adjust");
+        let output = apply_compiled_effect_graph_rgba_f32(
+            crate::EffectFloatFrameView::new(
+                crate::EffectFrameExtent::new(1, 1),
+                crate::EffectValueFormat::new(
+                    crate::EffectWorkingPrecision::Float32,
+                    crate::EffectColorDomain::SceneLinearRgb,
+                    mondrian_core::ColorFrameAlpha::StraightCoverage,
+                ),
+                mondrian_core::ImageSampling::UNIT_SQUARE,
+                &[[1.25, 0.25, 0.125, 1.0]],
+            ),
+            &compiled,
+            0,
+        )
+        .expect("float color adjust");
 
         assert!(compiled_effect_graph_supports_rgba_f32(&compiled));
         assert!((output[0][0] - 2.5).abs() <= 1.0e-6);
@@ -2565,12 +3487,19 @@ mod tests {
         .expect("compile color adjust graph");
 
         let output = apply_compiled_effect_graph_pass_rgba_f32(
-            &[[1.25, 0.25, 0.125, 1.0]],
-            1,
-            1,
+            crate::EffectFloatFrameView::new(
+                crate::EffectFrameExtent::new(1, 1),
+                crate::EffectValueFormat::new(
+                    crate::EffectWorkingPrecision::Float32,
+                    crate::EffectColorDomain::SceneLinearRgb,
+                    mondrian_core::ColorFrameAlpha::StraightCoverage,
+                ),
+                mondrian_core::ImageSampling::UNIT_SQUARE,
+                &[[1.25, 0.25, 0.125, 1.0]],
+            ),
             &compiled,
             0.5,
-            Some(BlendMode::Normal),
+            mondrian_core::EffectPassBlendPolicy::Blend(BlendMode::Normal),
             0,
         )
         .expect("float color adjust pass");
@@ -2594,13 +3523,22 @@ mod tests {
 
         let output = session
             .apply_compiled_pass_rgba_f32_owned(
-                base,
-                8,
-                8,
+                crate::EffectFloatFrame::from_pixels(
+                    crate::EffectFrameExtent::new(8, 8),
+                    crate::EffectValueFormat::new(
+                        crate::EffectWorkingPrecision::Float32,
+                        crate::EffectColorDomain::SceneLinearRgb,
+                        mondrian_core::ColorFrameAlpha::StraightCoverage,
+                    ),
+                    mondrian_core::ImageSampling::UNIT_SQUARE,
+                    base,
+                )
+                .expect("complete owned Float input"),
                 &compiled,
                 0.5,
-                Some(BlendMode::Normal),
+                mondrian_core::EffectPassBlendPolicy::Blend(BlendMode::Normal),
                 0,
+                &mut crate::EffectProcessorControl::uncancelled(),
             )
             .expect("owned float color adjust pass");
 
@@ -2616,12 +3554,19 @@ mod tests {
         .expect("compile color adjust graph");
 
         let output = apply_compiled_effect_graph_pass_rgba_f32(
-            &[[0.25, 0.5, 0.75, 1.0]],
-            1,
-            1,
+            crate::EffectFloatFrameView::new(
+                crate::EffectFrameExtent::new(1, 1),
+                crate::EffectValueFormat::new(
+                    crate::EffectWorkingPrecision::Float32,
+                    crate::EffectColorDomain::SceneLinearRgb,
+                    mondrian_core::ColorFrameAlpha::StraightCoverage,
+                ),
+                mondrian_core::ImageSampling::UNIT_SQUARE,
+                &[[0.25, 0.5, 0.75, 1.0]],
+            ),
             &compiled,
             1.0,
-            Some(BlendMode::Multiply),
+            mondrian_core::EffectPassBlendPolicy::Blend(BlendMode::Multiply),
             0,
         )
         .expect("multiply stays on float pass path");
@@ -2646,17 +3591,104 @@ mod tests {
         let input = [[0.25, 0.5, 0.75, 1.0]];
         let mut session = EffectExecutionSession::default();
 
-        assert!(effect_output_cache_key_f32(&input, 1, 1, &compiled, 7, None).is_some());
+        let input_view = crate::EffectFloatFrameView::new(
+            crate::EffectFrameExtent::new(1, 1),
+            crate::EffectValueFormat::new(
+                crate::EffectWorkingPrecision::Float32,
+                crate::EffectColorDomain::SceneLinearRgb,
+                mondrian_core::ColorFrameAlpha::StraightCoverage,
+            ),
+            mondrian_core::ImageSampling::UNIT_SQUARE,
+            &input,
+        );
+        assert!(effect_output_cache_key_f32(input_view, &compiled, 7, None).is_some());
         assert!(
-            get_cached_effect_output_f32(&mut session, &input, 1, 1, &compiled, 7, None).is_none()
+            get_cached_effect_output_f32(&mut session, input_view, &compiled, 7, None).is_none()
         );
         let output = session
-            .apply_compiled_rgba_f32(&input, 1, 1, &compiled, 7)
+            .apply_compiled_rgba_f32(
+                crate::EffectFloatFrameView::new(
+                    crate::EffectFrameExtent::new(1, 1),
+                    crate::EffectValueFormat::new(
+                        crate::EffectWorkingPrecision::Float32,
+                        crate::EffectColorDomain::SceneLinearRgb,
+                        mondrian_core::ColorFrameAlpha::StraightCoverage,
+                    ),
+                    mondrian_core::ImageSampling::UNIT_SQUARE,
+                    &input,
+                ),
+                &compiled,
+                7,
+                &mut crate::EffectProcessorControl::uncancelled(),
+            )
             .expect("float chain");
 
         assert_eq!(
-            get_cached_effect_output_f32(&mut session, &input, 1, 1, &compiled, 7, None),
+            get_cached_effect_output_f32(&mut session, input_view, &compiled, 7, None),
             Some(output)
+        );
+    }
+
+    #[test]
+    fn float_output_cache_isolates_equal_pixels_with_different_sampling() {
+        let compiled = compile_reference_effect_graph(&EffectRenderPlan {
+            ops: vec![
+                color_adjust(1.0, 1.0, 1.0),
+                EffectRenderOp::Vignette { intensity: 0.1, feather: 0.8 },
+                color_adjust(0.0, 1.1, 0.9),
+                EffectRenderOp::Vignette { intensity: 0.05, feather: 0.6 },
+            ],
+        })
+        .unwrap();
+        let extent = crate::EffectFrameExtent::new(1, 1);
+        let format = crate::EffectValueFormat::new(
+            crate::EffectWorkingPrecision::Float32,
+            crate::EffectColorDomain::SceneLinearRgb,
+            mondrian_core::ColorFrameAlpha::StraightCoverage,
+        );
+        let sampling = mondrian_core::ImageSampling::new(
+            mondrian_core::SampleAspectRatio::new(4, 3).unwrap(),
+            [
+                mondrian_core::Rational::new(1, 2),
+                mondrian_core::Rational::new(2, 3),
+            ],
+        )
+        .unwrap();
+        let pixels = [[0.25, 0.5, 0.75, 1.0]];
+        let first = crate::EffectFloatFrameView::new(extent, format, sampling, &pixels);
+        let second = crate::EffectFloatFrameView::new(
+            extent,
+            format,
+            mondrian_core::ImageSampling::UNIT_SQUARE,
+            &pixels,
+        );
+        assert_ne!(
+            effect_output_cache_key_f32(first, &compiled, 7, None),
+            effect_output_cache_key_f32(second, &compiled, 7, None)
+        );
+        let mut session = EffectExecutionSession::default();
+        let original = session
+            .apply_compiled_rgba_f32(
+                first,
+                &compiled,
+                7,
+                &mut crate::EffectProcessorControl::uncancelled(),
+            )
+            .unwrap();
+        assert_eq!(original.sampling(), sampling);
+        assert!(get_cached_effect_output_f32(&mut session, second, &compiled, 7, None).is_none());
+        let other = session
+            .apply_compiled_rgba_f32(
+                second,
+                &compiled,
+                7,
+                &mut crate::EffectProcessorControl::uncancelled(),
+            )
+            .unwrap();
+        assert_eq!(other.sampling(), second.sampling());
+        assert_eq!(
+            get_cached_effect_output_f32(&mut session, first, &compiled, 7, None),
+            Some(original)
         );
     }
 
@@ -2673,12 +3705,36 @@ mod tests {
         let mut session = EffectExecutionSession::default();
 
         assert!(!compiled.output_cache_enabled());
-        assert!(effect_output_cache_key_f32(&input, 1, 1, &compiled, 7, None).is_none());
+        let input_view = crate::EffectFloatFrameView::new(
+            crate::EffectFrameExtent::new(1, 1),
+            crate::EffectValueFormat::new(
+                crate::EffectWorkingPrecision::Float32,
+                crate::EffectColorDomain::SceneLinearRgb,
+                mondrian_core::ColorFrameAlpha::StraightCoverage,
+            ),
+            mondrian_core::ImageSampling::UNIT_SQUARE,
+            &input,
+        );
+        assert!(effect_output_cache_key_f32(input_view, &compiled, 7, None).is_none());
         session
-            .apply_compiled_rgba_f32(&input, 1, 1, &compiled, 7)
+            .apply_compiled_rgba_f32(
+                crate::EffectFloatFrameView::new(
+                    crate::EffectFrameExtent::new(1, 1),
+                    crate::EffectValueFormat::new(
+                        crate::EffectWorkingPrecision::Float32,
+                        crate::EffectColorDomain::SceneLinearRgb,
+                        mondrian_core::ColorFrameAlpha::StraightCoverage,
+                    ),
+                    mondrian_core::ImageSampling::UNIT_SQUARE,
+                    &input,
+                ),
+                &compiled,
+                7,
+                &mut crate::EffectProcessorControl::uncancelled(),
+            )
             .expect("low-cost float chain");
         assert!(
-            get_cached_effect_output_f32(&mut session, &input, 1, 1, &compiled, 7, None).is_none()
+            get_cached_effect_output_f32(&mut session, input_view, &compiled, 7, None).is_none()
         );
     }
 
@@ -2698,9 +3754,21 @@ mod tests {
         })
         .expect("compile custom graph");
 
-        let err =
-            apply_compiled_effect_graph_rgba_f32(&[[0.25, 0.5, 0.75, 1.0]], 1, 1, &compiled, 0)
-                .expect_err("custom effect without float ABI must fail closed");
+        let err = apply_compiled_effect_graph_rgba_f32(
+            crate::EffectFloatFrameView::new(
+                crate::EffectFrameExtent::new(1, 1),
+                crate::EffectValueFormat::new(
+                    crate::EffectWorkingPrecision::Float32,
+                    crate::EffectColorDomain::SceneLinearRgb,
+                    mondrian_core::ColorFrameAlpha::StraightCoverage,
+                ),
+                mondrian_core::ImageSampling::UNIT_SQUARE,
+                &[[0.25, 0.5, 0.75, 1.0]],
+            ),
+            &compiled,
+            0,
+        )
+        .expect_err("custom effect without float ABI must fail closed");
 
         assert!(!compiled_effect_graph_supports_rgba_f32(&compiled));
         assert!(matches!(
@@ -2719,8 +3787,8 @@ mod tests {
     #[test]
     fn float_custom_processor_preserves_hdr_pixels_and_uses_float_admission() {
         let processor = crate::CustomEffectProcessorBinding::new_f32(Arc::new(
-            |pixels, width, height, params, _frame_seed| {
-                assert_eq!((width, height), (1, 1));
+            |pixels, params, _frame_seed| {
+                assert_eq!((pixels.width(), pixels.height()), (1, 1));
                 pixels[0][0] += params["gain"].as_f64().unwrap_or_default() as f32;
                 Ok(())
             },
@@ -2738,21 +3806,34 @@ mod tests {
 
         assert!(compiled_effect_graph_supports_rgba_f32(&compiled));
         assert_eq!(
-            apply_compiled_effect_graph_rgba_f32(&[[2.0, -0.25, 0.5, 1.0]], 1, 1, &compiled, 0)
-                .expect("execute float custom graph"),
+            apply_compiled_effect_graph_rgba_f32(
+                crate::EffectFloatFrameView::new(
+                    crate::EffectFrameExtent::new(1, 1),
+                    crate::EffectValueFormat::new(
+                        crate::EffectWorkingPrecision::Float32,
+                        crate::EffectColorDomain::SceneLinearRgb,
+                        mondrian_core::ColorFrameAlpha::StraightCoverage
+                    ),
+                    mondrian_core::ImageSampling::UNIT_SQUARE,
+                    &[[2.0, -0.25, 0.5, 1.0]]
+                ),
+                &compiled,
+                0
+            )
+            .expect("execute float custom graph")
+            .pixels(),
             vec![[2.75, -0.25, 0.5, 1.0]]
         );
     }
 
     #[test]
     fn float_custom_processor_failure_keeps_original_pixels() {
-        let processor =
-            crate::CustomEffectProcessorBinding::new_f32(Arc::new(|pixels, _, _, _, _| {
-                pixels[0][0] = 0.0;
-                Err(mondrian_core::MondrianError::EffectGraphEvaluationFailed {
-                    reason: "processor failed".to_owned(),
-                })
-            }));
+        let processor = crate::CustomEffectProcessorBinding::new_f32(Arc::new(|pixels, _, _| {
+            pixels[0][0] = 0.0;
+            Err(mondrian_core::MondrianError::EffectGraphEvaluationFailed {
+                reason: "processor failed".to_owned(),
+            })
+        }));
         let op = EffectRenderOp::Custom {
             key: "test.custom.failure".to_owned(),
             params: serde_json::json!({}),
@@ -2760,22 +3841,44 @@ mod tests {
             cache_policy: crate::EffectCachePolicy::Uncacheable,
             processor: Some(processor),
         };
-        let mut pixels = vec![[2.0, -0.25, 0.5, 1.0]];
+        let mut pixels = crate::EffectFloatFrame::from_pixels(
+            crate::EffectFrameExtent::new(1, 1),
+            crate::EffectValueFormat::new(
+                crate::EffectWorkingPrecision::Float32,
+                crate::EffectColorDomain::SceneLinearRgb,
+                mondrian_core::ColorFrameAlpha::StraightCoverage,
+            ),
+            mondrian_core::ImageSampling::UNIT_SQUARE,
+            vec![[2.0, -0.25, 0.5, 1.0]],
+        )
+        .expect("typed staging");
         assert!(matches!(
-            apply_custom_render_op_f32(&mut pixels, 1, 1, &op, 0),
+            apply_custom_render_op_f32(
+                &mut pixels,
+                &op,
+                0,
+                None,
+                16,
+                &mut crate::EffectProcessorControl::uncancelled()
+            ),
             Err(EffectExecutionError::CustomProcessorFailed { .. })
         ));
-        assert_eq!(pixels, vec![[2.0, -0.25, 0.5, 1.0]]);
+        assert_eq!(pixels.pixels(), vec![[2.0, -0.25, 0.5, 1.0]]);
         assert_eq!(crate::adjustment::render_op_f32_scratch_frames(&op), 1);
     }
 
     #[test]
     fn float_custom_processor_cannot_change_pixel_count() {
-        let processor =
-            crate::CustomEffectProcessorBinding::new_f32(Arc::new(|pixels, _, _, _, _| {
-                pixels.clear();
-                Ok(())
-            }));
+        let processor = crate::CustomEffectProcessorBinding::new_f32(Arc::new(|pixels, _, _| {
+            *pixels = crate::EffectFloatFrame::from_pixels(
+                crate::EffectFrameExtent::new(0, 0),
+                pixels.format(),
+                mondrian_core::ImageSampling::UNIT_SQUARE,
+                Vec::new(),
+            )
+            .expect("malformed owned extent");
+            Ok(())
+        }));
         let op = EffectRenderOp::Custom {
             key: "test.custom.resize".to_owned(),
             params: serde_json::json!({}),
@@ -2783,12 +3886,29 @@ mod tests {
             cache_policy: crate::EffectCachePolicy::Uncacheable,
             processor: Some(processor),
         };
-        let mut pixels = vec![[2.0, -0.25, 0.5, 1.0]];
+        let mut pixels = crate::EffectFloatFrame::from_pixels(
+            crate::EffectFrameExtent::new(1, 1),
+            crate::EffectValueFormat::new(
+                crate::EffectWorkingPrecision::Float32,
+                crate::EffectColorDomain::SceneLinearRgb,
+                mondrian_core::ColorFrameAlpha::StraightCoverage,
+            ),
+            mondrian_core::ImageSampling::UNIT_SQUARE,
+            vec![[2.0, -0.25, 0.5, 1.0]],
+        )
+        .expect("typed staging");
         assert!(matches!(
-            apply_custom_render_op_f32(&mut pixels, 1, 1, &op, 0),
+            apply_custom_render_op_f32(
+                &mut pixels,
+                &op,
+                0,
+                None,
+                16,
+                &mut crate::EffectProcessorControl::uncancelled()
+            ),
             Err(EffectExecutionError::CustomProcessorFailed { .. })
         ));
-        assert_eq!(pixels, vec![[2.0, -0.25, 0.5, 1.0]]);
+        assert_eq!(pixels.pixels(), vec![[2.0, -0.25, 0.5, 1.0]]);
     }
 
     #[test]
@@ -2822,8 +3942,21 @@ mod tests {
             crate::compile_reference_render_graph(graph).expect("compile branching float graph");
         let input = [[1.5, 0.25, -0.125, 0.5]];
 
-        let output = apply_compiled_effect_graph_rgba_f32(&input, 1, 1, &compiled, 7)
-            .expect("execute branching float graph");
+        let output = apply_compiled_effect_graph_rgba_f32(
+            crate::EffectFloatFrameView::new(
+                crate::EffectFrameExtent::new(1, 1),
+                crate::EffectValueFormat::new(
+                    crate::EffectWorkingPrecision::Float32,
+                    crate::EffectColorDomain::SceneLinearRgb,
+                    mondrian_core::ColorFrameAlpha::StraightCoverage,
+                ),
+                mondrian_core::ImageSampling::UNIT_SQUARE,
+                &input,
+            ),
+            &compiled,
+            7,
+        )
+        .expect("execute branching float graph");
         let expected = blend_rgba_f32_pixel_seeded(
             input[0],
             [3.0, 0.5, -0.25, 0.5],
@@ -2843,6 +3976,14 @@ mod tests {
 
     #[test]
     fn float_mask_graph_uses_unquantized_matte_and_preserves_rgb() {
+        let sampling = mondrian_core::ImageSampling::new(
+            mondrian_core::SampleAspectRatio::new(3, 2).unwrap(),
+            [
+                mondrian_core::Rational::new(1, 2),
+                mondrian_core::Rational::new(2, 3),
+            ],
+        )
+        .unwrap();
         let graph = EffectRenderGraph {
             nodes: vec![
                 crate::EffectGraphNode {
@@ -2881,9 +4022,23 @@ mod tests {
             crate::compile_reference_render_graph(graph).expect("compile float mask graph");
         let input = [[2.0, -0.25, 0.5, 0.8]];
 
-        let output = apply_compiled_effect_graph_rgba_f32(&input, 1, 1, &compiled, 0)
-            .expect("execute float mask graph");
+        let output = apply_compiled_effect_graph_rgba_f32(
+            crate::EffectFloatFrameView::new(
+                crate::EffectFrameExtent::new(1, 1),
+                crate::EffectValueFormat::new(
+                    crate::EffectWorkingPrecision::Float32,
+                    crate::EffectColorDomain::SceneLinearRgb,
+                    mondrian_core::ColorFrameAlpha::StraightCoverage,
+                ),
+                sampling,
+                &input,
+            ),
+            &compiled,
+            0,
+        )
+        .expect("execute float mask graph");
 
+        assert_eq!(output.sampling(), sampling);
         assert!(compiled_effect_graph_supports_rgba_f32(&compiled));
         assert_eq!(&output[0][..3], &input[0][..3]);
         assert!((output[0][3] - 0.8 * 0.123_456).abs() <= 1.0e-6);
@@ -2968,9 +4123,21 @@ mod tests {
         ] {
             let compiled = grade_matte_graph(mask_op);
             let float_input = [[0.2, 0.3, 0.4, 0.42]];
-            let float_output =
-                apply_compiled_effect_graph_rgba_f32(&float_input, 1, 1, &compiled, 0)
-                    .expect("execute float grade matte");
+            let float_output = apply_compiled_effect_graph_rgba_f32(
+                crate::EffectFloatFrameView::new(
+                    crate::EffectFrameExtent::new(1, 1),
+                    crate::EffectValueFormat::new(
+                        crate::EffectWorkingPrecision::Float32,
+                        crate::EffectColorDomain::SceneLinearRgb,
+                        mondrian_core::ColorFrameAlpha::StraightCoverage,
+                    ),
+                    mondrian_core::ImageSampling::UNIT_SQUARE,
+                    &float_input,
+                ),
+                &compiled,
+                0,
+            )
+            .expect("execute float grade matte");
             for channel in 0..3 {
                 let expected = float_input[0][channel] * (1.0 + weight);
                 assert!((float_output[0][channel] - expected).abs() <= 1.0e-6);
@@ -3020,12 +4187,51 @@ mod tests {
             crate::compile_reference_render_graph(graph).expect("compile float multi-input graph");
         let input = vec![[0.75, 0.25, 0.125, 1.0]; 64];
 
-        let first = apply_compiled_effect_graph_rgba_f32(&input, 8, 8, &compiled, 1)
-            .expect("execute first dissolve frame");
-        let repeated = apply_compiled_effect_graph_rgba_f32(&input, 8, 8, &compiled, 1)
-            .expect("execute repeated dissolve frame");
-        let second = apply_compiled_effect_graph_rgba_f32(&input, 8, 8, &compiled, 2)
-            .expect("execute second dissolve frame");
+        let first = apply_compiled_effect_graph_rgba_f32(
+            crate::EffectFloatFrameView::new(
+                crate::EffectFrameExtent::new(8, 8),
+                crate::EffectValueFormat::new(
+                    crate::EffectWorkingPrecision::Float32,
+                    crate::EffectColorDomain::SceneLinearRgb,
+                    mondrian_core::ColorFrameAlpha::StraightCoverage,
+                ),
+                mondrian_core::ImageSampling::UNIT_SQUARE,
+                &input,
+            ),
+            &compiled,
+            1,
+        )
+        .expect("execute first dissolve frame");
+        let repeated = apply_compiled_effect_graph_rgba_f32(
+            crate::EffectFloatFrameView::new(
+                crate::EffectFrameExtent::new(8, 8),
+                crate::EffectValueFormat::new(
+                    crate::EffectWorkingPrecision::Float32,
+                    crate::EffectColorDomain::SceneLinearRgb,
+                    mondrian_core::ColorFrameAlpha::StraightCoverage,
+                ),
+                mondrian_core::ImageSampling::UNIT_SQUARE,
+                &input,
+            ),
+            &compiled,
+            1,
+        )
+        .expect("execute repeated dissolve frame");
+        let second = apply_compiled_effect_graph_rgba_f32(
+            crate::EffectFloatFrameView::new(
+                crate::EffectFrameExtent::new(8, 8),
+                crate::EffectValueFormat::new(
+                    crate::EffectWorkingPrecision::Float32,
+                    crate::EffectColorDomain::SceneLinearRgb,
+                    mondrian_core::ColorFrameAlpha::StraightCoverage,
+                ),
+                mondrian_core::ImageSampling::UNIT_SQUARE,
+                &input,
+            ),
+            &compiled,
+            2,
+        )
+        .expect("execute second dissolve frame");
 
         assert!(compiled_effect_graph_supports_rgba_f32(&compiled));
         assert_eq!(
@@ -3050,8 +4256,21 @@ mod tests {
             [0.0, 8.0, 0.0, 0.0],
         ];
 
-        let output =
-            apply_compiled_effect_graph_rgba_f32(&input, 3, 1, &compiled, 0).expect("float blur");
+        let output = apply_compiled_effect_graph_rgba_f32(
+            crate::EffectFloatFrameView::new(
+                crate::EffectFrameExtent::new(3, 1),
+                crate::EffectValueFormat::new(
+                    crate::EffectWorkingPrecision::Float32,
+                    crate::EffectColorDomain::SceneLinearRgb,
+                    mondrian_core::ColorFrameAlpha::StraightCoverage,
+                ),
+                mondrian_core::ImageSampling::UNIT_SQUARE,
+                &input,
+            ),
+            &compiled,
+            0,
+        )
+        .expect("float blur");
 
         assert!(compiled_effect_graph_supports_rgba_f32(&compiled));
         assert!(output[0][3] > 0.0 && output[0][3] < 1.0);
@@ -3080,10 +4299,36 @@ mod tests {
         .expect("compile built-in graph");
         let input = vec![[1.5, 0.5, 0.25, 1.0]; 9];
 
-        let first = apply_compiled_effect_graph_rgba_f32(&input, 3, 3, &compiled, 17)
-            .expect("built-in float graph");
-        let second = apply_compiled_effect_graph_rgba_f32(&input, 3, 3, &compiled, 17)
-            .expect("deterministic built-in float graph");
+        let first = apply_compiled_effect_graph_rgba_f32(
+            crate::EffectFloatFrameView::new(
+                crate::EffectFrameExtent::new(3, 3),
+                crate::EffectValueFormat::new(
+                    crate::EffectWorkingPrecision::Float32,
+                    crate::EffectColorDomain::SceneLinearRgb,
+                    mondrian_core::ColorFrameAlpha::StraightCoverage,
+                ),
+                mondrian_core::ImageSampling::UNIT_SQUARE,
+                &input,
+            ),
+            &compiled,
+            17,
+        )
+        .expect("built-in float graph");
+        let second = apply_compiled_effect_graph_rgba_f32(
+            crate::EffectFloatFrameView::new(
+                crate::EffectFrameExtent::new(3, 3),
+                crate::EffectValueFormat::new(
+                    crate::EffectWorkingPrecision::Float32,
+                    crate::EffectColorDomain::SceneLinearRgb,
+                    mondrian_core::ColorFrameAlpha::StraightCoverage,
+                ),
+                mondrian_core::ImageSampling::UNIT_SQUARE,
+                &input,
+            ),
+            &compiled,
+            17,
+        )
+        .expect("deterministic built-in float graph");
 
         assert!(compiled_effect_graph_supports_rgba_f32(&compiled));
         assert_eq!(first, second);
@@ -3100,10 +4345,36 @@ mod tests {
         .expect("compile grain graph");
         let input = vec![[1.25, -0.1, 0.5, 0.75]; 4];
 
-        let first = apply_compiled_effect_graph_rgba_f32(&input, 2, 2, &compiled, 1)
-            .expect("grain frame one");
-        let second = apply_compiled_effect_graph_rgba_f32(&input, 2, 2, &compiled, 2)
-            .expect("grain frame two");
+        let first = apply_compiled_effect_graph_rgba_f32(
+            crate::EffectFloatFrameView::new(
+                crate::EffectFrameExtent::new(2, 2),
+                crate::EffectValueFormat::new(
+                    crate::EffectWorkingPrecision::Float32,
+                    crate::EffectColorDomain::SceneLinearRgb,
+                    mondrian_core::ColorFrameAlpha::StraightCoverage,
+                ),
+                mondrian_core::ImageSampling::UNIT_SQUARE,
+                &input,
+            ),
+            &compiled,
+            1,
+        )
+        .expect("grain frame one");
+        let second = apply_compiled_effect_graph_rgba_f32(
+            crate::EffectFloatFrameView::new(
+                crate::EffectFrameExtent::new(2, 2),
+                crate::EffectValueFormat::new(
+                    crate::EffectWorkingPrecision::Float32,
+                    crate::EffectColorDomain::SceneLinearRgb,
+                    mondrian_core::ColorFrameAlpha::StraightCoverage,
+                ),
+                mondrian_core::ImageSampling::UNIT_SQUARE,
+                &input,
+            ),
+            &compiled,
+            2,
+        )
+        .expect("grain frame two");
 
         assert_ne!(first, second);
         assert!(first.iter().all(|pixel| (pixel[3] - 0.75).abs() <= f32::EPSILON));
@@ -3118,12 +4389,226 @@ mod tests {
         })
         .expect("compile color adjust graph");
 
-        let err = apply_compiled_effect_graph_rgba_f32(&[], 1, 1, &compiled, 0)
-            .expect_err("input extent mismatch");
+        let err = apply_compiled_effect_graph_rgba_f32(
+            crate::EffectFloatFrameView::new(
+                crate::EffectFrameExtent::new(1, 1),
+                crate::EffectValueFormat::new(
+                    crate::EffectWorkingPrecision::Float32,
+                    crate::EffectColorDomain::SceneLinearRgb,
+                    mondrian_core::ColorFrameAlpha::StraightCoverage,
+                ),
+                mondrian_core::ImageSampling::UNIT_SQUARE,
+                &[],
+            ),
+            &compiled,
+            0,
+        )
+        .expect_err("input extent mismatch");
 
         assert!(matches!(
             err,
-            EffectFloatExecutionError::InputSizeMismatch { expected: 1, actual: 0 }
+            EffectFloatExecutionError::FrameContract(
+                crate::EffectFloatFrameError::ExtentMismatch { expected: 1, actual: 0 }
+            )
         ));
+    }
+}
+
+#[cfg(test)]
+mod effect_pass_mix_contracts {
+    use super::*;
+
+    fn graph(blur: bool) -> Arc<CompiledEffectGraph> {
+        let mut builder = crate::EffectGraphBuilderState::new();
+        if blur {
+            builder.append_unary(EffectRenderOp::GaussianBlur { radius: 1.0 });
+        }
+        crate::compile_reference_render_graph(builder.finish()).expect("actual compiled graph")
+    }
+    fn view<'a>(pixel: &'a [[f32; 4]]) -> crate::EffectFloatFrameView<'a> {
+        crate::EffectFloatFrameView::new(
+            crate::EffectFrameExtent::new(1, 1),
+            crate::EffectValueFormat::new(
+                crate::EffectWorkingPrecision::Float32,
+                crate::EffectColorDomain::SceneLinearRgb,
+                mondrian_core::ColorFrameAlpha::StraightCoverage,
+            ),
+            mondrian_core::ImageSampling::UNIT_SQUARE,
+            pixel,
+        )
+    }
+    fn pass(
+        entry: u8,
+        graph: &CompiledEffectGraph,
+        amount: f32,
+        policy: mondrian_core::EffectPassBlendPolicy,
+    ) -> [f32; 4] {
+        let pixels = [[-0.5, 3.0, 0.8, 0.5]];
+        let mut session = EffectExecutionSession::default();
+        let mut control = crate::EffectProcessorControl::uncancelled();
+        let result = match entry {
+            0 => session.apply_compiled_pass_rgba_f32(
+                view(&pixels),
+                graph,
+                amount,
+                policy,
+                0,
+                &mut control,
+            ),
+            1 => session.apply_compiled_pass_rgba_f32_owned(
+                view(&pixels).to_owned().expect("owner"),
+                graph,
+                amount,
+                policy,
+                0,
+                &mut control,
+            ),
+            2 => session.apply_compiled_pass_rgba_f32_with_domain_processor(
+                view(&pixels),
+                graph,
+                amount,
+                policy,
+                0,
+                EffectDomainProcessorCacheKey::from_complete_semantic_fingerprint([29; 32]),
+                |_, _| panic!("scene linear requires no domain conversion"),
+                &mut control,
+            ),
+            3 => session.apply_compiled_pass_rgba_f32_owned_with_domain_processor(
+                view(&pixels).to_owned().expect("owner"),
+                graph,
+                amount,
+                policy,
+                0,
+                EffectDomainProcessorCacheKey::from_complete_semantic_fingerprint([29; 32]),
+                |_, _| panic!("scene linear requires no domain conversion"),
+                &mut control,
+            ),
+            _ => panic!("exact four public entries"),
+        }
+        .expect("real adjustment execution");
+        assert_eq!(
+            result.alpha(),
+            mondrian_core::ColorFrameAlpha::StraightCoverage
+        );
+        result.pixels()[0]
+    }
+    #[test]
+    fn effect_pass_mix_constant_preserves_coverage_across_all_float_entries() {
+        let blur = graph(true);
+        let identity = graph(false);
+        for entry in 0..4 {
+            for amount in [0.0, 0.125, 0.4, 1.0] {
+                let expected = [-0.5, 3.0, 0.8, 0.5];
+                for compiled in [&identity, &blur] {
+                    let actual = pass(
+                        entry,
+                        compiled,
+                        amount,
+                        mondrian_core::EffectPassBlendPolicy::Mix,
+                    );
+                    for (actual, expected) in actual.into_iter().zip(expected) {
+                        assert!(
+                            (actual - expected).abs() < 1e-6,
+                            "entry={entry} amount={amount} actual={actual} expected={expected}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+    #[test]
+    fn effect_pass_mix_explicit_normal_keeps_over_for_identity_graph() {
+        let identity = graph(false);
+        for entry in 0..4 {
+            for amount in [0.125_f32, 0.4, 1.0] {
+                let source_alpha = 0.5_f64 * f64::from(amount);
+                let expected_alpha = source_alpha + 0.5 * (1.0 - source_alpha);
+                let actual = pass(
+                    entry,
+                    &identity,
+                    amount,
+                    mondrian_core::EffectPassBlendPolicy::Blend(BlendMode::Normal),
+                );
+                assert!(
+                    (f64::from(actual[3]) - expected_alpha).abs() < 1e-6,
+                    "entry={entry} explicit over law"
+                );
+                for (actual, expected) in actual[..3].iter().zip([-0.5_f32, 3.0, 0.8]) {
+                    assert!((*actual - expected).abs() < 1e-6);
+                }
+            }
+        }
+    }
+    #[test]
+    fn effect_pass_mix_encoded_constant_preserves_coverage_without_override() {
+        let pixel = [40_u8, 100, 200, 128];
+        for amount in [0.125, 0.4, 1.0] {
+            let mut output = Vec::new();
+            crate::adjustment::blend_adjustment_result(
+                &pixel,
+                &pixel,
+                1,
+                1,
+                amount,
+                mondrian_core::EffectPassBlendPolicy::Mix,
+                &mut output,
+            );
+            assert_eq!(
+                output, pixel,
+                "encoded implicit mix must not composite a second copy"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod image_scale_cache_tests {
+    use super::*;
+
+    #[test]
+    fn cached_float_output_cannot_bypass_actual_unit_scale_admission() {
+        let graph = crate::image_scale_admission_tests::cacheable_unit_graph();
+        let sampling = mondrian_core::ImageSampling::new(
+            mondrian_core::SampleAspectRatio::new(4, 3).unwrap(),
+            [mondrian_core::Rational::new(1, 2); 2],
+        )
+        .unwrap();
+        let input = crate::EffectFloatFrame::from_pixels(
+            crate::EffectFrameExtent::new(1, 1),
+            crate::EffectValueFormat::new(
+                EffectWorkingPrecision::Float32,
+                crate::EffectColorDomain::SceneLinearRgb,
+                mondrian_core::ColorFrameAlpha::StraightFloat,
+            ),
+            sampling,
+            vec![[0.25, 0.5, 0.75, 1.0]],
+        )
+        .unwrap();
+        let key = effect_output_cache_key_f32(input.view(), &graph, 0, None)
+            .expect("the injected entry is eligible for normal output lookup");
+        let mut session = EffectExecutionSession::default();
+        session.put_float_output(key.clone(), input.clone());
+        assert!(session.get_float_output(&key).is_some());
+        assert_eq!(
+            session
+                .apply_compiled_rgba_f32(
+                    input.view(),
+                    &graph,
+                    0,
+                    &mut crate::EffectProcessorControl::uncancelled(),
+                )
+                .unwrap_err(),
+            EffectFloatExecutionError::CustomProcessor(
+                EffectExecutionError::ImageScaleNotAdmitted {
+                    requirement: crate::EffectImageScaleRequirement::Unit,
+                    actual_sampling: sampling,
+                },
+            )
+        );
+        assert!(
+            session.get_float_output(&key).is_some(),
+            "refusal does not mutate retained cache"
+        );
+        assert_eq!(session.diagnostics().processor_instances, 0);
     }
 }

@@ -6,3 +6,4 @@ pub mod openfx_adapter;
 pub mod openfx_effect;
 pub mod openfx_host;
 pub(crate) mod product_assets;
+pub mod resource_inspection;

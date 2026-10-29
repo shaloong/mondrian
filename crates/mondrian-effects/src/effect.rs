@@ -1,12 +1,12 @@
 //! 效果节点抽象
 
 use crate::execution::{CustomEffectFloatRenderProcessor, CustomEffectRenderProcessor};
+use crate::extension_contract::{
+    effect_extension_is_library_visible, record_extension_runtime_failure, EffectExtensionContract,
+};
 use crate::graph::{CompiledEffectGraph, EffectGraphBuilderState, EffectRenderGraph};
 use crate::lut::{Lut3D, LutPreparationCache};
 use crate::mask::MaskComponent;
-use crate::plugin_contract::{
-    effect_plugin_is_library_visible, record_plugin_runtime_failure, EffectPluginContract,
-};
 use crate::{
     EffectExecutionContract, EffectExecutionContractViolation, EffectGraphTopology,
     EffectResourceLifetime, EffectRoiPropagation,
@@ -41,11 +41,94 @@ use std::{
     },
 };
 
+/// Full, zero-offset owner project window, independent of any image raster.
+///
+/// A project window describes coordinates, not an allocation. Raster capacity
+/// and native image-bound limits must be checked against the actual image.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(try_from = "EffectProjectGeometryWire")]
+pub struct EffectProjectGeometry {
+    width: u32,
+    height: u32,
+    pixel_aspect_ratio: SampleAspectRatio,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EffectProjectGeometryWire {
+    width: u32,
+    height: u32,
+    pixel_aspect_ratio: SampleAspectRatio,
+}
+
+/// Invalid owner project coordinates, rejected before provider preparation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum EffectProjectGeometryError {
+    /// A full project window must have positive pixel dimensions.
+    #[error("effect project window must have positive dimensions")]
+    EmptyExtent,
+    /// Deserialized sample ratios must satisfy the same rule as constructed ones.
+    #[error("effect project sample aspect ratio must be positive")]
+    InvalidPixelAspectRatio,
+}
+
+impl EffectProjectGeometry {
+    /// Bind the complete project window. Partial or offset windows are not admitted.
+    pub fn new(
+        width: u32,
+        height: u32,
+        pixel_aspect_ratio: SampleAspectRatio,
+    ) -> Result<Self, EffectProjectGeometryError> {
+        if width == 0 || height == 0 {
+            return Err(EffectProjectGeometryError::EmptyExtent);
+        }
+        // SampleAspectRatio itself is deserializable. Revalidate and reduce it
+        // here so malformed external state cannot enter the execution contract.
+        let pixel_aspect_ratio = SampleAspectRatio::new(
+            pixel_aspect_ratio.numerator(),
+            pixel_aspect_ratio.denominator(),
+        )
+        .ok_or(EffectProjectGeometryError::InvalidPixelAspectRatio)?;
+        Ok(Self { width, height, pixel_aspect_ratio })
+    }
+
+    /// Project width in pixels, unrelated to staging image width.
+    pub const fn width(self) -> u32 {
+        self.width
+    }
+
+    /// Project height in pixels, unrelated to staging image height.
+    pub const fn height(self) -> u32 {
+        self.height
+    }
+
+    /// Exact project sample aspect ratio.
+    pub const fn pixel_aspect_ratio(self) -> SampleAspectRatio {
+        self.pixel_aspect_ratio
+    }
+
+    /// Full canonical extent, lowered only at the spatial ABI boundary.
+    pub fn canonical_size(self) -> [f64; 2] {
+        [
+            f64::from(self.width) * self.pixel_aspect_ratio.to_f64(),
+            f64::from(self.height),
+        ]
+    }
+}
+
+impl TryFrom<EffectProjectGeometryWire> for EffectProjectGeometry {
+    type Error = EffectProjectGeometryError;
+
+    fn try_from(value: EffectProjectGeometryWire) -> Result<Self, Self::Error> {
+        Self::new(value.width, value.height, value.pixel_aspect_ratio)
+    }
+}
+
 /// Exact sequence facts needed by effects that execute in a frame-based ABI.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EffectFrameContext {
     frame_rate: Rational,
-    pixel_aspect_ratio: SampleAspectRatio,
+    project_geometry: EffectProjectGeometry,
     available_range: TimelineTimeRange,
 }
 
@@ -67,7 +150,7 @@ impl EffectFrameContext {
     /// Bind one exact half-open owner range to a validated sequence grid.
     pub fn new(
         frame_rate: Rational,
-        pixel_aspect_ratio: SampleAspectRatio,
+        project_geometry: EffectProjectGeometry,
         available_range: TimelineTimeRange,
     ) -> Result<Self, EffectFrameContextError> {
         if frame_rate.num <= 0 || frame_rate.den <= 0 {
@@ -76,7 +159,7 @@ impl EffectFrameContext {
         if available_range.is_empty() {
             return Err(EffectFrameContextError::EmptyRange);
         }
-        let value = Self { frame_rate, pixel_aspect_ratio, available_range };
+        let value = Self { frame_rate, project_geometry, available_range };
         value.available_frames()?;
         Ok(value)
     }
@@ -88,7 +171,12 @@ impl EffectFrameContext {
 
     /// Exact width-to-height ratio of a sample.
     pub const fn pixel_aspect_ratio(self) -> SampleAspectRatio {
-        self.pixel_aspect_ratio
+        self.project_geometry.pixel_aspect_ratio()
+    }
+
+    /// Immutable owner window used by project-aware providers and reuse identity.
+    pub const fn project_geometry(self) -> EffectProjectGeometry {
+        self.project_geometry
     }
 
     /// Half-open availability interval in the effect owner's time domain.
@@ -160,7 +248,7 @@ pub enum EffectGraphBuildError {
         effect_key: String,
         effect_id: EffectId,
     },
-    /// The registered plugin cannot execute in the current process.
+    /// The registered effect definition cannot execute in the current process.
     #[error("effect runtime `{effect_key}` ({effect_id}) is unavailable")]
     RuntimeUnavailable {
         effect_key: String,
@@ -259,7 +347,7 @@ impl EffectGraphBuildError {
     }
 }
 
-/// Fallible graph builder shared by built-in and plugin effect definitions.
+/// Fallible graph builder shared by built-in and external effect definitions.
 pub type EffectGraphBuilder = Arc<
     dyn Fn(
             &EffectNode,
@@ -294,13 +382,13 @@ pub enum EffectResourceDependency {
         /// Stable fingerprint of the complete parsed LUT semantics.
         semantic_fingerprint: [u8; 32],
     },
-    /// Plugin-owned immutable resource identity.
+    /// Definition-owned immutable resource identity.
     ///
-    /// The plugin must re-register its definition when this identity changes.
+    /// The provider must re-register its definition when this identity changes.
     /// Registration advances the global definition revision and invalidates
     /// prepared programs conservatively.
-    PluginManaged {
-        /// Stable plugin-defined resource key.
+    ExtensionManaged {
+        /// Stable provider-defined resource key.
         identity: String,
     },
 }
@@ -368,7 +456,7 @@ impl PreparedEffectEvaluator {
 fn effect_resource_dependency_retained_bytes(dependency: &EffectResourceDependency) -> usize {
     match dependency {
         EffectResourceDependency::CubeLut { path, .. } => path.as_os_str().len(),
-        EffectResourceDependency::PluginManaged { identity } => identity.capacity(),
+        EffectResourceDependency::ExtensionManaged { identity } => identity.capacity(),
     }
 }
 
@@ -830,15 +918,22 @@ impl std::fmt::Debug for EffectRenderOp {
 /// Immutable in-process processor implementation retained by executable IR.
 #[derive(Clone)]
 pub struct CustomEffectProcessorBinding {
+    alpha_contract: crate::EffectAlphaContract,
+    input_role: crate::EffectFloatProcessorInputRole,
+    image_scale_requirement: crate::EffectImageScaleRequirement,
+    requires_input_service: bool,
     revision: u64,
     processor: CustomEffectProcessor,
     runtime_owner: Option<CustomEffectRuntimeOwner>,
+    occurrence_id: Option<EffectId>,
+    project_geometry: Option<EffectProjectGeometry>,
 }
 
 #[derive(Clone)]
 enum CustomEffectProcessor {
     Rgba8(CustomEffectRenderProcessor),
     Float32(CustomEffectFloatRenderProcessor),
+    Float32Factory(Arc<dyn crate::EffectFloatProcessorFactory>),
 }
 
 static NEXT_CUSTOM_PROCESSOR_REVISION: AtomicU64 = AtomicU64::new(1);
@@ -847,24 +942,51 @@ static NEXT_CUSTOM_PROCESSOR_REVISION: AtomicU64 = AtomicU64::new(1);
 struct CustomEffectRuntimeOwner {
     effect_key: String,
     definition_registry_revision: u64,
-    contract: EffectPluginContract,
+    contract: EffectExtensionContract,
 }
 
 impl CustomEffectProcessorBinding {
     pub(crate) fn new(processor: CustomEffectRenderProcessor) -> Self {
         Self {
+            alpha_contract: crate::EffectAlphaContract::COVERAGE_OPERATION,
+            input_role: crate::EffectFloatProcessorInputRole::SingleImage,
+            image_scale_requirement: crate::EffectImageScaleRequirement::Any,
+            requires_input_service: false,
             revision: NEXT_CUSTOM_PROCESSOR_REVISION.fetch_add(1, Ordering::AcqRel),
             processor: CustomEffectProcessor::Rgba8(processor),
             runtime_owner: None,
+            occurrence_id: None,
+            project_geometry: None,
         }
     }
 
     pub(crate) fn new_f32(processor: CustomEffectFloatRenderProcessor) -> Self {
         Self {
+            alpha_contract: crate::EffectAlphaContract::COVERAGE_OPERATION,
+            input_role: crate::EffectFloatProcessorInputRole::SingleImage,
+            image_scale_requirement: crate::EffectImageScaleRequirement::Any,
+            requires_input_service: false,
             revision: NEXT_CUSTOM_PROCESSOR_REVISION.fetch_add(1, Ordering::AcqRel),
             processor: CustomEffectProcessor::Float32(processor),
             runtime_owner: None,
+            occurrence_id: None,
+            project_geometry: None,
         }
+    }
+
+    /// Immutable alpha declaration retained by the compiled provider binding.
+    pub const fn alpha_contract(&self) -> crate::EffectAlphaContract {
+        self.alpha_contract
+    }
+
+    /// Immutable image arity retained with the provider declaration.
+    pub const fn input_role(&self) -> crate::EffectFloatProcessorInputRole {
+        self.input_role
+    }
+
+    /// Immutable render-scale restriction retained with the provider declaration.
+    pub const fn image_scale_requirement(&self) -> crate::EffectImageScaleRequirement {
+        self.image_scale_requirement
     }
 
     /// Process-local implementation revision used by graph/cache identity.
@@ -872,36 +994,83 @@ impl CustomEffectProcessorBinding {
         self.revision
     }
 
+    /// Frozen additional-input dependency declaration of this provider.
+    pub const fn requires_input_service(&self) -> bool {
+        self.requires_input_service
+    }
+
     pub(crate) fn rgba8_processor(&self) -> Option<&CustomEffectRenderProcessor> {
         match &self.processor {
             CustomEffectProcessor::Rgba8(processor) => Some(processor),
-            CustomEffectProcessor::Float32(_) => None,
+            CustomEffectProcessor::Float32(_) | CustomEffectProcessor::Float32Factory(_) => None,
         }
     }
 
     pub(crate) fn float32_processor(&self) -> Option<&CustomEffectFloatRenderProcessor> {
         match &self.processor {
-            CustomEffectProcessor::Rgba8(_) => None,
+            CustomEffectProcessor::Rgba8(_) | CustomEffectProcessor::Float32Factory(_) => None,
             CustomEffectProcessor::Float32(processor) => Some(processor),
         }
+    }
+
+    /// Author identity of the exact compiled occurrence, when compiler-bound.
+    pub const fn occurrence_id(&self) -> Option<EffectId> {
+        self.occurrence_id
+    }
+
+    /// Compiler-bound owner coordinates; absent for standalone literal effects.
+    pub const fn project_geometry(&self) -> Option<EffectProjectGeometry> {
+        self.project_geometry
+    }
+
+    pub(crate) fn float32_factory(&self) -> Option<&Arc<dyn crate::EffectFloatProcessorFactory>> {
+        if let CustomEffectProcessor::Float32Factory(factory) = &self.processor {
+            Some(factory)
+        } else {
+            None
+        }
+    }
+
+    /// A provider cannot change any declaration after its binding is frozen.
+    pub(crate) fn factory_contract_matches(&self) -> bool {
+        self.float32_factory().is_none_or(|factory| {
+            factory.input_role() == self.input_role
+                && factory.alpha_contract() == self.alpha_contract
+                && factory.image_scale_requirement() == self.image_scale_requirement
+                && factory.requires_input_service() == self.requires_input_service
+        })
+    }
+
+    pub(crate) fn supports_float32(&self) -> bool {
+        !matches!(self.processor, CustomEffectProcessor::Rgba8(_))
     }
 
     pub(crate) fn execution_modes(&self) -> crate::EffectExecutionModes {
         match self.processor {
             CustomEffectProcessor::Rgba8(_) => crate::EffectExecutionModes::CPU_U8,
-            CustomEffectProcessor::Float32(_) => crate::EffectExecutionModes::CPU_F32,
+            CustomEffectProcessor::Float32(_) | CustomEffectProcessor::Float32Factory(_) => {
+                crate::EffectExecutionModes::CPU_F32
+            }
         }
     }
 
     pub(crate) fn with_runtime_owner(
         &self,
         effect_key: &str,
+        occurrence_id: EffectId,
         definition_registry_revision: u64,
-        contract: Option<&EffectPluginContract>,
+        contract: Option<&EffectExtensionContract>,
+        project_geometry: Option<EffectProjectGeometry>,
     ) -> Self {
         Self {
+            alpha_contract: self.alpha_contract,
+            input_role: self.input_role,
+            image_scale_requirement: self.image_scale_requirement,
+            requires_input_service: self.requires_input_service,
             revision: self.revision,
             processor: self.processor.clone(),
+            occurrence_id: Some(occurrence_id),
+            project_geometry,
             runtime_owner: contract.cloned().map(|contract| CustomEffectRuntimeOwner {
                 effect_key: effect_key.to_owned(),
                 definition_registry_revision,
@@ -914,7 +1083,7 @@ impl CustomEffectProcessorBinding {
         let Some(owner) = &self.runtime_owner else {
             return;
         };
-        record_plugin_runtime_failure(
+        record_extension_runtime_failure(
             owner.effect_key.as_str(),
             owner.definition_registry_revision,
             Some(&owner.contract),
@@ -935,6 +1104,9 @@ impl std::fmt::Debug for CustomEffectProcessorBinding {
         formatter
             .debug_struct("CustomEffectProcessorBinding")
             .field("revision", &self.revision)
+            .field("alpha_contract", &self.alpha_contract)
+            .field("image_scale_requirement", &self.image_scale_requirement)
+            .field("requires_input_service", &self.requires_input_service)
             .field("runtime_owner_revision", &self.runtime_owner_revision())
             .finish_non_exhaustive()
     }
@@ -1092,9 +1264,22 @@ impl EffectRenderOp {
                 7u8.hash(state);
                 key.hash(state);
                 processor.as_ref().map(CustomEffectProcessorBinding::revision).hash(state);
+                processor.as_ref().map(CustomEffectProcessorBinding::alpha_contract).hash(state);
+                processor
+                    .as_ref()
+                    .map(CustomEffectProcessorBinding::image_scale_requirement)
+                    .hash(state);
+                processor
+                    .as_ref()
+                    .and_then(CustomEffectProcessorBinding::project_geometry)
+                    .hash(state);
                 processor
                     .as_ref()
                     .and_then(CustomEffectProcessorBinding::runtime_owner_revision)
+                    .hash(state);
+                processor
+                    .as_ref()
+                    .map(CustomEffectProcessorBinding::requires_input_service)
                     .hash(state);
                 cache_policy.hash(state);
                 // `cache_key` identifies stable external/custom implementation
@@ -1115,6 +1300,11 @@ impl EffectRenderOp {
     pub fn cache_policy(&self) -> EffectCachePolicy {
         match self {
             EffectRenderOp::Grain { .. } => EffectCachePolicy::FrameDependent,
+            EffectRenderOp::Custom { processor: Some(binding), .. }
+                if binding.requires_input_service() =>
+            {
+                EffectCachePolicy::Uncacheable
+            }
             EffectRenderOp::Custom { cache_policy, .. } => *cache_policy,
             _ => EffectCachePolicy::Deterministic,
         }
@@ -1200,9 +1390,11 @@ pub struct EffectDefinition {
     display_name: String,
     category_path: Vec<String>,
     default_properties: PropertyBag,
+    project_property_initializer: Option<crate::EffectProjectPropertyInitializer>,
+    project_property_initializer_retained_bytes: usize,
     evaluator_factory: Option<EffectEvaluatorFactory>,
     execution_contract: EffectExecutionContract,
-    plugin_contract: Option<EffectPluginContract>,
+    extension_contract: Option<EffectExtensionContract>,
     color_domain_contract: EffectColorDomainContract,
     definition_registry_revision: u64,
 }
@@ -1236,6 +1428,12 @@ pub enum EffectDefinitionError {
     /// Process-local registry generation can no longer advance safely.
     #[error("effect definition registry revision exhausted")]
     RegistryRevisionExhausted,
+    /// A contextual definition cannot materialize schemas without its owner.
+    #[error("effect `{effect_key}` requires owner project geometry")]
+    ProjectGeometryRequired { effect_key: String },
+    /// A project-dependent template did not produce a valid concrete schema.
+    #[error("effect `{effect_key}` project properties are invalid: {reason}")]
+    InvalidProjectProperties { effect_key: String, reason: String },
 }
 
 /// Failure to instantiate one author-visible Effect from the live registry.
@@ -1247,6 +1445,8 @@ pub enum EffectInstantiationError {
     /// The definition exists but cannot currently provide visual execution.
     #[error("effect definition is not currently authorable: {effect_key}")]
     DefinitionNotAuthorable { effect_key: String },
+    #[error(transparent)]
+    Properties(#[from] EffectDefinitionError),
 }
 
 impl EffectDefinition {
@@ -1265,9 +1465,11 @@ impl EffectDefinition {
             display_name: display_name.into(),
             category_path: Vec::new(),
             default_properties,
+            project_property_initializer: None,
+            project_property_initializer_retained_bytes: 0,
             evaluator_factory: None,
             execution_contract: EffectExecutionContract::default(),
-            plugin_contract: None,
+            extension_contract: None,
             color_domain_contract,
             definition_registry_revision: 0,
         }
@@ -1288,6 +1490,65 @@ impl EffectDefinition {
             self.default_properties.upsert(property.clone());
         }
         self
+    }
+
+    /// Add contextual properties before author instantiation and exact schema
+    /// admission. Literal base properties must remain unchanged. The byte charge
+    /// covers immutable data captured by the initializer, excluding its Arc.
+    pub fn with_project_properties(
+        mut self,
+        initializer: crate::EffectProjectPropertyInitializer,
+        retained_bytes: usize,
+    ) -> Self {
+        self.project_property_initializer = Some(initializer);
+        self.project_property_initializer_retained_bytes = retained_bytes;
+        self
+    }
+
+    pub(crate) fn resolved_properties(
+        &self,
+        geometry: Option<EffectProjectGeometry>,
+    ) -> Result<std::borrow::Cow<'_, PropertyBag>, EffectDefinitionError> {
+        let Some(initializer) = &self.project_property_initializer else {
+            return Ok(std::borrow::Cow::Borrowed(&self.default_properties));
+        };
+        let geometry = geometry.ok_or_else(|| EffectDefinitionError::ProjectGeometryRequired {
+            effect_key: self.key.clone(),
+        })?;
+        let invalid = |reason: String| EffectDefinitionError::InvalidProjectProperties {
+            effect_key: self.key.clone(),
+            reason,
+        };
+        let mut properties = self.default_properties.clone();
+        catch_unwind(AssertUnwindSafe(|| initializer(geometry, &mut properties)))
+            .map_err(|_| invalid("initializer panicked".into()))??;
+        for (path, property) in self.default_properties.iter() {
+            if properties.property(path) != Some(property) {
+                return Err(invalid(format!(
+                    "initializer changed literal property `{path}`"
+                )));
+            }
+        }
+        self.validate_properties(&properties)?;
+        Ok(std::borrow::Cow::Owned(properties))
+    }
+
+    pub(crate) fn project_geometry_for_instance(
+        &self,
+        effect: &EffectNode,
+        current: Option<EffectProjectGeometry>,
+    ) -> Result<Option<EffectProjectGeometry>, String> {
+        if self.project_property_initializer.is_none() {
+            if crate::project_properties::has_binding(&effect.params) {
+                return Err("definition no longer declares project-dependent defaults".into());
+            }
+            return Ok(None);
+        }
+        let bound = crate::project_properties::decode_binding(&effect.params)?;
+        if current != Some(bound) {
+            return Err("effect defaults require the original owner project geometry".into());
+        }
+        Ok(Some(bound))
     }
 
     pub fn with_graph_builder(mut self, graph_builder: EffectGraphBuilder) -> Self {
@@ -1358,6 +1619,33 @@ impl EffectDefinition {
         )
     }
 
+    /// Bind execution-owned reusable Float32 instances. The factory is
+    /// immutable; its instances never belong to the global definition registry.
+    pub fn with_custom_float_processor_factory(
+        self,
+        params_builder: EffectRenderParamsBuilder,
+        cache_key_builder: Option<EffectCacheKeyBuilder>,
+        cache_policy: EffectCachePolicy,
+        factory: Arc<dyn crate::EffectFloatProcessorFactory>,
+    ) -> Self {
+        self.with_custom_processor_binding(
+            params_builder,
+            cache_key_builder,
+            cache_policy,
+            CustomEffectProcessorBinding {
+                revision: NEXT_CUSTOM_PROCESSOR_REVISION.fetch_add(1, Ordering::AcqRel),
+                alpha_contract: factory.alpha_contract(),
+                input_role: factory.input_role(),
+                image_scale_requirement: factory.image_scale_requirement(),
+                requires_input_service: factory.requires_input_service(),
+                processor: CustomEffectProcessor::Float32Factory(factory),
+                runtime_owner: None,
+                occurrence_id: None,
+                project_geometry: None,
+            },
+        )
+    }
+
     fn with_custom_processor_binding(
         mut self,
         params_builder: EffectRenderParamsBuilder,
@@ -1366,28 +1654,41 @@ impl EffectDefinition {
         processor: CustomEffectProcessorBinding,
     ) -> Self {
         let effect_key = self.key.clone();
+        let role = processor.input_role();
         self.evaluator_factory = Some(EffectEvaluatorFactory::Frame(Arc::new(
             move |effect, context, graph| {
                 if let Some(params) = params_builder(effect, context)? {
                     let cache_key =
                         cache_key_builder.as_ref().and_then(|builder| builder(effect, context));
-                    graph.append_unary(EffectRenderOp::Custom {
+                    let op = EffectRenderOp::Custom {
                         key: effect_key.clone(),
                         params,
                         cache_key,
                         cache_policy,
                         processor: Some(processor.clone()),
-                    });
+                    };
+                    match role {
+                        crate::EffectFloatProcessorInputRole::SingleImage => {
+                            graph.append_unary(op);
+                        }
+                        crate::EffectFloatProcessorInputRole::NoImage => {
+                            graph.append_custom_source(op);
+                        }
+                    }
                 }
                 Ok(())
             },
         )));
-        self.execution_contract.topology = EffectGraphTopology::LinearChain;
+        self.execution_contract.topology = match role {
+            crate::EffectFloatProcessorInputRole::SingleImage => EffectGraphTopology::LinearChain,
+            crate::EffectFloatProcessorInputRole::NoImage => EffectGraphTopology::GeneralDag,
+        };
         self
     }
 
-    pub fn with_plugin_contract(mut self, plugin_contract: EffectPluginContract) -> Self {
-        self.plugin_contract = Some(plugin_contract);
+    /// Bind the Effect Extension version and availability contract.
+    pub fn with_extension_contract(mut self, extension_contract: EffectExtensionContract) -> Self {
+        self.extension_contract = Some(extension_contract);
         self
     }
 
@@ -1403,6 +1704,7 @@ impl EffectDefinition {
         &self.category_path
     }
 
+    #[cfg(test)]
     pub(crate) fn default_properties(&self) -> &PropertyBag {
         &self.default_properties
     }
@@ -1425,15 +1727,16 @@ impl EffectDefinition {
         self.evaluator_factory.is_some()
             && !self.execution_contract.execution_modes.is_empty()
             && self.execution_contract.state_model == crate::EffectStateModel::Stateless
-            && effect_plugin_is_library_visible(
+            && effect_extension_is_library_visible(
                 self.key(),
                 self.definition_registry_revision,
-                self.plugin_contract(),
+                self.extension_contract(),
             )
     }
 
-    pub fn plugin_contract(&self) -> Option<&EffectPluginContract> {
-        self.plugin_contract.as_ref()
+    /// Contract bound to this registered effect definition, if any.
+    pub fn extension_contract(&self) -> Option<&EffectExtensionContract> {
+        self.extension_contract.as_ref()
     }
 
     pub(crate) const fn definition_registry_revision(&self) -> u64 {
@@ -1449,10 +1752,10 @@ impl EffectDefinition {
         let property_floor = self.default_properties.iter().count().saturating_mul(512);
         let property_bytes = serde_json::to_vec(&self.default_properties)
             .map_or(property_floor, |bytes| bytes.len().max(property_floor));
-        let plugin_bytes = self
-            .plugin_contract
+        let extension_bytes = self
+            .extension_contract
             .as_ref()
-            .map_or(0, |contract| contract.plugin_version.capacity());
+            .map_or(0, |contract| contract.extension_version.capacity());
         std::mem::size_of::<Self>()
             .saturating_add(self.key.capacity())
             .saturating_add(self.display_name.capacity())
@@ -1461,7 +1764,13 @@ impl EffectDefinition {
             )
             .saturating_add(category_bytes)
             .saturating_add(property_bytes)
-            .saturating_add(plugin_bytes)
+            .saturating_add(self.project_property_initializer_retained_bytes)
+            .saturating_add(if self.project_property_initializer.is_some() {
+                OPAQUE_EFFECT_EVALUATOR_BASE_CHARGE_BYTES
+            } else {
+                0
+            })
+            .saturating_add(extension_bytes)
             .saturating_add(OPAQUE_EFFECT_EVALUATOR_BASE_CHARGE_BYTES)
     }
 
@@ -1476,8 +1785,12 @@ impl EffectDefinition {
                 reason: error.to_string(),
             }
         })?;
+        self.validate_properties(&self.default_properties)
+    }
+
+    fn validate_properties(&self, properties: &PropertyBag) -> Result<(), EffectDefinitionError> {
         let mut parameter_addresses = HashMap::<ParameterId, String>::new();
-        for (address, property) in self.default_properties.iter() {
+        for (address, property) in properties.iter() {
             let schema = &property.descriptor.schema;
             property
                 .validate()
@@ -1530,10 +1843,10 @@ impl EffectDefinition {
                 })) {
                     Ok(result) => result,
                     Err(_) => {
-                        record_plugin_runtime_failure(
+                        record_extension_runtime_failure(
                             self.key(),
                             self.definition_registry_revision,
-                            self.plugin_contract(),
+                            self.extension_contract(),
                             "effect resource preparer panicked",
                         );
                         Err(EffectGraphBuildError::BuilderPanicked {
@@ -1571,9 +1884,9 @@ fn builtin_effect_types() -> [EffectType; 19] {
     ]
 }
 
-/// Global effect definition registry. Entries are never evicted — if plugins
-/// are installed and later removed, their definitions persist until restart.
-/// This is acceptable for a desktop NLE where plugin install/uninstall is rare.
+/// Global effect definition registry. Entries are retained until process exit;
+/// replacing a definition advances its registry revision. This registry does
+/// not implement the future Extension installation or unload lifecycle.
 fn effect_registry() -> &'static RwLock<HashMap<String, Arc<EffectDefinition>>> {
     static REGISTRY: OnceLock<RwLock<HashMap<String, Arc<EffectDefinition>>>> = OnceLock::new();
     REGISTRY.get_or_init(|| {
@@ -1595,9 +1908,9 @@ fn effect_registry_revision_counter() -> &'static AtomicU64 {
     &REVISION
 }
 
-/// Process-local revision of the bound definition/plugin registry.
+/// Process-local revision of the effect definition registry.
 ///
-/// Prepared-program cache identity includes this value so replacing any plugin
+/// Prepared-program cache identity includes this value so replacing any effect
 /// definition conservatively invalidates previously bound code and resources.
 pub fn effect_registry_revision() -> u64 {
     effect_registry_revision_counter().load(Ordering::Acquire)
@@ -1638,6 +1951,22 @@ pub fn effect_definition(effect_type: &EffectType) -> Option<Arc<EffectDefinitio
 pub fn instantiate_effect_node(
     effect_type: EffectType,
 ) -> Result<EffectNode, EffectInstantiationError> {
+    instantiate_effect_node_in_project(effect_type, None)
+}
+
+/// Instantiate concrete defaults against the immutable owner project window.
+/// Literal definitions keep their original schema and do not capture a binding.
+pub fn instantiate_effect_node_with_project_geometry(
+    effect_type: EffectType,
+    project_geometry: EffectProjectGeometry,
+) -> Result<EffectNode, EffectInstantiationError> {
+    instantiate_effect_node_in_project(effect_type, Some(project_geometry))
+}
+
+fn instantiate_effect_node_in_project(
+    effect_type: EffectType,
+    project_geometry: Option<EffectProjectGeometry>,
+) -> Result<EffectNode, EffectInstantiationError> {
     let effect_key = effect_type.key();
     let definition = effect_definition(&effect_type).ok_or_else(|| {
         EffectInstantiationError::DefinitionUnavailable { effect_key: effect_key.clone() }
@@ -1645,13 +1974,24 @@ pub fn instantiate_effect_node(
     if !definition.supports_visual_evaluation() {
         return Err(EffectInstantiationError::DefinitionNotAuthorable { effect_key });
     }
-    let mut properties = definition.default_properties().clone();
+    let mut properties = definition.resolved_properties(project_geometry)?.into_owned();
+    let params = if definition.project_property_initializer.is_some() {
+        crate::project_properties::encode_binding(project_geometry.ok_or_else(|| {
+            EffectDefinitionError::ProjectGeometryRequired { effect_key: effect_key.clone() }
+        })?)
+        .map_err(|reason| EffectDefinitionError::InvalidProjectProperties {
+            effect_key: effect_key.clone(),
+            reason,
+        })?
+    } else {
+        serde_json::json!({})
+    };
     properties.fork_author_identities();
     Ok(EffectNode {
         id: EffectId::new(),
         effect_type,
         properties,
-        params: serde_json::json!({}),
+        params,
         is_enabled: true,
     })
 }
@@ -1780,7 +2120,13 @@ pub trait EffectNodeExt {
 impl EffectNodeExt for EffectNode {
     fn with_defaults(effect_type: EffectType) -> Self {
         let mut default_properties = effect_definition(&effect_type)
-            .map(|definition| definition.default_properties.clone())
+            .map(|definition| {
+                assert!(
+                    definition.project_property_initializer.is_none(),
+                    "contextual definitions require instantiate_effect_node_with_project_geometry"
+                );
+                definition.default_properties.clone()
+            })
             .unwrap_or_default();
         default_properties.fork_author_identities();
         Self {
@@ -2045,8 +2391,8 @@ fn default_properties_for(effect_type: EffectType) -> PropertyBag {
                 "Master 模式",
                 "rgb",
                 vec![
-                    ParameterEnumOption::new("rgb", "mondrian.effect.curves.mode.rgb"),
-                    ParameterEnumOption::new("yrgb", "mondrian.effect.curves.mode.yrgb"),
+                    ParameterEnumOption::new("rgb", "RGB", "mondrian.effect.curves.mode.rgb"),
+                    ParameterEnumOption::new("yrgb", "YRGB", "mondrian.effect.curves.mode.yrgb"),
                 ],
             );
             for (parameter, label, neutral_delta) in [
@@ -2116,9 +2462,10 @@ fn default_properties_for(effect_type: EffectType) -> PropertyBag {
                 "选择模式",
                 "hsl",
                 vec![
-                    ParameterEnumOption::new("hsl", "mondrian.effect.qualifier.mode.hsl"),
+                    ParameterEnumOption::new("hsl", "HSL", "mondrian.effect.qualifier.mode.hsl"),
                     ParameterEnumOption::new(
                         "three_dimensional",
+                        "3D",
                         "mondrian.effect.qualifier.mode.three_dimensional",
                     ),
                 ],
@@ -2420,7 +2767,7 @@ fn default_properties_for(effect_type: EffectType) -> PropertyBag {
                 None,
             );
         }
-        EffectType::Plugin(_) => {}
+        EffectType::External(_) => {}
     }
 
     properties
@@ -2463,7 +2810,11 @@ fn define_builtin_property(
             .with_numeric_contract(builtin_parameter_unit(effect_type, parameter), numeric);
     }
     if matches!(effect_type, EffectType::Lut3D) && parameter == "path" {
-        descriptor = descriptor.with_cache_impact(ParameterCacheImpact::Resource);
+        descriptor = descriptor
+            .with_cache_impact(ParameterCacheImpact::Resource)
+            .with_resource_contract(mondrian_core::ParameterResourceContract::external_file(
+                vec!["cube".to_owned()],
+            ));
     }
     if matches!(effect_type, EffectType::Qualifier) && parameter == "matte_preview" {
         descriptor = descriptor.with_cache_impact(ParameterCacheImpact::Topology);
@@ -2521,31 +2872,49 @@ fn define_builtin_curve_property(
 
 fn lut_processing_space_options() -> Vec<ParameterEnumOption> {
     [
-        "unassigned",
-        "scene_linear",
-        "rec709",
-        "srgb",
-        "rec2020",
-        "display_p3",
-        "rec2100_hlg",
-        "rec2100_pq",
-        "aces_cct",
-        "apple_log_bt2020",
-        "sony_slog2_sgamut",
-        "sony_slog3_sgamut3",
-        "sony_slog3_sgamut3_cine",
-        "arri_logc3_wide_gamut3",
-        "arri_logc4_wide_gamut4",
-        "canon_log2_cinema_gamut_d55",
-        "canon_log3_cinema_gamut_d55",
-        "panasonic_vlog_vgamut",
-        "red_log3g10_wide_gamut_rgb",
-        "blackmagic_film_wide_gamut_gen5",
-        "dji_dlog_dgamut",
-        "davinci_intermediate_wide_gamut",
+        ("unassigned", "Unassigned"),
+        ("scene_linear", "Scene linear"),
+        ("rec709", "Rec. 709"),
+        ("srgb", "sRGB"),
+        ("rec2020", "Rec. 2020"),
+        ("display_p3", "Display P3"),
+        ("rec2100_hlg", "Rec. 2100 HLG"),
+        ("rec2100_pq", "Rec. 2100 PQ"),
+        ("aces_cct", "ACEScct"),
+        ("apple_log_bt2020", "Apple Log / BT.2020"),
+        ("sony_slog2_sgamut", "Sony S-Log2 / S-Gamut"),
+        ("sony_slog3_sgamut3", "Sony S-Log3 / S-Gamut3"),
+        ("sony_slog3_sgamut3_cine", "Sony S-Log3 / S-Gamut3.Cine"),
+        ("arri_logc3_wide_gamut3", "ARRI LogC3 / Wide Gamut 3"),
+        ("arri_logc4_wide_gamut4", "ARRI LogC4 / Wide Gamut 4"),
+        (
+            "canon_log2_cinema_gamut_d55",
+            "Canon Log 2 / Cinema Gamut D55",
+        ),
+        (
+            "canon_log3_cinema_gamut_d55",
+            "Canon Log 3 / Cinema Gamut D55",
+        ),
+        ("panasonic_vlog_vgamut", "Panasonic V-Log / V-Gamut"),
+        ("red_log3g10_wide_gamut_rgb", "RED Log3G10 / Wide Gamut RGB"),
+        (
+            "blackmagic_film_wide_gamut_gen5",
+            "Blackmagic Film / Wide Gamut Gen 5",
+        ),
+        ("dji_dlog_dgamut", "DJI D-Log / D-Gamut"),
+        (
+            "davinci_intermediate_wide_gamut",
+            "DaVinci Intermediate / Wide Gamut",
+        ),
     ]
     .into_iter()
-    .map(|key| ParameterEnumOption::new(key, format!("builtin.lut_3d.processing_space.{key}")))
+    .map(|(key, caption)| {
+        ParameterEnumOption::new(
+            key,
+            caption,
+            format!("builtin.lut_3d.processing_space.{key}"),
+        )
+    })
     .collect()
 }
 
@@ -2718,7 +3087,7 @@ fn builtin_effect_execution_contract(effect_type: &EffectType) -> EffectExecutio
             topology: EffectGraphTopology::GeneralDag,
             ..cpu_linear
         },
-        EffectType::Plugin(_) => EffectExecutionContract {
+        EffectType::External(_) => EffectExecutionContract {
             execution_modes: EffectExecutionModes::NONE,
             ..cpu_linear
         },
@@ -2767,6 +3136,24 @@ fn builtin_graph_preparer_for(effect_type: &EffectType) -> Option<EffectGraphPre
                 reason: "resource is not bound to an external LUT file".to_string(),
             });
         };
+        let path = path.into_native_path().map_err(|error| {
+            EffectGraphBuildError::ResourceUnavailable {
+                effect_key: effect.effect_type.key(),
+                effect_id: effect.id,
+                parameter_id: path_id.clone(),
+                recovery: EffectResourceRecovery::AuthorEdit,
+                reason: error.to_string(),
+            }
+        })?;
+        if !path.is_absolute() {
+            return Err(EffectGraphBuildError::ResourceUnavailable {
+                effect_key: effect.effect_type.key(),
+                effect_id: effect.id,
+                parameter_id: path_id.clone(),
+                recovery: EffectResourceRecovery::AuthorEdit,
+                reason: "LUT resource has no absolute Project directory owner".into(),
+            });
+        }
         let prepared_lut = resources.prepare_cube_lut(&path).map_err(|error| {
             EffectGraphBuildError::ResourceUnavailable {
                 effect_key: effect.effect_type.key(),
@@ -3429,7 +3816,7 @@ fn builtin_display_name(effect_type: &EffectType) -> &'static str {
         EffectType::Grain => "颗粒",
         EffectType::ChromaKey => "色度抠像",
         EffectType::LumaKey => "亮度键",
-        EffectType::Plugin(_) => "插件特效",
+        EffectType::External(_) => "外部效果",
     }
 }
 
@@ -3451,7 +3838,7 @@ pub fn effect_display_name(effect_type: &EffectType) -> String {
     if let Some(definition) = effect_definition(effect_type) {
         return definition.display_name().to_string();
     }
-    if let EffectType::Plugin(key) = effect_type {
+    if let EffectType::External(key) = effect_type {
         return key.clone();
     }
     effect_type.display_name().to_string()
@@ -3476,20 +3863,72 @@ mod tests {
     }
 
     #[test]
+    fn project_geometry_validates_external_coordinates_without_raster_limits() {
+        assert_eq!(
+            EffectProjectGeometry::new(0, 7, SampleAspectRatio::SQUARE),
+            Err(EffectProjectGeometryError::EmptyExtent)
+        );
+        assert_eq!(
+            EffectProjectGeometry::new(10, 0, SampleAspectRatio::SQUARE),
+            Err(EffectProjectGeometryError::EmptyExtent)
+        );
+        let parse = |width, height, numerator, denominator| {
+            serde_json::from_value::<EffectProjectGeometry>(serde_json::json!({
+                "width": width, "height": height,
+                "pixel_aspect_ratio": {"numerator": numerator, "denominator": denominator}
+            }))
+        };
+        assert!(parse(10, 7, 0, 1).is_err());
+        assert!(parse(10, 7, 1, 0).is_err());
+        assert!(parse(0, 7, 1, 1).is_err());
+        let geometry = parse(10, 7, 4, 2).expect("equivalent ratios normalize");
+        assert_eq!(geometry.canonical_size(), [20.0, 7.0]);
+        assert_eq!(
+            geometry.pixel_aspect_ratio(),
+            SampleAspectRatio::new(2, 1).unwrap()
+        );
+        let mut wire = serde_json::to_value(geometry).expect("geometry wire");
+        assert_eq!(
+            serde_json::from_value::<EffectProjectGeometry>(wire.clone()).unwrap(),
+            geometry
+        );
+        wire["offset"] = serde_json::json!([1, 0]);
+        assert!(serde_json::from_value::<EffectProjectGeometry>(wire).is_err());
+        let huge = EffectProjectGeometry::new(
+            u32::MAX,
+            u32::MAX,
+            SampleAspectRatio::new(u32::MAX, 1).unwrap(),
+        )
+        .expect("coordinates are not allocation");
+        assert!(huge.canonical_size().iter().all(|v| v.is_finite()));
+        let invalid_ratio: SampleAspectRatio =
+            serde_json::from_value(serde_json::json!({"numerator": 1, "denominator": 0})).unwrap();
+        assert_eq!(
+            EffectProjectGeometry::new(10, 7, invalid_ratio),
+            Err(EffectProjectGeometryError::InvalidPixelAspectRatio)
+        );
+    }
+
+    #[test]
     fn frame_context_covers_subframe_clip_range_without_dropping_it() {
         let range = TimelineTimeRange::new(
             TimelineTime::new(1, 100).expect("start"),
             TimelineTime::new(1, 100).expect("duration"),
         )
         .expect("short range");
-        let context = EffectFrameContext::new(Rational::FPS_25, SampleAspectRatio::SQUARE, range)
-            .expect("subframe range remains renderable");
+        let context = EffectFrameContext::new(
+            Rational::FPS_25,
+            EffectProjectGeometry::new(10, 7, SampleAspectRatio::SQUARE).unwrap(),
+            range,
+        )
+        .expect("subframe range remains renderable");
         assert_eq!(context.available_frames().expect("frame bounds"), (0, 0));
         assert_eq!(context.frame_coordinate(range.start), 0.25);
 
         let ntsc = EffectFrameContext::new(
             Rational::FPS_23976,
-            SampleAspectRatio::new(4, 3).expect("sample aspect"),
+            EffectProjectGeometry::new(10, 7, SampleAspectRatio::new(4, 3).expect("sample aspect"))
+                .unwrap(),
             TimelineTimeRange::new(
                 TimelineTime::ZERO,
                 TimelineTime::new(1001, 24000).expect("one frame"),
@@ -3505,7 +3944,7 @@ mod tests {
         assert_eq!(ntsc.pixel_aspect_ratio().to_f64(), 4.0 / 3.0);
     }
 
-    fn test_plugin_execution_contract() -> EffectExecutionContract {
+    fn test_extension_execution_contract() -> EffectExecutionContract {
         EffectExecutionContract {
             execution_modes: crate::EffectExecutionModes::CPU_F32,
             determinism: crate::EffectDeterminism::Deterministic,
@@ -3521,48 +3960,56 @@ mod tests {
         EffectExecutionContract {
             roi_propagation: crate::EffectRoiPropagation::UnknownRequiresFullFrame,
             execution_modes: crate::EffectExecutionModes::CPU_U8,
-            ..test_plugin_execution_contract()
+            ..test_extension_execution_contract()
         }
     }
 
     #[test]
     fn authored_float_custom_backend_executes_through_compiled_graph() {
-        let plugin_type = EffectType::Plugin("plugin.test.float.custom_backend".to_owned());
+        let extension_type = EffectType::External("plugin.test.float.custom_backend".to_owned());
         register_effect_definition(
             EffectDefinition::new(
-                plugin_type.key(),
+                extension_type.key(),
                 "Float Custom",
                 PropertyBag::default(),
                 EffectColorDomainContract::SCENE_LINEAR,
             )
             .with_execution_contract(EffectExecutionContract {
                 roi_propagation: crate::EffectRoiPropagation::UnknownRequiresFullFrame,
-                ..test_plugin_execution_contract()
+                ..test_extension_execution_contract()
             })
             .with_custom_float_render_backend(
                 Arc::new(|_, _| Ok(Some(serde_json::json!({ "gain": 0.25 })))),
                 None,
                 EffectCachePolicy::Deterministic,
-                Arc::new(|pixels, _, _, params, _| {
+                Arc::new(|pixels, params, _| {
                     pixels[0][0] += params["gain"].as_f64().unwrap_or_default() as f32;
                     Ok(())
                 }),
             ),
         )
         .expect("register float custom effect");
-        let effect = EffectNode::with_defaults(plugin_type);
+        let effect = EffectNode::with_defaults(extension_type);
         let compiled = compile_clip_effect_graph(&[effect], &[], tt(0), TEST_WORKING_SPACE)
             .expect("compile float custom effect");
         assert!(crate::compiled_effect_graph_supports_rgba_f32(&compiled));
         assert_eq!(
             crate::apply_compiled_effect_graph_rgba_f32(
-                &[[2.0, -0.25, 0.5, 1.0]],
-                1,
-                1,
+                crate::EffectFloatFrameView::new(
+                    crate::EffectFrameExtent::new(1, 1),
+                    crate::EffectValueFormat::new(
+                        crate::EffectWorkingPrecision::Float32,
+                        crate::EffectColorDomain::SceneLinearRgb,
+                        mondrian_core::ColorFrameAlpha::StraightCoverage
+                    ),
+                    mondrian_core::ImageSampling::UNIT_SQUARE,
+                    &[[2.0, -0.25, 0.5, 1.0]]
+                ),
                 &compiled,
-                0,
+                0
             )
-            .expect("execute float custom effect"),
+            .expect("execute float custom effect")
+            .pixels(),
             vec![[2.25, -0.25, 0.5, 1.0]]
         );
     }
@@ -3584,7 +4031,7 @@ mod tests {
             second_property.static_value()
         );
 
-        let missing = EffectType::Plugin("plugin.test.not_registered".to_owned());
+        let missing = EffectType::External("plugin.test.not_registered".to_owned());
         assert!(matches!(
             instantiate_effect_node(missing),
             Err(EffectInstantiationError::DefinitionUnavailable { .. })
@@ -3596,7 +4043,7 @@ mod tests {
         contract: EffectExecutionContract,
         op: EffectRenderOp,
     ) -> crate::EffectExecutionContractViolation {
-        let effect_type = EffectType::Plugin(key.to_owned());
+        let effect_type = EffectType::External(key.to_owned());
         register_effect_definition(
             EffectDefinition::new(
                 effect_type.key(),
@@ -3735,7 +4182,7 @@ mod tests {
         .collect::<std::collections::BTreeSet<_>>();
         let actual = effect_library_types()
             .into_iter()
-            .filter(|effect_type| !matches!(effect_type, EffectType::Plugin(_)))
+            .filter(|effect_type| !matches!(effect_type, EffectType::External(_)))
             .map(|effect_type| effect_type.key())
             .collect::<std::collections::BTreeSet<_>>();
 
@@ -3757,8 +4204,21 @@ mod tests {
         let compiled = compile_clip_effect_graph(&[effect.clone()], &[], tt(0), TEST_WORKING_SPACE)
             .expect("compile Luma Key");
         assert!(crate::compiled_effect_graph_supports_rgba_f32(&compiled));
-        let output = crate::apply_compiled_effect_graph_rgba_f32(&input, 2, 1, &compiled, 0)
-            .expect("execute Luma Key");
+        let output = crate::apply_compiled_effect_graph_rgba_f32(
+            crate::EffectFloatFrameView::new(
+                crate::EffectFrameExtent::new(2, 1),
+                crate::EffectValueFormat::new(
+                    crate::EffectWorkingPrecision::Float32,
+                    crate::EffectColorDomain::SceneLinearRgb,
+                    mondrian_core::ColorFrameAlpha::StraightCoverage,
+                ),
+                mondrian_core::ImageSampling::UNIT_SQUARE,
+                &input,
+            ),
+            &compiled,
+            0,
+        )
+        .expect("execute Luma Key");
         assert!(output[0][3] <= 1.0e-6);
         assert!((output[1][3] - 0.5).abs() <= 1.0e-6);
 
@@ -3770,8 +4230,21 @@ mod tests {
             .expect("retain dark pixels");
         let inverted = compile_clip_effect_graph(&[effect], &[], tt(0), TEST_WORKING_SPACE)
             .expect("compile inverted Luma Key");
-        let output = crate::apply_compiled_effect_graph_rgba_f32(&input, 2, 1, &inverted, 0)
-            .expect("execute inverted Luma Key");
+        let output = crate::apply_compiled_effect_graph_rgba_f32(
+            crate::EffectFloatFrameView::new(
+                crate::EffectFrameExtent::new(2, 1),
+                crate::EffectValueFormat::new(
+                    crate::EffectWorkingPrecision::Float32,
+                    crate::EffectColorDomain::SceneLinearRgb,
+                    mondrian_core::ColorFrameAlpha::StraightCoverage,
+                ),
+                mondrian_core::ImageSampling::UNIT_SQUARE,
+                &input,
+            ),
+            &inverted,
+            0,
+        )
+        .expect("execute inverted Luma Key");
         assert!((output[0][3] - 0.5).abs() <= 1.0e-6);
         assert!(output[1][3] <= 1.0e-6);
     }
@@ -3796,8 +4269,21 @@ mod tests {
                 crate::EffectWorkingPrecision::Float32,
             )
             .is_err());
-        let output = crate::apply_compiled_effect_graph_rgba_f32(&input, 4, 1, &compiled, 0)
-            .expect("execute Chroma Key");
+        let output = crate::apply_compiled_effect_graph_rgba_f32(
+            crate::EffectFloatFrameView::new(
+                crate::EffectFrameExtent::new(4, 1),
+                crate::EffectValueFormat::new(
+                    crate::EffectWorkingPrecision::Float32,
+                    crate::EffectColorDomain::SceneLinearRgb,
+                    mondrian_core::ColorFrameAlpha::StraightCoverage,
+                ),
+                mondrian_core::ImageSampling::UNIT_SQUARE,
+                &input,
+            ),
+            &compiled,
+            0,
+        )
+        .expect("execute Chroma Key");
         assert!(output[0][3] <= 1.0e-6);
         assert!(output[1][3] <= 1.0e-6);
         assert!((output[2][3] - 0.5).abs() <= 1.0e-6);
@@ -3808,8 +4294,21 @@ mod tests {
         let reopened_graph = compile_clip_effect_graph(&[reopened], &[], tt(0), TEST_WORKING_SPACE)
             .expect("compile reopened Chroma Key");
         assert_eq!(
-            crate::apply_compiled_effect_graph_rgba_f32(&input, 4, 1, &reopened_graph, 0)
-                .expect("execute reopened Chroma Key"),
+            crate::apply_compiled_effect_graph_rgba_f32(
+                crate::EffectFloatFrameView::new(
+                    crate::EffectFrameExtent::new(4, 1),
+                    crate::EffectValueFormat::new(
+                        crate::EffectWorkingPrecision::Float32,
+                        crate::EffectColorDomain::SceneLinearRgb,
+                        mondrian_core::ColorFrameAlpha::StraightCoverage
+                    ),
+                    mondrian_core::ImageSampling::UNIT_SQUARE,
+                    &input
+                ),
+                &reopened_graph,
+                0
+            )
+            .expect("execute reopened Chroma Key"),
             output,
         );
 
@@ -3821,8 +4320,21 @@ mod tests {
             .expect("keep key color");
         let inverted = compile_clip_effect_graph(&[effect.clone()], &[], tt(0), TEST_WORKING_SPACE)
             .expect("compile inverted Chroma Key");
-        let output = crate::apply_compiled_effect_graph_rgba_f32(&input, 4, 1, &inverted, 0)
-            .expect("execute inverted Chroma Key");
+        let output = crate::apply_compiled_effect_graph_rgba_f32(
+            crate::EffectFloatFrameView::new(
+                crate::EffectFrameExtent::new(4, 1),
+                crate::EffectValueFormat::new(
+                    crate::EffectWorkingPrecision::Float32,
+                    crate::EffectColorDomain::SceneLinearRgb,
+                    mondrian_core::ColorFrameAlpha::StraightCoverage,
+                ),
+                mondrian_core::ImageSampling::UNIT_SQUARE,
+                &input,
+            ),
+            &inverted,
+            0,
+        )
+        .expect("execute inverted Chroma Key");
         assert!((output[0][3] - 0.5).abs() <= 1.0e-6);
         assert!(output[2][3] <= 1.0e-6);
 
@@ -3860,13 +4372,21 @@ mod tests {
             .is_err());
         assert_eq!(
             crate::apply_compiled_effect_graph_rgba_f32(
-                &[[2.0, -1.0, -1.0, 0.4]],
-                1,
-                1,
+                crate::EffectFloatFrameView::new(
+                    crate::EffectFrameExtent::new(1, 1),
+                    crate::EffectValueFormat::new(
+                        crate::EffectWorkingPrecision::Float32,
+                        crate::EffectColorDomain::SceneLinearRgb,
+                        mondrian_core::ColorFrameAlpha::StraightCoverage
+                    ),
+                    mondrian_core::ImageSampling::UNIT_SQUARE,
+                    &[[2.0, -1.0, -1.0, 0.4]]
+                ),
                 &compiled,
-                0,
+                0
             )
-            .expect("execute HSL"),
+            .expect("execute HSL")
+            .pixels(),
             vec![[-1.0, 2.0, 2.0, 0.4]],
         );
     }
@@ -4097,14 +4617,38 @@ mod tests {
             [1.0, 0.0, 0.0, 1.0],
             [-0.25, 4.0, 0.15, 0.5],
         ];
-        let normal_output =
-            crate::apply_compiled_effect_graph_rgba_f32(&input, 3, 1, &normal_compiled, 0)
-                .expect("CPU Mask output");
+        let normal_output = crate::apply_compiled_effect_graph_rgba_f32(
+            crate::EffectFloatFrameView::new(
+                crate::EffectFrameExtent::new(3, 1),
+                crate::EffectValueFormat::new(
+                    crate::EffectWorkingPrecision::Float32,
+                    crate::EffectColorDomain::SceneLinearRgb,
+                    mondrian_core::ColorFrameAlpha::StraightCoverage,
+                ),
+                mondrian_core::ImageSampling::UNIT_SQUARE,
+                &input,
+            ),
+            &normal_compiled,
+            0,
+        )
+        .expect("CPU Mask output");
         assert!(normal_output[0][3] > normal_output[1][3]);
         assert!(normal_output.iter().flatten().all(|channel| channel.is_finite()));
-        let preview_output =
-            crate::apply_compiled_effect_graph_rgba_f32(&input, 3, 1, &preview_compiled, 0)
-                .expect("CPU Matte preview");
+        let preview_output = crate::apply_compiled_effect_graph_rgba_f32(
+            crate::EffectFloatFrameView::new(
+                crate::EffectFrameExtent::new(3, 1),
+                crate::EffectValueFormat::new(
+                    crate::EffectWorkingPrecision::Float32,
+                    crate::EffectColorDomain::SceneLinearRgb,
+                    mondrian_core::ColorFrameAlpha::StraightCoverage,
+                ),
+                mondrian_core::ImageSampling::UNIT_SQUARE,
+                &input,
+            ),
+            &preview_compiled,
+            0,
+        )
+        .expect("CPU Matte preview");
         assert!(preview_output
             .iter()
             .all(|pixel| { pixel[0] == pixel[1] && pixel[1] == pixel[2] && pixel[3] == 1.0 }));
@@ -4258,8 +4802,21 @@ mod tests {
             .expect("gamut/highlight graph");
         let compiled = crate::compile_reference_render_graph(graph).expect("compiled graph");
         let input = [[3.0, -0.4, 0.2, 0.35], [0.5, 0.25, 0.1, 0.8]];
-        let output = crate::apply_compiled_effect_graph_rgba_f32(&input, 2, 1, &compiled, 0)
-            .expect("float32 execution");
+        let output = crate::apply_compiled_effect_graph_rgba_f32(
+            crate::EffectFloatFrameView::new(
+                crate::EffectFrameExtent::new(2, 1),
+                crate::EffectValueFormat::new(
+                    crate::EffectWorkingPrecision::Float32,
+                    crate::EffectColorDomain::SceneLinearRgb,
+                    mondrian_core::ColorFrameAlpha::StraightCoverage,
+                ),
+                mondrian_core::ImageSampling::UNIT_SQUARE,
+                &input,
+            ),
+            &compiled,
+            0,
+        )
+        .expect("float32 execution");
         assert_eq!(output[0][3], input[0][3]);
         assert_eq!(output[1][3], input[1][3]);
         assert_ne!(output[0][..3], input[0][..3]);
@@ -4323,7 +4880,15 @@ mod tests {
             .default_properties()
             .iter()
             .find(|(_, property)| property.descriptor.parameter_id() == &radius_id)
-            .and_then(|(_, property)| property.descriptor.schema.numeric)
+            .and_then(|(_, property)| {
+                property
+                    .descriptor
+                    .schema
+                    .numeric
+                    .as_ref()
+                    .and_then(|contracts| contracts.first())
+                    .copied()
+            })
             .map(|numeric| numeric.hard_range.max)
             .expect("blur radius hard maximum");
         assert_eq!(
@@ -4404,6 +4969,41 @@ mod tests {
     }
 
     #[test]
+    fn foreign_and_ownerless_lut_paths_require_author_repair() {
+        #[cfg(windows)]
+        let foreign = mondrian_core::NativePath::from_unix_bytes(b"/studio/look.cube".to_vec());
+        #[cfg(not(windows))]
+        let foreign = mondrian_core::NativePath::from_windows_units(
+            r"C:\studio\look.cube".encode_utf16().collect(),
+        );
+        for path in [foreign, std::path::PathBuf::from("relative.cube").into()] {
+            let mut effect = EffectNode::with_defaults(EffectType::Lut3D);
+            effect
+                .set_static_value_by_parameter(
+                    &EffectType::Lut3D.parameter_id("processing_space").expect("id"),
+                    PropertyValue::Enum("scene_linear".into()),
+                )
+                .expect("space");
+            effect
+                .set_static_value_by_parameter(
+                    &EffectType::Lut3D.parameter_id("path").expect("id"),
+                    PropertyValue::Resource(ParameterResourceReference::ExternalFile { path }),
+                )
+                .expect("preserve author intent");
+            let error = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+                .expect_err("must not open local CWD");
+            assert!(matches!(
+                error,
+                EffectGraphBuildError::ResourceUnavailable {
+                    recovery: EffectResourceRecovery::AuthorEdit,
+                    ..
+                }
+            ));
+            assert!(!error.dependency_refresh_retryable());
+        }
+    }
+
+    #[test]
     fn bound_missing_lut_is_retryable_external_dependency_failure() {
         let mut effect = EffectNode::with_defaults(EffectType::Lut3D);
         let processing_space_id = EffectType::Lut3D
@@ -4421,7 +5021,9 @@ mod tests {
         effect
             .set_static_value_by_parameter(
                 &path_id,
-                PropertyValue::Resource(ParameterResourceReference::ExternalFile { path }),
+                PropertyValue::Resource(ParameterResourceReference::ExternalFile {
+                    path: path.into(),
+                }),
             )
             .expect("bind missing LUT path");
 
@@ -4464,13 +5066,13 @@ mod tests {
     }
 
     #[test]
-    fn enabled_unknown_plugin_effect_fails_instead_of_rendering_identity() {
-        let effect = EffectNode::new(EffectType::Plugin(
+    fn enabled_unknown_extension_effect_fails_instead_of_rendering_identity() {
+        let effect = EffectNode::new(EffectType::External(
             "plugin.missing.persisted-definition".to_string(),
         ));
 
         let error = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
-            .expect_err("missing plugin definition must not render as identity");
+            .expect_err("missing extension definition must not render as identity");
 
         assert!(matches!(
             error,
@@ -4560,7 +5162,7 @@ mod tests {
             .set_static_value_by_parameter(
                 &path_id,
                 PropertyValue::Resource(ParameterResourceReference::ExternalFile {
-                    path: path.clone(),
+                    path: path.clone().into(),
                 }),
             )
             .expect("set lut path");
@@ -4580,10 +5182,10 @@ mod tests {
     }
 
     #[test]
-    fn plugin_can_register_custom_effect_property() {
-        let plugin_type = EffectType::Plugin("plugin.ai.auto_exposure".to_string());
-        let exposure_path = plugin_type.property_path("exposure");
-        let exposure_id = plugin_type.parameter_id("exposure").expect("parameter ID");
+    fn extension_can_register_custom_effect_property() {
+        let extension_type = EffectType::External("plugin.ai.auto_exposure".to_string());
+        let exposure_path = extension_type.property_path("exposure");
+        let exposure_id = extension_type.parameter_id("exposure").expect("parameter ID");
         let mut properties = PropertyBag::default();
         properties.define(
             PropertyDescriptor::new(
@@ -4595,12 +5197,12 @@ mod tests {
         );
         register_effect_definition(
             EffectDefinition::new(
-                plugin_type.key(),
+                extension_type.key(),
                 "AI 自动曝光",
                 properties,
                 EffectColorDomainContract::SCENE_LINEAR,
             )
-            .with_execution_contract(test_plugin_execution_contract())
+            .with_execution_contract(test_extension_execution_contract())
             .with_graph_builder(Arc::new(move |effect, context, graph| {
                 let exposure = effect.evaluate_f32_parameter(&exposure_id, context.time, 0.0);
                 if exposure.abs() > 1e-4 {
@@ -4616,31 +5218,34 @@ mod tests {
         )
         .expect("register auto exposure definition");
 
-        let mut effect = EffectNode::with_defaults(plugin_type.clone());
+        let mut effect = EffectNode::with_defaults(extension_type.clone());
         effect
             .apply_property_mutation(PropertyMutation::SetStaticValue {
                 path: exposure_path.clone(),
                 value: PropertyValue::Float(0.85),
             })
-            .expect("set plugin property");
+            .expect("set extension property");
 
         let value = effect
             .evaluate_property(&exposure_path, tt(0))
             .and_then(|value| value.as_f32())
-            .expect("read plugin property");
+            .expect("read extension property");
         assert!((value - 0.85).abs() < 0.001);
 
         // Verify the effect produces a graph node
         let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
-            .expect("build plugin graph");
+            .expect("build extension graph");
         assert!(!graph.nodes.is_empty());
-        assert_eq!(effect_display_name(&plugin_type), "AI 自动曝光".to_string());
+        assert_eq!(
+            effect_display_name(&extension_type),
+            "AI 自动曝光".to_string()
+        );
     }
 
     #[test]
-    fn plugin_can_build_custom_render_op_plan() {
-        let plugin_type = EffectType::Plugin("plugin.render.glow".to_string());
-        let amount_id = plugin_type.parameter_id("amount").expect("parameter ID");
+    fn extension_can_build_custom_render_op_plan() {
+        let extension_type = EffectType::External("plugin.render.glow".to_string());
+        let amount_id = extension_type.parameter_id("amount").expect("parameter ID");
         let mut properties = PropertyBag::default();
         properties.define(
             PropertyDescriptor::new(
@@ -4652,7 +5257,7 @@ mod tests {
         );
         register_effect_definition(
             EffectDefinition::new(
-                plugin_type.key(),
+                extension_type.key(),
                 "Glow",
                 properties,
                 EffectColorDomainContract::SCENE_LINEAR,
@@ -4672,7 +5277,7 @@ mod tests {
         )
         .expect("register custom render definition");
 
-        let effect = EffectNode::with_defaults(plugin_type);
+        let effect = EffectNode::with_defaults(extension_type);
         let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
             .expect("build custom graph");
         let custom_node = graph.nodes.iter().find(|n| {
@@ -4706,7 +5311,7 @@ mod tests {
                     horizontal_pixels: 1,
                     vertical_pixels: 1,
                 },
-                ..test_plugin_execution_contract()
+                ..test_extension_execution_contract()
             },
             EffectRenderOp::GaussianBlur { radius: 1.0 },
         );
@@ -4720,7 +5325,7 @@ mod tests {
             EffectExecutionContract {
                 execution_modes: crate::EffectExecutionModes::CPU_F32
                     .union(crate::EffectExecutionModes::GPU_F32),
-                ..test_plugin_execution_contract()
+                ..test_extension_execution_contract()
             },
             EffectRenderOp::Grain { amount: 0.5 },
         );
@@ -4731,7 +5336,7 @@ mod tests {
 
         let roi = emitted_op_contract_violation(
             "plugin.contract.roi",
-            test_plugin_execution_contract(),
+            test_extension_execution_contract(),
             EffectRenderOp::GaussianBlur { radius: 7.25 },
         );
         assert!(matches!(
@@ -4743,7 +5348,7 @@ mod tests {
             "plugin.contract.gpu_u8",
             EffectExecutionContract {
                 execution_modes: crate::EffectExecutionModes::GPU_U8,
-                ..test_plugin_execution_contract()
+                ..test_extension_execution_contract()
             },
             EffectRenderOp::ColorAdjust {
                 exposure: 0.0,
@@ -4762,7 +5367,7 @@ mod tests {
             EffectExecutionContract {
                 execution_modes: crate::EffectExecutionModes::CPU_F32,
                 roi_propagation: crate::EffectRoiPropagation::UnknownRequiresFullFrame,
-                ..test_plugin_execution_contract()
+                ..test_extension_execution_contract()
             },
             EffectRenderOp::Custom {
                 key: "plugin.contract.custom_precision".to_owned(),
@@ -4779,10 +5384,10 @@ mod tests {
     }
 
     #[test]
-    fn plugin_can_build_branching_render_graph() {
-        let plugin_type = EffectType::Plugin("plugin.graph.glow_mix".to_string());
-        let radius_id = plugin_type.parameter_id("radius").expect("radius ID");
-        let opacity_id = plugin_type.parameter_id("opacity").expect("opacity ID");
+    fn extension_can_build_branching_render_graph() {
+        let extension_type = EffectType::External("plugin.graph.glow_mix".to_string());
+        let radius_id = extension_type.parameter_id("radius").expect("radius ID");
+        let opacity_id = extension_type.parameter_id("opacity").expect("opacity ID");
         let mut properties = PropertyBag::default();
         properties.define(
             PropertyDescriptor::new(
@@ -4802,7 +5407,7 @@ mod tests {
         );
         register_effect_definition(
             EffectDefinition::new(
-                plugin_type.key(),
+                extension_type.key(),
                 "Glow Mix",
                 properties,
                 EffectColorDomainContract::SCENE_LINEAR,
@@ -4812,7 +5417,7 @@ mod tests {
                     horizontal_pixels: 4,
                     vertical_pixels: 4,
                 },
-                ..test_plugin_execution_contract()
+                ..test_extension_execution_contract()
             })
             .with_branching_graph_builder(Arc::new(move |effect, context, graph| {
                 let radius = effect.evaluate_f32_parameter(&radius_id, context.time, 0.0);
@@ -4834,7 +5439,7 @@ mod tests {
         )
         .expect("register branching definition");
 
-        let effect = EffectNode::with_defaults(plugin_type.clone());
+        let effect = EffectNode::with_defaults(extension_type.clone());
         let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
             .expect("build branching graph");
         assert_eq!(graph.nodes.len(), 3);
@@ -4847,7 +5452,7 @@ mod tests {
             Some(crate::graph::EffectGraphNodeKind::Blend { .. })
         ));
 
-        let definition = effect_definition(&plugin_type).expect("effect definition");
+        let definition = effect_definition(&extension_type).expect("effect definition");
         let contract = definition.execution_contract();
         assert_eq!(contract.topology, EffectGraphTopology::GeneralDag);
         assert!(contract.execution_modes.contains(
@@ -4858,8 +5463,8 @@ mod tests {
 
     #[test]
     fn custom_render_backend_can_provide_stable_cache_key_contract() {
-        let plugin_type = EffectType::Plugin("plugin.render.lut_loader".to_string());
-        let path_id = plugin_type.parameter_id("asset_path").expect("asset path ID");
+        let extension_type = EffectType::External("plugin.render.lut_loader".to_string());
+        let path_id = extension_type.parameter_id("asset_path").expect("asset path ID");
         let mut properties = PropertyBag::default();
         properties.define(
             PropertyDescriptor::new(
@@ -4874,7 +5479,7 @@ mod tests {
         let cache_path_id = path_id;
         register_effect_definition(
             EffectDefinition::new(
-                plugin_type.key(),
+                extension_type.key(),
                 "LUT Loader",
                 properties,
                 EffectColorDomainContract::SCENE_LINEAR,
@@ -4906,7 +5511,7 @@ mod tests {
         )
         .expect("register cached render definition");
 
-        let effect = EffectNode::with_defaults(plugin_type.clone());
+        let effect = EffectNode::with_defaults(extension_type.clone());
         let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
             .expect("build cached graph");
         let custom_node = graph.nodes.iter().find_map(|n| match &n.kind {
@@ -4920,8 +5525,9 @@ mod tests {
         assert_eq!(cache_key.as_deref(), Some("lut:looks/teal_orange.cube"));
         assert_eq!(cache_policy, EffectCachePolicy::Deterministic);
 
-        let contract =
-            effect_definition(&plugin_type).expect("effect definition").execution_contract();
+        let contract = effect_definition(&extension_type)
+            .expect("effect definition")
+            .execution_contract();
         assert_eq!(contract.topology, EffectGraphTopology::LinearChain);
         assert!(contract.execution_modes.contains(
             crate::EffectProcessingBackend::Cpu,
@@ -4949,22 +5555,22 @@ mod tests {
     }
 
     #[test]
-    fn failing_plugin_graph_builder_isolated_and_hidden_after_disable_policy() {
-        let plugin_type = EffectType::Plugin("plugin.graph.unstable".to_string());
+    fn failing_extension_graph_builder_isolated_and_hidden_after_disable_policy() {
+        let extension_type = EffectType::External("plugin.graph.unstable".to_string());
         register_effect_definition(
             EffectDefinition::new(
-                plugin_type.key(),
+                extension_type.key(),
                 "Unstable Graph",
                 PropertyBag::default(),
                 EffectColorDomainContract::SCENE_LINEAR,
             )
-            .with_execution_contract(test_plugin_execution_contract())
-            .with_plugin_contract(
-                crate::EffectPluginContract::new("1.0.0")
+            .with_execution_contract(test_extension_execution_contract())
+            .with_extension_contract(
+                crate::EffectExtensionContract::new("1.0.0")
                     .with_runtime_failure_policy(
-                        crate::EffectPluginRuntimeFailurePolicy::DisableDefinition,
+                        crate::EffectExtensionRuntimeFailurePolicy::DisableDefinition,
                     )
-                    .with_library_policy(crate::EffectPluginLibraryPolicy::HideWhenUnavailable),
+                    .with_library_policy(crate::EffectExtensionLibraryPolicy::HideWhenUnavailable),
             )
             .with_graph_builder(Arc::new(|_, _, _| {
                 panic!("unstable graph builder");
@@ -4972,7 +5578,7 @@ mod tests {
         )
         .expect("register unstable definition");
 
-        let effect = EffectNode::new(plugin_type.clone());
+        let effect = EffectNode::new(extension_type.clone());
         let error = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
             .expect_err("builder must fail");
         assert!(matches!(
@@ -4980,13 +5586,393 @@ mod tests {
             EffectGraphBuildError::BuilderPanicked { .. }
         ));
 
-        let status =
-            crate::effect_plugin_runtime_status(&plugin_type.key()).expect("plugin runtime status");
+        let status = crate::effect_extension_runtime_status(&extension_type.key())
+            .expect("extension runtime status");
         assert!(status.disabled);
         assert_eq!(
             status.last_error.as_deref(),
             Some("effect graph builder panicked")
         );
-        assert!(!effect_library_types().contains(&plugin_type));
+        assert!(!effect_library_types().contains(&extension_type));
+    }
+}
+
+#[cfg(test)]
+mod image_scale_requirement_tests {
+    use super::*;
+    use crate::{
+        EffectAlphaContract, EffectExecutionModes, EffectFloatProcessorFactory,
+        EffectFloatProcessorInputRole, EffectFloatProcessorInstance,
+        EffectFloatProcessorPreparation, EffectFloatProcessorSizing, EffectFloatProcessorStorage,
+        EffectImageScaleRequirement, EffectProcessorControl,
+    };
+    use std::sync::atomic::{AtomicBool, AtomicUsize};
+
+    #[derive(Debug)]
+    struct Factory {
+        role: EffectFloatProcessorInputRole,
+        unit: AtomicBool,
+        source_service: AtomicBool,
+        storage_calls: AtomicUsize,
+        prepare_calls: AtomicUsize,
+    }
+
+    impl Factory {
+        fn new(role: EffectFloatProcessorInputRole, unit: bool) -> Arc<Self> {
+            Arc::new(Self {
+                role,
+                unit: AtomicBool::new(unit),
+                source_service: AtomicBool::new(false),
+                storage_calls: AtomicUsize::new(0),
+                prepare_calls: AtomicUsize::new(0),
+            })
+        }
+    }
+
+    impl EffectFloatProcessorFactory for Factory {
+        fn requires_input_service(&self) -> bool {
+            self.source_service.load(Ordering::SeqCst)
+        }
+        fn input_role(&self) -> EffectFloatProcessorInputRole {
+            self.role
+        }
+        fn image_scale_requirement(&self) -> EffectImageScaleRequirement {
+            if self.unit.load(Ordering::SeqCst) {
+                EffectImageScaleRequirement::Unit
+            } else {
+                EffectImageScaleRequirement::Any
+            }
+        }
+        fn alpha_contract(&self) -> EffectAlphaContract {
+            if self.role == EffectFloatProcessorInputRole::NoImage {
+                EffectAlphaContract::SOURCE_FLOAT
+            } else {
+                EffectAlphaContract::IDENTITY
+            }
+        }
+        fn feedback_budget_bytes(&self) -> usize {
+            0
+        }
+        fn storage(
+            &self,
+            _: EffectFloatProcessorSizing,
+        ) -> mondrian_core::Result<EffectFloatProcessorStorage> {
+            self.storage_calls.fetch_add(1, Ordering::SeqCst);
+            EffectFloatProcessorStorage::new(0, 0)
+        }
+        fn prepare(
+            &self,
+            _: EffectFloatProcessorPreparation,
+            _: &mut EffectProcessorControl<'_>,
+        ) -> mondrian_core::Result<Box<dyn EffectFloatProcessorInstance>> {
+            self.prepare_calls.fetch_add(1, Ordering::SeqCst);
+            panic!("snapshot rejection must happen before prepare")
+        }
+    }
+
+    fn binding(factory: Arc<Factory>) -> CustomEffectProcessorBinding {
+        CustomEffectProcessorBinding {
+            alpha_contract: factory.alpha_contract(),
+            input_role: factory.input_role(),
+            image_scale_requirement: factory.image_scale_requirement(),
+            requires_input_service: factory.requires_input_service(),
+            revision: NEXT_CUSTOM_PROCESSOR_REVISION.fetch_add(1, Ordering::AcqRel),
+            processor: CustomEffectProcessor::Float32Factory(factory),
+            runtime_owner: None,
+            occurrence_id: Some(EffectId::new()),
+            project_geometry: None,
+        }
+    }
+
+    fn op(binding: CustomEffectProcessorBinding) -> EffectRenderOp {
+        EffectRenderOp::Custom {
+            key: "test.image-scale".to_owned(),
+            params: serde_json::json!({}),
+            cache_key: Some("same-implementation".to_owned()),
+            cache_policy: EffectCachePolicy::Uncacheable,
+            processor: Some(binding),
+        }
+    }
+
+    #[test]
+    fn frozen_image_scale_changes_complete_and_subtree_identity_without_revision_change() {
+        let factory = Factory::new(EffectFloatProcessorInputRole::SingleImage, false);
+        let any = binding(factory.clone());
+        let any_graph =
+            crate::compile_reference_effect_graph(&EffectRenderPlan { ops: vec![op(any.clone())] })
+                .unwrap();
+        factory.unit.store(true, Ordering::SeqCst);
+        let mut unit = any.clone();
+        unit.image_scale_requirement = EffectImageScaleRequirement::Unit;
+        let unit_graph = crate::compile_reference_effect_graph(&EffectRenderPlan {
+            ops: vec![op(unit.clone())],
+        })
+        .unwrap();
+        assert_eq!(
+            any.revision(),
+            unit.revision(),
+            "isolate the capability identity field"
+        );
+        assert_eq!(
+            any_graph.image_scale_requirement(),
+            EffectImageScaleRequirement::Any
+        );
+        assert_eq!(
+            unit_graph.image_scale_requirement(),
+            EffectImageScaleRequirement::Unit
+        );
+        assert_ne!(
+            any_graph.semantic_fingerprint(),
+            unit_graph.semantic_fingerprint()
+        );
+        let output = any_graph.graph().output.unwrap();
+        assert_ne!(
+            any_graph.node_profiles()[&output].subtree_signature,
+            unit_graph.node_profiles()[&output].subtree_signature
+        );
+        let owned = unit.with_runtime_owner("test.image-scale", EffectId::new(), 1, None, None);
+        assert_eq!(
+            owned.image_scale_requirement(),
+            EffectImageScaleRequirement::Unit
+        );
+        assert!(owned.factory_contract_matches());
+        let literal = CustomEffectProcessorBinding::new(Arc::new(|_, _, _, _, _| Ok(())));
+        let literal_f32 = CustomEffectProcessorBinding::new_f32(Arc::new(|_, _, _| Ok(())));
+        assert_eq!(
+            literal.image_scale_requirement(),
+            EffectImageScaleRequirement::Any
+        );
+        assert_eq!(
+            literal_f32.image_scale_requirement(),
+            EffectImageScaleRequirement::Any
+        );
+    }
+
+    #[test]
+    fn frozen_source_service_changes_identity_and_disables_incomplete_output_caching() {
+        let factory = Factory::new(EffectFloatProcessorInputRole::SingleImage, false);
+        let plain = binding(factory.clone());
+        let mut plain_op = op(plain.clone());
+        if let EffectRenderOp::Custom { cache_policy, .. } = &mut plain_op {
+            *cache_policy = EffectCachePolicy::Deterministic;
+        }
+        assert_eq!(plain_op.cache_policy(), EffectCachePolicy::Deterministic);
+        let plain_graph =
+            crate::compile_reference_effect_graph(&EffectRenderPlan { ops: vec![plain_op] })
+                .unwrap();
+        factory.source_service.store(true, Ordering::SeqCst);
+        assert!(
+            !plain.factory_contract_matches(),
+            "provider cannot mutate a sealed contract"
+        );
+        let mut source = plain.clone();
+        source.requires_input_service = true;
+        assert_eq!(plain.revision(), source.revision());
+        assert!(source.factory_contract_matches());
+        let mut source_op = op(source.clone());
+        if let EffectRenderOp::Custom { cache_policy, .. } = &mut source_op {
+            *cache_policy = EffectCachePolicy::Deterministic;
+        }
+        assert_eq!(source_op.cache_policy(), EffectCachePolicy::Uncacheable);
+        let source_graph =
+            crate::compile_reference_effect_graph(&EffectRenderPlan { ops: vec![source_op] })
+                .unwrap();
+        assert_ne!(
+            plain_graph.semantic_fingerprint(),
+            source_graph.semantic_fingerprint()
+        );
+        let output = plain_graph.graph().output.unwrap();
+        assert_ne!(
+            plain_graph.node_profiles()[&output].subtree_signature,
+            source_graph.node_profiles()[&output].subtree_signature
+        );
+        let owned =
+            source.with_runtime_owner("test.source-service", EffectId::new(), 1, None, None);
+        assert!(owned.requires_input_service());
+        assert!(owned.factory_contract_matches());
+    }
+
+    #[test]
+    fn source_service_requirement_is_owned_by_reachable_prepared_definition_inputs() {
+        let key = format!("test.source-service.{}", EffectId::new());
+        let factory = Factory::new(EffectFloatProcessorInputRole::SingleImage, false);
+        factory.source_service.store(true, Ordering::SeqCst);
+        register_effect_definition(
+            EffectDefinition::new(
+                &key,
+                "Source service",
+                PropertyBag::default(),
+                EffectColorDomainContract::SCENE_LINEAR,
+            )
+            .with_execution_contract(EffectExecutionContract {
+                execution_modes: EffectExecutionModes::CPU_F32,
+                roi_propagation: EffectRoiPropagation::UnknownRequiresFullFrame,
+                ..EffectExecutionContract::IDENTITY
+            })
+            .with_custom_float_processor_factory(
+                Arc::new(|_, _| Ok(Some(serde_json::json!({})))),
+                None,
+                EffectCachePolicy::Deterministic,
+                factory,
+            ),
+        )
+        .unwrap();
+        let mut effect = instantiate_effect_node(EffectType::External(key)).unwrap();
+        let active = crate::PreparedEffectProgram::prepare(
+            &[effect.clone()],
+            &[],
+            WorkingColorSpace::LinearRec709,
+        )
+        .unwrap()
+        .evaluate(TimelineTime::ZERO)
+        .unwrap();
+        assert!(active.requires_processor_input_service());
+        effect.is_enabled = false;
+        let disabled =
+            crate::PreparedEffectProgram::prepare(&[effect], &[], WorkingColorSpace::LinearRec709)
+                .unwrap()
+                .evaluate(TimelineTime::ZERO)
+                .unwrap();
+        assert!(!disabled.requires_processor_input_service());
+    }
+
+    #[test]
+    fn image_scale_aggregation_uses_reachable_nodes_including_no_image_providers() {
+        let unit = binding(Factory::new(
+            EffectFloatProcessorInputRole::SingleImage,
+            true,
+        ));
+        let mut dead = EffectGraphBuilderState::new();
+        dead.add_unary_from(dead.source(), op(unit.clone()));
+        let dead = crate::compile_reference_render_graph(dead.finish()).unwrap();
+        assert_eq!(
+            dead.image_scale_requirement(),
+            EffectImageScaleRequirement::Any
+        );
+        let mut reachable = EffectGraphBuilderState::new();
+        reachable.append_unary(op(unit));
+        let reachable = crate::compile_reference_render_graph(reachable.finish()).unwrap();
+        assert_eq!(
+            reachable.image_scale_requirement(),
+            EffectImageScaleRequirement::Unit
+        );
+        let mut source = EffectGraphBuilderState::new();
+        source.append_custom_source(op(binding(Factory::new(
+            EffectFloatProcessorInputRole::NoImage,
+            true,
+        ))));
+        let source = crate::compile_reference_render_graph(source.finish()).unwrap();
+        assert_eq!(
+            source.image_scale_requirement(),
+            EffectImageScaleRequirement::Unit
+        );
+        assert!(source
+            .graph()
+            .nodes
+            .iter()
+            .any(|node| matches!(node.kind, crate::EffectGraphNodeKind::CustomSource { .. })));
+    }
+
+    #[test]
+    fn disabled_registered_unit_provider_does_not_constrain_compiled_graph() {
+        let key = format!("test.disabled-scale.{}", EffectId::new());
+        register_effect_definition(
+            EffectDefinition::new(
+                &key,
+                "Unit source",
+                PropertyBag::default(),
+                EffectColorDomainContract::SCENE_LINEAR,
+            )
+            .with_execution_contract(EffectExecutionContract {
+                execution_modes: EffectExecutionModes::CPU_F32,
+                determinism: crate::EffectDeterminism::Nondeterministic,
+                roi_propagation: EffectRoiPropagation::UnknownRequiresFullFrame,
+                ..EffectExecutionContract::IDENTITY
+            })
+            .with_custom_float_processor_factory(
+                Arc::new(|_, _| Ok(Some(serde_json::json!({})))),
+                None,
+                EffectCachePolicy::Uncacheable,
+                Factory::new(EffectFloatProcessorInputRole::NoImage, true),
+            ),
+        )
+        .unwrap();
+        let mut effect = instantiate_effect_node(EffectType::External(key)).unwrap();
+        let active = compile_clip_effect_graph(
+            &[effect.clone()],
+            &[],
+            TimelineTime::ZERO,
+            WorkingColorSpace::LinearRec709,
+        )
+        .unwrap();
+        assert_eq!(
+            active.image_scale_requirement(),
+            EffectImageScaleRequirement::Unit
+        );
+        effect.is_enabled = false;
+        let disabled = compile_clip_effect_graph(
+            &[effect],
+            &[],
+            TimelineTime::ZERO,
+            WorkingColorSpace::LinearRec709,
+        )
+        .unwrap();
+        assert!(disabled.graph().is_identity());
+        assert_eq!(
+            disabled.image_scale_requirement(),
+            EffectImageScaleRequirement::Any
+        );
+    }
+
+    #[test]
+    fn provider_scale_drift_is_rejected_before_sizing_prepare_or_pixel_mutation() {
+        let factory = Factory::new(EffectFloatProcessorInputRole::SingleImage, false);
+        let operation = op(binding(factory.clone()));
+        let plan = EffectRenderPlan { ops: vec![operation.clone()] };
+        let graph = crate::compile_reference_effect_graph(&plan).unwrap();
+        let topology = crate::prepare_effect_graph_topology(graph.graph()).unwrap();
+        factory.unit.store(true, Ordering::SeqCst);
+        assert_eq!(
+            graph.image_scale_requirement(),
+            EffectImageScaleRequirement::Any,
+            "a compiled requirement never reads mutable provider state"
+        );
+        assert!(crate::compile_reference_effect_graph(&plan).is_none());
+        assert!(topology.bind(graph.graph().clone()).is_none());
+        assert!(matches!(
+            crate::processor_residency::frame_processor_charge(&operation, 1, 1),
+            Err(crate::EffectExecutionError::CustomProcessorUnavailable { .. })
+        ));
+        let mut pixels = crate::EffectFloatFrame::from_pixels(
+            crate::EffectFrameExtent::new(1, 1),
+            crate::EffectValueFormat::new(
+                crate::EffectWorkingPrecision::Float32,
+                crate::EffectColorDomain::SceneLinearRgb,
+                mondrian_core::ColorFrameAlpha::StraightFloat,
+            ),
+            mondrian_core::ImageSampling::UNIT_SQUARE,
+            vec![[0.25, 0.5, 0.75, 1.0]],
+        )
+        .unwrap();
+        assert!(matches!(
+            crate::adjustment::apply_custom_render_op_f32(
+                &mut pixels,
+                &operation,
+                0,
+                None,
+                0,
+                &mut EffectProcessorControl::uncancelled()
+            ),
+            Err(crate::EffectExecutionError::CustomProcessorUnavailable { .. })
+        ));
+        assert_eq!(pixels.pixels(), &[[0.25, 0.5, 0.75, 1.0]]);
+        assert_eq!(factory.storage_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(factory.prepare_calls.load(Ordering::SeqCst), 0);
+        factory.unit.store(false, Ordering::SeqCst);
+        let restored = topology.bind(graph.graph().clone()).unwrap();
+        assert_eq!(
+            restored.semantic_fingerprint(),
+            graph.semantic_fingerprint()
+        );
     }
 }

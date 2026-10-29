@@ -1580,7 +1580,7 @@ mod tests {
         assert!(dialog.raw_exposure_dropdown.is_enabled());
         assert!(dialog.raw_white_balance_dropdown.is_enabled());
         assert!(dialog.raw_quality_dropdown.is_enabled());
-        assert!(dialog.diagnostics_label.text().contains("Camera RAW"));
+        assert!(dialog.diagnostics_label.text().contains("相机 RAW："));
         assert!(dialog.diagnostics_label.text().contains("Synthetic DNG"));
     }
 

@@ -393,6 +393,7 @@ fn wait_for_relink_completion(
 ) -> anyhow::Result<crate::app::media_asset_mutation::MediaAssetMutationTerminalRecord> {
     let deadline = Instant::now() + PROXY_TIMEOUT;
     loop {
+        state.refresh_execution_resource_decision(Default::default());
         state.poll_media_asset_mutations();
         if let Some(record) = state
             .media_asset_mutation_diagnostics()
@@ -430,6 +431,7 @@ fn wait_for_proxy_completion(
 ) -> anyhow::Result<ProxyExecutionEvidence> {
     let deadline = Instant::now() + PROXY_TIMEOUT;
     loop {
+        state.refresh_execution_resource_decision(Default::default());
         state.poll_proxy_generation();
         if let Some(record) = state
             .proxy_generation_diagnostics()

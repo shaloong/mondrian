@@ -6,13 +6,14 @@
 
 use crate::{clip::Clip, track::Track};
 use mondrian_core::{
-    AudioChannelLayout, AudioChannelMixMatrix, AudioComponentEditId, AudioProcessingScopeId,
-    AudioProcessorInstanceId, AudioRoleId, AudioRouteId, AudioSourceComponentId, AudioTransitionId,
-    AuthoringFootprint, AuthoringFootprintCollector, AuthoringFootprintError, AuthoringList,
-    AuthoringMap, AutomationSegmentInterpolation, ClipId, ExactAutomationCurve, MixBusId,
-    ParameterCacheImpact, ParameterId, ParameterInterpolation, ParameterInvalidValuePolicy,
-    ParameterNumericContract, ParameterNumericRange, ParameterSchema, ParameterUnit,
-    ProgramOutputId, PropertyValue, PropertyValueType, TimelineTime, TimelineTimeRange, TrackId,
+    AudioChannelLayout, AudioChannelMixMatrix, AudioComponentEditId, AudioNoteId, AudioNoteLaneId,
+    AudioProcessingScopeId, AudioProcessorInstanceId, AudioRoleId, AudioRouteId,
+    AudioSourceComponentId, AudioTransitionId, AuthoringFootprint, AuthoringFootprintCollector,
+    AuthoringFootprintError, AuthoringList, AuthoringMap, AutomationSegmentInterpolation, ClipId,
+    ExactAutomationCurve, MixBusId, MusicalTimeReference, ParameterCacheImpact, ParameterId,
+    ParameterInterpolation, ParameterInvalidValuePolicy, ParameterNumericContract,
+    ParameterNumericRange, ParameterSchema, ParameterUnit, ProgramOutputId, PropertyValue,
+    PropertyValueType, TimelineTime, TimelineTimeRange, TrackId,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -77,6 +78,31 @@ pub fn gain_parameter_schema() -> ParameterSchema {
             hard_range: ParameterNumericRange { min: AUDIO_GAIN_DB_MIN, max: AUDIO_GAIN_DB_MAX },
             soft_range: ParameterNumericRange { min: -60.0, max: 12.0 },
             step: Some(0.1),
+            invalid_value_policy: ParameterInvalidValuePolicy::Reject,
+        },
+    )
+}
+
+/// Definition-backed gain admission under the owning strip/Scope/Component identity.
+pub(crate) fn gain_curve_schema(parameter_id: &'static str) -> ParameterSchema {
+    let mut schema = gain_parameter_schema();
+    schema.parameter_id = ParameterId::new_static(parameter_id);
+    schema.message_id = format!("{parameter_id}.label");
+    schema
+}
+
+/// Definition contract shared by placement pan authoring and curve preview.
+pub fn pan_parameter_schema() -> ParameterSchema {
+    ParameterSchema::v1(
+        ParameterId::new_static(CLIP_PAN_PARAMETER_ID),
+        PropertyValue::Double(0.0),
+    )
+    .with_numeric_contract(
+        ParameterUnit::Unitless,
+        ParameterNumericContract {
+            hard_range: ParameterNumericRange { min: -1.0, max: 1.0 },
+            soft_range: ParameterNumericRange { min: -1.0, max: 1.0 },
+            step: Some(0.01),
             invalid_value_policy: ParameterInvalidValuePolicy::Reject,
         },
     )
@@ -166,6 +192,7 @@ pub fn lookahead_limiter_release_parameter_schema() -> ParameterSchema {
 
 /// A persistent reference to one processor definition.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub enum AudioProcessorDefinitionRef {
     /// A Mondrian processor with a versioned parameter schema.
     BuiltIn {
@@ -179,6 +206,8 @@ pub enum AudioProcessorDefinitionRef {
         schema_version: u32,
         /// Exact installed binary revision captured when the author inserted it.
         /// An unbound definition uses an explicit `null` until rebind.
+        /// The field must be present in every canonical definition.
+        #[serde(deserialize_with = "deserialize_native_binary_revision")]
         binary_sha256: Option<[u8; 32]>,
     },
     /// A CLAP audio-effect definition.
@@ -187,23 +216,47 @@ pub enum AudioProcessorDefinitionRef {
         schema_version: u32,
         /// Exact installed binary revision captured when the author inserted it.
         /// An unbound definition uses an explicit `null` until rebind.
+        /// The field must be present in every canonical definition.
+        #[serde(deserialize_with = "deserialize_native_binary_revision")]
         binary_sha256: Option<[u8; 32]>,
     },
+}
+
+// Supplying a custom field decoder without a default makes field presence
+// mandatory while preserving the canonical explicit-null unbound state.
+fn deserialize_native_binary_revision<'de, D>(deserializer: D) -> Result<Option<[u8; 32]>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Option::<[u8; 32]>::deserialize(deserializer)
 }
 
 /// One processor parameter definition snapshot and its exact author-time value.
 ///
 /// The schema remains editable and serializable when a plugin is unavailable.
-/// The curve owns both the current unkeyed value and any automation keys; there
-/// is no parallel static-value field that could disagree with it.
+/// A present curve owns the host unkeyed value and automation keys. An absent
+/// curve means that this native parameter has no host automation reference; its
+/// schema remains captured, and native state owns the value. There is no parallel
+/// static-value field or implicit definition-default write.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AudioProcessorParameter {
     /// Stable, versioned definition contract captured for this instance.
     pub schema: ParameterSchema,
-    /// Exact owner-local parameter curve, including its unkeyed value.
-    pub automation: ExactAutomationCurve,
+    /// Exact host-owned curve, or explicit absence of a host automation reference.
+    /// `None` retains the parameter definition and emits no host parameter events.
+    #[serde(deserialize_with = "deserialize_parameter_automation")]
+    pub automation: Option<ExactAutomationCurve>,
     /// Captured plugin UI facts, separate from stable parameter identity and schema.
     pub ui: AudioProcessorParameterUiMetadata,
+}
+
+fn deserialize_parameter_automation<'de, D>(
+    deserializer: D,
+) -> Result<Option<ExactAutomationCurve>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Option::<ExactAutomationCurve>::deserialize(deserializer)
 }
 
 /// Display facts captured from a native plugin for offline project inspection.
@@ -236,7 +289,7 @@ impl AudioProcessorParameter {
             })?;
         let parameter = Self {
             schema,
-            automation,
+            automation: Some(automation),
             ui: AudioProcessorParameterUiMetadata::default(),
         };
         parameter.validate()?;
@@ -260,7 +313,7 @@ impl AudioProcessorParameter {
     ) -> Result<(), AudioAuthoringError> {
         let candidate = Self {
             schema: self.schema.clone(),
-            automation,
+            automation: Some(automation),
             ui: self.ui.clone(),
         };
         candidate.validate()?;
@@ -270,48 +323,9 @@ impl AudioProcessorParameter {
 
     fn validate(&self) -> Result<(), AudioAuthoringError> {
         self.ui.validate()?;
-        self.schema
-            .validate()
-            .map_err(|error| AudioAuthoringError::InvalidParameterSchema {
-                reason: error.to_string(),
-            })?;
-        if !matches!(
-            self.schema.value_type,
-            PropertyValueType::Double | PropertyValueType::Int
-        ) {
-            return Err(AudioAuthoringError::UnsupportedProcessorParameterType);
-        }
-        if self.schema.parameter_id != self.automation.parameter_id {
-            return Err(AudioAuthoringError::ParameterKeyMismatch);
-        }
-        validate_curve(&self.automation)?;
-        if !self.schema.is_animatable && !self.automation.keyframes.is_empty() {
-            return Err(AudioAuthoringError::ParameterDoesNotAdmitAutomation);
-        }
-        validate_parameter_value(&self.schema, self.automation.default_value)?;
-        for keyframe in &self.automation.keyframes {
-            validate_parameter_value(&self.schema, keyframe.value)?;
-            if let Some(handle) = keyframe.in_handle {
-                validate_parameter_value(&self.schema, keyframe.value + handle.value_offset)?;
-            }
-            if let Some(handle) = keyframe.out_handle {
-                validate_parameter_value(&self.schema, keyframe.value + handle.value_offset)?;
-            }
-        }
-        for keyframe in self
-            .automation
-            .keyframes
-            .iter()
-            .take(self.automation.keyframes.len().saturating_sub(1))
-        {
-            let interpolation = match keyframe.interpolation_to_next {
-                AutomationSegmentInterpolation::Hold => ParameterInterpolation::Hold,
-                AutomationSegmentInterpolation::Linear => ParameterInterpolation::Linear,
-                AutomationSegmentInterpolation::Bezier => ParameterInterpolation::Bezier,
-            };
-            if !self.schema.allowed_interpolations.contains(&interpolation) {
-                return Err(AudioAuthoringError::UnsupportedParameterInterpolation);
-            }
+        validate_numeric_parameter_schema(&self.schema)?;
+        if let Some(curve) = &self.automation {
+            validate_numeric_automation(&self.schema, curve)?;
         }
         Ok(())
     }
@@ -351,7 +365,7 @@ impl AudioProcessorInstance {
                 parameter_id,
                 AudioProcessorParameter {
                     schema,
-                    automation,
+                    automation: Some(automation),
                     ui: AudioProcessorParameterUiMetadata::default(),
                 },
             );
@@ -367,7 +381,7 @@ impl AudioProcessorInstance {
                 parameter_id,
                 AudioProcessorParameter {
                     schema,
-                    automation,
+                    automation: Some(automation),
                     ui: AudioProcessorParameterUiMetadata::default(),
                 },
             );
@@ -396,7 +410,7 @@ impl AudioProcessorInstance {
                     parameter_id,
                     AudioProcessorParameter {
                         schema,
-                        automation,
+                        automation: Some(automation),
                         ui: AudioProcessorParameterUiMetadata::default(),
                     },
                 );
@@ -434,11 +448,19 @@ impl AudioProcessorInstance {
         }
         for (parameter_id, parameter) in &self.parameters {
             if parameter_id != &parameter.schema.parameter_id
-                || parameter_id != &parameter.automation.parameter_id
+                || parameter
+                    .automation
+                    .as_ref()
+                    .is_some_and(|curve| parameter_id != &curve.parameter_id)
             {
                 return Err(AudioAuthoringError::ParameterKeyMismatch);
             }
             parameter.validate()?;
+            if matches!(self.definition, AudioProcessorDefinitionRef::BuiltIn { .. })
+                && parameter.automation.is_none()
+            {
+                return Err(AudioAuthoringError::ParameterAutomationRequired);
+            }
         }
         Ok(())
     }
@@ -661,7 +683,7 @@ impl AudioComponentEdit {
             ));
         }
         validate_optional_gain_curve(&self.volume_automation, CLIP_VOLUME_DB_PARAMETER_ID)?;
-        validate_optional_curve(&self.pan_automation, CLIP_PAN_PARAMETER_ID)?;
+        validate_optional_pan_curve(&self.pan_automation, self.id)?;
         for fade in [self.fades.fade_in, self.fades.fade_out].into_iter().flatten() {
             if fade.duration <= TimelineTime::ZERO || fade.duration > clip.duration {
                 return Err(AudioAuthoringError::InvalidFade(self.id));
@@ -766,8 +788,17 @@ pub enum AudioChannelStripOutputPort {
     PostMute,
 }
 
+/// A raw output immediately after this authored processor has returned.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub enum AudioProcessorOutputPort {
+    /// Snapshot of the in-place Main before any later rack processing.
+    Main,
+    /// One definition-owned additional output.
+    Auxiliary { bus_key: String },
+}
+
 /// Typed Route source; generated operations are never routable.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum AudioRouteSource {
     /// One explicit output port of a Track Mixer Channel.
     Track {
@@ -779,20 +810,29 @@ pub enum AudioRouteSource {
         bus_id: MixBusId,
         port: AudioChannelStripOutputPort,
     },
+    /// Strong reference to a Track/Bus rack instance and one raw output.
+    ProcessorOutput {
+        processor_id: AudioProcessorInstanceId,
+        port: AudioProcessorOutputPort,
+    },
 }
 
 impl AudioRouteSource {
-    fn track_id(self) -> Option<TrackId> {
+    pub(crate) fn references_processor(&self, ids: &BTreeSet<AudioProcessorInstanceId>) -> bool {
+        matches!(self, Self::ProcessorOutput { processor_id, .. } if ids.contains(processor_id))
+    }
+
+    fn track_id(&self) -> Option<TrackId> {
         match self {
-            Self::Track { track_id, .. } => Some(track_id),
-            Self::Bus { .. } => None,
+            Self::Track { track_id, .. } => Some(*track_id),
+            Self::Bus { .. } | Self::ProcessorOutput { .. } => None,
         }
     }
 
-    fn bus_id(self) -> Option<MixBusId> {
+    fn bus_id(&self) -> Option<MixBusId> {
         match self {
-            Self::Bus { bus_id, .. } => Some(bus_id),
-            Self::Track { .. } => None,
+            Self::Bus { bus_id, .. } => Some(*bus_id),
+            Self::Track { .. } | Self::ProcessorOutput { .. } => None,
         }
     }
 }
@@ -919,6 +959,95 @@ pub struct AudioTransition {
     pub curve: AudioTransitionCurve,
 }
 
+/// Strong reference to an existing processor in one owning audio Track rack.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AudioNoteTarget {
+    /// Existing editorial audio Track identity.
+    pub track_id: TrackId,
+    /// Existing author instance in that Track's pre- or post-fader rack.
+    pub processor_id: AudioProcessorInstanceId,
+    /// Definition-owned input-port key, retained exactly as authored.
+    pub input_port_key: String,
+}
+
+/// Exact Sequence-local authored note; this does not contain native voice state.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AudioNote {
+    /// Stable author identity, preserved by edits and ordinary snapshot clones.
+    pub id: AudioNoteId,
+    /// Exact Sequence-local start, before sample-grid projection.
+    pub start: TimelineTime,
+    /// Exact exclusive authored end, strictly after start.
+    pub end: TimelineTime,
+    /// Zero-based channel in the initial note subset.
+    pub channel: u8,
+    /// Key in the initial note subset.
+    pub key: u8,
+    /// Plain note-on velocity in [0, 1]; zero remains a note-on.
+    pub on_velocity: f64,
+    /// Plain note-off velocity in [0, 1].
+    pub off_velocity: f64,
+}
+
+/// Versioned finite score lane retained by the canonical AudioProgram.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AudioNoteLane {
+    /// This author shape currently admits version 1 only.
+    pub schema_version: u32,
+    /// Stable lane identity.
+    pub id: AudioNoteLaneId,
+    /// Strong processor reference; an empty lane still retains its target.
+    pub target: AudioNoteTarget,
+    /// Authored notes; list order is not execution rank.
+    pub notes: AuthoringList<AudioNote>,
+}
+
+fn note_lanes_are_empty(lanes: &AuthoringList<AudioNoteLane>) -> bool {
+    lanes.is_empty()
+}
+
+impl AuthoringFootprint for AudioNoteTarget {
+    fn collect_authoring_footprint(
+        &self,
+        collector: &mut AuthoringFootprintCollector,
+    ) -> Result<(), AuthoringFootprintError> {
+        let Self { track_id: _, processor_id: _, input_port_key } = self;
+        collector.collect(input_port_key)
+    }
+}
+
+impl AuthoringFootprint for AudioNote {
+    fn collect_authoring_footprint(
+        &self,
+        _collector: &mut AuthoringFootprintCollector,
+    ) -> Result<(), AuthoringFootprintError> {
+        let Self {
+            id: _,
+            start: _,
+            end: _,
+            channel: _,
+            key: _,
+            on_velocity: _,
+            off_velocity: _,
+        } = self;
+        Ok(())
+    }
+}
+
+impl AuthoringFootprint for AudioNoteLane {
+    fn collect_authoring_footprint(
+        &self,
+        collector: &mut AuthoringFootprintCollector,
+    ) -> Result<(), AuthoringFootprintError> {
+        let Self { schema_version: _, id: _, target, notes } = self;
+        collector.collect(target)?;
+        collector.collect(notes)
+    }
+}
+
 /// Sequence-owned audio author aggregate.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AudioProgram {
@@ -939,6 +1068,12 @@ pub struct AudioProgram {
     /// Explicit typed processor auxiliary-input Routes.
     #[serde(default)]
     pub sidechain_routes: AuthoringList<AudioProcessorSidechainRoute>,
+    /// Exact authored score, preserved even when note execution is unsupported.
+    #[serde(default, skip_serializing_if = "note_lanes_are_empty")]
+    pub note_lanes: AuthoringList<AudioNoteLane>,
+    /// Optional constant musical reference in the owning Sequence's seconds domain.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub musical_time_reference: Option<MusicalTimeReference>,
 }
 
 impl AuthoringFootprint for AudioProcessorDefinitionRef {
@@ -1190,13 +1325,26 @@ impl AuthoringFootprint for AudioChannelStripOutputPort {
     }
 }
 
+impl AuthoringFootprint for AudioProcessorOutputPort {
+    fn collect_authoring_footprint(
+        &self,
+        collector: &mut AuthoringFootprintCollector,
+    ) -> Result<(), AuthoringFootprintError> {
+        match self {
+            Self::Main => Ok(()),
+            Self::Auxiliary { bus_key } => bus_key.collect_authoring_footprint(collector),
+        }
+    }
+}
+
 impl AuthoringFootprint for AudioRouteSource {
     fn collect_authoring_footprint(
         &self,
-        _collector: &mut AuthoringFootprintCollector,
+        collector: &mut AuthoringFootprintCollector,
     ) -> Result<(), AuthoringFootprintError> {
         match self {
             Self::Track { track_id: _, port: _ } | Self::Bus { bus_id: _, port: _ } => Ok(()),
+            Self::ProcessorOutput { port, .. } => port.collect_authoring_footprint(collector),
         }
     }
 }
@@ -1285,6 +1433,8 @@ impl AuthoringFootprint for AudioProgram {
             outputs,
             routes,
             sidechain_routes,
+            note_lanes,
+            musical_time_reference,
         } = self;
         collector.collect(processing_scopes)?;
         collector.collect(transitions)?;
@@ -1292,7 +1442,9 @@ impl AuthoringFootprint for AudioProgram {
         collector.collect(buses)?;
         collector.collect(outputs)?;
         collector.collect(routes)?;
-        collector.collect(sidechain_routes)
+        collector.collect(sidechain_routes)?;
+        collector.collect(note_lanes)?;
+        collector.collect(musical_time_reference)
     }
 }
 
@@ -1350,6 +1502,62 @@ impl AudioProgram {
             outputs: AuthoringList::from(vec![output]),
             routes: AuthoringList::from(routes),
             sidechain_routes: AuthoringList::new(),
+            note_lanes: AuthoringList::new(),
+            musical_time_reference: None,
+        }
+    }
+
+    /// Resolve a route's producing channel/stage from canonical author identity.
+    /// Raw processor taps bypass the owning channel's final mute gate.
+    /// Scope and Program Output occurrences are deliberately not routable sources.
+    pub fn route_source_channel(
+        &self,
+        source: &AudioRouteSource,
+    ) -> Result<(AudioChannelStripOwner, AudioChannelStripOutputPort), AudioAuthoringError> {
+        match source {
+            AudioRouteSource::Track { track_id, port } => {
+                Ok((AudioChannelStripOwner::Track { track_id: *track_id }, *port))
+            }
+            AudioRouteSource::Bus { bus_id, port } => {
+                Ok((AudioChannelStripOwner::Bus { bus_id: *bus_id }, *port))
+            }
+            AudioRouteSource::ProcessorOutput { processor_id, port } => {
+                if let AudioProcessorOutputPort::Auxiliary { bus_key } = port
+                    && (bus_key.trim().is_empty()
+                        || bus_key.len() > 128
+                        || bus_key.chars().any(char::is_control))
+                {
+                    return Err(AudioAuthoringError::InvalidProcessorOutputKey);
+                }
+                for (owner, strip) in
+                    self.track_channels
+                        .iter()
+                        .map(|(id, channel)| {
+                            (
+                                AudioChannelStripOwner::Track { track_id: *id },
+                                &channel.strip,
+                            )
+                        })
+                        .chain(self.buses.iter().map(|bus| {
+                            (AudioChannelStripOwner::Bus { bus_id: bus.id }, &bus.strip)
+                        }))
+                {
+                    for (rack, tap) in [
+                        (&strip.pre_fader, AudioChannelStripOutputPort::PreFader),
+                        (
+                            &strip.post_fader,
+                            AudioChannelStripOutputPort::PostFaderPreMute,
+                        ),
+                    ] {
+                        if rack.processors.iter().any(|processor| processor.id == *processor_id) {
+                            return Ok((owner, tap));
+                        }
+                    }
+                }
+                Err(AudioAuthoringError::InvalidProcessorOutputSource(
+                    *processor_id,
+                ))
+            }
         }
     }
 
@@ -1386,11 +1594,70 @@ impl AudioProgram {
             .flat_map(|rack| rack.processors.iter().map(|processor| processor.id))
             .collect::<BTreeSet<_>>();
         self.track_channels.remove(&track_id);
-        self.routes.retain(|route| route.source.track_id() != Some(track_id));
+        self.note_lanes.retain(|lane| lane.target.track_id != track_id);
+        self.routes.retain(|route| {
+            route.source.track_id() != Some(track_id)
+                && !route.source.references_processor(&removed_processor_ids)
+        });
         self.sidechain_routes.retain(|route| {
             route.source.track_id() != Some(track_id)
+                && !route.source.references_processor(&removed_processor_ids)
                 && !removed_processor_ids.contains(&route.processor_id)
         });
+    }
+
+    /// Validate score scalars and strong targets before compilation or persistence.
+    fn validate_note_lanes(&self, audio_tracks: &[Track]) -> Result<(), AudioAuthoringError> {
+        let mut lane_ids = BTreeSet::new();
+        let mut note_ids = BTreeSet::new();
+        for lane in &self.note_lanes {
+            if !lane_ids.insert(lane.id) {
+                return Err(AudioAuthoringError::DuplicateNoteLane(lane.id));
+            }
+            if lane.schema_version != 1 {
+                return Err(AudioAuthoringError::UnsupportedNoteLaneVersion {
+                    lane_id: lane.id,
+                    version: lane.schema_version,
+                });
+            }
+            let key = &lane.target.input_port_key;
+            if key.trim().is_empty() || key.len() > 128 || key.chars().any(char::is_control) {
+                return Err(AudioAuthoringError::InvalidNotePortKey(lane.id));
+            }
+            let is_audio_track = audio_tracks.iter().any(|track| {
+                track.id == lane.target.track_id && track.track_type == crate::TrackType::Audio
+            });
+            let has_target =
+                self.track_channels.get(&lane.target.track_id).is_some_and(|channel| {
+                    [&channel.strip.pre_fader, &channel.strip.post_fader]
+                        .into_iter()
+                        .flat_map(|rack| &rack.processors)
+                        .any(|processor| processor.id == lane.target.processor_id)
+                });
+            if !is_audio_track || !has_target {
+                return Err(AudioAuthoringError::InvalidNoteTarget(lane.id));
+            }
+            for note in &lane.notes {
+                if !note_ids.insert(note.id) {
+                    return Err(AudioAuthoringError::DuplicateNote(note.id));
+                }
+                if note.start < TimelineTime::ZERO
+                    || note.end <= note.start
+                    || note.channel > 15
+                    || note.key > 127
+                    || !note.on_velocity.is_finite()
+                    || !note.off_velocity.is_finite()
+                    || !(0.0..=1.0).contains(&note.on_velocity)
+                    || !(0.0..=1.0).contains(&note.off_velocity)
+                {
+                    return Err(AudioAuthoringError::InvalidNote {
+                        lane_id: lane.id,
+                        note_id: note.id,
+                    });
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Remove Transitions whose strong endpoint no longer exists and discard unused scopes.
@@ -1521,6 +1788,7 @@ impl AudioProgram {
             }
         }
         validate_roles(audio_roles, &role_ids)?;
+        self.validate_note_lanes(audio_tracks)?;
 
         let mut edits = BTreeMap::<AudioComponentEditId, (&Clip, TrackId)>::new();
         for track in audio_tracks {
@@ -1567,6 +1835,7 @@ impl AudioProgram {
         let _ = route_ids;
         for route in &self.routes {
             route.validate()?;
+            self.route_source_channel(&route.source)?;
             if route.source.track_id().is_some_and(|id| !expected_tracks.contains(&id))
                 || route.source.bus_id().is_some_and(|id| !bus_ids.contains(&id))
             {
@@ -1590,6 +1859,7 @@ impl AudioProgram {
         }
         for route in &self.sidechain_routes {
             route.validate()?;
+            self.route_source_channel(&route.source)?;
             if route.source.track_id().is_some_and(|id| !expected_tracks.contains(&id))
                 || route.source.bus_id().is_some_and(|id| !bus_ids.contains(&id))
             {
@@ -1643,6 +1913,73 @@ fn validate_curve(curve: &ExactAutomationCurve) -> Result<(), AudioAuthoringErro
         .map_err(|error| AudioAuthoringError::InvalidAutomation { reason: error.to_string() })
 }
 
+/// Prepare an unkeyed curve using the current definition default.
+pub(crate) fn default_numeric_automation(
+    schema: &ParameterSchema,
+) -> Result<ExactAutomationCurve, AudioAuthoringError> {
+    let value = match schema.default_value {
+        mondrian_core::automation::PropertyValue::Double(value) => value,
+        mondrian_core::automation::PropertyValue::Int(value) => value as f64,
+        _ => return Err(AudioAuthoringError::UnsupportedProcessorParameterType),
+    };
+    let curve = ExactAutomationCurve::new(schema.parameter_id.clone(), value)
+        .map_err(|error| AudioAuthoringError::InvalidAutomation { reason: error.to_string() })?;
+    validate_numeric_automation(schema, &curve)?;
+    Ok(curve)
+}
+
+fn validate_numeric_parameter_schema(schema: &ParameterSchema) -> Result<(), AudioAuthoringError> {
+    schema.validate().map_err(|error| AudioAuthoringError::InvalidParameterSchema {
+        reason: error.to_string(),
+    })?;
+    if !matches!(
+        schema.value_type,
+        PropertyValueType::Double | PropertyValueType::Int
+    ) {
+        return Err(AudioAuthoringError::UnsupportedProcessorParameterType);
+    }
+    validate_parameter_value(
+        schema,
+        processor_parameter_default_value(&schema.default_value)?,
+    )
+}
+
+/// Admit an exact audio curve against the same complete definition used by authoring.
+pub(crate) fn validate_numeric_automation(
+    schema: &ParameterSchema,
+    curve: &ExactAutomationCurve,
+) -> Result<(), AudioAuthoringError> {
+    validate_numeric_parameter_schema(schema)?;
+    if schema.parameter_id != curve.parameter_id {
+        return Err(AudioAuthoringError::ParameterKeyMismatch);
+    }
+    validate_curve(curve)?;
+    if !schema.is_animatable && !curve.keyframes.is_empty() {
+        return Err(AudioAuthoringError::ParameterDoesNotAdmitAutomation);
+    }
+    validate_parameter_value(schema, curve.default_value)?;
+    for keyframe in &curve.keyframes {
+        validate_parameter_value(schema, keyframe.value)?;
+        if let Some(handle) = keyframe.in_handle {
+            validate_parameter_value(schema, keyframe.value + handle.value_offset)?;
+        }
+        if let Some(handle) = keyframe.out_handle {
+            validate_parameter_value(schema, keyframe.value + handle.value_offset)?;
+        }
+    }
+    for keyframe in curve.keyframes.iter().take(curve.keyframes.len().saturating_sub(1)) {
+        let interpolation = match keyframe.interpolation_to_next {
+            AutomationSegmentInterpolation::Hold => ParameterInterpolation::Hold,
+            AutomationSegmentInterpolation::Linear => ParameterInterpolation::Linear,
+            AutomationSegmentInterpolation::Bezier => ParameterInterpolation::Bezier,
+        };
+        if !schema.allowed_interpolations.contains(&interpolation) {
+            return Err(AudioAuthoringError::UnsupportedParameterInterpolation);
+        }
+    }
+    Ok(())
+}
+
 fn validate_parameter_value(
     schema: &ParameterSchema,
     value: f64,
@@ -1657,6 +1994,8 @@ fn validate_parameter_value(
     }
     if schema
         .numeric
+        .as_ref()
+        .and_then(|contracts| contracts.first())
         .is_some_and(|numeric| value < numeric.hard_range.min || value > numeric.hard_range.max)
     {
         return Err(AudioAuthoringError::InvalidProcessorParameterValue);
@@ -1664,7 +2003,9 @@ fn validate_parameter_value(
     Ok(())
 }
 
-fn processor_parameter_default_value(value: &PropertyValue) -> Result<f64, AudioAuthoringError> {
+pub(crate) fn processor_parameter_default_value(
+    value: &PropertyValue,
+) -> Result<f64, AudioAuthoringError> {
     match value {
         PropertyValue::Double(value) => Ok(*value),
         PropertyValue::Int(value) if value.unsigned_abs() <= 9_007_199_254_740_992_u64 => {
@@ -1675,37 +2016,47 @@ fn processor_parameter_default_value(value: &PropertyValue) -> Result<f64, Audio
     }
 }
 
-fn validate_optional_curve(
+fn validate_optional_gain_curve(
     curve: &Option<ExactAutomationCurve>,
-    expected_parameter: &str,
+    expected_parameter: &'static str,
 ) -> Result<(), AudioAuthoringError> {
     if let Some(curve) = curve {
-        if curve.parameter_id.as_str() != expected_parameter {
-            return Err(AudioAuthoringError::WrongAutomationParameter {
-                expected: expected_parameter.to_owned(),
-            });
-        }
-        validate_curve(curve)?;
+        validate_numeric_automation(&gain_curve_schema(expected_parameter), curve)
+            .map_err(gain_curve_error)?;
     }
     Ok(())
 }
 
-fn validate_optional_gain_curve(
+fn validate_optional_pan_curve(
     curve: &Option<ExactAutomationCurve>,
-    expected_parameter: &str,
+    edit_id: AudioComponentEditId,
 ) -> Result<(), AudioAuthoringError> {
-    validate_optional_curve(curve, expected_parameter)?;
-    let Some(curve) = curve else {
-        return Ok(());
-    };
-    validate_gain_db(curve.default_value)?;
-    for keyframe in &curve.keyframes {
-        validate_gain_db(keyframe.value)?;
-        for handle in [keyframe.in_handle, keyframe.out_handle].into_iter().flatten() {
-            validate_gain_db(keyframe.value + handle.value_offset)?;
-        }
+    if let Some(curve) = curve {
+        validate_numeric_automation(&pan_parameter_schema(), curve)
+            .map_err(|error| pan_curve_error(error, edit_id))?;
     }
     Ok(())
+}
+
+/// Preserve the gain domain diagnostic when scalar definition admission fails.
+pub(crate) fn gain_curve_error(error: AudioAuthoringError) -> AudioAuthoringError {
+    match error {
+        AudioAuthoringError::InvalidProcessorParameterValue => AudioAuthoringError::InvalidGain,
+        other => other,
+    }
+}
+
+/// Preserve the Component identity when pan definition admission fails.
+pub(crate) fn pan_curve_error(
+    error: AudioAuthoringError,
+    edit_id: AudioComponentEditId,
+) -> AudioAuthoringError {
+    match error {
+        AudioAuthoringError::InvalidProcessorParameterValue => {
+            AudioAuthoringError::InvalidPan(edit_id)
+        }
+        other => other,
+    }
 }
 
 fn validate_gain_db(value: f64) -> Result<(), AudioAuthoringError> {
@@ -1752,11 +2103,33 @@ fn unique_ids<T: Copy + Ord>(values: impl IntoIterator<Item = T>) -> Option<BTre
     Some(set)
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-enum AudioAuthorRoutingNode {
-    Track(TrackId),
-    Bus(MixBusId),
-    Output(ProgramOutputId),
+/// Causal channel execution stages shared by author routing and execution lowering.
+/// Scope processing, input summing, trim and the pre-fader rack precede `PreFader`.
+/// Fader, post-fader rack and mute complete `PostFader`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum AudioChannelSignalStage {
+    /// Input and pre-fader processing, producing the pre-fader tap.
+    PreFader,
+    /// Post-fader processing, producing both final taps.
+    PostFader,
+}
+
+impl AudioChannelSignalStage {
+    /// Stage that must complete before this channel tap is available.
+    pub fn producing(port: AudioChannelStripOutputPort) -> Self {
+        match port {
+            AudioChannelStripOutputPort::PreFader => Self::PreFader,
+            AudioChannelStripOutputPort::PostFaderPreMute
+            | AudioChannelStripOutputPort::PostMute => Self::PostFader,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(crate) enum AudioAuthorRoutingNode {
+    Track(TrackId, AudioChannelSignalStage),
+    Bus(MixBusId, AudioChannelSignalStage),
+    Output(ProgramOutputId, AudioChannelSignalStage),
 }
 
 fn validate_routing_cycles(
@@ -1783,24 +2156,8 @@ fn validate_routing_cycles(
         Ok(())
     }
 
-    let mut outgoing = BTreeMap::<AudioAuthorRoutingNode, BTreeSet<AudioAuthorRoutingNode>>::new();
-    let source_node = |source: AudioRouteSource| match source {
-        AudioRouteSource::Track { track_id, .. } => AudioAuthorRoutingNode::Track(track_id),
-        AudioRouteSource::Bus { bus_id, .. } => AudioAuthorRoutingNode::Bus(bus_id),
-    };
-    for route in &program.routes {
-        let destination = match route.destination {
-            AudioRouteDestination::Bus(bus_id) => AudioAuthorRoutingNode::Bus(bus_id),
-            AudioRouteDestination::Output(output_id) => AudioAuthorRoutingNode::Output(output_id),
-        };
-        outgoing.entry(source_node(route.source)).or_default().insert(destination);
-    }
-    for route in &program.sidechain_routes {
-        let targets = author_processor_target_nodes(program, audio_tracks, route.processor_id);
-        for target in targets {
-            outgoing.entry(source_node(route.source)).or_default().insert(target);
-        }
-    }
+    let graph = author_routing_graph(program, audio_tracks);
+    let outgoing = &graph.outgoing;
     let mut visiting = BTreeSet::new();
     let mut visited = BTreeSet::new();
     let nodes = outgoing
@@ -1809,65 +2166,140 @@ fn validate_routing_cycles(
         .chain(outgoing.values().flatten().copied())
         .collect::<BTreeSet<_>>();
     for node in nodes {
-        visit(node, &outgoing, &mut visiting, &mut visited)?;
+        visit(node, outgoing, &mut visiting, &mut visited)?;
     }
     Ok(())
 }
 
-fn author_processor_target_nodes(
+impl AudioAuthorRoutingNode {
+    pub(crate) fn from_source(program: &AudioProgram, source: &AudioRouteSource) -> Option<Self> {
+        let (owner, port) = program.route_source_channel(source).ok()?;
+        let stage = AudioChannelSignalStage::producing(port);
+        Some(match owner {
+            AudioChannelStripOwner::Track { track_id } => Self::Track(track_id, stage),
+            AudioChannelStripOwner::Bus { bus_id } => Self::Bus(bus_id, stage),
+            AudioChannelStripOwner::ProgramOutput { .. } => return None,
+        })
+    }
+}
+
+/// Complete retained graph shared by author validation and menu admission.
+pub(crate) struct AudioAuthorRoutingGraph {
+    pub(crate) outgoing: BTreeMap<AudioAuthorRoutingNode, BTreeSet<AudioAuthorRoutingNode>>,
+    pub(crate) processor_targets:
+        BTreeMap<AudioProcessorInstanceId, BTreeSet<AudioAuthorRoutingNode>>,
+}
+
+pub(crate) fn author_routing_graph(
     program: &AudioProgram,
     audio_tracks: &[Track],
-    processor_id: AudioProcessorInstanceId,
-) -> BTreeSet<AudioAuthorRoutingNode> {
-    let mut targets = BTreeSet::new();
-    for (track_id, channel) in &program.track_channels {
-        if strip_contains_processor(&channel.strip, processor_id) {
-            targets.insert(AudioAuthorRoutingNode::Track(*track_id));
+) -> AudioAuthorRoutingGraph {
+    let mut processor_targets = BTreeMap::<_, BTreeSet<_>>::new();
+    let mut outgoing = BTreeMap::<AudioAuthorRoutingNode, BTreeSet<AudioAuthorRoutingNode>>::new();
+    let mut record_rack = |rack: &AudioProcessorRack,
+                           targets: &BTreeSet<AudioAuthorRoutingNode>| {
+        for processor in &rack.processors {
+            processor_targets
+                .entry(processor.id)
+                .or_default()
+                .extend(targets.iter().copied());
         }
+    };
+    for (track_id, channel) in &program.track_channels {
+        let pre = AudioAuthorRoutingNode::Track(*track_id, AudioChannelSignalStage::PreFader);
+        let post = AudioAuthorRoutingNode::Track(*track_id, AudioChannelSignalStage::PostFader);
+        outgoing.entry(pre).or_default().insert(post);
+        outgoing.entry(post).or_default();
+        record_rack(&channel.strip.pre_fader, &BTreeSet::from([pre]));
+        record_rack(&channel.strip.post_fader, &BTreeSet::from([post]));
     }
     for bus in &program.buses {
-        if strip_contains_processor(&bus.strip, processor_id) {
-            targets.insert(AudioAuthorRoutingNode::Bus(bus.id));
-        }
+        let pre = AudioAuthorRoutingNode::Bus(bus.id, AudioChannelSignalStage::PreFader);
+        let post = AudioAuthorRoutingNode::Bus(bus.id, AudioChannelSignalStage::PostFader);
+        outgoing.entry(pre).or_default().insert(post);
+        outgoing.entry(post).or_default();
+        record_rack(&bus.strip.pre_fader, &BTreeSet::from([pre]));
+        record_rack(&bus.strip.post_fader, &BTreeSet::from([post]));
     }
     for output in &program.outputs {
-        if strip_contains_processor(&output.strip, processor_id) {
-            targets.insert(AudioAuthorRoutingNode::Output(output.id));
+        let pre = AudioAuthorRoutingNode::Output(output.id, AudioChannelSignalStage::PreFader);
+        let post = AudioAuthorRoutingNode::Output(output.id, AudioChannelSignalStage::PostFader);
+        outgoing.entry(pre).or_default().insert(post);
+        outgoing.entry(post).or_default();
+        record_rack(&output.strip.pre_fader, &BTreeSet::from([pre]));
+        record_rack(&output.strip.post_fader, &BTreeSet::from([post]));
+    }
+    let mut scope_tracks = BTreeMap::<_, BTreeSet<_>>::new();
+    for track in audio_tracks {
+        for edit in track.clips.iter().flat_map(|clip| &clip.audio_components) {
+            scope_tracks.entry(edit.processing.scope_id).or_default().insert(
+                AudioAuthorRoutingNode::Track(track.id, AudioChannelSignalStage::PreFader),
+            );
         }
     }
     for scope in &program.processing_scopes {
-        if rack_contains_processor(&scope.processors, processor_id) {
-            targets.extend(audio_tracks.iter().filter_map(|track| {
-                track
-                    .clips
-                    .iter()
-                    .flat_map(|clip| &clip.audio_components)
-                    .any(|edit| edit.processing.scope_id == scope.id)
-                    .then_some(AudioAuthorRoutingNode::Track(track.id))
-            }));
+        let targets = scope_tracks.get(&scope.id).cloned().unwrap_or_default();
+        record_rack(&scope.processors, &targets);
+    }
+    for route in &program.routes {
+        let destination = match route.destination {
+            AudioRouteDestination::Bus(bus_id) => {
+                AudioAuthorRoutingNode::Bus(bus_id, AudioChannelSignalStage::PreFader)
+            }
+            AudioRouteDestination::Output(output_id) => {
+                AudioAuthorRoutingNode::Output(output_id, AudioChannelSignalStage::PreFader)
+            }
+        };
+        if let Some(source) = AudioAuthorRoutingNode::from_source(program, &route.source) {
+            outgoing.entry(source).or_default().insert(destination);
         }
     }
-    targets
-}
-
-fn strip_contains_processor(
-    strip: &AudioChannelStrip,
-    processor_id: AudioProcessorInstanceId,
-) -> bool {
-    rack_contains_processor(&strip.pre_fader, processor_id)
-        || rack_contains_processor(&strip.post_fader, processor_id)
-}
-
-fn rack_contains_processor(
-    rack: &AudioProcessorRack,
-    processor_id: AudioProcessorInstanceId,
-) -> bool {
-    rack.processors.iter().any(|processor| processor.id == processor_id)
+    for route in &program.sidechain_routes {
+        if let Some(targets) = processor_targets.get(&route.processor_id)
+            && let Some(source) = AudioAuthorRoutingNode::from_source(program, &route.source)
+        {
+            outgoing.entry(source).or_default().extend(targets.iter().copied());
+        }
+    }
+    AudioAuthorRoutingGraph { outgoing, processor_targets }
 }
 
 /// Invalid author state. Such state cannot enter an immutable execution snapshot.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum AudioAuthoringError {
+    /// Raw output sources must belong to one authored Track/Bus rack.
+    #[error("processor {0} is not a routable Track/Bus rack source")]
+    InvalidProcessorOutputSource(AudioProcessorInstanceId),
+    /// Output identity has the same bounded lexical contract as auxiliary inputs.
+    #[error("invalid processor output key")]
+    InvalidProcessorOutputKey,
+    /// Each score lane identity is unique in the Sequence.
+    #[error("duplicate audio note lane {0}")]
+    DuplicateNoteLane(AudioNoteLaneId),
+    /// Each note identity is unique across all Sequence score lanes.
+    #[error("duplicate audio note {0}")]
+    DuplicateNote(AudioNoteId),
+    /// Unknown lane author schemas cannot be silently interpreted.
+    #[error("audio note lane {lane_id} has unsupported version {version}")]
+    UnsupportedNoteLaneVersion {
+        lane_id: AudioNoteLaneId,
+        version: u32,
+    },
+    /// The original opaque key must fit the admitted lexical representation.
+    #[error("audio note lane {0} has an invalid input-port key")]
+    InvalidNotePortKey(AudioNoteLaneId),
+    /// The target must be a strong reference to the same audio Track's rack.
+    #[error("audio note lane {0} targets an absent or different Track processor")]
+    InvalidNoteTarget(AudioNoteLaneId),
+    /// Exact author endpoints and scalar fields must fit the note subset.
+    #[error("audio note {note_id} in lane {lane_id} has invalid authored values")]
+    InvalidNote {
+        lane_id: AudioNoteLaneId,
+        note_id: AudioNoteId,
+    },
+    /// Built-in processors require a host value and cannot delegate it to native state.
+    #[error("built-in audio parameter requires a host automation reference")]
+    ParameterAutomationRequired,
     /// Track mixer state does not exactly match the Sequence audio Tracks.
     #[error("audio Track mixer channels do not match Sequence audio Tracks")]
     TrackChannelSetMismatch,
@@ -1901,9 +2333,6 @@ pub enum AudioAuthoringError {
     /// A persisted automation curve is invalid.
     #[error("invalid audio automation: {reason}")]
     InvalidAutomation { reason: String },
-    /// An automation curve used the wrong stable parameter identity.
-    #[error("audio automation must use parameter {expected}")]
-    WrongAutomationParameter { expected: String },
     /// Static, keyed, and Bezier-control gain values must fit the DSP hard range.
     #[error("audio gain must be finite and lie within the supported dB range")]
     InvalidGain,
@@ -1993,6 +2422,260 @@ pub enum AudioAuthoringError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Sequence;
+
+    #[test]
+    fn musical_time_reference_is_optional_and_adds_no_heap_footprint() {
+        let track = Track::new_audio("reference");
+        let original = AudioProgram::for_tracks([track.id]);
+        assert_eq!(original.musical_time_reference, None);
+        let absent = serde_json::to_value(&original).expect("absent reference");
+        assert!(absent.get("musical_time_reference").is_none());
+        assert_eq!(
+            serde_json::from_value::<AudioProgram>(absent).unwrap(),
+            original
+        );
+        let mut with_reference = original.clone();
+        let reference = MusicalTimeReference::new(
+            TimelineTime::new(-1001, 30000).unwrap(),
+            TimelineTime::new(1001, 2000).unwrap(),
+        )
+        .unwrap();
+        with_reference.musical_time_reference = Some(reference);
+        let value = serde_json::to_value(&with_reference).unwrap();
+        assert_eq!(
+            value["musical_time_reference"],
+            serde_json::to_value(reference).unwrap()
+        );
+        assert_eq!(
+            serde_json::from_value::<AudioProgram>(value).unwrap(),
+            with_reference
+        );
+        let mut collector = AuthoringFootprintCollector::new();
+        collector.collect(&original).unwrap();
+        let baseline = collector.finish();
+        let mut collector = AuthoringFootprintCollector::new();
+        collector.collect(&with_reference).unwrap();
+        assert_eq!(
+            collector.finish(),
+            baseline,
+            "inline reference adds no heap owner"
+        );
+        let mut collector = AuthoringFootprintCollector::new();
+        collector.collect(&original).unwrap();
+        collector.collect(&with_reference).unwrap();
+        assert_eq!(
+            collector.finish(),
+            baseline,
+            "shared author allocations remain deduplicated"
+        );
+        assert_eq!(original.musical_time_reference, None);
+    }
+
+    fn note_program_fixture() -> (Track, AudioProgram) {
+        let track = Track::new_audio("score");
+        let mut program = AudioProgram::for_tracks([track.id]);
+        let processor = AudioProcessorInstance::built_in(BUILTIN_GAIN_DEFINITION_ID, 1);
+        let processor_id = processor.id;
+        program
+            .track_channels
+            .get_mut(&track.id)
+            .expect("channel")
+            .strip
+            .pre_fader
+            .processors
+            .push(processor);
+        program.note_lanes.push(AudioNoteLane {
+            schema_version: 1,
+            id: AudioNoteLaneId::new(),
+            target: AudioNoteTarget {
+                track_id: track.id,
+                processor_id,
+                input_port_key: "  opaque.音符  ".to_owned(),
+            },
+            notes: AuthoringList::from(vec![AudioNote {
+                id: AudioNoteId::new(),
+                start: TimelineTime::new(1001, 30000).expect("exact start"),
+                end: TimelineTime::new(2002, 30000).expect("exact end"),
+                channel: 15,
+                key: 127,
+                on_velocity: -0.0,
+                off_velocity: 1.0,
+            }]),
+        });
+        (track, program)
+    }
+
+    #[test]
+    fn note_model_legacy_empty_field_is_omitted_and_new_shapes_reject_unknown_fields() {
+        let original = AudioProgram::for_tracks([TrackId::new()]);
+        let absent = serde_json::to_value(&original).expect("legacy shape");
+        assert!(absent.get("note_lanes").is_none());
+        let restored: AudioProgram = serde_json::from_value(absent.clone()).expect("absent field");
+        assert_eq!(restored, original);
+        let mut explicit_empty = absent.clone();
+        explicit_empty["note_lanes"] = serde_json::json!([]);
+        let restored: AudioProgram = serde_json::from_value(explicit_empty).expect("empty field");
+        assert_eq!(
+            serde_json::to_value(restored).expect("canonical empty"),
+            absent
+        );
+
+        let (_, program) = note_program_fixture();
+        let lane = serde_json::to_value(&program.note_lanes[0]).expect("lane");
+        let mut unknown_lane = lane.clone();
+        unknown_lane["unknown"] = true.into();
+        assert!(serde_json::from_value::<AudioNoteLane>(unknown_lane).is_err());
+        let mut unknown_target = lane["target"].clone();
+        unknown_target["unknown"] = true.into();
+        assert!(serde_json::from_value::<AudioNoteTarget>(unknown_target).is_err());
+        let mut unknown_note = lane["notes"][0].clone();
+        unknown_note["unknown"] = true.into();
+        assert!(serde_json::from_value::<AudioNote>(unknown_note).is_err());
+    }
+
+    #[test]
+    fn note_model_validates_exact_scalars_versions_and_sequence_wide_identities() {
+        let (track, program) = note_program_fixture();
+        let validate = |program: &AudioProgram| {
+            program.validate(
+                std::slice::from_ref(&track),
+                &[],
+                AudioChannelLayout::Stereo,
+            )
+        };
+        validate(&program).expect("zero-on velocity is valid author data");
+        let lane_id = program.note_lanes[0].id;
+        let note_id = program.note_lanes[0].notes[0].id;
+        let mut invalid = program.clone();
+        invalid.note_lanes[0].schema_version = 2;
+        assert_eq!(
+            validate(&invalid),
+            Err(AudioAuthoringError::UnsupportedNoteLaneVersion { lane_id, version: 2 })
+        );
+        let mut duplicate_lane = program.clone();
+        duplicate_lane.note_lanes.push(program.note_lanes[0].clone());
+        assert_eq!(
+            validate(&duplicate_lane),
+            Err(AudioAuthoringError::DuplicateNoteLane(lane_id))
+        );
+        let mut duplicate_note = program.clone();
+        let mut second_lane = program.note_lanes[0].clone();
+        second_lane.id = AudioNoteLaneId::new();
+        duplicate_note.note_lanes.push(second_lane);
+        assert_eq!(
+            validate(&duplicate_note),
+            Err(AudioAuthoringError::DuplicateNote(note_id))
+        );
+
+        for case in 0..8 {
+            let mut invalid = program.clone();
+            let note = &mut invalid.note_lanes[0].notes[0];
+            match case {
+                0 => note.start = TimelineTime::new(-1, 1).expect("negative time"),
+                1 => note.end = note.start,
+                2 => note.channel = 16,
+                3 => note.key = 128,
+                4 => note.on_velocity = f64::NAN,
+                5 => note.off_velocity = f64::INFINITY,
+                6 => note.on_velocity = -0.01,
+                7 => note.off_velocity = 1.01,
+                _ => unreachable!(),
+            }
+            assert_eq!(
+                validate(&invalid),
+                Err(AudioAuthoringError::InvalidNote { lane_id, note_id })
+            );
+        }
+    }
+
+    #[test]
+    fn note_model_keys_and_empty_lanes_keep_strong_track_rack_references() {
+        let (track, mut program) = note_program_fixture();
+        let lane_id = program.note_lanes[0].id;
+        let original_key = program.note_lanes[0].target.input_port_key.clone();
+        let validate = |program: &AudioProgram| {
+            program.validate(
+                std::slice::from_ref(&track),
+                &[],
+                AudioChannelLayout::Stereo,
+            )
+        };
+        validate(&program).expect("opaque key");
+        assert_eq!(program.note_lanes[0].target.input_port_key, original_key);
+        program.note_lanes[0].target.input_port_key = "é".repeat(64);
+        validate(&program).expect("128 UTF8 bytes");
+        for key in [" ".to_owned(), "x\n".to_owned(), "x".repeat(129)] {
+            let mut invalid = program.clone();
+            invalid.note_lanes[0].target.input_port_key = key;
+            assert_eq!(
+                validate(&invalid),
+                Err(AudioAuthoringError::InvalidNotePortKey(lane_id))
+            );
+        }
+        program.note_lanes[0].notes.clear();
+        program
+            .track_channels
+            .get_mut(&track.id)
+            .expect("channel")
+            .strip
+            .pre_fader
+            .processors[0]
+            .bypassed = true;
+        validate(&program).expect("empty lane and bypass preserve intent");
+        let mut missing = program.clone();
+        missing
+            .track_channels
+            .get_mut(&track.id)
+            .expect("channel")
+            .strip
+            .pre_fader
+            .processors
+            .clear();
+        assert_eq!(
+            validate(&missing),
+            Err(AudioAuthoringError::InvalidNoteTarget(lane_id))
+        );
+        missing.note_lanes.clear();
+        validate(&missing).expect("atomic processor and lane removal");
+        let mut wrong = program.clone();
+        wrong.note_lanes[0].target.track_id = TrackId::new();
+        assert_eq!(
+            validate(&wrong),
+            Err(AudioAuthoringError::InvalidNoteTarget(lane_id))
+        );
+        program.remove_track(track.id);
+        assert!(program.note_lanes.is_empty());
+        program
+            .validate(&[], &[], AudioChannelLayout::Stereo)
+            .expect("removed Track closure");
+    }
+
+    #[test]
+    fn note_model_footprint_deduplicates_shared_score_and_charges_detached_notes() {
+        let (_, original) = note_program_fixture();
+        let mut edited = original.clone();
+        let measure = |other: Option<&AudioProgram>| {
+            let mut collector = AuthoringFootprintCollector::new();
+            collector.collect(&original).expect("original footprint");
+            if let Some(other) = other {
+                collector.collect(other).expect("other footprint");
+            }
+            collector.finish().total_bytes()
+        };
+        assert_eq!(measure(None), measure(Some(&edited)));
+        assert!(edited.note_lanes.shares_allocation_with(&original.note_lanes));
+        edited.note_lanes[0].notes[0].key = 60;
+        assert!(!edited.note_lanes.shares_allocation_with(&original.note_lanes));
+        assert!(!edited.note_lanes[0].notes.shares_allocation_with(&original.note_lanes[0].notes));
+        assert!(edited.track_channels.shares_allocation_with(&original.track_channels));
+        assert!(measure(Some(&edited)) > measure(None));
+        assert_eq!(original.note_lanes[0].notes[0].key, 127);
+        assert_eq!(
+            edited.note_lanes[0].notes[0].id,
+            original.note_lanes[0].notes[0].id
+        );
+    }
 
     #[test]
     fn plugin_parameter_ui_snapshot_round_trips_without_changing_schema() {
@@ -2030,6 +2713,89 @@ mod tests {
             forged.validate(),
             Err(AudioAuthoringError::InvalidProcessorParameterDisplayName)
         );
+    }
+
+    fn native_revision_definitions() -> [AudioProcessorDefinitionRef; 2] {
+        [
+            AudioProcessorDefinitionRef::Clap {
+                plugin_id: "org.example.gain".to_owned(),
+                schema_version: 1,
+                binary_sha256: Some([7; 32]),
+            },
+            AudioProcessorDefinitionRef::Vst3 {
+                class_id: "00112233445566778899aabbccddeeff".to_owned(),
+                vendor: Some("Test Vendor".to_owned()),
+                schema_version: 1,
+                binary_sha256: Some([9; 32]),
+            },
+        ]
+    }
+
+    #[test]
+    fn native_processor_definition_rejects_missing_revision() {
+        for definition in native_revision_definitions() {
+            let payload = serde_json::to_value(&definition).expect("pinned definition");
+            assert_eq!(
+                serde_json::from_value::<AudioProcessorDefinitionRef>(payload.clone())
+                    .expect("canonical pinned definition"),
+                definition
+            );
+            let mut missing = payload.clone();
+            let fields = missing
+                .as_object_mut()
+                .expect("tagged definition")
+                .values_mut()
+                .next()
+                .expect("definition body")
+                .as_object_mut()
+                .expect("definition fields");
+            assert!(fields.remove("binary_sha256").is_some());
+            assert!(
+                serde_json::from_value::<AudioProcessorDefinitionRef>(missing).is_err(),
+                "an omitted revision cannot imply unbound author state: {definition:?}"
+            );
+            let mut unbound = payload;
+            unbound
+                .as_object_mut()
+                .expect("tagged definition")
+                .values_mut()
+                .next()
+                .expect("definition body")
+                .as_object_mut()
+                .expect("definition fields")
+                .insert("binary_sha256".to_owned(), serde_json::Value::Null);
+            assert!(matches!(
+                serde_json::from_value::<AudioProcessorDefinitionRef>(unbound)
+                    .expect("explicit canonical unbound state"),
+                AudioProcessorDefinitionRef::Clap { binary_sha256: None, .. }
+                    | AudioProcessorDefinitionRef::Vst3 { binary_sha256: None, .. }
+            ));
+        }
+    }
+
+    #[test]
+    fn native_processor_definition_rejects_unknown_fields() {
+        let mut definitions = native_revision_definitions().to_vec();
+        definitions.push(AudioProcessorDefinitionRef::BuiltIn {
+            definition_id: BUILTIN_GAIN_DEFINITION_ID.to_owned(),
+            schema_version: 1,
+        });
+        for definition in definitions {
+            let mut payload = serde_json::to_value(&definition).expect("canonical definition");
+            payload
+                .as_object_mut()
+                .expect("tagged definition")
+                .values_mut()
+                .next()
+                .expect("definition body")
+                .as_object_mut()
+                .expect("definition fields")
+                .insert("unsupported_key".to_owned(), serde_json::json!(42));
+            assert!(
+                serde_json::from_value::<AudioProcessorDefinitionRef>(payload).is_err(),
+                "unknown definition fields must not disappear on load: {definition:?}"
+            );
+        }
     }
 
     #[test]
@@ -2159,6 +2925,8 @@ mod tests {
             .get_mut(&ParameterId::new_static(GAIN_DB_PARAMETER_ID))
             .expect("gain parameter")
             .automation
+            .as_mut()
+            .expect("bound host curve")
             .default_value = 3.0;
         edited.processors[0].opaque_state.as_mut().expect("edited opaque state").push(5);
 
@@ -2181,6 +2949,8 @@ mod tests {
                 .get(&ParameterId::new_static(GAIN_DB_PARAMETER_ID))
                 .expect("original gain parameter")
                 .automation
+                .as_ref()
+                .expect("bound host curve")
                 .default_value,
             0.0
         );
@@ -2246,8 +3016,14 @@ mod tests {
         assert_eq!(processor.parameters.len(), 1);
         assert_eq!(parameter.schema, gain_parameter_schema());
         assert_eq!(parameter.schema.value_type, PropertyValueType::Double);
-        assert_eq!(parameter.automation.parameter_id, parameter_id);
-        assert_eq!(parameter.automation.default_value, 0.0);
+        assert_eq!(
+            parameter.automation.as_ref().expect("bound host curve").parameter_id,
+            parameter_id
+        );
+        assert_eq!(
+            parameter.automation.as_ref().expect("bound host curve").default_value,
+            0.0
+        );
         processor.validate().expect("valid built-in definition snapshot");
     }
 
@@ -2266,7 +3042,10 @@ mod tests {
             parameter.schema.cache_impact,
             ParameterCacheImpact::Topology
         );
-        assert_eq!(parameter.automation.default_value, 0.0);
+        assert_eq!(
+            parameter.automation.as_ref().expect("bound host curve").default_value,
+            0.0
+        );
         assert_eq!(
             AudioProcessorParameter::from_schema(sample_delay_frames_parameter_schema())
                 .expect("integer schema bridge"),
@@ -2297,15 +3076,27 @@ mod tests {
             lookahead_limiter_release_parameter_schema()
         );
         assert_eq!(
-            processor.parameters[&ceiling_id].automation.default_value,
+            processor.parameters[&ceiling_id]
+                .automation
+                .as_ref()
+                .expect("bound host curve")
+                .default_value,
             LOOKAHEAD_LIMITER_DEFAULT_CEILING_DB
         );
         assert_eq!(
-            processor.parameters[&lookahead_id].automation.default_value,
+            processor.parameters[&lookahead_id]
+                .automation
+                .as_ref()
+                .expect("bound host curve")
+                .default_value,
             LOOKAHEAD_LIMITER_DEFAULT_LOOKAHEAD_MS
         );
         assert_eq!(
-            processor.parameters[&release_id].automation.default_value,
+            processor.parameters[&release_id]
+                .automation
+                .as_ref()
+                .expect("bound host curve")
+                .default_value,
             LOOKAHEAD_LIMITER_DEFAULT_RELEASE_MS
         );
         assert!(!processor.parameters[&lookahead_id].schema.is_animatable);
@@ -2393,9 +3184,7 @@ mod tests {
                 &[],
                 AudioChannelLayout::Stereo
             ),
-            Err(AudioAuthoringError::WrongAutomationParameter {
-                expected: ROUTE_GAIN_DB_PARAMETER_ID.to_owned(),
-            })
+            Err(AudioAuthoringError::ParameterKeyMismatch)
         );
 
         let mut curve =
@@ -2440,7 +3229,7 @@ mod tests {
                 6.0,
             ))
             .expect("second key");
-        parameter.automation = curve;
+        parameter.automation = Some(curve);
 
         assert_eq!(
             processor.validate(),
@@ -2694,5 +3483,176 @@ mod tests {
             program.validate(&[track], &[], AudioChannelLayout::Stereo),
             Err(AudioAuthoringError::RouteCycle)
         );
+    }
+    fn processor_output_author_fixture() -> (Sequence, AudioProcessorInstanceId) {
+        let mut sequence = Sequence::new("raw processor author fixture");
+        let track = sequence.audio_tracks[0].id;
+        let processor = AudioProcessorInstance::built_in(BUILTIN_GAIN_DEFINITION_ID, 1);
+        let id = processor.id;
+        sequence
+            .audio_program
+            .track_channels
+            .get_mut(&track)
+            .unwrap()
+            .strip
+            .pre_fader
+            .processors
+            .push(processor);
+        sequence.audio_program.routes.push(AudioRoute::new(
+            AudioRouteSource::ProcessorOutput {
+                processor_id: id,
+                port: AudioProcessorOutputPort::Auxiliary { bus_key: "definition.output".into() },
+            },
+            AudioRouteDestination::Output(sequence.audio_program.outputs[0].id),
+        ));
+        (sequence, id)
+    }
+
+    #[test]
+    fn processor_output_author_sources_resolve_only_track_bus_and_reject_stage_cycles() {
+        let (sequence, id) = processor_output_author_fixture();
+        sequence
+            .validate_author_contract(&mondrian_core::ProjectColorEnvironment::default())
+            .unwrap();
+        let track = sequence.audio_tracks[0].id;
+        let source = sequence.audio_program.routes.last().unwrap().source.clone();
+        let candidates = crate::inspect_audio_route_candidates(&sequence).unwrap();
+        assert!(candidates.allows_addition(
+            source.clone(),
+            AudioRouteDestination::Output(sequence.audio_program.outputs[0].id)
+        ));
+        assert!(!candidates.allows_processor_sidechain_addition(source.clone(), id));
+        let mut cycle = sequence.clone();
+        cycle.audio_program.sidechain_routes.push(AudioProcessorSidechainRoute::new(
+            source.clone(),
+            id,
+            "detector",
+        ));
+        assert_eq!(
+            cycle.audio_program.validate(
+                &cycle.audio_tracks,
+                &cycle.audio_roles,
+                cycle.settings.audio_channel_layout
+            ),
+            Err(AudioAuthoringError::RouteCycle)
+        );
+        for owner in [0, 1] {
+            let mut invalid = sequence.clone();
+            let processor = invalid
+                .audio_program
+                .track_channels
+                .get_mut(&track)
+                .unwrap()
+                .strip
+                .pre_fader
+                .processors
+                .remove(0);
+            if owner == 0 {
+                let mut scope = AudioProcessingScope::identity();
+                scope.processors.processors.push(processor);
+                invalid.audio_program.processing_scopes.push(scope);
+            } else {
+                invalid.audio_program.outputs[0].strip.pre_fader.processors.push(processor);
+            }
+            assert_eq!(
+                invalid.audio_program.validate(
+                    &invalid.audio_tracks,
+                    &invalid.audio_roles,
+                    invalid.settings.audio_channel_layout
+                ),
+                Err(AudioAuthoringError::InvalidProcessorOutputSource(id))
+            );
+            assert!(crate::inspect_audio_route_candidates(&invalid).is_err());
+        }
+        let mut locked = sequence;
+        locked.audio_tracks[0].is_locked = true;
+        assert!(
+            !crate::inspect_audio_route_candidates(&locked).unwrap().allows_addition(
+                source,
+                AudioRouteDestination::Output(locked.audio_program.outputs[0].id)
+            )
+        );
+    }
+
+    #[test]
+    fn processor_output_strong_references_reject_single_delete_but_whole_track_prunes_and_duplicate_rekeys(
+    ) {
+        let (mut sequence, id) = processor_output_author_fixture();
+        let track = sequence.audio_tracks[0].id;
+        let before = sequence.clone();
+        let request = crate::AudioProcessorRackEditRequest {
+            address: crate::AudioProcessorRackAddress::ChannelStrip {
+                owner: AudioChannelStripOwner::Track { track_id: track },
+                rack: crate::AudioChannelStripRack::PreFader,
+            },
+            edit: crate::AudioProcessorRackEdit::Remove { processor_id: id },
+        };
+        assert!(crate::apply_audio_processor_rack_edit(&mut sequence, &request).is_err());
+        assert_eq!(sequence, before);
+        let mut duplicate = sequence.clone();
+        duplicate.fork_author_identities_for_sequence_duplicate();
+        duplicate
+            .validate_author_contract(&mondrian_core::ProjectColorEnvironment::default())
+            .unwrap();
+        let new_id = duplicate
+            .audio_program
+            .track_channels
+            .get(&duplicate.audio_tracks[0].id)
+            .unwrap()
+            .strip
+            .pre_fader
+            .processors[0]
+            .id;
+        assert_ne!(new_id, id);
+        assert!(
+            matches!(&duplicate.audio_program.routes.last().unwrap().source, AudioRouteSource::ProcessorOutput { processor_id, port: AudioProcessorOutputPort::Auxiliary { bus_key } } if *processor_id == new_id && bus_key == "definition.output")
+        );
+        // A raw producer on a Bus is a strong Bus dependency even without a
+        // legacy Bus source route; both original deletion policies still apply.
+        let mut bus_sequence = before.clone();
+        let producer = bus_sequence
+            .audio_program
+            .track_channels
+            .get_mut(&track)
+            .unwrap()
+            .strip
+            .pre_fader
+            .processors
+            .remove(0);
+        let bus_id = MixBusId::new();
+        let mut strip = AudioChannelStrip::default();
+        strip.pre_fader.processors.push(producer);
+        bus_sequence.audio_program.buses.push(AudioMixBus {
+            id: bus_id,
+            name: "producer bus".into(),
+            strip,
+        });
+        bus_sequence
+            .validate_author_contract(&mondrian_core::ProjectColorEnvironment::default())
+            .unwrap();
+        let saved = bus_sequence.clone();
+        let request = |policy| crate::AudioRoutingEditRequest {
+            edit: crate::AudioRoutingEdit::RemoveBus { bus_id, policy },
+        };
+        assert!(
+            matches!(crate::apply_audio_routing_edit(&mut bus_sequence, &request(crate::AudioBusRemovalPolicy::RejectIfConnected)), Err(crate::AudioRoutingEditError::BusConnected { bus_id: actual, route_count: 1 }) if actual == bus_id)
+        );
+        assert_eq!(bus_sequence, saved);
+        crate::apply_audio_routing_edit(
+            &mut bus_sequence,
+            &request(crate::AudioBusRemovalPolicy::Disconnect),
+        )
+        .unwrap();
+        assert!(bus_sequence.audio_program.buses.is_empty());
+        assert!(!bus_sequence.audio_program.routes.iter().any(|route| matches!(&route.source, AudioRouteSource::ProcessorOutput { processor_id, .. } if *processor_id == id)));
+        bus_sequence
+            .validate_author_contract(&mondrian_core::ProjectColorEnvironment::default())
+            .unwrap();
+        sequence.add_audio_track();
+        sequence.remove_audio_track(track).unwrap();
+        sequence
+            .validate_author_contract(&mondrian_core::ProjectColorEnvironment::default())
+            .unwrap();
+        assert!(!sequence.audio_program.routes.iter().any(|route| matches!(&route.source, AudioRouteSource::ProcessorOutput { processor_id, .. } if *processor_id == id)));
     }
 }

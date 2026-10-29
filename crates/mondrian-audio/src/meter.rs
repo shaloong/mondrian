@@ -339,6 +339,27 @@ impl AudioMeterBank {
     }
 }
 
+impl AudioMeterBank {
+    pub(crate) fn visit_host_storage<'a>(
+        &'a self,
+        visitor: &mut dyn FnMut(
+            crate::AudioProcessorFactoryStorageBorrow<'a>,
+        ) -> Result<(), crate::AudioProcessorFactoryStorageError>,
+    ) -> Result<(), crate::AudioProcessorFactoryStorageError> {
+        use crate::AudioProcessorFactoryStorageBorrow as Storage;
+        visitor(Storage::complete(&self.frame.targets)?)?;
+        for target in &self.frame.targets {
+            visitor(Storage::complete(&target.channels)?)?;
+        }
+        visitor(Storage::complete(&self.sum_squares)?)?;
+        visitor(Storage::complete(&self.finite_samples)?)?;
+        visitor(Storage::complete(&self.measured_targets)?)?;
+        visitor(Storage::arc_payload(&self.published))?;
+        visitor(Storage::complete(&self.published.targets)?)?;
+        visitor(Storage::complete(&self.published.channels)?)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

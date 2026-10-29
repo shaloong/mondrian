@@ -42,6 +42,16 @@ project-settings-custom-detail =
 project-settings-cancel = 取消
 project-settings-apply = 应用
 sequence-settings-title = 序列设置
+command-file-musical_time = 音乐时间...
+music-title = 音乐时间
+music-description = 设置恒定速度和第一拍在序列中的时间。支持精确的小数或分数输入；拍号未知时可留空。
+music-enabled = 向音频插件提供音乐时间
+music-tempo = 速度（BPM）
+music-origin = 第一拍时间（秒）
+music-signature = 拍号（例如 7/8）
+music-invalid-tempo = 请输入支持的精确时间范围内的正速度。
+music-invalid-origin = 请输入有效的第一拍时间，以秒为单位。
+music-invalid-signature = 请输入正拍号，例如 7/8；未知时可留空。
 sequence-settings-description = 调整活动序列的时间线格式和预览设置。
 sequence-tab-format = 格式
 sequence-tab-color = 色彩
@@ -98,6 +108,7 @@ menu-help = 帮助
 menu-import = 导入
 menu-import-folder = 文件夹...
 menu-install-openfx-filter = 安装 OpenFX Filter…
+menu-install-openfx-generator = 安装 OpenFX 生成器效果…
 menu-export = 导出
 menu-export-settings = 导出设置...
 menu-workspace = 工作区
@@ -197,6 +208,7 @@ effect-category-stylize = 风格化
 effect-category-transform = 变换
 effect-category-keying = 抠像
 effect-category-plugins = 插件
+effect-category-external = 外部效果
 effect-basic-correction = 基础调色
 effect-white-balance = 白平衡
 effect-lut-3d = 3D LUT
@@ -294,7 +306,7 @@ file-filter-vst3 = VST3 插件
 file-filter-media = 媒体
 file-filter-export = 导出
 file-filter-ancillary = ANC JSON / SCC V1.0 / 原始 CDP
-file-filter-pse = Regulatory PSE JSON
+file-filter-pse = PSE 规范配置（JSON）
 file-dialog-select-icc = 选择显示器 ICC 配置文件
 file-filter-icc = ICC 显示配置文件
 inspector-blend-mode = 混合模式
@@ -329,17 +341,17 @@ blend-mode-luminosity = 发光度
 audio-rack-scope-title = 音频处理器 Rack
 audio-rack-prefader-title = 推子前处理器 Rack
 audio-rack-postfader-title = 推子后处理器 Rack
-audio-rack-scope-unbound = 未绑定的 Processing Scope
+audio-rack-scope-unbound = 未绑定的处理范围
 audio-rack-scope-single = 仅由一个 Component 使用
-audio-rack-scope-shared = 共享 Processing Scope · { $count } 个 Component
-audio-rack-scope-identity = Processing Scope · { $identity }
+audio-rack-scope-shared = 共享处理范围 · { $count } 个音频组件
+audio-rack-scope-identity = 处理范围 · { $identity }
 audio-rack-track-identity = 音频轨道 · { $identity }
 audio-rack-locked-track = 轨道 { $identity } 已锁定，必须先解锁
-audio-rack-locked-scope-track = 共享 Scope 同时绑定到已锁定轨道 { $identity }，必须先解锁
+audio-rack-locked-scope-track = 共享处理范围同时绑定到已锁定轨道 { $identity }，必须先解锁
 audio-rack-invalid-state = 作者状态无法解析此 Rack：{ $error }
 audio-processor-gain = 增益
 audio-processor-lookahead-limiter = 前瞻限制器（Sample Peak）
-audio-processor-sample-delay = Sample Delay
+audio-processor-sample-delay = 采样延迟
 audio-parameter-gain = 增益
 audio-parameter-ceiling = 上限
 audio-parameter-lookahead = 前瞻
@@ -353,7 +365,7 @@ audio-mixer-port-prefader = 推子前
 audio-mixer-port-postfader-premute = 推子后 / 静音前
 audio-mixer-port-postmute = 静音后
 audio-mixer-port-postfader = 推子后
-audio-mixer-missing-bus = 缺失 Bus · { $identity }
+audio-mixer-missing-bus = 缺失总线 · { $identity }
 audio-mixer-missing-output = 缺失节目输出 · { $identity }
 audio-mixer-locked-strip = 轨道 { $identity } 已锁定；处理器、输入增益和推子为只读
 audio-mixer-locked-route = 轨道 { $identity } 已锁定；其 Route 为只读
@@ -410,7 +422,7 @@ interpret-diagnostics = 识别：{ $decision }
     OCIO processor cache-id：{ $processor }
 interpret-signal-missing = Range/Primaries/Transfer/Matrix：无视频信号
 interpret-camera-untagged = 未标记相机
-interpret-signal-camera-raw = Camera RAW：{ $adapter } · { $width }x{ $height } · { $bits }-bit · CFA { $cfa } · compression { $compression } · { $camera } · ColorMatrix={ $matrix } · AsShotNeutral={ $neutral }
+interpret-signal-camera-raw = 相机 RAW：{ $adapter } · { $width }x{ $height } · { $bits } 位 · CFA { $cfa } · 压缩 { $compression } · { $camera } · ColorMatrix={ $matrix } · AsShotNeutral={ $neutral }
 interpret-signal-range-auto = { $detected }（自动/探测）
 interpret-signal-range-full = Full（用户覆盖；探测为 { $detected }）
 interpret-signal-range-limited = Limited（用户覆盖；探测为 { $detected }）
@@ -454,7 +466,7 @@ mixer-create-bus = 新建 Bus
 mixer-create-named-bus = 新建 { $name }
 mixer-routing-graph = 路由图
 mixer-track = 轨道
-mixer-bus = Bus
+mixer-bus = 总线
 mixer-program-output = 节目输出
 mixer-mute = 静音
 mixer-solo = 独奏
@@ -489,7 +501,7 @@ audio-rack-install-vst3-file = 安装 VST3 插件文件…
 audio-rack-scope-row = 作用域
 audio-rack-add-row = 添加
 audio-rack-add-processor = 添加处理器…
-audio-rack-scope-input-curve = Scope 输入曲线
+audio-rack-scope-input-curve = 处理范围输入曲线
 audio-rack-bypass = 旁路
 audio-rack-plugin-binding = 插件绑定
 audio-rack-rebind-installed = 重新绑定已安装版本
@@ -525,7 +537,7 @@ preferences-export-draft = 导出草稿
 preferences-diagnostics = 诊断
 preferences-runtime = 运行时
 preferences-monitor-output = 监看输出
-preferences-icc-calibration = ICC device calibration
+preferences-icc-calibration = ICC 设备校准
 preferences-structured-diagnostics = 当前结构化诊断
 preferences-waiting-display = 等待 Window 发布 monitor/surface snapshot
 preferences-device-label = 输出设备：
@@ -642,3 +654,943 @@ command-panel-inspector = 检查器面板
 command-panel-effects = 效果面板
 command-panel-node_graph = 节点图面板
 command-panel-export = 导出面板
+mask-section = Power Window（窗口）
+mask-add = 添加
+mask-shape-rectangle = 矩形
+mask-shape-ellipse = 椭圆
+mask-shape-path = 路径
+mask-shape-bezier = 贝塞尔
+mask-controls = 控制
+mask-enabled = 启用
+mask-move-up = 上移
+mask-move-up-tooltip = 上移蒙版
+mask-move-down = 下移
+mask-move-down-tooltip = 下移蒙版
+mask-remove = 移除
+mask-remove-tooltip = 移除蒙版
+mask-lock = 锁定
+mask-lock-editing = 锁定编辑
+mask-shape = 形状
+mask-shape-animation = 形状动画
+mask-keyframes = 关键帧
+mask-insert-point-hint = Alt+单击曲线：插入控制点
+mask-track-object-forward = 目标 · 向前
+mask-track-object-backward = 目标 · 向后
+mask-track-object-both = 目标 · 双向
+mask-track-planar-forward = 平面 · 向前
+mask-track-planar-backward = 平面 · 向后
+mask-track-planar-both = 平面 · 双向
+mask-tracking = 跟踪
+mask-select-tracking = 选择模型与方向…
+mask-tracking-status = 跟踪状态
+mask-tracking-controls = 跟踪控制
+mask-cancel = 取消
+mask-recompute = 重算
+mask-status-generated = 已生成 · 可重算
+mask-status-untracked = 未跟踪
+mask-status-queued = 排队中
+mask-status-analyzing = 分析中 { $completed }/{ $total }
+mask-status-canceling = 正在取消
+mask-status-canceled = 已取消
+mask-status-completed = 已完成 · 可重算
+mask-status-cache-hit = 缓存命中 · 已应用
+mask-status-stale = 结果已过期
+mask-status-stale-detail = 已过期 · { $detail }
+mask-status-failed = 失败
+mask-status-failed-detail = 失败 · { $detail }
+inspector-title = 检查器
+inspector-selected-clip = 已选择片段
+inspector-no-clip-selected = 未选择片段
+inspector-clip-style = 剪辑样式
+inspector-enabled = 启用
+inspector-enable-effect = 启用效果
+inspector-opacity = 不透明度
+inspector-color = 颜色
+inspector-basic-title = 基础标题
+inspector-transform = 变换
+inspector-position-x = 位置 X (px)
+inspector-position-y = 位置 Y (px)
+inspector-scale-x = 缩放 X (%)
+inspector-scale-y = 缩放 Y (%)
+inspector-anchor-x = 锚点 X (px)
+inspector-anchor-y = 锚点 Y (px)
+inspector-rotation = 旋转 (°)
+inspector-timing = 时间
+inspector-speed = 速度 (%)
+inspector-source-time = 源时间
+inspector-hold = 定格
+inspector-resume-speed = 恢复速度 (%)
+inspector-place-playhead-in-clip = 先将播放头移入片段
+inspector-update-hold-frame = 更新为播放头画面
+inspector-create-hold-frame = 在播放头创建定格
+inspector-freeze-frame = 定格帧
+inspector-audio-component = 音频 Component
+inspector-audio-component-numbered = 音频 Component { $number }
+inspector-audio-in-mix = 参与混音
+inspector-audio-volume = 音量 (dB)
+inspector-audio-pan = 声像 / Balance
+inspector-audio-volume-curve = 音量曲线
+inspector-audio-pan-curve = 声像曲线
+inspector-audio-logical-source = 逻辑源
+inspector-audio-reprobe-file = 重新探测当前文件…
+inspector-audio-stream-binding = 资产流映射
+inspector-audio-fade-in = 淡入 (s)
+inspector-audio-fade-in-curve = 淡入曲线
+inspector-audio-fade-out = 淡出 (s)
+inspector-audio-fade-out-curve = 淡出曲线
+inspector-audio-fade-constant-gain = 恒定增益
+inspector-audio-fade-equal-power = 等功率
+inspector-grade-graph = 调色图
+inspector-grade-clip = 片段
+inspector-grade-create = 创建 Clip Grade
+inspector-grade-group = 分组
+inspector-grade-pre-post = 分组前/后
+inspector-grade-identity = 无处理
+inspector-grade-timeline = 时间线
+inspector-grade-version-nodes = 版本 / 节点
+inspector-grade-summary = { $version } · { $versions } 个版本 · { $nodes } 个节点
+inspector-grade-add-node = 添加节点
+inspector-grade-add-node-placeholder = 添加调色节点…
+inspector-effect-controls = 控制
+inspector-effect-move-up = 上移
+inspector-effect-move-up-tooltip = 上移效果
+inspector-effect-move-down = 下移
+inspector-effect-move-down-tooltip = 下移效果
+inspector-effect-remove = 移除
+inspector-effect-remove-tooltip = 移除效果
+inspector-effect-curve = { $name } 曲线
+inspector-animation = 动画
+inspector-curve = 曲线
+node-graph-title = 节点图
+node-graph-select-clip = 选择剪辑以检查渲染链
+node-graph-source = 源
+node-graph-output = 输出
+node-graph-composite = 合成
+node-graph-adjustment = 调整图层
+node-graph-nested-sequence = 嵌套序列
+node-graph-solid-color = 纯色
+node-graph-media-clip = 媒体剪辑
+node-graph-clip-effects = { $clip } / { $count } 个效果
+export-no-sequence = 没有序列
+export-hdr-select-sequence = 选择一个序列以配置 Dynamic HDR 交付
+export-anc-select-sequence = 选择序列后才能绑定 ANC 帧范围
+export-status-select-sequence = 导出前请打开或选择序列
+export-status-no-presets = 没有可用导出预设
+export-status-incompatible = 交付设置不兼容：{ $error }
+export-status-anc-failed = ANC 预检失败：{ $error }
+export-status-error = 错误：{ $error }
+export-status-select-output = 选择输出路径后即可加入队列
+export-status-ready = 就绪
+export-hdr-omit = 省略 Dynamic HDR
+export-hdr-preserve = 逐字节保留 { $family }
+export-hdr-remake = 重制：{ $program }
+export-hdr-missing-program = 重制：缺失 Program
+export-hdr-omit-readiness = 已明确省略动态元数据；静态 HDR 仍由序列交付策略独立控制
+export-hdr-preserve-readiness = 仅允许完整源文件逐字节复制并复探测 { $family }；剪辑、重封装或渲染均不回退
+export-hdr-remake-readiness = { $standard } / { $shots } 个 shot；需合格且已授权的生成、独立验证和人工 HDR/SDR QC Adapter
+export-hdr-missing-readiness = 引用的 Dynamic HDR Program 已缺失，交付将阻断
+export-hdr-preserve-st2094 = 逐字节保留 ST 2094-40 App #4
+export-hdr-preserve-dolby = 逐字节保留 Dolby Vision 元数据
+export-hdr-open-sequence = { $readiness }；先打开此序列才能修改交付意图
+export-job-pending = 等待中
+export-job-rendering-progress = 渲染中 { $completed }/{ $total }
+export-job-cancelling = 取消中
+export-job-completed = 已完成
+export-job-failed = 失败：{ $detail }
+export-job-cancelled = 已取消
+export-job-preparing = 准备中
+export-job-rendering = 渲染中
+export-job-encoding = 编码中
+export-job-packaging = 打包中
+export-job-validating = 验证中
+export-job-publishing = 发布中
+export-preset-modified = （已修改）
+export-image-sequence-directory = 图像序列目录
+export-no-video = 无视频
+export-follow-sequence-output = 由序列 Program Output 决定
+export-legal-rgb-range = 限制到合法 RGB 信号范围
+export-no-audio-image-sequence = 无音频（图像序列）
+export-delivery-title = 交付标题
+export-issuer = 发行方
+export-creator-system = 创建系统
+export-language = RFC 5646 语言
+export-browse = 浏览…
+export-output-path = 输出路径
+export-add-to-queue = 加入队列
+export-import-anc = 导入 ANC / 字幕…
+export-remove = 移除
+export-anc-none = 未选择 ANC / 广播字幕
+export-import-pse = 导入 PSE 配置…
+export-pse-none = 未选择独立监管分析器
+export-clear-finished = 清除已完成任务
+export-no-exportable-sequence = 没有可导出的序列
+export-format = 格式
+export-container = 容器
+export-video-codec = 视频编码
+export-resolution = 画幅
+export-frame-rate = 帧率
+export-width = 宽度
+export-height = 高度
+export-video-signal = 视频信号
+export-bit-depth = 位深
+export-range = 范围
+export-chroma = 色度采样
+export-color-output = 色彩输出
+export-processing-mode = 处理方式
+export-target-space = 目标空间
+export-encoding-parameters = 编码参数
+export-max-bitrate = 最大码率 kbps
+export-closed-gop = 封闭 GOP
+export-scene-cut-keyframes = 场景切换插入关键帧
+export-keyframe-interval = 关键帧间隔（秒）
+export-max-b-frames = 最大连续 B 帧
+export-scene-cut = 场景切换
+export-lookahead-frames = Lookahead 帧
+export-palette-dither = 允许调色板抖动
+export-palette-colors = 调色板颜色
+export-dither = 抖动
+export-controls = 控制
+export-fixed-profile = 由已验证的固定 Profile 决定
+export-audio = 音频
+export-codec = 编码
+export-audio-bitrate = 码率 kbps
+export-sample-depth = 采样位深
+export-queue = 队列
+export-jobs = 任务
+export-no-jobs = 没有排队任务
+export-queued-jobs = 队列中有 { $count } 个任务
+export-preset = 预设
+export-details = 详情
+export-delivery-metadata = 交付元数据
+export-title = 标题
+export-creator = 创建者
+export-language-short = 语言
+export-broadcast-anc = 广播 ANC
+export-select = 选择
+export-source = 来源
+export-frame-range = 帧范围
+export-frame-rate-packets = 帧率 / 包数
+export-qualification = 资格
+export-regulatory-pse = 监管 PSE
+export-analyzer = 分析器
+export-status = 状态
+export-dynamic-hdr-delivery = Dynamic HDR 交付
+export-intent = 意图
+export-hdr-program-count = { $count } 个已分析 Program
+export-qualification-status = 资格状态
+export-input = 输入
+export-sequence = 序列
+export-summary = 摘要
+export-output = 输出
+export-path = 路径
+export-cancel = 取消
+export-job = 任务
+export-anc-frame-range = 0…{ $last } · { $count } 帧 · 起点 { $start }
+export-anc-cadence = { $rate } fps · { $packets } 个包
+export-anc-source-scc = SCC V1.0 · 608 Field 1
+export-anc-source-cdp = 原始 CDP · ST334-2:2015
+export-anc-caption-readiness = { $format } · 导入器 v{ $version } · 608 通道位图 { $channels } · 708 服务 { $services }。传输校验通过；成品复读后发布，未授予字幕显示或 SDI 硬件资格
+export-anc-structure-readiness = ST436 结构与导出范围已验证；成品复读通过后发布，未授予 SDI 硬件资格
+export-anc-guidance = AS-11：ANC JSON、SCC V1.0（29.97→59.94 / Field 1）、原始 CDP；≤8 MiB / 100000 字幕帧，VANC 第 20 行。按序列起始时码与导出范围对齐
+export-pse-configured = 配置已冻结；入队核验分析器身份，成品复扫后判定监管结果
+export-pse-guidance = 导入 provider 与广播 QC profile 的 JSON 配置
+export-sequence-summary = 时间线渲染（V{ $video } / A{ $audio }）
+export-follow-sequence = 跟随序列
+export-no-audio = 无音频
+export-image-png8 = PNG 8 位（无损）
+export-image-png16 = PNG 16 位（无损）
+export-image-exr-half = OpenEXR Half（ZIP16）
+export-image-exr-float = OpenEXR Float32（ZIP16）
+export-image-dpx16 = DPX 16 位 RGB
+export-image-tiff16 = TIFF 16 位（Deflate）
+export-image-tiff-float = TIFF Float32（无损）
+export-alpha-flatten-black = 合成到黑色
+export-alpha-preserve = 保留 Straight Alpha
+export-color-follow-sequence = 跟随序列 Program Output
+export-color-rendering-view = 项目引擎 Rendering View
+export-color-colorimetric = 直接 Colorimetric 转换
+export-range-in-out = 序列入点/出点
+export-range-entire = 整个序列
+export-range-work-area = 工作区域
+export-directory-package = 目录包
+export-op1a-mxf-file = OP1a MXF 文件
+export-summary-professional = { $resolution } / { $profile } / { $essence } / { $frame_rate } / PCM 24 位 48 kHz 立体声 / { $layout } / .{ $extension }
+export-summary-audio-stems = 节目输出分轨 / PCM 24 位 WAV / 每个输出独立文件
+export-summary-image-sequence = { $resolution } / { $format } / { $color } / { $alpha } / { $frame_rate } / .{ $extension } 目录
+export-summary-media = { $resolution } / { $codec } / { $bitrate } / { $color } / { $bit_depth } / { $range } / { $chroma } / { $alpha } / { $audio } / .{ $extension }
+export-fixed-profile-class = 固定 Profile/Class 表示
+export-on = 开
+export-off = 关
+export-gif-rate-control = { $colors } 色 / 抖动 { $dither }
+export-rate-control-max = CRF { $crf } / 最大 { $max } kbps
+export-rate-control = CRF { $crf }
+
+# Export diagnostic summaries retain provider codes as values.
+export-diagnostic-none = 无
+export-diagnostic-pass = 通过
+export-diagnostic-warn = 警告
+export-diagnostic-fail = 失败
+export-diagnostic-complete = 完整
+export-diagnostic-incomplete = 不完整
+export-diagnostic-warning-code = 警告：{ $code }
+export-broadcast-qc-summary = 广播 QC：{ $profile }@{ $edition } / { $verdict } / { $frames } 帧（{ $coverage }）/ 发现 { $findings }，保留 { $retained }，溢出 { $overflow } / 待验收项 { $obligations } / { $complete }
+export-color-assets-summary = 素材 { $count } / 问题 { $issues }
+export-color-health-summary = 色彩：{ $verdict } / { $frames } 帧 / 元数据 { $metadata } / 覆盖 { $overrides } / 策略假设 { $policy } / 数据纹理 { $data } / 拒绝 { $rejected } / { $assets } / 检查 { $checks } / 原因 { $causes } / 建议 { $actions } / 阶段 CPU 输入 { $cpu_in }、CPU 输出 { $cpu_out }、GPU { $gpu }、阻塞 { $blockers }、传输 { $transfer } / GPU 阻塞 着色器 { $shader }、资源 { $resource }、包装器 { $wrapper }、管线 { $pipeline } / 合成 浮点 { $float }、旧 RGBA8 { $legacy }、原因 { $reasons }
+
+# Runtime status bar and retained notification history
+status-ready = 就绪
+status-history-title = 最近通知 · ↑/↓ · PgUp/PgDn · Home/End · Esc
+status-history-empty = 暂无通知
+status-history-accessibility = 最近通知，当前状态：{ $status }
+status-export-pending = 导出队列处理中（{ $count }）
+status-export-frames = 正在导出帧 { $completed }/{ $total }（队列 { $count }）
+status-export-phase = 导出：{ $phase }（队列 { $count }）
+status-export-cancelling = 正在取消导出（队列 { $count }）
+status-export-active = 导出处理中
+
+# Runtime status messages
+status-saving = 正在后台保存项目…
+status-open-preparing = 正在打开并验证项目…
+status-open-cancel-closing = 正在取消打开并安全关闭项目…
+status-open-failed = 打开项目失败：{ $reason }
+status-opened = 项目已打开
+status-save-as-failed = 无法启动另存为：{ $reason }
+status-save-as-started = 正在后台另存为：{ $path }
+status-create-project-failed = 新建项目失败：{ $reason }
+status-created-project = 项目已创建：{ $path }
+status-recovery-failed = 恢复自动保存失败：{ $reason }
+status-recovered = 已从自动保存恢复：{ $path }
+status-import-failed = 导入失败：{ $reason }
+status-relink-failed = 重新链接素材失败：{ $reason }
+status-relink-analyzing = 正在分析重新链接的媒体…
+status-audio-probe-failed = 音频 Component 探测失败：{ $reason }
+status-audio-probe-started = 正在刷新音频流候选…
+status-audio-rebind-failed = 音频 Component 重绑定失败：{ $reason }
+status-audio-rebind-started = 正在验证音频 Component 重绑定…
+status-rename-asset-failed = 重命名素材失败：{ $reason }
+status-renamed-asset = 已重命名素材：{ $name }
+status-interpret-failed = 解释素材失败：{ $reason }
+status-interpreted = 已更新素材解释：{ $asset_name }
+status-rename-folder-failed = 重命名文件夹失败：{ $reason }
+status-renamed-folder = 已重命名文件夹：{ $name }
+status-proxy-mode-failed = 设置代理模式失败：{ $reason }
+status-proxy-enable-failed = 无法启用代理：{ $reason }
+status-proxy-enabled = 已开启代理模式：{ $name }
+status-proxy-disabled = 已关闭代理模式：{ $name }
+status-remove-assets-failed = 删除素材选择失败：{ $reason }
+status-removed-asset = 已从素材面板移除：{ $name }
+status-removed-folder = 已删除文件夹：{ $name }
+status-removed-selection = 已从素材面板移除 { $assets } 个素材、删除 { $folders } 个文件夹
+status-move-assets-failed = 移动素材选择失败：{ $reason }
+status-moved-asset = 已移动素材：{ $name } → { $target_name }
+status-moved-folder = 已移动文件夹：{ $name } → { $target_name }
+status-moved-selection = 已移动 { $assets } 个素材、{ $folders } 个文件夹 → { $target_name }
+status-cross-dissolve-created = 已创建交叉溶解
+status-cross-dissolve-failed = 无法创建交叉溶解：{ $error }
+status-transition-update-failed = 无法调整视频转场：{ $error }
+status-preview-resolution = 预览分辨率：{ $scale }
+status-asset-prepare-failed = 素材准备失败：{ $reason }
+status-drag-ready = 已准备拖放：{ $name }（释放到{ $lane }）
+status-clap-installed = 已安装 { $count } 个 CLAP 处理器
+status-vst3-installed = 已安装 { $count } 个 VST3 处理器
+status-title-created = 已创建基础标题
+status-export-failed = 导出失败：{ $reason }
+status-export-queued = 已加入导出队列
+status-export-complete = 导出完成：{ $path }
+status-export-canceled = 导出已取消
+status-relinked = 已重新链接素材：{ $name } → { $path }
+status-audio-streams-refreshed = 已刷新 { $name } 的音频流候选
+status-audio-rebound = 已将 { $name } 的音频 Component 映射到流 #{ $stream }
+status-proxy-failed = 代理生成失败：{ $detail }
+status-proxy-switch-failed = 切换代理模式失败：{ $error }
+status-proxy-binding-failed = 代理模式已修改，但播放绑定失败：{ $error }
+status-native-audio-unavailable = 原生音频插件宿主不可用；已保存的插件无法恢复
+status-native-audio-restore-failed = 原生音频插件恢复无法启动：{ $error }
+status-audio-restored-partial = 音频插件恢复完成：{ $available } 个库可用，{ $failed } 个库失败；可重新选择失败的插件文件
+status-audio-restored = 已恢复 { $count } 个音频插件库
+status-openfx-scanning = 正在扫描所选 OpenFX 效果…
+status-openfx-restore-failed = OpenFX 恢复无法启动：{ $error }
+status-openfx-restore-queue-failed = OpenFX 恢复无法排队
+status-openfx-installed = 已安装 { $installed } 个 OpenFX 效果
+status-openfx-installed-partial = 已安装 { $installed } 个 OpenFX 效果；{ $unsupported } 个插件不支持所选类型或当前宿主契约
+status-openfx-install-failed = OpenFX 安装失败：{ $reason }
+status-openfx-restored-partial = OpenFX 恢复完成：{ $available } 个效果可用，{ $failed } 个失败；可重新选择安装文件
+status-openfx-restored = 已恢复 { $count } 个 OpenFX 效果
+status-openfx-scan-failed = OpenFX 扫描任务异常结束；请重新选择插件
+status-audio-prepare-failed = 音频处理无法准备：{ $error }
+status-persistence-failed = 项目持久化完成失败：{ $error }
+status-closing = 正在完成后台保存并安全关闭项目…
+status-close-failed = 项目关闭失败：{ $reason }
+status-close-save-canceled = 保存后关闭已取消：{ $reason }
+status-saved = 项目已耐久保存
+status-saved-cleanup-failed = 项目已耐久保存，但恢复点清理失败：{ $reason }
+status-autosaved-cleanup-failed = 自动保存完成，但恢复点清理状态异常：{ $reason }
+status-save-failed = 保存项目失败：{ $error }
+status-autosave-failed = 自动保存失败：{ $error }
+status-autosave-start-failed = 无法启动自动保存：{ $error }
+status-packaging = 正在打包项目…
+status-package-canceling = 正在取消项目打包…
+status-packaged = 项目打包完成：{ $path }
+status-package-canceled = 已取消项目打包
+status-package-failed = 项目打包未完成：{ $reason }
+status-package-worker-failed = 项目打包工作线程意外终止
+status-package-copying = 正在复制项目资源… { $percent }%
+status-package-validating = 正在校验项目资源… { $percent }%
+status-package-writing = 正在写入工程快照…
+status-package-publishing = 正在发布项目包…
+status-package-analyzing = 正在分析项目依赖…
+status-drop-probing = 正在探测拖入轨道的媒体文件...
+status-drop-placed = 已将文件导入素材库并添加到轨道
+status-placement-failed = 素材放置失败：{ $error }
+status-asset-placed = 已添加素材到时间线
+status-history-retired = 编辑已提交但未保留撤销记录；此前撤销段已清除以避免跨越未记录状态
+status-folder-created = 已新建文件夹：{ $name }
+status-asset-created = 已新建：{ $name }
+status-adjustment-created = 已创建调整图层：{ $name }
+status-solid-created = 已创建纯色层: { $name }
+status-precomposed = 已创建嵌套序列“{ $name }”
+status-clips-linked = 已链接所选剪辑
+status-clips-unlinked = 已取消所选剪辑链接
+status-cross-dissolve-shortened = 交叉溶解已按可用源素材手柄缩短
+status-transition-shortened = 视频转场已按可用源素材手柄缩短
+status-tracking-failed = 跟踪失败：{ $detail }
+status-tracking-cached = 跟踪缓存已应用
+status-tracking-complete = 跟踪完成
+status-plugin-preferences-failed = 插件已安装，但无法保存重启恢复信息：{ $error }
+status-reference-release-failed = 项目已关闭，但参考输出设备未能确认释放：{ $reason }
+status-shell-action-failed = 界面操作失败：{ $err }
+status-gallery-no-viewer = 当前没有可捕获的项目 Viewer
+status-gallery-captured = Gallery Still 已捕获
+status-gallery-capture-failed = Gallery Still 捕获失败：{ $error }
+status-gallery-preparing = 正在准备精确 Gallery Still…
+status-workspace-save-failed = Workspace preference could not be saved: { $err }
+status-startup-action-failed = 启动界面操作失败：{ $err }
+status-action-failed = 操作失败：{ $err }
+status-recent-save-failed = Recent projects could not be saved: { $err }
+status-shortcut-preference-invalid = 快捷键设置无效
+status-shortcut-key-invalid = 快捷键无效
+status-preferences-save-failed = Preferences could not be saved: { $err }
+status-preferences-action-failed = 设置操作失败：{ $err }
+status-asset-browser-action-failed = 素材库操作失败：{ $err }
+status-close-abandon-failed = 无法放弃失败的项目关闭操作：{ $err }
+status-close-start-failed = 无法开始安全关闭项目：{ $err }
+status-import-started = 正在导入 { $count } 个媒体文件...
+status-import-canceled = 媒体导入已取消
+status-import-progress = 正在导入媒体文件 { $completed }/{ $total }...
+status-drop-canceled = 文件放置已取消
+status-drop-failed = 文件放置失败：{ $reason }
+
+status-proxy-generating = 已开启代理模式：{ $name }（后台生成中）
+status-proxy-regenerating = 已开启代理模式：{ $name }（代理过期，后台重新生成中）
+status-audio-track = 音频轨
+status-video-track = 视频轨
+status-import-summary = 已导入 { $imported } 个媒体文件
+status-import-summary-proxies = { status-import-summary }，{ $proxies } 个后台生成代理
+status-import-summary-partial = { status-import-summary }，{ $failed } 个失败
+status-import-summary-proxies-partial = { status-import-summary-proxies }，{ $failed } 个失败
+status-range-lifted = Lift 完成：移除 { $removed } 个片段，修剪 { $trimmed } 个片段，分割 { $split } 个片段，移动 { $shifted } 个片段
+status-range-extracted = Extract 完成：移除 { $removed } 个片段，修剪 { $trimmed } 个片段，分割 { $split } 个片段，移动 { $shifted } 个片段
+status-opaque-detail = { $detail }
+
+status-no-project = 没有项目
+
+# Typed core failure projection
+error-media-open = 媒体文件无法打开：{ $path } — { $reason }
+error-decode-failed = 解码失败（素材 { $asset_id }）：{ $reason }
+error-unsupported-format = 不支持的媒体格式：{ $format }
+error-proxy-generation = 代理生成失败：{ $reason }
+error-track-not-found = 轨道不存在：{ $track_id }
+error-clip-not-found = 剪辑不存在：{ $clip_id }
+error-time-out-of-range = 时间位置超出范围：{ $timecode }
+error-track-locked = 轨道已锁定，无法编辑：{ $track_id }
+error-action-not-executed = 操作未执行（{ $action }）：{ $reason }
+error-gpu-init = GPU 初始化失败：{ $reason }
+error-shader-compile = Shader 编译失败（{ $shader_name }）：{ $reason }
+error-texture-upload = 纹理上传失败：{ $reason }
+error-effect-evaluation = 效果图求值失败：{ $reason }
+error-asset-not-found = 素材不存在：{ $asset_id }
+error-asset-file-missing = 素材文件已移动或删除，请重新链接：{ $path }
+error-asset-database = 素材库数据库错误：{ $reason }
+error-ai-provider = AI 服务调用失败（{ $provider }）：{ $reason }
+error-ai-rate-limit = AI 服务限流，请稍后重试（{ $provider }）
+error-workflow-step = 工作流步骤失败（{ $step_id }）：{ $reason }
+error-workflow-parse = 工作流解析失败：{ $reason }
+error-export = 导出编码失败：{ $reason }
+error-hardware-encoder = 硬件编码器不可用：{ $encoder }
+error-source-revision-unavailable = 无法确认媒体文件修订：{ $path } — { $reason }
+error-source-revision-changed = 媒体文件已变化，请刷新或重新链接：{ $path }
+error-media-resource = 媒体执行资源不可用（{ $operation }）：{ $source }
+error-media-resource-cleanup = 媒体执行资源不可用（{ $operation }）：{ $source }；清理失败：{ $cleanup }
+error-decode-timeout = 解码超时（素材 { $asset_id }，模式 { $access_mode }，帧 { $frame }，源时间 { $secs } 秒，预算 { $budget_ms } 毫秒）
+error-decode-budget = 解码扫描预算耗尽（素材 { $asset_id }，模式 { $access_mode }，已解码 { $decoded_frames } 帧，预算 { $budget_frames } 帧，目标 PTS { $target_pts }）
+error-decode-temporal = 解码帧未覆盖请求时间（素材 { $asset_id }，模式 { $access_mode }，请求 PTS { $requested_pts }，帧 PTS { $selected_pts }，持续时间 { $selected_duration_pts }）
+error-timeline-time = 无效的精确时间：{ $reason }
+error-io = 文件读写失败：{ $reason }
+error-serialization = 数据序列化失败：{ $reason }
+error-canceled = 操作已取消
+error-other = 操作失败：{ $reason }
+error-timestamp-unknown = 未提供
+
+error-context = { $context }：{ $source }
+
+# Product admission and exact-time reasons
+reason-no-project-save-as = 当前没有可另存的项目
+reason-empty-media-path = 请选择媒体文件，路径不能为空
+reason-library-disconnected = 项目素材库尚未连接
+reason-proxy-video-only = 只有视频素材支持代理模式
+reason-proxy-source-missing = 素材文件不存在，请先重新链接媒体
+reason-proxy-project-disabled = 项目已禁用代理工作流，请先在项目设置中启用代理
+reason-probe-evidence-missing = 素材的探测信息缺失或已失效，请刷新或重新链接素材
+reason-probe-duration-missing = 未能确认有效的素材时长，无法放置剪辑
+reason-time-zero-denominator = 时间分母不能为零
+reason-time-overflow = 时间运算超出支持的范围
+reason-time-invalid-base = 无效的帧时间基：{ $numerator }/{ $denominator }
+reason-time-invalid-rate = 无效的帧率：{ $numerator }/{ $denominator }
+reason-time-domain-mismatch = 时间属于不同域，需要显式时间映射
+reason-time-non-invertible = 时间映射不可逆
+reason-time-negative-duration = 时间范围的持续时间不能为负
+reason-time-non-finite = 时间输入必须是有限值
+
+reason-import-folder-missing = 目标素材文件夹不存在：{ $folder }
+reason-import-project-unavailable = 请先打开项目再导入媒体
+reason-import-worker-unavailable = 媒体导入工作线程不可用，请重启应用后重试
+reason-import-empty-batch = 请至少选择一个媒体文件
+reason-import-batch-capacity = 排队的导入批次已达上限 { $capacity }，请等待导入完成或取消一个批次
+reason-import-batch-too-large = 本次导入包含 { $files } 个文件，每批最多可选择 { $capacity } 个
+reason-import-file-capacity = 本次导入需要 { $files } 个文件槽位，当前仅剩 { $available } 个，请等待导入完成或减少所选文件
+
+inspector-track-locked = 所选剪辑所在轨道已锁定
+inspector-audio-asset-unavailable = 音频组件 { $identity }（素材不可用）
+inspector-audio-component-missing = 音频组件 { $identity }（目录中不存在）
+inspector-audio-output-unavailable = 嵌套输出 { $identity }（不可用）
+inspector-audio-primary = 主音频流 · { $label }
+inspector-audio-stream-rebind = 流 #{ $index } · { $layout }（需重绑定）
+inspector-audio-stream-rebind-short = 流 #{ $index }（需重绑定）
+inspector-audio-binding-unavailable = 无有效物理映射
+inspector-audio-stream = 流 #{ $index }
+inspector-audio-stream-default = 默认
+inspector-audio-layout-unspecified = 未指定 { $count }ch
+inspector-audio-layout-unsupported = 不支持的命名布局 { $count }ch
+
+# Stable parameter presentation; author keys remain language-neutral.
+parameter-mondrian-title-text-label = 文字
+parameter-mondrian-title-font-family-label = 字体
+parameter-mondrian-title-font-weight-label = 字重
+parameter-mondrian-title-font-style-label = 字形
+parameter-mondrian-title-font-size-label = 字号
+parameter-mondrian-title-fill-label = 填充
+parameter-mondrian-title-tracking-label = 字距
+parameter-mondrian-title-line-height-label = 行高
+parameter-mondrian-title-horizontal-align-label = 水平对齐
+parameter-mondrian-title-vertical-align-label = 垂直对齐
+parameter-mondrian-mask-feather-label = 羽化
+parameter-mondrian-mask-opacity-label = 不透明度
+parameter-mondrian-mask-expansion-label = 扩展
+parameter-mondrian-mask-invert-label = 反转
+parameter-mondrian-mask-operation-label = 模式
+parameter-mondrian-title-option-normal = 常规
+parameter-mondrian-title-option-italic = 斜体
+parameter-mondrian-title-option-oblique = 倾斜
+parameter-mondrian-title-option-left = 左
+parameter-mondrian-title-option-center = 居中
+parameter-mondrian-title-option-right = 右
+parameter-mondrian-title-option-top = 顶部
+parameter-mondrian-title-option-bottom = 底部
+parameter-mondrian-mask-operation-Add-label = 相加
+parameter-mondrian-mask-operation-Subtract-label = 相减
+parameter-mondrian-mask-operation-Intersect-label = 交集
+parameter-mondrian-mask-operation-Difference-label = 差集
+parameter-mondrian-effect-curves-mode-rgb = RGB
+parameter-mondrian-effect-curves-mode-yrgb = YRGB
+parameter-mondrian-effect-qualifier-mode-hsl = HSL
+parameter-builtin-lut-3d-processing-space-unassigned = 未指定
+parameter-builtin-lut-3d-processing-space-scene-linear = 场景线性
+parameter-builtin-lut-3d-processing-space-rec709 = Rec. 709
+parameter-builtin-lut-3d-processing-space-srgb = sRGB
+parameter-builtin-lut-3d-processing-space-rec2020 = Rec. 2020
+parameter-builtin-lut-3d-processing-space-display-p3 = Display P3
+parameter-builtin-lut-3d-processing-space-rec2100-hlg = Rec. 2100 HLG
+parameter-builtin-lut-3d-processing-space-rec2100-pq = Rec. 2100 PQ
+parameter-builtin-lut-3d-processing-space-aces-cct = ACEScct
+parameter-builtin-lut-3d-processing-space-apple-log-bt2020 = Apple Log / BT.2020
+parameter-builtin-lut-3d-processing-space-sony-slog2-sgamut = Sony S-Log2 / S-Gamut
+parameter-builtin-lut-3d-processing-space-sony-slog3-sgamut3 = Sony S-Log3 / S-Gamut3
+parameter-builtin-lut-3d-processing-space-sony-slog3-sgamut3-cine = Sony S-Log3 / S-Gamut3.Cine
+parameter-builtin-lut-3d-processing-space-arri-logc3-wide-gamut3 = ARRI LogC3 / Wide Gamut 3
+parameter-builtin-lut-3d-processing-space-arri-logc4-wide-gamut4 = ARRI LogC4 / Wide Gamut 4
+parameter-builtin-lut-3d-processing-space-canon-log2-cinema-gamut-d55 = Canon Log 2 / Cinema Gamut D55
+parameter-builtin-lut-3d-processing-space-canon-log3-cinema-gamut-d55 = Canon Log 3 / Cinema Gamut D55
+parameter-builtin-lut-3d-processing-space-panasonic-vlog-vgamut = Panasonic V-Log / V-Gamut
+parameter-builtin-lut-3d-processing-space-red-log3g10-wide-gamut-rgb = RED Log3G10 / Wide Gamut RGB
+parameter-builtin-lut-3d-processing-space-blackmagic-film-wide-gamut-gen5 = Blackmagic Film / Wide Gamut Gen 5
+parameter-builtin-lut-3d-processing-space-dji-dlog-dgamut = DJI D-Log / D-Gamut
+parameter-builtin-lut-3d-processing-space-davinci-intermediate-wide-gamut = DaVinci Intermediate / Wide Gamut
+parameter-mondrian-effect-builtin-asc-cdl-offset-label = 偏移
+parameter-mondrian-effect-builtin-asc-cdl-power-label = 幂
+parameter-mondrian-effect-builtin-asc-cdl-saturation-label = 饱和度
+parameter-mondrian-effect-builtin-asc-cdl-slope-label = 斜率
+parameter-mondrian-effect-builtin-basic-correction-contrast-label = 对比度
+parameter-mondrian-effect-builtin-basic-correction-exposure-label = 曝光
+parameter-mondrian-effect-builtin-basic-correction-saturation-label = 饱和度
+parameter-mondrian-effect-builtin-chroma-key-blend-label = 边缘混合
+parameter-mondrian-effect-builtin-chroma-key-invert-label = 保留键色
+parameter-mondrian-effect-builtin-chroma-key-key-color-label = 抠像颜色
+parameter-mondrian-effect-builtin-chroma-key-similarity-label = 相似度
+parameter-mondrian-effect-builtin-chromatic-aberration-amount-label = 色差强度
+parameter-mondrian-effect-builtin-color-wheel-gain-label = 亮部（Gain）
+parameter-mondrian-effect-builtin-color-wheel-gamma-label = 中间调（Gamma）
+parameter-mondrian-effect-builtin-color-wheel-lift-label = 暗部（Lift）
+parameter-mondrian-effect-builtin-color-wheel-offset-label = 偏移
+parameter-mondrian-effect-builtin-crop-bottom-label = 底部
+parameter-mondrian-effect-builtin-crop-left-label = 左侧
+parameter-mondrian-effect-builtin-crop-right-label = 右侧
+parameter-mondrian-effect-builtin-crop-top-label = 顶部
+parameter-mondrian-effect-builtin-curves-blue-label = 蓝
+parameter-mondrian-effect-builtin-curves-green-label = 绿
+parameter-mondrian-effect-builtin-curves-hue-vs-hue-label = 色相对色相
+parameter-mondrian-effect-builtin-curves-hue-vs-luma-label = 色相对亮度
+parameter-mondrian-effect-builtin-curves-hue-vs-saturation-label = 色相对饱和度
+parameter-mondrian-effect-builtin-curves-luma-vs-saturation-label = 亮度对饱和度
+parameter-mondrian-effect-builtin-curves-master-label = 主曲线
+parameter-mondrian-effect-builtin-curves-mode-label = Master 模式
+parameter-mondrian-effect-builtin-curves-red-label = 红
+parameter-mondrian-effect-builtin-curves-saturation-vs-luma-label = 饱和度对亮度
+parameter-mondrian-effect-builtin-curves-saturation-vs-saturation-label = 饱和度对饱和度
+parameter-mondrian-effect-builtin-gamut-compression-amount-label = 强度
+parameter-mondrian-effect-builtin-gaussian-blur-radius-label = 模糊半径
+parameter-mondrian-effect-builtin-grain-amount-label = 颗粒强度
+parameter-mondrian-effect-builtin-grain-size-label = 颗粒尺寸
+parameter-mondrian-effect-builtin-hdr-grading-blacks-balance-label = 色彩平衡
+parameter-mondrian-effect-builtin-hdr-grading-blacks-center-label = 中心
+parameter-mondrian-effect-builtin-hdr-grading-blacks-exposure-label = 曝光
+parameter-mondrian-effect-builtin-hdr-grading-blacks-saturation-label = 饱和度
+parameter-mondrian-effect-builtin-hdr-grading-blacks-width-label = 范围
+parameter-mondrian-effect-builtin-hdr-grading-dark-balance-label = 色彩平衡
+parameter-mondrian-effect-builtin-hdr-grading-dark-center-label = 中心
+parameter-mondrian-effect-builtin-hdr-grading-dark-exposure-label = 曝光
+parameter-mondrian-effect-builtin-hdr-grading-dark-saturation-label = 饱和度
+parameter-mondrian-effect-builtin-hdr-grading-dark-width-label = 范围
+parameter-mondrian-effect-builtin-hdr-grading-global-balance-label = 色彩平衡
+parameter-mondrian-effect-builtin-hdr-grading-global-exposure-label = 曝光
+parameter-mondrian-effect-builtin-hdr-grading-global-saturation-label = 饱和度
+parameter-mondrian-effect-builtin-hdr-grading-highlights-balance-label = 色彩平衡
+parameter-mondrian-effect-builtin-hdr-grading-highlights-center-label = 中心
+parameter-mondrian-effect-builtin-hdr-grading-highlights-exposure-label = 曝光
+parameter-mondrian-effect-builtin-hdr-grading-highlights-saturation-label = 饱和度
+parameter-mondrian-effect-builtin-hdr-grading-highlights-width-label = 范围
+parameter-mondrian-effect-builtin-hdr-grading-light-balance-label = 色彩平衡
+parameter-mondrian-effect-builtin-hdr-grading-light-center-label = 中心
+parameter-mondrian-effect-builtin-hdr-grading-light-exposure-label = 曝光
+parameter-mondrian-effect-builtin-hdr-grading-light-saturation-label = 饱和度
+parameter-mondrian-effect-builtin-hdr-grading-light-width-label = 范围
+parameter-mondrian-effect-builtin-hdr-grading-shadows-balance-label = 色彩平衡
+parameter-mondrian-effect-builtin-hdr-grading-shadows-center-label = 中心
+parameter-mondrian-effect-builtin-hdr-grading-shadows-exposure-label = 曝光
+parameter-mondrian-effect-builtin-hdr-grading-shadows-saturation-label = 饱和度
+parameter-mondrian-effect-builtin-hdr-grading-shadows-width-label = 范围
+parameter-mondrian-effect-builtin-hdr-grading-specular-balance-label = 色彩平衡
+parameter-mondrian-effect-builtin-hdr-grading-specular-center-label = 中心
+parameter-mondrian-effect-builtin-hdr-grading-specular-exposure-label = 曝光
+parameter-mondrian-effect-builtin-hdr-grading-specular-saturation-label = 饱和度
+parameter-mondrian-effect-builtin-hdr-grading-specular-width-label = 范围
+parameter-mondrian-effect-builtin-highlight-recovery-rolloff-label = 过渡宽度
+parameter-mondrian-effect-builtin-highlight-recovery-strength-label = 恢复强度
+parameter-mondrian-effect-builtin-highlight-recovery-threshold-label = 起始阈值
+parameter-mondrian-effect-builtin-hue-saturation-lightness-hue-label = 色相
+parameter-mondrian-effect-builtin-hue-saturation-lightness-lightness-label = 明度
+parameter-mondrian-effect-builtin-hue-saturation-lightness-saturation-label = 饱和度
+parameter-mondrian-effect-builtin-luma-key-invert-label = 保留暗部
+parameter-mondrian-effect-builtin-luma-key-softness-label = 柔化
+parameter-mondrian-effect-builtin-luma-key-threshold-label = 阈值
+parameter-mondrian-effect-builtin-lut-3d-intensity-label = LUT 强度
+parameter-mondrian-effect-builtin-lut-3d-path-label = LUT 文件
+parameter-mondrian-effect-builtin-lut-3d-processing-space-label = 处理色彩空间
+parameter-mondrian-effect-builtin-qualifier-blur-radius-label = Matte 羽化
+parameter-mondrian-effect-builtin-qualifier-clean-black-label = 清除黑色
+parameter-mondrian-effect-builtin-qualifier-clean-white-label = 清除白色
+parameter-mondrian-effect-builtin-qualifier-denoise-radius-label = Denoise 半径
+parameter-mondrian-effect-builtin-qualifier-hue-center-label = 色相中心
+parameter-mondrian-effect-builtin-qualifier-hue-softness-label = 色相柔化
+parameter-mondrian-effect-builtin-qualifier-hue-width-label = 色相宽度
+parameter-mondrian-effect-builtin-qualifier-invert-label = 反转 Matte
+parameter-mondrian-effect-builtin-qualifier-luminance-high-label = 亮度高
+parameter-mondrian-effect-builtin-qualifier-luminance-low-label = 亮度低
+parameter-mondrian-effect-builtin-qualifier-luminance-softness-label = 亮度柔化
+parameter-mondrian-effect-builtin-qualifier-matte-preview-label = Matte 预览
+parameter-mondrian-effect-builtin-qualifier-mode-label = 选择模式
+parameter-mondrian-effect-builtin-qualifier-samples-label = 采样颜色
+parameter-mondrian-effect-builtin-qualifier-saturation-high-label = 饱和度高
+parameter-mondrian-effect-builtin-qualifier-saturation-low-label = 饱和度低
+parameter-mondrian-effect-builtin-qualifier-saturation-softness-label = 饱和度柔化
+parameter-mondrian-effect-builtin-qualifier-three-d-softness-label = 3D 柔化
+parameter-mondrian-effect-builtin-qualifier-three-d-tolerance-label = 3D 容差
+parameter-mondrian-effect-builtin-sharpen-amount-label = 锐化强度
+parameter-mondrian-effect-builtin-vignette-feather-label = 暗角羽化
+parameter-mondrian-effect-builtin-vignette-intensity-label = 暗角强度
+parameter-mondrian-effect-builtin-white-balance-temperature-label = 色温
+parameter-mondrian-effect-builtin-white-balance-tint-label = 色调
+parameter-mondrian-effect-qualifier-mode-three-dimensional = 三维颜色
+parameter-group-asc-cdl = ASC CDL
+parameter-group-hdr-blacks = HDR · 黑部
+parameter-group-hdr-dark = HDR · 暗部
+parameter-group-hdr-global = HDR · 全局
+parameter-group-hdr-highlights = HDR · 高光
+parameter-group-hdr-light = HDR · 亮部
+parameter-group-hdr-shadows = HDR · 阴影
+parameter-group-hdr-specular = HDR · 镜面高光
+parameter-group-hsl = HSL
+parameter-group-lut = LUT
+parameter-group-primaries = 一级调色
+parameter-group-qualifier = 颜色选择器
+parameter-group-qualifier-3d = 颜色选择器 · 3D
+parameter-group-qualifier-matte = 颜色选择器 · 遮罩
+parameter-group-luma-key = 亮度键
+parameter-group-basic-correction = 基础校正
+parameter-group-chroma-key = 色度键
+parameter-group-vignette = 暗角
+parameter-group-curves = 曲线
+parameter-group-blur = 模糊
+parameter-group-white-balance = 白平衡
+parameter-group-gamut-compression = 色域压缩
+parameter-group-chromatic-aberration = 色差
+parameter-group-crop = 裁切
+parameter-group-sharpen = 锐化
+parameter-group-grain = 颗粒
+parameter-group-highlight-recovery = 高光恢复
+
+# Qualifier sample editing
+inspector-qualifier-include = 包含
+inspector-qualifier-exclude = 排除
+inspector-qualifier-remove-sample = 删除
+inspector-qualifier-add-include = + 包含
+inspector-qualifier-add-exclude = + 排除
+
+resource-unbound = 无资源
+resource-file = 外部文件或文件夹
+resource-file-only = 外部文件
+resource-folder-only = 外部文件夹
+resource-unavailable-asset = 素材不可用
+resource-project-asset = 项目资源
+resource-uri = URI
+resource-value = 资源地址
+resource-search-assets = 搜索项目资源
+resource-no-assets-match = 没有匹配的素材。
+resource-select-asset = 选择资源
+resource-browse-file = 浏览文件…
+resource-browse-folder = 浏览文件夹…
+resource-apply = 应用
+resource-cancel = 取消
+resource-path-required = 请选择或输入文件或文件夹路径。
+resource-asset-required = 请选择项目资源。
+resource-asset-missing = 此资源已不可用，请选择其他资源。
+resource-uri-invalid = 请输入含协议、不含空格或控制字符的绝对 URI。
+resource-browse-failed = 无法打开系统选择器。可以输入路径或重试。
+resource-select-one-file = 请为此参数选择一个文件。
+resource-not-admitted = 此参数不接受该资源类型、文件扩展名、路径格式或路径长度。
+
+keyframe-interpolation-hold = 保持
+keyframe-interpolation-linear = 线性
+keyframe-interpolation-bezier = 贝塞尔
+keyframe-interpolation-auto-bezier = 自动贝塞尔
+keyframe-interpolation-continuous-bezier = 连续贝塞尔
+keyframe-interpolation-ease-in = 缓入
+keyframe-interpolation-ease-out = 缓出
+
+resource-browse-existing-file = 浏览已有文件…
+resource-path-existing = 输入已有路径
+resource-path-existing-or-new = 输入已有或新路径
+resource-path-checking = 正在检查此路径… 你可以继续编辑或取消。
+resource-path-timeout = 检查此路径超时。请确认路径可用后重试。
+resource-path-confirm-again = 完成文字输入后，请再次确认此路径。
+resource-owner-unavailable = 此参数当前无法编辑。
+resource-path-missing = 此路径不存在，请选择现有文件或文件夹。
+resource-path-wrong-kind = 此路径不是参数要求的文件或文件夹类型。
+resource-path-unavailable = 无法检查此路径，请确认其可用性及访问权限。
+
+resource-path-owner-required = 请先打开或保存项目，再输入相对资源路径。
+resource-path-ambiguous = 请输入完整路径或相对于项目目录的路径；驱动器相对路径无法确定位置。
+curve-point-count-label = { $label }（{ $count }/{ $maximum }）
+export-alpha = 透明通道
+export-legalizer = 信号限幅
+export-vbv-buffer = VBV 缓冲区（kbit）
+export-depth-value = { $bits } 位
+export-integer-depth = { $bits } 位整数
+export-pcm-depth = PCM { $bits } 位
+export-video-range-full = 全范围
+export-video-range-legal = 限范围／视频电平
+export-container-imf = IMF 包
+export-container-dcp = SMPTE DCP 包
+export-professional-dcp-video = JPEG 2000 / ST 428-1 XYZ 12 位
+export-professional-pcm = PCM 24 位 / 48 kHz / 立体声
+export-essence-prores = ProRes 422 HQ 10 位 4:2:2
+export-essence-avc = AVC High 4:2:2 10 位帧内
+export-essence-jpeg2000 = JPEG 2000 XYZ 12 位
+
+curve-editor-name = 曲线编辑器
+curve-editor-keyboard-help = Home/End：首尾点；Ctrl/Cmd＋左右：上一个／下一个点；Alt＋左右：入／出手柄；Alt＋上：返回点；左右：一帧；Shift＋左右：五帧；上下：数值微调；Shift＋F10：插值菜单。 Ctrl/Cmd＋滚轮：时间缩放，加 Shift：数值缩放；中键拖动：平移；Ctrl/Cmd＋PageUp/PageDown：缩放，加 Shift：数值缩放；Ctrl/Cmd＋Shift＋方向键：平移；Ctrl/Cmd＋0：复位视图。
+curve-editor-shape-keyboard-help = Home/End：首尾点；Ctrl/Cmd＋左右：上一个／下一个点；方向键：微调；Shift＋方向键：较大幅度微调。 Ctrl/Cmd＋滚轮：时间缩放，加 Shift：数值缩放；中键拖动：平移；Ctrl/Cmd＋PageUp/PageDown：缩放，加 Shift：数值缩放；Ctrl/Cmd＋Shift＋方向键：平移；Ctrl/Cmd＋0：复位视图。
+
+curve-editor-selection-keyboard-help = { curve-editor-keyboard-help } Shift 或 Ctrl/Cmd＋点选：切换关键帧选择；Ctrl/Cmd＋A：全选作者关键帧；Delete/Backspace：整组删除，一次撤销；Escape：清空选择。←/→：整组移动一帧（Shift：五帧）。↑/↓：整组数值移动一步（Shift：五步），到边界时一起停止。右键已选关键帧或 Shift＋F10：整组修改插值。拖动已选关键帧：整组移动；Escape：取消拖动。 拖动空白：框选关键帧；Shift：追加；Ctrl/Cmd＋Shift：切换。Ctrl/Cmd＋点击空白：插入关键帧。框选时按 Escape 恢复原选择。
+
+audio-rack-occurrence-row = 时间参照
+audio-rack-occurrence-choose = 选择音频组件
+audio-rack-occurrence-option = 音频组件 { $index } · 起点 { $time } 秒
+
+# Focused curve clipboard
+error-curve-clipboard-owner-changed = 曲线选择已改变，请重新选择目标曲线。
+error-curve-clipboard-parameter-missing = 目标参数已改变，请重新选择曲线。
+error-curve-clipboard-not-animated = 此参数不支持关键帧。
+error-curve-clipboard-invalid-selection = 关键帧选择已改变，请重新选择完整关键帧组。
+error-curve-clipboard-incompatible = 请先从单个兼容参数复制关键帧，再粘贴到此曲线。
+error-curve-clipboard-empty = 关键帧剪贴板为空。
+error-curve-clipboard-missing-playhead = 请先选择序列并设置播放头位置，再粘贴关键帧。
+error-curve-clipboard-out-of-bounds = 整组关键帧必须位于目标片段内，请移动播放头或减少所选关键帧。
+
+curve-editor-clipboard-keyboard-help = { curve-editor-selection-keyboard-help } Ctrl/Cmd＋C：复制所选关键帧；Ctrl/Cmd＋X：剪切所选关键帧，一次撤销；Ctrl/Cmd＋V：在播放头位置粘贴到此曲线，一次撤销。
+
+curve-editor-read-only-keyboard-help = 只读曲线。单击查看点；Home/End 和 Ctrl/Cmd＋左右导航。Ctrl/Cmd＋滚轮缩放，中键拖动平移，Ctrl/Cmd＋0 复位视图。
+curve-editor-read-only-clipboard-keyboard-help = { curve-editor-read-only-keyboard-help } Shift 或 Ctrl/Cmd＋点选切换关键帧选择，Ctrl/Cmd＋A 全选作者关键帧，Ctrl/Cmd＋C 复制。当前不可编辑。 拖动空白框选，Shift 追加，Ctrl/Cmd＋Shift 切换；Escape 恢复原选择。
+status-history-accessibility-open = 最近通知，当前状态：{ $status }。第 { $first }–{ $last } 条，共 { $total } 条，按从新到旧排列。
+    { $entries }
+    上/下方向键：较新/较旧；Page Up/Down：上一页/下一页；Home/End：最新/最旧；Escape：关闭。
+status-history-accessibility-empty = 最近通知，当前状态：{ $status }。暂无通知。Escape：关闭。
+status-history-entry-error = 错误：{ $message }
+
+parameter-reset-to-default = 重置
+
+audio-input-row = 辅助输入
+audio-input-status = 输入状态
+audio-input-query = 检查输入
+audio-input-requery = 刷新输入
+audio-input-cancel = 取消检查
+audio-input-pending = 正在检查输入…
+audio-input-none = 此处理器不提供辅助输入
+audio-input-ready = 可用辅助输入：{ $count } 个
+audio-input-failed = 输入不可用：{ $error }
+audio-input-not-inspected = 尚未检查
+
+audio-sidechain-input = 辅助输入 · { $identity }
+audio-sidechain-bus = 总线 · { $identity }
+audio-sidechain-add-source = 添加来源…
+audio-sidechain-level = 侧链电平
+audio-sidechain-level-curve = 侧链电平曲线
+parameter-unit-samples = 采样
+parameter-unit-stops = 档
+parameter-unit-nits = 尼特
+audio-sidechain-status = 侧链状态
+audio-sidechain-controls = 侧链控制
+audio-sidechain-disconnect = 断开来源
+audio-sidechain-missing-track = 缺失轨道 · { $identity }
+
+audio-sidechain-source = 来源
+
+## Timeline / Inspector owned empty and invalid states
+timeline-empty-no-sequence = 未载入序列
+    打开项目或创建序列以开始编辑
+timeline-empty-no-tracks = 当前序列没有轨道
+    添加视频轨道或音频轨道后开始编辑
+timeline-invalid-display = 序列时间显示设置无效
+    { $reason }
+inspector-empty-selection = 未选择剪辑
+    选择剪辑、图层或效果后，可在这里调整参数。
+notification-native-processor = 处理器：{ $message }
+
+# Authenticated native audio diagnostics, never lifecycle/author authority.
+notification-native-audio-warning = 原生音频插件警告 ({ $instance }, { $process }): { $encoding ->
+        [hex] 原始字节（十六进制）: { $detail }
+       *[text] { $detail }
+    } { $truncated ->
+        [yes] (消息已截断)
+       *[no] { "" }
+    } { $null ->
+        [yes] (插件传入了无效空消息)
+       *[no] { "" }
+    }
+notification-native-audio-error = 原生音频插件错误 ({ $instance }, { $process }): { $encoding ->
+        [hex] 原始字节（十六进制）: { $detail }
+       *[text] { $detail }
+    } { $truncated ->
+        [yes] (消息已截断)
+       *[no] { "" }
+    } { $null ->
+        [yes] (插件传入了无效空消息)
+       *[no] { "" }
+    }
+notification-native-audio-fatal = 原生音频插件严重诊断 ({ $instance }, { $process }): { $encoding ->
+        [hex] 原始字节（十六进制）: { $detail }
+       *[text] { $detail }
+    } { $truncated ->
+        [yes] (消息已截断)
+       *[no] { "" }
+    } { $null ->
+        [yes] (插件传入了无效空消息)
+       *[no] { "" }
+    }
+notification-native-audio-host-misbehavior = 原生音频插件报告宿主行为异常 ({ $instance }, { $process }): { $encoding ->
+        [hex] 原始字节（十六进制）: { $detail }
+       *[text] { $detail }
+    } { $truncated ->
+        [yes] (消息已截断)
+       *[no] { "" }
+    } { $null ->
+        [yes] (插件传入了无效空消息)
+       *[no] { "" }
+    }
+notification-native-audio-plugin-misbehavior = 原生音频插件报告插件行为异常 ({ $instance }, { $process }): { $encoding ->
+        [hex] 原始字节（十六进制）: { $detail }
+       *[text] { $detail }
+    } { $truncated ->
+        [yes] (消息已截断)
+       *[no] { "" }
+    } { $null ->
+        [yes] (插件传入了无效空消息)
+       *[no] { "" }
+    }
+notification-native-audio-unknown-severity = 原生音频插件报告未知级别 { $severity } ({ $instance }, { $process }): { $encoding ->
+        [hex] 原始字节（十六进制）: { $detail }
+       *[text] { $detail }
+    } { $truncated ->
+        [yes] (消息已截断)
+       *[no] { "" }
+    } { $null ->
+        [yes] (插件传入了无效空消息)
+       *[no] { "" }
+    }
+notification-native-audio-log-incomplete = 原生音频插件诊断消息不完整 ({ $instance }, { $process }). { $capacity ->
+        [yes] 消息队列已满.
+       *[no] { "" }
+    } { $contention ->
+        [yes] 并发生产者已耗尽有界尝试.
+       *[no] { "" }
+    } { $exhausted ->
+        [yes] 原生消息序号已耗尽.
+       *[no] { "" }
+    }
+
+viewer-native-progress = { $message } · { $percent }%
+
+# Native replies are opaque local Widget callbacks, never authoring actions.
+native-visual-question-title = 插件问题
+native-visual-question-yes = 是
+native-visual-question-no = 否
+native-visual-question-dismiss = 关闭
+
+# Product-owned native editor status; plugin labels remain native metadata.
+native-editor-row = 原生编辑器
+native-editor-open = 打开编辑器
+native-editor-close = 关闭编辑器
+native-editor-opening = 原生编辑器请求已排队
+native-editor-opened = 原生编辑器已打开
+native-editor-closed = 原生编辑器已关闭
+native-editor-unavailable = 当前适配器暂不支持原生编辑器
+native-editor-no-view = 此处理器没有原生编辑器
+native-editor-control-pending = 原生编辑器更改尚待完成
+native-editor-owner-changed = 原生编辑器所属实例已更改，请重新打开
+native-editor-close-current = 请先关闭当前原生编辑器
+native-editor-cleanup-pending = 原生编辑器尚待清理
+native-editor-failed = 原生编辑器请求失败
+
+audio-rack-native-controlled-parameter = 由插件控制
+audio-rack-adopt-displayed-value = 采用显示值
+audio-rack-query-native-parameter = 读取当前值
+native-parameter-query-unavailable = 当前插件值暂不可用

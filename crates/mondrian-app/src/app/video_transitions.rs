@@ -4,6 +4,7 @@
 //! Timeline persistence owns edit geometry; media/nested adapters own real
 //! source extents; the renderer consumes only an already-admitted author plan.
 
+use crate::app::AppMessage;
 use std::{
     collections::{HashMap, HashSet},
     sync::Arc,
@@ -431,7 +432,7 @@ impl AppState {
             Ok(sequence.id)
         })?;
         if was_shortened {
-            self.set_status_hint("交叉溶解已按可用源素材手柄缩短", false);
+            self.set_status_hint(AppMessage::new("status-cross-dissolve-shortened"), false);
         }
         Ok(VideoTransitionEditOutcome { transition_id, changed: true })
     }
@@ -484,7 +485,7 @@ impl AppState {
             Ok(sequence.id)
         })?;
         if was_shortened {
-            self.set_status_hint("视频转场已按可用源素材手柄缩短", false);
+            self.set_status_hint(AppMessage::new("status-transition-shortened"), false);
         }
         Ok(VideoTransitionEditOutcome { transition_id, changed: true })
     }

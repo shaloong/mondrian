@@ -7,6 +7,8 @@
 pub mod about_dialog;
 #[cfg(target_os = "macos")]
 pub mod accessibility;
+#[cfg(any(test, target_os = "macos"))]
+mod accessibility_value;
 pub mod action_availability;
 pub mod action_queue;
 pub mod asset_thumbnails;
@@ -15,9 +17,11 @@ mod audio_component_mapping;
 mod audio_device_catalog;
 mod audio_mixer;
 mod audio_processor_rack;
+mod audio_sidechain;
 mod background_runtime;
 mod color_management_controls;
 pub mod commands;
+mod curve_tangents;
 pub(crate) mod display_probe_impl;
 #[cfg(feature = "validation")]
 mod event_loop_owner;
@@ -28,6 +32,13 @@ pub mod interpret_asset_dialog;
 pub mod localization;
 pub mod menu_bar;
 pub mod modal;
+pub(crate) mod musical_time_dialog;
+#[cfg(feature = "validation")]
+pub mod native_question_fixture;
+#[cfg(feature = "validation")]
+pub mod native_question_validation;
+pub(crate) mod native_visual_gui_section;
+pub(crate) mod native_visual_question_dialog;
 pub mod new_project_dialog;
 mod notifications;
 pub mod panels;
@@ -41,6 +52,7 @@ mod product_logging;
 pub mod project_settings_dialog;
 pub mod recovery_dialog;
 pub mod rendering;
+pub(crate) mod resource_dialog;
 pub mod runtime;
 pub(crate) mod scopes;
 pub mod sequence_settings_dialog;

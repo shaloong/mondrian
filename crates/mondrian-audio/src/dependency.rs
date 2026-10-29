@@ -57,6 +57,56 @@ impl AudioDependencyClosure {
         self.root_program.execution_demand()
     }
 
+    /// Read only the already selected Programs. No native query, cache or
+    /// author-candidate scan may substitute for this semantic closure.
+    pub(crate) fn validate_musical_references(
+        &self,
+        root: &Sequence,
+        sequences: &[Sequence],
+    ) -> Result<(), AudioDependencyError> {
+        if root.audio_program.musical_time_reference.is_none()
+            && sequences
+                .iter()
+                .all(|sequence| sequence.audio_program.musical_time_reference.is_none())
+            && self.programs.values().all(|program| program.musical_time_reference.is_none())
+        {
+            return Ok(());
+        } // Preserve the original all-None closure error order.
+        for (key, program) in &self.programs {
+            let author = if key.sequence_id == root.id {
+                root
+            } else {
+                sequences
+                    .iter()
+                    .find(|sequence| sequence.id == key.sequence_id)
+                    .ok_or(AudioDependencyError::MissingNestedSequence(key.sequence_id))?
+            };
+            if program.musical_time_reference != author.audio_program.musical_time_reference {
+                return Err(AudioDependencyError::MusicalReferenceChanged(
+                    key.sequence_id,
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn reject_nested_musical_reference(&self) -> Result<(), AudioDependencyError> {
+        let has_reference =
+            self.programs.values().any(|program| program.musical_time_reference.is_some());
+        let has_nested = self.programs.values().any(|program| {
+            program.contributions.iter().any(|contribution| {
+                matches!(
+                    contribution.source,
+                    CompiledAudioSource::NestedOutput { .. }
+                )
+            })
+        });
+        if has_reference && has_nested {
+            return Err(AudioDependencyError::UnsupportedNestedMusicalTime);
+        }
+        Ok(())
+    }
+
     pub(crate) fn program(
         &self,
         sequence_id: SequenceId,
@@ -81,6 +131,12 @@ struct AudioDependencyProgramKey {
 /// Failure while lowering one selected Audio Program dependency closure.
 #[derive(Debug, thiserror::Error)]
 pub enum AudioDependencyError {
+    /// Frozen selected semantic evidence belongs to a different author clock.
+    #[error("prepared musical reference differs from Sequence {0}")]
+    MusicalReferenceChanged(SequenceId),
+    /// Nested musical transport needs complete prospective child-cache windows.
+    #[error("musical references in a selected nested audio closure are unsupported")]
+    UnsupportedNestedMusicalTime,
     /// Authoring-to-semantic compilation failed.
     #[error(transparent)]
     Compile(#[from] AudioCompileError),
@@ -161,21 +217,7 @@ fn compile_dependency_closure(
     request: Option<AudioCompileRequest>,
     window: Option<DependencyWindow>,
 ) -> Result<AudioDependencyClosure, AudioDependencyError> {
-    let mut candidates = HashMap::with_capacity(sequences.len().saturating_add(1));
-    candidates.insert(root.id, root);
-    let mut root_candidate_seen = false;
-    for sequence in sequences {
-        if sequence.id == root.id {
-            if root_candidate_seen || sequence != root {
-                return Err(AudioDependencyError::DuplicateSequence(sequence.id));
-            }
-            root_candidate_seen = true;
-            continue;
-        }
-        if candidates.insert(sequence.id, sequence).is_some() {
-            return Err(AudioDependencyError::DuplicateSequence(sequence.id));
-        }
-    }
+    let candidates = dependency_candidates(root, sequences)?;
 
     let mut builder = AudioDependencyClosureBuilder::default();
     let mut stack = BTreeSet::new();
@@ -195,6 +237,112 @@ fn compile_dependency_closure(
         programs: builder.programs,
         root_program,
     })
+}
+
+fn dependency_candidates<'a>(
+    root: &'a Sequence,
+    sequences: &'a [Sequence],
+) -> Result<HashMap<SequenceId, &'a Sequence>, AudioDependencyError> {
+    let mut candidates = HashMap::with_capacity(sequences.len().saturating_add(1));
+    candidates.insert(root.id, root);
+    let mut root_candidate_seen = false;
+    for sequence in sequences {
+        if sequence.id == root.id {
+            if root_candidate_seen || sequence != root {
+                return Err(AudioDependencyError::DuplicateSequence(sequence.id));
+            }
+            root_candidate_seen = true;
+            continue;
+        }
+        if candidates.insert(sequence.id, sequence).is_some() {
+            return Err(AudioDependencyError::DuplicateSequence(sequence.id));
+        }
+    }
+
+    Ok(candidates)
+}
+
+/// Check the already compiled root before any source/factory. Descendants
+/// borrow the common non-Note compiler projection; Notes are never cloned or
+/// admitted a second time. Cold temporary graph/index storage is not a new
+/// persistent owner or a claim to an aggregate cold-heap bound.
+pub(crate) fn reject_nested_musical_reference(
+    root: &Sequence,
+    program: &CompiledAudioProgram,
+    sequences: &[Sequence],
+    window: Option<DependencyWindow>,
+) -> Result<(), AudioDependencyError> {
+    if root.audio_program.musical_time_reference.is_none()
+        && sequences
+            .iter()
+            .all(|sequence| sequence.audio_program.musical_time_reference.is_none())
+    {
+        return Ok(()); // Preserve the original all-None error and allocation path.
+    }
+    let candidates = dependency_candidates(root, sequences)?;
+    let mut stack = BTreeSet::new();
+    stack.insert(root.id);
+    reject_nested_musical_graph(root, program.graph(), window, &candidates, &mut stack, 0)
+}
+
+fn reject_nested_musical_graph(
+    sequence: &Sequence,
+    graph: crate::plan::CompiledAudioGraph<'_>,
+    window: Option<DependencyWindow>,
+    sequences: &HashMap<SequenceId, &Sequence>,
+    stack: &mut BTreeSet<SequenceId>,
+    depth: usize,
+) -> Result<(), AudioDependencyError> {
+    for contribution in graph.contributions {
+        let CompiledAudioSource::NestedOutput { sequence_id, output_id } = contribution.source
+        else {
+            continue;
+        };
+        let child_window = match window {
+            Some(window) => match selected_contribution_source_window(contribution, window)? {
+                Some(window) => Some(window),
+                None => continue,
+            },
+            None => None,
+        };
+        if sequence.audio_program.musical_time_reference.is_some() {
+            return Err(AudioDependencyError::UnsupportedNestedMusicalTime);
+        }
+        let child = sequences
+            .get(&sequence_id)
+            .copied()
+            .ok_or(AudioDependencyError::MissingNestedSequence(sequence_id))?;
+        if child.audio_program.musical_time_reference.is_some() {
+            return Err(AudioDependencyError::UnsupportedNestedMusicalTime);
+        }
+        let next_depth = depth.saturating_add(1);
+        if next_depth > MAX_NESTED_SEQUENCE_RENDER_DEPTH {
+            return Err(AudioDependencyError::NestedDepthExceeded {
+                sequence_id,
+                maximum: MAX_NESTED_SEQUENCE_RENDER_DEPTH,
+            });
+        }
+        if !stack.insert(sequence_id) {
+            return Err(AudioDependencyError::NestedCycle(sequence_id));
+        }
+        let result = crate::compiler::visit_audio_program_graph(
+            child,
+            AudioCompileRequest::program(output_id),
+            &mut |graph| {
+                reject_nested_musical_graph(
+                    child,
+                    graph,
+                    child_window,
+                    sequences,
+                    stack,
+                    next_depth,
+                )
+            },
+        );
+        stack.remove(&sequence_id);
+        result?;
+    }
+    Ok(())
 }
 
 #[derive(Default)]

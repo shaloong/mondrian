@@ -9,7 +9,7 @@ mod program;
 mod schedule;
 
 use crate::adjustment::{
-    apply_custom_render_op_f32, apply_render_op_f32_region_controlled,
+    apply_custom_render_op_f32_on_bank, apply_render_op_f32_region_controlled,
     render_op_f32_scratch_frames, EffectRasterRegion,
 };
 use crate::execution::{
@@ -22,7 +22,8 @@ use crate::{
     CompiledEffectGraph, EffectExecutionDemand, EffectExecutionDemandError, EffectExecutionSession,
     EffectFrameExtent, EffectGraphNodeId, EffectGraphNodeKind, EffectInputRoi, EffectPixelRoi,
     EffectProcessingBackend, EffectResourceLifetime, EffectRoiHalo, EffectStateModel,
-    EffectTemporalBoundary, EffectTemporalSpan, EffectWorkingPrecision, PreparedEffectProgram,
+    EffectTemporalBoundary, EffectTemporalSpan, EffectWorkingPrecision, PreparedEffectInput,
+    PreparedEffectProgram,
 };
 use mondrian_core::{ExecutionCancellationToken, TimelineTime};
 use sha2::{Digest, Sha256};
@@ -79,6 +80,7 @@ pub struct EffectTemporalExecutionRequest {
     output_time: TimelineTime,
     output_frame_seed: i64,
     frame_extent: EffectFrameExtent,
+    sampling: mondrian_core::ImageSampling,
     output_roi: EffectPixelRoi,
     cancellation: ExecutionCancellationToken,
 }
@@ -90,6 +92,7 @@ impl EffectTemporalExecutionRequest {
         continuity: EffectExecutionContinuity,
         output_time: TimelineTime,
         frame_extent: EffectFrameExtent,
+        sampling: mondrian_core::ImageSampling,
         output_roi: EffectPixelRoi,
         cancellation: ExecutionCancellationToken,
     ) -> Self {
@@ -99,6 +102,7 @@ impl EffectTemporalExecutionRequest {
             output_time,
             output_frame_seed: frame_seed_for_output(output_time),
             frame_extent,
+            sampling,
             output_roi,
             cancellation,
         }
@@ -139,6 +143,11 @@ impl EffectTemporalExecutionRequest {
         self.frame_extent
     }
 
+    /// Original sample shape and X/Y density; cropping preserves this metadata.
+    pub const fn sampling(&self) -> mondrian_core::ImageSampling {
+        self.sampling
+    }
+
     /// Requested half-open output region.
     pub const fn output_roi(&self) -> EffectPixelRoi {
         self.output_roi
@@ -156,6 +165,7 @@ pub struct EffectTemporalFrameRequest {
     generation: u64,
     time: TimelineTime,
     frame_extent: EffectFrameExtent,
+    sampling: mondrian_core::ImageSampling,
     input_roi: EffectInputRoi,
     exact_halo: Option<EffectRoiHalo>,
     precision: EffectWorkingPrecision,
@@ -212,6 +222,37 @@ pub struct PreparedEffectTemporalExecution {
     demands: EffectTemporalFrameDemandBatch,
 }
 
+/// Frozen time-expanded values and exact source instants, before an image
+/// producer has selected a raster. This is the same program later executed by
+/// `PreparedEffectTemporalExecution`; it owns no pixels or attempt authority.
+#[derive(Debug, Clone)]
+pub struct PreparedEffectTemporalProgram {
+    graph: Arc<CompiledEffectGraph>,
+    program: Arc<PreparedTemporalValueProgram>,
+}
+
+impl PreparedEffectTemporalProgram {
+    /// Exact, ordered source instants for early scheduling without a pixel ROI.
+    pub fn source_times(&self) -> &[TimelineTime] {
+        self.program.source_times()
+    }
+
+    /// Bind the producer-selected image domain without evaluating author state
+    /// again. Output time and seed must still address this frozen program.
+    pub fn bind_image_domain(
+        &self,
+        request: &EffectTemporalExecutionRequest,
+    ) -> Result<PreparedEffectTemporalExecution, EffectTemporalExecutionError> {
+        let root = self.program.context(0)?;
+        if root.time != request.output_time || root.frame_seed != request.output_frame_seed {
+            return Err(EffectTemporalExecutionError::InvalidTemporalOperation {
+                reason: "image-domain binding changed the frozen temporal time or seed",
+            });
+        }
+        bind_temporal_image_domain(self, request)
+    }
+}
+
 impl PreparedEffectTemporalExecution {
     /// Root compiled Effect IR at the requested output instant.
     pub const fn graph(&self) -> &Arc<CompiledEffectGraph> {
@@ -245,6 +286,11 @@ impl EffectTemporalFrameRequest {
         self.frame_extent
     }
 
+    /// Original sample shape and X/Y density; cropping preserves this metadata.
+    pub const fn sampling(&self) -> mondrian_core::ImageSampling {
+        self.sampling
+    }
+
     /// Concrete required source region and strength of its ROI evidence.
     pub const fn input_roi(self) -> EffectInputRoi {
         self.input_roi
@@ -267,26 +313,60 @@ impl EffectTemporalFrameRequest {
 pub struct EffectFrameTileF32 {
     time: TimelineTime,
     frame_extent: EffectFrameExtent,
+    sampling: mondrian_core::ImageSampling,
     roi: EffectPixelRoi,
     frame_seed: i64,
     pixels: Arc<Vec<[f32; 4]>>,
 }
 
 impl EffectFrameTileF32 {
+    /// Transfer uniquely owned pixels without a copy. Shared tiles return
+    /// unchanged so callers can explicitly admit any required materialization.
+    /// This never allocates or silently clones cached/source pixels.
+    pub fn try_into_pixels(self) -> Result<Vec<[f32; 4]>, Self> {
+        let Self {
+            time,
+            frame_extent,
+            sampling,
+            roi,
+            frame_seed,
+            pixels,
+        } = self;
+        match Arc::try_unwrap(pixels) {
+            Ok(pixels) => Ok(pixels),
+            Err(pixels) => Err(Self {
+                time,
+                frame_extent,
+                sampling,
+                roi,
+                frame_seed,
+                pixels,
+            }),
+        }
+    }
     /// Validate and retain one exact source tile.
     pub fn new(
         time: TimelineTime,
         frame_extent: EffectFrameExtent,
+        sampling: mondrian_core::ImageSampling,
         roi: EffectPixelRoi,
         frame_seed: i64,
         pixels: Vec<[f32; 4]>,
     ) -> Result<Self, EffectTemporalFrameProviderError> {
-        Self::from_shared(time, frame_extent, roi, frame_seed, Arc::new(pixels))
+        Self::from_shared(
+            time,
+            frame_extent,
+            sampling,
+            roi,
+            frame_seed,
+            Arc::new(pixels),
+        )
     }
 
     fn from_shared(
         time: TimelineTime,
         frame_extent: EffectFrameExtent,
+        sampling: mondrian_core::ImageSampling,
         roi: EffectPixelRoi,
         frame_seed: i64,
         pixels: Arc<Vec<[f32; 4]>>,
@@ -308,7 +388,21 @@ impl EffectFrameTileF32 {
                 reason: "tile ROI exceeds the complete frame extent".to_owned(),
             });
         }
-        Ok(Self { time, frame_extent, roi, frame_seed, pixels })
+        for (index, sample) in pixels.iter().enumerate() {
+            if !sample.iter().all(|channel| channel.is_finite())
+                || !mondrian_core::ColorFrameAlpha::StraightCoverage.admits_alpha(sample[3])
+            {
+                return Err(EffectTemporalFrameProviderError::InvalidTile { reason: format!("normalized straight source tile sample {index} violates its exact contract") });
+            }
+        }
+        Ok(Self {
+            time,
+            frame_extent,
+            sampling,
+            roi,
+            frame_seed,
+            pixels,
+        })
     }
 
     /// Exact source time.
@@ -319,6 +413,11 @@ impl EffectFrameTileF32 {
     /// Complete source coordinate extent.
     pub const fn frame_extent(&self) -> EffectFrameExtent {
         self.frame_extent
+    }
+
+    /// Original sample shape and X/Y density; cropping preserves this metadata.
+    pub const fn sampling(&self) -> mondrian_core::ImageSampling {
+        self.sampling
     }
 
     /// Half-open source region represented by `pixels`.
@@ -423,7 +522,10 @@ impl PreparedTemporalFrameSet {
                 return Err(PreparedTemporalFrameSetError::UnexpectedRequest { request });
             }
             validate_provider_tile(&tile, request).map_err(|error| {
-                PreparedTemporalFrameSetError::InvalidTile { request, reason: error.to_string() }
+                PreparedTemporalFrameSetError::InvalidTile {
+                    request: Box::new(request),
+                    reason: error.to_string(),
+                }
             })?;
             if frames.insert(request, tile).is_some() {
                 return Err(PreparedTemporalFrameSetError::DuplicateRequest { request });
@@ -505,6 +607,7 @@ impl EffectTemporalFrameProvider for PreparedTemporalFrameSet {
             prepared.generation == request.generation
                 && prepared.time == request.time
                 && prepared.frame_extent == request.frame_extent
+                && prepared.sampling == request.sampling
                 && prepared.precision == request.precision
                 && roi_contains(tile.roi, requested_roi)
         });
@@ -560,7 +663,7 @@ pub enum PreparedTemporalFrameSetError {
     #[error("invalid tile for temporal request {request:?}: {reason}")]
     InvalidTile {
         /// Request the tile claimed to satisfy.
-        request: EffectTemporalFrameRequest,
+        request: Box<EffectTemporalFrameRequest>,
         /// Exact validation failure.
         reason: String,
     },
@@ -577,6 +680,10 @@ pub struct EffectTemporalExecutionOutput {
 }
 
 impl EffectTemporalExecutionOutput {
+    /// Consume publication metadata and transfer the existing output tile.
+    pub fn into_tile(self) -> EffectFrameTileF32 {
+        self.tile
+    }
     /// Requested output tile.
     pub const fn tile(&self) -> &EffectFrameTileF32 {
         &self.tile
@@ -607,6 +714,9 @@ impl EffectTemporalExecutionOutput {
 /// Why exact temporal/ROI scalar execution failed closed.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum EffectTemporalExecutionError {
+    /// The exact retained value cannot enter this temporal coverage consumer.
+    #[error(transparent)]
+    FrameContract(#[from] crate::EffectFloatFrameError),
     /// Demand planning could not represent the exact request.
     #[error(transparent)]
     Demand(#[from] EffectExecutionDemandError),
@@ -806,11 +916,66 @@ pub fn prepare_temporal_frame_execution(
     )
 }
 
+/// Freeze time dependencies before source readiness. Only time, frame seed and
+/// cancellation from `request` are consumed here; no raster demand or coverage
+/// is inferred from its output canvas. Bind the actual input plane afterwards.
+pub fn prepare_temporal_frame_program(
+    program: &PreparedEffectProgram,
+    request: &EffectTemporalExecutionRequest,
+    mut sample_frame_seed: impl FnMut(TimelineTime) -> Result<i64, String>,
+) -> Result<PreparedEffectTemporalProgram, EffectTemporalExecutionError> {
+    let prepared = prepare_exact_frame_program_with_evaluator(
+        request,
+        |time| program.evaluate(time).map_err(|error| error.to_string()),
+        &mut sample_frame_seed,
+    )?;
+    ensure_temporal_program(&prepared.program)?;
+    Ok(prepared)
+}
+
 fn prepare_temporal_frame_execution_with_evaluator(
+    request: &EffectTemporalExecutionRequest,
+    evaluate_graph: impl FnMut(TimelineTime) -> Result<Arc<CompiledEffectGraph>, String>,
+    sample_frame_seed: &mut impl FnMut(TimelineTime) -> Result<i64, String>,
+) -> Result<PreparedEffectTemporalExecution, EffectTemporalExecutionError> {
+    let prepared =
+        prepare_exact_frame_execution_with_evaluator(request, evaluate_graph, sample_frame_seed)?;
+    ensure_temporal_program(&prepared.program)?;
+    Ok(prepared)
+}
+
+impl PreparedEffectInput {
+    /// Prepare the exact entering value using the existing bounded executor.
+    /// Ordinary as well as temporal upstream programs are valid here. This
+    /// capability selects the original program's upstream value; it does not
+    /// relax the separate temporal-only entry points or enable host features.
+    pub fn prepare_execution(
+        &self,
+        request: &EffectTemporalExecutionRequest,
+        mut sample_frame_seed: impl FnMut(TimelineTime) -> Result<i64, String>,
+    ) -> Result<PreparedEffectTemporalExecution, EffectTemporalExecutionError> {
+        prepare_exact_frame_execution_with_evaluator(
+            request,
+            |time| self.evaluate(time).map_err(|error| error.to_string()),
+            &mut sample_frame_seed,
+        )
+    }
+}
+
+fn prepare_exact_frame_execution_with_evaluator(
+    request: &EffectTemporalExecutionRequest,
+    evaluate_graph: impl FnMut(TimelineTime) -> Result<Arc<CompiledEffectGraph>, String>,
+    sample_frame_seed: &mut impl FnMut(TimelineTime) -> Result<i64, String>,
+) -> Result<PreparedEffectTemporalExecution, EffectTemporalExecutionError> {
+    prepare_exact_frame_program_with_evaluator(request, evaluate_graph, sample_frame_seed)?
+        .bind_image_domain(request)
+}
+
+fn prepare_exact_frame_program_with_evaluator(
     request: &EffectTemporalExecutionRequest,
     mut evaluate_graph: impl FnMut(TimelineTime) -> Result<Arc<CompiledEffectGraph>, String>,
     sample_frame_seed: &mut impl FnMut(TimelineTime) -> Result<i64, String>,
-) -> Result<PreparedEffectTemporalExecution, EffectTemporalExecutionError> {
+) -> Result<PreparedEffectTemporalProgram, EffectTemporalExecutionError> {
     let compiled = evaluate_graph(request.output_time).map_err(|reason| {
         EffectTemporalExecutionError::SampleGraphEvaluation { time: request.output_time, reason }
     })?;
@@ -819,9 +984,7 @@ fn prepare_temporal_frame_execution_with_evaluator(
         let frame_seed = sample_frame_seed(time)?;
         Ok((graph, frame_seed))
     };
-    let prepared = prepare_temporal_execution_inner(compiled, request, Some(&mut evaluate_sample))?;
-    ensure_temporal_program(&prepared.program)?;
-    Ok(prepared)
+    prepare_temporal_program_inner(compiled, request, Some(&mut evaluate_sample))
 }
 
 fn prepare_temporal_execution_inner(
@@ -829,6 +992,14 @@ fn prepare_temporal_execution_inner(
     request: &EffectTemporalExecutionRequest,
     evaluate_sample: Option<TemporalSampleEvaluator<'_>>,
 ) -> Result<PreparedEffectTemporalExecution, EffectTemporalExecutionError> {
+    prepare_temporal_program_inner(compiled, request, evaluate_sample)?.bind_image_domain(request)
+}
+
+fn prepare_temporal_program_inner(
+    compiled: Arc<CompiledEffectGraph>,
+    request: &EffectTemporalExecutionRequest,
+    evaluate_sample: Option<TemporalSampleEvaluator<'_>>,
+) -> Result<PreparedEffectTemporalProgram, EffectTemporalExecutionError> {
     if request.cancellation.is_canceled() {
         return Err(EffectTemporalExecutionError::Canceled);
     }
@@ -836,7 +1007,44 @@ fn prepare_temporal_execution_inner(
     if compiled.domain_plan().requires_conversion() || !compiled.domain_plan().blockers.is_empty() {
         return Err(EffectTemporalExecutionError::ColorDomainUnsupported);
     }
-    let program = prepare_temporal_value_program(Arc::clone(&compiled), request, evaluate_sample)?;
+    let window = crate::execution_planning::plan_temporal_window(
+        request.output_time,
+        compiled.execution_envelope().aggregate().temporal_input,
+    )?;
+    ensure_bounded_temporal_window(window)?;
+    let (earliest, latest) = finite_temporal_bounds(window)?;
+    let program = prepare_temporal_value_program(
+        Arc::clone(&compiled),
+        request.output_time,
+        request.output_frame_seed,
+        evaluate_sample,
+    )?;
+    for &time in program.source_times() {
+        if time < earliest || time > latest {
+            return Err(EffectTemporalExecutionError::InvalidTemporalOperation {
+                reason: "time-expanded source sample exceeds the declared temporal extent",
+            });
+        }
+    }
+    for context in program.contexts() {
+        let window = crate::execution_planning::plan_temporal_window(
+            context.time,
+            context.graph.execution_envelope().aggregate().temporal_input,
+        )?;
+        ensure_bounded_temporal_window(window)?;
+    }
+    Ok(PreparedEffectTemporalProgram { graph: compiled, program: Arc::new(program) })
+}
+
+fn bind_temporal_image_domain(
+    frozen: &PreparedEffectTemporalProgram,
+    request: &EffectTemporalExecutionRequest,
+) -> Result<PreparedEffectTemporalExecution, EffectTemporalExecutionError> {
+    if request.cancellation.is_canceled() {
+        return Err(EffectTemporalExecutionError::Canceled);
+    }
+    let compiled = &frozen.graph;
+    let program = &frozen.program;
     let demand = compiled.plan_execution_demand(
         request.output_time,
         request.frame_extent,
@@ -871,6 +1079,7 @@ fn prepare_temporal_execution_inner(
                 generation: request.generation,
                 time,
                 frame_extent: demand.frame_extent(),
+                sampling: request.sampling,
                 input_roi: demand.input_roi(),
                 exact_halo: demand.exact_halo(),
                 precision: EffectWorkingPrecision::Float32,
@@ -889,9 +1098,9 @@ fn prepare_temporal_execution_inner(
         coverage_bytes,
     };
     Ok(PreparedEffectTemporalExecution {
-        graph: compiled,
+        graph: Arc::clone(compiled),
         request: request.clone(),
-        program: Arc::new(program),
+        program: Arc::clone(program),
         demands,
     })
 }
@@ -1007,6 +1216,24 @@ impl PreparedScalarTemporalRequest {
 }
 
 impl EffectExecutionSession {
+    /// Freeze the same time-expanded program on this owner's bounded topology
+    /// Session, without borrowing an unknown source image domain.
+    pub fn prepare_temporal_frame_program(
+        &mut self,
+        program: &PreparedEffectProgram,
+        request: &EffectTemporalExecutionRequest,
+        mut sample_frame_seed: impl FnMut(TimelineTime) -> Result<i64, String>,
+    ) -> Result<PreparedEffectTemporalProgram, EffectTemporalExecutionError> {
+        self.bind_generation(request.generation());
+        let prepared = prepare_exact_frame_program_with_evaluator(
+            request,
+            |time| program.evaluate_with_session(time, self).map_err(|error| error.to_string()),
+            &mut sample_frame_seed,
+        )?;
+        ensure_temporal_program(&prepared.program)?;
+        Ok(prepared)
+    }
+
     /// Prepare one exact finite temporal execution while retaining every
     /// dynamic topology in this owner-scoped Session.
     ///
@@ -1056,46 +1283,79 @@ impl EffectExecutionSession {
         execution: &PreparedEffectTemporalExecution,
         provider: &mut dyn EffectTemporalFrameProvider,
     ) -> Result<EffectTemporalExecutionOutput, EffectTemporalExecutionError> {
+        let mut checkpoint = || {
+            execution
+                .request
+                .cancellation
+                .is_canceled()
+                .then_some(crate::EffectProcessorStopReason::Canceled)
+        };
+        // Keep this legacy standalone API unobserved. Invocation resolution
+        // below borrows the actual owner Control instead of binding a new sink.
+        let mut control = crate::EffectProcessorControl::new(&mut checkpoint);
+        self.execute_prepared_temporal_f32_with_control(execution, provider, &mut control)
+    }
+
+    /// Execute the prepared temporal program with the original task Control.
+    /// Its source service, stop reason, deadline and feedback remain borrowed
+    /// by this same Session and processor bank for the complete invocation.
+    pub fn execute_prepared_temporal_f32_with_control(
+        &mut self,
+        execution: &PreparedEffectTemporalExecution,
+        provider: &mut dyn EffectTemporalFrameProvider,
+        control: &mut crate::EffectProcessorControl<'_>,
+    ) -> Result<EffectTemporalExecutionOutput, EffectTemporalExecutionError> {
+        let request = scoped_input_request(&execution.request, control);
+        processor_input_checkpoint(&request, control)?;
         let compiled = execution.graph.as_ref();
-        let request = &execution.request;
-        let prepared = self.prepare_temporal_scalar_request(
+        let prepared = prepare_temporal_scalar_request(
             compiled,
-            request,
+            &request,
             Arc::clone(&execution.program),
             provider,
         )?;
-        if let Some(output) = self.cached_or_empty_temporal_output(compiled, request, &prepared)? {
+        self.bind_generation(request.generation);
+        // Dynamic Source requests are not part of the frozen provider's
+        // identity. Do not reuse or publish input-only cached pixels.
+        let cached = if control.uses_input_service() {
+            empty_temporal_output(&request, &prepared)?
+        } else {
+            self.cached_or_empty_temporal_output(compiled, &request, &prepared)?
+        };
+        if let Some(output) = cached {
+            processor_input_checkpoint(&request, control)?;
             return Ok(output);
         }
-        let budget = self.max_working_bytes();
-        let prepared = prepared.prepare_mask_rasters(request, budget)?;
-        let direct_working_bytes = temporal_scalar_required_bytes(
-            &prepared.temporal_program,
-            &prepared.demand,
-            &prepared.mask_rasters,
+        let output = execute_prepared_scalar_on_bank(
+            &mut self.processor_execution(),
+            control,
+            compiled,
+            &request,
+            provider,
+            prepared,
         )?;
-        let retained_execution_bytes = prepared.retained_execution_bytes()?;
-        let direct_required = retained_execution_bytes.checked_add(direct_working_bytes).ok_or(
-            EffectTemporalExecutionError::WorkingSetBudgetExceeded {
-                required_bytes: usize::MAX,
-                budget_bytes: budget,
-            },
-        )?;
-        if direct_required <= budget {
-            let mut output = self.execute_prepared_temporal_tile_f32(
-                compiled,
-                request,
-                provider,
-                prepared,
-                budget - retained_execution_bytes,
-                true,
-            )?;
-            output.peak_working_bytes =
-                output.peak_working_bytes.saturating_add(retained_execution_bytes);
-            return Ok(output);
+        processor_input_checkpoint(&request, control)?;
+        if !control.uses_input_service() {
+            self.publish_temporal_output(compiled, &request, &output);
         }
+        Ok(output)
+    }
 
-        self.execute_tiled_temporal_f32(compiled, request, provider, prepared, budget)
+    fn publish_temporal_output(
+        &mut self,
+        compiled: &CompiledEffectGraph,
+        request: &EffectTemporalExecutionRequest,
+        output: &EffectTemporalExecutionOutput,
+    ) {
+        if compiled.output_cache_enabled() && !request.cancellation.is_canceled() {
+            self.put_temporal_output(
+                output.cache_identity,
+                EffectTemporalCachedOutput {
+                    pixels: Arc::clone(&output.tile.pixels),
+                    frame_seed: output.tile.frame_seed,
+                },
+            );
+        }
     }
 
     /// Execute exactly one finite temporal Float32 ROI without scheduling
@@ -1115,18 +1375,40 @@ impl EffectExecutionSession {
         request: &EffectTemporalExecutionRequest,
         provider: &mut dyn EffectTemporalFrameProvider,
     ) -> Result<EffectTemporalExecutionOutput, EffectTemporalExecutionError> {
+        let mut checkpoint = || {
+            request
+                .cancellation
+                .is_canceled()
+                .then_some(crate::EffectProcessorStopReason::Canceled)
+        };
+        // Keep this legacy standalone API unobserved. Invocation resolution
+        // below borrows the actual owner Control instead of binding a new sink.
+        let mut control = crate::EffectProcessorControl::new(&mut checkpoint);
+        let scoped_request = scoped_input_request(request, &control);
+        let request = &scoped_request;
+        processor_input_checkpoint(request, &mut control)?;
         let budget = self.max_working_bytes();
         let execution =
             prepare_temporal_execution_inner(Arc::new(compiled.clone()), request, None)?;
-        let prepared = self.prepare_temporal_scalar_request(
+        let prepared = prepare_temporal_scalar_request(
             compiled,
             request,
             Arc::clone(&execution.program),
             provider,
         )?;
+        self.bind_generation(request.generation);
         if let Some(output) = self.cached_or_empty_temporal_output(compiled, request, &prepared)? {
             return Ok(output);
         }
+        let mask_reservation = prepared.temporal_program.contexts().iter().try_fold(
+            prepared.retained_coverage_bytes,
+            |bytes, context| {
+                PreparedMaskRasterSet::required_retained_bytes(context.graph.graph())
+                    .map(|retained| bytes.saturating_add(retained))
+                    .map_err(|source| EffectTemporalExecutionError::MaskRasterFailed { source })
+            },
+        )?;
+        self.processors.trim_working(budget.saturating_sub(mask_reservation));
         let prepared = prepared.prepare_mask_rasters(request, budget)?;
         let retained_execution_bytes = prepared.retained_execution_bytes()?;
         let available = budget.checked_sub(retained_execution_bytes).ok_or(
@@ -1135,53 +1417,19 @@ impl EffectExecutionSession {
                 budget_bytes: budget,
             },
         )?;
-        let mut output = self.execute_prepared_temporal_tile_f32(
-            compiled, request, provider, prepared, available, true,
+        let mut output = execute_prepared_temporal_tile_f32(
+            &mut self.processor_execution(),
+            &mut control,
+            request,
+            provider,
+            prepared,
+            available,
         )?;
         output.peak_working_bytes =
             output.peak_working_bytes.saturating_add(retained_execution_bytes);
+        processor_input_checkpoint(request, &mut control)?;
+        self.publish_temporal_output(compiled, request, &output);
         Ok(output)
-    }
-
-    fn prepare_temporal_scalar_request(
-        &mut self,
-        compiled: &CompiledEffectGraph,
-        request: &EffectTemporalExecutionRequest,
-        temporal_program: Arc<PreparedTemporalValueProgram>,
-        provider: &dyn EffectTemporalFrameProvider,
-    ) -> Result<PreparedScalarTemporalRequest, EffectTemporalExecutionError> {
-        if request.cancellation.is_canceled() {
-            return Err(EffectTemporalExecutionError::Canceled);
-        }
-        admit_temporal_scalar(compiled)?;
-        if compiled.domain_plan().requires_conversion()
-            || !compiled.domain_plan().blockers.is_empty()
-        {
-            return Err(EffectTemporalExecutionError::ColorDomainUnsupported);
-        }
-        self.bind_generation(request.generation);
-        let demand = compiled.plan_execution_demand(
-            request.output_time,
-            request.frame_extent,
-            request.output_roi,
-        )?;
-        ensure_bounded_temporal_window(demand.temporal_window())?;
-        let source_identity = provider.source_identity();
-        let retained_coverage_bytes = provider.retained_coverage_bytes();
-        let cache_identity = temporal_cache_identity(
-            compiled,
-            request,
-            demand.input_roi(),
-            source_identity,
-            temporal_program.fingerprint(),
-        );
-        Ok(PreparedScalarTemporalRequest {
-            temporal_program,
-            demand,
-            cache_identity,
-            retained_coverage_bytes,
-            mask_rasters: HashMap::new(),
-        })
     }
 
     fn cached_or_empty_temporal_output(
@@ -1196,6 +1444,7 @@ impl EffectExecutionSession {
             let tile = EffectFrameTileF32::from_shared(
                 request.output_time,
                 prepared.demand.frame_extent(),
+                request.sampling,
                 prepared.demand.output_roi(),
                 cached.frame_seed,
                 cached.pixels,
@@ -1208,236 +1457,395 @@ impl EffectExecutionSession {
                 peak_working_bytes: 0,
             }));
         }
-        if prepared.demand.output_roi().is_empty() || prepared.demand.frame_extent().is_empty() {
-            let tile = EffectFrameTileF32::new(
-                request.output_time,
-                prepared.demand.frame_extent(),
-                prepared.demand.output_roi(),
-                request.output_frame_seed,
-                Vec::new(),
-            )?;
-            return Ok(Some(EffectTemporalExecutionOutput {
-                tile,
-                cache_identity: prepared.cache_identity,
-                provider_requests: 0,
-                execution_tiles: 0,
-                peak_working_bytes: 0,
-            }));
-        }
-        Ok(None)
+        empty_temporal_output(request, prepared)
     }
+}
 
-    fn execute_prepared_temporal_tile_f32(
-        &mut self,
-        compiled: &CompiledEffectGraph,
-        request: &EffectTemporalExecutionRequest,
-        provider: &mut dyn EffectTemporalFrameProvider,
-        prepared: PreparedScalarTemporalRequest,
-        working_budget: usize,
-        publish_output_cache: bool,
-    ) -> Result<EffectTemporalExecutionOutput, EffectTemporalExecutionError> {
-        let mask_rasters = prepared.mask_rasters.clone();
-        let mut evaluator = ScalarTemporalEvaluator::new(
-            request,
-            prepared.demand.input_roi(),
-            prepared.demand.exact_halo(),
-            Arc::clone(&prepared.temporal_program),
-            mask_rasters,
-            provider,
-            working_budget,
-        )?;
-        let output = evaluator.execute()?;
-        if request.cancellation.is_canceled() {
-            return Err(EffectTemporalExecutionError::Canceled);
+pub(crate) fn processor_input_checkpoint(
+    request: &EffectTemporalExecutionRequest,
+    control: &mut crate::EffectProcessorControl<'_>,
+) -> Result<(), EffectTemporalExecutionError> {
+    control.checkpoint().map_err(|reason| match reason {
+        crate::EffectProcessorStopReason::Canceled => EffectTemporalExecutionError::Canceled,
+        reason => EffectTemporalExecutionError::CustomProcessor(
+            crate::EffectExecutionError::CustomProcessorStopped { reason },
+        ),
+    })?;
+    temporal_cancellation_checkpoint(&request.cancellation)
+}
+
+fn scoped_input_request(
+    request: &EffectTemporalExecutionRequest,
+    control: &crate::EffectProcessorControl<'_>,
+) -> EffectTemporalExecutionRequest {
+    let mut request = request.clone();
+    if let Some(deadline) = control.deadline() {
+        request.cancellation = request.cancellation.with_deadline(deadline);
+    }
+    request
+}
+
+pub(crate) fn execute_prepared_input_on_bank(
+    execution: &PreparedEffectTemporalExecution,
+    provider: &mut dyn EffectTemporalFrameProvider,
+    scope: &mut crate::processor_residency::FloatProcessorExecution<'_>,
+    control: &mut crate::EffectProcessorControl<'_>,
+) -> Result<EffectTemporalExecutionOutput, EffectTemporalExecutionError> {
+    let request = scoped_input_request(&execution.request, control);
+    processor_input_checkpoint(&request, control)?;
+    let compiled = execution.graph.as_ref();
+    let prepared = prepare_temporal_scalar_request(
+        compiled,
+        &request,
+        Arc::clone(&execution.program),
+        provider,
+    )?;
+    if let Some(output) = empty_temporal_output(&request, &prepared)? {
+        return Ok(output);
+    }
+    execute_prepared_scalar_on_bank(scope, control, compiled, &request, provider, prepared)
+}
+
+fn prepare_temporal_scalar_request(
+    compiled: &CompiledEffectGraph,
+    request: &EffectTemporalExecutionRequest,
+    temporal_program: Arc<PreparedTemporalValueProgram>,
+    provider: &dyn EffectTemporalFrameProvider,
+) -> Result<PreparedScalarTemporalRequest, EffectTemporalExecutionError> {
+    if request.cancellation.is_canceled() {
+        return Err(EffectTemporalExecutionError::Canceled);
+    }
+    admit_temporal_scalar(compiled)?;
+    if compiled.domain_plan().requires_conversion() || !compiled.domain_plan().blockers.is_empty() {
+        return Err(EffectTemporalExecutionError::ColorDomainUnsupported);
+    }
+    // Only values in this time-expanded execution projection contribute,
+    // rather than every node of every sampled graph context.
+    if !request.frame_extent.is_empty() && !request.output_roi.is_empty() {
+        for address in temporal_program.ordered_values() {
+            if let TemporalValueAddress::Graph { context, node_id } = *address {
+                let graph = &temporal_program.context(context)?.graph;
+                let node = graph.graph().node(node_id).ok_or(
+                    EffectTemporalExecutionError::UnsupportedGraphNode { node_id, kind: "missing" },
+                )?;
+                if let EffectGraphNodeKind::UnaryEffect { op, .. }
+                | EffectGraphNodeKind::DomainEffect { op, .. }
+                | EffectGraphNodeKind::CustomSource { op, .. } = &node.kind
+                {
+                    crate::execution::admit_render_op_image_scale(op, request.sampling)?;
+                }
+            }
         }
-        let output_pixel_bytes = checked_pixel_count(prepared.demand.output_roi())
-            .and_then(|pixels| pixels.checked_mul(std::mem::size_of::<[f32; 4]>()))
-            .ok_or(EffectTemporalExecutionError::WorkingSetBudgetExceeded {
-                required_bytes: usize::MAX,
-                budget_bytes: evaluator.working.budget,
-            })?;
-        // The crop Vec enters `Arc<Vec<_>>` ownership without copying its pixel
-        // allocation, so publication adds exactly one output-sized buffer.
-        evaluator.working.ensure_transient(output_pixel_bytes)?;
-        let output_pixels = Arc::new(crop_tile(
-            &output,
-            prepared.demand.input_roi().region(),
-            prepared.demand.output_roi(),
-            &request.cancellation,
-        )?);
-        let output_seed = request.output_frame_seed;
-        let provider_requests = evaluator.provider_requests;
-        let peak_working_bytes = evaluator.working.peak;
-        drop(output);
-        drop(evaluator);
-        if publish_output_cache
-            && compiled.output_cache_enabled()
-            && !request.cancellation.is_canceled()
-        {
-            self.put_temporal_output(
-                prepared.cache_identity,
-                EffectTemporalCachedOutput {
-                    pixels: Arc::clone(&output_pixels),
-                    frame_seed: output_seed,
-                },
-            );
-        }
-        let tile = EffectFrameTileF32::from_shared(
+    }
+    let demand = compiled.plan_execution_demand(
+        request.output_time,
+        request.frame_extent,
+        request.output_roi,
+    )?;
+    ensure_bounded_temporal_window(demand.temporal_window())?;
+    let source_identity = provider.source_identity();
+    let retained_coverage_bytes = provider.retained_coverage_bytes();
+    let cache_identity = temporal_cache_identity(
+        compiled,
+        request,
+        demand.input_roi(),
+        source_identity,
+        temporal_program.fingerprint(),
+    );
+    Ok(PreparedScalarTemporalRequest {
+        temporal_program,
+        demand,
+        cache_identity,
+        retained_coverage_bytes,
+        mask_rasters: HashMap::new(),
+    })
+}
+
+fn empty_temporal_output(
+    request: &EffectTemporalExecutionRequest,
+    prepared: &PreparedScalarTemporalRequest,
+) -> Result<Option<EffectTemporalExecutionOutput>, EffectTemporalExecutionError> {
+    if prepared.demand.output_roi().is_empty() || prepared.demand.frame_extent().is_empty() {
+        let tile = EffectFrameTileF32::new(
             request.output_time,
             prepared.demand.frame_extent(),
+            request.sampling,
             prepared.demand.output_roi(),
-            output_seed,
-            output_pixels,
-        )?;
-        Ok(EffectTemporalExecutionOutput {
-            tile,
-            cache_identity: prepared.cache_identity,
-            provider_requests,
-            execution_tiles: 1,
-            peak_working_bytes,
-        })
-    }
-
-    fn execute_tiled_temporal_f32(
-        &mut self,
-        compiled: &CompiledEffectGraph,
-        request: &EffectTemporalExecutionRequest,
-        provider: &mut dyn EffectTemporalFrameProvider,
-        prepared: PreparedScalarTemporalRequest,
-        budget: usize,
-    ) -> Result<EffectTemporalExecutionOutput, EffectTemporalExecutionError> {
-        temporal_cancellation_checkpoint(&request.cancellation)?;
-        let output_roi = prepared.demand.output_roi();
-        let output_pixels = checked_pixel_count(output_roi).ok_or(
-            EffectTemporalExecutionError::WorkingSetBudgetExceeded {
-                required_bytes: usize::MAX,
-                budget_bytes: budget,
-            },
-        )?;
-        let output_bytes = output_pixels.checked_mul(std::mem::size_of::<[f32; 4]>()).ok_or(
-            EffectTemporalExecutionError::WorkingSetBudgetExceeded {
-                required_bytes: usize::MAX,
-                budget_bytes: budget,
-            },
-        )?;
-        let mask_rasters = prepared.mask_rasters.clone();
-        if mask_rasters.values().any(|rasters| rasters.extent() != request.frame_extent) {
-            return Err(EffectTemporalExecutionError::InvalidGraphLiveness {
-                reason: "prepared Mask raster extent changed during tiled execution",
-            });
-        }
-        let base_resident_bytes = prepared
-            .retained_execution_bytes()?
-            .checked_add(output_bytes)
-            .ok_or(EffectTemporalExecutionError::WorkingSetBudgetExceeded {
-                required_bytes: usize::MAX,
-                budget_bytes: budget,
-            })?;
-        if base_resident_bytes > budget {
-            return Err(EffectTemporalExecutionError::WorkingSetBudgetExceeded {
-                required_bytes: base_resident_bytes,
-                budget_bytes: budget,
-            });
-        }
-        let tile_budget = budget - base_resident_bytes;
-        let tiles = plan_temporal_tiles(
-            compiled,
-            request,
-            &prepared.temporal_program,
-            output_roi,
-            base_resident_bytes,
-            tile_budget,
-            budget,
-            &mask_rasters,
-        )?;
-        let mut assembled = vec![[0.0_f32; 4]; output_pixels];
-        let mut provider_requests = 0usize;
-        let mut peak_working_bytes = base_resident_bytes;
-        let execution_tiles = tiles.len();
-
-        for tile_roi in tiles {
-            temporal_cancellation_checkpoint(&request.cancellation)?;
-            let tile_request = EffectTemporalExecutionRequest {
-                generation: request.generation,
-                continuity: request.continuity,
-                output_time: request.output_time,
-                output_frame_seed: request.output_frame_seed,
-                frame_extent: request.frame_extent,
-                output_roi: tile_roi,
-                cancellation: request.cancellation.clone(),
-            };
-            let mut tile_prepared = self.prepare_temporal_scalar_request(
-                compiled,
-                &tile_request,
-                Arc::clone(&prepared.temporal_program),
-                provider,
-            )?;
-            if tile_prepared.retained_coverage_bytes != prepared.retained_coverage_bytes {
-                return Err(EffectTemporalExecutionError::InvalidGraphLiveness {
-                    reason: "temporal provider coverage changed during one tiled execution",
-                });
-            }
-            tile_prepared.mask_rasters = mask_rasters.clone();
-            // Internal tiles are one attempt-local implementation detail. They
-            // never read or publish output-cache entries: a later cancellation
-            // must not leave a partially completed frame represented in the
-            // Session cache.
-            let tile_output = self.execute_prepared_temporal_tile_f32(
-                compiled,
-                &tile_request,
-                provider,
-                tile_prepared,
-                tile_budget,
-                false,
-            )?;
-            let required_with_output = base_resident_bytes
-                .checked_add(tile_output.peak_working_bytes)
-                .ok_or(EffectTemporalExecutionError::WorkingSetBudgetExceeded {
-                    required_bytes: usize::MAX,
-                    budget_bytes: budget,
-                })?;
-            if required_with_output > budget {
-                return Err(EffectTemporalExecutionError::WorkingSetLedgerMismatch {
-                    expected_bytes: budget,
-                    actual_bytes: required_with_output,
-                });
-            }
-            peak_working_bytes = peak_working_bytes.max(required_with_output);
-            provider_requests = provider_requests.saturating_add(tile_output.provider_requests);
-            stitch_temporal_output_tile(
-                &mut assembled,
-                output_roi,
-                tile_output.tile(),
-                &request.cancellation,
-            )?;
-        }
-
-        temporal_cancellation_checkpoint(&request.cancellation)?;
-        let output_pixels = Arc::new(assembled);
-        if compiled.output_cache_enabled() && !request.cancellation.is_canceled() {
-            self.put_temporal_output(
-                prepared.cache_identity,
-                EffectTemporalCachedOutput {
-                    pixels: Arc::clone(&output_pixels),
-                    frame_seed: request.output_frame_seed,
-                },
-            );
-        }
-        let tile = EffectFrameTileF32::from_shared(
-            request.output_time,
-            prepared.demand.frame_extent(),
-            output_roi,
             request.output_frame_seed,
-            output_pixels,
+            Vec::new(),
         )?;
-        Ok(EffectTemporalExecutionOutput {
+        return Ok(Some(EffectTemporalExecutionOutput {
             tile,
             cache_identity: prepared.cache_identity,
-            provider_requests,
-            execution_tiles,
-            peak_working_bytes,
-        })
+            provider_requests: 0,
+            execution_tiles: 0,
+            peak_working_bytes: 0,
+        }));
     }
+    Ok(None)
+}
+
+fn execute_prepared_scalar_on_bank(
+    scope: &mut crate::processor_residency::FloatProcessorExecution<'_>,
+    control: &mut crate::EffectProcessorControl<'_>,
+    compiled: &CompiledEffectGraph,
+    request: &EffectTemporalExecutionRequest,
+    provider: &mut dyn EffectTemporalFrameProvider,
+    prepared: PreparedScalarTemporalRequest,
+) -> Result<EffectTemporalExecutionOutput, EffectTemporalExecutionError> {
+    let budget = scope.working_bytes;
+    let mask_reservation = prepared.temporal_program.contexts().iter().try_fold(
+        prepared.retained_coverage_bytes,
+        |bytes, context| {
+            PreparedMaskRasterSet::required_retained_bytes(context.graph.graph())
+                .map(|retained| bytes.saturating_add(retained))
+                .map_err(|source| EffectTemporalExecutionError::MaskRasterFailed { source })
+        },
+    )?;
+    scope.bank.trim_working(budget.saturating_sub(mask_reservation));
+    let prepared = prepared.prepare_mask_rasters(request, budget)?;
+    let direct_working_bytes = temporal_scalar_required_bytes(
+        &prepared.temporal_program,
+        &prepared.demand,
+        &prepared.mask_rasters,
+    )?;
+    let retained_execution_bytes = prepared.retained_execution_bytes()?;
+    let direct_required = retained_execution_bytes
+        .checked_add(direct_working_bytes.required_bytes)
+        .ok_or(EffectTemporalExecutionError::WorkingSetBudgetExceeded {
+            required_bytes: usize::MAX,
+            budget_bytes: budget,
+        })?;
+    if direct_required <= budget {
+        let mut output = execute_prepared_temporal_tile_f32(
+            scope,
+            control,
+            request,
+            provider,
+            prepared,
+            budget - retained_execution_bytes,
+        )?;
+        output.peak_working_bytes =
+            output.peak_working_bytes.saturating_add(retained_execution_bytes);
+        return Ok(output);
+    }
+
+    execute_tiled_temporal_f32(
+        scope, control, compiled, request, provider, prepared, budget,
+    )
+}
+
+fn execute_prepared_temporal_tile_f32(
+    scope: &mut crate::processor_residency::FloatProcessorExecution<'_>,
+    control: &mut crate::EffectProcessorControl<'_>,
+    request: &EffectTemporalExecutionRequest,
+    provider: &mut dyn EffectTemporalFrameProvider,
+    prepared: PreparedScalarTemporalRequest,
+    working_budget: usize,
+) -> Result<EffectTemporalExecutionOutput, EffectTemporalExecutionError> {
+    let footprint = temporal_scalar_required_bytes(
+        &prepared.temporal_program,
+        &prepared.demand,
+        &prepared.mask_rasters,
+    )?;
+    if footprint.required_bytes > working_budget {
+        return Err(EffectTemporalExecutionError::WorkingSetBudgetExceeded {
+            required_bytes: footprint.required_bytes,
+            budget_bytes: working_budget,
+        });
+    }
+    let mask_rasters = prepared.mask_rasters.clone();
+    let mut evaluator = ScalarTemporalEvaluator::new(
+        request,
+        prepared.demand.input_roi(),
+        prepared.demand.exact_halo(),
+        Arc::clone(&prepared.temporal_program),
+        mask_rasters,
+        provider,
+        working_budget,
+    )?;
+    let output = evaluator.execute(scope, control, &footprint.pixel_reservations)?;
+    processor_input_checkpoint(request, control)?;
+    let output_pixel_bytes = checked_pixel_count(prepared.demand.output_roi())
+        .and_then(|pixels| pixels.checked_mul(std::mem::size_of::<[f32; 4]>()))
+        .ok_or(EffectTemporalExecutionError::WorkingSetBudgetExceeded {
+            required_bytes: usize::MAX,
+            budget_bytes: evaluator.working.budget,
+        })?;
+    // The crop Vec enters `Arc<Vec<_>>` ownership without copying its pixel
+    // allocation, so publication adds exactly one output-sized buffer.
+    let feedback_bytes = scope.feedback_bytes(control);
+    evaluator
+        .working
+        .ensure_transient(output_pixel_bytes.saturating_add(feedback_bytes))?;
+    scope.bank.trim_working(
+        working_budget - evaluator.working.resident_bytes - output_pixel_bytes - feedback_bytes,
+    );
+    evaluator
+        .working
+        .ensure_transient(output_pixel_bytes + feedback_bytes + scope.bank.counts().1)?;
+    let output_pixels = Arc::new(crop_tile(
+        &output,
+        prepared.demand.input_roi().region(),
+        prepared.demand.output_roi(),
+        &request.cancellation,
+    )?);
+    let output_seed = request.output_frame_seed;
+    let provider_requests = evaluator.provider_requests;
+    let peak_working_bytes = evaluator.working.peak;
+    drop(output);
+    drop(evaluator);
+    let tile = EffectFrameTileF32::from_shared(
+        request.output_time,
+        prepared.demand.frame_extent(),
+        request.sampling,
+        prepared.demand.output_roi(),
+        output_seed,
+        output_pixels,
+    )?;
+    Ok(EffectTemporalExecutionOutput {
+        tile,
+        cache_identity: prepared.cache_identity,
+        provider_requests,
+        execution_tiles: 1,
+        peak_working_bytes,
+    })
+}
+
+fn execute_tiled_temporal_f32(
+    scope: &mut crate::processor_residency::FloatProcessorExecution<'_>,
+    control: &mut crate::EffectProcessorControl<'_>,
+    compiled: &CompiledEffectGraph,
+    request: &EffectTemporalExecutionRequest,
+    provider: &mut dyn EffectTemporalFrameProvider,
+    prepared: PreparedScalarTemporalRequest,
+    budget: usize,
+) -> Result<EffectTemporalExecutionOutput, EffectTemporalExecutionError> {
+    processor_input_checkpoint(request, control)?;
+    let output_roi = prepared.demand.output_roi();
+    let output_pixels = checked_pixel_count(output_roi).ok_or(
+        EffectTemporalExecutionError::WorkingSetBudgetExceeded {
+            required_bytes: usize::MAX,
+            budget_bytes: budget,
+        },
+    )?;
+    let output_bytes = output_pixels.checked_mul(std::mem::size_of::<[f32; 4]>()).ok_or(
+        EffectTemporalExecutionError::WorkingSetBudgetExceeded {
+            required_bytes: usize::MAX,
+            budget_bytes: budget,
+        },
+    )?;
+    let mask_rasters = prepared.mask_rasters.clone();
+    if mask_rasters.values().any(|rasters| rasters.extent() != request.frame_extent) {
+        return Err(EffectTemporalExecutionError::InvalidGraphLiveness {
+            reason: "prepared Mask raster extent changed during tiled execution",
+        });
+    }
+    let base_resident_bytes = prepared
+        .retained_execution_bytes()?
+        .checked_add(output_bytes)
+        .ok_or(EffectTemporalExecutionError::WorkingSetBudgetExceeded {
+            required_bytes: usize::MAX,
+            budget_bytes: budget,
+        })?;
+    if base_resident_bytes > budget {
+        return Err(EffectTemporalExecutionError::WorkingSetBudgetExceeded {
+            required_bytes: base_resident_bytes,
+            budget_bytes: budget,
+        });
+    }
+    let tile_budget = budget - base_resident_bytes;
+    let tiles = plan_temporal_tiles(
+        compiled,
+        request,
+        &prepared.temporal_program,
+        output_roi,
+        base_resident_bytes,
+        tile_budget,
+        budget,
+        &mask_rasters,
+    )?;
+    scope.bank.trim_working(tile_budget);
+    let mut assembled = vec![[0.0_f32; 4]; output_pixels];
+    let mut provider_requests = 0usize;
+    let mut peak_working_bytes = base_resident_bytes;
+    let execution_tiles = tiles.len();
+
+    for tile_roi in tiles {
+        processor_input_checkpoint(request, control)?;
+        let tile_request = EffectTemporalExecutionRequest {
+            generation: request.generation,
+            continuity: request.continuity,
+            output_time: request.output_time,
+            output_frame_seed: request.output_frame_seed,
+            frame_extent: request.frame_extent,
+            sampling: request.sampling,
+            output_roi: tile_roi,
+            cancellation: request.cancellation.clone(),
+        };
+        let mut tile_prepared = prepare_temporal_scalar_request(
+            compiled,
+            &tile_request,
+            Arc::clone(&prepared.temporal_program),
+            provider,
+        )?;
+        if tile_prepared.retained_coverage_bytes != prepared.retained_coverage_bytes {
+            return Err(EffectTemporalExecutionError::InvalidGraphLiveness {
+                reason: "temporal provider coverage changed during one tiled execution",
+            });
+        }
+        tile_prepared.mask_rasters = mask_rasters.clone();
+        // Internal tiles are one attempt-local implementation detail. They
+        // never read or publish output-cache entries: a later cancellation
+        // must not leave a partially completed frame represented in the
+        // Session cache.
+        let tile_output = execute_prepared_temporal_tile_f32(
+            scope,
+            control,
+            &tile_request,
+            provider,
+            tile_prepared,
+            tile_budget,
+        )?;
+        let required_with_output = base_resident_bytes
+            .checked_add(tile_output.peak_working_bytes)
+            .ok_or(EffectTemporalExecutionError::WorkingSetBudgetExceeded {
+                required_bytes: usize::MAX,
+                budget_bytes: budget,
+            })?;
+        if required_with_output > budget {
+            return Err(EffectTemporalExecutionError::WorkingSetLedgerMismatch {
+                expected_bytes: budget,
+                actual_bytes: required_with_output,
+            });
+        }
+        peak_working_bytes = peak_working_bytes.max(required_with_output);
+        provider_requests = provider_requests.saturating_add(tile_output.provider_requests);
+        stitch_temporal_output_tile(
+            &mut assembled,
+            output_roi,
+            tile_output.tile(),
+            &request.cancellation,
+        )?;
+    }
+
+    processor_input_checkpoint(request, control)?;
+    let output_pixels = Arc::new(assembled);
+    let tile = EffectFrameTileF32::from_shared(
+        request.output_time,
+        prepared.demand.frame_extent(),
+        request.sampling,
+        output_roi,
+        request.output_frame_seed,
+        output_pixels,
+    )?;
+    Ok(EffectTemporalExecutionOutput {
+        tile,
+        cache_identity: prepared.cache_identity,
+        provider_requests,
+        execution_tiles,
+        peak_working_bytes,
+    })
 }
 
 fn admit_temporal_scalar(
@@ -1593,15 +2001,31 @@ impl<'a> ScalarTemporalEvaluator<'a> {
         })
     }
 
-    fn execute(&mut self) -> Result<Vec<[f32; 4]>, EffectTemporalExecutionError> {
+    fn execute(
+        &mut self,
+        scope: &mut crate::processor_residency::FloatProcessorExecution<'_>,
+        control: &mut crate::EffectProcessorControl<'_>,
+        pixel_reservations: &[usize],
+    ) -> Result<Vec<[f32; 4]>, EffectTemporalExecutionError> {
         let schedule = self.temporal_program.ordered_values().to_vec();
-        for address in schedule {
-            temporal_cancellation_checkpoint(&self.request.cancellation)?;
+        for (address, &pixels) in schedule.into_iter().zip(pixel_reservations) {
+            let feedback_bytes = scope.feedback_bytes(control);
+            let occupied = pixels.saturating_add(feedback_bytes);
+            if occupied > self.working.budget {
+                return Err(EffectTemporalExecutionError::WorkingSetBudgetExceeded {
+                    required_bytes: occupied,
+                    budget_bytes: self.working.budget,
+                });
+            }
+            scope.bank.trim_working(self.working.budget - occupied);
+            self.working.peak = self.working.peak.max(occupied + scope.bank.counts().1);
+            processor_input_checkpoint(self.request, control)?;
             let output = match address {
-                TemporalValueAddress::Source(time) => self.fetch_source(time)?,
+                TemporalValueAddress::Source(time) => self.fetch_source(time, control)?,
                 TemporalValueAddress::Graph { context, node_id } => {
                     let context_ref = self.temporal_program.context(context)?;
                     let frame_seed = context_ref.frame_seed;
+                    let input_stage = control.input_stage_for(&context_ref.graph, node_id);
                     let node = context_ref.graph.graph().node(node_id).cloned().ok_or(
                         EffectTemporalExecutionError::UnsupportedGraphNode {
                             node_id,
@@ -1609,6 +2033,12 @@ impl<'a> ScalarTemporalEvaluator<'a> {
                         },
                     )?;
                     match node.kind {
+                        EffectGraphNodeKind::CustomSource { .. } => {
+                            return Err(EffectTemporalExecutionError::UnsupportedGraphNode {
+                                node_id,
+                                kind: "custom_source",
+                            })
+                        }
                         EffectGraphNodeKind::Source => {
                             return Err(EffectTemporalExecutionError::InvalidGraphLiveness {
                                 reason:
@@ -1626,7 +2056,7 @@ impl<'a> ScalarTemporalEvaluator<'a> {
                                         reason: "temporal graph value has no expanded sample edge",
                                     },
                                 )?;
-                                self.temporal_blend(input, sample, mix)?
+                                self.temporal_blend(input, sample, mix, control)?
                             }
                             op => {
                                 let input =
@@ -1640,33 +2070,93 @@ impl<'a> ScalarTemporalEvaluator<'a> {
                                             budget_bytes: self.working.budget,
                                         },
                                     )?;
-                                self.working.ensure_transient(scratch_bytes)?;
-                                let cancellation = self.request.cancellation.clone();
-                                let execution =
-                                    if matches!(op, crate::EffectRenderOp::Custom { .. }) {
-                                        if !self.raster_region.is_full_frame() {
-                                            Ok(false)
-                                        } else {
-                                            temporal_cancellation_checkpoint(&cancellation)?;
-                                            apply_custom_render_op_f32(
-                                                &mut output,
-                                                self.raster_region.frame_width(),
-                                                self.raster_region.frame_height(),
-                                                &op,
-                                                frame_seed,
-                                            )?;
-                                            temporal_cancellation_checkpoint(&cancellation)?;
-                                            Ok(true)
-                                        }
+                                self.working.ensure_transient(
+                                    scratch_bytes.saturating_add(scope.feedback_bytes(control)),
+                                )?;
+                                let execution = if matches!(
+                                    op,
+                                    crate::EffectRenderOp::Custom { .. }
+                                ) {
+                                    if !self.raster_region.is_full_frame() {
+                                        Ok(false)
                                     } else {
-                                        apply_render_op_f32_region_controlled(
-                                            &mut output,
-                                            self.raster_region,
+                                        processor_input_checkpoint(self.request, control)?;
+                                        let owned_pixel_bytes = self
+                                            .outputs
+                                            .values()
+                                            .chain(std::iter::once(&output))
+                                            .fold(0usize, |bytes, buffer| {
+                                                bytes.saturating_add(
+                                                    buffer.capacity().saturating_mul(
+                                                        std::mem::size_of::<[f32; 4]>(),
+                                                    ),
+                                                )
+                                            });
+                                        let caller_owned_bytes = owned_pixel_bytes.saturating_add(
+                                            scope.working_bytes.saturating_sub(self.working.budget),
+                                        );
+                                        // This temporal executable slice has an exact
+                                        // Coverage source/output materialization contract.
+                                        // The custom provider receives/returns the same
+                                        // canonical Float value as scalar/mixed execution.
+                                        let extent = crate::EffectFrameExtent::new(
+                                            self.raster_region.frame_width(),
+                                            self.raster_region.frame_height(),
+                                        );
+                                        let format = crate::EffectValueFormat::new(
+                                            crate::EffectWorkingPrecision::Float32,
+                                            crate::EffectColorDomain::SceneLinearRgb,
+                                            mondrian_core::ColorFrameAlpha::StraightCoverage,
+                                        );
+                                        let mut frame = crate::EffectFloatFrame::from_pixels(
+                                            extent,
+                                            format,
+                                            self.request.sampling,
+                                            output,
+                                        )?;
+                                        let feedback_before = scope.feedback_bytes(control);
+                                        let processor_bytes = control.with_input_stage(input_stage, |control| apply_custom_render_op_f32_on_bank(
+                                            &mut frame,
                                             &op,
                                             frame_seed,
-                                            &mut || temporal_cancellation_checkpoint(&cancellation),
-                                        )
-                                    };
+                                            scope,
+                                            caller_owned_bytes,
+                                            control,
+                                        ))
+                                        .map_err(|error| match error {
+                                            crate::EffectExecutionError::CustomProcessorStopped {
+                                                reason: crate::EffectProcessorStopReason::Canceled,
+                                            } => EffectTemporalExecutionError::Canceled,
+                                            other => EffectTemporalExecutionError::CustomProcessor(other),
+                                        })?;
+                                        // Admission follows the completed owned provider
+                                        // result. It does not quarantine/retire a valid
+                                        // instance or request a fallback replay.
+                                        frame = crate::materialize_finite_coverage_controlled(
+                                            frame,
+                                            crate::EffectAlphaConsumer::StraightCoverageOperation,
+                                            &mut || {
+                                                processor_input_checkpoint(self.request, control)
+                                            },
+                                        )?;
+                                        output = frame.into_parts().3;
+                                        self.working.ensure_transient(
+                                            scratch_bytes
+                                                .saturating_add(processor_bytes)
+                                                .saturating_add(feedback_before),
+                                        )?;
+                                        processor_input_checkpoint(self.request, control)?;
+                                        Ok(true)
+                                    }
+                                } else {
+                                    apply_render_op_f32_region_controlled(
+                                        &mut output,
+                                        self.raster_region,
+                                        &op,
+                                        frame_seed,
+                                        &mut || processor_input_checkpoint(self.request, control),
+                                    )
+                                };
                                 match execution {
                                     Ok(true) => {}
                                     Ok(false) => {
@@ -1687,7 +2177,6 @@ impl<'a> ScalarTemporalEvaluator<'a> {
                                 self.temporal_program.address_for_input(context, overlay)?;
                             let mut base = self.take_value(base)?;
                             let overlay = self.take_value(overlay)?;
-                            let cancellation = self.request.cancellation.clone();
                             let blended = blend_rgba_f32_region_controlled(
                                 &mut base,
                                 &overlay,
@@ -1695,7 +2184,7 @@ impl<'a> ScalarTemporalEvaluator<'a> {
                                 opacity,
                                 blend_mode,
                                 frame_seed,
-                                &mut || temporal_cancellation_checkpoint(&cancellation),
+                                &mut || processor_input_checkpoint(self.request, control),
                             )?;
                             if !blended {
                                 return Err(EffectTemporalExecutionError::InvalidRoiProjection {
@@ -1715,13 +2204,12 @@ impl<'a> ScalarTemporalEvaluator<'a> {
                                     reason: "Mask input and raster do not cover the same region",
                                 });
                             }
-                            let cancellation = self.request.cancellation.clone();
                             apply_alpha_mask_f32_region_controlled(
                                 &mut output,
                                 &mask_pixels,
                                 invert,
                                 mask_op,
-                                &mut || temporal_cancellation_checkpoint(&cancellation),
+                                &mut || processor_input_checkpoint(self.request, control),
                             )?;
                             self.working.release_frame()?;
                             output
@@ -1766,12 +2254,11 @@ impl<'a> ScalarTemporalEvaluator<'a> {
                                     reason: "MaskCombine values do not cover the same region",
                                 });
                             }
-                            let cancellation = self.request.cancellation.clone();
                             combine_alpha_masks_f32_controlled(
                                 &mut output,
                                 &right,
                                 mask_op,
-                                &mut || temporal_cancellation_checkpoint(&cancellation),
+                                &mut || processor_input_checkpoint(self.request, control),
                             )?;
                             self.working.release_frame()?;
                             output
@@ -1789,9 +2276,8 @@ impl<'a> ScalarTemporalEvaluator<'a> {
                                     reason: "MatteMix values do not cover the same region",
                                 });
                             }
-                            let cancellation = self.request.cancellation.clone();
                             matte_mix_f32_controlled(&mut output, &graded, &matte, &mut || {
-                                temporal_cancellation_checkpoint(&cancellation)
+                                processor_input_checkpoint(self.request, control)
                             })?;
                             self.working.release_frame()?;
                             self.working.release_frame()?;
@@ -1810,7 +2296,6 @@ impl<'a> ScalarTemporalEvaluator<'a> {
                                     .temporal_program
                                     .address_for_input(context, *overlay_id)?;
                                 let overlay = self.take_value(overlay)?;
-                                let cancellation = self.request.cancellation.clone();
                                 let blended = blend_rgba_f32_region_controlled(
                                     &mut output,
                                     &overlay,
@@ -1818,7 +2303,7 @@ impl<'a> ScalarTemporalEvaluator<'a> {
                                     opacity,
                                     blend_mode,
                                     frame_seed,
-                                    &mut || temporal_cancellation_checkpoint(&cancellation),
+                                    &mut || processor_input_checkpoint(self.request, control),
                                 )?;
                                 if !blended {
                                     return Err(EffectTemporalExecutionError::InvalidRoiProjection {
@@ -1833,6 +2318,7 @@ impl<'a> ScalarTemporalEvaluator<'a> {
                     }
                 }
             };
+            processor_input_checkpoint(self.request, control)?;
             if self.outputs.insert(address, output).is_some() {
                 return Err(EffectTemporalExecutionError::InvalidGraphLiveness {
                     reason: "time-expanded schedule produced one value more than once",
@@ -1867,14 +2353,14 @@ impl<'a> ScalarTemporalEvaluator<'a> {
     fn fetch_source(
         &mut self,
         time: TimelineTime,
+        control: &mut crate::EffectProcessorControl<'_>,
     ) -> Result<Vec<[f32; 4]>, EffectTemporalExecutionError> {
-        if self.request.cancellation.is_canceled() {
-            return Err(EffectTemporalExecutionError::Canceled);
-        }
+        processor_input_checkpoint(self.request, control)?;
         let provider_request = EffectTemporalFrameRequest {
             generation: self.request.generation,
             time,
             frame_extent: self.request.frame_extent,
+            sampling: self.request.sampling,
             input_roi: self.input_roi,
             exact_halo: self.exact_halo,
             precision: EffectWorkingPrecision::Float32,
@@ -1890,9 +2376,7 @@ impl<'a> ScalarTemporalEvaluator<'a> {
         self.provider
             .copy_frame(provider_request, &self.request.cancellation, &mut pixels)?;
         self.provider_requests = self.provider_requests.saturating_add(1);
-        if self.request.cancellation.is_canceled() {
-            return Err(EffectTemporalExecutionError::Canceled);
-        }
+        processor_input_checkpoint(self.request, control)?;
         if pixels.len() != pixel_count {
             return Err(EffectTemporalFrameProviderError::InvalidTile {
                 reason: format!(
@@ -1910,6 +2394,7 @@ impl<'a> ScalarTemporalEvaluator<'a> {
         input: TemporalValueAddress,
         sample: TemporalValueAddress,
         mix: f32,
+        control: &mut crate::EffectProcessorControl<'_>,
     ) -> Result<Vec<[f32; 4]>, EffectTemporalExecutionError> {
         let mut current = self.take_value(input)?;
         let sample = self.take_value(sample)?;
@@ -1919,7 +2404,7 @@ impl<'a> ScalarTemporalEvaluator<'a> {
             });
         }
         mix_temporal_frames_in_place_controlled(&mut current, &sample, mix, &mut || {
-            temporal_cancellation_checkpoint(&self.request.cancellation)
+            processor_input_checkpoint(self.request, control)
         })?;
         self.working.release_frame()?;
         Ok(current)
@@ -2037,6 +2522,11 @@ fn validate_provider_tile(
             reason: "tile frame extent does not match the exact request".to_owned(),
         });
     }
+    if tile.sampling != request.sampling {
+        return Err(EffectTemporalFrameProviderError::InvalidTile {
+            reason: "tile sampling does not match the exact request".to_owned(),
+        });
+    }
     if tile.roi != request.input_roi.region() {
         return Err(EffectTemporalFrameProviderError::InvalidTile {
             reason: "tile ROI does not match the exact request".to_owned(),
@@ -2053,7 +2543,7 @@ fn temporal_cache_identity(
     temporal_program_fingerprint: [u8; 32],
 ) -> [u8; 32] {
     let mut hasher = Sha256::new();
-    hasher.update(b"mondrian.effect-temporal-roi-execution.v3");
+    hasher.update(b"mondrian.effect-temporal-roi-execution.v4");
     hasher.update(compiled.semantic_fingerprint());
     hasher.update(temporal_program_fingerprint);
     hasher.update(source_identity.semantic_fingerprint());
@@ -2062,6 +2552,13 @@ fn temporal_cache_identity(
     hasher.update(request.output_frame_seed.to_le_bytes());
     hasher.update(request.frame_extent.width().to_le_bytes());
     hasher.update(request.frame_extent.height().to_le_bytes());
+    let par = request.sampling.sample_aspect_ratio();
+    hasher.update(par.numerator().to_le_bytes());
+    hasher.update(par.denominator().to_le_bytes());
+    for scale in request.sampling.render_scale() {
+        hasher.update(scale.num.to_le_bytes());
+        hasher.update(scale.den.to_le_bytes());
+    }
     hash_roi(&mut hasher, request.output_roi);
     match input_roi {
         EffectInputRoi::Exact(roi) => {
@@ -2330,6 +2827,28 @@ mod tests {
     use mondrian_core::BlendMode;
 
     #[test]
+    fn output_tile_transfer_never_clones_shared_pixels() {
+        let extent = EffectFrameExtent::new(2, 1);
+        let pixels = vec![[1.0; 4]; 2];
+        let pointer = pixels.as_ptr();
+        let tile = EffectFrameTileF32::new(
+            TimelineTime::ZERO,
+            extent,
+            mondrian_core::ImageSampling::UNIT_SQUARE,
+            extent.full_frame_roi(),
+            0,
+            pixels,
+        )
+        .unwrap();
+        let shared = tile.clone();
+        let tile = tile.try_into_pixels().expect_err("shared backing must not be silently copied");
+        assert_eq!(tile.pixels().as_ptr(), pointer);
+        drop(shared);
+        let pixels = tile.try_into_pixels().unwrap();
+        assert_eq!(pixels.as_ptr(), pointer);
+    }
+
+    #[test]
     fn temporal_blend_checks_cancellation_at_fixed_pixel_chunks() {
         let current = vec![[1.0, 0.0, 0.0, 1.0]; 8_193];
         let past = vec![[0.0, 0.0, 1.0, 1.0]; 8_193];
@@ -2572,6 +3091,8 @@ mod tests {
         let extent = EffectFrameExtent::new(4, 2);
         let mut provider = GradientProvider::new(extent);
         let mut session = EffectExecutionSession::new(EffectExecutionSessionConfig {
+            max_processor_instances: 0,
+            max_processor_bytes: 0,
             max_cache_entries: 4,
             max_cache_bytes: 1024 * 1024,
             max_working_bytes: 1024 * 1024,
@@ -2583,6 +3104,7 @@ mod tests {
             EffectExecutionContinuity::Discontinuous,
             TimelineTime::new(1, 4).expect("time"),
             extent,
+            mondrian_core::ImageSampling::UNIT_SQUARE,
             EffectPixelRoi::new(1, 0, 2, 1),
             ExecutionCancellationToken::new(),
         );
@@ -2628,6 +3150,7 @@ mod tests {
             EffectExecutionContinuity::Discontinuous,
             TimelineTime::new(1, 4).expect("time"),
             extent,
+            mondrian_core::ImageSampling::UNIT_SQUARE,
             EffectPixelRoi::new(1, 0, 2, 1),
             ExecutionCancellationToken::new(),
         );
@@ -2721,6 +3244,7 @@ mod tests {
             EffectExecutionContinuity::Continuous,
             output_time,
             extent,
+            mondrian_core::ImageSampling::UNIT_SQUARE,
             extent.full_frame_roi(),
             ExecutionCancellationToken::new(),
         );
@@ -2801,6 +3325,7 @@ mod tests {
             EffectExecutionContinuity::Discontinuous,
             TimelineTime::new(3, 2).expect("time"),
             extent,
+            mondrian_core::ImageSampling::UNIT_SQUARE,
             extent.full_frame_roi(),
             ExecutionCancellationToken::new(),
         )
@@ -2825,6 +3350,7 @@ mod tests {
                 let tile = EffectFrameTileF32::new(
                     demand.time(),
                     demand.frame_extent(),
+                    mondrian_core::ImageSampling::UNIT_SQUARE,
                     roi,
                     demand.time().numerator(),
                     pixels,
@@ -2869,6 +3395,7 @@ mod tests {
             EffectExecutionContinuity::Continuous,
             TimelineTime::ONE,
             extent,
+            mondrian_core::ImageSampling::UNIT_SQUARE,
             extent.full_frame_roi(),
             ExecutionCancellationToken::new(),
         );
@@ -2889,6 +3416,7 @@ mod tests {
             EffectExecutionContinuity::Discontinuous,
             TimelineTime::ONE,
             extent,
+            mondrian_core::ImageSampling::UNIT_SQUARE,
             extent.full_frame_roi(),
             ExecutionCancellationToken::new(),
         )
@@ -2926,6 +3454,7 @@ mod tests {
                 let tile = EffectFrameTileF32::new(
                     demand.time(),
                     demand.frame_extent(),
+                    mondrian_core::ImageSampling::UNIT_SQUARE,
                     demand.input_roi().region(),
                     0,
                     vec![[demand.time().to_f64() as f32, 0.0, 0.0, 1.0]],
@@ -3027,6 +3556,7 @@ mod tests {
             EffectExecutionContinuity::Continuous,
             output_time,
             extent,
+            mondrian_core::ImageSampling::UNIT_SQUARE,
             partial_roi,
             ExecutionCancellationToken::new(),
         );
@@ -3106,6 +3636,7 @@ mod tests {
             EffectExecutionContinuity::Continuous,
             output_time,
             extent,
+            mondrian_core::ImageSampling::UNIT_SQUARE,
             extent.full_frame_roi(),
             ExecutionCancellationToken::new(),
         );
@@ -3268,9 +3799,16 @@ mod tests {
             })
             .collect::<Vec<_>>();
         let reference = apply_compiled_effect_graph_rgba_f32(
-            &mixed,
-            extent.width(),
-            extent.height(),
+            crate::EffectFloatFrameView::new(
+                crate::EffectFrameExtent::new(extent.width(), extent.height()),
+                crate::EffectValueFormat::new(
+                    crate::EffectWorkingPrecision::Float32,
+                    crate::EffectColorDomain::SceneLinearRgb,
+                    mondrian_core::ColorFrameAlpha::StraightCoverage,
+                ),
+                mondrian_core::ImageSampling::UNIT_SQUARE,
+                &mixed,
+            ),
             &reference_graph,
             frame_seed,
         )
@@ -3291,11 +3829,14 @@ mod tests {
             EffectExecutionContinuity::Continuous,
             output_time,
             extent,
+            mondrian_core::ImageSampling::UNIT_SQUARE,
             output_roi,
             ExecutionCancellationToken::new(),
         )
         .with_output_frame_seed(frame_seed);
         let mut session = EffectExecutionSession::new(EffectExecutionSessionConfig {
+            max_processor_instances: 0,
+            max_processor_bytes: 0,
             max_cache_entries: 0,
             max_cache_bytes: 0,
             max_working_bytes: exact_peak,
@@ -3311,6 +3852,8 @@ mod tests {
         assert_eq!(output.peak_working_bytes(), exact_peak);
 
         let mut rejected = EffectExecutionSession::new(EffectExecutionSessionConfig {
+            max_processor_instances: 0,
+            max_processor_bytes: 0,
             max_cache_entries: 0,
             max_cache_bytes: 0,
             max_working_bytes: exact_peak - 1,
@@ -3333,6 +3876,7 @@ mod tests {
             EffectExecutionContinuity::Continuous,
             output_time,
             extent,
+            mondrian_core::ImageSampling::UNIT_SQUARE,
             extent.full_frame_roi(),
             ExecutionCancellationToken::new(),
         )
@@ -3355,6 +3899,7 @@ mod tests {
                 let tile = EffectFrameTileF32::new(
                     demand.time(),
                     demand.frame_extent(),
+                    mondrian_core::ImageSampling::UNIT_SQUARE,
                     roi,
                     demand.time().numerator(),
                     pixels,
@@ -3373,6 +3918,8 @@ mod tests {
         let tiled_budget = source_coverage_bytes + full_output_bytes + 3_504;
         assert!(tiled_budget < source_coverage_bytes + full_output_bytes * 3);
         let mut tiled_session = EffectExecutionSession::new(EffectExecutionSessionConfig {
+            max_processor_instances: 0,
+            max_processor_bytes: 0,
             max_cache_entries: 0,
             max_cache_bytes: 0,
             max_working_bytes: tiled_budget,
@@ -3383,7 +3930,7 @@ mod tests {
         let tiled = tiled_session
             .execute_temporal_f32(&temporal_graph, &full_request, &mut tiled_provider)
             .expect("budget-driven temporal tiles");
-        assert_eq!(tiled.tile().pixels(), reference);
+        assert_eq!(tiled.tile().pixels(), reference.pixels());
         assert_eq!(tiled.execution_tiles(), 4);
         assert_eq!(tiled.provider_requests(), tiled.execution_tiles() * 2);
         let largest_tile_peak = 9 * 6 * std::mem::size_of::<[f32; 4]>() * 3;
@@ -3393,6 +3940,8 @@ mod tests {
         );
 
         let mut cached_session = EffectExecutionSession::new(EffectExecutionSessionConfig {
+            max_processor_instances: 0,
+            max_processor_bytes: 0,
             max_cache_entries: 16,
             max_cache_bytes: 1024 * 1024,
             max_working_bytes: tiled_budget,
@@ -3407,13 +3956,15 @@ mod tests {
         let second_cached = cached_session
             .execute_temporal_f32(&temporal_graph, &full_request, &mut cached_provider)
             .expect("assembled output cache hit");
-        assert_eq!(second_cached.tile().pixels(), reference);
+        assert_eq!(second_cached.tile().pixels(), reference.pixels());
         assert_eq!(second_cached.execution_tiles(), 0);
         assert_eq!(second_cached.provider_requests(), 0);
         assert_eq!(second_cached.peak_working_bytes(), 0);
 
         let publication_budget = source_coverage_bytes + full_output_bytes - 1;
         let mut publication_rejected = EffectExecutionSession::new(EffectExecutionSessionConfig {
+            max_processor_instances: 0,
+            max_processor_bytes: 0,
             max_cache_entries: 0,
             max_cache_bytes: 0,
             max_working_bytes: publication_budget,
@@ -3480,6 +4031,7 @@ mod tests {
             EffectExecutionContinuity::Continuous,
             TimelineTime::ONE,
             extent,
+            mondrian_core::ImageSampling::UNIT_SQUARE,
             extent.full_frame_roi(),
             cancellation.clone(),
         );
@@ -3489,6 +4041,8 @@ mod tests {
             cancel_after: 3,
         };
         let mut session = EffectExecutionSession::new(EffectExecutionSessionConfig {
+            max_processor_instances: 0,
+            max_processor_bytes: 0,
             max_cache_entries: 16,
             max_cache_bytes: 4 * 1024 * 1024,
             max_working_bytes: budget,
@@ -3523,11 +4077,14 @@ mod tests {
             EffectExecutionContinuity::Continuous,
             TimelineTime::ONE,
             extent,
+            mondrian_core::ImageSampling::UNIT_SQUARE,
             extent.full_frame_roi(),
             ExecutionCancellationToken::new(),
         );
         let mut provider = GradientProvider::new(extent);
         let mut session = EffectExecutionSession::new(EffectExecutionSessionConfig {
+            max_processor_instances: 0,
+            max_processor_bytes: 0,
             max_cache_entries: 0,
             max_cache_bytes: 0,
             max_working_bytes: output_bytes + 2 * std::mem::size_of::<[f32; 4]>(),
@@ -3564,6 +4121,7 @@ mod tests {
             EffectExecutionContinuity::Continuous,
             TimelineTime::ONE,
             extent,
+            mondrian_core::ImageSampling::UNIT_SQUARE,
             output_roi,
             ExecutionCancellationToken::new(),
         );
@@ -3584,7 +4142,7 @@ mod tests {
             temporal_scalar_required_bytes(&temporal_program, &demand, &mask_rasters)
                 .expect("direct proof");
         assert!(base_resident_bytes <= budget);
-        assert!(source_coverage_bytes + direct_working > budget);
+        assert!(source_coverage_bytes + direct_working.required_bytes > budget);
 
         let tiles = plan_temporal_tiles(
             &graph,
@@ -3627,6 +4185,7 @@ mod tests {
             EffectExecutionContinuity::Continuous,
             TimelineTime::ONE,
             extent,
+            mondrian_core::ImageSampling::UNIT_SQUARE,
             extent.full_frame_roi(),
             ExecutionCancellationToken::new(),
         );
@@ -3650,6 +4209,7 @@ mod tests {
         let tile = EffectFrameTileF32::new(
             stale.time(),
             stale.frame_extent(),
+            mondrian_core::ImageSampling::UNIT_SQUARE,
             roi,
             0,
             vec![[0.0; 4]; checked_pixel_count(roi).expect("pixel count")],
@@ -3678,6 +4238,8 @@ mod tests {
         let mut tiled_provider = GradientProvider::new(extent);
         let mut full_provider = GradientProvider::new(extent);
         let mut tiled_session = EffectExecutionSession::new(EffectExecutionSessionConfig {
+            max_processor_instances: 0,
+            max_processor_bytes: 0,
             max_cache_entries: 0,
             max_cache_bytes: 0,
             max_working_bytes: 8 * 1024 * 1024,
@@ -3685,6 +4247,8 @@ mod tests {
             max_gpu_plan_bytes: 0,
         });
         let mut full_session = EffectExecutionSession::new(EffectExecutionSessionConfig {
+            max_processor_instances: 0,
+            max_processor_bytes: 0,
             max_cache_entries: 0,
             max_cache_bytes: 0,
             max_working_bytes: 8 * 1024 * 1024,
@@ -3700,6 +4264,7 @@ mod tests {
                     EffectExecutionContinuity::Continuous,
                     time,
                     extent,
+                    mondrian_core::ImageSampling::UNIT_SQUARE,
                     tile_roi,
                     ExecutionCancellationToken::new(),
                 ),
@@ -3714,6 +4279,7 @@ mod tests {
                     EffectExecutionContinuity::Continuous,
                     time,
                     extent,
+                    mondrian_core::ImageSampling::UNIT_SQUARE,
                     extent.full_frame_roi(),
                     ExecutionCancellationToken::new(),
                 ),
@@ -3759,6 +4325,7 @@ mod tests {
                 EffectExecutionContinuity::Continuous,
                 time,
                 extent,
+                mondrian_core::ImageSampling::UNIT_SQUARE,
                 roi,
                 ExecutionCancellationToken::new(),
             )
@@ -3818,11 +4385,14 @@ mod tests {
             EffectExecutionContinuity::Continuous,
             TimelineTime::ZERO,
             extent,
+            mondrian_core::ImageSampling::UNIT_SQUARE,
             output_roi,
             ExecutionCancellationToken::new(),
         );
 
         let mut admitted = EffectExecutionSession::new(EffectExecutionSessionConfig {
+            max_processor_instances: 0,
+            max_processor_bytes: 0,
             max_cache_entries: 0,
             max_cache_bytes: 0,
             max_working_bytes: exact_peak,
@@ -3843,6 +4413,8 @@ mod tests {
         );
 
         let mut rejected = EffectExecutionSession::new(EffectExecutionSessionConfig {
+            max_processor_instances: 0,
+            max_processor_bytes: 0,
             max_cache_entries: 0,
             max_cache_bytes: 0,
             max_working_bytes: exact_peak - 1,
@@ -3878,10 +4450,13 @@ mod tests {
             EffectExecutionContinuity::Continuous,
             TimelineTime::ONE,
             extent,
+            mondrian_core::ImageSampling::UNIT_SQUARE,
             extent.full_frame_roi(),
             ExecutionCancellationToken::new(),
         );
         let config = |max_working_bytes| EffectExecutionSessionConfig {
+            max_processor_instances: 0,
+            max_processor_bytes: 0,
             max_cache_entries: 0,
             max_cache_bytes: 0,
             max_working_bytes,
@@ -3925,6 +4500,7 @@ mod tests {
             EffectExecutionContinuity::Continuous,
             TimelineTime::ONE,
             extent,
+            mondrian_core::ImageSampling::UNIT_SQUARE,
             EffectPixelRoi::new(0, 0, 0, 0),
             ExecutionCancellationToken::new(),
         )
@@ -3940,6 +4516,122 @@ mod tests {
         assert!(output.tile().pixels().is_empty());
         assert_eq!(output.provider_requests(), 0);
         assert!(provider.requests.is_empty());
+    }
+
+    #[test]
+    fn temporal_nonuniform_sampling_survives_roi_and_isolates_result_cache() {
+        let graph = bind_linear(
+            [crate::EffectRenderOp::GaussianBlur { radius: 2.0 }],
+            temporal_contract(
+                TimelineTime::ZERO,
+                EffectRoiPropagation::Expand { horizontal_pixels: 3, vertical_pixels: 3 },
+            ),
+        );
+        let extent = EffectFrameExtent::new(16, 12);
+        let sampling = mondrian_core::ImageSampling::new(
+            mondrian_core::SampleAspectRatio::new(3, 2).unwrap(),
+            [
+                mondrian_core::Rational::new(1, 2),
+                mondrian_core::Rational::new(2, 3),
+            ],
+        )
+        .unwrap();
+        let request = EffectTemporalExecutionRequest::new(
+            1,
+            EffectExecutionContinuity::Continuous,
+            TimelineTime::ZERO,
+            extent,
+            sampling,
+            EffectPixelRoi::new(4, 3, 3, 2),
+            ExecutionCancellationToken::new(),
+        );
+        assert_eq!(request.sampling(), sampling);
+        let mut provider = GradientProvider::new(extent);
+        let mut session = EffectExecutionSession::default();
+        let first = session.execute_temporal_roi_f32(&graph, &request, &mut provider).unwrap();
+        assert_eq!(first.tile().sampling(), sampling);
+        assert_eq!(first.tile().roi(), request.output_roi());
+        assert!(provider.requests.iter().all(|demand| demand.sampling() == sampling));
+        let calls = provider.requests.len();
+        assert!(calls > 0);
+        let cached = session.execute_temporal_roi_f32(&graph, &request, &mut provider).unwrap();
+        assert_eq!(cached.tile().sampling(), sampling);
+        assert_eq!(cached.tile().pixels(), first.tile().pixels());
+        assert_eq!(provider.requests.len(), calls);
+        let changed = EffectTemporalExecutionRequest {
+            sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
+            ..request
+        };
+        let other = session.execute_temporal_roi_f32(&graph, &changed, &mut provider).unwrap();
+        assert_ne!(first.cache_identity(), other.cache_identity());
+        assert_eq!(other.tile().sampling(), changed.sampling());
+        assert!(provider.requests.len() > calls);
+    }
+
+    #[test]
+    fn prepared_temporal_tiles_refuse_sampling_relabel_at_nonzero_roi() {
+        let extent = EffectFrameExtent::new(8, 6);
+        let sampling = mondrian_core::ImageSampling::new(
+            mondrian_core::SampleAspectRatio::new(4, 3).unwrap(),
+            [
+                mondrian_core::Rational::new(1, 2),
+                mondrian_core::Rational::new(3, 4),
+            ],
+        )
+        .unwrap();
+        let roi = EffectPixelRoi::new(2, 1, 3, 2);
+        let request = EffectTemporalFrameRequest {
+            generation: 7,
+            time: TimelineTime::ZERO,
+            frame_extent: extent,
+            sampling,
+            input_roi: EffectInputRoi::Exact(roi),
+            exact_halo: None,
+            precision: EffectWorkingPrecision::Float32,
+        };
+        let pixels = vec![[0.25, 0.5, 0.75, 1.0]; 6];
+        let wrong = EffectFrameTileF32::new(
+            request.time(),
+            extent,
+            mondrian_core::ImageSampling::UNIT_SQUARE,
+            roi,
+            9,
+            pixels.clone(),
+        )
+        .unwrap();
+        assert!(matches!(
+            validate_provider_tile(&wrong, request),
+            Err(EffectTemporalFrameProviderError::InvalidTile { .. })
+        ));
+        let tile =
+            EffectFrameTileF32::new(request.time(), extent, sampling, roi, 9, pixels.clone())
+                .unwrap();
+        assert_eq!(tile.sampling(), sampling);
+        validate_provider_tile(&tile, request).unwrap();
+        let batch = EffectTemporalFrameDemandBatch {
+            generation: 7,
+            requests: Arc::from([request]),
+            coverage_bytes: 6 * std::mem::size_of::<[f32; 4]>(),
+        };
+        let mut frames = PreparedTemporalFrameSet::prepare(
+            EffectTemporalSourceIdentity::from_complete_semantic_fingerprint([17; 32]),
+            batch,
+            [(request, tile)],
+        )
+        .unwrap();
+        let mut copied = Vec::with_capacity(6);
+        let changed = EffectTemporalFrameRequest {
+            sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
+            ..request
+        };
+        assert!(frames
+            .copy_frame(changed, &ExecutionCancellationToken::new(), &mut copied)
+            .is_err());
+        assert!(copied.is_empty());
+        frames
+            .copy_frame(request, &ExecutionCancellationToken::new(), &mut copied)
+            .unwrap();
+        assert_eq!(copied, pixels);
     }
 
     #[test]
@@ -3961,6 +4653,7 @@ mod tests {
             EffectExecutionContinuity::Continuous,
             TimelineTime::ZERO,
             extent,
+            mondrian_core::ImageSampling::UNIT_SQUARE,
             extent.full_frame_roi(),
             canceled,
         );
@@ -3976,6 +4669,7 @@ mod tests {
             EffectExecutionContinuity::Continuous,
             TimelineTime::ZERO,
             extent,
+            mondrian_core::ImageSampling::UNIT_SQUARE,
             extent.full_frame_roi(),
             ExecutionCancellationToken::new(),
         );
@@ -3993,6 +4687,7 @@ mod tests {
             EffectExecutionContinuity::Discontinuous,
             TimelineTime::ZERO,
             extent,
+            mondrian_core::ImageSampling::UNIT_SQUARE,
             extent.full_frame_roi(),
             ExecutionCancellationToken::new(),
         );

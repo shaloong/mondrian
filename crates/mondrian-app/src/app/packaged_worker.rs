@@ -14,6 +14,11 @@ pub(crate) enum PackagedWorkerDiscoveryError {
         purpose: &'static str,
         path: PathBuf,
     },
+    #[error("configured {purpose} worker must be absolute: {path}")]
+    ConfiguredPathRelative {
+        purpose: &'static str,
+        path: PathBuf,
+    },
     #[error("cannot resolve the current product executable for {purpose}: {source}")]
     CurrentExecutable {
         purpose: &'static str,
@@ -31,6 +36,17 @@ pub(crate) enum PackagedWorkerDiscoveryError {
 
 /// Maximum product time admitted for one physical media Probe Helper.
 pub(crate) const MEDIA_PROBE_TIMEOUT: Duration = Duration::from_secs(120);
+
+pub(super) fn discover_openfx_worker() -> Result<PathBuf, PackagedWorkerDiscoveryError> {
+    let path = discover_required_packaged_app_worker("MONDRIAN_OPENFX_WORKER_PATH", "OpenFX")?;
+    if !path.is_absolute() {
+        return Err(PackagedWorkerDiscoveryError::ConfiguredPathRelative {
+            purpose: "OpenFX",
+            path,
+        });
+    }
+    Ok(path)
+}
 
 pub(crate) fn discover_preview_demux_worker() -> Result<PathBuf, PackagedWorkerDiscoveryError> {
     if let Some(path) = mondrian_media::qualified_media_helper_path() {

@@ -1,7 +1,13 @@
 //! 后台渲染队列
 
+mod audio_delivery;
 mod final_broadcast_qc;
 mod st436;
+
+use audio_delivery::{partition_stem_grants, ExportAudioDelivery};
+
+#[cfg(test)]
+use mondrian_audio::AudioContinuityEpoch;
 
 use crate::audio_stems::{
     stem_file_name, stem_path, validate_and_write_audio_stem_manifest, AudioStemExpectation,
@@ -41,9 +47,9 @@ use crate::{
 };
 use chrono::Utc;
 use mondrian_audio::{
-    AudioContinuityEpoch, AudioDecodedSource, AudioLoudnessAnalyzer, AudioLoudnessReport,
-    AudioMediaResolver, AudioProcessingMode, AudioProcessorResolver, AudioProgramDeliveryRuntime,
-    AudioProgramRuntime, AudioRenderContract, AudioRenderRequest, AudioRuntimeResourceFootprint,
+    AudioDecodedSource, AudioLoudnessAnalyzer, AudioLoudnessReport, AudioMediaResolver,
+    AudioProcessingMode, AudioProcessorResolver, AudioProgramDeliveryRuntime, AudioProgramRuntime,
+    AudioRenderContract, AudioRenderRequest, AudioRuntimeResourceFootprint,
     AudioRuntimeResourceGrant, ResolvedAudioSource,
 };
 use mondrian_core::timeline_data::{AlphaInterpretation, TimelineClipExecutionRef};
@@ -84,8 +90,7 @@ use mondrian_renderer::{
         ProgramOutputBoundary, ProgramOutputModule, ProgramOutputRole, RenderColorStageDiagnostics,
         RenderColorStageGpuBlockerBreakdown, SourceColorModule, WorkingColorModule,
     },
-    color_report_vocab, composite_timeline_elements_color_frame_with_diagnostics,
-    execute_prepared_visual_closure, prepare_decoded_cpu_source_frame,
+    color_report_vocab, execute_prepared_visual_closure, prepare_decoded_cpu_source_frame,
     prepare_visual_frame_closure, project_affine_to_sampled_extents, project_basic_title_transform,
     BasicTitleRasterizer, ColorFrameResidency, CpuColorFrame, GpuColorFrameHandle,
     GpuColorFrameReadbackPlan, GpuColorFrameTextureFormat, GpuColorFrameWgpuResourcePool,
@@ -134,10 +139,12 @@ use std::sync::{mpsc, Arc};
 use std::time::{Duration, Instant};
 use tokio::runtime::Builder as TokioRuntimeBuilder;
 
+mod processor_sources;
 mod service;
 #[cfg(feature = "validation")]
 mod validation;
 mod visual_effect_execution;
+use processor_sources::ExportProcessorSources;
 pub use service::*;
 #[cfg(feature = "validation")]
 pub use validation::{
@@ -850,10 +857,11 @@ impl ExportGpuExecutionRuntime {
                 HeterogeneousGpuContinuationError::DeadlineExceeded,
             ),
         )?;
+        let sampling = completion.evidence().sampling();
         match &mut self.state {
             ExportGpuExecutionRuntimeState::Ready { backend, .. } => backend
                 .heterogeneous_runtime
-                .execute_to_cpu(request, completion, cancellation, deadline)
+                .execute_to_cpu(request, completion, cancellation, deadline, sampling)
                 .map_err(Into::into),
             ExportGpuExecutionRuntimeState::Cold
             | ExportGpuExecutionRuntimeState::Backoff { .. } => {
@@ -4527,11 +4535,10 @@ fn execute_timeline_export(
             }
         }
         let resolved_video_encoder = match &delivery.artifact {
-            ResolvedExportArtifactEncoding::MediaFile { video, .. } => {
+            ResolvedExportArtifactEncoding::MediaFile { .. } => {
                 let adapter = visual_session.active_adapter_identity();
                 match crate::hardware_encoding::resolve_video_encoder(
-                    video,
-                    delivery.pixel_format,
+                    &delivery,
                     adapter.as_ref(),
                     timeline
                         .sequence
@@ -5680,12 +5687,12 @@ fn prepare_timeline_audio_input(
         &mut analysis,
     ) {
         JobExecutionResult::ReversibleWorkCompleted => {
-            temp_guard.defuse();
             let Some(analysis) = analysis else {
                 return Err(JobExecutionResult::Failed(
                     "rendered audio completed without loudness/true-peak evidence".to_owned(),
                 ));
             };
+            temp_guard.defuse();
             Ok(TimelineAudioInput::PcmFile {
                 path: temp_path,
                 sample_rate,
@@ -5851,6 +5858,7 @@ fn prepare_timeline_audio_delivery(
     cache: &Arc<AudioSourceCache>,
     resource_grant: AudioRuntimeResourceGrant,
     processor_resolver: &dyn AudioProcessorResolver,
+    native_child_settlement: Option<&mondrian_core::NativeChildSettlementRegistrar>,
 ) -> Result<AudioProgramDeliveryRuntime, String> {
     let resolver = ExportAudioMediaResolver { timeline, cache: Arc::clone(cache) };
     let contract = AudioRenderContract {
@@ -5867,7 +5875,7 @@ fn prepare_timeline_audio_delivery(
     };
     let public_time_range = range.time_range()?;
     let runtime =
-        AudioProgramRuntime::build_from_precompiled_closure_for_range_with_processor_resolver_and_resource_grant(
+        AudioProgramRuntime::build_from_precompiled_closure_for_range_observing_native_child_settlement(
             &timeline.sequence,
             &timeline.sequences,
             &resolver,
@@ -5877,6 +5885,7 @@ fn prepare_timeline_audio_delivery(
             public_time_range,
             prepared_audio.closure(),
             resource_grant,
+            native_child_settlement,
         )
         .map_err(|error| format!("编译导出音频 Program 失败（未使用降级混音）: {error}"))?;
     if runtime.execution_demand() != prepared_audio.execution_demand() {
@@ -5965,7 +5974,7 @@ fn render_audio_stems_to_pcm_f32(
         path: PathBuf,
         guard: ExportAudioTempFile,
         writer: BufWriter<std::fs::File>,
-        delivery: AudioProgramDeliveryRuntime,
+        delivery: ExportAudioDelivery,
         loudness: AudioLoudnessAnalyzer,
     }
 
@@ -5973,13 +5982,14 @@ fn render_audio_stems_to_pcm_f32(
         return Err(JobExecutionResult::Cancelled);
     }
     let cache = audio_owner.cache(sample_rate).map_err(JobExecutionResult::Failed)?;
-    let outputs = prepared_audio.outputs().collect::<Vec<_>>();
     let resource_grant = execution_gate.resource_policy().audio_runtime_grant;
+    let native_child_settlement = execution_gate.native_child_settlement_registrar();
 
-    // Measure each immutable Runtime without retaining the others, then admit
-    // the aggregate before the simultaneously-live stem set is constructed.
-    let mut aggregate_footprint = AudioRuntimeResourceFootprint::default();
-    for output in &outputs {
+    // Measure without retaining other Runtimes, then partition the original
+    // job grant. Each live Runtime must admit dynamic overlap in its own slice.
+    let mut footprints = Vec::new();
+    let mut aggregate = AudioRuntimeResourceFootprint::default();
+    for output in prepared_audio.outputs() {
         let delivery = prepare_timeline_audio_delivery(
             timeline,
             output,
@@ -5989,24 +5999,26 @@ fn render_audio_stems_to_pcm_f32(
             &cache,
             resource_grant,
             execution_gate.audio_processor_resolver(),
+            native_child_settlement.as_ref(),
         )
         .map_err(JobExecutionResult::Failed)?;
-        aggregate_footprint =
-            add_audio_runtime_footprint(aggregate_footprint, delivery.resource_footprint())
-                .ok_or_else(|| {
-                    JobExecutionResult::Failed(
-                        "audio-stem aggregate Runtime footprint exceeds addressable capacity"
-                            .to_owned(),
-                    )
-                })?;
+        let footprint = delivery.resource_footprint();
+        aggregate = add_audio_runtime_footprint(aggregate, footprint).ok_or_else(|| {
+            JobExecutionResult::Failed(
+                "audio-stem aggregate Runtime footprint exceeds addressable capacity".to_owned(),
+            )
+        })?;
+        validate_audio_runtime_footprint_grant(aggregate, resource_grant)
+            .map_err(JobExecutionResult::Failed)?;
+        footprints.push(footprint);
     }
-    validate_audio_runtime_footprint_grant(aggregate_footprint, resource_grant)
-        .map_err(JobExecutionResult::Failed)?;
+    let grants =
+        partition_stem_grants(&footprints, resource_grant).map_err(JobExecutionResult::Failed)?;
 
     let (start_sample, total_samples) =
         timeline_audio_sample_range(range, sample_rate).map_err(JobExecutionResult::Failed)?;
-    let mut active = Vec::with_capacity(outputs.len());
-    for output in &outputs {
+    let mut active = Vec::with_capacity(grants.len());
+    for (output, resource_grant) in prepared_audio.outputs().zip(grants) {
         if !execution_gate.wait_at_boundary(ExportProgressPhase::Preparing, cancel) {
             return Err(JobExecutionResult::Cancelled);
         }
@@ -6028,7 +6040,7 @@ fn render_audio_stems_to_pcm_f32(
                 path.display()
             ))
         })?;
-        let mut delivery = prepare_timeline_audio_delivery(
+        let delivery = prepare_timeline_audio_delivery(
             timeline,
             output,
             range,
@@ -6037,17 +6049,24 @@ fn render_audio_stems_to_pcm_f32(
             &cache,
             resource_grant,
             execution_gate.audio_processor_resolver(),
+            native_child_settlement.as_ref(),
         )
         .map_err(JobExecutionResult::Failed)?;
-        if delivery.requires_state_entry() {
-            delivery
-                .enter_state(AudioContinuityEpoch::new(1), start_sample)
-                .map_err(|error| {
-                    JobExecutionResult::Failed(format!(
-                        "failed to enter audio-stem continuity state: {error}"
-                    ))
-                })?;
-        }
+        let mut delivery = ExportAudioDelivery::new(delivery, cancel).map_err(|error| {
+            if cancel.is_canceled() {
+                JobExecutionResult::Cancelled
+            } else {
+                JobExecutionResult::Failed(error)
+            }
+        })?;
+        delivery.enter_state(start_sample, cancel).map_err(|error| {
+            if cancel.is_canceled() {
+                return JobExecutionResult::Cancelled;
+            }
+            JobExecutionResult::Failed(format!(
+                "failed to enter audio-stem continuity state: {error}"
+            ))
+        })?;
         let loudness =
             AudioLoudnessAnalyzer::new(sample_rate, channel_layout).map_err(|error| {
                 JobExecutionResult::Failed(format!(
@@ -6096,7 +6115,11 @@ fn render_audio_stems_to_pcm_f32(
         for stem in &mut active {
             stem.delivery
                 .render_into_cancellable(
-                    AudioRenderRequest { start_sample: chunk_start, frames: chunk_frames },
+                    AudioRenderRequest {
+                        transport_activity: Some(mondrian_core::TimelineTransportActivity::Playing),
+                        start_sample: chunk_start,
+                        frames: chunk_frames,
+                    },
                     &mut pcm[..chunk_samples],
                     cancel,
                 )
@@ -6174,8 +6197,9 @@ fn render_timeline_audio_to_pcm_f32(
         Ok(cache) => cache,
         Err(error) => return JobExecutionResult::Failed(error),
     };
+    let native_child_settlement = execution_gate.native_child_settlement_registrar();
     {
-        let mut delivery = match prepare_timeline_audio_delivery(
+        let delivery = match prepare_timeline_audio_delivery(
             timeline,
             prepared_audio,
             range,
@@ -6184,6 +6208,7 @@ fn render_timeline_audio_to_pcm_f32(
             &cache,
             execution_gate.resource_policy().audio_runtime_grant,
             execution_gate.audio_processor_resolver(),
+            native_child_settlement.as_ref(),
         ) {
             Ok(delivery) => delivery,
             Err(error) => return JobExecutionResult::Failed(error),
@@ -6212,9 +6237,15 @@ fn render_timeline_audio_to_pcm_f32(
                 )),
             };
         }
-        if delivery.requires_state_entry()
-            && let Err(error) = delivery.enter_state(AudioContinuityEpoch::new(1), start_sample)
-        {
+        let mut delivery = match ExportAudioDelivery::new(delivery, cancel) {
+            Ok(delivery) => delivery,
+            Err(_) if cancel.is_canceled() => return JobExecutionResult::Cancelled,
+            Err(error) => return JobExecutionResult::Failed(error),
+        };
+        if let Err(error) = delivery.enter_state(start_sample, cancel) {
+            if cancel.is_canceled() {
+                return JobExecutionResult::Cancelled;
+            }
             return JobExecutionResult::Failed(format!("进入导出音频连续性状态失败: {error}"));
         }
 
@@ -6246,7 +6277,11 @@ fn render_timeline_audio_to_pcm_f32(
             };
             let chunk_samples = chunk_frames * channels;
             if let Err(error) = delivery.render_into_cancellable(
-                AudioRenderRequest { start_sample: chunk_start, frames: chunk_frames },
+                AudioRenderRequest {
+                    transport_activity: Some(mondrian_core::TimelineTransportActivity::Playing),
+                    start_sample: chunk_start,
+                    frames: chunk_frames,
+                },
                 &mut pcm[..chunk_samples],
                 cancel,
             ) {
@@ -7364,6 +7399,8 @@ impl ExportVisualRenderSession {
             max_working_bytes: resource_policy.effect_working_bytes,
             max_gpu_plan_entries: resource_policy.effect_gpu_plan_entries,
             max_gpu_plan_bytes: resource_policy.effect_gpu_plan_bytes,
+            max_processor_instances: resource_policy.effect_processor_instances,
+            max_processor_bytes: resource_policy.effect_processor_bytes,
         });
         composite_scratch.reconfigure_cpu_working_set(resource_policy.cpu_composite_working_set);
         composite_scratch.reconfigure_color_execution(resource_policy.cpu_color_processor_capacity);
@@ -8112,16 +8149,40 @@ fn prepare_export_visual_frame_closure(
                     ),
                 )
                 .map_err(|error| error.to_string())?;
+            for batch in prepared_frame.batches() {
+                if batch.graph().image_scale_requirement()
+                    == mondrian_effects::EffectImageScaleRequirement::Unit
+                {
+                    return Err(format!(
+                        "Unit-scale temporal export source materialization is unsupported for {:?}",
+                        batch.placement()
+                    ));
+                }
+            }
+            // The media decoder owns aspect-preserving output sizing. Bind its
+            // selected plane before temporal demand expansion or byte admission;
+            // the source resolver still validates every actual decoded sample.
+            let prepared_frame = if prepared_frame.has_unbound_temporal_media() {
+                prepared_frame
+                    .bind_temporal_media_image_domains(|input| {
+                        export_temporal_media_image_domain(
+                            &timeline.media,
+                            input.media(),
+                            resolution,
+                            _color_context,
+                        )
+                    })
+                    .map_err(|error| error.to_string())?
+            } else {
+                prepared_frame
+            };
             if prepared_frame.execution_plan().is_empty() {
-                let (render_plan, temporal_batches) = prepared_frame.into_parts();
                 return Ok(PreparedVisualFrameEvaluation::new(
-                    render_plan,
-                    temporal_batches,
+                    prepared_frame,
                     Vec::new(),
                 ));
             }
             let temporal_source_coverage_bytes = prepared_frame.source_coverage_bytes();
-            let (temporal_render_plan, temporal_batches) = prepared_frame.into_parts();
             visual_session
                 .composite_scratch
                 .admit_cpu_active_working_set(
@@ -8135,15 +8196,43 @@ fn prepare_export_visual_frame_closure(
                 })?;
             let effect_frame_plan = prepare_export_effect_frame_plan(
                 program.as_ref(),
-                &temporal_render_plan,
+                prepared_frame.execution_plan(),
                 resolution,
                 &mut visual_session,
             )
             .map_err(|error| error.to_string())?;
-            let (render_plan, heterogeneous) = effect_frame_plan.into_parts();
+            let (render_plan, mut heterogeneous) = effect_frame_plan.into_parts();
+            for route in &mut heterogeneous {
+                let original = &prepared_frame.execution_plan().elements[route.element_index];
+                let (placement, graph) = match original {
+                    TimelineRenderPlanElement::Media(layer) => {
+                        (layer.placement, &layer.effect_graph)
+                    }
+                    TimelineRenderPlanElement::BasicTitle(layer) => {
+                        (layer.placement, &layer.effect_graph)
+                    }
+                    TimelineRenderPlanElement::NestedSequence(layer) => {
+                        (layer.placement, &layer.effect_graph)
+                    }
+                    TimelineRenderPlanElement::SolidColor(layer) => {
+                        (layer.placement, &layer.effect_graph)
+                    }
+                    _ => return Err("heterogeneous source has no original Clip placement".into()),
+                };
+                if let Some(plan) = processor_sources::clip_input_plan(
+                    program,
+                    prepared_frame.request(),
+                    placement,
+                    graph,
+                )? {
+                    route.route.bind_clip_input(plan);
+                }
+            }
+            let prepared_frame = prepared_frame
+                .try_with_execution_plan(render_plan)
+                .map_err(|error| error.to_string())?;
             Ok(PreparedVisualFrameEvaluation::new(
-                render_plan,
-                temporal_batches,
+                prepared_frame,
                 heterogeneous,
             ))
         },
@@ -8625,7 +8714,7 @@ fn render_prepared_visual_node_gpu(
                         &adjustment.effect_graph,
                     )?,
                     opacity: adjustment.opacity,
-                    blend_mode: adjustment.blend_mode,
+                    blend_policy: adjustment.blend_policy,
                     frame_seed: adjustment.frame_seed,
                 }
             }
@@ -8635,7 +8724,7 @@ fn render_prepared_visual_node_gpu(
                     &grade.effect_graph,
                 )?,
                 opacity: 1.0,
-                blend_mode: mondrian_core::BlendMode::Normal,
+                blend_policy: mondrian_effects::EffectPassBlendPolicy::Mix,
                 frame_seed: grade.frame_seed,
             },
             TimelineRenderPlanElement::CrossDissolve(transition) => {
@@ -9023,6 +9112,7 @@ fn render_prepared_visual_node_into(
             width,
             height,
             color_context.working_color_space(),
+            materialization.image_sampling(resolution).map_err(|error| error.to_string())?,
             context.alpha_mode,
         );
         return Ok(());
@@ -9179,7 +9269,16 @@ fn render_prepared_visual_node_into(
                 }
             }
             TimelineRenderPlanElement::SolidColor(solid) => {
-                HeterogeneousCpuPrefixSource::solid_color(route.route.frame_extent(), solid.color)
+                HeterogeneousCpuPrefixSource::solid_color(
+                    route.route.frame_extent(),
+                    materialization
+                        .image_sampling(Resolution {
+                            width: route.route.frame_extent().width(),
+                            height: route.route.frame_extent().height(),
+                        })
+                        .map_err(|error| error.to_string())?,
+                    solid.color,
+                )
             }
             TimelineRenderPlanElement::Adjustment(_)
             | TimelineRenderPlanElement::TimelineGrade(_)
@@ -9190,13 +9289,22 @@ fn render_prepared_visual_node_into(
                 ));
             }
         };
+        let mut sources = ExportProcessorSources::new(
+            node.evaluation().execution_request(),
+            context.media,
+            &color_context,
+            &decode_cache,
+            context.input_color_counts.as_deref_mut(),
+            context.stage_diagnostics.as_deref_mut(),
+        );
         let output = context
             .visual_session
-            .execute_heterogeneous_element(
+            .execute_heterogeneous_element_with_sources(
                 route,
                 input,
                 color_context.working_color_space(),
                 context.cancellation,
+                Some(&mut sources),
             )
             .map_err(|error| error.to_string())?;
         let slot = heterogeneous_media.get_mut(route.element_index).ok_or_else(|| {
@@ -9216,7 +9324,7 @@ fn render_prepared_visual_node_into(
                     TimelineAdjustmentLayer {
                         effect_graph: adjustment.effect_graph.clone(),
                         opacity: adjustment.opacity,
-                        blend_mode: Some(adjustment.blend_mode),
+                        blend_policy: adjustment.blend_policy,
                         frame_seed: adjustment.frame_seed,
                     },
                 ));
@@ -9226,7 +9334,7 @@ fn render_prepared_visual_node_into(
                     TimelineAdjustmentLayer {
                         effect_graph: grade.effect_graph.clone(),
                         opacity: 1.0,
-                        blend_mode: None,
+                        blend_policy: mondrian_effects::EffectPassBlendPolicy::Mix,
                         frame_seed: grade.frame_seed,
                     },
                 ));
@@ -9266,6 +9374,12 @@ fn render_prepared_visual_node_into(
                     transform,
                     effect_graph: media.effect_graph.clone(),
                     frame_seed: media.frame_seed,
+                    processor_input_plan: processor_sources::clip_input_plan(
+                        node.program(),
+                        node.evaluation().execution_request(),
+                        media.placement,
+                        &media.effect_graph,
+                    )?,
                 }));
             }
             TimelineRenderPlanElement::BasicTitle(title) => {
@@ -9280,6 +9394,12 @@ fn render_prepared_visual_node_into(
                     transform: resolved.transform,
                     effect_graph: title.effect_graph.clone(),
                     frame_seed: title.frame_seed,
+                    processor_input_plan: processor_sources::clip_input_plan(
+                        node.program(),
+                        node.evaluation().execution_request(),
+                        title.placement,
+                        &title.effect_graph,
+                    )?,
                 }));
             }
             TimelineRenderPlanElement::NestedSequence(nested) => {
@@ -9316,6 +9436,12 @@ fn render_prepared_visual_node_into(
                     transform,
                     effect_graph: nested.effect_graph.clone(),
                     frame_seed: nested.frame_seed,
+                    processor_input_plan: processor_sources::clip_input_plan(
+                        node.program(),
+                        node.evaluation().execution_request(),
+                        nested.placement,
+                        &nested.effect_graph,
+                    )?,
                 }));
             }
             TimelineRenderPlanElement::SolidColor(solid) => {
@@ -9335,6 +9461,13 @@ fn render_prepared_visual_node_into(
                         transform,
                         effect_graph: solid.effect_graph.clone(),
                         frame_seed: solid.frame_seed,
+
+                        processor_input_plan: processor_sources::clip_input_plan(
+                            node.program(),
+                            node.evaluation().execution_request(),
+                            solid.placement,
+                            &solid.effect_graph,
+                        )?,
                     }));
                 } else {
                     composite_elements.push(TimelineCompositeElement::SolidColor(
@@ -9345,6 +9478,13 @@ fn render_prepared_visual_node_into(
                             transform,
                             effect_graph: solid.effect_graph.clone(),
                             frame_seed: solid.frame_seed,
+
+                            processor_input_plan: processor_sources::clip_input_plan(
+                                node.program(),
+                                node.evaluation().execution_request(),
+                                solid.placement,
+                                &solid.effect_graph,
+                            )?,
                         },
                     ));
                 }
@@ -9385,6 +9525,7 @@ fn render_prepared_visual_node_into(
             width,
             height,
             color_context.working_color_space(),
+            materialization.image_sampling(resolution).map_err(|error| error.to_string())?,
             context.alpha_mode,
         );
         return Ok(());
@@ -9404,17 +9545,62 @@ fn render_prepared_visual_node_into(
     } else {
         TimelineCompositeOptions::default()
     };
-    let rendered = composite_timeline_elements_color_frame_with_diagnostics(
-        width,
-        height,
-        &composite_elements,
-        composite_options,
-        TimelineEffectColorRuntime::new(
-            color_context.engine(),
-            color_context.working_color_space(),
-        ),
-        &mut context.visual_session.composite_scratch,
-    )
+    let mut checkpoint = || {
+        context
+            .cancellation
+            .is_canceled()
+            .then_some(mondrian_effects::EffectProcessorStopReason::Canceled)
+    };
+    let mut control = mondrian_effects::EffectProcessorControl::new(&mut checkpoint);
+    let rendered = {
+        let mut sources = ExportProcessorSources::new(
+            node.evaluation().execution_request(),
+            context.media,
+            &color_context,
+            &decode_cache,
+            context.input_color_counts.as_deref_mut(),
+            context.stage_diagnostics.as_deref_mut(),
+        );
+        let authority = sources.authority.clone();
+        let mut resolve =
+            |plan: &mondrian_renderer::PreparedTimelineClipInputPlan,
+             batch: &TimelineTemporalDemandBatch,
+             current: Option<&CpuColorFrame>,
+             space: WorkingColorSpace,
+             admit: &mut dyn FnMut(
+                usize,
+            ) -> Result<
+                (),
+                mondrian_effects::EffectTemporalExecutionError,
+            >,
+             control: &mut mondrian_effects::EffectProcessorControl<'_>| {
+                sources.resolve(
+                    &mut context.visual_session.decode_context,
+                    plan,
+                    batch,
+                    current,
+                    space,
+                    admit,
+                    control,
+                )
+            };
+        let mut inputs =
+            mondrian_renderer::TimelineProcessorInputExecution::new(authority, &mut resolve);
+        mondrian_renderer::composite_timeline_elements_color_frame_with_inputs(
+            width,
+            height,
+            &composite_elements,
+            composite_options,
+            TimelineEffectColorRuntime::new(
+                color_context.engine(),
+                color_context.working_color_space(),
+                materialization.image_sampling(resolution).map_err(|error| error.to_string())?,
+            ),
+            &mut context.visual_session.composite_scratch,
+            &mut control,
+            Some(&mut inputs),
+        )
+    }
     .map_err(|error| format!("timeline composite failed: {error}"))?;
     if let Some(diagnostics) = context.composite_diagnostics.as_deref_mut() {
         diagnostics.accumulate(rendered.diagnostics);
@@ -9593,6 +9779,115 @@ fn decode_export_media_plan(
     cancellation: &ExecutionCancellationToken,
     route: ExportDecodedSourceRoute,
 ) -> Result<Arc<DecodedVideoLayer>, String> {
+    let (key, request) = prepare_export_media_decode(
+        media_dependencies,
+        media,
+        width,
+        height,
+        color_context,
+        input_color_counts,
+        route,
+    )?;
+    if let Some(decoded) = cache.get(&key) {
+        if decoded.route() != route {
+            return Err("Export decode cache route disagrees with its visual owner".to_owned());
+        }
+        if decoded.source_fingerprint != key.source_fingerprint
+            || decoded.video_stream_index != key.video_stream_index
+        {
+            return Err(format!(
+                "asset={} export decode cache evidence diverged from admitted source revision",
+                media.asset_id
+            ));
+        }
+        return Ok(Arc::clone(decoded));
+    }
+    let native_import_support = if route == ExportDecodedSourceRoute::GpuInput {
+        visual_session
+            .gpu_output
+            .native_import_support(&mut visual_session.decode_context)?
+    } else {
+        None
+    };
+    let decoded = decode_video_layer_scaled(
+        request,
+        ExportVideoLayerDecodeExecutionContext {
+            native_import_support: native_import_support.as_ref(),
+            color_session: visual_session.composite_scratch.color_execution_mut(),
+            decode_context: &mut visual_session.decode_context,
+            cancellation,
+            route,
+        },
+    )?;
+    if decoded.source_fingerprint != key.source_fingerprint
+        || decoded.video_stream_index != key.video_stream_index
+    {
+        return Err(format!(
+            "asset={} export decode result did not prove the cache-authorizing source revision",
+            media.asset_id
+        ));
+    }
+    if let Some(diagnostics) = stage_diagnostics {
+        diagnostics.accumulate(decoded.stage_diagnostics);
+    }
+    cache.insert(key, Arc::clone(&decoded));
+    Ok(decoded)
+}
+
+fn export_temporal_media_image_domain(
+    media_dependencies: &HashMap<AssetId, crate::preset::ExportMediaDependency>,
+    media: &TimelineMediaPlan,
+    resolution: Resolution,
+    color_context: &ProgramColorContext,
+) -> Result<
+    (EffectFrameExtent, mondrian_core::ImageSampling),
+    mondrian_renderer::TimelineTemporalPreparationError,
+> {
+    let invalid =
+        |reason: String| mondrian_renderer::TimelineTemporalPreparationError::SourceSampling {
+            clip_id: media.placement.clip_id,
+            reason,
+        };
+    let (_, request) = prepare_export_media_decode(
+        media_dependencies,
+        media,
+        resolution.width,
+        resolution.height,
+        color_context,
+        None,
+        ExportDecodedSourceRoute::CpuWorking,
+    )
+    .map_err(invalid)?;
+    let (width, height) = mondrian_media::preview::fit_target_size(
+        request.source_resolution.width,
+        request.source_resolution.height,
+        Some(request.decode_resolution.width),
+        Some(request.decode_resolution.height),
+    );
+    let sampling = request
+        .picture_geometry
+        .image_sampling(Resolution { width, height })
+        .map_err(|error| invalid(error.to_string()))?;
+    Ok((EffectFrameExtent::new(width, height), sampling))
+}
+
+/// Freeze a source request without borrowing the active compositor Session.
+/// Both planned materialization and late processor input use this same lowering.
+#[allow(clippy::too_many_arguments)]
+fn prepare_export_media_decode<'a>(
+    media_dependencies: &'a HashMap<AssetId, crate::preset::ExportMediaDependency>,
+    media: &TimelineMediaPlan,
+    width: u32,
+    height: u32,
+    color_context: &ProgramColorContext,
+    input_color_counts: Option<&mut InputColorResolutionSourceCounts>,
+    route: ExportDecodedSourceRoute,
+) -> Result<(ExportDecodeCacheKey, ExportVideoLayerDecodeRequest<'a>), String> {
+    let unit = media.effect_graph.image_scale_requirement()
+        == mondrian_effects::EffectImageScaleRequirement::Unit;
+    if unit && route != ExportDecodedSourceRoute::CpuWorking {
+        return Err("Unit-scale media Effects require the complete CPU source route".to_owned());
+    }
     let dependency = media_dependencies
         .get(&media.asset_id)
         .ok_or_else(|| format!("导出快照缺少素材依赖: {}", media.asset_id))?;
@@ -9638,6 +9933,11 @@ fn decode_export_media_plan(
             media.asset_id
         )
     })?;
+    let decode_resolution = if unit {
+        source_resolution
+    } else {
+        Resolution { width, height }
+    };
     let key = ExportDecodeCacheKey::new(
         media.asset_id,
         dependency,
@@ -9645,64 +9945,24 @@ fn decode_export_media_plan(
         source_contract,
         preparation_intent.clone(),
         media.alpha_interpretation,
-        Resolution { width, height },
+        decode_resolution,
         source_resolution,
         picture_geometry,
     )?;
-    if let Some(decoded) = cache.get(&key) {
-        if decoded.route() != route {
-            return Err("Export decode cache route disagrees with its visual owner".to_owned());
-        }
-        if decoded.source_fingerprint != dependency.source_fingerprint
-            || decoded.video_stream_index != key.video_stream_index
-        {
-            return Err(format!(
-                "asset={} export decode cache evidence diverged from admitted source revision",
-                media.asset_id
-            ));
-        }
-        return Ok(Arc::clone(decoded));
-    }
-    let native_import_support = if route == ExportDecodedSourceRoute::GpuInput {
-        visual_session
-            .gpu_output
-            .native_import_support(&mut visual_session.decode_context)?
-    } else {
-        None
-    };
-    let decoded = decode_video_layer_scaled(
+    Ok((
+        key,
         ExportVideoLayerDecodeRequest {
             asset_id: media.asset_id,
             dependency,
             source_sample: media.source_sample,
-            decode_resolution: Resolution { width, height },
+            decode_resolution,
             source_resolution,
             picture_geometry,
             source_color: source_contract,
             alpha_interpretation: media.alpha_interpretation,
             preparation_intent,
         },
-        ExportVideoLayerDecodeExecutionContext {
-            native_import_support: native_import_support.as_ref(),
-            color_session: visual_session.composite_scratch.color_execution_mut(),
-            decode_context: &mut visual_session.decode_context,
-            cancellation,
-            route,
-        },
-    )?;
-    if decoded.source_fingerprint != key.source_fingerprint
-        || decoded.video_stream_index != key.video_stream_index
-    {
-        return Err(format!(
-            "asset={} export decode result did not prove the cache-authorizing source revision",
-            media.asset_id
-        ));
-    }
-    if let Some(diagnostics) = stage_diagnostics {
-        diagnostics.accumulate(decoded.stage_diagnostics);
-    }
-    cache.insert(key, Arc::clone(&decoded));
-    Ok(decoded)
+    ))
 }
 
 /// Exact decode and renderer-preparation contract selected for one export source.
@@ -9852,6 +10112,7 @@ fn render_export_basic_title_plan(
             materialization.title_safe_margin(),
             target_resolution,
             working_color_space,
+            materialization.sample_aspect_ratio(),
         )
         .map_err(|error| format!("Basic Title generation failed closed: {error}"))?;
     let transform = project_basic_title_transform(
@@ -9870,6 +10131,8 @@ fn resolve_export_temporal_batches(
     batches: &[TimelineTemporalDemandBatch],
     decode_cache: &mut HashMap<ExportDecodeCacheKey, Arc<DecodedVideoLayer>>,
 ) -> Result<HashMap<TimelineClipExecutionRef, PreparedExportTemporalLayer>, String> {
+    use mondrian_effects::{EffectProcessorControl, EffectTemporalExecutionError};
+
     let node = inputs.node();
     let materialization = node.materialization_contract();
     let color_context = node.color_context().clone();
@@ -9925,11 +10188,56 @@ fn resolve_export_temporal_batches(
             resolved,
         )
         .map_err(|error| format!("export temporal frame set is invalid: {error}"))?;
-        let output = context
-            .visual_session
-            .composite_scratch
-            .execute_prepared_temporal_batch(batch, &mut prepared)
-            .map_err(|error| format!("export temporal Effect execution failed: {error}"))?;
+        let owner = node.evaluation().execution_request();
+        let plan = processor_sources::clip_input_plan(
+            node.program(),
+            owner,
+            batch.placement(),
+            batch.graph(),
+        )?;
+        let mut checkpoint = || {
+            context
+                .cancellation
+                .is_canceled()
+                .then_some(mondrian_effects::EffectProcessorStopReason::Canceled)
+        };
+        let mut control = EffectProcessorControl::new(&mut checkpoint);
+        control.bind_observation(context.visual_session.composite_scratch.processor_observation());
+        let session = &mut context.visual_session;
+        let scratch = &mut session.composite_scratch;
+        let mut run = |control: &mut EffectProcessorControl<'_>| {
+            scratch.execute_prepared_temporal_batch_with_control(batch, &mut prepared, control)
+        };
+        let output = if let Some(plan) = plan {
+            let mut sources = ExportProcessorSources::new(
+                owner,
+                context.media,
+                &color_context,
+                decode_cache,
+                context.input_color_counts.as_deref_mut(),
+                context.stage_diagnostics.as_deref_mut(),
+            );
+            let authority = sources.authority.clone();
+            let mut resolve =
+                |batch: &TimelineTemporalDemandBatch,
+                 admit: &mut dyn FnMut(usize) -> Result<(), EffectTemporalExecutionError>,
+                 control: &mut EffectProcessorControl<'_>| {
+                    sources.resolve(
+                        &mut session.decode_context,
+                        &plan,
+                        batch,
+                        None,
+                        color_context.working_color_space(),
+                        admit,
+                        control,
+                    )
+                };
+            plan.with_input_service(&authority, &mut resolve, &mut control, run)
+                .map_err(|error| format!("export temporal input service failed: {error}"))?
+        } else {
+            run(&mut control)
+        }
+        .map_err(|error| format!("export temporal Effect execution failed: {error}"))?;
         let tile = output.tile();
         if tile.roi() != tile.frame_extent().full_frame_roi() {
             return Err(
@@ -9938,6 +10246,8 @@ fn resolve_export_temporal_batches(
             );
         }
         let frame = CpuColorFrame::working(WorkingRgbaF32Frame {
+            alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
+            sampling: tile.sampling(),
             width: tile.frame_extent().width(),
             height: tile.frame_extent().height(),
             data: tile.pixels().to_vec(),
@@ -9973,8 +10283,6 @@ fn resolve_export_temporal_source(
     if context.cancellation.is_canceled() {
         return Err("export temporal source resolution was canceled".to_owned());
     }
-    let identity = identity_compiled_effect_graph()
-        .ok_or_else(|| "renderer could not prepare the identity Effect graph".to_owned())?;
     let (frame, source_resolution, source_to_display_affine) = match &demand.source {
         TimelineTemporalSource::Media {
             asset_id,
@@ -9996,7 +10304,7 @@ fn resolve_export_temporal_source(
                 opacity: 1.0,
                 blend_mode: mondrian_core::BlendMode::Normal,
                 transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
-                effect_graph: Arc::clone(&identity),
+                effect_graph: Arc::clone(batch.graph()),
                 frame_seed: demand.effect_request.time().numerator(),
                 auto_tone_map: *auto_tone_map,
             };
@@ -10058,6 +10366,13 @@ fn resolve_export_temporal_source(
             let pixel = [color.r, color.g, color.b, color.a];
             (
                 CpuColorFrame::working(WorkingRgbaF32Frame {
+                    alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
+                    sampling: materialization
+                        .image_sampling(Resolution {
+                            width: extent.width(),
+                            height: extent.height(),
+                        })
+                        .map_err(|error| error.to_string())?,
                     width: extent.width(),
                     height: extent.height(),
                     data: vec![pixel; extent.width() as usize * extent.height() as usize],
@@ -10080,11 +10395,9 @@ fn resolve_export_temporal_source(
             expected.height()
         ));
     }
-    if descriptor.color_space.working() != Some(color_context.working_color_space())
-        || descriptor.alpha != mondrian_renderer::ColorFrameAlpha::StraightCoverage
-    {
+    if descriptor.color_space.working() != Some(color_context.working_color_space()) {
         return Err(format!(
-            "Clip {} temporal source did not resolve to parent working-space straight alpha",
+            "Clip {} temporal source did not resolve to parent working-space image contract",
             batch.placement().clip_id
         ));
     }
@@ -10097,6 +10410,13 @@ fn export_temporal_tile(
 ) -> Result<EffectFrameTileF32, String> {
     let roi = request.input_roi().region();
     let source = frame.rgba_f32();
+    if source.sampling != request.sampling() {
+        return Err(mondrian_effects::EffectFloatFrameError::SamplingMismatch {
+            expected: request.sampling(),
+            actual: source.sampling,
+        }
+        .to_string());
+    }
     let mut pixels = Vec::with_capacity(roi.width() as usize * roi.height() as usize);
     for y in roi.y()..roi.y().saturating_add(roi.height()) {
         let start = y as usize * source.width as usize + roi.x() as usize;
@@ -10105,11 +10425,23 @@ fn export_temporal_tile(
             .data
             .get(start..end)
             .ok_or_else(|| "temporal ROI exceeded the resolved export frame".to_owned())?;
-        pixels.extend_from_slice(row);
+        for sample in row {
+            pixels.push(
+                mondrian_effects::convert_alpha_sample(
+                    *sample,
+                    source.alpha,
+                    mondrian_core::ColorFrameAlpha::StraightCoverage,
+                )
+                .map_err(|error| {
+                    format!("temporal Coverage source materialization refused: {error}")
+                })?,
+            );
+        }
     }
     EffectFrameTileF32::new(
         request.time(),
         request.frame_extent(),
+        source.sampling,
         roi,
         request.time().numerator(),
         pixels,
@@ -10394,6 +10726,13 @@ fn lower_export_transition_input<'a>(
                 transform,
                 effect_graph: media.effect_graph.clone(),
                 frame_seed: media.frame_seed,
+
+                processor_input_plan: processor_sources::clip_input_plan(
+                    export_visual_node(closure, parent_node_id)?.program(),
+                    export_visual_node(closure, parent_node_id)?.evaluation().execution_request(),
+                    media.placement,
+                    &media.effect_graph,
+                )?,
             })
         }
         (
@@ -10422,6 +10761,13 @@ fn lower_export_transition_input<'a>(
                 transform,
                 effect_graph: nested.effect_graph.clone(),
                 frame_seed: nested.frame_seed,
+
+                processor_input_plan: processor_sources::clip_input_plan(
+                    export_visual_node(closure, parent_node_id)?.program(),
+                    export_visual_node(closure, parent_node_id)?.evaluation().execution_request(),
+                    nested.placement,
+                    &nested.effect_graph,
+                )?,
             })
         }
         (
@@ -10434,6 +10780,13 @@ fn lower_export_transition_input<'a>(
             transform: resolved.transform,
             effect_graph: title.effect_graph.clone(),
             frame_seed: title.frame_seed,
+
+            processor_input_plan: processor_sources::clip_input_plan(
+                export_visual_node(closure, parent_node_id)?.program(),
+                export_visual_node(closure, parent_node_id)?.evaluation().execution_request(),
+                title.placement,
+                &title.effect_graph,
+            )?,
         }),
         (
             TimelineTransitionInputPlan::SolidColor(solid),
@@ -10454,6 +10807,13 @@ fn lower_export_transition_input<'a>(
                 transform,
                 effect_graph: solid.effect_graph.clone(),
                 frame_seed: solid.frame_seed,
+
+                processor_input_plan: processor_sources::clip_input_plan(
+                    export_visual_node(closure, parent_node_id)?.program(),
+                    export_visual_node(closure, parent_node_id)?.evaluation().execution_request(),
+                    solid.placement,
+                    &solid.effect_graph,
+                )?,
             })
         }
         (plan, ResolvedExportTransitionInput::Temporal(temporal)) => {
@@ -10492,6 +10852,8 @@ fn lower_export_transition_input<'a>(
                     "renderer could not prepare the identity Effect graph".to_owned()
                 })?,
                 frame_seed: 0,
+
+                processor_input_plan: None,
             })
         }
         _ => {
@@ -10534,11 +10896,14 @@ fn finish_empty_sequence_target(
     width: u32,
     height: u32,
     working_color_space: WorkingColorSpace,
+    sampling: mondrian_core::ImageSampling,
     alpha_mode: ExportAlphaMode,
 ) {
     match target {
         SequenceRenderTarget::Working(output) => {
             **output = Some(CpuColorFrame::working(WorkingRgbaF32Frame {
+                alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
+                sampling,
                 width,
                 height,
                 data: vec![[0.0, 0.0, 0.0, 0.0]; width as usize * height as usize],
@@ -10701,26 +11066,44 @@ fn decode_video_layer_scaled(
     let decode_cancellation = cancellation.clone();
     let outcome =
         decode_context.decode_cancellable(media_request, move || decode_cancellation.is_canceled());
-    let (decoded, decode_diagnostics) = match outcome {
+    let (decoded, decode_diagnostics, sampling) = match outcome {
         Ok(PreviewDecodeOutcome::Frame(frame)) => {
             let diagnostics = frame.diagnostics;
+            let sampling = picture_geometry
+                .image_sampling(Resolution { width: frame.width, height: frame.height })
+                .map_err(|error| {
+                    format!("asset={asset_id} invalid decoded image sampling: {error}")
+                })?;
             (
                 mondrian_renderer::DecodedCpuSourceFrame::from(frame),
                 diagnostics,
+                sampling,
             )
         }
         Ok(PreviewDecodeOutcome::FloatFrame(frame)) => {
             let diagnostics = frame.diagnostics;
+            let sampling = picture_geometry
+                .image_sampling(Resolution { width: frame.width, height: frame.height })
+                .map_err(|error| {
+                    format!("asset={asset_id} invalid decoded image sampling: {error}")
+                })?;
             (
                 mondrian_renderer::DecodedCpuSourceFrame::from(frame),
                 diagnostics,
+                sampling,
             )
         }
         Ok(PreviewDecodeOutcome::Unorm16Frame(frame)) => {
             let diagnostics = frame.diagnostics;
+            let sampling = picture_geometry
+                .image_sampling(Resolution { width: frame.width, height: frame.height })
+                .map_err(|error| {
+                    format!("asset={asset_id} invalid decoded image sampling: {error}")
+                })?;
             (
                 mondrian_renderer::DecodedCpuSourceFrame::from(frame),
                 diagnostics,
+                sampling,
             )
         }
         Ok(PreviewDecodeOutcome::CpuYuvFrame(frame)) => {
@@ -10788,16 +11171,20 @@ fn decode_video_layer_scaled(
             ));
         }
     };
-    let source: PreparedSourceFrame =
-        prepare_decoded_cpu_source_frame(decoded, alpha_interpretation, preparation_intent)
-            .map_err(|err| {
-                format!(
-                    "asset={} path={} source frame preparation failed: {}",
-                    asset_id,
-                    path.display(),
-                    err
-                )
-            })?;
+    let source: PreparedSourceFrame = prepare_decoded_cpu_source_frame(
+        decoded,
+        alpha_interpretation,
+        preparation_intent,
+        sampling,
+    )
+    .map_err(|err| {
+        format!(
+            "asset={} path={} source frame preparation failed: {}",
+            asset_id,
+            path.display(),
+            err
+        )
+    })?;
     let (pixels, stage_diagnostics) = match route {
         ExportDecodedSourceRoute::CpuWorking => {
             let is_data_texture = source.is_data_texture();
@@ -10891,6 +11278,10 @@ pub(crate) use helpers::*;
 
 #[cfg(test)]
 mod tests {
+    mod native_reprepare;
+    mod native_transport_output;
+    mod processor_sources;
+
     #[test]
     fn smart_render_unclosed_probe_cannot_request_pixel_fallback() {
         for canceled in [false, true] {
@@ -11430,6 +11821,20 @@ mod tests {
         width: u32,
         height: u32,
     ) -> mondrian_renderer::CpuColorFrame {
+        test_working_frame_with_sampling(
+            rgba,
+            width,
+            height,
+            mondrian_core::ImageSampling::UNIT_SQUARE,
+        )
+    }
+
+    fn test_working_frame_with_sampling(
+        rgba: &[u8],
+        width: u32,
+        height: u32,
+        sampling: mondrian_core::ImageSampling,
+    ) -> mondrian_renderer::CpuColorFrame {
         let source = mondrian_renderer::CpuEncodedColorFrame::source_rgba8(
             width,
             height,
@@ -11444,6 +11849,7 @@ mod tests {
         mondrian_renderer::color::SourceColorModule::execute_cpu(
             &mondrian_renderer::CpuSourceColorFrame::from(source),
             &context.media_input(false),
+            sampling,
             &mut session,
         )
         .expect("test input transform")
@@ -11493,10 +11899,10 @@ mod tests {
     fn heterogeneous_cpu_dag_graph() -> Arc<CompiledEffectGraph> {
         static NEXT_DEFINITION_ID: AtomicUsize = AtomicUsize::new(1);
         let definition_id = NEXT_DEFINITION_ID.fetch_add(1, Ordering::Relaxed);
-        let cpu_type = mondrian_effects::EffectType::Plugin(format!(
+        let cpu_type = mondrian_effects::EffectType::External(format!(
             "test.export.heterogeneous.cpu-dag.{definition_id}.cpu"
         ));
-        let gpu_type = mondrian_effects::EffectType::Plugin(format!(
+        let gpu_type = mondrian_effects::EffectType::External(format!(
             "test.export.heterogeneous.cpu-dag.{definition_id}.gpu"
         ));
         mondrian_effects::register_effect_definition(
@@ -11651,7 +12057,12 @@ mod tests {
                 materialization.residency().format().domain() == EffectColorDomain::AlphaMask
             })
         );
-        assert_eq!(route.cpu_frontier_retained_bytes(), 2 * 4 * 3 * 16);
+        assert_eq!(
+            route.cpu_frontier_retained_bytes(),
+            2 * 4 * 3 * 16
+                + u64::try_from(mondrian_effects::EffectProcessorFeedbackBatch::storage_bytes())
+                    .expect("feedback storage fits retained-byte domain")
+        );
         assert_eq!(session.heterogeneous_route_contracts.len(), 1);
     }
 
@@ -11895,18 +12306,31 @@ mod tests {
         );
         session.route_contracts_sealed = true;
         session.composite_scratch.bind_effect_execution_generation(generation);
-        let input = test_working_frame(
+        let sampling = mondrian_core::ImageSampling::new(
+            mondrian_core::SampleAspectRatio::new(4, 3).unwrap(),
+            [Rational::new(1, 2), Rational::new(2, 3)],
+        )
+        .unwrap();
+        let input = test_working_frame_with_sampling(
             &[32, 96, 224, 255].repeat(12),
             extent.width(),
             extent.height(),
+            sampling,
         );
         let working_color_space = mondrian_timeline::sequence::SequenceSettings::default()
             .color
             .working_color_space;
         let expected = apply_compiled_effect_graph_rgba_f32(
-            &input.rgba_f32().data,
-            extent.width(),
-            extent.height(),
+            mondrian_effects::EffectFloatFrameView::new(
+                mondrian_effects::EffectFrameExtent::new(extent.width(), extent.height()),
+                mondrian_effects::EffectValueFormat::new(
+                    mondrian_effects::EffectWorkingPrecision::Float32,
+                    mondrian_effects::EffectColorDomain::SceneLinearRgb,
+                    mondrian_core::ColorFrameAlpha::StraightCoverage,
+                ),
+                input.rgba_f32().sampling,
+                &input.rgba_f32().data,
+            ),
             &graph,
             frame_seed,
         )
@@ -11926,6 +12350,7 @@ mod tests {
                 &ExecutionCancellationToken::new(),
             )
             .expect("complete Export heterogeneous route");
+        assert_eq!(output.rgba_f32().sampling, sampling);
         assert_eq!(output.descriptor(), input.descriptor());
         for (actual, expected) in output.rgba_f32().data.iter().zip(expected.iter()) {
             for channel in 0..4 {
@@ -11950,6 +12375,91 @@ mod tests {
                 .working_color_space,
             working_color_space
         );
+    }
+
+    #[test]
+    fn export_temporal_roi_preserves_source_sampling_and_refuses_target_relabel() {
+        let sampling = mondrian_core::ImageSampling::new(
+            mondrian_core::SampleAspectRatio::new(3, 2).unwrap(),
+            [Rational::new(1, 2), Rational::new(2, 3)],
+        )
+        .unwrap();
+        let pixels = vec![
+            [0.0, 0.0, 0.0, 1.0],
+            [0.125, 0.0, 0.0, 1.0],
+            [0.25, 0.0, 0.0, 1.0],
+            [0.375, 0.0, 0.0, 1.0],
+            [0.0, 0.25, 0.0, 1.0],
+            [0.5, 0.25, 0.125, 0.5],
+            [0.75, 0.25, 0.25, 1.0],
+            [1.0, 0.25, 0.0, 1.0],
+            [0.0, 0.5, 0.0, 1.0],
+            [0.25, 0.5, 0.0, 1.0],
+            [0.5, 0.5, 0.0, 1.0],
+            [0.75, 0.5, 0.0, 1.0],
+        ];
+        let frame = CpuColorFrame::working(WorkingRgbaF32Frame {
+            sampling,
+            alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
+            width: 4,
+            height: 3,
+            data: pixels.clone(),
+            color_space: test_working_color_space(),
+        });
+        let graph = compile_reference_effect_graph(&EffectRenderPlan {
+            ops: vec![EffectRenderOp::TemporalFrameBlend {
+                sample_offset: TimelineTime::new(1, 2).unwrap(),
+                mix: 0.25,
+            }],
+        })
+        .unwrap();
+        let extent = EffectFrameExtent::new(4, 3);
+        let request = |grid| {
+            mondrian_effects::EffectTemporalExecutionRequest::new(
+                19,
+                mondrian_effects::EffectExecutionContinuity::Continuous,
+                TimelineTime::ZERO,
+                extent,
+                grid,
+                mondrian_effects::EffectPixelRoi::new(1, 1, 2, 1),
+                ExecutionCancellationToken::new(),
+            )
+        };
+        let demands =
+            mondrian_effects::collect_temporal_frame_demands(&graph, &request(sampling)).unwrap();
+        assert_eq!(demands.requests().len(), 2);
+        let current = demands
+            .requests()
+            .iter()
+            .find(|demand| demand.time() == TimelineTime::ZERO)
+            .copied()
+            .expect("finite blend demands the current source frame");
+        let tile = export_temporal_tile(&frame, current).unwrap();
+        assert_eq!(tile.sampling(), sampling);
+        assert_eq!(
+            tile.roi(),
+            mondrian_effects::EffectPixelRoi::new(1, 1, 2, 1)
+        );
+        assert_eq!(
+            tile.pixels(),
+            &[[0.5, 0.25, 0.125, 0.5], [0.75, 0.25, 0.25, 1.0]]
+        );
+        let incompatible = mondrian_effects::collect_temporal_frame_demands(
+            &graph,
+            &request(mondrian_core::ImageSampling::UNIT_SQUARE),
+        )
+        .unwrap();
+        let incompatible_current = incompatible
+            .requests()
+            .iter()
+            .find(|demand| demand.time() == TimelineTime::ZERO)
+            .copied()
+            .expect("finite blend demands the current source frame");
+        let error = export_temporal_tile(&frame, incompatible_current)
+            .expect_err("source pixels must not acquire the target sampling label");
+        assert!(error.contains("sampling"));
+        assert_eq!(frame.rgba_f32().sampling, sampling);
+        assert_eq!(frame.rgba_f32().data, pixels);
     }
 
     #[test]
@@ -11979,9 +12489,16 @@ mod tests {
         session.composite_scratch.bind_effect_execution_generation(generation);
         let source = vec![[color.r, color.g, color.b, color.a]; 12];
         let expected = apply_compiled_effect_graph_rgba_f32(
-            &source,
-            extent.width(),
-            extent.height(),
+            mondrian_effects::EffectFloatFrameView::new(
+                mondrian_effects::EffectFrameExtent::new(extent.width(), extent.height()),
+                mondrian_effects::EffectValueFormat::new(
+                    mondrian_effects::EffectWorkingPrecision::Float32,
+                    mondrian_effects::EffectColorDomain::SceneLinearRgb,
+                    mondrian_core::ColorFrameAlpha::StraightCoverage,
+                ),
+                mondrian_core::ImageSampling::UNIT_SQUARE,
+                &source,
+            ),
             &graph,
             frame_seed,
         )
@@ -11996,7 +12513,11 @@ mod tests {
         let output = session
             .execute_heterogeneous_element(
                 &route,
-                HeterogeneousCpuPrefixSource::solid_color(extent, color),
+                HeterogeneousCpuPrefixSource::solid_color(
+                    extent,
+                    mondrian_core::ImageSampling::UNIT_SQUARE,
+                    color,
+                ),
                 test_working_color_space(),
                 &ExecutionCancellationToken::new(),
             )
@@ -12048,6 +12569,7 @@ mod tests {
                 &route,
                 HeterogeneousCpuPrefixSource::solid_color(
                     extent,
+                    mondrian_core::ImageSampling::UNIT_SQUARE,
                     mondrian_core::Color { r: 0.2, g: 0.4, b: 0.7, a: 1.0 },
                 ),
                 test_working_color_space(),
@@ -14289,6 +14811,167 @@ mod tests {
 
         assert!(error.contains("data-texture export requires RGB source sampling"));
         assert!(error.contains("Yuv420p"));
+    }
+
+    #[test]
+    fn unit_media_export_decodes_original_odd_grid_before_small_canvas() {
+        use mondrian_effects::*;
+        #[derive(Debug)]
+        struct UnitFactory;
+        impl EffectFloatProcessorFactory for UnitFactory {
+            fn image_scale_requirement(&self) -> EffectImageScaleRequirement {
+                EffectImageScaleRequirement::Unit
+            }
+            fn alpha_contract(&self) -> EffectAlphaContract {
+                EffectAlphaContract::STRAIGHT_COVERAGE
+            }
+            fn feedback_budget_bytes(&self) -> usize {
+                0
+            }
+            fn storage(
+                &self,
+                _: EffectFloatProcessorSizing,
+            ) -> mondrian_core::Result<EffectFloatProcessorStorage> {
+                panic!("decode/preflight cannot size a provider")
+            }
+            fn prepare(
+                &self,
+                _: EffectFloatProcessorPreparation,
+                _: &mut EffectProcessorControl<'_>,
+            ) -> mondrian_core::Result<Box<dyn EffectFloatProcessorInstance>> {
+                panic!("decode/preflight cannot prepare a provider")
+            }
+        }
+        let key = format!("test.export.unit-original.{}", AssetId::new());
+        register_effect_definition(
+            EffectDefinition::new(
+                &key,
+                "Unit original source",
+                Default::default(),
+                EffectColorDomainContract::SCENE_LINEAR,
+            )
+            .with_execution_contract(EffectExecutionContract {
+                execution_modes: EffectExecutionModes::CPU_F32,
+                roi_propagation: EffectRoiPropagation::UnknownRequiresFullFrame,
+                ..EffectExecutionContract::IDENTITY
+            })
+            .with_custom_float_processor_factory(
+                Arc::new(|_, _| Ok(Some(serde_json::json!({})))),
+                None,
+                EffectCachePolicy::Deterministic,
+                Arc::new(UnitFactory),
+            ),
+        )
+        .unwrap();
+        let effect = instantiate_effect_node(EffectType::External(key)).unwrap();
+        let graph = PreparedEffectProgram::prepare(&[effect], &[], test_working_color_space())
+            .unwrap()
+            .evaluate(TimelineTime::ZERO)
+            .unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("odd-source.ppm");
+        let mut ppm = b"P6\n7 5\n255\n".to_vec();
+        ppm.extend_from_slice(&[17, 64, 255].repeat(35));
+        std::fs::write(&path, ppm).unwrap();
+        let mut dependency = test_media_dependency(
+            path.clone(),
+            Some(ColorSpace::Srgb),
+            data_texture_interpretation(),
+            None,
+        );
+        dependency.source_resolution = Some(Resolution { width: 7, height: 5 });
+        dependency.picture = Some(mondrian_core::PictureStreamMetadata {
+            sample_aspect_ratio: mondrian_core::SampleAspectRatio::new(4, 3),
+            field_order: Some(mondrian_core::timeline_data::FieldOrder::Progressive),
+            ..Default::default()
+        });
+        let asset = AssetId::new();
+        let media = TimelineMediaPlan {
+            placement: mondrian_core::timeline_data::TimelineClipExecutionRef {
+                sequence_id: mondrian_core::SequenceId::new(),
+                sequence_revision: mondrian_core::SequenceRevision::INITIAL,
+                clip_id: mondrian_core::ClipId::new(),
+                clip_time: TimelineTime::ZERO,
+                endpoint: mondrian_core::timeline_data::TimelineClipEndpointContext::Ordinary,
+            },
+            asset_id: asset,
+            color_space_override: None,
+            pixel_aspect_ratio_override: None,
+            field_order_override: None,
+            alpha_interpretation: AlphaInterpretation::Straight,
+            frame_rate_override: None,
+            source_sample: mondrian_core::SourceSampleTarget::covering(TimelineTime::ZERO),
+            opacity: 1.0,
+            blend_mode: mondrian_core::BlendMode::Normal,
+            transform: [1., 0., 0., 0., 1., 0.],
+            effect_graph: Arc::clone(&graph),
+            frame_seed: 0,
+            auto_tone_map: false,
+        };
+        let sequence = Sequence::new("small export target");
+        let context = sequence
+            .settings
+            .root_program_color_context(&mondrian_core::ProjectColorEnvironment::default())
+            .unwrap();
+        let mut session = ExportVisualRenderSession::for_reference_generation(
+            701,
+            service::ExportExecutionResourcePolicy::default(),
+        );
+        assert!(session
+            .select_heterogeneous_route(
+                &graph,
+                ExportHeterogeneousPlacement::Media,
+                EffectFrameExtent::new(3, 2)
+            )
+            .unwrap()
+            .is_none());
+        let mut cache = HashMap::new();
+        let canceled = ExecutionCancellationToken::new();
+        let dependencies = HashMap::from([(asset, dependency)]);
+        let decoded = decode_export_media_plan(
+            &dependencies,
+            &media,
+            3,
+            2,
+            &context,
+            &mut cache,
+            None,
+            None,
+            &mut session,
+            &canceled,
+            ExportDecodedSourceRoute::CpuWorking,
+        )
+        .unwrap();
+        let actual = decoded.cpu_frame().unwrap().rgba_f32();
+        assert_eq!((actual.width, actual.height), (7, 5));
+        assert_eq!(
+            actual.sampling.sample_aspect_ratio(),
+            mondrian_core::SampleAspectRatio::new(4, 3).unwrap()
+        );
+        assert!(actual.sampling.is_unit_scale());
+        assert_eq!(
+            actual.data,
+            vec![[17.0 / 255.0, 64.0 / 255.0, 1.0, 1.0]; 35]
+        );
+        assert!(cache
+            .keys()
+            .all(|key| key.decode_resolution == Resolution { width: 7, height: 5 }));
+        assert!(decode_export_media_plan(
+            &dependencies,
+            &media,
+            3,
+            2,
+            &context,
+            &mut cache,
+            None,
+            None,
+            &mut session,
+            &canceled,
+            ExportDecodedSourceRoute::GpuInput
+        )
+        .unwrap_err()
+        .contains("complete CPU source route"));
+        session.decode_context.clear();
     }
 
     #[test]
@@ -17078,7 +17761,7 @@ mod tests {
         .expect("blocked child Clip");
         let blocked_id = blocked.id;
         blocked.add_effect_node(mondrian_effects::EffectNode::new(
-            mondrian_effects::EffectType::Plugin("vendor.missing.child.effect".to_owned()),
+            mondrian_effects::EffectType::External("vendor.missing.child.effect".to_owned()),
         ));
         child.video_tracks[0].add_clip(blocked).expect("add blocked child Clip");
 
@@ -17172,7 +17855,7 @@ mod tests {
             mondrian_core::TimelineTimeRange::new(tt(28, time_base), tt(4, time_base))
                 .expect("Transition range"),
         );
-        transition.transition_type = mondrian_timeline::VideoTransitionType::Plugin {
+        transition.transition_type = mondrian_timeline::VideoTransitionType::External {
             definition_id: "vendor.missing.transition".to_owned(),
         };
         let transition_id = transition.id;
@@ -17228,7 +17911,7 @@ mod tests {
 
         let evaluations = Arc::new(AtomicUsize::new(0));
         let evaluations_for_builder = Arc::clone(&evaluations);
-        let effect_type = EffectType::Plugin(format!(
+        let effect_type = EffectType::External(format!(
             "test.export.preflight.unrelated.{}",
             AssetId::new()
         ));
@@ -17324,7 +18007,7 @@ mod tests {
         let replacement_builds = Arc::new(AtomicUsize::new(0));
         let replacement_builds_for_definition = Arc::clone(&replacement_builds);
         let effect_type =
-            EffectType::Plugin(format!("test.export.frozen-definition.{}", AssetId::new()));
+            EffectType::External(format!("test.export.frozen-definition.{}", AssetId::new()));
         let definition = |temporal_input, builder: mondrian_effects::EffectGraphBuilder| {
             EffectDefinition::new(
                 effect_type.key(),
@@ -17491,7 +18174,7 @@ mod tests {
             EffectTemporalInputExtent, EffectType,
         };
 
-        let effect_type = EffectType::Plugin(format!(
+        let effect_type = EffectType::External(format!(
             "test.export.preflight.stateful_identity.{}",
             AssetId::new()
         ));
@@ -17576,7 +18259,7 @@ mod tests {
             EffectTemporalInputExtent, EffectType,
         };
 
-        let effect_type = EffectType::Plugin(format!(
+        let effect_type = EffectType::External(format!(
             "test.export.preflight.u8_only_identity.{}",
             AssetId::new()
         ));
@@ -17647,7 +18330,7 @@ mod tests {
             EffectTemporalInputExtent, EffectType,
         };
 
-        let effect_type = EffectType::Plugin(format!(
+        let effect_type = EffectType::External(format!(
             "test.export.preflight.dynamic_panic.{}",
             AssetId::new()
         ));
@@ -17743,7 +18426,7 @@ mod tests {
         let evaluations_for_builder = Arc::clone(&evaluations);
         let emit_blocked_domain = Arc::new(AtomicBool::new(false));
         let emit_blocked_domain_for_builder = Arc::clone(&emit_blocked_domain);
-        let effect_type = EffectType::Plugin(format!(
+        let effect_type = EffectType::External(format!(
             "test.export.render.dynamic_readmission.{}",
             AssetId::new()
         ));
@@ -18181,6 +18864,7 @@ mod tests {
             &Arc::new(AudioSourceCache::new(48_000)),
             service::ExportExecutionResourcePolicy::default().audio_runtime_grant,
             &RejectingProcessorResolver,
+            None,
         );
         assert!(
             matches!(result, Err(detail) if detail.contains("selected export resolver reached"))
@@ -18347,6 +19031,7 @@ mod tests {
             &Arc::new(AudioSourceCache::new(sample_rate)),
             service::ExportExecutionResourcePolicy::default().audio_runtime_grant,
             resolver,
+            None,
         )
         .expect("prepare offline export delivery with real plugin");
         if delivery.requires_state_entry() {
@@ -18357,7 +19042,11 @@ mod tests {
         let mut output = [0.0_f32; 128];
         delivery
             .render_into_cancellable(
-                AudioRenderRequest { start_sample: 0, frames: 64 },
+                AudioRenderRequest {
+                    transport_activity: None,
+                    start_sample: 0,
+                    frames: 64,
+                },
                 &mut output,
                 &ExecutionCancellationToken::new(),
             )
@@ -19273,6 +19962,8 @@ mod tests {
                     })
                     .expect("compile media effect graph"),
                     frame_seed: 0,
+
+                    processor_input_plan: None,
                 },
             )],
             mondrian_renderer::TimelineCompositeOptions::default(),
@@ -19303,6 +19994,8 @@ mod tests {
                         effect_graph: compile_reference_effect_graph(&EffectRenderPlan::default())
                             .expect("compile identity graph"),
                         frame_seed: 0,
+
+                        processor_input_plan: None,
                     },
                 ),
                 mondrian_renderer::TimelineCompositeElement::Adjustment(
@@ -19317,7 +20010,9 @@ mod tests {
                         })
                         .expect("compile adjustment graph"),
                         opacity: 1.0,
-                        blend_mode: Some(BlendMode::Normal),
+                        blend_policy: mondrian_effects::EffectPassBlendPolicy::Blend(
+                            BlendMode::Normal,
+                        ),
                         frame_seed: 0,
                     },
                 ),
@@ -19330,6 +20025,8 @@ mod tests {
                         effect_graph: compile_reference_effect_graph(&EffectRenderPlan::default())
                             .expect("compile identity graph"),
                         frame_seed: 0,
+
+                        processor_input_plan: None,
                     },
                 ),
             ],

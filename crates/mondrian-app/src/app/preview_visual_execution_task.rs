@@ -65,6 +65,11 @@ impl VisualExecutionTaskKey {
 /// Heavy renderer work carried opaquely by the visual frame-work Broker.
 #[derive(Debug, Clone)]
 enum VisualExecutionWork {
+    PreparedTimeline {
+        work: Arc<super::preview_timeline_execution::PreparedPreviewTimelineWork>,
+        effect_session: mondrian_effects::EffectExecutionSessionConfig,
+        cpu_grant: mondrian_renderer::TimelineCpuWorkingSetGrant,
+    },
     HeterogeneousCpuPrefixBatch {
         request: HeterogeneousCpuPrefixBatchRequest,
         gpu_grant: HeterogeneousGpuResourceGrant,
@@ -79,13 +84,30 @@ enum VisualExecutionWork {
 /// [`FrameWorkRequest`] and remain authoritative in the Broker.
 #[derive(Debug, Clone)]
 pub(crate) struct VisualExecutionTaskPayload {
+    source_work: Option<super::preview_processor_sources::PreviewProcessorSourceWork>,
     epoch: PlaybackEpoch,
+    native_gui_work: Option<super::preview_native_gui::PreviewNativeGuiWorkBatch>,
     work: VisualExecutionWork,
     #[cfg(test)]
     control: VisualExecutionTestControl,
 }
 
 impl VisualExecutionTaskPayload {
+    pub(crate) fn prepared_timeline(
+        epoch: PlaybackEpoch,
+        work: Arc<super::preview_timeline_execution::PreparedPreviewTimelineWork>,
+        effect_session: mondrian_effects::EffectExecutionSessionConfig,
+        cpu_grant: mondrian_renderer::TimelineCpuWorkingSetGrant,
+    ) -> Self {
+        Self {
+            epoch,
+            source_work: None,
+            native_gui_work: None,
+            work: VisualExecutionWork::PreparedTimeline { work, effect_session, cpu_grant },
+            #[cfg(test)]
+            control: VisualExecutionTestControl::default(),
+        }
+    }
     /// Construct one atomic heterogeneous CPU-prefix task.
     pub(crate) fn heterogeneous_cpu_prefix_batch(
         epoch: PlaybackEpoch,
@@ -94,7 +116,9 @@ impl VisualExecutionTaskPayload {
         media_residency_guards: Vec<PreviewMediaResidencyGuard>,
     ) -> Self {
         Self {
+            source_work: None,
             epoch,
+            native_gui_work: None,
             work: VisualExecutionWork::HeterogeneousCpuPrefixBatch {
                 request,
                 gpu_grant,
@@ -103,6 +127,22 @@ impl VisualExecutionTaskPayload {
             #[cfg(test)]
             control: VisualExecutionTestControl::default(),
         }
+    }
+
+    pub(crate) fn with_processor_sources(
+        mut self,
+        work: super::preview_processor_sources::PreviewProcessorSourceWork,
+    ) -> Self {
+        self.source_work = Some(work);
+        self
+    }
+
+    pub(crate) fn with_native_gui_work(
+        mut self,
+        work: Option<super::preview_native_gui::PreviewNativeGuiWorkBatch>,
+    ) -> Self {
+        self.native_gui_work = work;
+        self
     }
 
     /// Playback Session captured by this immutable task.
@@ -195,7 +235,16 @@ impl VisualExecutionAdmission {
 
 /// Successful heavy preparation awaiting its exact GPU continuation.
 #[derive(Debug)]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "The bounded worker result and its admitted owners are already boxed at the poll boundary; avoid an additional per-output allocation"
+)]
 pub(crate) enum VisualExecutionTaskOutput {
+    PreparedTimeline {
+        output: Box<super::preview_timeline_execution::PreviewTimelineResolution>,
+        feedback: mondrian_effects::EffectProcessorFeedbackBatch,
+        interest: std::sync::Weak<super::preview_timeline_execution::PreviewTimelineWorkInterest>,
+    },
     /// Atomic addressed CPU completions in deterministic request order.
     HeterogeneousCpuPrefixBatch {
         output: HeterogeneousCpuPrefixBatchOutput,
@@ -215,6 +264,9 @@ impl VisualExecutionTaskOutput {
         Vec<PreviewMediaResidencyGuard>,
     ) {
         match self {
+            Self::PreparedTimeline { .. } => {
+                unreachable!("prepared Timeline is consumed before GPU lowering")
+            }
             Self::HeterogeneousCpuPrefixBatch { output, gpu_grant, media_residency_guards } => {
                 (output, gpu_grant, media_residency_guards)
             }
@@ -225,6 +277,11 @@ impl VisualExecutionTaskOutput {
 /// Why a worker attempt terminated before it could hand off a GPU lease.
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum VisualExecutionTaskFailure {
+    #[error("prepared Preview Timeline failed: {reason}")]
+    PreparedTimeline {
+        reason: String,
+        blocked: Option<Arc<mondrian_effects::EffectProcessorFeedbackReceipt>>,
+    },
     /// Broker lifecycle, preemption, or deadline evidence stopped execution.
     #[error("visual execution stopped by Broker lifecycle: {evidence:?}")]
     BrokerCanceled {
@@ -246,6 +303,17 @@ pub(crate) enum VisualExecutionTaskFailure {
 }
 
 impl VisualExecutionTaskFailure {
+    /// Canonical user-blocked receipt from the renderer's actual failed work.
+    pub(crate) fn processor_blocked(
+        &self,
+    ) -> Option<&std::sync::Arc<mondrian_effects::EffectProcessorFeedbackReceipt>> {
+        match self {
+            Self::RendererBatch(error) => error.processor_blocked(),
+            Self::PreparedTimeline { blocked, .. } => blocked.as_ref(),
+            _ => None,
+        }
+    }
+
     fn is_broker_cancellation(&self) -> bool {
         matches!(self, Self::BrokerCanceled { .. })
     }
@@ -273,6 +341,73 @@ pub(crate) struct VisualExecutionPrefixReady {
 }
 
 impl VisualExecutionPrefixReady {
+    #[expect(
+        clippy::result_large_err,
+        reason = "A non-Timeline result must return its original output and completion lease intact"
+    )]
+    pub(crate) fn into_prepared_timeline(
+        self,
+    ) -> Result<
+        (
+            super::preview_timeline_execution::PreviewTimelineResolution,
+            VisualExecutionLease,
+        ),
+        Self,
+    > {
+        if !matches!(
+            self.output,
+            VisualExecutionTaskOutput::PreparedTimeline { .. }
+        ) {
+            return Err(self);
+        }
+        let Self { output, lease, .. } = self;
+        match output {
+            VisualExecutionTaskOutput::PreparedTimeline { output, .. } => Ok((*output, lease)),
+            _ => unreachable!("checked output kind"),
+        }
+    }
+
+    pub(crate) fn preparation_owner_is_active(&self) -> bool {
+        match &self.output {
+            VisualExecutionTaskOutput::PreparedTimeline { interest, .. } => {
+                interest.upgrade().is_some()
+            }
+            _ => true,
+        }
+    }
+
+    /// Read the existing sole lease cancellation authority before observing facts.
+    pub(crate) fn feedback_observation_is_active(&self) -> bool {
+        let owned = match &self.output {
+            VisualExecutionTaskOutput::PreparedTimeline { interest, .. } => {
+                interest.upgrade().is_some()
+            }
+            _ => true,
+        };
+        owned
+            && self
+                .lease
+                .broker
+                .execution_cancellation_evidence(self.identity.execution_id)
+                .is_none()
+    }
+    /// Move actual metadata; only the current Viewer adapter may publish it.
+    pub(crate) fn take_processor_feedback(
+        &mut self,
+    ) -> Result<
+        mondrian_effects::EffectProcessorFeedbackBatch,
+        mondrian_effects::EffectProcessorFeedbackError,
+    > {
+        match &mut self.output {
+            VisualExecutionTaskOutput::PreparedTimeline { feedback, .. } => {
+                Ok(std::mem::take(feedback))
+            }
+            VisualExecutionTaskOutput::HeterogeneousCpuPrefixBatch { output, .. } => {
+                output.take_processor_feedback()
+            }
+        }
+    }
+
     /// Complete logical artifact identity.
     pub(crate) const fn key(&self) -> VisualExecutionTaskKey {
         self.identity.key
@@ -301,9 +436,24 @@ pub(crate) struct VisualExecutionFailed {
     terminal_binding: Option<FrameRequestBinding<MonotonicTimestamp>>,
     terminal_evidence: Option<ExecutionTerminalEvidence>,
     failure: VisualExecutionTaskFailure,
+    preparation_interest:
+        Option<std::sync::Weak<super::preview_timeline_execution::PreviewTimelineWorkInterest>>,
 }
 
 impl VisualExecutionFailed {
+    pub(crate) fn preparation_interest(
+        &self,
+    ) -> Option<&std::sync::Weak<super::preview_timeline_execution::PreviewTimelineWorkInterest>>
+    {
+        self.preparation_interest.as_ref()
+    }
+
+    pub(crate) fn preparation_owner_is_active(&self) -> bool {
+        self.preparation_interest
+            .as_ref()
+            .is_none_or(|interest| interest.upgrade().is_some())
+    }
+
     /// Complete logical artifact identity.
     pub(crate) const fn key(&self) -> VisualExecutionTaskKey {
         self.identity.key
@@ -355,7 +505,17 @@ impl VisualExecutionFailed {
 
 /// One result emitted by the dedicated CPU preparation worker.
 #[derive(Debug)]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "Bounded result-channel slots retain the original execution receipts; the consumer boxes each complete result once"
+)]
 pub(crate) enum VisualExecutionTaskResult {
+    SourceRequest(Box<super::preview_processor_sources::PreviewProcessorSourceRequest>),
+    /// Bounded actual execution observation, with no Broker completion lease.
+    Progress(super::preview_processor_feedback::PreviewProcessorProgressUpdate),
+    /// Same bounded transport, opaque exact owner/work/service identity.
+    NativeQuestion(super::preview_native_gui::NativeVisualQuestionPresentation),
+    NativeGuiAction(super::preview_native_gui::NativeVisualGuiActionDelivery),
     /// CPU work succeeded; completion authority remains inside the lease.
     PrefixReady(VisualExecutionPrefixReady),
     /// CPU preparation truly terminated and no lease remains active.
@@ -426,6 +586,22 @@ pub(crate) enum VisualExecutionTaskStartError {
 type VisualExecutionBroker =
     FrameWorkBroker<VisualExecutionTaskKey, MonotonicTimestamp, VisualExecutionTaskPayload>;
 
+#[derive(Clone)]
+pub(crate) struct VisualExecutionCancellation {
+    broker: VisualExecutionBroker,
+    key: VisualExecutionTaskKey,
+}
+impl std::fmt::Debug for VisualExecutionCancellation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("VisualExecutionCancellation").field(&self.key).finish()
+    }
+}
+impl VisualExecutionCancellation {
+    pub(crate) fn cancel(&self) {
+        self.broker.cancel_key(&self.key);
+    }
+}
+
 /// Move-only authority spanning CPU prefix through real GPU completion.
 #[must_use = "dropping an unfinished visual lease abandons and cleans its Broker binding"]
 pub(crate) struct VisualExecutionLease {
@@ -448,6 +624,17 @@ impl fmt::Debug for VisualExecutionLease {
 }
 
 impl VisualExecutionLease {
+    /// Resolve CPU preparation only. This does not deliver a Playback frame;
+    /// the ordinary GPU presentation ticket remains authoritative afterwards.
+    pub(crate) fn finalize_preparation(mut self) -> bool {
+        let recorded = self.broker.mark_execution_completed(self.identity.execution_id);
+        let resolution = self.broker.resolve_execution(self.identity.execution_id, false);
+        self.active = false;
+        recorded
+            && matches!(resolution.completion, FrameRequestCompletion::Current)
+            && !resolution.deadline.is_missed()
+    }
+
     fn new(broker: VisualExecutionBroker, identity: VisualExecutionIdentity) -> Self {
         Self { broker, identity, active: true }
     }
@@ -625,6 +812,12 @@ impl MonotonicRuntimeClock for SharedVisualExecutionClock {
 }
 
 impl VisualExecutionTask {
+    pub(crate) fn cancellation_handle(
+        &self,
+        key: VisualExecutionTaskKey,
+    ) -> VisualExecutionCancellation {
+        VisualExecutionCancellation { broker: self.broker.clone(), key }
+    }
     /// Start one dedicated serial worker with an explicit Broker clock.
     #[cfg(test)]
     pub(crate) fn new<C>(
@@ -657,10 +850,19 @@ impl VisualExecutionTask {
         let broker =
             FrameWorkBroker::new_with_clock(config.max_pending, config.max_queued, clock.clone());
         let worker_broker = broker.clone();
+        let worker_clock = clock.clone();
         let (result_sender, result_receiver) = mpsc::sync_channel(config.result_capacity);
         let worker = thread::Builder::new()
             .name("mondrian-preview-visual-execution".to_owned())
-            .spawn(move || visual_execution_worker(worker_broker, result_sender, work_notifier))
+            .spawn(move || {
+                visual_execution_worker(
+                    worker_broker,
+                    worker_clock,
+                    config.result_capacity,
+                    result_sender,
+                    work_notifier,
+                )
+            })
             .map_err(VisualExecutionTaskStartError::WorkerStart)?;
         Ok(Self {
             broker,
@@ -716,6 +918,12 @@ impl VisualExecutionTask {
     #[cfg(test)]
     pub(crate) fn diagnostics(&self) -> FrameWorkBrokerDiagnostics {
         self.broker.diagnostics()
+    }
+
+    /// Wake the sole Broker owner for an actual GUI-lifetime boundary. This
+    /// adds neither frame work nor a second request/result transport.
+    pub(crate) fn reconcile_native_guis(&self) {
+        self.broker.interrupt_worker_waits();
     }
 
     /// Poll at most one worker result without blocking the caller.
@@ -788,13 +996,33 @@ impl Drop for VisualExecutionTask {
 
 fn visual_execution_worker(
     broker: VisualExecutionBroker,
+    clock: SharedVisualExecutionClock,
+    result_capacity: usize,
     results: mpsc::SyncSender<VisualExecutionTaskResult>,
     work_notifier: PreviewWorkNotifier,
 ) {
     let _exit_notification = work_notifier.worker_exit_notification();
     let mut executor = HeterogeneousCpuPrefixBatchExecutor::default();
-    while let Some(received) = broker.receive(FrameWorkerLane::Any) {
-        let (execution, expired) = match received {
+    let mut lifecycle_revision = broker.worker_lifecycle_revision();
+    loop {
+        let received = match broker.receive_timeout_after_lifecycle_revision(
+            FrameWorkerLane::Any,
+            Duration::from_secs(60),
+            lifecycle_revision,
+        ) {
+            mondrian_playback::FrameWorkReceiveWait::Work(received) => received,
+            mondrian_playback::FrameWorkReceiveWait::Interrupted { revision } => {
+                lifecycle_revision = revision;
+                executor.reconcile_processor_guis();
+                continue;
+            }
+            mondrian_playback::FrameWorkReceiveWait::TimedOut => {
+                executor.reconcile_processor_guis();
+                continue;
+            }
+            mondrian_playback::FrameWorkReceiveWait::Closed => break,
+        };
+        let (mut execution, expired) = match received {
             FrameWorkReceive::Ready(execution) => (execution, false),
             FrameWorkReceive::Expired(execution) => (execution, true),
         };
@@ -806,6 +1034,84 @@ fn visual_execution_worker(
             work_class: execution.work_class,
         };
         let lease = VisualExecutionLease::new(broker.clone(), identity);
+        // Project the actual dequeued Broker deadline once, conservatively.
+        // A later broker deadline cancellation remains the owning checkpoint.
+        let sampled_at = Instant::now();
+        let owner_deadline = execution.deadline.map(|deadline| {
+            let remaining = deadline
+                .duration_since_origin()
+                .saturating_sub(clock.now().duration_since_origin());
+            sampled_at.checked_add(remaining).unwrap_or(sampled_at)
+        });
+        let scope = super::preview_processor_feedback::PreviewProcessorFeedbackScope {
+            key: Some(
+                super::preview_processor_feedback::PreviewProcessorWorkKey::Visual(identity.key),
+            ),
+            generation: identity.generation,
+            epoch: identity.epoch,
+        };
+        let action_results = results.clone();
+        let action_notifier = work_notifier.clone();
+        let question_results = results.clone();
+        let question_notifier = work_notifier.clone();
+        let question_service = execution.payload.native_gui_work.take().and_then(|work| {
+            work.service(
+                result_capacity,
+                move |presentation| {
+                    if presentation.scope() != scope {
+                        presentation.dismiss();
+                        return false;
+                    }
+                    if question_results
+                        .try_send(VisualExecutionTaskResult::NativeQuestion(presentation))
+                        .is_ok()
+                    {
+                        question_notifier.result_became_pollable();
+                        true
+                    } else {
+                        false
+                    }
+                },
+                move |action| {
+                    if action_results
+                        .try_send(VisualExecutionTaskResult::NativeGuiAction(action))
+                        .is_ok()
+                    {
+                        action_notifier.result_became_pollable();
+                        true
+                    } else {
+                        false
+                    }
+                },
+            )
+        });
+        let progress_results = results.clone();
+        let progress_notifier = work_notifier.clone();
+        let progress_publication =
+            move |receipt: &mondrian_effects::EffectProcessorProgressReceipt| {
+                // Full progress channels drop observational metadata only.
+                // They never block DSP, cancellation or terminal publication.
+                let update = super::preview_processor_feedback::PreviewProcessorProgressUpdate {
+                    scope,
+                    receipt: Some(receipt.clone()),
+                };
+                if progress_results.try_send(VisualExecutionTaskResult::Progress(update)).is_ok() {
+                    progress_notifier.result_became_pollable();
+                }
+            };
+        let sink = match question_service {
+            Some(question_service) => super::preview_processor_feedback::PreviewProcessorProgressPublisher::with_question_service(
+                result_capacity, question_service, progress_publication),
+            None => super::preview_processor_feedback::PreviewProcessorProgressPublisher::new_observer(result_capacity, progress_publication),
+        };
+        executor.bind_processor_observation(mondrian_effects::EffectProcessorObservation {
+            sink: Some(sink),
+            deadline: owner_deadline,
+        });
+        let preparation_interest = match &execution.payload.work {
+            VisualExecutionWork::PreparedTimeline { work, .. } => Some(work.interest()),
+            _ => None,
+        };
         let outcome = if expired {
             Err(broker
                 .execution_cancellation_evidence(identity.execution_id)
@@ -816,7 +1122,29 @@ fn visual_execution_worker(
             catch_unwind(AssertUnwindSafe(|| {
                 #[cfg(test)]
                 execution.payload.apply_test_control();
-                execute_visual_payload(execution.payload, identity, &broker, &mut executor)
+                #[expect(clippy::result_large_err, reason = "Backpressure returns the same source request and leases without allocating a new refusal carrier")]
+                let mut publish_source = |request| match results
+                        .try_send(VisualExecutionTaskResult::SourceRequest(Box::new(request)))
+                    {
+                        Ok(()) => {
+                            work_notifier.result_became_pollable();
+                            Ok(())
+                        }
+                        Err(mpsc::TrySendError::Full(
+                            VisualExecutionTaskResult::SourceRequest(request),
+                        )) => Err(mpsc::TrySendError::Full(*request)),
+                        Err(mpsc::TrySendError::Disconnected(
+                            VisualExecutionTaskResult::SourceRequest(request),
+                        )) => Err(mpsc::TrySendError::Disconnected(*request)),
+                        _ => unreachable!("source publication returns its original payload"),
+                    };
+                execute_visual_payload(
+                    execution.payload,
+                    identity,
+                    &broker,
+                    &mut executor,
+                    &mut publish_source,
+                )
             }))
             .unwrap_or_else(|payload| {
                 // No mutable renderer/effect residency survives a task panic.
@@ -826,6 +1154,16 @@ fn visual_execution_worker(
                 })
             })
         };
+        executor
+            .bind_processor_observation(mondrian_effects::EffectProcessorObservation::default());
+        if preparation_interest
+            .as_ref()
+            .is_some_and(|interest| interest.upgrade().is_none())
+        {
+            drop(outcome);
+            drop(lease);
+            continue;
+        }
         let result = match outcome {
             Ok(output) => VisualExecutionTaskResult::PrefixReady(VisualExecutionPrefixReady {
                 identity,
@@ -841,6 +1179,7 @@ fn visual_execution_worker(
                     terminal_binding,
                     terminal_evidence,
                     failure,
+                    preparation_interest,
                 })
             }
         };
@@ -856,20 +1195,206 @@ fn execute_visual_payload(
     identity: VisualExecutionIdentity,
     broker: &VisualExecutionBroker,
     executor: &mut HeterogeneousCpuPrefixBatchExecutor,
+    publish_source: &mut dyn FnMut(
+        super::preview_processor_sources::PreviewProcessorSourceRequest,
+    ) -> Result<
+        (),
+        mpsc::TrySendError<super::preview_processor_sources::PreviewProcessorSourceRequest>,
+    >,
 ) -> Result<VisualExecutionTaskOutput, VisualExecutionTaskFailure> {
     match payload.work {
+        VisualExecutionWork::PreparedTimeline { work, effect_session, cpu_grant } => {
+            let cancellation = work.request().cancellation().clone();
+            let mut observed_cancellation = None;
+            let mut checkpoint = || {
+                if let Some(evidence) =
+                    broker.execution_cancellation_evidence(identity.execution_id)
+                {
+                    observed_cancellation = Some(evidence);
+                    return Some(match effect_stop_reason(evidence.cancellation) {
+                        HeterogeneousCpuExecutionStopReason::Canceled => {
+                            mondrian_effects::EffectProcessorStopReason::Canceled
+                        }
+                        HeterogeneousCpuExecutionStopReason::DeadlineExpired => {
+                            mondrian_effects::EffectProcessorStopReason::DeadlineExpired
+                        }
+                    });
+                }
+                (!work.is_active()).then_some(mondrian_effects::EffectProcessorStopReason::Canceled)
+            };
+            let mut control = mondrian_effects::EffectProcessorControl::new(&mut checkpoint);
+            let mut observation = executor.processor_observation();
+            if let Some(deadline) = work.request().cancellation().deadline() {
+                observation.deadline =
+                    Some(observation.deadline.map_or(deadline, |owner| owner.min(deadline)));
+            }
+            control.bind_observation(observation);
+            let scope = super::preview_processor_feedback::PreviewProcessorFeedbackScope {
+                key: Some(
+                    super::preview_processor_feedback::PreviewProcessorWorkKey::Visual(
+                        identity.key,
+                    ),
+                ),
+                generation: identity.generation,
+                epoch: payload.epoch,
+            };
+            let mut client = payload.source_work.as_ref().map(|sources| {
+                super::preview_processor_sources::PreviewProcessorSourceClient::new(
+                    scope,
+                    sources,
+                    publish_source,
+                )
+            });
+            let authority = mondrian_renderer::TimelineFrameExecutionAuthority::new(
+                identity.generation,
+                work.request().continuity(),
+                cancellation,
+            );
+            let mut resolve =
+                |plan: &mondrian_renderer::PreparedTimelineClipInputPlan,
+                 batch: &mondrian_renderer::TimelineTemporalDemandBatch,
+                 current: Option<&mondrian_renderer::CpuColorFrame>,
+                 space: mondrian_core::WorkingColorSpace,
+                 admit: &mut dyn FnMut(
+                    usize,
+                ) -> Result<
+                    (),
+                    mondrian_effects::EffectTemporalExecutionError,
+                >,
+                 control: &mut mondrian_effects::EffectProcessorControl<'_>| {
+                    match client.as_mut() {
+                        Some(client) => client.resolve(plan, batch, current, space, admit, control),
+                        None => {
+                            plan.prepare_available_sources(batch, current, space, admit, control)
+                        }
+                    }
+                };
+            let mut inputs =
+                mondrian_renderer::TimelineProcessorInputExecution::new(authority, &mut resolve);
+            if work.request().generation() != identity.generation {
+                return Err(VisualExecutionTaskFailure::PreparedTimeline {
+                    blocked: None,
+                    reason: "prepared Timeline changed its original generation".into(),
+                });
+            }
+            let mut blocked = None;
+            let output = executor.with_composite_scratch(|scratch| {
+                scratch.reconfigure_effect_execution(effect_session);
+                scratch.reconfigure_cpu_working_set(cpu_grant);
+                scratch.bind_effect_execution_generation(identity.generation);
+                let owned = std::cell::RefCell::new(std::mem::take(scratch));
+                let result = work.execute(&owned, &mut control, Some(&mut inputs), &mut blocked);
+                *scratch = owned.into_inner();
+                result
+            });
+            if control.check().is_err() {
+                let reason = control.stop_reason();
+                drop(control);
+                return Err(observed_cancellation.map_or(
+                    VisualExecutionTaskFailure::PreparedTimeline {
+                        blocked: None,
+                        reason: format!("prepared Timeline stopped: {reason:?}"),
+                    },
+                    |evidence| VisualExecutionTaskFailure::BrokerCanceled { evidence },
+                ));
+            }
+            match output {
+                super::preview_timeline_execution::PreviewTimelineResolution::Ready(_)
+                | super::preview_timeline_execution::PreviewTimelineResolution::Empty => {
+                    let feedback = control.take_feedback().map_err(|error| {
+                        VisualExecutionTaskFailure::PreparedTimeline {
+                            blocked: None,
+                            reason: error.to_string(),
+                        }
+                    })?;
+                    Ok(VisualExecutionTaskOutput::PreparedTimeline {
+                        output: Box::new(output),
+                        feedback,
+                        interest: work.interest(),
+                    })
+                }
+                super::preview_timeline_execution::PreviewTimelineResolution::Unavailable {
+                    reason,
+                } => Err(VisualExecutionTaskFailure::PreparedTimeline {
+                    blocked,
+                    reason: reason.detail().to_owned(),
+                }),
+                super::preview_timeline_execution::PreviewTimelineResolution::Pending {
+                    ..
+                } => Err(VisualExecutionTaskFailure::PreparedTimeline {
+                    blocked: None,
+                    reason: "source-ready worker returned to pre-DSP preparation".into(),
+                }),
+            }
+        }
         VisualExecutionWork::HeterogeneousCpuPrefixBatch {
             request,
             gpu_grant,
             media_residency_guards,
         } => {
             let mut observed_cancellation = None;
-            let output = executor.execute(request, identity.generation, || {
-                broker.execution_cancellation_evidence(identity.execution_id).map(|evidence| {
-                    observed_cancellation = Some(evidence);
-                    effect_stop_reason(evidence.cancellation)
-                })
-            });
+            let output = {
+                let observation = executor.processor_observation();
+                // This token is a downstream projection of this exact Broker
+                // execution, never a second cancellation authority or cached plan.
+                let cancellation = mondrian_core::ExecutionCancellationToken::new();
+                let cancellation = observation.deadline.map_or(cancellation.clone(), |deadline| {
+                    cancellation.with_deadline(deadline)
+                });
+                let authority = mondrian_renderer::TimelineFrameExecutionAuthority::new(
+                    identity.generation,
+                    mondrian_effects::EffectExecutionContinuity::Discontinuous,
+                    cancellation.clone(),
+                );
+                let mut checkpoint = || {
+                    broker.execution_cancellation_evidence(identity.execution_id).map(|evidence| {
+                        cancellation.cancel();
+                        observed_cancellation = Some(evidence);
+                        match effect_stop_reason(evidence.cancellation) {
+                            HeterogeneousCpuExecutionStopReason::Canceled => {
+                                mondrian_effects::EffectProcessorStopReason::Canceled
+                            }
+                            HeterogeneousCpuExecutionStopReason::DeadlineExpired => {
+                                mondrian_effects::EffectProcessorStopReason::DeadlineExpired
+                            }
+                        }
+                    })
+                };
+                let mut control = mondrian_effects::EffectProcessorControl::new(&mut checkpoint);
+                control.bind_observation(observation);
+                let source_scope =
+                    super::preview_processor_feedback::PreviewProcessorFeedbackScope {
+                        key: Some(
+                            super::preview_processor_feedback::PreviewProcessorWorkKey::Visual(
+                                identity.key,
+                            ),
+                        ),
+                        generation: identity.generation,
+                        epoch: payload.epoch,
+                    };
+                let mut source_client = payload.source_work.as_ref().map(|work| {
+                    super::preview_processor_sources::PreviewProcessorSourceClient::new(
+                        source_scope,
+                        work,
+                        publish_source,
+                    )
+                });
+                let mut resolve = |plan: &mondrian_renderer::PreparedTimelineClipInputPlan,
+                    batch: &mondrian_renderer::TimelineTemporalDemandBatch, current: Option<&mondrian_renderer::CpuColorFrame>,
+                    space: mondrian_core::WorkingColorSpace,
+                    admit: &mut dyn FnMut(usize) -> Result<(), mondrian_effects::EffectTemporalExecutionError>,
+                    control: &mut mondrian_effects::EffectProcessorControl<'_>| {
+                    match source_client.as_mut() {
+                        Some(client) => client.resolve(plan, batch, current, space, admit, control),
+                        None => plan.prepare_available_sources(batch, current, space, admit, control),
+                    }
+                };
+                let mut inputs = mondrian_renderer::TimelineProcessorInputExecution::new(
+                    authority,
+                    &mut resolve,
+                );
+                executor.execute_with_timeline_inputs(request, &mut inputs, &mut control)
+            };
             match output {
                 Ok(output) => Ok(VisualExecutionTaskOutput::HeterogeneousCpuPrefixBatch {
                     output,
@@ -908,6 +1433,11 @@ fn terminal_failure_evidence(
     failure: &VisualExecutionTaskFailure,
 ) -> Option<ExecutionTerminalEvidence> {
     let binding = terminal_binding?;
+    // A standards-defined persistent user blocker is not an execution fault.
+    // Its exact consumed binding and typed receipt are separate no-frame facts.
+    if failure.processor_blocked().is_some() {
+        return None;
+    }
     (!failure.is_broker_cancellation()).then_some(ExecutionTerminalEvidence {
         generation: binding.generation,
         priority: terminal_priority(binding.priority, binding.work_class),

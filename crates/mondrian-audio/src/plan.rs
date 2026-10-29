@@ -1,11 +1,12 @@
 use mondrian_core::{
-    AudioChannelLayout, AudioComponentEditId, AudioProcessingScopeId, AudioProcessorInstanceId,
-    ExactAutomationCurve, MixBusId, ProgramOutputId, SequenceId, SourceSampleTarget, TimeScale,
-    TimelineTime, TimelineTimeRange, TrackId,
+    AudioChannelLayout, AudioComponentEditId, AudioNoteLaneId, AudioProcessingScopeId,
+    AudioProcessorInstanceId, ExactAutomationCurve, MixBusId, ProgramOutputId, SequenceId,
+    SourceSampleTarget, TimeScale, TimelineTime, TimelineTimeRange, TrackId,
 };
 use mondrian_timeline::audio::{
-    AudioComponentChannelMapping, AudioFadeCurve, AudioProcessorDefinitionRef,
-    AudioProcessorParameter, AudioRouteDestination, AudioRouteSource, AudioTransitionCurve,
+    AudioComponentChannelMapping, AudioFadeCurve, AudioNote, AudioNoteTarget,
+    AudioProcessorDefinitionRef, AudioProcessorParameter, AudioRouteDestination, AudioRouteSource,
+    AudioTransitionCurve,
 };
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -205,9 +206,68 @@ pub(crate) struct CompiledTransition {
     pub(crate) curve: AudioTransitionCurve,
 }
 
+/// Selected immutable author score, not an executable native event stream.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct CompiledNoteLane {
+    pub(crate) id: AudioNoteLaneId,
+    pub(crate) target: AudioNoteTarget,
+    pub(crate) notes: Vec<AudioNote>,
+}
+
+/// Borrowed non-Note graph facts for the existing prepared logical policy.
+/// The compiler can expose these immutable facts before creating Note owners,
+/// without constructing or publishing an incomplete executable Program.
+#[derive(Clone, Copy)]
+pub(crate) struct CompiledAudioGraph<'a> {
+    pub(crate) contributions: &'a [CompiledAudioContribution],
+    pub(crate) processing_scopes: &'a BTreeMap<AudioProcessingScopeId, CompiledProcessingScope>,
+    pub(crate) transitions: &'a [CompiledTransition],
+    pub(crate) track_channels: &'a BTreeMap<TrackId, CompiledTrackChannel>,
+    pub(crate) buses: &'a BTreeMap<MixBusId, CompiledChannelStrip>,
+    pub(crate) bus_order: &'a [MixBusId],
+    pub(crate) output: &'a CompiledChannelStrip,
+    pub(crate) routes: &'a [CompiledRoute],
+    pub(crate) sidechain_routes: &'a [CompiledProcessorSidechainRoute],
+}
+
+impl CompiledAudioGraph<'_> {
+    /// Pure selected-graph capability admission, shared by direct Plan and
+    /// Runtime preparation before any source or foreign factory is accessed.
+    pub(crate) fn admit_musical_transport(
+        self,
+        reference: Option<mondrian_core::MusicalTimeReference>,
+    ) -> Result<(), crate::AudioCompileError> {
+        if reference.is_none() {
+            return Ok(());
+        }
+        // Direct PreparedAudioPlan callers have no dependency closure service.
+        // Refuse the selected nested projection before preparing any factory;
+        // Runtime additionally checks descendant references across its closure.
+        if self.contributions.iter().any(|contribution| {
+            matches!(
+                contribution.source,
+                CompiledAudioSource::NestedOutput { .. }
+            )
+        }) {
+            return Err(crate::AudioCompileError::SemanticProjectionNotExecutableYet);
+        }
+        Ok(())
+    }
+}
+
+/// Stack-local selected Note requests, not retained payload or execution permission.
+#[derive(Clone, Copy)]
+pub(crate) struct CompiledNoteStorageRequest {
+    pub(crate) lanes: usize,
+    pub(crate) events: usize,
+    pub(crate) key_bytes: usize,
+    pub(crate) compiler_bytes: usize,
+}
+
 /// Context-independent exact-time semantic Signal Closure.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CompiledAudioProgram {
+    pub(crate) musical_time_reference: Option<mondrian_core::MusicalTimeReference>,
     pub(crate) output_id: ProgramOutputId,
     pub(crate) contributions: Vec<CompiledAudioContribution>,
     pub(crate) processing_scopes: BTreeMap<AudioProcessingScopeId, CompiledProcessingScope>,
@@ -218,6 +278,7 @@ pub struct CompiledAudioProgram {
     pub(crate) output: CompiledChannelStrip,
     pub(crate) routes: Vec<CompiledRoute>,
     pub(crate) sidechain_routes: Vec<CompiledProcessorSidechainRoute>,
+    pub(crate) note_lanes: Vec<CompiledNoteLane>,
 }
 
 /// Whether one compiled Program Output can be omitted without changing PCM.
@@ -242,6 +303,51 @@ impl AudioProgramExecutionDemand {
 }
 
 impl CompiledAudioProgram {
+    /// Musical reference of this local Sequence, not an inherited root clock.
+    pub const fn musical_time_reference(&self) -> Option<mondrian_core::MusicalTimeReference> {
+        self.musical_time_reference
+    }
+
+    pub(crate) fn graph(&self) -> CompiledAudioGraph<'_> {
+        CompiledAudioGraph {
+            contributions: &self.contributions,
+            processing_scopes: &self.processing_scopes,
+            transitions: &self.transitions,
+            track_channels: &self.track_channels,
+            buses: &self.buses,
+            bus_order: &self.bus_order,
+            output: &self.output,
+            routes: &self.routes,
+            sidechain_routes: &self.sidechain_routes,
+        }
+    }
+
+    /// Actual retained selected Note payload for the existing logical policy.
+    /// All-empty scores add no executable Note weight; spare empty metadata is
+    /// outside this policy. This does not bound compiler or preparation peaks.
+    pub(crate) fn compiled_note_payload_bytes(
+        &self,
+    ) -> Result<usize, crate::AudioResourceFootprintError> {
+        use crate::AudioResourceFootprintError::ExtentOverflow;
+        use std::alloc::Layout;
+
+        if self.note_lanes.iter().all(|lane| lane.notes.is_empty()) {
+            return Ok(0);
+        }
+        let lane_bytes = Layout::array::<CompiledNoteLane>(self.note_lanes.capacity())
+            .map_err(|_| ExtentOverflow)?
+            .size();
+        self.note_lanes.iter().try_fold(lane_bytes, |bytes, lane| {
+            let note_bytes = Layout::array::<AudioNote>(lane.notes.capacity())
+                .map_err(|_| ExtentOverflow)?
+                .size();
+            bytes
+                .checked_add(note_bytes)
+                .and_then(|bytes| bytes.checked_add(lane.target.input_port_key.capacity()))
+                .ok_or(ExtentOverflow)
+        })
+    }
+
     /// Public output produced by this Signal Closure.
     pub fn output_id(&self) -> ProgramOutputId {
         self.output_id
@@ -299,6 +405,16 @@ pub struct AudioRenderContract {
 }
 
 impl AudioRenderContract {
+    pub(crate) fn validate(self) -> Result<(), crate::AudioCompileError> {
+        if self.sample_rate == 0
+            || self.max_block_frames == 0
+            || u32::try_from(self.max_block_frames).is_err()
+        {
+            return Err(crate::AudioCompileError::InvalidRenderContract);
+        }
+        Ok(())
+    }
+
     /// Conservative default admission budget for processor-private Session state.
     pub const DEFAULT_PROCESSOR_SESSION_SCRATCH_BUDGET_BYTES: usize = 256 * 1024 * 1024;
     /// Conservative default admission budget for public-output lookahead.

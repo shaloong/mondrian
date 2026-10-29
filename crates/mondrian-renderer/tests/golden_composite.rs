@@ -22,7 +22,11 @@ const IDENTITY_TRANSFORM: [f32; 6] = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0];
 static TEST_COLOR_ENGINE: ColorEngine = ColorEngine::mondrian_standard();
 
 fn test_color_runtime() -> TimelineEffectColorRuntime<'static> {
-    TimelineEffectColorRuntime::new(&TEST_COLOR_ENGINE, WorkingColorSpace::LinearRec709)
+    TimelineEffectColorRuntime::new(
+        &TEST_COLOR_ENGINE,
+        WorkingColorSpace::LinearRec709,
+        mondrian_core::ImageSampling::UNIT_SQUARE,
+    )
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────
@@ -66,6 +70,7 @@ fn prepare_source(source: CpuEncodedColorFrame, intent: &RenderInputTransform) -
     SourceColorModule::execute_cpu_with_intent(
         &CpuSourceColorFrame::from(source),
         intent,
+        mondrian_core::ImageSampling::UNIT_SQUARE,
         &mut session,
     )
     .expect("prepare golden source")
@@ -111,6 +116,8 @@ fn composite_single_layer(w: u32, h: u32, rgba: &[u8], opacity: f32, blend: Blen
         transform: IDENTITY_TRANSFORM,
         effect_graph: identity_graph(),
         frame_seed: 0,
+
+        processor_input_plan: None,
     })];
     let mut scratch = TimelineCompositeScratch::default();
     let frame = composite_timeline_elements_color_frame(
@@ -120,6 +127,7 @@ fn composite_single_layer(w: u32, h: u32, rgba: &[u8], opacity: f32, blend: Blen
         TimelineCompositeOptions::default(),
         test_color_runtime(),
         &mut scratch,
+        &mut mondrian_effects::EffectProcessorControl::uncancelled(),
     )
     .expect("composite reference frame");
     encode_rec709(&frame)
@@ -192,6 +200,7 @@ fn golden_transparent_canvas() {
         TimelineCompositeOptions::default(),
         test_color_runtime(),
         &mut scratch,
+        &mut mondrian_effects::EffectProcessorControl::uncancelled(),
     )
     .expect("composite transparent frame");
     let result = encode_rec709(&frame);
@@ -241,6 +250,8 @@ fn golden_two_layers_normal() {
             transform: IDENTITY_TRANSFORM,
             effect_graph: identity_graph(),
             frame_seed: 0,
+
+            processor_input_plan: None,
         }),
         TimelineCompositeElement::Media(TimelineMediaLayer {
             frame: &fg,
@@ -249,6 +260,8 @@ fn golden_two_layers_normal() {
             transform: IDENTITY_TRANSFORM,
             effect_graph: identity_graph(),
             frame_seed: 0,
+
+            processor_input_plan: None,
         }),
     ];
     let mut scratch = TimelineCompositeScratch::default();
@@ -259,6 +272,7 @@ fn golden_two_layers_normal() {
         TimelineCompositeOptions::default(),
         test_color_runtime(),
         &mut scratch,
+        &mut mondrian_effects::EffectProcessorControl::uncancelled(),
     )
     .expect("composite two-layer frame");
     let result = encode_rec709(&frame);
@@ -279,6 +293,8 @@ fn preview_display_and_export_delivery_boundaries_match_with_stable_hash() {
             transform: IDENTITY_TRANSFORM,
             effect_graph: identity_graph(),
             frame_seed: 11,
+
+            processor_input_plan: None,
         }),
         TimelineCompositeElement::Media(TimelineMediaLayer {
             frame: &fg,
@@ -287,6 +303,8 @@ fn preview_display_and_export_delivery_boundaries_match_with_stable_hash() {
             transform: IDENTITY_TRANSFORM,
             effect_graph: identity_graph(),
             frame_seed: 29,
+
+            processor_input_plan: None,
         }),
     ];
     let mut scratch = TimelineCompositeScratch::default();
@@ -297,6 +315,7 @@ fn preview_display_and_export_delivery_boundaries_match_with_stable_hash() {
         TimelineCompositeOptions::default(),
         test_color_runtime(),
         &mut scratch,
+        &mut mondrian_effects::EffectProcessorControl::uncancelled(),
     )
     .expect("composite display/export parity frame");
 
@@ -393,6 +412,8 @@ fn golden_multilayer_float_linear_blend() {
             transform: IDENTITY_TRANSFORM,
             effect_graph: identity_graph(),
             frame_seed: 0,
+
+            processor_input_plan: None,
         }),
         TimelineCompositeElement::Media(TimelineMediaLayer {
             frame: &fg,
@@ -401,6 +422,8 @@ fn golden_multilayer_float_linear_blend() {
             transform: IDENTITY_TRANSFORM,
             effect_graph: identity_graph(),
             frame_seed: 1,
+
+            processor_input_plan: None,
         }),
     ];
     let mut scratch = TimelineCompositeScratch::default();
@@ -411,6 +434,7 @@ fn golden_multilayer_float_linear_blend() {
         TimelineCompositeOptions::default(),
         test_color_runtime(),
         &mut scratch,
+        &mut mondrian_effects::EffectProcessorControl::uncancelled(),
     )
     .expect("composite screen-blend frame");
     let result = encode_rec709(&frame);
@@ -421,7 +445,8 @@ fn golden_multilayer_float_linear_blend() {
 fn golden_non_identity_transform_float_path() {
     let w = 32;
     let h = 24;
-    let media = working_frame(w, h, gradient_rgba(w, h, 55));
+    let source = gradient_rgba(w, h, 55);
+    let media = working_frame(w, h, source.clone());
     let elements = vec![TimelineCompositeElement::Media(TimelineMediaLayer {
         frame: &media,
         opacity: 1.0,
@@ -429,6 +454,8 @@ fn golden_non_identity_transform_float_path() {
         transform: [1.5, 0.0, 0.0, 0.0, 1.5, 0.0],
         effect_graph: identity_graph(),
         frame_seed: 0,
+
+        processor_input_plan: None,
     })];
     let mut scratch = TimelineCompositeScratch::default();
     let frame = composite_timeline_elements_color_frame(
@@ -438,8 +465,54 @@ fn golden_non_identity_transform_float_path() {
         TimelineCompositeOptions::default(),
         test_color_runtime(),
         &mut scratch,
+        &mut mondrian_effects::EffectProcessorControl::uncancelled(),
     )
     .expect("composite transformed frame");
+
+    // The scaled source covers [0,48) x [0,36), including every canvas
+    // pixel center. The half-texel border is covered even when one tap lies
+    // outside the source; clamping that axis must preserve the other axis.
+    // Derive its linear-light values independently in f64: for scale 3/2,
+    // the varying source texel coordinate is (4*d - 1)/6.
+    // Camera Rec.709 in mondrian_default_ocio_v2.ocio declares an
+    // ExponentWithLinearTransform, whose toe is tangent to the power curve
+    // (rather than the rounded 1/4.5 approximation).
+    let gamma = 1.0_f64 / 0.45;
+    let join = 0.099 / (gamma - 1.0);
+    let slope = ((join + 0.099) / 1.099).powf(gamma) / join;
+    let decode = |code: u8| {
+        let value = f64::from(code) / 255.0;
+        if value < join {
+            value * slope
+        } else {
+            ((value + 0.099) / 1.099).powf(gamma)
+        }
+    };
+    for y in 0..h {
+        for x in 0..w {
+            let actual = frame.rgba_f32().data[(y * w + x) as usize];
+            assert_eq!(actual[3], 1.0, "covered pixel ({x},{y}) lost alpha");
+            if x != 0 && y != 0 {
+                continue;
+            }
+            let coordinate = (4.0 * f64::from(x + y) - 1.0) / 6.0;
+            let lower = coordinate.floor();
+            let weight = coordinate - lower;
+            let stride = if y == 0 { 1 } else { w };
+            let a = (lower.max(0.0) as u32 * stride) as usize * 4;
+            let b = ((lower + 1.0).max(0.0) as u32 * stride) as usize * 4;
+            for channel in 0..3 {
+                let expected = decode(source[a + channel]) * (1.0 - weight)
+                    + decode(source[b + channel]) * weight;
+                // Allow only f32 affine-coordinate/interpolation roundoff.
+                assert!(
+                    (f64::from(actual[channel]) - expected).abs() <= 2.0e-6,
+                    "border ({x},{y}) channel {channel}: {} != {expected}",
+                    actual[channel]
+                );
+            }
+        }
+    }
     let result = encode_rec709(&frame);
     check_golden("scaled_transform_float_32x24.png", w, h, &result);
 }
@@ -458,6 +531,8 @@ fn golden_preview_export_parity_across_color_spaces() {
             transform: IDENTITY_TRANSFORM,
             effect_graph: identity_graph(),
             frame_seed: 0,
+
+            processor_input_plan: None,
         }),
         TimelineCompositeElement::Media(TimelineMediaLayer {
             frame: &fg,
@@ -466,6 +541,8 @@ fn golden_preview_export_parity_across_color_spaces() {
             transform: IDENTITY_TRANSFORM,
             effect_graph: identity_graph(),
             frame_seed: 2,
+
+            processor_input_plan: None,
         }),
     ];
     let mut scratch = TimelineCompositeScratch::default();
@@ -476,6 +553,7 @@ fn golden_preview_export_parity_across_color_spaces() {
         TimelineCompositeOptions::default(),
         test_color_runtime(),
         &mut scratch,
+        &mut mondrian_effects::EffectProcessorControl::uncancelled(),
     )
     .expect("composite HDR parity frame");
 

@@ -1,6 +1,41 @@
 use super::*;
 
+pub(super) fn effect_project_geometry(
+    settings: &SequenceSettings,
+    step: &str,
+) -> mondrian_core::Result<mondrian_effects::EffectProjectGeometry> {
+    let par = settings.pixel_aspect_ratio.exact_ratio().ok_or_else(|| {
+        mondrian_core::MondrianError::WorkflowStepFailed {
+            step_id: step.to_owned(),
+            reason: "owner Sequence has no exact pixel aspect ratio".into(),
+        }
+    })?;
+    mondrian_effects::EffectProjectGeometry::new(
+        settings.resolution.width,
+        settings.resolution.height,
+        par,
+    )
+    .map_err(|error| mondrian_core::MondrianError::WorkflowStepFailed {
+        step_id: step.to_owned(),
+        reason: error.to_string(),
+    })
+}
+
 impl AppState {
+    pub(super) fn instantiate_effect_for_active_sequence(
+        &self,
+        effect_type: EffectType,
+        step: &str,
+    ) -> mondrian_core::Result<mondrian_effects::EffectNode> {
+        let sequence = active_sequence_for_visual_effect(self, step)?;
+        let geometry = effect_project_geometry(&sequence.settings, step)?;
+        mondrian_effects::instantiate_effect_node_with_project_geometry(effect_type, geometry)
+            .map_err(|error| mondrian_core::MondrianError::WorkflowStepFailed {
+                step_id: step.to_owned(),
+                reason: error.to_string(),
+            })
+    }
+
     pub fn active_animation_property_address(
         &self,
         clip_id: ClipId,
@@ -63,6 +98,14 @@ impl AppState {
         self.animation_selection
             .selected_keyframes
             .retain(|selection| selection.property.clip_id != clip_id);
+    }
+
+    /// Inspect copy intent without allocating an owned selection snapshot.
+    pub(super) fn has_selected_animation_keyframes_for_clip(&self, clip_id: ClipId) -> bool {
+        self.animation_selection
+            .selected_keyframes
+            .iter()
+            .any(|selection| selection.property.clip_id == clip_id)
     }
 
     pub fn selected_animation_keyframes_for_clip(
@@ -202,10 +245,7 @@ impl AppState {
     }
 
     pub fn has_animation_clipboard(&self) -> bool {
-        self.animation_clipboard
-            .as_ref()
-            .map(|clipboard| !clipboard.entries.is_empty())
-            .unwrap_or(false)
+        matches!(&self.clipboard, Some(AppClipboard::AnimationKeyframes(clipboard)) if !clipboard.entries.is_empty())
     }
 
     pub fn copy_selected_animation_keyframes(
@@ -216,51 +256,72 @@ impl AppState {
         if selected.is_empty() {
             return Ok(false);
         }
-
         let clip = self.clip_snapshot(selection).ok_or_else(|| {
             mondrian_core::MondrianError::ClipNotFound { clip_id: selection.clip_id.to_string() }
         })?;
         let property_bag = clip.property_bag()?;
-        let mut resolved = Vec::new();
-        for selection in selected {
-            let Some((_, property)) =
-                property_bag.property_by_address(&selection.property.property)
-            else {
-                continue;
-            };
-            let Some(keyframe) = property.keyframe_by_id(selection.keyframe_id) else {
-                continue;
-            };
-            resolved.push((selection, keyframe));
-        }
-        let anchor_time = resolved
-            .iter()
-            .map(|(_, keyframe)| keyframe.time)
-            .min()
-            .unwrap_or(TimelineTime::ZERO);
+        self.capture_animation_keyframes(&property_bag, selected)
+    }
 
-        let mut entries = Vec::new();
-        for (selection, mut keyframe) in resolved {
-            keyframe.id = KeyframeId::new();
+    /// Publish one fully resolved canonical selection into the sole clipboard.
+    pub(super) fn capture_animation_keyframes(
+        &mut self,
+        property_bag: &mondrian_core::automation::PropertyBag,
+        selected: Vec<AnimationKeyframeSelection>,
+    ) -> mondrian_core::Result<bool> {
+        let Some(clipboard) = Self::prepare_animation_keyframes(property_bag, selected)? else {
+            return Ok(false);
+        };
+        self.clipboard = Some(AppClipboard::AnimationKeyframes(clipboard));
+        Ok(true)
+    }
+
+    /// Resolve a complete canonical clipboard candidate without publishing UI state.
+    pub(super) fn prepare_animation_keyframes(
+        property_bag: &mondrian_core::automation::PropertyBag,
+        selected: Vec<AnimationKeyframeSelection>,
+    ) -> mondrian_core::Result<Option<AnimationClipboard>> {
+        if selected.is_empty() {
+            return Ok(None);
+        }
+        let stale_selection =
+            || super::curve_clipboard::CurveClipboardError::InvalidSelection.into_core();
+        let mut owners: HashMap<_, Vec<_>> = HashMap::new();
+        for selection in selected {
+            owners
+                .entry(selection.property.property)
+                .or_default()
+                .push(selection.keyframe_id);
+        }
+        let mut resolved = Vec::new();
+        for (address, ids) in owners {
+            let (_, property) =
+                property_bag.property_by_address(&address).ok_or_else(stale_selection)?;
+            let groups =
+                property.capture_complete_keyframes(&ids).map_err(|_| stale_selection())?;
+            for keys in groups {
+                let time = keys.first().ok_or_else(stale_selection)?.time;
+                resolved.push((address.clone(), time, keys));
+            }
+        }
+        let anchor_time =
+            resolved.iter().map(|(_, time, _)| *time).min().ok_or_else(stale_selection)?;
+        let mut entries = Vec::with_capacity(resolved.len());
+        for (property, time, channel_keyframes) in resolved {
             entries.push(AnimationClipboardEntry {
-                property: selection.property.property,
-                relative_time: keyframe.time.checked_sub(anchor_time)?,
-                keyframe,
+                property,
+                relative_time: time.checked_sub(anchor_time)?,
+                channel_keyframes,
             });
         }
 
         entries.sort_by(|a, b| {
             a.relative_time.cmp(&b.relative_time).then_with(|| a.property.cmp(&b.property))
         });
-        self.animation_clipboard = if entries.is_empty() {
-            None
-        } else {
-            Some(AnimationClipboard { entries })
-        };
-        if self.has_animation_clipboard() {
-            self.active_clipboard_kind = Some(AppClipboardKind::AnimationKeyframes);
+        if entries.is_empty() {
+            return Ok(None);
         }
-        Ok(self.has_animation_clipboard())
+        Ok(Some(AnimationClipboard { entries }))
     }
 
     pub fn paste_animation_keyframes(
@@ -268,7 +329,7 @@ impl AppState {
         selection: SelectedClipRef,
         destination_clip_time: TimelineTime,
     ) -> mondrian_core::Result<bool> {
-        let Some(clipboard) = self.animation_clipboard.clone() else {
+        let Some(AppClipboard::AnimationKeyframes(clipboard)) = self.clipboard.clone() else {
             return Ok(false);
         };
         if clipboard.entries.is_empty() {
@@ -280,7 +341,7 @@ impl AppState {
         })?;
         let property_bag = clip.property_bag()?;
         let active_property = self.active_animation_property_address(selection.clip_id).cloned();
-        let mut mutations = Vec::with_capacity(clipboard.entries.len());
+        let mut batches: HashMap<String, Vec<_>> = HashMap::new();
         let mut selections = Vec::with_capacity(clipboard.entries.len());
 
         for entry in clipboard.entries {
@@ -314,22 +375,27 @@ impl AppState {
                         ),
                     }
                 })?;
-            let mut keyframe = entry.keyframe;
-            keyframe.id = KeyframeId::new();
-            keyframe.time = destination_clip_time.checked_add(entry.relative_time)?;
-            mutations.push(PropertyMutation::SetKeyframe {
-                path: path.to_owned(),
-                keyframe: keyframe.clone(),
-            });
+            let id = KeyframeId::new();
+            let time = destination_clip_time.checked_add(entry.relative_time)?;
+            let mut keys = entry.channel_keyframes;
+            for key in &mut keys {
+                key.id = id;
+                key.time = time;
+            }
+            batches.entry(path.to_owned()).or_default().push(keys);
             selections.push(AnimationKeyframeSelection {
                 property: AnimationPropertySelection {
                     clip_id: selection.clip_id,
                     property: destination_property,
                 },
-                keyframe_id: keyframe.id,
+                keyframe_id: id,
             });
         }
 
+        let mutations = batches
+            .into_iter()
+            .map(|(path, keyframes)| PropertyMutation::PasteCompleteKeyframes { path, keyframes })
+            .collect();
         self.mutate_clip_properties(selection, mutations, "粘贴关键帧")?;
         self.set_animation_keyframe_selection(selections);
         Ok(true)
@@ -393,32 +459,6 @@ impl AppState {
                 }
             })?;
             clip.transform.set_position(pos);
-            Ok(seq.id)
-        })?;
-        Ok(true)
-    }
-
-    /// Directly set clip anchor and adjust position to keep visual unchanged.
-    pub fn set_clip_anchor_direct(
-        &mut self,
-        selection: SelectedClipRef,
-        new_anchor: glam::Vec2,
-    ) -> mondrian_core::Result<bool> {
-        let _sequence_id = self.commit_active_sequence_edit("move anchor", |seq| {
-            let clip = find_clip_mut_by_selection(seq, selection).ok_or_else(|| {
-                mondrian_core::MondrianError::ClipNotFound {
-                    clip_id: selection.clip_id.to_string(),
-                }
-            })?;
-            let old_anchor = clip.transform.get_anchor_point(TimelineTime::ZERO);
-            let scale = clip.transform.get_scale(TimelineTime::ZERO);
-            let old_pos = clip.transform.get_position(TimelineTime::ZERO);
-            // Adjust position to keep visual position unchanged:
-            // pos_new + S*(-anchor_new) = pos_old + S*(-anchor_old)
-            // pos_new = pos_old + S*(anchor_new - anchor_old)
-            let new_pos = old_pos + scale * (new_anchor - old_anchor);
-            clip.transform.set_anchor_point(new_anchor);
-            clip.transform.set_position(new_pos);
             Ok(seq.id)
         })?;
         Ok(true)
@@ -493,13 +533,9 @@ impl AppState {
     ) -> mondrian_core::Result<EffectId> {
         let sequence = active_sequence_for_visual_effect(self, "add_effect_to_clip")?;
         authorable_visual_effect_clip(sequence, clip_id, "add_effect_to_clip")?;
-        let effect =
-            mondrian_effects::instantiate_effect_node(effect_type.clone()).map_err(|error| {
-                mondrian_core::MondrianError::WorkflowStepFailed {
-                    step_id: "add_effect_to_clip".to_owned(),
-                    reason: error.to_string(),
-                }
-            })?;
+        let mut effect =
+            self.instantiate_effect_for_active_sequence(effect_type.clone(), "add_effect_to_clip")?;
+        self.resolve_effect_resources(&mut effect)?;
         let description = format!("添加{}", effect_type.display_name());
         let (_sequence_id, effect_id) =
             self.commit_active_sequence_edit(description, move |seq| {

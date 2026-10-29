@@ -1,0 +1,1748 @@
+{
+  "schema": 1,
+  "status": "ACTUAL_GENERATED_ABI_SOURCE_MIGRATION_NOT_RUNTIME_QUALIFIED",
+  "official": {
+    "version": "1.2.10",
+    "commit": "195b42a004144fab0b3cf95e9c067187d15365b7",
+    "files": 71,
+    "receipt": "OFFICIAL-SOURCES.json",
+    "receipt_sha256": "f1e9d275f1a5c3ec208f6a20ec2cc21a435af6d3bee7da0efa02d5fc924059dc"
+  },
+  "generator": {
+    "bindgen": "0.72.1",
+    "target": "x86_64-pc-windows-msvc",
+    "actual_output_sha256": "0300511ca69490436738c05d6e5051de6745524a95029a78ba95ce2f43b74ca8",
+    "actual_lock_sha256": "961d084912db85564c06f6cb2eff66c095872bd1afa53a0026ebb29d5889eca8",
+    "actual_log_sha256": "576dfb3e230220e3f78587e7df44e211ac0b2349cd372c17342ff351c4f3940b",
+    "exclusions": [
+      "header-local CLAP_VERSION",
+      "header-local CLAP_COLOR_TRANSPARENT",
+      "header-local clap_version_is_compatible"
+    ]
+  },
+  "shipped_raw": {
+    "path": "src/raw.rs",
+    "sha256": "0300511ca69490436738c05d6e5051de6745524a95029a78ba95ce2f43b74ca8",
+    "format_delta": null
+  },
+  "thread_marker_source": {
+    "repository": "https://github.com/micahrj/clap-sys",
+    "commit": "429e6a6663f2865b0c0b7dbc4971f2e189dc4d8c",
+    "markers": [
+      [
+        "Send",
+        "clap_audio_buffer",
+        "src/audio_buffer.rs"
+      ],
+      [
+        "Sync",
+        "clap_audio_buffer",
+        "src/audio_buffer.rs"
+      ],
+      [
+        "Send",
+        "clap_event_param_value",
+        "src/events.rs"
+      ],
+      [
+        "Sync",
+        "clap_event_param_value",
+        "src/events.rs"
+      ],
+      [
+        "Send",
+        "clap_event_param_mod",
+        "src/events.rs"
+      ],
+      [
+        "Sync",
+        "clap_event_param_mod",
+        "src/events.rs"
+      ],
+      [
+        "Send",
+        "clap_event_midi_sysex",
+        "src/events.rs"
+      ],
+      [
+        "Sync",
+        "clap_event_midi_sysex",
+        "src/events.rs"
+      ],
+      [
+        "Send",
+        "clap_input_events",
+        "src/events.rs"
+      ],
+      [
+        "Sync",
+        "clap_input_events",
+        "src/events.rs"
+      ],
+      [
+        "Send",
+        "clap_output_events",
+        "src/events.rs"
+      ],
+      [
+        "Sync",
+        "clap_output_events",
+        "src/events.rs"
+      ],
+      [
+        "Send",
+        "clap_audio_port_info",
+        "src/ext/audio_ports.rs"
+      ],
+      [
+        "Sync",
+        "clap_audio_port_info",
+        "src/ext/audio_ports.rs"
+      ],
+      [
+        "Send",
+        "clap_audio_ports_config",
+        "src/ext/audio_ports_config.rs"
+      ],
+      [
+        "Sync",
+        "clap_audio_ports_config",
+        "src/ext/audio_ports_config.rs"
+      ],
+      [
+        "Send",
+        "clap_audio_port_configuration_request",
+        "src/ext/configurable_audio_ports.rs"
+      ],
+      [
+        "Sync",
+        "clap_audio_port_configuration_request",
+        "src/ext/configurable_audio_ports.rs"
+      ],
+      [
+        "Send",
+        "clap_context_menu_entry",
+        "src/ext/context_menu.rs"
+      ],
+      [
+        "Sync",
+        "clap_context_menu_entry",
+        "src/ext/context_menu.rs"
+      ],
+      [
+        "Send",
+        "clap_context_menu_check_entry",
+        "src/ext/context_menu.rs"
+      ],
+      [
+        "Sync",
+        "clap_context_menu_check_entry",
+        "src/ext/context_menu.rs"
+      ],
+      [
+        "Send",
+        "clap_context_menu_item_title",
+        "src/ext/context_menu.rs"
+      ],
+      [
+        "Sync",
+        "clap_context_menu_item_title",
+        "src/ext/context_menu.rs"
+      ],
+      [
+        "Send",
+        "clap_context_menu_submenu",
+        "src/ext/context_menu.rs"
+      ],
+      [
+        "Sync",
+        "clap_context_menu_submenu",
+        "src/ext/context_menu.rs"
+      ],
+      [
+        "Send",
+        "clap_context_menu_builder",
+        "src/ext/context_menu.rs"
+      ],
+      [
+        "Sync",
+        "clap_context_menu_builder",
+        "src/ext/context_menu.rs"
+      ],
+      [
+        "Send",
+        "clap_event_trigger",
+        "src/ext/draft/triggers.rs"
+      ],
+      [
+        "Sync",
+        "clap_event_trigger",
+        "src/ext/draft/triggers.rs"
+      ],
+      [
+        "Send",
+        "clap_trigger_info",
+        "src/ext/draft/triggers.rs"
+      ],
+      [
+        "Sync",
+        "clap_trigger_info",
+        "src/ext/draft/triggers.rs"
+      ],
+      [
+        "Send",
+        "clap_tuning_info",
+        "src/ext/draft/tuning.rs"
+      ],
+      [
+        "Sync",
+        "clap_tuning_info",
+        "src/ext/draft/tuning.rs"
+      ],
+      [
+        "Send",
+        "clap_window",
+        "src/ext/gui.rs"
+      ],
+      [
+        "Sync",
+        "clap_window",
+        "src/ext/gui.rs"
+      ],
+      [
+        "Send",
+        "clap_window__bindgen_ty_1",
+        "src/ext/gui.rs"
+      ],
+      [
+        "Sync",
+        "clap_window__bindgen_ty_1",
+        "src/ext/gui.rs"
+      ],
+      [
+        "Send",
+        "clap_param_info",
+        "src/ext/params.rs"
+      ],
+      [
+        "Sync",
+        "clap_param_info",
+        "src/ext/params.rs"
+      ],
+      [
+        "Send",
+        "clap_track_info",
+        "src/ext/track_info.rs"
+      ],
+      [
+        "Sync",
+        "clap_track_info",
+        "src/ext/track_info.rs"
+      ],
+      [
+        "Send",
+        "clap_plugin_invalidation_source",
+        "src/factory/draft/plugin_invalidation.rs"
+      ],
+      [
+        "Sync",
+        "clap_plugin_invalidation_source",
+        "src/factory/draft/plugin_invalidation.rs"
+      ],
+      [
+        "Send",
+        "clap_plugin_state_converter_descriptor",
+        "src/factory/draft/plugin_state_converter.rs"
+      ],
+      [
+        "Sync",
+        "clap_plugin_state_converter_descriptor",
+        "src/factory/draft/plugin_state_converter.rs"
+      ],
+      [
+        "Send",
+        "clap_plugin_state_converter",
+        "src/factory/draft/plugin_state_converter.rs"
+      ],
+      [
+        "Sync",
+        "clap_plugin_state_converter",
+        "src/factory/draft/plugin_state_converter.rs"
+      ],
+      [
+        "Send",
+        "clap_preset_discovery_metadata_receiver",
+        "src/factory/preset_discovery.rs"
+      ],
+      [
+        "Sync",
+        "clap_preset_discovery_metadata_receiver",
+        "src/factory/preset_discovery.rs"
+      ],
+      [
+        "Send",
+        "clap_preset_discovery_filetype",
+        "src/factory/preset_discovery.rs"
+      ],
+      [
+        "Sync",
+        "clap_preset_discovery_filetype",
+        "src/factory/preset_discovery.rs"
+      ],
+      [
+        "Send",
+        "clap_preset_discovery_location",
+        "src/factory/preset_discovery.rs"
+      ],
+      [
+        "Sync",
+        "clap_preset_discovery_location",
+        "src/factory/preset_discovery.rs"
+      ],
+      [
+        "Send",
+        "clap_preset_discovery_soundpack",
+        "src/factory/preset_discovery.rs"
+      ],
+      [
+        "Sync",
+        "clap_preset_discovery_soundpack",
+        "src/factory/preset_discovery.rs"
+      ],
+      [
+        "Send",
+        "clap_preset_discovery_provider_descriptor",
+        "src/factory/preset_discovery.rs"
+      ],
+      [
+        "Sync",
+        "clap_preset_discovery_provider_descriptor",
+        "src/factory/preset_discovery.rs"
+      ],
+      [
+        "Send",
+        "clap_preset_discovery_provider",
+        "src/factory/preset_discovery.rs"
+      ],
+      [
+        "Sync",
+        "clap_preset_discovery_provider",
+        "src/factory/preset_discovery.rs"
+      ],
+      [
+        "Send",
+        "clap_preset_discovery_indexer",
+        "src/factory/preset_discovery.rs"
+      ],
+      [
+        "Sync",
+        "clap_preset_discovery_indexer",
+        "src/factory/preset_discovery.rs"
+      ],
+      [
+        "Send",
+        "clap_host",
+        "src/host.rs"
+      ],
+      [
+        "Sync",
+        "clap_host",
+        "src/host.rs"
+      ],
+      [
+        "Send",
+        "clap_plugin_descriptor",
+        "src/plugin.rs"
+      ],
+      [
+        "Sync",
+        "clap_plugin_descriptor",
+        "src/plugin.rs"
+      ],
+      [
+        "Send",
+        "clap_plugin",
+        "src/plugin.rs"
+      ],
+      [
+        "Sync",
+        "clap_plugin",
+        "src/plugin.rs"
+      ],
+      [
+        "Send",
+        "clap_process",
+        "src/process.rs"
+      ],
+      [
+        "Sync",
+        "clap_process",
+        "src/process.rs"
+      ],
+      [
+        "Send",
+        "clap_istream",
+        "src/stream.rs"
+      ],
+      [
+        "Sync",
+        "clap_istream",
+        "src/stream.rs"
+      ],
+      [
+        "Send",
+        "clap_ostream",
+        "src/stream.rs"
+      ],
+      [
+        "Sync",
+        "clap_ostream",
+        "src/stream.rs"
+      ],
+      [
+        "Send",
+        "clap_universal_plugin_id",
+        "src/universal_plugin_id.rs"
+      ],
+      [
+        "Sync",
+        "clap_universal_plugin_id",
+        "src/universal_plugin_id.rs"
+      ]
+    ]
+  },
+  "field_projection": {
+    "CLAP_EVENT_IS_LIVE": {
+      "type": "u32",
+      "raw_type": "i32"
+    },
+    "CLAP_EVENT_DONT_RECORD": {
+      "type": "u32",
+      "raw_type": "i32"
+    },
+    "CLAP_EVENT_NOTE_ON": {
+      "type": "u16",
+      "raw_type": "i32"
+    },
+    "CLAP_EVENT_NOTE_OFF": {
+      "type": "u16",
+      "raw_type": "i32"
+    },
+    "CLAP_EVENT_NOTE_CHOKE": {
+      "type": "u16",
+      "raw_type": "i32"
+    },
+    "CLAP_EVENT_NOTE_END": {
+      "type": "u16",
+      "raw_type": "i32"
+    },
+    "CLAP_EVENT_NOTE_EXPRESSION": {
+      "type": "u16",
+      "raw_type": "i32"
+    },
+    "CLAP_EVENT_PARAM_VALUE": {
+      "type": "u16",
+      "raw_type": "i32"
+    },
+    "CLAP_EVENT_PARAM_MOD": {
+      "type": "u16",
+      "raw_type": "i32"
+    },
+    "CLAP_EVENT_PARAM_GESTURE_BEGIN": {
+      "type": "u16",
+      "raw_type": "i32"
+    },
+    "CLAP_EVENT_PARAM_GESTURE_END": {
+      "type": "u16",
+      "raw_type": "i32"
+    },
+    "CLAP_EVENT_TRANSPORT": {
+      "type": "u16",
+      "raw_type": "i32"
+    },
+    "CLAP_EVENT_MIDI": {
+      "type": "u16",
+      "raw_type": "i32"
+    },
+    "CLAP_EVENT_MIDI_SYSEX": {
+      "type": "u16",
+      "raw_type": "i32"
+    },
+    "CLAP_EVENT_MIDI2": {
+      "type": "u16",
+      "raw_type": "i32"
+    },
+    "CLAP_TRANSPORT_HAS_TEMPO": {
+      "type": "u32",
+      "raw_type": "i32"
+    },
+    "CLAP_TRANSPORT_HAS_BEATS_TIMELINE": {
+      "type": "u32",
+      "raw_type": "i32"
+    },
+    "CLAP_TRANSPORT_HAS_SECONDS_TIMELINE": {
+      "type": "u32",
+      "raw_type": "i32"
+    },
+    "CLAP_TRANSPORT_HAS_TIME_SIGNATURE": {
+      "type": "u32",
+      "raw_type": "i32"
+    },
+    "CLAP_TRANSPORT_IS_PLAYING": {
+      "type": "u32",
+      "raw_type": "i32"
+    },
+    "CLAP_TRANSPORT_IS_RECORDING": {
+      "type": "u32",
+      "raw_type": "i32"
+    },
+    "CLAP_TRANSPORT_IS_LOOP_ACTIVE": {
+      "type": "u32",
+      "raw_type": "i32"
+    },
+    "CLAP_TRANSPORT_IS_WITHIN_PRE_ROLL": {
+      "type": "u32",
+      "raw_type": "i32"
+    },
+    "CLAP_PRESET_DISCOVERY_LOCATION_FILE": {
+      "type": "u32",
+      "raw_type": "i32"
+    },
+    "CLAP_PRESET_DISCOVERY_LOCATION_PLUGIN": {
+      "type": "u32",
+      "raw_type": "i32"
+    },
+    "CLAP_PRESET_DISCOVERY_IS_FACTORY_CONTENT": {
+      "type": "u32",
+      "raw_type": "i32"
+    },
+    "CLAP_PRESET_DISCOVERY_IS_USER_CONTENT": {
+      "type": "u32",
+      "raw_type": "i32"
+    },
+    "CLAP_PRESET_DISCOVERY_IS_DEMO_CONTENT": {
+      "type": "u32",
+      "raw_type": "i32"
+    },
+    "CLAP_PRESET_DISCOVERY_IS_FAVORITE": {
+      "type": "u32",
+      "raw_type": "i32"
+    },
+    "CLAP_AMBISONIC_ORDERING_FUMA": {
+      "type": "u32",
+      "raw_type": "i32"
+    },
+    "CLAP_AMBISONIC_ORDERING_ACN": {
+      "type": "u32",
+      "raw_type": "i32"
+    },
+    "CLAP_AMBISONIC_NORMALIZATION_MAXN": {
+      "type": "u32",
+      "raw_type": "i32"
+    },
+    "CLAP_AMBISONIC_NORMALIZATION_SN3D": {
+      "type": "u32",
+      "raw_type": "i32"
+    },
+    "CLAP_AMBISONIC_NORMALIZATION_N3D": {
+      "type": "u32",
+      "raw_type": "i32"
+    },
+    "CLAP_AMBISONIC_NORMALIZATION_SN2D": {
+      "type": "u32",
+      "raw_type": "i32"
+    },
+    "CLAP_AMBISONIC_NORMALIZATION_N2D": {
+      "type": "u32",
+      "raw_type": "i32"
+    },
+    "CLAP_NAME_SIZE": {
+      "type": "usize",
+      "raw_type": "i32"
+    },
+    "CLAP_PATH_SIZE": {
+      "type": "usize",
+      "raw_type": "i32"
+    },
+    "CLAP_AUDIO_PORT_IS_MAIN": {
+      "type": "u32",
+      "raw_type": "i32"
+    },
+    "CLAP_AUDIO_PORT_SUPPORTS_64BITS": {
+      "type": "u32",
+      "raw_type": "i32"
+    },
+    "CLAP_AUDIO_PORT_PREFERS_64BITS": {
+      "type": "u32",
+      "raw_type": "i32"
+    },
+    "CLAP_AUDIO_PORT_REQUIRES_COMMON_SAMPLE_SIZE": {
+      "type": "u32",
+      "raw_type": "i32"
+    },
+    "CLAP_AUDIO_PORTS_RESCAN_NAMES": {
+      "type": "u32",
+      "raw_type": "i32"
+    },
+    "CLAP_AUDIO_PORTS_RESCAN_FLAGS": {
+      "type": "u32",
+      "raw_type": "i32"
+    },
+    "CLAP_AUDIO_PORTS_RESCAN_CHANNEL_COUNT": {
+      "type": "u32",
+      "raw_type": "i32"
+    },
+    "CLAP_AUDIO_PORTS_RESCAN_PORT_TYPE": {
+      "type": "u32",
+      "raw_type": "i32"
+    },
+    "CLAP_AUDIO_PORTS_RESCAN_IN_PLACE_PAIR": {
+      "type": "u32",
+      "raw_type": "i32"
+    },
+    "CLAP_AUDIO_PORTS_RESCAN_LIST": {
+      "type": "u32",
+      "raw_type": "i32"
+    },
+    "CLAP_CONTEXT_MENU_TARGET_KIND_GLOBAL": {
+      "type": "u32",
+      "raw_type": "i32"
+    },
+    "CLAP_CONTEXT_MENU_TARGET_KIND_PARAM": {
+      "type": "u32",
+      "raw_type": "i32"
+    },
+    "CLAP_CONTEXT_MENU_ITEM_ENTRY": {
+      "type": "u32",
+      "raw_type": "i32"
+    },
+    "CLAP_CONTEXT_MENU_ITEM_CHECK_ENTRY": {
+      "type": "u32",
+      "raw_type": "i32"
+    },
+    "CLAP_CONTEXT_MENU_ITEM_SEPARATOR": {
+      "type": "u32",
+      "raw_type": "i32"
+    },
+    "CLAP_CONTEXT_MENU_ITEM_BEGIN_SUBMENU": {
+      "type": "u32",
+      "raw_type": "i32"
+    },
+    "CLAP_CONTEXT_MENU_ITEM_END_SUBMENU": {
+      "type": "u32",
+      "raw_type": "i32"
+    },
+    "CLAP_CONTEXT_MENU_ITEM_TITLE": {
+      "type": "u32",
+      "raw_type": "i32"
+    },
+    "CLAP_NOTE_DIALECT_CLAP": {
+      "type": "u32",
+      "raw_type": "i32"
+    },
+    "CLAP_NOTE_DIALECT_MIDI": {
+      "type": "u32",
+      "raw_type": "i32"
+    },
+    "CLAP_NOTE_DIALECT_MIDI_MPE": {
+      "type": "u32",
+      "raw_type": "i32"
+    },
+    "CLAP_NOTE_DIALECT_MIDI2": {
+      "type": "u32",
+      "raw_type": "i32"
+    },
+    "CLAP_NOTE_PORTS_RESCAN_ALL": {
+      "type": "u32",
+      "raw_type": "i32"
+    },
+    "CLAP_NOTE_PORTS_RESCAN_NAMES": {
+      "type": "u32",
+      "raw_type": "i32"
+    },
+    "CLAP_PARAM_IS_STEPPED": {
+      "type": "u32",
+      "raw_type": "i32"
+    },
+    "CLAP_PARAM_IS_PERIODIC": {
+      "type": "u32",
+      "raw_type": "i32"
+    },
+    "CLAP_PARAM_IS_HIDDEN": {
+      "type": "u32",
+      "raw_type": "i32"
+    },
+    "CLAP_PARAM_IS_READONLY": {
+      "type": "u32",
+      "raw_type": "i32"
+    },
+    "CLAP_PARAM_IS_BYPASS": {
+      "type": "u32",
+      "raw_type": "i32"
+    },
+    "CLAP_PARAM_IS_AUTOMATABLE": {
+      "type": "u32",
+      "raw_type": "i32"
+    },
+    "CLAP_PARAM_IS_AUTOMATABLE_PER_NOTE_ID": {
+      "type": "u32",
+      "raw_type": "i32"
+    },
+    "CLAP_PARAM_IS_AUTOMATABLE_PER_KEY": {
+      "type": "u32",
+      "raw_type": "i32"
+    },
+    "CLAP_PARAM_IS_AUTOMATABLE_PER_CHANNEL": {
+      "type": "u32",
+      "raw_type": "i32"
+    },
+    "CLAP_PARAM_IS_AUTOMATABLE_PER_PORT": {
+      "type": "u32",
+      "raw_type": "i32"
+    },
+    "CLAP_PARAM_IS_MODULATABLE": {
+      "type": "u32",
+      "raw_type": "i32"
+    },
+    "CLAP_PARAM_IS_MODULATABLE_PER_NOTE_ID": {
+      "type": "u32",
+      "raw_type": "i32"
+    },
+    "CLAP_PARAM_IS_MODULATABLE_PER_KEY": {
+      "type": "u32",
+      "raw_type": "i32"
+    },
+    "CLAP_PARAM_IS_MODULATABLE_PER_CHANNEL": {
+      "type": "u32",
+      "raw_type": "i32"
+    },
+    "CLAP_PARAM_IS_MODULATABLE_PER_PORT": {
+      "type": "u32",
+      "raw_type": "i32"
+    },
+    "CLAP_PARAM_REQUIRES_PROCESS": {
+      "type": "u32",
+      "raw_type": "i32"
+    },
+    "CLAP_PARAM_IS_ENUM": {
+      "type": "u32",
+      "raw_type": "i32"
+    },
+    "CLAP_PARAM_RESCAN_VALUES": {
+      "type": "u32",
+      "raw_type": "i32"
+    },
+    "CLAP_PARAM_RESCAN_TEXT": {
+      "type": "u32",
+      "raw_type": "i32"
+    },
+    "CLAP_PARAM_RESCAN_INFO": {
+      "type": "u32",
+      "raw_type": "i32"
+    },
+    "CLAP_PARAM_RESCAN_ALL": {
+      "type": "u32",
+      "raw_type": "i32"
+    },
+    "CLAP_PARAM_CLEAR_ALL": {
+      "type": "u32",
+      "raw_type": "i32"
+    },
+    "CLAP_PARAM_CLEAR_AUTOMATIONS": {
+      "type": "u32",
+      "raw_type": "i32"
+    },
+    "CLAP_PARAM_CLEAR_MODULATIONS": {
+      "type": "u32",
+      "raw_type": "i32"
+    },
+    "CLAP_PARAM_INDICATION_AUTOMATION_NONE": {
+      "type": "u32",
+      "raw_type": "i32"
+    },
+    "CLAP_PARAM_INDICATION_AUTOMATION_PRESENT": {
+      "type": "u32",
+      "raw_type": "i32"
+    },
+    "CLAP_PARAM_INDICATION_AUTOMATION_PLAYING": {
+      "type": "u32",
+      "raw_type": "i32"
+    },
+    "CLAP_PARAM_INDICATION_AUTOMATION_RECORDING": {
+      "type": "u32",
+      "raw_type": "i32"
+    },
+    "CLAP_PARAM_INDICATION_AUTOMATION_OVERRIDING": {
+      "type": "u32",
+      "raw_type": "i32"
+    },
+    "CLAP_POSIX_FD_READ": {
+      "type": "u32",
+      "raw_type": "i32"
+    },
+    "CLAP_POSIX_FD_WRITE": {
+      "type": "u32",
+      "raw_type": "i32"
+    },
+    "CLAP_POSIX_FD_ERROR": {
+      "type": "u32",
+      "raw_type": "i32"
+    },
+    "CLAP_REMOTE_CONTROLS_COUNT": {
+      "type": "usize",
+      "raw_type": "i32"
+    },
+    "CLAP_STATE_CONTEXT_FOR_PRESET": {
+      "type": "u32",
+      "raw_type": "i32"
+    },
+    "CLAP_STATE_CONTEXT_FOR_DUPLICATE": {
+      "type": "u32",
+      "raw_type": "i32"
+    },
+    "CLAP_STATE_CONTEXT_FOR_PROJECT": {
+      "type": "u32",
+      "raw_type": "i32"
+    },
+    "CLAP_SURROUND_FL": {
+      "type": "u32",
+      "raw_type": "i32"
+    },
+    "CLAP_SURROUND_FR": {
+      "type": "u32",
+      "raw_type": "i32"
+    },
+    "CLAP_SURROUND_FC": {
+      "type": "u32",
+      "raw_type": "i32"
+    },
+    "CLAP_SURROUND_LFE": {
+      "type": "u32",
+      "raw_type": "i32"
+    },
+    "CLAP_SURROUND_BL": {
+      "type": "u32",
+      "raw_type": "i32"
+    },
+    "CLAP_SURROUND_BR": {
+      "type": "u32",
+      "raw_type": "i32"
+    },
+    "CLAP_SURROUND_FLC": {
+      "type": "u32",
+      "raw_type": "i32"
+    },
+    "CLAP_SURROUND_FRC": {
+      "type": "u32",
+      "raw_type": "i32"
+    },
+    "CLAP_SURROUND_BC": {
+      "type": "u32",
+      "raw_type": "i32"
+    },
+    "CLAP_SURROUND_SL": {
+      "type": "u32",
+      "raw_type": "i32"
+    },
+    "CLAP_SURROUND_SR": {
+      "type": "u32",
+      "raw_type": "i32"
+    },
+    "CLAP_SURROUND_TC": {
+      "type": "u32",
+      "raw_type": "i32"
+    },
+    "CLAP_SURROUND_TFL": {
+      "type": "u32",
+      "raw_type": "i32"
+    },
+    "CLAP_SURROUND_TFC": {
+      "type": "u32",
+      "raw_type": "i32"
+    },
+    "CLAP_SURROUND_TFR": {
+      "type": "u32",
+      "raw_type": "i32"
+    },
+    "CLAP_SURROUND_TBL": {
+      "type": "u32",
+      "raw_type": "i32"
+    },
+    "CLAP_SURROUND_TBC": {
+      "type": "u32",
+      "raw_type": "i32"
+    },
+    "CLAP_SURROUND_TBR": {
+      "type": "u32",
+      "raw_type": "i32"
+    },
+    "CLAP_TRACK_INFO_HAS_TRACK_NAME": {
+      "type": "u64",
+      "raw_type": "i32"
+    },
+    "CLAP_TRACK_INFO_HAS_TRACK_COLOR": {
+      "type": "u64",
+      "raw_type": "i32"
+    },
+    "CLAP_TRACK_INFO_HAS_AUDIO_CHANNEL": {
+      "type": "u64",
+      "raw_type": "i32"
+    },
+    "CLAP_TRACK_INFO_IS_FOR_RETURN_TRACK": {
+      "type": "u64",
+      "raw_type": "i32"
+    },
+    "CLAP_TRACK_INFO_IS_FOR_BUS": {
+      "type": "u64",
+      "raw_type": "i32"
+    },
+    "CLAP_TRACK_INFO_IS_FOR_MASTER": {
+      "type": "u64",
+      "raw_type": "i32"
+    },
+    "CLAP_VOICE_INFO_SUPPORTS_OVERLAPPING_NOTES": {
+      "type": "u64",
+      "raw_type": "i32"
+    },
+    "CLAP_TRIGGER_IS_AUTOMATABLE_PER_NOTE_ID": {
+      "type": "u32",
+      "raw_type": "i32"
+    },
+    "CLAP_TRIGGER_IS_AUTOMATABLE_PER_KEY": {
+      "type": "u32",
+      "raw_type": "i32"
+    },
+    "CLAP_TRIGGER_IS_AUTOMATABLE_PER_CHANNEL": {
+      "type": "u32",
+      "raw_type": "i32"
+    },
+    "CLAP_TRIGGER_IS_AUTOMATABLE_PER_PORT": {
+      "type": "u32",
+      "raw_type": "i32"
+    },
+    "CLAP_EVENT_TRIGGER": {
+      "type": "u16",
+      "raw_type": "i32"
+    },
+    "CLAP_TRIGGER_RESCAN_INFO": {
+      "type": "u32",
+      "raw_type": "i32"
+    },
+    "CLAP_TRIGGER_RESCAN_ALL": {
+      "type": "u32",
+      "raw_type": "i32"
+    },
+    "CLAP_TRIGGER_CLEAR_ALL": {
+      "type": "u32",
+      "raw_type": "i32"
+    },
+    "CLAP_TRIGGER_CLEAR_AUTOMATIONS": {
+      "type": "u32",
+      "raw_type": "i32"
+    }
+  },
+  "projection_clients": [
+    "vendor/clack/common/src/events/event_types/midi.rs",
+    "vendor/clack/common/src/events/event_types/note.rs",
+    "vendor/clack/common/src/events/event_types/note_expression.rs",
+    "vendor/clack/common/src/events/event_types/param_value.rs",
+    "vendor/clack/common/src/events/event_types/transport.rs",
+    "vendor/clack/common/src/events/header.rs",
+    "vendor/clack/extensions/src/ambisonic.rs",
+    "vendor/clack/extensions/src/audio_ports.rs",
+    "vendor/clack/extensions/src/context_menu/item.rs",
+    "vendor/clack/extensions/src/context_menu.rs",
+    "vendor/clack/extensions/src/note_name.rs",
+    "vendor/clack/extensions/src/note_ports.rs",
+    "vendor/clack/extensions/src/param_indication.rs",
+    "vendor/clack/extensions/src/params.rs",
+    "vendor/clack/extensions/src/posix_fd.rs",
+    "vendor/clack/extensions/src/preset_discovery/preset_data.rs",
+    "vendor/clack/extensions/src/state_context.rs",
+    "vendor/clack/extensions/src/surround.rs",
+    "vendor/clack/extensions/src/track_info.rs",
+    "vendor/clack/extensions/src/voice_info.rs"
+  ],
+  "host_features": "Existing services only; full latest standard inventory remains incomplete.",
+  "qualification": "Independent full native C++ and actual Rust ABI gate required; generation alone does not qualify host behavior or performance.",
+  "shipped_files": [
+    {
+      "path": "Cargo.toml",
+      "sha256": "25cdcf2d4308706e355616a8f94aa11c8f16d39cbf159799831cd9daa2b1ce23",
+      "bytes": 340
+    },
+    {
+      "path": "GENERATED-INPUT-DIFF.json",
+      "sha256": "dc7e81cba1989e2d88f275730efe20d060f4ff7df3c0586701c6038c6f63dda3",
+      "bytes": 814
+    },
+    {
+      "path": "generator/Cargo.lock",
+      "sha256": "961d084912db85564c06f6cb2eff66c095872bd1afa53a0026ebb29d5889eca8",
+      "bytes": 5487
+    },
+    {
+      "path": "generator/Cargo.toml",
+      "sha256": "ec6721cc1abdf0ac26e0a36fcfde67a8e56457874c0be1ad48e271b8b2b2673d",
+      "bytes": 253
+    },
+    {
+      "path": "generator/src/main.rs",
+      "sha256": "37ea6e6f889219cf520f69e0007f01b660126ba1364335a6a0583cb96d3f84c2",
+      "bytes": 2377
+    },
+    {
+      "path": "generator/wrapper.h",
+      "sha256": "024a7b2365fe0e15bb869ba0f178429fa288f86dea4d4acb3c90a0de0d87063e",
+      "bytes": 98
+    },
+    {
+      "path": "LICENSE-APACHE",
+      "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+      "bytes": 11358
+    },
+    {
+      "path": "LICENSE-CLAP.txt",
+      "sha256": "ced49f9ef950277afdb56199369ea6e8165ebfdbfbb37ebfe1827e0de892088d",
+      "bytes": 1072
+    },
+    {
+      "path": "LICENSE-MIT",
+      "sha256": "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3",
+      "bytes": 1023
+    },
+    {
+      "path": "official/ChangeLog.md",
+      "sha256": "58ae5d6c796d8d44e6925299236bcfd8a7b66bacd9dc48442474305a95599bbb",
+      "bytes": 18314
+    },
+    {
+      "path": "official/include/clap/all.h",
+      "sha256": "0f2b5d5ec3007443fa35dd6e9b22f44986d5bb011ebb73849cd87776e5f8b22a",
+      "bytes": 832
+    },
+    {
+      "path": "official/include/clap/audio-buffer.h",
+      "sha256": "efe1d90ba87499fc8f930d9c9c86157e023bede2c6ade01a20de6d2dfef3828e",
+      "bytes": 1083
+    },
+    {
+      "path": "official/include/clap/clap.h",
+      "sha256": "a92456f80610d3be34e0c037b448619cd10e18291d7ea82c9b4c0900c39b669c",
+      "bytes": 2213
+    },
+    {
+      "path": "official/include/clap/color.h",
+      "sha256": "acc184298ff9987e90c214e7998110b4bdb4b7d8e56d6a7a6f5ef0832713f6ca",
+      "bytes": 305
+    },
+    {
+      "path": "official/include/clap/entry.h",
+      "sha256": "ef6b40a61a5aaf3bf3c1473da43aba65d247c7cc1c4dd580d076b258d784a604",
+      "bytes": 6476
+    },
+    {
+      "path": "official/include/clap/events.h",
+      "sha256": "681c975f9b4fc1efd54988911d5520a18c29b79133993c54e3abb1b8fc488b9c",
+      "bytes": 14777
+    },
+    {
+      "path": "official/include/clap/ext/ambisonic.h",
+      "sha256": "eabed521abc0677c750937c729c904e302576e7b3890e64a4b27831ea6be7b65",
+      "bytes": 1972
+    },
+    {
+      "path": "official/include/clap/ext/audio-ports-activation.h",
+      "sha256": "44ccd8668bfb2badd6c9538dc7135ccdb69d000c0a1990bc580808b95567a8c2",
+      "bytes": 2578
+    },
+    {
+      "path": "official/include/clap/ext/audio-ports-config.h",
+      "sha256": "4fea079dd1ac5e2638a697bf045af54a407190078914956dc1aec24796853c83",
+      "bytes": 4019
+    },
+    {
+      "path": "official/include/clap/ext/audio-ports.h",
+      "sha256": "560d41cd2985772f1ef0c7720537ebd2b9b1298fa8e82bc8d0665b154cd6405a",
+      "bytes": 4108
+    },
+    {
+      "path": "official/include/clap/ext/configurable-audio-ports.h",
+      "sha256": "32fd49778f25988bcd11c78cadd31cab032bb4ddcf0b6dd10c85129ef3cbda12",
+      "bytes": 2349
+    },
+    {
+      "path": "official/include/clap/ext/context-menu.h",
+      "sha256": "9e235a77132a2eb3121a94d97b7fbc5924d52be6f1f67505d358764b32112223",
+      "bytes": 6034
+    },
+    {
+      "path": "official/include/clap/ext/draft/background-activation.h",
+      "sha256": "3a02cf4c9521ecf356e25848b721d76c456b953515fdbbe16300658e5f6ae493",
+      "bytes": 1710
+    },
+    {
+      "path": "official/include/clap/ext/draft/background-progress.h",
+      "sha256": "f9dd0f528461dedf48aaae34686e9b91264920e38b0c5cb3ec8ed87d4c8e5b1b",
+      "bytes": 1608
+    },
+    {
+      "path": "official/include/clap/ext/draft/background-state-context.h",
+      "sha256": "1765d5cd5f7586e640fef198fdb808094c9d8fed8a7e3eed07a5eb5aff611fe1",
+      "bytes": 1787
+    },
+    {
+      "path": "official/include/clap/ext/draft/extensible-audio-ports.h",
+      "sha256": "dcce635ec4c8202f82058f3682a6c8bfe78a7545092d3be88b247196eaeed918",
+      "bytes": 1205
+    },
+    {
+      "path": "official/include/clap/ext/draft/flush-events.h",
+      "sha256": "aab8a0cbde25dcd57143327e6c3675c7eaedd00cafe8b0c0eb48e2b7d5ac4944",
+      "bytes": 1600
+    },
+    {
+      "path": "official/include/clap/ext/draft/gain-adjustment-metering.h",
+      "sha256": "ea4177b7363bbf2ae87c7b30d8cb8aa14aa0febbfae6ddbaeec6ed42bc08ad51",
+      "bytes": 1279
+    },
+    {
+      "path": "official/include/clap/ext/draft/mini-curve-display.h",
+      "sha256": "e93371a0fdfa10eff539fe0efde1567ee3a8d5c0468e67f6269777d3ab5cdda6",
+      "bytes": 6311
+    },
+    {
+      "path": "official/include/clap/ext/draft/octave-number.h",
+      "sha256": "612ee7516034dd25338a983b5ef3d55ebc18ee9043dc1693442cf12fad71e292",
+      "bytes": 1125
+    },
+    {
+      "path": "official/include/clap/ext/draft/param-hovered.h",
+      "sha256": "8eb4849cdbc9498d856d6c5da3232026e7ca28edac4b42ead24bfe5d46821b3d",
+      "bytes": 874
+    },
+    {
+      "path": "official/include/clap/ext/draft/params-origin.h",
+      "sha256": "828be0657d52f6ec6264dd45f1d2fdfee62479c63c70809d0276827d676af34f",
+      "bytes": 2339
+    },
+    {
+      "path": "official/include/clap/ext/draft/project-location.h",
+      "sha256": "5f09ac2806fad93fbd40273d777f066ec2a4d2384e27b9d1ac4dd9e33396e3b1",
+      "bytes": 3539
+    },
+    {
+      "path": "official/include/clap/ext/draft/resource-directory.h",
+      "sha256": "7276929113825a3b23d97ddbd03ad2ba1e41d4332ccd97d9478e543652661150",
+      "bytes": 3874
+    },
+    {
+      "path": "official/include/clap/ext/draft/scratch-memory.h",
+      "sha256": "186f42db66fd4107fe4b84e25d0e37066efcf90aaa7eb099a8303305dd5867d1",
+      "bytes": 3606
+    },
+    {
+      "path": "official/include/clap/ext/draft/transport-control.h",
+      "sha256": "0e9861258818b51b37e576de6398601e567942a2e368e0c3b033f231dd50577d",
+      "bytes": 2401
+    },
+    {
+      "path": "official/include/clap/ext/draft/triggers.h",
+      "sha256": "5576da586a679c0b72eb87665b832d64f5d17940d347300c85edaaccab4c4dd1",
+      "bytes": 4317
+    },
+    {
+      "path": "official/include/clap/ext/draft/tuning.h",
+      "sha256": "7a7979f8abcd7875a6708189d35bb337253b42d350a52bc56c4a0cde285f2b9b",
+      "bytes": 2685
+    },
+    {
+      "path": "official/include/clap/ext/draft/undo.h",
+      "sha256": "6d88258bdbd1c42008b4c606490c24cf437db36db754ee0804f9ace1c1712308",
+      "bytes": 9304
+    },
+    {
+      "path": "official/include/clap/ext/draft/webview.h",
+      "sha256": "c7d0a1d4ef8869b993d93512365b4fdf39a2b28451c8f0812f89d1ce4f26acb2",
+      "bytes": 3586
+    },
+    {
+      "path": "official/include/clap/ext/event-registry.h",
+      "sha256": "a673ac102f7af52a18886aa53f218d0fbe8381de745679efa6676eb55c81a9b6",
+      "bytes": 596
+    },
+    {
+      "path": "official/include/clap/ext/gui.h",
+      "sha256": "489c27e5147e3faa19046a86b50fc439ee1d08f45dcd803637f1c30c62dfbc1e",
+      "bytes": 10064
+    },
+    {
+      "path": "official/include/clap/ext/latency.h",
+      "sha256": "a6ab271c2287817bb5f35a010876c3344357da7d9c380e31ce627949f90e9746",
+      "bytes": 719
+    },
+    {
+      "path": "official/include/clap/ext/log.h",
+      "sha256": "4c7a28368df3412a1b44b42188f7b4b25920c52a08fd4b525799a7e76f72263c",
+      "bytes": 744
+    },
+    {
+      "path": "official/include/clap/ext/note-name.h",
+      "sha256": "fac02f93927b0e37d0d662d35233b9293a1aced5854d445c37cd11b1985d26d0",
+      "bytes": 984
+    },
+    {
+      "path": "official/include/clap/ext/note-ports.h",
+      "sha256": "0bc144d3b41d0495a2f007abba80bcdf31ad0d76b144245d4344386132463fcf",
+      "bytes": 2659
+    },
+    {
+      "path": "official/include/clap/ext/param-indication.h",
+      "sha256": "b60023659350452c61f24017adba5507c9b182f63088ef28862ba0be224cc5a5",
+      "bytes": 3098
+    },
+    {
+      "path": "official/include/clap/ext/params.h",
+      "sha256": "aeeb42ac04847f4664ffdea4dea88e637ff6ce1f687d70a44b9f254582a0d29e",
+      "bytes": 16632
+    },
+    {
+      "path": "official/include/clap/ext/posix-fd-support.h",
+      "sha256": "713bff1fc10ad29b13c43dd800d92bf9f6aa3e5ee699498a722bd9a5332f42a6",
+      "bytes": 1586
+    },
+    {
+      "path": "official/include/clap/ext/preset-load.h",
+      "sha256": "687437dd7eddd9294f625064beb16eb7fb06efab5bc6d26f6e1d262e0f7f106a",
+      "bytes": 2082
+    },
+    {
+      "path": "official/include/clap/ext/remote-controls.h",
+      "sha256": "704cd78099ca5f773d0a35081881a5fbfc07ece820f6406eb47fe74c1264e8f1",
+      "bytes": 2752
+    },
+    {
+      "path": "official/include/clap/ext/render.h",
+      "sha256": "04d36c03bdcc63fd79edb023e9afe3dd02e3e6d9360dd43bc24f33c9c7bb62ba",
+      "bytes": 1152
+    },
+    {
+      "path": "official/include/clap/ext/state-context.h",
+      "sha256": "de392a8a7a7616c3e1016e2854578419c0ef6a0f3501a6536225185cb0a566f6",
+      "bytes": 2680
+    },
+    {
+      "path": "official/include/clap/ext/state.h",
+      "sha256": "616450227a2e4fa7de0a0c7f8d2e6ef7f7f6ab4f346aca06ad927a391a9b0001",
+      "bytes": 1528
+    },
+    {
+      "path": "official/include/clap/ext/surround.h",
+      "sha256": "5dc476e2a3eac9224b01e918840d091f829c3fa70144d4c40ca7ce5e24860739",
+      "bytes": 3582
+    },
+    {
+      "path": "official/include/clap/ext/tail.h",
+      "sha256": "5cd612fc32a292e0e5f0868cb34a1ca4f3a68336ec1d4b47c8b33190236cff06",
+      "bytes": 599
+    },
+    {
+      "path": "official/include/clap/ext/thread-check.h",
+      "sha256": "0b14e4ff86e4ab10ba46a4b3f644cfcacacede2122b5b4dc1a91b6e3855891d1",
+      "bytes": 4197
+    },
+    {
+      "path": "official/include/clap/ext/thread-pool.h",
+      "sha256": "670f90d6a0da76fece9b3e0c1bbb8e1b03325da53f9a3fc1e5116afc414b89d5",
+      "bytes": 2179
+    },
+    {
+      "path": "official/include/clap/ext/timer-support.h",
+      "sha256": "f3a3cbf10495be51706efb81305e8b319860d2bcdca1fae0d8e42dc14320a26c",
+      "bytes": 851
+    },
+    {
+      "path": "official/include/clap/ext/track-info.h",
+      "sha256": "5ff9f735240b0d7ada1479b36daa961ded9cc892de56600039034053289f84d4",
+      "bytes": 2201
+    },
+    {
+      "path": "official/include/clap/ext/voice-info.h",
+      "sha256": "b7c1f6fe01007f582bdc360f66e44e64dbf1c7b90737f63abf08f50a27d92617",
+      "bytes": 1849
+    },
+    {
+      "path": "official/include/clap/factory/draft/plugin-invalidation.h",
+      "sha256": "aa6c6275a1cc5c4f66ae0c476c046e7397225fd1bcd2623e3f136e44184ee64c",
+      "bytes": 1771
+    },
+    {
+      "path": "official/include/clap/factory/draft/plugin-state-converter.h",
+      "sha256": "88cb6215d4e79f9ad0f1dc9a430ddd0ae8489280e5bfad17430720d934d36633",
+      "bytes": 4234
+    },
+    {
+      "path": "official/include/clap/factory/plugin-factory.h",
+      "sha256": "10024390809a13ed3f758ddd10ae1beded43dbee3ce1acc090ffa73730a98301",
+      "bytes": 1738
+    },
+    {
+      "path": "official/include/clap/factory/preset-discovery.h",
+      "sha256": "50fa2ade36f2ec1f0a19ded5708226114295bc96de45c2342a579cb6b4b9ab27",
+      "bytes": 15605
+    },
+    {
+      "path": "official/include/clap/fixedpoint.h",
+      "sha256": "58f50936f9539e39b1cf01dfe70f9e95f179c9d730fa6686fbb490b6a7769e8a",
+      "bytes": 466
+    },
+    {
+      "path": "official/include/clap/host.h",
+      "sha256": "2cfb8845f53f6f04cc69b7714afad7fd2c3b92728f268cbad9ebc2d7d055db7c",
+      "bytes": 2152
+    },
+    {
+      "path": "official/include/clap/id.h",
+      "sha256": "7c8cdeea37bdcc4df1be83473fd42712e1b005c45cb64d5b1fde2f892a182ea4",
+      "bytes": 161
+    },
+    {
+      "path": "official/include/clap/plugin-features.h",
+      "sha256": "99aff972b7d887ba1bb7370e776373f8500f5b5b9f8f698e60374fd4ce01cc23",
+      "bytes": 2883
+    },
+    {
+      "path": "official/include/clap/plugin.h",
+      "sha256": "d2a178137349749eb1dd9c1d6a437300309044626dcc14b0f6e31995f1c5f25b",
+      "bytes": 5128
+    },
+    {
+      "path": "official/include/clap/private/macros.h",
+      "sha256": "861b57a204da34542413c021110dc4740f3dd27bc7a1f6ba3619092c7fd90b17",
+      "bytes": 1149
+    },
+    {
+      "path": "official/include/clap/private/std.h",
+      "sha256": "6e489536d32a059a7f27ccf3c2833e3e09f16336c1aa77d9101c714e70053011",
+      "bytes": 217
+    },
+    {
+      "path": "official/include/clap/process.h",
+      "sha256": "93132a2dc8c3ce7073c652ae0c9fa386bebb5ce23408a95a77842d2d85bae0a2",
+      "bytes": 2194
+    },
+    {
+      "path": "official/include/clap/stream.h",
+      "sha256": "bec9b7c95007ec729a668697d9e0637d0cea57eb767504de5744dbce6741957f",
+      "bytes": 1248
+    },
+    {
+      "path": "official/include/clap/string-sizes.h",
+      "sha256": "e8ebc287f05c3f068788f27b2db4bfd5727b252e8cc806064cb3dce7eb608b27",
+      "bytes": 461
+    },
+    {
+      "path": "official/include/clap/timestamp.h",
+      "sha256": "848e362e19c388dd088c0b2de682be08be628082079a77b2652722296c060acc",
+      "bytes": 313
+    },
+    {
+      "path": "official/include/clap/universal-plugin-id.h",
+      "sha256": "f25fd6e0479d9f0e0ec54a8e573bbba380d89db18322e51f0de91382624f45ad",
+      "bytes": 818
+    },
+    {
+      "path": "official/include/clap/version.h",
+      "sha256": "fb9f4863d4e636d07cfb16d661a3f54794347e5cb6952f3d402227ad306eb0a0",
+      "bytes": 1506
+    },
+    {
+      "path": "official/LICENSE",
+      "sha256": "ced49f9ef950277afdb56199369ea6e8165ebfdbfbb37ebfe1827e0de892088d",
+      "bytes": 1072
+    },
+    {
+      "path": "official/README.md",
+      "sha256": "9493548fc83ef6f294737182bf3d2a3c55b9450a24f20ead27b02b3e33466e23",
+      "bytes": 8600
+    },
+    {
+      "path": "OFFICIAL-SOURCES.json",
+      "sha256": "f1e9d275f1a5c3ec208f6a20ec2cc21a435af6d3bee7da0efa02d5fc924059dc",
+      "bytes": 17232
+    },
+    {
+      "path": "README.md",
+      "sha256": "90acc33eae6416380b400a3c45f1eb500dbd5f3fdf207dcfbcd847a7d34c3e88",
+      "bytes": 1911
+    },
+    {
+      "path": "src/audio_buffer.rs",
+      "sha256": "f65fdc0a3727a4a55355997d9ca4d006df8eff50d47d513f2629093e2c6e90e0",
+      "bytes": 129
+    },
+    {
+      "path": "src/color.rs",
+      "sha256": "ca4aa2109517c8e3d2c0719203b7cfd792b9529619ebf973761dd5389787fa6e",
+      "bytes": 156
+    },
+    {
+      "path": "src/entry.rs",
+      "sha256": "62d28b8004fe06f88256de703f450f4ab18a1db0f2fef361ee4452531d55a691",
+      "bytes": 171
+    },
+    {
+      "path": "src/events.rs",
+      "sha256": "21e2793b05e7ce90473f70788ee906c60196e338ff4a3ff0ebe4430fed6b3c1c",
+      "bytes": 1686
+    },
+    {
+      "path": "src/ext/ambisonic.rs",
+      "sha256": "825d36c717f6a646cb813fd62711939ab6e1bf63b31737ed11e3d873e2b0f2f5",
+      "bytes": 644
+    },
+    {
+      "path": "src/ext/audio_ports.rs",
+      "sha256": "05ce01fe504c03ed313ff42852700c8e99319519df4d5f2e722c611b43313be6",
+      "bytes": 780
+    },
+    {
+      "path": "src/ext/audio_ports_activation.rs",
+      "sha256": "ae287e4193ae6ca8d6b6eb63937ca75dd16b755eb82249161e67de7e2547fa4c",
+      "bytes": 369
+    },
+    {
+      "path": "src/ext/audio_ports_config.rs",
+      "sha256": "ee37a4d596a175ab8ff566c1be7cf509fe470b7342774d82c7ab31aecd7c7d0a",
+      "bytes": 632
+    },
+    {
+      "path": "src/ext/configurable_audio_ports.rs",
+      "sha256": "c0cbb72e4e7c90df5b2daa96dd2cdc12b95dab0c07965654de3aa964f63851e0",
+      "bytes": 523
+    },
+    {
+      "path": "src/ext/context_menu.rs",
+      "sha256": "45a0445e55b3840c6bd92294c4e51a8e985cdcfa054b52b08821fbb948d914b6",
+      "bytes": 988
+    },
+    {
+      "path": "src/ext/draft/background_activation.rs",
+      "sha256": "4aa9a3843a835e6dfe8baf87c3ddbfee49b9176c62dab44f08cb01a8e0741856",
+      "bytes": 282
+    },
+    {
+      "path": "src/ext/draft/background_progress.rs",
+      "sha256": "e104900ac6ea404ee08f2ca478d55e3c028d54173284c8daf60a2ab3811f850d",
+      "bytes": 295
+    },
+    {
+      "path": "src/ext/draft/background_state_context.rs",
+      "sha256": "e1225df265457751d0416a649f2cc49e13a6257fab84a641f7fff0ac9cedefae",
+      "bytes": 344
+    },
+    {
+      "path": "src/ext/draft/extensible_audio_ports.rs",
+      "sha256": "1fa506b1c7c514b1bd8a389209778f007540d971e2fdf599c119b2d4cb9d350a",
+      "bytes": 307
+    },
+    {
+      "path": "src/ext/draft/flush_events.rs",
+      "sha256": "2a6de9d8be6434385775de7b262c3f7e3c0e9a6e5c865fbbb49832ac38a270d4",
+      "bytes": 325
+    },
+    {
+      "path": "src/ext/draft/gain_adjustment_metering.rs",
+      "sha256": "e36c0043a9a70499f981926df498e88fe554a80009c364ab0284155c3e1b893e",
+      "bytes": 250
+    },
+    {
+      "path": "src/ext/draft/mini_curve_display.rs",
+      "sha256": "c3739270d658c6819b5c0c544256347395e68aefa8a4af8ad7c0bad1b0ea9b97",
+      "bytes": 946
+    },
+    {
+      "path": "src/ext/draft/mod.rs",
+      "sha256": "55eeae6e5e8f8cd7130bd40120c4b789185f80dbfe4f887548bd164eebf97b47",
+      "bytes": 1289
+    },
+    {
+      "path": "src/ext/draft/octave_number.rs",
+      "sha256": "8ae1fd3c3db4164eb6b6c2c0dc3f40bf07999669e793a91ba84cc473b3c16e04",
+      "bytes": 202
+    },
+    {
+      "path": "src/ext/draft/param_hovered.rs",
+      "sha256": "655cfac764a1b54b1b05268f8f00a4c5af9068eebd2a42732fcad7d99332b574",
+      "bytes": 226
+    },
+    {
+      "path": "src/ext/draft/params_origin.rs",
+      "sha256": "58f8026be8474824b0364ac292bd13cab94cb56d7c0c5d8c59472ac1b43714da",
+      "bytes": 350
+    },
+    {
+      "path": "src/ext/draft/project_location.rs",
+      "sha256": "b23714919031470970110fdd2ae841c224373fd056a4b3025df68c51a70ad8c1",
+      "bytes": 863
+    },
+    {
+      "path": "src/ext/draft/resource_directory.rs",
+      "sha256": "56e69c55945f5c244fc89ca4c8e40c47608d9c0c7c04ae593d5f869fab7a510e",
+      "bytes": 305
+    },
+    {
+      "path": "src/ext/draft/scratch_memory.rs",
+      "sha256": "9ff95fa059b645e616e46b1fad723b6902cbb8413fa62ad1bb8a66061203388c",
+      "bytes": 265
+    },
+    {
+      "path": "src/ext/draft/transport_control.rs",
+      "sha256": "ba97dc11c89611b9f3fd4af22ff5e9fc9643e2782a29b6e588a79478152aebfe",
+      "bytes": 255
+    },
+    {
+      "path": "src/ext/draft/triggers.rs",
+      "sha256": "5aeb75364e3e3c0346d871f381164eede51e9ce582ab016d8b67bc0809ed39c4",
+      "bytes": 812
+    },
+    {
+      "path": "src/ext/draft/tuning.rs",
+      "sha256": "16797678956ad514a986b3dca5617039ce7c321cd2dbd239be56ff77751db06f",
+      "bytes": 404
+    },
+    {
+      "path": "src/ext/draft/undo.rs",
+      "sha256": "752a98d8031e55aee5d89337a341e88927e3e89239e2f3d6eabd44f0050d8469",
+      "bytes": 419
+    },
+    {
+      "path": "src/ext/draft/webview.rs",
+      "sha256": "283754c524f5d96d6f20b1c9a186693973c5ad5a54f56ea78cf9f6752790904b",
+      "bytes": 310
+    },
+    {
+      "path": "src/ext/event_registry.rs",
+      "sha256": "a47e8a405340bd7f40fb536aee6daf9eea4ac737f7a679df27e1743686206910",
+      "bytes": 194
+    },
+    {
+      "path": "src/ext/gui.rs",
+      "sha256": "56da1587c63fe096e60718980a2bb4cb98f45f73e5d7f2fbc9fce814e8285391",
+      "bytes": 483
+    },
+    {
+      "path": "src/ext/latency.rs",
+      "sha256": "85b4025adef1fc402fe68759dc31a9b5f284a235575c67aaf5d9ae9d73b5d0ed",
+      "bytes": 229
+    },
+    {
+      "path": "src/ext/log.rs",
+      "sha256": "2a944f8d8c0e298f737d78ebcf66c3ed728c12c237b2a705894c9ff87381691a",
+      "bytes": 314
+    },
+    {
+      "path": "src/ext/mod.rs",
+      "sha256": "d78e3830282a247983e6ab74b909c6040107407eb9a16e29a4c4d19183b28111",
+      "bytes": 1757
+    },
+    {
+      "path": "src/ext/note_name.rs",
+      "sha256": "56c08c909d6f3d848d219cd96d4bbd6d8b65da6de1599f18c379b9207d597be5",
+      "bytes": 295
+    },
+    {
+      "path": "src/ext/note_ports.rs",
+      "sha256": "2feaed92e51da3b655ffa1c30434f9f41b450dca04e5254361a346428c3c5b45",
+      "bytes": 590
+    },
+    {
+      "path": "src/ext/param_indication.rs",
+      "sha256": "ada97d4c60e78981f7b11f8035ace0d4a0b03c57f690ffb096d0d00de5c10fdf",
+      "bytes": 493
+    },
+    {
+      "path": "src/ext/params.rs",
+      "sha256": "907f88bb33f26980e2a35d8541a5f1714daac32059db30d8e1d1fcba53cbaa74",
+      "bytes": 1335
+    },
+    {
+      "path": "src/ext/posix_fd_support.rs",
+      "sha256": "e7000d2e54323b1c1db015e6e0be0d4f77206e0d0f8cd4e3d02ba22f25782f0c",
+      "bytes": 376
+    },
+    {
+      "path": "src/ext/preset_load.rs",
+      "sha256": "f83a16caf26b2df1df335ffde667ada4da43992e1f3b692945db1f4f15a60c98",
+      "bytes": 282
+    },
+    {
+      "path": "src/ext/remote_controls.rs",
+      "sha256": "aa2958595d4a41e6d59d387a652de23623a4715925b3b6d181a96b072d59b798",
+      "bytes": 427
+    },
+    {
+      "path": "src/ext/render.rs",
+      "sha256": "cc8b2ed8e235099f7e5aaed6044a514ff2eb1eeb54f3d5e845d39121b928eeef",
+      "bytes": 240
+    },
+    {
+      "path": "src/ext/state.rs",
+      "sha256": "f0590d5de5fbaf7ceb7e4c60bd168d2fc37d0e0afbeca036597ddcf05a2933f8",
+      "bytes": 273
+    },
+    {
+      "path": "src/ext/state_context.rs",
+      "sha256": "079a0a3f99e6befbbddce12c764e59ad196e57b072f8c6e8ce844b6463569214",
+      "bytes": 404
+    },
+    {
+      "path": "src/ext/surround.rs",
+      "sha256": "d80745f91411fe364124f78e6c84932a826ed671a014b42fa686858cb0c5e2e4",
+      "bytes": 710
+    },
+    {
+      "path": "src/ext/tail.rs",
+      "sha256": "1b7948fcfbedfafa7fe04963247ff1dae6e60e36873630d58277a6f7b0fc1ed2",
+      "bytes": 211
+    },
+    {
+      "path": "src/ext/thread_check.rs",
+      "sha256": "368b311d033ae8da87e120d7d0018704d0270ba68033b837fa94296489d90911",
+      "bytes": 186
+    },
+    {
+      "path": "src/ext/thread_pool.rs",
+      "sha256": "5b22cf1c338e785a03f9fce03d6ed4fa126c3fc612c96433f1ec3f63f4609237",
+      "bytes": 280
+    },
+    {
+      "path": "src/ext/timer_support.rs",
+      "sha256": "0d5dd9d8b24280e44e206fa2995a6b43f9da9063163fc4a1783741e1f39389c9",
+      "bytes": 274
+    },
+    {
+      "path": "src/ext/track_info.rs",
+      "sha256": "cc05fc3056f0d2bc0d7255930dde7ded0466605d439285f8d6a79c24ae5cebe3",
+      "bytes": 575
+    },
+    {
+      "path": "src/ext/voice_info.rs",
+      "sha256": "88dd560c737d79131e5a350b8e71e0e75144479f53674662bc66918faf1da081",
+      "bytes": 331
+    },
+    {
+      "path": "src/factory/draft/mod.rs",
+      "sha256": "b7974cc11aa1fb7e7902202b3ec3d952c92be0d103f7dc8314fd1ddcf28b8307",
+      "bytes": 193
+    },
+    {
+      "path": "src/factory/draft/plugin_invalidation.rs",
+      "sha256": "dfee3127966818d07fe3440fea2c2e5cb840d2bd90ee09dc585d125dc3905130",
+      "bytes": 319
+    },
+    {
+      "path": "src/factory/draft/plugin_state_converter.rs",
+      "sha256": "122f52a66bfb90ddf2538ca85a72da77a6630c5893372c290dae5340953c7a75",
+      "bytes": 493
+    },
+    {
+      "path": "src/factory/mod.rs",
+      "sha256": "3f7505da25892787b41d1ab65eb57fbb4287e760887cd71e667c013613d56c09",
+      "bytes": 221
+    },
+    {
+      "path": "src/factory/plugin_factory.rs",
+      "sha256": "572c90d54a3389b78e5d885888abedaf315d7f46983918c29e7e0a51a5876304",
+      "bytes": 313
+    },
+    {
+      "path": "src/factory/preset_discovery.rs",
+      "sha256": "dcbc8d3935db1a45fa4540b7229c1b03cda478b2574fea841fad4efa9cc16df9",
+      "bytes": 1249
+    },
+    {
+      "path": "src/fixedpoint.rs",
+      "sha256": "c1dd9df96beddff10008d0e0f017a7224290b9e826524b29a8405c95b32f1ff1",
+      "bytes": 159
+    },
+    {
+      "path": "src/host.rs",
+      "sha256": "edda431a7c13a6cff57d4d8f7922e292c578bb234c257cf32cfadfdd53985806",
+      "bytes": 135
+    },
+    {
+      "path": "src/id.rs",
+      "sha256": "34283e722315599a39a79bfc34c01544976003bebf1df75df8683a525d69837c",
+      "bytes": 105
+    },
+    {
+      "path": "src/lib.rs",
+      "sha256": "e2f2510afb2e777cc36af7e1380d159c260ae3b540fc985a23182b351583c071",
+      "bytes": 1549
+    },
+    {
+      "path": "src/plugin.rs",
+      "sha256": "bd7614884aa53161ac2be2f76f858eac72fc213d31cedeeebf1b0290ca986fea",
+      "bytes": 253
+    },
+    {
+      "path": "src/plugin_features.rs",
+      "sha256": "e14b9be16cf0ff086275c4104f7d4d38cd70de89120736946f0650f1615f6f43",
+      "bytes": 1381
+    },
+    {
+      "path": "src/process.rs",
+      "sha256": "40f6583eeebb8633e773d6e2c070e176070e6e6b8008afed39955bc2a9acc1f1",
+      "bytes": 403
+    },
+    {
+      "path": "src/raw.rs",
+      "sha256": "0300511ca69490436738c05d6e5051de6745524a95029a78ba95ce2f43b74ca8",
+      "bytes": 118703
+    },
+    {
+      "path": "src/stream.rs",
+      "sha256": "25a29a0e9e114fbf80a86266978b0e5686d5bd175b4673fa4bf24912432c8ad5",
+      "bytes": 143
+    },
+    {
+      "path": "src/string_sizes.rs",
+      "sha256": "cc84ccfea03dae19087622868b03f20e03f3fa62c35c4b6475acd2c7446bdb10",
+      "bytes": 121
+    },
+    {
+      "path": "src/support.rs",
+      "sha256": "65d1b63e314c00479285eccf4f8770324af1945348bfa94845e1bc9c360617be",
+      "bytes": 23849
+    },
+    {
+      "path": "src/timestamp.rs",
+      "sha256": "28d8000f759263b49ced5acc4f9c0d9cd3c218a8b2e44d32fa953d3c83f0e7db",
+      "bytes": 126
+    },
+    {
+      "path": "src/universal_plugin_id.rs",
+      "sha256": "5a20947aff0f86315a7d7781f2c2f8339db8ff200afc08f9be26e4594394e9ac",
+      "bytes": 150
+    },
+    {
+      "path": "src/version.rs",
+      "sha256": "fdc8fe1b63bb232712e9bee51ae753f04df2929b50452b5df79118ce10cdedf6",
+      "bytes": 252
+    },
+    {
+      "path": "SUPPORT-SOURCES.json",
+      "sha256": "ca723e63a5f4aa48fede615b7581f9553e1cf91ab9af86a7053c14170600321d",
+      "bytes": 15137
+    }
+  ],
+  "local_formatting": {
+    "receipt": "LOCAL-FORMAT-CHANGES.json",
+    "receipt_sha256_raw": "7b18ec356cdc25e5d354b0532298b900d261c4e3efa9ad7d1b75051d3aeb2bbb",
+    "file_count": 66,
+    "official_input_bytes_unchanged": true,
+    "generated_abi_bytes_unchanged": true,
+    "runtime_qualification": false
+  }
+}

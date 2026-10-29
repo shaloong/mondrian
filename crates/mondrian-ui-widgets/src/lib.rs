@@ -7,6 +7,7 @@ pub mod button;
 pub mod checkbox;
 pub mod color_picker;
 pub mod context_menu;
+mod control_inspection;
 pub mod curve_editor;
 pub mod dialog_surface;
 pub mod dock_panel;
@@ -32,6 +33,7 @@ pub mod slider;
 pub mod text_input;
 mod text_metrics;
 pub mod timeline_view;
+mod value_edit;
 pub mod vector_icon;
 pub mod video_scopes_surface;
 pub mod viewer_surface;
@@ -54,7 +56,11 @@ pub use color_picker::{
     ColorPickerTriggerOptions,
 };
 pub use context_menu::ContextMenu;
-pub use curve_editor::{CurveEdit, CurveEditor, CurvePoint, CurvePointPolicy};
+pub use curve_editor::{
+    CurveBoundary, CurveClipboardCommand, CurveEdit, CurveEditor, CurveEditorViewState,
+    CurveGestureEvent, CurvePoint, CurvePointPolicy, CurvePointTarget, CurvePreview, CurveTangent,
+    CurveValueAxis,
+};
 pub use dialog_surface::DialogSurface;
 pub use dock_panel::{DockPanel, DockPanelDropArea};
 pub use dock_splitter::DockSplitter;
@@ -66,7 +72,9 @@ pub use label::Label;
 pub use list::{List, ListItem};
 pub use menu::{Dropdown, MenuItem};
 pub use node_graph_view::{NodeGraphEdge, NodeGraphNode, NodeGraphView};
-pub use number_input::{NumberInput, NumberInputChangeAction};
+pub use number_input::{
+    NumberInput, NumberInputChangeAction, NumberInputValue, NumericInputAdjustment,
+};
 pub use panel_list::{
     PanelList, PanelListAction, PanelListBadge, PanelListBadgeTone, PanelListItem, PanelListState,
 };
@@ -76,7 +84,9 @@ pub use raster_image::RasterImage;
 pub use scroll::{ScrollView, ScrollViewState};
 pub use segmented_button_group::{SegmentedButtonGroup, SegmentedButtonItem};
 pub use slider::Slider;
-pub use text_input::{MultilineTextInput, TabBehavior, TextInput, TextInputChangeAction};
+pub use text_input::{
+    MultilineTextInput, TabBehavior, TextInput, TextInputChangeAction, TextInputCommitAction,
+};
 pub use timeline_view::{
     TimelineAssetDrop, TimelineAssetDropAction, TimelineClip, TimelineClipAction, TimelineClipKind,
     TimelineClipMove, TimelineClipMoveAction, TimelineClipRef, TimelineClipSelectionMode,
@@ -90,6 +100,7 @@ pub use timeline_view::{
     TimelineTransitionRef, TimelineTransitionResize, TimelineTransitionResizeAction,
     TimelineTrimEdge, TimelineView, TimelineViewState, WaveformDisplay,
 };
+pub use value_edit::ValueEdit;
 pub use vector_icon::{VectorIcon, VectorIconError};
 pub use video_scopes_surface::{
     VideoScopesLayout, VideoScopesSettings, VideoScopesSurface, VideoScopesTextureSet,

@@ -1,0 +1,123 @@
+use super::*;
+use crate::utils::write_to_array_buf;
+use clack_plugin::extensions::prelude::*;
+use std::mem::MaybeUninit;
+
+/// A host-provided buffer where the plugin can write note port metadata.
+pub struct NotePortInfoWriter<'a> {
+    buf: &'a mut MaybeUninit<clap_note_port_info>,
+    is_set: bool,
+}
+
+impl NotePortInfoWriter<'_> {
+    /// # Safety
+    ///
+    /// The user must ensure the provided pointer is aligned and points to a valid allocation.
+    /// However, it doesn't have to be initialized.
+    #[inline]
+    unsafe fn from_raw(raw: *mut clap_note_port_info) -> Self {
+        Self {
+            buf: &mut *raw.cast(),
+            is_set: false,
+        }
+    }
+
+    /// Writes all fields from the given [`NotePortInfo`] into the host buffer.
+    #[inline]
+    pub fn set(&mut self, info: &NotePortInfo) {
+        use core::ptr::write;
+
+        let buf = self.buf.as_mut_ptr();
+
+        // SAFETY: all pointers come from `buf`, which is valid for writes and well-aligned
+        unsafe {
+            write(&raw mut (*buf).id, info.id.get());
+            write_to_array_buf(&raw mut (*buf).name, info.name);
+
+            write(
+                &raw mut (*buf).supported_dialects,
+                info.supported_dialects.bits(),
+            );
+            write(
+                &raw mut (*buf).preferred_dialect,
+                info.preferred_dialect.map(|d| d as u32).unwrap_or(0),
+            );
+        }
+
+        self.is_set = true;
+    }
+}
+
+/// Implementation of the Plugin-side of the Note Ports extension.
+pub trait PluginNotePortsImpl {
+    /// Returns number of audio ports, for either input or output.
+    fn count(&self, is_input: bool) -> u32;
+    /// Get information about a note port by its index, for either input or output.
+    fn get(&self, index: u32, is_input: bool, writer: &mut NotePortInfoWriter);
+}
+
+// SAFETY: The given struct is the CLAP extension struct for the matching side of this extension.
+unsafe impl<P> ExtensionImplementation<P> for PluginNotePorts
+where
+    for<'a> P: Plugin<MainThread<'a>: PluginNotePortsImpl>,
+{
+    const IMPLEMENTATION: RawExtensionImplementation =
+        RawExtensionImplementation::new(&clap_plugin_note_ports {
+            count: Some(count::<P>),
+            get: Some(get::<P>),
+        });
+}
+
+#[allow(clippy::missing_safety_doc)]
+unsafe extern "C" fn count<P>(plugin: *const clap_plugin, is_input: bool) -> u32
+where
+    for<'a> P: Plugin<MainThread<'a>: PluginNotePortsImpl>,
+{
+    PluginWrapper::<P>::handle(plugin, |p| Ok(p.main_thread().count(is_input))).unwrap_or(0)
+}
+
+#[allow(clippy::missing_safety_doc)]
+unsafe extern "C" fn get<P>(
+    plugin: *const clap_plugin,
+    index: u32,
+    is_input: bool,
+    info: *mut clap_note_port_info,
+) -> bool
+where
+    for<'a> P: Plugin<MainThread<'a>: PluginNotePortsImpl>,
+{
+    PluginWrapper::<P>::handle(plugin, |p| {
+        if info.is_null() {
+            return Err(PluginWrapperError::NulPtr("clap_note_port_info"));
+        };
+
+        let mut writer = NotePortInfoWriter::from_raw(info);
+        p.main_thread().get(index, is_input, &mut writer);
+        Ok(writer.is_set)
+    })
+    .unwrap_or(false)
+}
+
+impl HostNotePorts {
+    /// Query which note dialects are supported by the host.
+    #[inline]
+    pub fn supported_dialects(&self, host: &HostMainThreadHandle) -> NoteDialects {
+        match host.use_extension(&self.0).supported_dialects {
+            None => NoteDialects::empty(),
+            Some(supported) => {
+                // SAFETY: This type ensures the function pointer is valid.
+                NoteDialects::from_bits_truncate(unsafe { supported(host.as_raw()) })
+            }
+        }
+    }
+
+    /// Rescan the full list of note ports according to the flags.
+    /// See [`NotePortRescanFlags`] for more details.
+    #[inline]
+    pub fn rescan(&self, host: &HostMainThreadHandle, flags: NotePortRescanFlags) {
+        if let Some(rescan) = host.use_extension(&self.0).rescan {
+            // SAFETY: This type ensures the function pointer is valid.
+            unsafe { rescan(host.as_raw(), flags.bits()) }
+        }
+    }
+}

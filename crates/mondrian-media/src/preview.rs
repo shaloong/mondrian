@@ -131,8 +131,6 @@ use frame_materialization::{
 };
 #[cfg(test)]
 use native_frame::parse_ffmpeg_d3d11_texture;
-#[cfg(all(test, mondrian_ffmpeg_7_1))]
-use native_frame::{FfmpegAvD3D12VaFrame, FfmpegAvD3D12VaSyncContext};
 pub use native_frame::{
     FfmpegD3D11TextureView, FfmpegD3D12TextureView, FfmpegNativeDecodedFrameResource,
     FfmpegNativeDecodedFrameResourceError, PreviewCvPixelBuffer, PreviewNativeDecodedFrame,
@@ -2013,8 +2011,9 @@ fn apply_preview_codec_threading_policy(
     requested
 }
 
+pub use external_decode::fit_target_size;
 use external_decode::{
-    ensure_ffmpeg_initialized, fit_target_size, preview_external_ffmpeg_cpu_rgba_enabled,
+    ensure_ffmpeg_initialized, preview_external_ffmpeg_cpu_rgba_enabled,
     try_decode_with_external_ffmpeg_cpu_rgba,
 };
 #[cfg(test)]

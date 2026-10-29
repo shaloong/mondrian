@@ -3,20 +3,21 @@
 //! 在指定位置弹出菜单项列表。点击选项或外部区域关闭。
 //! 支持嵌套子菜单，与 Dropdown 共享相同的深度链架构。
 
+use crate::menu::{localize_menu_items, visit_menu_items, MenuAccessibilityIds};
 use mondrian_ui_core::types::*;
 use mondrian_ui_core::widget::{
     AccessibilityNode, AccessibilityRole, AccessibilityState, EventContext, PaintContext,
 };
 use mondrian_ui_core::{EventResult, UiEvent, Widget};
 use mondrian_ui_theme::{Theme, ThemePreset};
-use std::cell::Cell;
+use std::cell::{Cell, OnceCell};
 
 use crate::menu::{
     anchored_menu_rect, geometry_item_at, geometry_item_rect, menu_item_activation,
-    menu_item_text_width_with_metrics, paint_menu_popup_chrome, paint_menu_row,
-    paint_menu_scrollbar, paint_menu_separator, paint_submenu_arrow, popup_first_activatable_index,
-    popup_next_activatable_index, rect_has_paintable_area, root_hovered_index, submenu_rect,
-    MenuItem, MenuItemCommand, MenuItemKind, MenuMetrics, MenuRowPaint,
+    menu_item_text_width_with_metrics, navigate_popup, open_submenu_at, paint_menu_popup_chrome,
+    paint_menu_row, paint_menu_scrollbar, paint_menu_separator, paint_submenu_arrow,
+    rect_has_paintable_area, root_hovered_index, submenu_rect, MenuItem, MenuItemCommand,
+    MenuItemKind, MenuMetrics, MenuRowPaint, PopupKeyOutcome,
 };
 
 const MAX_VISIBLE_ITEMS: usize = 40;
@@ -27,6 +28,8 @@ const MAX_VISIBLE_ITEMS: usize = 40;
 pub struct ContextMenu {
     id: WidgetId,
     items: Vec<MenuItem>,
+    accessible_name: Option<String>,
+    accessibility_ids: OnceCell<Vec<MenuAccessibilityIds>>,
     anchor: Point,
     bounds: Rect,
     visible: bool,
@@ -78,6 +81,8 @@ impl ContextMenu {
         Self {
             id: WidgetId::new(),
             items,
+            accessible_name: None,
+            accessibility_ids: OnceCell::new(),
             anchor,
             bounds: Rect::ZERO,
             visible: true,
@@ -88,6 +93,24 @@ impl ContextMenu {
             scroll_offset: Cell::new(0.0),
             visual: Cell::new(ContextMenuVisualTokens::default()),
         }
+    }
+
+    /// Name the popup using application-owned localized text.
+    pub fn with_accessible_name(mut self, name: impl Into<String>) -> Self {
+        self.set_accessible_name(name);
+        self
+    }
+
+    /// Update the name without changing selection, geometry or input ownership.
+    pub fn set_accessible_name(&mut self, name: impl Into<String>) {
+        let name = name.into();
+        self.accessible_name = (!name.is_empty()).then_some(name);
+    }
+
+    /// Reformat keyed labels while retaining command identity and the open path.
+    /// The owner must relayout after changing measured label widths.
+    pub fn localize_item_labels(&mut self, mut translate: impl FnMut(&str) -> String) {
+        localize_menu_items(&mut self.items, &mut translate);
     }
 
     pub fn is_visible(&self) -> bool {
@@ -169,7 +192,7 @@ impl ContextMenu {
     }
 
     fn icon_lane_width(&self) -> f32 {
-        if self.items.iter().any(|item| item.icon.is_some() || item.checked) {
+        if self.items.iter().any(|item| item.icon.is_some() || item.checked == Some(true)) {
             self.visual.get().icon_lane_width
         } else {
             0.0
@@ -305,14 +328,6 @@ impl ContextMenu {
         root_hovered_index(self.hover_depth)
     }
 
-    fn first_activatable_index(&self) -> Option<usize> {
-        popup_first_activatable_index(&self.items)
-    }
-
-    fn next_activatable_index(&self, direction: i32) -> Option<usize> {
-        popup_next_activatable_index(&self.items, self.hovered_index(), direction)
-    }
-
     fn activate_index(&mut self, index: usize, ctx: &mut EventContext) -> bool {
         let Some(activation) = menu_item_activation(&self.items[index]) else {
             return false;
@@ -326,16 +341,10 @@ impl ContextMenu {
     fn apply_activation(&mut self, activation: MenuItemCommand, ctx: &mut EventContext) {
         match activation {
             MenuItemCommand::Action(action) => (ctx.dispatch)(action),
+            MenuItemCommand::Focused(command) => ctx.request_edit_command(command),
             MenuItemCommand::Local(command) => self.local_command = Some(command),
             MenuItemCommand::None => {}
         }
-    }
-
-    fn activate_hovered(&mut self, ctx: &mut EventContext) -> bool {
-        let Some(index) = self.hovered_index().or_else(|| self.first_activatable_index()) else {
-            return false;
-        };
-        self.activate_index(index, ctx)
     }
 
     fn ensure_hover_visible(&self) {
@@ -393,29 +402,39 @@ impl Widget for ContextMenu {
                     if let Some(sub_rect) = self.menu_rect_at_depth(depth)
                         && sub_rect.contains(*position)
                     {
-                        if let Some(children) = self.children_at(&self.submenu_chain[..depth])
-                            && let Some(sub_idx) = geometry_item_at(
-                                sub_rect,
-                                children.len(),
-                                self.item_height(),
-                                0.0,
-                                *position,
-                            )
-                            && let Some(child) = children.get(sub_idx)
-                            && let Some(activation) = menu_item_activation(child)
-                        {
-                            self.apply_activation(activation, ctx);
-                            self.close();
-                            return EventResult::Handled;
+                        if let Some(index) = self.item_at_depth(*position, depth) {
+                            if open_submenu_at(
+                                &self.items,
+                                &mut self.submenu_chain,
+                                &mut self.hover_depth,
+                                depth,
+                                index,
+                            ) {
+                                ctx.request_repaint();
+                            } else if let Some(command) = self
+                                .children_at(&self.submenu_chain[..depth])
+                                .and_then(|children| children.get(index))
+                                .and_then(menu_item_activation)
+                            {
+                                self.apply_activation(command, ctx);
+                                self.close();
+                            }
                         }
-                        self.close();
                         return EventResult::Handled;
                     }
                 }
 
                 // Parent menu click.
                 if let Some(index) = self.item_at(*position) {
-                    if self.items[index].is_activatable() && !self.items[index].is_submenu() {
+                    if open_submenu_at(
+                        &self.items,
+                        &mut self.submenu_chain,
+                        &mut self.hover_depth,
+                        0,
+                        index,
+                    ) {
+                        ctx.request_repaint();
+                    } else if self.items[index].is_activatable() {
                         self.activate_index(index, ctx);
                     }
                     return EventResult::Handled;
@@ -496,26 +515,24 @@ impl Widget for ContextMenu {
                 self.close();
                 EventResult::Handled
             }
-            UiEvent::KeyDown { key: KeyCode::Escape, .. } => {
-                self.close();
-                EventResult::Handled
-            }
-            UiEvent::KeyDown { key: KeyCode::Down, modifiers }
-                if *modifiers == Modifiers::none() =>
+            UiEvent::KeyDown { key, modifiers }
+                if *modifiers == Modifiers::none() || *key == KeyCode::Escape =>
             {
-                self.hover_depth = self.next_activatable_index(1).map(|i| (0, i));
-                self.ensure_hover_visible();
-                EventResult::Handled
-            }
-            UiEvent::KeyDown { key: KeyCode::Up, modifiers } if *modifiers == Modifiers::none() => {
-                self.hover_depth = self.next_activatable_index(-1).map(|i| (0, i));
-                self.ensure_hover_visible();
-                EventResult::Handled
-            }
-            UiEvent::KeyDown { key: KeyCode::Enter | KeyCode::Space, modifiers }
-                if *modifiers == Modifiers::none() =>
-            {
-                self.activate_hovered(ctx);
+                match navigate_popup(
+                    &self.items,
+                    &mut self.submenu_chain,
+                    &mut self.hover_depth,
+                    *key,
+                ) {
+                    PopupKeyOutcome::Unhandled => return EventResult::Ignored,
+                    PopupKeyOutcome::Handled => self.ensure_hover_visible(),
+                    PopupKeyOutcome::Close => self.close(),
+                    PopupKeyOutcome::Activate(command) => {
+                        self.apply_activation(command, ctx);
+                        self.close();
+                    }
+                }
+                ctx.request_repaint();
                 EventResult::Handled
             }
             _ => EventResult::Ignored,
@@ -560,8 +577,8 @@ impl Widget for ContextMenu {
                 item.icon.as_ref(),
                 reserve_icon_lane,
                 MenuRowPaint {
-                    enabled: item.enabled,
-                    active: item.checked,
+                    enabled: item.is_enabled(),
+                    active: item.checked == Some(true),
                     hovered: self.hover_depth.is_some_and(|(d, idx)| d == 0 && idx == i)
                         || self.submenu_chain.first() == Some(&i),
                 },
@@ -623,8 +640,8 @@ impl Widget for ContextMenu {
                     child.icon.as_ref(),
                     false,
                     MenuRowPaint {
-                        enabled: child.enabled,
-                        active: child.checked,
+                        enabled: child.is_enabled(),
+                        active: child.checked == Some(true),
                         hovered,
                     },
                 );
@@ -648,15 +665,38 @@ impl Widget for ContextMenu {
         self.visible && self.bounds_rect().contains(point)
     }
 
+    fn visit_accessibility_nodes(&self, visitor: &mut dyn FnMut(AccessibilityNode)) {
+        if !self.visible {
+            return;
+        }
+        if let Some(node) = self.accessibility() {
+            visitor(node);
+        }
+        let ids = self
+            .accessibility_ids
+            .get_or_init(|| MenuAccessibilityIds::for_items(&self.items));
+        visit_menu_items(
+            &self.items,
+            ids,
+            self.id,
+            &self.submenu_chain,
+            self.hover_depth,
+            0,
+            visitor,
+        );
+    }
+
     fn accessibility(&self) -> Option<AccessibilityNode> {
         self.visible.then(|| {
-            AccessibilityNode::new(self.id, AccessibilityRole::Menu)
-                .with_name("Context menu")
-                .with_state(AccessibilityState {
+            let mut node = AccessibilityNode::new(self.id, AccessibilityRole::Menu).with_state(
+                AccessibilityState {
                     expanded: Some(true),
                     selected: Some(self.hover_depth.is_some()),
                     ..AccessibilityState::default()
-                })
+                },
+            );
+            node.name = self.accessible_name.clone();
+            node
         })
     }
 
@@ -778,6 +818,126 @@ mod tests {
     }
 
     #[test]
+    fn context_menu_accessibility_projects_items_and_open_submenu_without_dispatch() {
+        use mondrian_ui_core::widget::collect_accessibility_nodes;
+        let mut menu = ContextMenu::new(
+            Point::new(10.0, 10.0),
+            vec![
+                MenuItem::new("复制🙂", Action::Copy).checked(true),
+                MenuItem::separator(),
+                MenuItem::new("不可用", Action::Cut).disabled(),
+                MenuItem::submenu(
+                    "选择",
+                    vec![
+                        MenuItem::new("未选中", Action::Paste).checked(false),
+                        MenuItem::inert("只读说明"),
+                    ],
+                ),
+            ],
+        );
+        menu.layout(Rect::new(0.0, 0.0, 300.0, 200.0));
+        let original_model = format!("{:?}", menu.items);
+        let nodes = collect_accessibility_nodes(&menu);
+        assert_eq!(nodes.len(), 4, "menu plus non-separator top-level items");
+        assert_eq!(nodes[1].name.as_deref(), Some("复制🙂"));
+        assert_eq!(nodes[1].state.checked, Some(true));
+        assert!(nodes[2].state.disabled);
+        assert_eq!(nodes[3].state.expanded, Some(false));
+        assert_eq!(nodes[2].state.checked, None);
+        assert_eq!(nodes[0].parent_id, None);
+        assert!(nodes[1..].iter().all(|node| node.parent_id == Some(menu.id())));
+        assert!(nodes.iter().all(|node| node.focus_order.is_none()));
+        assert_eq!(
+            nodes,
+            collect_accessibility_nodes(&menu),
+            "inspection identity is stable"
+        );
+        assert_eq!(format!("{:?}", menu.items), original_model);
+        let dispatched = RefCell::new(Vec::new());
+        let mut focus = DummyFocus;
+        let mut shortcuts = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let dispatch = |action| dispatched.borrow_mut().push(action);
+        let mut ctx = make_event_ctx(&mut focus, &mut shortcuts, &mut tooltip, &dispatch);
+        for key in [KeyCode::Down, KeyCode::End, KeyCode::Right] {
+            menu.event(
+                &UiEvent::KeyDown { key, modifiers: Modifiers::none() },
+                &mut ctx,
+            );
+        }
+        let expanded = collect_accessibility_nodes(&menu);
+        assert_eq!(expanded.len(), 6, "only the open submenu is projected");
+        assert_eq!(expanded[3].state.expanded, Some(true));
+        assert_eq!(expanded[4].name.as_deref(), Some("未选中"));
+        assert_eq!(expanded[4].state.checked, Some(false));
+        assert!(expanded[5].state.disabled);
+        assert_eq!(expanded[4].parent_id, Some(expanded[3].widget_id));
+        assert_eq!(expanded[5].parent_id, Some(expanded[3].widget_id));
+        assert_eq!(nodes[1].widget_id, expanded[1].widget_id);
+        assert_eq!(format!("{:?}", menu.items), original_model);
+        for _ in 0..3 {
+            if !menu.is_visible() {
+                break;
+            }
+            menu.event(
+                &UiEvent::KeyDown { key: KeyCode::Escape, modifiers: Modifiers::none() },
+                &mut ctx,
+            );
+        }
+        assert!(collect_accessibility_nodes(&menu).is_empty());
+        assert!(dispatched.borrow().is_empty());
+    }
+
+    #[test]
+    fn context_menu_accessibility_relabel_keeps_local_command_and_open_path() {
+        use mondrian_ui_core::widget::collect_accessibility_nodes;
+        let mut menu = ContextMenu::new(
+            Point::ZERO,
+            vec![MenuItem::submenu(
+                "操作",
+                vec![
+                    MenuItem::local("重置", "reset").with_message_id("reset"),
+                    MenuItem::inert("Vendor🙂/opaque"),
+                ],
+            )
+            .with_message_id("operations")],
+        )
+        .with_accessible_name("曲线");
+        menu.submenu_chain = vec![0];
+        menu.hover_depth = Some((1, 0));
+        let before = collect_accessibility_nodes(&menu);
+        menu.set_accessible_name("[Curve extended🙂]");
+        menu.localize_item_labels(|id| match id {
+            "operations" => "[Operations extended🙂]".to_owned(),
+            "reset" => "[Reset extended🙂]".to_owned(),
+            _ => panic!("unexpected key"),
+        });
+        let after = collect_accessibility_nodes(&menu);
+        assert_eq!(
+            before.iter().map(|n| n.widget_id).collect::<Vec<_>>(),
+            after.iter().map(|n| n.widget_id).collect::<Vec<_>>()
+        );
+        assert_eq!(after[0].name.as_deref(), Some("[Curve extended🙂]"));
+        assert_eq!(after[2].name.as_deref(), Some("[Reset extended🙂]"));
+        assert_eq!(after[3].name.as_deref(), Some("Vendor🙂/opaque"));
+        assert_eq!(menu.submenu_chain, [0]);
+        assert_eq!(menu.hover_depth, Some((1, 0)));
+        let actions = RefCell::new(Vec::new());
+        let mut f = DummyFocus;
+        let mut s = DummyShortcut;
+        let mut t = DummyTooltip;
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut ctx = make_event_ctx(&mut f, &mut s, &mut t, &dispatch);
+        menu.event(
+            &UiEvent::KeyDown { key: KeyCode::Enter, modifiers: Modifiers::none() },
+            &mut ctx,
+        );
+        assert_eq!(menu.take_local_command().as_deref(), Some("reset"));
+        assert!(actions.borrow().is_empty());
+        assert!(collect_accessibility_nodes(&menu).is_empty());
+    }
+
+    #[test]
     fn context_menu_accessibility_tracks_visibility_and_hover_selection() {
         let mut menu = ContextMenu::new(
             Point::new(100.0, 100.0),
@@ -788,7 +948,10 @@ mod tests {
         let node = menu.accessibility().expect("visible context menu should expose accessibility");
 
         assert_eq!(node.role, AccessibilityRole::Menu);
-        assert_eq!(node.name.as_deref(), Some("Context menu"));
+        assert_eq!(
+            node.name, None,
+            "the widget must not invent an untranslated name"
+        );
         assert_eq!(node.state.expanded, Some(true));
         assert_eq!(node.state.selected, Some(true));
 
@@ -962,6 +1125,35 @@ mod tests {
     }
 
     #[test]
+    fn context_menu_enter_without_highlight_cannot_run_the_first_command() {
+        let mut menu = ContextMenu::new(
+            Point::new(100.0, 100.0),
+            vec![MenuItem::new("Cut", Action::Cut)],
+        );
+        menu.layout(Rect::ZERO);
+        let mut f = DummyFocus;
+        let mut s = DummyShortcut;
+        let mut t = DummyTooltip;
+        let actions = RefCell::new(Vec::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut ctx = make_event_ctx(&mut f, &mut s, &mut t, &dispatch);
+        menu.event(
+            &UiEvent::MouseMove {
+                position: Point::new(500.0, 500.0),
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        assert!(menu.hover_depth.is_none());
+        menu.event(
+            &UiEvent::KeyDown { key: KeyCode::Enter, modifiers: Modifiers::none() },
+            &mut ctx,
+        );
+        assert!(actions.borrow().is_empty());
+        assert!(menu.is_visible());
+    }
+
+    #[test]
     fn context_menu_keyboard_activation_enters_first_submenu_child() {
         let mut menu = ContextMenu::new(
             Point::new(100.0, 100.0),
@@ -983,6 +1175,19 @@ mod tests {
         };
         let mut ctx = make_event_ctx(&mut f, &mut s, &mut t, &dispatch_fn);
 
+        assert!(menu.hover_depth.is_none());
+        menu.event(
+            &UiEvent::KeyDown { key: KeyCode::Enter, modifiers: Modifiers::none() },
+            &mut ctx,
+        );
+        assert!(
+            cell.borrow().is_empty(),
+            "mouse-opened context menu has no initial highlighted command"
+        );
+        menu.event(
+            &UiEvent::KeyDown { key: KeyCode::Down, modifiers: Modifiers::none() },
+            &mut ctx,
+        );
         assert_eq!(
             menu.event(
                 &UiEvent::KeyDown { key: KeyCode::Enter, modifiers: Modifiers::none() },
@@ -991,8 +1196,21 @@ mod tests {
             EventResult::Handled
         );
 
+        assert!(
+            menu.visible,
+            "Enter opens the submenu without running its first command"
+        );
+        assert!(cell.borrow().is_empty());
+        menu.event(
+            &UiEvent::KeyDown { key: KeyCode::Down, modifiers: Modifiers::none() },
+            &mut ctx,
+        );
+        menu.event(
+            &UiEvent::KeyDown { key: KeyCode::Enter, modifiers: Modifiers::none() },
+            &mut ctx,
+        );
         assert!(!menu.visible);
-        assert_eq!(cell.into_inner(), vec![Action::Cut]);
+        assert_eq!(cell.into_inner(), vec![Action::Paste]);
     }
 
     #[test]

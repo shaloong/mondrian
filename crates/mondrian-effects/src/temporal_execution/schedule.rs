@@ -2,11 +2,16 @@
 
 use super::*;
 
+pub(super) struct TemporalScalarFootprint {
+    pub(super) required_bytes: usize,
+    pub(super) pixel_reservations: Vec<usize>,
+}
+
 pub(super) fn temporal_scalar_required_bytes(
     temporal_program: &PreparedTemporalValueProgram,
     demand: &EffectExecutionDemand,
     mask_rasters: &HashMap<usize, Arc<PreparedMaskRasterSet>>,
-) -> Result<usize, EffectTemporalExecutionError> {
+) -> Result<TemporalScalarFootprint, EffectTemporalExecutionError> {
     let frame_bytes = checked_pixel_count(demand.input_roi().region())
         .and_then(|pixels| pixels.checked_mul(std::mem::size_of::<[f32; 4]>()))
         .ok_or(EffectTemporalExecutionError::WorkingSetBudgetExceeded {
@@ -22,8 +27,13 @@ pub(super) fn temporal_scalar_required_bytes(
     let mut working = ScalarWorkingSet::new(usize::MAX, frame_bytes);
     let mut live = HashSet::with_capacity(temporal_program.ordered_values().len());
     let mut remaining_uses = temporal_program.use_counts().clone();
+    let mut reservations = Vec::with_capacity(temporal_program.ordered_values().len());
+    let mut required_bytes = 0usize;
 
     for address in temporal_program.ordered_values() {
+        let previous_peak = working.peak;
+        working.peak = working.resident_bytes;
+        let mut processor_charge = 0usize;
         match *address {
             TemporalValueAddress::Source(_) => working.reserve_frame()?,
             TemporalValueAddress::Graph { context, node_id } => {
@@ -32,6 +42,12 @@ pub(super) fn temporal_scalar_required_bytes(
                     EffectTemporalExecutionError::UnsupportedGraphNode { node_id, kind: "missing" },
                 )?;
                 match &node.kind {
+                    EffectGraphNodeKind::CustomSource { .. } => {
+                        return Err(EffectTemporalExecutionError::UnsupportedGraphNode {
+                            node_id,
+                            kind: "custom_source",
+                        })
+                    }
                     EffectGraphNodeKind::Source => {
                         return Err(EffectTemporalExecutionError::InvalidGraphLiveness {
                             reason: "source node was not normalized in the time-expanded plan",
@@ -57,6 +73,12 @@ pub(super) fn temporal_scalar_required_bytes(
                                     budget_bytes: usize::MAX,
                                 })?;
                             working.ensure_transient(scratch_bytes)?;
+                            processor_charge = crate::processor_residency::frame_processor_charge(
+                                op,
+                                demand.input_roi().region().width(),
+                                demand.input_roi().region().height(),
+                            )
+                            .map_err(EffectTemporalExecutionError::CustomProcessor)?;
                         }
                     }
                     EffectGraphNodeKind::Blend { base, overlay, .. } => {
@@ -115,6 +137,9 @@ pub(super) fn temporal_scalar_required_bytes(
                 }
             }
         }
+        reservations.push(working.peak);
+        required_bytes = required_bytes.max(working.peak.saturating_add(processor_charge));
+        working.peak = working.peak.max(previous_peak);
         if !live.insert(*address) {
             return Err(EffectTemporalExecutionError::InvalidGraphLiveness {
                 reason: "time-expanded schedule planned one value more than once",
@@ -138,7 +163,10 @@ pub(super) fn temporal_scalar_required_bytes(
         });
     }
     working.ensure_transient(output_bytes)?;
-    Ok(working.peak)
+    Ok(TemporalScalarFootprint {
+        required_bytes: required_bytes.max(working.peak),
+        pixel_reservations: reservations,
+    })
 }
 
 fn plan_take_value(
@@ -190,6 +218,7 @@ pub(super) fn plan_temporal_tiles(
             output_time: request.output_time,
             output_frame_seed: request.output_frame_seed,
             frame_extent: request.frame_extent,
+            sampling: request.sampling,
             output_roi: candidate,
             cancellation: request.cancellation.clone(),
         };
@@ -199,7 +228,7 @@ pub(super) fn plan_temporal_tiles(
             tile_request.output_roi,
         )?;
         let required = temporal_scalar_required_bytes(temporal_program, &demand, mask_rasters)?;
-        if required <= tile_budget {
+        if required.required_bytes <= tile_budget {
             tiles.push(candidate);
             if tiles.len() > MAX_TEMPORAL_SCALAR_TILES {
                 return Err(EffectTemporalExecutionError::TileScheduleLimitExceeded {
@@ -258,7 +287,7 @@ pub(super) fn plan_temporal_tiles(
             continue;
         }
 
-        let required_bytes = retained_output_bytes.saturating_add(required);
+        let required_bytes = retained_output_bytes.saturating_add(required.required_bytes);
         return Err(EffectTemporalExecutionError::WorkingSetBudgetExceeded {
             required_bytes,
             budget_bytes: total_budget,

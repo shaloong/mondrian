@@ -676,6 +676,15 @@ fn validate_container_audio(
     container: &Container,
     audio: &AudioCodecConfig,
 ) -> Result<(), ExportDeliveryError> {
+    // The current Matroska PCM mux/demux path preserves only channel count,
+    // not speaker identity (including the distinction between the two 5.1
+    // layouts). Do not admit a delivery that cannot pass exact layout QC.
+    if *container == Container::Mkv && matches!(audio, AudioCodecConfig::Pcm { .. }) {
+        return Err(ExportDeliveryError::new(
+            ExportDeliveryIssueCode::UnsupportedContainerAudio,
+            "当前 Matroska PCM Adapter 不保留可独立验证的 channel-layout identity；请选择 MOV + PCM",
+        ));
+    }
     let audio_supported = match container {
         Container::Mp4 => matches!(
             audio,
@@ -1471,6 +1480,41 @@ mod tests {
             .expect_err("custom order needs an explicit encoding Adapter");
         assert_eq!(error.code, ExportDeliveryIssueCode::UnsupportedAudioLayout);
         assert!(error.detail.contains(&settings.audio_channel_layout.to_string()));
+    }
+
+    #[test]
+    fn matroska_pcm_is_rejected_before_execution_without_guessing_speaker_identity() {
+        let environment = ProjectColorEnvironment::default();
+        for layout in [
+            AudioChannelLayout::Mono,
+            AudioChannelLayout::Stereo,
+            AudioChannelLayout::Surround51Side,
+            AudioChannelLayout::Surround51Back,
+            AudioChannelLayout::Surround71,
+        ] {
+            let settings = SequenceSettings { audio_channel_layout: layout, ..Default::default() };
+            for bit_depth in [16, 24, 32] {
+                let mut preset = ExportPreset::h264_aac_sdr_1080p();
+                let media = preset.media_file_mut().expect("media preset");
+                media.container = Container::Mkv;
+                media.audio = AudioCodecConfig::Pcm { bit_depth };
+                let error = resolve_export_delivery(&preset, &settings, &environment)
+                    .expect_err("channel count alone cannot prove PCM speaker identity");
+                assert_eq!(
+                    error.code,
+                    ExportDeliveryIssueCode::UnsupportedContainerAudio
+                );
+                assert!(error.detail.contains("channel-layout identity"));
+
+                preset.media_file_mut().unwrap().container = Container::Mov;
+                resolve_export_delivery(&preset, &settings, &environment)
+                    .expect("MOV has an explicit PCM channel-layout lowering");
+            }
+        }
+        let mut preset = ExportPreset::h264_aac_sdr_1080p();
+        preset.media_file_mut().unwrap().container = Container::Mkv;
+        resolve_export_delivery(&preset, &SequenceSettings::default(), &environment)
+            .expect("Matroska AAC remains admitted");
     }
 
     #[test]

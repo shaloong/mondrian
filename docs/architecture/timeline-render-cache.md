@@ -7,7 +7,7 @@ proxies and the playback-owned in-memory Preview Frame Store.
 
 ## Semantic boundary
 
-A cache artifact contains a straight-coverage, working-linear RGBA32F frame
+A cache artifact contains a complete working-linear RGBA32F frame with its actual canonical Core alpha representation
 before Program Output and monitor adaptation. A hit therefore re-enters the
 same renderer Viewer output stages as an ordinary composite. It cannot encode
 an sRGB UI raster, display profile, stale presentation decision, Playback
@@ -40,7 +40,7 @@ tags are delivery work and remain outside this pre-Program-Output Store.
 
 `mondrian-render-cache` accepts only that opaque resolved identity plus the
 physical artifact envelope: exact output extent, lossless RGBA32F format, and
-straight-coverage alpha. There is no public partial builder or raw-digest
+the Core alpha-format admission set. Actual artifact association must be admitted by that identity. There is no public partial builder or raw-digest
 constructor. Program Output, authored Preview codec/format, monitor/ICC,
 Scopes, signal warnings, scheduling, and author revision are excluded because
 they do not shape the cached pre-Program-Output working pixels. Viewer output
@@ -55,21 +55,22 @@ of clearing unrelated cache entries.
 
 ## Artifact and Store
 
-Artifact schema version 1 stores independent little-endian RGBA32F frames compressed losslessly
+Artifact schema version 2 stores independent little-endian RGBA32F frames compressed losslessly
 with Zstandard. The header binds the complete key, dimensions, decoded and
-compressed lengths, format/alpha contracts, and SHA-256 of decoded bytes.
+compressed lengths, format/actual-alpha contracts, and SHA-256 over actual alpha, working color space, extent and decoded Float bits. Changing an admitted actual alpha tag without rewriting the checksum is corruption.
 Reads enforce both compressed and decoded byte limits before accepting pixels;
 truncation, checksum mismatch, identity mismatch and decompression overflow
 fail closed. Publication and decode also verify that payload dimensions match
 the extent carried by the typed identity envelope. One corrupt content address
 is removed locally.
 
-Canonical identity schema 2 lives in the independent `timeline-render-v2`
-Store namespace. Old v1 artifacts are never interpreted under the new semantic
-contract and age out under their former namespace without a destructive global
-clear. Canonical encodings are domain-separated, length-delimited and covered
+Canonical identity schema 3 lives in the independent `timeline-render-v3`
+Store namespace. Canonical encodings are domain-separated, length-delimited and covered
 by a golden digest test; future pixel-algorithm changes must bump the render
-semantics epoch or namespace.
+semantics epoch or namespace. The golden digest uses current render-semantics
+epoch 3 and the exact alpha-admission bitmap. Its expected bytes were separately
+recomputed from the documented domain/length/value encoding; no older identity
+reader is introduced.
 
 Complete bytes are published through `mondrian-storage`'s sibling temporary
 file and typed durable atomic-publication boundary. The Store uses two-level
@@ -137,3 +138,28 @@ owner replay. Preview requires a configured cache to carry an actually started,
 synchronously terminated worker and matching `Terminated` aggregate evidence.
 A disabled test cache is valid only with no worker, no startup failure and a
 `NotStarted` aggregate; a required cache cannot borrow that empty inventory.
+
+## Actual association and finite artifacts
+
+The identity signs an explicit admitted Core format set; it never guesses the
+result of native negotiation. The header carries the actual association. Writes
+and reads check that tag, extent, finite RGBA samples, exact Opaque alpha one and
+the coverage range when the representation declares coverage. Associated Float
+zero-alpha emission, signed/above-one alpha and raw signed-zero/subnormal bits
+survive compression and a fresh service read. Alpha conversion is execution
+work outside this store. External/uncacheable effects still bypass production
+cache eligibility; an artifact type does not grant graph reuse.
+
+
+## Effect amount semantic identity
+
+Exhaustive App materializations encode the entire Core Effect-pass policy,
+including Mix versus explicit Normal Over. The frame semantic epoch is 3 for
+both prepared and standalone materializations, separating old cached pixels
+from the corrected Adjustment amount law. A policy is not inferred from a
+missing optional field after plan lowering. Sequential Viewer work still
+reserves the exact shared pixel grant; a pending next-generation evaluation
+may return Loading before it reaches the actual live residency refusal. An
+actual GPU submission completion returns its retained owner, whose subsequent
+retirement releases the physical CPU charge. No cache clear or test-side flag
+substitutes for that owner lifetime.

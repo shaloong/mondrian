@@ -74,9 +74,135 @@ pub struct AudioProgramDeliveryRuntime {
     mixer: PreparedAudioChannelMixer,
     evidence: AudioDeliveryEvidence,
     program_pcm: Vec<f32>,
+    submitted_window: Option<AudioSubmittedWindowCursor>,
+}
+
+#[derive(Clone, Copy)]
+struct AudioSubmittedWindowCursor {
+    epoch: AudioContinuityEpoch,
+    next_start_sample: i64,
 }
 
 impl AudioProgramDeliveryRuntime {
+    /// Forward child-settlement evidence to the sole owned Program Runtime.
+    /// This adds no delivery state, native execution or installation permission.
+    pub fn bind_native_child_settlement(
+        &mut self,
+        registrar: &mondrian_core::NativeChildSettlementRegistrar,
+    ) -> Result<(), mondrian_core::NativeChildSettlementError> {
+        self.runtime.bind_native_child_settlement(registrar)
+    }
+
+    /// Read-only capability of the sole owned Program Runtime.
+    pub fn native_observations_supported(&self) -> bool {
+        self.runtime.native_observations_supported()
+    }
+
+    /// Actual current factory declarations, not an inferred native format or
+    /// statelessness capability. Intended for non-RT admission only.
+    pub fn installed_native_child_settlement_requirement(
+        &self,
+    ) -> mondrian_core::NativeChildSettlementRequirement {
+        self.runtime.installed_native_child_settlement_requirement()
+    }
+
+    /// Drain one actual occurrence on the same serial native control lane.
+    /// Delivery neither resets DSP nor introduces another observation store.
+    pub fn poll_native_observations(
+        &mut self,
+        cancellation: &ExecutionCancellationToken,
+    ) -> Result<Option<mondrian_core::NativeAudioObservationBatch>, crate::AudioProcessorHostError>
+    {
+        self.runtime.poll_native_observations(cancellation)
+    }
+
+    /// Check the sole Runtime's existing author obligations before retiring its
+    /// Source. This observes the current prefix; it does not seal future callbacks.
+    pub fn validate_native_author_source_closed(
+        &mut self,
+        cancellation: &ExecutionCancellationToken,
+    ) -> Result<(), crate::NativeAudioAuthorAdmissionError> {
+        self.runtime.validate_native_author_source_closed(cancellation)
+    }
+
+    /// Current actual Runtime registration; no wrapper-cached owner is inferred.
+    pub fn native_owner_installation_verifier(
+        &self,
+    ) -> Option<mondrian_core::AudioOwnerInstallationVerifier> {
+        self.runtime.native_owner_installation_verifier()
+    }
+
+    /// Register the exact sole owned Runtime without native work or graph install.
+    pub fn bind_native_owner_installation(
+        &mut self,
+        verifier: mondrian_core::AudioOwnerInstallationVerifier,
+    ) -> Result<(), mondrian_core::AudioOwnerInstallationError> {
+        self.runtime.bind_native_owner_installation(verifier)
+    }
+
+    /// Bind existing root/nested native objects on the sole non-RT consumer.
+    /// This is the same owned Runtime; no editor-only instance is constructed.
+    pub fn install_native_owner_bindings(
+        &mut self,
+        claim: &mondrian_core::AudioOwnerInstallationClaim,
+        cancellation: &ExecutionCancellationToken,
+    ) -> Result<usize, crate::AudioNativeOwnerError> {
+        self.runtime.install_native_owner_bindings(claim, cancellation)
+    }
+
+    /// Observe current exact native ownership from the same owned Runtime.
+    pub fn native_owner_lease(
+        &self,
+        address: crate::AudioNativeProcessorAddress,
+    ) -> Result<crate::AudioNativeProcessorOwnerLease, crate::AudioNativeOwnerError> {
+        self.runtime.native_owner_lease(address)
+    }
+
+    /// Refuse foreign/stale leases before accessing the actual retained object.
+    pub fn validate_native_owner(
+        &mut self,
+        lease: crate::AudioNativeProcessorOwnerLease,
+    ) -> Result<(), crate::AudioNativeOwnerError> {
+        self.runtime.validate_native_owner(lease)
+    }
+
+    /// Observe the actual object through the sole Runtime's authenticated
+    /// non-RT control lane, after validating the current installed owner.
+    /// This performs native IPC without querying parameters or draining author
+    /// work. Returned identity facts grant no execution or author authority.
+    pub fn observe_native_owner_object(
+        &mut self,
+        lease: crate::AudioNativeProcessorOwnerLease,
+    ) -> Result<crate::NativeAudioObjectObservation, crate::AudioNativeOwnerError> {
+        self.runtime.observe_native_owner_object(lease)
+    }
+
+    /// Read-only editor target from the sole owned Runtime's installed record.
+    pub fn native_editor_target(
+        &self,
+        address: crate::AudioNativeProcessorAddress,
+    ) -> Result<mondrian_core::NativeAudioEditorTarget, crate::AudioNativeOwnerError> {
+        self.runtime.native_editor_target(address)
+    }
+
+    /// Forward one explicit presentation query to the same owned Runtime.
+    pub fn query_native_parameter(
+        &mut self,
+        query: &mondrian_core::NativeAudioParameterQuery,
+        cancellation: &mondrian_core::ExecutionCancellationToken,
+    ) -> Result<mondrian_core::NativeAudioParameterQueryOutcome, crate::AudioNativeOwnerError> {
+        self.runtime.query_native_parameter(query, cancellation)
+    }
+
+    /// Forward one closed editor intent to the same owned Runtime.
+    pub fn control_native_editor(
+        &mut self,
+        intent: mondrian_core::NativeAudioEditorControlIntent,
+        cancellation: &mondrian_core::ExecutionCancellationToken,
+    ) -> Result<mondrian_core::NativeAudioEditorControlOutcome, crate::AudioNativeOwnerError> {
+        self.runtime.control_native_editor(intent, cancellation)
+    }
+
     /// Prepare Mondrian's standard delivery mapping for one concrete target.
     pub fn prepare_standard(
         runtime: AudioProgramRuntime,
@@ -115,12 +241,24 @@ impl AudioProgramDeliveryRuntime {
                 coefficient_count,
             },
             program_pcm: vec![0.0; program_samples],
+            submitted_window: None,
         })
     }
 
     /// Exact Program-to-target mapping evidence.
     pub const fn evidence(&self) -> AudioDeliveryEvidence {
         self.evidence
+    }
+
+    /// Visit the sole Program Runtime's generated cursor facts without execution.
+    ///
+    /// Delivery mapping and target PCM do not become private DSP checkpoints.
+    /// The caller separately owns renderer/generation/cohort and bounded storage.
+    pub fn visit_continuity_evidence(
+        &self,
+        visitor: &mut impl crate::AudioContinuityEvidenceVisitor,
+    ) -> Result<(), AudioExecutionError> {
+        self.runtime.visit_continuity_evidence(visitor)
     }
 
     /// Program-side Render Contract; target layout is carried by [`Self::evidence`].
@@ -148,17 +286,238 @@ impl AudioProgramDeliveryRuntime {
         self.runtime.requires_state_entry()
     }
 
-    /// Enter one fresh Program continuity epoch.
+    #[cfg(all(test, windows))]
+    pub(crate) fn submitted_window_for_test(&self) -> Option<(AudioContinuityEpoch, i64)> {
+        self.submitted_window.map(|cursor| (cursor.epoch, cursor.next_start_sample))
+    }
+
+    /// Enter one fresh Program epoch and start its submitted-window sequence.
+    /// The window cursor records public submissions, not private DSP position.
     pub fn enter_state(
         &mut self,
         epoch: AudioContinuityEpoch,
         start_sample: i64,
     ) -> Result<(), AudioDeliveryError> {
-        self.runtime.enter_state(AudioStateEntry { epoch, start_sample })?;
+        self.enter_state_cancellable(epoch, start_sample, &ExecutionCancellationToken::new())
+    }
+
+    /// Enter with the actual queued consumer's cancellation token.
+    pub fn enter_state_cancellable(
+        &mut self,
+        epoch: AudioContinuityEpoch,
+        start_sample: i64,
+        cancellation: &ExecutionCancellationToken,
+    ) -> Result<(), AudioDeliveryError> {
+        self.runtime
+            .enter_state_cancellable(AudioStateEntry { epoch, start_sample }, cancellation)?;
+        self.submitted_window =
+            Some(AudioSubmittedWindowCursor { epoch, next_start_sample: start_sample });
         Ok(())
     }
 
+    /// Read-only actual-tree state-entry policy; does not authorize SDK work.
+    pub fn native_author_state_entry_required(
+        &self,
+        proposal: &mondrian_core::NativeAudioAuthorProposal,
+    ) -> Result<bool, crate::AudioNativeOwnerError> {
+        self.runtime.native_author_state_entry_required(proposal)
+    }
+
+    /// Capture the exact retained root restart; physical output quiescence is a caller precondition.
+    /// Uses Runtime's limited byte-buffer/parent-owner reservation. Successful
+    /// and valid-schema-mismatch metadata scans reuse one scratch admitted in
+    /// the existing worker main-inline lane obligation instead of Vec/String
+    /// containers. Cold error Strings, SDK storage and other owners remain
+    /// outside complete-control-peak and whole-service zero-allocation claims.
+    pub fn service_native_reprepare(
+        &mut self,
+        ticket: crate::AudioProcessorReprepareTicket,
+        cancellation: &ExecutionCancellationToken,
+    ) -> Result<crate::NativeAudioReprepare, crate::NativeAudioReprepareError> {
+        self.runtime.service_native_reprepare(ticket, cancellation)
+    }
+    /// Service the actual pending Session ticket; a product notice grants no authority.
+    /// Neither refusal nor capture changes the submitted public window.
+    pub fn service_pending_native_reprepare(
+        &mut self,
+        expected: mondrian_core::NativeAudioReprepareNotice,
+        cancellation: &ExecutionCancellationToken,
+    ) -> Result<crate::NativeAudioReprepare, crate::NativeAudioReprepareError> {
+        self.runtime.service_pending_native_reprepare(expected, cancellation)
+    }
+
+    /// Prepare the canonical replacement on the same held Runtime without entry.
+    pub fn prepare_native_reprepare_plan(
+        &mut self,
+        operation: &crate::NativeAudioReprepare,
+        destination: mondrian_core::AudioOwnerInstallationVerifier,
+        cancellation: &ExecutionCancellationToken,
+    ) -> Result<crate::NativeAudioRepreparePlanFacts, crate::NativeAudioReprepareError> {
+        self.runtime.prepare_native_reprepare_plan(operation, destination, cancellation)
+    }
+
+    /// Install an unentered replacement and invalidate only its old public window.
+    /// All errors retain the old window, including errors after child seed commit.
+    /// The receipt must retire outside all caller Runtime/metadata/Source locks.
+    pub fn install_native_reprepare_plan(
+        &mut self,
+        operation: &crate::NativeAudioReprepare,
+        authorization: &mut mondrian_core::AudioOwnerRuntimeInstallationAuthorization,
+        cancellation: &ExecutionCancellationToken,
+    ) -> Result<crate::NativeAudioReprepareInstallReceipt, crate::NativeAudioReprepareError> {
+        let receipt =
+            self.runtime
+                .install_native_reprepare_plan(operation, authorization, cancellation)?;
+        self.submitted_window = None;
+        Ok(receipt)
+    }
+
+    /// Consume exact retired-owner evidence without entering or changing a window.
+    pub fn finish_native_reprepare_retirement(
+        &mut self,
+        completion: crate::NativeAudioReprepareRetirement,
+    ) -> Result<(), crate::NativeAudioReprepareError> {
+        self.runtime.finish_native_reprepare_retirement(completion)
+    }
+
+    /// Borrow current capture bytes without publishing a Plan, Source or author state.
+    pub fn native_reprepare_configuration<'a>(
+        &'a self,
+        operation: &crate::NativeAudioReprepare,
+    ) -> Result<&'a [u8], crate::NativeAudioReprepareError> {
+        self.runtime.native_reprepare_configuration(operation)
+    }
+
+    /// Prepare a terminal static Host fader at the retained Session frontier.
+    pub fn prepare_host_output_fader_handoff(
+        &mut self,
+        next_program: std::sync::Arc<crate::CompiledAudioProgram>,
+        destination: mondrian_core::AudioOwnerInstallationVerifier,
+        cancellation: &ExecutionCancellationToken,
+    ) -> Result<crate::PreparedHostOutputFaderHandoff, crate::AudioHostFaderHandoffError> {
+        self.runtime
+            .prepare_host_output_fader_handoff(next_program, destination, cancellation)
+    }
+
+    /// Retain the original submitted window, DSP, layout and output cursor.
+    pub fn install_host_output_fader_handoff(
+        &mut self,
+        prepared: &mut crate::PreparedHostOutputFaderHandoff,
+        authorization: &mut mondrian_core::AudioOwnerRuntimeInstallationAuthorization,
+        cancellation: &ExecutionCancellationToken,
+    ) -> Result<crate::HostOutputFaderHandoffReceipt, crate::AudioHostFaderHandoffError> {
+        self.runtime
+            .install_host_output_fader_handoff(prepared, authorization, cancellation)
+    }
+
+    /// Prepare a canonical parameter-only replacement on the SAME Runtime.
+    /// No target-layout remix, state entry or DSP reset is performed.
+    pub fn prepare_native_author_parameter_handoff(
+        &mut self,
+        programs: &[crate::NativeAudioAuthorProgram],
+        proposal: &mondrian_core::NativeAudioAuthorProposal,
+        destination: mondrian_core::AudioOwnerInstallationVerifier,
+        cancellation: &ExecutionCancellationToken,
+    ) -> Result<crate::PreparedNativeAudioParameterHandoff, crate::NativeAudioParameterHandoffError>
+    {
+        self.runtime.prepare_native_author_parameter_handoff(
+            programs,
+            proposal,
+            destination,
+            cancellation,
+        )
+    }
+
+    /// Publish only an already admitted same-object Plan/binding replacement.
+    /// The caller retains prepared retirement owners until final guards ended.
+    pub fn install_native_author_parameter_handoff(
+        &mut self,
+        prepared: &mut crate::PreparedNativeAudioParameterHandoff,
+        authorization: &mut mondrian_core::AudioOwnerRuntimeInstallationAuthorization,
+        cancellation: &ExecutionCancellationToken,
+    ) -> Result<crate::NativeAudioParameterHandoffReceipt, crate::NativeAudioParameterHandoffError>
+    {
+        let receipt = self.runtime.install_native_author_parameter_handoff(
+            prepared,
+            authorization,
+            cancellation,
+        )?;
+        if receipt.continuity == crate::NativeAudioParameterHandoffContinuity::StateEntryRequired {
+            self.submitted_window = None;
+        }
+        Ok(receipt)
+    }
+
+    /// Prepare an authenticated finite terminal frontier without changing the submitted window.
+    /// The caller retains one same-Source prepared owner through Ack and retirement.
+    pub fn prepare_native_author_terminal_batch(
+        &mut self,
+        programs: &[crate::NativeAudioAuthorProgram],
+        proposals: &[mondrian_core::NativeAudioAuthorProposal],
+        destination: mondrian_core::AudioOwnerInstallationVerifier,
+        cancellation: &ExecutionCancellationToken,
+    ) -> Result<crate::PreparedNativeAudioTerminalBatch, crate::NativeAudioParameterHandoffError>
+    {
+        self.runtime.prepare_native_author_terminal_batch(
+            programs,
+            proposals,
+            destination,
+            cancellation,
+        )
+    }
+
+    /// Publish the same prepared, preserved frontier once; no new window or native Ack.
+    pub fn install_native_author_terminal_batch(
+        &mut self,
+        prepared: &mut crate::PreparedNativeAudioTerminalBatch,
+        authorization: &mut mondrian_core::AudioOwnerRuntimeInstallationAuthorization,
+        cancellation: &ExecutionCancellationToken,
+    ) -> Result<
+        crate::NativeAudioTerminalBatchInstallReceipt,
+        crate::NativeAudioParameterHandoffError,
+    > {
+        self.runtime
+            .install_native_author_terminal_batch(prepared, authorization, cancellation)
+    }
+
+    /// Recheck first, then hold the adapter's canonical guard through bounded publication.
+    /// Neither preparation nor preserved publication changes the submitted window.
+    pub fn install_native_author_terminal_batch_with_commit_guard<G>(
+        &mut self,
+        prepared: &mut crate::PreparedNativeAudioTerminalBatch,
+        authorization: &mut mondrian_core::AudioOwnerRuntimeInstallationAuthorization,
+        cancellation: &ExecutionCancellationToken,
+        acquire: impl FnOnce() -> Result<G, crate::NativeAudioParameterHandoffError>,
+    ) -> Result<
+        (crate::NativeAudioTerminalBatchInstallReceipt, G),
+        crate::NativeAudioParameterHandoffError,
+    > {
+        self.runtime.install_native_author_terminal_batch_with_commit_guard(
+            prepared,
+            authorization,
+            cancellation,
+            acquire,
+        )
+    }
+
+    /// Retry only exact native Ack on the same installed Runtime and delivery.
+    /// No author, Plan, scratch, PDC or sample cursor changes occur.
+    pub fn acknowledge_native_author_parameter_handoff(
+        &mut self,
+        proposal: &mondrian_core::NativeAudioAuthorProposal,
+        cancellation: &ExecutionCancellationToken,
+    ) -> Result<crate::NativeAudioParameterHandoffReceipt, crate::NativeAudioParameterHandoffError>
+    {
+        self.runtime.acknowledge_native_author_parameter_handoff(proposal, cancellation)
+    }
+
     /// Render exact target-layout interleaved PCM without allocation.
+    ///
+    /// After successful entry, every request must exactly continue its submitted
+    /// public window sequence. Native holds and pre-canceled requests consume no
+    /// window. A stateless ordinary execution failure consumes its admitted
+    /// window so the consumer can substitute equal-duration silence and continue.
+    /// Without entry, stateless direct callers retain independent random windows.
     pub fn render_into_cancellable(
         &mut self,
         request: AudioRenderRequest,
@@ -186,19 +545,58 @@ impl AudioProgramDeliveryRuntime {
             .frames
             .checked_mul(self.evidence.program_layout.channel_count())
             .ok_or(AudioDeliveryError::SampleExtentOverflow)?;
-        self.runtime.render_into_cancellable(
-            request,
-            &mut self.program_pcm[..program_samples],
-            cancellation,
-        )?;
-        self.mixer
-            .mix_into(
-                crate::AudioKernelBackend::RuntimeVectorized,
-                request.frames,
-                &self.program_pcm[..program_samples],
-                destination,
+        // The same whole-root preflight must win over queued later-window
+        // coordinate errors while native control retains the first window.
+        self.runtime.preflight_render_cancellable(request, cancellation)?;
+        let next_start_sample =
+            crate::render::checked_advance_sample(request.start_sample, request.frames)?;
+        if let Some(cursor) = self.submitted_window
+            && cursor.next_start_sample != request.start_sample
+        {
+            return Err(AudioExecutionError::NonContiguousBlock {
+                epoch: cursor.epoch,
+                expected_start_sample: cursor.next_start_sample,
+                actual_start_sample: request.start_sample,
+            }
+            .into());
+        }
+        let generation_state = self.runtime.requires_state_entry();
+        let result = self
+            .runtime
+            .render_into_admitted_cancellable(
+                request,
+                &mut self.program_pcm[..program_samples],
+                cancellation,
             )
             .map_err(AudioDeliveryError::ProgramExecution)
+            .and_then(|()| {
+                self.mixer
+                    .mix_into(
+                        crate::AudioKernelBackend::RuntimeVectorized,
+                        request.frames,
+                        &self.program_pcm[..program_samples],
+                        destination,
+                    )
+                    .map_err(AudioDeliveryError::ProgramExecution)
+            });
+        // An independent failed attempt is still the exact submitted window
+        // that Media replaces with silence. Stateful failures retain the sole
+        // Session poison law; typed native holds never consume a submission.
+        let consumed = result.is_ok()
+            || (!generation_state
+                && !cancellation.is_canceled()
+                && !matches!(
+                    &result,
+                    Err(AudioDeliveryError::ProgramExecution(
+                        AudioExecutionError::ReprepareRequired(_)
+                            | AudioExecutionError::NativeAuthorPending(_)
+                            | AudioExecutionError::EditorCleanupRequired(_)
+                    ))
+                ));
+        if consumed && let Some(cursor) = &mut self.submitted_window {
+            cursor.next_start_sample = next_start_sample;
+        }
+        result
     }
 }
 
@@ -340,7 +738,11 @@ mod tests {
                 .expect("mono to stereo delivery");
         let error = delivery
             .render_into_cancellable(
-                AudioRenderRequest { start_sample: 0, frames: 2 },
+                AudioRenderRequest {
+                    transport_activity: None,
+                    start_sample: 0,
+                    frames: 2,
+                },
                 &mut [0.0; 3],
                 &ExecutionCancellationToken::new(),
             )
@@ -349,5 +751,319 @@ mod tests {
             error,
             AudioDeliveryError::TargetBufferSizeMismatch { expected: 4, actual: 3 }
         ));
+    }
+
+    #[test]
+    fn delivery_pending_restart_without_ticket_or_after_cancel_preserves_submitted_window() {
+        let mut delivery = AudioProgramDeliveryRuntime::prepare_standard(
+            silent_runtime(AudioChannelLayout::Stereo),
+            AudioChannelLayout::Stereo,
+        )
+        .expect("actual stateless delivery");
+        let epoch = AudioContinuityEpoch::new(7);
+        delivery.enter_state(epoch, 11).expect("actual entered delivery window");
+        let expected = mondrian_core::NativeAudioReprepareNotice {
+            instance_id: mondrian_core::AudioProcessorInstanceId::new(),
+            request: mondrian_core::NativeAudioReprepareRequest::ClapRestart,
+        };
+        let canceled = ExecutionCancellationToken::new();
+        canceled.cancel();
+        let before = delivery.resource_footprint();
+        assert!(matches!(
+            delivery.service_pending_native_reprepare(expected, &canceled),
+            Err(crate::NativeAudioReprepareError::Cancelled)
+        ));
+        assert!(matches!(
+            delivery.service_pending_native_reprepare(expected, &ExecutionCancellationToken::new()),
+            Err(crate::NativeAudioReprepareError::Admission(
+                "no actual Session restart is pending"
+            ))
+        ));
+        assert_eq!(delivery.resource_footprint(), before);
+        let cursor = delivery.submitted_window.expect("unchanged entered window");
+        assert_eq!((cursor.epoch, cursor.next_start_sample), (epoch, 11));
+        let mut pcm = [73.0; 8];
+        delivery
+            .render_into_cancellable(
+                AudioRenderRequest {
+                    transport_activity: None,
+                    start_sample: 11,
+                    frames: 4,
+                },
+                &mut pcm,
+                &ExecutionCancellationToken::new(),
+            )
+            .expect("neither refusal consumed the exact next submission");
+        assert_eq!(pcm, [0.0; 8]);
+        assert_eq!(delivery.submitted_window.unwrap().next_start_sample, 15);
+    }
+
+    #[test]
+    fn delivery_submitted_windows_entered_stateless_rejects_gap_without_consuming() {
+        let mut delivery = AudioProgramDeliveryRuntime::prepare_standard(
+            silent_runtime(AudioChannelLayout::Stereo),
+            AudioChannelLayout::Stereo,
+        )
+        .expect("actual stateless delivery");
+        assert!(!delivery.requires_state_entry());
+        let epoch = AudioContinuityEpoch::new(7);
+        delivery.enter_state(epoch, 0).expect("actual entry");
+        let cancel = ExecutionCancellationToken::new();
+        let mut pcm = [73.0; 8];
+        let wrong_first = delivery.render_into_cancellable(
+            AudioRenderRequest {
+                transport_activity: None,
+                start_sample: 1,
+                frames: 4,
+            },
+            &mut pcm,
+            &cancel,
+        );
+        assert!(matches!(
+            wrong_first,
+            Err(AudioDeliveryError::ProgramExecution(AudioExecutionError::NonContiguousBlock {
+                epoch: actual_epoch,
+                expected_start_sample: 0,
+                actual_start_sample: 1,
+            })) if actual_epoch == epoch
+        ));
+        assert_eq!(
+            pcm, [73.0; 8],
+            "rejected admission cannot mutate caller PCM"
+        );
+        for start_sample in [0, 4] {
+            delivery
+                .render_into_cancellable(
+                    AudioRenderRequest { transport_activity: None, start_sample, frames: 4 },
+                    &mut pcm,
+                    &cancel,
+                )
+                .expect("exact submitted continuation");
+        }
+        assert!(matches!(
+            delivery.render_into_cancellable(
+                AudioRenderRequest {
+                    transport_activity: None,
+                    start_sample: 9,
+                    frames: 4
+                },
+                &mut pcm,
+                &cancel,
+            ),
+            Err(AudioDeliveryError::ProgramExecution(
+                AudioExecutionError::NonContiguousBlock {
+                    expected_start_sample: 8,
+                    actual_start_sample: 9,
+                    ..
+                }
+            ))
+        ));
+        delivery
+            .render_into_cancellable(
+                AudioRenderRequest {
+                    transport_activity: None,
+                    start_sample: 8,
+                    frames: 4,
+                },
+                &mut pcm,
+                &cancel,
+            )
+            .expect("wrong-start rejection did not consume the exact window");
+    }
+
+    #[test]
+    fn delivery_submitted_windows_unentered_stateless_keeps_random_window_contract() {
+        let mut delivery = AudioProgramDeliveryRuntime::prepare_standard(
+            silent_runtime(AudioChannelLayout::Stereo),
+            AudioChannelLayout::Stereo,
+        )
+        .expect("actual independent delivery");
+        for start_sample in [37, -11, 5] {
+            let mut pcm = [73.0; 8];
+            delivery
+                .render_into_cancellable(
+                    AudioRenderRequest { transport_activity: None, start_sample, frames: 4 },
+                    &mut pcm,
+                    &ExecutionCancellationToken::new(),
+                )
+                .expect("no submitted generation was entered");
+            assert_eq!(pcm, [0.0; 8]);
+        }
+    }
+
+    struct SingleSourceMedia(Arc<dyn AudioDecodedSource>);
+
+    impl AudioMediaResolver for SingleSourceMedia {
+        fn resolve(
+            &self,
+            _asset_id: AssetId,
+            _component_id: AudioSourceComponentId,
+            _sample_rate: u32,
+        ) -> Result<ResolvedAudioSource, String> {
+            Ok(ResolvedAudioSource::new(
+                AudioChannelLayout::Stereo,
+                Arc::clone(&self.0),
+            ))
+        }
+    }
+
+    struct FailOnceSource(std::sync::atomic::AtomicBool);
+
+    impl AudioDecodedSource for FailOnceSource {
+        fn read_interleaved(
+            &self,
+            _start_frame: i64,
+            _frames: usize,
+            destination: &mut [f32],
+            _cancellation: &ExecutionCancellationToken,
+        ) -> Result<(), String> {
+            if self.0.swap(false, std::sync::atomic::Ordering::AcqRel) {
+                return Err("submitted independent window source failure".to_owned());
+            }
+            destination.fill(0.375);
+            Ok(())
+        }
+    }
+
+    fn source_delivery(source: Arc<dyn AudioDecodedSource>) -> AudioProgramDeliveryRuntime {
+        let mut sequence = Sequence::new("independent source admission");
+        let clip = Clip::new(AssetId::new(), TimelineTime::ZERO, TimelineTime::ONE)
+            .expect("actual authored source");
+        sequence
+            .add_media_audio_clip(
+                sequence.audio_tracks[0].id,
+                clip,
+                AudioSourceComponentId::primary(),
+            )
+            .expect("actual authored placement");
+        let runtime = AudioProgramRuntime::build(
+            &sequence,
+            &[],
+            &SingleSourceMedia(source),
+            contract(AudioChannelLayout::Stereo),
+            None,
+        )
+        .expect("actual independent Runtime");
+        assert!(!runtime.requires_state_entry());
+        AudioProgramDeliveryRuntime::prepare_standard(runtime, AudioChannelLayout::Stereo)
+            .expect("actual delivery")
+    }
+
+    #[test]
+    fn delivery_submitted_windows_independent_failure_consumes_only_admitted_window() {
+        let mut delivery = source_delivery(Arc::new(FailOnceSource(
+            std::sync::atomic::AtomicBool::new(true),
+        )));
+        delivery.enter_state(AudioContinuityEpoch::new(8), 0).expect("entry");
+        let cancellation = ExecutionCancellationToken::new();
+        let mut pcm = [73.0; 8];
+        let failed = delivery.render_into_cancellable(
+            AudioRenderRequest {
+                transport_activity: None,
+                start_sample: 0,
+                frames: 4,
+            },
+            &mut pcm,
+            &cancellation,
+        );
+        assert!(
+            matches!(failed, Err(AudioDeliveryError::ProgramExecution(AudioExecutionError::SourceUnavailable(detail))) if detail.contains("submitted independent window source failure"))
+        );
+        // Media replaces this accepted failed window with exactly four silent
+        // frames. Its already queued next request starts inside the same cache.
+        assert!(matches!(
+            delivery.render_into_cancellable(
+                AudioRenderRequest {
+                    transport_activity: None,
+                    start_sample: 8,
+                    frames: 4
+                },
+                &mut pcm,
+                &cancellation,
+            ),
+            Err(AudioDeliveryError::ProgramExecution(
+                AudioExecutionError::NonContiguousBlock {
+                    expected_start_sample: 4,
+                    actual_start_sample: 8,
+                    ..
+                }
+            ))
+        ));
+        delivery
+            .render_into_cancellable(
+                AudioRenderRequest {
+                    transport_activity: None,
+                    start_sample: 4,
+                    frames: 4,
+                },
+                &mut pcm,
+                &cancellation,
+            )
+            .expect("the ordinary failed independent window did not poison later PCM");
+        assert_eq!(
+            pcm, [0.375; 8],
+            "actual source PCM resumes at the exact next window"
+        );
+    }
+
+    struct CancelOnceSource(std::sync::atomic::AtomicBool);
+
+    impl AudioDecodedSource for CancelOnceSource {
+        fn read_interleaved(
+            &self,
+            _start_frame: i64,
+            _frames: usize,
+            destination: &mut [f32],
+            cancellation: &ExecutionCancellationToken,
+        ) -> Result<(), String> {
+            if self.0.swap(false, std::sync::atomic::Ordering::AcqRel) {
+                destination.fill(0.75);
+                cancellation.cancel();
+            } else {
+                destination.fill(0.375);
+            }
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn delivery_submitted_windows_canceled_successful_read_does_not_publish_or_consume() {
+        let mut delivery = source_delivery(Arc::new(CancelOnceSource(
+            std::sync::atomic::AtomicBool::new(true),
+        )));
+        delivery.enter_state(AudioContinuityEpoch::new(9), 0).expect("entry");
+        let canceled = ExecutionCancellationToken::new();
+        let mut pcm = [73.0; 8];
+        assert!(matches!(
+            delivery.render_into_cancellable(
+                AudioRenderRequest {
+                    transport_activity: None,
+                    start_sample: 0,
+                    frames: 4
+                },
+                &mut pcm,
+                &canceled,
+            ),
+            Err(AudioDeliveryError::ProgramExecution(
+                AudioExecutionError::SourceUnavailable(_)
+            ))
+        ));
+        assert!(canceled.is_canceled());
+        assert_eq!(pcm, [73.0; 8], "canceled source PCM cannot be delivered");
+        delivery
+            .render_into_cancellable(
+                AudioRenderRequest {
+                    transport_activity: None,
+                    start_sample: 0,
+                    frames: 4,
+                },
+                &mut pcm,
+                &ExecutionCancellationToken::new(),
+            )
+            .expect("the same unconsumed window retries with a fresh cancellation owner");
+        assert_eq!(
+            pcm, [0.375; 8],
+            "retry must read actual PCM, not the canceled cache"
+        );
     }
 }

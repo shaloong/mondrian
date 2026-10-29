@@ -328,14 +328,48 @@ fn transformed_source_damage(
     let crop = crop.clamped();
     let source_width = f64::from(source_width);
     let source_height = f64::from(source_height);
-    let left = 0.5_f64.max(f64::from(crop.left) * source_width);
-    let top = 0.5_f64.max(f64::from(crop.top) * source_height);
-    let right = (source_width + 0.5).min((1.0 - f64::from(crop.right)) * source_width);
-    let bottom = (source_height + 0.5).min((1.0 - f64::from(crop.bottom)) * source_height);
+    let left = f64::from(crop.left) * source_width;
+    let top = f64::from(crop.top) * source_height;
+    let right = (1.0 - f64::from(crop.right)) * source_width;
+    let bottom = (1.0 - f64::from(crop.bottom)) * source_height;
     if right <= left || bottom <= top {
         return None;
     }
 
+    // Image support uses physical pixel corners, independently of the
+    // conservative crop optimization. Include every pixel cell touched by its
+    // transformed bounds; integer-aligned support needs no extra border draw.
+    let [minimum_x, minimum_y, maximum_x, maximum_y] =
+        transformed_source_bounds(transform, [0.0, 0.0, source_width, source_height]);
+    let mut start_x = clamp_floor(minimum_x, canvas.width);
+    let mut start_y = clamp_floor(minimum_y, canvas.height);
+    let mut end_x = clamp_ceil(maximum_x, canvas.width);
+    let mut end_y = clamp_ceil(maximum_y, canvas.height);
+
+    if crop != GpuCompositeSourceCrop::default() {
+        let [minimum_x, minimum_y, maximum_x, maximum_y] =
+            transformed_source_bounds(transform, [left, top, right, bottom]);
+        // Keep the crop's conservative lower pixel-center bound. Its upper
+        // closure may be included after reflection, so retain a center exactly
+        // on that edge before intersecting with complete image support.
+        start_x = start_x.max(clamp_floor(minimum_x - 0.5, canvas.width));
+        start_y = start_y.max(clamp_floor(minimum_y - 0.5, canvas.height));
+        end_x = end_x.min(clamp_floor((maximum_x - 0.5).floor() + 1.0, canvas.width));
+        end_y = end_y.min(clamp_floor((maximum_y - 0.5).floor() + 1.0, canvas.height));
+    }
+    if end_x <= start_x || end_y <= start_y {
+        return None;
+    }
+    Some(GpuCompositeRect {
+        x: start_x,
+        y: start_y,
+        width: end_x - start_x,
+        height: end_y - start_y,
+    })
+}
+
+fn transformed_source_bounds(transform: [f32; 6], bounds: [f64; 4]) -> [f64; 4] {
+    let [left, top, right, bottom] = bounds;
     let points = [(left, top), (right, top), (left, bottom), (right, bottom)];
     let mut minimum_x = f64::INFINITY;
     let mut minimum_y = f64::INFINITY;
@@ -351,20 +385,7 @@ fn transformed_source_damage(
         maximum_x = maximum_x.max(output_x);
         maximum_y = maximum_y.max(output_y);
     }
-
-    // Pixel centers are x + 0.5/y + 0.5. Floor the lower edge to remain
-    // conservative under affine floating-point roundoff; the half-open upper
-    // edge can use ceil directly.
-    let start_x = clamp_floor(minimum_x - 0.5, canvas.width);
-    let start_y = clamp_floor(minimum_y - 0.5, canvas.height);
-    let end_x = clamp_ceil(maximum_x - 0.5, canvas.width);
-    let end_y = clamp_ceil(maximum_y - 0.5, canvas.height);
-    (end_x > start_x && end_y > start_y).then_some(GpuCompositeRect {
-        x: start_x,
-        y: start_y,
-        width: end_x - start_x,
-        height: end_y - start_y,
-    })
+    [minimum_x, minimum_y, maximum_x, maximum_y]
 }
 
 fn clamp_floor(value: f64, maximum: u32) -> u32 {
@@ -586,5 +607,116 @@ mod tests {
             plan.layers[0].damage,
             GpuCompositeRect { x: 24, y: 24, width: 51, height: 51 }
         );
+    }
+
+    #[test]
+    fn cropped_image_damage_contains_literal_centers_after_reflection_and_rotation() {
+        let left_half_removed =
+            GpuCompositeSourceCrop { left: 0.5, ..GpuCompositeSourceCrop::default() };
+        let top_half_removed =
+            GpuCompositeSourceCrop { top: 0.5, ..GpuCompositeSourceCrop::default() };
+        // These are literal surviving destination pixel centers, not a second
+        // implementation of the planner's affine bounding-box calculation.
+        // A reflected crop's included lower source edge becomes an included
+        // upper destination edge: (0.5, 1.5] still contains center 1.5.
+        let cases = [
+            (
+                "reflected horizontal crop",
+                (3, 1),
+                (2, 1),
+                [-1.0, 0.0, 2.5, 0.0, 1.0, 0.0],
+                left_half_removed,
+                (1, 0),
+            ),
+            (
+                "reflected vertical crop",
+                (1, 3),
+                (1, 2),
+                [1.0, 0.0, 0.0, 0.0, -1.0, 2.5],
+                top_half_removed,
+                (0, 1),
+            ),
+            (
+                "quarter-turn cropped image",
+                (1, 3),
+                (2, 1),
+                [0.0, 1.0, 0.0, -1.0, 0.0, 2.5],
+                left_half_removed,
+                (0, 1),
+            ),
+            (
+                "fractionally translated crop",
+                (2, 1),
+                (2, 1),
+                [1.0, 0.0, -0.75, 0.0, 1.0, 0.0],
+                left_half_removed,
+                (0, 0),
+            ),
+        ];
+        for (label, (width, height), (source_width, source_height), transform, crop, (x, y)) in
+            cases
+        {
+            let plan = GpuCompositeExecutionPlanner::plan(
+                width,
+                height,
+                &[GpuCompositeLayerFootprint::TransformedSource {
+                    source_width,
+                    source_height,
+                    transform,
+                    crop,
+                    fused_point_operations: 0,
+                }],
+                GpuCompositeExecutionPolicy::default(),
+            )
+            .expect("bounded cropped image support");
+            assert_eq!(plan.layers.len(), 1, "{label}: a legal center survives");
+            let layer = &plan.layers[0];
+            let damage = layer.damage;
+            assert!(
+                x >= damage.x && x < damage.right() && y >= damage.y && y < damage.bottom(),
+                "{label}: literal pixel ({x}, {y}) must be inside damage {damage:?}"
+            );
+            assert!(
+                layer.tiles.iter().any(|tile| {
+                    x >= tile.x && x < tile.right() && y >= tile.y && y < tile.bottom()
+                }),
+                "{label}: a recorded tile must draw literal pixel ({x}, {y})"
+            );
+        }
+    }
+
+    #[test]
+    fn magnified_image_damage_covers_complete_source_support() {
+        // Public recorder-consumed planning, with literal corner-space geometry:
+        // the full 1x1 square scaled to each canvas covers every pixel center.
+        for (width, height) in [(2, 2), (4, 4), (4, 2)] {
+            let plan = GpuCompositeExecutionPlanner::plan(
+                width,
+                height,
+                &[GpuCompositeLayerFootprint::TransformedSource {
+                    source_width: 1,
+                    source_height: 1,
+                    transform: [width as f32, 0., 0., 0., height as f32, 0.],
+                    crop: GpuCompositeSourceCrop::default(),
+                    fused_point_operations: 0,
+                }],
+                GpuCompositeExecutionPolicy::default(),
+            )
+            .expect("bounded complete image support");
+            let canvas = GpuCompositeRect { x: 0, y: 0, width, height };
+            assert_eq!(plan.layers.len(), 1);
+            assert_eq!(
+                plan.layers[0].damage, canvas,
+                "{width}x{height}: no first-pixel strip may be culled"
+            );
+            assert_eq!(plan.layers[0].tiles, [canvas]);
+            assert!(plan.layers[0].preserved_regions.is_empty());
+            assert_eq!(plan.diagnostics.eliminated_layers, 0);
+            assert_eq!(
+                plan.diagnostics.shaded_pixels,
+                u64::from(width) * u64::from(height)
+            );
+            assert_eq!(plan.diagnostics.avoided_shader_pixels, 0);
+        }
     }
 }

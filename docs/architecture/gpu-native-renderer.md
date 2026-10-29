@@ -811,8 +811,33 @@ a graphics-API-neutral contract. The preview scheduler carries that plan and
 the timeline frame seed across the app/window boundary; it does not interpret
 effect math or own wgpu resources. `GpuFrameCompositor` consumes the plan in its
 `Rgba32Float` working-space pass. Media and solid plans apply before
-straight-alpha source composition; adjustment plans apply to the lower
-accumulator and blend the processed result back. The retired RGBA8 global
+straight-alpha source composition. Adjustment plans apply to the lower
+accumulator and retain the Core `EffectPassBlendPolicy`: default Normal mixes
+original and processed associated scene-linear RGB and coverage by opacity.
+The Mix pass loads the two actual corresponding texels without re-filtering.
+It evaluates the finite Float32 dyadic polynomial with fixed integer storage,
+then rounds alpha and the exact straight-RGB quotient once, ties to even. Each
+term has at most three factors; 19 fixed 32-bit words cover its full exponent
+span and quotient alignment. The same arithmetic uses four active words when
+the admitted significand span fits 128 bits. Endpoint and numerically identical-texel
+branches retain the exact selected input, including hidden RGB and signed zero.
+The identity comparison maps only zero bit patterns to comparison zero; tiny
+nonzero values retain their identity without a floating comparison. Mutable host
+input and completed readback still use the sole typed frame validator. Invalid
+intermediate texels stay invalid for completed-frame admission; this arithmetic
+does not turn a nonfinite signal or invalid coverage into a finite output.
+
+This kernel consumes only the compositor's admitted StraightCoverage/Opaque
+frontier. Unrestricted Float association still requires a different admitted
+consumer; neither a coverage clamp nor an implicit conversion expands this
+route. Fixed shader-local storage has no host allocation, extra raster, queue
+or DSP replay. Shader compilation, actual adapter arithmetic, register/spill
+pressure and full Preview/Export performance are separate qualifications; a
+bounded exact model or a small correctness image is not a realtime receipt.
+
+Explicit Blend retains the selected compositing law. Mix can lower coverage, so
+Opaque output admission is proved in layer order rather than from any earlier
+Opaque source. The retired RGBA8 global
 executor/upload/readback path must not be reintroduced.
 Media affine transforms (translate, scale, rotate, and non-singular shear) are
 inverse-sampled in that same GPU pass for both uploaded and native-decoder GPU
@@ -1017,7 +1042,7 @@ so transformed solids need neither a full-frame materialization pass nor a
 second RGBA32F texture. Singular transforms remain typed blockers.
 External-domain adjustments are scheduled by the renderer-owned composite graph:
 it finalizes the lower accumulator, executes the stock-OCIO round trip, blends
-the processed frame back with the authored adjustment opacity/blend mode, and
+the processed frame back with the authored typed Adjustment pass policy, and
 continues upper layers from that working accumulator. Contiguous ordinary layers
 remain batched rather than forcing one compositor submission per layer. The
 adjustment merge is a dedicated single-pass node that samples the original
@@ -1587,7 +1612,7 @@ Readback is allowed for:
 - thumbnails or cached previews that explicitly require CPU pixels
 - tests/golden images
 - debug/profiling captures
-- interoperability with CPU-only plugins
+- interoperability with CPU-only effect providers, including native-format plugins
 
 Readback is not allowed as an invisible hop between ordinary render passes. All
 readback callers must use `GpuColorFrameReadbackPlan`; ad hoc
@@ -2081,6 +2106,106 @@ owner's CPU working-set grant, which the worker installs instead of retaining
 an unbounded default. CPU adaptation of cached working frames retains the same
 conservative complete estimate and existing cache residency contracts.
 CPU child and root limits, retained-scratch limits, and GPU budgets are unchanged.
+
+### Resource path execution admission
+
+Prepared visual programs continue to consume the shared compiled effect graph.
+Native resource paths are resolved by effect preparation; a foreign-platform or
+ownerless LUT reports unavailable author intent before local filesystem access.
+The renderer adds no second resource interpretation or fallback.
+
+## Float upload and completed readback admission
+
+Every Float32 CPU upload plan borrows its retained payload and uses the canonical
+Effects storage validator with its actual extent and alpha representation. RGBA8
+packing retains its separate byte contract. Upload admission adds one raster scan
+but no raster allocation or copy. It does not expand the compositor's explicitly
+normalized straight-compatible consumer support.
+
+Heterogeneous GPU continuation readback validates complete Float32 output in the
+existing scalar-to-pixel collection pass before publishing a CPU working frame.
+It preserves the output handle's actual alpha representation. A completed image
+with nonfinite values or invalid alpha/extent returns `FrameContract` and releases
+its completed resources for reuse. It does not poison a healthy GPU runtime.
+CPU storage allocation failure returns `ReadbackAllocationUnavailable` as a
+resource refusal, also releasing the proven-completed healthy GPU resources.
+Unproved submission completion and map/transport failures retain their existing
+resource-failure handling. Pure upload regressions require no adapter; the ignored
+overflow/recovery gate must be explicitly run on a real GPU. Neither source review
+nor ignored tests constitute hardware or performance qualification.
+# Upload-only effect continuation
+
+A complete CPU effect graph enters Viewer through the existing heterogeneous
+continuation with one uploaded Float32 graph-output texture and no GPU effect
+dispatch. Recording validates the exact graph, generation, extent, color space,
+transfer token chain and resource grant. Queue completion proves the upload;
+CPU completion alone cannot publish the frame. Upload and optional readback
+retain the usual cleanup and device failure contracts.
+
+
+### Lazy adjustment Mix pipeline
+
+Exact Adjustment Mix owns a separate shader module and a `OnceLock` pipeline
+inside the same `GpuFrameCompositor`. Ordinary composition and opaque Normal
+Over compile the ordinary module without the Mix integer types, functions or
+dynamic branch. A typed `Mix` pass creates its pipeline once on first use;
+explicit `Blend` selects the existing ordinary pipeline. The canonical inline
+Adjustment path first materializes its actual compiled point-effect result
+through the existing ordinary point-pass executor, then applies this same
+two-input exact Mix. The one processed texture is reused within a recorded
+composite segment and retained by the same frame table until command owners
+release it. It is never a dummy texture or an approximate recomputation. Both use the same
+texture bindings, uniform pages, output allocation and scheduled recorder.
+The exact Mix function body, signed-zero identity and public pixel contract
+are unchanged. The Mix shader reads only the shared uniform's first opacity
+member and loads corresponding texels; it does not run effects or transforms.
+
+First-use Mix module/pipeline creation is a cold cost and remains observable.
+The pipeline lives until its owning compositor is dropped. Driver/compiler
+allocation, register use and possible shader-local spills are not an exact
+texture resource ledger and still require actual platform qualification.
+Both Viewer and export visual-node active-working-set estimators charge the
+new processed raster before GPU recording, conservatively one per admitted
+inline Mix layer across segment boundaries. Existing budget caps are unchanged.
+This known texture demand does not claim complete driver/physical RSS.
+
+Performance reports must compare ordinary Over before and after first Mix,
+measure cold creation separately, and measure common and adversarial Mix.
+This source separation does not establish any throughput or frame-budget PASS.
+
+Identity Mix and zero-opacity layers are removed by the same composite footprint
+planner before processed-target allocation or pipeline initialization. Explicit
+Blend, including an identity effect with Normal Over, still records its pass.
+The required processed binding is checked with a structured compositor error;
+it never creates a new production panic boundary. A full-canvas Adjustment
+materializes every processed texel before scheduled Mix tiles read it. Its
+preserved-region set is empty; ordinary scissored copies remain unchanged.
+On recording refusal, the same local/table/encoder owners retain or drop their
+wgpu handles. This adds no automatic early return to the resource pool, detached
+task, CPU DSP replay or per-pixel Rust callback. Native GPU shader preemption is
+not claimed: execution and cancellation keep the existing submission owner.
+
+Every public compositor request admits each opacity as a finite Float32 in
+[0, 1] before inactive/identity elimination, capability checks and resource
+creation. This includes the two-input Adjustment pass's existing descriptor
+validation request. Refusal reports the original bits; no compatibility clamp
+or substituted endpoint is introduced. Negative zero remains a valid exact
+zero endpoint. The dedicated exact Mix decoder therefore receives only
+normalized finite amount bits through these public execution routes.
+
+### Shader compiler and platform qualification
+
+Windows MSVC x64 distributes wgpu's supported static DXC and uses its `Auto`
+compiler selection. Deployment qualification must exercise that ordinary
+selection from the shipped binary without an external Windows SDK compiler
+path. The fixed integer Mix shader needs a compiler supporting its legal WGSL
+lowering; the legacy FXC dynamic local-array limitation is not addressed with
+an alternate pixel law or a retry after pipeline failure. Naga type validation
+and an explicit development DXC run are separate evidence from this deployment
+gate. Other targets, including Windows ARM, Metal and Vulkan, require their
+own compiler/device qualification. Compiler provenance and redistributed
+licenses belong to the packaged dependency receipt. None of these compiler
+gates establishes realtime throughput or complete driver memory accounting.
 
 
 ## Idle Viewer device progress

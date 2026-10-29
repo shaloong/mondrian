@@ -1,0 +1,155 @@
+{
+  "schema": 1,
+  "crate": "crossbeam-queue",
+  "version": "0.3.12",
+  "repository": "https://github.com/crossbeam-rs/crossbeam",
+  "commit": "ccd83ac4108a2a1b41e9c6e79c87267167d18dfa",
+  "crate_source_archive": {
+    "sha256": "0f58bbc28f91df819d0aa2a2c00cd19754769c2fad90579b3592b1c9ba7a3115",
+    "bytes": 16270,
+    "source": "existing Cargo registry archive; no registry cache files were modified"
+  },
+  "licenses": "MIT OR Apache-2.0; both upstream license files shipped unchanged",
+  "upstream_shipped_sources": [
+    {
+      "path": "Cargo.toml",
+      "sha256": "187f241aad3a4370b6e112f2f5ec5ee212e8ad36d7919d2db29bc4245e70f76f",
+      "bytes": 1743
+    },
+    {
+      "path": "Cargo.toml.orig",
+      "sha256": "041410d34b12fa2d8d9ee3e13aecd58a754b1fde41644bd1d7a39d88882422b2",
+      "bytes": 1502
+    },
+    {
+      "path": "README.md",
+      "sha256": "88a50c7a414f6d8431061f0741dc6b46db012ec338b4e57d5d3e9746eeaaa543",
+      "bytes": 2113
+    },
+    {
+      "path": "CHANGELOG.md",
+      "sha256": "6e8a6185cb02ca76f58a29feb15cf075807b89e578c4da1b7d6228e2598c0e01",
+      "bytes": 1838
+    },
+    {
+      "path": "LICENSE-MIT",
+      "sha256": "5734ed989dfca1f625b40281ee9f4530f91b2411ec01cb748223e7eb87e201ab",
+      "bytes": 1099
+    },
+    {
+      "path": "LICENSE-APACHE",
+      "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2",
+      "bytes": 10847
+    },
+    {
+      "path": "src/array_queue.rs",
+      "sha256": "86c732c258c8b929a259e22d772241de80ec2741b18fce8cbb23815e4dd731d4",
+      "bytes": 17271
+    },
+    {
+      "path": "src/lib.rs",
+      "sha256": "e3b6c8dacf2f9f18d66c82cafdc0b2a06d3b13af91a303e66f81f069bbff4627",
+      "bytes": 971
+    },
+    {
+      "path": "src/seg_queue.rs",
+      "sha256": "49db03c80c97a44213a98e73b2db0be60b7d1253cd9d90bc01e8d3aa5e83bce3",
+      "bytes": 18943
+    },
+    {
+      "path": "tests/array_queue.rs",
+      "sha256": "426dd0ff6698bd63108b3a567703ec2e635bce0f337134116e237b11925a7716",
+      "bytes": 8465
+    },
+    {
+      "path": "tests/seg_queue.rs",
+      "sha256": "8dfa361d8f82467a58aff3741a3410689631d3c28d8e32b5c104148ba330ef74",
+      "bytes": 4469
+    }
+  ],
+  "local_deltas": [
+    "independent runtime-only workspace boundary",
+    "complete borrowed ArrayQueue buffer identity/layout owning API and export",
+    "exclusive FIFO initialized-value owning borrow with unchanged core queue algorithm"
+  ],
+  "queue_algorithm_or_semantic_change": false,
+  "unsupported_completeness": [
+    "nested T allocation owners",
+    "outer Arc prefix",
+    "allocator metadata",
+    "OS/kernel/vendor-private memory"
+  ],
+  "qualification": "Source-only; no build, native, allocation or deadline result asserted",
+  "shipped_files": [
+    {
+      "path": "Cargo.toml",
+      "bytes": 1829,
+      "sha256": "1ec20f3a36b3a8725768156ad5c47a5d9de473a23405fe8d40e12273edb345b3"
+    },
+    {
+      "path": "Cargo.toml.orig",
+      "bytes": 1502,
+      "sha256": "041410d34b12fa2d8d9ee3e13aecd58a754b1fde41644bd1d7a39d88882422b2"
+    },
+    {
+      "path": "README.md",
+      "bytes": 2113,
+      "sha256": "88a50c7a414f6d8431061f0741dc6b46db012ec338b4e57d5d3e9746eeaaa543"
+    },
+    {
+      "path": "CHANGELOG.md",
+      "bytes": 1838,
+      "sha256": "6e8a6185cb02ca76f58a29feb15cf075807b89e578c4da1b7d6228e2598c0e01"
+    },
+    {
+      "path": "LICENSE-MIT",
+      "bytes": 1099,
+      "sha256": "5734ed989dfca1f625b40281ee9f4530f91b2411ec01cb748223e7eb87e201ab"
+    },
+    {
+      "path": "LICENSE-APACHE",
+      "bytes": 10847,
+      "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2"
+    },
+    {
+      "path": "src/array_queue.rs",
+      "bytes": 20500,
+      "sha256": "2f2d8e2ac13f92ae9f29717fe68cabc91fa79c959f43d706a7ddbe010ecd5621"
+    },
+    {
+      "path": "src/lib.rs",
+      "bytes": 1009,
+      "sha256": "370b7559ed9c061862d754d9b1f736078ff399ddce7f2b3bec04818206456865"
+    },
+    {
+      "path": "src/seg_queue.rs",
+      "bytes": 18943,
+      "sha256": "49db03c80c97a44213a98e73b2db0be60b7d1253cd9d90bc01e8d3aa5e83bce3"
+    },
+    {
+      "path": "tests/array_queue.rs",
+      "bytes": 8465,
+      "sha256": "426dd0ff6698bd63108b3a567703ec2e635bce0f337134116e237b11925a7716"
+    },
+    {
+      "path": "tests/seg_queue.rs",
+      "bytes": 4469,
+      "sha256": "8dfa361d8f82467a58aff3741a3410689631d3c28d8e32b5c104148ba330ef74"
+    }
+  ],
+  "local_formatting": {
+    "receipt": "LOCAL-FORMAT-CHANGES.json",
+    "receipt_sha256_raw": "182abcc1035bb3a2aecd6a33f342a265dec37c1101af7b0bdb3be7c0b8471de5",
+    "file_count": 2,
+    "official_input_bytes_unchanged": true,
+    "generated_abi_bytes_unchanged": true,
+    "runtime_qualification": false
+  },
+  "local_output_owning": {
+    "receipt": "LOCAL-OUTPUT-OWNER-CHANGES.json",
+    "receipt_sha256_raw": "d5dc2efdbe5b6f712f7a8f38fd02fa0feacc7c7ecab1be44a64177e16590d286",
+    "runtime_qualification": false,
+    "actual_final_formatter_receipt_required": false,
+    "actual_formatter_replay_verified": true
+  }
+}

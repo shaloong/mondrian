@@ -30,28 +30,40 @@ const DEVICE_WORKER_TERMINAL_NORMAL: u8 = 1;
 const DEVICE_WORKER_TERMINAL_PANICKED: u8 = 2;
 const DEVICE_WORKER_TERMINAL_OPAQUE_PANIC_ABANDONED: u8 = 3;
 
-/// One lifecycle transition emitted while polling [`RealtimeAudioOutputManager`].
+/// One nonblocking lifecycle transition emitted by an owned realtime output adapter.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RealtimeAudioOutputEvent {
     /// A new concrete stream is ready but remains inactive for PCM preroll.
     Opened {
+        /// Fresh nonzero identity of the concrete stream.
         stream_generation: u64,
+        /// Actual selected device and executable stream contract.
         evidence: RealtimeAudioOutputDeviceEvidence,
     },
     /// The concrete stream was destroyed and its evidence is now frozen.
     Lost {
+        /// Concrete reason for the completed stream retirement.
         reason: RealtimeAudioOutputLossReason,
+        /// Coherent final evidence retained after old callbacks and stream close.
         final_snapshot: RealtimeAudioOutputSnapshot,
     },
     /// One background open attempt failed and a bounded retry was scheduled.
     OpenFailed {
+        /// Bounded time until the next lifecycle open attempt.
         retry_after: Duration,
+        /// Actual device/contract open rejection.
         failure: RealtimeAudioOutputOpenFailure,
     },
     /// The owned device lifecycle worker could not be created.
-    WorkerStartFailed { reason: String },
+    WorkerStartFailed {
+        /// Actual owner creation failure.
+        reason: String,
+    },
     /// The owned device lifecycle worker exited without an explicit shutdown.
-    WorkerStoppedUnexpectedly { reason: String },
+    WorkerStoppedUnexpectedly {
+        /// Actual unexpected owner termination.
+        reason: String,
+    },
 }
 
 /// Why one concrete stream was retired before the lifecycle worker reopened it.

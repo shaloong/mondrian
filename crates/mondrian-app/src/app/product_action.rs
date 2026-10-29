@@ -2,7 +2,7 @@
 //!
 //! Product code dispatches and admits the typed algebra in this Module.
 //! `Action::Custom` remains an external transport for reusable Widgets,
-//! scripting, and future plugin Adapters; it is decoded only at this seam.
+//! scripting, and future Extension Adapters; it is decoded only at this seam.
 
 mod visual_mask;
 
@@ -10,7 +10,11 @@ pub use visual_mask::*;
 
 use std::path::PathBuf;
 
-use mondrian_core::automation::{AnimationParameterAddress, PropertyValue};
+use mondrian_core::automation::AnimationParameterAddress;
+/// Shared canonical value-edit contract used by all product parameter owners.
+pub use mondrian_core::automation::ParameterValueWrite;
+#[cfg(test)]
+use mondrian_core::automation::PropertyValue;
 use mondrian_core::effect_data::EffectType;
 use mondrian_core::timeline_data::AssetMediaInterpretation;
 use mondrian_core::types::{
@@ -111,6 +115,8 @@ pub const CLIP_HOLD_FRAME: &str = "hold_frame";
 pub const CLIP_WRITE_PARAMETER_VALUES: &str = "write_parameter_values";
 /// External action name for editing one numeric Clip curve by stable identity.
 pub const CLIP_EDIT_NUMERIC_CURVE: &str = "edit_numeric_curve";
+/// Clipboard command for one exact Clip-contained curve.
+pub const CLIP_CURVE_CLIPBOARD: &str = "curve_clipboard";
 
 /// External custom-action namespace for Project product operations.
 pub const PROJECT_NAMESPACE: &str = "ui.project";
@@ -143,6 +149,8 @@ pub const SEQUENCE_DUPLICATE: &str = "duplicate";
 pub const SEQUENCE_DELETE: &str = "delete";
 /// External action name for updating Sequence identity and settings.
 pub const SEQUENCE_UPDATE_SETTINGS: &str = "update_settings";
+/// Replace or explicitly clear the Sequence's sole constant musical reference.
+pub const SEQUENCE_SET_MUSICAL_TIME_REFERENCE: &str = "set_musical_time_reference";
 
 /// External custom-action namespace for Export product operations.
 pub const EXPORT_NAMESPACE: &str = "ui.export";
@@ -206,6 +214,14 @@ pub const GALLERY_APPLY_SHOT_MATCH: &str = "apply_shot_match";
 /// External custom-action namespace for Sequence audio authoring operations.
 pub const AUDIO_NAMESPACE: &str = "ui.audio";
 
+/// External read-only processor input control operation.
+pub const AUDIO_QUERY_PROCESSOR_INPUTS: &str = "query_processor_inputs";
+
+/// External author action for connecting a current observed processor input.
+pub const AUDIO_CONNECT_PROCESSOR_INPUT: &str = "connect_processor_input";
+/// Rewire one retained input Route using the current observed native contract.
+pub const AUDIO_REWIRE_PROCESSOR_INPUT: &str = "rewire_processor_input";
+
 /// External action name for one atomic Audio Processor Rack edit.
 pub const AUDIO_EDIT_PROCESSOR_RACK: &str = "edit_processor_rack";
 /// External action name for inserting one product-visible built-in Processor.
@@ -224,10 +240,18 @@ pub const AUDIO_EDIT_CHANNEL_STRIP: &str = "edit_channel_strip";
 pub const AUDIO_EDIT_ROUTING: &str = "edit_routing";
 /// External action name for one stable-address audio automation edit.
 pub const AUDIO_EDIT_AUTOMATION: &str = "edit_automation";
+/// External action name for focused audio curve clipboard operations.
+pub const AUDIO_CURVE_CLIPBOARD: &str = "curve_clipboard";
 /// External action name for one placement-local Audio Component edit.
 pub const AUDIO_EDIT_COMPONENT: &str = "edit_component";
 /// External action name for one open-Session Track solo change.
 pub const AUDIO_SET_TRACK_SOLO: &str = "set_track_solo";
+/// External action name for navigating an Inspector Scope occurrence without authoring.
+pub const AUDIO_SELECT_SCOPE_OCCURRENCE: &str = "select_scope_occurrence";
+/// External action for one exact native editor product surface.
+pub const AUDIO_NATIVE_EDITOR: &str = "native_editor";
+/// Explicit single-row native presentation query; never an author transaction.
+pub const AUDIO_QUERY_NATIVE_PARAMETER: &str = "query_native_parameter";
 
 /// External custom-action namespace for Project Asset Library operations.
 pub const ASSET_NAMESPACE: &str = "ui.asset";
@@ -360,6 +384,8 @@ pub enum SequenceProductAction {
     Delete(SequenceTargetPayload),
     /// Replace one Sequence's name and complete settings atomically.
     UpdateSettings(Box<SequenceUpdateSettingsPayload>),
+    /// Edit musical time without replacing unrelated Sequence settings or audio state.
+    SetMusicalTimeReference(SequenceSetMusicalTimeReferencePayload),
 }
 
 /// Closed Export draft and execution operations.
@@ -380,7 +406,7 @@ pub enum ExportProductAction {
 /// Closed visual Effect installation, authoring, and selection operations.
 #[derive(Debug, Clone, PartialEq)]
 pub enum VisualEffectProductAction {
-    /// Discover and register supported Filters from one selected bundle.
+    /// Discover and register exactly the selected context from one bundle.
     InstallOpenFxBundle(VisualEffectInstallOpenFxBundlePayload),
     /// Instantiate one currently registered definition and append it to a Clip.
     AddToClip(VisualEffectAddToClipPayload),
@@ -439,6 +465,8 @@ pub enum ClipProductAction {
     WriteParameterValues(Box<ClipWriteParameterValuesPayload>),
     /// Insert, edit, or remove one complete numeric key by stable identity.
     EditNumericCurve(Box<ClipEditNumericCurvePayload>),
+    /// Copy or paste keys using the explicit focused curve target.
+    CurveClipboard(Box<ClipCurveClipboardPayload>),
 }
 
 /// Closed Viewer operations that mutate product state.
@@ -451,10 +479,24 @@ pub enum ViewerProductAction {
 /// Closed Sequence audio authoring operations.
 #[derive(Debug, Clone, PartialEq)]
 pub enum AudioProductAction {
+    /// Open or close the exact selected native author surface.
+    NativeEditor(AudioNativeEditorPayload),
+    /// Read one currently selected native-owned parameter without adopting it.
+    QueryNativeParameter(AudioNativeParameterQueryPayload),
+    /// Navigate a shared Scope curve using an explicit Component occurrence.
+    SelectScopeOccurrence(AudioScopeOccurrencePayload),
+    /// Query or cancel transient processor input observation.
+    QueryProcessorInputs(AudioProcessorInputQueryPayload),
+    /// Connect a source only to an exact current observed auxiliary input.
+    ConnectProcessorInput(AudioProcessorInputConnectionPayload),
+    /// Atomically replace a retained Route source without losing controls.
+    RewireProcessorInput(AudioProcessorInputRewirePayload),
     /// Change one transient Track audition flag without mutating author state.
     SetTrackSolo(AudioTrackSoloPayload),
     /// Apply one exact owner-time curve mutation.
     EditAutomation(AudioAutomationEditRequest),
+    /// Capture or paste complete keys through the sole transient clipboard.
+    CurveClipboard(Box<AudioCurveClipboardPayload>),
     /// Apply one stable-address placement-local Component mutation.
     EditComponent(AudioComponentEditRequest),
     /// Apply one stable-address Rack mutation in one author transaction.
@@ -563,7 +605,7 @@ pub enum VideoTransitionProductAction {
 /// Failure to decode a recognized external custom Action.
 ///
 /// Unknown namespaces and names are not errors: they return `None` from
-/// [`ProductAction::decode_external`] so an owning legacy or plugin Adapter may
+/// [`ProductAction::decode_external`] so an owning legacy or Extension Adapter may
 /// inspect them. A recognized product name with a malformed payload fails
 /// closed and must never fall through to another interpretation.
 #[derive(Debug, thiserror::Error)]
@@ -713,6 +755,37 @@ impl ProductAction {
                 _ => Ok(None),
             },
             AUDIO_NAMESPACE => match name.as_str() {
+                AUDIO_REWIRE_PROCESSOR_INPUT => {
+                    Ok(Some(Self::Audio(AudioProductAction::RewireProcessorInput(
+                        decode_payload(namespace, name, payload)?,
+                    ))))
+                }
+                AUDIO_CONNECT_PROCESSOR_INPUT => Ok(Some(Self::Audio(
+                    AudioProductAction::ConnectProcessorInput(decode_payload(
+                        namespace, name, payload,
+                    )?),
+                ))),
+                AUDIO_QUERY_PROCESSOR_INPUTS => {
+                    Ok(Some(Self::Audio(AudioProductAction::QueryProcessorInputs(
+                        decode_payload(namespace, name, payload)?,
+                    ))))
+                }
+                AUDIO_QUERY_NATIVE_PARAMETER => {
+                    Ok(Some(Self::Audio(AudioProductAction::QueryNativeParameter(
+                        decode_payload(namespace, name, payload)?,
+                    ))))
+                }
+                AUDIO_NATIVE_EDITOR => Ok(Some(Self::Audio(AudioProductAction::NativeEditor(
+                    decode_payload(namespace, name, payload)?,
+                )))),
+                AUDIO_SELECT_SCOPE_OCCURRENCE => Ok(Some(Self::Audio(
+                    AudioProductAction::SelectScopeOccurrence(decode_payload(
+                        namespace, name, payload,
+                    )?),
+                ))),
+                AUDIO_CURVE_CLIPBOARD => Ok(Some(Self::Audio(AudioProductAction::CurveClipboard(
+                    Box::new(decode_payload(namespace, name, payload)?),
+                )))),
                 AUDIO_EDIT_AUTOMATION => Ok(Some(Self::Audio(AudioProductAction::EditAutomation(
                     decode_payload(namespace, name, payload)?,
                 )))),
@@ -847,6 +920,9 @@ impl ProductAction {
                         Box::new(decode_payload(namespace, name, payload)?),
                     ))))
                 }
+                CLIP_CURVE_CLIPBOARD => Ok(Some(Self::Clip(ClipProductAction::CurveClipboard(
+                    Box::new(decode_payload(namespace, name, payload)?),
+                )))),
                 CLIP_EDIT_NUMERIC_CURVE => {
                     Ok(Some(Self::Clip(ClipProductAction::EditNumericCurve(
                         Box::new(decode_payload(namespace, name, payload)?),
@@ -909,6 +985,11 @@ impl ProductAction {
                         Box::new(decode_payload(namespace, name, payload)?),
                     ))))
                 }
+                SEQUENCE_SET_MUSICAL_TIME_REFERENCE => Ok(Some(Self::Sequence(
+                    SequenceProductAction::SetMusicalTimeReference(decode_payload(
+                        namespace, name, payload,
+                    )?),
+                ))),
                 _ => Ok(None),
             },
             EXPORT_NAMESPACE => match name.as_str() {
@@ -1083,16 +1164,51 @@ impl ProductAction {
         }
     }
 
-    /// Encode a typed product Action for an external Widget or plugin envelope.
+    /// Encode a typed product Action for an external Widget or Extension envelope.
     ///
     /// Product dispatch immediately lowers this envelope back through
     /// [`Self::decode_external`]; no other App Module may reinterpret these wire
     /// names or payloads.
     pub fn into_external_action(self) -> Action {
         let (namespace, name, payload) = match self {
+            Self::Audio(AudioProductAction::RewireProcessorInput(payload)) => (
+                AUDIO_NAMESPACE,
+                AUDIO_REWIRE_PROCESSOR_INPUT,
+                serde_json::json!(payload),
+            ),
+            Self::Audio(AudioProductAction::ConnectProcessorInput(payload)) => (
+                AUDIO_NAMESPACE,
+                AUDIO_CONNECT_PROCESSOR_INPUT,
+                serde_json::json!(payload),
+            ),
+            Self::Audio(AudioProductAction::QueryProcessorInputs(payload)) => (
+                AUDIO_NAMESPACE,
+                AUDIO_QUERY_PROCESSOR_INPUTS,
+                serde_json::json!(payload),
+            ),
+            Self::Audio(AudioProductAction::QueryNativeParameter(payload)) => (
+                AUDIO_NAMESPACE,
+                AUDIO_QUERY_NATIVE_PARAMETER,
+                serde_json::json!(payload),
+            ),
+            Self::Audio(AudioProductAction::NativeEditor(payload)) => (
+                AUDIO_NAMESPACE,
+                AUDIO_NATIVE_EDITOR,
+                serde_json::json!(payload),
+            ),
+            Self::Audio(AudioProductAction::SelectScopeOccurrence(payload)) => (
+                AUDIO_NAMESPACE,
+                AUDIO_SELECT_SCOPE_OCCURRENCE,
+                serde_json::json!(payload),
+            ),
             Self::Audio(AudioProductAction::SetTrackSolo(payload)) => (
                 AUDIO_NAMESPACE,
                 AUDIO_SET_TRACK_SOLO,
+                serde_json::json!(payload),
+            ),
+            Self::Audio(AudioProductAction::CurveClipboard(payload)) => (
+                AUDIO_NAMESPACE,
+                AUDIO_CURVE_CLIPBOARD,
                 serde_json::json!(payload),
             ),
             Self::Audio(AudioProductAction::EditAutomation(request)) => (
@@ -1349,6 +1465,11 @@ impl ProductAction {
                 CLIP_WRITE_PARAMETER_VALUES,
                 serde_json::json!(payload),
             ),
+            Self::Clip(ClipProductAction::CurveClipboard(payload)) => (
+                CLIP_NAMESPACE,
+                CLIP_CURVE_CLIPBOARD,
+                serde_json::json!(payload),
+            ),
             Self::Clip(ClipProductAction::EditNumericCurve(payload)) => (
                 CLIP_NAMESPACE,
                 CLIP_EDIT_NUMERIC_CURVE,
@@ -1410,6 +1531,11 @@ impl ProductAction {
             Self::Sequence(SequenceProductAction::UpdateSettings(payload)) => (
                 SEQUENCE_NAMESPACE,
                 SEQUENCE_UPDATE_SETTINGS,
+                serde_json::json!(payload),
+            ),
+            Self::Sequence(SequenceProductAction::SetMusicalTimeReference(payload)) => (
+                SEQUENCE_NAMESPACE,
+                SEQUENCE_SET_MUSICAL_TIME_REFERENCE,
                 serde_json::json!(payload),
             ),
             Self::Export(ExportProductAction::EditDraft(edit)) => {
@@ -1820,6 +1946,49 @@ pub struct AudioProcessorRebindVst3Payload {
     pub processor_id: AudioProcessorInstanceId,
 }
 
+/// Captured single-row query intent. The current App surface and schema must
+/// still match at submission and completion; no child ticket is serialized here.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AudioNativeParameterQueryPayload {
+    pub(crate) target: Box<super::parameter_gesture::AudioScalarGestureTarget>,
+    pub(crate) expected_author_generation: u64,
+}
+
+/// Closed native editor surface intent; metadata cannot mint runtime permission.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AudioNativeEditorPayload {
+    /// Real open author lifetime observed by the source projection.
+    pub session_id: mondrian_editor_state::AuthoringSessionId,
+    /// Exact source Sequence of the selected surface.
+    pub sequence_id: SequenceId,
+    /// Stable authored rack.
+    pub address: mondrian_timeline::AudioProcessorRackAddress,
+    /// Required materialization for a shared Scope.
+    pub occurrence: Option<mondrian_timeline::AudioComponentAddress>,
+    /// Stable processor within that rack.
+    pub processor_id: AudioProcessorInstanceId,
+    /// Complete installed binary/definition binding at projection.
+    pub definition: mondrian_timeline::audio::AudioProcessorDefinitionRef,
+    /// Explicit edit time chosen at this surface; no later active-frame inference.
+    pub sequence_time: mondrian_core::DomainTime,
+    /// True opens the selected editor, false closes its actual current target.
+    pub open: bool,
+}
+
+/// Inspector navigation into one shared Scope occurrence in the active Sequence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AudioScopeOccurrencePayload {
+    /// Sequence owning the occurrence; stale cross-Sequence actions are rejected.
+    pub sequence_id: SequenceId,
+    /// Shared author definition whose current-time coordinate is selected.
+    pub scope_id: mondrian_core::AudioProcessingScopeId,
+    /// Explicit placement-local Component occurrence.
+    pub address: mondrian_timeline::AudioComponentAddress,
+}
+
 /// Transient Track audition intent owned by the open App Session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -2199,6 +2368,17 @@ pub struct SequenceUpdateSettingsPayload {
     pub settings: SequenceSettings,
 }
 
+/// Replace the complete constant reference owned by one stable Sequence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SequenceSetMusicalTimeReferencePayload {
+    /// Explicit owner; switching the active Sequence cannot redirect a retained action.
+    pub sequence_id: SequenceId,
+    /// `null` explicitly clears musical time. Omission must not accidentally clear it.
+    #[serde(deserialize_with = "Deserialize::deserialize")]
+    pub reference: Option<mondrian_core::MusicalTimeReference>,
+}
+
 /// One exact edit to the app-session Export draft.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -2229,12 +2409,15 @@ struct ExportCancelWirePayload {
     job_id: JobId,
 }
 
-/// Machine-local OpenFX bundle explicitly selected for Filter installation.
+/// Machine-local OpenFX bundle and context explicitly selected for installation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct VisualEffectInstallOpenFxBundlePayload {
     /// Absolute `.ofx.bundle` directory chosen through the native picker.
     pub path: PathBuf,
+    /// Missing legacy command fields retain the original Filter selection.
+    #[serde(default)]
+    pub context: crate::openfx_host::OpenFxContext,
 }
 
 /// Clip and registered definition selected for one visual Effect insertion.
@@ -2289,10 +2472,8 @@ pub struct VisualEffectSetParameterValuePayload {
     pub clip_id: ClipId,
     /// Stable Effect instance that owns the parameter.
     pub effect_id: EffectId,
-    /// Stable parameter instance plus definition identity; never a property-path alias.
-    pub parameter: AnimationParameterAddress,
-    /// Value to write statically or as a key at the current Clip-local author time.
-    pub value: PropertyValue,
+    /// Complete or sparse edit resolved against the current parameter owner.
+    pub write: ParameterValueWrite,
 }
 
 /// Edit one numeric visual Effect curve over the owning Clip's author span.
@@ -2536,16 +2717,6 @@ pub struct ClipHoldFramePayload {
     pub sequence_time: FramePosition,
 }
 
-/// One stable-address parameter value in an atomic Clip write.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ClipParameterValueWrite {
-    /// Stable owner-local parameter instance and Definition identity.
-    pub parameter: AnimationParameterAddress,
-    /// Typed value to write statically or at the current Clip-local author time.
-    pub value: PropertyValue,
-}
-
 /// Atomically write one or more persistent parameters owned directly by a Clip.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -2553,34 +2724,96 @@ pub struct ClipWriteParameterValuesPayload {
     /// Canonical Clip identity; current Track placement is derived at dispatch.
     pub clip_id: ClipId,
     /// Non-empty, duplicate-free parameter writes committed as one gesture.
-    pub writes: Vec<ClipParameterValueWrite>,
+    pub writes: Vec<ParameterValueWrite>,
 }
 
-/// One finite normalized point in a Clip curve editor viewport.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ClipNormalizedCurvePointPayload {
-    /// Ratio across the visible Clip-local author span, in `0..=1`.
-    pub time_ratio: f64,
-    /// Ratio across the Parameter Schema soft range, in `0..=1`.
-    pub value_ratio: f64,
-}
+pub use super::animation_authoring::ClipCurveAuthorPoint;
 
 /// One stable-key numeric curve edit.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ClipCurveEditPayload {
+    /// Transform complete stable keys from one gesture origin in a single candidate.
+    TransformMany {
+        /// Nonempty unique complete key identities.
+        keyframe_ids: Vec<KeyframeId>,
+        /// Signed exact owner-time translation.
+        time_delta: TimelineTime,
+        /// Finite common displacement in author value units.
+        value_delta: f64,
+        /// Signed value increment count.
+        steps: i8,
+    },
+
+    /// Offset complete stable keys with one common numeric displacement.
+    OffsetValuesMany {
+        /// Nonempty unique complete key identities.
+        keyframe_ids: Vec<KeyframeId>,
+        /// Finite increment in author value units.
+        delta: f64,
+        /// Signed increment count.
+        steps: i8,
+    },
+    /// Translate complete stable keys together in their exact owner-time domain.
+    ShiftMany {
+        /// Nonempty unique complete canonical key identities.
+        keyframe_ids: Vec<KeyframeId>,
+        /// Signed exact owner-time translation.
+        delta: TimelineTime,
+    },
+    /// Remove a unique nonempty key set in one author transaction.
+    RemoveMany {
+        /// Complete canonical key identities.
+        keyframe_ids: Vec<KeyframeId>,
+        /// Exact owner time whose original evaluation survives deletion of all keys.
+        retain_time: TimelineTime,
+    },
+    /// Edit sparse exact coordinates of a stable key's temporal control.
+    EditHandle {
+        /// Existing canonical key identity.
+        keyframe_id: KeyframeId,
+        /// Incoming or outgoing control.
+        side: mondrian_core::BezierHandleSide,
+        /// Omitted coordinates retain their exact author values.
+        edit: mondrian_core::ExactBezierHandleEdit,
+    },
+    /// Move supplied exact author coordinates of an existing complete key.
+    Move {
+        /// Existing complete key's stable identity.
+        keyframe_id: KeyframeId,
+        /// Absolute owner time; omission retains the current exact author time.
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "mondrian_core::deserialize_present_coordinate"
+        )]
+        time: Option<TimelineTime>,
+        /// Canonical scalar channel value; omission retains the current author value.
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "mondrian_core::deserialize_present_coordinate"
+        )]
+        value: Option<mondrian_core::automation::AnimationChannelValue>,
+    },
     /// Insert a key, or edit one existing complete key.
     Upsert {
         /// Existing stable identity; `None` inserts or resolves by exact time.
         keyframe_id: Option<KeyframeId>,
-        /// New normalized editor point.
-        point: ClipNormalizedCurvePointPayload,
+        /// Exact owner time and typed author value.
+        point: ClipCurveAuthorPoint,
     },
     /// Remove one complete key by stable identity.
     Remove {
         /// Stable key identity captured by the current projection.
         keyframe_id: KeyframeId,
+    },
+    /// Set one interpolation preset on a complete stable selection atomically.
+    SetInterpolations {
+        /// Nonempty unique complete key identities.
+        keyframe_ids: Vec<KeyframeId>,
+        /// Current-schema interpolation preset.
+        interpolation: mondrian_core::automation::InterpolationType,
     },
     /// Change the interpolation preset of one existing complete key.
     SetInterpolation {
@@ -2589,6 +2822,84 @@ pub enum ClipCurveEditPayload {
         /// Authoring preset, including constrained Bezier modes.
         interpolation: mondrian_core::automation::InterpolationType,
     },
+}
+
+impl ClipCurveEditPayload {
+    /// Complete group retained after a successful non-deleting batch edit.
+    pub(crate) fn retained_group_keyframe_ids(&self) -> Option<&[KeyframeId]> {
+        match self {
+            Self::TransformMany { keyframe_ids, .. }
+            | Self::OffsetValuesMany { keyframe_ids, .. }
+            | Self::ShiftMany { keyframe_ids, .. }
+            | Self::SetInterpolations { keyframe_ids, .. } => Some(keyframe_ids),
+            Self::RemoveMany { .. }
+            | Self::EditHandle { .. }
+            | Self::Move { .. }
+            | Self::Upsert { .. }
+            | Self::Remove { .. }
+            | Self::SetInterpolation { .. } => None,
+        }
+    }
+
+    /// Stable deletion targets used to update selection after a successful commit.
+    pub(crate) fn removed_keyframe_ids(&self) -> Option<&[KeyframeId]> {
+        match self {
+            Self::Remove { keyframe_id } => Some(std::slice::from_ref(keyframe_id)),
+            Self::RemoveMany { keyframe_ids, .. } => Some(keyframe_ids),
+            Self::TransformMany { .. }
+            | Self::OffsetValuesMany { .. }
+            | Self::ShiftMany { .. }
+            | Self::EditHandle { .. }
+            | Self::Move { .. }
+            | Self::Upsert { .. }
+            | Self::SetInterpolations { .. }
+            | Self::SetInterpolation { .. } => None,
+        }
+    }
+}
+
+/// Clipboard intent for a complete stable selection or the focused paste target.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
+pub enum CurveClipboardOperation {
+    /// Capture a unique nonempty set of complete keys.
+    Copy {
+        /// Stable authored identities in the addressed property.
+        keyframe_ids: Vec<KeyframeId>,
+    },
+    /// Capture and remove the complete group in one author transaction.
+    Cut {
+        /// Stable authored identities in the addressed property.
+        keyframe_ids: Vec<KeyframeId>,
+    },
+    /// Paste at the current playhead into exactly the addressed property.
+    Paste {},
+}
+
+/// Focus-qualified clipboard request for one exact audio curve and occurrence.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AudioCurveClipboardPayload {
+    /// Sequence that owns the target; another active sequence never adopts it.
+    pub sequence_id: SequenceId,
+    /// Stable curve address, independent of its visible panel or row.
+    pub target: mondrian_timeline::AudioAutomationTarget,
+    /// Explicit occurrence for a shared Processing Scope's owner-time mapping.
+    pub scope_occurrence: Option<mondrian_timeline::AudioComponentAddress>,
+    /// Complete capture or focused target paste.
+    pub operation: CurveClipboardOperation,
+}
+
+/// Focus-qualified clipboard request; parameter identity names its exact instance.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ClipCurveClipboardPayload {
+    /// Current Clip containing the intrinsic or effect-owned property.
+    pub clip_id: ClipId,
+    /// Exact property instance; no display path or parameter-name fallback.
+    pub parameter: AnimationParameterAddress,
+    /// Complete selection capture or explicit target paste.
+    pub operation: CurveClipboardOperation,
 }
 
 /// Edit one Clip-owned numeric curve through stable author identity.
@@ -2634,6 +2945,9 @@ impl<'a> ProductActionAvailability<'a> {
             ProductAction::Timeline(action) => self.allows_timeline(action),
             ProductAction::Track(action) => self.allows_track(action),
             ProductAction::VideoTransition(action) => self.allows_video_transition(action),
+            ProductAction::Audio(AudioProductAction::CurveClipboard(payload)) => {
+                self.state.audio_curve_clipboard_available(payload)
+            }
             ProductAction::Audio(_) => self.state.active_sequence().is_some(),
             ProductAction::Asset(action) => self.allows_asset(action),
             ProductAction::Viewer(action) => self.allows_viewer(action),
@@ -2896,6 +3210,9 @@ impl<'a> ProductActionAvailability<'a> {
             ClipProductAction::EditNumericCurve(payload) => {
                 self.state.clip_numeric_curve_payload_would_change(payload).unwrap_or(false)
             }
+            ClipProductAction::CurveClipboard(payload) => {
+                self.state.curve_clipboard_available(payload)
+            }
         }
     }
 
@@ -2951,6 +3268,11 @@ impl<'a> ProductActionAvailability<'a> {
                     let name = payload.name.trim();
                     !name.is_empty()
                         && (sequence.name != name || sequence.settings != payload.settings)
+                })
+            }
+            SequenceProductAction::SetMusicalTimeReference(payload) => {
+                document.sequences.sequence(payload.sequence_id).is_some_and(|sequence| {
+                    sequence.audio_program.musical_time_reference != payload.reference
                 })
             }
         }
@@ -3061,11 +3383,7 @@ impl<'a> ProductActionAvailability<'a> {
                                 target
                                     .effect
                                     .properties
-                                    .prepare_value_write_by_address(
-                                        &payload.parameter,
-                                        time,
-                                        payload.value.clone(),
-                                    )
+                                    .prepare_parameter_write(&payload.write, time)
                                     .ok()
                                     .flatten()
                             })
@@ -3803,11 +4121,47 @@ mod tests {
     }
 
     #[test]
+    fn focused_curve_clipboard_codec_requires_exact_targets_and_closed_operations() {
+        let parameter = AnimationParameterAddress {
+            animation_track_id: mondrian_core::AnimationTrackId::new(),
+            parameter_id: mondrian_core::ParameterId::new("transform.opacity")
+                .expect("parameter ID"),
+        };
+        for operation in [
+            CurveClipboardOperation::Cut { keyframe_ids: vec![KeyframeId::new()] },
+            CurveClipboardOperation::Copy { keyframe_ids: vec![KeyframeId::new()] },
+            CurveClipboardOperation::Paste {},
+        ] {
+            let expected = ProductAction::Clip(ClipProductAction::CurveClipboard(Box::new(
+                ClipCurveClipboardPayload {
+                    clip_id: ClipId::new(),
+                    parameter: parameter.clone(),
+                    operation,
+                },
+            )));
+            let action = expected.clone().into_external_action();
+            assert_eq!(
+                ProductAction::decode_external(&action).expect("decode"),
+                Some(expected)
+            );
+            let Action::Custom { namespace, name, mut payload } = action else {
+                panic!("custom transport");
+            };
+            payload["operation"]["unexpected"] = serde_json::json!(true);
+            assert!(
+                ProductAction::decode_external(&Action::Custom { namespace, name, payload })
+                    .is_err(),
+                "Copy, Cut and Paste reject unknown operation fields"
+            );
+        }
+    }
+
+    #[test]
     fn external_codec_round_trips_atomic_clip_parameter_writes() {
         let expected = ProductAction::Clip(ClipProductAction::WriteParameterValues(Box::new(
             ClipWriteParameterValuesPayload {
                 clip_id: ClipId::new(),
-                writes: vec![ClipParameterValueWrite {
+                writes: vec![ParameterValueWrite::Value {
                     parameter: AnimationParameterAddress {
                         animation_track_id: mondrian_core::AnimationTrackId::new(),
                         parameter_id: mondrian_core::ParameterId::new_static("transform.position"),
@@ -3985,6 +4339,7 @@ mod tests {
             ProductAction::VisualEffect(VisualEffectProductAction::InstallOpenFxBundle(
                 VisualEffectInstallOpenFxBundlePayload {
                     path: PathBuf::from("E:/plugins/Basic.ofx.bundle"),
+                    context: crate::openfx_host::OpenFxContext::Filter,
                 },
             )),
             ProductAction::VisualEffect(VisualEffectProductAction::AddToClip(
@@ -4022,8 +4377,10 @@ mod tests {
                 VisualEffectSetParameterValuePayload {
                     clip_id,
                     effect_id,
-                    parameter: parameter.clone(),
-                    value: PropertyValue::Float(0.75),
+                    write: ParameterValueWrite::Value {
+                        parameter: parameter.clone(),
+                        value: PropertyValue::Float(0.75),
+                    },
                 },
             ))),
             ProductAction::VisualEffect(VisualEffectProductAction::EditNumericCurve(Box::new(
@@ -4100,8 +4457,10 @@ mod tests {
                 VisualMaskSetParameterValuePayload {
                     clip_id,
                     mask_id,
-                    parameter,
-                    value: PropertyValue::Float(0.75),
+                    write: ParameterValueWrite::Value {
+                        parameter,
+                        value: PropertyValue::Float(0.75),
+                    },
                 },
             ))),
             ProductAction::VisualMask(VisualMaskProductAction::StartTracking(
@@ -4373,7 +4732,7 @@ mod tests {
     fn external_codec_distinguishes_unknown_and_malformed_known_actions() {
         let unknown = Action::Custom {
             namespace: TIMELINE_NAMESPACE.to_owned(),
-            name: "plugin_extension".to_owned(),
+            name: "extension_example".to_owned(),
             payload: serde_json::json!({"anything": true}),
         };
         assert!(ProductAction::decode_external(&unknown)
@@ -4389,7 +4748,7 @@ mod tests {
 
         let unknown_audio = Action::Custom {
             namespace: AUDIO_NAMESPACE.to_owned(),
-            name: "plugin_extension".to_owned(),
+            name: "extension_example".to_owned(),
             payload: serde_json::json!({"anything": true}),
         };
         assert!(ProductAction::decode_external(&unknown_audio)
@@ -4464,7 +4823,7 @@ mod tests {
         for namespace in [PROJECT_NAMESPACE, SEQUENCE_NAMESPACE, EXPORT_NAMESPACE] {
             let unknown = Action::Custom {
                 namespace: namespace.to_owned(),
-                name: "plugin_extension".to_owned(),
+                name: "extension_example".to_owned(),
                 payload: serde_json::Value::Null,
             };
             assert!(ProductAction::decode_external(&unknown)
@@ -4543,7 +4902,7 @@ mod tests {
         assert!(projection.allows(&ProductAction::Clip(
             ClipProductAction::WriteParameterValues(Box::new(ClipWriteParameterValuesPayload {
                 clip_id,
-                writes: vec![ClipParameterValueWrite {
+                writes: vec![ParameterValueWrite::Value {
                     parameter: position_parameter.clone(),
                     value: PropertyValue::Vec2(glam::Vec2::new(10.0, 20.0)),
                 }],
@@ -4558,7 +4917,7 @@ mod tests {
         assert!(!projection.allows(&ProductAction::Clip(
             ClipProductAction::WriteParameterValues(Box::new(ClipWriteParameterValuesPayload {
                 clip_id: ClipId::new(),
-                writes: vec![ClipParameterValueWrite {
+                writes: vec![ParameterValueWrite::Value {
                     parameter: position_parameter.clone(),
                     value: PropertyValue::Vec2(glam::Vec2::new(10.0, 20.0)),
                 }],
@@ -4588,7 +4947,7 @@ mod tests {
         assert!(!locked.allows(&ProductAction::Clip(
             ClipProductAction::WriteParameterValues(Box::new(ClipWriteParameterValuesPayload {
                 clip_id,
-                writes: vec![ClipParameterValueWrite {
+                writes: vec![ParameterValueWrite::Value {
                     parameter: position_parameter,
                     value: PropertyValue::Vec2(glam::Vec2::new(10.0, 20.0)),
                 }],
@@ -4701,7 +5060,7 @@ mod tests {
         let missing_add = ProductAction::VisualEffect(VisualEffectProductAction::AddToClip(
             VisualEffectAddToClipPayload {
                 clip_id,
-                effect_type: EffectType::Plugin("plugin.test.missing".to_owned()),
+                effect_type: EffectType::External("plugin.test.missing".to_owned()),
             },
         ));
         let select = ProductAction::VisualEffect(VisualEffectProductAction::Select(
@@ -4732,8 +5091,10 @@ mod tests {
                 VisualEffectSetParameterValuePayload {
                     clip_id,
                     effect_id: first_id,
-                    parameter: parameter.clone(),
-                    value: initial_value,
+                    write: ParameterValueWrite::Value {
+                        parameter: parameter.clone(),
+                        value: initial_value,
+                    },
                 },
             )));
         let changed_parameter =
@@ -4741,8 +5102,10 @@ mod tests {
                 VisualEffectSetParameterValuePayload {
                     clip_id,
                     effect_id: first_id,
-                    parameter,
-                    value: PropertyValue::Float(3.0),
+                    write: ParameterValueWrite::Value {
+                        parameter,
+                        value: PropertyValue::Float(3.0),
+                    },
                 },
             )));
 
@@ -4771,13 +5134,44 @@ mod tests {
         let absolute = ProductAction::VisualEffect(VisualEffectProductAction::InstallOpenFxBundle(
             VisualEffectInstallOpenFxBundlePayload {
                 path: std::env::temp_dir().join("Basic.ofx.bundle"),
+                context: crate::openfx_host::OpenFxContext::Filter,
             },
         ));
         let relative = ProductAction::VisualEffect(VisualEffectProductAction::InstallOpenFxBundle(
-            VisualEffectInstallOpenFxBundlePayload { path: PathBuf::from("Basic.ofx.bundle") },
+            VisualEffectInstallOpenFxBundlePayload {
+                path: PathBuf::from("Basic.ofx.bundle"),
+                context: crate::openfx_host::OpenFxContext::Filter,
+            },
         ));
         assert!(availability.allows(&absolute));
         assert!(!availability.allows(&relative));
+    }
+
+    #[test]
+    fn openfx_install_codec_keeps_generator_selection_and_legacy_filter_default() {
+        use crate::openfx_host::OpenFxContext;
+        let path = std::env::temp_dir().join("selected.ofx.bundle");
+        let legacy: VisualEffectInstallOpenFxBundlePayload =
+            serde_json::from_value(serde_json::json!({"path":path})).unwrap();
+        assert_eq!(legacy.context, OpenFxContext::Filter);
+        let action = ProductAction::VisualEffect(VisualEffectProductAction::InstallOpenFxBundle(
+            VisualEffectInstallOpenFxBundlePayload {
+                path: path.clone(),
+                context: OpenFxContext::Generator,
+            },
+        ));
+        assert_eq!(
+            ProductAction::decode_external(&action.clone().into_external_action()).unwrap(),
+            Some(action)
+        );
+        for value in [
+            serde_json::json!({"path":path,"context":"retimer"}),
+            serde_json::json!({"path":path,"context":null}),
+        ] {
+            assert!(
+                serde_json::from_value::<VisualEffectInstallOpenFxBundlePayload>(value).is_err()
+            );
+        }
     }
 
     #[test]
@@ -4969,4 +5363,82 @@ mod tests {
             ))
         );
     }
+}
+
+/// Read-only processor input observation operation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AudioProcessorInputQueryOperation {
+    /// Inspect the actual selected class/state in a bounded control worker.
+    Query,
+    /// Discard this target's observations while retaining ownership of active work.
+    Cancel,
+}
+
+/// Session-bound input observation intent; this never edits the project.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AudioProcessorInputQueryPayload {
+    /// Exact in-memory editing session, including across reopening the same archive.
+    pub session_id: mondrian_editor_state::AuthoringSessionId,
+    /// Exact active author Sequence.
+    pub sequence_id: SequenceId,
+    /// Canonical owner and explicit Scope occurrence.
+    pub target: mondrian_audio::AudioProcessorInputInspectionTarget,
+    /// Processor within the addressed rack.
+    pub processor_id: AudioProcessorInstanceId,
+    /// Query or cancel transient observation work.
+    pub operation: AudioProcessorInputQueryOperation,
+}
+
+/// Exact transient input contract that authorized a product connection menu.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AudioProcessorInputBinding {
+    /// In-memory session; reopening the same archive invalidates this binding.
+    pub session_id: mondrian_editor_state::AuthoringSessionId,
+    /// Canonical active Sequence identity.
+    pub sequence_id: SequenceId,
+    /// Canonical rack owner and explicit Scope occurrence.
+    pub target: mondrian_audio::AudioProcessorInputInspectionTarget,
+    /// Exact processor instance within the addressed rack.
+    pub processor_id: AudioProcessorInstanceId,
+    /// Identity minted for this exact successful control observation.
+    pub observation_id: mondrian_core::AudioProcessorInputObservationId,
+}
+
+impl AudioProcessorInputBinding {
+    pub(crate) fn query_payload(self) -> AudioProcessorInputQueryPayload {
+        AudioProcessorInputQueryPayload {
+            session_id: self.session_id,
+            sequence_id: self.sequence_id,
+            target: self.target,
+            processor_id: self.processor_id,
+            operation: AudioProcessorInputQueryOperation::Query,
+        }
+    }
+}
+
+/// Connect one source using a current realized input contract, then one author transaction.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AudioProcessorInputConnectionPayload {
+    /// Exact menu authorization; never persisted in the project.
+    pub binding: AudioProcessorInputBinding,
+    /// Track/Bus output tap supplying the auxiliary signal.
+    pub source: mondrian_timeline::audio::AudioRouteSource,
+    /// Exact definition-owned key present in the observed contract.
+    pub bus_key: String,
+}
+
+/// Current-observation-bound source replacement for one retained auxiliary Route.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AudioProcessorInputRewirePayload {
+    /// Exact current native target, input and replacement source.
+    pub connection: AudioProcessorInputConnectionPayload,
+    /// Existing Route whose identity and controls must be retained.
+    pub route_id: mondrian_core::AudioRouteId,
+    /// Source shown in the originating menu; changed routes refuse stale intents.
+    pub expected_source: mondrian_timeline::audio::AudioRouteSource,
 }

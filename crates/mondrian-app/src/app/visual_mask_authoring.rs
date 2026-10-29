@@ -133,14 +133,14 @@ impl AppState {
                 })
             }
             VisualMaskProductAction::SetParameterValue(payload) => {
-                let VisualMaskSetParameterValuePayload { clip_id, mask_id, parameter, value } =
-                    *payload;
+                let VisualMaskSetParameterValuePayload { clip_id, mask_id, write } = *payload;
                 let context = self.visual_mask_context(
                     "visual_mask_set_parameter_value",
                     clip_id,
                     Some(mask_id),
                 )?;
                 ensure_track_unlocked("visual_mask_set_parameter_value", context)?;
+                let write = self.resolve_resource_parameter_write(&write)?;
                 let mutation = {
                     let sequence = self.active_sequence().ok_or_else(|| {
                         mask_action_error(
@@ -148,19 +148,21 @@ impl AppState {
                             "there is no active Sequence",
                         )
                     })?;
-                    video_clip(sequence, clip_id)?.prepare_mask_parameter_value(
+                    video_clip(sequence, clip_id)?.prepare_mask_parameter_write(
                         mask_id,
-                        &parameter,
+                        &write,
                         context.clip_time,
-                        value,
                     )?
-                }
-                .ok_or_else(|| {
-                    mask_action_error(
+                };
+                let Some(mutation) = mutation else {
+                    if self.parameter_gesture_command.is_some() {
+                        return Ok(());
+                    }
+                    return Err(mask_action_error(
                         "visual_mask_set_parameter_value",
                         "Mask parameter already has the requested value at the current author time",
-                    )
-                })?;
+                    ));
+                };
                 self.commit_sequence_edit(context.sequence_id, "修改蒙版属性", |sequence| {
                     video_clip_mut(sequence, clip_id)?
                         .apply_mask_parameter_mutation(mask_id, mutation)
@@ -390,6 +392,137 @@ mod tests {
     }
 
     #[test]
+    fn parameter_reset_mask_preserves_shape_and_reopens_exact_undo_redo() {
+        use mondrian_core::automation::{Keyframe, PropertyMutation};
+        let mut sequence = Sequence::new("Mask reset");
+        let title =
+            Clip::new_basic_title("Mask", "Arial", TimelineTime::ZERO, tt(50)).expect("title");
+        let clip_id = title.id;
+        sequence.video_tracks[0].add_clip(title).expect("clip");
+        let mut state = AppState::new();
+        state.test_set_sequence(Some(sequence));
+        dispatch(
+            &mut state,
+            VisualMaskProductAction::AddToClip(VisualMaskAddToClipPayload {
+                clip_id,
+                shape: MaskShape::default(),
+            }),
+        )
+        .expect("add Mask");
+        let mask_id = state.selection.selected_mask.expect("mask").0;
+        let parameter = mask(&state, clip_id, mask_id)
+            .properties
+            .property(MASK_PROP_OPACITY)
+            .expect("opacity")
+            .address();
+        let clip = state
+            .active_sequence_mut_uncommitted()
+            .expect("fixture")
+            .find_clip_mut(clip_id)
+            .expect("clip");
+        let authored_mask = clip.masks.iter_mut().find(|mask| mask.id == mask_id).expect("mask");
+        for (frame, value) in [(0, 0.2), (25, 0.8), (50, 0.3)] {
+            authored_mask
+                .properties
+                .apply_mutation(PropertyMutation::SetKeyframe {
+                    path: MASK_PROP_OPACITY.into(),
+                    keyframe: Keyframe::from_preset(
+                        tt(frame),
+                        PropertyValue::Float(value),
+                        mondrian_core::InterpolationType::ContinuousBezier,
+                    ),
+                })
+                .expect("mask keys");
+        }
+        let action = || {
+            VisualMaskProductAction::SetParameterValue(Box::new(
+                VisualMaskSetParameterValuePayload {
+                    clip_id,
+                    mask_id,
+                    write: ParameterValueWrite::ResetToDefault { parameter: parameter.clone() },
+                },
+            ))
+        };
+        dispatch(
+            &mut state,
+            VisualMaskProductAction::SetLocked(VisualMaskSetLockedPayload {
+                clip_id,
+                mask_id,
+                locked: true,
+            }),
+        )
+        .expect("lock mask");
+        let locked = state.active_sequence().expect("locked").clone();
+        let generation = state.project_author_generation();
+        dispatch(&mut state, action()).expect_err("locked Mask reset");
+        assert!(state
+            .active_sequence()
+            .expect("unchanged")
+            .author_state_eq_ignoring_revision(&locked));
+        assert_eq!(state.project_author_generation(), generation);
+        dispatch(
+            &mut state,
+            VisualMaskProductAction::SetLocked(VisualMaskSetLockedPayload {
+                clip_id,
+                mask_id,
+                locked: false,
+            }),
+        )
+        .expect("unlock mask");
+        let original = state.active_sequence().expect("original").clone();
+        dispatch(&mut state, action()).expect("reset Mask opacity");
+        let edited = state.active_sequence().expect("reset").clone();
+        let reset = mask(&state, clip_id, mask_id);
+        let property = reset.properties.property(MASK_PROP_OPACITY).expect("opacity");
+        assert_eq!(property.address(), parameter);
+        assert!(property.is_at_default());
+        assert_eq!(
+            reset.shape_keyframes,
+            original
+                .find_clip(clip_id)
+                .expect("clip")
+                .mask(mask_id)
+                .expect("mask")
+                .shape_keyframes
+        );
+        let generation = state.project_author_generation();
+        let history = state.authoring_history().expect("history").diagnostics();
+        dispatch(&mut state, action()).expect_err("redundant reset");
+        assert_eq!(state.project_author_generation(), generation);
+        assert_eq!(
+            state.authoring_history().expect("history").diagnostics(),
+            history
+        );
+        assert!(state.undo_timeline().expect("one Undo"));
+        assert!(state
+            .active_sequence()
+            .expect("undone")
+            .author_state_eq_ignoring_revision(&original));
+        let directory = tempfile::tempdir().expect("archives");
+        let undone = directory.path().join("蒙版参数重置撤销🙂.mdp");
+        state.save_project_file_as(undone.clone()).expect("save original");
+        assert!(state.can_redo_action());
+        let mut reopened = AppState::new();
+        reopened.open_project_file(undone).expect("reopen original");
+        assert!(reopened
+            .active_sequence()
+            .expect("original archive")
+            .author_state_eq_ignoring_revision(&original));
+        drop(reopened);
+        assert!(state.redo_timeline().expect("Redo after save"));
+        let redone = directory.path().join("蒙版参数重置重做🙂.mdp");
+        state.save_project_file_as(redone.clone()).expect("save reset");
+        drop(state);
+        let mut reopened = AppState::new();
+        reopened.open_project_file(redone).expect("reopen reset");
+        assert!(reopened
+            .active_sequence()
+            .expect("reset archive")
+            .author_state_eq_ignoring_revision(&edited));
+        assert!(!reopened.can_undo_action() && !reopened.can_redo_action());
+    }
+
+    #[test]
     fn mask_product_slice_preserves_shape_key_identity_across_undo_redo() {
         let (mut state, clip_id, _) = mask_test_state();
         dispatch(
@@ -493,8 +626,10 @@ mod tests {
                 VisualMaskSetParameterValuePayload {
                     clip_id,
                     mask_id,
-                    parameter: parameter.clone(),
-                    value: PropertyValue::Float(0.35),
+                    write: ParameterValueWrite::Value {
+                        parameter: parameter.clone(),
+                        value: PropertyValue::Float(0.35),
+                    },
                 },
             )),
         )
@@ -514,8 +649,10 @@ mod tests {
                 VisualMaskSetParameterValuePayload {
                     clip_id,
                     mask_id,
-                    parameter,
-                    value: PropertyValue::Float(0.5),
+                    write: ParameterValueWrite::Value {
+                        parameter,
+                        value: PropertyValue::Float(0.5)
+                    },
                 },
             )),
         )

@@ -18,6 +18,12 @@ use mondrian_timeline::audio::{
 use std::sync::Arc;
 
 impl AudioProcessorResolver for BuiltInAudioProcessorResolver {
+    fn native_child_settlement_requirement(
+        &self,
+    ) -> mondrian_core::NativeChildSettlementRequirement {
+        mondrian_core::NativeChildSettlementRequirement::NotApplicable
+    }
+
     fn prepare(
         &self,
         request: AudioProcessorPrepareRequest<'_>,
@@ -75,7 +81,10 @@ fn prepare_gain(
     };
     if request.parameters().len() != 1
         || parameter.schema != gain_parameter_schema()
-        || parameter.automation.parameter_id != parameter_id
+        || parameter
+            .automation
+            .as_ref()
+            .is_none_or(|curve| curve.parameter_id != parameter_id)
         || request.opaque_state().is_some()
     {
         return Err(AudioProcessorHostError::InvalidContract(
@@ -133,11 +142,19 @@ fn prepare_sample_delay(
             "built-in Sample Delay is missing its canonical parameter".to_owned(),
         ));
     };
-    let value = parameter.automation.default_value;
+    let curve = parameter.automation.as_ref().ok_or_else(|| {
+        AudioProcessorHostError::InvalidContract(
+            "built-in Sample Delay requires a host value".to_owned(),
+        )
+    })?;
+    let value = curve.default_value;
     if request.parameters().len() != 1
         || parameter.schema != sample_delay_frames_parameter_schema()
-        || parameter.automation.parameter_id != parameter_id
-        || !parameter.automation.keyframes.is_empty()
+        || parameter
+            .automation
+            .as_ref()
+            .is_none_or(|curve| curve.parameter_id != parameter_id)
+        || !curve.keyframes.is_empty()
         || !value.is_finite()
         || value.fract() != 0.0
         || !(0.0..=SAMPLE_DELAY_MAX_FRAMES as f64).contains(&value)
@@ -197,11 +214,31 @@ struct BuiltInGainFactory {
 }
 
 impl AudioProcessorFactory for BuiltInGainFactory {
+    fn native_child_settlement_requirement(
+        &self,
+    ) -> mondrian_core::NativeChildSettlementRequirement {
+        mondrian_core::NativeChildSettlementRequirement::NotApplicable
+    }
+
+    fn visit_host_owned_storage<'a>(
+        &'a self,
+        _visitor: &mut dyn FnMut(
+            crate::AudioProcessorFactoryStorageBorrow<'a>,
+        ) -> Result<(), crate::AudioProcessorFactoryStorageError>,
+    ) -> Result<(), crate::AudioProcessorFactoryStorageError> {
+        // All concrete factory fields are inline scalars. The caller reports
+        // the owning factory Arc payload; mutable DSP buffers are elsewhere.
+        Ok(())
+    }
+
     fn execution_contract(&self) -> AudioProcessorExecutionContract {
         self.execution_contract
     }
 
-    fn create(&self) -> Result<Box<dyn AudioProcessor>, AudioProcessorHostError> {
+    fn create(
+        &self,
+        _native_child_settlement: Option<&mondrian_core::NativeChildSettlementRegistrar>,
+    ) -> Result<Box<dyn AudioProcessor>, AudioProcessorHostError> {
         let samples = self
             .max_block_frames
             .checked_mul(self.channel_layout.channel_count())
@@ -225,6 +262,16 @@ struct BuiltInGainProcessor {
 }
 
 impl AudioProcessor for BuiltInGainProcessor {
+    fn bind_native_child_settlement(
+        &mut self,
+        _: &mondrian_core::NativeChildSettlementRegistrar,
+    ) -> Result<
+        mondrian_core::NativeChildSettlementBinding,
+        mondrian_core::NativeChildSettlementError,
+    > {
+        Ok(mondrian_core::NativeChildSettlementBinding::NotApplicable)
+    }
+
     fn enter_state(&mut self, _start_sample: i64) -> Result<(), AudioProcessorHostError> {
         Ok(())
     }
@@ -297,11 +344,31 @@ struct BuiltInSampleDelayFactory {
 }
 
 impl AudioProcessorFactory for BuiltInSampleDelayFactory {
+    fn native_child_settlement_requirement(
+        &self,
+    ) -> mondrian_core::NativeChildSettlementRequirement {
+        mondrian_core::NativeChildSettlementRequirement::NotApplicable
+    }
+
+    fn visit_host_owned_storage<'a>(
+        &'a self,
+        _visitor: &mut dyn FnMut(
+            crate::AudioProcessorFactoryStorageBorrow<'a>,
+        ) -> Result<(), crate::AudioProcessorFactoryStorageError>,
+    ) -> Result<(), crate::AudioProcessorFactoryStorageError> {
+        // All concrete factory fields are inline scalars. The caller reports
+        // the owning factory Arc payload; mutable DSP buffers are elsewhere.
+        Ok(())
+    }
+
     fn execution_contract(&self) -> AudioProcessorExecutionContract {
         self.execution_contract
     }
 
-    fn create(&self) -> Result<Box<dyn AudioProcessor>, AudioProcessorHostError> {
+    fn create(
+        &self,
+        _native_child_settlement: Option<&mondrian_core::NativeChildSettlementRegistrar>,
+    ) -> Result<Box<dyn AudioProcessor>, AudioProcessorHostError> {
         let delay_samples = self
             .delay_frames
             .checked_mul(self.channel_layout.channel_count())
@@ -327,6 +394,16 @@ struct BuiltInSampleDelayProcessor {
 }
 
 impl AudioProcessor for BuiltInSampleDelayProcessor {
+    fn bind_native_child_settlement(
+        &mut self,
+        _: &mondrian_core::NativeChildSettlementRegistrar,
+    ) -> Result<
+        mondrian_core::NativeChildSettlementBinding,
+        mondrian_core::NativeChildSettlementError,
+    > {
+        Ok(mondrian_core::NativeChildSettlementBinding::NotApplicable)
+    }
+
     fn enter_state(&mut self, _start_sample: i64) -> Result<(), AudioProcessorHostError> {
         self.delay_line.fill(0.0);
         self.cursor = 0;

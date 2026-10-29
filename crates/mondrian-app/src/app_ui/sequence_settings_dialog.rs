@@ -797,17 +797,17 @@ fn resolution_dropdown_for(
 fn resolution_width_input_for(
     draft: &AppUiSequenceSettingsDraft,
     localizer: Option<&Localizer>,
-) -> NumberInput {
+) -> NumberInput<i64> {
     NumberInput::new(
-        draft.settings.resolution.width as f64,
-        SequenceSettings::MIN_WIDTH as f64,
-        SequenceSettings::MAX_WIDTH as f64,
+        draft.settings.resolution.width as i64,
+        SequenceSettings::MIN_WIDTH as i64,
+        SequenceSettings::MAX_WIDTH as i64,
     )
     .with_placeholder(sequence_text(localizer, "sequence-width", "宽度"))
-    .with_step(1.0)
+    .with_step(1)
     .on_change(|value| {
         app_shell_sequence_settings_draft_changed_action(
-            SequenceSettingsDraftUpdatePayload::ResolutionWidth(value.round() as u32),
+            SequenceSettingsDraftUpdatePayload::ResolutionWidth(value as u32),
         )
     })
 }
@@ -815,17 +815,17 @@ fn resolution_width_input_for(
 fn resolution_height_input_for(
     draft: &AppUiSequenceSettingsDraft,
     localizer: Option<&Localizer>,
-) -> NumberInput {
+) -> NumberInput<i64> {
     NumberInput::new(
-        draft.settings.resolution.height as f64,
-        SequenceSettings::MIN_HEIGHT as f64,
-        SequenceSettings::MAX_HEIGHT as f64,
+        draft.settings.resolution.height as i64,
+        SequenceSettings::MIN_HEIGHT as i64,
+        SequenceSettings::MAX_HEIGHT as i64,
     )
     .with_placeholder(sequence_text(localizer, "sequence-height", "高度"))
-    .with_step(1.0)
+    .with_step(1)
     .on_change(|value| {
         app_shell_sequence_settings_draft_changed_action(
-            SequenceSettingsDraftUpdatePayload::ResolutionHeight(value.round() as u32),
+            SequenceSettingsDraftUpdatePayload::ResolutionHeight(value as u32),
         )
     })
 }
@@ -841,17 +841,17 @@ fn frame_rate_dropdown_for(draft: &AppUiSequenceSettingsDraft) -> Dropdown {
 fn start_timecode_input_for(
     draft: &AppUiSequenceSettingsDraft,
     localizer: Option<&Localizer>,
-) -> NumberInput {
+) -> NumberInput<i64> {
     NumberInput::new(
-        draft.settings.timeline_display.timecode_start_frame as f64,
-        -(24 * 60 * 60 * 240) as f64,
-        (24 * 60 * 60 * 240) as f64,
+        draft.settings.timeline_display.timecode_start_frame,
+        -(24 * 60 * 60 * 240) as i64,
+        (24 * 60 * 60 * 240) as i64,
     )
     .with_placeholder(sequence_text(localizer, "sequence-start-frame", "起始帧"))
-    .with_step(1.0)
+    .with_step(1)
     .on_change(|value| {
         app_shell_sequence_settings_draft_changed_action(
-            SequenceSettingsDraftUpdatePayload::StartTimecodeFrame(value.round() as i64),
+            SequenceSettingsDraftUpdatePayload::StartTimecodeFrame(value),
         )
     })
 }
@@ -1140,13 +1140,13 @@ pub struct SequenceSettingsDialog {
     name_input: TextInput,
     editing_mode_dropdown: Dropdown,
     resolution_dropdown: Dropdown,
-    resolution_width_input: NumberInput,
-    resolution_height_input: NumberInput,
+    resolution_width_input: NumberInput<i64>,
+    resolution_height_input: NumberInput<i64>,
     frame_rate_dropdown: Dropdown,
     pixel_aspect_ratio_dropdown: Dropdown,
     field_order_dropdown: Dropdown,
     timeline_display_format_dropdown: Dropdown,
-    start_timecode_input: NumberInput,
+    start_timecode_input: NumberInput<i64>,
     color_space_dropdown: Dropdown,
     output_color_space_dropdown: Dropdown,
     project_color_engine_label: Label,
@@ -1706,12 +1706,17 @@ impl Widget for SequenceSettingsDialog {
     }
 
     fn event(&mut self, event: &UiEvent, ctx: &mut EventContext) -> EventResult {
+        if matches!(event, UiEvent::MouseUp { position, .. } if self.apply_button.hit_test(*position))
+        {
+            self.commit_pending_input(ctx);
+        }
         match event {
             UiEvent::KeyDown { key: KeyCode::Escape, .. } => {
                 (ctx.dispatch)(app_shell_close_modal_action());
                 return EventResult::Handled;
             }
             UiEvent::KeyDown { key: KeyCode::Enter, .. } => {
+                self.commit_pending_input(ctx);
                 (ctx.dispatch)(app_shell_confirm_sequence_settings_action());
                 return EventResult::Handled;
             }

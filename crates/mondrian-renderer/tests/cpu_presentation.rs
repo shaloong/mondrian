@@ -73,9 +73,11 @@ fn count_rasters<T>(bytes: usize, execute: impl FnOnce() -> T) -> (T, usize) {
 fn presentation_moves_float_raster_unless_the_selected_signal_tap_needs_it() -> anyhow::Result<()> {
     let (width, height) = (257, 33);
     let frame = CpuColorFrame::working(WorkingRgbaF32Frame {
+        sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
         width,
         height,
         color_space: WorkingColorSpace::LinearRec2020,
+        alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
         data: (0..width * height)
             .map(|index| {
                 let x = (index % width) as f32 / width as f32;

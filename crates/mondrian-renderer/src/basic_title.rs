@@ -323,6 +323,9 @@ impl BasicTitleRasterFrame {
 /// Fail-closed Basic Title generation error.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum BasicTitleRasterError {
+    /// The actual rasterization density cannot be represented exactly.
+    #[error(transparent)]
+    Sampling(#[from] mondrian_core::ImageSamplingError),
     /// Author or sampled canvas has no usable pixels.
     #[error(
         "Basic Title canvas is invalid: author {author_width}x{author_height}, sampled {sampled_width}x{sampled_height}"
@@ -515,6 +518,7 @@ impl BasicTitleRasterizer {
         title_safe_margin: f32,
         sampled_resolution: Resolution,
         working_color_space: WorkingColorSpace,
+        owner_sample_aspect_ratio: mondrian_core::SampleAspectRatio,
     ) -> Result<BasicTitleRasterFrame, BasicTitleRasterError> {
         validate_canvas(author_resolution, sampled_resolution)?;
         validate_title_safe_margin(title_safe_margin)?;
@@ -539,6 +543,7 @@ impl BasicTitleRasterizer {
             title_safe_margin,
             sampled_resolution,
             working_color_space,
+            owner_sample_aspect_ratio,
         );
         let identity = title_raster_identity(request_identity, face_fingerprint);
         if let Some(cached) = self.cache.get(&identity) {
@@ -549,6 +554,10 @@ impl BasicTitleRasterizer {
 
         let uniform_scale = (sampled_resolution.width as f32 / author_resolution.width as f32)
             .min(sampled_resolution.height as f32 / author_resolution.height as f32);
+        let sampling = mondrian_core::ImageSampling::from_uniform_f32(
+            owner_sample_aspect_ratio,
+            uniform_scale,
+        )?;
         let sampled_font_size = title.font_size * uniform_scale;
         let sampled_line_height = sampled_font_size * title.line_height;
         let safe_margin_per_side = title_safe_margin * 0.5;
@@ -677,6 +686,8 @@ impl BasicTitleRasterizer {
 
         let frame = BasicTitleRasterFrame {
             frame: CpuColorFrame::working(WorkingRgbaF32Frame {
+                sampling,
+                alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
                 width,
                 height,
                 data: pixels,
@@ -809,6 +820,7 @@ pub fn basic_title_raster_request_identity(
     title_safe_margin: f32,
     sampled_resolution: Resolution,
     working_color_space: WorkingColorSpace,
+    owner_sample_aspect_ratio: mondrian_core::SampleAspectRatio,
 ) -> BasicTitleRasterRequestIdentity {
     let mut hasher =
         BasicTitleIdentityHasher::new(b"mondrian.renderer.basic-title-raster-request.v1");
@@ -820,6 +832,7 @@ pub fn basic_title_raster_request_identity(
         sampled_resolution,
         working_color_space,
     );
+    owner_sample_aspect_ratio.hash(&mut hasher);
     BasicTitleRasterRequestIdentity(hasher.finish_identity())
 }
 
@@ -1181,6 +1194,7 @@ mod tests {
                 0.20,
                 Resolution::HD,
                 WorkingColorSpace::LinearRec709,
+                mondrian_core::SampleAspectRatio::SQUARE,
             )
             .expect("the default title must use its declared font");
         assert!(output.frame.rgba_f32().data.iter().any(|pixel| pixel[3] > 0.0));
@@ -1196,6 +1210,7 @@ mod tests {
                 0.20,
                 Resolution::FHD,
                 WorkingColorSpace::LinearRec709,
+                mondrian_core::SampleAspectRatio::SQUARE,
             )
             .expect("raster");
 
@@ -1210,6 +1225,89 @@ mod tests {
     }
 
     #[test]
+    fn fractional_title_crop_retains_executed_density_and_owner_par_in_cache() {
+        let mut rasterizer = BasicTitleRasterizer::new();
+        let title = evaluated("Fractional crop");
+        let author = Resolution::FHD;
+        let sampled = Resolution { width: 640, height: 361 };
+        let par_a = mondrian_core::SampleAspectRatio::new(2, 1).unwrap();
+        let par_b = mondrian_core::SampleAspectRatio::new(4, 3).unwrap();
+        let first = rasterizer
+            .rasterize(
+                &title,
+                author,
+                0.20,
+                sampled,
+                WorkingColorSpace::LinearRec709,
+                par_a,
+            )
+            .unwrap();
+        let second = rasterizer
+            .rasterize(
+                &title,
+                author,
+                0.20,
+                sampled,
+                WorkingColorSpace::LinearRec709,
+                par_b,
+            )
+            .unwrap();
+        let again = rasterizer
+            .rasterize(
+                &title,
+                author,
+                0.20,
+                sampled,
+                WorkingColorSpace::LinearRec709,
+                par_a,
+            )
+            .unwrap();
+        // The executed f32 rate is 1/3, while the cropped extent covers only glyphs.
+        let expected = mondrian_core::ImageSampling::new(
+            par_a,
+            [mondrian_core::Rational::new(11184811, 33554432); 2],
+        )
+        .unwrap();
+        assert_eq!(first.frame.rgba_f32().sampling, expected);
+        assert_eq!(
+            second.frame.rgba_f32().sampling.sample_aspect_ratio(),
+            par_b
+        );
+        assert_eq!(
+            second.frame.rgba_f32().sampling.render_scale(),
+            expected.render_scale()
+        );
+        assert!(first.frame.rgba_f32().width < sampled.width);
+        assert!(first.frame.rgba_f32().height < sampled.height);
+        assert_eq!(first.sampled_source_to_author()[0], 1.0 / (1.0_f32 / 3.0));
+        assert_eq!(first.frame.rgba_f32().data, second.frame.rgba_f32().data);
+        assert_ne!(first.identity(), second.identity());
+        assert!(!first.diagnostics().cache_hit);
+        assert!(!second.diagnostics().cache_hit);
+        assert!(again.diagnostics().cache_hit);
+        assert_eq!(again.identity(), first.identity());
+        assert_eq!(again.frame.rgba_f32().sampling, expected);
+        assert_ne!(
+            basic_title_raster_request_identity(
+                &title,
+                author,
+                0.20,
+                sampled,
+                WorkingColorSpace::LinearRec709,
+                par_a
+            ),
+            basic_title_raster_request_identity(
+                &title,
+                author,
+                0.20,
+                sampled,
+                WorkingColorSpace::LinearRec709,
+                par_b
+            ),
+        );
+    }
+
+    #[test]
     fn same_title_reuses_bounded_session_raster() {
         let mut rasterizer = BasicTitleRasterizer::new();
         let title = evaluated("Cached");
@@ -1220,6 +1318,7 @@ mod tests {
                 0.20,
                 Resolution::HD,
                 WorkingColorSpace::LinearRec709,
+                mondrian_core::SampleAspectRatio::SQUARE,
             )
             .expect("first");
         let second = rasterizer
@@ -1229,6 +1328,7 @@ mod tests {
                 0.20,
                 Resolution::HD,
                 WorkingColorSpace::LinearRec709,
+                mondrian_core::SampleAspectRatio::SQUARE,
             )
             .expect("second");
 
@@ -1259,6 +1359,7 @@ mod tests {
                 0.20,
                 Resolution::HD,
                 WorkingColorSpace::LinearRec709,
+                mondrian_core::SampleAspectRatio::SQUARE,
             )
             .expect("rasterize from frozen face bytes");
         assert_eq!(
@@ -1288,6 +1389,7 @@ mod tests {
                 0.20,
                 Resolution::HD,
                 WorkingColorSpace::LinearRec709,
+                mondrian_core::SampleAspectRatio::SQUARE,
             )
             .expect("raster");
 
@@ -1308,6 +1410,7 @@ mod tests {
                 0.20,
                 Resolution::FHD,
                 WorkingColorSpace::LinearRec709,
+                mondrian_core::SampleAspectRatio::SQUARE,
             )
             .expect_err("missing font must fail");
 
@@ -1363,6 +1466,7 @@ mod tests {
             0.10,
             Resolution::HD,
             WorkingColorSpace::LinearRec709,
+            mondrian_core::SampleAspectRatio::SQUARE,
         );
         let wide = basic_title_raster_request_identity(
             &title,
@@ -1370,6 +1474,7 @@ mod tests {
             0.20,
             Resolution::HD,
             WorkingColorSpace::LinearRec709,
+            mondrian_core::SampleAspectRatio::SQUARE,
         );
         assert_ne!(narrow, wide);
 
@@ -1380,6 +1485,7 @@ mod tests {
                 f32::NAN,
                 Resolution::HD,
                 WorkingColorSpace::LinearRec709,
+                mondrian_core::SampleAspectRatio::SQUARE,
             )
             .expect_err("invalid safe area must fail");
         assert!(matches!(
@@ -1397,6 +1503,7 @@ mod tests {
             0.20,
             Resolution::HD,
             WorkingColorSpace::LinearRec709,
+            mondrian_core::SampleAspectRatio::SQUARE,
         );
         let mut variants = Vec::new();
 
@@ -1444,6 +1551,7 @@ mod tests {
                     0.20,
                     Resolution::HD,
                     WorkingColorSpace::LinearRec709,
+                    mondrian_core::SampleAspectRatio::SQUARE
                 ),
                 "{field} must participate in Basic Title request identity"
             );
@@ -1457,6 +1565,7 @@ mod tests {
                 0.20,
                 Resolution::HD,
                 WorkingColorSpace::LinearRec709,
+                mondrian_core::SampleAspectRatio::SQUARE
             ),
             "author extent must participate in Basic Title request identity"
         );
@@ -1468,6 +1577,7 @@ mod tests {
                 0.21,
                 Resolution::HD,
                 WorkingColorSpace::LinearRec709,
+                mondrian_core::SampleAspectRatio::SQUARE
             ),
             "title-safe margin must participate in Basic Title request identity"
         );
@@ -1479,6 +1589,7 @@ mod tests {
                 0.20,
                 Resolution { width: 1279, height: 720 },
                 WorkingColorSpace::LinearRec709,
+                mondrian_core::SampleAspectRatio::SQUARE
             ),
             "sampled extent must participate in Basic Title request identity"
         );
@@ -1490,6 +1601,7 @@ mod tests {
                 0.20,
                 Resolution::HD,
                 WorkingColorSpace::LinearRec2020,
+                mondrian_core::SampleAspectRatio::SQUARE
             ),
             "working color space must participate in Basic Title request identity"
         );
@@ -1503,6 +1615,7 @@ mod tests {
             0.20,
             Resolution::HD,
             WorkingColorSpace::LinearRec709,
+            mondrian_core::SampleAspectRatio::SQUARE,
         );
         assert_eq!(
             title_raster_identity(request, [0x11; 32]),

@@ -1,0 +1,18 @@
+[package]
+name = "mondrian-clap-sample-gain-fixture"
+version = "0.0.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+clack-plugin = { path = "../../../../../vendor/clack/plugin" }
+clack-extensions = { path = "../../../../../vendor/clack/extensions", features = ["audio-ports", "params", "state", "gui", "clack-plugin"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+winapi = { version = "0.3", features = ["winuser", "windef", "libloaderapi", "processthreadsapi"] }
+
+[workspace]

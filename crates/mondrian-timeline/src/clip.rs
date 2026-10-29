@@ -280,7 +280,8 @@ fn blend_mode_options() -> Vec<ParameterEnumOption> {
         .map(|option| {
             ParameterEnumOption::new(
                 option.value,
-                format!("mondrian.blend_mode.{}.label", option.value),
+                option.label,
+                format!("blend-mode-{}", option.value.to_ascii_lowercase()),
             )
         })
         .collect()
@@ -1211,13 +1212,12 @@ impl Clip {
         Ok(true)
     }
 
-    /// Prepare one scalar Mask parameter write through stable author identity.
-    pub fn prepare_mask_parameter_value(
+    /// Prepare one complete or sparse Mask parameter write through stable author identity.
+    pub fn prepare_mask_parameter_write(
         &self,
         mask_id: MaskId,
-        address: &mondrian_core::automation::AnimationParameterAddress,
+        write: &mondrian_core::automation::ParameterValueWrite,
         time: TimelineTime,
-        value: PropertyValue,
     ) -> Result<Option<PropertyMutation>> {
         let mask = self
             .mask(mask_id)
@@ -1225,10 +1225,10 @@ impl Clip {
         if mask.locked {
             return Err(mask_author_error(format!("Mask is locked: {mask_id}")));
         }
-        mask.properties.prepare_value_write_by_address(address, time, value)
+        mask.properties.prepare_parameter_write(write, time)
     }
 
-    /// Apply a previously prepared scalar Mask parameter mutation.
+    /// Apply a previously prepared complete or sparse Mask parameter mutation.
     pub fn apply_mask_parameter_mutation(
         &mut self,
         mask_id: MaskId,
@@ -1776,7 +1776,14 @@ mod tests {
             .map(|property| property.address())
             .expect("stable Mask parameter address");
         let mutation = clip
-            .prepare_mask_parameter_value(mask_id, &address, tt(5), PropertyValue::Float(0.4))
+            .prepare_mask_parameter_write(
+                mask_id,
+                &mondrian_core::automation::ParameterValueWrite::Value {
+                    parameter: address.clone(),
+                    value: PropertyValue::Float(0.4),
+                },
+                tt(5),
+            )
             .expect("prepare stable write")
             .expect("semantic change");
         clip.apply_mask_parameter_mutation(mask_id, mutation)
@@ -1789,12 +1796,44 @@ mod tests {
             Some(PropertyValue::Float(0.4))
         );
 
+        let write = mondrian_core::automation::ParameterValueWrite::Channels {
+            parameter: address.clone(),
+            channel_values: vec![(0, 0.6)],
+        };
+        let mutation = clip
+            .prepare_mask_parameter_write(mask_id, &write, tt(5))
+            .expect("prepare component")
+            .expect("changed");
+        clip.apply_mask_parameter_mutation(mask_id, mutation).expect("write component");
+        assert_eq!(
+            clip.mask(mask_id)
+                .expect("Mask")
+                .properties
+                .evaluate(mondrian_core::mask_data::MASK_PROP_OPACITY, tt(5)),
+            Some(PropertyValue::Float(0.6)),
+        );
+        assert!(clip
+            .prepare_mask_parameter_write(mask_id, &write, tt(5))
+            .expect("canonical no-op")
+            .is_none());
+        let mut locked = clip.clone();
+        locked.set_mask_locked(mask_id, true).expect("lock Mask");
+        assert!(locked.prepare_mask_parameter_write(mask_id, &write, tt(5)).is_err());
+        assert!(clip.prepare_mask_parameter_write(MaskId::new(), &write, tt(5)).is_err());
+
         let stale = mondrian_core::automation::AnimationParameterAddress {
             animation_track_id: mondrian_core::AnimationTrackId::new(),
             parameter_id: address.parameter_id,
         };
         assert!(clip
-            .prepare_mask_parameter_value(mask_id, &stale, tt(5), PropertyValue::Float(0.2))
+            .prepare_mask_parameter_write(
+                mask_id,
+                &mondrian_core::automation::ParameterValueWrite::Value {
+                    parameter: stale.clone(),
+                    value: PropertyValue::Float(0.2)
+                },
+                tt(5)
+            )
             .is_err());
         assert!(clip
             .apply_property_mutation(PropertyMutation::SetStaticValue {

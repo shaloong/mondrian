@@ -1,22 +1,22 @@
 //! Product Adapter for exact owner-time audio automation.
 //!
 //! Timeline owns curve addresses, time domains, lock admission, and mutation.
-//! This Module only projects an explicit exact viewport into normalized Widget
+//! This Module projects an explicit exact time viewport and absolute author value
 //! coordinates and lowers one committed gesture back to a stable-ID edit.
 
 use std::collections::BTreeMap;
 
 use mondrian_core::{
     AuthoringTimeDomain, AutomationSegmentInterpolation, ExactAutomationKeyframe,
-    ExactAutomationTangentMode, InterpolationType, ParameterInterpolation, PropertyValueType,
-    TimeScale, TimelineTime, TimelineTimeRange,
+    ExactAutomationTangentMode, InterpolationType, KeyframeId, ParameterInterpolation,
+    PropertyValue, PropertyValueType, TimeScale, TimelineTime, TimelineTimeRange,
 };
 use mondrian_editor_state::Action;
 use mondrian_timeline::{
     inspect_audio_automation, AudioAutomationEdit, AudioAutomationEditRequest,
     AudioAutomationTarget, Sequence,
 };
-use mondrian_ui_widgets::{CurveEdit, CurvePoint, CurvePointPolicy};
+use mondrian_ui_widgets::{CurveEdit, CurvePoint, CurvePointPolicy, CurvePointTarget};
 
 use crate::app::ui_actions::audio_automation_edit_action;
 
@@ -30,25 +30,50 @@ pub(crate) struct AudioAutomationViewport {
     pub(crate) range: TimelineTimeRange,
 }
 
-/// One editable key or read-only boundary anchor in a normalized viewport.
+/// One authored key or virtual boundary that becomes a key when its value is edited.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct AudioAutomationCurveKeyModel {
     pub(crate) keyframe: Option<ExactAutomationKeyframe>,
     pub(crate) point: CurvePoint,
 }
 
-/// Complete normalized curve projection consumed by the shared CurveEditor.
+/// Current Sequence coordinate plus the selected shared-Scope occurrence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct AudioAutomationTimeContext {
+    pub(crate) sequence_time: mondrian_core::DomainTime,
+    pub(crate) scope_occurrence: Option<mondrian_timeline::AudioComponentAddress>,
+}
+
+impl AudioAutomationTimeContext {
+    /// Explicit Sequence coordinate; shared Scopes must additionally name an occurrence.
+    pub(crate) fn at_sequence_time(sequence: &Sequence, time: TimelineTime) -> Self {
+        Self {
+            sequence_time: mondrian_core::DomainTime::new(
+                AuthoringTimeDomain::Sequence(sequence.id),
+                time,
+            ),
+            scope_occurrence: None,
+        }
+    }
+}
+
+/// Absolute author values and normalized owner time consumed by CurveEditor.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct AudioAutomationCurveModel {
+    pub(crate) time_context: AudioAutomationTimeContext,
+    pub(crate) current_author_time:
+        Result<mondrian_core::DomainTime, mondrian_timeline::AudioAutomationTimeError>,
+    pub(crate) frame_time_step: TimelineTime,
+    /// Visible placement extent for Component edits; shared owners have no viewport bound.
+    pub(crate) component_author_range: Option<TimelineTimeRange>,
+    pub(crate) source_curve: mondrian_core::ExactAutomationCurve,
+    pub(crate) curve_contract: mondrian_timeline::AudioAutomationCurveContract,
     pub(crate) target: AudioAutomationTarget,
+    pub(crate) selected_keyframe_ids: Vec<KeyframeId>,
     pub(crate) viewport: AudioAutomationViewport,
     pub(crate) keys: Vec<AudioAutomationCurveKeyModel>,
     pub(crate) display_points: Vec<CurvePoint>,
-    pub(crate) hard_min: f64,
-    pub(crate) hard_max: f64,
-    pub(crate) view_min: f64,
-    pub(crate) view_max: f64,
-    pub(crate) step: Option<f64>,
+    pub(crate) value_axis: mondrian_ui_widgets::CurveValueAxis,
     pub(crate) value_type: PropertyValueType,
     pub(crate) insert_interpolation: AutomationSegmentInterpolation,
     pub(crate) allowed_interpolations: Vec<ParameterInterpolation>,
@@ -57,8 +82,62 @@ pub(crate) struct AudioAutomationCurveModel {
 }
 
 impl AudioAutomationCurveModel {
+    /// Project the existing App selection intent without authoring or inventing key identities.
+    pub(crate) fn project_selection(&mut self, state: &crate::app::AppState) {
+        self.selected_keyframe_ids = state
+            .animation_selection
+            .audio_curve
+            .as_ref()
+            .filter(|selection| {
+                self.time_context.sequence_time.domain
+                    == AuthoringTimeDomain::Sequence(selection.sequence_id)
+                    && self.target == selection.target
+            })
+            .map_or_else(Vec::new, |selection| selection.keyframe_ids.clone());
+    }
+
+    pub(crate) fn key_points(&self) -> Vec<(mondrian_core::KeyframeId, CurvePoint)> {
+        self.source_curve
+            .keyframes
+            .iter()
+            .filter_map(|key| {
+                Some((
+                    key.id,
+                    crate::app_ui::curve_tangents::project_key(
+                        key.time,
+                        key.value,
+                        self.viewport.range,
+                    )?,
+                ))
+            })
+            .collect()
+    }
+
     pub(crate) fn is_automated(&self) -> bool {
         self.keys.iter().any(|key| key.keyframe.is_some())
+    }
+
+    pub(crate) fn tangents(&self) -> Vec<mondrian_ui_widgets::CurveTangent> {
+        let end = match self.viewport.range.end() {
+            Ok(end) => end,
+            Err(_) => return Vec::new(),
+        };
+        self.source_curve
+            .keyframe_controls()
+            .filter(|control| {
+                control.key_time >= self.viewport.range.start && control.key_time <= end
+            })
+            .filter_map(|control| {
+                crate::app_ui::curve_tangents::project(
+                    control.keyframe_id,
+                    control.side,
+                    (control.key_time, control.key_value),
+                    control.neighbor_time,
+                    control.handle,
+                    self.viewport.range,
+                )
+            })
+            .collect()
     }
 
     pub(crate) fn points(&self) -> Vec<CurvePoint> {
@@ -132,56 +211,59 @@ pub(crate) fn component_automation_viewport(
     })
 }
 
-/// Project one Timeline-owned curve into an explicit normalized viewport.
+/// Project one Timeline-owned curve without clamping author values to the display range.
 pub(crate) fn project_audio_automation(
     sequence: &Sequence,
     target: AudioAutomationTarget,
     viewport: AudioAutomationViewport,
+    time_context: AudioAutomationTimeContext,
 ) -> Option<AudioAutomationCurveModel> {
     let inspection = inspect_audio_automation(sequence, &target).ok()?;
     if inspection.time_domain() != viewport.domain || viewport.range.duration.is_zero() {
         return None;
     }
+    let component_author_range = match &target {
+        AudioAutomationTarget::ComponentVolume { clip_id, .. }
+        | AudioAutomationTarget::ComponentPan { clip_id, .. } => {
+            let clip = sequence.find_clip(*clip_id)?;
+            let resolve = |time| {
+                mondrian_timeline::audio_automation_author_time(
+                    sequence,
+                    &target,
+                    mondrian_core::DomainTime::new(
+                        AuthoringTimeDomain::Sequence(sequence.id),
+                        time,
+                    ),
+                    time_context.scope_occurrence,
+                )
+                .ok()
+                .map(|time| time.time)
+            };
+            let start = resolve(clip.position)?;
+            let end = resolve(clip.position.checked_add(clip.duration).ok()?)?;
+            Some(TimelineTimeRange::new(start, end.checked_sub(start).ok()?).ok()?)
+        }
+        _ => None,
+    };
     let contract = inspection.value_contract();
     let allowed = inspection.allowed_interpolations();
-    let insert_interpolation = if allowed.contains(&ParameterInterpolation::Linear) {
-        AutomationSegmentInterpolation::Linear
-    } else if allowed.contains(&ParameterInterpolation::Hold) {
-        AutomationSegmentInterpolation::Hold
-    } else if allowed.contains(&ParameterInterpolation::Bezier) {
-        AutomationSegmentInterpolation::Bezier
-    } else {
-        return None;
+    let insert_interpolation = match allowed.first()? {
+        ParameterInterpolation::Linear => AutomationSegmentInterpolation::Linear,
+        ParameterInterpolation::Hold => AutomationSegmentInterpolation::Hold,
+        ParameterInterpolation::Bezier => AutomationSegmentInterpolation::Bezier,
     };
-    let mut view_min = contract.soft_range.min;
-    let mut view_max = contract.soft_range.max;
-    if let Some(curve) = inspection.curve().filter(|curve| !curve.keyframes.is_empty()) {
-        for keyframe in &curve.keyframes {
-            view_min = view_min.min(keyframe.value);
-            view_max = view_max.max(keyframe.value);
-            if let Some(handle) = keyframe.in_handle {
-                view_min = view_min.min(keyframe.value + handle.value_offset);
-                view_max = view_max.max(keyframe.value + handle.value_offset);
-            }
-            if let Some(handle) = keyframe.out_handle {
-                view_min = view_min.min(keyframe.value + handle.value_offset);
-                view_max = view_max.max(keyframe.value + handle.value_offset);
-            }
-        }
-    } else {
-        view_min = view_min.min(inspection.default_value());
-        view_max = view_max.max(inspection.default_value());
-    }
-    let value_span = view_max - view_min;
-    if !value_span.is_finite() || value_span <= 0.0 {
-        return None;
-    }
+    let value_axis = mondrian_ui_widgets::CurveValueAxis::new(
+        contract.soft_range,
+        contract.hard_range,
+        if contract.value_type == PropertyValueType::Int {
+            Some(contract.step.unwrap_or(1.0).round().max(1.0))
+        } else {
+            contract.step
+        },
+    )
+    .ok()?;
     let range_end = viewport.range.end().ok()?;
-    let normalized_value = |value: f64| {
-        value
-            .is_finite()
-            .then_some(((value - view_min) / value_span).clamp(0.0, 1.0) as f32)
-    };
+    let author_value = |value: f64| value.is_finite().then_some(value);
     let normalized_time = |time: TimelineTime| {
         let elapsed = time.checked_sub(viewport.range.start).ok()?.to_f64();
         Some((elapsed / viewport.range.duration.to_f64()).clamp(0.0, 1.0) as f32)
@@ -196,14 +278,17 @@ pub(crate) fn project_audio_automation(
         viewport.range.start,
         AudioAutomationCurveKeyModel {
             keyframe: None,
-            point: CurvePoint::new(0.0, normalized_value(evaluate(viewport.range.start)?)?),
+            point: CurvePoint {
+                x: 0.0,
+                y: author_value(evaluate(viewport.range.start)?)?,
+            },
         },
     );
     keys.insert(
         range_end,
         AudioAutomationCurveKeyModel {
             keyframe: None,
-            point: CurvePoint::new(1.0, normalized_value(evaluate(range_end)?)?),
+            point: CurvePoint { x: 1.0, y: author_value(evaluate(range_end)?)? },
         },
     );
     if let Some(curve) = inspection.curve() {
@@ -215,10 +300,10 @@ pub(crate) fn project_audio_automation(
                 keyframe.time,
                 AudioAutomationCurveKeyModel {
                     keyframe: Some(keyframe.clone()),
-                    point: CurvePoint::new(
-                        normalized_time(keyframe.time)?,
-                        normalized_value(keyframe.value)?,
-                    ),
+                    point: CurvePoint {
+                        x: normalized_time(keyframe.time)?,
+                        y: author_value(keyframe.value)?,
+                    },
                 },
             );
         }
@@ -232,23 +317,42 @@ pub(crate) fn project_audio_automation(
                 .start
                 .checked_add(viewport.range.duration.checked_scale(scale).ok()?)
                 .ok()?;
-            Some(CurvePoint::new(
-                index as f32 / DISPLAY_SEGMENTS as f32,
-                normalized_value(evaluate(time)?)?,
-            ))
+            Some(CurvePoint {
+                x: index as f32 / DISPLAY_SEGMENTS as f32,
+                y: author_value(evaluate(time)?)?,
+            })
         })
         .collect::<Option<Vec<_>>>()?;
 
     Some(AudioAutomationCurveModel {
+        time_context,
+        current_author_time: mondrian_timeline::audio_automation_author_time(
+            sequence,
+            &target,
+            time_context.sequence_time,
+            time_context.scope_occurrence,
+        ),
+        frame_time_step: TimelineTime::from_frame_position(mondrian_core::FramePosition::new(
+            1,
+            sequence.time_base(),
+        ))
+        .ok()?,
+        component_author_range,
+        source_curve: match inspection.curve() {
+            Some(curve) => curve.clone(),
+            None => mondrian_core::ExactAutomationCurve::new(
+                inspection.parameter_id().clone(),
+                inspection.default_value(),
+            )
+            .ok()?,
+        },
+        curve_contract: inspection.curve_contract().clone(),
         target,
+        selected_keyframe_ids: Vec::new(),
         viewport,
         keys: keys.into_values().collect(),
         display_points,
-        hard_min: contract.hard_range.min,
-        hard_max: contract.hard_range.max,
-        view_min,
-        view_max,
-        step: contract.step,
+        value_axis,
         value_type: contract.value_type,
         insert_interpolation,
         allowed_interpolations: allowed.to_vec(),
@@ -257,10 +361,45 @@ pub(crate) fn project_audio_automation(
     })
 }
 
-/// Lower a keyframe context-menu choice through the same stable target address.
-pub(crate) fn audio_automation_interpolation_action(
+/// Lower one focused complete-selection clipboard intent with explicit owner identity.
+pub(crate) fn audio_curve_clipboard_action(
     model: &AudioAutomationCurveModel,
-    index: usize,
+    command: mondrian_ui_widgets::CurveClipboardCommand,
+    ids: &[KeyframeId],
+) -> Option<Action> {
+    use crate::app::product_action::{
+        AudioCurveClipboardPayload, AudioProductAction, CurveClipboardOperation, ProductAction,
+    };
+    use mondrian_ui_widgets::CurveClipboardCommand;
+    let AuthoringTimeDomain::Sequence(sequence_id) = model.time_context.sequence_time.domain else {
+        return None;
+    };
+    if command != CurveClipboardCommand::Copy && !model.is_editable {
+        return None;
+    }
+    let operation = match command {
+        CurveClipboardCommand::Copy | CurveClipboardCommand::Cut if ids.is_empty() => return None,
+        CurveClipboardCommand::Copy => CurveClipboardOperation::Copy { keyframe_ids: ids.to_vec() },
+        CurveClipboardCommand::Cut => CurveClipboardOperation::Cut { keyframe_ids: ids.to_vec() },
+        CurveClipboardCommand::Paste => CurveClipboardOperation::Paste {},
+    };
+    Some(
+        ProductAction::Audio(AudioProductAction::CurveClipboard(Box::new(
+            AudioCurveClipboardPayload {
+                sequence_id,
+                target: model.target.clone(),
+                scope_occurrence: model.time_context.scope_occurrence,
+                operation,
+            },
+        )))
+        .into_external_action(),
+    )
+}
+
+/// Admit one complete-selection preset through the current audio definition.
+pub(crate) fn audio_automation_interpolations_action(
+    model: &AudioAutomationCurveModel,
+    keyframe_ids: &[KeyframeId],
     interpolation: InterpolationType,
 ) -> Option<Action> {
     if !model.is_editable {
@@ -274,11 +413,33 @@ pub(crate) fn audio_automation_interpolation_action(
     if !model.allowed_interpolations.contains(&family) {
         return None;
     }
-    let keyframe_id = model.keys.get(index)?.keyframe.as_ref()?.id;
+    let edit = AudioAutomationEdit::SetInterpolations {
+        keyframe_ids: keyframe_ids.to_vec(),
+        interpolation,
+    };
+    let candidate = model.curve_contract.preview_edit(&model.source_curve, &edit).ok()?;
+    if candidate == model.source_curve {
+        return None;
+    }
     Some(audio_automation_edit_action(AudioAutomationEditRequest {
         target: model.target.clone(),
-        edit: AudioAutomationEdit::SetInterpolation { keyframe_id, interpolation },
+        edit,
     }))
+}
+
+/// Reset using fresh definition admission, independent of playhead edit time.
+pub(crate) fn audio_parameter_reset_action(model: &AudioAutomationCurveModel) -> Option<Action> {
+    if !model.is_editable {
+        return None;
+    }
+    let edit = AudioAutomationEdit::ResetToDefault;
+    let candidate = model.curve_contract.preview_edit(&model.source_curve, &edit).ok()?;
+    (candidate != model.source_curve).then(|| {
+        audio_automation_edit_action(AudioAutomationEditRequest {
+            target: model.target.clone(),
+            edit,
+        })
+    })
 }
 
 pub(crate) fn audio_keyframe_interpolation(
@@ -295,36 +456,240 @@ pub(crate) fn audio_keyframe_interpolation(
     }
 }
 
-/// Lower one committed CurveEditor gesture into one stable-ID author action.
-pub(crate) fn audio_automation_curve_edit_action(
+/// One definition-admitted author intent and its exact projected source.
+pub(crate) struct PreparedAudioCurveEdit {
+    /// Closed author action for this admitted candidate.
+    pub(crate) action: Action,
+    /// Exact candidate shared by UI geometry and author execution.
+    pub(crate) curve: mondrian_core::ExactAutomationCurve,
+}
+
+/// Prepare one edit once before either author intent or preview geometry is exposed.
+pub(crate) fn prepare_audio_curve_edit(
     model: &AudioAutomationCurveModel,
     edit: CurveEdit,
-) -> Option<Action> {
+) -> Option<PreparedAudioCurveEdit> {
+    let intent = lower_audio_curve_edit(model, edit)?;
+    let curve = model.curve_contract.preview_edit(&model.source_curve, &intent).ok()?;
+    if let (
+        AudioAutomationEdit::ShiftKeyframes { keyframe_ids, .. }
+        | AudioAutomationEdit::TransformKeyframes { keyframe_ids, .. },
+        Some(range),
+    ) = (&intent, model.component_author_range)
+    {
+        let end = range.end().ok()?;
+        let identities = keyframe_ids.iter().copied().collect::<std::collections::HashSet<_>>();
+        if curve
+            .keyframes
+            .iter()
+            .filter(|key| identities.contains(&key.id))
+            .any(|key| key.time < range.start || key.time > end)
+        {
+            return None;
+        }
+    }
+    Some(PreparedAudioCurveEdit {
+        action: audio_automation_edit_action(AudioAutomationEditRequest {
+            target: model.target.clone(),
+            edit: intent,
+        }),
+        curve,
+    })
+}
+
+fn lower_audio_curve_edit(
+    model: &AudioAutomationCurveModel,
+    edit: CurveEdit,
+) -> Option<AudioAutomationEdit> {
     if !model.is_editable {
         return None;
     }
     let edit = match edit {
-        CurveEdit::Insert { point, .. } => {
+        CurveEdit::TransformMany { keyframe_ids, time_delta, value_delta } => {
+            AudioAutomationEdit::TransformKeyframes {
+                keyframe_ids,
+                time_delta,
+                value_delta,
+                steps: 1,
+            }
+        }
+        CurveEdit::NudgeValue { keyframe_id, delta, steps } => {
+            let mut key =
+                model.source_curve.keyframes.iter().find(|key| key.id == keyframe_id)?.clone();
+            let range = model.value_axis.hard_range();
+            let contract = mondrian_core::automation::ParameterNumericContract::closed(
+                range.min,
+                range.max,
+                None,
+                mondrian_core::automation::ParameterInvalidValuePolicy::Reject,
+            )
+            .ok()?;
+            key.value = contract
+                .offset_scalar(PropertyValue::Double(key.value), delta, steps)?
+                .as_f64()?;
+            AudioAutomationEdit::UpsertKeyframe { keyframe: key }
+        }
+        CurveEdit::NudgeValueMany { keyframe_ids, delta, steps } => {
+            AudioAutomationEdit::OffsetKeyframeValues { keyframe_ids, delta, steps }
+        }
+        CurveEdit::NudgeTimeMany { keyframe_ids, delta } => {
+            AudioAutomationEdit::ShiftKeyframes { keyframe_ids, delta }
+        }
+        CurveEdit::NudgeTime { keyframe_id, side, delta } => {
+            if let Some(side) = side {
+                let control = model
+                    .source_curve
+                    .keyframe_controls()
+                    .find(|control| control.keyframe_id == keyframe_id && control.side == side)?;
+                AudioAutomationEdit::EditHandle {
+                    keyframe_id,
+                    side,
+                    edit: crate::app_ui::curve_tangents::nudge_handle_time(control, delta)?,
+                }
+            } else {
+                let mut key =
+                    model.source_curve.keyframes.iter().find(|key| key.id == keyframe_id)?.clone();
+                key.time = crate::app_ui::curve_tangents::nudge_key_time(
+                    key.time,
+                    delta,
+                    model.viewport.range,
+                    model.source_curve.keyframes.iter().map(|key| key.time),
+                )?;
+                AudioAutomationEdit::UpsertKeyframe { keyframe: key }
+            }
+        }
+        CurveEdit::Handle { keyframe_id: id, side, point } => {
+            let key = model.source_curve.keyframes.iter().find(|key| key.id == id)?;
+            let handle = model.source_curve.keyframe_handle(id, side)?;
+            let tangent = model
+                .tangents()
+                .into_iter()
+                .find(|tangent| tangent.keyframe_id == id && tangent.side == side)?;
+            let edit = crate::app_ui::curve_tangents::lower(
+                tangent,
+                point,
+                (key.time, key.value),
+                handle,
+                model.viewport.range,
+            )?;
+            AudioAutomationEdit::EditHandle { keyframe_id: id, side, edit }
+        }
+        CurveEdit::Insert { keyframe_id, point, .. } => {
             let time = denormalized_time(model.viewport.range, point.x)?;
-            let value = denormalized_value(model, point.y)?;
+            let value = deauthor_value(model, point.y)?;
             let mut keyframe = ExactAutomationKeyframe::linear(time, value);
+            keyframe.id = keyframe_id;
             keyframe.interpolation_to_next = model.insert_interpolation;
             AudioAutomationEdit::UpsertKeyframe { keyframe }
         }
-        CurveEdit::Move { index, point } => {
-            let mut keyframe = model.keys.get(index)?.keyframe.clone()?;
-            keyframe.time = denormalized_time(model.viewport.range, point.x)?;
-            keyframe.value = denormalized_value(model, point.y)?;
+        CurveEdit::Move { target, point } => {
+            let (identity, reference) = match target {
+                CurvePointTarget::Keyframe(id) => {
+                    let key = model.source_curve.keyframes.iter().find(|key| key.id == id)?;
+                    let reference = crate::app_ui::curve_tangents::project_key(
+                        key.time,
+                        key.value,
+                        model.viewport.range,
+                    )?;
+                    (Some(id), reference)
+                }
+                CurvePointTarget::VirtualBoundary(boundary) => {
+                    let (x, time) = match boundary {
+                        mondrian_ui_widgets::CurveBoundary::Start => {
+                            (0.0, model.viewport.range.start)
+                        }
+                        mondrian_ui_widgets::CurveBoundary::End => {
+                            (1.0, model.viewport.range.end().ok()?)
+                        }
+                    };
+                    (
+                        None,
+                        CurvePoint { x, y: model.source_curve.evaluate(time).ok()? },
+                    )
+                }
+                CurvePointTarget::Snapshot(_) => return None,
+            };
+            let keyframe = if let Some(id) = identity {
+                let mut keyframe =
+                    model.source_curve.keyframes.iter().find(|key| key.id == id)?.clone();
+                if point.x != reference.x {
+                    keyframe.time = denormalized_time(model.viewport.range, point.x)?;
+                }
+                if point.y != reference.y {
+                    keyframe.value = deauthor_value(model, point.y)?;
+                }
+                keyframe
+            } else {
+                if point.y == reference.y {
+                    return None;
+                }
+                let time = denormalized_time(model.viewport.range, reference.x)?;
+                let value = deauthor_value(model, point.y)?;
+                let mut keyframe = ExactAutomationKeyframe::linear(time, value);
+                keyframe.interpolation_to_next = model.insert_interpolation;
+                keyframe
+            };
             AudioAutomationEdit::UpsertKeyframe { keyframe }
         }
-        CurveEdit::Delete { index } => AudioAutomationEdit::RemoveKeyframe {
-            keyframe_id: model.keys.get(index)?.keyframe.as_ref()?.id,
+        CurveEdit::DeleteMany { keyframe_ids } => AudioAutomationEdit::RemoveKeyframes {
+            keyframe_ids,
+            retain_time: model.current_author_time.as_ref().ok()?.time,
         },
+        CurveEdit::Delete { target } => {
+            let CurvePointTarget::Keyframe(keyframe_id) = target else {
+                return None;
+            };
+            AudioAutomationEdit::RemoveKeyframe { keyframe_id }
+        }
     };
-    Some(audio_automation_edit_action(AudioAutomationEditRequest {
-        target: model.target.clone(),
-        edit,
-    }))
+    Some(edit)
+}
+
+/// Author action and geometry derived from one admitted exact candidate.
+pub(crate) struct AudioCurveEditProjection {
+    /// Closed action corresponding to the projected curve.
+    pub(crate) action: Action,
+    /// Evaluated drawing points; never reconstructed author values.
+    pub(crate) display_points: Vec<CurvePoint>,
+}
+
+pub(crate) fn preview_audio_curve_edit(
+    model: &mut AudioAutomationCurveModel,
+    edit: CurveEdit,
+) -> Option<AudioCurveEditProjection> {
+    let PreparedAudioCurveEdit { action, curve } = prepare_audio_curve_edit(model, edit)?;
+    let segments = curve.prepared_segments().ok()?;
+    let display = (0..=DISPLAY_SEGMENTS)
+        .map(|index| {
+            let time = model
+                .viewport
+                .range
+                .start
+                .checked_add(
+                    model
+                        .viewport
+                        .range
+                        .duration
+                        .checked_scale(TimeScale::new(index, DISPLAY_SEGMENTS).ok()?)
+                        .ok()?,
+                )
+                .ok()?;
+            let value = if segments.is_empty() {
+                curve.keyframes.first().map_or(curve.default_value, |key| key.value)
+            } else {
+                let segment = segments
+                    .partition_point(|segment| segment.end_time() < time)
+                    .min(segments.len() - 1);
+                segments[segment].evaluate(time).ok()?
+            };
+            Some(CurvePoint {
+                x: index as f32 / DISPLAY_SEGMENTS as f32,
+                y: value,
+            })
+        })
+        .collect::<Option<Vec<_>>>()?;
+    model.source_curve = curve;
+    Some(AudioCurveEditProjection { action, display_points: display })
 }
 
 fn denormalized_time(range: TimelineTimeRange, ratio: f32) -> Option<TimelineTime> {
@@ -339,16 +704,16 @@ fn denormalized_time(range: TimelineTimeRange, ratio: f32) -> Option<TimelineTim
         .ok()
 }
 
-fn denormalized_value(model: &AudioAutomationCurveModel, ratio: f32) -> Option<f64> {
-    let span = model.view_max - model.view_min;
-    let mut value = model.view_min + span * f64::from(ratio.clamp(0.0, 1.0));
-    if let Some(step) = model.step.filter(|step| step.is_finite() && *step > 0.0) {
-        value = (value / step).round() * step;
-    }
-    if model.value_type == PropertyValueType::Int {
-        value = value.round();
-    }
-    value.is_finite().then_some(value.clamp(model.hard_min, model.hard_max))
+fn deauthor_value(model: &AudioAutomationCurveModel, author_value: f64) -> Option<f64> {
+    let value = if model.value_type == PropertyValueType::Int {
+        author_value.round()
+    } else {
+        author_value
+    };
+    value.is_finite().then_some(value.clamp(
+        model.value_axis.hard_range().min,
+        model.value_axis.hard_range().max,
+    ))
 }
 
 #[cfg(test)]
@@ -357,6 +722,492 @@ mod tests {
     use crate::app::product_action::{AudioProductAction, ProductAction};
     use mondrian_core::AutomationSegmentInterpolation;
     use mondrian_timeline::{AudioAutomationTarget, AudioChannelStripOwner};
+
+    fn audio_target(model: &AudioAutomationCurveModel, index: usize) -> CurvePointTarget {
+        model.keys[index].keyframe.as_ref().map(|key| key.id).map_or(
+            CurvePointTarget::VirtualBoundary(if model.keys[index].point.x == 0.0 {
+                mondrian_ui_widgets::CurveBoundary::Start
+            } else {
+                mondrian_ui_widgets::CurveBoundary::End
+            }),
+            CurvePointTarget::Keyframe,
+        )
+    }
+
+    #[test]
+    fn processor_curve_edits_preserve_continuous_values_across_finite_ranges() {
+        use mondrian_core::automation::{
+            ParameterInvalidValuePolicy, ParameterNumericContract, ParameterSchema, ParameterUnit,
+        };
+        use mondrian_core::{AudioProcessorInstanceId, AuthoringMap, ParameterId, PropertyValue};
+        use mondrian_timeline::audio::{
+            AudioProcessorDefinitionRef, AudioProcessorInstance, AudioProcessorParameter,
+        };
+        use mondrian_timeline::{
+            apply_audio_processor_rack_edit, AudioChannelStripRack, AudioProcessorRackAddress,
+            AudioProcessorRackEdit, AudioProcessorRackEditRequest, AudioProcessorRackPlacement,
+        };
+
+        for (name, min, max, initial, author_value, expected) in [
+            (
+                "full range quarter",
+                -f64::MAX,
+                f64::MAX,
+                PropertyValue::Double(0.0),
+                -f64::MAX * 0.5,
+                -f64::MAX * 0.5,
+            ),
+            (
+                "full range endpoint",
+                -f64::MAX,
+                f64::MAX,
+                PropertyValue::Double(0.0),
+                f64::MAX,
+                f64::MAX,
+            ),
+            (
+                "fixed maximum",
+                f64::MAX,
+                f64::MAX,
+                PropertyValue::Double(f64::MAX),
+                f64::MAX,
+                f64::MAX,
+            ),
+            (
+                "continuous value",
+                0.0,
+                1.0,
+                PropertyValue::Double(0.0),
+                0.125,
+                0.125,
+            ),
+            (
+                "integer rounding",
+                0.0,
+                10.0,
+                PropertyValue::Int(0),
+                2.5,
+                3.0,
+            ),
+        ] {
+            let parameter_id = ParameterId::new_static("test.audio.continuous.value");
+            let step = if matches!(initial, PropertyValue::Int(_)) {
+                2.0
+            } else {
+                0.1
+            };
+            let schema = ParameterSchema::v1(parameter_id.clone(), initial).with_numeric_contract(
+                ParameterUnit::Unitless,
+                ParameterNumericContract::closed(
+                    min,
+                    max,
+                    Some(step),
+                    ParameterInvalidValuePolicy::Reject,
+                )
+                .expect("legal finite numeric contract"),
+            );
+            let mut parameters = AuthoringMap::new();
+            parameters.insert(
+                parameter_id.clone(),
+                AudioProcessorParameter::from_schema(schema)
+                    .expect("validated processor parameter"),
+            );
+            let processor = AudioProcessorInstance {
+                id: AudioProcessorInstanceId::new(),
+                definition: AudioProcessorDefinitionRef::Clap {
+                    plugin_id: "org.mondrian.test.continuous".into(),
+                    schema_version: 1,
+                    binary_sha256: None,
+                },
+                bypassed: false,
+                parameters,
+                opaque_state: None,
+            };
+            let processor_id = processor.id;
+            let mut sequence = Sequence::new(name);
+            let rack = AudioProcessorRackAddress::ChannelStrip {
+                owner: AudioChannelStripOwner::Track { track_id: sequence.audio_tracks[0].id },
+                rack: AudioChannelStripRack::PreFader,
+            };
+            apply_audio_processor_rack_edit(
+                &mut sequence,
+                &AudioProcessorRackEditRequest {
+                    address: rack,
+                    edit: AudioProcessorRackEdit::Insert {
+                        processor,
+                        placement: AudioProcessorRackPlacement::End,
+                    },
+                },
+            )
+            .expect("atomic validated processor insertion");
+            let target =
+                AudioAutomationTarget::ProcessorParameter { rack, processor_id, parameter_id };
+            let viewport = sequence_automation_viewport(&sequence).expect("Sequence viewport");
+            let model = project_audio_automation(
+                &sequence,
+                target.clone(),
+                viewport,
+                crate::app_ui::audio_automation::AudioAutomationTimeContext::at_sequence_time(
+                    &sequence,
+                    sequence.playhead,
+                ),
+            )
+            .expect("actual processor projection");
+            assert!(model.is_editable);
+            assert!(model.points().iter().all(|point| point.x.is_finite() && point.y.is_finite()));
+            let before = sequence.clone();
+            let mut state = crate::app::AppState::new();
+            state.test_set_sequence(Some(sequence));
+            let action = prepare_audio_curve_edit(
+                &model,
+                CurveEdit::Insert {
+                    keyframe_id: mondrian_core::KeyframeId::new(),
+                    index: 1,
+                    point: CurvePoint { x: 0.25, y: author_value },
+                },
+            )
+            .map(|prepared| prepared.action)
+            .expect(
+                "legal continuous curve edit must dispatch even when value / editor step overflows",
+            );
+            state.dispatch_action(action).expect("canonical author transaction");
+            let after = state.active_sequence().expect("committed Sequence").clone();
+            let inspection =
+                inspect_audio_automation(&after, &target).expect("stable target inspection");
+            let keys = &inspection.curve().expect("authored curve").keyframes;
+            assert_eq!(keys.len(), 1);
+            assert_eq!(keys[0].time, TimelineTime::new(1, 4).expect("exact time"));
+            assert_eq!(
+                keys[0].value, expected,
+                "{name}: an editor increment must not quantize continuous automation"
+            );
+            assert!(state.undo_timeline().expect("Undo"));
+            assert!(state
+                .active_sequence()
+                .expect("Undo state")
+                .author_state_eq_ignoring_revision(&before));
+            assert!(state.redo_timeline().expect("Redo"));
+            assert!(state
+                .active_sequence()
+                .expect("Redo state")
+                .author_state_eq_ignoring_revision(&after));
+        }
+    }
+
+    #[test]
+    fn live_audio_curve_display_samples_match_canonical_author_edits() {
+        for interpolation in [
+            AutomationSegmentInterpolation::Hold,
+            AutomationSegmentInterpolation::Linear,
+            AutomationSegmentInterpolation::Bezier,
+        ] {
+            let mut sequence = Sequence::new("Canonical preview samples");
+            let target = AudioAutomationTarget::ChannelFader {
+                owner: AudioChannelStripOwner::Track { track_id: sequence.audio_tracks[0].id },
+            };
+            for (time, value) in [(TimelineTime::ZERO, -18.0), (TimelineTime::ONE, -6.0)] {
+                let mut keyframe = ExactAutomationKeyframe::linear(time, value);
+                keyframe.interpolation_to_next = interpolation;
+                if interpolation == AutomationSegmentInterpolation::Bezier {
+                    keyframe.out_handle = Some(mondrian_core::ExactBezierHandle {
+                        time_offset: TimelineTime::new(1, 4).unwrap(),
+                        value_offset: 3.0,
+                    });
+                    keyframe.in_handle = Some(mondrian_core::ExactBezierHandle {
+                        time_offset: TimelineTime::new(-1, 4).unwrap(),
+                        value_offset: -1.0,
+                    });
+                }
+                mondrian_timeline::apply_audio_automation_edit(
+                    &mut sequence,
+                    &AudioAutomationEditRequest {
+                        target: target.clone(),
+                        edit: AudioAutomationEdit::UpsertKeyframe { keyframe },
+                    },
+                )
+                .unwrap();
+            }
+            let viewport = AudioAutomationViewport {
+                domain: AuthoringTimeDomain::Sequence(sequence.id),
+                range: TimelineTimeRange::new(TimelineTime::ZERO, TimelineTime::ONE).unwrap(),
+            };
+            let model = project_audio_automation(
+                &sequence,
+                target.clone(),
+                viewport,
+                crate::app_ui::audio_automation::AudioAutomationTimeContext::at_sequence_time(
+                    &sequence,
+                    sequence.playhead,
+                ),
+            )
+            .unwrap();
+            for edit in [
+                CurveEdit::Move {
+                    target: audio_target(&model, 0),
+                    point: CurvePoint::new(0.1, 0.2),
+                },
+                CurveEdit::Insert {
+                    keyframe_id: mondrian_core::KeyframeId::new(),
+                    index: 1,
+                    point: CurvePoint::new(0.5, 0.6),
+                },
+                CurveEdit::Delete { target: audio_target(&model, 0) },
+            ] {
+                let display = preview_audio_curve_edit(&mut model.clone(), edit.clone())
+                    .unwrap()
+                    .display_points;
+                let mut authored = sequence.clone();
+                mondrian_timeline::apply_audio_automation_edit(
+                    &mut authored,
+                    &AudioAutomationEditRequest {
+                        target: target.clone(),
+                        edit: lower_audio_curve_edit(&model, edit.clone()).unwrap(),
+                    },
+                )
+                .unwrap();
+                let projected = project_audio_automation(
+                    &authored,
+                    target.clone(),
+                    viewport,
+                    crate::app_ui::audio_automation::AudioAutomationTimeContext::at_sequence_time(
+                        &authored,
+                        authored.playhead,
+                    ),
+                )
+                .unwrap();
+                assert_eq!(
+                    display, projected.display_points,
+                    "preview must equal canonical authored output for {interpolation:?} / {edit:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn dragging_virtual_audio_boundaries_authors_real_endpoint_keys() {
+        for index in [0, 1] {
+            let sequence = Sequence::new("Boundary automation");
+            let target = AudioAutomationTarget::ChannelFader {
+                owner: AudioChannelStripOwner::Track { track_id: sequence.audio_tracks[0].id },
+            };
+            let viewport = AudioAutomationViewport {
+                domain: AuthoringTimeDomain::Sequence(sequence.id),
+                range: TimelineTimeRange::new(TimelineTime::ZERO, TimelineTime::ONE).unwrap(),
+            };
+            let model = project_audio_automation(
+                &sequence,
+                target.clone(),
+                viewport,
+                crate::app_ui::audio_automation::AudioAutomationTimeContext::at_sequence_time(
+                    &sequence,
+                    sequence.playhead,
+                ),
+            )
+            .unwrap();
+            assert_eq!(model.keys.len(), 2);
+            assert!(model.keys[index].keyframe.is_none());
+            assert!(
+                prepare_audio_curve_edit(
+                    &model,
+                    CurveEdit::Move {
+                        target: audio_target(&model, index),
+                        point: model.keys[index].point
+                    },
+                )
+                .map(|prepared| prepared.action)
+                .is_none(),
+                "an unchanged virtual boundary must not create automation"
+            );
+            let point = CurvePoint::new(model.keys[index].point.x, 0.25);
+            let action = prepare_audio_curve_edit(
+                &model,
+                CurveEdit::Move { target: audio_target(&model, index), point },
+            )
+            .map(|prepared| prepared.action)
+            .expect("boundary drag must author a key, not leave an uncommitted widget point");
+            let Some(ProductAction::Audio(AudioProductAction::EditAutomation(request))) =
+                ProductAction::decode_external(&action).unwrap()
+            else {
+                panic!("expected canonical audio author action");
+            };
+            let AudioAutomationEdit::UpsertKeyframe { keyframe } = &request.edit else {
+                panic!("expected boundary key insertion");
+            };
+            let id = keyframe.id;
+            assert_eq!(
+                keyframe.time,
+                if index == 0 {
+                    TimelineTime::ZERO
+                } else {
+                    TimelineTime::ONE
+                }
+            );
+            let before = sequence.clone();
+            let mut state = crate::app::AppState::new();
+            state.test_set_sequence(Some(sequence));
+            state.dispatch_action(action).expect("canonical endpoint transaction");
+            let committed = state.active_sequence().unwrap().clone();
+            assert!(state.undo_timeline().unwrap());
+            assert!(state.active_sequence().unwrap().author_state_eq_ignoring_revision(&before));
+            assert!(state.redo_timeline().unwrap());
+            assert!(state.active_sequence().unwrap().author_state_eq_ignoring_revision(&committed));
+            let directory = std::env::temp_dir()
+                .join(format!("mondrian-audio-boundary-{}", uuid::Uuid::new_v4()));
+            let library = mondrian_assets::AssetLibrary::open(directory.join("library")).unwrap();
+            let archive = directory.join("音频 端点.mdp");
+            let document = mondrian_project::ProjectDocument::new(
+                "Boundary automation",
+                mondrian_timeline::SequenceCollection::new(committed),
+                mondrian_core::ProjectColorEnvironment::default(),
+                mondrian_timeline::SequenceSettings::default(),
+                mondrian_core::ProjectSettings::default(),
+            );
+            mondrian_project::save_project_archive(&document, &library.database_path(), &archive)
+                .unwrap();
+            let reopened =
+                mondrian_project::load_project_archive(&archive, &directory.join("reopened.db"))
+                    .unwrap();
+            assert_eq!(reopened.document, document);
+            let after = project_audio_automation(
+                &reopened.document.sequences.sequences[0],
+                target,
+                viewport,
+                crate::app_ui::audio_automation::AudioAutomationTimeContext::at_sequence_time(
+                    &reopened.document.sequences.sequences[0],
+                    reopened.document.sequences.sequences[0].playhead,
+                ),
+            )
+            .unwrap();
+            let authored = after
+                .keys
+                .iter()
+                .find(|key| key.keyframe.as_ref().is_some_and(|key| key.id == id))
+                .unwrap();
+            assert_eq!(authored.point, point);
+            drop(library);
+            std::fs::remove_dir_all(directory).unwrap();
+        }
+    }
+
+    #[test]
+    fn audio_frame_nudge_preserves_author_metadata_and_sparse_handle_values() {
+        use mondrian_core::{BezierHandleSide, Rational};
+        use mondrian_timeline::apply_audio_automation_edit;
+        let mut sequence = Sequence::new("Exact audio nudge");
+        sequence.settings.frame_rate = Rational::new(30000, 1001);
+        let target = AudioAutomationTarget::ChannelFader {
+            owner: AudioChannelStripOwner::Track { track_id: sequence.audio_tracks[0].id },
+        };
+        let middle =
+            ExactAutomationKeyframe::linear(TimelineTime::new(1, 2).expect("middle"), -6.123456789);
+        for keyframe in [
+            ExactAutomationKeyframe::linear(TimelineTime::ZERO, -12.0),
+            middle.clone(),
+            ExactAutomationKeyframe::linear(TimelineTime::ONE, -3.0),
+        ] {
+            apply_audio_automation_edit(
+                &mut sequence,
+                &AudioAutomationEditRequest {
+                    target: target.clone(),
+                    edit: AudioAutomationEdit::UpsertKeyframe { keyframe },
+                },
+            )
+            .expect("seed");
+        }
+        let viewport = AudioAutomationViewport {
+            domain: AuthoringTimeDomain::Sequence(sequence.id),
+            range: TimelineTimeRange::new(TimelineTime::ZERO, TimelineTime::ONE).expect("range"),
+        };
+        let model = project_audio_automation(
+            &sequence,
+            target.clone(),
+            viewport,
+            crate::app_ui::audio_automation::AudioAutomationTimeContext::at_sequence_time(
+                &sequence,
+                sequence.playhead,
+            ),
+        )
+        .expect("model");
+        let frame = TimelineTime::new(1001, 30000).expect("frame");
+        assert_eq!(model.frame_time_step, frame);
+        let edit = lower_audio_curve_edit(
+            &model,
+            CurveEdit::NudgeTime { keyframe_id: middle.id, side: None, delta: frame },
+        )
+        .expect("exact intent");
+        let mut expected = middle.clone();
+        expected.time = expected.time.checked_add(frame).expect("next frame");
+        assert_eq!(
+            edit,
+            AudioAutomationEdit::UpsertKeyframe { keyframe: expected.clone() }
+        );
+        assert!(lower_audio_curve_edit(
+            &model,
+            CurveEdit::NudgeTime {
+                keyframe_id: middle.id,
+                side: None,
+                delta: TimelineTime::new(1, 2).expect("collision")
+            }
+        )
+        .is_none());
+        apply_audio_automation_edit(
+            &mut sequence,
+            &AudioAutomationEditRequest { target: target.clone(), edit },
+        )
+        .expect("author move");
+        apply_audio_automation_edit(
+            &mut sequence,
+            &AudioAutomationEditRequest {
+                target: target.clone(),
+                edit: AudioAutomationEdit::SetInterpolation {
+                    keyframe_id: middle.id,
+                    interpolation: InterpolationType::ContinuousBezier,
+                },
+            },
+        )
+        .expect("constrained mode");
+        let model = project_audio_automation(
+            &sequence,
+            target,
+            viewport,
+            crate::app_ui::audio_automation::AudioAutomationTimeContext::at_sequence_time(
+                &sequence,
+                sequence.playhead,
+            ),
+        )
+        .expect("current model");
+        assert_eq!(
+            model.key_points().iter().find(|(id, _)| *id == middle.id).expect("marker").1.x,
+            expected.time.to_f64() as f32
+        );
+        let control = model
+            .source_curve
+            .keyframe_controls()
+            .find(|control| {
+                control.keyframe_id == middle.id && control.side == BezierHandleSide::Outgoing
+            })
+            .expect("control");
+        assert_eq!(
+            lower_audio_curve_edit(
+                &model,
+                CurveEdit::NudgeTime {
+                    keyframe_id: middle.id,
+                    side: Some(BezierHandleSide::Outgoing),
+                    delta: frame
+                }
+            ),
+            Some(AudioAutomationEdit::EditHandle {
+                keyframe_id: middle.id,
+                side: BezierHandleSide::Outgoing,
+                edit: mondrian_core::ExactBezierHandleEdit {
+                    time_offset: Some(
+                        control.handle.time_offset.checked_add(frame).expect("control step")
+                    ),
+                    value_offset: None
+                }
+            })
+        );
+    }
 
     #[test]
     fn projection_preserves_stable_keys_and_exact_owner_domain() {
@@ -379,16 +1230,29 @@ mod tests {
             domain: AuthoringTimeDomain::Sequence(sequence.id),
             range: TimelineTimeRange::new(TimelineTime::ZERO, TimelineTime::ONE).unwrap(),
         };
-        let model = project_audio_automation(&sequence, target.clone(), viewport).unwrap();
+        let model = project_audio_automation(
+            &sequence,
+            target.clone(),
+            viewport,
+            crate::app_ui::audio_automation::AudioAutomationTimeContext::at_sequence_time(
+                &sequence,
+                sequence.playhead,
+            ),
+        )
+        .unwrap();
         assert_eq!(model.keys.len(), 3);
         assert_eq!(model.keys[1].keyframe.as_ref().unwrap().id, keyframe_id);
-        assert_eq!(model.keys[1].point, CurvePoint::new(0.5, 0.75));
+        assert_eq!(model.keys[1].point, CurvePoint { x: 0.5, y: -6.0 });
         assert_eq!(model.display_points.len(), 129);
 
-        let action = audio_automation_curve_edit_action(
+        let action = prepare_audio_curve_edit(
             &model,
-            CurveEdit::Move { index: 1, point: CurvePoint::new(0.75, 0.5) },
+            CurveEdit::Move {
+                target: audio_target(&model, 1),
+                point: CurvePoint::new(0.75, 0.5),
+            },
         )
+        .map(|prepared| prepared.action)
         .unwrap();
         assert!(matches!(
             ProductAction::decode_external(&action).unwrap(),
@@ -424,11 +1288,20 @@ mod tests {
             domain: AuthoringTimeDomain::Sequence(sequence.id),
             range: TimelineTimeRange::new(TimelineTime::ZERO, TimelineTime::ONE).unwrap(),
         };
-        let mut model = project_audio_automation(&sequence, target, viewport).unwrap();
-        let index = model.keys.iter().position(|key| key.keyframe.is_some()).unwrap();
-        let action = audio_automation_interpolation_action(
+        let mut model = project_audio_automation(
+            &sequence,
+            target,
+            viewport,
+            crate::app_ui::audio_automation::AudioAutomationTimeContext::at_sequence_time(
+                &sequence,
+                sequence.playhead,
+            ),
+        )
+        .unwrap();
+
+        let action = audio_automation_interpolations_action(
             &model,
-            index,
+            &[keyframe_id],
             InterpolationType::ContinuousBezier,
         )
         .unwrap();
@@ -436,25 +1309,26 @@ mod tests {
             ProductAction::decode_external(&action).unwrap(),
             Some(ProductAction::Audio(AudioProductAction::EditAutomation(
                 AudioAutomationEditRequest {
-                    edit: AudioAutomationEdit::SetInterpolation {
-                        keyframe_id: id,
+                    edit: AudioAutomationEdit::SetInterpolations {
+                        keyframe_ids: ids,
                         interpolation: InterpolationType::ContinuousBezier,
                     },
                     ..
                 }
-            ))) if id == keyframe_id
+            ))) if ids == vec![keyframe_id]
         ));
         model
             .allowed_interpolations
             .retain(|mode| *mode != ParameterInterpolation::Bezier);
-        assert!(audio_automation_interpolation_action(
+        assert!(audio_automation_interpolations_action(
             &model,
-            index,
+            &[keyframe_id],
             InterpolationType::AutoBezier,
         )
         .is_none());
         assert!(
-            audio_automation_interpolation_action(&model, 0, InterpolationType::Linear,).is_none()
+            audio_automation_interpolations_action(&model, &[], InterpolationType::Linear)
+                .is_none()
         );
     }
 
@@ -467,12 +1341,26 @@ mod tests {
             owner: AudioChannelStripOwner::Track { track_id },
         };
         let viewport = sequence_automation_viewport(&sequence).unwrap();
-        let model = project_audio_automation(&sequence, target, viewport).unwrap();
-        assert!(!model.is_editable);
-        assert!(audio_automation_curve_edit_action(
-            &model,
-            CurveEdit::Insert { index: 1, point: CurvePoint::new(0.5, 0.5) }
+        let model = project_audio_automation(
+            &sequence,
+            target,
+            viewport,
+            crate::app_ui::audio_automation::AudioAutomationTimeContext::at_sequence_time(
+                &sequence,
+                sequence.playhead,
+            ),
         )
+        .unwrap();
+        assert!(!model.is_editable);
+        assert!(prepare_audio_curve_edit(
+            &model,
+            CurveEdit::Insert {
+                keyframe_id: mondrian_core::KeyframeId::new(),
+                index: 1,
+                point: CurvePoint::new(0.5, 0.5)
+            }
+        )
+        .map(|prepared| prepared.action)
         .is_none());
     }
 
@@ -496,16 +1384,26 @@ mod tests {
             domain: AuthoringTimeDomain::Sequence(sequence.id),
             range: TimelineTimeRange::new(TimelineTime::ZERO, TimelineTime::ONE).unwrap(),
         };
-        let model = project_audio_automation(&sequence, target, viewport).unwrap();
-        assert_eq!(model.keys[1].point.y, 0.0);
+        let model = project_audio_automation(
+            &sequence,
+            target,
+            viewport,
+            crate::app_ui::audio_automation::AudioAutomationTimeContext::at_sequence_time(
+                &sequence,
+                sequence.playhead,
+            ),
+        )
+        .unwrap();
+        assert_eq!(model.keys[1].point.y, -100.0);
 
-        let action = audio_automation_curve_edit_action(
+        let action = prepare_audio_curve_edit(
             &model,
             CurveEdit::Move {
-                index: 1,
-                point: CurvePoint::new(0.75, model.keys[1].point.y),
+                target: audio_target(&model, 1),
+                point: CurvePoint { x: 0.75, y: model.keys[1].point.y },
             },
         )
+        .map(|prepared| prepared.action)
         .unwrap();
         assert!(matches!(
             ProductAction::decode_external(&action).unwrap(),
@@ -516,5 +1414,297 @@ mod tests {
                 }
             ))) if keyframe.value == -100.0
         ));
+    }
+
+    #[test]
+    fn single_axis_audio_key_drag_preserves_the_untouched_exact_coordinate() {
+        for horizontal in [true, false] {
+            let mut sequence = Sequence::new("Exact audio key drag");
+            let target = AudioAutomationTarget::ChannelFader {
+                owner: AudioChannelStripOwner::Track { track_id: sequence.audio_tracks[0].id },
+            };
+            let time = TimelineTime::new(1, 3).unwrap();
+            let value = -6.123456789;
+            let keyframe = ExactAutomationKeyframe::linear(time, value);
+            let keyframe_id = keyframe.id;
+            mondrian_timeline::apply_audio_automation_edit(
+                &mut sequence,
+                &AudioAutomationEditRequest {
+                    target: target.clone(),
+                    edit: AudioAutomationEdit::UpsertKeyframe { keyframe },
+                },
+            )
+            .unwrap();
+            let viewport = AudioAutomationViewport {
+                domain: AuthoringTimeDomain::Sequence(sequence.id),
+                range: TimelineTimeRange::new(TimelineTime::ZERO, TimelineTime::ONE).unwrap(),
+            };
+            let model = project_audio_automation(
+                &sequence,
+                target.clone(),
+                viewport,
+                crate::app_ui::audio_automation::AudioAutomationTimeContext::at_sequence_time(
+                    &sequence,
+                    sequence.playhead,
+                ),
+            )
+            .unwrap();
+            let original = model.keys[1].point;
+            let point = if horizontal {
+                CurvePoint { x: 0.75, y: original.y }
+            } else {
+                CurvePoint::new(original.x, 0.25)
+            };
+            let action = prepare_audio_curve_edit(
+                &model,
+                CurveEdit::Move { target: audio_target(&model, 1), point },
+            )
+            .map(|prepared| prepared.action)
+            .unwrap();
+            let Some(ProductAction::Audio(AudioProductAction::EditAutomation(request))) =
+                ProductAction::decode_external(&action).unwrap()
+            else {
+                panic!("canonical audio automation edit");
+            };
+            mondrian_timeline::apply_audio_automation_edit(&mut sequence, &request).unwrap();
+            let inspection = inspect_audio_automation(&sequence, &target).unwrap();
+            let moved = inspection
+                .curve()
+                .unwrap()
+                .keyframes
+                .iter()
+                .find(|key| key.id == keyframe_id)
+                .unwrap();
+            if horizontal {
+                assert_eq!(
+                    moved.value, value,
+                    "horizontal drag must preserve exact author value"
+                );
+                assert_eq!(moved.time, TimelineTime::new(3, 4).unwrap());
+            } else {
+                assert_eq!(
+                    moved.time, time,
+                    "vertical drag must preserve exact author time"
+                );
+                assert_ne!(moved.value, value);
+            }
+        }
+    }
+
+    #[test]
+    fn joint_audio_group_transform_uses_component_extent_not_shared_owner_viewport() {
+        use mondrian_core::{AssetId, AudioSourceComponentId};
+        use mondrian_timeline::{apply_audio_automation_edit, AudioChannelStripOwner, Clip};
+        for owner in 0..3 {
+            for interpolation in [
+                InterpolationType::AutoBezier,
+                InterpolationType::ContinuousBezier,
+            ] {
+                let mut sequence = Sequence::new("Joint audio bounds");
+                let track_id = sequence.audio_tracks[0].id;
+                let duration = TimelineTime::new(1, 2).expect("short Clip");
+                let clip = Clip::new(
+                    AssetId::new(),
+                    TimelineTime::new(10, 1).expect("placement"),
+                    duration,
+                )
+                .expect("clip");
+                sequence
+                    .add_media_audio_clip(track_id, clip, AudioSourceComponentId::primary())
+                    .expect("audio occurrence");
+                let clip = &mut sequence.audio_tracks[0].clips[0];
+                let component = &mut clip.audio_components[0];
+                component.local_time_in = TimelineTime::new(2, 1).expect("component origin");
+                component.processing.scope_in = TimelineTime::new(7, 1).expect("scope origin");
+                let target = match owner {
+                    0 => AudioAutomationTarget::ChannelFader {
+                        owner: AudioChannelStripOwner::Track { track_id },
+                    },
+                    1 => AudioAutomationTarget::ComponentVolume {
+                        track_id,
+                        clip_id: clip.id,
+                        edit_id: component.id,
+                    },
+                    _ => AudioAutomationTarget::ProcessingScopeInputGain {
+                        scope_id: component.processing.scope_id,
+                    },
+                };
+                let origin = match owner {
+                    0 => TimelineTime::ZERO,
+                    1 => component.local_time_in,
+                    _ => component.processing.scope_in,
+                };
+                let viewport = AudioAutomationViewport {
+                    domain: match owner {
+                        0 => AuthoringTimeDomain::Sequence(sequence.id),
+                        1 => AuthoringTimeDomain::AudioComponentEdit(component.id),
+                        _ => {
+                            AuthoringTimeDomain::AudioProcessingScope(component.processing.scope_id)
+                        }
+                    },
+                    range: TimelineTimeRange::new(origin, TimelineTime::ONE)
+                        .expect("one-second view"),
+                };
+                let mut ids = Vec::new();
+                for (offset, value) in [(1, -24.0), (2, -18.0), (4, -12.0)] {
+                    let keyframe = ExactAutomationKeyframe::linear(
+                        origin
+                            .checked_add(TimelineTime::new(offset, 10).expect("offset"))
+                            .expect("time"),
+                        value,
+                    );
+                    ids.push(keyframe.id);
+                    apply_audio_automation_edit(
+                        &mut sequence,
+                        &AudioAutomationEditRequest {
+                            target: target.clone(),
+                            edit: AudioAutomationEdit::UpsertKeyframe { keyframe },
+                        },
+                    )
+                    .expect("seed");
+                }
+                apply_audio_automation_edit(
+                    &mut sequence,
+                    &AudioAutomationEditRequest {
+                        target: target.clone(),
+                        edit: AudioAutomationEdit::SetInterpolations {
+                            keyframe_ids: ids.clone(),
+                            interpolation,
+                        },
+                    },
+                )
+                .expect("constrained source");
+                let model = project_audio_automation(
+                    &sequence,
+                    target.clone(),
+                    viewport,
+                    AudioAutomationTimeContext::at_sequence_time(&sequence, sequence.playhead),
+                )
+                .expect("model");
+                let original = model.clone();
+                let make_edit = |time_delta| CurveEdit::TransformMany {
+                    keyframe_ids: ids[..2].to_vec(),
+                    time_delta,
+                    value_delta: 1.25,
+                };
+                let accepted = prepare_audio_curve_edit(
+                    &model,
+                    make_edit(TimelineTime::new(1, 20).expect("small offset")),
+                )
+                .expect("complete joint candidate");
+                let Some(ProductAction::Audio(AudioProductAction::EditAutomation(request))) =
+                    ProductAction::decode_external(&accepted.action).expect("decode")
+                else {
+                    panic!("audio action");
+                };
+                let mut changed = sequence.clone();
+                apply_audio_automation_edit(&mut changed, &request).expect("canonical admission");
+                assert_eq!(
+                    inspect_audio_automation(&changed, &target).expect("target").curve(),
+                    Some(&accepted.curve)
+                );
+                let large_delta = TimelineTime::new(11, 10).expect("outside displayed viewport");
+                let moved = prepare_audio_curve_edit(&model, make_edit(large_delta));
+                if owner == 1 {
+                    assert!(moved.is_none(), "short Component cannot use the padded one-second viewport as author extent");
+                    assert_eq!(
+                        model.component_author_range.expect("component extent").duration,
+                        duration
+                    );
+                } else {
+                    assert!(
+                        moved.is_some(),
+                        "shared author curves are not bounded by visible time"
+                    );
+                    assert!(model.component_author_range.is_none());
+                }
+                assert_eq!(
+                    model, original,
+                    "candidate preparation never mutates inspection state"
+                );
+                let collision = prepare_audio_curve_edit(
+                    &model,
+                    make_edit(TimelineTime::new(1, 5).expect("collision")),
+                );
+                assert!(
+                    collision.is_none(),
+                    "complete transform refuses collision with the unselected key"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn audio_group_crossing_rejects_invalid_new_continuous_control_before_preview() {
+        use mondrian_timeline::{apply_audio_automation_edit, AudioAutomationEditError};
+        let mut sequence = Sequence::new("Crossed continuous endpoint");
+        let target = AudioAutomationTarget::ChannelFader {
+            owner: AudioChannelStripOwner::Track { track_id: sequence.audio_tracks[0].id },
+        };
+        let mut ids = Vec::new();
+        for (num, den, value) in [(1, 5, -119.0), (6, 25, -1.0), (19, 50, -1.0)] {
+            let keyframe =
+                ExactAutomationKeyframe::linear(TimelineTime::new(num, den).expect("time"), value);
+            ids.push(keyframe.id);
+            apply_audio_automation_edit(
+                &mut sequence,
+                &AudioAutomationEditRequest {
+                    target: target.clone(),
+                    edit: AudioAutomationEdit::UpsertKeyframe { keyframe },
+                },
+            )
+            .expect("seed keys");
+        }
+        apply_audio_automation_edit(
+            &mut sequence,
+            &AudioAutomationEditRequest {
+                target: target.clone(),
+                edit: AudioAutomationEdit::SetInterpolation {
+                    keyframe_id: ids[0],
+                    interpolation: InterpolationType::ContinuousBezier,
+                },
+            },
+        )
+        .expect("legal original continuous endpoint");
+        let edit = AudioAutomationEdit::ShiftKeyframes {
+            keyframe_ids: ids[..2].to_vec(),
+            delta: TimelineTime::new(1, 5).expect("five frames"),
+        };
+        let original = sequence.clone();
+        let error = apply_audio_automation_edit(
+            &mut sequence,
+            &AudioAutomationEditRequest { target: target.clone(), edit },
+        )
+        .expect_err("new reverse control falls below the gain floor");
+        assert!(matches!(
+            error,
+            AudioAutomationEditError::AuthorState(
+                mondrian_timeline::audio::AudioAuthoringError::InvalidGain
+            )
+        ));
+        assert_eq!(sequence, original);
+        let mut model = project_audio_automation(
+            &sequence,
+            target,
+            sequence_automation_viewport(&sequence).expect("viewport"),
+            AudioAutomationTimeContext::at_sequence_time(&sequence, TimelineTime::ZERO),
+        )
+        .expect("actual audio model");
+        let original_model = model.clone();
+        let ui_edit = CurveEdit::NudgeTimeMany {
+            keyframe_ids: ids[..2].to_vec(),
+            delta: TimelineTime::new(1, 5).expect("five frames"),
+        };
+        assert!(
+            preview_audio_curve_edit(&mut model, ui_edit.clone()).is_none(),
+            "a canonically refused curve cannot become projected geometry"
+        );
+        assert_eq!(model, original_model);
+        assert!(
+            prepare_audio_curve_edit(&model, ui_edit)
+                .map(|prepared| prepared.action)
+                .is_none(),
+            "a canonically refused curve cannot publish an author intent"
+        );
     }
 }

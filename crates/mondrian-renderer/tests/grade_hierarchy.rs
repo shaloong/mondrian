@@ -230,6 +230,8 @@ fn composite_grade_plan(plan: &TimelineRenderPlan) -> Vec<[f32; 4]> {
                         transform: layer.transform,
                         effect_graph: Arc::clone(&layer.effect_graph),
                         frame_seed: layer.frame_seed,
+
+                        processor_input_plan: None,
                     },
                 ));
             }
@@ -238,7 +240,7 @@ fn composite_grade_plan(plan: &TimelineRenderPlan) -> Vec<[f32; 4]> {
                     TimelineAdjustmentLayer {
                         effect_graph: Arc::clone(&grade.effect_graph),
                         opacity: 1.0,
-                        blend_mode: None,
+                        blend_policy: mondrian_effects::EffectPassBlendPolicy::Mix,
                         frame_seed: grade.frame_seed,
                     },
                 ));
@@ -252,8 +254,13 @@ fn composite_grade_plan(plan: &TimelineRenderPlan) -> Vec<[f32; 4]> {
         1,
         &elements,
         TimelineCompositeOptions::default(),
-        TimelineEffectColorRuntime::new(&engine, WorkingColorSpace::LinearRec709),
+        TimelineEffectColorRuntime::new(
+            &engine,
+            WorkingColorSpace::LinearRec709,
+            mondrian_core::ImageSampling::UNIT_SQUARE,
+        ),
         &mut TimelineCompositeScratch::default(),
+        &mut mondrian_effects::EffectProcessorControl::uncancelled(),
     )
     .expect("composite grade plan")
     .rgba_f32()
@@ -315,7 +322,7 @@ fn timeline_grade_blocker_fails_preflight_and_active_frame_closed() {
     append_grade_effect(
         &mut sequence,
         timeline_grade,
-        EffectNode::new(EffectType::Plugin("missing.timeline.grade".to_owned())),
+        EffectNode::new(EffectType::External("missing.timeline.grade".to_owned())),
     );
     sequence
         .assign_grade(GradeScope::Timeline, Some(timeline_grade))
@@ -332,7 +339,7 @@ fn timeline_grade_blocker_fails_preflight_and_active_frame_closed() {
 #[test]
 fn temporal_timeline_grade_fails_closed_until_full_stack_history_is_admitted() {
     let _registry_guard = EFFECT_REGISTRY_TEST_LOCK.lock().expect("effect registry test lock");
-    let effect_type = EffectType::Plugin("test.timeline.grade.temporal".to_owned());
+    let effect_type = EffectType::External("test.timeline.grade.temporal".to_owned());
     let offset = TimelineTime::new(1, 24).expect("temporal offset");
     register_effect_definition(
         EffectDefinition::new(

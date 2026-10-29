@@ -44,7 +44,7 @@ pub(crate) enum ResolvedPreviewElement {
         blend_mode: BlendMode,
         transform: [f32; 6],
         effect_graph: Arc<CompiledEffectGraph>,
-        prepared_heterogeneous_route: Option<Box<PreparedHeterogeneousEffectRoute>>,
+        prepared_effect_route: Option<Box<mondrian_renderer::PreparedTimelinePreviewEffectRoute>>,
         frame_seed: i64,
     },
     CrossDissolve {
@@ -67,7 +67,7 @@ pub(crate) enum ResolvedPreviewTransitionInput {
         blend_mode: BlendMode,
         transform: [f32; 6],
         effect_graph: Arc<CompiledEffectGraph>,
-        prepared_heterogeneous_route: Option<Box<PreparedHeterogeneousEffectRoute>>,
+        prepared_effect_route: Option<Box<mondrian_renderer::PreparedTimelinePreviewEffectRoute>>,
         frame_seed: i64,
     },
 }
@@ -184,8 +184,11 @@ pub(crate) fn viewer_preview_cache_key_for_resolved_plan(
     height: u32,
     elements: &[ResolvedPreviewElement],
     color_context: &ProgramColorContext,
+    sampling: mondrian_core::ImageSampling,
 ) -> PreviewOutputKey {
-    let mut builder = PreviewSemanticIdentityBuilder::new(b"mondrian.preview.viewer-plan.v1");
+    // v5 invalidates GPU image coverage computed with a half-pixel-shifted support.
+    let mut builder = PreviewSemanticIdentityBuilder::new(b"mondrian.preview.viewer-plan.v5");
+    sampling.hash(&mut builder);
     color_context.working_color_space().hash(&mut builder);
     color_context.output_color_space().hash(&mut builder);
     color_context.output_tone_map().hash(&mut builder);
@@ -213,7 +216,7 @@ pub(crate) fn viewer_preview_cache_key_for_resolved_plan(
             ResolvedPreviewElement::Adjustment(adjustment) => {
                 1u8.hash(&mut builder);
                 adjustment.opacity.to_bits().hash(&mut builder);
-                adjustment.blend_mode.hash(&mut builder);
+                adjustment.blend_policy.hash(&mut builder);
                 hash_effect_graph_identity(
                     &adjustment.effect_graph,
                     adjustment.frame_seed,
@@ -371,8 +374,8 @@ pub(crate) fn gpu_composite_layers_for_resolved_with_session(
                 blend_mode,
                 transform,
                 effect_graph,
+                prepared_effect_route,
                 frame_seed,
-                ..
             } => {
                 layers.push(ViewerGpuExecutionLayer::Source(Box::new(gpu_media_source(
                     frame,
@@ -380,6 +383,7 @@ pub(crate) fn gpu_composite_layers_for_resolved_with_session(
                     *blend_mode,
                     *transform,
                     effect_graph,
+                    prepared_effect_route.as_deref(),
                     *frame_seed,
                     working_color_space,
                     scratch,
@@ -401,18 +405,19 @@ pub(crate) fn gpu_composite_layers_for_resolved_with_session(
             ResolvedPreviewElement::Adjustment(layer) => {
                 if !has_composited_layer
                     || !opacity_has_contribution(layer.opacity)
-                    || layer.effect_graph.graph().is_identity()
+                    || (layer.effect_graph.graph().is_identity()
+                        && layer.blend_policy == mondrian_effects::EffectPassBlendPolicy::Mix)
                 {
                     continue;
                 }
-                let blend_mode = layer.blend_mode.unwrap_or(BlendMode::Normal);
+                let blend_policy = layer.blend_policy;
                 let effect_plan = scratch
                     .get_or_lower_effect_gpu_plan(&layer.effect_graph)
                     .map_err(|_| GpuCompositingBlockerReason::EffectRequiresCpu)?;
                 layers.push(ViewerGpuExecutionLayer::Adjustment {
                     effect_plan,
                     opacity: layer.opacity,
-                    blend_mode,
+                    blend_policy,
                     frame_seed: layer.frame_seed,
                 });
             }
@@ -473,6 +478,7 @@ pub(crate) fn gpu_layer_for_cached_working(
 pub(crate) fn prepare_gpu_composite_layers_with_heterogeneous_effects(
     resolved: &[ResolvedPreviewElement],
     working_color_space: WorkingColorSpace,
+    sampling: mondrian_core::ImageSampling,
     scratch: &mut TimelineCompositeScratch,
     cpu_prefix_grant: HeterogeneousCpuPrefixBatchGrant,
 ) -> Result<PreparedPreviewViewerGpuLayers, PreviewViewerGpuLayerPreparationError> {
@@ -484,7 +490,7 @@ pub(crate) fn prepare_gpu_composite_layers_with_heterogeneous_effects(
         }
     }
 
-    let mut builder = HeterogeneousPreviewLayerBuilder::new(working_color_space, scratch);
+    let mut builder = HeterogeneousPreviewLayerBuilder::new(working_color_space, sampling, scratch);
     let mut layers = Vec::with_capacity(resolved.len());
     let mut has_composited_layer = false;
     for element in resolved {
@@ -495,7 +501,7 @@ pub(crate) fn prepare_gpu_composite_layers_with_heterogeneous_effects(
                 blend_mode,
                 transform,
                 effect_graph,
-                prepared_heterogeneous_route,
+                prepared_effect_route,
                 frame_seed,
             } => {
                 if !opacity_has_contribution(*opacity) {
@@ -508,7 +514,7 @@ pub(crate) fn prepare_gpu_composite_layers_with_heterogeneous_effects(
                         *blend_mode,
                         *transform,
                         effect_graph,
-                        prepared_heterogeneous_route.as_deref(),
+                        prepared_effect_route.as_deref(),
                         *frame_seed,
                     )?,
                 )));
@@ -537,11 +543,12 @@ pub(crate) fn prepare_gpu_composite_layers_with_heterogeneous_effects(
             ResolvedPreviewElement::Adjustment(layer) => {
                 if !has_composited_layer
                     || !opacity_has_contribution(layer.opacity)
-                    || layer.effect_graph.graph().is_identity()
+                    || (layer.effect_graph.graph().is_identity()
+                        && layer.blend_policy == mondrian_effects::EffectPassBlendPolicy::Mix)
                 {
                     continue;
                 }
-                let blend_mode = layer.blend_mode.unwrap_or(BlendMode::Normal);
+                let blend_policy = layer.blend_policy;
                 let effect_plan = builder
                     .scratch
                     .get_or_lower_effect_gpu_plan(&layer.effect_graph)
@@ -551,7 +558,7 @@ pub(crate) fn prepare_gpu_composite_layers_with_heterogeneous_effects(
                 layers.push(ViewerGpuExecutionLayer::Adjustment {
                     effect_plan,
                     opacity: layer.opacity,
-                    blend_mode,
+                    blend_policy,
                     frame_seed: layer.frame_seed,
                 });
             }
@@ -586,6 +593,7 @@ pub(crate) fn prepare_gpu_composite_layers_with_heterogeneous_effects(
 
 struct HeterogeneousPreviewLayerBuilder<'a> {
     working_color_space: WorkingColorSpace,
+    sampling: mondrian_core::ImageSampling,
     scratch: &'a mut TimelineCompositeScratch,
     identity_effect_plan: Option<Arc<mondrian_effects::CompiledEffectGpuPlan>>,
     items: Vec<HeterogeneousCpuPrefixBatchItem>,
@@ -595,10 +603,12 @@ struct HeterogeneousPreviewLayerBuilder<'a> {
 impl<'a> HeterogeneousPreviewLayerBuilder<'a> {
     fn new(
         working_color_space: WorkingColorSpace,
+        sampling: mondrian_core::ImageSampling,
         scratch: &'a mut TimelineCompositeScratch,
     ) -> Self {
         Self {
             working_color_space,
+            sampling,
             scratch,
             identity_effect_plan: None,
             items: Vec::new(),
@@ -614,9 +624,21 @@ impl<'a> HeterogeneousPreviewLayerBuilder<'a> {
         blend_mode: BlendMode,
         transform: [f32; 6],
         effect_graph: &Arc<CompiledEffectGraph>,
-        prepared_heterogeneous_route: Option<&PreparedHeterogeneousEffectRoute>,
+        prepared_effect_route: Option<&mondrian_renderer::PreparedTimelinePreviewEffectRoute>,
         frame_seed: i64,
     ) -> Result<ViewerGpuSourceLayer, PreviewViewerGpuLayerPreparationError> {
+        // The Renderer already selected the complete compositor, for example
+        // to preserve a native effect's source raster. Honor that route before
+        // requiring a working payload or a heterogeneous prefix. The existing
+        // CPU task owns conversion and late processor-input requests.
+        if matches!(
+            prepared_effect_route,
+            Some(mondrian_renderer::PreparedTimelinePreviewEffectRoute::Cpu { .. })
+        ) {
+            return Err(PreviewViewerGpuLayerPreparationError::Compositing {
+                reason: GpuCompositingBlockerReason::EffectRequiresCpu,
+            });
+        }
         let layer_working_color_space = frame.working_color_space().ok_or(
             PreviewViewerGpuLayerPreparationError::Compositing {
                 reason: GpuCompositingBlockerReason::GpuUnavailable,
@@ -653,7 +675,8 @@ impl<'a> HeterogeneousPreviewLayerBuilder<'a> {
         let input = frame
             .working_payload()
             .ok_or(PreviewViewerGpuLayerPreparationError::MissingCpuWorkingPayload { address })?;
-        let route = prepared_heterogeneous_route
+        let route = prepared_effect_route
+            .and_then(|route| route.heterogeneous())
             .cloned()
             .ok_or(PreviewViewerGpuLayerPreparationError::MissingPreparedRoute { address })?;
         let descriptor = input.descriptor();
@@ -705,6 +728,7 @@ impl<'a> HeterogeneousPreviewLayerBuilder<'a> {
         self.items.push(HeterogeneousCpuPrefixBatchItem::new_solid_color(
             address,
             route,
+            self.sampling,
             layer.color,
             self.working_color_space,
             layer.frame_seed,
@@ -763,7 +787,7 @@ impl<'a> HeterogeneousPreviewLayerBuilder<'a> {
                 blend_mode,
                 transform,
                 effect_graph,
-                prepared_heterogeneous_route,
+                prepared_effect_route,
                 frame_seed,
             } => {
                 if !opacity_has_contribution(*opacity) {
@@ -775,7 +799,7 @@ impl<'a> HeterogeneousPreviewLayerBuilder<'a> {
                     *blend_mode,
                     *transform,
                     effect_graph,
-                    prepared_heterogeneous_route.as_deref(),
+                    prepared_effect_route.as_deref(),
                     *frame_seed,
                 )?
             }
@@ -834,10 +858,17 @@ fn gpu_media_source(
     blend_mode: BlendMode,
     transform: [f32; 6],
     effect_graph: &Arc<CompiledEffectGraph>,
+    prepared_effect_route: Option<&mondrian_renderer::PreparedTimelinePreviewEffectRoute>,
     frame_seed: i64,
     working_color_space: WorkingColorSpace,
     scratch: &mut TimelineCompositeScratch,
 ) -> Result<ViewerGpuSourceLayer, GpuCompositingBlockerReason> {
+    if matches!(
+        prepared_effect_route,
+        Some(mondrian_renderer::PreparedTimelinePreviewEffectRoute::Cpu { .. })
+    ) {
+        return Err(GpuCompositingBlockerReason::EffectRequiresCpu);
+    }
     let layer_working_color_space =
         frame.working_color_space().ok_or(GpuCompositingBlockerReason::GpuUnavailable)?;
     if layer_working_color_space != working_color_space
@@ -931,14 +962,15 @@ fn gpu_transition_input(
             blend_mode,
             transform,
             effect_graph,
+            prepared_effect_route,
             frame_seed,
-            ..
         } => gpu_media_source(
             frame,
             *opacity,
             *blend_mode,
             *transform,
             effect_graph,
+            prepared_effect_route.as_deref(),
             *frame_seed,
             working_color_space,
             scratch,
@@ -1076,8 +1108,49 @@ mod heterogeneous_tests {
     }
 
     #[test]
+    fn viewer_adjustment_identity_keeps_explicit_blend_and_skips_only_mix() {
+        use mondrian_effects::EffectPassBlendPolicy::{Blend, Mix};
+        let graph = identity_compiled_effect_graph().expect("identity graph");
+        for (policy, expected_layers) in [(Mix, 1), (Blend(BlendMode::Normal), 2)] {
+            let resolved = [
+                ordinary_solid(Arc::clone(&graph), 3),
+                ResolvedPreviewElement::Adjustment(TimelineAdjustmentLayer {
+                    effect_graph: Arc::clone(&graph),
+                    opacity: 0.5,
+                    blend_policy: policy,
+                    frame_seed: 4,
+                }),
+            ];
+            let ordinary = gpu_composite_layers_for_resolved(&resolved, WORKING_SPACE)
+                .expect("ordinary Viewer lowering");
+            assert_eq!(ordinary.len(), expected_layers);
+            let prepared = prepare_gpu_composite_layers_with_heterogeneous_effects(
+                &resolved,
+                WORKING_SPACE,
+                mondrian_core::ImageSampling::UNIT_SQUARE,
+                &mut TimelineCompositeScratch::default(),
+                cpu_grant(),
+            )
+            .expect("same canonical Viewer preparation");
+            let PreparedPreviewViewerGpuLayers::Ordinary { layers } = prepared else {
+                panic!("identity Adjustment needs no heterogeneous processor");
+            };
+            assert_eq!(layers.len(), expected_layers);
+            if let Blend(_) = policy {
+                assert!(matches!(
+                    layers.last(),
+                    Some(ViewerGpuExecutionLayer::Adjustment { blend_policy, frame_seed: 4, .. })
+                        if *blend_policy == policy
+                ));
+            }
+        }
+    }
+
+    #[test]
     fn verified_render_cache_frame_lowers_as_one_identity_working_layer() {
         let frame = CpuColorFrame::working(WorkingRgbaF32Frame {
+            sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
+            alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
             width: WIDTH,
             height: HEIGHT,
             data: vec![[0.25, 0.5, 1.0, 1.0]; (WIDTH * HEIGHT) as usize],
@@ -1117,6 +1190,8 @@ mod heterogeneous_tests {
         identity_salt.hash(&mut identity);
         MediaPreviewFrame::from_working(
             CpuColorFrame::working(WorkingRgbaF32Frame {
+                sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
+                alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
                 width: WIDTH,
                 height: HEIGHT,
                 color_space: WORKING_SPACE,
@@ -1134,6 +1209,8 @@ mod heterogeneous_tests {
             PreviewSemanticIdentityBuilder::new(b"mondrian.preview.data-texture-plan-test.v1");
         identity_salt.hash(&mut identity);
         let numeric = CpuColorFrame::working(WorkingRgbaF32Frame {
+            sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
+            alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
             width: WIDTH,
             height: HEIGHT,
             color_space: WORKING_SPACE,
@@ -1157,7 +1234,7 @@ mod heterogeneous_tests {
         identity_salt: u64,
         blend_mode: BlendMode,
     ) -> ResolvedPreviewElement {
-        let prepared_heterogeneous_route = PreparedHeterogeneousEffectRoute::prepare(
+        let prepared_effect_route = PreparedHeterogeneousEffectRoute::prepare(
             Arc::clone(&graph),
             EffectFrameExtent::new(WIDTH, HEIGHT),
             cpu_grant().graph_execution(),
@@ -1170,7 +1247,11 @@ mod heterogeneous_tests {
             blend_mode,
             transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
             effect_graph: graph,
-            prepared_heterogeneous_route,
+            prepared_effect_route: prepared_effect_route.map(|route| {
+                Box::new(
+                    mondrian_renderer::PreparedTimelinePreviewEffectRoute::Heterogeneous(*route),
+                )
+            }),
             frame_seed: identity_salt as i64,
         }
     }
@@ -1190,6 +1271,8 @@ mod heterogeneous_tests {
                 transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
                 effect_graph: graph,
                 frame_seed: 31,
+
+                processor_input_plan: None,
             },
             prepared_route: Box::new(prepared_route),
         }
@@ -1203,6 +1286,8 @@ mod heterogeneous_tests {
             transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
             effect_graph: graph,
             frame_seed,
+
+            processor_input_plan: None,
         })
     }
 
@@ -1239,6 +1324,7 @@ mod heterogeneous_tests {
         let prepared = prepare_gpu_composite_layers_with_heterogeneous_effects(
             &resolved,
             WORKING_SPACE,
+            mondrian_core::ImageSampling::UNIT_SQUARE,
             &mut TimelineCompositeScratch::default(),
             cpu_grant(),
         )
@@ -1265,7 +1351,7 @@ mod heterogeneous_tests {
             blend_mode: BlendMode::Normal,
             transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
             effect_graph: graph,
-            prepared_heterogeneous_route: None,
+            prepared_effect_route: None,
             frame_seed: 9,
         }];
 
@@ -1296,6 +1382,7 @@ mod heterogeneous_tests {
         let prepared = prepare_gpu_composite_layers_with_heterogeneous_effects(
             &resolved,
             WORKING_SPACE,
+            mondrian_core::ImageSampling::UNIT_SQUARE,
             &mut TimelineCompositeScratch::default(),
             cpu_grant(),
         )
@@ -1345,6 +1432,7 @@ mod heterogeneous_tests {
         let prepared = prepare_gpu_composite_layers_with_heterogeneous_effects(
             &[solid(Arc::clone(&graph))],
             WORKING_SPACE,
+            mondrian_core::ImageSampling::UNIT_SQUARE,
             &mut TimelineCompositeScratch::default(),
             cpu_grant(),
         )
@@ -1397,6 +1485,7 @@ mod heterogeneous_tests {
         let prepared = prepare_gpu_composite_layers_with_heterogeneous_effects(
             &[transition],
             WORKING_SPACE,
+            mondrian_core::ImageSampling::UNIT_SQUARE,
             &mut TimelineCompositeScratch::default(),
             cpu_grant(),
         )
@@ -1427,7 +1516,7 @@ mod heterogeneous_tests {
                     blend_mode,
                     transform,
                     effect_graph,
-                    prepared_heterogeneous_route,
+                    prepared_effect_route,
                     frame_seed,
                 } => ResolvedPreviewTransitionInput::Media {
                     frame,
@@ -1435,7 +1524,7 @@ mod heterogeneous_tests {
                     blend_mode,
                     transform,
                     effect_graph,
-                    prepared_heterogeneous_route,
+                    prepared_effect_route,
                     frame_seed,
                 },
                 _ => unreachable!("media helper"),
@@ -1447,7 +1536,7 @@ mod heterogeneous_tests {
                     blend_mode,
                     transform,
                     effect_graph,
-                    prepared_heterogeneous_route,
+                    prepared_effect_route,
                     frame_seed,
                 } => ResolvedPreviewTransitionInput::Media {
                     frame,
@@ -1455,7 +1544,7 @@ mod heterogeneous_tests {
                     blend_mode,
                     transform,
                     effect_graph,
-                    prepared_heterogeneous_route,
+                    prepared_effect_route,
                     frame_seed,
                 },
                 _ => unreachable!("media helper"),
@@ -1465,6 +1554,7 @@ mod heterogeneous_tests {
         let prepared = prepare_gpu_composite_layers_with_heterogeneous_effects(
             &[transition],
             WORKING_SPACE,
+            mondrian_core::ImageSampling::UNIT_SQUARE,
             &mut TimelineCompositeScratch::default(),
             cpu_grant(),
         )

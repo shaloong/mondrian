@@ -10,7 +10,6 @@ use mondrian_media::{
     DecodedGpuFrameHandleKind, DecodedVideoSurfaceFormat, PreviewNativeDecodedFrame,
 };
 use parking_lot::Mutex;
-use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -67,33 +66,8 @@ pub enum ColorFrameResidency {
     Gpu,
 }
 
-/// Association of RGB samples with linear coverage alpha.
-///
-/// Alpha is never color-managed. This value is nevertheless part of the frame
-/// contract because filtering and compositing must know whether RGB is stored
-/// independently from coverage or already multiplied by it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ColorFrameAlpha {
-    /// RGB is independent of alpha and alpha carries coverage.
-    StraightCoverage,
-    /// RGB has been multiplied by coverage alpha.
-    PremultipliedCoverage,
-    /// Every pixel is guaranteed fully opaque.
-    Opaque,
-}
-
-impl ColorFrameAlpha {
-    /// Return whether RGB is stored premultiplied by coverage.
-    pub const fn is_premultiplied(self) -> bool {
-        matches!(self, Self::PremultipliedCoverage)
-    }
-
-    /// Return whether this contract can be consumed as straight RGB without conversion.
-    pub const fn is_straight_compatible(self) -> bool {
-        matches!(self, Self::StraightCoverage | Self::Opaque)
-    }
-}
+// Core owns this contract across Media, Effects, rendering and artifacts.
+pub use mondrian_core::ColorFrameAlpha;
 
 /// Color identity carried by a renderer frame.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -1503,6 +1477,20 @@ enum GpuColorFrameUploadPayload {
 }
 
 impl GpuColorFrameUploadPayload {
+    // Called only after exact byte-length admission; Float32's scalar storage
+    // therefore contains complete RGBA pixels. All variants retain their Arc.
+    fn float_pixels(&self) -> Option<&[[f32; 4]]> {
+        match self {
+            Self::Bytes(_) | Self::Unorm16(_) => None,
+            Self::Float32(samples) => Some(bytemuck::cast_slice(samples.as_slice())),
+            Self::EncodedRgba32(frame) => Some(frame.data.as_slice()),
+            Self::WorkingRgba32(frame) | Self::DataTextureRgba32(frame) => {
+                Some(frame.data.as_slice())
+            }
+            Self::AlphaMaskRgba32(samples) => Some(samples.as_slice()),
+        }
+    }
+
     fn bytes(&self) -> &[u8] {
         match self {
             Self::Bytes(bytes) => bytes.as_slice(),
@@ -1710,6 +1698,14 @@ impl GpuColorFrameUploadPlan {
                 actual: payload.bytes().len(),
             });
         }
+        if let Some(pixels) = payload.float_pixels() {
+            mondrian_effects::validate_float32_frame_storage(
+                mondrian_effects::EffectFrameExtent::new(descriptor.width, descriptor.height),
+                descriptor.alpha,
+                pixels,
+            )
+            .map_err(GpuColorFrameUploadError::FrameContract)?;
+        }
         Ok(Self {
             handle,
             texture_format,
@@ -1820,6 +1816,8 @@ impl GpuColorFrameUploader {
 /// Error returned when a CPU color frame cannot be packed for GPU upload.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GpuColorFrameUploadError {
+    /// Float32 pixels contradict their exact extent, finite-value or alpha contract.
+    FrameContract(mondrian_effects::EffectFloatFrameError),
     /// The requested texture format cannot represent a CPU linear float frame yet.
     UnsupportedCpuFloatTextureFormat {
         /// Requested texture format.
@@ -3387,7 +3385,7 @@ impl CpuColorFrame {
             domain: ColorFrameDomain::Working,
             encoding: ColorFrameEncoding::LinearFloat,
             residency: ColorFrameResidency::Cpu,
-            alpha: ColorFrameAlpha::StraightCoverage,
+            alpha: frame.alpha,
         };
         Self { descriptor, frame: Arc::new(frame) }
     }
@@ -3399,6 +3397,7 @@ impl CpuColorFrame {
 
     pub(crate) fn set_alpha_contract(&mut self, alpha: ColorFrameAlpha) {
         self.descriptor.alpha = alpha;
+        Arc::make_mut(&mut self.frame).alpha = alpha;
     }
 
     /// Borrow the underlying linear-light frame.
@@ -3749,10 +3748,16 @@ impl LinearFloatSource {
     /// Convert to a working-space [`CpuColorFrame`] without any u8
     /// quantization. The caller must ensure the data is already in the target
     /// working color space.
-    pub fn to_working_frame(self, working_color_space: WorkingColorSpace) -> CpuColorFrame {
+    pub fn to_working_frame(
+        self,
+        working_color_space: WorkingColorSpace,
+        sampling: mondrian_core::ImageSampling,
+    ) -> CpuColorFrame {
         let pixels: Vec<[f32; 4]> =
             self.data.chunks_exact(4).map(|c| [c[0], c[1], c[2], c[3]]).collect();
         let frame = WorkingRgbaF32Frame {
+            sampling,
+            alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
             width: self.descriptor.width,
             height: self.descriptor.height,
             data: pixels,
@@ -5253,9 +5258,300 @@ mod tests {
         assert_eq!(table.len(), 0);
     }
 
+    mod gpu_float_upload_admission_tests {
+        use super::*;
+
+        #[derive(Clone, Copy)]
+        enum PayloadKind {
+            Working,
+            Encoded,
+            LinearSource,
+        }
+
+        fn upload(
+            kind: PayloadKind,
+            pixel: [f32; 4],
+        ) -> Result<GpuColorFrameUploadPlan, GpuColorFrameUploadError> {
+            let id = GpuColorFrameId::from_raw(998);
+            match kind {
+                PayloadKind::Working => {
+                    let frame = LinearFloatSource::new(
+                        1,
+                        1,
+                        WorkingColorSpace::LinearRec709,
+                        pixel.to_vec(),
+                    )
+                    .to_working_frame(
+                        WorkingColorSpace::LinearRec709,
+                        mondrian_core::ImageSampling::UNIT_SQUARE,
+                    );
+                    GpuColorFrameUploadPlan::from_cpu_color_frame(
+                        id,
+                        &frame,
+                        GpuColorFrameTextureFormat::Rgba32Float,
+                        "finite-working",
+                    )
+                }
+                PayloadKind::Encoded => {
+                    let frame = CpuEncodedFloatColorFrame::source_flat_rgba_f32(
+                        1,
+                        1,
+                        ColorSpace::Rec709,
+                        pixel.to_vec(),
+                    );
+                    GpuColorFrameUploadPlan::from_cpu_encoded_float_frame(
+                        id,
+                        &frame,
+                        "finite-encoded",
+                    )
+                }
+                PayloadKind::LinearSource => {
+                    let frame = LinearFloatSource::new(
+                        1,
+                        1,
+                        WorkingColorSpace::LinearRec709,
+                        pixel.to_vec(),
+                    );
+                    GpuColorFrameUploadPlan::from_linear_float_source(id, &frame, "finite-source")
+                }
+            }
+        }
+
+        fn prove_positive_payloads(kind: PayloadKind) {
+            for pixel in [
+                [f32::MAX, -f32::MAX, -0.0, 0.0],
+                [7.0, -3.0, 11.0, 0.5],
+                [0.25, 0.5, 0.75, 1.0],
+            ] {
+                let plan = upload(kind, pixel)
+                    .expect("finite negative/HDR RGB with legal coverage remains usable");
+                assert_eq!(plan.bytes(), bytemuck::bytes_of(&pixel), "upload admission preserves exact raw Float32 channels without clamp or conversion");
+                assert_eq!(
+                    plan.handle.descriptor().alpha,
+                    ColorFrameAlpha::StraightCoverage
+                );
+                assert_eq!(plan.bytes_per_row, 16);
+                assert_eq!(plan.rows_per_image, 1);
+            }
+        }
+
+        fn refuses_nonfinite(kind: PayloadKind) {
+            prove_positive_payloads(kind);
+            for lane in 0..4 {
+                for invalid in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+                    let mut pixel = [0.25, 0.5, 0.75, 0.5];
+                    pixel[lane] = invalid;
+                    assert!(upload(kind, pixel).is_err(), "GPU float upload must refuse nonfinite lane {lane} before a plan is published");
+                }
+            }
+        }
+
+        fn refuses_invalid_coverage(kind: PayloadKind) {
+            prove_positive_payloads(kind);
+            for alpha in [-0.125, 1.125] {
+                assert!(
+                    upload(kind, [7.0, -3.0, 11.0, alpha]).is_err(),
+                    "StraightCoverage descriptor cannot admit alpha {alpha}"
+                );
+            }
+        }
+
+        #[test]
+        fn gpu_float_upload_working_refuses_nonfinite_channels() {
+            refuses_nonfinite(PayloadKind::Working);
+        }
+
+        #[test]
+        fn gpu_float_upload_working_refuses_out_of_range_coverage() {
+            refuses_invalid_coverage(PayloadKind::Working);
+        }
+
+        #[test]
+        fn gpu_float_upload_encoded_refuses_nonfinite_channels() {
+            refuses_nonfinite(PayloadKind::Encoded);
+        }
+
+        #[test]
+        fn gpu_float_upload_encoded_refuses_out_of_range_coverage() {
+            refuses_invalid_coverage(PayloadKind::Encoded);
+        }
+
+        #[test]
+        fn gpu_float_upload_linear_source_refuses_nonfinite_channels() {
+            refuses_nonfinite(PayloadKind::LinearSource);
+        }
+
+        #[test]
+        fn gpu_float_upload_linear_source_refuses_out_of_range_coverage() {
+            refuses_invalid_coverage(PayloadKind::LinearSource);
+        }
+    }
+
+    mod gpu_float_upload_contract_tests {
+        use super::*;
+
+        fn working(alpha: ColorFrameAlpha, samples: Vec<[f32; 4]>) -> CpuColorFrame {
+            CpuColorFrame::working(WorkingRgbaF32Frame {
+                sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
+                width: samples.len() as u32,
+                height: 1,
+                color_space: WorkingColorSpace::LinearRec709,
+                alpha,
+                data: samples,
+            })
+        }
+
+        #[test]
+        fn gpu_float_upload_contract_retains_raw_float_association_without_copy() {
+            for (alpha, samples) in [
+                (ColorFrameAlpha::Opaque, vec![[f32::MAX, -2.0, -0.0, 1.0]]),
+                (
+                    ColorFrameAlpha::StraightFloat,
+                    vec![[f32::MAX, -2.0, -0.0, -0.5], [16.0, -2.0, 0.5, 1.5]],
+                ),
+                (
+                    ColorFrameAlpha::PremultipliedFloat,
+                    vec![[1.0, -2.0, -0.0, 0.0], [16.0, -2.0, 0.5, 1.5]],
+                ),
+            ] {
+                let frame = working(alpha, samples);
+                let before: Vec<_> = frame
+                    .rgba_f32()
+                    .data
+                    .iter()
+                    .flat_map(|pixel| pixel.map(f32::to_bits))
+                    .collect();
+                let plan = GpuColorFrameUploadPlan::from_cpu_color_frame(GpuColorFrameId::from_raw(700), &frame,
+                    GpuColorFrameTextureFormat::Rgba32Float, "raw-float-storage")
+                    .expect("storage upload admits finite declared Float data without granting compositor support");
+                assert_eq!(plan.handle.descriptor().alpha, alpha);
+                let actual: &[f32] = bytemuck::cast_slice(plan.bytes());
+                assert_eq!(
+                    actual.iter().map(|value| value.to_bits()).collect::<Vec<_>>(),
+                    before
+                );
+                let GpuColorFrameUploadPayload::WorkingRgba32(payload) = &plan.payload else {
+                    panic!("retained working payload");
+                };
+                assert!(
+                    Arc::ptr_eq(payload, &frame.frame),
+                    "admission borrows the sole retained raster"
+                );
+            }
+        }
+
+        #[test]
+        fn gpu_float_upload_contract_refuses_actual_opaque_and_coverage_disagreement() {
+            for (alpha, value) in [
+                (ColorFrameAlpha::Opaque, 0.5),
+                (ColorFrameAlpha::StraightCoverage, -0.5),
+            ] {
+                let frame = working(alpha, vec![[0.25, 0.5, 0.75, value]]);
+                let rejected = GpuColorFrameUploadPlan::from_cpu_color_frame(
+                    GpuColorFrameId::from_raw(701),
+                    &frame,
+                    GpuColorFrameTextureFormat::Rgba32Float,
+                    "invalid-alpha",
+                );
+                assert!(
+                    matches!(rejected, Err(GpuColorFrameUploadError::FrameContract(
+                    mondrian_effects::EffectFloatFrameError::InvalidSample { index: 0, alpha: actual })) if actual == alpha)
+                );
+            }
+        }
+
+        #[test]
+        fn gpu_float_upload_contract_data_and_alpha_mask_use_canonical_borrowed_storage() {
+            let samples = vec![[f32::MAX, -2.0, -0.0, 0.0], [16.0, -2.0, 0.5, 1.0]];
+            let frame = working(ColorFrameAlpha::StraightCoverage, samples.clone());
+            let data_plan = GpuColorFrameUploadPlan::from_cpu_data_texture(
+                GpuColorFrameId::from_raw(702),
+                &frame,
+                "data",
+            )
+            .expect("non-color numeric data has no invented Effects working identity");
+            assert_eq!(
+                data_plan.handle.descriptor().domain,
+                ColorFrameDomain::DataTexture
+            );
+            assert_eq!(
+                data_plan.handle.descriptor().color_space,
+                ColorFrameSpace::NonColorData
+            );
+            let GpuColorFrameUploadPayload::DataTextureRgba32(payload) = &data_plan.payload else {
+                panic!("retained data payload");
+            };
+            assert!(Arc::ptr_eq(payload, &frame.frame));
+            let mask = CpuAlphaMaskFrame::new(2, 1, samples);
+            let mask_plan = GpuColorFrameUploadPlan::from_cpu_alpha_mask_frame(
+                GpuColorFrameId::from_raw(703),
+                &mask,
+                "mask",
+            )
+            .expect("finite alpha mask storage is admitted with its real non-color descriptor");
+            assert_eq!(
+                mask_plan.handle.descriptor().domain,
+                ColorFrameDomain::AlphaMask
+            );
+            let GpuColorFrameUploadPayload::AlphaMaskRgba32(payload) = &mask_plan.payload else {
+                panic!("retained mask payload");
+            };
+            assert!(Arc::ptr_eq(payload, &mask.samples));
+            for sample in [[f32::NAN, 0.0, 0.0, 0.5], [0.0, 0.0, 0.0, 1.5]] {
+                let invalid_data = working(ColorFrameAlpha::StraightCoverage, vec![sample]);
+                let invalid_mask = CpuAlphaMaskFrame::new(1, 1, vec![sample]);
+                assert!(matches!(
+                    GpuColorFrameUploadPlan::from_cpu_data_texture(
+                        GpuColorFrameId::from_raw(704),
+                        &invalid_data,
+                        "invalid-data"
+                    ),
+                    Err(GpuColorFrameUploadError::FrameContract(_))
+                ));
+                assert!(matches!(
+                    GpuColorFrameUploadPlan::from_cpu_alpha_mask_frame(
+                        GpuColorFrameId::from_raw(705),
+                        &invalid_mask,
+                        "invalid-mask"
+                    ),
+                    Err(GpuColorFrameUploadError::FrameContract(_))
+                ));
+            }
+        }
+
+        #[test]
+        fn gpu_float_upload_contract_scalar_shape_refuses_before_pixel_cast() {
+            let handle = GpuColorFrameHandle::new(
+                GpuColorFrameId::from_raw(706),
+                ColorFrameDescriptor {
+                    width: 1,
+                    height: 1,
+                    color_space: WorkingColorSpace::LinearRec709.into(),
+                    domain: ColorFrameDomain::Source,
+                    encoding: ColorFrameEncoding::LinearFloat,
+                    residency: ColorFrameResidency::Gpu,
+                    alpha: ColorFrameAlpha::StraightCoverage,
+                },
+                GpuColorFrameTextureFormat::Rgba32Float,
+                "partial-scalars",
+            )
+            .expect("valid source handle");
+            let rejected = GpuColorFrameUploadPlan::new(
+                handle,
+                GpuColorFrameUploadPayload::Float32(Arc::new(vec![0.25; 5])),
+            );
+            assert!(matches!(
+                rejected,
+                Err(GpuColorFrameUploadError::ByteLengthMismatch { expected: 16, actual: 20 })
+            ));
+        }
+    }
+
     #[test]
     fn gpu_color_frame_upload_plan_packs_cpu_linear_float_as_rgba32float() {
         let frame = CpuColorFrame::working(WorkingRgbaF32Frame {
+            sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
+            alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
             width: 2,
             height: 1,
             color_space: WorkingColorSpace::LinearRec709,
@@ -5601,6 +5897,59 @@ mod tests {
     }
 
     #[test]
+    fn gpu_color_frame_upload_plan_preserves_cpu_encoded_rgba16_samples() {
+        // Adjacent full-range u16 samples are valid UNORM values even when
+        // their packed bytes would represent a non-finite f32.
+        let samples = Arc::new(vec![
+            1_u16,
+            0x00ff,
+            0x0100,
+            u16::MAX,
+            u16::MAX,
+            u16::MAX,
+            0x8001,
+            0x1234,
+        ]);
+        let frame = CpuEncodedUnorm16ColorFrame::source_shared(
+            2,
+            1,
+            ColorSpace::Rec709,
+            Arc::clone(&samples),
+        );
+
+        let plan = GpuColorFrameUploadPlan::from_cpu_encoded_unorm16_frame(
+            GpuColorFrameId::from_raw(204),
+            &frame,
+            "encoded-unorm16-source-upload",
+        )
+        .expect("packed UNORM16 upload plan");
+
+        assert_eq!(
+            plan.handle.descriptor(),
+            frame.descriptor().with_residency(ColorFrameResidency::Gpu)
+        );
+        assert_eq!(plan.texture_format, GpuColorFrameTextureFormat::Rgba16Unorm);
+        assert_eq!(plan.bytes_per_row, 2 * 8);
+        assert_eq!(plan.rows_per_image, 1);
+        let expected_bytes =
+            samples.iter().flat_map(|sample| sample.to_le_bytes()).collect::<Vec<_>>();
+        assert_eq!(plan.bytes(), expected_bytes.as_slice());
+        assert_eq!(plan.clone().bytes(), expected_bytes.as_slice());
+        #[cfg(target_endian = "little")]
+        {
+            let GpuColorFrameUploadPayload::Unorm16(payload) = &plan.payload else {
+                panic!("little-endian RGBA16 upload must retain u16 payload");
+            };
+            assert!(Arc::ptr_eq(payload, &samples));
+            let cloned_plan = plan.clone();
+            let GpuColorFrameUploadPayload::Unorm16(cloned_payload) = &cloned_plan.payload else {
+                panic!("cloned RGBA16 upload must retain u16 payload");
+            };
+            assert!(Arc::ptr_eq(payload, cloned_payload));
+        }
+    }
+
+    #[test]
     fn linear_float_source_upload_preserves_extended_range_and_shares_payload() {
         let samples = Arc::new(vec![-0.25, 0.18, 2.0, 1.0, 4.0, -1.0, 0.5, 0.25]);
         let frame =
@@ -5664,6 +6013,8 @@ mod tests {
     #[test]
     fn cpu_color_frame_clone_shares_linear_payload() {
         let frame = CpuColorFrame::working(WorkingRgbaF32Frame {
+            sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
+            alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
             width: 2,
             height: 1,
             color_space: WorkingColorSpace::LinearRec709,
@@ -5726,6 +6077,8 @@ mod tests {
     #[test]
     fn gpu_color_frame_upload_plan_rejects_unsupported_cpu_formats() {
         let frame = CpuColorFrame::working(WorkingRgbaF32Frame {
+            sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
+            alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
             width: 1,
             height: 1,
             color_space: WorkingColorSpace::LinearRec709,

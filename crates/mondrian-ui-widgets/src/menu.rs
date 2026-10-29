@@ -4,6 +4,7 @@
 //! Shared paint, geometry, and model primitives are consumed by
 //! `ContextMenu`, `ColorPicker` mode dropdowns, and menu bars.
 
+mod accessibility;
 mod geometry;
 mod model;
 mod paint;
@@ -24,11 +25,12 @@ pub(crate) use paint::{
     paint_submenu_arrow,
 };
 pub(crate) use popup::{
-    first_activatable_index as popup_first_activatable_index,
-    next_activatable_index as popup_next_activatable_index, root_hovered_index,
+    first_activatable_index as popup_first_activatable_index, navigate_popup, open_submenu_at,
+    root_hovered_index, PopupKeyOutcome,
 };
 
-use std::cell::Cell;
+pub(crate) use accessibility::{localize_menu_items, visit_menu_items, MenuAccessibilityIds};
+use std::cell::{Cell, OnceCell};
 
 use mondrian_editor_state::Action;
 use mondrian_ui_core::types::*;
@@ -52,8 +54,10 @@ use geometry::{
 /// keyboard navigation skips disabled items and separators.
 pub struct Dropdown {
     id: WidgetId,
+    inspection_identity: crate::control_inspection::ControlInspectionIdentity,
     label: String,
     items: Vec<MenuItem>,
+    accessibility_ids: OnceCell<Vec<MenuAccessibilityIds>>,
     bounds: Rect,
     enabled: bool,
     open: bool,
@@ -76,11 +80,19 @@ pub struct Dropdown {
 }
 
 impl Dropdown {
+    /// Address this control independently of labels, ordering and current value.
+    pub fn with_control_inspection_key(mut self, key: Option<String>) -> Self {
+        self.inspection_identity.set_key(key);
+        self
+    }
+
     pub fn new(label: impl Into<String>, items: Vec<MenuItem>) -> Self {
         Self {
             id: WidgetId::new(),
+            inspection_identity: crate::control_inspection::ControlInspectionIdentity::default(),
             label: label.into(),
             items,
+            accessibility_ids: OnceCell::new(),
             bounds: Rect::ZERO,
             enabled: true,
             open: false,
@@ -147,6 +159,7 @@ impl Dropdown {
     pub fn set_model(&mut self, label: impl Into<String>, items: Vec<MenuItem>) {
         self.set_label(label);
         self.items = items;
+        self.accessibility_ids.take();
         self.pressed_index = None;
         self.submenu_chain.clear();
         self.hover_depth = None;
@@ -155,17 +168,7 @@ impl Dropdown {
 
     /// Reformat keyed row labels without changing open, focus, or submenu state.
     pub fn localize_item_labels(&mut self, mut translate: impl FnMut(&str) -> String) {
-        fn visit(items: &mut [MenuItem], translate: &mut impl FnMut(&str) -> String) {
-            for item in items {
-                if let Some(message_id) = &item.message_id {
-                    item.label = translate(message_id);
-                }
-                if let MenuItemKind::Submenu { children } = &mut item.kind {
-                    visit(children, translate);
-                }
-            }
-        }
-        visit(&mut self.items, &mut translate);
+        localize_menu_items(&mut self.items, &mut translate);
     }
 
     /// Select the visual style for the closed trigger.
@@ -191,7 +194,7 @@ impl Dropdown {
         while i < items_to_check.len() {
             let item = items_to_check[i];
             if item.action().is_some_and(|candidate| candidate == action) {
-                return Some(item.checked);
+                return item.checked;
             }
             if let MenuItemKind::Submenu { ref children } = item.kind {
                 items_to_check.extend(children);
@@ -400,10 +403,6 @@ impl Dropdown {
         root_hovered_index(self.hover_depth)
     }
 
-    fn next_activatable_index(&self, direction: i32) -> Option<usize> {
-        popup_next_activatable_index(&self.items, self.hovered_index(), direction)
-    }
-
     fn ensure_hover_visible(&mut self) {
         self.scroll_offset = scroll_to_visible(
             self.hovered_index(),
@@ -412,18 +411,6 @@ impl Dropdown {
             self.items.len(),
             self.item_height(),
         );
-    }
-
-    fn activate_hovered(&mut self, ctx: &mut EventContext) -> bool {
-        let Some(index) = self.hovered_index() else {
-            return false;
-        };
-        let Some(activation) = menu_item_activation(&self.items[index]) else {
-            return false;
-        };
-        apply_menu_activation(activation, ctx);
-        self.close(ctx);
-        true
     }
 
     fn open(&mut self, ctx: &mut EventContext) {
@@ -458,7 +445,7 @@ impl Dropdown {
 fn set_checked_recursive(items: &mut [MenuItem], action: &Action, checked: bool) {
     for item in items.iter_mut() {
         if item.action().is_some_and(|candidate| candidate == action) {
-            item.checked = checked;
+            item.checked = Some(checked);
         }
         if let MenuItemKind::Submenu { ref mut children } = item.kind {
             set_checked_recursive(children, action, checked);
@@ -466,9 +453,16 @@ fn set_checked_recursive(items: &mut [MenuItem], action: &Action, checked: bool)
     }
 }
 
-fn apply_menu_activation(activation: MenuItemCommand, ctx: &mut EventContext) {
+fn apply_menu_activation(activation: MenuItemCommand, ctx: &mut EventContext, command_menu: bool) {
     match activation {
-        MenuItemCommand::Action(action) => (ctx.dispatch)(action),
+        MenuItemCommand::Action(action) => {
+            if command_menu {
+                ctx.request_menu_action(action);
+            } else {
+                (ctx.dispatch)(action);
+            }
+        }
+        MenuItemCommand::Focused(command) => ctx.request_edit_command(command),
         MenuItemCommand::Local(_) | MenuItemCommand::None => {}
     }
 }
@@ -491,6 +485,14 @@ impl Widget for Dropdown {
     }
 
     fn event(&mut self, event: &UiEvent, ctx: &mut EventContext) -> EventResult {
+        if matches!(event, UiEvent::FocusLost) {
+            self.focused = false;
+            self.focus_visible = false;
+            if self.open {
+                self.close(ctx);
+            }
+            return EventResult::Handled;
+        }
         if !self.enabled {
             if self.open {
                 self.close(ctx);
@@ -499,7 +501,31 @@ impl Widget for Dropdown {
             self.focus_visible = false;
             return EventResult::Ignored;
         }
+        if let UiEvent::FocusGained { source } = event {
+            self.focused = true;
+            self.focus_visible = source.is_focus_visible();
+            return EventResult::Handled;
+        }
         if self.open {
+            if self.is_command_menu()
+                && let UiEvent::KeyDown { key, modifiers } = event
+                && (modifiers.ctrl ^ modifiers.meta)
+                && !modifiers.alt
+                && !modifiers.shift
+            {
+                use mondrian_ui_core::widget::EditCommand;
+                let command = match key {
+                    KeyCode::X => Some(EditCommand::Cut),
+                    KeyCode::C => Some(EditCommand::Copy),
+                    KeyCode::V => Some(EditCommand::Paste),
+                    _ => None,
+                };
+                if let Some(command) = command {
+                    self.close(ctx);
+                    ctx.request_edit_command(command);
+                    return EventResult::Handled;
+                }
+            }
             match event {
                 UiEvent::MouseDown { position, button: MouseButton::Left, .. } => {
                     if self.trigger_rect().contains(*position) {
@@ -542,16 +568,35 @@ impl Widget for Dropdown {
                         if let Some(sub_rect) = self.menu_rect_at_depth(depth)
                             && sub_rect.contains(*position)
                         {
-                            let metrics = MenuMetrics::current();
-                            let rel_y = position.y - sub_rect.y - metrics.popup_padding;
-                            let sub_item = (rel_y / self.item_height()).floor().max(0.0) as usize;
-                            if let Some(children) = self.children_at(&self.submenu_chain[..depth])
-                                && let Some(child) = children.get(sub_item)
-                                && let Some(activation) = menu_item_activation(child)
-                            {
-                                apply_menu_activation(activation, ctx);
+                            let selected = self.children_at(&self.submenu_chain[..depth]).and_then(
+                                |children| {
+                                    item_at(
+                                        sub_rect,
+                                        children.len(),
+                                        self.item_height(),
+                                        0.0,
+                                        *position,
+                                    )
+                                },
+                            );
+                            if let Some(index) = selected {
+                                if open_submenu_at(
+                                    &self.items,
+                                    &mut self.submenu_chain,
+                                    &mut self.hover_depth,
+                                    depth,
+                                    index,
+                                ) {
+                                    ctx.request_repaint();
+                                } else if let Some(command) = self
+                                    .children_at(&self.submenu_chain[..depth])
+                                    .and_then(|children| children.get(index))
+                                    .and_then(menu_item_activation)
+                                {
+                                    apply_menu_activation(command, ctx, self.is_command_menu());
+                                    self.close(ctx);
+                                }
                             }
-                            self.close(ctx);
                             return EventResult::Handled;
                         }
                     }
@@ -561,10 +606,18 @@ impl Widget for Dropdown {
                             // Don't close if the clicked item is a submenu
                             if self.items[released].is_submenu() {
                                 self.pressed_index = None;
+                                open_submenu_at(
+                                    &self.items,
+                                    &mut self.submenu_chain,
+                                    &mut self.hover_depth,
+                                    0,
+                                    released,
+                                );
+                                ctx.request_repaint();
                             } else if let Some(activation) =
                                 menu_item_activation(&self.items[released])
                             {
-                                apply_menu_activation(activation, ctx);
+                                apply_menu_activation(activation, ctx, self.is_command_menu());
                                 self.close(ctx);
                             } else {
                                 self.pressed_index = None;
@@ -650,44 +703,30 @@ impl Widget for Dropdown {
                     }
                     return EventResult::Handled;
                 }
-                UiEvent::KeyDown { key: KeyCode::Escape, .. } => {
-                    self.close(ctx);
-                    return EventResult::Handled;
-                }
-                UiEvent::KeyDown { key: KeyCode::Down, modifiers }
-                    if *modifiers == Modifiers::none() =>
+                UiEvent::KeyDown { key, modifiers }
+                    if *modifiers == Modifiers::none() || *key == KeyCode::Escape =>
                 {
-                    self.hover_depth = self.next_activatable_index(1).map(|i| (0, i));
-                    self.ensure_hover_visible();
-                    return EventResult::Handled;
-                }
-                UiEvent::KeyDown { key: KeyCode::Up, modifiers }
-                    if *modifiers == Modifiers::none() =>
-                {
-                    self.hover_depth = self.next_activatable_index(-1).map(|i| (0, i));
-                    self.ensure_hover_visible();
-                    return EventResult::Handled;
-                }
-                UiEvent::KeyDown { key: KeyCode::Enter | KeyCode::Space, modifiers }
-                    if *modifiers == Modifiers::none() =>
-                {
-                    self.activate_hovered(ctx);
+                    match navigate_popup(
+                        &self.items,
+                        &mut self.submenu_chain,
+                        &mut self.hover_depth,
+                        *key,
+                    ) {
+                        PopupKeyOutcome::Unhandled => return EventResult::Ignored,
+                        PopupKeyOutcome::Handled => self.ensure_hover_visible(),
+                        PopupKeyOutcome::Close => self.close(ctx),
+                        PopupKeyOutcome::Activate(command) => {
+                            apply_menu_activation(command, ctx, self.is_command_menu());
+                            self.close(ctx);
+                        }
+                    }
+                    ctx.request_repaint();
                     return EventResult::Handled;
                 }
                 _ => {}
             }
         } else {
             match event {
-                UiEvent::FocusGained { source } => {
-                    self.focused = true;
-                    self.focus_visible = source.is_focus_visible();
-                    return EventResult::Handled;
-                }
-                UiEvent::FocusLost => {
-                    self.focused = false;
-                    self.focus_visible = false;
-                    return EventResult::Handled;
-                }
                 UiEvent::KeyDown {
                     key: KeyCode::Enter | KeyCode::Space | KeyCode::Down,
                     modifiers,
@@ -767,6 +806,76 @@ impl Widget for Dropdown {
 
     fn can_focus(&self) -> bool {
         self.enabled
+    }
+
+    fn is_command_menu(&self) -> bool {
+        self.trigger_style == DropdownTriggerStyle::MenuBar
+    }
+
+    fn set_edit_command_availability(&mut self, availability: [Option<bool>; 3]) {
+        fn project(items: &mut [MenuItem], availability: [Option<bool>; 3]) {
+            for item in items {
+                if let MenuItemCommand::Focused(command) = item.command {
+                    item.context_enabled = availability[command.index()];
+                }
+                if let MenuItemKind::Submenu { children } = &mut item.kind {
+                    project(children, availability);
+                }
+            }
+        }
+        project(&mut self.items, availability);
+    }
+
+    fn visit_accessibility_nodes(&self, visitor: &mut dyn FnMut(AccessibilityNode)) {
+        if let Some(node) = self.accessibility() {
+            visitor(node);
+        }
+        if self.open {
+            let ids = self
+                .accessibility_ids
+                .get_or_init(|| MenuAccessibilityIds::for_items(&self.items));
+            visit_menu_items(
+                &self.items,
+                ids,
+                self.id,
+                &self.submenu_chain,
+                self.hover_depth,
+                0,
+                visitor,
+            );
+        }
+    }
+
+    fn set_control_inspection_key(&mut self, key: Option<String>) -> bool {
+        self.inspection_identity.set_key(key);
+        true
+    }
+
+    fn control_inspection_state(&self) -> Option<mondrian_ui_core::ControlInspectionState> {
+        self.inspection_identity.inspect(
+            self.id,
+            AccessibilityRole::Menu,
+            self.focused,
+            self.focus_visible,
+            self.enabled && !self.open,
+        )
+    }
+
+    fn restore_control_inspection_state(
+        &mut self,
+        state: &mondrian_ui_core::ControlInspectionState,
+    ) -> bool {
+        let Some((id, focused, focus_visible)) = self.inspection_identity.restore(
+            state,
+            AccessibilityRole::Menu,
+            self.enabled && !self.open,
+        ) else {
+            return false;
+        };
+        self.id = id;
+        self.focused = focused;
+        self.focus_visible = focus_visible;
+        true
     }
 
     fn accessibility(&self) -> Option<AccessibilityNode> {
@@ -995,22 +1104,42 @@ mod tests {
 
     #[test]
     fn dropdown_updates_checked_state_for_matching_action() {
+        use mondrian_ui_core::widget::collect_accessibility_nodes;
         let mut d = Dropdown::new(
             "View",
             vec![
-                MenuItem::new("Viewer", Action::TogglePanel(PanelKind::Viewer)),
-                MenuItem::new("Timeline", Action::TogglePanel(PanelKind::Timeline)),
+                MenuItem::new("Viewer", Action::TogglePanel(PanelKind::Viewer)).checked(false),
+                MenuItem::new("Timeline", Action::TogglePanel(PanelKind::Timeline)).checked(false),
+                MenuItem::new("Save", Action::SaveProject),
             ],
         );
-
+        d.open = true;
+        let before = collect_accessibility_nodes(&d);
+        assert_eq!(before[1].state.checked, Some(false));
+        assert_eq!(before[2].state.checked, Some(false));
+        assert_eq!(before[3].state.checked, None);
         d.set_checked_for_action(&Action::TogglePanel(PanelKind::Viewer), true);
-
         assert_eq!(
             d.checked_for_action(&Action::TogglePanel(PanelKind::Viewer)),
             Some(true)
         );
         assert_eq!(
             d.checked_for_action(&Action::TogglePanel(PanelKind::Timeline)),
+            Some(false)
+        );
+        assert_eq!(d.checked_for_action(&Action::SaveProject), None);
+        assert_eq!(d.checked_for_action(&Action::CloseProject), None);
+        let after = collect_accessibility_nodes(&d);
+        assert_eq!(
+            before.iter().map(|node| node.widget_id).collect::<Vec<_>>(),
+            after.iter().map(|node| node.widget_id).collect::<Vec<_>>()
+        );
+        assert_eq!(after[1].state.checked, Some(true));
+        assert_eq!(after[2].state.checked, Some(false));
+        assert_eq!(after[3].state.checked, None);
+        d.set_checked_for_action(&Action::TogglePanel(PanelKind::Viewer), false);
+        assert_eq!(
+            d.checked_for_action(&Action::TogglePanel(PanelKind::Viewer)),
             Some(false)
         );
     }
@@ -1163,6 +1292,38 @@ mod tests {
         assert!(!d.can_focus());
         assert!(ctx.requests.pointer_capture.is_none());
         assert!(cell.into_inner().is_empty());
+    }
+
+    #[test]
+    fn dropdown_accessibility_identity_follows_model_lifetime_without_extra_tab_targets() {
+        use mondrian_ui_core::widget::collect_accessibility_nodes;
+        let mut menu = Dropdown::new(
+            "文件",
+            vec![MenuItem::new("保存", Action::SaveProject).with_message_id("save")],
+        );
+        let closed = collect_accessibility_nodes(&menu);
+        assert_eq!(closed.len(), 1);
+        assert!(menu.accessibility_ids.get().is_none());
+        menu.open = true;
+        let before = collect_accessibility_nodes(&menu);
+        assert_eq!(before.len(), 2);
+        assert_eq!(before[1].parent_id, Some(menu.id()));
+        assert_eq!(before[1].state.checked, None);
+        assert_eq!(before[1].focus_order, None);
+        assert_eq!(menu.child_count(), 0);
+        menu.set_label("File");
+        menu.localize_item_labels(|_| "Save".to_owned());
+        let relabeled = collect_accessibility_nodes(&menu);
+        assert_eq!(before[1].widget_id, relabeled[1].widget_id);
+        assert_eq!(relabeled[1].name.as_deref(), Some("Save"));
+        let other = Dropdown::new("File", vec![]);
+        assert_ne!(other.id(), menu.id());
+        menu.set_model("File", vec![MenuItem::new("保存", Action::CloseProject)]);
+        let replaced = collect_accessibility_nodes(&menu);
+        assert_eq!(before[0].widget_id, replaced[0].widget_id);
+        assert_ne!(before[1].widget_id, replaced[1].widget_id);
+        assert_eq!(replaced[0].focus_order, Some(0));
+        assert_eq!(replaced[1].focus_order, None);
     }
 
     #[test]
@@ -1492,51 +1653,86 @@ mod tests {
     }
 
     #[test]
-    fn dropdown_scrolled_last_row_dispatches_its_action() {
+    fn dropdown_enter_without_highlight_cannot_run_the_first_command() {
+        let mut menu = Dropdown::new("Edit", vec![MenuItem::new("Cut", Action::Cut)]);
+        menu.layout(Rect::new(0.0, 0.0, 120.0, 28.0));
+        let mut f = DummyFocus;
+        let mut s = DummyShortcut;
+        let mut t = DummyTooltip;
         let actions = RefCell::new(Vec::new());
         let dispatch = |action| actions.borrow_mut().push(action);
-        let mut focus = DummyFocus;
-        let mut shortcut = DummyShortcut;
-        let mut tooltip = DummyTooltip;
-        let mut ctx = make_event_ctx(&mut focus, &mut shortcut, &mut tooltip, &dispatch);
-        let mut items: Vec<MenuItem> = (0..7)
-            .map(|index| MenuItem::new(format!("Item {index}"), Action::SaveProject))
-            .collect();
-        items.push(MenuItem::new("60 fps", Action::Pause));
-        let mut dropdown = Dropdown::new("Frame rate", items).with_max_visible_items(7);
-        dropdown.layout(Rect::new(0.0, 0.0, 120.0, 28.0));
-        dropdown.open_menu(&mut ctx);
+        let mut ctx = make_event_ctx(&mut f, &mut s, &mut t, &dispatch);
+        menu.open_menu(&mut ctx);
+        menu.event(
+            &UiEvent::MouseMove {
+                position: Point::new(500.0, 500.0),
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        assert!(menu.hover_depth.is_none(), "pointer left every menu row");
+        menu.event(
+            &UiEvent::KeyDown { key: KeyCode::Enter, modifiers: Modifiers::none() },
+            &mut ctx,
+        );
+        assert!(
+            actions.borrow().is_empty(),
+            "no highlighted row means no selected command"
+        );
+        assert!(menu.is_open(), "refused activation keeps the menu open");
+    }
 
-        dropdown.event(
-            &UiEvent::MouseWheel {
-                delta: 999.0,
-                position: dropdown.menu_rect().center(),
-                modifiers: Modifiers::none(),
-            },
+    #[test]
+    fn dropdown_keyboard_activation_enters_submenu_without_running_first_command() {
+        let mut menu = Dropdown::new(
+            "File",
+            vec![MenuItem::submenu(
+                "New",
+                vec![
+                    MenuItem::new("Video Track", Action::Cut),
+                    MenuItem::new("Disabled", Action::Undo).disabled(),
+                    MenuItem::separator(),
+                    MenuItem::new("Audio Track", Action::Paste),
+                ],
+            )],
+        );
+        menu.layout(Rect::new(0.0, 0.0, 120.0, 28.0));
+        let mut f = DummyFocus;
+        let mut s = DummyShortcut;
+        let mut t = DummyTooltip;
+        let actions = RefCell::new(Vec::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut ctx = make_event_ctx(&mut f, &mut s, &mut t, &dispatch);
+        menu.open_menu(&mut ctx);
+        assert_eq!(
+            menu.event(
+                &UiEvent::KeyDown { key: KeyCode::Enter, modifiers: Modifiers::none() },
+                &mut ctx
+            ),
+            EventResult::Handled
+        );
+        assert!(
+            menu.is_open(),
+            "Enter on a submenu opens it; it cannot execute the first child"
+        );
+        assert!(
+            actions.borrow().is_empty(),
+            "submenu navigation cannot dispatch an author command"
+        );
+        menu.event(
+            &UiEvent::KeyDown { key: KeyCode::Down, modifiers: Modifiers::none() },
             &mut ctx,
         );
-        assert!(dropdown.scroll_offset > 0.0);
-        let last_row = dropdown.item_rect(7).center();
-        assert!(dropdown.menu_rect().contains(last_row));
-        dropdown.event(
-            &UiEvent::MouseDown {
-                position: last_row,
-                button: MouseButton::Left,
-                modifiers: Modifiers::none(),
-            },
+        menu.event(
+            &UiEvent::KeyDown { key: KeyCode::Enter, modifiers: Modifiers::none() },
             &mut ctx,
         );
-        dropdown.event(
-            &UiEvent::MouseUp {
-                position: last_row,
-                button: MouseButton::Left,
-                modifiers: Modifiers::none(),
-            },
-            &mut ctx,
+        assert!(!menu.is_open());
+        assert_eq!(
+            actions.borrow().as_slice(),
+            &[Action::Paste],
+            "activate the selected child after skipping disabled/separator rows"
         );
-
-        assert_eq!(*actions.borrow(), [Action::Pause]);
-        assert!(!dropdown.is_open());
     }
 
     #[test]
@@ -2249,5 +2445,53 @@ mod tests {
             encoder.rects.iter().any(|rect| rect.height == 1.0),
             "separator should be drawn as a geometric divider"
         );
+    }
+
+    #[test]
+    fn dropdown_scrolled_last_row_dispatches_its_action() {
+        let actions = RefCell::new(Vec::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut ctx = make_event_ctx(&mut focus, &mut shortcut, &mut tooltip, &dispatch);
+        let mut items: Vec<MenuItem> = (0..7)
+            .map(|index| MenuItem::new(format!("Item {index}"), Action::SaveProject))
+            .collect();
+        items.push(MenuItem::new("60 fps", Action::Pause));
+        let mut dropdown = Dropdown::new("Frame rate", items).with_max_visible_items(7);
+        dropdown.layout(Rect::new(0.0, 0.0, 120.0, 28.0));
+        dropdown.open_menu(&mut ctx);
+
+        dropdown.event(
+            &UiEvent::MouseWheel {
+                delta: 999.0,
+                position: dropdown.menu_rect().center(),
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        assert!(dropdown.scroll_offset > 0.0);
+        let last_row = dropdown.item_rect(7).center();
+        assert!(dropdown.menu_rect().contains(last_row));
+        dropdown.event(
+            &UiEvent::MouseDown {
+                position: last_row,
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        dropdown.event(
+            &UiEvent::MouseUp {
+                position: last_row,
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+
+        assert_eq!(*actions.borrow(), [Action::Pause]);
+        assert!(!dropdown.is_open());
     }
 }

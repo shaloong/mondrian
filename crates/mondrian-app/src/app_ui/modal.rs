@@ -20,9 +20,15 @@ use crate::app_ui::project_settings_dialog::{AppUiProjectSettingsDraft, ProjectS
 use crate::app_ui::recovery_dialog::{RecoveryConfirmationDialog, RecoveryConfirmationModel};
 use crate::app_ui::sequence_settings_dialog::{AppUiSequenceSettingsDraft, SequenceSettingsDialog};
 
+use crate::app_ui::resource_dialog::ResourceDialog;
+
 /// Shell-local modal dialog.
 pub enum ShellModal {
     About(Box<AboutDialog>),
+    NativeVisualQuestion(
+        Box<crate::app_ui::native_visual_question_dialog::NativeVisualQuestionDialog>,
+    ),
+    Resource(Box<ResourceDialog>),
     InterpretAsset(Box<InterpretAssetDialog>),
     NewProject(Box<NewProjectDialog>),
     PendingClose(Box<PendingCloseDialog>),
@@ -30,9 +36,60 @@ pub enum ShellModal {
     ProjectSettings(Box<ProjectSettingsDialog>),
     Recovery(Box<RecoveryConfirmationDialog>),
     SequenceSettings(Box<SequenceSettingsDialog>),
+    MusicalTime(Box<crate::app_ui::musical_time_dialog::MusicalTimeDialog>),
 }
 
 impl ShellModal {
+    pub(crate) fn as_musical_time(
+        &self,
+    ) -> Option<&crate::app_ui::musical_time_dialog::MusicalTimeDialog> {
+        match self {
+            Self::MusicalTime(dialog) => Some(dialog),
+            _ => None,
+        }
+    }
+    pub(crate) fn as_musical_time_mut(
+        &mut self,
+    ) -> Option<&mut crate::app_ui::musical_time_dialog::MusicalTimeDialog> {
+        match self {
+            Self::MusicalTime(dialog) => Some(dialog),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn native_visual_question(
+        presentation: crate::app::preview_native_gui::NativeVisualQuestionPresentation,
+        locale: AppUiLocale,
+    ) -> Self {
+        Self::NativeVisualQuestion(Box::new(
+            crate::app_ui::native_visual_question_dialog::NativeVisualQuestionDialog::new(
+                presentation,
+                locale,
+            ),
+        ))
+    }
+
+    pub(crate) fn as_native_visual_question(
+        &self,
+    ) -> Option<&crate::app_ui::native_visual_question_dialog::NativeVisualQuestionDialog> {
+        match self {
+            Self::NativeVisualQuestion(dialog) => Some(dialog),
+            _ => None,
+        }
+    }
+    pub(crate) fn as_resource(&self) -> Option<&ResourceDialog> {
+        match self {
+            Self::Resource(dialog) => Some(dialog),
+            _ => None,
+        }
+    }
+    pub(crate) fn as_resource_mut(&mut self) -> Option<&mut ResourceDialog> {
+        match self {
+            Self::Resource(dialog) => Some(dialog),
+            _ => None,
+        }
+    }
+
     /// Build the product about modal.
     pub fn about(locale: AppUiLocale) -> Self {
         Self::About(Box::new(AboutDialog::new(locale)))
@@ -208,6 +265,8 @@ impl Widget for ShellModal {
     fn id(&self) -> WidgetId {
         match self {
             Self::About(dialog) => dialog.id(),
+            Self::NativeVisualQuestion(dialog) => dialog.id(),
+            Self::Resource(dialog) => dialog.id(),
             Self::InterpretAsset(dialog) => dialog.id(),
             Self::NewProject(dialog) => dialog.id(),
             Self::PendingClose(dialog) => dialog.id(),
@@ -215,12 +274,15 @@ impl Widget for ShellModal {
             Self::ProjectSettings(dialog) => dialog.id(),
             Self::Recovery(dialog) => dialog.id(),
             Self::SequenceSettings(dialog) => dialog.id(),
+            Self::MusicalTime(dialog) => dialog.id(),
         }
     }
 
     fn measure(&self, constraint: LayoutConstraint) -> Size {
         match self {
             Self::About(dialog) => dialog.measure(constraint),
+            Self::NativeVisualQuestion(dialog) => dialog.measure(constraint),
+            Self::Resource(dialog) => dialog.measure(constraint),
             Self::InterpretAsset(dialog) => dialog.measure(constraint),
             Self::NewProject(dialog) => dialog.measure(constraint),
             Self::PendingClose(dialog) => dialog.measure(constraint),
@@ -228,12 +290,15 @@ impl Widget for ShellModal {
             Self::ProjectSettings(dialog) => dialog.measure(constraint),
             Self::Recovery(dialog) => dialog.measure(constraint),
             Self::SequenceSettings(dialog) => dialog.measure(constraint),
+            Self::MusicalTime(dialog) => dialog.measure(constraint),
         }
     }
 
     fn layout(&mut self, bounds: Rect) {
         match self {
             Self::About(dialog) => dialog.layout(bounds),
+            Self::NativeVisualQuestion(dialog) => dialog.layout(bounds),
+            Self::Resource(dialog) => dialog.layout(bounds),
             Self::InterpretAsset(dialog) => dialog.layout(bounds),
             Self::NewProject(dialog) => dialog.layout(bounds),
             Self::PendingClose(dialog) => dialog.layout(bounds),
@@ -241,12 +306,15 @@ impl Widget for ShellModal {
             Self::ProjectSettings(dialog) => dialog.layout(bounds),
             Self::Recovery(dialog) => dialog.layout(bounds),
             Self::SequenceSettings(dialog) => dialog.layout(bounds),
+            Self::MusicalTime(dialog) => dialog.layout(bounds),
         }
     }
 
     fn event(&mut self, event: &UiEvent, ctx: &mut EventContext) -> EventResult {
         match self {
             Self::About(dialog) => dialog.event(event, ctx),
+            Self::NativeVisualQuestion(dialog) => dialog.event(event, ctx),
+            Self::Resource(dialog) => dialog.event(event, ctx),
             Self::InterpretAsset(dialog) => dialog.event(event, ctx),
             Self::NewProject(dialog) => dialog.event(event, ctx),
             Self::PendingClose(dialog) => dialog.event(event, ctx),
@@ -254,12 +322,15 @@ impl Widget for ShellModal {
             Self::ProjectSettings(dialog) => dialog.event(event, ctx),
             Self::Recovery(dialog) => dialog.event(event, ctx),
             Self::SequenceSettings(dialog) => dialog.event(event, ctx),
+            Self::MusicalTime(dialog) => dialog.event(event, ctx),
         }
     }
 
     fn paint(&self, ctx: &mut PaintContext) {
         match self {
             Self::About(dialog) => dialog.paint(ctx),
+            Self::NativeVisualQuestion(dialog) => dialog.paint(ctx),
+            Self::Resource(dialog) => dialog.paint(ctx),
             Self::InterpretAsset(dialog) => dialog.paint(ctx),
             Self::NewProject(dialog) => dialog.paint(ctx),
             Self::PendingClose(dialog) => dialog.paint(ctx),
@@ -267,12 +338,15 @@ impl Widget for ShellModal {
             Self::ProjectSettings(dialog) => dialog.paint(ctx),
             Self::Recovery(dialog) => dialog.paint(ctx),
             Self::SequenceSettings(dialog) => dialog.paint(ctx),
+            Self::MusicalTime(dialog) => dialog.paint(ctx),
         }
     }
 
     fn hit_test(&self, point: Point) -> bool {
         match self {
             Self::About(dialog) => dialog.hit_test(point),
+            Self::NativeVisualQuestion(dialog) => dialog.hit_test(point),
+            Self::Resource(dialog) => dialog.hit_test(point),
             Self::InterpretAsset(dialog) => dialog.hit_test(point),
             Self::NewProject(dialog) => dialog.hit_test(point),
             Self::PendingClose(dialog) => dialog.hit_test(point),
@@ -280,6 +354,7 @@ impl Widget for ShellModal {
             Self::ProjectSettings(dialog) => dialog.hit_test(point),
             Self::Recovery(dialog) => dialog.hit_test(point),
             Self::SequenceSettings(dialog) => dialog.hit_test(point),
+            Self::MusicalTime(dialog) => dialog.hit_test(point),
         }
     }
 
@@ -290,6 +365,8 @@ impl Widget for ShellModal {
     fn can_focus(&self) -> bool {
         match self {
             Self::About(dialog) => dialog.can_focus(),
+            Self::NativeVisualQuestion(dialog) => dialog.can_focus(),
+            Self::Resource(dialog) => dialog.can_focus(),
             Self::InterpretAsset(dialog) => dialog.can_focus(),
             Self::NewProject(dialog) => dialog.can_focus(),
             Self::PendingClose(dialog) => dialog.can_focus(),
@@ -297,12 +374,15 @@ impl Widget for ShellModal {
             Self::ProjectSettings(dialog) => dialog.can_focus(),
             Self::Recovery(dialog) => dialog.can_focus(),
             Self::SequenceSettings(dialog) => dialog.can_focus(),
+            Self::MusicalTime(dialog) => dialog.can_focus(),
         }
     }
 
     fn accepts_text_input(&self) -> bool {
         match self {
             Self::About(dialog) => dialog.accepts_text_input(),
+            Self::NativeVisualQuestion(dialog) => dialog.accepts_text_input(),
+            Self::Resource(dialog) => dialog.accepts_text_input(),
             Self::InterpretAsset(dialog) => dialog.accepts_text_input(),
             Self::NewProject(dialog) => dialog.accepts_text_input(),
             Self::PendingClose(dialog) => dialog.accepts_text_input(),
@@ -310,12 +390,15 @@ impl Widget for ShellModal {
             Self::ProjectSettings(dialog) => dialog.accepts_text_input(),
             Self::Recovery(dialog) => dialog.accepts_text_input(),
             Self::SequenceSettings(dialog) => dialog.accepts_text_input(),
+            Self::MusicalTime(dialog) => dialog.accepts_text_input(),
         }
     }
 
     fn child_count(&self) -> usize {
         match self {
             Self::About(dialog) => dialog.child_count(),
+            Self::NativeVisualQuestion(dialog) => dialog.child_count(),
+            Self::Resource(dialog) => dialog.child_count(),
             Self::InterpretAsset(dialog) => dialog.child_count(),
             Self::NewProject(dialog) => dialog.child_count(),
             Self::PendingClose(dialog) => dialog.child_count(),
@@ -323,12 +406,15 @@ impl Widget for ShellModal {
             Self::ProjectSettings(dialog) => dialog.child_count(),
             Self::Recovery(dialog) => dialog.child_count(),
             Self::SequenceSettings(dialog) => dialog.child_count(),
+            Self::MusicalTime(dialog) => dialog.child_count(),
         }
     }
 
     fn child(&self, index: usize) -> Option<&dyn Widget> {
         match self {
             Self::About(dialog) => dialog.child(index),
+            Self::NativeVisualQuestion(dialog) => dialog.child(index),
+            Self::Resource(dialog) => dialog.child(index),
             Self::InterpretAsset(dialog) => dialog.child(index),
             Self::NewProject(dialog) => dialog.child(index),
             Self::PendingClose(dialog) => dialog.child(index),
@@ -336,12 +422,15 @@ impl Widget for ShellModal {
             Self::ProjectSettings(dialog) => dialog.child(index),
             Self::Recovery(dialog) => dialog.child(index),
             Self::SequenceSettings(dialog) => dialog.child(index),
+            Self::MusicalTime(dialog) => dialog.child(index),
         }
     }
 
     fn child_mut(&mut self, index: usize) -> Option<&mut dyn Widget> {
         match self {
             Self::About(dialog) => dialog.child_mut(index),
+            Self::NativeVisualQuestion(dialog) => dialog.child_mut(index),
+            Self::Resource(dialog) => dialog.child_mut(index),
             Self::InterpretAsset(dialog) => dialog.child_mut(index),
             Self::NewProject(dialog) => dialog.child_mut(index),
             Self::PendingClose(dialog) => dialog.child_mut(index),
@@ -349,6 +438,7 @@ impl Widget for ShellModal {
             Self::ProjectSettings(dialog) => dialog.child_mut(index),
             Self::Recovery(dialog) => dialog.child_mut(index),
             Self::SequenceSettings(dialog) => dialog.child_mut(index),
+            Self::MusicalTime(dialog) => dialog.child_mut(index),
         }
     }
 }

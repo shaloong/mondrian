@@ -14,6 +14,7 @@ mondrian-ui-theme   = { workspace = true }
 mondrian-ui-renderer = { workspace = true }
 
 cosmic-text = { workspace = true }
+unicode-segmentation = { workspace = true }
 fontdb = { workspace = true }
 wgpu        = { workspace = true }
 

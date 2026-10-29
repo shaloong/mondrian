@@ -311,6 +311,7 @@ pub(crate) struct PreviewGpuFrame {
     // Intentionally unread: dropping the complete submitted frame releases
     // these physical Frame Store leases only after exact GPU completion.
     _media_residency_guards: Vec<super::preview_media_residency::PreviewMediaResidencyGuard>,
+    _working_resource: Option<mondrian_playback::ViewerFrameResourceLease>,
     #[cfg_attr(not(test), allow(dead_code))]
     decode_execution: PreviewDecodeExecutionSummary,
 }
@@ -356,6 +357,7 @@ impl PreviewGpuFrame {
             presentation_ticket,
             heterogeneous_execution,
             _media_residency_guards: media_residency_guards,
+            _working_resource: None,
             decode_execution,
         }
     }
@@ -368,6 +370,15 @@ impl PreviewGpuFrame {
     /// Candidate identity used to correlate one execution attempt.
     pub(crate) const fn candidate_id(&self) -> u64 {
         self.candidate_id
+    }
+
+    /// Retain the admitted CPU working allocation through candidate/submission retirement.
+    pub(crate) fn retain_working_resource(
+        mut self,
+        resource: Option<mondrian_playback::ViewerFrameResourceLease>,
+    ) -> Self {
+        self._working_resource = resource;
+        self
     }
 
     /// Preview execution generation that proved this complete CPU candidate.

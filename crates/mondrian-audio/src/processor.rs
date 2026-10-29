@@ -138,6 +138,19 @@ pub enum AudioProcessorTail {
 /// Failure while resolving, instantiating, resetting, or executing a processor.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum AudioProcessorHostError {
+    /// Bounded Note admission/pairing refusal, without callback-path allocation.
+    #[error("audio Note execution refused: {0}")]
+    NoteExecutionRefused(&'static str),
+    /// The exact native parameter source has no exclusive publication role.
+    /// This callback-path refusal owns no diagnostic String or allocation.
+    #[error("native parameter source publication is unavailable")]
+    NativeParameterSourceUnavailable,
+    /// Dedicated native DSP scheduling admission or same-thread restoration failed.
+    #[error(transparent)]
+    NativeScheduling(#[from] mondrian_audio_scheduling::AudioThreadSchedulingError),
+    /// The known native worker lane request or actual owner failed admission.
+    #[error(transparent)]
+    NativeWorkerLaneResource(#[from] crate::NativeWorkerLaneResourceError),
     /// No installed Adapter can realize the persistent definition.
     #[error("audio processor is unavailable: {0}")]
     Unavailable(String),
@@ -170,6 +183,9 @@ pub enum AudioProcessorHostError {
         /// Bounded diagnostic or protocol detail.
         detail: String,
     },
+    /// A legal native request is retained; the next independent window is deferred.
+    #[error("native audio processor requires owner reprepare: {request:?}", request = .0.request())]
+    ReprepareRequired(crate::NativeObservedRequest),
     /// A prior failure left an exclusive instance in unknown mutable state.
     #[error("audio processor instance is poisoned and must be recreated")]
     PoisonedInstance,
@@ -215,6 +231,48 @@ pub struct AudioProcessorOccurrence {
     pub insertion: AudioProcessorInsertionPoint,
 }
 
+/// Exact execution ticket retained by one Session before nonRT owner service.
+///
+/// Shared author IDs are insufficient when nested Programs or processing Scopes
+/// materialize more than once. Both immutable preparation and exclusive Session
+/// identities must match before a future candidate can replace this occurrence.
+/// This is transient execution evidence, never an author edit or DSP checkpoint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AudioProcessorReprepareTicket {
+    /// Immutable plan whose exact PDC/port contract is pending replacement.
+    pub prepared_plan_id: mondrian_core::AudioPreparedPlanId,
+    /// Unique live Session, even when another Session shares the same Plan Arc.
+    pub session_id: mondrian_core::AudioRenderSessionId,
+    /// Exact local generated owner/rack/author instance within this Session.
+    pub occurrence: AudioProcessorOccurrence,
+    /// Continuity identity observed at the deferred boundary, when entered.
+    pub continuity_epoch: Option<crate::AudioContinuityEpoch>,
+    /// Actual standard request retained by the live native child.
+    pub request: crate::NativeObservedRequest,
+}
+
+impl AudioProcessorReprepareTicket {
+    /// Minimal product notice; not authority to select or mutate a materialization.
+    pub const fn product_notice(self) -> mondrian_core::NativeAudioReprepareNotice {
+        mondrian_core::NativeAudioReprepareNotice {
+            instance_id: self.occurrence.instance_id,
+            request: self.request.request(),
+        }
+    }
+}
+
+impl std::fmt::Display for AudioProcessorReprepareTicket {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "{} in Session {} / Plan {}",
+            self.product_notice(),
+            self.session_id,
+            self.prepared_plan_id
+        )
+    }
+}
+
 /// Immutable data offered to a processor resolver during plan preparation.
 pub struct AudioProcessorPrepareRequest<'a> {
     occurrence: AudioProcessorOccurrence,
@@ -222,6 +280,9 @@ pub struct AudioProcessorPrepareRequest<'a> {
     parameters: &'a BTreeMap<ParameterId, AudioProcessorParameter>,
     opaque_state: Option<&'a [u8]>,
     render_contract: AudioRenderContract,
+    note_input_requested: bool,
+    musical_time_reference: Option<mondrian_core::MusicalTimeReference>,
+    native_child_settlement_registrar: Option<&'a mondrian_core::NativeChildSettlementRegistrar>,
 }
 
 impl<'a> AudioProcessorPrepareRequest<'a> {
@@ -238,7 +299,25 @@ impl<'a> AudioProcessorPrepareRequest<'a> {
             parameters,
             opaque_state,
             render_contract,
+            note_input_requested: false,
+            musical_time_reference: None,
+            native_child_settlement_registrar: None,
         }
+    }
+
+    /// Cold-construction observation only; absence is not evidence of no Child.
+    pub const fn native_child_settlement_registrar(
+        &self,
+    ) -> Option<&'a mondrian_core::NativeChildSettlementRegistrar> {
+        self.native_child_settlement_registrar
+    }
+
+    pub(crate) const fn with_native_child_settlement_registrar(
+        mut self,
+        registrar: Option<&'a mondrian_core::NativeChildSettlementRegistrar>,
+    ) -> Self {
+        self.native_child_settlement_registrar = registrar;
+        self
     }
 
     /// Stable author instance being realized.
@@ -270,6 +349,53 @@ impl<'a> AudioProcessorPrepareRequest<'a> {
     pub const fn render_contract(&self) -> AudioRenderContract {
         self.render_contract
     }
+
+    pub(crate) const fn with_note_input_requested(mut self, requested: bool) -> Self {
+        self.note_input_requested = requested;
+        self
+    }
+
+    /// Whether this occurrence has selected authored Notes to bind. Metadata
+    /// discovery alone remains separate from actual Note execution admission.
+    pub const fn note_input_requested(&self) -> bool {
+        self.note_input_requested
+    }
+
+    pub(crate) const fn with_musical_time_reference(
+        mut self,
+        reference: Option<mondrian_core::MusicalTimeReference>,
+    ) -> Self {
+        self.musical_time_reference = reference;
+        self
+    }
+
+    /// Immutable musical reference of this occurrence's owning Sequence.
+    pub const fn musical_time_reference(&self) -> Option<mondrian_core::MusicalTimeReference> {
+        self.musical_time_reference
+    }
+}
+
+/// Project only the available constant tempo. No beat, bar or playing facts
+/// follow from this value. Success is allocation-free and uses no clock state.
+pub(crate) fn musical_tempo(
+    reference: Option<mondrian_core::MusicalTimeReference>,
+) -> Result<Option<f64>, AudioProcessorHostError> {
+    let Some(reference) = reference else {
+        return Ok(None);
+    };
+    let duration = reference.quarter_note_duration();
+    if duration.numerator() <= 0 || duration.denominator() <= 0 {
+        return Err(AudioProcessorHostError::InvalidContract(
+            "musical quarter-note duration must be positive".to_owned(),
+        ));
+    }
+    let tempo = 60.0 * duration.denominator() as f64 / duration.numerator() as f64;
+    if !tempo.is_finite() || tempo <= 0.0 {
+        return Err(AudioProcessorHostError::InvalidContract(
+            "musical tempo is not positive and finite".to_owned(),
+        ));
+    }
+    Ok(Some(tempo))
 }
 
 /// Non-realtime resolver for built-in or separately hosted processor definitions.
@@ -278,6 +404,13 @@ impl<'a> AudioProcessorPrepareRequest<'a> {
 /// isolation selection happen here. The resolver must return a factory already
 /// bound to the exact Render Contract; it is never called from `render_into`.
 pub trait AudioProcessorResolver: Send + Sync {
+    /// Explicit cold-construction forwarding capability; unknown is never no-Child evidence.
+    fn native_child_settlement_requirement(
+        &self,
+    ) -> mondrian_core::NativeChildSettlementRequirement {
+        mondrian_core::NativeChildSettlementRequirement::Unavailable
+    }
+
     /// Resolve one immutable author instance for this plan.
     fn prepare(
         &self,
@@ -287,6 +420,31 @@ pub trait AudioProcessorResolver: Send + Sync {
 
 /// Render-contract-bound factory retained by an immutable prepared plan.
 pub trait AudioProcessorFactory: Send + Sync {
+    /// Explicit child-settlement evidence requirement, independent of DSP admission.
+    /// Missing forwarding is unavailable, never evidence of no native child.
+    fn native_child_settlement_requirement(
+        &self,
+    ) -> mondrian_core::NativeChildSettlementRequirement {
+        mondrian_core::NativeChildSettlementRequirement::Unavailable
+    }
+
+    /// Visit each actual nested immutable factory allocation without loading,
+    /// creating, entering or mutating a processor. The prepared binding separately
+    /// reports this factory's Arc payload and its own auxiliary metadata.
+    ///
+    /// Returning Unavailable is an explicit missing observer, never zero storage.
+    /// Visitors must preserve each coverage kind, propagate every rejection and
+    /// retain owner borrows through admission. This is non-realtime observation,
+    /// not a grant or proof of complete std/SDK/foreign process residency.
+    fn visit_host_owned_storage<'a>(
+        &'a self,
+        _visitor: &mut dyn FnMut(
+            crate::AudioProcessorFactoryStorageBorrow<'a>,
+        ) -> Result<(), crate::AudioProcessorFactoryStorageError>,
+    ) -> Result<(), crate::AudioProcessorFactoryStorageError> {
+        Err(crate::AudioProcessorFactoryStorageError::Unavailable)
+    }
+
     /// Fixed latency, continuity, and processing-mode admission facts.
     fn execution_contract(&self) -> AudioProcessorExecutionContract;
 
@@ -299,8 +457,78 @@ pub trait AudioProcessorFactory: Send + Sync {
         AudioProcessorAuxiliaryInputContract::default()
     }
 
+    /// Ordered additional output buses for this exact prepared instance.
+    /// Main remains the existing in-place bus. The default exposes no extra outputs.
+    fn auxiliary_output_contract(&self) -> AudioProcessorAuxiliaryOutputContract {
+        AudioProcessorAuxiliaryOutputContract::default()
+    }
+
+    /// Concrete Note inputs and fixed limits for this exact restored instance.
+    /// The empty default admits no Notes. Native adapters must preserve this
+    /// contract through state seeding and validate it on actual creation.
+    fn note_input_contract(&self) -> crate::AudioProcessorNoteInputContract {
+        crate::AudioProcessorNoteInputContract::default()
+    }
+
+    /// Optional control-side native names keyed by admitted auxiliary buses.
+    /// Names never enter execution-contract equality or per-block processing.
+    fn auxiliary_input_names(&self) -> Vec<AudioProcessorInputName> {
+        Vec::new()
+    }
+
+    /// Bind reusable native configuration to a new immutable factory with the
+    /// same already prepared execution, buses, parameter lanes and render mode.
+    ///
+    /// This is a pure non-realtime payload operation: it must not create, probe,
+    /// enter, stop or mutate a native instance. The caller retains responsibility
+    /// for exact author/source admission, configuration provenance, old/new peak
+    /// resources and actual Plan publication. Configuration is not a DSP checkpoint.
+    /// Future instance creation still validates the real activated contract.
+    /// `None` is an unsupported capability and cannot authorize a handoff.
+    fn with_native_configuration_seed(
+        &self,
+        _format: crate::NativeConfigurationFormat,
+        _configuration: &[u8],
+    ) -> Result<Option<Arc<dyn AudioProcessorFactory>>, AudioProcessorHostError> {
+        Ok(None)
+    }
+    /// Conservative known-parent layout request for an execution-only restart
+    /// Factory. No allocation, native call, author edit or installation occurs.
+    /// The caller must admit this overlap before requesting the replacement.
+    /// This is not a complete allocator/SDK/Arc-prefix peak guarantee.
+    fn native_reprepare_factory_bound(
+        &self,
+        _identity: crate::NativeConfigurationSeedTicket,
+        _configuration_bytes: usize,
+        _inputs: Option<&crate::ClapAudioInputProposal>,
+    ) -> Option<usize> {
+        None
+    }
+
+    /// Prepare an immutable execution-only Factory from the caller's actual
+    /// retained capture. Latency/tail and an explicit authenticated CLAP input
+    /// proposal may change; schema, output ports and render mode remain fixed.
+    /// `report_peak` records known-parent overlap even before an error returns.
+    /// Neither the returned Factory nor the capture ticket grants native/Source
+    /// or canonical author permission. No create/probe/Enter/seed RPC is allowed.
+    fn with_native_reprepare_configuration(
+        &self,
+        _identity: crate::NativeConfigurationSeedTicket,
+        _configuration: &[u8],
+        _inputs: Option<&crate::ClapAudioInputProposal>,
+        _report_peak: &mut dyn FnMut(usize),
+    ) -> Result<Option<Arc<dyn AudioProcessorFactory>>, AudioProcessorHostError> {
+        Ok(None)
+    }
+
     /// Create one exclusive mutable instance before realtime execution starts.
-    fn create(&self) -> Result<Box<dyn AudioProcessor>, AudioProcessorHostError>;
+    /// Borrow the optional observation domain for this call only; an immutable
+    /// Factory or cache must not retain it. Missing evidence grants no execution
+    /// permission and must not replace the actual construction result.
+    fn create(
+        &self,
+        native_child_settlement: Option<&mondrian_core::NativeChildSettlementRegistrar>,
+    ) -> Result<Box<dyn AudioProcessor>, AudioProcessorHostError>;
 }
 
 /// Exclusive mutable processor state owned by exactly one render Session.
@@ -310,6 +538,204 @@ pub trait AudioProcessorFactory: Send + Sync {
 /// another thread/device, panic, or retain borrowed block data. An isolated
 /// plugin Adapter owns enforcing its deadline and failure policy.
 pub trait AudioProcessor: Send {
+    /// Forward evidence to this actual instance's original native child owner.
+    /// This grants no execution, installation, teardown or retry permission.
+    fn bind_native_child_settlement(
+        &mut self,
+        _registrar: &mondrian_core::NativeChildSettlementRegistrar,
+    ) -> Result<
+        mondrian_core::NativeChildSettlementBinding,
+        mondrian_core::NativeChildSettlementError,
+    > {
+        Err(mondrian_core::NativeChildSettlementError::Unavailable)
+    }
+
+    /// Whether this exact instance has an authenticated native observation lane.
+    /// This read-only capability performs no foreign/native calls.
+    fn native_observations_supported(&self) -> bool {
+        false
+    }
+
+    /// Observe the actual retained native child/object without loading or DSP.
+    /// The isolation adapter checks the retained supervisor process handle;
+    /// an authored ID, class name or seed ticket cannot synthesize this fact.
+    /// None means no supported native-owner adapter, not an installed lease.
+    fn native_audio_object_observation(
+        &mut self,
+    ) -> Result<Option<crate::NativeAudioObjectObservation>, AudioProcessorHostError> {
+        Ok(None)
+    }
+
+    /// Non-realtime observation on the existing authenticated native-owner stream.
+    /// Capability preparation preserves pending logs; the serial diagnostic
+    /// consumer drains a fixed batch. Diagnostics do not authorize author work.
+    fn poll_native_observations(
+        &mut self,
+        _consumption: crate::NativeAudioObservationConsumption,
+    ) -> Result<crate::NativeAudioObservations, AudioProcessorHostError> {
+        Ok(crate::NativeAudioObservations {
+            object: self.native_audio_object_observation()?,
+            ..Default::default()
+        })
+    }
+
+    /// Observe native object, cleanup and pending configuration before a root
+    /// DSP window without consuming callbacks or diagnostics. Generic adapters
+    /// retain both existing observation/query semantics; the isolated adapter
+    /// overrides this seam with one actual main-thread Poll9 round trip under
+    /// its configured process deadline. None cannot clear a Session ticket.
+    fn preflight_native_observations(
+        &mut self,
+        expected_object: crate::NativeAudioObjectObservation,
+    ) -> Result<crate::NativeAudioObservations, AudioProcessorHostError> {
+        let mut observations =
+            self.poll_native_observations(crate::NativeAudioObservationConsumption::Preserve)?;
+        if observations.object == Some(expected_object) && observations.editor_cleanup.is_none() {
+            observations.pending_reprepare =
+                self.preflight_reprepare()?.or(observations.pending_reprepare);
+        }
+        Ok(observations)
+    }
+
+    /// Confirm the exact actual object on the existing authenticated stream.
+    /// This non-RT acknowledgement alone grants neither installed ownership
+    /// nor author permission; the sole current Runtime must publish its record.
+    fn bind_native_audio_object(
+        &mut self,
+        _request: crate::NativeAudioObjectBindRequest,
+    ) -> Result<crate::NativeAudioObjectBindOutcome, AudioProcessorHostError> {
+        Ok(crate::NativeAudioObjectBindOutcome::Refused(
+            crate::NativeAudioObjectBindRefusal::UnsupportedAdapter,
+        ))
+    }
+
+    /// Query one admitted native ID on the joined full owner, without author
+    /// flushing, callback consumption, DSP or state entry. Non-RT control only.
+    fn query_native_parameter(
+        &mut self,
+        _binding: crate::NativeAudioObjectBindRequest,
+        _native_parameter_id: u32,
+    ) -> Result<crate::NativeAudioParameterQueryResult, AudioProcessorHostError> {
+        Ok(Err(
+            mondrian_core::NativeAudioParameterQueryRefusal::UnsupportedAdapter,
+        ))
+    }
+    /// Attach this actual bound native object's view after DSP join.
+    /// The sole Runtime has already admitted its installed owner lease.
+    fn open_native_audio_editor(
+        &mut self,
+        _request: crate::NativeAudioEditorOpenRequest,
+    ) -> Result<crate::NativeAudioEditorOutcome, AudioProcessorHostError> {
+        Ok(crate::NativeAudioEditorOutcome::Refused(
+            crate::NativeAudioEditorRefusal::UnsupportedAdapter,
+        ))
+    }
+
+    /// Close this same bound view; native teardown failure retains its owner.
+    fn close_native_audio_editor(
+        &mut self,
+        _binding: crate::NativeAudioObjectBindRequest,
+    ) -> Result<crate::NativeAudioEditorOutcome, AudioProcessorHostError> {
+        Ok(crate::NativeAudioEditorOutcome::Refused(
+            crate::NativeAudioEditorRefusal::UnsupportedAdapter,
+        ))
+    }
+
+    /// Prepare a fresh native incarnation on this same child after DSP/output
+    /// quiescence. The caller still needs whole-root resource/author/Source
+    /// admission. Success does not enter a sample or authorize an editor.
+    fn prepare_native_author_state_entry(
+        &mut self,
+        _request: crate::NativeAudioAuthorStateEntryRequest<'_>,
+    ) -> Result<crate::NativeAudioAuthorStateEntryOutcome, AudioProcessorHostError> {
+        Ok(crate::NativeAudioAuthorStateEntryOutcome::Refused(
+            crate::NativeAudioAuthorStateEntryRefusal::UnsupportedAdapter,
+        ))
+    }
+
+    /// Snapshot an exact native callback cohort on this retained owner, without servicing it.
+    ///
+    /// This non-RT control query is separate from root realtime preflight. Its
+    /// result must remain associated with the same exclusive processor object.
+    fn native_configuration_cohort(
+        &mut self,
+    ) -> Result<Option<crate::NativeRequestCohort>, AudioProcessorHostError> {
+        Ok(None)
+    }
+
+    /// Run bounded native control after quiescence, returning an uninstalled candidate.
+    ///
+    /// The caller must validate exact occurrence, plan, session and epoch before
+    /// a later installation, recompile canonical PDC and admit the entire known
+    /// owner peak. The candidate is configuration, not a DSP checkpoint; this
+    /// command neither resumes playback nor commits an author edit or Undo item.
+    fn service_native_configuration(
+        &mut self,
+        _request: crate::NativeConfigurationControlRequest<'_>,
+    ) -> Result<crate::NativeConfigurationControlOutcome, AudioProcessorHostError> {
+        Ok(crate::NativeConfigurationControlOutcome::CapabilityRefused(
+            crate::NativeConfigurationRefusal::UnsupportedAdapter,
+        ))
+    }
+
+    /// Stage input owners after Root resource admission, keeping native DSP inactive.
+    fn stage_clap_audio_input_buffers(
+        &mut self,
+        _request: crate::ClapAudioInputBufferRequest,
+    ) -> Result<crate::ClapAudioInputBufferOutcome, AudioProcessorHostError> {
+        Ok(crate::ClapAudioInputBufferOutcome::Refused(
+            crate::NativeConfigurationRefusal::UnsupportedAdapter,
+        ))
+    }
+
+    /// Stage matching shared input storage on both peers while DSP remains stopped.
+    fn stage_clap_audio_input_mapping(
+        &mut self,
+        _request: crate::ClapAudioInputMappingRequest,
+    ) -> Result<crate::ClapAudioInputMappingOutcome, AudioProcessorHostError> {
+        Ok(crate::ClapAudioInputMappingOutcome::Refused(
+            crate::NativeConfigurationRefusal::UnsupportedAdapter,
+        ))
+    }
+
+    /// Stage an exact same-child configuration seed while DSP/output are quiesced.
+    ///
+    /// Accepted storage is one additional accounted child owner. It does not
+    /// install a root plan, resume audio, authorize Undo or preserve private DSP.
+    fn stage_native_configuration_seed(
+        &mut self,
+        _request: crate::NativeConfigurationSeedRequest<'_>,
+    ) -> Result<crate::NativeConfigurationSeedOutcome, AudioProcessorHostError> {
+        Ok(crate::NativeConfigurationSeedOutcome::Refused(
+            crate::NativeConfigurationSeedRefusal::UnsupportedAdapter,
+        ))
+    }
+
+    /// Commit only the exact preowned seed on this exclusive child processor.
+    ///
+    /// The caller still needs its current occurrence/plan/session/epoch lease,
+    /// complete resource/PDC admission and paused graph installation. This child
+    /// acknowledgement is not playback completion or a continuous DSP resume.
+    fn commit_native_configuration_seed(
+        &mut self,
+        _ticket: crate::NativeConfigurationSeedTicket,
+    ) -> Result<crate::NativeConfigurationSeedOutcome, AudioProcessorHostError> {
+        Ok(crate::NativeConfigurationSeedOutcome::Refused(
+            crate::NativeConfigurationSeedRefusal::UnsupportedAdapter,
+        ))
+    }
+
+    /// Check pending native requests before admitting a complete root window.
+    ///
+    /// Native isolation uses its bounded process deadline for a fixed pending
+    /// query. This calls no DSP/metadata/lifecycle operation and consumes no flag.
+    /// A successful notice retains the instance and is distinct from a fault.
+    fn preflight_reprepare(
+        &mut self,
+    ) -> Result<Option<crate::NativeObservedRequest>, AudioProcessorHostError> {
+        Ok(None)
+    }
+
     /// Reset all history for a fresh continuity epoch at an exact Sequence sample.
     fn enter_state(&mut self, start_sample: i64) -> Result<(), AudioProcessorHostError>;
 
@@ -330,6 +756,8 @@ pub struct AudioProcessorProcessContext {
     channel_layout: AudioChannelLayout,
     processing_mode: AudioProcessingMode,
     kernel_backend: AudioKernelBackend,
+    admitted_root_window: bool,
+    musical_time_reference: Option<mondrian_core::MusicalTimeReference>,
 }
 
 impl AudioProcessorProcessContext {
@@ -346,12 +774,41 @@ impl AudioProcessorProcessContext {
             channel_layout,
             processing_mode,
             kernel_backend,
+            admitted_root_window: false,
+            musical_time_reference: None,
         }
+    }
+
+    pub(crate) const fn admitted_root_window(mut self) -> Self {
+        self.admitted_root_window = true;
+        self
+    }
+
+    pub(crate) const fn with_musical_time_reference(
+        mut self,
+        reference: Option<mondrian_core::MusicalTimeReference>,
+    ) -> Self {
+        self.musical_time_reference = reference;
+        self
+    }
+
+    /// Same immutable Sequence reference admitted during factory preparation.
+    pub const fn musical_time_reference(self) -> Option<mondrian_core::MusicalTimeReference> {
+        self.musical_time_reference
+    }
+
+    pub(crate) const fn has_root_window_admission(self) -> bool {
+        self.admitted_root_window
     }
 
     /// Exact Sequence-domain block coordinates.
     pub const fn request(self) -> AudioRenderRequest {
         self.request
+    }
+
+    /// Exact consumer fact propagated with this original signal window.
+    pub const fn transport_activity(self) -> Option<mondrian_core::TimelineTransportActivity> {
+        self.request.transport_activity
     }
 
     /// Prepared sample grid.
@@ -413,6 +870,106 @@ pub struct AudioProcessorAuxiliaryInputBusContract {
     pub channel_layout: AudioChannelLayout,
 }
 
+/// Borrowed writable output; its memory belongs to this Session, never the adapter.
+pub struct AudioProcessorOutputBus<'a> {
+    /// Stable definition-owned output key.
+    pub bus_key: &'a str,
+    /// Prepared semantic channel layout.
+    pub channel_layout: AudioChannelLayout,
+    /// Exact frame count for this call.
+    pub frames: usize,
+    /// Mutable interleaved PCM, cleared before each processor call.
+    pub interleaved: &'a mut [f32],
+}
+
+/// One stable additional output; its order is the factory's native binding order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AudioProcessorAuxiliaryOutputBusContract {
+    /// Definition-owned stable identity, independent of presentation names.
+    pub bus_key: String,
+    /// Exact layout; this host currently admits the render layout only.
+    pub channel_layout: AudioChannelLayout,
+}
+
+/// Complete immutable additional-output contract of one prepared processor.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AudioProcessorAuxiliaryOutputContract {
+    /// All actual additional outputs, including currently unrouted outputs.
+    pub buses: Vec<AudioProcessorAuxiliaryOutputBusContract>,
+}
+
+impl AudioProcessorAuxiliaryOutputContract {
+    pub(crate) fn validate(
+        &self,
+        main_layout: AudioChannelLayout,
+    ) -> Result<(), AudioProcessorHostError> {
+        let mut keys = std::collections::BTreeSet::new();
+        for bus in &self.buses {
+            if bus.bus_key.trim().is_empty()
+                || bus.bus_key.len() > 128
+                || bus.bus_key.chars().any(char::is_control)
+                || !keys.insert(bus.bus_key.as_str())
+                || bus.channel_layout != main_layout
+            {
+                return Err(AudioProcessorHostError::InvalidContract(
+                    "processor outputs require unique bounded keys and the exact render layout"
+                        .to_owned(),
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Control-side native name independent of a bus's routing identity and layout.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AudioProcessorInputName {
+    /// Exact stable key in the auxiliary input contract.
+    pub bus_key: String,
+    /// Native text suitable for one control row.
+    pub name: String,
+}
+
+impl AudioProcessorInputName {
+    /// Capture valid native text; absent or invalid names use the key in the UI.
+    pub fn capture(bus_key: impl Into<String>, name: &str) -> Option<Self> {
+        let name = name.trim();
+        Self::valid_name(name).then(|| Self { bus_key: bus_key.into(), name: name.to_owned() })
+    }
+
+    fn valid_name(name: &str) -> bool {
+        !name.trim().is_empty()
+            && name.len() <= 1024
+            && !name.chars().any(|character| {
+                character.is_control() || matches!(character, '\u{2028}' | '\u{2029}')
+            })
+    }
+
+    pub(crate) fn validate_all(
+        names: &[Self],
+        contract: &AudioProcessorAuxiliaryInputContract,
+    ) -> Result<(), AudioProcessorHostError> {
+        if names.len() > contract.buses.len() {
+            return Err(AudioProcessorHostError::InvalidContract(
+                "too many auxiliary input names".to_owned(),
+            ));
+        }
+        let mut keys = std::collections::BTreeSet::new();
+        for name in names {
+            if !contract.buses.iter().any(|bus| bus.bus_key == name.bus_key)
+                || !keys.insert(name.bus_key.as_str())
+                || !Self::valid_name(&name.name)
+            {
+                return Err(AudioProcessorHostError::InvalidContract(
+                    "invalid auxiliary input presentation metadata".to_owned(),
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
 /// Complete immutable auxiliary-input contract of one prepared processor.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct AudioProcessorAuxiliaryInputContract {
@@ -437,9 +994,12 @@ impl AudioProcessorAuxiliaryInputContract {
                         .to_owned(),
                 ));
             }
-            if bus.channel_layout != main_layout {
+            if bus.channel_layout != main_layout
+                && mondrian_core::AudioChannelMixMatrix::standard(main_layout, bus.channel_layout)
+                    .is_err()
+            {
                 return Err(AudioProcessorHostError::InvalidContract(format!(
-                    "processor auxiliary bus {} requires {:?}, but this host currently admits exact main-layout auxiliary buses ({main_layout:?})",
+                    "processor auxiliary bus {} has no standard mapping from {main_layout:?} to {:?}",
                     bus.bus_key, bus.channel_layout
                 )));
             }
@@ -454,12 +1014,29 @@ impl AudioProcessorAuxiliaryInputContract {
 /// auxiliary lookup is the stable extension point for sidechains; absent buses
 /// return `None` instead of being silently mixed into the main input.
 pub trait AudioProcessorAudioIo {
+    /// Borrow the admitted Note stream for this same process call. The empty
+    /// default preserves parameter/PCM-only consumers. Unsupported adapters
+    /// must reject nonempty input before touching PCM or native DSP.
+    fn note_events(&self) -> &[crate::AudioNoteEvent] {
+        &[]
+    }
+    /// Retain one copied completion within the prepared output capacity. True
+    /// means retained, never discarded. Adapters must report any refusal even
+    /// if a plugin ignores its failed output callback. No author mutation or
+    /// voice-capacity credit occurs here; the parent applies it after return.
+    fn try_push_note_end(&mut self, _event: crate::AudioNoteEndEvent) -> bool {
+        false
+    }
     /// Negotiated main-bus layout.
     fn main_layout(&self) -> AudioChannelLayout;
     /// Exact frame count.
     fn frames(&self) -> usize;
     /// Mutable in-place main-bus PCM.
     fn main_interleaved(&mut self) -> &mut [f32];
+    /// Borrow a negotiated additional output. No lookup allocates or retains PCM.
+    fn auxiliary_output(&mut self, _bus_key: &str) -> Option<AudioProcessorOutputBus<'_>> {
+        None
+    }
     /// Find one negotiated read-only auxiliary input by stable definition key.
     fn auxiliary_input(&self, bus_key: &str) -> Option<AudioProcessorInputBus<'_>>;
     /// Borrow the mutable main bus and one read-only auxiliary bus together.

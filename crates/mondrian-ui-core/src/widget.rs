@@ -85,7 +85,7 @@ pub enum AccessibilityRole {
     MultilineTextInput,
     /// Popup or dropdown menu.
     Menu,
-    /// A selectable row within an open menu.
+    /// Command or submenu entry within a menu.
     MenuItem,
     /// Scrollable viewport.
     ScrollView,
@@ -112,7 +112,7 @@ pub struct AccessibilityState {
     pub focused: bool,
     /// Whether the control is disabled.
     pub disabled: bool,
-    /// Whether text can be read and selected but not changed.
+    /// Whether the control exposes readable content without authoring input.
     pub read_only: bool,
     /// Optional checked state for checkboxes and similar controls.
     pub checked: Option<bool>,
@@ -129,8 +129,12 @@ pub struct AccessibilityState {
 pub enum AccessibilityValue {
     /// Editable or readable text value.
     Text(String),
-    /// Numeric value with an inclusive range.
-    Number { value: f32, min: f32, max: f32 },
+    /// Floating value with an inclusive range, preserving f64 domain precision.
+    /// Generic control coordinates may be promoted here; a declared domain
+    /// adapter supplies its actual value and range instead.
+    Number { value: f64, min: f64, max: f64 },
+    /// Exact signed integer value and inclusive range, without a float roundtrip.
+    Integer { value: i64, min: i64, max: i64 },
     /// Scroll position and range.
     Scroll {
         x: f32,
@@ -169,6 +173,8 @@ pub enum AccessibilityValue {
 pub struct AccessibilityNode {
     /// Widget identifier that owns this metadata.
     pub widget_id: WidgetId,
+    /// Nearest semantic parent, including a control-owned virtual item parent.
+    pub parent_id: Option<WidgetId>,
     /// Semantic role.
     pub role: AccessibilityRole,
     /// User-facing accessible name.
@@ -200,6 +206,7 @@ impl AccessibilityNode {
     pub fn new(widget_id: WidgetId, role: AccessibilityRole) -> Self {
         Self {
             widget_id,
+            parent_id: None,
             role,
             name: None,
             state: AccessibilityState::default(),
@@ -228,12 +235,224 @@ impl AccessibilityNode {
     }
 }
 
+/// Keyboard key whose matching release completes one button activation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeyboardActivationKey {
+    /// Complete an Enter activation on the matching Enter release.
+    Enter,
+    /// Complete a Space activation on the matching Space release.
+    Space,
+}
+
+/// Owned release intent for the exact enabled semantic control being inspected.
+///
+/// Its key is retained only within the same role, panel and live author session.
+/// The replacement control executes its fresh callback on the matching release.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct KeyboardActivationLease {
+    /// Exact activation key that must be released once.
+    pub key: KeyboardActivationKey,
+}
+
+/// Exact numeric presentation baseline used only to admit a retained input draft.
+///
+/// Floating bits preserve declared precision and signed zero. This baseline is
+/// compared with a fresh model; it never replaces that model's author value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NumericInputInspectionValue {
+    /// IEEE 754 bits of an f32 numeric input value.
+    Float32(u32),
+    /// IEEE 754 bits of an f64 numeric input value.
+    Float64(u64),
+    /// Exact signed integer numeric input value.
+    Integer(i64),
+}
+
+/// Fresh numeric model contract required before a local text draft can resume.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NumericInputInspectionContract {
+    /// Exact committed baseline, compared and never copied into author state.
+    pub baseline: NumericInputInspectionValue,
+    /// Inclusive lower entry bound.
+    pub min: NumericInputInspectionValue,
+    /// Inclusive upper entry bound.
+    pub max: NumericInputInspectionValue,
+    /// Configured keyboard increment, or the default increment when absent.
+    pub step: Option<NumericInputInspectionValue>,
+    /// Minimum display decimals, which also govern default keyboard stepping.
+    pub minimum_decimals: usize,
+}
+
+/// Maximum number of retained local text edit entries.
+pub const TEXT_INPUT_HISTORY_MAX_ENTRIES: usize = 100;
+/// Maximum retained UTF-8 snapshot allocation per local text history (16 MiB).
+pub const TEXT_INPUT_HISTORY_MAX_BYTES: usize = 16 * 1024 * 1024;
+
+/// Logical cluster supplying a caret's visual association at a BiDi seam.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TextCaretAffinity {
+    /// The next logical grapheme supplies the caret position.
+    BeforeNext,
+    /// The previous logical grapheme supplies the caret position.
+    AfterPrevious,
+}
+
+/// A local single-line caret/selection endpoint, independent of layout pixels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TextInputCaretPosition {
+    /// Logical grapheme offset in the owned draft.
+    pub grapheme_index: usize,
+    /// Logical adjacent cluster associated with this visual position.
+    pub affinity: TextCaretAffinity,
+}
+
+impl TextInputCaretPosition {
+    /// Default association for a programmatically synchronized logical boundary.
+    pub const fn at_logical_boundary(grapheme_index: usize) -> Self {
+        Self {
+            grapheme_index,
+            affinity: if grapheme_index == 0 {
+                TextCaretAffinity::BeforeNext
+            } else {
+                TextCaretAffinity::AfterPrevious
+            },
+        }
+    }
+}
+
+impl Default for TextInputCaretPosition {
+    fn default() -> Self {
+        Self::at_logical_boundary(0)
+    }
+}
+
+/// One bounded local text edit's reversible grapheme-based snapshots.
+/// This is inspection data, independent of author history and callbacks.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TextInputHistoryInspectionEntry {
+    /// Text before the local edit.
+    pub text_before: String,
+    /// Text after the local edit.
+    pub text_after: String,
+    /// Grapheme caret before the local edit.
+    pub cursor_before: TextInputCaretPosition,
+    /// Grapheme caret after the local edit.
+    pub cursor_after: TextInputCaretPosition,
+    /// Selection anchor before the local edit.
+    pub anchor_before: Option<TextInputCaretPosition>,
+    /// Selection anchor after the local edit.
+    pub anchor_after: Option<TextInputCaretPosition>,
+}
+/// Bounded local Undo/Redo snapshots admitted with the same numeric draft owner.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TextInputHistoryInspectionState {
+    /// Retained text edits; both entry-count and allocation budgets apply.
+    pub entries: Vec<TextInputHistoryInspectionEntry>,
+    /// Number of retained entries already applied to the current text.
+    pub position: usize,
+    /// An unconfirmed text interaction owns history keys even after exhaustion or eviction.
+    pub owns_input: bool,
+}
+
+/// Local committed-text draft with grapheme-based selection and caret coordinates.
+///
+/// IME preedit, pointer selection/capture, author history and callbacks are excluded.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TextInputDraftInspectionState {
+    /// Unconfirmed single-line text.
+    pub text: String,
+    /// Caret grapheme offset and visual cluster association.
+    pub cursor: TextInputCaretPosition,
+    /// Selection anchor grapheme offset and visual cluster association, when present.
+    pub selection_anchor: Option<TextInputCaretPosition>,
+    /// Bounded local history and its unconfirmed keyboard ownership.
+    pub history: TextInputHistoryInspectionState,
+}
+
+/// Numeric input's owned local draft, admitted only by an exact fresh contract.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NumericInputInspectionState {
+    /// Original model contract that the newly projected model must equal.
+    pub contract: NumericInputInspectionContract,
+    /// Local text, selection and caret; no authoritative value or callback.
+    pub draft: TextInputDraftInspectionState,
+}
+
+/// Inspection identity for one explicitly addressed author control.
+///
+/// Hosts match the exact key, panel and live author session before restoring it.
+/// It carries focus and explicitly owned keyboard input intent. Numeric drafts
+/// require an exact fresh baseline/contract. Author values, callbacks, pointer
+/// state/capture, menu paths and IME preedit are never restored.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ControlInspectionState {
+    /// Application-owned semantic address, independent of presentation and value.
+    pub key: String,
+    /// Identity resolved by the sole event router in the replacement tree.
+    pub widget_id: WidgetId,
+    /// Compatible input role required by a replacement control.
+    pub role: AccessibilityRole,
+    /// Local keyboard focus presentation.
+    pub focused: bool,
+    /// Whether keyboard focus should be drawn.
+    pub focus_visible: bool,
+    /// Pending release intent; cleared at modal and invalid-owner boundaries.
+    pub keyboard_activation: Option<KeyboardActivationLease>,
+    /// Numeric local draft; boxed so ordinary control inspection stays compact.
+    pub numeric_input: Option<Box<NumericInputInspectionState>>,
+}
+
+/// A semantic clipboard command addressed to the original editing control.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EditCommand {
+    /// Copy and remove the selected content.
+    Cut,
+    /// Copy the selected content.
+    Copy,
+    /// Insert clipboard content into the editing control.
+    Paste,
+}
+
+impl EditCommand {
+    /// All commands in availability projection order.
+    pub const ALL: [Self; 3] = [Self::Cut, Self::Copy, Self::Paste];
+
+    /// Index into a command availability projection.
+    pub const fn index(self) -> usize {
+        match self {
+            Self::Cut => 0,
+            Self::Copy => 1,
+            Self::Paste => 2,
+        }
+    }
+
+    /// The editor action used when a control does not own this command.
+    pub const fn action(self) -> &'static Action {
+        match self {
+            Self::Cut => &Action::Cut,
+            Self::Copy => &Action::Copy,
+            Self::Paste => &Action::Paste,
+        }
+    }
+}
+
+/// A single command issued by menu chrome after its widget event completes.
+#[derive(Debug, Clone)]
+pub enum MenuCommand {
+    /// Resolve against the original editing control.
+    Edit(EditCommand),
+    /// Confirm pending editor input before dispatching the application action.
+    Action(Action),
+}
+
 /// Side-effect requests emitted by widgets while handling an input event.
 ///
 /// Widgets stay platform independent: they record intent here, and the app or
 /// event router decides how to apply it to winit/the OS.
 #[derive(Debug, Clone, Default)]
 pub struct EventRequests {
+    /// Execute against the editing control after dismissing command chrome.
+    pub menu_command: Option<MenuCommand>,
     pub pointer_capture: Option<PointerCaptureRequest>,
     pub ime: Option<ImeRequest>,
     pub cursor: Option<CursorRequest>,
@@ -297,6 +516,16 @@ pub struct EventContext<'a> {
 }
 
 impl EventContext<'_> {
+    /// Request a semantic command without changing its editing owner.
+    pub fn request_edit_command(&mut self, command: EditCommand) {
+        self.requests.menu_command = Some(MenuCommand::Edit(command));
+    }
+
+    /// Confirm pending editor input before dispatching a menu action.
+    pub fn request_menu_action(&mut self, action: Action) {
+        self.requests.menu_command = Some(MenuCommand::Action(action));
+    }
+
     pub fn request_pointer_capture(&mut self, widget: WidgetId) {
         self.requests.request_pointer_capture(widget);
     }
@@ -524,11 +753,51 @@ pub trait Widget {
     /// 返回 `Handled` 则停止冒泡，`Ignored` 则继续向父级传递。
     fn event(&mut self, event: &UiEvent, ctx: &mut EventContext) -> EventResult;
 
+    /// Whether this is command chrome that temporarily suspends editing focus.
+    fn is_command_menu(&self) -> bool {
+        false
+    }
+
+    /// Control-owned availability; `None` uses the application domain's fallback.
+    fn edit_command_available(&self, _command: EditCommand) -> Option<bool> {
+        None
+    }
+
+    /// Execute a semantic command. An owned refusal must return `Handled`.
+    fn edit_command(&mut self, _command: EditCommand, _ctx: &mut EventContext) -> EventResult {
+        EventResult::Ignored
+    }
+
+    /// Project the editing owner's availability into command chrome.
+    fn set_edit_command_availability(&mut self, availability: [Option<bool>; 3]) {
+        for index in 0..self.child_count() {
+            if let Some(child) = self.child_mut(index) {
+                child.set_edit_command_availability(availability);
+            }
+        }
+    }
+
+    /// Commit pending input before a container submits its form.
+    ///
+    /// Returns whether a value changed. The default visits every logical child;
+    /// editable leaves dispatch their confirmed values through the same context.
+    fn commit_pending_input(&mut self, ctx: &mut EventContext) -> bool {
+        let mut changed = false;
+        for index in 0..self.child_count() {
+            if let Some(child) = self.child_mut(index) {
+                changed |= child.commit_pending_input(ctx);
+            }
+        }
+        changed
+    }
+
     /// Called on ancestors before a descendant receives an event.
     ///
     /// This is for parent-owned chrome that must win over child hit targets,
-    /// such as dock splitter handles. It must not re-dispatch the event to
-    /// children.
+    /// such as dock splitter handles, or a numeric pair that owns domain keyboard
+    /// adjustments for its exactly focused Slider. Keyboard admission stays
+    /// within the Router's active modal scope. It must not re-dispatch the event
+    /// to children or create another focus authority.
     fn before_child_event(&mut self, _event: &UiEvent, _ctx: &mut EventContext) -> EventResult {
         EventResult::Ignored
     }
@@ -639,6 +908,53 @@ pub trait Widget {
         false
     }
 
+    /// Set an explicit semantic key on this control, without dispatching input.
+    ///
+    /// Returns false for widgets that do not support semantic focus inspection.
+    /// Containers do not assign keys recursively: compound builders must address
+    /// their exact control roles, so siblings never share an accidental identity.
+    fn set_control_inspection_key(&mut self, _key: Option<String>) -> bool {
+        false
+    }
+
+    /// Whether this addressed text draft permits model refresh without capturing it.
+    ///
+    /// This allocation-free admission predicate introduces no focus authority.
+    /// Actual restoration still requires unique semantic identity and fresh owner
+    /// contracts. Unaddressed inputs and unsupported widgets return false.
+    fn can_inspect_text_draft(&self) -> bool {
+        false
+    }
+
+    /// Inspect focus and supported local input intent; pointer and author state stay live.
+    fn control_inspection_state(&self) -> Option<ControlInspectionState> {
+        None
+    }
+
+    /// Restore only the same enabled semantic control and compatible input role.
+    /// New model values, schemas and callbacks remain authoritative.
+    fn restore_control_inspection_state(&mut self, _state: &ControlInspectionState) -> bool {
+        false
+    }
+
+    /// Cancel an owned keyboard release intent at an input-scope boundary.
+    ///
+    /// Returns whether an intent was canceled. Focus, widget identity, pointer
+    /// capture, author values and text drafts are unaffected. Scope owners invoke
+    /// this directly when opening a modal, even before the next routed event.
+    fn cancel_keyboard_activation(&mut self) -> bool {
+        false
+    }
+
+    /// Active modal subtree that owns keyboard input and focus traversal.
+    ///
+    /// The root declares this directly. The scope must name a current descendant;
+    /// `None` permits ordinary root traversal. Background shortcuts are suspended
+    /// while a scope is active, including when it has no focusable controls.
+    fn keyboard_focus_scope(&self) -> Option<WidgetId> {
+        None
+    }
+
     /// Whether the currently focused state of this widget accepts committed
     /// text input.
     ///
@@ -650,6 +966,24 @@ pub trait Widget {
         false
     }
 
+    /// Whether this widget owns an unfinished pointer interaction.
+    ///
+    /// Model hosts must retain the widget while a drag is in progress so routed
+    /// pointer capture keeps its owner. This is local input state, independent
+    /// of focus, accessibility, and whether the interaction has changed a value.
+    /// Return false after release, cancellation, or programmatic disable.
+    fn has_active_pointer_interaction(&self) -> bool {
+        false
+    }
+
+    /// Supply a fresh model-owned accessible name when this control supports it.
+    ///
+    /// Names do not identify author controls and are never restored by semantic
+    /// inspection. Return false when the control has no name override.
+    fn set_accessible_name(&mut self, _name: Option<String>) -> bool {
+        false
+    }
+
     /// Accessibility metadata for this widget.
     ///
     /// Containers that are only layout structure can return `None`; controls
@@ -657,6 +991,18 @@ pub trait Widget {
     /// expose roles, names, values, state, and focus order.
     fn accessibility(&self) -> Option<AccessibilityNode> {
         None
+    }
+
+    /// Visit semantic nodes derived from this control's existing model.
+    ///
+    /// The default emits the control's single node. Controls with virtual items
+    /// may emit additional nodes with stable identifiers and explicit parents.
+    /// These nodes do not become hit-test, Tab or pointer-capture targets;
+    /// their input remains owned by the control. Inspection must not dispatch.
+    fn visit_accessibility_nodes(&self, visitor: &mut dyn FnMut(AccessibilityNode)) {
+        if let Some(node) = self.accessibility() {
+            visitor(node);
+        }
     }
 
     /// Bounds of the semantic node in window logical coordinates, after layout.
@@ -679,25 +1025,33 @@ pub trait Widget {
 pub fn collect_accessibility_nodes(root: &dyn Widget) -> Vec<AccessibilityNode> {
     let mut nodes = Vec::new();
     let mut next_focus_order = 0;
-    collect_accessibility_nodes_inner(root, &mut nodes, &mut next_focus_order);
+    collect_accessibility_nodes_inner(root, None, &mut nodes, &mut next_focus_order);
     nodes
 }
 
 fn collect_accessibility_nodes_inner(
     widget: &dyn Widget,
+    parent_id: Option<WidgetId>,
     nodes: &mut Vec<AccessibilityNode>,
     next_focus_order: &mut u32,
 ) {
-    if let Some(mut node) = widget.accessibility() {
+    let mut child_parent = parent_id;
+    widget.visit_accessibility_nodes(&mut |mut node| {
+        if node.widget_id == widget.id() {
+            node.parent_id = parent_id;
+            child_parent = Some(node.widget_id);
+        } else if node.parent_id.is_none() {
+            node.parent_id = child_parent;
+        }
         if node.state.focusable && node.focus_order.is_none() {
             node.focus_order = Some(*next_focus_order);
             *next_focus_order = next_focus_order.saturating_add(1);
         }
         nodes.push(node);
-    }
+    });
     for index in 0..widget.child_count() {
         if let Some(child) = widget.child(index) {
-            collect_accessibility_nodes_inner(child, nodes, next_focus_order);
+            collect_accessibility_nodes_inner(child, child_parent, nodes, next_focus_order);
         }
     }
 }
@@ -954,6 +1308,24 @@ mod tests {
     fn widget_id_is_accessible() {
         let w = TestWidget::new(Color::from_hex(0xFF0000));
         assert_eq!(w.id(), w.id); // idempotent
+    }
+
+    #[test]
+    fn accessibility_collection_uses_nearest_semantic_parent_through_structural_wrappers() {
+        let mut group = AccessibilityTestWidget::with_children(vec![Box::new(
+            AccessibilityTestWidget::with_children(vec![Box::new(AccessibilityTestWidget::new(
+                Some(AccessibilityRole::Button),
+                true,
+            ))]),
+        )]);
+        group.role = Some(AccessibilityRole::Group);
+        let group_id = group.id;
+        let root = AccessibilityTestWidget::with_children(vec![Box::new(group)]);
+        let nodes = collect_accessibility_nodes(&root);
+        assert_eq!(nodes.len(), 2);
+        assert_eq!(nodes[0].parent_id, None);
+        assert_eq!(nodes[1].parent_id, Some(group_id));
+        assert_eq!(nodes[1].focus_order, Some(0));
     }
 
     #[test]

@@ -1,0 +1,31 @@
+[workspace]
+resolver = "2"
+members = ["common", "host", "plugin", "extensions"]
+exclude = ["host/examples/*", "plugin/examples/*"]
+[workspace.dependencies]
+clack-common = { path = "./common", version = "0.2.0" }
+clack-plugin = { path = "./plugin", version = "0.2.0" }
+clack-host = { path = "./host", version = "0.2.0", default-features = false }
+clack-extensions = { path = "./extensions", version = "0.2.0" }
+
+clap-sys = { path = "../clap-sys" }
+
+bitflags = "2.11.0"
+libloading = "=0.8.9" # Exact inline loader-owner implementation qualified by the storage observer.
+raw-window-handle_05 = { package = "raw-window-handle", version = "0.5.2" }
+raw-window-handle_06 = { package = "raw-window-handle", version = "0.6.0" }
+
+[workspace.lints.rust]
+unsafe-op-in-unsafe-fn = "allow"
+missing-docs = "deny"
+
+[workspace.lints.clippy]
+undocumented-unsafe-blocks = "deny"
+cast-possible-truncation = "deny"
+cast-possible-wrap = "deny"
+cast-precision-loss = "deny"
+cast-ptr-alignment = "deny"
+cast-sign-loss = "deny"
+checked-conversions = "warn"
+invalid_upcast_comparisons = "deny"
+transmute_ptr_to_ptr = "deny"

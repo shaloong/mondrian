@@ -104,7 +104,8 @@ impl PreparedTemporalValueProgram {
 
 pub(super) fn prepare_temporal_value_program(
     root_graph: Arc<CompiledEffectGraph>,
-    request: &EffectTemporalExecutionRequest,
+    output_time: TimelineTime,
+    output_frame_seed: i64,
     evaluate_sample: Option<TemporalSampleEvaluator<'_>>,
 ) -> Result<PreparedTemporalValueProgram, EffectTemporalExecutionError> {
     let root_output = root_graph
@@ -118,11 +119,11 @@ pub(super) fn prepare_temporal_value_program(
             .map(|binding| (binding.stage_index(), binding.contract()))
             .collect(),
         contexts: vec![TemporalGraphContext {
-            time: request.output_time,
-            frame_seed: request.output_frame_seed,
+            time: output_time,
+            frame_seed: output_frame_seed,
             graph: root_graph,
         }],
-        context_by_time: HashMap::from([(request.output_time, 0)]),
+        context_by_time: HashMap::from([(output_time, 0)]),
         evaluate_sample,
         visit: HashMap::new(),
         ordered_values: Vec::new(),
@@ -208,6 +209,12 @@ impl TemporalProgramBuilder<'_> {
         self.visit.insert(address, VisitState::Visiting);
         match node.kind {
             EffectGraphNodeKind::Source => unreachable!("source was normalized above"),
+            EffectGraphNodeKind::CustomSource { .. } => {
+                return Err(EffectTemporalExecutionError::UnsupportedGraphNode {
+                    node_id,
+                    kind: "custom_source",
+                })
+            }
             EffectGraphNodeKind::UnaryEffect { input, op }
             | EffectGraphNodeKind::DomainEffect { input, op, .. } => {
                 let input_address = self.visit_graph_value(context, input)?;

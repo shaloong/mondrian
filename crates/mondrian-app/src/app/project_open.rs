@@ -115,7 +115,7 @@ impl PreparedProductProjectOpen {
         project_file: PathBuf,
         prepared: PreparedProjectArchive<'_>,
         install_policy: ProjectArchiveInstallPolicy,
-        package_bindings: Option<&BTreeMap<PathBuf, PathBuf>>,
+        package_bindings: Option<&BTreeMap<mondrian_core::NativePath, PathBuf>>,
         runtime_lease: Arc<ProjectRuntimeLease>,
         mut library_generation: ProjectLibraryGenerationCandidate,
     ) -> anyhow::Result<Self> {
@@ -148,10 +148,7 @@ impl PreparedProductProjectOpen {
         if let Some(bindings) = package_bindings {
             super::project_packaging::rebind_document_resources(&mut loaded.document, bindings)?;
             asset_library.rebind_verified_package_sources(
-                &bindings
-                    .iter()
-                    .map(|(source, target)| (source.clone(), target.clone()))
-                    .collect::<Vec<_>>(),
+                &super::project_packaging::utf8_package_source_bindings(bindings)?,
             )?;
             super::project_packaging::ensure_package_asset_sources_rebound(
                 &asset_library,

@@ -281,7 +281,11 @@ impl AudioIdleWarmupExecutor for ProductionAudioIdleWarmupExecutor {
             mondrian_audio::AudioAuditionOverlay::default(),
             key.sample_rate,
             key.channel_layout,
+            key.chunk_frames,
             self.processor_resolver.as_ref(),
+            // This service owns a separate background execution lifetime.
+            // Playback's closure tracker cannot stand in for its own closure.
+            None,
         );
         if !asset_library_revision_matches(&revision_probe, key.binding.asset_library_revision)? {
             return Ok(AudioIdleWarmupExecutionOutcome::Superseded);
@@ -315,6 +319,7 @@ impl AudioIdleWarmupExecutor for ProductionAudioIdleWarmupExecutor {
             };
             let render = renderer.render(
                 AudioPcmRenderRequest {
+                    transport_activity: None,
                     start_sample,
                     frame_count: key.chunk_frames,
                     sample_rate: key.sample_rate,
@@ -1082,6 +1087,41 @@ mod tests {
             next_binding.asset_library_revision
         );
         service.shutdown();
+    }
+
+    #[test]
+    fn production_executor_prepares_the_captured_pcm_quantum() {
+        struct Resolver(Mutex<Vec<usize>>);
+        impl AudioProcessorResolver for Resolver {
+            fn prepare(
+                &self,
+                request: mondrian_audio::AudioProcessorPrepareRequest<'_>,
+            ) -> Result<
+                Arc<dyn mondrian_audio::AudioProcessorFactory>,
+                mondrian_audio::AudioProcessorHostError,
+            > {
+                self.0.lock().push(request.render_contract().max_block_frames);
+                BuiltInAudioProcessorResolver.prepare(request)
+            }
+        }
+        let (_app, binding) = binding();
+        let mut sequence = Sequence::new("warmup quantum");
+        sequence.audio_program.outputs[0].strip.pre_fader.processors.push(
+            mondrian_timeline::audio::AudioProcessorInstance::built_in(
+                mondrian_timeline::audio::BUILTIN_GAIN_DEFINITION_ID,
+                1,
+            ),
+        );
+        let mut demand = fixture_for_sequence(0, binding, &sequence);
+        demand.key.chunk_frames = 7;
+        demand.key.binding.asset_library_revision =
+            demand.library.database_revision().expect("current library revision");
+        let resolver = Arc::new(Resolver(Mutex::new(Vec::new())));
+        let outcome = ProductionAudioIdleWarmupExecutor { processor_resolver: resolver.clone() }
+            .execute(demand, &ExecutionCancellationToken::new())
+            .expect("actual production executor");
+        assert_eq!(outcome, AudioIdleWarmupExecutionOutcome::Completed);
+        assert_eq!(*resolver.0.lock(), vec![7]);
     }
 
     #[test]

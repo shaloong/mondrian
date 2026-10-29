@@ -140,13 +140,13 @@ pub(super) enum ExportHeterogeneousEffectError {
     Preparation {
         placement: &'static str,
         #[source]
-        source: PreparedHeterogeneousEffectWorkError,
+        source: Box<PreparedHeterogeneousEffectWorkError>,
     },
     #[error("export heterogeneous CPU prefix failed for {placement}: {source}")]
     CpuPrefix {
         placement: &'static str,
         #[source]
-        source: PreparedHeterogeneousEffectWorkError,
+        source: Box<PreparedHeterogeneousEffectWorkError>,
     },
     #[error("export heterogeneous GPU suffix failed for {placement}: {source}")]
     GpuContinuation {
@@ -266,7 +266,7 @@ impl ExportVisualRenderSession {
         let prepared = PreparedHeterogeneousEffectRoute::prepare(Arc::clone(graph), extent, budget)
             .map_err(|source| ExportHeterogeneousEffectError::Preparation {
                 placement: placement.label(),
-                source,
+                source: Box::new(source),
             })?;
         Ok(prepared)
     }
@@ -362,6 +362,14 @@ impl ExportVisualRenderSession {
         placement: ExportHeterogeneousPlacement,
         maximum_extent: EffectFrameExtent,
     ) -> Result<Option<PreparedHeterogeneousEffectRoute>, ExportHeterogeneousEffectError> {
+        if placement == ExportHeterogeneousPlacement::Media
+            && graph.image_scale_requirement()
+                == mondrian_effects::EffectImageScaleRequirement::Unit
+        {
+            // Full media Effects run before the node-canvas spatial join. Keep
+            // the original graph for complete CPU admission below.
+            return Ok(None);
+        }
         let cpu_exact = compiled_effect_graph_supports_rgba_f32_with_domain_processor(graph);
         if cpu_exact {
             self.visual_diagnostics.cpu_compatible_effect_checks =
@@ -389,6 +397,7 @@ impl ExportVisualRenderSession {
         Ok(Some(route))
     }
 
+    #[cfg(test)]
     pub(super) fn execute_heterogeneous_element(
         &mut self,
         route: &PreparedExportHeterogeneousElement,
@@ -396,7 +405,28 @@ impl ExportVisualRenderSession {
         working_color_space: WorkingColorSpace,
         cancellation: &ExecutionCancellationToken,
     ) -> Result<CpuColorFrame, ExportHeterogeneousEffectError> {
+        self.execute_heterogeneous_element_with_sources(
+            route,
+            input,
+            working_color_space,
+            cancellation,
+            None,
+        )
+    }
+
+    pub(super) fn execute_heterogeneous_element_with_sources(
+        &mut self,
+        route: &PreparedExportHeterogeneousElement,
+        input: HeterogeneousCpuPrefixSource,
+        working_color_space: WorkingColorSpace,
+        cancellation: &ExecutionCancellationToken,
+        sources: Option<&mut super::processor_sources::ExportProcessorSources<'_>>,
+    ) -> Result<CpuColorFrame, ExportHeterogeneousEffectError> {
         let extent = route.route.frame_extent();
+        let sampling = match &input {
+            HeterogeneousCpuPrefixSource::WorkingFrame(frame) => frame.rgba_f32().sampling,
+            HeterogeneousCpuPrefixSource::SolidColor { sampling, .. } => *sampling,
+        };
         let descriptor = match &input {
             HeterogeneousCpuPrefixSource::WorkingFrame(input) => input.descriptor(),
             HeterogeneousCpuPrefixSource::SolidColor { .. } => {
@@ -478,30 +508,80 @@ impl ExportVisualRenderSession {
         let mut checkpoint = || {
             cancellation
                 .is_canceled()
-                .then_some(mondrian_effects::HeterogeneousCpuExecutionStopReason::Canceled)
+                .then_some(mondrian_effects::EffectProcessorStopReason::Canceled)
         };
-        let completion = match input {
-            HeterogeneousCpuPrefixSource::WorkingFrame(input) => self
-                .composite_scratch
-                .execute_prepared_heterogeneous_cpu_prefix_with_checkpoint(
+        let mut control = mondrian_effects::EffectProcessorControl::new(&mut checkpoint);
+        control.bind_observation(self.composite_scratch.processor_observation());
+        let current = match &input {
+            HeterogeneousCpuPrefixSource::WorkingFrame(frame) => Some(frame.clone()),
+            HeterogeneousCpuPrefixSource::SolidColor { .. } => None,
+        };
+        let scratch = &mut self.composite_scratch;
+        let run = |control: &mut mondrian_effects::EffectProcessorControl<'_>| match input {
+            HeterogeneousCpuPrefixSource::WorkingFrame(input) => scratch
+                .execute_prepared_heterogeneous_cpu_prefix_with_control(
                     route.route.prepared_work(),
                     generation,
-                    &input.rgba_f32().data,
+                    mondrian_effects::EffectFloatFrameView::new(
+                        extent,
+                        mondrian_effects::EffectValueFormat::new(
+                            mondrian_effects::EffectWorkingPrecision::Float32,
+                            mondrian_effects::EffectColorDomain::SceneLinearRgb,
+                            input.rgba_f32().alpha,
+                        ),
+                        input.rgba_f32().sampling,
+                        &input.rgba_f32().data,
+                    ),
                     route.frame_seed,
                     working_color_space,
-                    &mut checkpoint,
+                    control,
                 ),
-            HeterogeneousCpuPrefixSource::SolidColor { color, .. } => self
-                .composite_scratch
-                .execute_prepared_heterogeneous_solid_cpu_prefix_with_checkpoint(
+            HeterogeneousCpuPrefixSource::SolidColor { color, sampling, .. } => scratch
+                .execute_prepared_heterogeneous_solid_cpu_prefix_with_control(
                     route.route.prepared_work(),
                     generation,
                     extent,
+                    sampling,
                     color,
                     route.frame_seed,
                     working_color_space,
-                    &mut checkpoint,
+                    control,
                 ),
+        };
+        let completion = if let (Some(plan), Some(sources)) =
+            (route.route.clip_input_plan(), sources)
+        {
+            let authority = sources.authority.clone();
+            let mut resolve =
+                |batch: &mondrian_renderer::TimelineTemporalDemandBatch,
+                 admit: &mut dyn FnMut(
+                    usize,
+                ) -> Result<
+                    (),
+                    mondrian_effects::EffectTemporalExecutionError,
+                >,
+                 control: &mut mondrian_effects::EffectProcessorControl<'_>| {
+                    sources.resolve(
+                        &mut self.decode_context,
+                        plan,
+                        batch,
+                        current.as_ref(),
+                        working_color_space,
+                        admit,
+                        control,
+                    )
+                };
+            plan.with_input_service(&authority, &mut resolve, &mut control, run).map_err(
+                |error| {
+                    self.visual_diagnostics.heterogeneous_terminal_failures =
+                        self.visual_diagnostics.heterogeneous_terminal_failures.saturating_add(1);
+                    ExportHeterogeneousEffectError::CapabilityUnavailable {
+                        reason: error.to_string(),
+                    }
+                },
+            )?
+        } else {
+            run(&mut control)
         }
         .map_err(|source| {
             self.visual_diagnostics.heterogeneous_terminal_failures =
@@ -513,7 +593,7 @@ impl ExportVisualRenderSession {
                 } => ExportHeterogeneousEffectError::Canceled { checkpoint: "cpu_prefix" },
                 source => ExportHeterogeneousEffectError::CpuPrefix {
                     placement: route.placement.label(),
-                    source,
+                    source: Box::new(source),
                 },
             }
         })?;
@@ -562,12 +642,16 @@ impl ExportVisualRenderSession {
             ExportHeterogeneousEffectError::MissingReadbackEvidence
         })?;
         let output = completed.into_frame();
-        if output.descriptor() != descriptor {
+        if output.descriptor() != descriptor || output.rgba_f32().sampling != sampling {
             self.visual_diagnostics.heterogeneous_terminal_failures =
                 self.visual_diagnostics.heterogeneous_terminal_failures.saturating_add(1);
             return Err(ExportHeterogeneousEffectError::FrameContractMismatch {
-                expected: format!("{descriptor:?}"),
-                actual: format!("{:?}", output.descriptor()),
+                expected: format!("{descriptor:?} sampling={sampling:?}"),
+                actual: format!(
+                    "{:?} sampling={:?}",
+                    output.descriptor(),
+                    output.rgba_f32().sampling
+                ),
             });
         }
         self.visual_diagnostics.heterogeneous_frames_completed =

@@ -127,6 +127,13 @@ const APP_UI_WINDOW_PRODUCT_SHUTDOWN_TIMEOUT: Duration = Duration::from_millis(7
 #[cfg(target_os = "macos")]
 const APP_UI_NATIVE_DISPLAY_OBSERVATION_PERIOD: Duration = Duration::from_secs(1);
 
+// The external surface-reopen deadline is a caller-owned consuming budget.
+// A Question's operation deadline is not a consuming-shutdown deadline.
+fn window_consuming_shutdown_deadline(external: Option<Instant>, now: Instant) -> Instant {
+    external
+        .unwrap_or_else(|| now.checked_add(APP_UI_WINDOW_PRODUCT_SHUTDOWN_TIMEOUT).unwrap_or(now))
+}
+
 fn control_flow_wake_no_later_than(
     current: winit::event_loop::ControlFlow,
     deadline: Instant,
@@ -361,6 +368,9 @@ enum AppUiValidationWindowShutdown {
 struct AppUiValidationReturnedState {
     app_state: AppState,
     shutdown: AppUiValidationWindowShutdown,
+    // Actual budget already used by the consuming Window owners. The returned
+    // App consumes the remainder, never a renewed per-component budget.
+    shutdown_deadline: Instant,
 }
 
 #[cfg(feature = "validation")]
@@ -420,6 +430,7 @@ impl AppUiHostSessionOwner {
         if let Some(return_slot) = self.validation_return.take() {
             *return_slot.borrow_mut() = Some(AppUiValidationReturnedState {
                 app_state,
+                shutdown_deadline: deadline,
                 shutdown: AppUiValidationWindowShutdown::PendingHostActive {
                     host: ui_shutdown,
                     gpu: gpu_shutdown,
@@ -467,13 +478,10 @@ impl Drop for AppUiHostSessionOwner {
                 tracing::error!("validation Window lost its App UI host before state return");
                 return;
             };
-            let Some(deadline) = self.validation_shutdown_deadline.take() else {
-                tracing::error!(
-                    "validation Window Host fallback had no caller-owned shutdown deadline; retaining Host authority"
-                );
-                std::mem::forget(host);
-                return;
-            };
+            let deadline = window_consuming_shutdown_deadline(
+                self.validation_shutdown_deadline.take(),
+                Instant::now(),
+            );
             let (app_state, ui_shutdown) = host.into_app_state_until(deadline);
             let mut returned = return_slot.borrow_mut();
             if returned.is_some() {
@@ -485,6 +493,7 @@ impl Drop for AppUiHostSessionOwner {
             }
             *returned = Some(AppUiValidationReturnedState {
                 app_state,
+                shutdown_deadline: deadline,
                 shutdown: AppUiValidationWindowShutdown::IncompleteHostFallback {
                     host: ui_shutdown,
                 },
@@ -772,6 +781,14 @@ enum WindowCornerPreference {
 enum SurfaceLifecycleReason {
     Resize,
     ScaleFactorChanged,
+    #[cfg_attr(
+        not(windows),
+        allow(
+            dead_code,
+            reason = "Windows retains the session on role changes; other backends replace it"
+        )
+    )]
+    RoleChanged,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -1037,6 +1054,7 @@ struct AppUiViewerGpuOutputDisplayView {
 enum AppUiDisplayContractRefreshReasonDiagnostic {
     Resize,
     ScaleFactorChanged,
+    RoleChanged,
     WindowMoved,
     DisplayPolicyChanged,
     #[cfg(target_os = "macos")]
@@ -1729,6 +1747,9 @@ impl AppUiDisplayContractRefreshReasonDiagnostic {
             DisplayOutputContractRefreshReason::SurfaceLifecycle(
                 SurfaceLifecycleReason::ScaleFactorChanged,
             ) => Self::ScaleFactorChanged,
+            DisplayOutputContractRefreshReason::SurfaceLifecycle(
+                SurfaceLifecycleReason::RoleChanged,
+            ) => Self::RoleChanged,
             DisplayOutputContractRefreshReason::WindowMoved => Self::WindowMoved,
             DisplayOutputContractRefreshReason::DisplayPolicyChanged => Self::DisplayPolicyChanged,
             #[cfg(target_os = "macos")]
@@ -1837,6 +1858,7 @@ struct AppUiWindowSession {
     viewer_gpu_device_progress: ViewerGpuDeviceGenerationMember<ViewerGpuDeviceProgressOwner>,
     surface_generation_id: AppUiSurfaceGenerationId,
     role: AppUiWindowRole,
+    workspace_placement: WorkspaceWindowPlacement,
     #[cfg(target_os = "macos")]
     accessibility: Option<super::accessibility::MacAccessibility>,
     #[cfg(target_os = "macos")]
@@ -2895,6 +2917,178 @@ pub fn run_app_ui() -> Result<(), Box<dyn std::error::Error>> {
     run_app_ui_with_initial_state(AppState::new())
 }
 
+/// Run the real product Window/modal/router/native Question qualification.
+///
+/// The request names existing author data, not an editor capability. The ordinary
+/// Inspector/Preview/bank paths must issue all actual service ownership. This
+/// command prints one bounded JSON report and consumes Window/App/EventLoop
+/// owners. Float pixel acceptance and physical OS termination are separate gates.
+#[cfg(feature = "validation")]
+pub fn run_app_ui_native_question_validation_file(
+    request_path: &Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use super::native_question_validation::{
+        NativeQuestionWindowPump, NativeQuestionWindowReport, NativeQuestionWindowRequest,
+    };
+    let mut bytes = Vec::new();
+    File::open(request_path)?.take(16 * 1024 + 1).read_to_end(&mut bytes)?;
+    if bytes.len() > 16 * 1024 {
+        return Err("Question validation request exceeds 16 KiB".into());
+    }
+    let request: NativeQuestionWindowRequest = serde_json::from_slice(&bytes)?;
+    let _ = request.deadline(Instant::now())?;
+    let mut app = AppState::new();
+    let setup = (|| -> anyhow::Result<()> {
+        use crate::app::product_action::{
+            ProductAction, VisualEffectInstallOpenFxBundlePayload, VisualEffectProductAction,
+            VisualEffectTargetPayload,
+        };
+        anyhow::ensure!(
+            request.project.is_absolute() && request.bundle.is_absolute(),
+            "validation project and bundle must be explicit absolute paths"
+        );
+        app.open_project_file(request.project.clone())?;
+        anyhow::ensure!(
+            app.active_sequence_id() == Some(request.sequence),
+            "request Sequence must be the actual active project Sequence"
+        );
+        app.dispatch_action(
+            ProductAction::VisualEffect(VisualEffectProductAction::InstallOpenFxBundle(
+                VisualEffectInstallOpenFxBundlePayload {
+                    path: request.bundle.clone(),
+                    context: crate::openfx_host::OpenFxContext::Filter,
+                },
+            ))
+            .into_external_action(),
+        )?;
+        if !app.primary_selected_effect().is_some_and(|selected| {
+            selected.clip.clip_id == request.clip && selected.effect_id == request.effect
+        }) {
+            app.dispatch_action(
+                ProductAction::VisualEffect(VisualEffectProductAction::Select(
+                    VisualEffectTargetPayload { clip_id: request.clip, effect_id: request.effect },
+                ))
+                .into_external_action(),
+            )?;
+        }
+        Ok(())
+    })();
+    let pump = match setup
+        .map_err(|error| error.to_string())
+        .and_then(|()| NativeQuestionWindowPump::new(request, &app))
+    {
+        Ok(pump) => pump,
+        Err(error) => {
+            let shutdown_deadline = window_consuming_shutdown_deadline(None, Instant::now());
+            let shutdown = app.shutdown_for_endurance(shutdown_deadline);
+            let report = NativeQuestionWindowReport {
+                app_owners_released: shutdown.all_resources_released(),
+                app_shutdown: Some(format!("{shutdown:?}")),
+                failures: vec![error],
+                ..Default::default()
+            };
+            println!("{}", serde_json::to_string(&report)?);
+            return Err(
+                "Question validation setup failed; report contains actual App cleanup".into(),
+            );
+        }
+    };
+    let mut event_loop = match AppUiReusableEventLoop::new() {
+        Ok(event_loop) => event_loop,
+        Err(error) => {
+            let shutdown_deadline = window_consuming_shutdown_deadline(None, Instant::now());
+            let shutdown = app.shutdown_for_endurance(shutdown_deadline);
+            let report = NativeQuestionWindowReport {
+                app_owners_released: shutdown.all_resources_released(),
+                app_shutdown: Some(format!("{shutdown:?}")),
+                failures: vec![error.to_string()],
+                ..Default::default()
+            };
+            println!("{}", serde_json::to_string(&report)?);
+            return Err("Question validation could not construct the actual EventLoop".into());
+        }
+    };
+    let validation = Rc::new(RefCell::new(pump));
+    let returned_state: AppUiValidationReturnSlot = Rc::new(RefCell::new(None));
+    let run = run_app_ui_with_initial_state_on_event_loop(
+        event_loop.event_loop_mut(),
+        app,
+        None,
+        Some(Rc::clone(&validation)),
+        Some(Rc::clone(&returned_state)),
+    );
+    let mut report = std::mem::take(&mut validation.borrow_mut().report);
+    if let Err(error) = run {
+        report.failures.push(error.to_string());
+    }
+    let returned = returned_state.borrow_mut().take();
+    if let Some(AppUiValidationReturnedState { app_state, shutdown, shutdown_deadline }) = returned
+    {
+        let native = AppUiWindowNativeReturnEvidence::after_window_function_return();
+        let outer = match shutdown {
+            AppUiValidationWindowShutdown::PendingActive { runtime, host, gpu } => Some(
+                AppUiWindowOuterShutdownEvidence::active_exited(runtime, host, gpu, native),
+            ),
+            AppUiValidationWindowShutdown::PendingActivePublicationFailure {
+                runtime,
+                host,
+                gpu,
+            } => Some(AppUiWindowOuterShutdownEvidence::active_publication_failed(
+                runtime, host, gpu, native,
+            )),
+            AppUiValidationWindowShutdown::Complete(evidence) => Some(evidence),
+            AppUiValidationWindowShutdown::PendingHostActive { .. } => {
+                report.failures.push(
+                    "actual Window returned before background Runtime shutdown evidence".to_owned(),
+                );
+                None
+            }
+            AppUiValidationWindowShutdown::IncompleteHostFallback { host } => {
+                report.failures.push(format!(
+                    "incomplete actual Window consuming Host shutdown: {host:?}"
+                ));
+                None
+            }
+        };
+        report.window_owners_released =
+            outer.as_ref().is_some_and(|evidence| evidence.all_owned_authority_released());
+        report.window_shutdown = outer.map(|evidence| format!("{evidence:?}"));
+        let app_shutdown = app_state.shutdown_for_endurance(shutdown_deadline);
+        report.app_owners_released = app_shutdown.all_resources_released();
+        report.app_shutdown = Some(format!("{app_shutdown:?}"));
+    } else {
+        report
+            .failures
+            .push("actual Window returned without its consuming App owner handback".to_owned());
+    }
+    report.event_loop_owner_released = event_loop.shutdown().rust_owner_released();
+    if report.completed.is_none() {
+        report.failures.push(
+            "original native invocation did not publish matching current feedback".to_owned(),
+        );
+    }
+    if report.reply.is_none() {
+        report
+            .failures
+            .push("no real routed reply was accepted for the original service".to_owned());
+    }
+    if !report.window_owners_released
+        || !report.app_owners_released
+        || !report.event_loop_owner_released
+    {
+        report
+            .failures
+            .push("actual owner-consuming shutdown did not qualify".to_owned());
+    }
+    report.passed = report.failures.is_empty();
+    println!("{}", serde_json::to_string(&report)?);
+    if report.passed {
+        Ok(())
+    } else {
+        Err("real Question Window qualification failed; see JSON report".into())
+    }
+}
+
 /// Process-local reusable desktop event-loop owner for endurance validation.
 ///
 /// Winit permits only one event-loop owner per process on the supported
@@ -3661,11 +3855,12 @@ fn run_app_ui_surface_device_reopen_validation_returning_state_with_deadline(
         event_loop,
         initial_state,
         Some(validation),
+        None,
         Some(Rc::clone(&returned_state)),
     );
     let returned = returned_state.borrow_mut().take();
     let recovery_pump = recovery_pump_return.borrow_mut().take();
-    let AppUiValidationReturnedState { app_state, shutdown } = returned
+    let AppUiValidationReturnedState { app_state, shutdown, .. } = returned
         .unwrap_or_else(|| panic!("validation Window exited without returning its AppState owner"));
     let native = AppUiWindowNativeReturnEvidence::after_window_function_return();
     let (shutdown, outer_failure) = match shutdown {
@@ -3766,6 +3961,7 @@ fn merge_window_cleanup_failures(first: Option<String>, second: Option<String>) 
     }
 }
 
+#[cfg(any(not(target_os = "windows"), test, feature = "validation"))]
 fn with_window_candidate_installed<T, R>(
     active: &mut T,
     candidate: &mut T,
@@ -3868,6 +4064,8 @@ fn run_app_ui_with_initial_state(
         #[cfg(feature = "validation")]
         surface_reopen_validation,
         #[cfg(feature = "validation")]
+        None,
+        #[cfg(feature = "validation")]
         validation_return,
     )
 }
@@ -3877,6 +4075,9 @@ fn run_app_ui_with_initial_state_on_event_loop(
     initial_state: AppState,
     #[cfg(feature = "validation")] mut surface_reopen_validation: Option<
         AppUiSurfaceDeviceReopenValidation,
+    >,
+    #[cfg(feature = "validation")] question_validation: Option<
+        Rc<RefCell<super::native_question_validation::NativeQuestionWindowPump>>,
     >,
     #[cfg(feature = "validation")] validation_return: Option<AppUiValidationReturnSlot>,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -3889,8 +4090,9 @@ fn run_app_ui_with_initial_state_on_event_loop(
     let product_startup_deadline =
         || Instant::now().checked_add(Duration::from_secs(5)).unwrap_or_else(Instant::now);
     #[cfg(feature = "validation")]
-    let host_startup_deadline =
-        validation_shutdown_deadline.unwrap_or_else(product_startup_deadline);
+    let host_startup_deadline = validation_shutdown_deadline
+        .or_else(|| question_validation.as_ref().map(|validation| validation.borrow().deadline))
+        .unwrap_or_else(product_startup_deadline);
     #[cfg(not(feature = "validation"))]
     let host_startup_deadline = product_startup_deadline();
     // Evidence identity is immutable process startup work. Reading and hashing
@@ -3908,6 +4110,7 @@ fn run_app_ui_with_initial_state_on_event_loop(
             if let Some(return_slot) = validation_return.as_ref() {
                 *return_slot.borrow_mut() = Some(AppUiValidationReturnedState {
                     app_state: initial_state,
+                    shutdown_deadline: host_startup_deadline,
                     shutdown: AppUiValidationWindowShutdown::Complete(
                         AppUiWindowOuterShutdownEvidence::runtime_startup_failed(
                             runtime_shutdown.clone(),
@@ -3952,6 +4155,7 @@ fn run_app_ui_with_initial_state_on_event_loop(
             if let Some(return_slot) = validation_return.as_ref() {
                 *return_slot.borrow_mut() = Some(AppUiValidationReturnedState {
                     app_state: closed.app_state,
+                    shutdown_deadline: host_startup_deadline,
                     shutdown: AppUiValidationWindowShutdown::Complete(
                         AppUiWindowOuterShutdownEvidence::host_startup_failed(
                             runtime_shutdown.clone(),
@@ -4026,6 +4230,12 @@ fn run_app_ui_with_initial_state_on_event_loop(
             };
             // Install the activated native owner before any fallible Host publication.
             initial_candidate = Some(candidate);
+            #[cfg(feature = "validation")]
+            if question_validation.is_some() {
+                host.root_mut().focus_panel(PanelKind::Inspector);
+                host.mark_dirty();
+                host.refresh_if_dirty(initial_candidate.as_ref().expect("installed Window candidate").session_bounds);
+            }
             publication_failure = publish_initial_window_candidate(
                 &mut host, initial_candidate.as_ref().expect("installed Window candidate"),
             ).err();
@@ -4351,6 +4561,12 @@ fn run_app_ui_with_initial_state_on_event_loop(
                             &session.router,
                             pixels_per_point,
                         );
+                        let painted_native_question = host.painted_native_visual_question();
+                        #[cfg(feature = "validation")]
+                        let question_validation_painted = painted_native_question.clone();
+                        #[cfg(feature = "validation")]
+                        let question_validation_before = question_validation_painted
+                            .as_ref().map(|question| question.validation_state());
                         let frame_result = frame.paint(|acquired| {
                             session.frame_renderer.render_acquired_draw_commands(
                                 device,
@@ -4360,6 +4576,15 @@ fn run_app_ui_with_initial_state_on_event_loop(
                                 encoder.finish_scaled(pixels_per_point),
                             )
                         });
+                        host.finish_native_visual_question_surface(painted_native_question, frame_result);
+                        #[cfg(feature = "validation")]
+                        if let Some(validation) = question_validation.as_ref() {
+                            validation.borrow_mut().observe_surface(
+                                &host, question_validation_painted, super::native_question_validation::NativeQuestionSurfaceFrame { state_before: question_validation_before, result: frame_result, pixels_per_point },
+                                format!("{:?}", session.window.id()), session.surface_generation_id.get(),
+                                format!("{:?}", session.renderer_adapter),
+                            );
+                        }
                         if matches!(frame_result, crate::app_ui::rendering::AppUiFrameResult::Reconfigured { .. }) {
                             session.configure_surface(device);
                         } else if matches!(frame_result, crate::app_ui::rendering::AppUiFrameResult::Skipped {
@@ -4475,6 +4700,9 @@ fn run_app_ui_with_initial_state_on_event_loop(
                     }
 
                     WindowEvent::Resized(new_size) => {
+                        if session.role == AppUiWindowRole::Workspace {
+                            session.workspace_placement.observe(&session.window);
+                        }
                         apply_surface_lifecycle_update(
                             SurfaceLifecycleReason::Resize,
                             (new_size.width, new_size.height),
@@ -4620,6 +4848,15 @@ fn run_app_ui_with_initial_state_on_event_loop(
                     }
 
                     WindowEvent::MouseInput { state, button, .. } => {
+                        if state == ElementState::Pressed
+                            && button == winit::event::MouseButton::Left
+                            && let Some(direction) = window_resize_direction(session)
+                        {
+                            match session.window.drag_resize_window(direction) {
+                                Ok(()) => return,
+                                Err(error) => tracing::debug!(%error, "native window resize unavailable"),
+                            }
+                        }
                         let sync_workspace_layout = state == ElementState::Released
                             && button == winit::event::MouseButton::Left;
                         let evt = match state {
@@ -4772,7 +5009,7 @@ fn run_app_ui_with_initial_state_on_event_loop(
                 let playback_clock_started = Instant::now();
                 #[cfg(feature = "validation")]
                 let playback_changed = if !validation_window_advances_playback(
-                    surface_reopen_validation.is_some(),
+                    surface_reopen_validation.is_some() || question_validation.is_some(),
                 ) {
                     false
                 } else {
@@ -4817,6 +5054,25 @@ fn run_app_ui_with_initial_state_on_event_loop(
                 if background_tasks.needs_follow_up_poll {
                     elwt.set_control_flow(ControlFlow::Poll);
                 }
+                #[cfg(feature = "validation")]
+                if let Some(validation) = question_validation.as_ref() {
+                    let event = validation.borrow_mut().next_event(&host, session.router.focused());
+                    if let Some(event) = event {
+                        let _ = session.ui_runtime.route_window_event(
+                            &session.window, &mut session.router, host.active_root_mut(), event, &dispatch_action,
+                        );
+                        drain_actions_and_sync_window_session(
+                            &mut host, &pending_actions, &platform, elwt, instance, adapter, device, session,
+                        );
+                        validation.borrow_mut().after_event(&host, session.router.focused());
+                        update_window_cursor_icon(&host, session);
+                        session.window.request_redraw();
+                    }
+                    if validation.borrow().finished() { elwt.exit(); }
+                    else {
+                        elwt.set_control_flow(control_flow_wake_no_later_than(elwt.control_flow(), validation.borrow().wake()));
+                    }
+                }
                 // Preview execution follows owner clock/results directly. It
                 // must not wait for a repaint (and a native drawable) before
                 // satisfying an already-bound presentation ticket. Paint only
@@ -4851,6 +5107,12 @@ fn run_app_ui_with_initial_state_on_event_loop(
                         elwt.control_flow(),
                         next_wake,
                     ));
+                }
+                if let Some(delay) = host.native_audio_control_next_wake_delay() {
+                    elwt.set_control_flow(control_flow_wake_no_later_than(elwt.control_flow(), Instant::now() + delay));
+                }
+                if let Some(delay) = host.resource_inspection_next_wake_delay() {
+                    elwt.set_control_flow(control_flow_wake_no_later_than(elwt.control_flow(), Instant::now() + delay));
                 }
                 if host.has_pending_ui_refresh() {
                     session.window.request_redraw();
@@ -4954,6 +5216,7 @@ fn run_app_ui_with_initial_state_on_event_loop(
         if let Some(return_slot) = host.validation_return.take() {
             *return_slot.borrow_mut() = Some(AppUiValidationReturnedState {
                 app_state,
+                shutdown_deadline: host_startup_deadline,
                 shutdown: AppUiValidationWindowShutdown::Complete(
                     AppUiWindowOuterShutdownEvidence::pre_active_failed(
                         runtime_shutdown,
@@ -4995,6 +5258,7 @@ fn run_app_ui_with_initial_state_on_event_loop(
         if let Some(return_slot) = host.validation_return.take() {
             *return_slot.borrow_mut() = Some(AppUiValidationReturnedState {
                 app_state,
+                shutdown_deadline: host_startup_deadline,
                 shutdown: AppUiValidationWindowShutdown::PendingActivePublicationFailure {
                     runtime: runtime_shutdown,
                     host: ui_shutdown,
@@ -5022,15 +5286,17 @@ fn run_app_ui_with_initial_state_on_event_loop(
 
     let event_loop_result =
         merge_app_ui_event_loop_failure(event_loop_result, session.event_loop_failure.take());
-    let product_shutdown_deadline = || {
-        Instant::now()
-            .checked_add(APP_UI_WINDOW_PRODUCT_SHUTDOWN_TIMEOUT)
-            .unwrap_or_else(Instant::now)
-    };
     #[cfg(feature = "validation")]
-    let shutdown_deadline = validation_shutdown_deadline.unwrap_or_else(product_shutdown_deadline);
+    let external_shutdown_deadline = validation_shutdown_deadline;
     #[cfg(not(feature = "validation"))]
-    let shutdown_deadline = product_shutdown_deadline();
+    let external_shutdown_deadline = None;
+    let shutdown_deadline =
+        window_consuming_shutdown_deadline(external_shutdown_deadline, Instant::now());
+    #[cfg(feature = "validation")]
+    {
+        // A fallback during this consuming pass shares its already-frozen budget.
+        host.validation_shutdown_deadline = Some(shutdown_deadline);
+    }
     let gpu_shutdown = catch_window_viewer_gpu_shutdown(session, &host, shutdown_deadline);
     let gpu_failure = gpu_shutdown.qualification_failure();
     if mondrian_renderer::profile::profiling_enabled() {
@@ -7300,6 +7566,7 @@ fn prepare_viewer_gpu_preview(
     session: &mut AppUiWindowSession,
     host: &AppUiHost,
 ) {
+    host.sync_native_visual_gui_presence();
     let prepare_started = Instant::now();
     let mut renderer_record_us = None;
     let mut renderer_cpu_stage_timings: Option<ViewerGpuExecutionCpuStageTimings> = None;
@@ -8642,6 +8909,12 @@ fn synchronize_viewer_spatial_presentation(
 }
 
 fn clear_viewer_spatial_presentation(session: &mut AppUiWindowSession, host: &AppUiHost) {
+    // These candidates have not crossed Window GPU submission. Retire their
+    // source leases with the old presentation even when backend preparation is
+    // pending or the next root has no Viewer geometry. Submitted owners remain
+    // in the existing completion/quarantine lifecycle below.
+    session.pending_viewer_backend_frame = None;
+    session.staged_viewer_gpu_successors.retain_only(&[]);
     let cleanup_deferred = cancel_viewer_gpu_submission(
         session,
         host,
@@ -8878,7 +9151,7 @@ fn surface_lifecycle_update(
     }
 
     let size_changed = current_size != next_size;
-    let relayout_root = size_changed || reason == SurfaceLifecycleReason::ScaleFactorChanged;
+    let relayout_root = size_changed || reason != SurfaceLifecycleReason::Resize;
     let bounds = relayout_root
         .then(|| coordinates.bounds(winit::dpi::PhysicalSize::new(next_size.0, next_size.1)));
 
@@ -9289,6 +9562,7 @@ impl AppUiPreparedWindowSession {
             viewer_gpu_device_progress: ViewerGpuDeviceGenerationMember::empty(),
             surface_generation_id,
             role,
+            workspace_placement: WorkspaceWindowPlacement::default(),
             #[cfg(target_os = "macos")]
             accessibility: None,
             #[cfg(target_os = "macos")]
@@ -9639,18 +9913,136 @@ fn sync_window_session_role(
     if session.role == target_role {
         return;
     }
-    if let Err(err) =
-        replace_window_session(target_role, elwt, instance, adapter, device, host, session)
+    #[cfg(not(target_os = "windows"))]
     {
-        let failure = format!("failed to replace app UI native window: {err}");
-        tracing::error!("{failure}");
-        if session.event_loop_failure.is_none() {
-            session.event_loop_failure = Some(failure);
+        if let Err(err) =
+            replace_window_session(target_role, elwt, instance, adapter, device, host, session)
+        {
+            let failure = format!("failed to replace app UI native window: {err}");
+            tracing::error!("{failure}");
+            session.event_loop_failure.get_or_insert(failure);
+            elwt.exit();
         }
-        elwt.exit();
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let _ = instance;
+        let old_role = session.role;
+        if old_role == AppUiWindowRole::Workspace {
+            session.workspace_placement.observe(&session.window);
+        }
+        // Publication is revoked, but in-flight device owners and callback receivers
+        // remain in this session until their existing completion gates release them.
+        clear_viewer_spatial_presentation(session, host);
+        session.ui_runtime.reset_for_root_change(&session.window);
+        session.router = build_event_router(
+            host.active_root().id(),
+            &host.preferences().shortcut_overrides,
+        );
+        session.last_window_cursor_icon = None;
+        session.role = target_role;
+        apply_window_role_chrome(&session.window, target_role, session.workspace_placement);
+        let size = session.window.inner_size();
+        apply_surface_lifecycle_update(
+            SurfaceLifecycleReason::RoleChanged,
+            (size.width, size.height),
+            adapter,
+            device,
+            session,
+            host,
+        );
+        // The active root changes even when the native size has not changed yet.
+        if let Err(err) = publish_active_window_session(host, session, session.current_bounds.get())
+        {
+            let failure = format!("failed to publish retained app UI window role: {err}");
+            tracing::error!("{failure}");
+            session.event_loop_failure.get_or_insert(failure);
+            elwt.exit();
+            return;
+        }
+        if let Err(err) = host.renew_still_frame_demand_after_output_retirement() {
+            let failure = format!("failed to renew app UI window role demand: {err}");
+            tracing::error!("{failure}");
+            if session.event_loop_failure.is_none() {
+                session.event_loop_failure = Some(failure);
+            }
+            elwt.exit();
+            return;
+        }
+        tracing::info!(
+            ?old_role,
+            ?target_role,
+            surface_generation = session.surface_generation_id.get(),
+            "app UI role changed on retained native window"
+        );
+        session.window.request_redraw();
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+struct WorkspaceWindowPlacement {
+    normal_size: winit::dpi::LogicalSize<f64>,
+    maximized: bool,
+}
+
+impl Default for WorkspaceWindowPlacement {
+    fn default() -> Self {
+        Self {
+            normal_size: logical_size(WORKSPACE_WINDOW_WIDTH, WORKSPACE_WINDOW_HEIGHT),
+            maximized: false,
+        }
+    }
+}
+
+impl WorkspaceWindowPlacement {
+    fn observe(&mut self, window: &winit::window::Window) {
+        self.record(
+            window.inner_size().to_logical(window.scale_factor()),
+            window.is_maximized(),
+            window.is_minimized().unwrap_or(false),
+        );
+    }
+
+    fn record(&mut self, size: winit::dpi::LogicalSize<f64>, maximized: bool, minimized: bool) {
+        if minimized {
+            return;
+        }
+        self.maximized = maximized;
+        if !maximized && size.width > 0.0 && size.height > 0.0 {
+            self.normal_size = size;
+        }
+    }
+}
+
+#[cfg(windows)]
+fn apply_window_role_chrome(
+    window: &winit::window::Window,
+    role: AppUiWindowRole,
+    workspace: WorkspaceWindowPlacement,
+) {
+    let chrome = window_chrome_for_role(role);
+    window.set_maximized(false);
+    window.set_minimized(false);
+    // Remove Startup's fixed maximum before raising Workspace's minimum.
+    window.set_max_inner_size(None::<winit::dpi::LogicalSize<f64>>);
+    window.set_min_inner_size(chrome.min_size.map(|(w, h)| logical_size(w, h)));
+    window.set_title(chrome.title);
+    window.set_transparent(chrome.transparent);
+    window.set_decorations(chrome.decorations);
+    window.set_resizable(chrome.resizable);
+    apply_window_corner_preference(window, window_corner_preference_for_role(role));
+    let size = match role {
+        AppUiWindowRole::Startup => logical_size(chrome.width, chrome.height),
+        AppUiWindowRole::Workspace => workspace.normal_size,
+    };
+    let _ = window.request_inner_size(size);
+    window.set_max_inner_size(chrome.max_size.map(|(w, h)| logical_size(w, h)));
+    if role == AppUiWindowRole::Workspace && workspace.maximized {
+        window.set_maximized(true);
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
 fn replace_window_session(
     role: AppUiWindowRole,
     elwt: &winit::event_loop::ActiveEventLoop,
@@ -9733,6 +10125,7 @@ fn replace_window_session(
     Ok(())
 }
 
+#[cfg(any(not(target_os = "windows"), test))]
 #[allow(clippy::too_many_arguments)]
 fn handoff_window_viewer_gpu_device_generation<P, E, Q, O, C>(
     retiring_progress: &mut P,
@@ -9894,6 +10287,9 @@ fn update_window_cursor_icon(host: &AppUiHost, session: &mut AppUiWindowSession)
 }
 
 fn window_cursor_icon(host: &AppUiHost, session: &AppUiWindowSession) -> winit::window::CursorIcon {
+    if let Some(direction) = window_resize_direction(session) {
+        return direction.into();
+    }
     winit_cursor_icon_for_ui_state(
         session.ui_runtime.is_eyedropper_active(),
         session.ui_runtime.widget_cursor_request(),
@@ -9903,6 +10299,72 @@ fn window_cursor_icon(host: &AppUiHost, session: &AppUiWindowSession) -> winit::
             session.router.focus_manager().focused_widget(),
         ),
     )
+}
+
+fn window_resize_direction(session: &AppUiWindowSession) -> Option<winit::window::ResizeDirection> {
+    // AppKit provides its own resize handling; winit's explicit drag API is
+    // unsupported there. Windows and Linux need client-side edge hit testing.
+    if cfg!(target_os = "macos")
+        || session.router.captured().is_some()
+        || session.ui_runtime.is_eyedropper_active()
+    {
+        return None;
+    }
+    let size = session.window.inner_size();
+    let scale = session.window.scale_factor() as f32;
+    resize_direction_at_point(
+        session.role,
+        session.window.is_maximized() || session.window.fullscreen().is_some(),
+        Point::new(session.last_cursor.x / scale, session.last_cursor.y / scale),
+        size.width as f32 / scale,
+        size.height as f32 / scale,
+    )
+}
+
+fn resize_direction_at_point(
+    role: AppUiWindowRole,
+    expanded: bool,
+    point: Point,
+    width: f32,
+    height: f32,
+) -> Option<winit::window::ResizeDirection> {
+    use winit::window::ResizeDirection::*;
+    const EDGE: f32 = 6.0;
+    const CORNER: f32 = 16.0;
+    if role != AppUiWindowRole::Workspace
+        || expanded
+        || !width.is_finite()
+        || !height.is_finite()
+        || width <= 2.0 * CORNER
+        || height <= 2.0 * CORNER
+        || !point.x.is_finite()
+        || !point.y.is_finite()
+        || point.x < 0.0
+        || point.y < 0.0
+        || point.x >= width
+        || point.y >= height
+    {
+        return None;
+    }
+    let left = point.x < EDGE;
+    let right = point.x >= width - EDGE;
+    let top = point.y < EDGE;
+    let bottom = point.y >= height - EDGE;
+    match (left || right, top || bottom) {
+        (false, false) => None,
+        _ if (left && point.y < CORNER) || (top && point.x < CORNER) => Some(NorthWest),
+        _ if (right && point.y < CORNER) || (top && point.x >= width - CORNER) => Some(NorthEast),
+        _ if (left && point.y >= height - CORNER) || (bottom && point.x < CORNER) => {
+            Some(SouthWest)
+        }
+        _ if (right && point.y >= height - CORNER) || (bottom && point.x >= width - CORNER) => {
+            Some(SouthEast)
+        }
+        _ if left => Some(West),
+        _ if right => Some(East),
+        _ if top => Some(North),
+        _ => Some(South),
+    }
 }
 
 fn splitter_direction_at_cursor(host: &AppUiHost, cursor: Point) -> Option<SplitDirection> {
@@ -10040,6 +10502,49 @@ mod platform_window_chrome {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn workspace_resize_edges_and_corners_respect_window_state() {
+        use winit::window::ResizeDirection::*;
+        let samples = [
+            (Point::new(1.0, 1.0), NorthWest),
+            (Point::new(799.0, 1.0), NorthEast),
+            (Point::new(1.0, 599.0), SouthWest),
+            (Point::new(799.0, 599.0), SouthEast),
+            (Point::new(1.0, 300.0), West),
+            (Point::new(799.0, 300.0), East),
+            (Point::new(400.0, 1.0), North),
+            (Point::new(400.0, 599.0), South),
+            (Point::new(12.0, 1.0), NorthWest),
+        ];
+        for (point, expected) in samples {
+            assert_eq!(
+                resize_direction_at_point(AppUiWindowRole::Workspace, false, point, 800.0, 600.0),
+                Some(expected)
+            );
+            assert_eq!(
+                resize_direction_at_point(AppUiWindowRole::Startup, false, point, 800.0, 600.0),
+                None
+            );
+            assert_eq!(
+                resize_direction_at_point(AppUiWindowRole::Workspace, true, point, 800.0, 600.0),
+                None
+            );
+        }
+        for point in [
+            Point::new(6.0, 300.0),
+            Point::new(12.0, 12.0),
+            Point::new(400.0, 300.0),
+            Point::new(-1.0, 0.0),
+            Point::new(800.0, 0.0),
+            Point::new(f32::NAN, 0.0),
+        ] {
+            assert_eq!(
+                resize_direction_at_point(AppUiWindowRole::Workspace, false, point, 800.0, 600.0),
+                None
+            );
+        }
+    }
+
     #[test]
     fn pre_active_construction_error_releases_scope_before_building_evidence() {
         struct DropProbe(std::sync::Arc<std::sync::atomic::AtomicBool>);
@@ -10204,6 +10709,64 @@ mod tests {
     }
 
     #[cfg(feature = "validation")]
+    #[test]
+    fn ordinary_window_shutdown_handback_keeps_one_consuming_deadline() {
+        let _theme_guard = crate::app_ui::test_utils::theme_test_guard();
+        let host = AppUiHost::new(AppState::new());
+        let returned: AppUiValidationReturnSlot = Rc::new(RefCell::new(None));
+        let deadline = window_consuming_shutdown_deadline(None, Instant::now());
+        let mut owner = AppUiHostSessionOwner::new(host, Some(Rc::clone(&returned)), None);
+        let result = owner.shutdown_until(deadline, clean_final_window_gpu_shutdown());
+        assert!(
+            result.as_ref().is_ok_and(|ui| ui.all_resources_released()),
+            "{result:?}"
+        );
+        assert!(owner.host.is_none());
+        let handback = returned.borrow_mut().take().expect("actual consuming Host handback");
+        assert_eq!(
+            handback.shutdown_deadline, deadline,
+            "App must receive the exact remaining budget"
+        );
+        let closed = handback.app_state.shutdown_for_endurance(handback.shutdown_deadline);
+        assert!(closed.all_resources_released(), "{closed:?}");
+    }
+
+    #[cfg(feature = "validation")]
+    #[test]
+    fn ordinary_window_shutdown_expired_handback_does_not_renew_app_budget() {
+        let _theme_guard = crate::app_ui::test_utils::theme_test_guard();
+        let host = AppUiHost::new(AppState::new());
+        let returned: AppUiValidationReturnSlot = Rc::new(RefCell::new(None));
+        let deadline = Instant::now();
+        let mut owner =
+            AppUiHostSessionOwner::new(host, Some(Rc::clone(&returned)), Some(deadline));
+        let _ = owner.shutdown_until(deadline, clean_final_window_gpu_shutdown());
+        assert!(owner.host.is_none());
+        let handback = returned.borrow_mut().take().expect("actual expired Host handback");
+        assert_eq!(handback.shutdown_deadline, deadline);
+        let closed = handback.app_state.shutdown_for_endurance(handback.shutdown_deadline);
+        assert!(
+            !closed.all_resources_released(),
+            "expired shared budget was silently renewed: {closed:?}"
+        );
+    }
+
+    #[cfg(feature = "validation")]
+    #[test]
+    fn ordinary_window_shutdown_budget_preserves_surface_external_deadline() {
+        let now = Instant::now();
+        let expired_external = now.checked_sub(Duration::from_secs(1)).expect("past Instant");
+        assert_eq!(
+            window_consuming_shutdown_deadline(Some(expired_external), now),
+            expired_external
+        );
+        assert_eq!(
+            window_consuming_shutdown_deadline(None, now),
+            now + APP_UI_WINDOW_PRODUCT_SHUTDOWN_TIMEOUT
+        );
+    }
+
+    #[cfg(feature = "validation")]
     fn clean_final_window_gpu_shutdown() -> AppUiActiveWindowGpuShutdownEvidence {
         AppUiActiveWindowGpuShutdownEvidence {
             surface_generation: 2,
@@ -10336,7 +10899,6 @@ mod tests {
     };
     use mondrian_ui_core::widget::{EventContext, PaintContext};
     use mondrian_ui_core::Widget;
-    use std::sync::Mutex;
 
     #[test]
     fn qualification_diagnostics_bind_full_contract_and_runtime_image() {
@@ -10350,65 +10912,211 @@ mod tests {
         assert!(runtime_image.chars().all(|value| value.is_ascii_hexdigit()));
     }
 
+    #[cfg(all(target_os = "windows", feature = "validation"))]
     #[test]
-    fn delayed_viewer_callback_survives_native_window_replacement() {
-        type CompletionCallback = Box<dyn FnOnce(u64) + Send + 'static>;
+    #[ignore = "requires a native Windows desktop and GPU; run alone"]
+    fn native_window_role_cycle_retains_surface_and_device_authority() {
+        use winit::platform::run_on_demand::EventLoopExtRunOnDemand;
+        use winit::platform::windows::EventLoopBuilderExtWindows;
 
-        let now = Instant::now();
-        let callback = Arc::new(Mutex::new(None::<CompletionCallback>));
-        let mut retiring_progress = "active-device-generation".to_owned();
-        let mut replacement_progress = "unused-replacement-worker".to_owned();
-        let mut retiring_execution = "retained-frame-resource-runtime".to_owned();
-        let mut replacement_execution = "unused-replacement-runtime".to_owned();
-        let mut retiring_profile = Some("in-flight-device-query-ring");
-        let mut replacement_profile = None;
-        let mut retiring_submissions = ViewerGpuSubmissionLifecycle::<String, u64>::new();
-        let mut replacement_submissions = ViewerGpuSubmissionLifecycle::<String, u64>::new();
-        let mut retiring_cleanup = WindowViewerGpuDeferredCleanup::Reset;
-        let mut replacement_cleanup = WindowViewerGpuDeferredCleanup::None;
-
-        let reservation = retiring_submissions.reserve().expect("reserve old Window submission");
-        let submission_id = reservation.submission_id();
-        let callback_slot = Arc::clone(&callback);
-        reservation.commit(
-            "retained-media-owner".to_owned(),
-            now + Duration::from_secs(1),
-            move |registered| {
-                *callback_slot.lock().expect("callback slot") = Some(registered);
-            },
-            || {},
+        let _theme_guard = crate::app_ui::test_utils::theme_test_guard();
+        let deadline = Instant::now() + Duration::from_secs(120);
+        let background = AppUiBackgroundRuntimeOwner::start(deadline)
+            .unwrap_or_else(|_| panic!("native test background startup failed"));
+        let runtime_guard = background.enter();
+        let project_dir = tempfile::tempdir().expect("native role project directory");
+        let mut host = AppUiHost::new_with_preferences_path(
+            AppState::new(),
+            crate::app_ui::preferences_store::AppUiPreferences::default(),
+            project_dir.path().join("preferences.json"),
         );
+        let project_file = project_dir.path().join("窗口角色.mdp");
+        let mut builder = winit::event_loop::EventLoop::<AppUiUserEvent>::with_user_event();
+        builder.with_any_thread(true);
+        let mut event_loop = builder.build().expect("native role event loop");
+        let event_proxy = event_loop.create_proxy();
+        let mut candidate: Option<AppUiInitialWindowCandidate> = None;
+        let mut exercised = false;
+        let result = catch_app_ui_event_loop(|| {
+            #[allow(deprecated)]
+            event_loop.run_on_demand(|event, elwt| {
+                if !matches!(event, winit::event::Event::Resumed) || exercised {
+                    return;
+                }
+                exercised = true;
+                candidate = Some(
+                    prepare_initial_window_candidate(elwt, event_proxy.clone(), &host, deadline)
+                        .unwrap_or_else(|failure| panic!("native candidate: {}", failure.primary)),
+                );
+                let candidate = candidate.as_mut().expect("Resumed native candidate");
+                let id = candidate.session.window.id();
+                let surface_generation = candidate.session.surface_generation_id;
+                let device_generation =
+                    candidate.session.viewer_gpu_device_progress.generation_id();
+                assert!(device_generation.is_some());
+                assert!(!candidate.session.window.is_resizable());
+                host.with_validation_app_state_mut(|app| {
+                    app.create_new_project_at(
+                        project_file.clone(),
+                        "Native role cycle",
+                        1280,
+                        720,
+                        mondrian_core::Rational::new(24, 1),
+                    )
+                    .expect("create native role project");
+                });
+                host.mark_dirty();
+                host.refresh_if_dirty(candidate.session.current_bounds.get());
+                assert_eq!(host.mode(), AppUiMode::Workspace);
+                sync_window_session_role(
+                    &mut host,
+                    elwt,
+                    &candidate.instance,
+                    &candidate.adapter,
+                    &candidate.device,
+                    &mut candidate.session,
+                );
+                assert!(candidate.session.window.is_resizable());
+                mondrian_core::ensure_mondrian_default_ocio_loaded()
+                    .expect("native staging color context");
+                host.with_validation_app_state_mut(|app| {
+                    let mut sequence = mondrian_timeline::Sequence::new("Native staging");
+                    sequence.video_tracks[0]
+                        .add_clip(
+                            mondrian_timeline::Clip::new_solid_color(
+                                mondrian_core::AssetId::new(),
+                                mondrian_core::Color::from_rgba8(24, 80, 160, 255),
+                                mondrian_core::TimelineTime::ZERO,
+                                mondrian_core::TimelineTime::new(1, 1).expect("one second"),
+                            )
+                            .expect("solid source"),
+                        )
+                        .expect("staging source placement");
+                    app.test_set_sequence(Some(sequence));
+                    app.seek(4).expect("staging seek");
+                    app.play().expect("staging playback");
+                });
+                host.mark_dirty();
+                host.refresh_if_dirty(candidate.session.current_bounds.get());
+                stage_window_viewer_gpu_lookahead(&mut candidate.session, &host);
+                assert_eq!(candidate.session.staged_viewer_gpu_successors.len(), 1);
+                let normal = logical_size(1300.0, 800.0);
+                let _ = candidate.session.window.request_inner_size(normal);
+                candidate.session.workspace_placement.observe(&candidate.session.window);
+                assert_eq!(candidate.session.workspace_placement.normal_size, normal);
+                candidate.session.window.set_maximized(true);
+                assert!(candidate.session.window.is_maximized());
+                host.with_validation_app_state_mut(|app| app.close_project())
+                    .expect("close native role project");
+                host.mark_dirty();
+                host.refresh_if_dirty(candidate.session.current_bounds.get());
+                sync_window_session_role(
+                    &mut host,
+                    elwt,
+                    &candidate.instance,
+                    &candidate.adapter,
+                    &candidate.device,
+                    &mut candidate.session,
+                );
+                assert_eq!(host.mode(), AppUiMode::Startup);
+                assert_eq!(candidate.session.staged_viewer_gpu_successors.len(), 0);
+                assert!(!candidate.session.window.is_resizable());
+                assert!(!candidate.session.window.is_maximized());
+                assert_eq!(candidate.session.workspace_placement.normal_size, normal);
+                assert!(candidate.session.workspace_placement.maximized);
+                let startup_size = candidate
+                    .session
+                    .window
+                    .inner_size()
+                    .to_logical::<f64>(candidate.session.window.scale_factor());
+                assert!((startup_size.width - f64::from(STARTUP_WINDOW_WIDTH)).abs() < 1.0);
+                assert!((startup_size.height - f64::from(STARTUP_WINDOW_HEIGHT)).abs() < 1.0);
+                host.with_validation_app_state_mut(|app| {
+                    app.open_project_file(project_file.clone())
+                })
+                .expect("reopen native role project");
+                host.mark_dirty();
+                host.refresh_if_dirty(candidate.session.current_bounds.get());
+                sync_window_session_role(
+                    &mut host,
+                    elwt,
+                    &candidate.instance,
+                    &candidate.adapter,
+                    &candidate.device,
+                    &mut candidate.session,
+                );
+                assert!(candidate.session.window.is_resizable());
+                assert!(candidate.session.window.is_maximized());
+                assert_eq!(candidate.session.workspace_placement.normal_size, normal);
+                assert_eq!(candidate.session.window.id(), id);
+                assert_eq!(candidate.session.surface_generation_id, surface_generation);
+                assert_eq!(
+                    candidate.session.viewer_gpu_device_progress.generation_id(),
+                    device_generation
+                );
+                assert!(candidate.session.event_loop_failure.is_none());
+                candidate.session.window.set_visible(true);
+                match candidate.session.surface.get_current_texture() {
+                    wgpu::CurrentSurfaceTexture::Success(frame)
+                    | wgpu::CurrentSurfaceTexture::Suboptimal(frame) => {
+                        candidate.queue.present(frame)
+                    }
+                    failure => panic!("retained surface acquisition failed: {failure:?}"),
+                }
+                elwt.exit();
+            })
+        });
+        let mut candidate = candidate.expect("native candidate created");
+        let gpu = candidate.session.shutdown_viewer_gpu_until(&host, deadline);
+        assert!(gpu.qualification_failure().is_none(), "{gpu:?}");
+        drop(candidate);
+        let (state, ui) = host.into_app_state_until(deadline);
+        assert!(ui.all_resources_released(), "{ui:?}");
+        let app = state.shutdown_for_endurance(deadline);
+        assert!(app.all_resources_released(), "{app:?}");
+        drop(runtime_guard);
+        assert!(background.shutdown_until(deadline).all_created_resources_released());
+        assert!(exercised);
+        result.expect("native role cycle");
+    }
 
-        handoff_window_viewer_gpu_device_generation(
-            &mut retiring_progress,
-            &mut replacement_progress,
-            &mut retiring_execution,
-            &mut replacement_execution,
-            &mut retiring_profile,
-            &mut replacement_profile,
-            &mut retiring_submissions,
-            &mut replacement_submissions,
-            &mut retiring_cleanup,
-            &mut replacement_cleanup,
+    #[test]
+    fn role_change_relayouts_same_sized_surface_with_distinct_diagnostics() {
+        let update = surface_lifecycle_update(
+            SurfaceLifecycleReason::RoleChanged,
+            (1280, 720),
+            (1280, 720),
+            UiWindowCoordinates::new(1.0),
         );
+        assert!(!update.reconfigure_surface);
+        assert!(update.relayout_root);
+        assert!(update.request_redraw);
+        assert_eq!(update.bounds, Some(Rect::new(0.0, 0.0, 1280.0, 720.0)));
+        assert_eq!(
+            AppUiDisplayContractRefreshReasonDiagnostic::from_reason(
+                DisplayOutputContractRefreshReason::SurfaceLifecycle(
+                    SurfaceLifecycleReason::RoleChanged
+                ),
+            ),
+            AppUiDisplayContractRefreshReasonDiagnostic::RoleChanged,
+        );
+    }
 
-        assert_eq!(replacement_progress, "active-device-generation");
-        assert_eq!(replacement_execution, "retained-frame-resource-runtime");
-        assert_eq!(replacement_profile, Some("in-flight-device-query-ring"));
-        assert_eq!(retiring_profile, None);
-        assert_eq!(replacement_cleanup, WindowViewerGpuDeferredCleanup::Reset);
-        assert!(matches!(
-            retiring_submissions.poll(now),
-            ViewerGpuSubmissionPoll::Idle
-        ));
-        callback.lock().expect("callback slot").take().expect("registered callback")(73);
-        let completed = match replacement_submissions.poll(now) {
-            ViewerGpuSubmissionPoll::Completed(completed) => completed,
-            _ => panic!("replacement must retain the exact in-flight lifecycle"),
-        };
-        assert_eq!(completed.submission_id, submission_id);
-        assert_eq!(completed.owner, "retained-media-owner");
-        assert_eq!(completed.completion, 73);
+    #[test]
+    fn workspace_placement_retains_normal_size_through_maximize_and_minimize() {
+        let mut placement = WorkspaceWindowPlacement::default();
+        let normal = winit::dpi::LogicalSize::new(1300.0, 800.0);
+        placement.record(normal, false, false);
+        placement.record(winit::dpi::LogicalSize::new(1920.0, 1080.0), true, false);
+        assert_eq!(placement.normal_size, normal);
+        assert!(placement.maximized);
+        placement.record(winit::dpi::LogicalSize::new(0.0, 0.0), false, true);
+        assert_eq!(placement.normal_size, normal);
+        assert!(placement.maximized);
+        placement.record(normal, false, false);
+        assert!(!placement.maximized);
+        placement.record(winit::dpi::LogicalSize::new(0.0, 0.0), false, false);
+        assert_eq!(placement.normal_size, normal);
     }
 
     #[test]
@@ -12990,6 +13698,7 @@ mod tests {
         for reason in [
             SurfaceLifecycleReason::Resize,
             SurfaceLifecycleReason::ScaleFactorChanged,
+            SurfaceLifecycleReason::RoleChanged,
         ] {
             assert_eq!(
                 surface_lifecycle_update(
@@ -13447,5 +14156,66 @@ mod tests {
             .expect("construction failure has no EventLoop shutdown receipt")
             .is_none());
         assert!(error.all_returned_authority_released(), "{error:#?}");
+    }
+
+    #[test]
+    fn delayed_viewer_callback_survives_native_window_replacement() {
+        type CompletionCallback = Box<dyn FnOnce(u64) + Send + 'static>;
+
+        let now = Instant::now();
+        let callback = Arc::new(Mutex::new(None::<CompletionCallback>));
+        let mut retiring_progress = "active-device-generation".to_owned();
+        let mut replacement_progress = "unused-replacement-worker".to_owned();
+        let mut retiring_execution = "retained-frame-resource-runtime".to_owned();
+        let mut replacement_execution = "unused-replacement-runtime".to_owned();
+        let mut retiring_profile = Some("in-flight-device-query-ring");
+        let mut replacement_profile = None;
+        let mut retiring_submissions = ViewerGpuSubmissionLifecycle::<String, u64>::new();
+        let mut replacement_submissions = ViewerGpuSubmissionLifecycle::<String, u64>::new();
+        let mut retiring_cleanup = WindowViewerGpuDeferredCleanup::Reset;
+        let mut replacement_cleanup = WindowViewerGpuDeferredCleanup::None;
+
+        let reservation = retiring_submissions.reserve().expect("reserve old Window submission");
+        let submission_id = reservation.submission_id();
+        let callback_slot = Arc::clone(&callback);
+        reservation.commit(
+            "retained-media-owner".to_owned(),
+            now + Duration::from_secs(1),
+            move |registered| {
+                *callback_slot.lock().expect("callback slot") = Some(registered);
+            },
+            || {},
+        );
+
+        handoff_window_viewer_gpu_device_generation(
+            &mut retiring_progress,
+            &mut replacement_progress,
+            &mut retiring_execution,
+            &mut replacement_execution,
+            &mut retiring_profile,
+            &mut replacement_profile,
+            &mut retiring_submissions,
+            &mut replacement_submissions,
+            &mut retiring_cleanup,
+            &mut replacement_cleanup,
+        );
+
+        assert_eq!(replacement_progress, "active-device-generation");
+        assert_eq!(replacement_execution, "retained-frame-resource-runtime");
+        assert_eq!(replacement_profile, Some("in-flight-device-query-ring"));
+        assert_eq!(retiring_profile, None);
+        assert_eq!(replacement_cleanup, WindowViewerGpuDeferredCleanup::Reset);
+        assert!(matches!(
+            retiring_submissions.poll(now),
+            ViewerGpuSubmissionPoll::Idle
+        ));
+        callback.lock().expect("callback slot").take().expect("registered callback")(73);
+        let completed = match replacement_submissions.poll(now) {
+            ViewerGpuSubmissionPoll::Completed(completed) => completed,
+            _ => panic!("replacement must retain the exact in-flight lifecycle"),
+        };
+        assert_eq!(completed.submission_id, submission_id);
+        assert_eq!(completed.owner, "retained-media-owner");
+        assert_eq!(completed.completion, 73);
     }
 }

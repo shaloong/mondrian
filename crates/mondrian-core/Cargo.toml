@@ -27,6 +27,7 @@ crossbeam-channel = { workspace = true }
 parking_lot       = { workspace = true }
 dashmap           = { workspace = true }
 lru               = "0.18"
+typed-path        = "0.12.3"
 # 数学
 glam       = { workspace = true }
 # 颜色管理

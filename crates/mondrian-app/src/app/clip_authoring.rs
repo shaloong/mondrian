@@ -1,6 +1,6 @@
 //! Stable-identity authoring for properties owned directly by a Timeline Clip.
 //!
-//! Inspector, Viewer, Headless, scripting, and future plugin Adapters all use
+//! Inspector, Viewer, Headless, scripting, and future Extension Adapters all use
 //! this Module. It derives current Track placement, resolves persistent
 //! parameters, prepares exact mutations, rejects stale/no-op requests before a
 //! mutable candidate exists, and commits one Author Transaction per gesture.
@@ -10,7 +10,7 @@ use std::collections::HashSet;
 use mondrian_core::automation::{AnimationParameterAddress, PropertyHost, PropertyMutation};
 use mondrian_core::{BlendMode, ClipId, Color, MondrianError, Result};
 
-use super::animation_authoring::{ClipNumericCurveEdit, NormalizedCurvePoint};
+use super::animation_authoring::ClipNumericCurveEdit;
 use super::product_action::{
     ClipCurveEditPayload, ClipEditNumericCurvePayload, ClipWriteParameterValuesPayload,
 };
@@ -198,20 +198,19 @@ fn prepare_clip_parameter_writes(
     let mut seen = HashSet::<AnimationParameterAddress>::with_capacity(payload.writes.len());
     let mut mutations = Vec::with_capacity(payload.writes.len());
     for write in &payload.writes {
-        if !seen.insert(write.parameter.clone()) {
+        let parameter = write.parameter();
+        if !seen.insert(parameter.clone()) {
             return Err(clip_authoring_error(
                 "clip_write_parameter_values",
                 format!(
                     "duplicate parameter instance {} / {}",
-                    write.parameter.animation_track_id, write.parameter.parameter_id
+                    parameter.animation_track_id, parameter.parameter_id
                 ),
             ));
         }
-        if let Some(mutation) = parameters.prepare_value_write_by_address(
-            &write.parameter,
-            author_time,
-            write.value.clone(),
-        )? {
+        let write = state.resolve_resource_parameter_write(write)?;
+        let mutation = parameters.prepare_parameter_write(&write, author_time)?;
+        if let Some(mutation) = mutation {
             mutations.push(mutation);
         }
     }
@@ -249,12 +248,56 @@ pub(super) fn numeric_curve_edit_from_payload(
     edit: &ClipCurveEditPayload,
 ) -> Result<ClipNumericCurveEdit> {
     match edit {
-        ClipCurveEditPayload::Upsert { keyframe_id, point } => Ok(ClipNumericCurveEdit::Upsert {
+        ClipCurveEditPayload::TransformMany { keyframe_ids, time_delta, value_delta, steps } => {
+            Ok(ClipNumericCurveEdit::TransformMany {
+                keyframe_ids: keyframe_ids.clone(),
+                time_delta: *time_delta,
+                value_delta: *value_delta,
+                steps: *steps,
+            })
+        }
+        ClipCurveEditPayload::OffsetValuesMany { keyframe_ids, delta, steps } => {
+            Ok(ClipNumericCurveEdit::OffsetValuesMany {
+                keyframe_ids: keyframe_ids.clone(),
+                delta: *delta,
+                steps: *steps,
+            })
+        }
+        ClipCurveEditPayload::ShiftMany { keyframe_ids, delta } => {
+            Ok(ClipNumericCurveEdit::ShiftMany {
+                keyframe_ids: keyframe_ids.clone(),
+                delta: *delta,
+            })
+        }
+        ClipCurveEditPayload::RemoveMany { keyframe_ids, retain_time } => {
+            Ok(ClipNumericCurveEdit::RemoveMany {
+                keyframe_ids: keyframe_ids.clone(),
+                retain_time: *retain_time,
+            })
+        }
+        ClipCurveEditPayload::EditHandle { keyframe_id, side, edit } => {
+            Ok(ClipNumericCurveEdit::EditHandle {
+                keyframe_id: *keyframe_id,
+                side: *side,
+                edit: *edit,
+            })
+        }
+        ClipCurveEditPayload::Move { keyframe_id, time, value } => Ok(ClipNumericCurveEdit::Move {
             keyframe_id: *keyframe_id,
-            point: NormalizedCurvePoint::new(point.time_ratio, point.value_ratio)?,
+            time: *time,
+            value: *value,
         }),
+        ClipCurveEditPayload::Upsert { keyframe_id, point } => {
+            Ok(ClipNumericCurveEdit::Upsert { keyframe_id: *keyframe_id, point: point.clone() })
+        }
         ClipCurveEditPayload::Remove { keyframe_id } => {
             Ok(ClipNumericCurveEdit::Remove { keyframe_id: *keyframe_id })
+        }
+        ClipCurveEditPayload::SetInterpolations { keyframe_ids, interpolation } => {
+            Ok(ClipNumericCurveEdit::SetInterpolations {
+                keyframe_ids: keyframe_ids.clone(),
+                interpolation: *interpolation,
+            })
         }
         ClipCurveEditPayload::SetInterpolation { keyframe_id, interpolation } => {
             Ok(ClipNumericCurveEdit::SetInterpolation {

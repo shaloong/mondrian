@@ -139,6 +139,7 @@ pub enum PreparedSourceFrame {
     ColorManaged {
         source: Arc<CpuSourceColorFrame>,
         transform: RenderInputTransform,
+        sampling: mondrian_core::ImageSampling,
     },
     /// A normalized numeric payload that bypasses every OCIO processor.
     DataTexture {
@@ -167,10 +168,12 @@ impl PreparedSourceFrame {
     pub fn from_typed_source(
         source: impl Into<CpuSourceColorFrame>,
         input_transform: RenderInputTransform,
+        sampling: mondrian_core::ImageSampling,
     ) -> Self {
         Self::ColorManaged {
             source: Arc::new(source.into()),
             transform: input_transform,
+            sampling,
         }
     }
 
@@ -181,6 +184,14 @@ impl PreparedSourceFrame {
             Self::DataTexture { frame, .. } => frame.descriptor(),
         };
         (descriptor.width, descriptor.height)
+    }
+
+    /// Sampling of the eventual working value, without executing its color transform.
+    pub fn sampling(&self) -> mondrian_core::ImageSampling {
+        match self {
+            Self::ColorManaged { sampling, .. } => *sampling,
+            Self::DataTexture { frame, .. } => frame.rgba_f32().sampling,
+        }
     }
 
     /// CPU bytes retained by the decoded/prepared payload.
@@ -237,7 +248,7 @@ impl PreparedSourceFrame {
         &self,
     ) -> Option<(Arc<CpuSourceColorFrame>, RenderInputTransform)> {
         match self {
-            Self::ColorManaged { source, transform } => {
+            Self::ColorManaged { source, transform, .. } => {
                 Some((Arc::clone(source), transform.clone()))
             }
             Self::DataTexture { .. } => None,
@@ -250,10 +261,11 @@ impl PreparedSourceFrame {
         session: &mut RenderCpuColorExecutionSession,
     ) -> Result<PreparedSourceFrameExecution, RenderColorTransformError> {
         match self {
-            Self::ColorManaged { source, transform } => {
+            Self::ColorManaged { source, transform, sampling } => {
                 let execution = execute_cpu_source_input_stage_with_session(
                     source.as_ref(),
                     transform,
+                    *sampling,
                     session,
                 )?;
                 Ok(PreparedSourceFrameExecution {
@@ -332,6 +344,7 @@ pub fn prepare_decoded_cpu_source_frame(
     decoded: impl Into<DecodedCpuSourceFrame>,
     alpha_interpretation: AlphaInterpretation,
     intent: impl Into<SourceFramePreparationIntent>,
+    sampling: mondrian_core::ImageSampling,
 ) -> Result<PreparedSourceFrame, SourceFramePreparationError> {
     let decoded = decoded.into();
     let intent = intent.into();
@@ -362,6 +375,7 @@ pub fn prepare_decoded_cpu_source_frame(
             expected_components,
             alpha_interpretation,
             intent.working_color_space(),
+            sampling,
         )?;
         return Ok(PreparedSourceFrame::DataTexture {
             frame,
@@ -450,7 +464,7 @@ pub fn prepare_decoded_cpu_source_frame(
     let SourceFramePreparationIntent::ColorManaged(transform) = intent else {
         return Err(SourceFramePreparationError::ColorPayloadEnteredDataTextureBypass);
     };
-    Ok(PreparedSourceFrame::ColorManaged { source: Arc::new(source), transform })
+    Ok(PreparedSourceFrame::ColorManaged { source: Arc::new(source), transform, sampling })
 }
 
 fn prepare_data_texture_frame(
@@ -458,6 +472,7 @@ fn prepare_data_texture_frame(
     expected_components: usize,
     alpha_interpretation: AlphaInterpretation,
     working_color_space: WorkingColorSpace,
+    sampling: mondrian_core::ImageSampling,
 ) -> Result<CpuColorFrame, SourceFramePreparationError> {
     let data = match decoded.pixels {
         DecodedCpuSourcePixels::Rgba8(shared) => {
@@ -507,6 +522,8 @@ fn prepare_data_texture_frame(
         }
     };
     Ok(CpuColorFrame::working(WorkingRgbaF32Frame {
+        sampling,
+        alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
         width: decoded.width,
         height: decoded.height,
         data,
@@ -600,6 +617,7 @@ mod tests {
             ),
             AlphaInterpretation::Straight,
             input_transform(),
+            mondrian_core::ImageSampling::UNIT_SQUARE,
         )
         .expect("encoded float source");
         assert!(matches!(
@@ -615,6 +633,7 @@ mod tests {
             ),
             AlphaInterpretation::Straight,
             input_transform(),
+            mondrian_core::ImageSampling::UNIT_SQUARE,
         )
         .expect("linear float source");
         let CpuSourceColorFrame::LinearFloat(linear) =
@@ -635,6 +654,7 @@ mod tests {
             ),
             AlphaInterpretation::Premultiplied,
             input_transform(),
+            mondrian_core::ImageSampling::UNIT_SQUARE,
         )
         .expect("premultiplied source normalization");
         let CpuSourceColorFrame::LinearFloat(linear) =
@@ -655,6 +675,7 @@ mod tests {
             ),
             AlphaInterpretation::Straight,
             input_transform(),
+            mondrian_core::ImageSampling::UNIT_SQUARE,
         )
         .expect("encoded source preparation");
         let mut session = RenderCpuColorExecutionSession::new(2);
@@ -668,6 +689,192 @@ mod tests {
     }
 
     #[test]
+    fn bound_sampling_survives_shared_source_pixels_and_color_session_reuse() {
+        mondrian_core::ensure_mondrian_default_ocio_loaded().unwrap();
+        let raw = Arc::new([17, 64, 255, 128].repeat(6));
+        let source = CpuSourceColorFrame::from(CpuEncodedColorFrame::source_rgba8_shared(
+            3,
+            2,
+            ColorSpace::Rec709,
+            Arc::clone(&raw),
+        ));
+        let a = mondrian_core::ImageSampling::new(
+            mondrian_core::SampleAspectRatio::new(2, 1).unwrap(),
+            [
+                mondrian_core::Rational::new(1, 2),
+                mondrian_core::Rational::new(3, 4),
+            ],
+        )
+        .unwrap();
+        let b = mondrian_core::ImageSampling::new(
+            mondrian_core::SampleAspectRatio::new(4, 3).unwrap(),
+            [
+                mondrian_core::Rational::new(2, 3),
+                mondrian_core::Rational::new(1, 3),
+            ],
+        )
+        .unwrap();
+        let first = PreparedSourceFrame::from_typed_source(source.clone(), input_transform(), a);
+        let second = PreparedSourceFrame::from_typed_source(source, input_transform(), b);
+        assert!(
+            Arc::strong_count(&raw) >= 3,
+            "both interpretations retain the same raw samples"
+        );
+        let mut session = RenderCpuColorExecutionSession::new(2);
+        let mut expected_pixels = None;
+        for (prepared, sampling) in [(&first, a), (&second, b), (&first, a)] {
+            let output = prepared.execute_cpu_with_session(&mut session).unwrap();
+            assert_eq!(output.frame.rgba_f32().sampling, sampling);
+            if let Some(expected) = &expected_pixels {
+                assert_eq!(&output.frame.rgba_f32().data, expected);
+            } else {
+                expected_pixels = Some(output.frame.rgba_f32().data.clone());
+            }
+            let converted = crate::CpuColorTransformExecutor::working_to_working_with_session(
+                &output.frame,
+                WorkingColorSpace::LinearRec709,
+                &ColorEngine::mondrian_standard(),
+                &mut session,
+            )
+            .unwrap();
+            assert_eq!(converted.frame.rgba_f32().sampling, sampling);
+            let extent = mondrian_effects::EffectFrameExtent::new(3, 2);
+            let format = mondrian_effects::EffectValueFormat::new(
+                mondrian_effects::EffectWorkingPrecision::Float32,
+                mondrian_effects::EffectColorDomain::SceneLinearRgb,
+                converted.frame.rgba_f32().alpha,
+            );
+            let associated = mondrian_effects::EffectFloatFrame::from_pixels(
+                extent,
+                format,
+                sampling,
+                converted.frame.rgba_f32().data.clone(),
+            )
+            .unwrap()
+            .into_alpha(mondrian_core::ColorFrameAlpha::PremultipliedFloat)
+            .unwrap();
+            assert_eq!(associated.sampling(), sampling);
+            let straight = mondrian_effects::materialize_straight_coverage(
+                associated,
+                mondrian_effects::EffectAlphaConsumer::StraightCoverageOperation,
+            )
+            .unwrap();
+            assert_eq!(straight.sampling(), sampling);
+            let (_, _, sampling, pixels) = straight.into_parts();
+            let restored = CpuColorFrame::working(mondrian_core::WorkingRgbaF32Frame {
+                width: 3,
+                height: 2,
+                sampling,
+                data: pixels,
+                alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
+                color_space: WorkingColorSpace::LinearRec709,
+            });
+            use mondrian_effects::{EffectNodeExt, EffectType};
+            let mut exposure =
+                mondrian_effects::EffectNode::with_defaults(EffectType::BasicCorrection);
+            exposure
+                .set_static_value_by_parameter(
+                    &EffectType::BasicCorrection.parameter_id("exposure").unwrap(),
+                    mondrian_core::automation::PropertyValue::Float(1.0),
+                )
+                .unwrap();
+            let graph = mondrian_effects::PreparedEffectProgram::prepare(
+                &[exposure],
+                &[],
+                WorkingColorSpace::LinearRec709,
+            )
+            .unwrap()
+            .evaluate(mondrian_core::TimelineTime::ZERO)
+            .unwrap();
+            let mut effects = mondrian_effects::EffectExecutionSession::default();
+            let expected = effects
+                .apply_compiled_rgba_f32(
+                    mondrian_effects::EffectFloatFrameView::new(
+                        extent,
+                        format,
+                        sampling,
+                        &restored.rgba_f32().data,
+                    ),
+                    &graph,
+                    0,
+                    &mut mondrian_effects::EffectProcessorControl::uncancelled(),
+                )
+                .unwrap();
+            assert_eq!(expected.sampling(), sampling);
+            assert!(expected.pixels()[0][0] > restored.rgba_f32().data[0][0]);
+            let target_sampling = mondrian_core::ImageSampling::from_full_raster(
+                mondrian_core::SampleAspectRatio::new(3, 2).unwrap(),
+                mondrian_core::Resolution { width: 10, height: 8 },
+                mondrian_core::Resolution { width: 5, height: 4 },
+            )
+            .unwrap();
+            let elements = [crate::TimelineCompositeElement::Media(
+                crate::TimelineMediaLayer {
+                    frame: &restored,
+                    opacity: 1.0,
+                    blend_mode: mondrian_core::BlendMode::Normal,
+                    transform: [1.0, 0.0, 1.0, 0.0, 1.0, 1.0],
+                    effect_graph: graph,
+                    frame_seed: 0,
+
+                    processor_input_plan: None,
+                },
+            )];
+            let engine = ColorEngine::mondrian_standard();
+            let composite = crate::composite_timeline_elements_color_frame_with_diagnostics(
+                5,
+                4,
+                &elements,
+                crate::TimelineCompositeOptions::default(),
+                crate::TimelineEffectColorRuntime::new(
+                    &engine,
+                    WorkingColorSpace::LinearRec709,
+                    target_sampling,
+                ),
+                &mut crate::TimelineCompositeScratch::default(),
+                &mut mondrian_effects::EffectProcessorControl::uncancelled(),
+            )
+            .unwrap();
+            assert_eq!(composite.frame.rgba_f32().sampling, target_sampling);
+            assert_eq!(restored.rgba_f32().sampling, sampling);
+            assert_eq!(composite.execution.zero_copy_identity_passthroughs, 0);
+            // Translation executes a spatial join; it does not relabel the source image.
+            for y in 0..4_usize {
+                for x in 0..5_usize {
+                    let oracle = if (1..4).contains(&x) && (1..3).contains(&y) {
+                        expected.pixels()[(y - 1) * 3 + x - 1]
+                    } else {
+                        [0.0; 4]
+                    };
+                    for (actual, expected) in
+                        composite.frame.rgba_f32().data[y * 5 + x].iter().zip(oracle)
+                    {
+                        assert!((*actual - expected).abs() < 1.0e-6, "pixel ({x}, {y})");
+                    }
+                }
+            }
+        }
+        assert_eq!(&*raw, &[17, 64, 255, 128].repeat(6));
+        let numeric = prepare_decoded_cpu_source_frame(
+            decoded_data_rgba8(vec![17, 64, 255, 128]),
+            AlphaInterpretation::Straight,
+            SourceFramePreparationIntent::data_texture(WorkingColorSpace::LinearRec2020),
+            b,
+        )
+        .unwrap();
+        assert_eq!(numeric.data_texture_frame().unwrap().rgba_f32().sampling, b);
+        assert_eq!(
+            numeric
+                .execute_cpu_with_session(&mut session)
+                .unwrap()
+                .frame
+                .rgba_f32()
+                .sampling,
+            b
+        );
+    }
+
+    #[test]
     fn preparation_rejects_inconsistent_linear_identity_and_payload_extent() {
         let inconsistent = prepare_decoded_cpu_source_frame(
             decoded_float(
@@ -677,6 +884,7 @@ mod tests {
             ),
             AlphaInterpretation::Straight,
             input_transform(),
+            mondrian_core::ImageSampling::UNIT_SQUARE,
         )
         .expect_err("non-linear identity cannot claim source-linear samples");
         assert_eq!(
@@ -694,6 +902,7 @@ mod tests {
             ),
             AlphaInterpretation::Straight,
             input_transform(),
+            mondrian_core::ImageSampling::UNIT_SQUARE,
         )
         .expect_err("malformed component count");
         assert_eq!(
@@ -713,6 +922,7 @@ mod tests {
             decoded_data_rgba8(vec![17, 64, 255, 128]),
             AlphaInterpretation::Straight,
             SourceFramePreparationIntent::data_texture(WorkingColorSpace::LinearRec2020),
+            mondrian_core::ImageSampling::UNIT_SQUARE,
         )
         .expect("explicit data-texture preparation");
 
@@ -744,6 +954,7 @@ mod tests {
             decoded_data_rgba8(vec![0, 64, 255, 255]),
             AlphaInterpretation::Straight,
             input_transform(),
+            mondrian_core::ImageSampling::UNIT_SQUARE,
         )
         .expect_err("data texture cannot enter OCIO");
         assert_eq!(
@@ -759,6 +970,7 @@ mod tests {
             ),
             AlphaInterpretation::Straight,
             SourceFramePreparationIntent::data_texture(WorkingColorSpace::LinearRec2020),
+            mondrian_core::ImageSampling::UNIT_SQUARE,
         )
         .expect_err("color payload cannot enter numeric bypass");
         assert_eq!(

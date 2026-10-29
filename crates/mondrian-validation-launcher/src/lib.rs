@@ -18,6 +18,10 @@ pub use windows::{
     attest, launch, prepare_process_authority, process_authority, PreparedAuthority,
 };
 
+/// Frozen libtest execution using the launcher's existing native process owner.
+#[cfg(windows)]
+pub mod plugin_lab;
+
 /// Absolute direct file with an externally approved full-file SHA-256.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

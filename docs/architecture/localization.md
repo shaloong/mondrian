@@ -7,6 +7,10 @@ dropdown, and an immutable Fluent formatter for `zh-CN`, `en-US`, and a pseudo
 locale. The preference is stored in `app_ui_preferences.json`; switching it
 reprojects the dialog model without changing Project authoring state. System
 resolution supports English language tags and otherwise falls back to Chinese.
+Persisted product choices are exactly System, Chinese, English, and pseudo;
+unknown choices reject the preference document. The machine preference loader
+then selects its complete defaults without changing the rejected file. This
+keeps external OS-language selection separate from strict product schema admission.
 The initial catalogs cover the language selector, notification copy, the
 complete application menu bar, Startup screen chrome, Asset Browser chrome/cards/menus, and the Effect Browser's built-in effect names,
 categories, title, search hint, and empty state. Menu rows carry stable message IDs; locale
@@ -19,7 +23,7 @@ category path IDs for tree state and action payloads. Locale changes rebuild
 only displayed labels, then restore the retained panel state by stable IDs.
 Categories use a semantic order independent of translated spelling; effects
 within each category sort by their displayed name. Third-party effect names
-fall back to their declared display name until plugin catalogs are supported.
+fall back to their declared display name until Extension catalogs are supported.
 Asset Browser construction formats labels while reading the library snapshot;
 the folder name, Asset ID, folder ID, drag payload, and action payload stay
 canonical. Context menus are captured in the same locale snapshot so a
@@ -90,7 +94,7 @@ Other product surfaces still contain literal Chinese and must migrate before
 English can be advertised as a complete product language.
 
 The application owns one machine-local UI locale. The Project, Timeline,
-Effects, Audio, Export, and plugin authoring contracts persist stable IDs,
+Effects, Audio, Export, and Extension authoring contracts persist stable IDs,
 numeric values, exact time, and resource references; they never persist a
 translated label. A Project reopened under another UI locale must retain the
 same execution and cache identities.
@@ -107,10 +111,18 @@ from the UI model. Widgets receive already-formatted text; neither domain
 modules nor widgets query a process-global locale.
 
 Stable `ParameterSchema::message_id` and `ParameterEnumOption::message_id`
-already identify definition-owned labels. Built-in definitions and plugin
-manifests provide translation catalogs keyed by these IDs. Missing plugin
-translations fall back to the plugin's declared default display name and emit
-a diagnostic; they do not change the parameter's stable key or execution.
+already identify definition-owned labels. Built-in catalogs use these stable
+identities. Future Extension catalogs will use definition-owned namespaces;
+Extension manifest/catalog loading is not implemented. Missing third-party
+translations should fall back to the definition's declared default display name
+and emit a diagnostic, without changing the stable key or execution.
+
+Language packs are resource-only contributions in the planned
+[Extension system](extension-system.md). Future locale discovery must replace
+the closed built-in locale list without changing the current Fluent resource
+semantics or product fallback. Loading a language pack requires no executable
+Extension runtime; namespace ownership, catalog conflicts, update/disable and
+fallback must be validated before advertising external language packs.
 
 ## Locale and formatting boundaries
 
@@ -139,6 +151,25 @@ argument names, fallback coverage, and remaining literal user-facing strings.
 The Interpret Footage modal is now one complete localized slice: controls,
 auto-detection, RAW options, and evidence diagnostics use the same locale
 snapshot and Fluent catalogs. Its draft and Product Action stay locale-free.
+The Inspector's clip style, transform, timing, audio-component, Grade Graph,
+visual-effect controls, Power Window, and Mask tracking controls use this locale
+snapshot. The projected Mask shape is a typed rectangle/ellipse/path value;
+the path editing hint and shape actions never branch on a translated label.
+Tracking progress formats both counts through Fluent while native failure
+details remain diagnostic evidence attached to a localized status prefix.
+The Node Graph projection receives the same locale snapshot for source/output
+nodes, built-in effect names, and its empty-state and selected-Clip summaries;
+node and Effect IDs remain independent of translated labels.
+The Export workspace now projects its main controls, queue state, readiness,
+Dynamic HDR intent, ANC/PSE guidance, and frame/packet summaries from the
+captured locale. The Export draft, Sequence delivery intent, and queued jobs
+retain typed values and diagnostic evidence; changing locale only rebuilds
+display text. Codec/profile names and exact regulatory identifiers stay as
+technical identities. Dropdown option labels and preset summaries use the same
+snapshot; summaries derive image-sequence format and color target from the
+selected preset, and distinguish audio stems from image sequences. Raw provider
+diagnostics still need localized presentation before the Export workspace can
+be considered fully localized.
 Inspector audio Component mapping follows the same boundary: the model's
 diagnostics and the widget's policy controls share the panel locale, while
 channel layout identities and edit addresses remain typed author data.
@@ -149,3 +180,199 @@ site.
 References: [Project Fluent](https://projectfluent.org/),
 [Fluent selectors](https://projectfluent.org/fluent/guide/selectors.html), and
 [the Rust Fluent bundle](https://docs.rs/fluent/latest/fluent/).
+
+Export queue broadcast QC and color health summaries use the captured UI locale, including verdicts, coverage, evidence counts, and completion state. Provider diagnostic codes remain untranslated argument values so reports retain stable lookup identifiers.
+
+
+## Runtime status projection and pseudo arguments
+
+The App shell projects ready/queued/running/cancelling Export statuses using its
+captured locale. Export panel and status bar share exact phase message IDs;
+rendered frame counts remain decimal strings so u64 progress never loses digits
+through floating-point formatting. A phase change stops presenting stale frame
+units. Notification-history title, empty text and accessible name also use the
+current locale. A locale refresh preserves the status button identity and its
+open history viewport. App status hints and history now retain `AppMessage`
+facts instead of rendered strings. All status publication paths, including Host
+failures and async terminal results, use catalog IDs and named arguments. The
+non-test-module migration inventory contains 159 calls, including qualification
+helpers. Native error evidence remains opaque data; internal diagnostic reason
+strings need further typed codes before a completely English diagnostic UI can
+be claimed.
+
+Pseudo mode transforms Fluent pattern text in the catalog AST once, then caches
+the resulting resource separately. It does not expand formatted output:
+variables, selectors, references, numeric/function expressions and runtime
+arguments retain their identities. Select variant text and attributes expand
+without changing grammar. This preserves literal file paths, braces, exact
+numbers and already-formatted nested status text in accessible names. Generic
+widgets still consume formatted labels; the private App status composite owns
+a formatter with the same explicit locale snapshot as the root, with no global
+locale lookup during painting or playback refresh.
+
+
+## Shared product message data
+
+`app::AppMessage` and `AppMessageValue` own the stable catalog key and named
+arguments for product notifications, current status, and retained status history.
+The notification-specific message/value types have been removed, with no alpha
+compatibility aliases. A deterministic argument map gives equal messages equal
+identity regardless of builder insertion order; assigning an existing argument
+replaces its value. The message tree contains text, signed integer, and nested
+message arguments. A nested operation or phase label remains locale-independent
+until projection, rather than becoming a translated string inside App state.
+
+`Localizer::message` is the common projection used by toasts, status chrome,
+the Export panel, and each visible retained-history row. It resolves nested
+messages using that same captured UI locale and leaves opaque text intact. Fluent
+numbers are used within the exactly representable integer range through 2^53;
+larger signed integers are passed as decimal text to preserve their exact value.
+Those large arguments intentionally do not participate in numeric plural rules.
+Pseudo localization expands catalog text nodes, including nested messages, once;
+it does not expand runtime path/error arguments again. Locale changes can resolve
+the same message facts repeatedly without modifying them or notification IDs.
+
+`AppState::set_status_hint` accepts only `AppMessage`; there is no raw-string
+conversion or compatibility formatter. History retains the last 64 facts and
+deduplicates identical adjacent message data and severity. Language switching
+never adds records or changes their severity. Clearing the current hint retains
+history. User data (paths, asset/folder names and qualification markers) is
+represented explicitly as text arguments; product-owned labels such as the
+root library destination and drag target lane are nested messages.
+
+Media import summary chooses a complete message for plain completion, background
+proxies, partial failure, or both. It omits irrelevant zero counts and empty
+interpolations; numeric selectors provide English singular/plural copy. `with_count` retains the exact `usize`
+value, using decimal text when it cannot fit a signed numeric argument. Packaging
+progress, native catalog restore and range-edit counts remain structured facts.
+No catalog lookup occurs in authoring commands or background workers.
+
+Locale switching is verified against the retained root widget, open/scrolled
+history, current error priority, opaque path values, and unchanged author
+state/generation. The real async import test projects its terminal fact in
+English after the import completes. Additional product diagnostic bodies beyond
+these localized context messages remain a separate coverage requirement.
+
+
+## Typed core failure projection
+
+`AppMessage::from_error` exhaustively matches the existing `MondrianError`
+variants. Host fallback status and typed Asset/workflow failure adapters retain
+that projection as a nested message instead of freezing `Display` text. This
+adds no error-string classifier or second error enum. A newly added core variant
+requires an explicit product projection at compile time.
+
+Media/Timeline/GPU/Asset/AI/workflow/Export/I/O headings use bilingual catalog
+keys. Native source details, paths, IDs, and shader/encoder names stay opaque
+arguments. Decode frame counts, budgets, and stream timestamps remain exact
+decimal text. An unavailable stream timestamp is a nested localized value rather
+than the technical token `None`. Source-revision failures retain expected/actual
+fingerprint evidence as named data for fact identity while their concise headline
+uses the path; different evidence cannot disappear through history deduplication.
+
+`from_anyhow` walks the existing error chain by actual source types. When a core
+failure is present, outer context nodes remain opaque context arguments around
+its typed projection. Otherwise the complete foreign error chain remains one
+opaque reason under a localized heading. `MondrianError::Other` uses that same
+boundary. Returned errors and diagnostic logs retain their original authority;
+there is no reverse mapping from formatted text to error semantics.
+
+This projects existing structured failure categories. Internal reasons still
+stored as String inside those categories require further domain-owned codes;
+complete English diagnostic coverage is not yet claimed.
+
+
+### Admission reasons and exact-time causes
+
+Fixed admission conditions in the Asset/project action adapters choose a stable
+reason message directly at the decision branch: missing library, empty media
+path, unavailable Save As project, video-only proxies, absent source media,
+disabled project proxy workflow, stale probe evidence, and unproven duration.
+The corresponding diagnostic error remains available to non-UI callers; no
+reason-string lookup or translated comparison determines behavior. Missing
+Assets now return the existing typed `AssetNotFound` cause rather than wrapping
+that fact in a generic workflow reason.
+
+The `InvalidTimelineTime` projection exhaustively maps its eight
+`TimelineTimeError` variants into a nested message. Invalid frame rates/time
+bases preserve numerator and denominator as exact decimal text, including signed
+64-bit endpoints. Arithmetic limits, domain mismatch, non-invertible mapping,
+negative duration and non-finite input localize without changing time arithmetic
+or admission semantics. New owner variants require explicit projection.
+
+These branches and exact-time causes are migrated. Other domain diagnostic
+String bodies and remaining product UI literals still require further inventory
+and typed owner contracts before full language coverage is claimed.
+
+
+### Repeated localized failures
+
+Status data identity and report identity have separate responsibilities. An
+identical operation-specific error can be freshly published, even while bounded
+history suppresses an identical row. Host snapshots a typed publication identity
+before dispatch and observes it afterward. This preserves specific nested reason
+messages on consecutive failures while still replacing a genuinely stale error
+when the next action reports nothing. Status and history now expose read-only
+views; direct mutable public field access is removed.
+
+Regression coverage dispatches the same invalid import twice, requires the same
+specific localized error and one history row, then dispatches an unreported
+failure and requires the generic typed fallback. Further cases cover clearing,
+success-only reporting and unchanged author generation.
+
+
+### Media import admission reasons
+
+The App projects all six typed Media Import admission variants exhaustively at
+its product boundary. Missing project/worker, empty batch, batch capacity, batch
+size and outstanding file capacity retain catalog identities and exact counts.
+Both library import and deferred Timeline file admission use this projection;
+the execution owner retains its diagnostic Display and has no locale dependency.
+Disconnected library and missing destination folder choose nested reasons at
+their decision branches. Folder identifiers remain opaque arguments, including
+braces and non-English text. Status/history resolve these retained facts in the
+current locale. Rejection does not enqueue files or mutate authoring/library
+state. Foreign probe and publication diagnostic details remain a separate
+migration task; this does not claim full import failure localization.
+
+## Parameter enum captions
+
+Every schema choice declares `key`, `display_name`, and `message_id`. The App
+resolves the address using the current immutable Localizer, with the declared
+caption as fallback. Unknown vendor addresses retain Unicode vendor captions
+in English, Chinese and pseudo locales. Equal captions may identify different
+keys: menu checked state and dispatch still use canonical keys. Direct schema
+consumers also use declared captions when no localized projection is supplied.
+Locale projection does not modify schema, current values or automation addresses.
+
+The generic Inspector dropdown sorts a temporary projection by declared choice
+rank, retaining schema order for naturally ordered definitions. Ranks are signed
+32-bit values and need not be contiguous or positive. Canonical keys, option
+vector order, checked state, current value and Hold keyframes remain unchanged;
+locale changes only replace captions. Duplicate translated/vendor captions never
+merge choices or become action payload values.
+
+
+External resource selection uses shared English/Chinese path-selection, missing-path,
+wrong-shape and unavailable-path messages. Selection intent controls the file
+browse caption, and locale changes refresh that caption while retaining draft
+paths, input composition and focus.
+Input hints distinguish required existing paths from existing-or-new paths;
+file browsing uses the open picker and never presents overwrite confirmation.
+Inspection progress, timeout and IME reconfirmation use shared English/Chinese
+messages. Locale refresh changes presentation while keeping the inspection ticket
+and editable candidate; it does not initiate a filesystem request.
+
+Context menu names come from localized owner or application text. Keyed context
+and dropdown row labels share recursive relabeling against the current catalog,
+without changing commands, checked state, stable semantic IDs or submenu paths.
+The widget library does not supply an English context-menu or timeline name.
+Unkeyed user/vendor labels remain opaque. Expanded pseudo copy is inspected in
+full independently of width-limited drawing.
+
+## Native visual Question labels
+
+Native visual Question title and Yes/No/Dismiss labels use the bundled en-US and
+zh-CN Fluent catalogs. Plugin-authored question text remains complete original
+UTF-8 and is shown in the same bounded scrollable dialog; it is not translated or
+truncated by the host.

@@ -1,0 +1,319 @@
+use crate::events::helpers::impl_event_helpers;
+use crate::events::spaces::CoreEventSpace;
+use crate::events::{Event, EventFlags, EventHeader, UnknownEvent};
+use crate::utils::abi_field_values::{CLAP_EVENT_MIDI, CLAP_EVENT_MIDI_SYSEX, CLAP_EVENT_MIDI2};
+use crate::utils::*;
+use clap_sys::events::{clap_event_midi, clap_event_midi_sysex, clap_event_midi2};
+use std::fmt::{Debug, Formatter};
+
+/// A raw MIDI 1.0 event.
+/// This event type can be used to send raw, unprocessed MIDI 1.0 data.
+#[derive(Copy, Clone)]
+pub struct MidiEvent {
+    inner: clap_event_midi,
+}
+
+// SAFETY: this matches the type ID and event space
+unsafe impl Event for MidiEvent {
+    const TYPE_ID: u16 = CLAP_EVENT_MIDI;
+    type EventSpace<'a> = CoreEventSpace<'a>;
+}
+
+impl AsRef<UnknownEvent> for MidiEvent {
+    #[inline]
+    fn as_ref(&self) -> &UnknownEvent {
+        self.as_unknown()
+    }
+}
+
+impl MidiEvent {
+    /// Creates a new raw MIDI 1.0 event from a `time` stamp, a `port_index`, and raw MIDI `data`.
+    #[inline]
+    pub const fn new(time: u32, port_index: u16, data: [u8; 3]) -> Self {
+        Self {
+            inner: clap_event_midi {
+                header: EventHeader::<Self>::new_core(time, EventFlags::empty()).into_raw(),
+                port_index,
+                data,
+            },
+        }
+    }
+
+    /// The raw MIDI 1.0 data, as 3 bytes.
+    #[inline]
+    pub const fn data(&self) -> [u8; 3] {
+        self.inner.data
+    }
+
+    /// Sets the raw MIDI 1.0 data, as 3 bytes.
+    #[inline]
+    pub const fn set_data(&mut self, data: [u8; 3]) {
+        self.inner.data = data
+    }
+
+    /// Sets the raw MIDI 1.0 data, as 3 bytes.
+    #[inline]
+    pub const fn with_data(mut self, data: [u8; 3]) -> Self {
+        self.inner.data = data;
+        self
+    }
+
+    /// The index of the port this event applies to.
+    #[inline]
+    pub const fn port_index(&self) -> u16 {
+        self.inner.port_index
+    }
+
+    /// Sets the index of the port this event applies to.
+    #[inline]
+    pub const fn set_port_index(&mut self, port_index: u16) {
+        self.inner.port_index = port_index
+    }
+
+    /// Sets the index of the port this event applies to.
+    #[inline]
+    pub const fn with_port_index(mut self, port_index: u16) -> Self {
+        self.inner.port_index = port_index;
+        self
+    }
+
+    impl_event_helpers!(clap_event_midi);
+}
+
+impl PartialEq for MidiEvent {
+    #[inline]
+    fn eq(&self, other: &Self) -> bool {
+        self.inner.data == other.inner.data && self.inner.port_index == other.inner.port_index
+    }
+}
+
+impl Eq for MidiEvent {}
+
+impl Debug for MidiEvent {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MidiEvent")
+            .field("header", &self.header())
+            .field("port_index", &self.inner.port_index)
+            .field("data", &self.inner.data)
+            .finish()
+    }
+}
+
+/// A raw MIDI 1.0 System Exclusive (SysEx) event.
+///
+/// This event contains a pointer to a sysex data buffer. The lifetime of this
+/// buffer is only guaranteed to be valid for the duration of the `process` call
+/// (when received from the host) or the `try_push` call (when sent to the host).
+///
+/// Because of this, if you need to keep the data around for longer, you must
+/// copy it to a plugin-owned or host-owned buffer.
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct MidiSysExEvent {
+    inner: clap_event_midi_sysex,
+}
+
+// SAFETY: this matches the type ID and event space
+unsafe impl Event for MidiSysExEvent {
+    const TYPE_ID: u16 = CLAP_EVENT_MIDI_SYSEX;
+    type EventSpace<'a> = CoreEventSpace<'a>;
+}
+
+impl AsRef<UnknownEvent> for MidiSysExEvent {
+    #[inline]
+    fn as_ref(&self) -> &UnknownEvent {
+        self.as_unknown()
+    }
+}
+
+impl MidiSysExEvent {
+    /// # Panics
+    ///
+    /// This will panic if `data.len()` is larger than `u32::MAX`.
+    ///
+    /// # Safety
+    ///
+    /// Users *must* ensure that the buffer lives long enough.
+    ///
+    /// As a plugin, the buffer must live at least until this event is `try_push`ed into the host's
+    /// output event buffer for the last time.
+    ///
+    /// As a host, the buffer must live at least until this event is used for the last time through
+    /// input buffers passed to a plugin method call (e.g. `process` or `flush`).
+    #[inline]
+    pub const unsafe fn new(time: u32, port_index: u16, data: &[u8]) -> Self {
+        Self {
+            inner: clap_event_midi_sysex {
+                header: EventHeader::<Self>::new_core(time, EventFlags::empty()).into_raw(),
+                port_index,
+                buffer: data.as_ptr(),
+                size: usize_to_clap_size(data.len()),
+            },
+        }
+    }
+
+    /// The index of the port this event applies to.
+    #[inline]
+    pub const fn port_index(&self) -> u16 {
+        self.inner.port_index
+    }
+
+    /// Sets the index of the port this event applies to.
+    #[inline]
+    pub const fn set_port_index(&mut self, port_index: u16) {
+        self.inner.port_index = port_index;
+    }
+
+    /// Sets the index of the port this event applies to.
+    #[inline]
+    pub const fn with_port_index(mut self, port_index: u16) -> Self {
+        self.inner.port_index = port_index;
+        self
+    }
+
+    /// A raw pointer to the sysex data buffer.
+    #[inline]
+    pub const fn buffer_ptr(&self) -> *const u8 {
+        self.inner.buffer
+    }
+
+    /// The size of the sysex data buffer.
+    #[inline]
+    pub const fn buffer_size(&self) -> u32 {
+        self.inner.size
+    }
+
+    /// # Safety
+    ///
+    /// Users *must* ensure that the buffer lives long enough.
+    ///
+    /// As a plugin, host-provided buffers are guaranteed to live at least as long as the current
+    /// method call (e.g. `process` or `flush`).
+    ///
+    /// As a host, plugin-provided buffers are guaranteed to live at least as long as this event's
+    /// call to `OutputEventBuffer::try_push`. Note that this means that accessing the data buffer
+    /// after the current plugin method call has returned is always disallowed.
+    #[inline]
+    pub const unsafe fn data<'a>(&self) -> &'a [u8] {
+        // SAFETY: this struct ensures the buffer is valid, and the user enforces the lifetime
+        unsafe { slice_from_external_parts(self.inner.buffer, self.inner.size as usize) }
+    }
+
+    impl_event_helpers!(clap_event_midi_sysex);
+}
+
+impl PartialEq for MidiSysExEvent {
+    #[inline]
+    fn eq(&self, other: &Self) -> bool {
+        self.inner.port_index == other.inner.port_index
+            && self.buffer_size() == other.buffer_size()
+            && self.buffer_ptr() == other.buffer_ptr()
+    }
+}
+
+impl Eq for MidiSysExEvent {}
+
+impl Debug for MidiSysExEvent {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MidiSysexEvent")
+            .field("header", &self.header())
+            .field("port_index", &self.inner.port_index)
+            .field("buffer_size", &self.buffer_size())
+            .finish()
+    }
+}
+
+/// A raw MIDI 2.0 event.
+///
+/// While it is possible to use a series of MIDI 2.0 events to send sysex data,
+/// it is recommended to use the [`MidiSysExEvent`] type instead for efficiency.
+#[derive(Copy, Clone)]
+pub struct Midi2Event {
+    inner: clap_event_midi2,
+}
+
+// SAFETY: this matches the type ID and event space
+unsafe impl Event for Midi2Event {
+    const TYPE_ID: u16 = CLAP_EVENT_MIDI2;
+    type EventSpace<'a> = CoreEventSpace<'a>;
+}
+
+impl AsRef<UnknownEvent> for Midi2Event {
+    #[inline]
+    fn as_ref(&self) -> &UnknownEvent {
+        self.as_unknown()
+    }
+}
+
+impl Midi2Event {
+    /// Creates a new raw MIDI 2.0 event from a `time` stamp, a `port_index`, and raw MIDI `data`.
+    #[inline]
+    pub const fn new(time: u32, port_index: u16, data: [u32; 4]) -> Self {
+        Self {
+            inner: clap_event_midi2 {
+                header: EventHeader::<Self>::new_core(time, EventFlags::empty()).into_raw(),
+                port_index,
+                data,
+            },
+        }
+    }
+
+    /// The raw MIDI 2.0 data, as 4 `u32`s.
+    #[inline]
+    pub const fn data(&self) -> [u32; 4] {
+        self.inner.data
+    }
+
+    /// Sets the raw MIDI 2.0 data, as 4 `u32`s.
+    #[inline]
+    pub const fn set_data(&mut self, data: [u32; 4]) {
+        self.inner.data = data
+    }
+
+    /// Sets the raw MIDI 2.0 data, as 4 `u32`s.
+    #[inline]
+    pub const fn with_data(mut self, data: [u32; 4]) -> Self {
+        self.inner.data = data;
+        self
+    }
+
+    /// The index of the port this event applies to.
+    #[inline]
+    pub const fn port_index(&self) -> u16 {
+        self.inner.port_index
+    }
+
+    /// Sets the index of the port this event applies to.
+    #[inline]
+    pub const fn set_port_index(&mut self, port_index: u16) {
+        self.inner.port_index = port_index;
+    }
+
+    /// Sets the index of the port this event applies to.
+    #[inline]
+    pub const fn with_port_index(mut self, port_index: u16) -> Self {
+        self.inner.port_index = port_index;
+        self
+    }
+
+    impl_event_helpers!(clap_event_midi2);
+}
+
+impl PartialEq for Midi2Event {
+    #[inline]
+    fn eq(&self, other: &Self) -> bool {
+        self.inner.data == other.inner.data && self.inner.port_index == other.inner.port_index
+    }
+}
+
+impl Eq for Midi2Event {}
+
+impl Debug for Midi2Event {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Midi2Event")
+            .field("header", &self.header())
+            .field("port_index", &self.inner.port_index)
+            .field("data", &self.inner.data)
+            .finish()
+    }
+}

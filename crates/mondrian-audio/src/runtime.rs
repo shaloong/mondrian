@@ -1,3 +1,11 @@
+pub(crate) mod host_output_fader;
+pub(crate) mod native_author;
+mod native_author_logical_fees;
+mod native_author_preflight;
+mod native_author_scope;
+pub(crate) mod native_reprepare;
+mod preparation_admission;
+
 use crate::dependency::{
     select_program_window, selected_contribution_source_window, AudioDependencyClosure,
     DependencyWindow,
@@ -11,7 +19,7 @@ use crate::{
     CompiledAudioSource, PreparedAudioPlan,
 };
 use mondrian_core::{
-    AssetId, AudioChannelLayout, AudioComponentEditId, AudioSourceComponentId,
+    AssetId, AudioChannelLayout, AudioComponentEditId, AudioSamplePosition, AudioSourceComponentId,
     ExecutionCancellationToken, ProgramOutputId, SequenceId, TimelineTimeRange,
 };
 use mondrian_timeline::{sequence::MAX_NESTED_SEQUENCE_RENDER_DEPTH, Sequence};
@@ -63,7 +71,7 @@ impl AudioRuntimeResourceGrant {
 pub struct AudioRuntimeResourceFootprint {
     /// Generated mutable Runtime occurrences, not unique Sequence identities.
     pub runtime_occurrences: usize,
-    /// Aggregate fixed live residency.
+    /// Aggregate fixed residency, including retained restart capture reservations.
     pub fixed_resident_bytes: usize,
     /// Aggregate immutable prepared-plan logical bytes.
     pub prepared_logical_bytes: usize,
@@ -117,7 +125,14 @@ impl AudioRuntimeAdmissionLedger {
             output_id,
             AudioRuntimeResourceFootprint {
                 runtime_occurrences: 1,
-                fixed_resident_bytes: session.fixed_resident_bytes,
+                fixed_resident_bytes: session
+                    .fixed_resident_bytes
+                    .checked_add(std::mem::size_of::<native_reprepare::NativeReprepareState>())
+                    .ok_or(AudioRuntimeBuildError::ResourceExtentOverflow {
+                        category: AudioRuntimeResourceCategory::FixedResidentBytes,
+                        sequence_id,
+                        output_id,
+                    })?,
                 prepared_logical_bytes: session.prepared_logical_bytes,
                 render_scratch_bytes: session.render_scratch_bytes,
                 processor_session_bytes: session.processor_session_bytes,
@@ -331,13 +346,836 @@ pub trait AudioMediaResolver {
 /// The runtime owns one exclusive mutable Session and recursively compiled
 /// child-output Sessions. Consumers only supply the media decode Adapter.
 pub struct AudioProgramRuntime {
+    sequence_id: SequenceId,
     session: AudioRenderSession,
     sources: RuntimeSources,
     execution_demand: AudioProgramExecutionDemand,
     resource_footprint: AudioRuntimeResourceFootprint,
+    resource_grant: AudioRuntimeResourceGrant,
+    native_installation: crate::native_runtime_owner::NativeRuntimeInstallation,
+    native_diagnostic_cursor: usize,
+    // Only this exclusive Root enrolls extra logical Plan roles; actual owner
+    // receipts independently release them after their field drop glue retires.
+    native_held_plan_fees: Option<Arc<std::sync::atomic::AtomicUsize>>,
+    native_author_scope: Option<Box<native_author_scope::NativeAuthorScopeCohort>>,
+    native_reprepare: native_reprepare::NativeReprepareState,
 }
 
 impl AudioProgramRuntime {
+    #[cfg(test)]
+    pub(crate) fn prepare_owned_note_model_for_test(
+        &mut self,
+        program: Arc<crate::CompiledAudioProgram>,
+    ) -> Result<(), AudioRuntimeBuildError> {
+        if self.native_installation.verifier.is_some()
+            || self.native_installation.claim.is_some()
+            || self.native_installation.entry_context.is_some()
+            || self.native_installation.prepared.is_some()
+            || self.native_author_scope.is_some()
+            || !self.session.is_unentered_for_owned_note_control()
+            || self
+                .sources
+                .entries
+                .values()
+                .any(|source| matches!(source, RuntimeSource::Nested(_)))
+        {
+            return Err(AudioRuntimeBuildError::InvalidResourceReplacement);
+        }
+        let old = self.session.resource_plan().session_resource_footprint()?;
+        let plan = Arc::new(self.session.resource_plan().with_owned_note_score_for_test(program)?);
+        let next = plan.session_resource_footprint()?;
+        // Only Note immutable/fixed payload changes. Other categories remain the
+        // same prepared base graph, and every original policy ceiling is retained.
+        if (
+            old.render_scratch_bytes,
+            old.processor_session_bytes,
+            old.compensation_delay_bytes,
+            old.parameter_event_bytes,
+        ) != (
+            next.render_scratch_bytes,
+            next.processor_session_bytes,
+            next.compensation_delay_bytes,
+            next.parameter_event_bytes,
+        ) {
+            return Err(AudioRuntimeBuildError::InvalidResourceReplacement);
+        }
+        let checked =
+            |value: Option<usize>| value.ok_or(AudioRuntimeBuildError::InvalidResourceReplacement);
+        let peak_fixed = checked(
+            self.resource_footprint
+                .fixed_resident_bytes
+                .checked_add(next.fixed_resident_bytes),
+        )?;
+        let peak_logical = checked(
+            self.resource_footprint
+                .prepared_logical_bytes
+                .checked_add(next.prepared_logical_bytes),
+        )?;
+        for (category, required, granted) in [
+            (
+                AudioRuntimeResourceCategory::FixedResidentBytes,
+                peak_fixed,
+                self.resource_grant.max_fixed_resident_bytes,
+            ),
+            (
+                AudioRuntimeResourceCategory::PreparedLogicalBytes,
+                peak_logical,
+                self.resource_grant.max_prepared_logical_bytes,
+            ),
+        ] {
+            if required > granted {
+                return Err(AudioRuntimeBuildError::ResourceOverlapGrantExceeded {
+                    category,
+                    required,
+                    granted,
+                });
+            }
+        }
+        let final_fixed = checked(
+            self.resource_footprint
+                .fixed_resident_bytes
+                .checked_sub(old.fixed_resident_bytes)
+                .and_then(|bytes| bytes.checked_add(next.fixed_resident_bytes)),
+        )?;
+        let final_logical = checked(
+            self.resource_footprint
+                .prepared_logical_bytes
+                .checked_sub(old.prepared_logical_bytes)
+                .and_then(|bytes| bytes.checked_add(next.prepared_logical_bytes)),
+        )?;
+        // Existing canonical allocator/population; no Enter, Bind, lease or origin.
+        let mut storage = AudioRenderSession::allocate_storage(plan)?;
+        storage.inherit_native_child_settlement(&self.session);
+        let session = storage.populate()?;
+        self.session = session;
+        self.resource_footprint.fixed_resident_bytes = final_fixed;
+        self.resource_footprint.prepared_logical_bytes = final_logical;
+        Ok(())
+    }
+
+    /// Bind child-settlement evidence to every currently owned actual Session.
+    /// This performs no DSP or owner replacement and grants no execution permission.
+    /// Missing forwarding permanently invalidates the supplied evidence domain.
+    pub fn bind_native_child_settlement(
+        &mut self,
+        registrar: &mondrian_core::NativeChildSettlementRegistrar,
+    ) -> Result<(), mondrian_core::NativeChildSettlementError> {
+        self.validate_native_child_settlement_domain(registrar)?;
+        self.bind_native_child_settlement_admitted(registrar)
+    }
+
+    fn validate_native_child_settlement_domain(
+        &self,
+        registrar: &mondrian_core::NativeChildSettlementRegistrar,
+    ) -> Result<(), mondrian_core::NativeChildSettlementError> {
+        let mut failure = self.session.validate_native_child_settlement_domain(registrar).err();
+        if let Some(cohort) = &self.native_author_scope
+            && let Err(error) = cohort.validate_native_child_settlement_domain(registrar)
+        {
+            failure.get_or_insert(error);
+        }
+        for source in self.sources.entries.values() {
+            if let RuntimeSource::Nested(nested) = source
+                && let Err(error) =
+                    nested.runtime.validate_native_child_settlement_domain(registrar)
+            {
+                failure.get_or_insert(error);
+            }
+        }
+        failure.map_or(Ok(()), Err)
+    }
+
+    fn bind_native_child_settlement_admitted(
+        &mut self,
+        registrar: &mondrian_core::NativeChildSettlementRegistrar,
+    ) -> Result<(), mondrian_core::NativeChildSettlementError> {
+        let mut failure = self.session.bind_native_child_settlement(registrar).err();
+        if let Some(cohort) = &mut self.native_author_scope
+            && let Err(error) = cohort.bind_native_child_settlement(registrar)
+        {
+            failure.get_or_insert(error);
+        }
+        for source in self.sources.entries.values_mut() {
+            if let RuntimeSource::Nested(nested) = source
+                && let Err(error) = nested.runtime.bind_native_child_settlement_admitted(registrar)
+            {
+                failure.get_or_insert(error);
+            }
+        }
+        failure.map_or(Ok(()), Err)
+    }
+
+    /// Bind one read-only registration supplied by the actual Media slot owner.
+    /// A second unrelated pair cannot replace this Runtime's registration.
+    /// This metadata operation performs no foreign native work.
+    pub fn bind_native_owner_installation(
+        &mut self,
+        verifier: mondrian_core::AudioOwnerInstallationVerifier,
+    ) -> Result<(), mondrian_core::AudioOwnerInstallationError> {
+        match &self.native_installation.verifier {
+            Some(current) if current.same_registration(&verifier) => Ok(()),
+            Some(_) => Err(mondrian_core::AudioOwnerInstallationError::WrongRegistration),
+            None => {
+                self.native_installation.verifier = Some(verifier);
+                Ok(())
+            }
+        }
+    }
+
+    /// Whether one actual root/nested instance can produce native observations.
+    /// This read-only capability performs no native control or DSP work.
+    pub fn native_observations_supported(&self) -> bool {
+        self.session.native_observation_sources() != 0 || self.sources.entries.values().any(|source|
+            matches!(source, RuntimeSource::Nested(nested) if nested.runtime.native_observations_supported()))
+    }
+
+    /// Aggregate declarations from actual current factories and instance shapes.
+    /// Unknown, poisoned or held/prospective owners remain Unavailable. This
+    /// control-thread query may call an opaque factory getter under its existing
+    /// panic boundary. NotApplicable says nothing about DSP statefulness or
+    /// in-process native observations; callers must query those separately.
+    pub fn installed_native_child_settlement_requirement(
+        &self,
+    ) -> mondrian_core::NativeChildSettlementRequirement {
+        use mondrian_core::NativeChildSettlementRequirement as Requirement;
+        if self.native_author_scope.is_some()
+            || self.native_installation.prepared.is_some()
+            || self.held_native_plan_logical_bytes() != 0
+        {
+            return Requirement::Unavailable;
+        }
+        let mut aggregate = self.session.installed_native_child_settlement_requirement();
+        if aggregate == Requirement::Unavailable {
+            return aggregate;
+        }
+        for source in self.sources.entries.values() {
+            if let RuntimeSource::Nested(nested) = source {
+                match nested.runtime.installed_native_child_settlement_requirement() {
+                    Requirement::Unavailable => return Requirement::Unavailable,
+                    Requirement::Required => aggregate = Requirement::Required,
+                    Requirement::NotApplicable => {}
+                }
+            }
+        }
+        aggregate
+    }
+
+    /// Poll one exact occurrence fairly on the sole non-RT serial control owner.
+    /// Logs require no editor binding; actual parent/child transport still
+    /// authenticates the producer. Other native queues remain unconsumed.
+    pub fn poll_native_observations(
+        &mut self,
+        cancellation: &ExecutionCancellationToken,
+    ) -> Result<Option<mondrian_core::NativeAudioObservationBatch>, crate::AudioProcessorHostError>
+    {
+        let count = self.native_observation_sources()?;
+        if count == 0 || cancellation.is_canceled() {
+            return Ok(None);
+        }
+        let index = self.native_diagnostic_cursor % count;
+        self.native_diagnostic_cursor = if index + 1 == count { 0 } else { index + 1 };
+        let root = self.session.native_owner_identity();
+        let installed_serial = self.native_author_installation_serial().ok();
+        let result =
+            self.poll_native_observation_index(index, root, installed_serial, cancellation)?;
+        if result.as_ref().is_some_and(|batch| batch.author.is_some())
+            && self.native_author_installation_serial().ok() != installed_serial
+        {
+            return Err(crate::AudioProcessorHostError::InvalidContract(
+                "native author installation changed during observation".to_owned(),
+            ));
+        }
+        Ok(result)
+    }
+
+    fn native_observation_sources(&self) -> Result<usize, crate::AudioProcessorHostError> {
+        // All counts come from existing finite owner Vecs in this prepared root.
+        let mut count = self.session.native_observation_sources();
+        for source in self.sources.entries.values() {
+            if let RuntimeSource::Nested(nested) = source {
+                count = count
+                    .checked_add(nested.runtime.native_observation_sources()?)
+                    .ok_or_else(|| {
+                        crate::AudioProcessorHostError::InvalidContract(
+                            "native diagnostic source count overflow".to_owned(),
+                        )
+                    })?;
+            }
+        }
+        Ok(count)
+    }
+
+    fn poll_native_observation_index(
+        &mut self,
+        mut index: usize,
+        root: crate::AudioSessionCursorIdentity,
+        installed_serial: Option<std::num::NonZeroU64>,
+        cancellation: &ExecutionCancellationToken,
+    ) -> Result<Option<mondrian_core::NativeAudioObservationBatch>, crate::AudioProcessorHostError>
+    {
+        let count = self.session.native_observation_sources();
+        if index < count {
+            return self.session.poll_native_observation_at(
+                index,
+                root,
+                self.sequence_id,
+                installed_serial,
+                cancellation,
+            );
+        }
+        index -= count;
+        for source in self.sources.entries.values_mut() {
+            if let RuntimeSource::Nested(nested) = source {
+                let count = nested.runtime.native_observation_sources()?;
+                if index < count {
+                    return nested.runtime.poll_native_observation_index(
+                        index,
+                        root,
+                        installed_serial,
+                        cancellation,
+                    );
+                }
+                index -= count;
+            }
+        }
+        Err(crate::AudioProcessorHostError::InvalidContract(
+            "native diagnostic root occurrence changed".to_owned(),
+        ))
+    }
+
+    pub fn validate_native_author_source_closed(
+        &mut self,
+        cancellation: &ExecutionCancellationToken,
+    ) -> Result<(), crate::NativeAudioAuthorAdmissionError> {
+        if cancellation.is_canceled() {
+            return Err(crate::NativeAudioAuthorAdmissionError::Cancelled);
+        }
+        if !self.native_observations_supported() {
+            return Ok(());
+        }
+        let installed_serial = self.native_author_installation_serial()?;
+        let root = self.session.native_owner_identity();
+        self.validate_native_author_sources_recursively(root, installed_serial, cancellation)?;
+        if cancellation.is_canceled() {
+            return Err(crate::NativeAudioAuthorAdmissionError::Cancelled);
+        }
+        // The same private Source claim may be revoked by a real Media slot
+        // swap while native observation was in progress. No reply can revive it.
+        if self.native_author_installation_serial()? != installed_serial {
+            return Err(crate::AudioNativeOwnerError::OwnerUnavailable.into());
+        }
+        Ok(())
+    }
+
+    fn native_author_installation_serial(
+        &self,
+    ) -> Result<std::num::NonZeroU64, crate::AudioNativeOwnerError> {
+        let verifier = self
+            .native_installation
+            .verifier
+            .as_ref()
+            .ok_or(crate::AudioNativeOwnerError::UnregisteredRuntime)?;
+        let claim = self
+            .native_installation
+            .claim
+            .as_ref()
+            .ok_or(crate::AudioNativeOwnerError::OwnerUnavailable)?;
+        verifier.validate(claim).map_err(crate::AudioNativeOwnerError::from)?;
+        Ok(claim.generation())
+    }
+
+    fn validate_native_author_sources_recursively(
+        &mut self,
+        root: crate::AudioSessionCursorIdentity,
+        installed_serial: std::num::NonZeroU64,
+        cancellation: &ExecutionCancellationToken,
+    ) -> Result<(), crate::NativeAudioAuthorAdmissionError> {
+        self.session
+            .validate_native_author_source_closed(root, installed_serial, cancellation)?;
+        for source in self.sources.entries.values_mut() {
+            if let RuntimeSource::Nested(nested) = source {
+                nested.runtime.validate_native_author_sources_recursively(
+                    root,
+                    installed_serial,
+                    cancellation,
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Read-only registration of the actual current root Runtime.
+    /// Wrappers must query it again after a proven same-object Session swap.
+    pub fn native_owner_installation_verifier(
+        &self,
+    ) -> Option<mondrian_core::AudioOwnerInstallationVerifier> {
+        self.native_installation.verifier.clone()
+    }
+
+    /// Prepare all actual root/nested native bindings without publishing leases.
+    ///
+    /// Foreign acknowledgements run only on the non-RT serial native owner.
+    /// Candidates may prepare before their actual root swap. Failed preparation
+    /// withdraws all records; a ticket alone has no installation/author power.
+    pub fn prepare_native_owner_bindings(
+        &mut self,
+        cancellation: &ExecutionCancellationToken,
+    ) -> Result<crate::NativeAudioBindingPreparation, crate::AudioNativeOwnerError> {
+        if self.native_reprepare.attempt.is_some() {
+            return Err(crate::AudioNativeOwnerError::OwnerUnavailable);
+        }
+        if self.native_installation.verifier.is_none() {
+            return Err(crate::AudioNativeOwnerError::UnregisteredRuntime);
+        }
+        if cancellation.is_canceled() {
+            return Err(crate::AudioNativeOwnerError::Cancelled);
+        }
+        let serial = std::num::NonZeroU64::new(self.native_installation.next_preparation_serial)
+            .ok_or(crate::AudioNativeOwnerError::PreparationSerialExhausted)?;
+        self.native_installation.next_preparation_serial = self
+            .native_installation
+            .next_preparation_serial
+            .checked_add(1)
+            .ok_or(crate::AudioNativeOwnerError::PreparationSerialExhausted)?;
+        let root = self.session.native_owner_identity();
+        self.revoke_native_bindings_recursively();
+        let count = match self.prepare_native_bindings_recursively(root, cancellation) {
+            Ok(count) => count,
+            Err(error) => {
+                self.revoke_native_bindings_recursively();
+                return Err(error);
+            }
+        };
+        if cancellation.is_canceled() {
+            self.revoke_native_bindings_recursively();
+            return Err(crate::AudioNativeOwnerError::Cancelled);
+        }
+        self.native_installation.prepared = Some((serial, root, count));
+        Ok(crate::NativeAudioBindingPreparation { root, serial, count })
+    }
+
+    /// Publish only this exact preparation after the actual renderer/Runtime swap.
+    ///
+    /// All foreign work precedes this bounded record move; publication allocates
+    /// nothing, resets no DSP and writes no author history. A superseded Core
+    /// claim refuses editors and does not roll back an already-valid graph.
+    pub fn publish_prepared_native_owner_bindings(
+        &mut self,
+        preparation: crate::NativeAudioBindingPreparation,
+        claim: &mondrian_core::AudioOwnerInstallationClaim,
+    ) -> Result<usize, crate::AudioNativeOwnerError> {
+        let verifier = self
+            .native_installation
+            .verifier
+            .as_ref()
+            .ok_or(crate::AudioNativeOwnerError::UnregisteredRuntime)?;
+        verifier.validate(claim)?;
+        if self.native_installation.prepared
+            != Some((preparation.serial, preparation.root, preparation.count))
+            || preparation.root != self.session.native_owner_identity()
+        {
+            return Err(crate::AudioNativeOwnerError::OwnerUnavailable);
+        }
+        if self.validate_prepared_native_bindings_recursively(preparation.root)?
+            != preparation.count
+        {
+            return Err(crate::AudioNativeOwnerError::OwnerUnavailable);
+        }
+        self.publish_native_bindings_recursively(claim.generation());
+        self.native_installation.prepared = None;
+        self.native_installation.claim = Some(claim.clone());
+        self.refresh_native_entry_context();
+        Ok(preparation.count)
+    }
+
+    /// Prepare/publish current native bindings on the same serial Media worker.
+    /// This initial-install wrapper never grants a candidate permission early.
+    pub fn install_native_owner_bindings(
+        &mut self,
+        claim: &mondrian_core::AudioOwnerInstallationClaim,
+        cancellation: &ExecutionCancellationToken,
+    ) -> Result<usize, crate::AudioNativeOwnerError> {
+        let verifier = self
+            .native_installation
+            .verifier
+            .clone()
+            .ok_or(crate::AudioNativeOwnerError::UnregisteredRuntime)?;
+        verifier.validate(claim)?;
+        let preparation = self.prepare_native_owner_bindings(cancellation)?;
+        if cancellation.is_canceled() {
+            self.revoke_native_bindings_recursively();
+            return Err(crate::AudioNativeOwnerError::Cancelled);
+        }
+        match self.publish_prepared_native_owner_bindings(preparation, claim) {
+            Ok(count) => Ok(count),
+            Err(error) => {
+                self.revoke_native_bindings_recursively();
+                Err(error)
+            }
+        }
+    }
+
+    fn revoke_native_bindings_recursively(&mut self) {
+        self.native_installation.claim = None;
+        self.native_installation.entry_context = None;
+        self.session.set_native_entry_context(None);
+        self.native_installation.prepared = None;
+        self.session.revoke_native_bindings();
+        for source in self.sources.entries.values_mut() {
+            if let RuntimeSource::Nested(nested) = source {
+                nested.runtime.revoke_native_bindings_recursively();
+            }
+        }
+    }
+
+    fn prepare_native_bindings_recursively(
+        &mut self,
+        root: crate::AudioSessionCursorIdentity,
+        cancellation: &ExecutionCancellationToken,
+    ) -> Result<usize, crate::AudioNativeOwnerError> {
+        let mut prepared = self.session.prepare_native_bindings(root, cancellation)?;
+        for source in self.sources.entries.values_mut() {
+            if let RuntimeSource::Nested(nested) = source {
+                prepared = prepared
+                    .checked_add(
+                        nested.runtime.prepare_native_bindings_recursively(root, cancellation)?,
+                    )
+                    .ok_or(crate::AudioNativeOwnerError::RecordExtentOverflow)?;
+            }
+        }
+        Ok(prepared)
+    }
+
+    fn publish_native_bindings_recursively(&mut self, installed_root_serial: std::num::NonZeroU64) {
+        self.session.publish_native_bindings(installed_root_serial);
+        for source in self.sources.entries.values_mut() {
+            if let RuntimeSource::Nested(nested) = source {
+                nested.runtime.publish_native_bindings_recursively(installed_root_serial);
+            }
+        }
+    }
+
+    fn validate_prepared_native_bindings_recursively(
+        &self,
+        root: crate::AudioSessionCursorIdentity,
+    ) -> Result<usize, crate::AudioNativeOwnerError> {
+        let mut count = self.session.validate_prepared_native_bindings(root)?;
+        for source in self.sources.entries.values() {
+            if let RuntimeSource::Nested(nested) = source {
+                count = count
+                    .checked_add(
+                        nested.runtime.validate_prepared_native_bindings_recursively(root)?,
+                    )
+                    .ok_or(crate::AudioNativeOwnerError::RecordExtentOverflow)?;
+            }
+        }
+        Ok(count)
+    }
+
+    /// Observe a lease only in this currently installed actual root Runtime.
+    /// Full nested occurrence/epoch must match; address IDs cannot mint a lease.
+    pub fn native_owner_lease(
+        &self,
+        address: crate::AudioNativeProcessorAddress,
+    ) -> Result<crate::AudioNativeProcessorOwnerLease, crate::AudioNativeOwnerError> {
+        let verifier = self
+            .native_installation
+            .verifier
+            .as_ref()
+            .ok_or(crate::AudioNativeOwnerError::UnregisteredRuntime)?;
+        let claim = self
+            .native_installation
+            .claim
+            .as_ref()
+            .ok_or(crate::AudioNativeOwnerError::OwnerUnavailable)?;
+        verifier.validate(claim)?;
+        if address.root != self.session.native_owner_identity() {
+            return Err(crate::AudioNativeOwnerError::OwnerUnavailable);
+        }
+        let lease = self
+            .find_native_owner_lease(address)
+            .ok_or(crate::AudioNativeOwnerError::OwnerUnavailable)?;
+        if lease.installed_root_serial() != claim.generation() {
+            return Err(crate::AudioNativeOwnerError::OwnerUnavailable);
+        }
+        Ok(lease)
+    }
+
+    fn find_native_owner_lease(
+        &self,
+        address: crate::AudioNativeProcessorAddress,
+    ) -> Option<crate::AudioNativeProcessorOwnerLease> {
+        if address.local == self.session.native_owner_identity() {
+            return self.session.native_owner_lease(address);
+        }
+        self.sources.entries.values().find_map(|source| match source {
+            RuntimeSource::Nested(nested) => nested.runtime.find_native_owner_lease(address),
+            RuntimeSource::Media(_) => None,
+        })
+    }
+
+    /// Validate current install, exact Hosted record and actual retained object.
+    /// This non-RT control admission executes no DSP and changes no author state.
+    pub fn validate_native_owner(
+        &mut self,
+        lease: crate::AudioNativeProcessorOwnerLease,
+    ) -> Result<(), crate::AudioNativeOwnerError> {
+        self.observe_native_owner_object(lease).map(|_| ())
+    }
+
+    /// Observe the actual object after current installed-owner validation.
+    ///
+    /// This non-RT control uses the same authenticated observation as owner
+    /// validation, without querying parameter metadata or draining author work.
+    /// Returned PID/load facts grant no execution, editor or author authority;
+    /// every later operation must still admit the current opaque owner lease.
+    pub fn observe_native_owner_object(
+        &mut self,
+        lease: crate::AudioNativeProcessorOwnerLease,
+    ) -> Result<crate::NativeAudioObjectObservation, crate::AudioNativeOwnerError> {
+        if self.native_owner_lease(lease.address())? != lease {
+            return Err(crate::AudioNativeOwnerError::OwnerUnavailable);
+        }
+        let object = self.validate_local_native_owner(lease)?;
+        // A Source claim can be superseded while the non-RT native control
+        // call is in flight. Do not publish facts under its obsolete authority.
+        if self.native_owner_lease(lease.address())? != lease {
+            return Err(crate::AudioNativeOwnerError::OwnerUnavailable);
+        }
+        Ok(object)
+    }
+
+    fn validate_local_native_owner(
+        &mut self,
+        lease: crate::AudioNativeProcessorOwnerLease,
+    ) -> Result<crate::NativeAudioObjectObservation, crate::AudioNativeOwnerError> {
+        if lease.address().local == self.session.native_owner_identity() {
+            return self.session.validate_native_owner(lease);
+        }
+        for source in self.sources.entries.values_mut() {
+            if let RuntimeSource::Nested(nested) = source {
+                match nested.runtime.validate_local_native_owner(lease) {
+                    Err(crate::AudioNativeOwnerError::OwnerUnavailable) => {}
+                    result => return result,
+                }
+            }
+        }
+        Err(crate::AudioNativeOwnerError::OwnerUnavailable)
+    }
+
+    /// Return read-only editor address facts from one actual installed record.
+    /// Queued copies remain metadata and must be re-admitted before native work.
+    pub fn native_editor_target(
+        &self,
+        address: crate::AudioNativeProcessorAddress,
+    ) -> Result<mondrian_core::NativeAudioEditorTarget, crate::AudioNativeOwnerError> {
+        self.native_owner_lease(address)
+            .map(crate::AudioNativeProcessorOwnerLease::editor_target)
+    }
+
+    fn resolve_native_editor_locator(
+        &self,
+        locator: mondrian_core::NativeAudioEditorLocator,
+        root: crate::AudioSessionCursorIdentity,
+        installed_serial: std::num::NonZeroU64,
+    ) -> Result<Option<mondrian_core::NativeAudioEditorTarget>, crate::AudioNativeOwnerError> {
+        let mut found = if self.sequence_id == locator.sequence {
+            self.session.resolve_native_editor_target(locator, root, installed_serial)?
+        } else {
+            None
+        };
+        for source in self.sources.entries.values() {
+            if let RuntimeSource::Nested(nested) = source
+                && let Some(target) =
+                    nested.runtime.resolve_native_editor_locator(locator, root, installed_serial)?
+                && found.replace(target).is_some()
+            {
+                return Err(crate::AudioNativeOwnerError::OwnerUnavailable);
+            }
+        }
+        Ok(found)
+    }
+
+    /// Query one selected canonical ID on the current installed owner. This
+    /// non-RT control operation does not change author values or retained UI data.
+    pub fn query_native_parameter(
+        &mut self,
+        query: &mondrian_core::NativeAudioParameterQuery,
+        cancellation: &ExecutionCancellationToken,
+    ) -> Result<mondrian_core::NativeAudioParameterQueryOutcome, crate::AudioNativeOwnerError> {
+        use mondrian_core::{
+            NativeAudioParameterQueryOutcome as Out, NativeAudioParameterQueryRefusal as Refusal,
+        };
+        if cancellation.is_canceled() {
+            return Err(crate::AudioNativeOwnerError::Cancelled);
+        }
+        let address = crate::native_runtime_owner::editor_target_address(query.target);
+        let lease = match self.native_owner_lease(address) {
+            Ok(lease) if lease.editor_target() == query.target => lease,
+            Ok(_) | Err(crate::AudioNativeOwnerError::Installation(_)) => {
+                return Ok(Out::Refused(Refusal::OwnerChanged))
+            }
+            Err(
+                crate::AudioNativeOwnerError::OwnerUnavailable
+                | crate::AudioNativeOwnerError::UnregisteredRuntime
+                | crate::AudioNativeOwnerError::ContinuityUnavailable,
+            ) => return Ok(Out::Refused(Refusal::Unavailable)),
+            Err(error) => return Err(error),
+        };
+        let outcome = self.query_local_native_parameter(lease, &query.parameter)?;
+        if cancellation.is_canceled() {
+            return Err(crate::AudioNativeOwnerError::Cancelled);
+        }
+        if self.native_owner_lease(address) != Ok(lease) {
+            return Ok(Out::Refused(Refusal::OwnerChanged));
+        }
+        Ok(outcome)
+    }
+
+    fn query_local_native_parameter(
+        &mut self,
+        lease: crate::AudioNativeProcessorOwnerLease,
+        parameter: &mondrian_core::ParameterId,
+    ) -> Result<mondrian_core::NativeAudioParameterQueryOutcome, crate::AudioNativeOwnerError> {
+        if lease.address().local == self.session.native_owner_identity() {
+            return self.session.query_native_parameter(lease, parameter);
+        }
+        for source in self.sources.entries.values_mut() {
+            if let RuntimeSource::Nested(nested) = source
+                && nested.runtime.find_native_owner_lease(lease.address()) == Some(lease)
+            {
+                return nested.runtime.query_local_native_parameter(lease, parameter);
+            }
+        }
+        Ok(mondrian_core::NativeAudioParameterQueryOutcome::Refused(
+            mondrian_core::NativeAudioParameterQueryRefusal::Unavailable,
+        ))
+    }
+    /// Execute a closed editor intent on this sole installed root and child.
+    /// Current claim, exact root/local/occurrence/epoch/binding and actual native
+    /// object are checked before SDK work. No DSP, author edit or Undo occurs.
+    pub fn control_native_editor(
+        &mut self,
+        intent: mondrian_core::NativeAudioEditorControlIntent,
+        cancellation: &ExecutionCancellationToken,
+    ) -> Result<mondrian_core::NativeAudioEditorControlOutcome, crate::AudioNativeOwnerError> {
+        use mondrian_core::{
+            NativeAudioEditorControlOutcome as Out, NativeAudioEditorControlRefusal as Refusal,
+        };
+        if cancellation.is_canceled() {
+            return Ok(Out::Refused(Refusal::Cancelled));
+        }
+        let (mut target, title) = match intent {
+            mondrian_core::NativeAudioEditorControlIntent::ResolveAndOpen { locator, title } => {
+                let serial = match self.native_author_installation_serial() {
+                    Ok(serial) => serial,
+                    Err(_) => return Ok(Out::Refused(Refusal::NotInstalled)),
+                };
+                let root = self.session.native_owner_identity();
+                let target = match self.resolve_native_editor_locator(locator, root, serial) {
+                    Ok(Some(target)) => target,
+                    Ok(None) => return Ok(Out::Refused(Refusal::NotInstalled)),
+                    Err(crate::AudioNativeOwnerError::OwnerUnavailable) => {
+                        return Ok(Out::Refused(Refusal::OwnerChanged))
+                    }
+                    Err(error) => return Err(error),
+                };
+                (target, Some(title))
+            }
+            mondrian_core::NativeAudioEditorControlIntent::Open { target, title } => {
+                (target, Some(title))
+            }
+            mondrian_core::NativeAudioEditorControlIntent::Close { target } => (target, None),
+        };
+        // Close alone may resolve the exact actual view attachment address.
+        // Its private receipt proves same actual object/Session/epoch across
+        // arbitrarily many parameter-only Plan replacements;
+        // new Open and author callbacks never receive this cleanup permission.
+        let retained_close = if title.is_none()
+            && let Ok(serial) = self.native_author_installation_serial()
+        {
+            self.retained_native_close_lease(target, self.session.native_owner_identity(), serial)
+        } else {
+            None
+        };
+        if let Some(lease) = retained_close {
+            target = lease.editor_target();
+        }
+        let address = crate::native_runtime_owner::editor_target_address(target);
+        let lease = match self.native_owner_lease(address) {
+            Ok(lease) if lease.editor_target() == target => lease,
+            Ok(_) => return Ok(Out::Refused(Refusal::OwnerChanged)),
+            Err(
+                crate::AudioNativeOwnerError::OwnerUnavailable
+                | crate::AudioNativeOwnerError::UnregisteredRuntime
+                | crate::AudioNativeOwnerError::ContinuityUnavailable,
+            ) => return Ok(Out::Refused(Refusal::NotInstalled)),
+            Err(crate::AudioNativeOwnerError::Installation(_)) => {
+                return Ok(Out::Refused(Refusal::OwnerChanged))
+            }
+            Err(error) => return Err(error),
+        };
+        let outcome = self.control_local_native_editor(lease, title)?;
+        let cancelled = cancellation.is_canceled();
+        if cancelled || self.native_owner_lease(address) != Ok(lease) {
+            // A UI slot swap can revoke the claim during native attach. Clean
+            // that exact old object on this worker before discarding evidence.
+            if matches!(outcome, crate::NativeAudioEditorOutcome::Opened { .. }) {
+                match self.control_local_native_editor(lease, None)? {
+                    crate::NativeAudioEditorOutcome::Closed { .. } => {}
+                    _ => return Err(crate::AudioNativeOwnerError::OwnerUnavailable),
+                }
+            }
+            self.revoke_native_bindings_recursively();
+            return Ok(Out::Refused(if cancelled {
+                Refusal::Cancelled
+            } else {
+                Refusal::OwnerChanged
+            }));
+        }
+        Ok(crate::native_runtime_owner::project_editor_outcome(
+            target, outcome,
+        ))
+    }
+
+    fn retained_native_close_lease(
+        &self,
+        previous: mondrian_core::NativeAudioEditorTarget,
+        root: crate::AudioSessionCursorIdentity,
+        serial: std::num::NonZeroU64,
+    ) -> Option<crate::AudioNativeProcessorOwnerLease> {
+        if previous.root_session != root.session_id {
+            return None;
+        }
+        if previous.local_session == self.session.native_owner_identity().session_id {
+            return self.session.retained_native_close_lease(previous, root, serial);
+        }
+        self.sources.entries.values().find_map(|source| match source {
+            RuntimeSource::Nested(nested) => {
+                nested.runtime.retained_native_close_lease(previous, root, serial)
+            }
+            _ => None,
+        })
+    }
+
+    fn control_local_native_editor(
+        &mut self,
+        lease: crate::AudioNativeProcessorOwnerLease,
+        title: Option<mondrian_core::NativeAudioEditorTitle>,
+    ) -> Result<crate::NativeAudioEditorOutcome, crate::AudioNativeOwnerError> {
+        if lease.address().local == self.session.native_owner_identity() {
+            return self.session.control_native_editor(lease, title);
+        }
+        for source in self.sources.entries.values_mut() {
+            if let RuntimeSource::Nested(nested) = source
+                && nested.runtime.find_native_owner_lease(lease.address()) == Some(lease)
+            {
+                return nested.runtime.control_local_native_editor(lease, title);
+            }
+        }
+        Err(crate::AudioNativeOwnerError::OwnerUnavailable)
+    }
+
     /// Compile, prepare, bind media, and recursively instantiate nested public outputs.
     pub fn build(
         root: &Sequence,
@@ -412,6 +1250,32 @@ impl AudioProgramRuntime {
         request: AudioCompileRequest,
         resource_grant: AudioRuntimeResourceGrant,
     ) -> Result<Self, AudioRuntimeBuildError> {
+        Self::build_observing_native_child_settlement(
+            root,
+            sequences,
+            resolver,
+            processor_resolver,
+            contract,
+            request,
+            resource_grant,
+            None,
+        )
+    }
+
+    /// Build through the same preparation path while observing cold native children.
+    /// Each real Session holds its existing counted branch before population.
+    /// None means unobserved, never no-Child evidence or a new DSP permission.
+    #[allow(clippy::too_many_arguments)]
+    pub fn build_observing_native_child_settlement(
+        root: &Sequence,
+        sequences: &[Sequence],
+        resolver: &dyn AudioMediaResolver,
+        processor_resolver: &dyn AudioProcessorResolver,
+        contract: AudioRenderContract,
+        request: AudioCompileRequest,
+        resource_grant: AudioRuntimeResourceGrant,
+        native_child_settlement: Option<&mondrian_core::NativeChildSettlementRegistrar>,
+    ) -> Result<Self, AudioRuntimeBuildError> {
         if contract.channel_layout != root.settings.audio_channel_layout {
             return Err(AudioRuntimeBuildError::ProgramLayoutMismatch {
                 sequence_id: root.id,
@@ -433,6 +1297,7 @@ impl AudioProgramRuntime {
             &mut stack,
             0,
             &mut ledger,
+            native_child_settlement,
         )
     }
 
@@ -487,6 +1352,7 @@ impl AudioProgramRuntime {
             &mut stack,
             0,
             &mut ledger,
+            None,
         )
     }
 
@@ -527,6 +1393,7 @@ impl AudioProgramRuntime {
             &mut stack,
             0,
             &mut ledger,
+            None,
         )
     }
 
@@ -573,6 +1440,36 @@ impl AudioProgramRuntime {
         prepared_closure: &AudioDependencyClosure,
         resource_grant: AudioRuntimeResourceGrant,
     ) -> Result<Self, AudioRuntimeBuildError> {
+        Self::build_from_precompiled_closure_for_range_observing_native_child_settlement(
+            root,
+            sequences,
+            resolver,
+            processor_resolver,
+            contract,
+            output_id,
+            range,
+            prepared_closure,
+            resource_grant,
+            None,
+        )
+    }
+
+    /// Build the same frozen closure while observing cold native children.
+    /// Registration precedes factory preparation, including failed construction;
+    /// it grants no execution authority and adds no alternate compilation path.
+    #[allow(clippy::too_many_arguments)]
+    pub fn build_from_precompiled_closure_for_range_observing_native_child_settlement(
+        root: &Sequence,
+        sequences: &[Sequence],
+        resolver: &dyn AudioMediaResolver,
+        processor_resolver: &dyn AudioProcessorResolver,
+        contract: AudioRenderContract,
+        output_id: Option<ProgramOutputId>,
+        range: TimelineTimeRange,
+        prepared_closure: &AudioDependencyClosure,
+        resource_grant: AudioRuntimeResourceGrant,
+        native_child_settlement: Option<&mondrian_core::NativeChildSettlementRegistrar>,
+    ) -> Result<Self, AudioRuntimeBuildError> {
         if contract.channel_layout != root.settings.audio_channel_layout {
             return Err(AudioRuntimeBuildError::ProgramLayoutMismatch {
                 sequence_id: root.id,
@@ -595,6 +1492,7 @@ impl AudioProgramRuntime {
             &mut stack,
             0,
             &mut ledger,
+            native_child_settlement,
         )
     }
 
@@ -610,6 +1508,7 @@ impl AudioProgramRuntime {
         stack: &mut BTreeSet<SequenceId>,
         depth: usize,
         ledger: &mut AudioRuntimeAdmissionLedger,
+        native_child_settlement: Option<&mondrian_core::NativeChildSettlementRegistrar>,
     ) -> Result<Self, AudioRuntimeBuildError> {
         if depth > MAX_NESTED_SEQUENCE_RENDER_DEPTH {
             return Err(AudioRuntimeBuildError::NestedDepthExceeded {
@@ -632,6 +1531,7 @@ impl AudioProgramRuntime {
                 })
                 .ok_or(AudioRuntimeBuildError::MissingProgramOutput(sequence.id))?;
             let output_id = compile_request.output_id;
+            let mut note_reservation = None;
             let program = if let Some(prepared_closure) = prepared_closure {
                 let window = selection.ok_or(AudioRuntimeBuildError::MissingPreparedProgram {
                     sequence_id: sequence.id,
@@ -643,6 +1543,21 @@ impl AudioProgramRuntime {
                         output_id,
                     },
                 )?
+            } else if selection.is_none() {
+                // Choice A: author/non-Note errors precede checked request and
+                // grant refusal; later media/child/contract/endpoint errors
+                // follow. Only this direct unwindowed selected-Note family
+                // changes priority. There is still no Note execution permit.
+                let (program, reservation) =
+                    crate::compiler::compile_audio_program_with_note_admission(
+                        sequence,
+                        compile_request,
+                        |graph, notes| {
+                            ledger.reserve_compiled_note_plan(sequence.id, output_id, graph, notes)
+                        },
+                    )?;
+                note_reservation = reservation;
+                Arc::new(program)
             } else {
                 let mut program = compile_audio_program(sequence, compile_request)?;
                 if let Some(window) = selection {
@@ -650,6 +1565,60 @@ impl AudioProgramRuntime {
                         .map_err(AudioExecutionError::from)?;
                 }
                 Arc::new(program)
+            };
+            if depth == 0 {
+                if let Some(closure) = prepared_closure {
+                    closure.validate_musical_references(sequence, sequences)?;
+                    closure.reject_nested_musical_reference()?;
+                } else {
+                    crate::dependency::reject_nested_musical_reference(
+                        sequence, &program, sequences, selection,
+                    )?;
+                }
+            }
+            program.graph().admit_musical_transport(program.musical_time_reference)?;
+            // Native Note candidates must be scoped and all targets checked
+            // before dependency/factory IO. VST additionally requires Some.
+            // Other formats retain their accepted refusal/accounting.
+            let admitted_note_reservation = if PreparedAudioPlan::has_native_note_targets(&program)
+            {
+                PreparedAudioPlan::validate_admitted_root_note_preparation(&program, contract)?;
+                if depth != 0 || selection.is_some() || prepared_closure.is_some() {
+                    let lane = program
+                        .note_lanes
+                        .iter()
+                        .find(|lane| !lane.notes.is_empty())
+                        .expect("observed nonempty native Note candidate");
+                    return Err(crate::AudioCompileError::NoteExecutionNotSupported {
+                        lane_id: lane.id,
+                        processor_id: lane.target.processor_id,
+                    }
+                    .into());
+                }
+                Some(
+                    note_reservation.take().ok_or(AudioRuntimeBuildError::Compile(
+                        crate::AudioCompileError::InvalidPreparedGraph(
+                            "admitted root Note preparation has no original ledger receipt"
+                                .to_owned(),
+                        ),
+                    ))?,
+                )
+            } else {
+                None
+            };
+            // Carry one receipt through descendants and complete it once with
+            // the actual common Session footprint. Empty/window/precompiled
+            // families retain their existing admission and error boundaries.
+            let prepared_reservation = if note_reservation.is_some() {
+                note_reservation
+            } else if program.note_lanes.iter().all(|lane| lane.notes.is_empty()) {
+                Some(ledger.reserve_prepared_plan(
+                    sequence.id,
+                    output_id,
+                    PreparedAudioPlan::requested_base_logical_bytes(&program)?,
+                )?)
+            } else {
+                None
             };
             let execution_demand = program.execution_demand();
             let nested_cache_frames =
@@ -697,7 +1666,7 @@ impl AudioProgramRuntime {
                         ledger.reserve_media_window(sequence.id, output_id, cache_bytes)?;
                         RuntimeSource::Media(MediaRuntimeSource {
                             source: resolved.source,
-                            cache_start: i64::MIN,
+                            cache_start: None,
                             cache_frames,
                             cache: vec![0.0; cache_samples],
                             channel_layout: resolved.channel_layout,
@@ -732,6 +1701,7 @@ impl AudioProgramRuntime {
                             stack,
                             depth + 1,
                             ledger,
+                            native_child_settlement,
                         )?;
                         if runtime.requires_state_entry()
                             && contribution.source_time_map.scale.numerator() < 0
@@ -792,16 +1762,43 @@ impl AudioProgramRuntime {
                 };
                 entries.insert(contribution.edit_id, source);
             }
-            let plan = Arc::new(PreparedAudioPlan::prepare_with_dependencies(
-                program,
-                contract,
-                AudioKernelBackend::default(),
-                &dependencies,
-                processor_resolver,
-            )?);
-            let session_footprint = plan.session_resource_footprint()?;
-            ledger.reserve_session(sequence.id, output_id, session_footprint)?;
-            let session = AudioRenderSession::new(plan)?;
+            let (plan, session_footprint) = if let Some(reservation) = admitted_note_reservation {
+                // This helper consumes the sole local receipt and completes the
+                // original ledger once. Do not run ordinary completion again.
+                let plan = ledger.prepare_admitted_root_notes(
+                    reservation,
+                    program,
+                    contract,
+                    &dependencies,
+                    processor_resolver,
+                    native_child_settlement,
+                )?;
+                let footprint = plan.session_resource_footprint()?;
+                (plan, footprint)
+            } else {
+                let plan = Arc::new(PreparedAudioPlan::prepare_with_dependencies(
+                    program,
+                    contract,
+                    AudioKernelBackend::default(),
+                    &dependencies,
+                    processor_resolver,
+                    native_child_settlement,
+                )?);
+                let footprint = plan.session_resource_footprint()?;
+                if let Some(reservation) = prepared_reservation {
+                    ledger.complete_prepared_session(reservation, footprint)?;
+                } else {
+                    ledger.reserve_session(sequence.id, output_id, footprint)?;
+                }
+                (plan, footprint)
+            };
+            let mut storage = AudioRenderSession::allocate_storage(plan)?;
+            if let Some(registrar) = native_child_settlement {
+                // Scope precedes actual Factory creation; unavailable evidence
+                // leaves the original construction result untouched.
+                let _ = storage.attach_native_child_settlement(registrar);
+            }
+            let session = storage.populate()?;
             let capacity = session.capacity();
             let realized_compensation_bytes = capacity
                 .compensation_delay_samples
@@ -817,13 +1814,26 @@ impl AudioProgramRuntime {
                 return Err(AudioExecutionError::InvalidPreparedSchedule.into());
             }
             Ok(Self {
+                sequence_id: sequence.id,
                 session,
                 sources: RuntimeSources {
                     entries,
                     cancellation: ExecutionCancellationToken::new(),
+                    transport_activity: None,
                 },
                 execution_demand,
                 resource_footprint: ledger.footprint.difference(footprint_before),
+                resource_grant: ledger.grant,
+                native_installation:
+                    crate::native_runtime_owner::NativeRuntimeInstallation::default(),
+                native_diagnostic_cursor: 0,
+                native_held_plan_fees: None,
+                native_author_scope: None,
+                native_reprepare: native_reprepare::NativeReprepareState {
+                    attempt: None,
+                    next_attempt: 1,
+                    current_fixed_extra: 0,
+                },
             })
         })();
         stack.remove(&sequence.id);
@@ -854,6 +1864,97 @@ impl AudioProgramRuntime {
         self.execution_demand
     }
 
+    /// Visit existing root/nested materializations in canonical source order.
+    ///
+    /// Traversal performs no source reads, native calls, reset, allocation or
+    /// cursor change. Every child retains its own Plan/Session/grid identity.
+    /// Poisoned evidence does not provide a recoverable DSP checkpoint.
+    pub fn visit_continuity_evidence(
+        &self,
+        visitor: &mut impl crate::AudioContinuityEvidenceVisitor,
+    ) -> Result<(), AudioExecutionError> {
+        self.session.visit_continuity_evidence(visitor)?;
+        for source in self.sources.entries.values() {
+            if let RuntimeSource::Nested(nested) = source {
+                nested.runtime.visit_continuity_evidence(visitor)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Original closure-wide policy ceiling frozen by actual preparation.
+    /// Observed footprint and replacement candidates cannot enlarge this grant.
+    pub const fn resource_grant(&self) -> AudioRuntimeResourceGrant {
+        self.resource_grant
+    }
+
+    pub(crate) fn resource_root_identity(&self) -> crate::AudioSessionCursorIdentity {
+        self.session.native_owner_identity()
+    }
+
+    pub(crate) fn find_resource_session(
+        &self,
+        identity: crate::AudioSessionCursorIdentity,
+    ) -> Option<&AudioRenderSession> {
+        if self.session.native_owner_identity() == identity {
+            return Some(&self.session);
+        }
+        for source in self.sources.entries.values() {
+            if let RuntimeSource::Nested(nested) = source
+                && let Some(session) = nested.runtime.find_resource_session(identity)
+            {
+                return Some(session);
+            }
+        }
+        None
+    }
+
+    pub(crate) fn check_resource_ceiling(
+        &self,
+        category: AudioRuntimeResourceCategory,
+        required: usize,
+    ) -> Result<usize, AudioRuntimeBuildError> {
+        let required = if category == AudioRuntimeResourceCategory::PreparedLogicalBytes {
+            self.include_held_native_plan_logical_bytes(required)?
+        } else {
+            required
+        };
+        let granted = match category {
+            AudioRuntimeResourceCategory::RuntimeOccurrences => {
+                self.resource_grant.max_runtime_occurrences
+            }
+            AudioRuntimeResourceCategory::FixedResidentBytes => {
+                self.resource_grant.max_fixed_resident_bytes
+            }
+            AudioRuntimeResourceCategory::PreparedLogicalBytes => {
+                self.resource_grant.max_prepared_logical_bytes
+            }
+        };
+        if required > granted {
+            return Err(AudioRuntimeBuildError::ResourceOverlapGrantExceeded {
+                category,
+                required,
+                granted,
+            });
+        }
+        Ok(required)
+    }
+
+    /// Admit prepared ordinary-parameter replacements against the original
+    /// root ceiling, retaining old plans until their final retirement frontier.
+    ///
+    /// New events/lanes and extra complete local owners are observed by actual
+    /// capacities, with aliased extra allocations charged once. This resource
+    /// result is not complete SDK/native heap evidence or author/slot permission.
+    /// Existing source, author, same-object and final installation gates remain.
+    pub fn admit_parameter_plan_overlap(
+        &self,
+        replacements: &[crate::AudioParameterPlanResourceReplacement<'_>],
+        extra_owned_allocations: &Vec<crate::NativeHostAllocationBorrow<'_>>,
+    ) -> Result<crate::AudioParameterPlanResourceAdmission, AudioRuntimeBuildError> {
+        crate::resource_overlap::admit(self, replacements, extra_owned_allocations)
+    }
+
     /// Frozen closure-wide resource evidence for this Runtime occurrence.
     pub const fn resource_footprint(&self) -> AudioRuntimeResourceFootprint {
         self.resource_footprint
@@ -874,6 +1975,14 @@ impl AudioProgramRuntime {
         self.session.requires_state_entry()
     }
 
+    /// Fixed fresh-entry origin, if required by this prepared Runtime contract.
+    /// Current contracts permit cold entry at an admitted caller-selected sample,
+    /// including score Notes. None does not remove explicit state entry or native
+    /// owner, author, resource, PDC and downstream output admission requirements.
+    pub fn state_entry_origin(&self) -> Result<Option<AudioSamplePosition>, AudioExecutionError> {
+        Ok(None)
+    }
+
     #[cfg(test)]
     pub(crate) fn require_state_entry_recursively_for_test(&mut self) {
         self.session.require_state_entry_for_test();
@@ -889,9 +1998,140 @@ impl AudioProgramRuntime {
     /// Child instances enter lazily at the first exact child sample demanded by
     /// the parent time map. Each instance owns its own monotonic epoch sequence.
     pub fn enter_state(&mut self, entry: AudioStateEntry) -> Result<(), AudioExecutionError> {
-        self.session.enter_state(entry)?;
+        self.enter_state_cancellable(entry, &ExecutionCancellationToken::new())
+    }
+
+    /// Enter under the actual consumer's cancellation and renderer slot proof.
+    /// Child entry remains lazy; standalone DSP never mints native author leases.
+    pub fn enter_state_cancellable(
+        &mut self,
+        entry: AudioStateEntry,
+        cancellation: &ExecutionCancellationToken,
+    ) -> Result<(), AudioExecutionError> {
+        if cancellation.is_canceled() {
+            return Err(crate::AudioNativeOwnerError::Cancelled.into());
+        }
+        self.reject_nested_note_execution()?;
+        // A retired actual slot must refuse before even Preserve/PollPending.
+        if let Some(verifier) = &self.native_installation.verifier {
+            let claim = verifier.current_claim().map_err(crate::AudioNativeOwnerError::from)?;
+            verifier.validate(&claim).map_err(crate::AudioNativeOwnerError::from)?;
+        } else if let Some(context) = &self.native_installation.entry_context {
+            context.validate(Some(cancellation))?;
+        }
+        // Unsupported Note entry must refuse before native observation or revoke.
+        self.session.validate_vst3_note_entry(entry)?;
+        self.preflight_native_control(true)?;
+        self.enter_state_admitted(entry, cancellation)
+    }
+
+    fn enter_state_admitted(
+        &mut self,
+        entry: AudioStateEntry,
+        cancellation: &ExecutionCancellationToken,
+    ) -> Result<(), AudioExecutionError> {
+        self.session.validate_state_entry(entry)?;
+        let context = if let Some(verifier) = &self.native_installation.verifier {
+            Some(
+                crate::native_runtime_owner::NativeStateEntryBindingContext {
+                    root: self.session.native_owner_identity(),
+                    verifier: verifier.clone(),
+                    claim: verifier.current_claim().map_err(crate::AudioNativeOwnerError::from)?,
+                },
+            )
+        } else {
+            self.native_installation.entry_context.clone()
+        };
+        if let Some(context) = &context {
+            context.validate(Some(cancellation))?;
+        }
+        if cancellation.is_canceled() {
+            return Err(crate::AudioNativeOwnerError::Cancelled.into());
+        }
+        // Unsupported score entry must retain every existing installed owner.
+        self.session.validate_note_entry_context(entry, context.is_some())?;
+        self.session.arm_note_reentry(entry, context.as_ref(), cancellation)?;
+        self.revoke_native_bindings_for_entry_recursively();
+        self.set_native_entry_context_recursively(context.clone());
+        let result = self
+            .session
+            .enter_state_admitted(entry, Some(cancellation))
+            .and_then(|()| {
+                self.bind_native_observation_owners_recursively(cancellation)
+                    .map_err(AudioExecutionError::from)
+            })
+            .and_then(|()| {
+                context.as_ref().map_or(Ok(()), |context| {
+                    context.validate(Some(cancellation)).map_err(AudioExecutionError::from)
+                })
+            });
+        if let Err(error) = result {
+            // Accepted partial Bind acknowledgements are never published as a
+            // mixed ready prefix when Source/cancellation changed mid-entry.
+            self.session.poison_note_entry(entry);
+            self.revoke_native_bindings_recursively();
+            return Err(error);
+        }
+        if self.native_installation.verifier.is_some() {
+            self.native_installation.claim = context.as_ref().map(|context| context.claim.clone());
+        }
         self.sources.begin_continuity();
         Ok(())
+    }
+
+    fn bind_native_observation_owners_recursively(
+        &mut self,
+        cancellation: &ExecutionCancellationToken,
+    ) -> Result<(), crate::AudioNativeOwnerError> {
+        self.session.bind_native_observation_owners(cancellation)?;
+        for source in self.sources.entries.values_mut() {
+            if let RuntimeSource::Nested(nested) = source {
+                nested.runtime.bind_native_observation_owners_recursively(cancellation)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn revoke_native_bindings_for_entry_recursively(&mut self) {
+        self.native_installation.claim = None;
+        self.native_installation.prepared = None;
+        self.session.revoke_native_bindings_for_entry();
+        for source in self.sources.entries.values_mut() {
+            if let RuntimeSource::Nested(nested) = source {
+                nested.runtime.revoke_native_bindings_for_entry_recursively();
+            }
+        }
+    }
+
+    fn set_native_entry_context_recursively(
+        &mut self,
+        context: Option<crate::native_runtime_owner::NativeStateEntryBindingContext>,
+    ) {
+        self.native_installation.entry_context = context.clone();
+        self.session.set_native_entry_context(context.clone());
+        for source in self.sources.entries.values_mut() {
+            if let RuntimeSource::Nested(nested) = source {
+                nested.runtime.set_native_entry_context_recursively(context.clone());
+            }
+        }
+    }
+
+    fn refresh_native_entry_context(&mut self) {
+        let context = self
+            .native_installation
+            .verifier
+            .as_ref()
+            .zip(self.native_installation.claim.as_ref())
+            .map(
+                |(verifier, claim)| crate::native_runtime_owner::NativeStateEntryBindingContext {
+                    root: self.session.native_owner_identity(),
+                    verifier: verifier.clone(),
+                    claim: claim.clone(),
+                },
+            );
+        // Existing Source/claim Arc owners are shared metadata, not a new native
+        // owner or allocation. Refresh is after the final Source guard released.
+        self.set_native_entry_context_recursively(context);
     }
 
     /// Execute one exact block with consumer-generation cancellation authority.
@@ -901,19 +2141,100 @@ impl AudioProgramRuntime {
         destination: &mut [f32],
         cancellation: &ExecutionCancellationToken,
     ) -> Result<(), AudioExecutionError> {
-        self.sources.cancellation = cancellation.clone();
+        self.preflight_render_cancellable(request, cancellation)?;
+        self.render_into_admitted_cancellable(request, destination, cancellation)
+    }
+
+    /// Shared cancellation and whole-root native admission before public-window checks.
+    pub(crate) fn preflight_render_cancellable(
+        &mut self,
+        request: AudioRenderRequest,
+        cancellation: &ExecutionCancellationToken,
+    ) -> Result<(), AudioExecutionError> {
+        // A canceled public request must never query a foreign processor. The
+        // admitted path retains its own check for cancellation after preflight.
         if cancellation.is_canceled() {
             return Err(AudioExecutionError::SourceUnavailable(
                 "audio render generation was canceled before execution".to_owned(),
             ));
         }
-        self.session.render_into(&mut self.sources, request, destination)
+        self.session.preflight_transport_activity(request)?;
+        self.session.reject_empty_note_request(request)?;
+        self.reject_nested_note_execution()?;
+        self.preflight_native_control(false)?;
+        self.session.preflight_note_window(request)
+    }
+
+    fn reject_nested_note_execution(&self) -> Result<(), AudioExecutionError> {
+        for source in self.sources.entries.values() {
+            if let RuntimeSource::Nested(nested) = source {
+                if nested.runtime.session.has_notes() {
+                    return Err(crate::AudioProcessorHostError::NoteExecutionRefused(
+                        "nested Note score replay is unsupported",
+                    )
+                    .into());
+                }
+                nested.runtime.reject_nested_note_execution()?;
+            }
+        }
+        Ok(())
+    }
+
+    fn preflight_native_control(&mut self, entering: bool) -> Result<(), AudioExecutionError> {
+        if let Some(hold) = self.native_scope_control_hold() {
+            return Err(AudioExecutionError::NativeAuthorPending(Box::new(hold)));
+        }
+        self.session.preflight_native_control(entering)?;
+        for source in self.sources.entries.values_mut() {
+            if let RuntimeSource::Nested(nested) = source {
+                nested.runtime.preflight_native_control(entering)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Execute after the caller completes the same whole-root native preflight.
+    pub(crate) fn render_into_admitted_cancellable(
+        &mut self,
+        request: AudioRenderRequest,
+        destination: &mut [f32],
+        cancellation: &ExecutionCancellationToken,
+    ) -> Result<(), AudioExecutionError> {
+        if cancellation.is_canceled() {
+            return Err(AudioExecutionError::SourceUnavailable(
+                "audio render generation was canceled before execution".to_owned(),
+            ));
+        }
+        self.reject_nested_note_execution()?;
+        self.session.preflight_note_window(request)?;
+        self.session.preflight_transport_activity(request)?;
+        self.session.preflight_output_shape(request, destination.len())?;
+        if self.sources.transport_activity != request.transport_activity {
+            // Only unentered stateless requests may change activity without
+            // an explicit new epoch. Their nested PCM is context-dependent.
+            // Entered history has already been refused by the pure check.
+            self.sources.begin_continuity();
+        }
+        self.sources.transport_activity = request.transport_activity;
+        self.sources.cancellation = cancellation.clone();
+        let result = self.session.render_into_admitted(
+            &mut self.sources,
+            request,
+            destination,
+            Some(cancellation),
+        );
+        if matches!(result, Err(AudioExecutionError::NativeOwner(_))) {
+            self.revoke_native_bindings_recursively();
+        }
+        result
     }
 }
 
 struct RuntimeSources {
     entries: BTreeMap<AudioComponentEditId, RuntimeSource>,
     cancellation: ExecutionCancellationToken,
+    // Last supplied call context is also the identity of nested prefetched PCM.
+    transport_activity: Option<mondrian_core::TimelineTransportActivity>,
 }
 
 impl RuntimeSources {
@@ -933,7 +2254,7 @@ enum RuntimeSource {
 
 struct MediaRuntimeSource {
     source: Arc<dyn AudioDecodedSource>,
-    cache_start: i64,
+    cache_start: Option<i64>,
     cache_frames: usize,
     cache: Vec<f32>,
     channel_layout: AudioChannelLayout,
@@ -982,6 +2303,7 @@ impl AudioPcmSource for RuntimeSources {
                 channel_layout,
                 destination,
                 &cancellation,
+                self.transport_activity,
             ),
         }
     }
@@ -1008,23 +2330,32 @@ impl MediaRuntimeSource {
             if source_frame < 0 {
                 continue;
             }
-            let cache_end = self.cache_start.saturating_add(cache_frames_i64);
-            if source_frame < self.cache_start || source_frame >= cache_end {
-                self.cache_start =
-                    source_frame.div_euclid(cache_frames_i64).saturating_mul(cache_frames_i64);
-                self.cache.fill(0.0);
-                self.source
-                    .read_interleaved(
-                        self.cache_start,
-                        self.cache_frames,
-                        &mut self.cache,
-                        cancellation,
-                    )
-                    .map_err(AudioExecutionError::SourceUnavailable)?;
-            }
+            let cache_start = match self.cache_start.filter(|start| {
+                source_frame >= *start && source_frame < start.saturating_add(cache_frames_i64)
+            }) {
+                Some(start) => start,
+                None => {
+                    let start =
+                        source_frame.div_euclid(cache_frames_i64).saturating_mul(cache_frames_i64);
+                    // A failed read can overwrite an earlier cache. Publish
+                    // this range only after all its PCM was read successfully.
+                    self.cache_start = None;
+                    self.cache.fill(0.0);
+                    self.source
+                        .read_interleaved(start, self.cache_frames, &mut self.cache, cancellation)
+                        .map_err(AudioExecutionError::SourceUnavailable)?;
+                    if cancellation.is_canceled() {
+                        return Err(AudioExecutionError::SourceUnavailable(
+                            "audio source read was canceled before cache publication".to_owned(),
+                        ));
+                    }
+                    self.cache_start = Some(start);
+                    start
+                }
+            };
             copy_interleaved_frame(
                 &self.cache,
-                usize::try_from(source_frame - self.cache_start)
+                usize::try_from(source_frame - cache_start)
                     .map_err(|_| AudioExecutionError::BufferTooLarge)?,
                 destination,
                 output_frame,
@@ -1049,6 +2380,7 @@ impl NestedRuntimeSource {
         channel_layout: AudioChannelLayout,
         destination: &mut [f32],
         cancellation: &ExecutionCancellationToken,
+        transport_activity: Option<mondrian_core::TimelineTransportActivity>,
     ) -> Result<(), AudioExecutionError> {
         if channel_layout != self.channel_layout {
             return Err(AudioExecutionError::SourceUnavailable(format!(
@@ -1071,7 +2403,7 @@ impl NestedRuntimeSource {
         for order_index in 0..self.ordered_output_frames.len() {
             let output_frame = self.ordered_output_frames[order_index];
             let source_frame = source_frames[output_frame];
-            self.ensure_cached(source_frame, cancellation)?;
+            self.ensure_cached(source_frame, cancellation, transport_activity)?;
             copy_interleaved_frame(
                 &self.cache,
                 usize::try_from(source_frame - self.cache_start)
@@ -1111,6 +2443,7 @@ impl NestedRuntimeSource {
         &mut self,
         source_frame: i64,
         cancellation: &ExecutionCancellationToken,
+        transport_activity: Option<mondrian_core::TimelineTransportActivity>,
     ) -> Result<(), AudioExecutionError> {
         let cache_frames_i64 =
             i64::try_from(self.cache_frames).map_err(|_| AudioExecutionError::BufferTooLarge)?;
@@ -1120,22 +2453,26 @@ impl NestedRuntimeSource {
         }
 
         if !self.runtime.requires_state_entry() {
-            return self.render_cache(source_frame, cancellation);
+            return self.render_cache(source_frame, cancellation, transport_activity);
         }
 
         match self.next_sample {
             Some(next_sample) if source_frame >= next_sample => {}
-            Some(_) | None => self.enter_child(source_frame)?,
+            Some(_) | None => self.enter_child(source_frame, cancellation)?,
         }
         while self.next_sample.is_some_and(|next_sample| source_frame >= next_sample) {
             let start_sample =
                 self.next_sample.ok_or(AudioExecutionError::InvalidPreparedSchedule)?;
-            self.render_cache(start_sample, cancellation)?;
+            self.render_cache(start_sample, cancellation, transport_activity)?;
         }
         Ok(())
     }
 
-    fn enter_child(&mut self, start_sample: i64) -> Result<(), AudioExecutionError> {
+    fn enter_child(
+        &mut self,
+        start_sample: i64,
+        cancellation: &ExecutionCancellationToken,
+    ) -> Result<(), AudioExecutionError> {
         let epoch = AudioContinuityEpoch::new(self.next_epoch);
         self.next_epoch = self
             .next_epoch
@@ -1143,7 +2480,8 @@ impl NestedRuntimeSource {
             .ok_or(AudioExecutionError::ContinuityEpochExhausted)?;
         self.cache_start = i64::MIN;
         self.next_sample = None;
-        self.runtime.enter_state(AudioStateEntry { epoch, start_sample })?;
+        self.runtime
+            .enter_state_admitted(AudioStateEntry { epoch, start_sample }, cancellation)?;
         self.next_sample = Some(start_sample);
         Ok(())
     }
@@ -1152,11 +2490,16 @@ impl NestedRuntimeSource {
         &mut self,
         start_sample: i64,
         cancellation: &ExecutionCancellationToken,
+        transport_activity: Option<mondrian_core::TimelineTransportActivity>,
     ) -> Result<(), AudioExecutionError> {
         self.cache_start = i64::MIN;
         self.cache.fill(0.0);
-        let result = self.runtime.render_into_cancellable(
-            AudioRenderRequest { start_sample, frames: self.cache_frames },
+        let result = self.runtime.render_into_admitted_cancellable(
+            AudioRenderRequest {
+                transport_activity,
+                start_sample,
+                frames: self.cache_frames,
+            },
             &mut self.cache,
             cancellation,
         );
@@ -1208,6 +2551,32 @@ fn copy_interleaved_frame(
 /// Failure before a render Session is ready. No partial/fallback graph is returned.
 #[derive(Debug, thiserror::Error)]
 pub enum AudioRuntimeBuildError {
+    /// Prepared overlap no longer belongs to these exact root/local Sessions.
+    #[error("prepared audio resource admission was superseded")]
+    StaleResourceAdmission,
+    /// An ordinary-parameter replacement changes retained execution shape,
+    /// duplicates a local Session or lacks its required event storage.
+    #[error("invalid prepared audio parameter resource replacement")]
+    InvalidResourceReplacement,
+    /// The unchanged policy ceiling cannot admit old/new overlapping owners.
+    #[error("audio {category:?} overlap requires {required}, grant is {granted}")]
+    ResourceOverlapGrantExceeded {
+        /// Original resource policy category.
+        category: AudioRuntimeResourceCategory,
+        /// Required overlapping extent.
+        required: usize,
+        /// The original frozen policy ceiling.
+        granted: usize,
+    },
+    /// Admission bookkeeping could not acquire its bounded storage.
+    #[error("audio resource admission bookkeeping is unavailable")]
+    ResourceAdmissionAllocation,
+    /// A complete local allocation union could not be admitted.
+    #[error(transparent)]
+    ResourceOwner(#[from] crate::NativeHostLedgerError),
+    /// A selected musical reference requires unsupported nested transport.
+    #[error(transparent)]
+    Dependency(#[from] crate::AudioDependencyError),
     /// Authoring-to-execution compile failure.
     #[error(transparent)]
     Compile(#[from] crate::AudioCompileError),
@@ -1282,3 +2651,11 @@ pub enum AudioRuntimeBuildError {
         reason: String,
     },
 }
+
+#[cfg(test)]
+#[path = "runtime/note_preclone_admission_tests.rs"]
+mod note_preclone_admission_tests;
+
+#[cfg(test)]
+#[path = "runtime/note_public_preparation_tests.rs"]
+mod note_public_preparation_tests;

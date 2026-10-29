@@ -8,7 +8,7 @@ use std::collections::BTreeSet;
 use std::time::{Duration, Instant};
 
 use mondrian_assets::AssetLibrary;
-use mondrian_core::{types::AssetId, FrameRounding};
+use mondrian_core::types::AssetId;
 use mondrian_core::{
     DisplayManagementPolicy, FramePosition, ProjectColorEnvironment, ProjectSettings,
 };
@@ -167,11 +167,7 @@ impl<'a> PreviewAuthoringSnapshot<'a> {
 
     /// Last content frame in the active Sequence.
     pub(crate) fn last_content_frame(&self) -> Option<i64> {
-        let sequence = self.active_sequence()?;
-        let end = sequence.total_duration().ok()?;
-        end.to_frame_position(sequence.settings.frame_rate, FrameRounding::Nearest)
-            .ok()
-            .map(|position| position.frame.saturating_sub(1).max(0))
+        self.active_sequence()?.last_content_frame().ok()
     }
 }
 
@@ -287,7 +283,10 @@ impl PreviewTransportSnapshot {
     pub(crate) const fn is_playing(self) -> bool {
         matches!(
             self.state,
-            TransportState::Priming | TransportState::Playing | TransportState::Recovering
+            TransportState::Priming
+                | TransportState::Playing
+                | TransportState::Recovering
+                | TransportState::HoldingForNativeAudioControl
         )
     }
 

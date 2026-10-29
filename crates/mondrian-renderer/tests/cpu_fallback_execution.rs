@@ -19,6 +19,8 @@ static COLOR_ENGINE: ColorEngine = ColorEngine::mondrian_standard();
 
 fn working_frame(color: [f32; 4]) -> CpuColorFrame {
     CpuColorFrame::working(WorkingRgbaF32Frame {
+        sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
+        alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
         width: WIDTH,
         height: HEIGHT,
         data: vec![color; WIDTH as usize * HEIGHT as usize],
@@ -50,11 +52,17 @@ fn media<'a>(frame: &'a CpuColorFrame, opacity: f32) -> TimelineCompositeElement
         transform: IDENTITY,
         effect_graph: identity_graph(),
         frame_seed: 0,
+
+        processor_input_plan: None,
     })
 }
 
 fn runtime() -> TimelineEffectColorRuntime<'static> {
-    TimelineEffectColorRuntime::new(&COLOR_ENGINE, WorkingColorSpace::LinearRec709)
+    TimelineEffectColorRuntime::new(
+        &COLOR_ENGINE,
+        WorkingColorSpace::LinearRec709,
+        mondrian_core::ImageSampling::UNIT_SQUARE,
+    )
 }
 
 #[test]
@@ -72,6 +80,7 @@ fn preview_export_cpu_seam_proves_parallel_simd_reuse_and_owned_adjustment() {
         TimelineCompositeOptions::default(),
         runtime(),
         &mut scratch,
+        &mut mondrian_effects::EffectProcessorControl::uncancelled(),
     )
     .expect("parallel CPU fallback composite");
     assert!(layered.execution.owner_parallel_kernel_dispatches >= 1);
@@ -94,6 +103,7 @@ fn preview_export_cpu_seam_proves_parallel_simd_reuse_and_owned_adjustment() {
         TimelineCompositeOptions::default(),
         runtime(),
         &mut scratch,
+        &mut mondrian_effects::EffectProcessorControl::uncancelled(),
     )
     .expect("first transition composite");
     assert_eq!(
@@ -117,6 +127,7 @@ fn preview_export_cpu_seam_proves_parallel_simd_reuse_and_owned_adjustment() {
         TimelineCompositeOptions::default(),
         runtime(),
         &mut scratch,
+        &mut mondrian_effects::EffectProcessorControl::uncancelled(),
     )
     .expect("second transition composite");
     assert_eq!(
@@ -133,13 +144,14 @@ fn preview_export_cpu_seam_proves_parallel_simd_reuse_and_owned_adjustment() {
             TimelineCompositeElement::Adjustment(TimelineAdjustmentLayer {
                 effect_graph: adjustment_graph(),
                 opacity: 0.75,
-                blend_mode: Some(BlendMode::Normal),
+                blend_policy: mondrian_effects::EffectPassBlendPolicy::Blend(BlendMode::Normal),
                 frame_seed: 7,
             }),
         ],
         TimelineCompositeOptions::default(),
         runtime(),
         &mut scratch,
+        &mut mondrian_effects::EffectProcessorControl::uncancelled(),
     )
     .expect("owned adjustment composite");
     assert_eq!(adjustment.execution.owned_adjustment_base_reuses, 1);
@@ -160,6 +172,7 @@ fn optimized_cpu_execution_matches_serial_reference_pixels() {
         TimelineCompositeOptions::default(),
         runtime(),
         &mut serial,
+        &mut mondrian_effects::EffectProcessorControl::uncancelled(),
     )
     .expect("serial reference");
 
@@ -172,6 +185,7 @@ fn optimized_cpu_execution_matches_serial_reference_pixels() {
         TimelineCompositeOptions::default(),
         runtime(),
         &mut parallel,
+        &mut mondrian_effects::EffectProcessorControl::uncancelled(),
     )
     .expect("parallel execution");
 
@@ -211,6 +225,7 @@ fn optional_transition_reuse_never_bypasses_the_retained_scratch_grant() {
         TimelineCompositeOptions::default(),
         runtime(),
         &mut scratch,
+        &mut mondrian_effects::EffectProcessorControl::uncancelled(),
     )
     .expect("transition executes within the active-frame grant");
 

@@ -1,7 +1,8 @@
 //! Isolated OpenFX binary identity discovery.
 //!
 //! This is an ABI entry-point inspection boundary, not image-effect admission:
-//! discovery never calls `setHost`, `OfxActionLoad`, or a render action. Native
+//! discovery calls the optional early `OfxSetHost` with the actual native host,
+//! then inspects headers without `OfxActionLoad` or a render action. Native
 //! code runs only in the supervised child dispatched by the product executable.
 
 use std::collections::BTreeSet;
@@ -10,8 +11,10 @@ use std::fs::{self, File};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::thread;
 use std::time::{Duration, Instant};
+
+pub(crate) mod child_supervision;
+use child_supervision::{wait_for_child, ChildWaitError};
 
 use libloading::Library;
 use serde::{Deserialize, Serialize};
@@ -24,12 +27,12 @@ const RESPONSE_ENV: &str = "MONDRIAN_INTERNAL_OPENFX_DISCOVERY_RESPONSE";
 const DEADLINE: Duration = Duration::from_secs(10);
 const MAX_MESSAGE_BYTES: u64 = 256 * 1024;
 const MAX_PLUGINS: c_int = 1024;
-const MAX_API_BYTES: usize = 64;
 const MAX_IDENTIFIER_BYTES: usize = 256;
 const IMAGE_EFFECT_API: &str = "OfxImageEffectPluginAPI";
 
 /// One exact image-effect plugin header exported from an installed OFX binary.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct OpenFxPluginDescriptor {
     /// Globally unique plugin identifier supplied by the native binary.
     pub identifier: String,
@@ -52,6 +55,48 @@ pub struct OpenFxBinaryInspection {
     pub plugins: Vec<OpenFxPluginDescriptor>,
 }
 
+impl OpenFxPluginDescriptor {
+    pub(crate) fn validate(&self) -> Result<(), OpenFxDiscoveryError> {
+        if self.api_version != 1 || !valid_identifier(&self.identifier) {
+            return Err(invalid("invalid OpenFX image-effect descriptor"));
+        }
+        Ok(())
+    }
+}
+
+impl OpenFxBinaryInspection {
+    /// Identifier-only callers must never silently choose a major/minor version.
+    pub(crate) fn unique_plugin(
+        &self,
+        identifier: &str,
+    ) -> Result<&OpenFxPluginDescriptor, OpenFxDiscoveryError> {
+        let mut matches = self.plugins.iter().filter(|p| p.identifier == identifier);
+        let plugin = matches
+            .next()
+            .ok_or_else(|| invalid("selected plugin is absent from the pinned binary"))?;
+        if matches.next().is_some() {
+            return Err(invalid(
+                "plugin identifier has multiple versions; an exact descriptor is required",
+            ));
+        }
+        plugin.validate()?;
+        Ok(plugin)
+    }
+
+    pub(crate) fn require_plugin(
+        &self,
+        plugin: &OpenFxPluginDescriptor,
+    ) -> Result<(), OpenFxDiscoveryError> {
+        plugin.validate()?;
+        if self.plugins.iter().filter(|p| *p == plugin).count() != 1 {
+            return Err(invalid(
+                "exact plugin descriptor is absent or duplicated in the pinned binary",
+            ));
+        }
+        Ok(())
+    }
+}
+
 /// Failure to inspect a native OFX binary without trusting its process.
 #[derive(Debug, thiserror::Error)]
 pub enum OpenFxDiscoveryError {
@@ -67,6 +112,9 @@ pub enum OpenFxDiscoveryError {
     /// Child exited without a valid response, including native crashes.
     #[error("OpenFX discovery worker failed: {0}")]
     WorkerFailed(String),
+    /// The catalog owner closed before metadata publication.
+    #[error("OpenFX discovery was canceled")]
+    Canceled,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -93,6 +141,16 @@ pub fn inspect_openfx_binary(
     helper_executable: &Path,
     binary_path: &Path,
 ) -> Result<OpenFxBinaryInspection, OpenFxDiscoveryError> {
+    inspect_openfx_binary_with_checkpoint(helper_executable, binary_path, &mut || Ok(()))
+}
+
+/// Inspect a binary while observing its owning catalog's cancellation authority.
+pub fn inspect_openfx_binary_with_checkpoint(
+    helper_executable: &Path,
+    binary_path: &Path,
+    checkpoint: &mut impl FnMut() -> Result<(), OpenFxDiscoveryError>,
+) -> Result<OpenFxBinaryInspection, OpenFxDiscoveryError> {
+    checkpoint()?;
     if !helper_executable.is_absolute() || !helper_executable.is_file() {
         return Err(invalid("OpenFX helper must be an absolute regular file"));
     }
@@ -100,7 +158,7 @@ pub fn inspect_openfx_binary(
         return Err(invalid("OpenFX binary path must be absolute"));
     }
     let binary_path = resolve_openfx_binary(binary_path)?;
-    let before = sha256_file(&binary_path)?;
+    let before = sha256_file_with_checkpoint(&binary_path, checkpoint)?;
     let directory = tempfile::tempdir()
         .map_err(|error| unavailable(format!("discovery staging failed: {error}")))?;
     let request_path = directory.path().join("request.json");
@@ -115,6 +173,7 @@ pub fn inspect_openfx_binary(
     }
     fs::write(&request_path, request)
         .map_err(|error| unavailable(format!("request write failed: {error}")))?;
+    checkpoint()?;
     let mut child = Command::new(helper_executable)
         .arg(OPENFX_DISCOVERY_WORKER_ARGUMENT)
         .env(REQUEST_ENV, &request_path)
@@ -125,27 +184,25 @@ pub fn inspect_openfx_binary(
         .spawn()
         .map_err(|error| unavailable(format!("worker start failed: {error}")))?;
     let deadline = Instant::now() + DEADLINE;
-    loop {
-        match child.try_wait() {
-            Ok(Some(status)) if status.success() => break,
-            Ok(Some(status)) => return Err(OpenFxDiscoveryError::WorkerFailed(status.to_string())),
-            Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(10)),
-            Ok(None) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(OpenFxDiscoveryError::DeadlineExceeded);
-            }
-            Err(error) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(unavailable(format!("worker observation failed: {error}")));
-            }
+    let status = wait_for_child(&mut child, deadline, checkpoint).map_err(|error| match error {
+        ChildWaitError::Checkpoint(error) => error,
+        ChildWaitError::Deadline => OpenFxDiscoveryError::DeadlineExceeded,
+        ChildWaitError::Observation(error) => {
+            unavailable(format!("worker observation failed: {error}"))
         }
+        ChildWaitError::Settlement(error) => {
+            tracing::error!(pid = child.id(), %error, "OpenFX discovery child settlement failed");
+            unavailable(format!("worker settlement failed: {error}"))
+        }
+    })?;
+    if !status.success() {
+        return Err(OpenFxDiscoveryError::WorkerFailed(status.to_string()));
     }
+    checkpoint()?;
     let bytes = read_bounded(&response_path)?;
     let response: DiscoveryResponse = serde_json::from_slice(&bytes)
         .map_err(|error| invalid(format!("worker response is malformed: {error}")))?;
-    if sha256_file(&binary_path)? != before {
+    if sha256_file_with_checkpoint(&binary_path, checkpoint)? != before {
         return Err(unavailable("binary changed during OpenFX discovery"));
     }
     let mut plugins = match response {
@@ -176,6 +233,7 @@ pub fn inspect_openfx_binary(
             .then(left.version_major.cmp(&right.version_major))
             .then(left.version_minor.cmp(&right.version_minor))
     });
+    checkpoint()?;
     Ok(OpenFxBinaryInspection { binary_path, binary_sha256: before, plugins })
 }
 
@@ -269,6 +327,50 @@ pub fn run_openfx_discovery_worker() -> Result<(), OpenFxDiscoveryError> {
         .map_err(|error| unavailable(format!("OpenFX response write failed: {error}")))
 }
 
+unsafe extern "C" {
+    fn mondrian_openfx_discovery_host_create(
+        owner: *mut *mut c_void,
+        handle: *mut *const c_void,
+    ) -> c_int;
+    fn mondrian_openfx_discovery_host_destroy(owner: *mut c_void);
+}
+
+struct NativeDiscoveryHost {
+    owner: std::ptr::NonNull<c_void>,
+    handle: std::ptr::NonNull<c_void>,
+}
+
+impl NativeDiscoveryHost {
+    fn create() -> Result<Self, OpenFxDiscoveryError> {
+        let mut owner = std::ptr::null_mut();
+        let mut handle = std::ptr::null();
+        // SAFETY: Writable output pointers stay live; the native host never runs
+        // installed code and returns one owned descriptor or clears both outputs.
+        let status = unsafe { mondrian_openfx_discovery_host_create(&mut owner, &mut handle) };
+        if status != 0 {
+            return Err(unavailable(format!(
+                "native discovery host failed ({status})"
+            )));
+        }
+        let owner = std::ptr::NonNull::new(owner)
+            .ok_or_else(|| unavailable("native discovery host has no owner"))?;
+        let Some(handle) = std::ptr::NonNull::new(handle.cast_mut()) else {
+            // SAFETY: The successful native call transferred this exact owner.
+            unsafe { mondrian_openfx_discovery_host_destroy(owner.as_ptr()) };
+            return Err(unavailable("native discovery host has no descriptor"));
+        };
+        Ok(Self { owner, handle })
+    }
+}
+
+impl Drop for NativeDiscoveryHost {
+    fn drop(&mut self) {
+        // SAFETY: The guard exclusively owns this exact allocation and is dropped
+        // after the selected library, including on every failed bootstrap path.
+        unsafe { mondrian_openfx_discovery_host_destroy(self.owner.as_ptr()) };
+    }
+}
+
 fn inspect_loaded_binary(
     request: &DiscoveryRequest,
 ) -> Result<Vec<OpenFxPluginDescriptor>, OpenFxDiscoveryError> {
@@ -286,6 +388,7 @@ fn inspect_loaded_binary(
     // All exported pointers remain borrowed while `library` is alive. A bad
     // plugin can still crash this process; the parent supervises that failure.
     let plugins = unsafe {
+        let host = NativeDiscoveryHost::create()?;
         let library = Library::new(&path)
             .map_err(|error| unavailable(format!("OpenFX binary load failed: {error}")))?;
         let count = library
@@ -294,7 +397,18 @@ fn inspect_loaded_binary(
         let get_plugin = library
             .get::<unsafe extern "C" fn(c_int) -> *const OfxPlugin>(b"OfxGetPlugin\0")
             .map_err(|error| invalid(format!("OpenFX descriptor export is missing: {error}")))?;
-        let count = count();
+        // The optional export precedes all enumeration calls. A not-for-host
+        // response is a successful empty discovery, not a native loading fault.
+        let admitted =
+            match library.get::<unsafe extern "C" fn(*const c_void) -> c_int>(b"OfxSetHost\0") {
+                Ok(bootstrap) => match bootstrap(host.handle.as_ptr().cast_const()) {
+                    0 => true,
+                    1 => false,
+                    status => return Err(invalid(format!("OpenFX bootstrap failed ({status})"))),
+                },
+                Err(_) => true,
+            };
+        let count = if admitted { count() } else { 0 };
         if !(0..=MAX_PLUGINS).contains(&count) {
             return Err(invalid("OpenFX plugin count is outside the admitted range"));
         }
@@ -305,8 +419,7 @@ fn inspect_loaded_binary(
                 return Err(invalid(format!("OpenFX plugin {index} has no descriptor")));
             }
             let header = &*pointer;
-            let api = read_ascii(header.plugin_api, MAX_API_BYTES)?;
-            if api != IMAGE_EFFECT_API || header.api_version != 1 {
+            if header.api_version != 1 || !is_image_effect_api(header.plugin_api) {
                 continue;
             }
             let identifier = read_ascii(header.plugin_identifier, MAX_IDENTIFIER_BYTES)?;
@@ -346,6 +459,23 @@ struct OfxPlugin {
     >,
 }
 
+// Compare only the one admitted API, including its terminator. Unknown APIs
+// have no product string-size/ASCII requirement and need no owned allocation.
+unsafe fn is_image_effect_api(pointer: *const c_char) -> bool {
+    if pointer.is_null() {
+        return false;
+    }
+    for (index, expected) in IMAGE_EFFECT_API.bytes().chain(std::iter::once(0)).enumerate() {
+        // SAFETY: A legal header contains a terminated C string. Stop at the
+        // first differing byte (including an early NUL), so a short string is
+        // never read beyond its terminator. Malformed plugins remain supervised.
+        if unsafe { *pointer.add(index) } as u8 != expected {
+            return false;
+        }
+    }
+    true
+}
+
 unsafe fn read_ascii(
     pointer: *const c_char,
     capacity: usize,
@@ -379,11 +509,20 @@ fn valid_identifier(identifier: &str) -> bool {
 }
 
 pub(crate) fn sha256_file(path: &Path) -> Result<String, OpenFxDiscoveryError> {
+    sha256_file_with_checkpoint(path, &mut || Ok(()))
+}
+
+pub(crate) fn sha256_file_with_checkpoint<E: From<OpenFxDiscoveryError>>(
+    path: &Path,
+    checkpoint: &mut impl FnMut() -> Result<(), E>,
+) -> Result<String, E> {
+    checkpoint()?;
     let mut file = File::open(path)
         .map_err(|error| unavailable(format!("OpenFX binary cannot be read: {error}")))?;
     let mut digest = Sha256::new();
     let mut buffer = [0u8; 64 * 1024];
     loop {
+        checkpoint()?;
         let count = file
             .read(&mut buffer)
             .map_err(|error| unavailable(format!("OpenFX binary read failed: {error}")))?;
@@ -422,6 +561,63 @@ fn unavailable(reason: impl Into<String>) -> OpenFxDiscoveryError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn exact_versions_are_independent_of_export_order_and_id_only_refuses_ambiguity() {
+        let plugin = |major, minor| OpenFxPluginDescriptor {
+            identifier: "test.versioned".into(),
+            api_version: 1,
+            version_major: major,
+            version_minor: minor,
+        };
+        let mut inspection = OpenFxBinaryInspection {
+            binary_path: PathBuf::from("must-not-load.ofx"),
+            binary_sha256: "a".repeat(64),
+            plugins: vec![plugin(2, 0), plugin(3, 0), plugin(1, 0)],
+        };
+        assert!(inspection.unique_plugin("test.versioned").is_err());
+        for major in [1, 2, 3] {
+            inspection.require_plugin(&plugin(major, 0)).unwrap();
+        }
+        assert!(inspection.require_plugin(&plugin(4, 0)).is_err());
+        assert!(inspection.require_plugin(&plugin(1, 1)).is_err());
+        inspection.plugins.push(plugin(1, 0));
+        assert!(inspection.require_plugin(&plugin(1, 0)).is_err());
+        inspection.plugins = vec![plugin(u32::MAX, u32::MAX)];
+        assert_eq!(
+            inspection.unique_plugin("test.versioned").unwrap(),
+            &plugin(u32::MAX, u32::MAX)
+        );
+    }
+
+    #[test]
+    fn canceled_discovery_never_resolves_or_spawns_an_invalid_selection() {
+        assert!(matches!(
+            inspect_openfx_binary_with_checkpoint(
+                Path::new("invalid-helper"),
+                Path::new("invalid-plugin"),
+                &mut || Err(OpenFxDiscoveryError::Canceled),
+            ),
+            Err(OpenFxDiscoveryError::Canceled)
+        ));
+    }
+
+    #[test]
+    fn binary_identity_hash_observes_cancellation_between_read_chunks() {
+        let directory = tempfile::tempdir().expect("staging");
+        let path = directory.path().join("binary.ofx");
+        fs::write(&path, vec![0_u8; 128 * 1024]).expect("fixture bytes");
+        let mut checkpoints = 0;
+        let result = sha256_file_with_checkpoint(&path, &mut || {
+            checkpoints += 1;
+            if checkpoints == 3 {
+                Err(OpenFxDiscoveryError::Canceled)
+            } else {
+                Ok(())
+            }
+        });
+        assert!(matches!(result, Err(OpenFxDiscoveryError::Canceled)));
+    }
 
     #[test]
     fn descriptor_contract_rejects_controls_and_duplicates() {
@@ -465,5 +661,117 @@ mod tests {
             resolve_openfx_binary(&bundle),
             Err(OpenFxDiscoveryError::Invalid(_))
         ));
+    }
+    #[test]
+    #[ignore = "requires the owned SessionProbe native bundle"]
+    fn native_discovery_skips_long_unknown_apis_before_descriptor_validation() {
+        const TEST: &str = "openfx_adapter::tests::native_discovery_skips_long_unknown_apis_before_descriptor_validation";
+        if !crate::openfx_host::shared_frame_tests::qualification_child(
+            TEST,
+            &[("MONDRIAN_OPENFX_SESSION_PROBE_MODE", "mixed_api_long")],
+        ) {
+            return;
+        }
+        let path = resolve_openfx_binary(&PathBuf::from(
+            std::env::var_os("MONDRIAN_OPENFX_SESSION_PROBE_BINARY")
+                .expect("owned SessionProbe binary"),
+        ))
+        .expect("probe path");
+        let request = DiscoveryRequest {
+            binary_path: path.clone(),
+            binary_sha256: sha256_file(&path).expect("probe fingerprint"),
+        };
+        for _ in 0..3 {
+            let plugins = inspect_loaded_binary(&request)
+                .expect("skip unknown long API without applying known-API metadata bounds");
+            assert_eq!(plugins.len(), 1);
+            assert_eq!(plugins[0].identifier, "uk.co.thefoundry.BasicGainPlugin");
+            assert_eq!(plugins[0].api_version, 1);
+        }
+    }
+
+    #[test]
+    #[ignore = "requires the owned SessionProbe native bundle"]
+    fn native_discovery_bootstrap_owns_image_memory_and_releases_host_binding() {
+        const TEST: &str = "openfx_adapter::tests::native_discovery_bootstrap_owns_image_memory_and_releases_host_binding";
+        if !crate::openfx_host::shared_frame_tests::qualification_child(
+            TEST,
+            &[("MONDRIAN_OPENFX_SESSION_PROBE_MODE", "bootstrap_memory")],
+        ) {
+            return;
+        }
+        let path = resolve_openfx_binary(&PathBuf::from(
+            std::env::var_os("MONDRIAN_OPENFX_SESSION_PROBE_BINARY")
+                .expect("owned SessionProbe binary"),
+        ))
+        .expect("probe path");
+        let request = DiscoveryRequest {
+            binary_path: path.clone(),
+            binary_sha256: sha256_file(&path).expect("probe fingerprint"),
+        };
+        for _ in 0..3 {
+            let plugins = inspect_loaded_binary(&request)
+                .expect("host-owned image memory must work during early bootstrap");
+            assert_eq!(plugins.len(), 1);
+            assert_eq!(plugins[0].identifier, "uk.co.thefoundry.BasicGainPlugin");
+        }
+        // Sequential owners must fully release the native singleton binding.
+        // The test uses the existing constructor, without exporting a test-only
+        // global accessor or introducing another native bootstrap owner path.
+        let first = NativeDiscoveryHost::create().expect("fresh owner after repeated bootstrap");
+        drop(first);
+        let second = NativeDiscoveryHost::create().expect("binding released before next owner");
+        drop(second);
+    }
+
+    #[test]
+    #[ignore = "requires the owned SessionProbe native bundle"]
+    fn native_discovery_refuses_busy_owners_without_waiting_or_switching_host_callbacks() {
+        const TEST: &str = "openfx_adapter::tests::native_discovery_refuses_busy_owners_without_waiting_or_switching_host_callbacks";
+        if !crate::openfx_host::shared_frame_tests::qualification_child(
+            TEST,
+            &[("MONDRIAN_OPENFX_SESSION_PROBE_MODE", "bootstrap_memory")],
+        ) {
+            return;
+        }
+        let path = resolve_openfx_binary(&PathBuf::from(
+            std::env::var_os("MONDRIAN_OPENFX_SESSION_PROBE_BINARY")
+                .expect("owned SessionProbe binary"),
+        ))
+        .expect("probe path");
+        let first = NativeDiscoveryHost::create().expect("first host owner");
+        assert!(
+            matches!(NativeDiscoveryHost::create(),
+            Err(OpenFxDiscoveryError::Unavailable(reason)) if reason.ends_with("(9)")),
+            "same-thread second owner must return native HostBusy immediately"
+        );
+        let other = std::thread::spawn(|| {
+            matches!(NativeDiscoveryHost::create(),
+            Err(OpenFxDiscoveryError::Unavailable(reason)) if reason.ends_with("(9)"))
+        });
+        assert!(
+            other.join().expect("second owner thread"),
+            "cross-thread owner must return HostBusy, without waiting for first drop"
+        );
+        crate::openfx_host::shared_frame_tests::native_canonical_geometry_overflow_refuses_before_binary_loading();
+        // The first owner's live suite must remain usable after both refused
+        // attempts. The fixture performs allocation/lock/write/read/free through
+        // the exposed suite, rather than inspecting a vendor global pointer.
+        // SAFETY: Library and its export remain live until after bootstrap; the
+        // first owner remains live until the library has been unloaded.
+        unsafe {
+            let library = Library::new(path).expect("bootstrap fixture library");
+            let bootstrap = library
+                .get::<unsafe extern "C" fn(*const c_void) -> c_int>(b"OfxSetHost\0")
+                .expect("owned optional bootstrap");
+            assert_eq!(
+                bootstrap(first.handle.as_ptr().cast_const()),
+                0,
+                "refused owners must not replace the first host's image-memory binding"
+            );
+        }
+        drop(first);
+        let next = NativeDiscoveryHost::create().expect("owner after first complete teardown");
+        drop(next);
     }
 }

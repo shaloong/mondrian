@@ -340,6 +340,22 @@ impl ResolvedPictureGeometry {
         self.sample_aspect_ratio
     }
 
+    /// Sampling density of the complete encoded raster at an actual output size.
+    ///
+    /// Orientation stays in the later placement affine. Only a full-raster
+    /// materializer may use this projection; cropped windows retain their
+    /// explicit sampling and position rather than inferring scale from bounds.
+    pub fn image_sampling(
+        self,
+        sampled_resolution: Resolution,
+    ) -> Result<crate::ImageSampling, crate::ImageSamplingError> {
+        crate::ImageSampling::from_full_raster(
+            self.sample_aspect_ratio,
+            self.encoded_resolution,
+            sampled_resolution,
+        )
+    }
+
     /// Effective cardinal source orientation.
     pub const fn orientation(self) -> PictureOrientation {
         self.orientation

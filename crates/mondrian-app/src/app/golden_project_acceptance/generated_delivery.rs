@@ -22,7 +22,7 @@ use crate::app::preview_unavailability::{PreviewOutputStage, PreviewUnavailabili
 use crate::app::preview_viewer_plan::ResolvedPreviewElement;
 use crate::app::ui_actions::{
     assets_prepare_drag_action, clip_write_parameter_values_action, timeline_trim_clips_action,
-    AssetsPrepareDragPayload, ClipParameterValueWrite, ClipWriteParameterValuesPayload,
+    AssetsPrepareDragPayload, ClipWriteParameterValuesPayload, ParameterValueWrite,
     TimelineTrimClipsPayload, TimelineTrimPayloadEdge,
 };
 use crate::app::{AppState, ClipOverlapMode};
@@ -559,7 +559,9 @@ fn render_program_reference(
         resolution.height,
         &resolved.plan.elements,
         &resolved.plan.color_context,
+        resolved.plan.sampling,
         &mut scratch,
+        &mut mondrian_effects::EffectProcessorControl::uncancelled(),
     )?;
     ensure!(
         working.composite_diagnostics.float_linear_composites == 1
@@ -914,6 +916,7 @@ pub(super) fn render_program_audio_reference(
     )?;
     let buffer = renderer.render(
         AudioPcmRenderRequest {
+            transport_activity: None,
             start_sample,
             frame_count,
             sample_rate,
@@ -922,6 +925,9 @@ pub(super) fn render_program_audio_reference(
         },
         &ExecutionCancellationToken::new(),
     )?;
+    let mondrian_media::AudioPcmRenderOutcome::Rendered(buffer) = buffer else {
+        bail!("canonical audio reference did not produce PCM: {buffer:?}");
+    };
     stereo_signal_evidence(start_sample, frame_count, &buffer.samples)
 }
 
@@ -1097,6 +1103,7 @@ fn reimport_export(
         .root_program_color_context(state.project_color_environment())?
         .media_input(false);
     let request = PreviewTimelineMediaRequest {
+        image_scale_requirement: mondrian_effects::EffectImageScaleRequirement::Any,
         asset_id: asset.id,
         color_space_override: None,
         alpha_interpretation: AlphaInterpretation::Ignore,
@@ -1329,11 +1336,11 @@ pub(super) fn execute_delivery_stage(
         clip_write_parameter_values_action(ClipWriteParameterValuesPayload {
             clip_id: solid_clip_id,
             writes: vec![
-                ClipParameterValueWrite {
+                ParameterValueWrite::Value {
                     parameter: position_parameter,
                     value: PropertyValue::Vec2(glam::Vec2::new(96.0, 54.0)),
                 },
-                ClipParameterValueWrite {
+                ParameterValueWrite::Value {
                     parameter: scale_parameter,
                     value: PropertyValue::Vec2(glam::Vec2::splat(0.9)),
                 },
@@ -1345,7 +1352,7 @@ pub(super) fn execute_delivery_stage(
         "set-delivery-opacity",
         clip_write_parameter_values_action(ClipWriteParameterValuesPayload {
             clip_id: solid_clip_id,
-            writes: vec![ClipParameterValueWrite {
+            writes: vec![ParameterValueWrite::Value {
                 parameter: opacity_parameter,
                 value: PropertyValue::Float(0.8),
             }],

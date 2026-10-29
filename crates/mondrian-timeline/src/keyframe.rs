@@ -1,1 +1,1 @@
-pub use mondrian_core::automation::{Interpolatable, InterpolationType, Keyframe, KeyframeTrack};
+pub use mondrian_core::automation::{InterpolationType, Keyframe};

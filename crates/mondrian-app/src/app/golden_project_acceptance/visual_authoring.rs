@@ -25,9 +25,9 @@ use crate::app::ui_actions::{
     video_transition_create_cross_dissolve_action, visual_effect_add_to_clip_action,
     visual_effect_set_parameter_value_action, visual_mask_add_to_clip_action,
     visual_mask_set_parameter_value_action, visual_mask_set_shape_animation_enabled_action,
-    visual_mask_write_shape_action, AssetsCreateAssetPayload, ClipCurveEditPayload,
-    ClipEditNumericCurvePayload, ClipNormalizedCurvePointPayload, ClipParameterValueWrite,
-    ClipSetSolidColorPayload, ClipWriteParameterValuesPayload, TimelineDropAssetPayload,
+    visual_mask_write_shape_action, AssetsCreateAssetPayload, ClipCurveAuthorPoint,
+    ClipCurveEditPayload, ClipEditNumericCurvePayload, ClipSetSolidColorPayload,
+    ClipWriteParameterValuesPayload, ParameterValueWrite, TimelineDropAssetPayload,
     TimelineTrimClipsPayload, TimelineTrimPayloadEdge, VideoTransitionCreateCrossDissolvePayload,
     VideoTransitionHandlePolicy, VisualEffectAddToClipPayload,
     VisualEffectSetParameterValuePayload, VisualMaskAddToClipPayload,
@@ -535,8 +535,7 @@ fn set_mask_parameter(
         visual_mask_set_parameter_value_action(VisualMaskSetParameterValuePayload {
             clip_id,
             mask_id,
-            parameter: property.address(),
-            value,
+            write: ParameterValueWrite::Value { parameter: property.address(), value },
         }),
     )
 }
@@ -574,8 +573,7 @@ fn set_effect_parameter(
         visual_effect_set_parameter_value_action(VisualEffectSetParameterValuePayload {
             clip_id,
             effect_id,
-            parameter,
-            value,
+            write: ParameterValueWrite::Value { parameter, value },
         }),
     )
 }
@@ -720,7 +718,7 @@ impl From<KeyframeInterpolation> for KeyframeInterpolationKind {
         match value {
             KeyframeInterpolation::Hold => Self::Hold,
             KeyframeInterpolation::Linear => Self::Linear,
-            KeyframeInterpolation::Bezier(_) => Self::Bezier,
+            KeyframeInterpolation::Bezier(_) | KeyframeInterpolation::DefaultBezier => Self::Bezier,
         }
     }
 }
@@ -869,6 +867,7 @@ fn execute_visual_frame(state: &AppState, frame: i64) -> anyhow::Result<VisualEx
                 request.title_safe_margin,
                 request.target_resolution,
                 request.working_color_space,
+                request.sample_aspect_ratio,
             ) {
                 Ok(frame) => {
                     raster_identities.push(frame.identity().to_string());
@@ -947,7 +946,9 @@ fn execute_visual_frame(state: &AppState, frame: i64) -> anyhow::Result<VisualEx
         PREVIEW_RESOLUTION.height,
         &resolved.plan.elements,
         &resolved.plan.color_context,
+        resolved.plan.sampling,
         &mut scratch,
+        &mut mondrian_effects::EffectProcessorControl::uncancelled(),
     )?;
     ensure!(
         output.rgba.len()
@@ -1142,7 +1143,7 @@ pub(super) fn execute_visual_stage(
             lut_effect_id,
             "path",
             PropertyValue::Resource(ParameterResourceReference::ExternalFile {
-                path: lut_path.clone(),
+                path: lut_path.clone().into(),
             }),
             "bind-lut-resource",
         )?,
@@ -1366,7 +1367,7 @@ pub(super) fn execute_visual_stage(
         "set-basic-title-text",
         clip_write_parameter_values_action(ClipWriteParameterValuesPayload {
             clip_id: title_clip_id,
-            writes: vec![ClipParameterValueWrite {
+            writes: vec![ParameterValueWrite::Value {
                 parameter: title_text_parameter,
                 value: PropertyValue::Text(TITLE_TEXT.to_owned()),
             }],
@@ -1488,7 +1489,7 @@ pub(super) fn execute_visual_stage(
     .len();
     ensure!(after_redo == 2, "Redo did not restore the Bezier keyframe");
 
-    let (bezier_address, bezier_end_id, bezier_end_value_ratio) = {
+    let (bezier_address, bezier_end_id, bezier_end_value) = {
         let bag = find_video_clip(
             state.active_sequence().context("active Sequence is absent")?,
             title_clip_id,
@@ -1499,18 +1500,20 @@ pub(super) fn execute_visual_stage(
             .property(BasicTitle::FONT_SIZE_PATH)
             .context("font size property is absent before Curve Editor edit")?;
         let keyframe = property
+            .channel(0)
+            .context("Bezier author channel is absent before Curve Editor edit")?
             .keyframe_at(end_time)
             .context("Bezier endpoint is absent before Curve Editor edit")?;
-        let numeric = property
-            .descriptor
-            .schema
-            .numeric
-            .context("font size property has no numeric editor contract")?;
-        let value = f64::from(keyframe.value.as_f32().context("font size endpoint is not scalar")?);
-        let ratio = ((value - numeric.soft_range.min)
-            / (numeric.soft_range.max - numeric.soft_range.min))
-            .clamp(0.0, 1.0) as f32;
-        (property.address(), keyframe.id, ratio)
+        (property.address(), keyframe.id, keyframe.value)
+    };
+    let curve_author_time = {
+        let clip = find_video_clip(
+            state.active_sequence().context("active sequence")?,
+            title_clip_id,
+        )?
+        .0;
+        clip.clip_time_in
+            .checked_add(clip.duration.checked_scale(mondrian_core::TimeScale::new(7, 8)?)?)?
     };
     let curve_edit_step = dispatch_author_transition(
         state,
@@ -1520,10 +1523,7 @@ pub(super) fn execute_visual_stage(
             parameter: bezier_address,
             edit: ClipCurveEditPayload::Upsert {
                 keyframe_id: Some(bezier_end_id),
-                point: ClipNormalizedCurvePointPayload {
-                    time_ratio: 0.875,
-                    value_ratio: f64::from(bezier_end_value_ratio),
-                },
+                point: ClipCurveAuthorPoint { time: curve_author_time, value: bezier_end_value },
             },
         }),
     )?;
@@ -1702,7 +1702,7 @@ pub(super) fn execute_visual_stage(
         EffectType::Lut3D,
         "path",
         PropertyValue::Resource(ParameterResourceReference::ExternalFile {
-            path: lut_path.clone(),
+            path: lut_path.clone().into(),
         }),
     )?;
     assert_effect_parameter(

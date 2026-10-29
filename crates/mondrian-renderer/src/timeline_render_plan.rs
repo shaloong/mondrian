@@ -231,7 +231,8 @@ pub struct TimelineAdjustmentPlan {
     pub placement: TimelineClipExecutionRef,
     pub effect_graph: Arc<CompiledEffectGraph>,
     pub opacity: f32,
-    pub blend_mode: BlendMode,
+    /// Sole lowering of the canonical resolved Adjustment mode.
+    pub blend_policy: mondrian_core::EffectPassBlendPolicy,
     pub frame_seed: i64,
 }
 
@@ -571,11 +572,10 @@ impl ClipEffectResolver for SessionPreparedClipEffectResolver<'_> {
     }
 }
 
-fn evaluate_timeline_render_plan_with_effects(
+pub(crate) fn validate_timeline_evaluation_position(
     source: &dyn RenderPlanSource,
-    request: TimelineEvaluationRequest,
-    effects: &mut dyn ClipEffectResolver,
-) -> Result<TimelineRenderPlan> {
+    position: FramePosition,
+) -> Result<TimelineTime> {
     let expected_time_base = source.source_time_base();
     let field_time_base = Rational::new(
         expected_time_base.num,
@@ -590,31 +590,37 @@ fn evaluate_timeline_render_plan_with_effects(
                 ),
             })?,
     );
-    if request.position.time_base != expected_time_base
-        && request.position.time_base != field_time_base
-    {
+    if position.time_base != expected_time_base && position.time_base != field_time_base {
         return Err(MondrianError::WorkflowStepFailed {
             step_id: "evaluate_timeline_render_plan".to_owned(),
             reason: format!(
                 "evaluation position grid {} does not match Sequence {} frame grid {} or field grid {}",
-                request.position.time_base,
+                position.time_base,
                 source.source_sequence_id(),
                 expected_time_base,
                 field_time_base,
             ),
         });
     }
-    if request.position.frame < 0 {
+    if position.frame < 0 {
         return Err(MondrianError::WorkflowStepFailed {
             step_id: "evaluate_timeline_render_plan".to_owned(),
             reason: format!(
                 "evaluation position frame {} is negative for Sequence {}",
-                request.position.frame,
+                position.frame,
                 source.source_sequence_id()
             ),
         });
     }
-    let current_time = TimelineTime::from_frame_position(request.position)?;
+    Ok(TimelineTime::from_frame_position(position)?)
+}
+
+fn evaluate_timeline_render_plan_with_effects(
+    source: &dyn RenderPlanSource,
+    request: TimelineEvaluationRequest,
+    effects: &mut dyn ClipEffectResolver,
+) -> Result<TimelineRenderPlan> {
+    let current_time = validate_timeline_evaluation_position(source, request.position)?;
     let active = source.flat_visual_items_at(current_time)?;
     let mut diagnostics = TimelineEvaluationDiagnostics {
         active_visual_items: active.len(),
@@ -713,7 +719,7 @@ fn compile_transition(
                 },
             )))
         }
-        FlatVideoTransitionDefinition::Plugin { definition_id } => {
+        FlatVideoTransitionDefinition::External { definition_id } => {
             Err(MondrianError::WorkflowStepFailed {
                 step_id: "compile_video_transition".to_owned(),
                 reason: format!(
@@ -745,7 +751,7 @@ fn validate_flat_transition_definition(transition: &FlatVideoTransition) -> Resu
                 transition.transition_id
             ),
         }),
-        FlatVideoTransitionDefinition::Plugin { definition_id } => {
+        FlatVideoTransitionDefinition::External { definition_id } => {
             Err(MondrianError::WorkflowStepFailed {
                 step_id: "compile_video_transition".to_owned(),
                 reason: format!(
@@ -837,7 +843,9 @@ fn compile_flat_clip(
                 placement,
                 effect_graph,
                 opacity,
-                blend_mode: ac.blend_mode,
+                blend_policy: mondrian_core::EffectPassBlendPolicy::from_adjustment_mode(
+                    ac.blend_mode,
+                ),
                 frame_seed,
             })
         }
@@ -1120,7 +1128,10 @@ mod tests {
 
         match &plan[1] {
             TimelineRenderPlanElement::Adjustment(adjustment) => {
-                assert_eq!(adjustment.blend_mode, BlendMode::Multiply);
+                assert_eq!(
+                    adjustment.blend_policy,
+                    mondrian_core::EffectPassBlendPolicy::Blend(BlendMode::Multiply)
+                );
             }
             _ => panic!("expected adjustment"),
         }
@@ -1562,7 +1573,7 @@ mod tests {
 
     #[test]
     fn unavailable_transition_definition_fails_closed() {
-        let mut sequence = Sequence::new("missing transition plugin");
+        let mut sequence = Sequence::new("missing external transition");
         let time_base = sequence.time_base();
         let left = Clip::new(AssetId::new(), tt(0, time_base), tt(10, time_base)).expect("left");
         let right = Clip::new(AssetId::new(), tt(10, time_base), tt(10, time_base)).expect("right");
@@ -1575,7 +1586,7 @@ mod tests {
             mondrian_core::TimelineTimeRange::new(tt(8, time_base), tt(4, time_base))
                 .expect("transition range"),
         );
-        transition.transition_type = mondrian_timeline::VideoTransitionType::Plugin {
+        transition.transition_type = mondrian_timeline::VideoTransitionType::External {
             definition_id: "vendor.missing.transition".to_owned(),
         };
         sequence.video_transitions.push(transition);
@@ -1584,7 +1595,7 @@ mod tests {
             &sequence,
             TimelineEvaluationRequest::preview(fp(10, time_base), 1.0),
         )
-        .expect_err("missing plugin must not substitute Cross Dissolve");
+        .expect_err("missing external definition must not substitute Cross Dissolve");
         assert!(error.to_string().contains("unavailable definition"));
     }
 
@@ -1605,7 +1616,7 @@ mod tests {
         },
         Adjustment {
             opacity: f32,
-            blend_mode: BlendMode,
+            blend_policy: mondrian_core::EffectPassBlendPolicy,
             frame_seed: i64,
         },
         SolidColor {
@@ -1681,7 +1692,7 @@ mod tests {
                 TimelineRenderPlanElement::Adjustment(adjustment) => {
                     RenderPlanSemanticElement::Adjustment {
                         opacity: adjustment.opacity,
-                        blend_mode: adjustment.blend_mode,
+                        blend_policy: adjustment.blend_policy,
                         frame_seed: adjustment.frame_seed,
                     }
                 }
@@ -1752,6 +1763,71 @@ mod tests {
                 RenderPlanSemanticTransitionInput::NestedSequence {
                     sequence_id: nested.sequence_id,
                     source_time: nested.source_sample.time(),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn effect_pass_mix_real_default_and_selected_normal_adjustment_preserve_coverage() {
+        // Exercise the actual author Clip and sole Preview/Export plan compiler.
+        // Track Screen plus an explicit user Normal selection must still mix.
+        for explicitly_normal in [false, true] {
+            let mut sequence = Sequence::new("actual adjustment Mix");
+            let rate = sequence.time_base();
+            sequence.settings.resolution = Resolution { width: 1, height: 1 };
+            if explicitly_normal {
+                sequence.video_tracks[0].blend_mode = BlendMode::Screen;
+            }
+            let mut clip = Clip::new_adjustment_layer(AssetId::new(), tt(0, rate), tt(10, rate))
+                .expect("real clip");
+            if explicitly_normal {
+                clip.blend_mode = Some(BlendMode::Normal);
+            }
+            clip.effects.push(
+                mondrian_effects::instantiate_effect_node(
+                    mondrian_effects::EffectType::GaussianBlur,
+                )
+                .expect("actual authorable effect"),
+            );
+            sequence.video_tracks[0].add_clip(clip).expect("actual placement");
+            for request in [
+                TimelineEvaluationRequest::preview(fp(2, rate), 1.0),
+                TimelineEvaluationRequest::export(fp(2, rate)),
+            ] {
+                let plan = evaluate_timeline_render_plan(&sequence, request).expect("sole plan");
+                let TimelineRenderPlanElement::Adjustment(adjustment) = &plan.elements[0] else {
+                    panic!("real adjustment")
+                };
+                assert!(
+                    !adjustment.effect_graph.graph().is_identity(),
+                    "real blur is not an identity shortcut"
+                );
+                let samples = [[-0.5, 3.0, 0.8, 0.5]];
+                let input = mondrian_effects::EffectFloatFrameView::new(
+                    mondrian_effects::EffectFrameExtent::new(1, 1),
+                    mondrian_effects::EffectValueFormat::new(
+                        mondrian_effects::EffectWorkingPrecision::Float32,
+                        mondrian_effects::EffectColorDomain::SceneLinearRgb,
+                        mondrian_core::ColorFrameAlpha::StraightCoverage,
+                    ),
+                    mondrian_core::ImageSampling::UNIT_SQUARE,
+                    &samples,
+                );
+                let output = mondrian_effects::apply_compiled_effect_graph_pass_rgba_f32(
+                    input,
+                    &adjustment.effect_graph,
+                    adjustment.opacity,
+                    adjustment.blend_policy,
+                    adjustment.frame_seed,
+                )
+                .expect("real effect pass");
+                assert_eq!(
+                    output.alpha(),
+                    mondrian_core::ColorFrameAlpha::StraightCoverage
+                );
+                for (actual, expected) in output.pixels()[0].into_iter().zip(samples[0]) {
+                    assert!((actual-expected).abs() < 1e-6, "canonical Normal adjustment must preserve constant image: actual={actual}, expected={expected}");
                 }
             }
         }

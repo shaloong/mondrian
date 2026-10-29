@@ -8,22 +8,39 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+mondrian-audio-scheduling.workspace = true
 mondrian-core.workspace = true
 mondrian-timeline.workspace = true
 thiserror.workspace = true
+tracing.workspace = true
 pulp.workspace = true
 serde.workspace = true
-serde_json.workspace = true
+serde_json = { workspace = true, features = ["raw_value"] }
 sha2.workspace = true
+base64.workspace = true
 tempfile.workspace = true
 memmap2.workspace = true
 bytemuck.workspace = true
 uuid.workspace = true
+clap-sys.workspace = true
 clack-host.workspace = true
 clack-extensions.workspace = true
 vst3-host.workspace = true
 
+[target.'cfg(unix)'.dependencies]
+# Actual pthread identity for the scoped CLAP audio role; already used by the workspace.
+libc = "0.2"
+
 [dev-dependencies]
+crossbeam-queue.workspace = true
+libloading.workspace = true
+# Test the same canonical binding selected by the native audio adapter.
+vst3.workspace = true
 clack-plugin.workspace = true
 clack-host = { workspace = true, features = ["clack-plugin"] }
-clack-extensions = { workspace = true, features = ["clack-plugin"] }
+clack-extensions = { workspace = true, features = ["clack-plugin", "note-ports", "gui", "log", "timer"] }
+
+[target.'cfg(windows)'.dev-dependencies]
+# Joint native-owner closure tests use the real Media retirement worker.
+mondrian-media.workspace = true
+windows-sys = { workspace = true, features = ["Win32_System_JobObjects", "Win32_System_Threading"] }

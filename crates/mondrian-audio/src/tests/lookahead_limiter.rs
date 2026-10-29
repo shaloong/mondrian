@@ -216,7 +216,11 @@ fn built_in_lookahead_limiter_is_block_invariant_and_bounds_sample_peaks() {
     scalar
         .render_into(
             &mut scalar_source,
-            AudioRenderRequest { start_sample: 0, frames: scalar_pcm.len() },
+            AudioRenderRequest {
+                transport_activity: None,
+                start_sample: 0,
+                frames: scalar_pcm.len(),
+            },
             &mut scalar_pcm,
         )
         .expect("scalar limiter render");
@@ -254,14 +258,22 @@ fn built_in_lookahead_limiter_is_block_invariant_and_bounds_sample_peaks() {
     vector
         .render_into(
             &mut vector_source,
-            AudioRenderRequest { start_sample: 0, frames: first.len() },
+            AudioRenderRequest {
+                transport_activity: None,
+                start_sample: 0,
+                frames: first.len(),
+            },
             &mut first,
         )
         .expect("first vector partition");
     vector
         .render_into(
             &mut vector_source,
-            AudioRenderRequest { start_sample: 2, frames: second.len() },
+            AudioRenderRequest {
+                transport_activity: None,
+                start_sample: 2,
+                frames: second.len(),
+            },
             &mut second,
         )
         .expect("second vector partition");
@@ -329,7 +341,11 @@ fn limiter_monotonic_window_matches_independent_scalar_reference_and_seek_entry(
     scalar
         .render_into(
             &mut scalar_source,
-            AudioRenderRequest { start_sample: 0, frames: FRAMES },
+            AudioRenderRequest {
+                transport_activity: None,
+                start_sample: 0,
+                frames: FRAMES,
+            },
             &mut scalar_pcm,
         )
         .expect("scalar whole block");
@@ -354,7 +370,7 @@ fn limiter_monotonic_window_matches_independent_scalar_reference_and_seek_entry(
         vector
             .render_into(
                 &mut vector_source,
-                AudioRenderRequest { start_sample, frames },
+                AudioRenderRequest { transport_activity: None, start_sample, frames },
                 &mut block,
             )
             .expect("partitioned vector block");
@@ -383,6 +399,7 @@ fn limiter_monotonic_window_matches_independent_scalar_reference_and_seek_entry(
         .render_into(
             &mut vector_source,
             AudioRenderRequest {
+                transport_activity: None,
                 start_sample: SEEK_START as i64,
                 frames: SEEK_FRAMES,
             },
@@ -427,7 +444,11 @@ fn built_in_lookahead_limiter_drives_real_parallel_pdc() {
     session
         .render_into(
             &mut source,
-            AudioRenderRequest { start_sample: 0, frames: pcm.len() },
+            AudioRenderRequest {
+                transport_activity: None,
+                start_sample: 0,
+                frames: pcm.len(),
+            },
             &mut pcm,
         )
         .expect("parallel limited render");
@@ -460,7 +481,11 @@ fn built_in_lookahead_limiter_links_channels_without_collapsing_image() {
     session
         .render_into(
             &mut source,
-            AudioRenderRequest { start_sample: 0, frames: 2 },
+            AudioRenderRequest {
+                transport_activity: None,
+                start_sample: 0,
+                frames: 2,
+            },
             &mut pcm,
         )
         .expect("linked limiter render");
@@ -497,7 +522,11 @@ fn limiter_ceiling_automation_stays_on_signal_time_across_lookahead() {
     session
         .render_into(
             &mut source,
-            AudioRenderRequest { start_sample: 0, frames: pcm.len() },
+            AudioRenderRequest {
+                transport_activity: None,
+                start_sample: 0,
+                frames: pcm.len(),
+            },
             &mut pcm,
         )
         .expect("automated limiter render");
@@ -560,7 +589,11 @@ fn limiter_resource_and_non_finite_failures_close_before_publication() {
     assert!(matches!(
         session.render_into(
             &mut invalid,
-            AudioRenderRequest { start_sample: 0, frames: 1 },
+            AudioRenderRequest {
+                transport_activity: None,
+                start_sample: 0,
+                frames: 1
+            },
             &mut destination,
         ),
         Err(AudioExecutionError::ProcessorHost(
@@ -571,7 +604,11 @@ fn limiter_resource_and_non_finite_failures_close_before_publication() {
     assert_eq!(
         session.render_into(
             &mut PatternSource::mono([0.25; 4]),
-            AudioRenderRequest { start_sample: 0, frames: 1 },
+            AudioRenderRequest {
+                transport_activity: None,
+                start_sample: 0,
+                frames: 1
+            },
             &mut destination,
         ),
         Err(AudioExecutionError::ContinuityPoisoned(
@@ -587,7 +624,11 @@ fn limiter_resource_and_non_finite_failures_close_before_publication() {
     session
         .render_into(
             &mut PatternSource::mono([0.25; 4]),
-            AudioRenderRequest { start_sample: 0, frames: 1 },
+            AudioRenderRequest {
+                transport_activity: None,
+                start_sample: 0,
+                frames: 1,
+            },
             &mut destination,
         )
         .expect("fresh finite render");

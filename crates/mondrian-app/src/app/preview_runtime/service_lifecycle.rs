@@ -219,6 +219,10 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         } else {
             self.execution.borrow_mut().invalidate(|| generation);
         }
+        // Both original execution domains now observe cancellation. Retire
+        // their source replies and partial Ready leases before decoder joins.
+        self.pending_processor_sources.borrow_mut().clear();
+        self.retire_processor_feedback_view();
         (pending_requests, queued_jobs)
     }
 
@@ -348,6 +352,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
     }
 
     fn begin_shutdown(&self) -> bool {
+        self.execution.borrow().generation_cancellation().cancel();
         self.work_watch.begin_shutdown();
         self.jobs.close();
         self.visual_dependencies.begin_shutdown();

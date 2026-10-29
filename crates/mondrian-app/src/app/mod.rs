@@ -4,6 +4,9 @@ use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 use std::{fs, path::Path, path::PathBuf};
 
+#[cfg(test)]
+use mondrian_core::automation::PropertyValue;
+
 use mondrian_assets::{AssetKind, AssetLibrary};
 use mondrian_audio::{
     AudioProcessorHostError, AudioProcessorPrepareRequest, AudioProcessorResolver,
@@ -14,7 +17,7 @@ use mondrian_audio::{
 use mondrian_core::{
     automation::{
         interpolation_mode_from_keyframe, AnimationParameterAddress, InterpolationType, Keyframe,
-        PropertyHost, PropertyMutation, PropertyValue,
+        PropertyHost, PropertyMutation,
     },
     events::{AppEvent, EventBus},
     types::{
@@ -102,11 +105,23 @@ pub(crate) fn tt(frame: i64, time_base: Rational) -> TimelineTime {
 
 mod action_handler;
 mod animation_authoring;
+pub(crate) use animation_authoring::{
+    numeric_curve_author_time, numeric_curve_author_value, preview_numeric_curve_edit,
+};
 mod animation_state;
 mod audio_authoring;
+mod audio_curve_clipboard;
 mod audio_idle_warmup;
 mod audio_monitoring;
 mod clip_authoring;
+#[cfg(test)]
+mod contextual_effect_authoring_tests;
+#[cfg(test)]
+mod contextual_effect_geometry_tests;
+mod native_audio_editor;
+mod resource_authoring;
+#[cfg(test)]
+pub(crate) mod test_curve_authoring;
 #[cfg(test)]
 mod test_fixture;
 pub use audio_monitoring::ActiveAudioMonitoringPathEvidence;
@@ -114,8 +129,12 @@ pub use audio_monitoring::ActiveAudioMonitoringPathEvidence;
 mod audio_playback_acceptance;
 mod audio_rendering;
 mod basic_titles;
+mod messages;
+pub use messages::{AppMessage, AppMessageValue};
+pub(crate) mod audio_input_observation;
 mod clip_clipboard;
 mod clip_retime;
+mod curve_clipboard;
 mod dynamic_hdr_authoring;
 #[cfg(any(test, feature = "validation"))]
 pub mod endurance_ancillary;
@@ -145,7 +164,7 @@ pub mod endurance_reference_output;
 pub mod endurance_run_request;
 pub(crate) mod endurance_shutdown;
 mod native_audio_catalog_restore;
-mod openfx_catalog;
+pub(crate) mod openfx_catalog;
 pub use endurance_shutdown::AppEnduranceShutdownEvidence;
 #[cfg(feature = "validation")]
 pub use endurance_shutdown::{AppEnduranceShutdownReceipt, AppEnduranceShutdownReceiptError};
@@ -221,6 +240,9 @@ pub(crate) mod preview_media_frame;
 mod preview_media_residency;
 pub(crate) mod preview_media_source;
 pub(crate) mod preview_media_task;
+pub(crate) mod preview_native_gui;
+pub(crate) mod preview_processor_feedback;
+mod preview_processor_sources;
 pub(crate) mod preview_quality;
 pub(crate) mod preview_raster_frame;
 pub(crate) mod preview_render_cache;
@@ -248,6 +270,7 @@ pub use project_packaging::{
     verify_portable_project_package, PortableDependencyFile, PortableDependencyInventory,
     PortableDependencyIssue, PortablePackageFile, PortablePackageManifest,
 };
+pub(crate) mod parameter_gesture;
 mod project_persistence;
 mod project_recovery;
 pub(crate) mod project_runtime;
@@ -349,14 +372,29 @@ pub struct SelectionState {
     pub selected_effect: Option<SelectedEffectRef>,
     /// Currently selected mask (canvas → effect controls).
     pub selected_mask: Option<(MaskId, ClipId, TrackId)>,
+    /// Transient per-Scope occurrence navigation, qualified by Sequence identity.
+    /// This is never persisted or included in author Undo history.
+    pub audio_scope_occurrences: HashMap<
+        (SequenceId, mondrian_core::AudioProcessingScopeId),
+        mondrian_timeline::AudioComponentAddress,
+    >,
 }
 
 #[derive(Debug, Clone, Default)]
 pub struct AnimationSelectionState {
+    pub(crate) audio_curve: Option<AudioCurveSelection>,
     pub active_property: Option<AnimationPropertySelection>,
     pub remembered_active_properties: HashMap<ClipId, AnimationParameterAddress>,
     pub selected_keyframes: HashSet<AnimationKeyframeSelection>,
     pub bubble_host: Option<AnimationBubbleHost>,
+}
+
+/// Explicit post-edit audio selection retained through temporarily absent Undo keys.
+#[derive(Debug, Clone)]
+pub(crate) struct AudioCurveSelection {
+    pub(crate) sequence_id: SequenceId,
+    pub(crate) target: mondrian_timeline::AudioAutomationTarget,
+    pub(crate) keyframe_ids: Vec<KeyframeId>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -369,7 +407,8 @@ pub enum AnimationBubbleHost {
 pub struct AnimationClipboardEntry {
     pub property: AnimationParameterAddress,
     pub relative_time: TimelineTime,
-    pub keyframe: Keyframe<PropertyValue>,
+    /// Complete schema-ordered canonical keys, preserving per-channel metadata.
+    pub channel_keyframes: Vec<Keyframe<mondrian_core::automation::AnimationChannelValue>>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -396,20 +435,40 @@ struct ClipClipboardEntry {
     audio_processing_scopes: Vec<mondrian_timeline::audio::AudioProcessingScope>,
 }
 
+/// Sole transient clipboard payload; copying replaces the previous author intent.
+#[derive(Debug, Clone)]
+enum AppClipboard {
+    AudioAutomation(audio_curve_clipboard::AudioAutomationClipboard),
+    AnimationKeyframes(AnimationClipboard),
+    Clips(ClipClipboard),
+}
+
 /// Active app clipboard payload kind.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AppClipboardKind {
+    /// Complete exact keys copied from a focused audio automation curve.
+    AudioAutomation,
     /// Animation keyframes copied from the selected clip.
     AnimationKeyframes,
     /// Timeline clips copied from the active sequence.
     Clips,
 }
 
+/// Identity of a transient status publication, independent of its display data.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct StatusPublicationId(uuid::Uuid);
+
+impl StatusPublicationId {
+    fn new() -> Self {
+        Self(uuid::Uuid::new_v4())
+    }
+}
+
 /// One user-visible runtime status message retained for diagnostics panels.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StatusLogEntry {
-    /// Human-readable status message.
-    pub message: String,
+    /// Language-neutral message resolved by the current UI locale.
+    pub message: AppMessage,
     /// Whether the message represents an error.
     pub is_error: bool,
 }
@@ -427,6 +486,13 @@ pub struct AppState {
     /// Sole mutable authority for the open Project document, asset library,
     /// navigation, author generations, and project-wide Undo/Redo.
     pub(crate) authoring: Option<AuthoringSession>,
+    pub(crate) active_parameter_gesture: Option<parameter_gesture::ActiveParameterGesture>,
+    native_audio_editor: Option<native_audio_editor::NativeAudioEditorProductContext>,
+    // App lifetime, not surface lifetime: replaced/closed contexts cannot reuse A.
+    native_parameter_query_serial: u64,
+    native_audio_author_work: Option<native_audio_editor::NativeAudioAuthorWork>,
+    native_audio_renderer: Option<std::sync::Weak<audio_rendering::TimelineAudioPcmRenderer>>,
+    pub(super) parameter_gesture_command: Option<parameter_gesture::ParameterGestureCommand>,
     /// Kernel-backed exclusive authority for the open Project runtime.
     ///
     /// Background persistence requests clone this same lease; Project
@@ -514,17 +580,19 @@ pub struct AppState {
     pub export_draft: TimelineExportDraft,
 
     // 底部状态栏提示（message, is_error）
-    pub status_hint: Option<(String, bool)>,
+    status_hint: Option<(AppMessage, bool)>,
+    status_publication_id: StatusPublicationId,
     /// Bounded history of user-visible status messages for diagnostics panels.
-    pub status_log: Vec<StatusLogEntry>,
+    status_log: Vec<StatusLogEntry>,
     /// Bounded, language-neutral facts for nonblocking terminal notifications.
     pub notifications: notifications::AppNotificationFeed,
+    /// Current bounded processor facts; this never owns native private state.
+    pub(crate) processor_feedback: preview_processor_feedback::PreviewProcessorFeedbackState,
 
     // 动画选择状态（timeline / inspector / future graph 共用）
     pub animation_selection: AnimationSelectionState,
-    pub animation_clipboard: Option<AnimationClipboard>,
-    pub clip_clipboard: Option<ClipClipboard>,
-    pub active_clipboard_kind: Option<AppClipboardKind>,
+    /// One current clipboard value; its kind is derived from its payload.
+    clipboard: Option<AppClipboard>,
 
     // 代理策略
     pub auto_proxy_enabled: bool,
@@ -549,8 +617,9 @@ pub struct AppState {
     /// Session-installed CLAP definitions shared by Preview and Export.
     clap_catalog: Option<Arc<InstalledClapAudioProcessorSpecResolver>>,
     native_audio_restore: Option<native_audio_catalog_restore::NativeAudioCatalogRestore>,
+    audio_input_observations: audio_input_observation::AudioInputObservationService,
     openfx_catalog: Option<openfx_catalog::OpenFxCatalog>,
-    completed_openfx_installs: Vec<PathBuf>,
+    completed_openfx_installs: Vec<openfx_catalog::OpenFxBundleSelection>,
     vst3_catalog: Option<Arc<InstalledVst3AudioProcessorSpecResolver>>,
     pub audio_source_cache: Arc<AudioSourceCache>,
     audio_idle_warmup: AudioIdleWarmupService,
@@ -582,6 +651,21 @@ struct NativeAudioProcessorSpecResolver {
 }
 
 impl IsolatedAudioProcessorSpecResolver for NativeAudioProcessorSpecResolver {
+    fn native_child_settlement_requirement(
+        &self,
+    ) -> mondrian_core::NativeChildSettlementRequirement {
+        use mondrian_core::NativeChildSettlementRequirement as Requirement;
+        // Both concrete installed catalogs forward the request's short borrow
+        // through their actual fresh probe. Preserve an unknown inner contract.
+        if self.clap.native_child_settlement_requirement() == Requirement::Unavailable
+            || self.vst3.native_child_settlement_requirement() == Requirement::Unavailable
+        {
+            Requirement::Unavailable
+        } else {
+            Requirement::Required
+        }
+    }
+
     fn resolve(
         &self,
         request: AudioProcessorPrepareRequest<'_>,
@@ -648,6 +732,12 @@ impl AppState {
         Self {
             event_bus: EventBus::new(),
             authoring: None,
+            active_parameter_gesture: None,
+            native_audio_editor: None,
+            native_parameter_query_serial: 0,
+            native_audio_author_work: None,
+            native_audio_renderer: None,
+            parameter_gesture_command: None,
             project_runtime_lease: None,
             retired_project_libraries: Vec::new(),
             project_persistence: ProjectPersistenceService::new(),
@@ -681,12 +771,13 @@ impl AppState {
             export_terminal_notifications_seen: HashSet::new(),
             export_draft: TimelineExportDraft::default(),
             status_hint: None,
+            status_publication_id: StatusPublicationId::new(),
             status_log: Vec::new(),
             notifications: notifications::AppNotificationFeed::default(),
+            processor_feedback: preview_processor_feedback::PreviewProcessorFeedbackState::default(
+            ),
             animation_selection: AnimationSelectionState::default(),
-            animation_clipboard: None,
-            clip_clipboard: None,
-            active_clipboard_kind: None,
+            clipboard: None,
             auto_proxy_enabled: false,
             proxy_generation: ProxyGenerationService::new(),
             proxy_terminal_observed_sequence: 0,
@@ -699,6 +790,8 @@ impl AppState {
             audio_processor_resolver: Arc::clone(&audio_processor_resolver),
             clap_catalog: None,
             native_audio_restore: None,
+            audio_input_observations:
+                audio_input_observation::AudioInputObservationService::default(),
             openfx_catalog: None,
             completed_openfx_installs: Vec::new(),
             vst3_catalog: None,
@@ -715,20 +808,35 @@ impl AppState {
         }
     }
 
-    pub fn set_status_hint(&mut self, message: impl Into<String>, is_error: bool) {
-        let message = message.into();
+    /// Observe the current language-neutral status and its error severity.
+    pub fn status_hint(&self) -> Option<&(AppMessage, bool)> {
+        self.status_hint.as_ref()
+    }
+
+    /// Observe bounded in-session status facts without permitting external mutation.
+    pub fn status_log(&self) -> &[StatusLogEntry] {
+        &self.status_log
+    }
+
+    /// Observe publication identity even when message data is unchanged.
+    pub(crate) const fn status_publication_id(&self) -> StatusPublicationId {
+        self.status_publication_id
+    }
+
+    /// Publish a language-neutral current status and retain its bounded history.
+    pub fn set_status_hint(&mut self, message: AppMessage, is_error: bool) {
+        self.status_publication_id = StatusPublicationId::new();
         self.status_hint = Some((message.clone(), is_error));
         self.push_status_log(message, is_error);
     }
 
+    /// Clear the current publication while retaining its bounded history.
     pub fn clear_status_hint(&mut self) {
+        self.status_publication_id = StatusPublicationId::new();
         self.status_hint = None;
     }
 
-    fn push_status_log(&mut self, message: String, is_error: bool) {
-        if message.trim().is_empty() {
-            return;
-        }
+    fn push_status_log(&mut self, message: AppMessage, is_error: bool) {
         if self
             .status_log
             .last()
@@ -861,6 +969,30 @@ impl AppState {
             .as_ref()
             .map(|session| session.author_generation().get())
             .unwrap_or(0)
+    }
+
+    pub(crate) fn native_visual_author_view(
+        &self,
+        sequence: SequenceId,
+        clip: ClipId,
+        effect: mondrian_core::EffectId,
+    ) -> mondrian_core::Result<mondrian_editor_state::NativeVisualAuthorView> {
+        let session = self.authoring.as_ref().ok_or_else(|| {
+            mondrian_core::MondrianError::WorkflowStepFailed {
+                step_id: "native_visual_author_view".to_owned(),
+                reason: "no open authoring Session".to_owned(),
+            }
+        })?;
+        session.native_visual_author_view(sequence, clip, effect)
+    }
+
+    pub(crate) fn native_visual_author_view_is_current(
+        &self,
+        view: &mondrian_editor_state::NativeVisualAuthorView,
+    ) -> bool {
+        self.authoring
+            .as_ref()
+            .is_some_and(|session| session.native_visual_author_view_is_current(view))
     }
 
     /// Process-local identity of the currently open Authoring Session.
@@ -1235,7 +1367,10 @@ impl AppState {
                 && terminal.evidence.generation == current_generation
                 && let Some(detail) = terminal.failure_detail
             {
-                self.set_status_hint(format!("代理生成失败：{detail}"), true);
+                self.set_status_hint(
+                    AppMessage::new("status-proxy-failed").with_text("detail", detail.clone()),
+                    true,
+                );
             }
         }
         let _ = self.refresh_internal_execution_resource_decision();
@@ -1280,14 +1415,19 @@ impl AppState {
                 Ok(Some(commit)) => {
                     if let Err(error) = self.consume_authoring_commit(commit) {
                         self.set_status_hint(
-                            format!("代理模式已修改，但播放绑定失败：{error}"),
+                            AppMessage::new("status-proxy-binding-failed")
+                                .with_text("error", error.to_string()),
                             true,
                         );
                     }
                 }
                 Ok(None) => {}
                 Err(error) => {
-                    self.set_status_hint(format!("切换代理模式失败：{error}"), true);
+                    self.set_status_hint(
+                        AppMessage::new("status-proxy-switch-failed")
+                            .with_text("error", error.to_string()),
+                        true,
+                    );
                 }
             }
         }
@@ -1317,30 +1457,50 @@ mod status_log_tests {
     fn set_status_hint_records_bounded_status_log_without_duplicate_tail() {
         let mut state = AppState::new();
 
-        state.set_status_hint("Ready", false);
-        state.set_status_hint("Ready", false);
-        state.set_status_hint("Failed", true);
+        state.set_status_hint(
+            AppMessage::new("status-opaque-detail").with_text("detail", "Ready"),
+            false,
+        );
+        state.set_status_hint(
+            AppMessage::new("status-opaque-detail").with_text("detail", "Ready"),
+            false,
+        );
+        state.set_status_hint(
+            AppMessage::new("status-opaque-detail").with_text("detail", "Failed"),
+            true,
+        );
 
         assert_eq!(
             state.status_log,
             vec![
-                StatusLogEntry { message: "Ready".to_owned(), is_error: false },
-                StatusLogEntry { message: "Failed".to_owned(), is_error: true },
+                StatusLogEntry {
+                    message: AppMessage::new("status-opaque-detail").with_text("detail", "Ready"),
+                    is_error: false
+                },
+                StatusLogEntry {
+                    message: AppMessage::new("status-opaque-detail").with_text("detail", "Failed"),
+                    is_error: true
+                },
             ]
         );
 
         for index in 0..(MAX_STATUS_LOG_ENTRIES + 4) {
-            state.set_status_hint(format!("Message {index}"), false);
+            state.set_status_hint(
+                AppMessage::new("status-opaque-detail")
+                    .with_text("detail", format!("Message {index}")),
+                false,
+            );
         }
 
         assert_eq!(state.status_log.len(), MAX_STATUS_LOG_ENTRIES);
         assert_eq!(
             state.status_log.first().expect("first status").message,
-            "Message 4"
+            AppMessage::new("status-opaque-detail").with_text("detail", "Message 4")
         );
         assert_eq!(
             state.status_log.last().expect("last status").message,
-            format!("Message {}", MAX_STATUS_LOG_ENTRIES + 3)
+            AppMessage::new("status-opaque-detail")
+                .with_text("detail", format!("Message {}", MAX_STATUS_LOG_ENTRIES + 3))
         );
     }
 
@@ -1348,12 +1508,18 @@ mod status_log_tests {
     fn clear_status_hint_preserves_status_log_history() {
         let mut state = AppState::new();
 
-        state.set_status_hint("Saved", false);
+        state.set_status_hint(
+            AppMessage::new("status-opaque-detail").with_text("detail", "Saved"),
+            false,
+        );
         state.clear_status_hint();
 
         assert!(state.status_hint.is_none());
         assert_eq!(state.status_log.len(), 1);
-        assert_eq!(state.status_log[0].message, "Saved");
+        assert_eq!(
+            state.status_log[0].message,
+            AppMessage::new("status-opaque-detail").with_text("detail", "Saved")
+        );
     }
 }
 

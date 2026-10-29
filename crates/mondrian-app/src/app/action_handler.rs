@@ -8,13 +8,13 @@ use crate::app::preview_quality::normalize_preview_resolution_scale;
 use crate::app::product_action::{
     AssetAudioComponentRebindPayload, AssetLibraryMovePayload, AssetLibrarySelectionPayload,
     AssetProductAction, AssetRelinkPayload, AssetRenameFolderPayload, AssetRenamePayload,
-    AssetSetInterpretationPayload, AssetSetProxyModePayload, AssetTargetPayload,
-    ClipCurveEditPayload, ClipProductAction, ExportDraftEdit, ExportProductAction, ProductAction,
-    ProjectCreateWithSettingsPayload, ProjectProductAction, ProjectRecoverFromAutosavePayload,
-    SequenceProductAction, SequenceUpdateSettingsPayload, TimelineClipSelectionModePayload,
-    TimelineProductAction, TrackAddKind, TrackAuthorControl, TrackEditPolicyControl,
-    TrackProductAction, VideoTransitionProductAction, VideoTransitionTargetPayload,
-    ViewerProductAction, VisualEffectProductAction, VisualEffectSetParameterValuePayload,
+    AssetSetInterpretationPayload, AssetSetProxyModePayload, AssetTargetPayload, ClipProductAction,
+    ExportDraftEdit, ExportProductAction, ProductAction, ProjectCreateWithSettingsPayload,
+    ProjectProductAction, ProjectRecoverFromAutosavePayload, SequenceProductAction,
+    SequenceUpdateSettingsPayload, TimelineClipSelectionModePayload, TimelineProductAction,
+    TrackAddKind, TrackAuthorControl, TrackEditPolicyControl, TrackProductAction,
+    VideoTransitionProductAction, VideoTransitionTargetPayload, ViewerProductAction,
+    VisualEffectProductAction, VisualEffectSetParameterValuePayload,
 };
 #[cfg(test)]
 use crate::app::product_action::{
@@ -25,6 +25,7 @@ use crate::app::proxy_generation::{
 };
 use crate::app::selection::resolve_track_selection;
 use crate::app::timeline_position::lower_nearest_sequence_frame;
+use crate::app::AppMessage;
 #[cfg(test)]
 use crate::app::SelectedClipRef;
 use crate::app::{AppClipboardKind, AppState, ClipOverlapMode, ClipSelectionMode};
@@ -70,6 +71,10 @@ impl AppState {
                 reason: "项目正在打开或安全关闭，或持久化所有权未能证明；作者操作保持冻结"
                     .to_owned(),
             });
+        }
+
+        if let Some(gesture) = super::parameter_gesture::ParameterGestureAction::decode(&action)? {
+            return self.dispatch_parameter_gesture(gesture);
         }
 
         if let Some(product_action) = ProductAction::decode_external(&action).map_err(|error| {
@@ -201,7 +206,7 @@ impl AppState {
             Action::OpenProject(path) => self.open_project_from_action(path),
             Action::SaveProject => {
                 self.request_project_save().map_err(mondrian_core::MondrianError::Other)?;
-                self.set_status_hint("正在后台保存项目…", false);
+                self.set_status_hint(AppMessage::new("status-saving"), false);
                 Ok(())
             }
             Action::SaveProjectAs(path) => self.save_project_as_from_action(path),
@@ -267,8 +272,9 @@ impl AppState {
             let copied = self.copy_selected_clips_to_clipboard()?;
             return require_action_executed(copied, "copy", "当前没有可复制的片段");
         };
-        if self.copy_selected_animation_keyframes(selection)? {
-            Ok(())
+        if self.has_selected_animation_keyframes_for_clip(selection.clip_id) {
+            let copied = self.copy_selected_animation_keyframes(selection)?;
+            require_action_executed(copied, "copy", "当前没有可复制的动画关键帧")
         } else {
             let copied = self.copy_selected_clips_to_clipboard()?;
             require_action_executed(copied, "copy", "当前没有可复制的片段")
@@ -286,7 +292,11 @@ impl AppState {
         }
         self.request_project_open(path).map_err(|err| {
             let reason = err.to_string();
-            self.set_status_hint(format!("打开项目失败：{reason}"), true);
+            self.set_status_hint(
+                AppMessage::new("status-open-failed")
+                    .with_message("reason", AppMessage::from_anyhow(&err)),
+                true,
+            );
             MondrianError::WorkflowStepFailed { step_id: "open_project".to_string(), reason }
         })
     }
@@ -297,7 +307,11 @@ impl AppState {
         }
         if !self.has_open_project() {
             let reason = "当前无可另存项目".to_string();
-            self.set_status_hint(reason.clone(), true);
+            self.set_status_hint(
+                AppMessage::new("status-save-failed")
+                    .with_message("error", AppMessage::new("reason-no-project-save-as")),
+                true,
+            );
             return Err(MondrianError::WorkflowStepFailed {
                 step_id: "save_project_as".to_string(),
                 reason,
@@ -306,10 +320,18 @@ impl AppState {
         let display_path = super::ensure_project_extension(path.clone());
         self.request_project_save_as(path).map_err(|err| {
             let reason = err.to_string();
-            self.set_status_hint(format!("无法启动另存为：{reason}"), true);
+            self.set_status_hint(
+                AppMessage::new("status-save-as-failed")
+                    .with_message("reason", AppMessage::from_anyhow(&err)),
+                true,
+            );
             MondrianError::WorkflowStepFailed { step_id: "save_project_as".to_string(), reason }
         })?;
-        self.set_status_hint(format!("正在后台另存为：{}", display_path.display()), false);
+        self.set_status_hint(
+            AppMessage::new("status-save-as-started")
+                .with_text("path", (display_path.display()).to_string()),
+            false,
+        );
         Ok(())
     }
 
@@ -338,10 +360,18 @@ impl AppState {
         )
         .map_err(|err| {
             let reason = err.to_string();
-            self.set_status_hint(format!("新建项目失败：{reason}"), true);
+            self.set_status_hint(
+                AppMessage::new("status-create-project-failed")
+                    .with_message("reason", AppMessage::from_anyhow(&err)),
+                true,
+            );
             MondrianError::WorkflowStepFailed { step_id: "create_project".to_string(), reason }
         })?;
-        self.set_status_hint(format!("项目已创建：{}", project_file.display()), false);
+        self.set_status_hint(
+            AppMessage::new("status-created-project")
+                .with_text("path", (project_file.display()).to_string()),
+            false,
+        );
         Ok(())
     }
 
@@ -352,11 +382,16 @@ impl AppState {
         let project_file = payload.candidate.project_file.clone();
         self.open_project_from_autosave_snapshot(payload.candidate).map_err(|err| {
             let reason = err.to_string();
-            self.set_status_hint(format!("恢复自动保存失败：{reason}"), true);
+            self.set_status_hint(
+                AppMessage::new("status-recovery-failed")
+                    .with_message("reason", AppMessage::from_anyhow(&err)),
+                true,
+            );
             MondrianError::WorkflowStepFailed { step_id: "recover_project".to_string(), reason }
         })?;
         self.set_status_hint(
-            format!("已从自动保存恢复：{}", project_file.display()),
+            AppMessage::new("status-recovered")
+                .with_text("path", (project_file.display()).to_string()),
             false,
         );
         Ok(())
@@ -379,7 +414,11 @@ impl AppState {
         }
         if paths.iter().any(|path| path.as_os_str().is_empty()) {
             let reason = "媒体路径不能为空".to_string();
-            self.set_status_hint(format!("导入失败：{reason}"), true);
+            self.set_status_hint(
+                AppMessage::new("status-import-failed")
+                    .with_message("reason", AppMessage::new("reason-empty-media-path")),
+                true,
+            );
             return Err(MondrianError::WorkflowStepFailed {
                 step_id: "import_media".to_string(),
                 reason,
@@ -388,7 +427,11 @@ impl AppState {
 
         let library = self.asset_library_handle().ok_or_else(|| {
             let reason = "素材库未连接".to_string();
-            self.set_status_hint(format!("导入失败：{reason}"), true);
+            self.set_status_hint(
+                AppMessage::new("status-import-failed")
+                    .with_message("reason", AppMessage::new("reason-library-disconnected")),
+                true,
+            );
             MondrianError::WorkflowStepFailed { step_id: "import_media".to_string(), reason }
         })?;
 
@@ -396,7 +439,10 @@ impl AppState {
             && !library.folder_exists(folder_id)?
         {
             let reason = format!("目标素材文件夹不存在：{folder_id}");
-            self.set_status_hint(format!("导入失败：{reason}"), true);
+            self.set_status_hint(
+                AppMessage::new("status-import-failed").with_text("reason", reason.clone()),
+                true,
+            );
             return Err(MondrianError::WorkflowStepFailed {
                 step_id: "import_media".to_string(),
                 reason,
@@ -415,10 +461,14 @@ impl AppState {
         )
         .map_err(|err| {
             let reason = err.to_string();
-            self.set_status_hint(format!("重新链接素材失败：{reason}"), true);
+            self.set_status_hint(
+                AppMessage::new("status-relink-failed")
+                    .with_message("reason", AppMessage::from_error(&err)),
+                true,
+            );
             MondrianError::WorkflowStepFailed { step_id: "relink_asset".to_string(), reason }
         })?;
-        self.set_status_hint("正在分析重新链接的媒体…".to_owned(), false);
+        self.set_status_hint(AppMessage::new("status-relink-analyzing"), false);
         Ok(())
     }
 
@@ -430,13 +480,17 @@ impl AppState {
         )
         .map_err(|error| {
             let reason = error.to_string();
-            self.set_status_hint(format!("音频 Component 探测失败：{reason}"), true);
+            self.set_status_hint(
+                AppMessage::new("status-audio-probe-failed")
+                    .with_message("reason", AppMessage::from_error(&error)),
+                true,
+            );
             MondrianError::WorkflowStepFailed {
                 step_id: "assets_refresh_audio_components".to_string(),
                 reason,
             }
         })?;
-        self.set_status_hint("正在刷新音频流候选…".to_owned(), false);
+        self.set_status_hint(AppMessage::new("status-audio-probe-started"), false);
         Ok(())
     }
 
@@ -454,20 +508,28 @@ impl AppState {
         )
         .map_err(|error| {
             let reason = error.to_string();
-            self.set_status_hint(format!("音频 Component 重绑定失败：{reason}"), true);
+            self.set_status_hint(
+                AppMessage::new("status-audio-rebind-failed")
+                    .with_message("reason", AppMessage::from_error(&error)),
+                true,
+            );
             MondrianError::WorkflowStepFailed {
                 step_id: "assets_rebind_audio_component".to_string(),
                 reason,
             }
         })?;
-        self.set_status_hint("正在验证音频 Component 重绑定…".to_owned(), false);
+        self.set_status_hint(AppMessage::new("status-audio-rebind-started"), false);
         Ok(())
     }
 
     fn rename_asset_from_ui(&mut self, payload: AssetRenamePayload) -> Result<()> {
         let library = self.asset_library_handle().ok_or_else(|| {
             let reason = "素材库未连接".to_string();
-            self.set_status_hint(format!("重命名素材失败：{reason}"), true);
+            self.set_status_hint(
+                AppMessage::new("status-rename-asset-failed")
+                    .with_message("reason", AppMessage::new("reason-library-disconnected")),
+                true,
+            );
             MondrianError::WorkflowStepFailed { step_id: "rename_asset".to_string(), reason }
         })?;
         let requested_name = payload.name.trim();
@@ -485,11 +547,19 @@ impl AppState {
         }
         library.rename_asset(payload.asset_id, &payload.name).map_err(|err| {
             let reason = err.to_string();
-            self.set_status_hint(format!("重命名素材失败：{reason}"), true);
+            self.set_status_hint(
+                AppMessage::new("status-rename-asset-failed")
+                    .with_message("reason", AppMessage::from_error(&err)),
+                true,
+            );
             MondrianError::WorkflowStepFailed { step_id: "rename_asset".to_string(), reason }
         })?;
         self.event_bus.publish(mondrian_core::events::AppEvent::AssetLibraryReloaded);
-        self.set_status_hint(format!("已重命名素材：{}", payload.name.trim()), false);
+        self.set_status_hint(
+            AppMessage::new("status-renamed-asset")
+                .with_text("name", (payload.name.trim()).to_string()),
+            false,
+        );
         Ok(())
     }
 
@@ -505,7 +575,11 @@ impl AppState {
         })?;
         let library = self.asset_library_handle().ok_or_else(|| {
             let reason = "素材库未连接".to_string();
-            self.set_status_hint(format!("解释素材失败：{reason}"), true);
+            self.set_status_hint(
+                AppMessage::new("status-interpret-failed")
+                    .with_message("reason", AppMessage::new("reason-library-disconnected")),
+                true,
+            );
             MondrianError::WorkflowStepFailed {
                 step_id: "set_asset_interpretation".to_string(),
                 reason,
@@ -528,21 +602,32 @@ impl AppState {
             .set_asset_interpretation(payload.asset_id, payload.interpretation)
             .map_err(|err| {
                 let reason = err.to_string();
-                self.set_status_hint(format!("解释素材失败：{reason}"), true);
+                self.set_status_hint(
+                    AppMessage::new("status-interpret-failed")
+                        .with_message("reason", AppMessage::from_error(&err)),
+                    true,
+                );
                 MondrianError::WorkflowStepFailed {
                     step_id: "set_asset_interpretation".to_string(),
                     reason,
                 }
             })?;
         self.event_bus.publish(AppEvent::AssetLibraryReloaded);
-        self.set_status_hint(format!("已更新素材解释：{asset_name}"), false);
+        self.set_status_hint(
+            AppMessage::new("status-interpreted").with_text("asset_name", asset_name.clone()),
+            false,
+        );
         Ok(())
     }
 
     fn rename_folder_from_ui(&mut self, payload: AssetRenameFolderPayload) -> Result<()> {
         let library = self.asset_library_handle().ok_or_else(|| {
             let reason = "素材库未连接".to_string();
-            self.set_status_hint(format!("重命名文件夹失败：{reason}"), true);
+            self.set_status_hint(
+                AppMessage::new("status-rename-folder-failed")
+                    .with_message("reason", AppMessage::new("reason-library-disconnected")),
+                true,
+            );
             MondrianError::WorkflowStepFailed { step_id: "rename_folder".to_string(), reason }
         })?;
         let requested_name = payload.name.trim();
@@ -561,34 +646,51 @@ impl AppState {
         }
         library.rename_folder(&payload.folder_id, &payload.name).map_err(|err| {
             let reason = err.to_string();
-            self.set_status_hint(format!("重命名文件夹失败：{reason}"), true);
+            self.set_status_hint(
+                AppMessage::new("status-rename-folder-failed")
+                    .with_message("reason", AppMessage::from_error(&err)),
+                true,
+            );
             MondrianError::WorkflowStepFailed { step_id: "rename_folder".to_string(), reason }
         })?;
         self.event_bus.publish(mondrian_core::events::AppEvent::AssetLibraryReloaded);
-        self.set_status_hint(format!("已重命名文件夹：{}", payload.name.trim()), false);
+        self.set_status_hint(
+            AppMessage::new("status-renamed-folder")
+                .with_text("name", (payload.name.trim()).to_string()),
+            false,
+        );
         Ok(())
     }
 
     fn set_asset_proxy_mode_from_ui(&mut self, payload: AssetSetProxyModePayload) -> Result<()> {
         let library = self.asset_library_handle().ok_or_else(|| {
             let reason = "素材库未连接".to_string();
-            self.set_status_hint(format!("设置代理模式失败：{reason}"), true);
+            self.set_status_hint(
+                AppMessage::new("status-proxy-mode-failed")
+                    .with_message("reason", AppMessage::new("reason-library-disconnected")),
+                true,
+            );
             MondrianError::WorkflowStepFailed {
                 step_id: "set_asset_proxy_mode".to_string(),
                 reason,
             }
         })?;
         let asset = library.get_asset(payload.asset_id)?.ok_or_else(|| {
-            let reason = format!("素材不存在：{}", payload.asset_id);
-            self.set_status_hint(format!("设置代理模式失败：{reason}"), true);
-            MondrianError::WorkflowStepFailed {
-                step_id: "set_asset_proxy_mode".to_string(),
-                reason,
-            }
+            let error = MondrianError::AssetNotFound { asset_id: payload.asset_id.to_string() };
+            self.set_status_hint(
+                AppMessage::new("status-proxy-mode-failed")
+                    .with_message("reason", AppMessage::from_error(&error)),
+                true,
+            );
+            error
         })?;
         if !matches!(asset.kind, AssetKind::Video) {
             let reason = "只有视频素材支持代理模式".to_string();
-            self.set_status_hint(format!("设置代理模式失败：{reason}"), true);
+            self.set_status_hint(
+                AppMessage::new("status-proxy-mode-failed")
+                    .with_message("reason", AppMessage::new("reason-proxy-video-only")),
+                true,
+            );
             return Err(MondrianError::WorkflowStepFailed {
                 step_id: "set_asset_proxy_mode".to_string(),
                 reason,
@@ -603,7 +705,11 @@ impl AppState {
         let source_path = asset.file_path().map(PathBuf::from);
         if payload.enabled && source_path.as_ref().is_none_or(|source_path| !source_path.exists()) {
             let reason = "素材文件不存在，请先重新链接媒体".to_string();
-            self.set_status_hint(format!("设置代理模式失败：{reason}"), true);
+            self.set_status_hint(
+                AppMessage::new("status-proxy-mode-failed")
+                    .with_message("reason", AppMessage::new("reason-proxy-source-missing")),
+                true,
+            );
             return Err(MondrianError::WorkflowStepFailed {
                 step_id: "set_asset_proxy_mode".to_string(),
                 reason,
@@ -611,7 +717,11 @@ impl AppState {
         }
         if payload.enabled && !self.project_settings().proxy_enabled {
             let reason = "项目已禁用代理工作流，请先在项目设置中启用代理".to_string();
-            self.set_status_hint(format!("设置代理模式失败：{reason}"), true);
+            self.set_status_hint(
+                AppMessage::new("status-proxy-mode-failed")
+                    .with_message("reason", AppMessage::new("reason-proxy-project-disabled")),
+                true,
+            );
             return Err(MondrianError::WorkflowStepFailed {
                 step_id: "set_asset_proxy_mode".to_string(),
                 reason,
@@ -619,9 +729,9 @@ impl AppState {
         }
 
         let mut status = if payload.enabled {
-            format!("已开启代理模式：{}", asset.name)
+            AppMessage::new("status-proxy-enabled").with_text("name", asset.name.to_string())
         } else {
-            format!("已关闭代理模式：{}", asset.name)
+            AppMessage::new("status-proxy-disabled").with_text("name", asset.name.to_string())
         };
         if payload.enabled {
             let source_path = source_path.ok_or_else(|| MondrianError::WorkflowStepFailed {
@@ -631,7 +741,11 @@ impl AppState {
             let proxy_config = self.proxy_config();
             let proxy_color =
                 resolve_app_state_proxy_color_contract(self, &asset).map_err(|reason| {
-                    self.set_status_hint(format!("无法启用代理：{reason}"), true);
+                    self.set_status_hint(
+                        AppMessage::new("status-proxy-enable-failed")
+                            .with_text("reason", reason.clone()),
+                        true,
+                    );
                     MondrianError::WorkflowStepFailed {
                         step_id: "set_asset_proxy_mode".to_owned(),
                         reason,
@@ -648,23 +762,27 @@ impl AppState {
                 ProxyGenerationRequestOutcome::Admitted {
                     prior_status: mondrian_media::ProxyStatus::Missing,
                 } => {
-                    status.push_str("（后台生成中）");
+                    status.id = "status-proxy-generating";
                 }
                 ProxyGenerationRequestOutcome::Admitted {
                     prior_status: mondrian_media::ProxyStatus::Stale,
                 } => {
-                    status.push_str("（代理过期，后台重新生成中）");
+                    status.id = "status-proxy-regenerating";
                 }
                 ProxyGenerationRequestOutcome::Admitted {
                     prior_status: mondrian_media::ProxyStatus::Fresh,
                 } => {}
                 ProxyGenerationRequestOutcome::Deduplicated { .. } => {
-                    status.push_str("（后台生成中）");
+                    status.id = "status-proxy-generating";
                 }
                 ProxyGenerationRequestOutcome::RetainedFailure(failure)
                 | ProxyGenerationRequestOutcome::Failed(failure) => {
                     let reason = failure.detail;
-                    self.set_status_hint(format!("无法启用代理：{reason}"), true);
+                    self.set_status_hint(
+                        AppMessage::new("status-proxy-enable-failed")
+                            .with_text("reason", reason.clone()),
+                        true,
+                    );
                     return Err(MondrianError::WorkflowStepFailed {
                         step_id: "set_asset_proxy_mode".to_owned(),
                         reason,
@@ -689,7 +807,11 @@ impl AppState {
         }
         let library = self.asset_library_handle().ok_or_else(|| {
             let reason = "素材库未连接".to_string();
-            self.set_status_hint(format!("删除素材选择失败：{reason}"), true);
+            self.set_status_hint(
+                AppMessage::new("status-remove-assets-failed")
+                    .with_message("reason", AppMessage::new("reason-library-disconnected")),
+                true,
+            );
             MondrianError::WorkflowStepFailed {
                 step_id: "remove_asset_library_entries".to_string(),
                 reason,
@@ -710,7 +832,11 @@ impl AppState {
             .retire_assets_and_delete_folders(&payload.asset_ids, &payload.folder_ids)
             .map_err(|err| {
                 let reason = err.to_string();
-                self.set_status_hint(format!("删除素材选择失败：{reason}"), true);
+                self.set_status_hint(
+                    AppMessage::new("status-remove-assets-failed")
+                        .with_message("reason", AppMessage::from_error(&err)),
+                    true,
+                );
                 MondrianError::WorkflowStepFailed {
                     step_id: "remove_asset_library_entries".to_string(),
                     reason,
@@ -734,16 +860,19 @@ impl AppState {
         self.event_bus.publish(mondrian_core::events::AppEvent::AssetLibraryReloaded);
         if let Some(subject) = single_subject {
             let message = match subject {
-                AssetLibrarySubject::Asset(name) => format!("已从素材面板移除：{name}"),
-                AssetLibrarySubject::Folder(name) => format!("已删除文件夹：{name}"),
+                AssetLibrarySubject::Asset(name) => {
+                    AppMessage::new("status-removed-asset").with_text("name", name.clone())
+                }
+                AssetLibrarySubject::Folder(name) => {
+                    AppMessage::new("status-removed-folder").with_text("name", name.clone())
+                }
             };
             self.set_status_hint(message, false);
         } else {
             self.set_status_hint(
-                format!(
-                    "已从素材面板移除 {} 个素材、删除 {} 个文件夹",
-                    outcome.retired_assets, outcome.deleted_folders
-                ),
+                AppMessage::new("status-removed-selection")
+                    .with_count("assets", outcome.retired_assets)
+                    .with_count("folders", outcome.deleted_folders),
                 false,
             );
         }
@@ -768,7 +897,11 @@ impl AppState {
         }
         let library = self.asset_library_handle().ok_or_else(|| {
             let reason = "素材库未连接".to_string();
-            self.set_status_hint(format!("移动素材选择失败：{reason}"), true);
+            self.set_status_hint(
+                AppMessage::new("status-move-assets-failed")
+                    .with_message("reason", AppMessage::new("reason-library-disconnected")),
+                true,
+            );
             MondrianError::WorkflowStepFailed {
                 step_id: "move_asset_library_entries".to_string(),
                 reason,
@@ -776,7 +909,11 @@ impl AppState {
         })?;
         let folders = library.list_folders().map_err(|err| {
             let reason = err.to_string();
-            self.set_status_hint(format!("移动素材选择失败：{reason}"), true);
+            self.set_status_hint(
+                AppMessage::new("status-move-assets-failed")
+                    .with_message("reason", AppMessage::from_error(&err)),
+                true,
+            );
             MondrianError::WorkflowStepFailed {
                 step_id: "move_asset_library_entries".to_string(),
                 reason,
@@ -797,8 +934,12 @@ impl AppState {
                 .iter()
                 .find(|folder| folder.id == folder_id)
                 .map(|folder| folder.name.clone())
-                .unwrap_or_else(|| folder_id.to_string()),
-            None => "All assets".to_string(),
+                .map(|name| AppMessage::new("status-opaque-detail").with_text("detail", name))
+                .unwrap_or_else(|| {
+                    AppMessage::new("status-opaque-detail")
+                        .with_text("detail", folder_id.to_string())
+                }),
+            None => AppMessage::new("asset-all"),
         };
         let outcome = library
             .move_assets_and_folders(
@@ -808,7 +949,11 @@ impl AppState {
             )
             .map_err(|err| {
                 let reason = err.to_string();
-                self.set_status_hint(format!("移动素材选择失败：{reason}"), true);
+                self.set_status_hint(
+                    AppMessage::new("status-move-assets-failed")
+                        .with_message("reason", AppMessage::from_error(&err)),
+                    true,
+                );
                 MondrianError::WorkflowStepFailed {
                     step_id: "move_asset_library_entries".to_string(),
                     reason,
@@ -824,20 +969,20 @@ impl AppState {
         self.event_bus.publish(mondrian_core::events::AppEvent::AssetLibraryReloaded);
         if let Some(subject) = single_subject {
             let message = match subject {
-                AssetLibrarySubject::Asset(name) => {
-                    format!("已移动素材：{name} → {target_name}")
-                }
-                AssetLibrarySubject::Folder(name) => {
-                    format!("已移动文件夹：{name} → {target_name}")
-                }
+                AssetLibrarySubject::Asset(name) => AppMessage::new("status-moved-asset")
+                    .with_text("name", name.clone())
+                    .with_message("target_name", target_name),
+                AssetLibrarySubject::Folder(name) => AppMessage::new("status-moved-folder")
+                    .with_text("name", name.clone())
+                    .with_message("target_name", target_name),
             };
             self.set_status_hint(message, false);
         } else {
             self.set_status_hint(
-                format!(
-                    "已移动 {} 个素材、{} 个文件夹 → {target_name}",
-                    outcome.moved_assets, outcome.moved_folders
-                ),
+                AppMessage::new("status-moved-selection")
+                    .with_count("assets", outcome.moved_assets)
+                    .with_count("folders", outcome.moved_folders)
+                    .with_message("target_name", target_name),
                 false,
             );
         }
@@ -862,18 +1007,15 @@ impl AppState {
                 "剪贴板为空或当前没有可用的粘贴目标",
             ));
         }
-        match self.active_clipboard_kind {
-            Some(AppClipboardKind::AnimationKeyframes) => self
-                .paste_animation_keyframes_from_action()
-                .or_else(|_| self.paste_clip_clipboard_from_action()),
-            Some(AppClipboardKind::Clips) => self.paste_clip_clipboard_from_action(),
-            None => {
-                if self.has_animation_clipboard() {
-                    self.paste_animation_keyframes_from_action()
-                } else {
-                    self.paste_clip_clipboard_from_action()
-                }
+        match self.active_clipboard_kind() {
+            Some(AppClipboardKind::AnimationKeyframes) => {
+                self.paste_animation_keyframes_from_action()
             }
+            Some(AppClipboardKind::Clips) => self.paste_clip_clipboard_from_action(),
+            Some(AppClipboardKind::AudioAutomation) | None => Err(action_not_executed(
+                "paste",
+                "剪贴板为空或当前没有可用的粘贴目标",
+            )),
         }
     }
 
@@ -1098,7 +1240,7 @@ impl AppState {
         self.authoring_history().is_some_and(|history| history.can_redo())
     }
 
-    fn dispatch_product_action(&mut self, action: ProductAction) -> Result<()> {
+    pub(super) fn dispatch_product_action(&mut self, action: ProductAction) -> Result<()> {
         match action {
             ProductAction::Timeline(action) => self.dispatch_timeline_product_action(action),
             ProductAction::Track(action) => self.dispatch_track_product_action(action),
@@ -1181,11 +1323,18 @@ impl AppState {
                 ) {
                     Ok(outcome) => {
                         self.select_video_transition_by_id(outcome.transition_id);
-                        self.set_status_hint("已创建交叉溶解", false);
+                        self.set_status_hint(
+                            AppMessage::new("status-cross-dissolve-created"),
+                            false,
+                        );
                         Ok(())
                     }
                     Err(error) => {
-                        self.set_status_hint(format!("无法创建交叉溶解：{error}"), true);
+                        self.set_status_hint(
+                            AppMessage::new("status-cross-dissolve-failed")
+                                .with_text("error", error.to_string()),
+                            true,
+                        );
                         Err(error)
                     }
                 }
@@ -1206,7 +1355,11 @@ impl AppState {
                         Ok(())
                     }
                     Err(error) => {
-                        self.set_status_hint(format!("无法调整视频转场：{error}"), true);
+                        self.set_status_hint(
+                            AppMessage::new("status-transition-update-failed")
+                                .with_text("error", error.to_string()),
+                            true,
+                        );
                         Err(error)
                     }
                 }
@@ -1327,7 +1480,10 @@ impl AppState {
     ) -> Result<()> {
         match action {
             VisualEffectProductAction::InstallOpenFxBundle(payload) => {
-                self.install_openfx_bundle(payload.path)
+                self.install_openfx_bundle(super::openfx_catalog::OpenFxBundleSelection {
+                    path: payload.path,
+                    context: payload.context,
+                })
             }
             VisualEffectProductAction::AddToClip(payload) => {
                 let effect_id = self.add_effect_to_clip(payload.clip_id, payload.effect_type)?;
@@ -1372,22 +1528,33 @@ impl AppState {
                 "visual_effect_reorder",
                 "Effect chain already has the requested relative order",
             ),
-            VisualEffectProductAction::SetParameterValue(payload) => require_action_executed(
-                self.set_effect_parameter_value(*payload)?,
-                "visual_effect_set_parameter_value",
-                "Effect parameter already has the requested value at the current author time",
-            ),
+            VisualEffectProductAction::SetParameterValue(payload) => {
+                let changed = self.set_effect_parameter_value(*payload)?;
+                if self.parameter_gesture_command.is_some() {
+                    Ok(())
+                } else {
+                    require_action_executed(changed, "visual_effect_set_parameter_value", "Effect parameter already has the requested value at the current author time")
+                }
+            }
             VisualEffectProductAction::EditNumericCurve(payload) => {
                 let edit = super::clip_authoring::numeric_curve_edit_from_payload(&payload.edit)?;
                 let clip_id = payload.clip_id;
                 let property = payload.parameter.clone();
-                let removing = matches!(&payload.edit, ClipCurveEditPayload::Remove { .. });
+                let retained_keys =
+                    payload.edit.retained_group_keyframe_ids().map(|ids| ids.to_vec());
+                let removed_keys = payload
+                    .edit
+                    .removed_keyframe_ids()
+                    .map(|ids| ids.iter().copied().collect::<std::collections::HashSet<_>>());
                 let outcome = self.edit_effect_numeric_curve(
                     payload.clip_id,
                     payload.effect_id,
                     payload.parameter,
                     edit,
                 )?;
+                if !outcome.changed && self.parameter_gesture_command.is_some() {
+                    return Ok(());
+                }
                 require_action_executed(
                     outcome.changed,
                     "visual_effect_edit_numeric_curve",
@@ -1400,9 +1567,21 @@ impl AppState {
                     },
                     keyframe_id: outcome.keyframe_id,
                 };
-                if removing {
-                    self.animation_selection.selected_keyframes.remove(&key_selection);
+                if let Some(removed_keys) = removed_keys {
+                    self.animation_selection.selected_keyframes.retain(|selected| {
+                        selected.property != key_selection.property
+                            || !removed_keys.contains(&selected.keyframe_id)
+                    });
                     self.set_active_animation_property(clip_id, property);
+                } else if let Some(ids) = retained_keys {
+                    self.set_animation_keyframe_selection(
+                        ids.into_iter()
+                            .map(|keyframe_id| crate::app::AnimationKeyframeSelection {
+                                property: key_selection.property.clone(),
+                                keyframe_id,
+                            })
+                            .collect(),
+                    );
                 } else {
                     self.select_animation_keyframe_only(key_selection);
                 }
@@ -1528,16 +1707,28 @@ impl AppState {
                 "clip_hold_frame",
                 "Clip already holds the requested source picture",
             ),
-            ClipProductAction::WriteParameterValues(payload) => require_action_executed(
-                self.write_clip_parameter_values(*payload)?,
-                "clip_write_parameter_values",
-                "Clip parameters already have the requested values at the current author time",
-            ),
+            ClipProductAction::WriteParameterValues(payload) => {
+                let changed = self.write_clip_parameter_values(*payload)?;
+                if self.parameter_gesture_command.is_some() {
+                    Ok(())
+                } else {
+                    require_action_executed(changed, "clip_write_parameter_values", "Clip parameters already have the requested values at the current author time")
+                }
+            }
+            ClipProductAction::CurveClipboard(payload) => self.dispatch_curve_clipboard(*payload),
             ClipProductAction::EditNumericCurve(payload) => {
                 let clip_id = payload.clip_id;
                 let property = payload.parameter.clone();
-                let removing = matches!(&payload.edit, ClipCurveEditPayload::Remove { .. });
+                let retained_keys =
+                    payload.edit.retained_group_keyframe_ids().map(|ids| ids.to_vec());
+                let removed_keys = payload
+                    .edit
+                    .removed_keyframe_ids()
+                    .map(|ids| ids.iter().copied().collect::<std::collections::HashSet<_>>());
                 let outcome = self.edit_clip_numeric_curve_payload(*payload)?;
+                if !outcome.changed && self.parameter_gesture_command.is_some() {
+                    return Ok(());
+                }
                 require_action_executed(
                     outcome.changed,
                     "clip_edit_numeric_curve",
@@ -1550,9 +1741,21 @@ impl AppState {
                     },
                     keyframe_id: outcome.keyframe_id,
                 };
-                if removing {
-                    self.animation_selection.selected_keyframes.remove(&key_selection);
+                if let Some(removed_keys) = removed_keys {
+                    self.animation_selection.selected_keyframes.retain(|selected| {
+                        selected.property != key_selection.property
+                            || !removed_keys.contains(&selected.keyframe_id)
+                    });
                     self.set_active_animation_property(clip_id, property);
+                } else if let Some(ids) = retained_keys {
+                    self.set_animation_keyframe_selection(
+                        ids.into_iter()
+                            .map(|keyframe_id| crate::app::AnimationKeyframeSelection {
+                                property: key_selection.property.clone(),
+                                keyframe_id,
+                            })
+                            .collect(),
+                    );
                 } else {
                     self.select_animation_keyframe_only(key_selection);
                 }
@@ -1618,6 +1821,14 @@ impl AppState {
                 let SequenceUpdateSettingsPayload { sequence_id, name, settings } = *payload;
                 self.update_sequence_identity_and_settings(sequence_id, name, settings)
             }
+            SequenceProductAction::SetMusicalTimeReference(payload) => self.commit_sequence_edit(
+                payload.sequence_id,
+                "编辑音乐时间参考",
+                |sequence| {
+                    sequence.audio_program.musical_time_reference = payload.reference;
+                    Ok(())
+                },
+            ),
         }
     }
 
@@ -1653,7 +1864,8 @@ impl AppState {
             sequence.apply_settings(settings)
         })?;
         self.set_status_hint(
-            format!("预览分辨率：{}", preview_resolution_scale_label(scale)),
+            AppMessage::new("status-preview-resolution")
+                .with_text("scale", (preview_resolution_scale_label(scale)).to_string()),
             false,
         );
         Ok(())
@@ -1662,13 +1874,21 @@ impl AppState {
     pub(super) fn prepare_asset_drag(&mut self, payload: AssetTargetPayload) -> Result<()> {
         let library = self.asset_library_handle().ok_or_else(|| {
             let reason = "素材库未连接".to_string();
-            self.set_status_hint(format!("素材准备失败：{reason}"), true);
+            self.set_status_hint(
+                AppMessage::new("status-asset-prepare-failed")
+                    .with_message("reason", AppMessage::new("reason-library-disconnected")),
+                true,
+            );
             MondrianError::WorkflowStepFailed { step_id: "assets_prepare_drag".into(), reason }
         })?;
         let asset = library.get_asset(payload.asset_id)?.ok_or_else(|| {
-            let reason = format!("素材不存在：{}", payload.asset_id);
-            self.set_status_hint(format!("素材准备失败：{reason}"), true);
-            MondrianError::WorkflowStepFailed { step_id: "assets_prepare_drag".into(), reason }
+            let error = MondrianError::AssetNotFound { asset_id: payload.asset_id.to_string() };
+            self.set_status_hint(
+                AppMessage::new("status-asset-prepare-failed")
+                    .with_message("reason", AppMessage::from_error(&error)),
+                true,
+            );
+            error
         })?;
         let media_probe = asset.media_probe();
         if matches!(
@@ -1677,7 +1897,11 @@ impl AppState {
         ) && media_probe.is_none()
         {
             let reason = "文件素材的探测证据缺失或已失效，请先刷新或重新链接素材".to_owned();
-            self.set_status_hint(format!("素材准备失败：{reason}"), true);
+            self.set_status_hint(
+                AppMessage::new("status-asset-prepare-failed")
+                    .with_message("reason", AppMessage::new("reason-probe-evidence-missing")),
+                true,
+            );
             return Err(MondrianError::WorkflowStepFailed {
                 step_id: "assets_prepare_drag".to_owned(),
                 reason,
@@ -1697,7 +1921,13 @@ impl AppState {
                 };
                 if probe.duration == Duration::ZERO {
                     let reason = "媒体探测没有证明正的源时长，不能创建虚构长度的 Clip".to_owned();
-                    self.set_status_hint(format!("素材准备失败：{reason}"), true);
+                    self.set_status_hint(
+                        AppMessage::new("status-asset-prepare-failed").with_message(
+                            "reason",
+                            AppMessage::new("reason-probe-duration-missing"),
+                        ),
+                        true,
+                    );
                     return Err(MondrianError::WorkflowStepFailed {
                         step_id: "assets_prepare_drag".to_owned(),
                         reason,
@@ -1709,11 +1939,11 @@ impl AppState {
         let has_linked_audio = matches!(asset.kind, AssetKind::Video)
             && media_probe.is_some_and(|probe| probe.has_audio);
         let lane = match asset.kind {
-            AssetKind::Audio => "音频轨",
+            AssetKind::Audio => AppMessage::new("status-audio-track"),
             AssetKind::Video
             | AssetKind::StillImage
             | AssetKind::AdjustmentLayer
-            | AssetKind::SolidColor => "视频轨",
+            | AssetKind::SolidColor => AppMessage::new("status-video-track"),
         };
         self.begin_drag_asset(
             asset.id,
@@ -1722,7 +1952,12 @@ impl AppState {
             duration,
             has_linked_audio,
         );
-        self.set_status_hint(format!("已准备拖放：{}（释放到{lane}）", asset.name), false);
+        self.set_status_hint(
+            AppMessage::new("status-drag-ready")
+                .with_text("name", asset.name.to_string())
+                .with_message("lane", lane),
+            false,
+        );
         Ok(())
     }
 
@@ -1730,7 +1965,7 @@ impl AppState {
         &mut self,
         payload: VisualEffectSetParameterValuePayload,
     ) -> Result<bool> {
-        let VisualEffectSetParameterValuePayload { clip_id, effect_id, parameter, value } = payload;
+        let VisualEffectSetParameterValuePayload { clip_id, effect_id, write } = payload;
         self.ensure_clip_track_unlocked("visual_effect_set_parameter_value", clip_id)?;
         let (_, is_video_track, _) =
             self.clip_action_location("visual_effect_set_parameter_value", clip_id)?;
@@ -1744,6 +1979,7 @@ impl AppState {
         let Some(sequence_id) = self.active_sequence_id() else {
             return Err(missing_sequence_error("visual_effect_set_parameter_value"));
         };
+        let write = self.resolve_resource_parameter_write(&write)?;
         let mutation = {
             let sequence = self
                 .active_sequence()
@@ -1760,9 +1996,7 @@ impl AppState {
                         reason: format!("Effect {effect_id} does not belong to Clip {clip_id}"),
                     }
                 })?;
-            effect
-                .properties
-                .prepare_value_write_by_address(&parameter, author_time, value)?
+            effect.properties.prepare_parameter_write(&write, author_time)?
         };
         let Some(mutation) = mutation else {
             return Ok(false);
@@ -2028,16 +2262,16 @@ mod tests {
         AssetsPrepareDragPayload, AssetsRebindAudioComponentPayload,
         AssetsRefreshAudioComponentsPayload, AssetsRelinkAssetPayload, AssetsRenameAssetPayload,
         AssetsRenameFolderPayload, AssetsSetInterpretationPayload, AssetsSetProxyModePayload,
-        ClipCurveEditPayload, ClipEditNumericCurvePayload, ClipNormalizedCurvePointPayload,
-        ClipParameterValueWrite, ClipSetBlendModePayload, ClipSetEnabledPayload,
-        ClipSetSolidColorPayload, ClipWriteParameterValuesPayload, ExportDraftEdit,
-        ProjectCreateWithSettingsPayload, ProjectRecoverFromAutosavePayload,
-        ProjectUpdateColorEnvironmentPayload, ProjectUpdateNewSequenceDefaultsPayload,
-        SequenceTargetPayload, SequenceUpdateSettingsPayload, TimelineDropAssetPayload,
-        TimelineDropFilePayload, TimelineExportRequest, TimelineInOutPointKind,
-        TimelineInsertAssetPayload, TimelineSeekSource, TimelineSetInOutPointPayload,
-        TimelineTrimClipsPayload, TimelineTrimPayloadEdge, TrackAddKind, TrackAddPayload,
-        TrackAuthorControl, TrackEditPolicyControl, TrackMovePayload, TrackSetAuthorControlPayload,
+        ClipCurveEditPayload, ClipEditNumericCurvePayload, ClipSetBlendModePayload,
+        ClipSetEnabledPayload, ClipSetSolidColorPayload, ClipWriteParameterValuesPayload,
+        ExportDraftEdit, ParameterValueWrite, ProjectCreateWithSettingsPayload,
+        ProjectRecoverFromAutosavePayload, ProjectUpdateColorEnvironmentPayload,
+        ProjectUpdateNewSequenceDefaultsPayload, SequenceTargetPayload,
+        SequenceUpdateSettingsPayload, TimelineDropAssetPayload, TimelineDropFilePayload,
+        TimelineExportRequest, TimelineInOutPointKind, TimelineInsertAssetPayload,
+        TimelineSeekSource, TimelineSetInOutPointPayload, TimelineTrimClipsPayload,
+        TimelineTrimPayloadEdge, TrackAddKind, TrackAddPayload, TrackAuthorControl,
+        TrackEditPolicyControl, TrackMovePayload, TrackSetAuthorControlPayload,
         TrackSetEditPolicyPayload, ViewerSetPreviewResolutionScalePayload,
         VisualEffectAddToClipPayload, VisualEffectReorderPayload, VisualEffectSetEnabledPayload,
         VisualEffectSetParameterValuePayload, VisualEffectTargetPayload,
@@ -2237,7 +2471,7 @@ mod tests {
     ) -> mondrian_editor_state::Action {
         clip_write_parameter_values_action(ClipWriteParameterValuesPayload {
             clip_id,
-            writes: vec![ClipParameterValueWrite { parameter, value }],
+            writes: vec![ParameterValueWrite::Value { parameter, value }],
         })
     }
 
@@ -2308,6 +2542,24 @@ mod tests {
             PropertyValue::Int(value) => PropertyValue::Int(value.saturating_add(1)),
             PropertyValue::Float(value) => PropertyValue::Float(*value + 0.5),
             PropertyValue::Double(value) => PropertyValue::Double(*value + 0.5),
+            PropertyValue::DoubleVec2(value) => {
+                PropertyValue::DoubleVec2(value.map(|component| component + 0.5))
+            }
+            PropertyValue::DoubleVec3(value) => {
+                PropertyValue::DoubleVec3(value.map(|component| component + 0.5))
+            }
+            PropertyValue::DoubleRgb(value) => {
+                PropertyValue::DoubleRgb(value.map(|component| component + 0.5))
+            }
+            PropertyValue::DoubleColor(value) => {
+                PropertyValue::DoubleColor(value.map(|component| component + 0.5))
+            }
+            PropertyValue::IntVec2(value) => {
+                PropertyValue::IntVec2(value.map(|component| component.saturating_add(1)))
+            }
+            PropertyValue::IntVec3(value) => {
+                PropertyValue::IntVec3(value.map(|component| component.saturating_add(1)))
+            }
             PropertyValue::Curve(value) => {
                 let mut points = value.points().to_vec();
                 points[0].y = if points[0].y < 0.5 {
@@ -2343,7 +2595,7 @@ mod tests {
                 mondrian_core::automation::ParameterResourceReference::Unbound => {
                     PropertyValue::Resource(
                         mondrian_core::automation::ParameterResourceReference::ExternalFile {
-                            path: std::path::PathBuf::from("test-resource.cube"),
+                            path: std::path::PathBuf::from("test-resource.cube").into(),
                         },
                     )
                 }
@@ -3317,10 +3569,11 @@ mod tests {
         assert_eq!(created.label.as_deref(), Some("Slate"));
         assert!(state.dragging_asset().is_none());
         assert!(state.can_undo_action());
-        assert!(state
-            .status_hint
-            .as_ref()
-            .is_some_and(|(message, is_error)| !*is_error && message.contains("已添加素材")));
+        assert!(
+            state.status_hint.as_ref().is_some_and(|(message, is_error)| !*is_error
+                && crate::app_ui::localization::chinese_product_message(message)
+                    .contains("已添加素材"))
+        );
 
         remove_temp_path(&library_root);
     }
@@ -4057,10 +4310,11 @@ mod tests {
             .expect("invalid media path is reported by background import completion");
 
         assert_eq!(state.pending_media_import_batches(), 1);
-        assert!(state
-            .status_hint
-            .as_ref()
-            .is_some_and(|(message, is_error)| !*is_error && message.contains("正在导入")));
+        assert!(
+            state.status_hint.as_ref().is_some_and(|(message, is_error)| !*is_error
+                && crate::app_ui::localization::chinese_product_message(message)
+                    .contains("正在导入"))
+        );
         poll_media_imports_until_idle(&mut state);
         assert!(state.status_hint.as_ref().is_some_and(|(_, is_error)| *is_error));
         let assets = state.asset_library().expect("library").list_assets().expect("list assets");
@@ -4129,10 +4383,17 @@ mod tests {
         assert_eq!(assets.len(), 1);
         assert_eq!(assets[0].name, "tone.wav");
         assert_eq!(assets[0].folder_id.as_deref(), Some(folder_id.as_str()));
-        assert!(state
-            .status_hint
-            .as_ref()
-            .is_some_and(|(message, is_error)| !*is_error && message.contains("已导入 1")));
+        assert!(
+            state.status_hint.as_ref().is_some_and(|(message, is_error)| !*is_error
+                && message.id == "status-import-summary"
+                && message.args.get("imported") == Some(&crate::app::AppMessageValue::Number(1)))
+        );
+        let english = crate::app_ui::localization::Localizer::new(
+            crate::app_ui::localization::AppUiLocale::EnUs,
+        )
+        .expect("English catalog");
+        let terminal = &state.status_hint.as_ref().expect("async import terminal fact").0;
+        assert_eq!(english.message(terminal), "Imported one media file");
         assert!(state.notifications.iter().any(|notification| {
             notification.message.id == "notification-import-complete"
                 && notification.severity
@@ -4192,10 +4453,13 @@ mod tests {
         assert_eq!(dragging.kind, AssetKind::SolidColor);
         assert!(dragging.duration > Duration::ZERO);
         assert!(!dragging.has_linked_audio);
-        assert!(state
-            .status_hint
-            .as_ref()
-            .is_some_and(|(message, is_error)| { !*is_error && message.contains("Brand Solid") }));
+        assert!(
+            state.status_hint.as_ref().is_some_and(|(message, is_error)| {
+                !*is_error
+                    && crate::app_ui::localization::chinese_product_message(message)
+                        .contains("Brand Solid")
+            })
+        );
 
         remove_temp_path(&library_root);
     }
@@ -4291,10 +4555,11 @@ mod tests {
         assert_eq!(state.active_sequence().expect("sequence"), &sequence_before);
         assert!(state.is_asset_proxy_mode(asset_id));
         assert!(state.can_undo_action());
-        assert!(state
-            .status_hint
-            .as_ref()
-            .is_some_and(|(message, is_error)| !*is_error && message.contains("Temp Plate")));
+        assert!(
+            state.status_hint.as_ref().is_some_and(|(message, is_error)| !*is_error
+                && crate::app_ui::localization::chinese_product_message(message)
+                    .contains("Temp Plate"))
+        );
         let mut saw_asset_retired = false;
         while let Ok(event) = events.try_recv() {
             if matches!(event, AppEvent::AssetRetired { asset_id: event_asset_id } if event_asset_id == asset_id)
@@ -4360,7 +4625,9 @@ mod tests {
         assert!(matches!(err, MondrianError::WorkflowStepFailed { .. }));
         assert!(
             state.status_hint.as_ref().is_some_and(|(message, is_error)| {
-                *is_error && message.contains("重新链接素材失败")
+                *is_error
+                    && crate::app_ui::localization::chinese_product_message(message)
+                        .contains("重新链接素材失败")
             })
         );
     }
@@ -4427,7 +4694,11 @@ mod tests {
         );
         assert!(
             state.status_hint.as_ref().is_some_and(|(message, is_error)| {
-                !*is_error && message.contains("已重新链接素材") && message.contains("original.wav")
+                !*is_error
+                    && crate::app_ui::localization::chinese_product_message(message)
+                        .contains("已重新链接素材")
+                    && crate::app_ui::localization::chinese_product_message(message)
+                        .contains("original.wav")
             })
         );
         assert!(events.try_iter().any(|event| matches!(event, AppEvent::AssetLibraryReloaded)));
@@ -4478,10 +4749,13 @@ mod tests {
         assert!(diagnostics.terminals.iter().all(|terminal| {
             terminal.evidence.disposition == mondrian_core::ExecutionTerminalDisposition::Completed
         }));
-        assert!(state
-            .status_hint
-            .as_ref()
-            .is_some_and(|(message, is_error)| { !*is_error && message.contains("映射到流") }));
+        assert!(
+            state.status_hint.as_ref().is_some_and(|(message, is_error)| {
+                !*is_error
+                    && crate::app_ui::localization::chinese_product_message(message)
+                        .contains("映射到流")
+            })
+        );
         assert_eq!(
             events
                 .try_iter()
@@ -4517,10 +4791,13 @@ mod tests {
             .expect("get asset")
             .expect("asset");
         assert_eq!(asset.name, "New Name");
-        assert!(state
-            .status_hint
-            .as_ref()
-            .is_some_and(|(message, is_error)| { !*is_error && message.contains("New Name") }));
+        assert!(
+            state.status_hint.as_ref().is_some_and(|(message, is_error)| {
+                !*is_error
+                    && crate::app_ui::localization::chinese_product_message(message)
+                        .contains("New Name")
+            })
+        );
         assert!(events.try_iter().any(|event| matches!(event, AppEvent::AssetLibraryReloaded)));
 
         remove_temp_path(&library_root);
@@ -4568,7 +4845,11 @@ mod tests {
         assert_eq!(asset.interpretation, interpretation);
         assert!(
             state.status_hint.as_ref().is_some_and(|(message, is_error)| {
-                !*is_error && message.contains("已更新素材解释") && message.contains("Shot A")
+                !*is_error
+                    && crate::app_ui::localization::chinese_product_message(message)
+                        .contains("已更新素材解释")
+                    && crate::app_ui::localization::chinese_product_message(message)
+                        .contains("Shot A")
             })
         );
         assert!(events.try_iter().any(|event| matches!(event, AppEvent::AssetLibraryReloaded)));
@@ -4661,6 +4942,27 @@ mod tests {
     }
 
     #[test]
+    fn missing_project_save_as_reason_reformats_without_an_author_edit() {
+        let mut state = AppState::new();
+        let generation = state.project_author_generation();
+        let error = state
+            .save_project_as_from_action(PathBuf::from("draft.mdp"))
+            .expect_err("no project");
+        assert!(matches!(error, MondrianError::WorkflowStepFailed { .. }));
+        let (message, is_error) = state.status_hint.as_ref().expect("failure status");
+        assert!(*is_error);
+        let english = crate::app_ui::localization::Localizer::new(
+            crate::app_ui::localization::AppUiLocale::EnUs,
+        )
+        .expect("English")
+        .message(message);
+        assert!(english.contains("No project is available for Save As"));
+        assert!(!english.contains("当前无可另存项目"));
+        assert_eq!(state.project_author_generation(), generation);
+        assert!(!state.has_open_project());
+    }
+
+    #[test]
     fn dispatch_assets_set_proxy_mode_reports_missing_library() {
         let mut state = AppState::new();
 
@@ -4674,7 +4976,9 @@ mod tests {
         assert!(matches!(err, MondrianError::WorkflowStepFailed { .. }));
         assert!(
             state.status_hint.as_ref().is_some_and(|(message, is_error)| {
-                *is_error && message.contains("设置代理模式失败")
+                *is_error
+                    && crate::app_ui::localization::chinese_product_message(message)
+                        .contains("设置代理模式失败")
             })
         );
     }
@@ -4702,7 +5006,9 @@ mod tests {
         assert!(!state.is_asset_proxy_mode(asset_id));
         assert!(
             state.status_hint.as_ref().is_some_and(|(message, is_error)| {
-                *is_error && message.contains("只有视频素材支持代理模式")
+                *is_error
+                    && crate::app_ui::localization::chinese_product_message(message)
+                        .contains("只有视频素材支持代理模式")
             }),
             "status hint: {:?}",
             state.status_hint
@@ -4710,6 +5016,14 @@ mod tests {
 
         remove_temp_path(&library_root);
         remove_temp_path(&media_root);
+        let message = &state.status_hint.as_ref().expect("proxy rejection").0;
+        let english = crate::app_ui::localization::Localizer::new(
+            crate::app_ui::localization::AppUiLocale::EnUs,
+        )
+        .expect("English")
+        .message(message);
+        assert!(english.contains("Proxy mode is available only for video assets"));
+        assert!(!english.contains("只有视频"));
     }
 
     #[test]
@@ -4736,10 +5050,11 @@ mod tests {
         assert!(!library.folder_exists(&child_id).expect("child gone"));
         let asset = library.get_asset(asset_id).expect("get asset").expect("asset kept");
         assert_eq!(asset.folder_id, None);
-        assert!(state
-            .status_hint
-            .as_ref()
-            .is_some_and(|(message, is_error)| !*is_error && message.contains("Rushes")));
+        assert!(
+            state.status_hint.as_ref().is_some_and(|(message, is_error)| !*is_error
+                && crate::app_ui::localization::chinese_product_message(message)
+                    .contains("Rushes"))
+        );
         let mut saw_reload = false;
         while let Ok(event) = events.try_recv() {
             if matches!(event, AppEvent::AssetLibraryReloaded) {
@@ -4828,7 +5143,9 @@ mod tests {
         assert!(events.iter().any(|event| matches!(event, AppEvent::AssetLibraryReloaded)));
         assert!(
             state.status_hint.as_ref().is_some_and(|(message, is_error)| {
-                !*is_error && message.contains("1 个素材") && message.contains("1 个文件夹")
+                !*is_error
+                    && message.args.get("assets") == Some(&crate::app::AppMessageValue::Number(1))
+                    && message.args.get("folders") == Some(&crate::app::AppMessageValue::Number(1))
             })
         );
 
@@ -4898,10 +5215,10 @@ mod tests {
             .expect("get asset")
             .expect("asset");
         assert_eq!(asset.folder_id.as_deref(), Some(folder_id.as_str()));
-        assert!(state
-            .status_hint
-            .as_ref()
-            .is_some_and(|(message, is_error)| !*is_error && message.contains("Plate")));
+        assert!(
+            state.status_hint.as_ref().is_some_and(|(message, is_error)| !*is_error
+                && crate::app_ui::localization::chinese_product_message(message).contains("Plate"))
+        );
         assert!(events.try_iter().any(|event| matches!(event, AppEvent::AssetLibraryReloaded)));
 
         remove_temp_path(&library_root);
@@ -4982,7 +5299,9 @@ mod tests {
         );
         assert!(
             state.status_hint.as_ref().is_some_and(|(message, is_error)| {
-                !*is_error && message.contains("2 个素材") && message.contains("1 个文件夹")
+                !*is_error
+                    && message.args.get("assets") == Some(&crate::app::AppMessageValue::Number(2))
+                    && message.args.get("folders") == Some(&crate::app::AppMessageValue::Number(1))
             })
         );
         assert_eq!(
@@ -5080,10 +5399,13 @@ mod tests {
             folders[1].parent_id.as_deref(),
             Some(first_folder_id.as_str())
         );
-        assert!(state
-            .status_hint
-            .as_ref()
-            .is_some_and(|(message, is_error)| { !*is_error && message.contains("文件夹 2") }));
+        assert!(
+            state.status_hint.as_ref().is_some_and(|(message, is_error)| {
+                !*is_error
+                    && crate::app_ui::localization::chinese_product_message(message)
+                        .contains("文件夹 2")
+            })
+        );
 
         remove_temp_path(&library_root);
     }
@@ -6293,11 +6615,11 @@ mod tests {
                 ClipWriteParameterValuesPayload {
                     clip_id,
                     writes: vec![
-                        ClipParameterValueWrite {
+                        ParameterValueWrite::Value {
                             parameter: position,
                             value: PropertyValue::Vec2(glam::Vec2::new(20.0, 10.0)),
                         },
-                        ClipParameterValueWrite {
+                        ParameterValueWrite::Value {
                             parameter: stale,
                             value: PropertyValue::Float(0.5),
                         },
@@ -6850,15 +7172,15 @@ mod tests {
                 ClipWriteParameterValuesPayload {
                     clip_id,
                     writes: vec![
-                        ClipParameterValueWrite {
+                        ParameterValueWrite::Value {
                             parameter: position,
                             value: PropertyValue::Vec2(glam::Vec2::new(128.0, 72.0)),
                         },
-                        ClipParameterValueWrite {
+                        ParameterValueWrite::Value {
                             parameter: scale,
                             value: PropertyValue::Vec2(glam::Vec2::splat(1.5)),
                         },
-                        ClipParameterValueWrite {
+                        ParameterValueWrite::Value {
                             parameter: rotation,
                             value: PropertyValue::Float(-12.5),
                         },
@@ -6898,6 +7220,207 @@ mod tests {
     }
 
     #[test]
+    fn clip_component_write_preserves_concurrent_sibling_and_exact_undo_redo() {
+        for path in [
+            Transform2D::POSITION_PATH,
+            Transform2D::SCALE_PATH,
+            Transform2D::ANCHOR_POINT_PATH,
+        ] {
+            let (mut state, _, clip_id) = state_with_two_video_tracks();
+            let parameter = clip_parameter_address(&state, clip_id, path);
+            let sibling = f32::from_bits(0x3f800001);
+            state
+                .dispatch_action(clip_parameter_action(
+                    clip_id,
+                    parameter.clone(),
+                    PropertyValue::Vec2(glam::Vec2::new(1.0, sibling)),
+                ))
+                .expect("initial vector");
+            let edit = clip_write_parameter_values_action(ClipWriteParameterValuesPayload {
+                clip_id,
+                writes: vec![ParameterValueWrite::Channels {
+                    parameter: parameter.clone(),
+                    channel_values: vec![(0, 1.25)],
+                }],
+            });
+            state
+                .dispatch_action(clip_parameter_action(
+                    clip_id,
+                    parameter,
+                    PropertyValue::Vec2(glam::Vec2::new(1.0, sibling * 2.0)),
+                ))
+                .expect("concurrent sibling");
+            let mut before = state.active_sequence().expect("sequence").clone();
+            state.dispatch_action(edit).expect("component edit");
+            let mut after = state.active_sequence().expect("sequence").clone();
+            assert_eq!(
+                after.revision,
+                before.revision.checked_next().expect("revision")
+            );
+            let value = after
+                .find_clip(clip_id)
+                .expect("clip")
+                .intrinsic_parameter_bag()
+                .evaluate(path, TimelineTime::ZERO)
+                .expect("value");
+            assert_eq!(
+                value,
+                PropertyValue::Vec2(glam::Vec2::new(1.25, sibling * 2.0))
+            );
+            assert!(state.undo_timeline().expect("undo one component edit"));
+            let undone = state.active_sequence().expect("sequence");
+            assert_eq!(
+                undone.revision,
+                after.revision.checked_next().expect("revision")
+            );
+            // Undo restores author content but publishes a new monotonic revision.
+            before.revision = undone.revision;
+            assert_eq!(state.active_sequence().expect("sequence"), &before);
+            assert!(state.redo_timeline().expect("redo"));
+            let redone = state.active_sequence().expect("sequence");
+            assert_eq!(
+                redone.revision,
+                before.revision.checked_next().expect("revision")
+            );
+            after.revision = redone.revision;
+            assert_eq!(state.active_sequence().expect("sequence"), &after);
+        }
+    }
+
+    #[test]
+    fn whole_clip_transform_gesture_preserves_independent_axis_keys_and_undo() {
+        let (mut state, _, clip_id) = state_with_two_video_tracks_at_rate(Rational::new(25, 1));
+        let mut sequence = state.active_sequence().expect("sequence").clone();
+        sequence
+            .find_clip_mut(clip_id)
+            .expect("clip")
+            .apply_property_mutation(PropertyMutation::EnableAnimation {
+                path: Transform2D::POSITION_PATH.to_owned(),
+                time: TimelineTime::ZERO,
+            })
+            .expect("enable vector animation");
+        state.test_set_sequence(Some(sequence));
+        state.seek(13).expect("seek inside offset Clip");
+        let parameter = clip_parameter_address(&state, clip_id, Transform2D::POSITION_PATH);
+        state
+            .dispatch_action(clip_write_parameter_values_action(
+                ClipWriteParameterValuesPayload {
+                    clip_id,
+                    writes: vec![ParameterValueWrite::Channels {
+                        parameter: parameter.clone(),
+                        channel_values: vec![(0, 3.75)],
+                    }],
+                },
+            ))
+            .expect("write one independent axis");
+        let before = state
+            .active_sequence()
+            .expect("sequence")
+            .find_clip(clip_id)
+            .expect("clip")
+            .intrinsic_parameter_bag();
+        let x = before
+            .property(Transform2D::POSITION_PATH)
+            .expect("position")
+            .channel(0)
+            .expect("x")
+            .keyframes()
+            .last()
+            .expect("x key")
+            .clone();
+        assert_eq!(x.time, TimelineTime::new(3, 25).expect("Clip-local time"));
+        state
+            .dispatch_action(clip_parameter_action(
+                clip_id,
+                parameter,
+                PropertyValue::Vec2(glam::Vec2::new(17.0, 29.0)),
+            ))
+            .expect("complete Viewer-style vector gesture");
+        let after = state
+            .active_sequence()
+            .expect("sequence")
+            .find_clip(clip_id)
+            .expect("clip")
+            .intrinsic_parameter_bag();
+        let property = after.property(Transform2D::POSITION_PATH).expect("position");
+        assert_eq!(
+            property.evaluate(x.time),
+            PropertyValue::Vec2(glam::Vec2::new(17.0, 29.0))
+        );
+        let edited = property.channel(0).expect("x").keyframes().last().expect("x key");
+        assert_eq!(edited.id, x.id);
+        assert_eq!(edited.interp_in, x.interp_in);
+        assert_eq!(edited.interp_out, x.interp_out);
+        assert_eq!(edited.temporal_flags, x.temporal_flags);
+        assert!(state.undo_timeline().expect("undo complete gesture"));
+        assert_eq!(
+            state
+                .active_sequence()
+                .expect("sequence")
+                .find_clip(clip_id)
+                .expect("clip")
+                .intrinsic_parameter_bag(),
+            before
+        );
+        assert!(state.redo_timeline().expect("redo complete gesture"));
+        assert_eq!(
+            state
+                .active_sequence()
+                .expect("sequence")
+                .find_clip(clip_id)
+                .expect("clip")
+                .intrinsic_parameter_bag(),
+            after
+        );
+    }
+
+    #[test]
+    fn clip_component_write_rejects_invalid_atomic_batch_and_elides_noop() {
+        let (mut state, _, clip_id) = state_with_two_video_tracks();
+        let position = clip_parameter_address(&state, clip_id, Transform2D::POSITION_PATH);
+        let scale = clip_parameter_address(&state, clip_id, Transform2D::SCALE_PATH);
+        let before = state.active_sequence().expect("sequence").clone();
+        let generation = state.project_author_generation();
+        for channels in [
+            vec![(0, 1.5), (0, 2.0)],
+            vec![(2, 1.5)],
+            vec![(0, f64::INFINITY)],
+        ] {
+            let payload = ClipWriteParameterValuesPayload {
+                clip_id,
+                writes: vec![
+                    ParameterValueWrite::Channels {
+                        parameter: position.clone(),
+                        channel_values: vec![(0, 20.0)],
+                    },
+                    ParameterValueWrite::Channels {
+                        parameter: scale.clone(),
+                        channel_values: channels,
+                    },
+                ],
+            };
+            let action =
+                ProductAction::Clip(ClipProductAction::WriteParameterValues(Box::new(payload)));
+            assert!(!state.product_action_availability().allows(&action));
+            assert!(state.dispatch_product_action(action).is_err());
+            assert_eq!(state.active_sequence().expect("sequence"), &before);
+            assert_eq!(state.project_author_generation(), generation);
+            assert!(!state.can_undo_action());
+        }
+        let noop = clip_write_parameter_values_action(ClipWriteParameterValuesPayload {
+            clip_id,
+            writes: vec![ParameterValueWrite::Channels {
+                parameter: scale,
+                channel_values: vec![(0, 1.0)],
+            }],
+        });
+        assert!(state.dispatch_action(noop).is_err());
+        assert_eq!(state.active_sequence().expect("sequence"), &before);
+        assert_eq!(state.project_author_generation(), generation);
+        assert!(!state.can_undo_action());
+    }
+
+    #[test]
     fn compensated_anchor_write_preserves_picture_and_undoes_as_one_action() {
         let (mut state, _, clip_id) = state_with_two_video_tracks();
         let anchor = clip_parameter_address(&state, clip_id, Transform2D::ANCHOR_POINT_PATH);
@@ -6910,11 +7433,11 @@ mod tests {
                 ClipWriteParameterValuesPayload {
                     clip_id,
                     writes: vec![
-                        ClipParameterValueWrite {
+                        ParameterValueWrite::Value {
                             parameter: anchor,
                             value: PropertyValue::Vec2(glam::Vec2::new(20.0, 10.0)),
                         },
-                        ClipParameterValueWrite {
+                        ParameterValueWrite::Value {
                             parameter: position,
                             value: PropertyValue::Vec2(glam::Vec2::new(20.0, 10.0)),
                         },
@@ -6969,7 +7492,7 @@ mod tests {
                 ClipProductAction::WriteParameterValues(Box::new(
                     ClipWriteParameterValuesPayload {
                         clip_id,
-                        writes: vec![ClipParameterValueWrite {
+                        writes: vec![ParameterValueWrite::Value {
                             parameter: position,
                             value: PropertyValue::Vec2(glam::Vec2::new(f32::NAN, 0.0)),
                         }],
@@ -7004,7 +7527,7 @@ mod tests {
                 ClipProductAction::WriteParameterValues(Box::new(
                     ClipWriteParameterValuesPayload {
                         clip_id: audio_clip_id,
-                        writes: vec![ClipParameterValueWrite {
+                        writes: vec![ParameterValueWrite::Value {
                             parameter: position,
                             value: PropertyValue::Vec2(glam::Vec2::new(10.0, 20.0)),
                         }],
@@ -7024,9 +7547,15 @@ mod tests {
         let property = opacity_parameter_address(&state, clip_id);
 
         for point in [
-            ClipNormalizedCurvePointPayload { time_ratio: 0.0, value_ratio: 0.0 },
-            ClipNormalizedCurvePointPayload { time_ratio: 0.5, value_ratio: 0.72 },
-            ClipNormalizedCurvePointPayload { time_ratio: 1.0, value_ratio: 1.0 },
+            crate::app::test_curve_authoring::curve_author_point(
+                &state, clip_id, &property, 0.0, 0.0,
+            ),
+            crate::app::test_curve_authoring::curve_author_point(
+                &state, clip_id, &property, 0.5, 0.72,
+            ),
+            crate::app::test_curve_authoring::curve_author_point(
+                &state, clip_id, &property, 1.0, 1.0,
+            ),
         ] {
             state
                 .dispatch_action(clip_edit_numeric_curve_action(
@@ -7081,7 +7610,13 @@ mod tests {
                 parameter: opacity_property,
                 edit: ClipCurveEditPayload::Upsert {
                     keyframe_id: None,
-                    point: ClipNormalizedCurvePointPayload { time_ratio: 0.0, value_ratio: 0.5 },
+                    point: crate::app::test_curve_authoring::curve_author_point(
+                        &state,
+                        clip_id,
+                        &opacity_parameter_address(&state, clip_id),
+                        0.0,
+                        0.5,
+                    ),
                 },
             }),
         ] {
@@ -7231,6 +7766,172 @@ mod tests {
     }
 
     #[test]
+    fn parameter_reset_clip_and_effect_roundtrips_exact_history_and_unicode_archives() {
+        for effect_owned in [false, true] {
+            let mut sequence = Sequence::new("Parameter reset");
+            let mut clip = Clip::new_basic_title(
+                "Reset",
+                "Arial",
+                TimelineTime::ZERO,
+                TimelineTime::new(2, 1).expect("duration"),
+            )
+            .expect("title");
+            let clip_id = clip.id;
+            let (effect_id, address, default) = if effect_owned {
+                let mut effect =
+                    mondrian_effects::instantiate_effect_node(EffectType::Crop).expect("Crop");
+                let (path, property) = effect.properties.iter().next().expect("parameter");
+                let (path, address, default) = (
+                    path.to_owned(),
+                    property.address(),
+                    property.descriptor.schema.default_value.clone(),
+                );
+                for (time, value) in [(0, 0.1), (1, 0.3), (2, 0.2)] {
+                    effect
+                        .properties
+                        .apply_mutation(PropertyMutation::SetKeyframe {
+                            path: path.clone(),
+                            keyframe: mondrian_core::automation::Keyframe::from_preset(
+                                TimelineTime::new(time, 1).expect("time"),
+                                PropertyValue::Float(value),
+                                mondrian_core::InterpolationType::ContinuousBezier,
+                            ),
+                        })
+                        .expect("effect keys");
+                }
+                let id = effect.id;
+                clip.add_effect_node(effect);
+                (Some(id), address, default)
+            } else {
+                let bag = clip.property_bag().expect("bag");
+                let property = bag.property(Transform2D::POSITION_PATH).expect("position");
+                let address = property.address();
+                let default = property.descriptor.schema.default_value.clone();
+                for (time, x) in [(0, 10.0), (1, 30.0), (2, 20.0)] {
+                    clip.apply_property_mutation(PropertyMutation::SetKeyframe {
+                        path: Transform2D::POSITION_PATH.into(),
+                        keyframe: mondrian_core::automation::Keyframe::from_preset(
+                            TimelineTime::new(time, 1).expect("time"),
+                            PropertyValue::Vec2(glam::Vec2::new(x, -x)),
+                            mondrian_core::InterpolationType::AutoBezier,
+                        ),
+                    })
+                    .expect("vector keys");
+                }
+                (None, address, default)
+            };
+            sequence.video_tracks[0].add_clip(clip).expect("clip");
+            let mut state = AppState::new();
+            state.test_set_sequence(Some(sequence));
+            let action = |parameter| {
+                let write = ParameterValueWrite::ResetToDefault { parameter };
+                match effect_id {
+                    Some(effect_id) => visual_effect_set_parameter_value_action(
+                        VisualEffectSetParameterValuePayload { clip_id, effect_id, write },
+                    ),
+                    None => clip_write_parameter_values_action(ClipWriteParameterValuesPayload {
+                        clip_id,
+                        writes: vec![write],
+                    }),
+                }
+            };
+            let generation = state.project_author_generation();
+            let history = state.authoring_history().expect("history").diagnostics();
+            state.active_sequence_mut_uncommitted().expect("lock").video_tracks[0].is_locked = true;
+            let locked = state.active_sequence().expect("locked").clone();
+            state.dispatch_action(action(address.clone())).expect_err("locked reset");
+            assert!(state
+                .active_sequence()
+                .expect("unchanged")
+                .author_state_eq_ignoring_revision(&locked));
+            assert_eq!(state.project_author_generation(), generation);
+            assert_eq!(
+                state.authoring_history().expect("history").diagnostics(),
+                history
+            );
+            state.active_sequence_mut_uncommitted().expect("unlock").video_tracks[0].is_locked =
+                false;
+            let original = state.active_sequence().expect("original").clone();
+            state
+                .dispatch_action(action(AnimationParameterAddress {
+                    animation_track_id: mondrian_core::AnimationTrackId::new(),
+                    ..address.clone()
+                }))
+                .expect_err("stale parameter");
+            assert!(state
+                .active_sequence()
+                .expect("unchanged")
+                .author_state_eq_ignoring_revision(&original));
+            assert_eq!(state.project_author_generation(), generation);
+            state.dispatch_action(action(address.clone())).expect("reset");
+            assert_eq!(state.project_author_generation(), generation + 1);
+            let edited = state.active_sequence().expect("reset snapshot").clone();
+            let clip = edited.find_clip(clip_id).expect("clip");
+            let bag = match effect_id {
+                Some(id) => clip
+                    .effects
+                    .iter()
+                    .find(|effect| effect.id == id)
+                    .expect("effect")
+                    .properties
+                    .clone(),
+                None => clip.property_bag().expect("bag"),
+            };
+            let (_, property) = bag
+                .property_by_address(&address)
+                .expect("reset parameter retains stable identity");
+            assert_eq!(property.address(), address);
+            assert_eq!(property.static_value(), &default);
+            assert!(property.is_at_default());
+            let reset_history = state.authoring_history().expect("history").diagnostics();
+            state
+                .dispatch_action(action(address))
+                .expect_err("already default refuses redundant command");
+            assert_eq!(
+                state.authoring_history().expect("history").diagnostics(),
+                reset_history
+            );
+            assert_eq!(state.project_author_generation(), generation + 1);
+            assert!(state.undo_timeline().expect("one Undo"));
+            assert!(state
+                .active_sequence()
+                .expect("undone")
+                .author_state_eq_ignoring_revision(&original));
+            assert!(
+                !state.can_undo_action(),
+                "one transaction restores all vector channels and keys"
+            );
+            let directory = tempfile::tempdir().expect("archives");
+            let undone = directory.path().join("参数重置撤销🙂.mdp");
+            state.save_project_file_as(undone.clone()).expect("save undone");
+            assert!(state.can_redo_action());
+            let mut reopened = AppState::new();
+            reopened.open_project_file(undone).expect("reopen original");
+            assert!(reopened
+                .active_sequence()
+                .expect("original archive")
+                .author_state_eq_ignoring_revision(&original));
+            assert!(!reopened.can_undo_action() && !reopened.can_redo_action());
+            drop(reopened);
+            assert!(state.redo_timeline().expect("Redo after save"));
+            assert!(state
+                .active_sequence()
+                .expect("redone")
+                .author_state_eq_ignoring_revision(&edited));
+            let redone = directory.path().join("参数重置重做🙂.mdp");
+            state.save_project_file_as(redone.clone()).expect("save redone");
+            drop(state);
+            let mut reopened = AppState::new();
+            reopened.open_project_file(redone).expect("reopen reset");
+            assert!(reopened
+                .active_sequence()
+                .expect("reset archive")
+                .author_state_eq_ignoring_revision(&edited));
+            assert!(!reopened.can_undo_action() && !reopened.can_redo_action());
+        }
+    }
+
+    #[test]
     fn dispatch_crop_parameter_by_stable_address_has_reversible_author_snapshot() {
         let (mut state, _, clip_id) = state_with_two_video_tracks();
         let (effect_id, path, parameter, initial_value) =
@@ -7242,8 +7943,7 @@ mod tests {
                 VisualEffectSetParameterValuePayload {
                     clip_id,
                     effect_id,
-                    parameter,
-                    value: next_value.clone(),
+                    write: ParameterValueWrite::Value { parameter, value: next_value.clone() },
                 },
             ))
             .expect("dispatch effect property");
@@ -7315,8 +8015,7 @@ mod tests {
                 VisualEffectSetParameterValuePayload {
                     clip_id,
                     effect_id,
-                    parameter,
-                    value: next_value.clone(),
+                    write: ParameterValueWrite::Value { parameter, value: next_value.clone() },
                 },
             ))
             .expect("dispatch curve edit");
@@ -7388,8 +8087,7 @@ mod tests {
                 VisualEffectSetParameterValuePayload {
                     clip_id,
                     effect_id,
-                    parameter,
-                    value: next_value.clone(),
+                    write: ParameterValueWrite::Value { parameter, value: next_value.clone() },
                 },
             ))
             .expect("dispatch Qualifier sample edit");
@@ -7498,8 +8196,7 @@ mod tests {
                 VisualEffectSetParameterValuePayload {
                     clip_id,
                     effect_id,
-                    parameter,
-                    value: initial_value,
+                    write: ParameterValueWrite::Value { parameter, value: initial_value },
                 },
             ))
             .expect_err("no-op parameter edit must not report success");
@@ -7520,8 +8217,7 @@ mod tests {
                 VisualEffectSetParameterValuePayload {
                     clip_id,
                     effect_id,
-                    parameter,
-                    value: initial_value,
+                    write: ParameterValueWrite::Value { parameter, value: initial_value },
                 },
             ))
             .expect_err("missing effect property should reject mutation");
@@ -7719,6 +8415,336 @@ mod tests {
     }
 
     #[test]
+    fn dispatch_key_paste_without_target_never_inserts_previous_clip_copy() {
+        let (mut state, track_id, clip_id) = state_with_two_video_tracks();
+        let selection = SelectedClipRef { track_id, is_video_track: true, clip_id };
+        state.selection.selected_clips = vec![selection];
+        state
+            .dispatch_action(mondrian_editor_state::Action::Copy)
+            .expect("copy clip first");
+        let tb = state.active_sequence().expect("sequence").time_base();
+        let times = [tt(4, tb), tt(8, tb)];
+        for (time, value) in times.into_iter().zip([0.25, 0.75]) {
+            state
+                .mutate_clip_property(
+                    selection,
+                    PropertyMutation::SetKeyframe {
+                        path: Transform2D::OPACITY_PATH.into(),
+                        keyframe: mondrian_core::automation::Keyframe::linear(
+                            time,
+                            PropertyValue::Float(value),
+                        ),
+                    },
+                    "seed copied key group",
+                )
+                .expect("seed key");
+        }
+        state.set_animation_keyframe_selection(
+            times
+                .into_iter()
+                .map(|time| opacity_keyframe_selection(&state, clip_id, time))
+                .collect(),
+        );
+        state
+            .dispatch_action(mondrian_editor_state::Action::Copy)
+            .expect("copy key group");
+        assert!(state.has_animation_clipboard());
+        state.selection.selected_clips.clear();
+        state.seek(50).expect("seek to free clip paste position");
+        let original = state.active_sequence().expect("original").clone();
+        let generation = state.project_author_generation();
+        let history = state.authoring_history().expect("history").diagnostics();
+        let result = state.dispatch_action(mondrian_editor_state::Action::Paste);
+        assert_eq!(
+            state.active_sequence().expect("after refused key paste").video_tracks[0]
+                .clips
+                .len(),
+            original.video_tracks[0].clips.len(),
+            "key paste must never insert a previously copied clip when its target is absent"
+        );
+        assert!(
+            result.is_err(),
+            "key paste without a target must be refused"
+        );
+        assert!(!state.can_paste_from_app_clipboard());
+        assert!(state
+            .active_sequence()
+            .expect("unchanged author state")
+            .author_state_eq_ignoring_revision(&original));
+        assert_eq!(state.project_author_generation(), generation);
+        assert_eq!(
+            state.authoring_history().expect("history").diagnostics(),
+            history
+        );
+        assert!(state.selection.selected_clips.is_empty());
+        assert!(
+            state.has_animation_clipboard(),
+            "refusal preserves the copied keys"
+        );
+    }
+
+    #[test]
+    fn dispatch_key_group_clipboard_switches_intent_and_roundtrips_history() {
+        use mondrian_core::InterpolationType;
+        for mode in [
+            InterpolationType::AutoBezier,
+            InterpolationType::ContinuousBezier,
+        ] {
+            let mut sequence = Sequence::new("clipboard group history");
+            let tb = sequence.time_base();
+            let title = Clip::new_basic_title("Clipboard", "Arial", tt(10, tb), tt(40, tb))
+                .expect("self-contained title");
+            let clip_id = title.id;
+            let track_id = sequence.video_tracks[0].id;
+            sequence.video_tracks[0].add_clip(title).expect("title clip");
+            let mut state = AppState::new();
+            state.test_set_sequence(Some(sequence));
+            let selection = SelectedClipRef { track_id, is_video_track: true, clip_id };
+            state.selection.selected_clips = vec![selection];
+            state.dispatch_action(mondrian_editor_state::Action::Copy).expect("copy clips");
+            assert_eq!(state.active_clipboard_kind(), Some(AppClipboardKind::Clips));
+            let times = [tt(4, tb), tt(8, tb), tt(12, tb)];
+            for (time, value) in times.into_iter().zip([0.2, 0.7, 0.3]) {
+                state
+                    .mutate_clip_property(
+                        selection,
+                        PropertyMutation::SetKeyframe {
+                            path: Transform2D::OPACITY_PATH.into(),
+                            keyframe: mondrian_core::automation::Keyframe::from_preset(
+                                time,
+                                PropertyValue::Float(value),
+                                mode,
+                            ),
+                        },
+                        "seed group",
+                    )
+                    .expect("seed constrained key");
+            }
+            state.set_animation_keyframe_selection(
+                times
+                    .into_iter()
+                    .map(|time| opacity_keyframe_selection(&state, clip_id, time))
+                    .collect(),
+            );
+            let original = state.active_sequence().expect("original").clone();
+            let original_property = state
+                .clip_snapshot(selection)
+                .expect("title")
+                .property_bag()
+                .expect("bag")
+                .property(Transform2D::OPACITY_PATH)
+                .expect("opacity")
+                .clone();
+            let original_keys: Vec<_> = times
+                .into_iter()
+                .map(|time| original_property.keyframe_at(time).expect("original key"))
+                .collect();
+            let generation = state.project_author_generation();
+            state
+                .dispatch_action(mondrian_editor_state::Action::Copy)
+                .expect("copy key group");
+            assert_eq!(
+                state.active_clipboard_kind(),
+                Some(AppClipboardKind::AnimationKeyframes)
+            );
+            assert!(state.has_animation_clipboard() && !state.has_clip_clipboard());
+            assert_eq!(state.project_author_generation(), generation);
+            state.active_sequence_mut_uncommitted().expect("lock fixture").video_tracks[0]
+                .is_locked = true;
+            let locked = state.active_sequence().expect("locked source").clone();
+            let history = state.authoring_history().expect("history").diagnostics();
+            assert!(!state.can_paste_from_app_clipboard());
+            state
+                .dispatch_action(mondrian_editor_state::Action::Paste)
+                .expect_err("locked key target refuses paste");
+            assert!(state
+                .active_sequence()
+                .expect("refused source")
+                .author_state_eq_ignoring_revision(&locked));
+            assert_eq!(state.project_author_generation(), generation);
+            assert_eq!(
+                state.authoring_history().expect("history").diagnostics(),
+                history
+            );
+            assert!(state.has_animation_clipboard() && !state.has_clip_clipboard());
+            state.active_sequence_mut_uncommitted().expect("unlock fixture").video_tracks[0]
+                .is_locked = false;
+            state.seek(26).expect("paste at clip-local frame sixteen");
+            state
+                .dispatch_action(mondrian_editor_state::Action::Paste)
+                .expect("paste group");
+            assert_eq!(state.project_author_generation(), generation + 1);
+            let edited = state.active_sequence().expect("edited").clone();
+            let bag = state.clip_snapshot(selection).expect("title").property_bag().expect("bag");
+            let property = bag.property(Transform2D::OPACITY_PATH).expect("opacity");
+            for (source, frame) in original_keys.iter().zip([16, 20, 24]) {
+                let key = property.keyframe_at(tt(frame, tb)).expect("pasted group key");
+                assert_ne!(key.id, source.id);
+                assert_eq!(key.value, source.value);
+                assert_eq!(
+                    mondrian_core::automation::interpolation_mode_from_keyframe(
+                        key.interp_in,
+                        key.interp_out,
+                        key.temporal_flags,
+                    ),
+                    mode
+                );
+            }
+            assert!(state.undo_timeline().expect("single paste Undo"));
+            assert!(state
+                .active_sequence()
+                .expect("undone")
+                .author_state_eq_ignoring_revision(&original));
+            let directory = tempfile::tempdir().expect("archives");
+            let undone_path = directory.path().join("关键帧粘贴撤销🙂.mdp");
+            state.save_project_file_as(undone_path.clone()).expect("save undone");
+            assert!(state.can_redo_action());
+            let mut reopened = AppState::new();
+            reopened.open_project_file(undone_path).expect("fresh undone reopen");
+            assert!(reopened
+                .active_sequence()
+                .expect("saved original")
+                .author_state_eq_ignoring_revision(&original));
+            assert!(!reopened.can_undo_action() && !reopened.can_redo_action());
+            assert_eq!(reopened.active_clipboard_kind(), None);
+            drop(reopened);
+            assert!(state.redo_timeline().expect("Redo after save"));
+            assert!(state
+                .active_sequence()
+                .expect("redone")
+                .author_state_eq_ignoring_revision(&edited));
+            let edited_path = directory.path().join("关键帧粘贴重做🙂.mdp");
+            state.save_project_file_as(edited_path.clone()).expect("save edited");
+            drop(state);
+            let mut reopened = AppState::new();
+            reopened.open_project_file(edited_path).expect("fresh edited reopen");
+            assert!(reopened
+                .active_sequence()
+                .expect("saved edited")
+                .author_state_eq_ignoring_revision(&edited));
+            assert!(!reopened.can_undo_action() && !reopened.can_redo_action());
+            assert_eq!(reopened.active_clipboard_kind(), None);
+        }
+    }
+
+    #[test]
+    fn dispatch_partial_stale_key_copy_preserves_clipboard() {
+        assert_stale_key_copy_refused(StaleKeyCopyCase::MissingKey);
+    }
+
+    #[test]
+    fn dispatch_stale_key_copy_with_missing_property_preserves_clipboard() {
+        assert_stale_key_copy_refused(StaleKeyCopyCase::MissingProperty);
+    }
+
+    #[test]
+    fn dispatch_fully_stale_key_copy_never_copies_clip() {
+        assert_stale_key_copy_refused(StaleKeyCopyCase::AllKeys);
+    }
+
+    #[derive(Debug, Clone, Copy)]
+    enum StaleKeyCopyCase {
+        MissingKey,
+        MissingProperty,
+        AllKeys,
+    }
+
+    fn assert_stale_key_copy_refused(case: StaleKeyCopyCase) {
+        let (mut state, track_id, clip_id) = state_with_two_video_tracks();
+        let selection = SelectedClipRef { track_id, is_video_track: true, clip_id };
+        state.selection.selected_clips = vec![selection];
+        state
+            .dispatch_action(mondrian_editor_state::Action::Copy)
+            .expect("copy clips first");
+        let tb = state.active_sequence().expect("sequence").time_base();
+        let times = [tt(4, tb), tt(8, tb)];
+        for (time, value) in times.into_iter().zip([0.25, 0.75]) {
+            state
+                .mutate_clip_property(
+                    selection,
+                    PropertyMutation::SetKeyframe {
+                        path: Transform2D::OPACITY_PATH.into(),
+                        keyframe: mondrian_core::automation::Keyframe::linear(
+                            time,
+                            PropertyValue::Float(value),
+                        ),
+                    },
+                    "seed source keys",
+                )
+                .expect("seed key");
+        }
+        let mut selected: Vec<_> = times
+            .into_iter()
+            .map(|time| opacity_keyframe_selection(&state, clip_id, time))
+            .collect();
+        state.set_animation_keyframe_selection(selected.clone());
+        state
+            .dispatch_action(mondrian_editor_state::Action::Copy)
+            .expect("capture valid group");
+        let clipboard = |state: &AppState| match &state.clipboard {
+            Some(crate::app::AppClipboard::AnimationKeyframes(clipboard)) => Some(
+                clipboard
+                    .entries
+                    .iter()
+                    .map(|entry| {
+                        (
+                            entry.property.clone(),
+                            entry.relative_time,
+                            entry.channel_keyframes.clone(),
+                        )
+                    })
+                    .collect::<Vec<_>>(),
+            ),
+            _ => None,
+        };
+        let original_clipboard = clipboard(&state);
+        match case {
+            StaleKeyCopyCase::MissingKey => {
+                selected[1].keyframe_id = mondrian_core::KeyframeId::new()
+            }
+            StaleKeyCopyCase::MissingProperty => {
+                selected[1].property.property.animation_track_id =
+                    mondrian_core::AnimationTrackId::new()
+            }
+            StaleKeyCopyCase::AllKeys => {
+                for key in &mut selected {
+                    key.keyframe_id = mondrian_core::KeyframeId::new();
+                }
+            }
+        }
+        state.set_animation_keyframe_selection(selected);
+        let original_selection = state.animation_selection.selected_keyframes.clone();
+        let original_sequence = state.active_sequence().expect("original").clone();
+        let generation = state.project_author_generation();
+        let history = state.authoring_history().expect("history").diagnostics();
+        let result = state.dispatch_action(mondrian_editor_state::Action::Copy);
+        assert_eq!(
+            state.active_clipboard_kind(),
+            Some(AppClipboardKind::AnimationKeyframes),
+            "{case:?}: a key-group request cannot turn into a clip copy"
+        );
+        assert_eq!(clipboard(&state), original_clipboard,
+            "{case:?}: a stale member must refuse the whole capture, preserving the previous clipboard");
+        assert!(
+            result.is_err(),
+            "{case:?}: stale copy intent must report refusal"
+        );
+        assert_eq!(
+            state.animation_selection.selected_keyframes,
+            original_selection
+        );
+        assert!(state
+            .active_sequence()
+            .expect("unchanged source")
+            .author_state_eq_ignoring_revision(&original_sequence));
+        assert_eq!(state.project_author_generation(), generation);
+        assert_eq!(
+            state.authoring_history().expect("history").diagnostics(),
+            history
+        );
+    }
+
+    #[test]
     fn dispatch_clipboard_actions_reject_missing_selection_or_clipboard() {
         let (mut state, track_id, clip_id) = state_with_two_video_tracks();
 
@@ -7767,7 +8793,7 @@ mod tests {
         let pasted = clips.iter().find(|clip| clip.id != clip_id).expect("pasted clip");
         assert_eq!(pasted.position, tt(50, tb));
         assert_eq!(pasted.duration, tt(20, tb));
-        assert_eq!(state.active_clipboard_kind, Some(AppClipboardKind::Clips));
+        assert_eq!(state.active_clipboard_kind(), Some(AppClipboardKind::Clips));
         assert_eq!(
             state.selection.selected_clips,
             vec![SelectedClipRef { track_id, is_video_track: true, clip_id: pasted.id }]
@@ -7795,7 +8821,7 @@ mod tests {
         assert!(state.selection.selected_mask.is_none());
         assert!(state.animation_selection.active_property.is_none());
         assert!(state.has_clip_clipboard());
-        assert_eq!(state.active_clipboard_kind, Some(AppClipboardKind::Clips));
+        assert_eq!(state.active_clipboard_kind(), Some(AppClipboardKind::Clips));
         assert!(state.can_undo_action());
     }
 
@@ -7815,7 +8841,7 @@ mod tests {
         let _tb = sequence.time_base();
         assert_eq!(sequence.video_tracks[0].clips.len(), 1);
         assert!(!state.has_clip_clipboard());
-        assert_eq!(state.active_clipboard_kind, None);
+        assert_eq!(state.active_clipboard_kind(), None);
         assert!(!state.can_undo_action());
     }
 

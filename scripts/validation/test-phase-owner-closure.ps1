@@ -29,6 +29,43 @@ foreach ($kind in @('continuous_export','playback_reference','concurrent_recover
     } }
     $original = [pscustomobject]@{schema_version=2;run_id='fixture-run';phase_id='fixture-phase';ordinal=0;terminal=[pscustomobject]@{phase_kind=$kind;closure=[pscustomobject]@{status='completed';playback_workers_terminated=$true;supervised_child_processes_remaining=0;export=$export};owners=$owners;export_verifier=$verifier;failures=@()}}
     Assert-MondrianPhaseOwnerReceipt (Seal-Report $original) fixture-run fixture-phase 0 $kind
+    if ($kind -ceq 'continuous_export') {
+        foreach ($mutation in @('balanced','missing','missing-field','extra','scope','pending','unavailable','mismatch','integer-string','negative','overflow','bool-string','snapshot-mismatch','legacy-schema')) {
+            $changed = $original | ConvertTo-Json -Depth 80 -Compress | ConvertFrom-Json
+            $envelope = $changed.terminal.owners.AppOnly
+            $rawApp = $envelope.canonical_json | ConvertFrom-Json
+            foreach ($domain in @('export','export_terminal_snapshot')) {
+                $leaf = $rawApp.$domain.json | ConvertFrom-Json
+                $native = $leaf.audio_native_children
+                switch ($mutation) {
+                    'balanced' { $native.children_registered=2; $native.children_settled=2 }
+                    'missing' { $leaf.PSObject.Properties.Remove('audio_native_children') }
+                    'missing-field' { $native.PSObject.Properties.Remove('children_settled') }
+                    'extra' { $native | Add-Member invented 0 }
+                    'scope' { $native.registration_scopes=1 }
+                    'pending' { $native.pending_children=1 }
+                    'unavailable' { $native.unavailable=$true }
+                    'mismatch' { $native.children_registered=1 }
+                    'integer-string' { $native.children_registered='0' }
+                    'negative' { $native.children_registered=-1; $native.children_settled=-1 }
+                    'overflow' { $native.children_registered=[bigint]'18446744073709551616'; $native.children_settled=$native.children_registered }
+                    'bool-string' { $native.unavailable='false' }
+                    'snapshot-mismatch' { if ($domain -ceq 'export') { $native.children_registered=2; $native.children_settled=2 } }
+                    'legacy-schema' { $leaf.schema_version=if ($domain -ceq 'export') {4} else {2} }
+                }
+                $rawApp.$domain.json = $leaf | ConvertTo-Json -Depth 80 -Compress
+                $rawApp.$domain.sha256 = [Convert]::ToHexStringLower([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($rawApp.$domain.json)))
+                if ($domain -ceq 'export') { $changed.terminal.closure.export=$leaf }
+            }
+            $envelope.canonical_json = $rawApp | ConvertTo-Json -Depth 80 -Compress
+            $envelope.sha256 = [Convert]::ToHexStringLower([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($envelope.canonical_json)))
+            if ($mutation -ceq 'balanced') {
+                Assert-MondrianPhaseOwnerReceipt (Seal-Report $changed) fixture-run fixture-phase 0 $kind
+            } else {
+                Assert-Rejected $changed $kind "native audio $mutation"
+            }
+        }
+    }
     $ancillary = $original | ConvertTo-Json -Depth 80 -Compress | ConvertFrom-Json
     $ancillary | Add-Member ancillary_program_sha256 ('a' * 64)
     $ancillary | Add-Member ancillary_export_artifacts @()

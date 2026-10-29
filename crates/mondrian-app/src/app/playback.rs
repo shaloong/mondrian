@@ -1,6 +1,8 @@
 use super::product_action::TimelineSeekPayload;
 use super::timeline_position::lower_nearest_sequence_frame;
 use super::*;
+mod host_output_fader;
+use crate::app::AppMessage;
 
 const MAX_PLAYBACK_WAKE_DELAY: Duration = Duration::from_millis(100);
 const AUDIO_CALLBACK_STALE_AFTER: Duration = Duration::from_millis(100);
@@ -12,8 +14,9 @@ enum AudioOutputClockCommit {
     Hold,
 }
 
-struct PreparedTimelineAudioSource {
-    renderer: Arc<dyn AudioPcmRenderer>,
+/// Prepared timeline audio source owned by the App playback adapter.
+pub(super) struct PreparedTimelineAudioSource {
+    renderer: Arc<TimelineAudioPcmRenderer>,
     continuity_model: AudioPcmContinuityModel,
     meter_observer: mondrian_audio::AudioMeterObserver,
     delivery_evidence: mondrian_audio::AudioDeliveryEvidence,
@@ -91,6 +94,24 @@ impl AppAudioPlayback {
                 tracing::error!(%reason, "Audio Playback execution is unavailable; transport will remain Synthetic-mastered");
                 Self::Unavailable { sample_rate, reason }
             }
+        }
+    }
+
+    fn render_chunk_frames(&self) -> Option<usize> {
+        match self {
+            Self::Available(playback) => Some(playback.render_chunk_frames()),
+            Self::Unavailable { .. } => None,
+        }
+    }
+
+    fn native_child_settlement_registrar(
+        &self,
+    ) -> Option<mondrian_core::NativeChildSettlementRegistrar> {
+        match self {
+            // The same Media tracker has already recorded an acquisition error.
+            // Continue the original constructor; None never asserts no children.
+            Self::Available(playback) => playback.native_child_settlement_registrar().ok(),
+            Self::Unavailable { .. } => None,
         }
     }
 
@@ -174,6 +195,191 @@ impl AppAudioPlayback {
         }
     }
 
+    pub(super) fn matches_source_weak(
+        &self,
+        renderer: &std::sync::Weak<dyn AudioPcmRenderer>,
+    ) -> bool {
+        match self {
+            Self::Available(playback) => playback.matches_source_weak(renderer),
+            Self::Unavailable { .. } => false,
+        }
+    }
+
+    fn request_source_close(
+        &mut self,
+        expected: &Arc<dyn AudioPcmRenderer>,
+        anchor: AudioSamplePosition,
+    ) -> Result<mondrian_media::AudioPcmSourceCloseTicket, AudioPlaybackError> {
+        match self {
+            Self::Available(playback) => playback.request_source_close(expected, anchor),
+            Self::Unavailable { .. } => Err(AudioPlaybackError::ExecutionUnavailable),
+        }
+    }
+
+    pub(super) fn source_close_status<'a>(
+        &'a self,
+        ticket: &mondrian_media::AudioPcmSourceCloseTicket,
+    ) -> Result<mondrian_media::AudioPcmSourceCloseStatus<'a>, AudioPlaybackError> {
+        match self {
+            Self::Available(playback) => playback.source_close_status(ticket),
+            Self::Unavailable { .. } => Err(AudioPlaybackError::ExecutionUnavailable),
+        }
+    }
+
+    fn finish_source_close(
+        &mut self,
+        ticket: &mondrian_media::AudioPcmSourceCloseTicket,
+        anchor: AudioSamplePosition,
+    ) -> Result<(), AudioPlaybackError> {
+        match self {
+            Self::Available(playback) => playback.finish_source_close(ticket, anchor),
+            Self::Unavailable { .. } => Err(AudioPlaybackError::ExecutionUnavailable),
+        }
+    }
+
+    pub(super) fn cancel_source_close(
+        &mut self,
+        ticket: &mondrian_media::AudioPcmSourceCloseTicket,
+    ) -> Result<(), AudioPlaybackError> {
+        match self {
+            Self::Available(playback) => playback.cancel_source_close(ticket),
+            Self::Unavailable { .. } => Err(AudioPlaybackError::ExecutionUnavailable),
+        }
+    }
+
+    pub(super) fn native_editor_source_available(&self) -> bool {
+        match self {
+            Self::Available(playback) => playback.native_editor_source_available(),
+            Self::Unavailable { .. } => false,
+        }
+    }
+
+    pub(super) fn request_native_parameter_query(
+        &mut self,
+        ticket: std::num::NonZeroU64,
+        query: mondrian_core::NativeAudioParameterQuery,
+    ) -> Result<Result<(), mondrian_core::NativeAudioParameterQueryRefusal>, AudioPlaybackError>
+    {
+        match self {
+            Self::Available(playback) => playback.request_native_parameter_query(ticket, query),
+            Self::Unavailable { .. } => Ok(Err(
+                mondrian_core::NativeAudioParameterQueryRefusal::Unavailable,
+            )),
+        }
+    }
+
+    pub(super) fn request_native_audio_editor(
+        &mut self,
+        intent: mondrian_core::NativeAudioEditorControlIntent,
+    ) -> Result<mondrian_core::NativeAudioEditorControlSubmission, AudioPlaybackError> {
+        match self {
+            Self::Available(playback) => playback.request_native_audio_editor(intent),
+            Self::Unavailable { .. } => {
+                Ok(mondrian_core::NativeAudioEditorControlSubmission::Refused(
+                    mondrian_core::NativeAudioEditorControlRefusal::UnsupportedAdapter,
+                ))
+            }
+        }
+    }
+
+    pub(super) fn request_native_audio_author_handoff(
+        &mut self,
+        request: Box<dyn mondrian_media::AudioPcmNativeAuthorHandoff>,
+    ) -> Result<bool, AudioPlaybackError> {
+        match self {
+            Self::Available(playback) => playback.request_native_author_handoff(request),
+            Self::Unavailable { .. } => {
+                drop(request);
+                Ok(false)
+            }
+        }
+    }
+
+    fn seek_native_reprepare(
+        &mut self,
+        generation: u64,
+        anchor: AudioSamplePosition,
+    ) -> Result<bool, AudioPlaybackError> {
+        match self {
+            Self::Available(playback) => playback.seek_native_reprepare(generation, anchor),
+            Self::Unavailable { .. } => Ok(false),
+        }
+    }
+
+    fn finish_native_reprepare(
+        &mut self,
+        generation: u64,
+        anchor: AudioSamplePosition,
+    ) -> Result<bool, AudioPlaybackError> {
+        match self {
+            Self::Available(playback) => playback.finish_native_reprepare(generation, anchor),
+            Self::Unavailable { .. } => Ok(false),
+        }
+    }
+
+    fn finish_native_author_state_entry(
+        &mut self,
+        target: mondrian_core::NativeAudioEditorTarget,
+        anchor: AudioSamplePosition,
+    ) -> Result<bool, AudioPlaybackError> {
+        match self {
+            Self::Available(playback) => playback.finish_native_author_state_entry(target, anchor),
+            Self::Unavailable { .. } => Ok(false),
+        }
+    }
+
+    pub(super) fn native_control_hold_generation(&self) -> Option<u64> {
+        match self {
+            Self::Available(playback) => playback.native_control_hold_generation(),
+            Self::Unavailable { .. } => None,
+        }
+    }
+
+    fn native_author_state_entry_target(&self) -> Option<mondrian_core::NativeAudioEditorTarget> {
+        match self {
+            Self::Available(playback) => playback.native_author_state_entry_target(),
+            Self::Unavailable { .. } => None,
+        }
+    }
+
+    fn native_editor_cleanup_target(&self) -> Option<mondrian_core::NativeAudioEditorTarget> {
+        match self {
+            Self::Available(playback) => playback.native_editor_cleanup_target(),
+            Self::Unavailable { .. } => None,
+        }
+    }
+
+    fn has_retained_native_reprepare(&self) -> bool {
+        matches!(self, Self::Available(playback) if playback.has_retained_native_reprepare())
+    }
+
+    fn native_reprepare_refused_generation(&self) -> Option<u64> {
+        match self {
+            Self::Available(playback) => playback.native_reprepare_refused_generation(),
+            Self::Unavailable { .. } => None,
+        }
+    }
+
+    fn native_reprepare_pending_generation(&self) -> Option<u64> {
+        match self {
+            Self::Available(playback) => playback.native_reprepare_pending_generation(),
+            Self::Unavailable { .. } => None,
+        }
+    }
+
+    fn finalize_native_control_anchor(
+        &mut self,
+        generation: u64,
+        anchor: AudioSamplePosition,
+    ) -> Result<bool, AudioPlaybackError> {
+        match self {
+            Self::Available(playback) => {
+                playback.finalize_native_control_anchor(generation, anchor)
+            }
+            Self::Unavailable { .. } => Ok(false),
+        }
+    }
+
     fn clear_source(&mut self, anchor: AudioSamplePosition) -> Result<(), AudioPlaybackError> {
         match self {
             Self::Available(playback) => playback.clear_source(anchor),
@@ -186,6 +392,24 @@ impl AppAudioPlayback {
     fn reprime(&mut self, anchor: AudioSamplePosition) -> Result<(), AudioPlaybackError> {
         match self {
             Self::Available(playback) => playback.reprime(anchor),
+            Self::Unavailable { sample_rate, .. } => {
+                mondrian_media::validate_audio_playback_anchor(anchor, *sample_rate)
+            }
+        }
+    }
+
+    fn suspend(&mut self, anchor: AudioSamplePosition) -> Result<(), AudioPlaybackError> {
+        match self {
+            Self::Available(playback) => playback.suspend(anchor),
+            Self::Unavailable { sample_rate, .. } => {
+                mondrian_media::validate_audio_playback_anchor(anchor, *sample_rate)
+            }
+        }
+    }
+
+    fn recover_at(&mut self, anchor: AudioSamplePosition) -> Result<(), AudioPlaybackError> {
+        match self {
+            Self::Available(playback) => playback.recover_at(anchor),
             Self::Unavailable { sample_rate, .. } => {
                 mondrian_media::validate_audio_playback_anchor(anchor, *sample_rate)
             }
@@ -462,7 +686,7 @@ impl AppState {
         Ok(())
     }
 
-    fn authoritative_audio_anchor(
+    pub(super) fn authoritative_audio_anchor(
         &self,
         engine: &PlaybackEngine,
         observed_at: MonotonicTimestamp,
@@ -636,7 +860,7 @@ impl AppState {
             .map_err(|error| transport_action_error("pause", error))?;
         let audio_anchor = self.authoritative_audio_anchor(&engine, playback_now, "pause")?;
         self.audio_playback
-            .reprime(audio_anchor)
+            .suspend(audio_anchor)
             .map_err(|error| transport_action_error("pause", error))?;
         self.playback_engine = engine;
         self.audio_idle_warmup.set_automatic_policy_enabled(false);
@@ -645,6 +869,267 @@ impl AppState {
         self.reanchor_playback_observation_projection(observed_at);
         self.capture_playback_evidence();
         self.refresh_internal_execution_resource_decision();
+        Ok(())
+    }
+
+    fn validate_project_audio_handoff_admission(&self) -> mondrian_core::Result<()> {
+        self.validate_audio_source_replacement_admission("project_audio_handoff", "Project handoff")
+    }
+
+    // Only explicit ProjectClose can request a SourceClosed proof for a failed
+    // restart. The local generation is not a Closed or retirement permission.
+    fn validate_project_audio_close_admission(&self) -> mondrian_core::Result<()> {
+        let refused = self.audio_playback.native_reprepare_refused_generation();
+        if let Some(generation) = refused {
+            let ticket = self.playback_engine.native_audio_control_hold_ticket();
+            if self.audio_playback.native_control_hold_generation() != Some(generation)
+                || self.audio_playback.native_reprepare_pending_generation() != Some(generation)
+                || ticket.is_some_and(|ticket| {
+                    ticket.pending_generation() != generation
+                        || ticket.epoch() != self.playback_engine.snapshot().epoch
+                })
+            {
+                return Err(transport_action_error(
+                    "project_audio_handoff",
+                    "native author or editor work must settle before Project handoff",
+                ));
+            }
+        }
+        self.validate_audio_source_replacement_admission_for_close(
+            "project_audio_handoff",
+            "Project handoff",
+            refused,
+        )
+    }
+
+    pub(super) fn validate_audio_source_replacement_admission(
+        &self,
+        action: &str,
+        operation: &str,
+    ) -> mondrian_core::Result<()> {
+        self.validate_audio_source_replacement_admission_for_close(action, operation, None)
+    }
+
+    fn validate_audio_source_replacement_admission_for_close(
+        &self,
+        action: &str,
+        operation: &str,
+        refused_close: Option<u64>,
+    ) -> mondrian_core::Result<()> {
+        let cleanup_complete = self.audio_playback_snapshot().state
+            == mondrian_media::AudioPlaybackState::EditorCleanupCompletePaused;
+        if self
+            .native_audio_editor
+            .as_ref()
+            .is_some_and(|context| context.blocks_source_replacement())
+            || self
+                .native_audio_author_work
+                .as_ref()
+                .is_some_and(|work| work.blocks_source_replacement())
+            || self
+                .playback_engine
+                .native_audio_control_hold_ticket()
+                .is_some_and(|ticket| Some(ticket.pending_generation()) != refused_close)
+            || self.audio_playback.native_author_state_entry_target().is_some()
+            || self
+                .audio_playback
+                .native_reprepare_pending_generation()
+                .is_some_and(|generation| Some(generation) != refused_close)
+            || (!cleanup_complete
+                && (self
+                    .audio_playback
+                    .native_control_hold_generation()
+                    .is_some_and(|generation| Some(generation) != refused_close)
+                    || self.audio_playback.native_editor_cleanup_target().is_some()))
+        {
+            return Err(transport_action_error(
+                action,
+                format!("native author or editor work must settle before {operation}"),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Open already detached the old Source before entering its persistence
+    /// barrier. Cancellation verifies that boundary without submitting another
+    /// stop to Media, which the enclosing App shutdown may already have sealed.
+    pub(super) fn validate_project_audio_detached(&self) -> mondrian_core::Result<()> {
+        self.validate_project_audio_handoff_admission()?;
+        if self.audio_playback.native_editor_source_available() {
+            return Err(transport_action_error(
+                "project_audio_handoff",
+                "requested Project Open regained an audio Source",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Submit one close validation behind earlier work on Media's serial queue.
+    /// Keep the actual Source installed until that queue proves Closed.
+    pub(super) fn begin_project_audio_close(
+        &mut self,
+    ) -> mondrian_core::Result<Option<mondrian_media::AudioPcmSourceCloseTicket>> {
+        self.validate_project_audio_close_admission()?;
+        if !self.audio_playback.native_editor_source_available() {
+            self.prepare_project_audio_handoff()?;
+            return Ok(None);
+        }
+        let renderer = self.project_audio_handoff_renderer()?;
+        let observed_at = Instant::now();
+        self.synchronize_playback_observation_clock(observed_at);
+        let playback_now = self.playback_engine.monotonic_high_water();
+        let mut engine = self.playback_engine.clone();
+        engine
+            .stop(playback_now)
+            .map_err(|error| transport_action_error("project_audio_handoff", error))?;
+        let anchor =
+            self.authoritative_audio_anchor(&engine, playback_now, "project_audio_handoff")?;
+        // request_source_close owns the one Suspend. Calling stop() here would
+        // cancel that request's generation a second time.
+        let ticket = self
+            .audio_playback
+            .request_source_close(&renderer, anchor)
+            .map_err(|error| transport_action_error("project_audio_handoff", error))?;
+        drop(renderer);
+        self.playback_engine = engine;
+        self.audio_idle_warmup.set_automatic_policy_enabled(false);
+        self.audio_idle_warmup.set_dispatch_enabled(false);
+        self.settle_preview_access_source();
+        self.reanchor_playback_observation_projection(observed_at);
+        self.capture_playback_evidence();
+        self.refresh_internal_execution_resource_decision();
+        Ok(Some(ticket))
+    }
+
+    pub(super) fn project_audio_source_is_current(&self) -> bool {
+        self.native_audio_renderer.as_ref().is_some_and(|renderer| {
+            let erased: std::sync::Weak<dyn AudioPcmRenderer> = renderer.clone();
+            self.audio_playback.matches_source_weak(&erased)
+        })
+    }
+
+    fn project_audio_handoff_renderer(&self) -> mondrian_core::Result<Arc<dyn AudioPcmRenderer>> {
+        if self.active_sequence().is_none() {
+            return Err(transport_action_error(
+                "project_audio_handoff",
+                "installed audio Source has no active Sequence",
+            ));
+        }
+        let renderer = self
+            .native_audio_renderer
+            .as_ref()
+            .filter(|renderer| renderer.strong_count() != 0)
+            .ok_or_else(|| {
+                transport_action_error(
+                    "project_audio_handoff",
+                    "installed audio Source has no current Timeline Runtime",
+                )
+            })?;
+        let erased: std::sync::Weak<dyn AudioPcmRenderer> = renderer.clone();
+        if !self.audio_playback.matches_source_weak(&erased) {
+            return Err(transport_action_error(
+                "project_audio_handoff",
+                "Timeline Runtime is not the installed audio Source",
+            ));
+        }
+        // The actual Media slot now proves a strong owner of this exact weak
+        // allocation. A stale alias is never upgraded on the caller, where it
+        // could race the retirement worker and become the final native owner.
+        renderer
+            .upgrade()
+            .map(|renderer| renderer as Arc<dyn AudioPcmRenderer>)
+            .ok_or_else(|| {
+                transport_action_error(
+                    "project_audio_handoff",
+                    "installed audio Source has no current Timeline Runtime",
+                )
+            })
+    }
+
+    /// Deliver original completions, without admitting another Idle warmup or
+    /// committing a device clock. Media gates new work while this ticket lives.
+    pub(super) fn poll_project_audio_close_queue(&mut self) -> mondrian_core::Result<()> {
+        let anchor = self.authoritative_audio_anchor(
+            &self.playback_engine,
+            self.playback_engine.monotonic_high_water(),
+            "project_audio_handoff",
+        )?;
+        let poll = self
+            .audio_playback
+            .poll(AudioPlaybackMode::Idle, anchor)
+            .map_err(|error| transport_action_error("project_audio_handoff", error))?;
+        for event in poll.events {
+            if matches!(
+                event,
+                AudioPlaybackEvent::NativeAuthorProposalObserved { .. }
+            ) {
+                // The original Runtime retains this proposal for redelivery.
+                // Close must observe its refusal, never install/Ack the prefix
+                // as a side effect of draining a preceding completion.
+                continue;
+            }
+            self.handle_audio_playback_event(event, Instant::now())?;
+        }
+        Ok(())
+    }
+
+    pub(super) fn finish_project_audio_close(
+        &mut self,
+        ticket: &mondrian_media::AudioPcmSourceCloseTicket,
+    ) -> mondrian_core::Result<()> {
+        self.validate_project_audio_close_admission()?;
+        // Recheck the current Timeline alias as well as Media's full claim.
+        // Do not retain this temporary Arc across the original retirement.
+        drop(self.project_audio_handoff_renderer()?);
+        let anchor = self.authoritative_audio_anchor(
+            &self.playback_engine,
+            self.playback_engine.monotonic_high_water(),
+            "project_audio_handoff",
+        )?;
+        self.audio_playback
+            .finish_source_close(ticket, anchor)
+            .map_err(|error| transport_action_error("project_audio_handoff", error))?;
+        self.native_audio_renderer = None;
+        self.audio_playback_author_binding = None;
+        self.audio_monitoring.clear_meter();
+        self.native_audio_editor = None;
+        self.native_audio_author_work = None;
+        Ok(())
+    }
+
+    /// Terminate the current Project's audio domain before persistence admission
+    /// retires. Known author/editor obligations refuse before transport changes.
+    /// The original Media clear revokes old claims and retires owners on its own
+    /// queue; it leaves Playback reusable and does not certify native OS exit.
+    pub(super) fn prepare_project_audio_handoff(&mut self) -> mondrian_core::Result<()> {
+        self.validate_project_audio_handoff_admission()?;
+        let has_source = self.audio_playback.native_editor_source_available();
+        if has_source {
+            let renderer = self.project_audio_handoff_renderer()?;
+            renderer.validate_native_author_source_closed(
+                &mondrian_core::ExecutionCancellationToken::new(),
+            )?;
+        }
+        // Cancelled cold Open has no old Sequence or Source. A real Project,
+        // including video-only/AudioUnavailable, still uses the original stop.
+        if self.active_sequence().is_some() {
+            self.stop()?;
+            if has_source {
+                let anchor = self.authoritative_audio_anchor(
+                    &self.playback_engine,
+                    self.playback_engine.monotonic_high_water(),
+                    "project_audio_handoff",
+                )?;
+                self.audio_playback
+                    .clear_source(anchor)
+                    .map_err(|error| transport_action_error("project_audio_handoff", error))?;
+            }
+        }
+        self.native_audio_renderer = None;
+        self.audio_playback_author_binding = None;
+        self.audio_monitoring.clear_meter();
+        self.native_audio_editor = None;
+        self.native_audio_author_work = None;
         Ok(())
     }
 
@@ -659,7 +1144,7 @@ impl AppState {
             .map_err(|error| transport_action_error("stop", error))?;
         let audio_anchor = self.authoritative_audio_anchor(&engine, playback_now, "stop")?;
         self.audio_playback
-            .reprime(audio_anchor)
+            .suspend(audio_anchor)
             .map_err(|error| transport_action_error("stop", error))?;
         self.playback_engine = engine;
         self.audio_idle_warmup.set_automatic_policy_enabled(false);
@@ -706,16 +1191,41 @@ impl AppState {
         frame: i64,
         source: TimelineSeekSource,
     ) -> mondrian_core::Result<()> {
-        let observed_at = Instant::now();
-        self.synchronize_playback_observation_clock(observed_at);
         self.require_transport_sequence("seek")?;
-        let playback_now = self.playback_engine.monotonic_high_water();
         if frame < 0 {
             return Err(transport_action_error(
                 "seek",
                 "timeline frame must be non-negative",
             ));
         }
+        // This branch retires only PCM/output for the actual retained Source.
+        // Validate its identity before touching either observation or transport
+        // clocks; a stale Weak must never fall back to a cold renderer.
+        let retained_restart = if self.audio_playback.has_retained_native_reprepare() {
+            let sequence = self.active_sequence().expect("checked transport Sequence").id;
+            let _source = self.retained_native_reprepare_source("seek", sequence)?;
+            let generation = self
+                .audio_playback
+                .native_reprepare_pending_generation()
+                .ok_or_else(|| transport_action_error("seek", "native restart is unavailable"))?;
+            let next = generation.checked_add(1).ok_or_else(|| {
+                transport_action_error("seek", "native restart generation overflowed")
+            })?;
+            Some((generation, next))
+        } else {
+            None
+        };
+        let observed_at = Instant::now();
+        let playback_now = if retained_restart.is_some() {
+            // A seek during HOLD has its own Engine target, never the old frozen
+            // callback's phase. Keep failed candidate admission non-mutating.
+            self.playback_timestamp_for_observation(observed_at)
+                .map_err(|error| transport_action_error("seek", error))?
+                .max(self.playback_engine.monotonic_high_water())
+        } else {
+            self.synchronize_playback_observation_clock(observed_at);
+            self.playback_engine.monotonic_high_water()
+        };
         let was_running = self.is_playing();
         let realtime_audio = self.playback_engine.snapshot().rate.supports_realtime_audio();
         let end_frame = self.last_content_frame()?;
@@ -724,7 +1234,7 @@ impl AppState {
             .playback_timeline_binding(end_frame)
             .map_err(|error| transport_action_error("seek", error))?;
         let timeline_anchor = FramePosition::new(frame, time_base);
-        let renderer = (was_running && realtime_audio)
+        let renderer = (retained_restart.is_none() && was_running && realtime_audio)
             .then(|| self.audio_playback_renderer("seek"))
             .transpose()?
             .flatten();
@@ -736,11 +1246,29 @@ impl AppState {
         self.audio_playback
             .validate_anchor(audio_anchor)
             .map_err(|error| transport_action_error("seek", error))?;
-        if was_running {
+        if let Some((generation, next)) = retained_restart {
+            // Finish all fallible Engine work before Media retires PCM. The
+            // actual work/provider retains its original admission generation.
+            if was_running {
+                engine
+                    .hold_for_native_audio_control(next, None, playback_now)
+                    .map_err(|error| transport_action_error("seek", error))?;
+            }
+            if !self
+                .audio_playback
+                .seek_native_reprepare(generation, audio_anchor)
+                .map_err(|error| transport_action_error("seek", error))?
+            {
+                return Err(transport_action_error(
+                    "seek",
+                    "retained native restart no longer accepts a seek",
+                ));
+            }
+        } else if was_running {
             self.commit_audio_playback("seek", audio_anchor, renderer)?;
         } else {
             self.audio_playback
-                .reprime(audio_anchor)
+                .suspend(audio_anchor)
                 .map_err(|error| transport_action_error("seek", error))?;
         }
         self.playback_engine = engine;
@@ -801,9 +1329,29 @@ impl AppState {
         &mut self,
         clock_commit: AudioOutputClockCommit,
     ) -> mondrian_core::Result<()> {
+        self.pump_audio_output_with_observer_clock(clock_commit, &mut Instant::now, &mut |_, _| {})
+    }
+
+    /// Functional software-output tests supply observation time explicitly.
+    /// This changes no production clock, callback counter, deadline or authority.
+    #[cfg(test)]
+    pub(in crate::app) fn pump_audio_output_clocked_for_test(
+        &mut self,
+        clock: &mut impl FnMut() -> Instant,
+        observer: &mut impl FnMut(&AppState, &AudioPlaybackEvent),
+    ) -> mondrian_core::Result<()> {
+        self.pump_audio_output_with_observer_clock(AudioOutputClockCommit::Observe, clock, observer)
+    }
+
+    fn pump_audio_output_with_observer_clock(
+        &mut self,
+        clock_commit: AudioOutputClockCommit,
+        clock: &mut impl FnMut() -> Instant,
+        observer: &mut impl FnMut(&AppState, &AudioPlaybackEvent),
+    ) -> mondrian_core::Result<()> {
         self.poll_audio_idle_warmup();
         let mode = self.audio_playback_mode();
-        let poll_started_at = Instant::now();
+        let poll_started_at = clock();
         let poll_timestamp = self
             .playback_timestamp_for_observation(poll_started_at)
             .map(|timestamp| timestamp.max(self.playback_engine.monotonic_high_water()))
@@ -818,7 +1366,22 @@ impl AppState {
             .poll(mode, audio_anchor)
             .map_err(|error| transport_action_error("pump_audio_output", error))?;
         for event in poll.events {
-            self.handle_audio_playback_event(event, Instant::now())?;
+            observer(self, &event);
+            self.handle_audio_playback_event(event, clock())?;
+        }
+        self.retry_native_audio_terminal_author()?;
+        if self.audio_playback.native_reprepare_pending_generation()
+            == Some(poll.snapshot.generation)
+            && self.is_playing()
+            && self
+                .playback_engine
+                .native_audio_control_hold_ticket()
+                .is_none_or(|ticket| ticket.pending_generation() != poll.snapshot.generation)
+        {
+            let now = self.playback_engine.monotonic_high_water().max(poll_timestamp);
+            self.playback_engine
+                .hold_for_native_audio_control(poll.snapshot.generation, None, now)
+                .map_err(|error| transport_action_error("native_audio_hold_pending", error))?;
         }
         if mode == AudioPlaybackMode::Idle {
             self.request_audio_idle_warmup();
@@ -827,9 +1390,36 @@ impl AppState {
         self.audio_idle_warmup.set_automatic_policy_enabled(false);
         self.audio_idle_warmup.set_dispatch_enabled(false);
         if clock_commit == AudioOutputClockCommit::Observe {
-            self.observe_audio_output_clock(poll.snapshot, Instant::now())?;
+            self.observe_audio_output_clock(poll.snapshot, clock())?;
         }
         Ok(())
+    }
+
+    fn native_pending_clock_observation(
+        &self,
+        output: Option<RealtimeAudioOutputSnapshot>,
+        anchor: Option<AudioSamplePosition>,
+        quiesced: bool,
+    ) -> mondrian_core::Result<Option<AudioDeviceClockObservation>> {
+        let (Some(output), Some(anchor)) = (output, anchor) else {
+            return Ok(None);
+        };
+        let observed_at = self
+            .playback_timestamp_for_observation(output.captured_at)
+            .map_err(|error| transport_action_error("native_audio_hold_observation", error))?;
+        audio_device_clock_observation(
+            output,
+            self.playback_engine.snapshot().epoch,
+            observed_at,
+            true,
+            anchor,
+            false,
+            quiesced,
+        )
+        .map(|observation| {
+            (observation.state == AudioDeviceClockState::Running).then_some(observation)
+        })
+        .map_err(|error| transport_action_error("native_audio_hold_observation", error))
     }
 
     fn handle_audio_playback_event(
@@ -957,6 +1547,469 @@ impl AppState {
                     ?disposition,
                     %reason,
                     "stateful audio render generation invalidated; using Synthetic Clock Master"
+                );
+                Ok(())
+            }
+            AudioPlaybackEvent::NativeReprepareRequired {
+                previous_generation,
+                pending_generation,
+                start_sample,
+                restart_anchor,
+                final_output,
+                final_media_anchor,
+                notice,
+            } => {
+                // Queued notices can outlive a seek, fatal renderer loss or
+                // explicit source replacement. The actual retained Media
+                // generation is authority, never the notice's diagnostic ID.
+                if !self.is_playing()
+                    || self.audio_playback.native_reprepare_pending_generation()
+                        != Some(pending_generation)
+                {
+                    return Ok(());
+                }
+                let now = self
+                    .playback_timestamp_for_observation(handled_at)
+                    .map(|timestamp| timestamp.max(self.playback_engine.monotonic_high_water()))
+                    .map_err(|error| transport_action_error("native_audio_hold", error))?;
+                let observation = match self.native_pending_clock_observation(
+                    final_output,
+                    final_media_anchor,
+                    false,
+                ) {
+                    Ok(observation) => observation,
+                    Err(error) => {
+                        tracing::warn!(%error, "unusable provisional native-retirement clock evidence; keeping accepted phase");
+                        None
+                    }
+                };
+                if let Err(error) = self.playback_engine.hold_for_native_audio_control(
+                    pending_generation,
+                    observation,
+                    now,
+                ) {
+                    tracing::warn!(%error, "provisional native-retirement sample arithmetic rejected; retaining accepted phase");
+                    self.playback_engine
+                        .hold_for_native_audio_control(pending_generation, None, now)
+                        .map_err(|error| transport_action_error("native_audio_hold", error))?;
+                }
+                tracing::info!(previous_generation, pending_generation, start_sample,
+                    restart_sample = restart_anchor.sample(), ?notice,
+                    "native audio retained pending canonical reprepare; authoritative transport held");
+                Ok(())
+            }
+            AudioPlaybackEvent::NativeReprepareOutputQuiesced {
+                pending_generation,
+                final_output,
+                final_media_anchor,
+            } => {
+                if self.audio_playback.native_reprepare_pending_generation()
+                    != Some(pending_generation)
+                {
+                    return Ok(());
+                }
+                let now = self
+                    .playback_timestamp_for_observation(handled_at)
+                    .map(|timestamp| timestamp.max(self.playback_engine.monotonic_high_water()))
+                    .map_err(|error| transport_action_error("native_audio_hold_final", error))?;
+                let finalized = if self.is_playing() {
+                    let ticket = self
+                        .playback_engine
+                        .hold_for_native_audio_control(pending_generation, None, now)
+                        .map_err(|error| {
+                            transport_action_error("native_audio_hold_final", error)
+                        })?;
+                    let observation = match self.native_pending_clock_observation(
+                        final_output,
+                        final_media_anchor,
+                        true,
+                    ) {
+                        Ok(observation) => observation,
+                        Err(error) => {
+                            tracing::warn!(%error, "unusable final native-retirement clock evidence; keeping accepted phase");
+                            None
+                        }
+                    };
+                    let finalized = match self.playback_engine.finalize_native_audio_control_hold(
+                        ticket,
+                        observation,
+                        now,
+                    ) {
+                        Ok(finalized) => finalized,
+                        Err(error) => {
+                            tracing::warn!(%error, "final native-retirement sample arithmetic rejected; retaining accepted phase");
+                            false
+                        }
+                    };
+                    // The exact output token is acknowledged even if its clock
+                    // snapshot cannot refine the accepted phase. Retain that phase
+                    // and stop retirement polling; this remains a blocked hold.
+                    finalized
+                        || self
+                            .playback_engine
+                            .finalize_native_audio_control_hold(ticket, None, now)
+                            .map_err(|error| {
+                                transport_action_error("native_audio_hold_final", error)
+                            })?
+                } else {
+                    // The actual Media ack still owns token/old-PCM proof. Pause
+                    // grants neither quiescence nor clock advancement; never
+                    // discard this one-shot event merely because transport paused.
+                    true
+                };
+                if finalized {
+                    let anchor = self.authoritative_audio_anchor(
+                        &self.playback_engine,
+                        now,
+                        "native_audio_hold_final",
+                    )?;
+                    if self
+                        .audio_playback
+                        .finalize_native_control_anchor(pending_generation, anchor)
+                        .map_err(|error| transport_action_error("native_audio_hold_final", error))?
+                    {
+                        // A terminal refusal still owes output/clock acknowledgement,
+                        // but a later rotation grants no new native service attempt.
+                        if self.audio_playback.native_reprepare_refused_generation()
+                            == Some(pending_generation)
+                        {
+                            return Ok(());
+                        }
+                        // Construct the provider only for an actual available
+                        // Playback. The API owns even rejected providers and
+                        // retires them away from this caller thread.
+                        let renderer = self
+                            .native_audio_renderer
+                            .as_ref()
+                            .filter(|weak| {
+                                let identity: std::sync::Weak<dyn AudioPcmRenderer> =
+                                    (*weak).clone();
+                                self.audio_playback.matches_source_weak(&identity)
+                            })
+                            .and_then(std::sync::Weak::upgrade);
+                        if let (AppAudioPlayback::Available(playback), Some(renderer)) =
+                            (&mut self.audio_playback, renderer)
+                            && playback
+                                .request_native_reprepare(
+                                    pending_generation,
+                                    renderer.native_reprepare_request(),
+                                )
+                                .map_err(|error| {
+                                    transport_action_error("native_audio_reprepare", error)
+                                })?
+                        {
+                            self.invalidate_native_audio_parameter_presentation();
+                        }
+                        self.finish_native_reprepare_product(pending_generation, handled_at)?;
+                    }
+                }
+                Ok(())
+            }
+            AudioPlaybackEvent::NativeReprepareObserved { generation, status, .. } => {
+                if matches!(
+                    status,
+                    mondrian_media::AudioPcmNativeReprepareStatus::Settled { .. }
+                ) {
+                    self.invalidate_native_audio_parameter_presentation();
+                    self.finish_native_reprepare_product(generation, handled_at)?;
+                } else {
+                    tracing::warn!(?status, "native restart remains held after service refusal");
+                }
+                Ok(())
+            }
+            AudioPlaybackEvent::NativeEditorObserved {
+                renderer_id,
+                generation,
+                intent,
+                outcome,
+            } => self.observe_native_audio_editor_product(renderer_id, generation, intent, outcome),
+            AudioPlaybackEvent::NativeAuthorHandoffObserved {
+                generation,
+                proposal,
+                status,
+                ..
+            } => {
+                if self.audio_playback_snapshot().generation != generation {
+                    return Ok(());
+                }
+                let state_entry = match &status {
+                    mondrian_media::AudioPcmNativeAuthorHandoffStatus::Acknowledged {
+                        target,
+                        continuity:
+                            mondrian_media::AudioPcmNativeAuthorHandoffContinuity::StateEntryRequired,
+                    } => Some(**target),
+                    _ => None,
+                };
+                let acknowledged = self.observe_native_audio_author_handoff(*proposal, status)?;
+                if acknowledged
+                    && self
+                        .native_audio_author_work
+                        .as_ref()
+                        .zip(self.native_audio_renderer.as_ref())
+                        .is_some_and(|(work, source)| {
+                            work.snapshot_current_for_source(source, &self.audio_playback)
+                        })
+                {
+                    self.audio_playback_author_binding =
+                        self.current_audio_playback_author_binding()?;
+                }
+                if acknowledged && let Some(target) = state_entry {
+                    self.finish_native_author_state_entry_product(generation, target, handled_at)?;
+                }
+                Ok(())
+            }
+            AudioPlaybackEvent::NativeAuthorStateEntryRequired {
+                pending_generation,
+                final_output,
+                final_media_anchor,
+                ..
+            } => self.observe_native_author_state_entry_retirement(
+                pending_generation,
+                final_output,
+                final_media_anchor,
+                false,
+                handled_at,
+            ),
+            AudioPlaybackEvent::NativeAuthorStateEntryOutputQuiesced {
+                pending_generation,
+                final_output,
+                final_media_anchor,
+                ..
+            } => self.observe_native_author_state_entry_retirement(
+                pending_generation,
+                final_output,
+                final_media_anchor,
+                true,
+                handled_at,
+            ),
+            AudioPlaybackEvent::NativeAuthorPending { .. } => {
+                self.set_status_hint(AppMessage::new("native-editor-control-pending"), false);
+                Ok(())
+            }
+            AudioPlaybackEvent::NativeEditorCleanupRequired {
+                pending_generation,
+                final_output,
+                final_media_anchor,
+                target,
+                ..
+            } => {
+                if self.audio_playback.native_control_hold_generation() != Some(pending_generation)
+                    || self.audio_playback.native_editor_cleanup_target() != Some(target)
+                {
+                    return Ok(());
+                }
+                if self.is_playing() {
+                    let now = self
+                        .playback_timestamp_for_observation(handled_at)
+                        .map(|timestamp| timestamp.max(self.playback_engine.monotonic_high_water()))
+                        .map_err(|error| {
+                            transport_action_error("native_editor_cleanup_hold", error)
+                        })?;
+                    let observation = self
+                        .native_pending_clock_observation(final_output, final_media_anchor, false)
+                        .ok()
+                        .flatten();
+                    if self
+                        .playback_engine
+                        .hold_for_native_audio_control(pending_generation, observation, now)
+                        .is_err()
+                    {
+                        self.playback_engine
+                            .hold_for_native_audio_control(pending_generation, None, now)
+                            .map_err(|error| {
+                                transport_action_error("native_editor_cleanup_hold", error)
+                            })?;
+                    }
+                }
+                Ok(())
+            }
+            AudioPlaybackEvent::NativeEditorCleanupOutputQuiesced {
+                pending_generation,
+                final_output,
+                final_media_anchor,
+                target,
+            } => {
+                if self.audio_playback.native_control_hold_generation() != Some(pending_generation)
+                    || self.audio_playback.native_editor_cleanup_target() != Some(target)
+                {
+                    return Ok(());
+                }
+                let now = self
+                    .playback_timestamp_for_observation(handled_at)
+                    .map(|timestamp| timestamp.max(self.playback_engine.monotonic_high_water()))
+                    .map_err(|error| {
+                        transport_action_error("native_editor_cleanup_final", error)
+                    })?;
+                let ticket = if self.is_playing() {
+                    let ticket = self
+                        .playback_engine
+                        .hold_for_native_audio_control(pending_generation, None, now)
+                        .map_err(|error| {
+                            transport_action_error("native_editor_cleanup_final", error)
+                        })?;
+                    let observation = self
+                        .native_pending_clock_observation(final_output, final_media_anchor, true)
+                        .ok()
+                        .flatten();
+                    if !self
+                        .playback_engine
+                        .finalize_native_audio_control_hold(ticket, observation, now)
+                        .map_err(|error| {
+                            transport_action_error("native_editor_cleanup_final", error)
+                        })?
+                    {
+                        self.playback_engine
+                            .finalize_native_audio_control_hold(ticket, None, now)
+                            .map_err(|error| {
+                                transport_action_error("native_editor_cleanup_final", error)
+                            })?;
+                    }
+                    Some(ticket)
+                } else {
+                    None
+                };
+                let anchor = self.authoritative_audio_anchor(
+                    &self.playback_engine,
+                    now,
+                    "native_editor_cleanup_final",
+                )?;
+                self.audio_playback
+                    .finalize_native_control_anchor(pending_generation, anchor)
+                    .map_err(|error| {
+                        transport_action_error("native_editor_cleanup_final", error)
+                    })?;
+                if self.audio_playback.snapshot(AudioPlaybackMode::Idle).state
+                    == mondrian_media::AudioPlaybackState::EditorCleanupCompletePaused
+                    && let Some(ticket) = ticket
+                {
+                    self.playback_engine
+                        .finish_native_audio_control_hold_paused(ticket, now)
+                        .map_err(|error| {
+                            transport_action_error("native_editor_cleanup_paused", error)
+                        })?;
+                }
+                Ok(())
+            }
+            AudioPlaybackEvent::NativeEditorCleanupReadyPaused { pending_generation, target } => {
+                if self.audio_playback.native_control_hold_generation() != Some(pending_generation)
+                    || self.audio_playback.native_editor_cleanup_target() != Some(target)
+                {
+                    return Ok(());
+                }
+                if let Some(ticket) = self.playback_engine.native_audio_control_hold_ticket() {
+                    if ticket.pending_generation() != pending_generation {
+                        return Ok(());
+                    }
+                    let now = self
+                        .playback_timestamp_for_observation(handled_at)
+                        .map(|timestamp| timestamp.max(self.playback_engine.monotonic_high_water()))
+                        .map_err(|error| {
+                            transport_action_error("native_editor_cleanup_paused", error)
+                        })?;
+                    self.playback_engine
+                        .finish_native_audio_control_hold_paused(ticket, now)
+                        .map_err(|error| {
+                            transport_action_error("native_editor_cleanup_paused", error)
+                        })?;
+                }
+                Ok(())
+            }
+            AudioPlaybackEvent::NativeEditorAttachmentObserved { observation, .. } => {
+                self.observe_native_audio_editor_attachment(*observation);
+                Ok(())
+            }
+            AudioPlaybackEvent::NativeParameterQueryCompleted {
+                ticket,
+                renderer_id,
+                generation,
+                query,
+                completion,
+            } => {
+                self.observe_native_audio_parameter_query(
+                    ticket,
+                    renderer_id,
+                    generation,
+                    query,
+                    completion,
+                );
+                Ok(())
+            }
+            AudioPlaybackEvent::NativeParameterObservationsObserved { observation, .. } => {
+                self.observe_native_audio_parameter_observation(*observation);
+                Ok(())
+            }
+            AudioPlaybackEvent::NativeDiagnosticsObserved { renderer_id, generation, batch } => {
+                // Media admitted this completion against its actual renderer/generation.
+                // Readiness and log provenance grant no native author permission.
+                tracing::debug!(
+                    ?renderer_id,
+                    generation,
+                    "current native audio diagnostics observed"
+                );
+                self.publish_native_audio_diagnostics(*batch);
+                Ok(())
+            }
+            AudioPlaybackEvent::NativeAuthorProposalObserved {
+                renderer_id,
+                generation,
+                proposal,
+            } => self.observe_native_audio_author_delivery(renderer_id, generation, *proposal),
+            AudioPlaybackEvent::NativeAuthorTerminalBatchPrepared {
+                renderer_id,
+                generation,
+                proposal,
+                key,
+            } => {
+                self.observe_native_audio_terminal_prepared(renderer_id, generation, *proposal, key)
+            }
+            AudioPlaybackEvent::NativeAuthorTerminalBatchObserved {
+                renderer_id,
+                generation,
+                proposal,
+                key,
+                status,
+            } => {
+                if self.observe_native_audio_terminal_status(
+                    renderer_id,
+                    generation,
+                    *proposal,
+                    key,
+                    status,
+                )? && self
+                    .native_audio_author_work
+                    .as_ref()
+                    .zip(self.native_audio_renderer.as_ref())
+                    .is_some_and(|(work, source)| {
+                        work.snapshot_current_for_source(source, &self.audio_playback)
+                    })
+                {
+                    self.audio_playback_author_binding =
+                        self.current_audio_playback_author_binding()?;
+                }
+                Ok(())
+            }
+            AudioPlaybackEvent::NativeObservationPollRefused {
+                renderer_id,
+                generation,
+                reason,
+            } => {
+                tracing::warn!(
+                    ?renderer_id,
+                    generation,
+                    ?reason,
+                    "native audio diagnostic observation refused; PCM validity unchanged"
+                );
+                Ok(())
+            }
+            AudioPlaybackEvent::NativeOwnerBindingsObserved { renderer_id, generation, status } => {
+                // This is a current-generation readiness observation, never an
+                // author lease or permission to write values. Editor actions
+                // still require the sole Runtime's exact live binding record.
+                tracing::debug!(
+                    ?renderer_id,
+                    generation,
+                    ?status,
+                    "native audio binding readiness observed"
                 );
                 Ok(())
             }
@@ -1155,7 +2208,7 @@ impl AppState {
                 .validate_anchor(restart_anchor)
                 .map_err(|error| transport_action_error("audio_phase_rejection", error))?;
             self.audio_playback
-                .reprime(restart_anchor)
+                .recover_at(restart_anchor)
                 .map_err(|error| transport_action_error("audio_phase_rejection", error))?;
         }
         self.playback_engine = engine;
@@ -1175,15 +2228,23 @@ impl AppState {
             .ok_or_else(|| transport_action_error(action, "there is no active Sequence to bind"))
     }
 
-    fn audio_playback_renderer(
+    pub(super) fn audio_playback_renderer(
         &self,
         action: &str,
     ) -> mondrian_core::Result<Option<PreparedTimelineAudioSource>> {
         let sequence = self.active_sequence().ok_or_else(|| {
             transport_action_error(action, "there is no active Sequence to compile")
         })?;
+        // Existence is checked before the unavailable fallback. A failed
+        // retained restart is still an owner, never permission for cold rebuild.
+        if self.audio_playback.has_retained_native_reprepare() {
+            return self.retained_native_reprepare_source(action, sequence.id).map(Some);
+        }
         if !self.audio_playback.execution_available() {
             return Ok(None);
+        }
+        if let Some(retained) = self.retained_native_author_state_entry_source(sequence.id) {
+            return Ok(Some(retained));
         }
         let Some(library) = self.asset_library_handle() else {
             // Direct headless/UI model fixtures may carry a Sequence without a
@@ -1202,7 +2263,10 @@ impl AppState {
         })?;
         let runtime_grant = self.execution_resources.decision().audio.runtime_grant;
         let audition = self.audio_monitoring.audition_overlay(authoring_session_id, sequence);
-        let renderer = TimelineAudioPcmRenderer::new_with_processor_resolver(
+        let max_block_frames = self.audio_playback.render_chunk_frames().ok_or_else(|| {
+            transport_action_error(action, "Audio Playback execution is unavailable")
+        })?;
+        let mut renderer = TimelineAudioPcmRenderer::new_with_processor_resolver(
             sequence.clone(),
             self.sequences().to_vec(),
             library,
@@ -1211,9 +2275,19 @@ impl AppState {
             audition,
             self.audio_sample_rate,
             AUDIO_OUTPUT_LAYOUT,
+            max_block_frames,
             self.audio_processor_resolver.as_ref(),
+            self.audio_playback.native_child_settlement_registrar(),
         )
         .map_err(|error| transport_action_error(action, error))?;
+        renderer.bind_author_snapshot(
+            self.authoring
+                .as_ref()
+                .ok_or_else(|| {
+                    transport_action_error(action, "there is no Authoring Session to bind")
+                })?
+                .execution_snapshot(),
+        );
         let requires_execution = renderer.execution_demand().requires_execution();
         let continuity_model = renderer.continuity_model();
         let meter_observer = renderer.meter_observer();
@@ -1228,7 +2302,7 @@ impl AppState {
         }))
     }
 
-    fn commit_audio_playback(
+    pub(super) fn commit_audio_playback(
         &mut self,
         action: &str,
         anchor: AudioSamplePosition,
@@ -1236,46 +2310,191 @@ impl AppState {
     ) -> mondrian_core::Result<()> {
         let binding = self.current_audio_playback_author_binding()?;
         if let Some(source) = source {
+            let concrete = Arc::downgrade(&source.renderer);
+            let identity: std::sync::Weak<dyn AudioPcmRenderer> = concrete.clone();
+            let retained_entry = self
+                .audio_playback
+                .native_author_state_entry_target()
+                .filter(|_| self.audio_playback.matches_source_weak(&identity));
+            let erased: Arc<dyn AudioPcmRenderer> = source.renderer;
             self.audio_playback
-                .prepare(anchor, source.renderer, source.continuity_model)
+                .prepare(anchor, erased, source.continuity_model)
                 .map_err(|error| transport_action_error(action, error))?;
+            // An exact retained state-entry reprime keeps the same Source,
+            // claim and parameter facts. Other successful preparations may
+            // install a fresh claim even when the renderer Arc is unchanged.
+            if retained_entry.is_none()
+                || retained_entry != self.audio_playback.native_author_state_entry_target()
+                || !self.audio_playback.matches_source_weak(&identity)
+            {
+                self.invalidate_native_audio_parameter_presentation();
+            }
+            self.native_audio_renderer = Some(concrete);
             self.audio_monitoring.bind_meter(
                 source.authoring_session_id,
                 source.sequence_id,
                 source.meter_observer,
                 source.delivery_evidence,
             );
+        } else if self
+            .active_sequence()
+            .and_then(|sequence| self.retained_native_author_state_entry_source(sequence.id))
+            .is_some()
+        {
+            // Pause/seek/stop change the sole Engine's intent and coordinate.
+            // They do not replace a partially prepared same-child Runtime.
+            self.audio_playback
+                .reprime(anchor)
+                .map_err(|error| transport_action_error(action, error))?;
         } else {
             self.audio_playback
                 .clear_source(anchor)
                 .map_err(|error| transport_action_error(action, error))?;
             self.audio_monitoring.clear_meter();
+            self.native_audio_renderer = None;
+            self.invalidate_native_audio_parameter_presentation();
         }
         self.audio_playback_author_binding = binding;
         Ok(())
     }
 
-    fn current_audio_playback_author_binding(
+    fn retained_native_reprepare_source(
+        &self,
+        action: &str,
+        sequence: mondrian_core::SequenceId,
+    ) -> mondrian_core::Result<PreparedTimelineAudioSource> {
+        let refused = || {
+            transport_action_error(action,
+            "retained native restart Source cannot be replaced or resumed under changed execution")
+        };
+        if !self.audio_playback.execution_available() {
+            return Err(refused());
+        }
+        let weak = self.native_audio_renderer.as_ref().ok_or_else(refused)?;
+        let identity: std::sync::Weak<dyn AudioPcmRenderer> = weak.clone();
+        if !self.audio_playback.matches_source_weak(&identity) {
+            return Err(refused());
+        }
+        // The actual Media slot proves a strong owner before this temporary
+        // upgrade. No stale Weak can become the last native owner on the UI.
+        let session = self.authoring_session_id().ok_or_else(refused)?;
+        let current = self
+            .active_sequence()
+            .filter(|value| value.id == sequence)
+            .ok_or_else(refused)?;
+        if self.current_audio_playback_author_binding()? != self.audio_playback_author_binding {
+            return Err(refused());
+        }
+        let renderer = weak.upgrade().ok_or_else(refused)?;
+        let audition = self.audio_monitoring.audition_overlay(session, current);
+        if !renderer.same_presentation_execution(
+            &audition,
+            self.audio_sample_rate,
+            AUDIO_OUTPUT_LAYOUT,
+        ) {
+            return Err(refused());
+        }
+        Ok(PreparedTimelineAudioSource {
+            continuity_model: renderer.continuity_model(),
+            meter_observer: renderer.meter_observer(),
+            delivery_evidence: renderer.delivery_evidence(),
+            renderer,
+            authoring_session_id: session,
+            sequence_id: sequence,
+        })
+    }
+
+    fn retained_native_author_state_entry_source(
+        &self,
+        sequence: mondrian_core::SequenceId,
+    ) -> Option<PreparedTimelineAudioSource> {
+        let target = self.audio_playback.native_author_state_entry_target();
+        let session = self.authoring_session_id()?;
+        let renderer = self.native_audio_author_work.as_ref()?.retained_state_entry_source(
+            target,
+            session,
+            sequence,
+            &self.audio_playback,
+        )?;
+        let current = self.active_sequence().filter(|current| current.id == sequence)?;
+        let audition = self.audio_monitoring.audition_overlay(session, current);
+        if !renderer.same_presentation_execution(
+            &audition,
+            self.audio_sample_rate,
+            AUDIO_OUTPUT_LAYOUT,
+        ) {
+            return None;
+        }
+        Some(PreparedTimelineAudioSource {
+            continuity_model: renderer.continuity_model(),
+            meter_observer: renderer.meter_observer(),
+            delivery_evidence: renderer.delivery_evidence(),
+            renderer,
+            authoring_session_id: session,
+            sequence_id: sequence,
+        })
+    }
+
+    fn compile_audio_author_closure(
+        &self,
+        session_id: AuthoringSessionId,
+        root: &Sequence,
+        sequences: &[Sequence],
+    ) -> mondrian_core::Result<mondrian_audio::AudioDependencyClosure> {
+        let output_id =
+            root.audio_program.outputs.first().map(|output| output.id).ok_or_else(|| {
+                transport_action_error("audio_author_binding", "Sequence has no Program Output")
+            })?;
+        let request = mondrian_audio::AudioCompileRequest {
+            output_id,
+            audition: self.audio_monitoring.audition_overlay(session_id, root),
+        };
+        mondrian_audio::compile_full_audio_dependency_closure(root, sequences, request)
+            .map_err(|error| transport_action_error("audio_author_binding", error))
+    }
+
+    /// A busy Source can retain custody while an author-only edit publishes.
+    /// Compare the two author collections, not an absent or stale installed
+    /// binding. Sequence edits do not change the sample rate or Asset Library.
+    pub(super) fn validate_audio_authoring_candidate(
+        &self,
+        candidates: &[Sequence],
+        refusal: mondrian_core::MondrianError,
+    ) -> mondrian_core::Result<()> {
+        let Some((session_id, before)) = self.authoring_session_id().zip(self.active_sequence())
+        else {
+            return Ok(());
+        };
+        let comparison = (|| -> mondrian_core::Result<bool> {
+            let after =
+                candidates.iter().find(|sequence| sequence.id == before.id).ok_or_else(|| {
+                    transport_action_error(
+                        "audio_author_binding",
+                        "prepared collection lost the active Sequence",
+                    )
+                })?;
+            let before = self.compile_audio_author_closure(session_id, before, self.sequences())?;
+            let after = self.compile_audio_author_closure(session_id, after, candidates)?;
+            Ok(before == after)
+        })();
+        match comparison {
+            Ok(true) => Ok(()),
+            Ok(false) => Err(refusal),
+            Err(error) => {
+                tracing::warn!(%error, "cannot establish unchanged audio for a busy author edit");
+                Err(refusal)
+            }
+        }
+    }
+
+    pub(super) fn current_audio_playback_author_binding(
         &self,
     ) -> mondrian_core::Result<Option<AudioPlaybackAuthorBinding>> {
         let Some((session_id, sequence)) = self.authoring_session_id().zip(self.active_sequence())
         else {
             return Ok(None);
         };
-        let output_id =
-            sequence.audio_program.outputs.first().map(|output| output.id).ok_or_else(|| {
-                transport_action_error("audio_author_binding", "Sequence has no Program Output")
-            })?;
-        let request = mondrian_audio::AudioCompileRequest {
-            output_id,
-            audition: self.audio_monitoring.audition_overlay(session_id, sequence),
-        };
-        let closure = mondrian_audio::compile_full_audio_dependency_closure(
-            sequence,
-            self.sequences(),
-            request,
-        )
-        .map_err(|error| transport_action_error("audio_author_binding", error))?;
+        let closure = self.compile_audio_author_closure(session_id, sequence, self.sequences())?;
         let asset_library_revision = if closure.media_components().is_empty() {
             None
         } else {
@@ -1292,17 +2511,37 @@ impl AppState {
         }))
     }
 
-    /// Every author transaction reaches this seam. Only changes to the compiled
-    /// audible closure retire queued PCM; opacity, visibility and author-only
-    /// metadata do not restart audio or destroy processor history.
+    /// Every author transaction reaches this seam. Changes to the compiled
+    /// audible closure reconcile the prepared Source, including while paused;
+    /// opacity, visibility and author-only metadata preserve processor history.
     pub(super) fn reconcile_audio_after_authoring_commit(&mut self) {
-        if !self.is_playing() || !self.playback_engine.snapshot().rate.supports_realtime_audio() {
-            return;
-        }
         if self
             .current_audio_playback_author_binding()
             .is_ok_and(|binding| binding == self.audio_playback_author_binding)
         {
+            if let Some(renderer) =
+                self.native_audio_renderer.as_ref().and_then(std::sync::Weak::upgrade)
+                && let Some(author) = self.authoring.as_ref()
+                && let Err(error) =
+                    renderer.rebind_unchanged_author_snapshot(author.execution_snapshot())
+            {
+                tracing::warn!(%error, "unchanged audio source author metadata was superseded");
+            }
+            return;
+        }
+        // The author transaction is already committed. Live native work still
+        // owns this Source; refusal cannot flow into the refresh helper's
+        // failure cleanup, which would otherwise retire that same owner.
+        if let Err(error) = self.validate_audio_source_replacement_admission(
+            "authoring_commit",
+            "audio Source replacement",
+        ) {
+            tracing::warn!(%error, "audio Source replacement refused after authoring committed");
+            self.set_status_hint(
+                AppMessage::new("status-audio-prepare-failed")
+                    .with_text("error", format!("Authoring committed; {error}")),
+                true,
+            );
             return;
         }
         self.reconcile_audio_after_committed_authoring_change("authoring_commit");
@@ -1350,7 +2589,11 @@ impl AppState {
                         .map_err(|cleanup_error| {
                             transport_action_error("clear_stale_audio", cleanup_error)
                         })
-                        .map(|()| self.audio_monitoring.clear_meter())
+                        .map(|()| {
+                            self.audio_monitoring.clear_meter();
+                            self.native_audio_renderer = None;
+                            self.invalidate_native_audio_parameter_presentation();
+                        })
                 });
             if let Err(cleanup_error) = cleanup {
                 tracing::error!(
@@ -1359,7 +2602,11 @@ impl AppState {
                     "failed to clear stale audio after committed authoring change"
                 );
             }
-            self.set_status_hint(format!("音频处理无法准备：{error}"), true);
+            self.set_status_hint(
+                AppMessage::new("status-audio-prepare-failed")
+                    .with_text("error", error.to_string()),
+                true,
+            );
         }
     }
 
@@ -1683,7 +2930,7 @@ impl AppState {
         let target_frame = snapshot.position.frame;
         if snapshot.state == TransportState::Ended {
             self.settle_preview_access_source();
-            // End-of-program reprime is runtime cleanup after the Engine has
+            // End-of-program suspension is runtime cleanup after the Engine has
             // already committed `Ended`; it cannot retroactively reject the
             // clock tick, so record cleanup failure explicitly.
             let cleanup = self
@@ -1694,11 +2941,11 @@ impl AppState {
                 )
                 .and_then(|anchor| {
                     self.audio_playback
-                        .reprime(anchor)
+                        .suspend(anchor)
                         .map_err(|error| transport_action_error("playback_end", error))
                 });
             if let Err(error) = cleanup {
-                tracing::error!(%error, "failed to reprime audio at end of Playback Session");
+                tracing::error!(%error, "failed to suspend audio at end of Playback Session");
             }
             self.refresh_internal_execution_resource_decision();
             return PlaybackAdvance {
@@ -1757,18 +3004,21 @@ impl AppState {
     }
 
     pub fn current_timeline_time(&self) -> mondrian_core::Result<Option<TimelineTime>> {
-        let Some(sequence) = self.active_sequence() else {
+        if self.active_sequence().is_none() {
             return Ok(None);
-        };
+        }
         Ok(Some(TimelineTime::from_frame_position(
-            FramePosition::new(self.current_frame().max(0), sequence.time_base()),
+            self.playback_engine.snapshot().position,
         )?))
     }
 
     pub fn is_playing(&self) -> bool {
         matches!(
             self.playback_engine.snapshot().state,
-            TransportState::Priming | TransportState::Playing | TransportState::Recovering
+            TransportState::Priming
+                | TransportState::Playing
+                | TransportState::Recovering
+                | TransportState::HoldingForNativeAudioControl
         )
     }
 
@@ -2465,6 +3715,35 @@ fn trace_non_ready_frame_presentation(
     }
 }
 
+// Deterministic test driver for the original App/Media processing boundary.
+// Native/UI/device scheduling policy remains in the public pump; callers must
+// separately reject holds, recovery and substituted PCM in their finite gate.
+#[cfg(test)]
+pub(super) fn poll_audio_playback_at_for_test(
+    state: &mut AppState,
+    observed_at: Instant,
+    observe_clock: bool,
+) -> mondrian_core::Result<AudioPlaybackSnapshot> {
+    let timestamp = state
+        .playback_timestamp_for_observation(observed_at)
+        .map_err(|error| transport_action_error("test_audio_poll", error))?
+        .max(state.playback_engine.monotonic_high_water());
+    let anchor =
+        state.authoritative_audio_anchor(&state.playback_engine, timestamp, "test_audio_poll")?;
+    let mode = state.audio_playback_mode();
+    let poll = state
+        .audio_playback
+        .poll(mode, anchor)
+        .map_err(|error| transport_action_error("test_audio_poll", error))?;
+    for event in poll.events {
+        state.handle_audio_playback_event(event, observed_at)?;
+    }
+    if observe_clock {
+        state.observe_audio_output_clock(poll.snapshot, observed_at)?;
+    }
+    Ok(poll.snapshot)
+}
+
 fn audio_playback_mode_for_transport(
     state: TransportState,
     rate: PlaybackRate,
@@ -2473,7 +3752,9 @@ fn audio_playback_mode_for_transport(
         return AudioPlaybackMode::Idle;
     }
     match state {
-        TransportState::Priming => AudioPlaybackMode::Preroll,
+        TransportState::Priming | TransportState::HoldingForNativeAudioControl => {
+            AudioPlaybackMode::Preroll
+        }
         TransportState::Playing | TransportState::Recovering => AudioPlaybackMode::Consume,
         TransportState::Stopped
         | TransportState::Paused
@@ -2694,8 +3975,12 @@ fn audio_device_clock_observation(
 }
 
 #[cfg(test)]
-mod tests {
+pub(in crate::app) mod tests {
     use super::*;
+
+    mod native_process_author_contracts {
+        include!("native_process_author_contracts.rs");
+    }
 
     fn tt(frame: i64, time_base: mondrian_core::Rational) -> mondrian_core::TimelineTime {
         let numerator = frame.checked_mul(time_base.num).expect("test time fits i64");
@@ -2721,7 +4006,25 @@ mod tests {
         state
     }
 
-    fn play_ready(state: &mut AppState) {
+    pub(in crate::app) fn current_playback_ready_at(state: &mut AppState, observed_at: Instant) {
+        let demand = state
+            .playback_engine
+            .frame_demand()
+            .map(|demand| demand.identity())
+            .expect("actual current headless video demand");
+        assert!(!state.observe_frame_delivery_candidate(
+            FrameDeliveryCandidate::for_demand(demand, FrameDeliveryKind::Ready),
+            observed_at
+        ));
+        let demand = state
+            .playback_engine
+            .frame_demand()
+            .map(|demand| demand.identity())
+            .expect("current frame demand after Ready");
+        assert!(state.observe_video_preroll_at_wall(demand, 0, 0, true, true, observed_at));
+    }
+
+    pub(in crate::app) fn play_ready(state: &mut AppState) {
         state.play().expect("play");
         assert!(!state.observe_viewer_frame_delivery(FrameDeliveryKind::Ready));
         let demand = state
@@ -2833,6 +4136,32 @@ mod tests {
         let before = state.playback_engine.snapshot();
         let generation = state.audio_playback_snapshot().generation;
         assert!(state.active_audio_delivery_evidence().is_some());
+        let renderer = state
+            .native_audio_renderer
+            .as_ref()
+            .and_then(std::sync::Weak::upgrade)
+            .expect("prepared source");
+        let video_track_id = state.active_sequence().unwrap().video_tracks[0].id;
+        state.set_track_visible(video_track_id, false).expect("visual-only edit");
+        state
+            .commit_active_sequence_edit("rename Sequence", |sequence| {
+                sequence.name = "renamed audible Sequence".to_owned();
+                Ok(())
+            })
+            .expect("author-only edit");
+        assert_eq!(state.audio_playback_snapshot().generation, generation);
+        assert!(Arc::ptr_eq(
+            &renderer,
+            &state
+                .native_audio_renderer
+                .as_ref()
+                .and_then(std::sync::Weak::upgrade)
+                .expect("same prepared source"),
+        ));
+        assert!(
+            renderer.native_author_snapshot_current(),
+            "audible-equivalent edits must retain valid native author metadata without replacing DSP"
+        );
         state.set_track_muted(track_id, true).expect("author mute");
         assert_eq!(state.playback_engine.snapshot(), before);
         assert!(
@@ -2844,8 +4173,7 @@ mod tests {
             "muted Program is proven silent"
         );
         let muted_generation = state.audio_playback_snapshot().generation;
-        let video_track_id = state.active_sequence().unwrap().video_tracks[0].id;
-        state.set_track_visible(video_track_id, false).expect("visual-only edit");
+        state.set_track_visible(video_track_id, true).expect("visual-only edit");
         assert_eq!(state.audio_playback_snapshot().generation, muted_generation);
         state.set_track_muted(track_id, false).expect("author unmute");
         assert_eq!(
@@ -2860,6 +4188,8 @@ mod tests {
             audible_generation + 1,
             "one transaction must not rotate PCM twice through per-action refreshes"
         );
+        // The test's old renderer alias also retains its native settlement scope.
+        drop(renderer);
         assert!(state.shutdown_audio_playback_and_wait().all_workers_terminated());
         drop(state);
         std::fs::remove_dir_all(root).unwrap();
@@ -3704,6 +5034,17 @@ mod tests {
     fn invalid_final_device_evidence_cannot_block_confirmed_loss_handoff() {
         let mut state = state_with_sequence(20);
         play_ready(&mut state);
+        // Startup need not complete before an absolute ten-millisecond timestamp.
+        // Exercise a nonzero Engine clock independently of physical scheduling.
+        let initialized_at = state
+            .playback_engine
+            .monotonic_high_water()
+            .checked_add(Duration::from_millis(20))
+            .expect("initialization timestamp");
+        state
+            .playback_engine
+            .tick(initialized_at)
+            .expect("nonzero initialized Engine clock");
         let observation = audio_device_clock_observation(
             audio_snapshot(),
             state.playback_engine.snapshot().epoch,
@@ -3718,17 +5059,32 @@ mod tests {
             .playback_engine
             .observe_audio_device_clock(observation)
             .expect("qualify audio master");
+        let advanced_at = state
+            .playback_engine
+            .monotonic_high_water()
+            .checked_add(Duration::from_millis(10))
+            .expect("advanced timestamp");
         state
             .playback_engine
-            .tick(MonotonicTimestamp::from_duration(Duration::from_millis(10)))
+            .tick(advanced_at)
             .expect("advance Engine timestamp beyond App adapter timestamp");
+        let handled_at = state.playback_observation_instant_anchor;
+        let final_output =
+            RealtimeAudioOutputSnapshot { captured_at: handled_at, ..audio_snapshot() };
+        assert!(
+            state
+                .playback_timestamp_for_observation(final_output.captured_at)
+                .expect("projection")
+                < state.playback_engine.monotonic_high_water(),
+            "the frozen final evidence must be older than the authoritative Engine clock"
+        );
         let result = state.handle_audio_playback_event(
             AudioPlaybackEvent::DeviceLost {
                 reason: mondrian_media::RealtimeAudioOutputLossReason::BackendFailure,
-                final_output: audio_snapshot(),
+                final_output,
                 final_media_anchor: Some(audio_anchor(0)),
             },
-            Instant::now(),
+            handled_at,
         );
 
         assert!(result.is_ok());
@@ -4459,6 +5815,38 @@ mod tests {
     }
 
     #[test]
+    fn successive_seeks_preserve_latest_paused_intent_and_reject_old_ready() {
+        let mut state = state_with_sequence(30);
+        play_ready(&mut state);
+        state.seek(0).expect("seek to Timeline origin");
+        let origin = state.pending_playback_frame_demand_identity().unwrap();
+        state.seek(10).expect("replace with nonzero intent");
+        let intermediate = state.pending_playback_frame_demand_identity().unwrap();
+        state.pause().expect("pause the latest intent");
+        state.seek(3).expect("seek while paused");
+        assert_eq!(state.current_frame(), 3);
+        assert_eq!(
+            state.playback_engine.snapshot().state,
+            TransportState::Paused
+        );
+        let before = state.playback_engine.snapshot();
+        let observed_at = state.playback_observation_instant_anchor;
+        for stale in [origin, intermediate] {
+            assert!(!state.observe_frame_delivery_candidate(
+                FrameDeliveryCandidate::for_demand(stale, FrameDeliveryKind::Ready),
+                observed_at,
+            ));
+            assert_eq!(state.playback_engine.snapshot(), before);
+        }
+        play_ready(&mut state);
+        assert_eq!(state.current_frame(), 3);
+        assert_eq!(
+            state.playback_engine.snapshot().state,
+            TransportState::Playing
+        );
+    }
+
+    #[test]
     fn seek_records_preview_access_source() {
         let mut state = state_with_sequence(30);
 
@@ -4660,5 +6048,2108 @@ mod tests {
             state.advance_playback_clock_at(priming_completed_at + Duration::from_millis(40));
         assert_eq!(boundary.status, PlaybackAdvanceStatus::Advanced);
         assert_eq!(state.current_frame(), 1);
+    }
+    // These are App/Media host-model controls. They execute the real serial
+    // PCM worker and product transport consumers, not a third-party plugin.
+    mod restricted_origin_product_controls {
+        use super::*;
+
+        type Requests = Arc<parking_lot::Mutex<Vec<mondrian_media::AudioPcmRenderRequest>>>;
+
+        struct RestrictedOriginRenderer {
+            requests: Requests,
+        }
+
+        impl AudioPcmRenderer for RestrictedOriginRenderer {
+            fn bind_native_child_settlement(
+                &self,
+                _: &mondrian_core::NativeChildSettlementRegistrar,
+            ) -> Result<(), mondrian_core::NativeChildSettlementError> {
+                Ok(()) // This closed PCM recording model owns no native child.
+            }
+
+            fn render(
+                &self,
+                request: mondrian_media::AudioPcmRenderRequest,
+                _cancellation: &mondrian_core::ExecutionCancellationToken,
+            ) -> mondrian_core::Result<mondrian_media::AudioPcmRenderOutcome> {
+                self.requests.lock().push(request);
+                Ok(mondrian_media::AudioPcmRenderOutcome::Rendered(
+                    mondrian_media::AudioBuffer::silent(
+                        request.sample_rate,
+                        request.channel_layout,
+                        request.frame_count,
+                    ),
+                ))
+            }
+        }
+
+        fn active_source(
+            duration_frames: i64,
+        ) -> (
+            AppState,
+            Arc<parking_lot::Mutex<NativeHoldPlatformState>>,
+            Requests,
+        ) {
+            let mut state = state_with_sequence(duration_frames);
+            play_ready(&mut state);
+            assert!(state.shutdown_audio_playback_and_wait().all_workers_terminated());
+            let mut snapshot = audio_snapshot();
+            snapshot.active = false;
+            snapshot.buffered_frames = 0;
+            snapshot.callback_consumed_frames = 0;
+            snapshot.active_callback_consumed_frames = 0;
+            // Media needs idle callback timing before it can activate real PCM.
+            // Keep consumption at zero and make the activation lead exactly zero.
+            snapshot.callback_count = 1;
+            snapshot.last_callback_playback_delay = Some(Duration::ZERO);
+            snapshot.last_callback_age = Some(Duration::ZERO);
+            snapshot.active_duration = None;
+            let output = Arc::new(parking_lot::Mutex::new(NativeHoldPlatformState {
+                snapshot,
+                revision: 0,
+                acknowledged: 0,
+                auto_acknowledge: true,
+                queued: 0,
+            }));
+            let config = mondrian_media::AudioPlaybackConfig {
+                chunk_frames: 4_096,
+                preroll_frames: 4_096,
+                high_watermark_frames: 8_192,
+                max_in_flight: 1,
+                ..mondrian_media::AudioPlaybackConfig::product_default()
+            };
+            state.audio_playback = AppAudioPlayback::Available(Box::new(
+                AudioPlayback::with_output(
+                    config,
+                    Box::new(NativeHoldPlatformOutput(Arc::clone(&output))),
+                )
+                .expect("owned model output"),
+            ));
+            let requests: Requests = Arc::new(parking_lot::Mutex::new(Vec::new()));
+            state
+                .audio_playback
+                .prepare(
+                    audio_anchor(0),
+                    Arc::new(RestrictedOriginRenderer { requests: Arc::clone(&requests) }),
+                    AudioPcmContinuityModel::GenerationStateFromOrigin(audio_anchor(0)),
+                )
+                .expect("prepare the constrained source at its declared origin");
+            let deadline = Instant::now() + Duration::from_secs(2);
+            loop {
+                let poll = state
+                    .audio_playback
+                    .poll(AudioPlaybackMode::Consume, audio_anchor(0))
+                    .expect("actual serial PCM admission");
+                for event in poll.events {
+                    state.handle_audio_playback_event(event, Instant::now()).unwrap();
+                }
+                if output.lock().snapshot.active {
+                    break;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "serial PCM did not activate the output"
+                );
+                std::thread::yield_now();
+            }
+            assert!(
+                output.lock().queued > 0,
+                "activation uses actually rendered PCM"
+            );
+            assert_eq!(
+                state.audio_playback_snapshot().media_anchor,
+                Some(audio_anchor(0))
+            );
+            assert_eq!(state.playback_clock_master(), Some(ClockMaster::Synthetic));
+            (state, output, requests)
+        }
+
+        fn assert_retired_without_reentry(
+            state: &mut AppState,
+            output: &parking_lot::Mutex<NativeHoldPlatformState>,
+            requests: &Requests,
+        ) {
+            assert!(
+                !output.lock().snapshot.active,
+                "the actual App caller must close output"
+            );
+            // Fixed-step advance can leave the test's wall projection in the future.
+            // Join the real pump observation to the unchanged Engine high-water mark.
+            state.reanchor_playback_observation_projection(Instant::now());
+            let deadline = Instant::now() + Duration::from_secs(2);
+            loop {
+                state.pump_audio_output().expect("retirement must not retry an illegal Enter");
+                let snapshot = state.audio_playback_snapshot();
+                if snapshot.in_flight == 0 && output.lock().queued == 0 {
+                    break;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "retired PCM did not settle after callback Ack"
+                );
+                std::thread::yield_now();
+            }
+            // A later ordinary owner turn must not reactivate or replay origin zero.
+            for _ in 0..3 {
+                state.pump_audio_output().expect("settled retirement remains pollable");
+                assert!(!output.lock().snapshot.active);
+                assert_eq!(output.lock().queued, 0);
+            }
+            assert_eq!(
+                requests
+                    .lock()
+                    .iter()
+                    .filter(|request| matches!(
+                        request.continuity,
+                        mondrian_media::AudioPcmContinuity::Enter(_)
+                    ))
+                    .map(|request| request.start_sample)
+                    .collect::<Vec<_>>(),
+                vec![0],
+                "retirement cannot Enter at the nonzero anchor or secretly replay zero"
+            );
+            assert!(state.shutdown_audio_playback_and_wait().all_workers_terminated());
+        }
+
+        #[test]
+        fn pause_at_nonzero_retires_constrained_pcm_without_fresh_entry() {
+            let (mut state, output, requests) = active_source(20);
+            state.advance_playback_clock(Duration::from_millis(100));
+            assert!(
+                state.current_frame() > 0,
+                "exercise a genuinely nonzero Pause"
+            );
+            state
+                .pause()
+                .expect("Pause must stop consumption without requiring a fresh Enter");
+            assert_eq!(
+                state.playback_engine.snapshot().state,
+                TransportState::Paused
+            );
+            assert_retired_without_reentry(&mut state, &output, &requests);
+        }
+
+        #[test]
+        fn reached_end_retires_constrained_pcm_before_later_idle_poll() {
+            let (mut state, output, requests) = active_source(5);
+            let outcome = state.advance_playback_clock(Duration::from_secs(1));
+            assert_eq!(outcome.status, PlaybackAdvanceStatus::ReachedEnd);
+            assert_eq!(state.current_frame(), 4);
+            assert_eq!(
+                state.playback_engine.snapshot().state,
+                TransportState::Ended
+            );
+            assert_retired_without_reentry(&mut state, &output, &requests);
+        }
+
+        #[test]
+        fn rejected_device_phase_retires_constrained_pcm_without_reentry() {
+            let (mut state, output, requests) = active_source(20);
+            state.advance_playback_clock(Duration::from_millis(100));
+            assert!(state.current_frame() > 0);
+            let captured_at = state.playback_observation_instant_anchor;
+            {
+                let mut output = output.lock();
+                output.snapshot.captured_at = captured_at;
+                output.snapshot.callback_consumed_frames = 480;
+                output.snapshot.active_callback_consumed_frames = 480;
+                output.snapshot.callback_count = 1;
+                output.snapshot.last_callback_frames = 480;
+                output.snapshot.active_duration = Some(Duration::from_millis(10));
+                output.snapshot.last_callback_age = Some(Duration::ZERO);
+                output.snapshot.last_callback_playback_delay = Some(Duration::ZERO);
+                output.snapshot.last_callback_playback_delay_uncertainty = Some(Duration::ZERO);
+            }
+            let audio = state.audio_playback_snapshot();
+            assert_eq!(audio.media_anchor, Some(audio_anchor(0)));
+            state
+                .observe_audio_output_clock(audio, captured_at)
+                .expect("a rejected initial device phase must retire inadmissible recovery");
+            assert_eq!(state.playback_clock_master(), Some(ClockMaster::Synthetic));
+            assert_eq!(
+                state.playback_engine.snapshot().audio_handoff.map(|handoff| handoff.status),
+                Some(mondrian_playback::AudioClockHandoffStatus::PhaseRejected),
+                "the real Engine must classify the measured phase as rejected"
+            );
+            assert_retired_without_reentry(&mut state, &output, &requests);
+        }
+    }
+
+    // Positive notices below are emitted by the actual serial Media render
+    // owner. The controlled platform adapter proves software callback state,
+    // not hardware/DAC behavior, and exposes no alternate playback authority.
+    pub(in crate::app) struct NativeHoldPlatformState {
+        snapshot: RealtimeAudioOutputSnapshot,
+        revision: u64,
+        acknowledged: u64,
+        auto_acknowledge: bool,
+        pub(in crate::app) queued: usize,
+    }
+
+    struct NativeHoldPlatformOutput(Arc<parking_lot::Mutex<NativeHoldPlatformState>>);
+
+    #[cfg(windows)]
+    mod cold_native_joint_controls;
+
+    mod author_audio_admission_contracts;
+    mod author_audio_reconciliation_contracts;
+    pub(in crate::app) mod project_close_audio_contracts;
+    mod source_close_admission_contracts;
+
+    mod native_settlement_queue_controls {
+        use super::*;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        #[derive(Default)]
+        struct DropProbe {
+            created: AtomicUsize,
+            entered: AtomicUsize,
+            processed: AtomicUsize,
+            dropped: parking_lot::Mutex<Vec<(std::thread::ThreadId, Option<String>)>>,
+        }
+
+        struct Resolver(Arc<DropProbe>);
+        struct Factory(Arc<DropProbe>);
+        struct Processor(Arc<DropProbe>);
+        impl mondrian_audio::AudioProcessorResolver for Resolver {
+            fn prepare(
+                &self,
+                _: mondrian_audio::AudioProcessorPrepareRequest<'_>,
+            ) -> Result<
+                Arc<dyn mondrian_audio::AudioProcessorFactory>,
+                mondrian_audio::AudioProcessorHostError,
+            > {
+                Ok(Arc::new(Factory(self.0.clone())))
+            }
+        }
+        impl mondrian_audio::AudioProcessorFactory for Factory {
+            fn native_child_settlement_requirement(
+                &self,
+            ) -> mondrian_core::NativeChildSettlementRequirement {
+                mondrian_core::NativeChildSettlementRequirement::NotApplicable
+            }
+            fn execution_contract(&self) -> mondrian_audio::AudioProcessorExecutionContract {
+                mondrian_audio::AudioProcessorExecutionContract::stateless()
+            }
+            fn create(
+                &self,
+                _: Option<&mondrian_core::NativeChildSettlementRegistrar>,
+            ) -> Result<
+                Box<dyn mondrian_audio::AudioProcessor>,
+                mondrian_audio::AudioProcessorHostError,
+            > {
+                self.0.created.fetch_add(1, Ordering::SeqCst);
+                Ok(Box::new(Processor(self.0.clone())))
+            }
+        }
+        impl mondrian_audio::AudioProcessor for Processor {
+            fn bind_native_child_settlement(
+                &mut self,
+                _: &mondrian_core::NativeChildSettlementRegistrar,
+            ) -> Result<
+                mondrian_core::NativeChildSettlementBinding,
+                mondrian_core::NativeChildSettlementError,
+            > {
+                Ok(mondrian_core::NativeChildSettlementBinding::NotApplicable)
+            }
+            fn enter_state(
+                &mut self,
+                _: i64,
+            ) -> Result<(), mondrian_audio::AudioProcessorHostError> {
+                self.0.entered.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            }
+            fn process(
+                &mut self,
+                _: mondrian_audio::AudioProcessorProcessContext,
+                _: &mut dyn mondrian_audio::AudioProcessorAudioIo,
+                _: mondrian_audio::AudioParameterEventBatch<'_>,
+            ) -> Result<(), mondrian_audio::AudioProcessorHostError> {
+                self.0.processed.fetch_add(1, Ordering::SeqCst);
+                panic!("the lifecycle-only queue control must not schedule PCM")
+            }
+        }
+        impl Drop for Processor {
+            fn drop(&mut self) {
+                let current = std::thread::current();
+                self.0.dropped.lock().push((current.id(), current.name().map(str::to_owned)));
+            }
+        }
+
+        fn observe_refused_timeline_request(retain_external: bool) {
+            let directory = tempfile::tempdir().expect("private author/library fixture");
+            let library =
+                AssetLibrary::open(directory.path().join("library")).expect("actual Asset Library");
+            let mut sequence = Sequence::new("App request queue ownership");
+            let processor = mondrian_timeline::audio::AudioProcessorInstance::built_in(
+                mondrian_timeline::audio::BUILTIN_GAIN_DEFINITION_ID,
+                1,
+            );
+            let instance = processor.id;
+            sequence.audio_program.outputs[0].strip.pre_fader.processors.push(processor);
+            let sequence_id = sequence.id;
+            let output_id = sequence.audio_program.outputs[0].id;
+            let programs: Arc<[mondrian_audio::NativeAudioAuthorProgram]> =
+                vec![mondrian_audio::NativeAudioAuthorProgram {
+                    sequence: sequence_id,
+                    program: Arc::new(
+                        mondrian_audio::compile_audio_program(
+                            &sequence,
+                            mondrian_audio::AudioCompileRequest {
+                                output_id,
+                                audition: mondrian_audio::AudioAuditionOverlay::default(),
+                            },
+                        )
+                        .expect("actual immutable Program"),
+                    ),
+                }]
+                .into();
+            let document = mondrian_project::ProjectDocument::new(
+                "queue ownership",
+                mondrian_timeline::SequenceCollection::new(sequence.clone()),
+                mondrian_core::ProjectColorEnvironment::default(),
+                mondrian_timeline::SequenceSettings::default(),
+                mondrian_core::ProjectSettings::default(),
+            );
+            let author = mondrian_editor_state::AuthoringSession::new_unsaved(
+                document,
+                directory.path().join("project.mdp"),
+                directory.path().to_owned(),
+                library.clone(),
+            )
+            .expect("actual Authoring Session snapshot");
+            let snapshot = Arc::new(author.execution_snapshot());
+            let probe = Arc::new(DropProbe::default());
+            let resolver = Resolver(probe.clone());
+            let renderer = Arc::new(
+                TimelineAudioPcmRenderer::new_with_processor_resolver(
+                    sequence,
+                    Vec::new(),
+                    library,
+                    Arc::new(AudioSourceCache::new(48_000)),
+                    mondrian_audio::AudioRuntimeResourceGrant::new(
+                        64,
+                        512 * 1024 * 1024,
+                        128 * 1024 * 1024,
+                    ),
+                    mondrian_audio::AudioAuditionOverlay::default(),
+                    48_000,
+                    AudioChannelLayout::Stereo,
+                    4,
+                    &resolver,
+                    None,
+                )
+                .expect("actual Timeline/Delivery/Runtime ordinary resolver seam"),
+            );
+            assert_eq!(probe.created.load(Ordering::SeqCst), 1);
+            let weak = Arc::downgrade(&renderer);
+            let mut output_snapshot = audio_snapshot();
+            output_snapshot.active = false;
+            output_snapshot.buffered_frames = 0;
+            let output = Arc::new(parking_lot::Mutex::new(NativeHoldPlatformState {
+                snapshot: output_snapshot,
+                revision: 0,
+                acknowledged: 0,
+                auto_acknowledge: true,
+                queued: 0,
+            }));
+            let mut playback = AppAudioPlayback::Available(Box::new(
+                AudioPlayback::with_output(
+                    mondrian_media::AudioPlaybackConfig {
+                        chunk_frames: 4,
+                        preroll_frames: 4,
+                        high_watermark_frames: 8,
+                        max_in_flight: 1,
+                        ..mondrian_media::AudioPlaybackConfig::product_default()
+                    },
+                    Box::new(NativeHoldPlatformOutput(output.clone())),
+                )
+                .expect("real Media workers with software output only"),
+            ));
+            playback
+                .prepare(
+                    audio_anchor(0),
+                    renderer.clone(),
+                    renderer.continuity_model(),
+                )
+                .expect("original Media Source/claim admission");
+            let verifier = renderer
+                .owner_installation_verifier()
+                .expect("actual Runtime forwarding of original Media verifier");
+            let claim = verifier.current_claim().expect("actual installed Source claim");
+
+            // Deliberately ineligible native-author DTO. Only its installation
+            // generation comes from the real Source; these IDs grant no actual
+            // native target or Delivered/Plan/Ack permission. The real App Ack
+            // must refuse it because no author snapshot/producer was bound.
+            let root_plan = mondrian_core::AudioPreparedPlanId::new();
+            let root_session = mondrian_core::AudioRenderSessionId::new();
+            let target = mondrian_core::NativeAudioEditorTarget {
+                root_plan,
+                root_session,
+                local_plan: root_plan,
+                local_session: root_session,
+                instance,
+                owner: mondrian_core::NativeAudioEditorOccurrenceOwner::Output(output_id),
+                insertion: mondrian_core::NativeAudioEditorInsertion::PreFader,
+                continuity_epoch: None,
+                binding: mondrian_core::AudioProcessorBindingId::new(),
+                installed_generation: claim.generation(),
+            };
+            let proposal = mondrian_core::NativeAudioAuthorProposal::project(
+                target,
+                sequence_id,
+                1,
+                mondrian_core::NativeAudioAuthorBoundaryFacts {
+                    completion: mondrian_core::NativeAudioAuthorCompletion::Nonterminal,
+                    open_parameter_edits: 0,
+                    group_depth: 1,
+                },
+                vec![mondrian_core::NativeAudioAuthorCallback::GroupStarted],
+                None,
+            )
+            .expect("bounded negative DTO, never a synthetic native Source");
+            let request = renderer.native_author_handoff_request(
+                proposal.clone(),
+                target,
+                snapshot,
+                programs,
+                mondrian_media::AudioPcmNativeAuthorHandoffIntent::Acknowledge,
+            );
+            let erased: Arc<dyn AudioPcmRenderer> = renderer.clone();
+            assert!(Arc::ptr_eq(request.renderer(), &erased));
+            drop(erased);
+            let external = retain_external.then(|| renderer.clone());
+            assert!(playback
+                .request_native_audio_author_handoff(request)
+                .expect("original App wrapper/Media queue admission"));
+            drop(renderer);
+            assert!(probe.dropped.lock().is_empty());
+
+            let deadline = Instant::now() + Duration::from_secs(2);
+            let mut refused = false;
+            while Instant::now() < deadline && !refused {
+                let poll = playback
+                    .poll(AudioPlaybackMode::Idle, audio_anchor(0))
+                    .expect("original serial completion path");
+                for event in poll.events {
+                    if let AudioPlaybackEvent::NativeAuthorHandoffObserved {
+                        proposal: completed,
+                        status,
+                        ..
+                    } = event
+                    {
+                        assert!(completed.same_retained_proposal(&proposal));
+                        assert_eq!(
+                            status,
+                            mondrian_media::AudioPcmNativeAuthorHandoffStatus::Refused(
+                                mondrian_media::AudioPcmNativeAuthorHandoffRefusal::Superseded,
+                            ),
+                            "real App Ack refused before any author install/native operation"
+                        );
+                        refused = true;
+                    }
+                }
+                if !refused {
+                    std::thread::yield_now();
+                }
+            }
+            assert!(
+                refused,
+                "must observe executed typed refusal before shutdown, not cancellation"
+            );
+            assert!(
+                weak.upgrade().is_some(),
+                "installed Media source still owns the Timeline"
+            );
+            assert_eq!(probe.entered.load(Ordering::SeqCst), 0);
+            assert_eq!(probe.processed.load(Ordering::SeqCst), 0);
+            assert_eq!(output.lock().queued, 0);
+            let caller = std::thread::current().id();
+            let evidence = playback.shutdown_and_wait(48_000);
+            if retain_external {
+                assert!(!evidence.shutdown_resource_facts_complete_at_deadline);
+                assert!(evidence.shutdown_owner_lifetime_unresolved_at_deadline);
+                assert!(!evidence.all_workers_terminated());
+                assert!(weak.upgrade().is_some());
+                assert!(
+                    probe.dropped.lock().is_empty(),
+                    "external alias retains real Runtime"
+                );
+                drop(external);
+                assert!(weak.upgrade().is_none());
+                let dropped = probe.dropped.lock();
+                assert_eq!(dropped.len(), 1);
+                assert_eq!(
+                    dropped[0].0, caller,
+                    "late alias release is outside the receipt"
+                );
+                assert!(
+                    !evidence.all_workers_terminated(),
+                    "no retrospective repair"
+                );
+            } else {
+                assert!(evidence.all_workers_terminated(), "{evidence:?}");
+                assert!(weak.upgrade().is_none());
+                let dropped = probe.dropped.lock();
+                assert_eq!(
+                    dropped.len(),
+                    1,
+                    "actual exclusive processor retired exactly once"
+                );
+                assert_ne!(dropped[0].0, caller);
+                assert_eq!(
+                    dropped[0].1.as_deref(),
+                    Some("mondrian-audio-render-retirement")
+                );
+            }
+        }
+
+        #[test]
+        fn timeline_refused_handoff_queue_retires_runtime_before_shutdown_receipt() {
+            observe_refused_timeline_request(false);
+        }
+
+        #[test]
+        fn timeline_refused_handoff_external_alias_keeps_shutdown_unresolved() {
+            observe_refused_timeline_request(true);
+        }
+    }
+
+    #[test]
+    fn product_audio_renderer_uses_available_playback_quantum_and_skips_unavailable() {
+        struct Resolver(parking_lot::Mutex<Vec<usize>>);
+        impl mondrian_audio::AudioProcessorResolver for Resolver {
+            fn native_child_settlement_requirement(
+                &self,
+            ) -> mondrian_core::NativeChildSettlementRequirement {
+                // The only prepare branch directly forwards to the host built-in resolver.
+                mondrian_core::NativeChildSettlementRequirement::NotApplicable
+            }
+
+            fn prepare(
+                &self,
+                request: mondrian_audio::AudioProcessorPrepareRequest<'_>,
+            ) -> Result<
+                Arc<dyn mondrian_audio::AudioProcessorFactory>,
+                mondrian_audio::AudioProcessorHostError,
+            > {
+                assert!(request.native_child_settlement_registrar().is_some());
+                self.0.lock().push(request.render_contract().max_block_frames);
+                mondrian_audio::BuiltInAudioProcessorResolver.prepare(request)
+            }
+        }
+        let mut state = state_with_sequence(20);
+        assert!(state.shutdown_audio_playback_and_wait().all_workers_terminated());
+        let mut sequence = state.active_sequence().expect("Sequence").clone();
+        sequence.audio_program.outputs[0].strip.pre_fader.processors.push(
+            mondrian_timeline::audio::AudioProcessorInstance::built_in(
+                mondrian_timeline::audio::BUILTIN_GAIN_DEFINITION_ID,
+                1,
+            ),
+        );
+        state.test_set_sequence(Some(sequence));
+        let mut snapshot = audio_snapshot();
+        snapshot.active = false;
+        snapshot.buffered_frames = 0;
+        let output = Arc::new(parking_lot::Mutex::new(NativeHoldPlatformState {
+            snapshot,
+            revision: 0,
+            acknowledged: 0,
+            auto_acknowledge: true,
+            queued: 0,
+        }));
+        let config = mondrian_media::AudioPlaybackConfig {
+            chunk_frames: 7,
+            ..mondrian_media::AudioPlaybackConfig::product_default()
+        };
+        state.audio_playback = AppAudioPlayback::Available(Box::new(
+            AudioPlayback::with_output(config, Box::new(NativeHoldPlatformOutput(output)))
+                .expect("owned platform output"),
+        ));
+        let resolver = Arc::new(Resolver(parking_lot::Mutex::new(Vec::new())));
+        state.audio_processor_resolver = resolver.clone();
+        assert_eq!(state.audio_playback.render_chunk_frames(), Some(7));
+        let prepared = state
+            .audio_playback_renderer("quantum control")
+            .expect("actual App consumer")
+            .expect("selected processor needs execution");
+        assert_eq!(*resolver.0.lock(), vec![7]);
+        drop(prepared);
+        assert!(state.audio_playback.shutdown_and_wait(48_000).all_workers_terminated());
+        assert_eq!(state.audio_playback.render_chunk_frames(), None);
+        assert!(state
+            .audio_playback_renderer("unavailable quantum control")
+            .expect("unavailable remains inactive")
+            .is_none());
+        assert_eq!(
+            *resolver.0.lock(),
+            vec![7],
+            "inactive path prepares nothing"
+        );
+    }
+
+    fn observe_cold_product_renderer(fail_unknown: bool) {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        struct Resolver {
+            calls: AtomicUsize,
+            fail_unknown: bool,
+        }
+        impl mondrian_audio::AudioProcessorResolver for Resolver {
+            fn native_child_settlement_requirement(
+                &self,
+            ) -> mondrian_core::NativeChildSettlementRequirement {
+                if self.fail_unknown {
+                    mondrian_core::NativeChildSettlementRequirement::Unavailable
+                } else {
+                    mondrian_core::NativeChildSettlementRequirement::NotApplicable
+                }
+            }
+
+            fn prepare(
+                &self,
+                request: mondrian_audio::AudioProcessorPrepareRequest<'_>,
+            ) -> Result<
+                Arc<dyn mondrian_audio::AudioProcessorFactory>,
+                mondrian_audio::AudioProcessorHostError,
+            > {
+                assert!(
+                    request.native_child_settlement_registrar().is_some(),
+                    "the actual App constructor must observe before resolver entry"
+                );
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                if self.fail_unknown {
+                    Err(mondrian_audio::AudioProcessorHostError::InvalidContract(
+                        "cold-observation-control-original-error".to_owned(),
+                    ))
+                } else {
+                    mondrian_audio::BuiltInAudioProcessorResolver.prepare(request)
+                }
+            }
+        }
+        let mut state = state_with_sequence(20);
+        assert!(state.shutdown_audio_playback_and_wait().all_workers_terminated());
+        let mut sequence = state.active_sequence().unwrap().clone();
+        sequence.audio_program.outputs[0].strip.pre_fader.processors.push(
+            mondrian_timeline::audio::AudioProcessorInstance::built_in(
+                mondrian_timeline::audio::BUILTIN_GAIN_DEFINITION_ID,
+                1,
+            ),
+        );
+        state.test_set_sequence(Some(sequence));
+        let mut snapshot = audio_snapshot();
+        snapshot.active = false;
+        snapshot.buffered_frames = 0;
+        let output = Arc::new(parking_lot::Mutex::new(NativeHoldPlatformState {
+            snapshot,
+            revision: 0,
+            acknowledged: 0,
+            auto_acknowledge: true,
+            queued: 0,
+        }));
+        state.audio_playback = AppAudioPlayback::Available(Box::new(
+            AudioPlayback::with_output(
+                mondrian_media::AudioPlaybackConfig::product_default(),
+                Box::new(NativeHoldPlatformOutput(output)),
+            )
+            .unwrap(),
+        ));
+        let resolver = Arc::new(Resolver { calls: AtomicUsize::new(0), fail_unknown });
+        state.audio_processor_resolver = resolver.clone();
+        let result = state.audio_playback_renderer("cold construction control");
+        assert_eq!(resolver.calls.load(Ordering::SeqCst), 1);
+        let prepared = if fail_unknown {
+            let error = result.err().expect("the original resolver still refuses");
+            assert!(error.to_string().contains("cold-observation-control-original-error"));
+            None
+        } else {
+            Some(result.expect("the original constructor succeeds").expect("gain executes"))
+        };
+        // No prepare/commit, Source binding or render has occurred. A returned
+        // cold renderer is nevertheless a live capability to own native children.
+        let evidence = state.audio_playback.shutdown_and_wait(48_000);
+        assert!(!evidence.all_workers_terminated());
+        assert!(!evidence.shutdown_resource_facts_complete_at_deadline);
+        assert!(evidence.shutdown_owner_lifetime_unresolved_at_deadline);
+        assert_eq!(evidence.foreign_owner_panics, 0);
+        assert_eq!(evidence.foreign_owner_abandonments, 0);
+        drop(prepared);
+        assert!(
+            !evidence.all_workers_terminated(),
+            "the receipt stays immutable"
+        );
+    }
+
+    #[test]
+    fn product_cold_uninstalled_renderer_keeps_original_playback_scope_unresolved() {
+        observe_cold_product_renderer(false);
+    }
+
+    #[test]
+    fn product_cold_unknown_resolver_preserves_original_error_and_unresolved_evidence() {
+        observe_cold_product_renderer(true);
+    }
+
+    impl mondrian_media::AudioOutputAdapter for NativeHoldPlatformOutput {
+        fn poll(&mut self) -> Option<mondrian_media::RealtimeAudioOutputEvent> {
+            None
+        }
+
+        fn enqueue(
+            &mut self,
+            buffer: &mondrian_media::AudioBuffer,
+        ) -> Result<(), mondrian_media::RealtimeAudioOutputEnqueueError> {
+            let mut state = self.0.lock();
+            if buffer.sample_rate != state.snapshot.contract.sample_rate {
+                return Err(
+                    mondrian_media::RealtimeAudioOutputEnqueueError::SampleRateMismatch {
+                        expected: state.snapshot.contract.sample_rate,
+                        actual: buffer.sample_rate,
+                    },
+                );
+            }
+            if buffer.channel_layout != state.snapshot.contract.channel_layout {
+                return Err(
+                    mondrian_media::RealtimeAudioOutputEnqueueError::ChannelLayoutMismatch {
+                        expected: state.snapshot.contract.channel_layout,
+                        actual: buffer.channel_layout,
+                    },
+                );
+            }
+            let frames = buffer.frame_count();
+            if frames > 96_000 - state.queued {
+                return Err(
+                    mondrian_media::RealtimeAudioOutputEnqueueError::InsufficientCapacity {
+                        required_samples: buffer.samples.len(),
+                        available_samples: (96_000 - state.queued) * 2,
+                    },
+                );
+            }
+            state.queued += frames;
+            state.snapshot.buffered_frames = state.queued;
+            Ok(())
+        }
+
+        fn clear(&mut self) {
+            let mut state = self.0.lock();
+            state.queued = 0;
+            state.snapshot.buffered_frames = 0;
+        }
+
+        fn validate_deactivation(
+            &self,
+        ) -> Result<(), mondrian_media::RealtimeAudioOutputControlError> {
+            let state = self.0.lock();
+            if state.snapshot.active && state.revision == u64::MAX {
+                return Err(
+                    mondrian_media::RealtimeAudioOutputControlError::QuiescenceRevisionExhausted {
+                        stream_generation: state.snapshot.stream_generation,
+                    },
+                );
+            }
+            Ok(())
+        }
+
+        fn deactivate(
+            &self,
+        ) -> Result<
+            Option<mondrian_media::RealtimeAudioOutputQuiescenceToken>,
+            mondrian_media::RealtimeAudioOutputControlError,
+        > {
+            self.validate_deactivation()?;
+            let mut state = self.0.lock();
+            if state.snapshot.active {
+                state.revision += 1;
+                state.snapshot.active = false;
+            }
+            if state.auto_acknowledge {
+                state.acknowledged = state.revision;
+            }
+            Ok(Some(
+                mondrian_media::RealtimeAudioOutputQuiescenceToken::new(
+                    state.snapshot.stream_generation,
+                    state.revision,
+                ),
+            ))
+        }
+
+        fn is_quiescent(
+            &self,
+            token: mondrian_media::RealtimeAudioOutputQuiescenceToken,
+        ) -> Result<bool, mondrian_media::RealtimeAudioOutputControlError> {
+            let state = self.0.lock();
+            if token.stream_generation() != state.snapshot.stream_generation {
+                return Err(
+                    mondrian_media::RealtimeAudioOutputControlError::StreamGenerationMismatch {
+                        token_generation: token.stream_generation(),
+                        current_generation: state.snapshot.stream_generation,
+                    },
+                );
+            }
+            if token.revision() != state.revision {
+                return Err(
+                    mondrian_media::RealtimeAudioOutputControlError::QuiescenceRevisionMismatch {
+                        token_revision: token.revision(),
+                        current_revision: state.revision,
+                    },
+                );
+            }
+            Ok(state.acknowledged == token.revision())
+        }
+
+        fn activate_after_discard(
+            &self,
+            token: mondrian_media::RealtimeAudioOutputQuiescenceToken,
+            frames: usize,
+        ) -> Result<(), mondrian_media::RealtimeAudioOutputControlError> {
+            if !self.is_quiescent(token)? {
+                return Err(
+                    mondrian_media::RealtimeAudioOutputControlError::CallbackNotQuiescent {
+                        revision: token.revision(),
+                    },
+                );
+            }
+            let mut state = self.0.lock();
+            if frames > state.queued {
+                return Err(
+                    mondrian_media::RealtimeAudioOutputControlError::InsufficientBufferedFrames {
+                        requested_frames: frames,
+                        buffered_frames: state.queued,
+                    },
+                );
+            }
+            state.queued -= frames;
+            state.snapshot.buffered_frames = state.queued;
+            state.snapshot.active = true;
+            Ok(())
+        }
+
+        fn buffered_frames(&self) -> usize {
+            self.0.lock().queued
+        }
+        fn capacity_frames(&self) -> Option<usize> {
+            Some(96_000)
+        }
+        fn snapshot(&self) -> Option<RealtimeAudioOutputSnapshot> {
+            Some(self.0.lock().snapshot)
+        }
+    }
+
+    struct NativeHoldSerialRenderer {
+        successful_first: bool,
+        calls: std::sync::atomic::AtomicUsize,
+        entered: Arc<std::sync::atomic::AtomicBool>,
+        release: Arc<std::sync::atomic::AtomicBool>,
+        notice: mondrian_core::NativeAudioReprepareNotice,
+    }
+
+    impl AudioPcmRenderer for NativeHoldSerialRenderer {
+        fn bind_native_child_settlement(
+            &self,
+            _: &mondrian_core::NativeChildSettlementRegistrar,
+        ) -> Result<(), mondrian_core::NativeChildSettlementError> {
+            Ok(()) // Only host-model atomics and Core notices are retained.
+        }
+
+        fn render(
+            &self,
+            request: mondrian_media::AudioPcmRenderRequest,
+            cancellation: &mondrian_core::ExecutionCancellationToken,
+        ) -> mondrian_core::Result<mondrian_media::AudioPcmRenderOutcome> {
+            use std::sync::atomic::Ordering;
+            let call = self.calls.fetch_add(1, Ordering::AcqRel);
+            if call == 0 && self.successful_first {
+                return Ok(mondrian_media::AudioPcmRenderOutcome::Rendered(
+                    mondrian_media::AudioBuffer::silent(
+                        request.sample_rate,
+                        request.channel_layout,
+                        request.frame_count,
+                    ),
+                ));
+            }
+            self.entered.store(true, Ordering::Release);
+            while !self.release.load(Ordering::Acquire) && !cancellation.is_canceled() {
+                std::thread::yield_now();
+            }
+            Ok(mondrian_media::AudioPcmRenderOutcome::DeferredForReprepare(
+                self.notice,
+            ))
+        }
+    }
+
+    struct NativeHoldAppRelease(Arc<std::sync::atomic::AtomicBool>);
+    impl Drop for NativeHoldAppRelease {
+        fn drop(&mut self) {
+            self.0.store(true, std::sync::atomic::Ordering::Release);
+        }
+    }
+
+    fn native_hold_actual_required(
+        successful_first: bool,
+        startup: bool,
+        malformed: bool,
+    ) -> (
+        AppState,
+        Arc<parking_lot::Mutex<NativeHoldPlatformState>>,
+        AudioPlaybackEvent,
+        Instant,
+    ) {
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        let mut state = state_with_sequence(20_000);
+        if startup {
+            state.play().expect("startup intent");
+        } else {
+            play_ready(&mut state);
+        }
+        state.shutdown_audio_playback_and_wait();
+        let mut snapshot = audio_snapshot();
+        snapshot.active = false;
+        snapshot.callback_consumed_frames = 0;
+        snapshot.active_callback_consumed_frames = 0;
+        snapshot.active_duration = None;
+        snapshot.buffered_frames = 0;
+        snapshot.last_callback_playback_delay = Some(Duration::ZERO);
+        snapshot.last_callback_playback_delay_uncertainty = Some(Duration::ZERO);
+        snapshot.last_callback_age = Some(Duration::ZERO);
+        let output = Arc::new(parking_lot::Mutex::new(NativeHoldPlatformState {
+            snapshot,
+            revision: 0,
+            acknowledged: 0,
+            auto_acknowledge: true,
+            queued: 0,
+        }));
+        let entered = Arc::new(AtomicBool::new(false));
+        let release = Arc::new(AtomicBool::new(false));
+        let renderer: Arc<dyn AudioPcmRenderer> = Arc::new(NativeHoldSerialRenderer {
+            successful_first,
+            calls: AtomicUsize::new(0),
+            entered: Arc::clone(&entered),
+            release: Arc::clone(&release),
+            notice: mondrian_core::NativeAudioReprepareNotice {
+                instance_id: mondrian_core::AudioProcessorInstanceId::new(),
+                request: mondrian_core::NativeAudioReprepareRequest::ClapRestart,
+            },
+        });
+        let config = mondrian_media::AudioPlaybackConfig {
+            chunk_frames: 4_096,
+            preroll_frames: 4_096,
+            high_watermark_frames: 8_192,
+            max_in_flight: 1,
+            ..mondrian_media::AudioPlaybackConfig::product_default()
+        };
+        state.audio_playback = AppAudioPlayback::Available(Box::new(
+            AudioPlayback::with_output(
+                config,
+                Box::new(NativeHoldPlatformOutput(Arc::clone(&output))),
+            )
+            .expect("actual serial renderer with owned platform output"),
+        ));
+        // This guard drops before AppState and releases a blocked worker even
+        // when a test assertion unwinds. No thread is detached by the fixture.
+        let release_guard = NativeHoldAppRelease(Arc::clone(&release));
+        state
+            .audio_playback
+            .prepare(
+                audio_anchor(0),
+                renderer,
+                AudioPcmContinuityModel::GenerationState,
+            )
+            .expect("source");
+        let mode = if successful_first {
+            AudioPlaybackMode::Consume
+        } else {
+            AudioPlaybackMode::Preroll
+        };
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !entered.load(Ordering::Acquire) && Instant::now() < deadline {
+            let poll = state.audio_playback.poll(mode, audio_anchor(0)).expect("serial admission");
+            for event in poll.events {
+                state
+                    .handle_audio_playback_event(event, Instant::now())
+                    .expect("initial lifecycle");
+            }
+            std::thread::yield_now();
+        }
+        assert!(
+            entered.load(Ordering::Acquire),
+            "actual render worker did not enter deferred window"
+        );
+        let anchor_wall = state.playback_observation_instant_anchor;
+        if successful_first {
+            let active = state.audio_playback.snapshot(mode);
+            assert!(active.activation_preroll_satisfied);
+            assert_eq!(
+                active.media_anchor,
+                Some(audio_anchor(0)),
+                "actual Media activation owns its anchor"
+            );
+            {
+                let mut owned = output.lock();
+                assert!(owned.snapshot.active);
+                owned.snapshot.captured_at = anchor_wall;
+                owned.snapshot.callback_consumed_frames = 480;
+                owned.snapshot.active_callback_consumed_frames = 480;
+                owned.snapshot.active_duration = Some(Duration::from_millis(10));
+                owned.snapshot.last_callback_playback_delay = Some(Duration::from_millis(10));
+                owned.snapshot.callback_count = 2;
+            }
+            let observation = audio_device_clock_observation(
+                output.lock().snapshot,
+                state.playback_engine.snapshot().epoch,
+                state.playback_engine.monotonic_high_water(),
+                false,
+                active.media_anchor.expect("Media anchor"),
+                true,
+                false,
+            )
+            .expect("actual adapter initial evidence");
+            state
+                .playback_engine
+                .observe_audio_device_clock(observation)
+                .expect("qualified AudioDevice authority");
+            assert_eq!(
+                state.playback_clock_master(),
+                Some(ClockMaster::AudioDevice)
+            );
+            state.advance_playback_clock_at(anchor_wall + Duration::from_millis(30));
+        }
+        let handled_at = anchor_wall + Duration::from_millis(40);
+        {
+            let mut owned = output.lock();
+            owned.auto_acknowledge = false;
+            owned.snapshot.captured_at = handled_at;
+            if successful_first {
+                owned.snapshot.callback_consumed_frames = if malformed { u64::MAX } else { 2_400 };
+                owned.snapshot.active_callback_consumed_frames =
+                    owned.snapshot.callback_consumed_frames;
+                owned.snapshot.active_duration = Some(Duration::from_millis(50));
+                owned.snapshot.callback_count = 6;
+            }
+        }
+        release_guard.0.store(true, Ordering::Release);
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let required =
+            loop {
+                let poll = state
+                    .audio_playback
+                    .poll(mode, audio_anchor(1_440))
+                    .expect("actual deferred completion");
+                if let Some(event) = poll.events.into_iter().find(|event| {
+                    matches!(event, AudioPlaybackEvent::NativeReprepareRequired { .. })
+                }) {
+                    break event;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "typed deferred completion was not consumed"
+                );
+                std::thread::yield_now();
+            };
+        assert_eq!(
+            state.audio_playback.snapshot(mode).state,
+            mondrian_media::AudioPlaybackState::RepreparePending
+        );
+        assert_eq!(
+            state.audio_playback.snapshot(mode).render_substitution_count,
+            0
+        );
+        drop(release_guard);
+        (state, output, required, handled_at)
+    }
+
+    fn native_hold_assert_frozen(state: &mut AppState) {
+        let snapshot = state.playback_engine.snapshot();
+        let rate = AudioSampleRate::new(48_000).expect("rate");
+        let began = state.playback_engine.monotonic_high_water();
+        let sample = state
+            .playback_engine
+            .authoritative_audio_sample_position_at(snapshot.epoch, began, rate)
+            .expect("accepted phase");
+        for seconds in [1, 30, 120] {
+            let now = began.checked_add(Duration::from_secs(seconds)).expect("bounded wait");
+            state
+                .playback_engine
+                .tick(now)
+                .expect("existing Engine tick during pending wait");
+            assert!(state.is_playing(), "native wait must retain play intent");
+            assert_eq!(state.playback_engine.snapshot().epoch, snapshot.epoch);
+            assert_eq!(
+                state
+                    .playback_engine
+                    .authoritative_audio_sample_position_at(snapshot.epoch, now, rate)
+                    .expect("phase"),
+                sample,
+                "physical audio is stopped: transport must remain at the accepted sample phase"
+            );
+            assert_eq!(state.playback_engine.snapshot().position, snapshot.position);
+            if let Some(demand) = state.playback_engine.frame_demand() {
+                assert_eq!(demand.target, snapshot.position);
+            }
+        }
+    }
+
+    #[test]
+    fn native_author_commit_preserves_pending_generation_output_retirement_and_clock_hold() {
+        let (mut state, output, required, handled_at) =
+            native_hold_actual_required(true, false, false);
+        state
+            .handle_audio_playback_event(required, handled_at)
+            .expect("actual pending native owner");
+        // The fixture advanced a virtual wall instant; the author commit reads
+        // Instant::now(). Join that observation to the accepted Engine time.
+        state.reanchor_playback_observation_projection(Instant::now());
+        let before = state.playback_engine.snapshot();
+        let ticket = state.playback_engine.native_audio_control_hold_ticket();
+        let generation = state.audio_playback_snapshot().generation;
+        let binding = state.current_audio_playback_author_binding().expect("old closure");
+        let (_, commit) = state
+            .authoring
+            .as_mut()
+            .expect("Authoring Session")
+            .edit_active_sequence("native author semantic commit", |sequence| {
+                sequence.audio_program.outputs[0].strip.fader_db = -6.0;
+                Ok(())
+            })
+            .expect("accepted author transaction");
+        assert_ne!(
+            state.current_audio_playback_author_binding().expect("new closure"),
+            binding,
+            "the native transaction must actually change audible semantics"
+        );
+        state
+            .consume_native_audio_authoring_commit(commit.expect("semantic change"))
+            .expect("publish commit while retaining the native handoff");
+        assert_eq!(state.playback_engine.snapshot(), before);
+        assert_eq!(
+            state.playback_engine.native_audio_control_hold_ticket(),
+            ticket
+        );
+        assert_eq!(state.audio_playback_snapshot().generation, generation);
+        assert_eq!(
+            state.audio_playback.native_control_hold_generation(),
+            Some(generation)
+        );
+        assert_eq!(output.lock().queued, 0);
+        assert!(
+            state
+                .playback_engine
+                .next_wake(state.playback_engine.monotonic_high_water())
+                .expect("exact output retirement wake")
+                .is_some(),
+            "the author commit cannot fabricate physical output quiescence"
+        );
+        native_hold_assert_frozen(&mut state);
+    }
+
+    #[test]
+    fn injected_audio_observation_clock_preserves_poll_handler_and_observe_boundaries() {
+        // Portable original output/DTO route only; no native fixture or device.
+        let (mut state, output, required, handled_at) =
+            native_hold_actual_required(true, false, false);
+        state.handle_audio_playback_event(required, handled_at).unwrap();
+        let at = state.playback_observation_instant_anchor;
+        // Windows Instant tolerates a backward interval within one QPC tick.
+        // The negative control must also fail checked_duration_since.
+        let stale = at.checked_sub(Duration::from_secs(1)).unwrap();
+        assert!(stale < at, "negative control must be strictly earlier");
+        assert_eq!(
+            stale.checked_duration_since(at),
+            None,
+            "negative control must exceed platform Instant tolerance"
+        );
+        let before = state.playback_engine.snapshot();
+        let media = state.audio_playback_snapshot();
+        let mut samples = 0;
+        let mut observed = 0;
+        let refused = state.pump_audio_output_clocked_for_test(
+            &mut || {
+                samples += 1;
+                stale
+            },
+            &mut |_, _| {
+                observed += 1;
+            },
+        );
+        assert!(
+            matches!(
+                refused,
+                Err(mondrian_core::MondrianError::ActionNotExecuted { action, reason })
+                    if action == "pump_audio_output"
+                        && reason == mondrian_playback::PlaybackError::NonMonotonicTimestamp.to_string()
+            ),
+            "stale poll time must fail before consuming a DTO"
+        );
+        assert_eq!(samples, 1);
+        assert_eq!(observed, 0);
+        assert_eq!(state.playback_engine.snapshot(), before);
+        assert_eq!(state.audio_playback_snapshot(), media);
+        assert_eq!(
+            media.in_flight, 0,
+            "the single deferred PCM completion was consumed"
+        );
+        let positive_at = handled_at;
+        assert!(positive_at >= at);
+        assert_eq!(
+            state.playback_timestamp_for_observation(positive_at).unwrap(),
+            state.playback_engine.monotonic_high_water(),
+            "the positive input is the fixture's current observation, without clock clamping"
+        );
+        let output_obligation = {
+            let mut owned = output.lock();
+            assert!(!owned.snapshot.active);
+            assert!(!owned.auto_acknowledge);
+            assert!(owned.acknowledged < owned.revision);
+            assert_eq!(owned.snapshot.captured_at, positive_at);
+            let obligation = (owned.snapshot.stream_generation, owned.revision);
+            // The original manual mock protocol confirms the already-issued token.
+            owned.acknowledged = owned.revision;
+            obligation
+        };
+        let mut samples = 0;
+        let mut observed = 0;
+        state
+            .pump_audio_output_clocked_for_test(
+                &mut || {
+                    samples += 1;
+                    positive_at
+                },
+                &mut |_, event| {
+                    assert!(matches!(
+                        event,
+                        AudioPlaybackEvent::NativeReprepareOutputQuiesced { .. }
+                    ));
+                    observed += 1;
+                },
+            )
+            .unwrap();
+        assert_eq!(observed, 1, "one actual software-output acknowledgement");
+        assert_eq!(
+            samples,
+            observed + 2,
+            "one poll, every original handler and final Observe all sample the supplied clock"
+        );
+        assert!(state.audio_playback.has_retained_native_reprepare());
+        assert!(
+            state
+                .playback_engine
+                .next_wake(state.playback_engine.monotonic_high_water())
+                .unwrap()
+                .is_none(),
+            "the real acknowledgement was finalized by the original handler"
+        );
+        let owned = output.lock();
+        assert_eq!(
+            (owned.snapshot.stream_generation, owned.revision),
+            output_obligation
+        );
+        assert_eq!(owned.acknowledged, output_obligation.1);
+        assert!(!owned.snapshot.active);
+    }
+
+    #[test]
+    fn retained_restart_seek_refusal_preserves_transport_media_and_author() {
+        let (mut state, output, required, handled_at) =
+            native_hold_actual_required(true, false, false);
+        state.handle_audio_playback_event(required, handled_at).unwrap();
+        let engine = state.playback_engine.snapshot();
+        let clock = state.playback_engine.monotonic_high_water();
+        let observation = state.playback_observation_instant_anchor;
+        let frame = state.current_frame();
+        let seek_source = state.last_timeline_seek_source;
+        let author = state.current_audio_playback_author_binding().unwrap();
+        let author_session = state.authoring_session_id();
+        let retained = |state: &AppState| {
+            let AppAudioPlayback::Available(playback) = &state.audio_playback else {
+                panic!("actual installed Media owner")
+            };
+            let generation = playback.snapshot(AudioPlaybackMode::Idle).generation;
+            let mut windows = Vec::new();
+            let journal =
+                playback.visit_native_retained_pcm(generation, audio_anchor(0), |window| {
+                    windows.push((
+                        window.start_sample,
+                        window.first_frame,
+                        window.pcm.samples.as_ptr() as usize,
+                        window.pcm.samples.len(),
+                        window.pcm.samples.capacity(),
+                    ));
+                });
+            (
+                playback.snapshot(AudioPlaybackMode::Idle),
+                playback.native_owner_binding_status(),
+                journal,
+                windows,
+            )
+        };
+        let media = retained(&state);
+        assert!(
+            media.2.is_ok(),
+            "the original complete PCM owner must be observable"
+        );
+        let output_revision = output.lock().revision;
+        let output_queued = output.lock().queued;
+        let invalid = state.seek_with_source(-1, TimelineSeekSource::Settled).unwrap_err();
+        assert!(invalid.to_string().contains("non-negative"));
+        let error = state.seek_with_source(100, TimelineSeekSource::Settled).unwrap_err();
+        assert!(error.to_string().contains(
+            "retained native restart Source cannot be replaced or resumed under changed execution"
+        ));
+        assert_eq!(state.playback_engine.snapshot(), engine);
+        assert_eq!(state.playback_engine.monotonic_high_water(), clock);
+        assert_eq!(state.playback_observation_instant_anchor, observation);
+        assert_eq!(state.current_frame(), frame);
+        assert_eq!(state.last_timeline_seek_source, seek_source);
+        assert_eq!(
+            state.current_audio_playback_author_binding().unwrap(),
+            author
+        );
+        assert_eq!(state.authoring_session_id(), author_session);
+        assert_eq!(retained(&state), media);
+        assert_eq!(output.lock().revision, output_revision);
+        assert_eq!(output.lock().queued, output_queued);
+        assert!(state.audio_playback.has_retained_native_reprepare());
+        // This portable App fixture has no DLL/runtime claim. Actual claim
+        // preservation is checked by the same-Arc Media resume controls.
+    }
+
+    #[test]
+    fn retained_restart_factory_refuses_missing_exact_renderer_and_unavailable_owner() {
+        let (mut state, _output, required, handled_at) =
+            native_hold_actual_required(true, false, false);
+        state.handle_audio_playback_event(required, handled_at).unwrap();
+        let generation = state.audio_playback.snapshot(AudioPlaybackMode::Idle).generation;
+        let before = state.playback_engine.snapshot();
+        // This existing host-model fixture is not the Timeline Runtime provider.
+        // A C07 hold must refuse it rather than falling through to cold compile.
+        assert!(state.audio_playback_renderer("retained_restart_control").is_err());
+        assert_eq!(state.playback_engine.snapshot(), before);
+        assert_eq!(
+            state.audio_playback.snapshot(AudioPlaybackMode::Idle).generation,
+            generation
+        );
+        if let AppAudioPlayback::Available(playback) = &mut state.audio_playback {
+            playback.begin_shutdown();
+        } else {
+            unreachable!();
+        }
+        assert!(state.audio_playback.has_retained_native_reprepare());
+        assert_eq!(
+            state.audio_playback.native_reprepare_pending_generation(),
+            None
+        );
+        assert!(
+            state.audio_playback_renderer("retained_restart_unavailable").is_err(),
+            "unavailable fallback cannot hide the real retained owner"
+        );
+    }
+
+    #[test]
+    fn native_reprepare_actual_app_required_freezes_qualified_sample_and_viewer() {
+        let (mut state, _output, required, handled_at) =
+            native_hold_actual_required(true, false, false);
+        assert!(
+            matches!(&required, AudioPlaybackEvent::NativeReprepareRequired {
+            final_output: Some(output), final_media_anchor: Some(anchor), ..
+        } if output.active_callback_consumed_frames == 2_400 && *anchor == audio_anchor(0))
+        );
+        state
+            .handle_audio_playback_event(required, handled_at)
+            .expect("actual Media notice");
+        let epoch = state.playback_engine.snapshot().epoch;
+        let phase = state
+            .playback_engine
+            .authoritative_audio_sample_position_at(
+                epoch,
+                state.playback_engine.monotonic_high_water(),
+                AudioSampleRate::new(48_000).expect("rate"),
+            )
+            .expect("held phase");
+        assert_eq!(
+            phase.sample(),
+            1_920,
+            "2400 consumed - 480 measured delay; not rounded to video frames"
+        );
+        native_hold_assert_frozen(&mut state);
+    }
+
+    #[test]
+    fn native_reprepare_actual_app_required_without_device_phase_retains_current_authority() {
+        let (mut state, _output, required, handled_at) =
+            native_hold_actual_required(false, false, false);
+        assert!(matches!(
+            &required,
+            AudioPlaybackEvent::NativeReprepareRequired { final_media_anchor: None, .. }
+        ));
+        state
+            .handle_audio_playback_event(required, handled_at)
+            .expect("actual Media notice without activated old source");
+        native_hold_assert_frozen(&mut state);
+    }
+
+    #[test]
+    fn native_reprepare_actual_app_required_cannot_expire_startup_priming() {
+        let (mut state, _output, required, handled_at) =
+            native_hold_actual_required(false, true, false);
+        assert_eq!(
+            state.playback_engine.snapshot().state,
+            TransportState::Priming
+        );
+        state
+            .handle_audio_playback_event(required, handled_at)
+            .expect("actual pending source during startup");
+        native_hold_assert_frozen(&mut state);
+    }
+
+    #[test]
+    fn native_reprepare_actual_app_old_required_after_reprime_is_ignored() {
+        let (mut state, _output, required, handled_at) =
+            native_hold_actual_required(true, false, false);
+        state
+            .audio_playback
+            .reprime(audio_anchor(17_000))
+            .expect("new generation supersedes notice");
+        let before = state.playback_engine.snapshot();
+        state
+            .handle_audio_playback_event(required, handled_at)
+            .expect("stale notice rejected without mutation");
+        assert_eq!(state.playback_engine.snapshot(), before);
+        assert_eq!(
+            state.playback_clock_master(),
+            Some(ClockMaster::AudioDevice)
+        );
+    }
+
+    #[test]
+    fn native_reprepare_actual_app_old_required_after_source_retirement_is_ignored() {
+        let (mut state, _output, required, handled_at) =
+            native_hold_actual_required(true, false, false);
+        state
+            .audio_playback
+            .clear_source(audio_anchor(17_000))
+            .expect("retire actual pending owner");
+        let before = state.playback_engine.snapshot();
+        state
+            .handle_audio_playback_event(required, handled_at)
+            .expect("retired notice rejected without mutation");
+        assert_eq!(state.playback_engine.snapshot(), before);
+    }
+
+    #[test]
+    fn native_reprepare_actual_app_unusable_provisional_counter_still_freezes() {
+        let (mut state, _output, required, handled_at) =
+            native_hold_actual_required(true, false, true);
+        assert!(
+            matches!(&required, AudioPlaybackEvent::NativeReprepareRequired { final_output: Some(output), .. }
+            if output.active_callback_consumed_frames == u64::MAX)
+        );
+        state
+            .handle_audio_playback_event(required, handled_at)
+            .expect("invalid counter does not abandon native hold");
+        native_hold_assert_frozen(&mut state);
+    }
+
+    fn native_hold_actual_quiesced(
+        state: &mut AppState,
+        output: &Arc<parking_lot::Mutex<NativeHoldPlatformState>>,
+        captured_at: Instant,
+        consumed: u64,
+    ) -> AudioPlaybackEvent {
+        {
+            let mut owned = output.lock();
+            owned.snapshot.captured_at = captured_at;
+            owned.snapshot.callback_consumed_frames = consumed;
+            owned.snapshot.active_callback_consumed_frames = consumed;
+            owned.snapshot.active_duration = Some(Duration::from_millis(60));
+            owned.acknowledged = owned.revision;
+        }
+        let poll = state
+            .audio_playback
+            .poll(AudioPlaybackMode::Preroll, audio_anchor(1_920))
+            .expect("actual exact output acknowledgement");
+        let mut events = poll.events.into_iter().filter(|event| {
+            matches!(
+                event,
+                AudioPlaybackEvent::NativeReprepareOutputQuiesced { .. }
+            )
+        });
+        let event = events.next().expect("Media publishes quiesced final callback evidence");
+        assert!(
+            events.next().is_none(),
+            "one exact acknowledgement produces one final event"
+        );
+        event
+    }
+
+    #[test]
+    fn native_reprepare_actual_app_quiesced_final_callback_refines_phase_without_resuming() {
+        let (mut state, output, required, handled_at) =
+            native_hold_actual_required(true, false, false);
+        state
+            .handle_audio_playback_event(required, handled_at)
+            .expect("actual required");
+        let captured_at = handled_at + Duration::from_millis(10);
+        let event = native_hold_actual_quiesced(&mut state, &output, captured_at, 2_880);
+        assert!(
+            matches!(&event, AudioPlaybackEvent::NativeReprepareOutputQuiesced {
+            final_output: Some(output), final_media_anchor: Some(anchor), ..
+        } if output.active_callback_consumed_frames == 2_880 && !output.active && *anchor == audio_anchor(0))
+        );
+        state
+            .handle_audio_playback_event(event, captured_at)
+            .expect("final actual acknowledgement");
+        let epoch = state.playback_engine.snapshot().epoch;
+        let now = state.playback_engine.monotonic_high_water();
+        assert_eq!(
+            state
+                .playback_engine
+                .authoritative_audio_sample_position_at(
+                    epoch,
+                    now,
+                    AudioSampleRate::new(48_000).expect("rate")
+                )
+                .expect("final exact phase")
+                .sample(),
+            2_400
+        );
+        assert!(
+            state.playback_engine.next_wake(now).expect("hold wake").is_none(),
+            "acknowledged output must stop 2ms retirement polls"
+        );
+        assert_eq!(
+            state.audio_playback.snapshot(AudioPlaybackMode::Preroll).state,
+            mondrian_media::AudioPlaybackState::RepreparePending
+        );
+        assert_eq!(output.lock().queued, 0);
+        native_hold_assert_frozen(&mut state);
+    }
+
+    #[test]
+    fn native_reprepare_actual_app_quiesced_unrepresentable_counter_finishes_polling_at_accepted_phase(
+    ) {
+        let (mut state, output, required, handled_at) =
+            native_hold_actual_required(true, false, false);
+        state
+            .handle_audio_playback_event(required, handled_at)
+            .expect("actual required");
+        let captured_at = handled_at + Duration::from_millis(10);
+        let event = native_hold_actual_quiesced(&mut state, &output, captured_at, u64::MAX);
+        // The Media event and App conversion are real. The SDK/device fact is
+        // representable as u64 but cannot become a canonical signed sample.
+        let observation = state
+            .native_pending_clock_observation(
+                Some(output.lock().snapshot),
+                Some(audio_anchor(0)),
+                true,
+            )
+            .expect("App evidence conversion succeeds")
+            .expect("running callback proof");
+        assert!(observation.consumed_frames > i64::MAX as u64);
+        state
+            .handle_audio_playback_event(event, captured_at)
+            .expect("actual ack must finalize even when sample arithmetic rejects evidence");
+        let epoch = state.playback_engine.snapshot().epoch;
+        let now = state.playback_engine.monotonic_high_water();
+        assert_eq!(
+            state
+                .playback_engine
+                .authoritative_audio_sample_position_at(
+                    epoch,
+                    now,
+                    AudioSampleRate::new(48_000).expect("rate")
+                )
+                .expect("accepted phase")
+                .sample(),
+            1_920
+        );
+        assert!(
+            state.playback_engine.next_wake(now).expect("hold wake").is_none(),
+            "malformed final evidence must not leave perpetual 2ms polling"
+        );
+        assert_eq!(
+            state.audio_playback.snapshot(AudioPlaybackMode::Preroll).state,
+            mondrian_media::AudioPlaybackState::RepreparePending
+        );
+        native_hold_assert_frozen(&mut state);
+    }
+
+    #[test]
+    fn native_reprepare_actual_app_old_quiesced_event_cannot_finalize_new_generation() {
+        let (mut state, output, required, handled_at) =
+            native_hold_actual_required(true, false, false);
+        state
+            .handle_audio_playback_event(required, handled_at)
+            .expect("actual required");
+        let captured_at = handled_at + Duration::from_millis(10);
+        let old_event = native_hold_actual_quiesced(&mut state, &output, captured_at, 2_880);
+        state
+            .audio_playback
+            .reprime(audio_anchor(17_000))
+            .expect("rotate actual pending generation");
+        let before = state.playback_engine.snapshot();
+        let ticket = state.playback_engine.native_audio_control_hold_ticket();
+        state
+            .handle_audio_playback_event(old_event, captured_at)
+            .expect("old final event is rejected");
+        assert_eq!(state.playback_engine.snapshot(), before);
+        assert_eq!(
+            state.playback_engine.native_audio_control_hold_ticket(),
+            ticket
+        );
+        assert!(state
+            .playback_engine
+            .next_wake(state.playback_engine.monotonic_high_water())
+            .expect("still unfinalized")
+            .is_some());
+    }
+}
+
+fn native_audio_diagnostic_message(
+    record: &mondrian_core::NativeAudioDiagnosticRecord,
+    source: mondrian_core::NativeAudioDiagnosticSource,
+) -> Option<(AppMessage, notifications::AppNotificationSeverity)> {
+    use mondrian_core::NativeAudioDiagnosticSeverity as Native;
+    use notifications::AppNotificationSeverity as Product;
+    let (key, urgency) = match record.severity() {
+        Native::Debug | Native::Info => return None,
+        Native::Warning => ("notification-native-audio-warning", Product::Warning),
+        Native::Error => ("notification-native-audio-error", Product::Error),
+        Native::Fatal => ("notification-native-audio-fatal", Product::Error),
+        Native::HostMisbehaving => ("notification-native-audio-host-misbehavior", Product::Error),
+        Native::PluginMisbehaving => (
+            "notification-native-audio-plugin-misbehavior",
+            Product::Error,
+        ),
+        Native::Unknown => (
+            "notification-native-audio-unknown-severity",
+            Product::Warning,
+        ),
+    };
+    let (encoding, detail) = match std::str::from_utf8(record.bytes()) {
+        Ok(text) => ("text", text.to_owned()),
+        Err(_) => {
+            const HEX: &[u8; 16] = b"0123456789abcdef";
+            let mut text = String::with_capacity(record.bytes().len() * 2);
+            for byte in record.bytes() {
+                text.push(char::from(HEX[usize::from(byte >> 4)]));
+                text.push(char::from(HEX[usize::from(byte & 15)]));
+            }
+            ("hex", text)
+        }
+    };
+    let facts = record.facts();
+    Some((
+        AppMessage::new(key)
+            .with_text("detail", detail)
+            .with_text("encoding", encoding)
+            .with_text("instance", source.instance.to_string())
+            .with_number("process", i64::from(source.process_id.get()))
+            .with_number("severity", i64::from(record.raw_severity()))
+            .with_text("truncated", if facts.truncated { "yes" } else { "no" })
+            .with_text("null", if facts.null_message { "yes" } else { "no" }),
+        urgency,
+    ))
+}
+
+impl AppState {
+    fn publish_native_audio_diagnostics(
+        &mut self,
+        batch: mondrian_core::NativeAudioDiagnosticBatch,
+    ) {
+        use mondrian_core::NativeAudioDiagnosticSeverity as Severity;
+        let source = batch.source();
+        // Presentation identity is never a native owner lookup or author lease.
+        // Sequence is deliberately absent so identical repeated reports dedupe.
+        let operation = format!(
+            "native-audio:{}:{}:{}:{}:{}:{:?}:{:?}:{}",
+            source.root_plan,
+            source.root_session,
+            source.local_plan,
+            source.local_session,
+            source.instance,
+            source.location,
+            source.insertion,
+            source.process_id
+        );
+        for record in batch.records() {
+            match record.severity() {
+                Severity::Debug => {
+                    tracing::debug!(?source, sequence=record.sequence(), severity=record.raw_severity(), facts=?record.facts(), bytes=?record.bytes(), "native audio diagnostic")
+                }
+                Severity::Info => {
+                    tracing::info!(?source, sequence=record.sequence(), severity=record.raw_severity(), facts=?record.facts(), bytes=?record.bytes(), "native audio diagnostic")
+                }
+                Severity::Warning | Severity::Unknown => {
+                    tracing::warn!(?source, sequence=record.sequence(), severity=record.raw_severity(), facts=?record.facts(), bytes=?record.bytes(), "native audio diagnostic")
+                }
+                Severity::Error
+                | Severity::Fatal
+                | Severity::HostMisbehaving
+                | Severity::PluginMisbehaving => {
+                    tracing::error!(?source, sequence=record.sequence(), severity=record.raw_severity(), facts=?record.facts(), bytes=?record.bytes(), "native audio diagnostic")
+                }
+            }
+            if let Some((message, severity)) = native_audio_diagnostic_message(record, source) {
+                self.set_status_hint(
+                    message.clone(),
+                    severity == notifications::AppNotificationSeverity::Error,
+                );
+                self.notifications.publish(operation.clone(), severity, message);
+            }
+        }
+        if batch.loss().incomplete() {
+            tracing::warn!(?source, loss=?batch.loss(), "native audio diagnostic prefix is incomplete");
+            let message = AppMessage::new("notification-native-audio-log-incomplete")
+                .with_text("instance", source.instance.to_string())
+                .with_number("process", i64::from(source.process_id.get()))
+                .with_text("capacity", if batch.loss().capacity { "yes" } else { "no" })
+                .with_text(
+                    "contention",
+                    if batch.loss().contention { "yes" } else { "no" },
+                )
+                .with_text(
+                    "exhausted",
+                    if batch.loss().sequence_exhausted {
+                        "yes"
+                    } else {
+                        "no"
+                    },
+                );
+            self.set_status_hint(message.clone(), false);
+            self.notifications.publish(
+                format!("{operation}:incomplete"),
+                notifications::AppNotificationSeverity::Warning,
+                message,
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod native_diagnostic_product_contracts {
+    use super::*;
+    use mondrian_core::*;
+    fn source() -> NativeAudioDiagnosticSource {
+        NativeAudioDiagnosticSource {
+            root_plan: AudioPreparedPlanId::new(),
+            root_session: AudioRenderSessionId::new(),
+            local_plan: AudioPreparedPlanId::new(),
+            local_session: AudioRenderSessionId::new(),
+            instance: AudioProcessorInstanceId::new(),
+            location: NativeAudioDiagnosticLocation::Output(ProgramOutputId::new()),
+            insertion: NativeAudioDiagnosticInsertion::PreFader,
+            process_id: std::num::NonZeroU32::new(789).expect("owned projection control"),
+        }
+    }
+    #[test]
+    fn native_diagnostic_product_seven_levels_keep_low_priority_out_of_toasts_and_fatal_does_not_mutate_transport(
+    ) {
+        let source = source();
+        let mut batch =
+            NativeAudioDiagnosticBatch::new(source, NativeAudioDiagnosticLoss::default());
+        for (index, severity) in [
+            NativeAudioDiagnosticSeverity::Debug,
+            NativeAudioDiagnosticSeverity::Info,
+            NativeAudioDiagnosticSeverity::Warning,
+            NativeAudioDiagnosticSeverity::Error,
+            NativeAudioDiagnosticSeverity::Fatal,
+            NativeAudioDiagnosticSeverity::HostMisbehaving,
+            NativeAudioDiagnosticSeverity::PluginMisbehaving,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            batch
+                .push(
+                    NativeAudioDiagnosticRecord::project(
+                        index as u64,
+                        index as i32,
+                        severity,
+                        NativeAudioDiagnosticMessageFacts::default(),
+                        b"owned native message",
+                    )
+                    .expect("bounded prefix"),
+                )
+                .expect("bounded batch");
+        }
+        let mut app = AppState::new();
+        let playing = app.is_playing();
+        app.publish_native_audio_diagnostics(batch);
+        let observed: Vec<_> =
+            app.notifications.iter().map(|notification| notification.message.id).collect();
+        assert_eq!(
+            observed,
+            [
+                "notification-native-audio-warning",
+                "notification-native-audio-error",
+                "notification-native-audio-fatal",
+                "notification-native-audio-host-misbehavior",
+                "notification-native-audio-plugin-misbehavior"
+            ]
+        );
+        assert_eq!(
+            app.is_playing(),
+            playing,
+            "native severity is not a lifecycle/transport command"
+        );
+    }
+    #[test]
+    fn native_diagnostic_product_invalid_utf8_unknown_severity_and_sticky_loss_are_explicit_and_repeated_tail_dedupes(
+    ) {
+        let source = source();
+        let record = NativeAudioDiagnosticRecord::project(
+            17,
+            -17,
+            NativeAudioDiagnosticSeverity::Unknown,
+            NativeAudioDiagnosticMessageFacts { invalid_utf8: true, ..Default::default() },
+            &[0xff, 0x00, 0x7f],
+        )
+        .expect("retained original bytes");
+        let (message, urgency) =
+            native_audio_diagnostic_message(&record, source).expect("unknown retained as warning");
+        assert_eq!(urgency, notifications::AppNotificationSeverity::Warning);
+        assert_eq!(message.id, "notification-native-audio-unknown-severity");
+        assert_eq!(
+            message.args.get("encoding"),
+            Some(&AppMessageValue::Text("hex".to_owned()))
+        );
+        assert_eq!(
+            message.args.get("detail"),
+            Some(&AppMessageValue::Text("ff007f".to_owned()))
+        );
+        assert_eq!(
+            message.args.get("severity"),
+            Some(&AppMessageValue::Number(-17))
+        );
+        let mut app = AppState::new();
+        let mut first =
+            NativeAudioDiagnosticBatch::new(source, NativeAudioDiagnosticLoss::default());
+        first.push(record).expect("one record");
+        app.publish_native_audio_diagnostics(first.clone());
+        app.publish_native_audio_diagnostics(first);
+        assert_eq!(
+            app.notifications.iter().count(),
+            1,
+            "same report is not repeated toast spam"
+        );
+        let lost = NativeAudioDiagnosticBatch::new(
+            source,
+            NativeAudioDiagnosticLoss {
+                capacity: true,
+                contention: true,
+                sequence_exhausted: false,
+            },
+        );
+        app.publish_native_audio_diagnostics(lost.clone());
+        app.publish_native_audio_diagnostics(lost);
+        assert_eq!(
+            app.notifications.iter().count(),
+            2,
+            "sticky loss remains observable without repeated tail spam"
+        );
+        assert_eq!(
+            app.notifications.iter().last().expect("loss fact").message.id,
+            "notification-native-audio-log-incomplete"
+        );
+    }
+}
+
+impl AppState {
+    fn observe_native_author_state_entry_retirement(
+        &mut self,
+        pending_generation: u64,
+        final_output: Option<mondrian_media::RealtimeAudioOutputSnapshot>,
+        final_media_anchor: Option<AudioSamplePosition>,
+        quiesced: bool,
+        handled_at: Instant,
+    ) -> mondrian_core::Result<()> {
+        if self.audio_playback.native_control_hold_generation() != Some(pending_generation) {
+            return Ok(());
+        }
+        let now = self
+            .playback_timestamp_for_observation(handled_at)
+            .map(|time| time.max(self.playback_engine.monotonic_high_water()))
+            .map_err(|error| transport_action_error("native_author_state_entry_hold", error))?;
+        if self.is_playing() {
+            // A deliberate transport action retires the old ticket. Its newer
+            // phase must not be overwritten by historical retiring-output data.
+            let previous = self
+                .playback_engine
+                .native_audio_control_hold_ticket()
+                .filter(|ticket| ticket.pending_generation() == pending_generation);
+            let observation = if !quiesced || previous.is_some() {
+                match self.native_pending_clock_observation(
+                    final_output,
+                    final_media_anchor,
+                    quiesced,
+                ) {
+                    Ok(observation) => observation,
+                    Err(error) => {
+                        tracing::warn!(%error,"native state-entry output observation rejected; retaining the accepted transport phase");
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+            let ticket = match self.playback_engine.hold_for_native_audio_control(
+                pending_generation,
+                observation,
+                now,
+            ) {
+                Ok(ticket) => ticket,
+                Err(error) => {
+                    tracing::warn!(%error,"native state-entry provisional hold observation rejected");
+                    self.playback_engine
+                        .hold_for_native_audio_control(pending_generation, None, now)
+                        .map_err(|error| {
+                            transport_action_error("native_author_state_entry_hold", error)
+                        })?
+                }
+            };
+            if quiesced {
+                let finalized = match self.playback_engine.finalize_native_audio_control_hold(
+                    ticket,
+                    observation,
+                    now,
+                ) {
+                    Ok(finalized) => finalized,
+                    Err(error) => {
+                        tracing::warn!(%error,"native state-entry final output observation rejected");
+                        false
+                    }
+                };
+                if !finalized {
+                    self.playback_engine
+                        .finalize_native_audio_control_hold(ticket, None, now)
+                        .map_err(|error| {
+                            transport_action_error("native_author_state_entry_anchor", error)
+                        })?;
+                }
+            }
+        }
+        if quiesced {
+            let anchor = self.authoritative_audio_anchor(
+                &self.playback_engine,
+                now,
+                "native_author_state_entry_anchor",
+            )?;
+            self.audio_playback
+                .finalize_native_control_anchor(pending_generation, anchor)
+                .map_err(|error| {
+                    transport_action_error("native_author_state_entry_anchor", error)
+                })?;
+        }
+        Ok(())
+    }
+
+    fn finish_native_reprepare_product(
+        &mut self,
+        pending_generation: u64,
+        handled_at: Instant,
+    ) -> mondrian_core::Result<()> {
+        if self.audio_playback.native_reprepare_pending_generation() != Some(pending_generation)
+            || !self.is_playing()
+        {
+            // Resource settlement may finish while paused. Keep this exact
+            // Source/HOLD; only a later explicit transport entry admits PCM.
+            return Ok(());
+        }
+        let now = self
+            .playback_timestamp_for_observation(handled_at)
+            .map(|time| time.max(self.playback_engine.monotonic_high_water()))
+            .map_err(|error| transport_action_error("native_audio_reprepare_entry", error))?;
+        let mut engine = self.playback_engine.clone();
+        if let Some(ticket) = engine.native_audio_control_hold_ticket()
+            && ticket.pending_generation() == pending_generation
+        {
+            let binding = self
+                .playback_timeline_binding(self.last_content_frame()?)
+                .map_err(|error| transport_action_error("native_audio_reprepare_entry", error))?;
+            engine
+                .finish_native_audio_control_hold_reprime(ticket, binding, now)
+                .map_err(|error| transport_action_error("native_audio_reprepare_entry", error))?;
+        }
+        let anchor =
+            self.authoritative_audio_anchor(&engine, now, "native_audio_reprepare_entry")?;
+        if self
+            .audio_playback
+            .finish_native_reprepare(pending_generation, anchor)
+            .map_err(|error| transport_action_error("native_audio_reprepare_entry", error))?
+        {
+            self.playback_engine = engine;
+            if let (Some(source), Some(session), Some(sequence)) = (
+                self.native_audio_renderer
+                    .as_ref()
+                    .filter(|weak| {
+                        let identity: std::sync::Weak<dyn AudioPcmRenderer> = (*weak).clone();
+                        self.audio_playback.matches_source_weak(&identity)
+                    })
+                    .and_then(std::sync::Weak::upgrade),
+                self.authoring_session_id(),
+                self.active_sequence().map(|sequence| sequence.id),
+            ) {
+                self.audio_monitoring.bind_meter(
+                    session,
+                    sequence,
+                    source.meter_observer(),
+                    source.delivery_evidence(),
+                );
+            }
+            self.capture_playback_evidence();
+        }
+        Ok(())
+    }
+
+    fn finish_native_author_state_entry_product(
+        &mut self,
+        pending_generation: u64,
+        target: mondrian_core::NativeAudioEditorTarget,
+        handled_at: Instant,
+    ) -> mondrian_core::Result<()> {
+        if self.audio_playback.native_control_hold_generation() != Some(pending_generation) {
+            return Ok(());
+        }
+        let now = self
+            .playback_timestamp_for_observation(handled_at)
+            .map(|time| time.max(self.playback_engine.monotonic_high_water()))
+            .map_err(|error| transport_action_error("native_author_state_entry_reprime", error))?;
+        let mut engine = self.playback_engine.clone();
+        if let Some(ticket) = engine.native_audio_control_hold_ticket()
+            && ticket.pending_generation() == pending_generation
+        {
+            let binding =
+                self.playback_timeline_binding(self.last_content_frame()?).map_err(|error| {
+                    transport_action_error("native_author_state_entry_reprime", error)
+                })?;
+            engine.finish_native_audio_control_hold_reprime(ticket, binding, now).map_err(
+                |error| transport_action_error("native_author_state_entry_reprime", error),
+            )?;
+        }
+        let anchor =
+            self.authoritative_audio_anchor(&engine, now, "native_author_state_entry_reprime")?;
+        if self
+            .audio_playback
+            .finish_native_author_state_entry(target, anchor)
+            .map_err(|error| transport_action_error("native_author_state_entry_reprime", error))?
+        {
+            self.playback_engine = engine;
+            // Metadata observation has no DSP/native lock. The real installed
+            // source is already validated by Media's target/claim admission.
+            if let (Some(source), Some(session), Some(sequence)) = (
+                self.native_audio_renderer.as_ref().and_then(std::sync::Weak::upgrade),
+                self.authoring_session_id(),
+                self.active_sequence().map(|sequence| sequence.id),
+            ) {
+                self.audio_monitoring.bind_meter(
+                    session,
+                    sequence,
+                    source.meter_observer(),
+                    source.delivery_evidence(),
+                );
+            }
+            self.capture_playback_evidence();
+        }
+        Ok(())
     }
 }

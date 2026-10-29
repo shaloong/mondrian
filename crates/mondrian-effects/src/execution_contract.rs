@@ -156,7 +156,10 @@ impl EffectTemporalSpan {
     }
 }
 
-/// Past and future input demand for one output instant.
+/// Statically expanded past and future input demand for one output instant.
+/// Invocation-dependent Definition input is separately declared by the processor
+/// factory's `requires_input_service`; it uses that borrowed service and cannot
+/// use a current-image-only cache identity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct EffectTemporalInputExtent {
     /// Required history before the output instant.
@@ -166,7 +169,8 @@ pub struct EffectTemporalInputExtent {
 }
 
 impl EffectTemporalInputExtent {
-    /// Current-frame-only execution.
+    /// No statically expanded demand outside the current instant. This does not
+    /// authorize late input access without the factory's explicit service binding.
     pub const CURRENT_FRAME: Self = Self {
         past: EffectTemporalSpan::None,
         future: EffectTemporalSpan::None,
@@ -464,7 +468,9 @@ impl std::fmt::Debug for EffectExecutionModes {
 /// Longest resource lifetime and ownership scope required by an occurrence.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum EffectResourceLifetime {
-    /// All resources are frame-local and require no preparation.
+    /// No immutable author-time resources or ordered continuity are required.
+    /// Execution owners may retain stateless processor instances as evictable
+    /// implementation caches; every frame remains independently executable.
     Frame,
     /// Immutable resources must be resolved once and retained by the prepared
     /// program.
@@ -514,12 +520,12 @@ impl EffectExecutionContract {
         topology: EffectGraphTopology::LinearChain,
     };
 
-    /// Conservative plugin default.
+    /// Conservative default for externally registered effect definitions.
     ///
     /// It deliberately admits no backend and assumes unbounded, stateful,
-    /// full-frame execution. A plugin must replace this complete contract before
+    /// full-frame execution. A provider must replace this complete contract before
     /// a prepared program can execute it.
-    pub const CONSERVATIVE_PLUGIN_DEFAULT: Self = Self {
+    pub const CONSERVATIVE_EXTENSION_DEFAULT: Self = Self {
         execution_modes: EffectExecutionModes::NONE,
         determinism: EffectDeterminism::Nondeterministic,
         state_model: EffectStateModel::StatefulSequential,
@@ -562,7 +568,7 @@ impl EffectExecutionContract {
 
 impl Default for EffectExecutionContract {
     fn default() -> Self {
-        Self::CONSERVATIVE_PLUGIN_DEFAULT
+        Self::CONSERVATIVE_EXTENSION_DEFAULT
     }
 }
 

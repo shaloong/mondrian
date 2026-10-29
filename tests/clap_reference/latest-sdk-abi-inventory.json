@@ -1,0 +1,5391 @@
+{
+  "schema": 1,
+  "status": "SOURCE_ONLY_NATIVE_CPP_NOT_COMPILED",
+  "raw_sha256": "0300511ca69490436738c05d6e5051de6745524a95029a78ba95ce2f43b74ca8",
+  "records": [
+    {
+      "kind": "struct",
+      "name": "clap_version",
+      "fields": [
+        {
+          "name": "major",
+          "rust_type": "u32"
+        },
+        {
+          "name": "minor",
+          "rust_type": "u32"
+        },
+        {
+          "name": "revision",
+          "rust_type": "u32"
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "clap_plugin_entry",
+      "fields": [
+        {
+          "name": "clap_version",
+          "rust_type": "clap_version_t"
+        },
+        {
+          "name": "init",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (plugin_path : * const core :: ffi :: c_char) -> bool >"
+        },
+        {
+          "name": "deinit",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn () >"
+        },
+        {
+          "name": "get_factory",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (factory_id : * const core :: ffi :: c_char) -> * const core :: ffi :: c_void >"
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "clap_host",
+      "fields": [
+        {
+          "name": "clap_version",
+          "rust_type": "clap_version_t"
+        },
+        {
+          "name": "host_data",
+          "rust_type": "* mut core :: ffi :: c_void"
+        },
+        {
+          "name": "name",
+          "rust_type": "* const core :: ffi :: c_char"
+        },
+        {
+          "name": "vendor",
+          "rust_type": "* const core :: ffi :: c_char"
+        },
+        {
+          "name": "url",
+          "rust_type": "* const core :: ffi :: c_char"
+        },
+        {
+          "name": "version",
+          "rust_type": "* const core :: ffi :: c_char"
+        },
+        {
+          "name": "get_extension",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (host : * const clap_host , extension_id : * const core :: ffi :: c_char) -> * const core :: ffi :: c_void >"
+        },
+        {
+          "name": "request_restart",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (host : * const clap_host) >"
+        },
+        {
+          "name": "request_process",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (host : * const clap_host) >"
+        },
+        {
+          "name": "request_callback",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (host : * const clap_host) >"
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "clap_event_header",
+      "fields": [
+        {
+          "name": "size",
+          "rust_type": "u32"
+        },
+        {
+          "name": "time",
+          "rust_type": "u32"
+        },
+        {
+          "name": "space_id",
+          "rust_type": "u16"
+        },
+        {
+          "name": "type_",
+          "rust_type": "u16"
+        },
+        {
+          "name": "flags",
+          "rust_type": "u32"
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "clap_event_note",
+      "fields": [
+        {
+          "name": "header",
+          "rust_type": "clap_event_header_t"
+        },
+        {
+          "name": "note_id",
+          "rust_type": "i32"
+        },
+        {
+          "name": "port_index",
+          "rust_type": "i16"
+        },
+        {
+          "name": "channel",
+          "rust_type": "i16"
+        },
+        {
+          "name": "key",
+          "rust_type": "i16"
+        },
+        {
+          "name": "velocity",
+          "rust_type": "f64"
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "clap_event_note_expression",
+      "fields": [
+        {
+          "name": "header",
+          "rust_type": "clap_event_header_t"
+        },
+        {
+          "name": "expression_id",
+          "rust_type": "clap_note_expression"
+        },
+        {
+          "name": "note_id",
+          "rust_type": "i32"
+        },
+        {
+          "name": "port_index",
+          "rust_type": "i16"
+        },
+        {
+          "name": "channel",
+          "rust_type": "i16"
+        },
+        {
+          "name": "key",
+          "rust_type": "i16"
+        },
+        {
+          "name": "value",
+          "rust_type": "f64"
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "clap_event_param_value",
+      "fields": [
+        {
+          "name": "header",
+          "rust_type": "clap_event_header_t"
+        },
+        {
+          "name": "param_id",
+          "rust_type": "clap_id"
+        },
+        {
+          "name": "cookie",
+          "rust_type": "* mut core :: ffi :: c_void"
+        },
+        {
+          "name": "note_id",
+          "rust_type": "i32"
+        },
+        {
+          "name": "port_index",
+          "rust_type": "i16"
+        },
+        {
+          "name": "channel",
+          "rust_type": "i16"
+        },
+        {
+          "name": "key",
+          "rust_type": "i16"
+        },
+        {
+          "name": "value",
+          "rust_type": "f64"
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "clap_event_param_mod",
+      "fields": [
+        {
+          "name": "header",
+          "rust_type": "clap_event_header_t"
+        },
+        {
+          "name": "param_id",
+          "rust_type": "clap_id"
+        },
+        {
+          "name": "cookie",
+          "rust_type": "* mut core :: ffi :: c_void"
+        },
+        {
+          "name": "note_id",
+          "rust_type": "i32"
+        },
+        {
+          "name": "port_index",
+          "rust_type": "i16"
+        },
+        {
+          "name": "channel",
+          "rust_type": "i16"
+        },
+        {
+          "name": "key",
+          "rust_type": "i16"
+        },
+        {
+          "name": "amount",
+          "rust_type": "f64"
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "clap_event_param_gesture",
+      "fields": [
+        {
+          "name": "header",
+          "rust_type": "clap_event_header_t"
+        },
+        {
+          "name": "param_id",
+          "rust_type": "clap_id"
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "clap_event_transport",
+      "fields": [
+        {
+          "name": "header",
+          "rust_type": "clap_event_header_t"
+        },
+        {
+          "name": "flags",
+          "rust_type": "u32"
+        },
+        {
+          "name": "song_pos_beats",
+          "rust_type": "clap_beattime"
+        },
+        {
+          "name": "song_pos_seconds",
+          "rust_type": "clap_sectime"
+        },
+        {
+          "name": "tempo",
+          "rust_type": "f64"
+        },
+        {
+          "name": "tempo_inc",
+          "rust_type": "f64"
+        },
+        {
+          "name": "loop_start_beats",
+          "rust_type": "clap_beattime"
+        },
+        {
+          "name": "loop_end_beats",
+          "rust_type": "clap_beattime"
+        },
+        {
+          "name": "loop_start_seconds",
+          "rust_type": "clap_sectime"
+        },
+        {
+          "name": "loop_end_seconds",
+          "rust_type": "clap_sectime"
+        },
+        {
+          "name": "bar_start",
+          "rust_type": "clap_beattime"
+        },
+        {
+          "name": "bar_number",
+          "rust_type": "i32"
+        },
+        {
+          "name": "tsig_num",
+          "rust_type": "u16"
+        },
+        {
+          "name": "tsig_denom",
+          "rust_type": "u16"
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "clap_event_midi",
+      "fields": [
+        {
+          "name": "header",
+          "rust_type": "clap_event_header_t"
+        },
+        {
+          "name": "port_index",
+          "rust_type": "u16"
+        },
+        {
+          "name": "data",
+          "rust_type": "[u8 ; 3usize]"
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "clap_event_midi_sysex",
+      "fields": [
+        {
+          "name": "header",
+          "rust_type": "clap_event_header_t"
+        },
+        {
+          "name": "port_index",
+          "rust_type": "u16"
+        },
+        {
+          "name": "buffer",
+          "rust_type": "* const u8"
+        },
+        {
+          "name": "size",
+          "rust_type": "u32"
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "clap_event_midi2",
+      "fields": [
+        {
+          "name": "header",
+          "rust_type": "clap_event_header_t"
+        },
+        {
+          "name": "port_index",
+          "rust_type": "u16"
+        },
+        {
+          "name": "data",
+          "rust_type": "[u32 ; 4usize]"
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "clap_input_events",
+      "fields": [
+        {
+          "name": "ctx",
+          "rust_type": "* mut core :: ffi :: c_void"
+        },
+        {
+          "name": "size",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (list : * const clap_input_events) -> u32 >"
+        },
+        {
+          "name": "get",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (list : * const clap_input_events , index : u32) -> * const clap_event_header_t >"
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "clap_output_events",
+      "fields": [
+        {
+          "name": "ctx",
+          "rust_type": "* mut core :: ffi :: c_void"
+        },
+        {
+          "name": "try_push",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (list : * const clap_output_events , event : * const clap_event_header_t) -> bool >"
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "clap_audio_buffer",
+      "fields": [
+        {
+          "name": "data32",
+          "rust_type": "* mut * mut f32"
+        },
+        {
+          "name": "data64",
+          "rust_type": "* mut * mut f64"
+        },
+        {
+          "name": "channel_count",
+          "rust_type": "u32"
+        },
+        {
+          "name": "latency",
+          "rust_type": "u32"
+        },
+        {
+          "name": "constant_mask",
+          "rust_type": "u64"
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "clap_process",
+      "fields": [
+        {
+          "name": "steady_time",
+          "rust_type": "i64"
+        },
+        {
+          "name": "frames_count",
+          "rust_type": "u32"
+        },
+        {
+          "name": "transport",
+          "rust_type": "* const clap_event_transport_t"
+        },
+        {
+          "name": "audio_inputs",
+          "rust_type": "* const clap_audio_buffer_t"
+        },
+        {
+          "name": "audio_outputs",
+          "rust_type": "* mut clap_audio_buffer_t"
+        },
+        {
+          "name": "audio_inputs_count",
+          "rust_type": "u32"
+        },
+        {
+          "name": "audio_outputs_count",
+          "rust_type": "u32"
+        },
+        {
+          "name": "in_events",
+          "rust_type": "* const clap_input_events_t"
+        },
+        {
+          "name": "out_events",
+          "rust_type": "* const clap_output_events_t"
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "clap_plugin_descriptor",
+      "fields": [
+        {
+          "name": "clap_version",
+          "rust_type": "clap_version_t"
+        },
+        {
+          "name": "id",
+          "rust_type": "* const core :: ffi :: c_char"
+        },
+        {
+          "name": "name",
+          "rust_type": "* const core :: ffi :: c_char"
+        },
+        {
+          "name": "vendor",
+          "rust_type": "* const core :: ffi :: c_char"
+        },
+        {
+          "name": "url",
+          "rust_type": "* const core :: ffi :: c_char"
+        },
+        {
+          "name": "manual_url",
+          "rust_type": "* const core :: ffi :: c_char"
+        },
+        {
+          "name": "support_url",
+          "rust_type": "* const core :: ffi :: c_char"
+        },
+        {
+          "name": "version",
+          "rust_type": "* const core :: ffi :: c_char"
+        },
+        {
+          "name": "description",
+          "rust_type": "* const core :: ffi :: c_char"
+        },
+        {
+          "name": "features",
+          "rust_type": "* const * const core :: ffi :: c_char"
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "clap_plugin",
+      "fields": [
+        {
+          "name": "desc",
+          "rust_type": "* const clap_plugin_descriptor_t"
+        },
+        {
+          "name": "plugin_data",
+          "rust_type": "* mut core :: ffi :: c_void"
+        },
+        {
+          "name": "init",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (plugin : * const clap_plugin) -> bool >"
+        },
+        {
+          "name": "destroy",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (plugin : * const clap_plugin) >"
+        },
+        {
+          "name": "activate",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (plugin : * const clap_plugin , sample_rate : f64 , min_frames_count : u32 , max_frames_count : u32) -> bool >"
+        },
+        {
+          "name": "deactivate",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (plugin : * const clap_plugin) >"
+        },
+        {
+          "name": "start_processing",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (plugin : * const clap_plugin) -> bool >"
+        },
+        {
+          "name": "stop_processing",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (plugin : * const clap_plugin) >"
+        },
+        {
+          "name": "reset",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (plugin : * const clap_plugin) >"
+        },
+        {
+          "name": "process",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (plugin : * const clap_plugin , process : * const clap_process_t) -> clap_process_status >"
+        },
+        {
+          "name": "get_extension",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (plugin : * const clap_plugin , id : * const core :: ffi :: c_char) -> * const core :: ffi :: c_void >"
+        },
+        {
+          "name": "on_main_thread",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (plugin : * const clap_plugin) >"
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "clap_plugin_factory",
+      "fields": [
+        {
+          "name": "get_plugin_count",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (factory : * const clap_plugin_factory) -> u32 >"
+        },
+        {
+          "name": "get_plugin_descriptor",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (factory : * const clap_plugin_factory , index : u32) -> * const clap_plugin_descriptor_t >"
+        },
+        {
+          "name": "create_plugin",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (factory : * const clap_plugin_factory , host : * const clap_host_t , plugin_id : * const core :: ffi :: c_char) -> * const clap_plugin_t >"
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "clap_universal_plugin_id",
+      "fields": [
+        {
+          "name": "abi",
+          "rust_type": "* const core :: ffi :: c_char"
+        },
+        {
+          "name": "id",
+          "rust_type": "* const core :: ffi :: c_char"
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "clap_preset_discovery_metadata_receiver",
+      "fields": [
+        {
+          "name": "receiver_data",
+          "rust_type": "* mut core :: ffi :: c_void"
+        },
+        {
+          "name": "on_error",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (receiver : * const clap_preset_discovery_metadata_receiver , os_error : i32 , error_message : * const core :: ffi :: c_char) >"
+        },
+        {
+          "name": "begin_preset",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (receiver : * const clap_preset_discovery_metadata_receiver , name : * const core :: ffi :: c_char , load_key : * const core :: ffi :: c_char) -> bool >"
+        },
+        {
+          "name": "add_plugin_id",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (receiver : * const clap_preset_discovery_metadata_receiver , plugin_id : * const clap_universal_plugin_id_t) >"
+        },
+        {
+          "name": "set_soundpack_id",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (receiver : * const clap_preset_discovery_metadata_receiver , soundpack_id : * const core :: ffi :: c_char) >"
+        },
+        {
+          "name": "set_flags",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (receiver : * const clap_preset_discovery_metadata_receiver , flags : u32) >"
+        },
+        {
+          "name": "add_creator",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (receiver : * const clap_preset_discovery_metadata_receiver , creator : * const core :: ffi :: c_char) >"
+        },
+        {
+          "name": "set_description",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (receiver : * const clap_preset_discovery_metadata_receiver , description : * const core :: ffi :: c_char) >"
+        },
+        {
+          "name": "set_timestamps",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (receiver : * const clap_preset_discovery_metadata_receiver , creation_time : clap_timestamp , modification_time : clap_timestamp) >"
+        },
+        {
+          "name": "add_feature",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (receiver : * const clap_preset_discovery_metadata_receiver , feature : * const core :: ffi :: c_char) >"
+        },
+        {
+          "name": "add_extra_info",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (receiver : * const clap_preset_discovery_metadata_receiver , key : * const core :: ffi :: c_char , value : * const core :: ffi :: c_char) >"
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "clap_preset_discovery_filetype",
+      "fields": [
+        {
+          "name": "name",
+          "rust_type": "* const core :: ffi :: c_char"
+        },
+        {
+          "name": "description",
+          "rust_type": "* const core :: ffi :: c_char"
+        },
+        {
+          "name": "file_extension",
+          "rust_type": "* const core :: ffi :: c_char"
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "clap_preset_discovery_location",
+      "fields": [
+        {
+          "name": "flags",
+          "rust_type": "u32"
+        },
+        {
+          "name": "name",
+          "rust_type": "* const core :: ffi :: c_char"
+        },
+        {
+          "name": "kind",
+          "rust_type": "u32"
+        },
+        {
+          "name": "location",
+          "rust_type": "* const core :: ffi :: c_char"
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "clap_preset_discovery_soundpack",
+      "fields": [
+        {
+          "name": "flags",
+          "rust_type": "u32"
+        },
+        {
+          "name": "id",
+          "rust_type": "* const core :: ffi :: c_char"
+        },
+        {
+          "name": "name",
+          "rust_type": "* const core :: ffi :: c_char"
+        },
+        {
+          "name": "description",
+          "rust_type": "* const core :: ffi :: c_char"
+        },
+        {
+          "name": "homepage_url",
+          "rust_type": "* const core :: ffi :: c_char"
+        },
+        {
+          "name": "vendor",
+          "rust_type": "* const core :: ffi :: c_char"
+        },
+        {
+          "name": "image_path",
+          "rust_type": "* const core :: ffi :: c_char"
+        },
+        {
+          "name": "release_timestamp",
+          "rust_type": "clap_timestamp"
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "clap_preset_discovery_provider_descriptor",
+      "fields": [
+        {
+          "name": "clap_version",
+          "rust_type": "clap_version_t"
+        },
+        {
+          "name": "id",
+          "rust_type": "* const core :: ffi :: c_char"
+        },
+        {
+          "name": "name",
+          "rust_type": "* const core :: ffi :: c_char"
+        },
+        {
+          "name": "vendor",
+          "rust_type": "* const core :: ffi :: c_char"
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "clap_preset_discovery_provider",
+      "fields": [
+        {
+          "name": "desc",
+          "rust_type": "* const clap_preset_discovery_provider_descriptor_t"
+        },
+        {
+          "name": "provider_data",
+          "rust_type": "* mut core :: ffi :: c_void"
+        },
+        {
+          "name": "init",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (provider : * const clap_preset_discovery_provider) -> bool >"
+        },
+        {
+          "name": "destroy",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (provider : * const clap_preset_discovery_provider) >"
+        },
+        {
+          "name": "get_metadata",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (provider : * const clap_preset_discovery_provider , location_kind : u32 , location : * const core :: ffi :: c_char , metadata_receiver : * const clap_preset_discovery_metadata_receiver_t) -> bool >"
+        },
+        {
+          "name": "get_extension",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (provider : * const clap_preset_discovery_provider , extension_id : * const core :: ffi :: c_char) -> * const core :: ffi :: c_void >"
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "clap_preset_discovery_indexer",
+      "fields": [
+        {
+          "name": "clap_version",
+          "rust_type": "clap_version_t"
+        },
+        {
+          "name": "name",
+          "rust_type": "* const core :: ffi :: c_char"
+        },
+        {
+          "name": "vendor",
+          "rust_type": "* const core :: ffi :: c_char"
+        },
+        {
+          "name": "url",
+          "rust_type": "* const core :: ffi :: c_char"
+        },
+        {
+          "name": "version",
+          "rust_type": "* const core :: ffi :: c_char"
+        },
+        {
+          "name": "indexer_data",
+          "rust_type": "* mut core :: ffi :: c_void"
+        },
+        {
+          "name": "declare_filetype",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (indexer : * const clap_preset_discovery_indexer , filetype : * const clap_preset_discovery_filetype_t) -> bool >"
+        },
+        {
+          "name": "declare_location",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (indexer : * const clap_preset_discovery_indexer , location : * const clap_preset_discovery_location_t) -> bool >"
+        },
+        {
+          "name": "declare_soundpack",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (indexer : * const clap_preset_discovery_indexer , soundpack : * const clap_preset_discovery_soundpack_t) -> bool >"
+        },
+        {
+          "name": "get_extension",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (indexer : * const clap_preset_discovery_indexer , extension_id : * const core :: ffi :: c_char) -> * const core :: ffi :: c_void >"
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "clap_preset_discovery_factory",
+      "fields": [
+        {
+          "name": "count",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (factory : * const clap_preset_discovery_factory) -> u32 >"
+        },
+        {
+          "name": "get_descriptor",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (factory : * const clap_preset_discovery_factory , index : u32) -> * const clap_preset_discovery_provider_descriptor_t >"
+        },
+        {
+          "name": "create",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (factory : * const clap_preset_discovery_factory , indexer : * const clap_preset_discovery_indexer_t , provider_id : * const core :: ffi :: c_char) -> * const clap_preset_discovery_provider_t >"
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "clap_ambisonic_config",
+      "fields": [
+        {
+          "name": "ordering",
+          "rust_type": "u32"
+        },
+        {
+          "name": "normalization",
+          "rust_type": "u32"
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "clap_plugin_ambisonic",
+      "fields": [
+        {
+          "name": "is_config_supported",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (plugin : * const clap_plugin_t , config : * const clap_ambisonic_config_t) -> bool >"
+        },
+        {
+          "name": "get_config",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (plugin : * const clap_plugin_t , is_input : bool , port_index : u32 , config : * mut clap_ambisonic_config_t) -> bool >"
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "clap_host_ambisonic",
+      "fields": [
+        {
+          "name": "changed",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (host : * const clap_host_t) >"
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "clap_plugin_audio_ports_activation",
+      "fields": [
+        {
+          "name": "can_activate_while_processing",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (plugin : * const clap_plugin_t) -> bool >"
+        },
+        {
+          "name": "set_active",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (plugin : * const clap_plugin_t , is_input : bool , port_index : u32 , is_active : bool , sample_size : u32) -> bool >"
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "clap_audio_port_info",
+      "fields": [
+        {
+          "name": "id",
+          "rust_type": "clap_id"
+        },
+        {
+          "name": "name",
+          "rust_type": "[core :: ffi :: c_char ; 256usize]"
+        },
+        {
+          "name": "flags",
+          "rust_type": "u32"
+        },
+        {
+          "name": "channel_count",
+          "rust_type": "u32"
+        },
+        {
+          "name": "port_type",
+          "rust_type": "* const core :: ffi :: c_char"
+        },
+        {
+          "name": "in_place_pair",
+          "rust_type": "clap_id"
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "clap_plugin_audio_ports",
+      "fields": [
+        {
+          "name": "count",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (plugin : * const clap_plugin_t , is_input : bool) -> u32 >"
+        },
+        {
+          "name": "get",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (plugin : * const clap_plugin_t , index : u32 , is_input : bool , info : * mut clap_audio_port_info_t) -> bool >"
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "clap_host_audio_ports",
+      "fields": [
+        {
+          "name": "is_rescan_flag_supported",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (host : * const clap_host_t , flag : u32) -> bool >"
+        },
+        {
+          "name": "rescan",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (host : * const clap_host_t , flags : u32) >"
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "clap_audio_ports_config",
+      "fields": [
+        {
+          "name": "id",
+          "rust_type": "clap_id"
+        },
+        {
+          "name": "name",
+          "rust_type": "[core :: ffi :: c_char ; 256usize]"
+        },
+        {
+          "name": "input_port_count",
+          "rust_type": "u32"
+        },
+        {
+          "name": "output_port_count",
+          "rust_type": "u32"
+        },
+        {
+          "name": "has_main_input",
+          "rust_type": "bool"
+        },
+        {
+          "name": "main_input_channel_count",
+          "rust_type": "u32"
+        },
+        {
+          "name": "main_input_port_type",
+          "rust_type": "* const core :: ffi :: c_char"
+        },
+        {
+          "name": "has_main_output",
+          "rust_type": "bool"
+        },
+        {
+          "name": "main_output_channel_count",
+          "rust_type": "u32"
+        },
+        {
+          "name": "main_output_port_type",
+          "rust_type": "* const core :: ffi :: c_char"
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "clap_plugin_audio_ports_config",
+      "fields": [
+        {
+          "name": "count",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (plugin : * const clap_plugin_t) -> u32 >"
+        },
+        {
+          "name": "get",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (plugin : * const clap_plugin_t , index : u32 , config : * mut clap_audio_ports_config_t) -> bool >"
+        },
+        {
+          "name": "select",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (plugin : * const clap_plugin_t , config_id : clap_id) -> bool >"
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "clap_plugin_audio_ports_config_info",
+      "fields": [
+        {
+          "name": "current_config",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (plugin : * const clap_plugin_t) -> clap_id >"
+        },
+        {
+          "name": "get",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (plugin : * const clap_plugin_t , config_id : clap_id , port_index : u32 , is_input : bool , info : * mut clap_audio_port_info_t) -> bool >"
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "clap_host_audio_ports_config",
+      "fields": [
+        {
+          "name": "rescan",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (host : * const clap_host_t) >"
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "clap_audio_port_configuration_request",
+      "fields": [
+        {
+          "name": "is_input",
+          "rust_type": "bool"
+        },
+        {
+          "name": "port_index",
+          "rust_type": "u32"
+        },
+        {
+          "name": "channel_count",
+          "rust_type": "u32"
+        },
+        {
+          "name": "port_type",
+          "rust_type": "* const core :: ffi :: c_char"
+        },
+        {
+          "name": "port_details",
+          "rust_type": "* const core :: ffi :: c_void"
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "clap_plugin_configurable_audio_ports",
+      "fields": [
+        {
+          "name": "can_apply_configuration",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (plugin : * const clap_plugin_t , requests : * const clap_audio_port_configuration_request , request_count : u32) -> bool >"
+        },
+        {
+          "name": "apply_configuration",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (plugin : * const clap_plugin_t , requests : * const clap_audio_port_configuration_request , request_count : u32) -> bool >"
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "clap_context_menu_target",
+      "fields": [
+        {
+          "name": "kind",
+          "rust_type": "u32"
+        },
+        {
+          "name": "id",
+          "rust_type": "clap_id"
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "clap_context_menu_entry",
+      "fields": [
+        {
+          "name": "label",
+          "rust_type": "* const core :: ffi :: c_char"
+        },
+        {
+          "name": "is_enabled",
+          "rust_type": "bool"
+        },
+        {
+          "name": "action_id",
+          "rust_type": "clap_id"
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "clap_context_menu_check_entry",
+      "fields": [
+        {
+          "name": "label",
+          "rust_type": "* const core :: ffi :: c_char"
+        },
+        {
+          "name": "is_enabled",
+          "rust_type": "bool"
+        },
+        {
+          "name": "is_checked",
+          "rust_type": "bool"
+        },
+        {
+          "name": "action_id",
+          "rust_type": "clap_id"
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "clap_context_menu_item_title",
+      "fields": [
+        {
+          "name": "title",
+          "rust_type": "* const core :: ffi :: c_char"
+        },
+        {
+          "name": "is_enabled",
+          "rust_type": "bool"
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "clap_context_menu_submenu",
+      "fields": [
+        {
+          "name": "label",
+          "rust_type": "* const core :: ffi :: c_char"
+        },
+        {
+          "name": "is_enabled",
+          "rust_type": "bool"
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "clap_context_menu_builder",
+      "fields": [
+        {
+          "name": "ctx",
+          "rust_type": "* mut core :: ffi :: c_void"
+        },
+        {
+          "name": "add_item",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (builder : * const clap_context_menu_builder , item_kind : clap_context_menu_item_kind_t , item_data : * const core :: ffi :: c_void) -> bool >"
+        },
+        {
+          "name": "supports",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (builder : * const clap_context_menu_builder , item_kind : clap_context_menu_item_kind_t) -> bool >"
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "clap_plugin_context_menu",
+      "fields": [
+        {
+          "name": "populate",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (plugin : * const clap_plugin_t , target : * const clap_context_menu_target_t , builder : * const clap_context_menu_builder_t) -> bool >"
+        },
+        {
+          "name": "perform",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (plugin : * const clap_plugin_t , target : * const clap_context_menu_target_t , action_id : clap_id) -> bool >"
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "clap_host_context_menu",
+      "fields": [
+        {
+          "name": "populate",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (host : * const clap_host_t , target : * const clap_context_menu_target_t , builder : * const clap_context_menu_builder_t) -> bool >"
+        },
+        {
+          "name": "perform",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (host : * const clap_host_t , target : * const clap_context_menu_target_t , action_id : clap_id) -> bool >"
+        },
+        {
+          "name": "can_popup",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (host : * const clap_host_t) -> bool >"
+        },
+        {
+          "name": "popup",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (host : * const clap_host_t , target : * const clap_context_menu_target_t , screen_index : i32 , x : i32 , y : i32) -> bool >"
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "clap_host_event_registry",
+      "fields": [
+        {
+          "name": "query",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (host : * const clap_host_t , space_name : * const core :: ffi :: c_char , space_id : * mut u16) -> bool >"
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "clap_window",
+      "fields": [
+        {
+          "name": "api",
+          "rust_type": "* const core :: ffi :: c_char"
+        },
+        {
+          "name": "__bindgen_anon_1",
+          "rust_type": "clap_window__bindgen_ty_1"
+        }
+      ]
+    },
+    {
+      "kind": "union",
+      "name": "clap_window__bindgen_ty_1",
+      "fields": [
+        {
+          "name": "cocoa",
+          "rust_type": "clap_nsview"
+        },
+        {
+          "name": "uikit",
+          "rust_type": "clap_uiview"
+        },
+        {
+          "name": "x11",
+          "rust_type": "clap_xwnd"
+        },
+        {
+          "name": "win32",
+          "rust_type": "clap_hwnd"
+        },
+        {
+          "name": "ptr",
+          "rust_type": "* mut core :: ffi :: c_void"
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "clap_gui_resize_hints",
+      "fields": [
+        {
+          "name": "can_resize_horizontally",
+          "rust_type": "bool"
+        },
+        {
+          "name": "can_resize_vertically",
+          "rust_type": "bool"
+        },
+        {
+          "name": "preserve_aspect_ratio",
+          "rust_type": "bool"
+        },
+        {
+          "name": "aspect_ratio_width",
+          "rust_type": "u32"
+        },
+        {
+          "name": "aspect_ratio_height",
+          "rust_type": "u32"
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "clap_plugin_gui",
+      "fields": [
+        {
+          "name": "is_api_supported",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (plugin : * const clap_plugin_t , api : * const core :: ffi :: c_char , is_floating : bool) -> bool >"
+        },
+        {
+          "name": "get_preferred_api",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (plugin : * const clap_plugin_t , api : * mut * const core :: ffi :: c_char , is_floating : * mut bool) -> bool >"
+        },
+        {
+          "name": "create",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (plugin : * const clap_plugin_t , api : * const core :: ffi :: c_char , is_floating : bool) -> bool >"
+        },
+        {
+          "name": "destroy",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (plugin : * const clap_plugin_t) >"
+        },
+        {
+          "name": "set_scale",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (plugin : * const clap_plugin_t , scale : f64) -> bool >"
+        },
+        {
+          "name": "get_size",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (plugin : * const clap_plugin_t , width : * mut u32 , height : * mut u32) -> bool >"
+        },
+        {
+          "name": "can_resize",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (plugin : * const clap_plugin_t) -> bool >"
+        },
+        {
+          "name": "get_resize_hints",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (plugin : * const clap_plugin_t , hints : * mut clap_gui_resize_hints_t) -> bool >"
+        },
+        {
+          "name": "adjust_size",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (plugin : * const clap_plugin_t , width : * mut u32 , height : * mut u32) -> bool >"
+        },
+        {
+          "name": "set_size",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (plugin : * const clap_plugin_t , width : u32 , height : u32) -> bool >"
+        },
+        {
+          "name": "set_parent",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (plugin : * const clap_plugin_t , window : * const clap_window_t) -> bool >"
+        },
+        {
+          "name": "set_transient",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (plugin : * const clap_plugin_t , window : * const clap_window_t) -> bool >"
+        },
+        {
+          "name": "suggest_title",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (plugin : * const clap_plugin_t , title : * const core :: ffi :: c_char) >"
+        },
+        {
+          "name": "show",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (plugin : * const clap_plugin_t) -> bool >"
+        },
+        {
+          "name": "hide",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (plugin : * const clap_plugin_t) -> bool >"
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "clap_host_gui",
+      "fields": [
+        {
+          "name": "resize_hints_changed",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (host : * const clap_host_t) >"
+        },
+        {
+          "name": "request_resize",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (host : * const clap_host_t , width : u32 , height : u32) -> bool >"
+        },
+        {
+          "name": "request_show",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (host : * const clap_host_t) -> bool >"
+        },
+        {
+          "name": "request_hide",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (host : * const clap_host_t) -> bool >"
+        },
+        {
+          "name": "closed",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (host : * const clap_host_t , was_destroyed : bool) >"
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "clap_plugin_latency",
+      "fields": [
+        {
+          "name": "get",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (plugin : * const clap_plugin_t) -> u32 >"
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "clap_host_latency",
+      "fields": [
+        {
+          "name": "changed",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (host : * const clap_host_t) >"
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "clap_host_log",
+      "fields": [
+        {
+          "name": "log",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (host : * const clap_host_t , severity : clap_log_severity , msg : * const core :: ffi :: c_char) >"
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "clap_note_name",
+      "fields": [
+        {
+          "name": "name",
+          "rust_type": "[core :: ffi :: c_char ; 256usize]"
+        },
+        {
+          "name": "port",
+          "rust_type": "i16"
+        },
+        {
+          "name": "key",
+          "rust_type": "i16"
+        },
+        {
+          "name": "channel",
+          "rust_type": "i16"
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "clap_plugin_note_name",
+      "fields": [
+        {
+          "name": "count",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (plugin : * const clap_plugin_t) -> u32 >"
+        },
+        {
+          "name": "get",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (plugin : * const clap_plugin_t , index : u32 , note_name : * mut clap_note_name_t) -> bool >"
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "clap_host_note_name",
+      "fields": [
+        {
+          "name": "changed",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (host : * const clap_host_t) >"
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "clap_note_port_info",
+      "fields": [
+        {
+          "name": "id",
+          "rust_type": "clap_id"
+        },
+        {
+          "name": "supported_dialects",
+          "rust_type": "u32"
+        },
+        {
+          "name": "preferred_dialect",
+          "rust_type": "u32"
+        },
+        {
+          "name": "name",
+          "rust_type": "[core :: ffi :: c_char ; 256usize]"
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "clap_plugin_note_ports",
+      "fields": [
+        {
+          "name": "count",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (plugin : * const clap_plugin_t , is_input : bool) -> u32 >"
+        },
+        {
+          "name": "get",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (plugin : * const clap_plugin_t , index : u32 , is_input : bool , info : * mut clap_note_port_info_t) -> bool >"
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "clap_host_note_ports",
+      "fields": [
+        {
+          "name": "supported_dialects",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (host : * const clap_host_t) -> u32 >"
+        },
+        {
+          "name": "rescan",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (host : * const clap_host_t , flags : u32) >"
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "clap_param_info",
+      "fields": [
+        {
+          "name": "id",
+          "rust_type": "clap_id"
+        },
+        {
+          "name": "flags",
+          "rust_type": "clap_param_info_flags"
+        },
+        {
+          "name": "cookie",
+          "rust_type": "* mut core :: ffi :: c_void"
+        },
+        {
+          "name": "name",
+          "rust_type": "[core :: ffi :: c_char ; 256usize]"
+        },
+        {
+          "name": "module",
+          "rust_type": "[core :: ffi :: c_char ; 1024usize]"
+        },
+        {
+          "name": "min_value",
+          "rust_type": "f64"
+        },
+        {
+          "name": "max_value",
+          "rust_type": "f64"
+        },
+        {
+          "name": "default_value",
+          "rust_type": "f64"
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "clap_plugin_params",
+      "fields": [
+        {
+          "name": "count",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (plugin : * const clap_plugin_t) -> u32 >"
+        },
+        {
+          "name": "get_info",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (plugin : * const clap_plugin_t , param_index : u32 , param_info : * mut clap_param_info_t) -> bool >"
+        },
+        {
+          "name": "get_value",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (plugin : * const clap_plugin_t , param_id : clap_id , out_value : * mut f64) -> bool >"
+        },
+        {
+          "name": "value_to_text",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (plugin : * const clap_plugin_t , param_id : clap_id , value : f64 , out_buffer : * mut core :: ffi :: c_char , out_buffer_capacity : u32) -> bool >"
+        },
+        {
+          "name": "text_to_value",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (plugin : * const clap_plugin_t , param_id : clap_id , param_value_text : * const core :: ffi :: c_char , out_value : * mut f64) -> bool >"
+        },
+        {
+          "name": "flush",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (plugin : * const clap_plugin_t , in_ : * const clap_input_events_t , out : * const clap_output_events_t) >"
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "clap_host_params",
+      "fields": [
+        {
+          "name": "rescan",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (host : * const clap_host_t , flags : clap_param_rescan_flags) >"
+        },
+        {
+          "name": "clear",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (host : * const clap_host_t , param_id : clap_id , flags : clap_param_clear_flags) >"
+        },
+        {
+          "name": "request_flush",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (host : * const clap_host_t) >"
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "clap_color",
+      "fields": [
+        {
+          "name": "alpha",
+          "rust_type": "u8"
+        },
+        {
+          "name": "red",
+          "rust_type": "u8"
+        },
+        {
+          "name": "green",
+          "rust_type": "u8"
+        },
+        {
+          "name": "blue",
+          "rust_type": "u8"
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "clap_plugin_param_indication",
+      "fields": [
+        {
+          "name": "set_mapping",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (plugin : * const clap_plugin_t , param_id : clap_id , has_mapping : bool , color : * const clap_color_t , label : * const core :: ffi :: c_char , description : * const core :: ffi :: c_char) >"
+        },
+        {
+          "name": "set_automation",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (plugin : * const clap_plugin_t , param_id : clap_id , automation_state : u32 , color : * const clap_color_t) >"
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "clap_plugin_posix_fd_support",
+      "fields": [
+        {
+          "name": "on_fd",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (plugin : * const clap_plugin_t , fd : core :: ffi :: c_int , flags : clap_posix_fd_flags_t) >"
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "clap_host_posix_fd_support",
+      "fields": [
+        {
+          "name": "register_fd",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (host : * const clap_host_t , fd : core :: ffi :: c_int , flags : clap_posix_fd_flags_t) -> bool >"
+        },
+        {
+          "name": "modify_fd",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (host : * const clap_host_t , fd : core :: ffi :: c_int , flags : clap_posix_fd_flags_t) -> bool >"
+        },
+        {
+          "name": "unregister_fd",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (host : * const clap_host_t , fd : core :: ffi :: c_int) -> bool >"
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "clap_plugin_preset_load",
+      "fields": [
+        {
+          "name": "from_location",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (plugin : * const clap_plugin_t , location_kind : u32 , location : * const core :: ffi :: c_char , load_key : * const core :: ffi :: c_char) -> bool >"
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "clap_host_preset_load",
+      "fields": [
+        {
+          "name": "on_error",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (host : * const clap_host_t , location_kind : u32 , location : * const core :: ffi :: c_char , load_key : * const core :: ffi :: c_char , os_error : i32 , msg : * const core :: ffi :: c_char) >"
+        },
+        {
+          "name": "loaded",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (host : * const clap_host_t , location_kind : u32 , location : * const core :: ffi :: c_char , load_key : * const core :: ffi :: c_char) >"
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "clap_remote_controls_page",
+      "fields": [
+        {
+          "name": "section_name",
+          "rust_type": "[core :: ffi :: c_char ; 256usize]"
+        },
+        {
+          "name": "page_id",
+          "rust_type": "clap_id"
+        },
+        {
+          "name": "page_name",
+          "rust_type": "[core :: ffi :: c_char ; 256usize]"
+        },
+        {
+          "name": "param_ids",
+          "rust_type": "[clap_id ; 8usize]"
+        },
+        {
+          "name": "is_for_preset",
+          "rust_type": "bool"
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "clap_plugin_remote_controls",
+      "fields": [
+        {
+          "name": "count",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (plugin : * const clap_plugin_t) -> u32 >"
+        },
+        {
+          "name": "get",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (plugin : * const clap_plugin_t , page_index : u32 , page : * mut clap_remote_controls_page_t) -> bool >"
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "clap_host_remote_controls",
+      "fields": [
+        {
+          "name": "changed",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (host : * const clap_host_t) >"
+        },
+        {
+          "name": "suggest_page",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (host : * const clap_host_t , page_id : clap_id) >"
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "clap_plugin_render",
+      "fields": [
+        {
+          "name": "has_hard_realtime_requirement",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (plugin : * const clap_plugin_t) -> bool >"
+        },
+        {
+          "name": "set",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (plugin : * const clap_plugin_t , mode : clap_plugin_render_mode) -> bool >"
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "clap_istream",
+      "fields": [
+        {
+          "name": "ctx",
+          "rust_type": "* mut core :: ffi :: c_void"
+        },
+        {
+          "name": "read",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (stream : * const clap_istream , buffer : * mut core :: ffi :: c_void , size : u64) -> i64 >"
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "clap_ostream",
+      "fields": [
+        {
+          "name": "ctx",
+          "rust_type": "* mut core :: ffi :: c_void"
+        },
+        {
+          "name": "write",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (stream : * const clap_ostream , buffer : * const core :: ffi :: c_void , size : u64) -> i64 >"
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "clap_plugin_state_context",
+      "fields": [
+        {
+          "name": "save",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (plugin : * const clap_plugin_t , stream : * const clap_ostream_t , context_type : u32) -> bool >"
+        },
+        {
+          "name": "load",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (plugin : * const clap_plugin_t , stream : * const clap_istream_t , context_type : u32) -> bool >"
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "clap_plugin_state",
+      "fields": [
+        {
+          "name": "save",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (plugin : * const clap_plugin_t , stream : * const clap_ostream_t) -> bool >"
+        },
+        {
+          "name": "load",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (plugin : * const clap_plugin_t , stream : * const clap_istream_t) -> bool >"
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "clap_host_state",
+      "fields": [
+        {
+          "name": "mark_dirty",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (host : * const clap_host_t) >"
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "clap_plugin_surround",
+      "fields": [
+        {
+          "name": "is_channel_mask_supported",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (plugin : * const clap_plugin_t , channel_mask : u64) -> bool >"
+        },
+        {
+          "name": "get_channel_map",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (plugin : * const clap_plugin_t , is_input : bool , port_index : u32 , channel_map : * mut u8 , channel_map_capacity : u32) -> u32 >"
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "clap_host_surround",
+      "fields": [
+        {
+          "name": "changed",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (host : * const clap_host_t) >"
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "clap_plugin_tail",
+      "fields": [
+        {
+          "name": "get",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (plugin : * const clap_plugin_t) -> u32 >"
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "clap_host_tail",
+      "fields": [
+        {
+          "name": "changed",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (host : * const clap_host_t) >"
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "clap_host_thread_check",
+      "fields": [
+        {
+          "name": "is_main_thread",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (host : * const clap_host_t) -> bool >"
+        },
+        {
+          "name": "is_audio_thread",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (host : * const clap_host_t) -> bool >"
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "clap_plugin_thread_pool",
+      "fields": [
+        {
+          "name": "exec",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (plugin : * const clap_plugin_t , task_index : u32) >"
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "clap_host_thread_pool",
+      "fields": [
+        {
+          "name": "request_exec",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (host : * const clap_host_t , num_tasks : u32) -> bool >"
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "clap_plugin_timer_support",
+      "fields": [
+        {
+          "name": "on_timer",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (plugin : * const clap_plugin_t , timer_id : clap_id) >"
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "clap_host_timer_support",
+      "fields": [
+        {
+          "name": "register_timer",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (host : * const clap_host_t , period_ms : u32 , timer_id : * mut clap_id) -> bool >"
+        },
+        {
+          "name": "unregister_timer",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (host : * const clap_host_t , timer_id : clap_id) -> bool >"
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "clap_track_info",
+      "fields": [
+        {
+          "name": "flags",
+          "rust_type": "u64"
+        },
+        {
+          "name": "name",
+          "rust_type": "[core :: ffi :: c_char ; 256usize]"
+        },
+        {
+          "name": "color",
+          "rust_type": "clap_color_t"
+        },
+        {
+          "name": "audio_channel_count",
+          "rust_type": "i32"
+        },
+        {
+          "name": "audio_port_type",
+          "rust_type": "* const core :: ffi :: c_char"
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "clap_plugin_track_info",
+      "fields": [
+        {
+          "name": "changed",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (plugin : * const clap_plugin_t) >"
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "clap_host_track_info",
+      "fields": [
+        {
+          "name": "get",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (host : * const clap_host_t , info : * mut clap_track_info_t) -> bool >"
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "clap_voice_info",
+      "fields": [
+        {
+          "name": "voice_count",
+          "rust_type": "u32"
+        },
+        {
+          "name": "voice_capacity",
+          "rust_type": "u32"
+        },
+        {
+          "name": "flags",
+          "rust_type": "u64"
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "clap_plugin_voice_info",
+      "fields": [
+        {
+          "name": "get",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (plugin : * const clap_plugin_t , info : * mut clap_voice_info_t) -> bool >"
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "clap_host_voice_info",
+      "fields": [
+        {
+          "name": "changed",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (host : * const clap_host_t) >"
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "clap_plugin_invalidation_source",
+      "fields": [
+        {
+          "name": "directory",
+          "rust_type": "* const core :: ffi :: c_char"
+        },
+        {
+          "name": "filename_glob",
+          "rust_type": "* const core :: ffi :: c_char"
+        },
+        {
+          "name": "recursive_scan",
+          "rust_type": "bool"
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "clap_plugin_invalidation_factory",
+      "fields": [
+        {
+          "name": "count",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (factory : * const clap_plugin_invalidation_factory) -> u32 >"
+        },
+        {
+          "name": "get",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (factory : * const clap_plugin_invalidation_factory , index : u32) -> * const clap_plugin_invalidation_source_t >"
+        },
+        {
+          "name": "refresh",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (factory : * const clap_plugin_invalidation_factory) -> bool >"
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "clap_plugin_state_converter_descriptor",
+      "fields": [
+        {
+          "name": "clap_version",
+          "rust_type": "clap_version_t"
+        },
+        {
+          "name": "src_plugin_id",
+          "rust_type": "clap_universal_plugin_id_t"
+        },
+        {
+          "name": "dst_plugin_id",
+          "rust_type": "clap_universal_plugin_id_t"
+        },
+        {
+          "name": "id",
+          "rust_type": "* const core :: ffi :: c_char"
+        },
+        {
+          "name": "name",
+          "rust_type": "* const core :: ffi :: c_char"
+        },
+        {
+          "name": "vendor",
+          "rust_type": "* const core :: ffi :: c_char"
+        },
+        {
+          "name": "version",
+          "rust_type": "* const core :: ffi :: c_char"
+        },
+        {
+          "name": "description",
+          "rust_type": "* const core :: ffi :: c_char"
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "clap_plugin_state_converter",
+      "fields": [
+        {
+          "name": "desc",
+          "rust_type": "* const clap_plugin_state_converter_descriptor_t"
+        },
+        {
+          "name": "converter_data",
+          "rust_type": "* mut core :: ffi :: c_void"
+        },
+        {
+          "name": "destroy",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (converter : * mut clap_plugin_state_converter) >"
+        },
+        {
+          "name": "convert_state",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (converter : * mut clap_plugin_state_converter , src : * const clap_istream_t , dst : * const clap_ostream_t , error_buffer : * mut core :: ffi :: c_char , error_buffer_size : usize) -> bool >"
+        },
+        {
+          "name": "convert_normalized_value",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (converter : * mut clap_plugin_state_converter , src_param_id : clap_id , src_normalized_value : f64 , dst_param_id : * mut clap_id , dst_normalized_value : * mut f64) -> bool >"
+        },
+        {
+          "name": "convert_plain_value",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (converter : * mut clap_plugin_state_converter , src_param_id : clap_id , src_plain_value : f64 , dst_param_id : * mut clap_id , dst_plain_value : * mut f64) -> bool >"
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "clap_plugin_state_converter_factory",
+      "fields": [
+        {
+          "name": "count",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (factory : * const clap_plugin_state_converter_factory) -> u32 >"
+        },
+        {
+          "name": "get_descriptor",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (factory : * const clap_plugin_state_converter_factory , index : u32) -> * const clap_plugin_state_converter_descriptor_t >"
+        },
+        {
+          "name": "create",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (factory : * const clap_plugin_state_converter_factory , converter_id : * const core :: ffi :: c_char) -> * mut clap_plugin_state_converter_t >"
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "clap_plugin_background_activation",
+      "fields": [
+        {
+          "name": "activate_from_background_thread",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (plugin : * mut clap_plugin_t , sample_rate : f64 , min_frames_count : u32 , max_frames_count : u32) -> bool >"
+        },
+        {
+          "name": "deactivate_from_background_thread",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (plugin : * const clap_plugin) >"
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "clap_host_background_progress",
+      "fields": [
+        {
+          "name": "is_canceled",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (host : * const clap_host_t) -> bool >"
+        },
+        {
+          "name": "progress",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (host : * const clap_host_t , progress : f64 , msg : * const core :: ffi :: c_char) >"
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "clap_plugin_background_state_context",
+      "fields": [
+        {
+          "name": "save_from_background_thread",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (plugin : * const clap_plugin_t , stream : * const clap_ostream_t , context_type : u32) -> bool >"
+        },
+        {
+          "name": "load_from_background_thread",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (plugin : * const clap_plugin_t , stream : * const clap_istream_t , context_type : u32) -> bool >"
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "clap_plugin_extensible_audio_ports",
+      "fields": [
+        {
+          "name": "add_port",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (plugin : * const clap_plugin_t , is_input : bool , channel_count : u32 , port_type : * const core :: ffi :: c_char , port_details : * const core :: ffi :: c_void) -> bool >"
+        },
+        {
+          "name": "remove_port",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (plugin : * const clap_plugin_t , is_input : bool , index : u32) -> bool >"
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "clap_plugin_flush_events",
+      "fields": [
+        {
+          "name": "flush",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (plugin : * const clap_plugin_t , in_ : * const clap_input_events_t , out : * const clap_output_events_t) >"
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "clap_host_flush_events",
+      "fields": [
+        {
+          "name": "request_flush",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (host : * const clap_host_t) >"
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "clap_plugin_gain_adjustment_metering",
+      "fields": [
+        {
+          "name": "get",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (plugin : * const clap_plugin_t) -> f64 >"
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "clap_mini_curve_display_curve_hints",
+      "fields": [
+        {
+          "name": "x_min",
+          "rust_type": "f64"
+        },
+        {
+          "name": "x_max",
+          "rust_type": "f64"
+        },
+        {
+          "name": "y_min",
+          "rust_type": "f64"
+        },
+        {
+          "name": "y_max",
+          "rust_type": "f64"
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "clap_mini_curve_display_curve_data",
+      "fields": [
+        {
+          "name": "curve_kind",
+          "rust_type": "i32"
+        },
+        {
+          "name": "values",
+          "rust_type": "* mut u16"
+        },
+        {
+          "name": "values_count",
+          "rust_type": "u32"
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "clap_plugin_mini_curve_display",
+      "fields": [
+        {
+          "name": "get_curve_count",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (plugin : * const clap_plugin_t) -> u32 >"
+        },
+        {
+          "name": "render",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (plugin : * const clap_plugin_t , curves : * mut clap_mini_curve_display_curve_data_t , curves_size : u32) -> u32 >"
+        },
+        {
+          "name": "set_observed",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (plugin : * const clap_plugin_t , is_observed : bool) >"
+        },
+        {
+          "name": "get_axis_name",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (plugin : * const clap_plugin_t , curve_index : u32 , x_name : * mut core :: ffi :: c_char , y_name : * mut core :: ffi :: c_char , name_capacity : u32) -> bool >"
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "clap_host_mini_curve_display",
+      "fields": [
+        {
+          "name": "get_hints",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (host : * const clap_host_t , kind : u32 , hints : * mut clap_mini_curve_display_curve_hints_t) -> bool >"
+        },
+        {
+          "name": "set_dynamic",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (host : * const clap_host_t , is_dynamic : bool) >"
+        },
+        {
+          "name": "changed",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (host : * const clap_host_t , flags : u32) >"
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "clap_plugin_octave_number",
+      "fields": [
+        {
+          "name": "set_note60_octave",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (plugin : * const clap_plugin_t , octave_number : i8) >"
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "clap_plugin_params_origin",
+      "fields": [
+        {
+          "name": "get",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (plugin : * const clap_plugin_t , param_id : clap_id , out_value : * mut f64) -> bool >"
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "clap_host_params_origin",
+      "fields": [
+        {
+          "name": "changed",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (host : * const clap_host_t) >"
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "clap_host_param_hovered",
+      "fields": [
+        {
+          "name": "update",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (host : * const clap_host_t , hovered_param_id : clap_id) >"
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "clap_project_location_element",
+      "fields": [
+        {
+          "name": "flags",
+          "rust_type": "u64"
+        },
+        {
+          "name": "kind",
+          "rust_type": "u32"
+        },
+        {
+          "name": "track_kind",
+          "rust_type": "u32"
+        },
+        {
+          "name": "index",
+          "rust_type": "u32"
+        },
+        {
+          "name": "id",
+          "rust_type": "[core :: ffi :: c_char ; 1024usize]"
+        },
+        {
+          "name": "name",
+          "rust_type": "[core :: ffi :: c_char ; 256usize]"
+        },
+        {
+          "name": "color",
+          "rust_type": "clap_color_t"
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "clap_plugin_project_location",
+      "fields": [
+        {
+          "name": "set",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (plugin : * const clap_plugin_t , path : * const clap_project_location_element_t , num_elements : u32) >"
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "clap_plugin_resource_directory",
+      "fields": [
+        {
+          "name": "set_directory",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (plugin : * const clap_plugin_t , path : * const core :: ffi :: c_char , is_shared : bool) >"
+        },
+        {
+          "name": "collect",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (plugin : * const clap_plugin_t , all : bool) >"
+        },
+        {
+          "name": "get_files_count",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (plugin : * const clap_plugin_t) -> u32 >"
+        },
+        {
+          "name": "get_file_path",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (plugin : * const clap_plugin_t , index : u32 , path : * mut core :: ffi :: c_char , path_size : u32) -> i32 >"
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "clap_host_resource_directory",
+      "fields": [
+        {
+          "name": "request_directory",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (host : * const clap_host_t , is_shared : bool) -> bool >"
+        },
+        {
+          "name": "release_directory",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (host : * const clap_host_t , is_shared : bool) >"
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "clap_host_scratch_memory",
+      "fields": [
+        {
+          "name": "reserve",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (host : * const clap_host_t , scratch_size_bytes : u32 , max_concurrency_hint : u32) -> bool >"
+        },
+        {
+          "name": "access",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (host : * const clap_host_t) -> * mut core :: ffi :: c_void >"
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "clap_host_transport_control",
+      "fields": [
+        {
+          "name": "request_start",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (host : * const clap_host_t) >"
+        },
+        {
+          "name": "request_stop",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (host : * const clap_host_t) >"
+        },
+        {
+          "name": "request_continue",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (host : * const clap_host_t) >"
+        },
+        {
+          "name": "request_pause",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (host : * const clap_host_t) >"
+        },
+        {
+          "name": "request_toggle_play",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (host : * const clap_host_t) >"
+        },
+        {
+          "name": "request_jump",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (host : * const clap_host_t , position : clap_beattime) >"
+        },
+        {
+          "name": "request_loop_region",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (host : * const clap_host_t , start : clap_beattime , duration : clap_beattime) >"
+        },
+        {
+          "name": "request_toggle_loop",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (host : * const clap_host_t) >"
+        },
+        {
+          "name": "request_enable_loop",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (host : * const clap_host_t , is_enabled : bool) >"
+        },
+        {
+          "name": "request_record",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (host : * const clap_host_t , is_recording : bool) >"
+        },
+        {
+          "name": "request_toggle_record",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (host : * const clap_host_t) >"
+        },
+        {
+          "name": "request_tempo",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (host : * const clap_host_t , tempo : f64) >"
+        },
+        {
+          "name": "request_time_signature",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (host : * const clap_host_t , tsig_num : u16 , tsig_denom : u16) >"
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "clap_event_trigger",
+      "fields": [
+        {
+          "name": "header",
+          "rust_type": "clap_event_header_t"
+        },
+        {
+          "name": "trigger_id",
+          "rust_type": "clap_id"
+        },
+        {
+          "name": "cookie",
+          "rust_type": "* mut core :: ffi :: c_void"
+        },
+        {
+          "name": "note_id",
+          "rust_type": "i32"
+        },
+        {
+          "name": "port_index",
+          "rust_type": "i16"
+        },
+        {
+          "name": "channel",
+          "rust_type": "i16"
+        },
+        {
+          "name": "key",
+          "rust_type": "i16"
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "clap_trigger_info",
+      "fields": [
+        {
+          "name": "id",
+          "rust_type": "clap_id"
+        },
+        {
+          "name": "flags",
+          "rust_type": "clap_trigger_info_flags"
+        },
+        {
+          "name": "cookie",
+          "rust_type": "* mut core :: ffi :: c_void"
+        },
+        {
+          "name": "name",
+          "rust_type": "[core :: ffi :: c_char ; 256usize]"
+        },
+        {
+          "name": "module",
+          "rust_type": "[core :: ffi :: c_char ; 1024usize]"
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "clap_plugin_triggers",
+      "fields": [
+        {
+          "name": "count",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (plugin : * const clap_plugin_t) -> u32 >"
+        },
+        {
+          "name": "get_info",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (plugin : * const clap_plugin_t , index : u32 , trigger_info : * mut clap_trigger_info_t) -> bool >"
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "clap_host_triggers",
+      "fields": [
+        {
+          "name": "rescan",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (host : * const clap_host_t , flags : clap_trigger_rescan_flags) >"
+        },
+        {
+          "name": "clear",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (host : * const clap_host_t , trigger_id : clap_id , flags : clap_trigger_clear_flags) >"
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "clap_event_tuning",
+      "fields": [
+        {
+          "name": "header",
+          "rust_type": "clap_event_header_t"
+        },
+        {
+          "name": "port_index",
+          "rust_type": "i16"
+        },
+        {
+          "name": "channel",
+          "rust_type": "i16"
+        },
+        {
+          "name": "tunning_id",
+          "rust_type": "clap_id"
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "clap_tuning_info",
+      "fields": [
+        {
+          "name": "tuning_id",
+          "rust_type": "clap_id"
+        },
+        {
+          "name": "name",
+          "rust_type": "[core :: ffi :: c_char ; 256usize]"
+        },
+        {
+          "name": "is_dynamic",
+          "rust_type": "bool"
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "clap_plugin_tuning",
+      "fields": [
+        {
+          "name": "changed",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (plugin : * const clap_plugin_t) >"
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "clap_host_tuning",
+      "fields": [
+        {
+          "name": "get_relative",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (host : * const clap_host_t , tuning_id : clap_id , channel : i32 , key : i32 , sample_offset : u32) -> f64 >"
+        },
+        {
+          "name": "should_play",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (host : * const clap_host_t , tuning_id : clap_id , channel : i32 , key : i32) -> bool >"
+        },
+        {
+          "name": "get_tuning_count",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (host : * const clap_host_t) -> u32 >"
+        },
+        {
+          "name": "get_info",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (host : * const clap_host_t , tuning_index : u32 , info : * mut clap_tuning_info_t) -> bool >"
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "clap_undo_delta_properties",
+      "fields": [
+        {
+          "name": "has_delta",
+          "rust_type": "bool"
+        },
+        {
+          "name": "are_deltas_persistent",
+          "rust_type": "bool"
+        },
+        {
+          "name": "format_version",
+          "rust_type": "clap_id"
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "clap_plugin_undo_delta",
+      "fields": [
+        {
+          "name": "get_delta_properties",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (plugin : * const clap_plugin_t , properties : * mut clap_undo_delta_properties_t) >"
+        },
+        {
+          "name": "can_use_delta_format_version",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (plugin : * const clap_plugin_t , format_version : clap_id) -> bool >"
+        },
+        {
+          "name": "undo",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (plugin : * const clap_plugin_t , format_version : clap_id , delta : * const core :: ffi :: c_void , delta_size : usize) -> bool >"
+        },
+        {
+          "name": "redo",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (plugin : * const clap_plugin_t , format_version : clap_id , delta : * const core :: ffi :: c_void , delta_size : usize) -> bool >"
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "clap_plugin_undo_context",
+      "fields": [
+        {
+          "name": "set_can_undo",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (plugin : * const clap_plugin_t , can_undo : bool) >"
+        },
+        {
+          "name": "set_can_redo",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (plugin : * const clap_plugin_t , can_redo : bool) >"
+        },
+        {
+          "name": "set_undo_name",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (plugin : * const clap_plugin_t , name : * const core :: ffi :: c_char) >"
+        },
+        {
+          "name": "set_redo_name",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (plugin : * const clap_plugin_t , name : * const core :: ffi :: c_char) >"
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "clap_host_undo",
+      "fields": [
+        {
+          "name": "begin_change",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (host : * const clap_host_t) >"
+        },
+        {
+          "name": "cancel_change",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (host : * const clap_host_t) >"
+        },
+        {
+          "name": "change_made",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (host : * const clap_host_t , name : * const core :: ffi :: c_char , delta : * const core :: ffi :: c_void , delta_size : usize , delta_can_undo : bool) >"
+        },
+        {
+          "name": "request_undo",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (host : * const clap_host_t) >"
+        },
+        {
+          "name": "request_redo",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (host : * const clap_host_t) >"
+        },
+        {
+          "name": "set_wants_context_updates",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (host : * const clap_host_t , is_subscribed : bool) >"
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "clap_plugin_webview",
+      "fields": [
+        {
+          "name": "get_uri",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (plugin : * const clap_plugin_t , uri : * mut core :: ffi :: c_char , uri_capacity : u32) -> i32 >"
+        },
+        {
+          "name": "get_resource",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (plugin : * const clap_plugin_t , path : * const core :: ffi :: c_char , mime : * mut core :: ffi :: c_char , mime_capacity : u32 , data_stream : * const clap_ostream_t) -> bool >"
+        },
+        {
+          "name": "receive",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (plugin : * const clap_plugin_t , buffer : * const core :: ffi :: c_void , size : u32) -> bool >"
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "clap_host_webview",
+      "fields": [
+        {
+          "name": "send",
+          "rust_type": ":: core :: option :: Option < unsafe extern \"C\" fn (host : * const clap_host_t , buffer : * const core :: ffi :: c_void , size : u32) -> bool >"
+        }
+      ]
+    }
+  ],
+  "aliases": {
+    "clap_version_t": "clap_version",
+    "clap_plugin_entry_t": "clap_plugin_entry",
+    "clap_host_t": "clap_host",
+    "clap_beattime": "i64",
+    "clap_sectime": "i64",
+    "clap_id": "u32",
+    "clap_event_header_t": "clap_event_header",
+    "clap_event_flags": "core :: ffi :: c_int",
+    "_bindgen_ty_1": "core :: ffi :: c_int",
+    "clap_event_note_t": "clap_event_note",
+    "_bindgen_ty_2": "core :: ffi :: c_int",
+    "clap_note_expression": "i32",
+    "clap_event_note_expression_t": "clap_event_note_expression",
+    "clap_event_param_value_t": "clap_event_param_value",
+    "clap_event_param_mod_t": "clap_event_param_mod",
+    "clap_event_param_gesture_t": "clap_event_param_gesture",
+    "clap_transport_flags": "core :: ffi :: c_int",
+    "clap_event_transport_t": "clap_event_transport",
+    "clap_event_midi_t": "clap_event_midi",
+    "clap_event_midi_sysex_t": "clap_event_midi_sysex",
+    "clap_event_midi2_t": "clap_event_midi2",
+    "clap_input_events_t": "clap_input_events",
+    "clap_output_events_t": "clap_output_events",
+    "clap_audio_buffer_t": "clap_audio_buffer",
+    "_bindgen_ty_3": "core :: ffi :: c_int",
+    "clap_process_status": "i32",
+    "clap_process_t": "clap_process",
+    "clap_plugin_descriptor_t": "clap_plugin_descriptor",
+    "clap_plugin_t": "clap_plugin",
+    "clap_plugin_factory_t": "clap_plugin_factory",
+    "clap_timestamp": "u64",
+    "clap_universal_plugin_id_t": "clap_universal_plugin_id",
+    "clap_preset_discovery_location_kind": "core :: ffi :: c_int",
+    "clap_preset_discovery_flags": "core :: ffi :: c_int",
+    "clap_preset_discovery_metadata_receiver_t": "clap_preset_discovery_metadata_receiver",
+    "clap_preset_discovery_filetype_t": "clap_preset_discovery_filetype",
+    "clap_preset_discovery_location_t": "clap_preset_discovery_location",
+    "clap_preset_discovery_soundpack_t": "clap_preset_discovery_soundpack",
+    "clap_preset_discovery_provider_descriptor_t": "clap_preset_discovery_provider_descriptor",
+    "clap_preset_discovery_provider_t": "clap_preset_discovery_provider",
+    "clap_preset_discovery_indexer_t": "clap_preset_discovery_indexer",
+    "clap_preset_discovery_factory_t": "clap_preset_discovery_factory",
+    "clap_ambisonic_ordering": "core :: ffi :: c_int",
+    "clap_ambisonic_normalization": "core :: ffi :: c_int",
+    "clap_ambisonic_config_t": "clap_ambisonic_config",
+    "clap_plugin_ambisonic_t": "clap_plugin_ambisonic",
+    "clap_host_ambisonic_t": "clap_host_ambisonic",
+    "clap_plugin_audio_ports_activation_t": "clap_plugin_audio_ports_activation",
+    "_bindgen_ty_4": "core :: ffi :: c_int",
+    "_bindgen_ty_5": "core :: ffi :: c_int",
+    "clap_audio_port_info_t": "clap_audio_port_info",
+    "clap_plugin_audio_ports_t": "clap_plugin_audio_ports",
+    "_bindgen_ty_6": "core :: ffi :: c_int",
+    "clap_host_audio_ports_t": "clap_host_audio_ports",
+    "clap_audio_ports_config_t": "clap_audio_ports_config",
+    "clap_plugin_audio_ports_config_t": "clap_plugin_audio_ports_config",
+    "clap_plugin_audio_ports_config_info_t": "clap_plugin_audio_ports_config_info",
+    "clap_host_audio_ports_config_t": "clap_host_audio_ports_config",
+    "clap_audio_port_configuration_request_t": "clap_audio_port_configuration_request",
+    "clap_plugin_configurable_audio_ports_t": "clap_plugin_configurable_audio_ports",
+    "_bindgen_ty_7": "core :: ffi :: c_int",
+    "clap_context_menu_target_t": "clap_context_menu_target",
+    "_bindgen_ty_8": "core :: ffi :: c_int",
+    "clap_context_menu_item_kind_t": "u32",
+    "clap_context_menu_entry_t": "clap_context_menu_entry",
+    "clap_context_menu_check_entry_t": "clap_context_menu_check_entry",
+    "clap_context_menu_item_title_t": "clap_context_menu_item_title",
+    "clap_context_menu_submenu_t": "clap_context_menu_submenu",
+    "clap_context_menu_builder_t": "clap_context_menu_builder",
+    "clap_plugin_context_menu_t": "clap_plugin_context_menu",
+    "clap_host_context_menu_t": "clap_host_context_menu",
+    "clap_host_event_registry_t": "clap_host_event_registry",
+    "clap_hwnd": "* mut core :: ffi :: c_void",
+    "clap_nsview": "* mut core :: ffi :: c_void",
+    "clap_uiview": "* mut core :: ffi :: c_void",
+    "clap_xwnd": "core :: ffi :: c_ulong",
+    "clap_window_t": "clap_window",
+    "clap_gui_resize_hints_t": "clap_gui_resize_hints",
+    "clap_plugin_gui_t": "clap_plugin_gui",
+    "clap_host_gui_t": "clap_host_gui",
+    "clap_plugin_latency_t": "clap_plugin_latency",
+    "clap_host_latency_t": "clap_host_latency",
+    "_bindgen_ty_9": "core :: ffi :: c_int",
+    "clap_log_severity": "i32",
+    "clap_host_log_t": "clap_host_log",
+    "clap_note_name_t": "clap_note_name",
+    "clap_plugin_note_name_t": "clap_plugin_note_name",
+    "clap_host_note_name_t": "clap_host_note_name",
+    "clap_note_dialect": "core :: ffi :: c_int",
+    "clap_note_port_info_t": "clap_note_port_info",
+    "clap_plugin_note_ports_t": "clap_plugin_note_ports",
+    "_bindgen_ty_10": "core :: ffi :: c_int",
+    "clap_host_note_ports_t": "clap_host_note_ports",
+    "_bindgen_ty_11": "core :: ffi :: c_int",
+    "clap_param_info_flags": "u32",
+    "clap_param_info_t": "clap_param_info",
+    "clap_plugin_params_t": "clap_plugin_params",
+    "_bindgen_ty_12": "core :: ffi :: c_int",
+    "clap_param_rescan_flags": "u32",
+    "_bindgen_ty_13": "core :: ffi :: c_int",
+    "clap_param_clear_flags": "u32",
+    "clap_host_params_t": "clap_host_params",
+    "clap_color_t": "clap_color",
+    "_bindgen_ty_14": "core :: ffi :: c_int",
+    "clap_plugin_param_indication_t": "clap_plugin_param_indication",
+    "_bindgen_ty_15": "core :: ffi :: c_int",
+    "clap_posix_fd_flags_t": "u32",
+    "clap_plugin_posix_fd_support_t": "clap_plugin_posix_fd_support",
+    "clap_host_posix_fd_support_t": "clap_host_posix_fd_support",
+    "clap_plugin_preset_load_t": "clap_plugin_preset_load",
+    "clap_host_preset_load_t": "clap_host_preset_load",
+    "_bindgen_ty_16": "core :: ffi :: c_int",
+    "clap_remote_controls_page_t": "clap_remote_controls_page",
+    "clap_plugin_remote_controls_t": "clap_plugin_remote_controls",
+    "clap_host_remote_controls_t": "clap_host_remote_controls",
+    "_bindgen_ty_17": "core :: ffi :: c_int",
+    "clap_plugin_render_mode": "i32",
+    "clap_plugin_render_t": "clap_plugin_render",
+    "clap_istream_t": "clap_istream",
+    "clap_ostream_t": "clap_ostream",
+    "clap_plugin_state_context_type": "core :: ffi :: c_int",
+    "clap_plugin_state_context_t": "clap_plugin_state_context",
+    "clap_plugin_state_t": "clap_plugin_state",
+    "clap_host_state_t": "clap_host_state",
+    "_bindgen_ty_18": "core :: ffi :: c_int",
+    "clap_plugin_surround_t": "clap_plugin_surround",
+    "clap_host_surround_t": "clap_host_surround",
+    "clap_plugin_tail_t": "clap_plugin_tail",
+    "clap_host_tail_t": "clap_host_tail",
+    "clap_host_thread_check_t": "clap_host_thread_check",
+    "clap_plugin_thread_pool_t": "clap_plugin_thread_pool",
+    "clap_host_thread_pool_t": "clap_host_thread_pool",
+    "clap_plugin_timer_support_t": "clap_plugin_timer_support",
+    "clap_host_timer_support_t": "clap_host_timer_support",
+    "_bindgen_ty_19": "core :: ffi :: c_int",
+    "clap_track_info_t": "clap_track_info",
+    "clap_plugin_track_info_t": "clap_plugin_track_info",
+    "clap_host_track_info_t": "clap_host_track_info",
+    "_bindgen_ty_20": "core :: ffi :: c_int",
+    "clap_voice_info_t": "clap_voice_info",
+    "clap_plugin_voice_info_t": "clap_plugin_voice_info",
+    "clap_host_voice_info_t": "clap_host_voice_info",
+    "clap_plugin_invalidation_source_t": "clap_plugin_invalidation_source",
+    "clap_plugin_invalidation_factory_t": "clap_plugin_invalidation_factory",
+    "clap_plugin_state_converter_descriptor_t": "clap_plugin_state_converter_descriptor",
+    "clap_plugin_state_converter_t": "clap_plugin_state_converter",
+    "clap_plugin_state_converter_factory_t": "clap_plugin_state_converter_factory",
+    "clap_plugin_background_activation_t": "clap_plugin_background_activation",
+    "clap_host_background_progress_t": "clap_host_background_progress",
+    "clap_plugin_background_state_context_t": "clap_plugin_background_state_context",
+    "clap_plugin_extensible_audio_ports_t": "clap_plugin_extensible_audio_ports",
+    "clap_plugin_flush_events_t": "clap_plugin_flush_events",
+    "clap_host_flush_events_t": "clap_host_flush_events",
+    "clap_plugin_gain_adjustment_metering_t": "clap_plugin_gain_adjustment_metering",
+    "clap_mini_curve_display_curve_kind": "core :: ffi :: c_int",
+    "clap_mini_curve_display_curve_hints_t": "clap_mini_curve_display_curve_hints",
+    "clap_mini_curve_display_curve_data_t": "clap_mini_curve_display_curve_data",
+    "clap_plugin_mini_curve_display_t": "clap_plugin_mini_curve_display",
+    "clap_mini_curve_display_change_flags": "core :: ffi :: c_int",
+    "clap_host_mini_curve_display_t": "clap_host_mini_curve_display",
+    "clap_plugin_octave_number_t": "clap_plugin_octave_number",
+    "clap_plugin_params_origin_t": "clap_plugin_params_origin",
+    "clap_host_params_origin_t": "clap_host_params_origin",
+    "clap_host_param_hovered_t": "clap_host_param_hovered",
+    "clap_project_location_kind": "core :: ffi :: c_int",
+    "clap_project_location_track_kind": "core :: ffi :: c_int",
+    "clap_project_location_flags": "core :: ffi :: c_int",
+    "clap_project_location_element_t": "clap_project_location_element",
+    "clap_plugin_project_location_t": "clap_plugin_project_location",
+    "clap_plugin_resource_directory_t": "clap_plugin_resource_directory",
+    "clap_host_resource_directory_t": "clap_host_resource_directory",
+    "clap_host_scratch_memory_t": "clap_host_scratch_memory",
+    "clap_host_transport_control_t": "clap_host_transport_control",
+    "_bindgen_ty_21": "core :: ffi :: c_int",
+    "clap_trigger_info_flags": "u32",
+    "_bindgen_ty_22": "core :: ffi :: c_int",
+    "clap_event_trigger_t": "clap_event_trigger",
+    "clap_trigger_info_t": "clap_trigger_info",
+    "clap_plugin_triggers_t": "clap_plugin_triggers",
+    "_bindgen_ty_23": "core :: ffi :: c_int",
+    "clap_trigger_rescan_flags": "u32",
+    "_bindgen_ty_24": "core :: ffi :: c_int",
+    "clap_trigger_clear_flags": "u32",
+    "clap_host_triggers_t": "clap_host_triggers",
+    "clap_event_tuning_t": "clap_event_tuning",
+    "clap_tuning_info_t": "clap_tuning_info",
+    "clap_plugin_tuning_t": "clap_plugin_tuning",
+    "clap_host_tuning_t": "clap_host_tuning",
+    "clap_undo_delta_properties_t": "clap_undo_delta_properties",
+    "clap_plugin_undo_delta_t": "clap_plugin_undo_delta",
+    "clap_plugin_undo_context_t": "clap_plugin_undo_context",
+    "clap_host_undo_t": "clap_host_undo",
+    "clap_plugin_webview_t": "clap_plugin_webview",
+    "clap_host_webview_t": "clap_host_webview"
+  },
+  "constants": [
+    {
+      "name": "CLAP_VERSION_MAJOR",
+      "kind": "integer",
+      "rust_type": "u32",
+      "unsigned": true
+    },
+    {
+      "name": "CLAP_VERSION_MINOR",
+      "kind": "integer",
+      "rust_type": "u32",
+      "unsigned": true
+    },
+    {
+      "name": "CLAP_VERSION_REVISION",
+      "kind": "integer",
+      "rust_type": "u32",
+      "unsigned": true
+    },
+    {
+      "name": "CLAP_PLUGIN_FEATURE_INSTRUMENT",
+      "kind": "string",
+      "rust_type": "& :: core :: ffi :: CStr",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_PLUGIN_FEATURE_AUDIO_EFFECT",
+      "kind": "string",
+      "rust_type": "& :: core :: ffi :: CStr",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_PLUGIN_FEATURE_NOTE_EFFECT",
+      "kind": "string",
+      "rust_type": "& :: core :: ffi :: CStr",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_PLUGIN_FEATURE_NOTE_DETECTOR",
+      "kind": "string",
+      "rust_type": "& :: core :: ffi :: CStr",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_PLUGIN_FEATURE_ANALYZER",
+      "kind": "string",
+      "rust_type": "& :: core :: ffi :: CStr",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_PLUGIN_FEATURE_SYNTHESIZER",
+      "kind": "string",
+      "rust_type": "& :: core :: ffi :: CStr",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_PLUGIN_FEATURE_SAMPLER",
+      "kind": "string",
+      "rust_type": "& :: core :: ffi :: CStr",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_PLUGIN_FEATURE_DRUM",
+      "kind": "string",
+      "rust_type": "& :: core :: ffi :: CStr",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_PLUGIN_FEATURE_DRUM_MACHINE",
+      "kind": "string",
+      "rust_type": "& :: core :: ffi :: CStr",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_PLUGIN_FEATURE_FILTER",
+      "kind": "string",
+      "rust_type": "& :: core :: ffi :: CStr",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_PLUGIN_FEATURE_PHASER",
+      "kind": "string",
+      "rust_type": "& :: core :: ffi :: CStr",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_PLUGIN_FEATURE_EQUALIZER",
+      "kind": "string",
+      "rust_type": "& :: core :: ffi :: CStr",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_PLUGIN_FEATURE_DEESSER",
+      "kind": "string",
+      "rust_type": "& :: core :: ffi :: CStr",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_PLUGIN_FEATURE_PHASE_VOCODER",
+      "kind": "string",
+      "rust_type": "& :: core :: ffi :: CStr",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_PLUGIN_FEATURE_GRANULAR",
+      "kind": "string",
+      "rust_type": "& :: core :: ffi :: CStr",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_PLUGIN_FEATURE_FREQUENCY_SHIFTER",
+      "kind": "string",
+      "rust_type": "& :: core :: ffi :: CStr",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_PLUGIN_FEATURE_PITCH_SHIFTER",
+      "kind": "string",
+      "rust_type": "& :: core :: ffi :: CStr",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_PLUGIN_FEATURE_DISTORTION",
+      "kind": "string",
+      "rust_type": "& :: core :: ffi :: CStr",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_PLUGIN_FEATURE_TRANSIENT_SHAPER",
+      "kind": "string",
+      "rust_type": "& :: core :: ffi :: CStr",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_PLUGIN_FEATURE_COMPRESSOR",
+      "kind": "string",
+      "rust_type": "& :: core :: ffi :: CStr",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_PLUGIN_FEATURE_EXPANDER",
+      "kind": "string",
+      "rust_type": "& :: core :: ffi :: CStr",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_PLUGIN_FEATURE_GATE",
+      "kind": "string",
+      "rust_type": "& :: core :: ffi :: CStr",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_PLUGIN_FEATURE_LIMITER",
+      "kind": "string",
+      "rust_type": "& :: core :: ffi :: CStr",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_PLUGIN_FEATURE_FLANGER",
+      "kind": "string",
+      "rust_type": "& :: core :: ffi :: CStr",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_PLUGIN_FEATURE_CHORUS",
+      "kind": "string",
+      "rust_type": "& :: core :: ffi :: CStr",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_PLUGIN_FEATURE_DELAY",
+      "kind": "string",
+      "rust_type": "& :: core :: ffi :: CStr",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_PLUGIN_FEATURE_REVERB",
+      "kind": "string",
+      "rust_type": "& :: core :: ffi :: CStr",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_PLUGIN_FEATURE_TREMOLO",
+      "kind": "string",
+      "rust_type": "& :: core :: ffi :: CStr",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_PLUGIN_FEATURE_GLITCH",
+      "kind": "string",
+      "rust_type": "& :: core :: ffi :: CStr",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_PLUGIN_FEATURE_UTILITY",
+      "kind": "string",
+      "rust_type": "& :: core :: ffi :: CStr",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_PLUGIN_FEATURE_PITCH_CORRECTION",
+      "kind": "string",
+      "rust_type": "& :: core :: ffi :: CStr",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_PLUGIN_FEATURE_RESTORATION",
+      "kind": "string",
+      "rust_type": "& :: core :: ffi :: CStr",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_PLUGIN_FEATURE_MULTI_EFFECTS",
+      "kind": "string",
+      "rust_type": "& :: core :: ffi :: CStr",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_PLUGIN_FEATURE_MIXING",
+      "kind": "string",
+      "rust_type": "& :: core :: ffi :: CStr",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_PLUGIN_FEATURE_MASTERING",
+      "kind": "string",
+      "rust_type": "& :: core :: ffi :: CStr",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_PLUGIN_FEATURE_MONO",
+      "kind": "string",
+      "rust_type": "& :: core :: ffi :: CStr",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_PLUGIN_FEATURE_STEREO",
+      "kind": "string",
+      "rust_type": "& :: core :: ffi :: CStr",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_PLUGIN_FEATURE_SURROUND",
+      "kind": "string",
+      "rust_type": "& :: core :: ffi :: CStr",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_PLUGIN_FEATURE_AMBISONIC",
+      "kind": "string",
+      "rust_type": "& :: core :: ffi :: CStr",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_BEATTIME_FACTOR",
+      "kind": "integer",
+      "rust_type": "i64",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_SECTIME_FACTOR",
+      "kind": "integer",
+      "rust_type": "i64",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_INVALID_ID",
+      "kind": "integer",
+      "rust_type": "clap_id",
+      "unsigned": true
+    },
+    {
+      "name": "CLAP_CORE_EVENT_SPACE_ID",
+      "kind": "integer",
+      "rust_type": "u16",
+      "unsigned": true
+    },
+    {
+      "name": "CLAP_EVENT_IS_LIVE",
+      "kind": "integer",
+      "rust_type": "clap_event_flags",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_EVENT_DONT_RECORD",
+      "kind": "integer",
+      "rust_type": "clap_event_flags",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_EVENT_NOTE_ON",
+      "kind": "integer",
+      "rust_type": "_bindgen_ty_1",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_EVENT_NOTE_OFF",
+      "kind": "integer",
+      "rust_type": "_bindgen_ty_1",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_EVENT_NOTE_CHOKE",
+      "kind": "integer",
+      "rust_type": "_bindgen_ty_1",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_EVENT_NOTE_END",
+      "kind": "integer",
+      "rust_type": "_bindgen_ty_1",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_EVENT_NOTE_EXPRESSION",
+      "kind": "integer",
+      "rust_type": "_bindgen_ty_1",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_EVENT_PARAM_VALUE",
+      "kind": "integer",
+      "rust_type": "_bindgen_ty_1",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_EVENT_PARAM_MOD",
+      "kind": "integer",
+      "rust_type": "_bindgen_ty_1",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_EVENT_PARAM_GESTURE_BEGIN",
+      "kind": "integer",
+      "rust_type": "_bindgen_ty_1",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_EVENT_PARAM_GESTURE_END",
+      "kind": "integer",
+      "rust_type": "_bindgen_ty_1",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_EVENT_TRANSPORT",
+      "kind": "integer",
+      "rust_type": "_bindgen_ty_1",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_EVENT_MIDI",
+      "kind": "integer",
+      "rust_type": "_bindgen_ty_1",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_EVENT_MIDI_SYSEX",
+      "kind": "integer",
+      "rust_type": "_bindgen_ty_1",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_EVENT_MIDI2",
+      "kind": "integer",
+      "rust_type": "_bindgen_ty_1",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_NOTE_EXPRESSION_VOLUME",
+      "kind": "integer",
+      "rust_type": "_bindgen_ty_2",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_NOTE_EXPRESSION_PAN",
+      "kind": "integer",
+      "rust_type": "_bindgen_ty_2",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_NOTE_EXPRESSION_TUNING",
+      "kind": "integer",
+      "rust_type": "_bindgen_ty_2",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_NOTE_EXPRESSION_VIBRATO",
+      "kind": "integer",
+      "rust_type": "_bindgen_ty_2",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_NOTE_EXPRESSION_EXPRESSION",
+      "kind": "integer",
+      "rust_type": "_bindgen_ty_2",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_NOTE_EXPRESSION_BRIGHTNESS",
+      "kind": "integer",
+      "rust_type": "_bindgen_ty_2",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_NOTE_EXPRESSION_PRESSURE",
+      "kind": "integer",
+      "rust_type": "_bindgen_ty_2",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_TRANSPORT_HAS_TEMPO",
+      "kind": "integer",
+      "rust_type": "clap_transport_flags",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_TRANSPORT_HAS_BEATS_TIMELINE",
+      "kind": "integer",
+      "rust_type": "clap_transport_flags",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_TRANSPORT_HAS_SECONDS_TIMELINE",
+      "kind": "integer",
+      "rust_type": "clap_transport_flags",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_TRANSPORT_HAS_TIME_SIGNATURE",
+      "kind": "integer",
+      "rust_type": "clap_transport_flags",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_TRANSPORT_IS_PLAYING",
+      "kind": "integer",
+      "rust_type": "clap_transport_flags",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_TRANSPORT_IS_RECORDING",
+      "kind": "integer",
+      "rust_type": "clap_transport_flags",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_TRANSPORT_IS_LOOP_ACTIVE",
+      "kind": "integer",
+      "rust_type": "clap_transport_flags",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_TRANSPORT_IS_WITHIN_PRE_ROLL",
+      "kind": "integer",
+      "rust_type": "clap_transport_flags",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_PROCESS_ERROR",
+      "kind": "integer",
+      "rust_type": "_bindgen_ty_3",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_PROCESS_CONTINUE",
+      "kind": "integer",
+      "rust_type": "_bindgen_ty_3",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_PROCESS_CONTINUE_IF_NOT_QUIET",
+      "kind": "integer",
+      "rust_type": "_bindgen_ty_3",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_PROCESS_TAIL",
+      "kind": "integer",
+      "rust_type": "_bindgen_ty_3",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_PROCESS_SLEEP",
+      "kind": "integer",
+      "rust_type": "_bindgen_ty_3",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_PLUGIN_FACTORY_ID",
+      "kind": "string",
+      "rust_type": "& :: core :: ffi :: CStr",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_TIMESTAMP_UNKNOWN",
+      "kind": "integer",
+      "rust_type": "clap_timestamp",
+      "unsigned": true
+    },
+    {
+      "name": "CLAP_PRESET_DISCOVERY_FACTORY_ID",
+      "kind": "string",
+      "rust_type": "& :: core :: ffi :: CStr",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_PRESET_DISCOVERY_FACTORY_ID_COMPAT",
+      "kind": "string",
+      "rust_type": "& :: core :: ffi :: CStr",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_PRESET_DISCOVERY_LOCATION_FILE",
+      "kind": "integer",
+      "rust_type": "clap_preset_discovery_location_kind",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_PRESET_DISCOVERY_LOCATION_PLUGIN",
+      "kind": "integer",
+      "rust_type": "clap_preset_discovery_location_kind",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_PRESET_DISCOVERY_IS_FACTORY_CONTENT",
+      "kind": "integer",
+      "rust_type": "clap_preset_discovery_flags",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_PRESET_DISCOVERY_IS_USER_CONTENT",
+      "kind": "integer",
+      "rust_type": "clap_preset_discovery_flags",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_PRESET_DISCOVERY_IS_DEMO_CONTENT",
+      "kind": "integer",
+      "rust_type": "clap_preset_discovery_flags",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_PRESET_DISCOVERY_IS_FAVORITE",
+      "kind": "integer",
+      "rust_type": "clap_preset_discovery_flags",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_EXT_AMBISONIC",
+      "kind": "string",
+      "rust_type": "& :: core :: ffi :: CStr",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_EXT_AMBISONIC_COMPAT",
+      "kind": "string",
+      "rust_type": "& :: core :: ffi :: CStr",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_PORT_AMBISONIC",
+      "kind": "string",
+      "rust_type": "& :: core :: ffi :: CStr",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_AMBISONIC_ORDERING_FUMA",
+      "kind": "integer",
+      "rust_type": "clap_ambisonic_ordering",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_AMBISONIC_ORDERING_ACN",
+      "kind": "integer",
+      "rust_type": "clap_ambisonic_ordering",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_AMBISONIC_NORMALIZATION_MAXN",
+      "kind": "integer",
+      "rust_type": "clap_ambisonic_normalization",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_AMBISONIC_NORMALIZATION_SN3D",
+      "kind": "integer",
+      "rust_type": "clap_ambisonic_normalization",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_AMBISONIC_NORMALIZATION_N3D",
+      "kind": "integer",
+      "rust_type": "clap_ambisonic_normalization",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_AMBISONIC_NORMALIZATION_SN2D",
+      "kind": "integer",
+      "rust_type": "clap_ambisonic_normalization",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_AMBISONIC_NORMALIZATION_N2D",
+      "kind": "integer",
+      "rust_type": "clap_ambisonic_normalization",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_EXT_AUDIO_PORTS_ACTIVATION",
+      "kind": "string",
+      "rust_type": "& :: core :: ffi :: CStr",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_EXT_AUDIO_PORTS_ACTIVATION_COMPAT",
+      "kind": "string",
+      "rust_type": "& :: core :: ffi :: CStr",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_NAME_SIZE",
+      "kind": "integer",
+      "rust_type": "_bindgen_ty_4",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_PATH_SIZE",
+      "kind": "integer",
+      "rust_type": "_bindgen_ty_4",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_EXT_AUDIO_PORTS",
+      "kind": "string",
+      "rust_type": "& :: core :: ffi :: CStr",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_PORT_MONO",
+      "kind": "string",
+      "rust_type": "& :: core :: ffi :: CStr",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_PORT_STEREO",
+      "kind": "string",
+      "rust_type": "& :: core :: ffi :: CStr",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_AUDIO_PORT_IS_MAIN",
+      "kind": "integer",
+      "rust_type": "_bindgen_ty_5",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_AUDIO_PORT_SUPPORTS_64BITS",
+      "kind": "integer",
+      "rust_type": "_bindgen_ty_5",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_AUDIO_PORT_PREFERS_64BITS",
+      "kind": "integer",
+      "rust_type": "_bindgen_ty_5",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_AUDIO_PORT_REQUIRES_COMMON_SAMPLE_SIZE",
+      "kind": "integer",
+      "rust_type": "_bindgen_ty_5",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_AUDIO_PORTS_RESCAN_NAMES",
+      "kind": "integer",
+      "rust_type": "_bindgen_ty_6",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_AUDIO_PORTS_RESCAN_FLAGS",
+      "kind": "integer",
+      "rust_type": "_bindgen_ty_6",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_AUDIO_PORTS_RESCAN_CHANNEL_COUNT",
+      "kind": "integer",
+      "rust_type": "_bindgen_ty_6",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_AUDIO_PORTS_RESCAN_PORT_TYPE",
+      "kind": "integer",
+      "rust_type": "_bindgen_ty_6",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_AUDIO_PORTS_RESCAN_IN_PLACE_PAIR",
+      "kind": "integer",
+      "rust_type": "_bindgen_ty_6",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_AUDIO_PORTS_RESCAN_LIST",
+      "kind": "integer",
+      "rust_type": "_bindgen_ty_6",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_EXT_AUDIO_PORTS_CONFIG",
+      "kind": "string",
+      "rust_type": "& :: core :: ffi :: CStr",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_EXT_AUDIO_PORTS_CONFIG_INFO",
+      "kind": "string",
+      "rust_type": "& :: core :: ffi :: CStr",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_EXT_AUDIO_PORTS_CONFIG_INFO_COMPAT",
+      "kind": "string",
+      "rust_type": "& :: core :: ffi :: CStr",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_EXT_CONFIGURABLE_AUDIO_PORTS",
+      "kind": "string",
+      "rust_type": "& :: core :: ffi :: CStr",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_EXT_CONFIGURABLE_AUDIO_PORTS_COMPAT",
+      "kind": "string",
+      "rust_type": "& :: core :: ffi :: CStr",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_EXT_CONTEXT_MENU",
+      "kind": "string",
+      "rust_type": "& :: core :: ffi :: CStr",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_EXT_CONTEXT_MENU_COMPAT",
+      "kind": "string",
+      "rust_type": "& :: core :: ffi :: CStr",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_CONTEXT_MENU_TARGET_KIND_GLOBAL",
+      "kind": "integer",
+      "rust_type": "_bindgen_ty_7",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_CONTEXT_MENU_TARGET_KIND_PARAM",
+      "kind": "integer",
+      "rust_type": "_bindgen_ty_7",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_CONTEXT_MENU_ITEM_ENTRY",
+      "kind": "integer",
+      "rust_type": "_bindgen_ty_8",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_CONTEXT_MENU_ITEM_CHECK_ENTRY",
+      "kind": "integer",
+      "rust_type": "_bindgen_ty_8",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_CONTEXT_MENU_ITEM_SEPARATOR",
+      "kind": "integer",
+      "rust_type": "_bindgen_ty_8",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_CONTEXT_MENU_ITEM_BEGIN_SUBMENU",
+      "kind": "integer",
+      "rust_type": "_bindgen_ty_8",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_CONTEXT_MENU_ITEM_END_SUBMENU",
+      "kind": "integer",
+      "rust_type": "_bindgen_ty_8",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_CONTEXT_MENU_ITEM_TITLE",
+      "kind": "integer",
+      "rust_type": "_bindgen_ty_8",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_EXT_EVENT_REGISTRY",
+      "kind": "string",
+      "rust_type": "& :: core :: ffi :: CStr",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_EXT_GUI",
+      "kind": "string",
+      "rust_type": "& :: core :: ffi :: CStr",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_WINDOW_API_WIN32",
+      "kind": "string",
+      "rust_type": "& :: core :: ffi :: CStr",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_WINDOW_API_COCOA",
+      "kind": "string",
+      "rust_type": "& :: core :: ffi :: CStr",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_WINDOW_API_UIKIT",
+      "kind": "string",
+      "rust_type": "& :: core :: ffi :: CStr",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_WINDOW_API_X11",
+      "kind": "string",
+      "rust_type": "& :: core :: ffi :: CStr",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_WINDOW_API_WAYLAND",
+      "kind": "string",
+      "rust_type": "& :: core :: ffi :: CStr",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_EXT_LATENCY",
+      "kind": "string",
+      "rust_type": "& :: core :: ffi :: CStr",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_EXT_LOG",
+      "kind": "string",
+      "rust_type": "& :: core :: ffi :: CStr",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_LOG_DEBUG",
+      "kind": "integer",
+      "rust_type": "_bindgen_ty_9",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_LOG_INFO",
+      "kind": "integer",
+      "rust_type": "_bindgen_ty_9",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_LOG_WARNING",
+      "kind": "integer",
+      "rust_type": "_bindgen_ty_9",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_LOG_ERROR",
+      "kind": "integer",
+      "rust_type": "_bindgen_ty_9",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_LOG_FATAL",
+      "kind": "integer",
+      "rust_type": "_bindgen_ty_9",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_LOG_HOST_MISBEHAVING",
+      "kind": "integer",
+      "rust_type": "_bindgen_ty_9",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_LOG_PLUGIN_MISBEHAVING",
+      "kind": "integer",
+      "rust_type": "_bindgen_ty_9",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_EXT_NOTE_NAME",
+      "kind": "string",
+      "rust_type": "& :: core :: ffi :: CStr",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_EXT_NOTE_PORTS",
+      "kind": "string",
+      "rust_type": "& :: core :: ffi :: CStr",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_NOTE_DIALECT_CLAP",
+      "kind": "integer",
+      "rust_type": "clap_note_dialect",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_NOTE_DIALECT_MIDI",
+      "kind": "integer",
+      "rust_type": "clap_note_dialect",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_NOTE_DIALECT_MIDI_MPE",
+      "kind": "integer",
+      "rust_type": "clap_note_dialect",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_NOTE_DIALECT_MIDI2",
+      "kind": "integer",
+      "rust_type": "clap_note_dialect",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_NOTE_PORTS_RESCAN_ALL",
+      "kind": "integer",
+      "rust_type": "_bindgen_ty_10",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_NOTE_PORTS_RESCAN_NAMES",
+      "kind": "integer",
+      "rust_type": "_bindgen_ty_10",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_EXT_PARAMS",
+      "kind": "string",
+      "rust_type": "& :: core :: ffi :: CStr",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_PARAM_IS_STEPPED",
+      "kind": "integer",
+      "rust_type": "_bindgen_ty_11",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_PARAM_IS_PERIODIC",
+      "kind": "integer",
+      "rust_type": "_bindgen_ty_11",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_PARAM_IS_HIDDEN",
+      "kind": "integer",
+      "rust_type": "_bindgen_ty_11",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_PARAM_IS_READONLY",
+      "kind": "integer",
+      "rust_type": "_bindgen_ty_11",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_PARAM_IS_BYPASS",
+      "kind": "integer",
+      "rust_type": "_bindgen_ty_11",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_PARAM_IS_AUTOMATABLE",
+      "kind": "integer",
+      "rust_type": "_bindgen_ty_11",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_PARAM_IS_AUTOMATABLE_PER_NOTE_ID",
+      "kind": "integer",
+      "rust_type": "_bindgen_ty_11",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_PARAM_IS_AUTOMATABLE_PER_KEY",
+      "kind": "integer",
+      "rust_type": "_bindgen_ty_11",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_PARAM_IS_AUTOMATABLE_PER_CHANNEL",
+      "kind": "integer",
+      "rust_type": "_bindgen_ty_11",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_PARAM_IS_AUTOMATABLE_PER_PORT",
+      "kind": "integer",
+      "rust_type": "_bindgen_ty_11",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_PARAM_IS_MODULATABLE",
+      "kind": "integer",
+      "rust_type": "_bindgen_ty_11",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_PARAM_IS_MODULATABLE_PER_NOTE_ID",
+      "kind": "integer",
+      "rust_type": "_bindgen_ty_11",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_PARAM_IS_MODULATABLE_PER_KEY",
+      "kind": "integer",
+      "rust_type": "_bindgen_ty_11",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_PARAM_IS_MODULATABLE_PER_CHANNEL",
+      "kind": "integer",
+      "rust_type": "_bindgen_ty_11",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_PARAM_IS_MODULATABLE_PER_PORT",
+      "kind": "integer",
+      "rust_type": "_bindgen_ty_11",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_PARAM_REQUIRES_PROCESS",
+      "kind": "integer",
+      "rust_type": "_bindgen_ty_11",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_PARAM_IS_ENUM",
+      "kind": "integer",
+      "rust_type": "_bindgen_ty_11",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_PARAM_RESCAN_VALUES",
+      "kind": "integer",
+      "rust_type": "_bindgen_ty_12",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_PARAM_RESCAN_TEXT",
+      "kind": "integer",
+      "rust_type": "_bindgen_ty_12",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_PARAM_RESCAN_INFO",
+      "kind": "integer",
+      "rust_type": "_bindgen_ty_12",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_PARAM_RESCAN_ALL",
+      "kind": "integer",
+      "rust_type": "_bindgen_ty_12",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_PARAM_CLEAR_ALL",
+      "kind": "integer",
+      "rust_type": "_bindgen_ty_13",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_PARAM_CLEAR_AUTOMATIONS",
+      "kind": "integer",
+      "rust_type": "_bindgen_ty_13",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_PARAM_CLEAR_MODULATIONS",
+      "kind": "integer",
+      "rust_type": "_bindgen_ty_13",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_EXT_PARAM_INDICATION",
+      "kind": "string",
+      "rust_type": "& :: core :: ffi :: CStr",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_EXT_PARAM_INDICATION_COMPAT",
+      "kind": "string",
+      "rust_type": "& :: core :: ffi :: CStr",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_PARAM_INDICATION_AUTOMATION_NONE",
+      "kind": "integer",
+      "rust_type": "_bindgen_ty_14",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_PARAM_INDICATION_AUTOMATION_PRESENT",
+      "kind": "integer",
+      "rust_type": "_bindgen_ty_14",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_PARAM_INDICATION_AUTOMATION_PLAYING",
+      "kind": "integer",
+      "rust_type": "_bindgen_ty_14",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_PARAM_INDICATION_AUTOMATION_RECORDING",
+      "kind": "integer",
+      "rust_type": "_bindgen_ty_14",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_PARAM_INDICATION_AUTOMATION_OVERRIDING",
+      "kind": "integer",
+      "rust_type": "_bindgen_ty_14",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_EXT_POSIX_FD_SUPPORT",
+      "kind": "string",
+      "rust_type": "& :: core :: ffi :: CStr",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_POSIX_FD_READ",
+      "kind": "integer",
+      "rust_type": "_bindgen_ty_15",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_POSIX_FD_WRITE",
+      "kind": "integer",
+      "rust_type": "_bindgen_ty_15",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_POSIX_FD_ERROR",
+      "kind": "integer",
+      "rust_type": "_bindgen_ty_15",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_EXT_PRESET_LOAD",
+      "kind": "string",
+      "rust_type": "& :: core :: ffi :: CStr",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_EXT_PRESET_LOAD_COMPAT",
+      "kind": "string",
+      "rust_type": "& :: core :: ffi :: CStr",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_EXT_REMOTE_CONTROLS",
+      "kind": "string",
+      "rust_type": "& :: core :: ffi :: CStr",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_EXT_REMOTE_CONTROLS_COMPAT",
+      "kind": "string",
+      "rust_type": "& :: core :: ffi :: CStr",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_REMOTE_CONTROLS_COUNT",
+      "kind": "integer",
+      "rust_type": "_bindgen_ty_16",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_EXT_RENDER",
+      "kind": "string",
+      "rust_type": "& :: core :: ffi :: CStr",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_RENDER_REALTIME",
+      "kind": "integer",
+      "rust_type": "_bindgen_ty_17",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_RENDER_OFFLINE",
+      "kind": "integer",
+      "rust_type": "_bindgen_ty_17",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_EXT_STATE_CONTEXT",
+      "kind": "string",
+      "rust_type": "& :: core :: ffi :: CStr",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_STATE_CONTEXT_FOR_PRESET",
+      "kind": "integer",
+      "rust_type": "clap_plugin_state_context_type",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_STATE_CONTEXT_FOR_DUPLICATE",
+      "kind": "integer",
+      "rust_type": "clap_plugin_state_context_type",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_STATE_CONTEXT_FOR_PROJECT",
+      "kind": "integer",
+      "rust_type": "clap_plugin_state_context_type",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_EXT_STATE",
+      "kind": "string",
+      "rust_type": "& :: core :: ffi :: CStr",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_EXT_SURROUND",
+      "kind": "string",
+      "rust_type": "& :: core :: ffi :: CStr",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_EXT_SURROUND_COMPAT",
+      "kind": "string",
+      "rust_type": "& :: core :: ffi :: CStr",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_PORT_SURROUND",
+      "kind": "string",
+      "rust_type": "& :: core :: ffi :: CStr",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_SURROUND_FL",
+      "kind": "integer",
+      "rust_type": "_bindgen_ty_18",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_SURROUND_FR",
+      "kind": "integer",
+      "rust_type": "_bindgen_ty_18",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_SURROUND_FC",
+      "kind": "integer",
+      "rust_type": "_bindgen_ty_18",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_SURROUND_LFE",
+      "kind": "integer",
+      "rust_type": "_bindgen_ty_18",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_SURROUND_BL",
+      "kind": "integer",
+      "rust_type": "_bindgen_ty_18",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_SURROUND_BR",
+      "kind": "integer",
+      "rust_type": "_bindgen_ty_18",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_SURROUND_FLC",
+      "kind": "integer",
+      "rust_type": "_bindgen_ty_18",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_SURROUND_FRC",
+      "kind": "integer",
+      "rust_type": "_bindgen_ty_18",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_SURROUND_BC",
+      "kind": "integer",
+      "rust_type": "_bindgen_ty_18",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_SURROUND_SL",
+      "kind": "integer",
+      "rust_type": "_bindgen_ty_18",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_SURROUND_SR",
+      "kind": "integer",
+      "rust_type": "_bindgen_ty_18",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_SURROUND_TC",
+      "kind": "integer",
+      "rust_type": "_bindgen_ty_18",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_SURROUND_TFL",
+      "kind": "integer",
+      "rust_type": "_bindgen_ty_18",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_SURROUND_TFC",
+      "kind": "integer",
+      "rust_type": "_bindgen_ty_18",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_SURROUND_TFR",
+      "kind": "integer",
+      "rust_type": "_bindgen_ty_18",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_SURROUND_TBL",
+      "kind": "integer",
+      "rust_type": "_bindgen_ty_18",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_SURROUND_TBC",
+      "kind": "integer",
+      "rust_type": "_bindgen_ty_18",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_SURROUND_TBR",
+      "kind": "integer",
+      "rust_type": "_bindgen_ty_18",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_SURROUND_TSL",
+      "kind": "integer",
+      "rust_type": "_bindgen_ty_18",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_SURROUND_TSR",
+      "kind": "integer",
+      "rust_type": "_bindgen_ty_18",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_EXT_TAIL",
+      "kind": "string",
+      "rust_type": "& :: core :: ffi :: CStr",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_EXT_THREAD_CHECK",
+      "kind": "string",
+      "rust_type": "& :: core :: ffi :: CStr",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_EXT_THREAD_POOL",
+      "kind": "string",
+      "rust_type": "& :: core :: ffi :: CStr",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_EXT_TIMER_SUPPORT",
+      "kind": "string",
+      "rust_type": "& :: core :: ffi :: CStr",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_EXT_TRACK_INFO",
+      "kind": "string",
+      "rust_type": "& :: core :: ffi :: CStr",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_EXT_TRACK_INFO_COMPAT",
+      "kind": "string",
+      "rust_type": "& :: core :: ffi :: CStr",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_TRACK_INFO_HAS_TRACK_NAME",
+      "kind": "integer",
+      "rust_type": "_bindgen_ty_19",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_TRACK_INFO_HAS_TRACK_COLOR",
+      "kind": "integer",
+      "rust_type": "_bindgen_ty_19",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_TRACK_INFO_HAS_AUDIO_CHANNEL",
+      "kind": "integer",
+      "rust_type": "_bindgen_ty_19",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_TRACK_INFO_IS_FOR_RETURN_TRACK",
+      "kind": "integer",
+      "rust_type": "_bindgen_ty_19",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_TRACK_INFO_IS_FOR_BUS",
+      "kind": "integer",
+      "rust_type": "_bindgen_ty_19",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_TRACK_INFO_IS_FOR_MASTER",
+      "kind": "integer",
+      "rust_type": "_bindgen_ty_19",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_EXT_VOICE_INFO",
+      "kind": "string",
+      "rust_type": "& :: core :: ffi :: CStr",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_VOICE_INFO_SUPPORTS_OVERLAPPING_NOTES",
+      "kind": "integer",
+      "rust_type": "_bindgen_ty_20",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_PLUGIN_INVALIDATION_FACTORY_ID",
+      "kind": "string",
+      "rust_type": "& :: core :: ffi :: CStr",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_PLUGIN_STATE_CONVERTER_FACTORY_ID",
+      "kind": "string",
+      "rust_type": "& :: core :: ffi :: CStr",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_EXT_BACKGROUND_ACTIVATION",
+      "kind": "string",
+      "rust_type": "& :: core :: ffi :: CStr",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_EXT_BACKGROUND_PROGRESS",
+      "kind": "string",
+      "rust_type": "& :: core :: ffi :: CStr",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_EXT_BACKGROUND_STATE_CONTEXT",
+      "kind": "string",
+      "rust_type": "& :: core :: ffi :: CStr",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_EXT_EXTENSIBLE_AUDIO_PORTS",
+      "kind": "string",
+      "rust_type": "& :: core :: ffi :: CStr",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_EXT_FLUSH_EVENTS",
+      "kind": "string",
+      "rust_type": "& :: core :: ffi :: CStr",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_EXT_GAIN_ADJUSTMENT_METERING",
+      "kind": "string",
+      "rust_type": "& :: core :: ffi :: CStr",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_EXT_MINI_CURVE_DISPLAY",
+      "kind": "string",
+      "rust_type": "& :: core :: ffi :: CStr",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_MINI_CURVE_DISPLAY_CURVE_KIND_UNSPECIFIED",
+      "kind": "integer",
+      "rust_type": "clap_mini_curve_display_curve_kind",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_MINI_CURVE_DISPLAY_CURVE_KIND_GAIN_RESPONSE",
+      "kind": "integer",
+      "rust_type": "clap_mini_curve_display_curve_kind",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_MINI_CURVE_DISPLAY_CURVE_KIND_PHASE_RESPONSE",
+      "kind": "integer",
+      "rust_type": "clap_mini_curve_display_curve_kind",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_MINI_CURVE_DISPLAY_CURVE_KIND_TRANSFER_CURVE",
+      "kind": "integer",
+      "rust_type": "clap_mini_curve_display_curve_kind",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_MINI_CURVE_DISPLAY_CURVE_KIND_GAIN_REDUCTION",
+      "kind": "integer",
+      "rust_type": "clap_mini_curve_display_curve_kind",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_MINI_CURVE_DISPLAY_CURVE_KIND_TIME_SERIES",
+      "kind": "integer",
+      "rust_type": "clap_mini_curve_display_curve_kind",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_MINI_CURVE_DISPLAY_CURVE_CHANGED",
+      "kind": "integer",
+      "rust_type": "clap_mini_curve_display_change_flags",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_MINI_CURVE_DISPLAY_AXIS_NAME_CHANGED",
+      "kind": "integer",
+      "rust_type": "clap_mini_curve_display_change_flags",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_EXT_OCTAVE_NUMBER",
+      "kind": "string",
+      "rust_type": "& :: core :: ffi :: CStr",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_EXT_PARAMS_ORIGIN",
+      "kind": "string",
+      "rust_type": "& :: core :: ffi :: CStr",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_EXT_PARAM_HOVERED",
+      "kind": "string",
+      "rust_type": "& :: core :: ffi :: CStr",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_EXT_PROJECT_LOCATION",
+      "kind": "string",
+      "rust_type": "& :: core :: ffi :: CStr",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_PROJECT_LOCATION_PROJECT",
+      "kind": "integer",
+      "rust_type": "clap_project_location_kind",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_PROJECT_LOCATION_TRACK_GROUP",
+      "kind": "integer",
+      "rust_type": "clap_project_location_kind",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_PROJECT_LOCATION_TRACK",
+      "kind": "integer",
+      "rust_type": "clap_project_location_kind",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_PROJECT_LOCATION_DEVICE",
+      "kind": "integer",
+      "rust_type": "clap_project_location_kind",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_PROJECT_LOCATION_NESTED_DEVICE_CHAIN",
+      "kind": "integer",
+      "rust_type": "clap_project_location_kind",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_PROJECT_LOCATION_INSTUMENT_TRACK",
+      "kind": "integer",
+      "rust_type": "clap_project_location_track_kind",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_PROJECT_LOCATION_AUDIO_TRACK",
+      "kind": "integer",
+      "rust_type": "clap_project_location_track_kind",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_PROJECT_LOCATION_HYBRID_TRACK",
+      "kind": "integer",
+      "rust_type": "clap_project_location_track_kind",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_PROJECT_LOCATION_RETURN_TRACK",
+      "kind": "integer",
+      "rust_type": "clap_project_location_track_kind",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_PROJECT_LOCATION_MASTER_TRACK",
+      "kind": "integer",
+      "rust_type": "clap_project_location_track_kind",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_PROJECT_LOCATION_HAS_INDEX",
+      "kind": "integer",
+      "rust_type": "clap_project_location_flags",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_PROJECT_LOCATION_HAS_COLOR",
+      "kind": "integer",
+      "rust_type": "clap_project_location_flags",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_EXT_RESOURCE_DIRECTORY",
+      "kind": "string",
+      "rust_type": "& :: core :: ffi :: CStr",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_EXT_SCRATCH_MEMORY",
+      "kind": "string",
+      "rust_type": "& :: core :: ffi :: CStr",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_EXT_TRANSPORT_CONTROL",
+      "kind": "string",
+      "rust_type": "& :: core :: ffi :: CStr",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_EXT_TRIGGERS",
+      "kind": "string",
+      "rust_type": "& :: core :: ffi :: CStr",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_TRIGGER_IS_AUTOMATABLE_PER_NOTE_ID",
+      "kind": "integer",
+      "rust_type": "_bindgen_ty_21",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_TRIGGER_IS_AUTOMATABLE_PER_KEY",
+      "kind": "integer",
+      "rust_type": "_bindgen_ty_21",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_TRIGGER_IS_AUTOMATABLE_PER_CHANNEL",
+      "kind": "integer",
+      "rust_type": "_bindgen_ty_21",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_TRIGGER_IS_AUTOMATABLE_PER_PORT",
+      "kind": "integer",
+      "rust_type": "_bindgen_ty_21",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_EVENT_TRIGGER",
+      "kind": "integer",
+      "rust_type": "_bindgen_ty_22",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_TRIGGER_RESCAN_INFO",
+      "kind": "integer",
+      "rust_type": "_bindgen_ty_23",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_TRIGGER_RESCAN_ALL",
+      "kind": "integer",
+      "rust_type": "_bindgen_ty_23",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_TRIGGER_CLEAR_ALL",
+      "kind": "integer",
+      "rust_type": "_bindgen_ty_24",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_TRIGGER_CLEAR_AUTOMATIONS",
+      "kind": "integer",
+      "rust_type": "_bindgen_ty_24",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_EXT_TUNING",
+      "kind": "string",
+      "rust_type": "& :: core :: ffi :: CStr",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_EXT_UNDO",
+      "kind": "string",
+      "rust_type": "& :: core :: ffi :: CStr",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_EXT_UNDO_CONTEXT",
+      "kind": "string",
+      "rust_type": "& :: core :: ffi :: CStr",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_EXT_UNDO_DELTA",
+      "kind": "string",
+      "rust_type": "& :: core :: ffi :: CStr",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_EXT_WEBVIEW",
+      "kind": "string",
+      "rust_type": "& :: core :: ffi :: CStr",
+      "unsigned": false
+    },
+    {
+      "name": "CLAP_WINDOW_API_WEBVIEW",
+      "kind": "string",
+      "rust_type": "& :: core :: ffi :: CStr",
+      "unsigned": false
+    }
+  ],
+  "symbols": [
+    "CLAP_AMBISONIC_NORMALIZATION_MAXN",
+    "CLAP_AMBISONIC_NORMALIZATION_N2D",
+    "CLAP_AMBISONIC_NORMALIZATION_N3D",
+    "CLAP_AMBISONIC_NORMALIZATION_SN2D",
+    "CLAP_AMBISONIC_NORMALIZATION_SN3D",
+    "CLAP_AMBISONIC_ORDERING_ACN",
+    "CLAP_AMBISONIC_ORDERING_FUMA",
+    "CLAP_AUDIO_PORTS_RESCAN_CHANNEL_COUNT",
+    "CLAP_AUDIO_PORTS_RESCAN_FLAGS",
+    "CLAP_AUDIO_PORTS_RESCAN_IN_PLACE_PAIR",
+    "CLAP_AUDIO_PORTS_RESCAN_LIST",
+    "CLAP_AUDIO_PORTS_RESCAN_NAMES",
+    "CLAP_AUDIO_PORTS_RESCAN_PORT_TYPE",
+    "CLAP_AUDIO_PORT_IS_MAIN",
+    "CLAP_AUDIO_PORT_PREFERS_64BITS",
+    "CLAP_AUDIO_PORT_REQUIRES_COMMON_SAMPLE_SIZE",
+    "CLAP_AUDIO_PORT_SUPPORTS_64BITS",
+    "CLAP_BEATTIME_FACTOR",
+    "CLAP_CONTEXT_MENU_ITEM_BEGIN_SUBMENU",
+    "CLAP_CONTEXT_MENU_ITEM_CHECK_ENTRY",
+    "CLAP_CONTEXT_MENU_ITEM_END_SUBMENU",
+    "CLAP_CONTEXT_MENU_ITEM_ENTRY",
+    "CLAP_CONTEXT_MENU_ITEM_SEPARATOR",
+    "CLAP_CONTEXT_MENU_ITEM_TITLE",
+    "CLAP_CONTEXT_MENU_TARGET_KIND_GLOBAL",
+    "CLAP_CONTEXT_MENU_TARGET_KIND_PARAM",
+    "CLAP_CORE_EVENT_SPACE_ID",
+    "CLAP_EVENT_DONT_RECORD",
+    "CLAP_EVENT_IS_LIVE",
+    "CLAP_EVENT_MIDI",
+    "CLAP_EVENT_MIDI2",
+    "CLAP_EVENT_MIDI_SYSEX",
+    "CLAP_EVENT_NOTE_CHOKE",
+    "CLAP_EVENT_NOTE_END",
+    "CLAP_EVENT_NOTE_EXPRESSION",
+    "CLAP_EVENT_NOTE_OFF",
+    "CLAP_EVENT_NOTE_ON",
+    "CLAP_EVENT_PARAM_GESTURE_BEGIN",
+    "CLAP_EVENT_PARAM_GESTURE_END",
+    "CLAP_EVENT_PARAM_MOD",
+    "CLAP_EVENT_PARAM_VALUE",
+    "CLAP_EVENT_TRANSPORT",
+    "CLAP_EVENT_TRIGGER",
+    "CLAP_EXT_AMBISONIC",
+    "CLAP_EXT_AMBISONIC_COMPAT",
+    "CLAP_EXT_AUDIO_PORTS",
+    "CLAP_EXT_AUDIO_PORTS_ACTIVATION",
+    "CLAP_EXT_AUDIO_PORTS_ACTIVATION_COMPAT",
+    "CLAP_EXT_AUDIO_PORTS_CONFIG",
+    "CLAP_EXT_AUDIO_PORTS_CONFIG_INFO",
+    "CLAP_EXT_AUDIO_PORTS_CONFIG_INFO_COMPAT",
+    "CLAP_EXT_BACKGROUND_ACTIVATION",
+    "CLAP_EXT_BACKGROUND_PROGRESS",
+    "CLAP_EXT_BACKGROUND_STATE_CONTEXT",
+    "CLAP_EXT_CONFIGURABLE_AUDIO_PORTS",
+    "CLAP_EXT_CONFIGURABLE_AUDIO_PORTS_COMPAT",
+    "CLAP_EXT_CONTEXT_MENU",
+    "CLAP_EXT_CONTEXT_MENU_COMPAT",
+    "CLAP_EXT_EVENT_REGISTRY",
+    "CLAP_EXT_EXTENSIBLE_AUDIO_PORTS",
+    "CLAP_EXT_FLUSH_EVENTS",
+    "CLAP_EXT_GAIN_ADJUSTMENT_METERING",
+    "CLAP_EXT_GUI",
+    "CLAP_EXT_LATENCY",
+    "CLAP_EXT_LOG",
+    "CLAP_EXT_MINI_CURVE_DISPLAY",
+    "CLAP_EXT_NOTE_NAME",
+    "CLAP_EXT_NOTE_PORTS",
+    "CLAP_EXT_OCTAVE_NUMBER",
+    "CLAP_EXT_PARAMS",
+    "CLAP_EXT_PARAMS_ORIGIN",
+    "CLAP_EXT_PARAM_HOVERED",
+    "CLAP_EXT_PARAM_INDICATION",
+    "CLAP_EXT_PARAM_INDICATION_COMPAT",
+    "CLAP_EXT_POSIX_FD_SUPPORT",
+    "CLAP_EXT_PRESET_LOAD",
+    "CLAP_EXT_PRESET_LOAD_COMPAT",
+    "CLAP_EXT_PROJECT_LOCATION",
+    "CLAP_EXT_REMOTE_CONTROLS",
+    "CLAP_EXT_REMOTE_CONTROLS_COMPAT",
+    "CLAP_EXT_RENDER",
+    "CLAP_EXT_RESOURCE_DIRECTORY",
+    "CLAP_EXT_SCRATCH_MEMORY",
+    "CLAP_EXT_STATE",
+    "CLAP_EXT_STATE_CONTEXT",
+    "CLAP_EXT_SURROUND",
+    "CLAP_EXT_SURROUND_COMPAT",
+    "CLAP_EXT_TAIL",
+    "CLAP_EXT_THREAD_CHECK",
+    "CLAP_EXT_THREAD_POOL",
+    "CLAP_EXT_TIMER_SUPPORT",
+    "CLAP_EXT_TRACK_INFO",
+    "CLAP_EXT_TRACK_INFO_COMPAT",
+    "CLAP_EXT_TRANSPORT_CONTROL",
+    "CLAP_EXT_TRIGGERS",
+    "CLAP_EXT_TUNING",
+    "CLAP_EXT_UNDO",
+    "CLAP_EXT_UNDO_CONTEXT",
+    "CLAP_EXT_UNDO_DELTA",
+    "CLAP_EXT_VOICE_INFO",
+    "CLAP_EXT_WEBVIEW",
+    "CLAP_INVALID_ID",
+    "CLAP_LOG_DEBUG",
+    "CLAP_LOG_ERROR",
+    "CLAP_LOG_FATAL",
+    "CLAP_LOG_HOST_MISBEHAVING",
+    "CLAP_LOG_INFO",
+    "CLAP_LOG_PLUGIN_MISBEHAVING",
+    "CLAP_LOG_WARNING",
+    "CLAP_MINI_CURVE_DISPLAY_AXIS_NAME_CHANGED",
+    "CLAP_MINI_CURVE_DISPLAY_CURVE_CHANGED",
+    "CLAP_MINI_CURVE_DISPLAY_CURVE_KIND_GAIN_REDUCTION",
+    "CLAP_MINI_CURVE_DISPLAY_CURVE_KIND_GAIN_RESPONSE",
+    "CLAP_MINI_CURVE_DISPLAY_CURVE_KIND_PHASE_RESPONSE",
+    "CLAP_MINI_CURVE_DISPLAY_CURVE_KIND_TIME_SERIES",
+    "CLAP_MINI_CURVE_DISPLAY_CURVE_KIND_TRANSFER_CURVE",
+    "CLAP_MINI_CURVE_DISPLAY_CURVE_KIND_UNSPECIFIED",
+    "CLAP_NAME_SIZE",
+    "CLAP_NOTE_DIALECT_CLAP",
+    "CLAP_NOTE_DIALECT_MIDI",
+    "CLAP_NOTE_DIALECT_MIDI2",
+    "CLAP_NOTE_DIALECT_MIDI_MPE",
+    "CLAP_NOTE_EXPRESSION_BRIGHTNESS",
+    "CLAP_NOTE_EXPRESSION_EXPRESSION",
+    "CLAP_NOTE_EXPRESSION_PAN",
+    "CLAP_NOTE_EXPRESSION_PRESSURE",
+    "CLAP_NOTE_EXPRESSION_TUNING",
+    "CLAP_NOTE_EXPRESSION_VIBRATO",
+    "CLAP_NOTE_EXPRESSION_VOLUME",
+    "CLAP_NOTE_PORTS_RESCAN_ALL",
+    "CLAP_NOTE_PORTS_RESCAN_NAMES",
+    "CLAP_PARAM_CLEAR_ALL",
+    "CLAP_PARAM_CLEAR_AUTOMATIONS",
+    "CLAP_PARAM_CLEAR_MODULATIONS",
+    "CLAP_PARAM_INDICATION_AUTOMATION_NONE",
+    "CLAP_PARAM_INDICATION_AUTOMATION_OVERRIDING",
+    "CLAP_PARAM_INDICATION_AUTOMATION_PLAYING",
+    "CLAP_PARAM_INDICATION_AUTOMATION_PRESENT",
+    "CLAP_PARAM_INDICATION_AUTOMATION_RECORDING",
+    "CLAP_PARAM_IS_AUTOMATABLE",
+    "CLAP_PARAM_IS_AUTOMATABLE_PER_CHANNEL",
+    "CLAP_PARAM_IS_AUTOMATABLE_PER_KEY",
+    "CLAP_PARAM_IS_AUTOMATABLE_PER_NOTE_ID",
+    "CLAP_PARAM_IS_AUTOMATABLE_PER_PORT",
+    "CLAP_PARAM_IS_BYPASS",
+    "CLAP_PARAM_IS_ENUM",
+    "CLAP_PARAM_IS_HIDDEN",
+    "CLAP_PARAM_IS_MODULATABLE",
+    "CLAP_PARAM_IS_MODULATABLE_PER_CHANNEL",
+    "CLAP_PARAM_IS_MODULATABLE_PER_KEY",
+    "CLAP_PARAM_IS_MODULATABLE_PER_NOTE_ID",
+    "CLAP_PARAM_IS_MODULATABLE_PER_PORT",
+    "CLAP_PARAM_IS_PERIODIC",
+    "CLAP_PARAM_IS_READONLY",
+    "CLAP_PARAM_IS_STEPPED",
+    "CLAP_PARAM_REQUIRES_PROCESS",
+    "CLAP_PARAM_RESCAN_ALL",
+    "CLAP_PARAM_RESCAN_INFO",
+    "CLAP_PARAM_RESCAN_TEXT",
+    "CLAP_PARAM_RESCAN_VALUES",
+    "CLAP_PATH_SIZE",
+    "CLAP_PLUGIN_FACTORY_ID",
+    "CLAP_PLUGIN_FEATURE_AMBISONIC",
+    "CLAP_PLUGIN_FEATURE_ANALYZER",
+    "CLAP_PLUGIN_FEATURE_AUDIO_EFFECT",
+    "CLAP_PLUGIN_FEATURE_CHORUS",
+    "CLAP_PLUGIN_FEATURE_COMPRESSOR",
+    "CLAP_PLUGIN_FEATURE_DEESSER",
+    "CLAP_PLUGIN_FEATURE_DELAY",
+    "CLAP_PLUGIN_FEATURE_DISTORTION",
+    "CLAP_PLUGIN_FEATURE_DRUM",
+    "CLAP_PLUGIN_FEATURE_DRUM_MACHINE",
+    "CLAP_PLUGIN_FEATURE_EQUALIZER",
+    "CLAP_PLUGIN_FEATURE_EXPANDER",
+    "CLAP_PLUGIN_FEATURE_FILTER",
+    "CLAP_PLUGIN_FEATURE_FLANGER",
+    "CLAP_PLUGIN_FEATURE_FREQUENCY_SHIFTER",
+    "CLAP_PLUGIN_FEATURE_GATE",
+    "CLAP_PLUGIN_FEATURE_GLITCH",
+    "CLAP_PLUGIN_FEATURE_GRANULAR",
+    "CLAP_PLUGIN_FEATURE_INSTRUMENT",
+    "CLAP_PLUGIN_FEATURE_LIMITER",
+    "CLAP_PLUGIN_FEATURE_MASTERING",
+    "CLAP_PLUGIN_FEATURE_MIXING",
+    "CLAP_PLUGIN_FEATURE_MONO",
+    "CLAP_PLUGIN_FEATURE_MULTI_EFFECTS",
+    "CLAP_PLUGIN_FEATURE_NOTE_DETECTOR",
+    "CLAP_PLUGIN_FEATURE_NOTE_EFFECT",
+    "CLAP_PLUGIN_FEATURE_PHASER",
+    "CLAP_PLUGIN_FEATURE_PHASE_VOCODER",
+    "CLAP_PLUGIN_FEATURE_PITCH_CORRECTION",
+    "CLAP_PLUGIN_FEATURE_PITCH_SHIFTER",
+    "CLAP_PLUGIN_FEATURE_RESTORATION",
+    "CLAP_PLUGIN_FEATURE_REVERB",
+    "CLAP_PLUGIN_FEATURE_SAMPLER",
+    "CLAP_PLUGIN_FEATURE_STEREO",
+    "CLAP_PLUGIN_FEATURE_SURROUND",
+    "CLAP_PLUGIN_FEATURE_SYNTHESIZER",
+    "CLAP_PLUGIN_FEATURE_TRANSIENT_SHAPER",
+    "CLAP_PLUGIN_FEATURE_TREMOLO",
+    "CLAP_PLUGIN_FEATURE_UTILITY",
+    "CLAP_PLUGIN_INVALIDATION_FACTORY_ID",
+    "CLAP_PLUGIN_STATE_CONVERTER_FACTORY_ID",
+    "CLAP_PORT_AMBISONIC",
+    "CLAP_PORT_MONO",
+    "CLAP_PORT_STEREO",
+    "CLAP_PORT_SURROUND",
+    "CLAP_POSIX_FD_ERROR",
+    "CLAP_POSIX_FD_READ",
+    "CLAP_POSIX_FD_WRITE",
+    "CLAP_PRESET_DISCOVERY_FACTORY_ID",
+    "CLAP_PRESET_DISCOVERY_FACTORY_ID_COMPAT",
+    "CLAP_PRESET_DISCOVERY_IS_DEMO_CONTENT",
+    "CLAP_PRESET_DISCOVERY_IS_FACTORY_CONTENT",
+    "CLAP_PRESET_DISCOVERY_IS_FAVORITE",
+    "CLAP_PRESET_DISCOVERY_IS_USER_CONTENT",
+    "CLAP_PRESET_DISCOVERY_LOCATION_FILE",
+    "CLAP_PRESET_DISCOVERY_LOCATION_PLUGIN",
+    "CLAP_PROCESS_CONTINUE",
+    "CLAP_PROCESS_CONTINUE_IF_NOT_QUIET",
+    "CLAP_PROCESS_ERROR",
+    "CLAP_PROCESS_SLEEP",
+    "CLAP_PROCESS_TAIL",
+    "CLAP_PROJECT_LOCATION_AUDIO_TRACK",
+    "CLAP_PROJECT_LOCATION_DEVICE",
+    "CLAP_PROJECT_LOCATION_HAS_COLOR",
+    "CLAP_PROJECT_LOCATION_HAS_INDEX",
+    "CLAP_PROJECT_LOCATION_HYBRID_TRACK",
+    "CLAP_PROJECT_LOCATION_INSTUMENT_TRACK",
+    "CLAP_PROJECT_LOCATION_MASTER_TRACK",
+    "CLAP_PROJECT_LOCATION_NESTED_DEVICE_CHAIN",
+    "CLAP_PROJECT_LOCATION_PROJECT",
+    "CLAP_PROJECT_LOCATION_RETURN_TRACK",
+    "CLAP_PROJECT_LOCATION_TRACK",
+    "CLAP_PROJECT_LOCATION_TRACK_GROUP",
+    "CLAP_REMOTE_CONTROLS_COUNT",
+    "CLAP_RENDER_OFFLINE",
+    "CLAP_RENDER_REALTIME",
+    "CLAP_SECTIME_FACTOR",
+    "CLAP_STATE_CONTEXT_FOR_DUPLICATE",
+    "CLAP_STATE_CONTEXT_FOR_PRESET",
+    "CLAP_STATE_CONTEXT_FOR_PROJECT",
+    "CLAP_SURROUND_BC",
+    "CLAP_SURROUND_BL",
+    "CLAP_SURROUND_BR",
+    "CLAP_SURROUND_FC",
+    "CLAP_SURROUND_FL",
+    "CLAP_SURROUND_FLC",
+    "CLAP_SURROUND_FR",
+    "CLAP_SURROUND_FRC",
+    "CLAP_SURROUND_LFE",
+    "CLAP_SURROUND_SL",
+    "CLAP_SURROUND_SR",
+    "CLAP_SURROUND_TBC",
+    "CLAP_SURROUND_TBL",
+    "CLAP_SURROUND_TBR",
+    "CLAP_SURROUND_TC",
+    "CLAP_SURROUND_TFC",
+    "CLAP_SURROUND_TFL",
+    "CLAP_SURROUND_TFR",
+    "CLAP_SURROUND_TSL",
+    "CLAP_SURROUND_TSR",
+    "CLAP_TIMESTAMP_UNKNOWN",
+    "CLAP_TRACK_INFO_HAS_AUDIO_CHANNEL",
+    "CLAP_TRACK_INFO_HAS_TRACK_COLOR",
+    "CLAP_TRACK_INFO_HAS_TRACK_NAME",
+    "CLAP_TRACK_INFO_IS_FOR_BUS",
+    "CLAP_TRACK_INFO_IS_FOR_MASTER",
+    "CLAP_TRACK_INFO_IS_FOR_RETURN_TRACK",
+    "CLAP_TRANSPORT_HAS_BEATS_TIMELINE",
+    "CLAP_TRANSPORT_HAS_SECONDS_TIMELINE",
+    "CLAP_TRANSPORT_HAS_TEMPO",
+    "CLAP_TRANSPORT_HAS_TIME_SIGNATURE",
+    "CLAP_TRANSPORT_IS_LOOP_ACTIVE",
+    "CLAP_TRANSPORT_IS_PLAYING",
+    "CLAP_TRANSPORT_IS_RECORDING",
+    "CLAP_TRANSPORT_IS_WITHIN_PRE_ROLL",
+    "CLAP_TRIGGER_CLEAR_ALL",
+    "CLAP_TRIGGER_CLEAR_AUTOMATIONS",
+    "CLAP_TRIGGER_IS_AUTOMATABLE_PER_CHANNEL",
+    "CLAP_TRIGGER_IS_AUTOMATABLE_PER_KEY",
+    "CLAP_TRIGGER_IS_AUTOMATABLE_PER_NOTE_ID",
+    "CLAP_TRIGGER_IS_AUTOMATABLE_PER_PORT",
+    "CLAP_TRIGGER_RESCAN_ALL",
+    "CLAP_TRIGGER_RESCAN_INFO",
+    "CLAP_VERSION_MAJOR",
+    "CLAP_VERSION_MINOR",
+    "CLAP_VERSION_REVISION",
+    "CLAP_VOICE_INFO_SUPPORTS_OVERLAPPING_NOTES",
+    "CLAP_WINDOW_API_COCOA",
+    "CLAP_WINDOW_API_UIKIT",
+    "CLAP_WINDOW_API_WAYLAND",
+    "CLAP_WINDOW_API_WEBVIEW",
+    "CLAP_WINDOW_API_WIN32",
+    "CLAP_WINDOW_API_X11",
+    "_bindgen_ty_1",
+    "_bindgen_ty_10",
+    "_bindgen_ty_11",
+    "_bindgen_ty_12",
+    "_bindgen_ty_13",
+    "_bindgen_ty_14",
+    "_bindgen_ty_15",
+    "_bindgen_ty_16",
+    "_bindgen_ty_17",
+    "_bindgen_ty_18",
+    "_bindgen_ty_19",
+    "_bindgen_ty_2",
+    "_bindgen_ty_20",
+    "_bindgen_ty_21",
+    "_bindgen_ty_22",
+    "_bindgen_ty_23",
+    "_bindgen_ty_24",
+    "_bindgen_ty_3",
+    "_bindgen_ty_4",
+    "_bindgen_ty_5",
+    "_bindgen_ty_6",
+    "_bindgen_ty_7",
+    "_bindgen_ty_8",
+    "_bindgen_ty_9",
+    "clap_ambisonic_config",
+    "clap_ambisonic_config_t",
+    "clap_ambisonic_normalization",
+    "clap_ambisonic_ordering",
+    "clap_audio_buffer",
+    "clap_audio_buffer_t",
+    "clap_audio_port_configuration_request",
+    "clap_audio_port_configuration_request_t",
+    "clap_audio_port_info",
+    "clap_audio_port_info_t",
+    "clap_audio_ports_config",
+    "clap_audio_ports_config_t",
+    "clap_beattime",
+    "clap_color",
+    "clap_color_t",
+    "clap_context_menu_builder",
+    "clap_context_menu_builder_t",
+    "clap_context_menu_check_entry",
+    "clap_context_menu_check_entry_t",
+    "clap_context_menu_entry",
+    "clap_context_menu_entry_t",
+    "clap_context_menu_item_kind_t",
+    "clap_context_menu_item_title",
+    "clap_context_menu_item_title_t",
+    "clap_context_menu_submenu",
+    "clap_context_menu_submenu_t",
+    "clap_context_menu_target",
+    "clap_context_menu_target_t",
+    "clap_entry",
+    "clap_event_flags",
+    "clap_event_header",
+    "clap_event_header_t",
+    "clap_event_midi",
+    "clap_event_midi2",
+    "clap_event_midi2_t",
+    "clap_event_midi_sysex",
+    "clap_event_midi_sysex_t",
+    "clap_event_midi_t",
+    "clap_event_note",
+    "clap_event_note_expression",
+    "clap_event_note_expression_t",
+    "clap_event_note_t",
+    "clap_event_param_gesture",
+    "clap_event_param_gesture_t",
+    "clap_event_param_mod",
+    "clap_event_param_mod_t",
+    "clap_event_param_value",
+    "clap_event_param_value_t",
+    "clap_event_transport",
+    "clap_event_transport_t",
+    "clap_event_trigger",
+    "clap_event_trigger_t",
+    "clap_event_tuning",
+    "clap_event_tuning_t",
+    "clap_gui_resize_hints",
+    "clap_gui_resize_hints_t",
+    "clap_host",
+    "clap_host_ambisonic",
+    "clap_host_ambisonic_t",
+    "clap_host_audio_ports",
+    "clap_host_audio_ports_config",
+    "clap_host_audio_ports_config_t",
+    "clap_host_audio_ports_t",
+    "clap_host_background_progress",
+    "clap_host_background_progress_t",
+    "clap_host_context_menu",
+    "clap_host_context_menu_t",
+    "clap_host_event_registry",
+    "clap_host_event_registry_t",
+    "clap_host_flush_events",
+    "clap_host_flush_events_t",
+    "clap_host_gui",
+    "clap_host_gui_t",
+    "clap_host_latency",
+    "clap_host_latency_t",
+    "clap_host_log",
+    "clap_host_log_t",
+    "clap_host_mini_curve_display",
+    "clap_host_mini_curve_display_t",
+    "clap_host_note_name",
+    "clap_host_note_name_t",
+    "clap_host_note_ports",
+    "clap_host_note_ports_t",
+    "clap_host_param_hovered",
+    "clap_host_param_hovered_t",
+    "clap_host_params",
+    "clap_host_params_origin",
+    "clap_host_params_origin_t",
+    "clap_host_params_t",
+    "clap_host_posix_fd_support",
+    "clap_host_posix_fd_support_t",
+    "clap_host_preset_load",
+    "clap_host_preset_load_t",
+    "clap_host_remote_controls",
+    "clap_host_remote_controls_t",
+    "clap_host_resource_directory",
+    "clap_host_resource_directory_t",
+    "clap_host_scratch_memory",
+    "clap_host_scratch_memory_t",
+    "clap_host_state",
+    "clap_host_state_t",
+    "clap_host_surround",
+    "clap_host_surround_t",
+    "clap_host_t",
+    "clap_host_tail",
+    "clap_host_tail_t",
+    "clap_host_thread_check",
+    "clap_host_thread_check_t",
+    "clap_host_thread_pool",
+    "clap_host_thread_pool_t",
+    "clap_host_timer_support",
+    "clap_host_timer_support_t",
+    "clap_host_track_info",
+    "clap_host_track_info_t",
+    "clap_host_transport_control",
+    "clap_host_transport_control_t",
+    "clap_host_triggers",
+    "clap_host_triggers_t",
+    "clap_host_tuning",
+    "clap_host_tuning_t",
+    "clap_host_undo",
+    "clap_host_undo_t",
+    "clap_host_voice_info",
+    "clap_host_voice_info_t",
+    "clap_host_webview",
+    "clap_host_webview_t",
+    "clap_hwnd",
+    "clap_id",
+    "clap_input_events",
+    "clap_input_events_t",
+    "clap_istream",
+    "clap_istream_t",
+    "clap_log_severity",
+    "clap_mini_curve_display_change_flags",
+    "clap_mini_curve_display_curve_data",
+    "clap_mini_curve_display_curve_data_t",
+    "clap_mini_curve_display_curve_hints",
+    "clap_mini_curve_display_curve_hints_t",
+    "clap_mini_curve_display_curve_kind",
+    "clap_note_dialect",
+    "clap_note_expression",
+    "clap_note_name",
+    "clap_note_name_t",
+    "clap_note_port_info",
+    "clap_note_port_info_t",
+    "clap_nsview",
+    "clap_ostream",
+    "clap_ostream_t",
+    "clap_output_events",
+    "clap_output_events_t",
+    "clap_param_clear_flags",
+    "clap_param_info",
+    "clap_param_info_flags",
+    "clap_param_info_t",
+    "clap_param_rescan_flags",
+    "clap_plugin",
+    "clap_plugin_ambisonic",
+    "clap_plugin_ambisonic_t",
+    "clap_plugin_audio_ports",
+    "clap_plugin_audio_ports_activation",
+    "clap_plugin_audio_ports_activation_t",
+    "clap_plugin_audio_ports_config",
+    "clap_plugin_audio_ports_config_info",
+    "clap_plugin_audio_ports_config_info_t",
+    "clap_plugin_audio_ports_config_t",
+    "clap_plugin_audio_ports_t",
+    "clap_plugin_background_activation",
+    "clap_plugin_background_activation_t",
+    "clap_plugin_background_state_context",
+    "clap_plugin_background_state_context_t",
+    "clap_plugin_configurable_audio_ports",
+    "clap_plugin_configurable_audio_ports_t",
+    "clap_plugin_context_menu",
+    "clap_plugin_context_menu_t",
+    "clap_plugin_descriptor",
+    "clap_plugin_descriptor_t",
+    "clap_plugin_entry",
+    "clap_plugin_entry_t",
+    "clap_plugin_extensible_audio_ports",
+    "clap_plugin_extensible_audio_ports_t",
+    "clap_plugin_factory",
+    "clap_plugin_factory_t",
+    "clap_plugin_flush_events",
+    "clap_plugin_flush_events_t",
+    "clap_plugin_gain_adjustment_metering",
+    "clap_plugin_gain_adjustment_metering_t",
+    "clap_plugin_gui",
+    "clap_plugin_gui_t",
+    "clap_plugin_invalidation_factory",
+    "clap_plugin_invalidation_factory_t",
+    "clap_plugin_invalidation_source",
+    "clap_plugin_invalidation_source_t",
+    "clap_plugin_latency",
+    "clap_plugin_latency_t",
+    "clap_plugin_mini_curve_display",
+    "clap_plugin_mini_curve_display_t",
+    "clap_plugin_note_name",
+    "clap_plugin_note_name_t",
+    "clap_plugin_note_ports",
+    "clap_plugin_note_ports_t",
+    "clap_plugin_octave_number",
+    "clap_plugin_octave_number_t",
+    "clap_plugin_param_indication",
+    "clap_plugin_param_indication_t",
+    "clap_plugin_params",
+    "clap_plugin_params_origin",
+    "clap_plugin_params_origin_t",
+    "clap_plugin_params_t",
+    "clap_plugin_posix_fd_support",
+    "clap_plugin_posix_fd_support_t",
+    "clap_plugin_preset_load",
+    "clap_plugin_preset_load_t",
+    "clap_plugin_project_location",
+    "clap_plugin_project_location_t",
+    "clap_plugin_remote_controls",
+    "clap_plugin_remote_controls_t",
+    "clap_plugin_render",
+    "clap_plugin_render_mode",
+    "clap_plugin_render_t",
+    "clap_plugin_resource_directory",
+    "clap_plugin_resource_directory_t",
+    "clap_plugin_state",
+    "clap_plugin_state_context",
+    "clap_plugin_state_context_t",
+    "clap_plugin_state_context_type",
+    "clap_plugin_state_converter",
+    "clap_plugin_state_converter_descriptor",
+    "clap_plugin_state_converter_descriptor_t",
+    "clap_plugin_state_converter_factory",
+    "clap_plugin_state_converter_factory_t",
+    "clap_plugin_state_converter_t",
+    "clap_plugin_state_t",
+    "clap_plugin_surround",
+    "clap_plugin_surround_t",
+    "clap_plugin_t",
+    "clap_plugin_tail",
+    "clap_plugin_tail_t",
+    "clap_plugin_thread_pool",
+    "clap_plugin_thread_pool_t",
+    "clap_plugin_timer_support",
+    "clap_plugin_timer_support_t",
+    "clap_plugin_track_info",
+    "clap_plugin_track_info_t",
+    "clap_plugin_triggers",
+    "clap_plugin_triggers_t",
+    "clap_plugin_tuning",
+    "clap_plugin_tuning_t",
+    "clap_plugin_undo_context",
+    "clap_plugin_undo_context_t",
+    "clap_plugin_undo_delta",
+    "clap_plugin_undo_delta_t",
+    "clap_plugin_voice_info",
+    "clap_plugin_voice_info_t",
+    "clap_plugin_webview",
+    "clap_plugin_webview_t",
+    "clap_posix_fd_flags_t",
+    "clap_preset_discovery_factory",
+    "clap_preset_discovery_factory_t",
+    "clap_preset_discovery_filetype",
+    "clap_preset_discovery_filetype_t",
+    "clap_preset_discovery_flags",
+    "clap_preset_discovery_indexer",
+    "clap_preset_discovery_indexer_t",
+    "clap_preset_discovery_location",
+    "clap_preset_discovery_location_kind",
+    "clap_preset_discovery_location_t",
+    "clap_preset_discovery_metadata_receiver",
+    "clap_preset_discovery_metadata_receiver_t",
+    "clap_preset_discovery_provider",
+    "clap_preset_discovery_provider_descriptor",
+    "clap_preset_discovery_provider_descriptor_t",
+    "clap_preset_discovery_provider_t",
+    "clap_preset_discovery_soundpack",
+    "clap_preset_discovery_soundpack_t",
+    "clap_process",
+    "clap_process_status",
+    "clap_process_t",
+    "clap_project_location_element",
+    "clap_project_location_element_t",
+    "clap_project_location_flags",
+    "clap_project_location_kind",
+    "clap_project_location_track_kind",
+    "clap_remote_controls_page",
+    "clap_remote_controls_page_t",
+    "clap_sectime",
+    "clap_timestamp",
+    "clap_track_info",
+    "clap_track_info_t",
+    "clap_transport_flags",
+    "clap_trigger_clear_flags",
+    "clap_trigger_info",
+    "clap_trigger_info_flags",
+    "clap_trigger_info_t",
+    "clap_trigger_rescan_flags",
+    "clap_tuning_info",
+    "clap_tuning_info_t",
+    "clap_uiview",
+    "clap_undo_delta_properties",
+    "clap_undo_delta_properties_t",
+    "clap_universal_plugin_id",
+    "clap_universal_plugin_id_t",
+    "clap_version",
+    "clap_version_t",
+    "clap_voice_info",
+    "clap_voice_info_t",
+    "clap_window",
+    "clap_window__bindgen_ty_1",
+    "clap_window_t",
+    "clap_xwnd"
+  ],
+  "callback_signature_assertions": 228,
+  "anonymous_union_policy": "whole official clap_window size/alignment and each native anonymous member offset checked; generated union helper is not falsely named as an independent published C type"
+}

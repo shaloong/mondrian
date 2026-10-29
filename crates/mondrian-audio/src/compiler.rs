@@ -1,28 +1,181 @@
 use crate::plan::{
-    AudioCompileRequest, CompiledAudioContribution, CompiledAudioProgram, CompiledAudioSource,
-    CompiledChannelStrip, CompiledProcessingScope, CompiledProcessor,
-    CompiledProcessorSidechainRoute, CompiledRack, CompiledRoute, CompiledSourceTimeMap,
-    CompiledTrackChannel, CompiledTransition,
+    AudioCompileRequest, CompiledAudioContribution, CompiledAudioGraph, CompiledAudioProgram,
+    CompiledAudioSource, CompiledChannelStrip, CompiledNoteLane, CompiledNoteStorageRequest,
+    CompiledProcessingScope, CompiledProcessor, CompiledProcessorSidechainRoute, CompiledRack,
+    CompiledRoute, CompiledSourceTimeMap, CompiledTrackChannel, CompiledTransition,
 };
-use mondrian_core::{AudioProcessingScopeId, MixBusId, ProgramOutputId, TrackId};
+use mondrian_core::{
+    AudioNoteId, AudioNoteLaneId, AudioProcessingScopeId, AudioProcessorInstanceId, MixBusId,
+    ProgramOutputId, TrackId,
+};
 use mondrian_timeline::audio::{
     AudioChannelStrip, AudioChannelStripOutputPort, AudioComponentSource, AudioProcessorRack,
-    AudioProcessorSidechainRoute, AudioProgramOutput, AudioRoute, AudioRouteDestination,
-    AudioRouteSource, ProgramOutputMainSource,
+    AudioProcessorSidechainRoute, AudioProgramOutput, AudioRouteDestination, AudioRouteSource,
+    ProgramOutputMainSource,
 };
 use mondrian_timeline::{AudioAuthoringError, Sequence};
 use std::collections::{BTreeMap, BTreeSet};
+
+// Fresh compiler-owned Note payload acceptance; no Runtime grant or retained A.
+fn compiled_note_array_bytes<T>(count: usize) -> Result<usize, AudioCompileError> {
+    std::alloc::Layout::array::<T>(count)
+        .map(|layout| layout.size())
+        .map_err(|_| AudioCompileError::NoteEventCountOverflow)
+}
+
+fn compiled_note_payload_bytes(
+    lanes: usize,
+    note_bytes: usize,
+    key_bytes: usize,
+) -> Result<usize, AudioCompileError> {
+    compiled_note_array_bytes::<CompiledNoteLane>(lanes)?
+        .checked_add(note_bytes)
+        .and_then(|bytes| bytes.checked_add(key_bytes))
+        .ok_or(AudioCompileError::NoteEventCountOverflow)
+}
+
+fn requested_compiled_note_payload<'a>(
+    mut lanes: impl Iterator<Item = &'a mondrian_timeline::audio::AudioNoteLane>,
+) -> Result<CompiledNoteStorageRequest, AudioCompileError> {
+    let (count, note_bytes, key_bytes, events) = lanes.try_fold(
+        (0_usize, 0_usize, 0_usize, 0_usize),
+        |(count, notes, keys, events), lane| {
+            Ok::<_, AudioCompileError>((
+                count.checked_add(1).ok_or(AudioCompileError::NoteEventCountOverflow)?,
+                notes
+                    .checked_add(compiled_note_array_bytes::<
+                        mondrian_timeline::audio::AudioNote,
+                    >(lane.notes.len())?)
+                    .ok_or(AudioCompileError::NoteEventCountOverflow)?,
+                keys.checked_add(lane.target.input_port_key.len())
+                    .ok_or(AudioCompileError::NoteEventCountOverflow)?,
+                lane.notes
+                    .len()
+                    .checked_mul(2)
+                    .and_then(|count| events.checked_add(count))
+                    .ok_or(AudioCompileError::NoteEventCountOverflow)?,
+            ))
+        },
+    )?;
+    Ok(CompiledNoteStorageRequest {
+        lanes: count,
+        events,
+        key_bytes,
+        compiler_bytes: compiled_note_payload_bytes(count, note_bytes, key_bytes)?,
+    })
+}
+
+fn require_compiled_note_capacity(
+    actual: usize,
+    requested: usize,
+) -> Result<(), AudioCompileError> {
+    if actual > requested {
+        return Err(AudioCompileError::InvalidPreparedGraph(
+            "compiled Note storage capacity exceeds request".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn reserve_compiled_note_rows<T>(count: usize) -> Result<Vec<T>, AudioCompileError> {
+    compiled_note_array_bytes::<T>(count)?;
+    let mut values = Vec::new();
+    values.try_reserve_exact(count).map_err(|_| {
+        AudioCompileError::InvalidPreparedGraph(
+            "compiled Note storage allocation refused".to_owned(),
+        )
+    })?;
+    require_compiled_note_capacity(values.capacity(), count)?;
+    Ok(values)
+}
+
+fn require_compiled_note_payload(actual: usize, requested: usize) -> Result<(), AudioCompileError> {
+    if actual > requested {
+        return Err(AudioCompileError::InvalidPreparedGraph(
+            "compiled Note payload exceeds request".to_owned(),
+        ));
+    }
+    Ok(())
+}
 
 /// Compile one public output from the validated Track/Clip placement authority.
 pub fn compile_audio_program(
     sequence: &Sequence,
     request: AudioCompileRequest,
 ) -> Result<CompiledAudioProgram, AudioCompileError> {
-    sequence.audio_program.validate(
-        &sequence.audio_tracks,
-        &sequence.audio_roles,
-        sequence.settings.audio_channel_layout,
-    )?;
+    compile_audio_program_with_note_admission(sequence, request, |_, _| {
+        Ok::<(), AudioCompileError>(())
+    })
+    .map(|(program, _)| program)
+}
+
+/// The sole Runtime caller supplies admission before selected Note ownership.
+/// The receipt leaves this function only with the complete, accepted Program.
+pub(crate) fn compile_audio_program_with_note_admission<R, E>(
+    sequence: &Sequence,
+    request: AudioCompileRequest,
+    admit: impl FnOnce(CompiledAudioGraph<'_>, CompiledNoteStorageRequest) -> Result<R, E>,
+) -> Result<(CompiledAudioProgram, Option<R>), E>
+where
+    E: From<AudioCompileError>,
+{
+    match compile_audio_program_inner(sequence, request, admit, None)? {
+        AudioCompileStep::Program(program, receipt) => Ok((program, receipt)),
+        AudioCompileStep::GraphVisited => unreachable!("no graph visitor supplied"),
+    }
+}
+
+// This control result never publishes a graph with silently omitted Notes.
+#[expect(
+    clippy::large_enum_variant,
+    reason = "Cold compilation returns the existing Program by value; boxing would add a new heap owner."
+)]
+enum AudioCompileStep<R> {
+    Program(CompiledAudioProgram, Option<R>),
+    GraphVisited,
+}
+
+type AudioGraphVisitor<'visitor, E> =
+    dyn for<'graph> FnMut(CompiledAudioGraph<'graph>) -> Result<(), E> + 'visitor;
+
+/// Borrow the exact common non-Note projection before Note extent requests or
+/// ownership. Only cold dependency refusal uses this continuation; it creates
+/// no complete Program, grant, persistent cache or alternate routing model.
+pub(crate) fn visit_audio_program_graph<E>(
+    sequence: &Sequence,
+    request: AudioCompileRequest,
+    visitor: &mut AudioGraphVisitor<'_, E>,
+) -> Result<(), E>
+where
+    E: From<AudioCompileError>,
+{
+    match compile_audio_program_inner(sequence, request, |_, _| Ok(()), Some(visitor))? {
+        AudioCompileStep::GraphVisited => Ok(()),
+        AudioCompileStep::Program(_, _) => {
+            unreachable!("graph visitor always returns before Notes")
+        }
+    }
+}
+
+fn compile_audio_program_inner<R, E>(
+    sequence: &Sequence,
+    request: AudioCompileRequest,
+    admit: impl FnOnce(CompiledAudioGraph<'_>, CompiledNoteStorageRequest) -> Result<R, E>,
+    graph_visitor: Option<&mut AudioGraphVisitor<'_, E>>,
+) -> Result<AudioCompileStep<R>, E>
+where
+    E: From<AudioCompileError>,
+{
+    crate::processor::musical_tempo(sequence.audio_program.musical_time_reference)
+        .map_err(|error| AudioCompileError::InvalidPreparedGraph(error.to_string()))?;
+    sequence
+        .audio_program
+        .validate(
+            &sequence.audio_tracks,
+            &sequence.audio_roles,
+            sequence.settings.audio_channel_layout,
+        )
+        .map_err(AudioCompileError::from)?;
     let output = sequence
         .audio_program
         .outputs
@@ -30,7 +183,7 @@ pub fn compile_audio_program(
         .find(|output| output.id == request.output_id)
         .ok_or(AudioCompileError::OutputNotFound(request.output_id))?;
     if !matches!(output.main_source, ProgramOutputMainSource::RoutedInputs) {
-        return Err(AudioCompileError::SemanticProjectionNotExecutableYet);
+        return Err(AudioCompileError::SemanticProjectionNotExecutableYet.into());
     }
 
     let muted_tracks = sequence
@@ -44,18 +197,20 @@ pub fn compile_audio_program(
     let mut selected_sidechain_ids = BTreeSet::new();
     let (mut routes, mut required_tracks, required_buses) = loop {
         let (routes, mut required_tracks, required_buses) = resolve_signal_closure(
-            &sequence.audio_program.routes,
+            &sequence.audio_program,
             request.output_id,
             &sidechain_source_buses,
             &muted_tracks,
         );
         required_tracks.extend(sidechain_source_tracks.iter().copied());
         let post_fader_tracks = post_fader_tracks(
+            &sequence.audio_program,
             &routes,
             &sequence.audio_program.sidechain_routes,
             &selected_sidechain_ids,
         );
         let post_fader_buses = post_fader_buses(
+            &sequence.audio_program,
             &routes,
             &sequence.audio_program.sidechain_routes,
             &selected_sidechain_ids,
@@ -90,20 +245,24 @@ pub fn compile_audio_program(
             .sidechain_routes
             .iter()
             .filter(|route| selected.contains(&route.id))
-            .filter_map(|route| match route.source {
-                AudioRouteSource::Bus { bus_id, .. } => Some(bus_id),
-                AudioRouteSource::Track { .. } => None,
-            })
+            .filter_map(
+                |route| match channel_source(&sequence.audio_program, &route.source) {
+                    AudioRouteSource::Bus { bus_id, .. } => Some(bus_id),
+                    _ => None,
+                },
+            )
             .collect::<BTreeSet<_>>();
         let next_source_tracks = sequence
             .audio_program
             .sidechain_routes
             .iter()
             .filter(|route| selected.contains(&route.id))
-            .filter_map(|route| match route.source {
-                AudioRouteSource::Track { track_id, .. } => Some(track_id),
-                AudioRouteSource::Bus { .. } => None,
-            })
+            .filter_map(
+                |route| match channel_source(&sequence.audio_program, &route.source) {
+                    AudioRouteSource::Track { track_id, .. } => Some(track_id),
+                    _ => None,
+                },
+            )
             .collect::<BTreeSet<_>>();
         if selected == selected_sidechain_ids
             && next_source_buses == sidechain_source_buses
@@ -117,33 +276,64 @@ pub fn compile_audio_program(
     };
     if !request.audition.soloed_tracks.is_empty() {
         required_tracks.retain(|track| request.audition.soloed_tracks.contains(track));
-        routes.retain(|route| match route.source {
-            AudioRouteSource::Track { track_id, .. } => required_tracks.contains(&track_id),
-            AudioRouteSource::Bus { .. } => true,
-        });
+        routes.retain(
+            |route| match channel_source(&sequence.audio_program, &route.source) {
+                AudioRouteSource::Track { track_id, .. } => required_tracks.contains(&track_id),
+                _ => true,
+            },
+        );
         selected_sidechain_ids.retain(|route_id| {
             sequence
                 .audio_program
                 .sidechain_routes
                 .iter()
                 .find(|route| route.id == *route_id)
-                .is_some_and(|route| match route.source {
-                    AudioRouteSource::Track { track_id, .. } => required_tracks.contains(&track_id),
-                    AudioRouteSource::Bus { .. } => true,
-                })
+                .is_some_and(
+                    |route| match channel_source(&sequence.audio_program, &route.source) {
+                        AudioRouteSource::Track { track_id, .. } => {
+                            required_tracks.contains(&track_id)
+                        }
+                        _ => true,
+                    },
+                )
         });
     }
     let post_fader_tracks = post_fader_tracks(
+        &sequence.audio_program,
         &routes,
         &sequence.audio_program.sidechain_routes,
         &selected_sidechain_ids,
     );
     let post_fader_buses = post_fader_buses(
+        &sequence.audio_program,
         &routes,
         &sequence.audio_program.sidechain_routes,
         &selected_sidechain_ids,
     );
 
+    for source in routes.iter().map(|route| &route.source).chain(
+        sequence
+            .audio_program
+            .sidechain_routes
+            .iter()
+            .filter(|route| selected_sidechain_ids.contains(&route.id))
+            .map(|route| &route.source),
+    ) {
+        if let AudioRouteSource::ProcessorOutput { processor_id, .. } = source {
+            let bypassed = sequence
+                .audio_program
+                .track_channels
+                .values()
+                .map(|channel| &channel.strip)
+                .chain(sequence.audio_program.buses.iter().map(|bus| &bus.strip))
+                .flat_map(|strip| [&strip.pre_fader, &strip.post_fader])
+                .flat_map(|rack| &rack.processors)
+                .any(|processor| processor.id == *processor_id && processor.bypassed);
+            if bypassed {
+                return Err(AudioCompileError::BypassedProcessorOutput(*processor_id).into());
+            }
+        }
+    }
     let mut track_channels = BTreeMap::new();
     for track_id in &required_tracks {
         let track = sequence
@@ -174,7 +364,7 @@ pub fn compile_audio_program(
             );
         }
     }
-    let bus_order = topological_bus_order(&routes, &required_buses)?;
+    let bus_order = topological_bus_order(&sequence.audio_program, &routes, &required_buses)?;
 
     let mut processing_scopes = BTreeMap::<AudioProcessingScopeId, CompiledProcessingScope>::new();
     let mut contributions = Vec::new();
@@ -253,7 +443,7 @@ pub fn compile_audio_program(
         .iter()
         .map(|contribution| contribution.edit_id)
         .collect::<BTreeSet<_>>();
-    let transitions = sequence
+    let transitions: Vec<CompiledTransition> = sequence
         .audio_program
         .transitions
         .iter()
@@ -311,7 +501,7 @@ pub fn compile_audio_program(
         })
         .map(|route| CompiledProcessorSidechainRoute {
             id: route.id,
-            source: route.source,
+            source: route.source.clone(),
             processor_id: route.processor_id,
             bus_key: route.bus_key.clone(),
             gain_db: route.gain_db,
@@ -320,7 +510,78 @@ pub fn compile_audio_program(
         .collect::<Vec<_>>();
     sidechain_routes.sort_by_key(|route| route.id);
 
-    Ok(CompiledAudioProgram {
+    if let Some(visitor) = graph_visitor {
+        visitor(CompiledAudioGraph {
+            contributions: &contributions,
+            processing_scopes: &processing_scopes,
+            transitions: &transitions,
+            track_channels: &track_channels,
+            buses: &buses,
+            bus_order: &bus_order,
+            output: &compiled_output,
+            routes: &routes,
+            sidechain_routes: &sidechain_routes,
+        })?;
+        return Ok(AudioCompileStep::GraphVisited);
+    }
+
+    // Only the selected active Track rack is a Note consumer. Required Track
+    // presence alone does not retain a pruned post-fader or bypassed processor.
+    let selected_note_lane = |lane: &mondrian_timeline::audio::AudioNoteLane| {
+        !lane.notes.is_empty()
+            && track_channels.get(&lane.target.track_id).is_some_and(|channel| {
+                [&channel.strip.pre_fader, &channel.strip.post_fader]
+                    .into_iter()
+                    .flat_map(|rack| &rack.processors)
+                    .any(|processor| processor.instance_id == lane.target.processor_id)
+            })
+    };
+    let note_request = requested_compiled_note_payload(
+        sequence.audio_program.note_lanes.iter().filter(|lane| selected_note_lane(lane)),
+    )?;
+    let reservation = if note_request.lanes != 0 {
+        Some(admit(
+            CompiledAudioGraph {
+                contributions: &contributions,
+                processing_scopes: &processing_scopes,
+                transitions: &transitions,
+                track_channels: &track_channels,
+                buses: &buses,
+                bus_order: &bus_order,
+                output: &compiled_output,
+                routes: &routes,
+                sidechain_routes: &sidechain_routes,
+            },
+            note_request,
+        )?)
+    } else {
+        None
+    };
+    let lane_count = note_request.lanes;
+    let requested_payload = note_request.compiler_bytes;
+    #[cfg(test)]
+    note_materialization_tests::observe_request(lane_count, requested_payload);
+    let mut note_lanes = reserve_compiled_note_rows::<CompiledNoteLane>(lane_count)?;
+    for lane in sequence.audio_program.note_lanes.iter().filter(|lane| selected_note_lane(lane)) {
+        let mut notes =
+            reserve_compiled_note_rows::<mondrian_timeline::audio::AudioNote>(lane.notes.len())?;
+        notes.extend(lane.notes.iter().cloned());
+        // Global author validation already rejects duplicate lane/note IDs.
+        // These two total-key sorts preserve canonical order without heap scratch.
+        notes.sort_unstable_by_key(|note| note.id);
+        let target = lane.target.clone();
+        require_compiled_note_capacity(
+            target.input_port_key.capacity(),
+            lane.target.input_port_key.len(),
+        )?;
+        note_lanes.push(CompiledNoteLane { id: lane.id, target, notes });
+    }
+    note_lanes.sort_unstable_by_key(|lane| lane.id);
+    #[cfg(test)]
+    note_materialization_tests::observe_owners(&note_lanes);
+
+    let program = CompiledAudioProgram {
+        musical_time_reference: sequence.audio_program.musical_time_reference,
         output_id: request.output_id,
         contributions,
         processing_scopes,
@@ -331,7 +592,13 @@ pub fn compile_audio_program(
         output: compiled_output,
         routes,
         sidechain_routes,
-    })
+        note_lanes,
+    };
+    let actual_payload = program
+        .compiled_note_payload_bytes()
+        .map_err(|_| AudioCompileError::NoteEventCountOverflow)?;
+    require_compiled_note_payload(actual_payload, requested_payload)?;
+    Ok(AudioCompileStep::Program(program, reservation))
 }
 
 fn compile_scope(
@@ -454,19 +721,37 @@ fn active_author_processor_ids(
     active
 }
 
+fn channel_source(
+    program: &mondrian_timeline::audio::AudioProgram,
+    source: &AudioRouteSource,
+) -> AudioRouteSource {
+    use mondrian_timeline::audio::AudioChannelStripOwner;
+    let (owner, port) = program
+        .route_source_channel(source)
+        .expect("compiler sources passed complete author validation");
+    match owner {
+        AudioChannelStripOwner::Track { track_id } => AudioRouteSource::Track { track_id, port },
+        AudioChannelStripOwner::Bus { bus_id } => AudioRouteSource::Bus { bus_id, port },
+        AudioChannelStripOwner::ProgramOutput { .. } => {
+            unreachable!("Program Output sources are not admitted")
+        }
+    }
+}
+
 fn post_fader_tracks(
+    program: &mondrian_timeline::audio::AudioProgram,
     routes: &[CompiledRoute],
     sidechains: &[AudioProcessorSidechainRoute],
     selected_sidechains: &BTreeSet<mondrian_core::AudioRouteId>,
 ) -> BTreeSet<TrackId> {
     routes
         .iter()
-        .map(|route| route.source)
+        .map(|route| channel_source(program, &route.source))
         .chain(
             sidechains
                 .iter()
                 .filter(|route| selected_sidechains.contains(&route.id))
-                .map(|route| route.source),
+                .map(|route| channel_source(program, &route.source)),
         )
         .filter_map(|source| match source {
             AudioRouteSource::Track { track_id, port }
@@ -480,18 +765,19 @@ fn post_fader_tracks(
 }
 
 fn post_fader_buses(
+    program: &mondrian_timeline::audio::AudioProgram,
     routes: &[CompiledRoute],
     sidechains: &[AudioProcessorSidechainRoute],
     selected_sidechains: &BTreeSet<mondrian_core::AudioRouteId>,
 ) -> BTreeSet<MixBusId> {
     routes
         .iter()
-        .map(|route| route.source)
+        .map(|route| channel_source(program, &route.source))
         .chain(
             sidechains
                 .iter()
                 .filter(|route| selected_sidechains.contains(&route.id))
-                .map(|route| route.source),
+                .map(|route| channel_source(program, &route.source)),
         )
         .filter_map(|source| match source {
             AudioRouteSource::Bus { bus_id, port }
@@ -505,7 +791,7 @@ fn post_fader_buses(
 }
 
 fn resolve_signal_closure(
-    routes: &[AudioRoute],
+    program: &mondrian_timeline::audio::AudioProgram,
     output_id: ProgramOutputId,
     additional_bus_destinations: &BTreeSet<MixBusId>,
     muted_tracks: &BTreeSet<TrackId>,
@@ -517,7 +803,7 @@ fn resolve_signal_closure(
         .chain(additional_bus_destinations.iter().copied().map(AudioRouteDestination::Bus))
         .collect::<Vec<_>>();
     while let Some(destination) = pending_destinations.pop() {
-        for route in routes.iter().filter(|route| {
+        for route in program.routes.iter().filter(|route| {
             route.enabled
                 && route.destination == destination
                 && !matches!(
@@ -533,12 +819,12 @@ fn resolve_signal_closure(
             }
             selected.push(CompiledRoute {
                 id: route.id,
-                source: route.source,
+                source: route.source.clone(),
                 destination: route.destination,
                 gain_db: route.gain_db,
                 gain_automation: route.gain_automation.clone(),
             });
-            match route.source {
+            match channel_source(program, &route.source) {
                 AudioRouteSource::Track { track_id, .. } => {
                     required_tracks.insert(track_id);
                 }
@@ -547,6 +833,7 @@ fn resolve_signal_closure(
                         pending_destinations.push(AudioRouteDestination::Bus(bus_id));
                     }
                 }
+                AudioRouteSource::ProcessorOutput { .. } => unreachable!("normalized source"),
             }
         }
     }
@@ -555,6 +842,7 @@ fn resolve_signal_closure(
 }
 
 fn topological_bus_order(
+    program: &mondrian_timeline::audio::AudioProgram,
     routes: &[CompiledRoute],
     buses: &BTreeSet<MixBusId>,
 ) -> Result<Vec<MixBusId>, AudioCompileError> {
@@ -563,7 +851,7 @@ fn topological_bus_order(
         if let (
             AudioRouteSource::Bus { bus_id: source, .. },
             AudioRouteDestination::Bus(destination),
-        ) = (route.source, route.destination)
+        ) = (channel_source(program, &route.source), route.destination)
             && buses.contains(&source)
             && buses.contains(&destination)
         {
@@ -578,7 +866,7 @@ fn topological_bus_order(
     while let Some(id) = ready.pop_first() {
         order.push(id);
         for route in routes {
-            if matches!(route.source, AudioRouteSource::Bus { bus_id, .. } if bus_id == id)
+            if matches!(channel_source(program, &route.source), AudioRouteSource::Bus { bus_id, .. } if bus_id == id)
                 && let AudioRouteDestination::Bus(destination) = route.destination
                 && let Some(value) = indegree.get_mut(&destination)
             {
@@ -598,6 +886,9 @@ fn topological_bus_order(
 /// Author validation, dependency, or lowering failure.
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
 pub enum AudioCompileError {
+    /// A raw output cannot be fabricated by host bypass.
+    #[error("routed processor {0} is bypassed")]
+    BypassedProcessorOutput(mondrian_core::AudioProcessorInstanceId),
     /// Invalid persistent author state.
     #[error(transparent)]
     InvalidAuthoring(#[from] AudioAuthoringError),
@@ -616,6 +907,32 @@ pub enum AudioCompileError {
     /// Semantic projection authoring is preserved but not executable yet.
     #[error("semantic audio output projection is not executable yet")]
     SemanticProjectionNotExecutableYet,
+    /// A selected note cannot be projected onto the requested sample grid.
+    #[error("audio note {note_id} in lane {lane_id} cannot be projected: {source}")]
+    NoteSampleProjection {
+        lane_id: AudioNoteLaneId,
+        note_id: AudioNoteId,
+        source: mondrian_core::AudioTimeError,
+    },
+    /// Strict exact-time duration can collapse after single-grid projection.
+    #[error(
+        "audio note {note_id} in lane {lane_id} collapses to samples {start_sample}..{end_sample}"
+    )]
+    CollapsedNoteDuration {
+        lane_id: AudioNoteLaneId,
+        note_id: AudioNoteId,
+        start_sample: i64,
+        end_sample: i64,
+    },
+    /// A selected score is preserved but has no admitted Note executor yet.
+    #[error("audio note execution is unsupported for lane {lane_id}, processor {processor_id}")]
+    NoteExecutionNotSupported {
+        lane_id: AudioNoteLaneId,
+        processor_id: AudioProcessorInstanceId,
+    },
+    /// The finite score's potential On/Off count must fit the host address range.
+    #[error("audio note event count exceeds the supported address range")]
+    NoteEventCountOverflow,
     /// Instantaneous Route cycle reached compilation.
     #[error("audio routing contains a cycle")]
     RouteCycle,
@@ -652,4 +969,13 @@ pub enum AudioCompileError {
     /// Semantic IR could not be lowered into a closed dense execution schedule.
     #[error("invalid prepared audio graph: {0}")]
     InvalidPreparedGraph(String),
+}
+
+#[cfg(test)]
+#[path = "compiler/note_materialization_tests.rs"]
+mod note_materialization_tests;
+
+#[cfg(test)]
+pub(crate) fn observe_note_materialization<R>(run: impl FnOnce() -> R) -> (R, usize, usize) {
+    note_materialization_tests::observe_counts(run)
 }

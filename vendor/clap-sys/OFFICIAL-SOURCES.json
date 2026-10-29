@@ -1,0 +1,438 @@
+{
+  "schema": 1,
+  "status": "VERIFIED_SOURCE_ONLY_NOT_GENERATED_OR_COMPILED",
+  "observed_utc": "2026-10-09T06:04:19.142158+00:00",
+  "official_commit": "195b42a004144fab0b3cf95e9c067187d15365b7",
+  "primary_tree_url": "https://api.github.com/repos/free-audio/clap/git/trees/195b42a004144fab0b3cf95e9c067187d15365b7?recursive=1",
+  "tree_sha256": "9ac0902a8c366f305fe5f04bcd0d2c45e3b28d6ebed3d9c5cd3d517be1965898",
+  "primary_archive_url": "https://codeload.github.com/free-audio/clap/tar.gz/195b42a004144fab0b3cf95e9c067187d15365b7",
+  "archive_sha256": "30f68830ee462dbe86acf0cdb57743cfb9539c6f1fa0d3e2275aa1b06b179cca",
+  "files": [
+    {
+      "path": "ChangeLog.md",
+      "git_blob": "ae4abf389ec26af091a48dfc9cecdc36ede28dd2",
+      "sha256": "58ae5d6c796d8d44e6925299236bcfd8a7b66bacd9dc48442474305a95599bbb",
+      "bytes": 18314
+    },
+    {
+      "path": "LICENSE",
+      "git_blob": "428a3e5b22018cb0bf2342609936c4c36b12085e",
+      "sha256": "ced49f9ef950277afdb56199369ea6e8165ebfdbfbb37ebfe1827e0de892088d",
+      "bytes": 1072
+    },
+    {
+      "path": "README.md",
+      "git_blob": "547935df4a37f60f23872a4ea32fe2ddf8bd6964",
+      "sha256": "9493548fc83ef6f294737182bf3d2a3c55b9450a24f20ead27b02b3e33466e23",
+      "bytes": 8600
+    },
+    {
+      "path": "include/clap/all.h",
+      "git_blob": "a1063f962212df31dd43fcf156c6bc5b09c8fb75",
+      "sha256": "0f2b5d5ec3007443fa35dd6e9b22f44986d5bb011ebb73849cd87776e5f8b22a",
+      "bytes": 832
+    },
+    {
+      "path": "include/clap/audio-buffer.h",
+      "git_blob": "cd18f3a158aafc8cb2aedfe0339bc387a663755d",
+      "sha256": "efe1d90ba87499fc8f930d9c9c86157e023bede2c6ade01a20de6d2dfef3828e",
+      "bytes": 1083
+    },
+    {
+      "path": "include/clap/clap.h",
+      "git_blob": "6da567648f04a9c9fb0909cb8df3a8c19776f0e5",
+      "sha256": "a92456f80610d3be34e0c037b448619cd10e18291d7ea82c9b4c0900c39b669c",
+      "bytes": 2213
+    },
+    {
+      "path": "include/clap/color.h",
+      "git_blob": "9da24facd0c60142a282e1ba9d0da6eb3e21a49b",
+      "sha256": "acc184298ff9987e90c214e7998110b4bdb4b7d8e56d6a7a6f5ef0832713f6ca",
+      "bytes": 305
+    },
+    {
+      "path": "include/clap/entry.h",
+      "git_blob": "3ff1ad59b8b9c6d5de1ead0d509b3217438bbe17",
+      "sha256": "ef6b40a61a5aaf3bf3c1473da43aba65d247c7cc1c4dd580d076b258d784a604",
+      "bytes": 6476
+    },
+    {
+      "path": "include/clap/events.h",
+      "git_blob": "a39df02cb868ffc59b843182bfaa0a3c1b941f15",
+      "sha256": "681c975f9b4fc1efd54988911d5520a18c29b79133993c54e3abb1b8fc488b9c",
+      "bytes": 14777
+    },
+    {
+      "path": "include/clap/ext/ambisonic.h",
+      "git_blob": "8889904b3de54ebd02cfdb6993770e89d25b30d0",
+      "sha256": "eabed521abc0677c750937c729c904e302576e7b3890e64a4b27831ea6be7b65",
+      "bytes": 1972
+    },
+    {
+      "path": "include/clap/ext/audio-ports-activation.h",
+      "git_blob": "f63085c56e461721cf7e2b2bbd1011194d5f5427",
+      "sha256": "44ccd8668bfb2badd6c9538dc7135ccdb69d000c0a1990bc580808b95567a8c2",
+      "bytes": 2578
+    },
+    {
+      "path": "include/clap/ext/audio-ports-config.h",
+      "git_blob": "2ab865739f1aa04b4dd6059cfab1ef22c1eb4319",
+      "sha256": "4fea079dd1ac5e2638a697bf045af54a407190078914956dc1aec24796853c83",
+      "bytes": 4019
+    },
+    {
+      "path": "include/clap/ext/audio-ports.h",
+      "git_blob": "398804936b1177824765d82bae2e311685dfcb7b",
+      "sha256": "560d41cd2985772f1ef0c7720537ebd2b9b1298fa8e82bc8d0665b154cd6405a",
+      "bytes": 4108
+    },
+    {
+      "path": "include/clap/ext/configurable-audio-ports.h",
+      "git_blob": "08bade9b404adf82589efd0836430dd4f00fc59e",
+      "sha256": "32fd49778f25988bcd11c78cadd31cab032bb4ddcf0b6dd10c85129ef3cbda12",
+      "bytes": 2349
+    },
+    {
+      "path": "include/clap/ext/context-menu.h",
+      "git_blob": "293f59a8246d35e6918a10496a5658bcb773a931",
+      "sha256": "9e235a77132a2eb3121a94d97b7fbc5924d52be6f1f67505d358764b32112223",
+      "bytes": 6034
+    },
+    {
+      "path": "include/clap/ext/draft/background-activation.h",
+      "git_blob": "d238bc2c56c168ab381eb65d819a7c70df297e9a",
+      "sha256": "3a02cf4c9521ecf356e25848b721d76c456b953515fdbbe16300658e5f6ae493",
+      "bytes": 1710
+    },
+    {
+      "path": "include/clap/ext/draft/background-progress.h",
+      "git_blob": "63a4b0ebd1928abc885c84dc0304955bb8d49f88",
+      "sha256": "f9dd0f528461dedf48aaae34686e9b91264920e38b0c5cb3ec8ed87d4c8e5b1b",
+      "bytes": 1608
+    },
+    {
+      "path": "include/clap/ext/draft/background-state-context.h",
+      "git_blob": "96e02492afa8fbe74cbe4aaf0ef3804ff91a2788",
+      "sha256": "1765d5cd5f7586e640fef198fdb808094c9d8fed8a7e3eed07a5eb5aff611fe1",
+      "bytes": 1787
+    },
+    {
+      "path": "include/clap/ext/draft/extensible-audio-ports.h",
+      "git_blob": "5bbe9669fd958dd930e04bb98a7b0f45109d46d2",
+      "sha256": "dcce635ec4c8202f82058f3682a6c8bfe78a7545092d3be88b247196eaeed918",
+      "bytes": 1205
+    },
+    {
+      "path": "include/clap/ext/draft/flush-events.h",
+      "git_blob": "63eaf209330fb5e6fde0afe0de650f74e8832c93",
+      "sha256": "aab8a0cbde25dcd57143327e6c3675c7eaedd00cafe8b0c0eb48e2b7d5ac4944",
+      "bytes": 1600
+    },
+    {
+      "path": "include/clap/ext/draft/gain-adjustment-metering.h",
+      "git_blob": "3bf2935eac398d36e5b0b61310bec91502cc2681",
+      "sha256": "ea4177b7363bbf2ae87c7b30d8cb8aa14aa0febbfae6ddbaeec6ed42bc08ad51",
+      "bytes": 1279
+    },
+    {
+      "path": "include/clap/ext/draft/mini-curve-display.h",
+      "git_blob": "ad518eb74cf02bb546ab714fdaf09bd1a47a39c6",
+      "sha256": "e93371a0fdfa10eff539fe0efde1567ee3a8d5c0468e67f6269777d3ab5cdda6",
+      "bytes": 6311
+    },
+    {
+      "path": "include/clap/ext/draft/octave-number.h",
+      "git_blob": "9d01bb7a5b5194de764368ca2e4ec6bb00ccb735",
+      "sha256": "612ee7516034dd25338a983b5ef3d55ebc18ee9043dc1693442cf12fad71e292",
+      "bytes": 1125
+    },
+    {
+      "path": "include/clap/ext/draft/param-hovered.h",
+      "git_blob": "a863d47bb74519f4bdda8b330787efc5f8ba83a0",
+      "sha256": "8eb4849cdbc9498d856d6c5da3232026e7ca28edac4b42ead24bfe5d46821b3d",
+      "bytes": 874
+    },
+    {
+      "path": "include/clap/ext/draft/params-origin.h",
+      "git_blob": "3692523b4bda494d22dd7e11aafea3fb04af5d60",
+      "sha256": "828be0657d52f6ec6264dd45f1d2fdfee62479c63c70809d0276827d676af34f",
+      "bytes": 2339
+    },
+    {
+      "path": "include/clap/ext/draft/project-location.h",
+      "git_blob": "4496cc33e7e67ac66e05bff2dadb710a13a77c66",
+      "sha256": "5f09ac2806fad93fbd40273d777f066ec2a4d2384e27b9d1ac4dd9e33396e3b1",
+      "bytes": 3539
+    },
+    {
+      "path": "include/clap/ext/draft/resource-directory.h",
+      "git_blob": "6b8bd57eb36d8605cc1f56245d9deed79c75252b",
+      "sha256": "7276929113825a3b23d97ddbd03ad2ba1e41d4332ccd97d9478e543652661150",
+      "bytes": 3874
+    },
+    {
+      "path": "include/clap/ext/draft/scratch-memory.h",
+      "git_blob": "8beaa84a8bc6419a682cd7f04b36118cb2ad4ea9",
+      "sha256": "186f42db66fd4107fe4b84e25d0e37066efcf90aaa7eb099a8303305dd5867d1",
+      "bytes": 3606
+    },
+    {
+      "path": "include/clap/ext/draft/transport-control.h",
+      "git_blob": "5094dc002f0821da30738bcad3b2090d361508ec",
+      "sha256": "0e9861258818b51b37e576de6398601e567942a2e368e0c3b033f231dd50577d",
+      "bytes": 2401
+    },
+    {
+      "path": "include/clap/ext/draft/triggers.h",
+      "git_blob": "bf85dee546121c9aee484903889b449903dffe2c",
+      "sha256": "5576da586a679c0b72eb87665b832d64f5d17940d347300c85edaaccab4c4dd1",
+      "bytes": 4317
+    },
+    {
+      "path": "include/clap/ext/draft/tuning.h",
+      "git_blob": "ae668b133efca7b8af3dd3815ad09b6f8523f739",
+      "sha256": "7a7979f8abcd7875a6708189d35bb337253b42d350a52bc56c4a0cde285f2b9b",
+      "bytes": 2685
+    },
+    {
+      "path": "include/clap/ext/draft/undo.h",
+      "git_blob": "76070c38b12bf1abef9b312a88fb38e3a74b58a3",
+      "sha256": "6d88258bdbd1c42008b4c606490c24cf437db36db754ee0804f9ace1c1712308",
+      "bytes": 9304
+    },
+    {
+      "path": "include/clap/ext/draft/webview.h",
+      "git_blob": "761c28bb5a916533372d56238b79d73b2feb5431",
+      "sha256": "c7d0a1d4ef8869b993d93512365b4fdf39a2b28451c8f0812f89d1ce4f26acb2",
+      "bytes": 3586
+    },
+    {
+      "path": "include/clap/ext/event-registry.h",
+      "git_blob": "c89cea47dc5197d13e00723d4bc7cb6bfc4cad54",
+      "sha256": "a673ac102f7af52a18886aa53f218d0fbe8381de745679efa6676eb55c81a9b6",
+      "bytes": 596
+    },
+    {
+      "path": "include/clap/ext/gui.h",
+      "git_blob": "38f2c5e983ee9815891d15a87aad38cc3ee5b863",
+      "sha256": "489c27e5147e3faa19046a86b50fc439ee1d08f45dcd803637f1c30c62dfbc1e",
+      "bytes": 10064
+    },
+    {
+      "path": "include/clap/ext/latency.h",
+      "git_blob": "d10a13266842a0c442c708a7e89b38d26f371a36",
+      "sha256": "a6ab271c2287817bb5f35a010876c3344357da7d9c380e31ce627949f90e9746",
+      "bytes": 719
+    },
+    {
+      "path": "include/clap/ext/log.h",
+      "git_blob": "9609c6c46c29d93c1156ae5aeaede254795e8610",
+      "sha256": "4c7a28368df3412a1b44b42188f7b4b25920c52a08fd4b525799a7e76f72263c",
+      "bytes": 744
+    },
+    {
+      "path": "include/clap/ext/note-name.h",
+      "git_blob": "41e6a83a18948fb24abbbd27a8e8cc8fc4d016ad",
+      "sha256": "fac02f93927b0e37d0d662d35233b9293a1aced5854d445c37cd11b1985d26d0",
+      "bytes": 984
+    },
+    {
+      "path": "include/clap/ext/note-ports.h",
+      "git_blob": "f91b527f4fe6e33c21b1446c08193394434ad372",
+      "sha256": "0bc144d3b41d0495a2f007abba80bcdf31ad0d76b144245d4344386132463fcf",
+      "bytes": 2659
+    },
+    {
+      "path": "include/clap/ext/param-indication.h",
+      "git_blob": "643a9534333342d286760f8da15ebebc9d6922d3",
+      "sha256": "b60023659350452c61f24017adba5507c9b182f63088ef28862ba0be224cc5a5",
+      "bytes": 3098
+    },
+    {
+      "path": "include/clap/ext/params.h",
+      "git_blob": "08800bb892833b487570f3b19ac694e24066e986",
+      "sha256": "aeeb42ac04847f4664ffdea4dea88e637ff6ce1f687d70a44b9f254582a0d29e",
+      "bytes": 16632
+    },
+    {
+      "path": "include/clap/ext/posix-fd-support.h",
+      "git_blob": "c713ec88571a3132c6abe864986a68a185eba352",
+      "sha256": "713bff1fc10ad29b13c43dd800d92bf9f6aa3e5ee699498a722bd9a5332f42a6",
+      "bytes": 1586
+    },
+    {
+      "path": "include/clap/ext/preset-load.h",
+      "git_blob": "e2c19e3642e48b24042fd28447c1b5b303a8760c",
+      "sha256": "687437dd7eddd9294f625064beb16eb7fb06efab5bc6d26f6e1d262e0f7f106a",
+      "bytes": 2082
+    },
+    {
+      "path": "include/clap/ext/remote-controls.h",
+      "git_blob": "d7bf4fc52df6d782cc09d0549960fb4ce7ecdc53",
+      "sha256": "704cd78099ca5f773d0a35081881a5fbfc07ece820f6406eb47fe74c1264e8f1",
+      "bytes": 2752
+    },
+    {
+      "path": "include/clap/ext/render.h",
+      "git_blob": "0e1c1cdeffb0dc6eeec1980e504bd54df580cdb5",
+      "sha256": "04d36c03bdcc63fd79edb023e9afe3dd02e3e6d9360dd43bc24f33c9c7bb62ba",
+      "bytes": 1152
+    },
+    {
+      "path": "include/clap/ext/state-context.h",
+      "git_blob": "20248b37031747daaf2106776a799b0e1ee6b682",
+      "sha256": "de392a8a7a7616c3e1016e2854578419c0ef6a0f3501a6536225185cb0a566f6",
+      "bytes": 2680
+    },
+    {
+      "path": "include/clap/ext/state.h",
+      "git_blob": "540246b350cfea7ee27bfa92b5dfe2f731b96325",
+      "sha256": "616450227a2e4fa7de0a0c7f8d2e6ef7f7f6ab4f346aca06ad927a391a9b0001",
+      "bytes": 1528
+    },
+    {
+      "path": "include/clap/ext/surround.h",
+      "git_blob": "585ac4cbf4c2d6eca7a37ce6c37bc487f0d24d77",
+      "sha256": "5dc476e2a3eac9224b01e918840d091f829c3fa70144d4c40ca7ce5e24860739",
+      "bytes": 3582
+    },
+    {
+      "path": "include/clap/ext/tail.h",
+      "git_blob": "5d79e3a619b5171670c6b61cea39b7e4de082e0f",
+      "sha256": "5cd612fc32a292e0e5f0868cb34a1ca4f3a68336ec1d4b47c8b33190236cff06",
+      "bytes": 599
+    },
+    {
+      "path": "include/clap/ext/thread-check.h",
+      "git_blob": "50dd1b456046a95c72e6a9a52067c4003dfce1be",
+      "sha256": "0b14e4ff86e4ab10ba46a4b3f644cfcacacede2122b5b4dc1a91b6e3855891d1",
+      "bytes": 4197
+    },
+    {
+      "path": "include/clap/ext/thread-pool.h",
+      "git_blob": "1d34d9bd121273ed829361d89d7827c7a0bac0be",
+      "sha256": "670f90d6a0da76fece9b3e0c1bbb8e1b03325da53f9a3fc1e5116afc414b89d5",
+      "bytes": 2179
+    },
+    {
+      "path": "include/clap/ext/timer-support.h",
+      "git_blob": "221de967d77ef977f8682a27542b3a757b2a5d3a",
+      "sha256": "f3a3cbf10495be51706efb81305e8b319860d2bcdca1fae0d8e42dc14320a26c",
+      "bytes": 851
+    },
+    {
+      "path": "include/clap/ext/track-info.h",
+      "git_blob": "3e1a55590efb1713f04616e4ffb7479d72f3ce81",
+      "sha256": "5ff9f735240b0d7ada1479b36daa961ded9cc892de56600039034053289f84d4",
+      "bytes": 2201
+    },
+    {
+      "path": "include/clap/ext/voice-info.h",
+      "git_blob": "49651f6ab6c8749424e5d2c04357618c2e31a1ed",
+      "sha256": "b7c1f6fe01007f582bdc360f66e44e64dbf1c7b90737f63abf08f50a27d92617",
+      "bytes": 1849
+    },
+    {
+      "path": "include/clap/factory/draft/plugin-invalidation.h",
+      "git_blob": "7f65dd04dfa048b9ffc6aa449d2d07736462adc2",
+      "sha256": "aa6c6275a1cc5c4f66ae0c476c046e7397225fd1bcd2623e3f136e44184ee64c",
+      "bytes": 1771
+    },
+    {
+      "path": "include/clap/factory/draft/plugin-state-converter.h",
+      "git_blob": "20badb306a64b5d3c7ef664a1cf008de9d38ad25",
+      "sha256": "88cb6215d4e79f9ad0f1dc9a430ddd0ae8489280e5bfad17430720d934d36633",
+      "bytes": 4234
+    },
+    {
+      "path": "include/clap/factory/plugin-factory.h",
+      "git_blob": "5b157737ea2714a4040b08e8135420bf913d5bcf",
+      "sha256": "10024390809a13ed3f758ddd10ae1beded43dbee3ce1acc090ffa73730a98301",
+      "bytes": 1738
+    },
+    {
+      "path": "include/clap/factory/preset-discovery.h",
+      "git_blob": "fbb0244a451e725e679cf7ced9e21ecb46ab7ee2",
+      "sha256": "50fa2ade36f2ec1f0a19ded5708226114295bc96de45c2342a579cb6b4b9ab27",
+      "bytes": 15605
+    },
+    {
+      "path": "include/clap/fixedpoint.h",
+      "git_blob": "fb042d3a6f62de5a2332fbe98a8ed7492f44ff5d",
+      "sha256": "58f50936f9539e39b1cf01dfe70f9e95f179c9d730fa6686fbb490b6a7769e8a",
+      "bytes": 466
+    },
+    {
+      "path": "include/clap/host.h",
+      "git_blob": "0a49ca4396c5ea6b5bbf67509ee69704bd85eb4c",
+      "sha256": "2cfb8845f53f6f04cc69b7714afad7fd2c3b92728f268cbad9ebc2d7d055db7c",
+      "bytes": 2152
+    },
+    {
+      "path": "include/clap/id.h",
+      "git_blob": "3b2b6e67247961476ca009f4ee25ae1c35fbdd9a",
+      "sha256": "7c8cdeea37bdcc4df1be83473fd42712e1b005c45cb64d5b1fde2f892a182ea4",
+      "bytes": 161
+    },
+    {
+      "path": "include/clap/plugin-features.h",
+      "git_blob": "e5dc18c5e3e6e6abca11f23024759cd92a3b6d91",
+      "sha256": "99aff972b7d887ba1bb7370e776373f8500f5b5b9f8f698e60374fd4ce01cc23",
+      "bytes": 2883
+    },
+    {
+      "path": "include/clap/plugin.h",
+      "git_blob": "d9c837a852ef2a80d853fc4ab713e8ba7100b2de",
+      "sha256": "d2a178137349749eb1dd9c1d6a437300309044626dcc14b0f6e31995f1c5f25b",
+      "bytes": 5128
+    },
+    {
+      "path": "include/clap/private/macros.h",
+      "git_blob": "ba1d6656884f801c98934129bc02a217036bbca7",
+      "sha256": "861b57a204da34542413c021110dc4740f3dd27bc7a1f6ba3619092c7fd90b17",
+      "bytes": 1149
+    },
+    {
+      "path": "include/clap/private/std.h",
+      "git_blob": "1c2ffdd2d0df0868dd0be85454ce12906a910209",
+      "sha256": "6e489536d32a059a7f27ccf3c2833e3e09f16336c1aa77d9101c714e70053011",
+      "bytes": 217
+    },
+    {
+      "path": "include/clap/process.h",
+      "git_blob": "c9dbf923bda6e1220e210184639968affea76b33",
+      "sha256": "93132a2dc8c3ce7073c652ae0c9fa386bebb5ce23408a95a77842d2d85bae0a2",
+      "bytes": 2194
+    },
+    {
+      "path": "include/clap/stream.h",
+      "git_blob": "b9b0b6cf1c87056ba8d56582eb1aed6978df319f",
+      "sha256": "bec9b7c95007ec729a668697d9e0637d0cea57eb767504de5744dbce6741957f",
+      "bytes": 1248
+    },
+    {
+      "path": "include/clap/string-sizes.h",
+      "git_blob": "4334c6def60223a102ba9c3256123eb0b36ec668",
+      "sha256": "e8ebc287f05c3f068788f27b2db4bfd5727b252e8cc806064cb3dce7eb608b27",
+      "bytes": 461
+    },
+    {
+      "path": "include/clap/timestamp.h",
+      "git_blob": "63d2caba0f37e4f344b7861fe6ebb761f1dc2bdb",
+      "sha256": "848e362e19c388dd088c0b2de682be08be628082079a77b2652722296c060acc",
+      "bytes": 313
+    },
+    {
+      "path": "include/clap/universal-plugin-id.h",
+      "git_blob": "b039d03598600e141d888546b1fe32767284f48f",
+      "sha256": "f25fd6e0479d9f0e0ec54a8e573bbba380d89db18322e51f0de91382624f45ad",
+      "bytes": 818
+    },
+    {
+      "path": "include/clap/version.h",
+      "git_blob": "cfba5553ebc6d6ff57b1951c178e054c5cbd3b69",
+      "sha256": "fb9f4863d4e636d07cfb16d661a3f54794347e5cb6952f3d402227ad306eb0a0",
+      "bytes": 1506
+    }
+  ]
+}

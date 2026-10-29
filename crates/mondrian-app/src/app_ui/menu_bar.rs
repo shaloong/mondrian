@@ -13,6 +13,7 @@ use mondrian_ui_core::{EventResult, UiEvent, Widget};
 use mondrian_ui_widgets::menu::{Dropdown, DropdownTriggerStyle, MenuItem, MenuItemKind};
 
 use crate::app::ui_actions::app_shell_install_openfx_bundle_dialog_action;
+use crate::app::ui_actions::app_shell_install_openfx_generator_dialog_action;
 use crate::app::AppState;
 use crate::app_ui::action_availability::app_state_action_enabled;
 use crate::app_ui::commands::command_by_id;
@@ -69,6 +70,7 @@ pub fn default_menu_items() -> Vec<(&'static str, Vec<MenuItem>)> {
                 MenuItem::separator(),
                 command_menu_item("file.project_settings"),
                 command_menu_item("file.sequence_settings"),
+                command_menu_item("file.musical_time"),
                 MenuItem::separator(),
                 command_menu_item("file.close_project"),
             ],
@@ -112,6 +114,11 @@ pub fn default_menu_items() -> Vec<(&'static str, Vec<MenuItem>)> {
                     app_shell_install_openfx_bundle_dialog_action(),
                 )
                 .with_message_id("menu-install-openfx-filter"),
+                MenuItem::new(
+                    "安装 OpenFX 生成器效果…",
+                    app_shell_install_openfx_generator_dialog_action(),
+                )
+                .with_message_id("menu-install-openfx-generator"),
             ],
         ),
         // ── Window ──────────────────────────────────────────────────────
@@ -294,8 +301,14 @@ fn menu_item_with_shortcut(item: MenuItem) -> MenuItem {
 
 fn command_menu_item(id: &str) -> MenuItem {
     let command = command_by_id(id).unwrap_or_else(|| panic!("unknown app UI command id {id}"));
-    menu_item_with_shortcut(MenuItem::new(command.menu_title, command.action()))
-        .with_message_id(format!("command-{}", id.replace('.', "-")))
+    use mondrian_ui_core::widget::EditCommand;
+    let item = match command.action() {
+        Action::Cut => MenuItem::focused(command.menu_title, EditCommand::Cut),
+        Action::Copy => MenuItem::focused(command.menu_title, EditCommand::Copy),
+        Action::Paste => MenuItem::focused(command.menu_title, EditCommand::Paste),
+        action => MenuItem::new(command.menu_title, action),
+    };
+    menu_item_with_shortcut(item).with_message_id(format!("command-{}", id.replace('.', "-")))
 }
 
 fn apply_shortcut_overrides_to_menu_items(
@@ -499,9 +512,33 @@ impl MenuBar {
         self.close_other_menus(target, ctx);
         self.menus[target].open_menu(ctx);
     }
+
+    fn coordinate_pointer_switch(
+        &mut self,
+        event: &UiEvent,
+        ctx: &mut EventContext,
+    ) -> EventResult {
+        let position = match event {
+            UiEvent::MouseMove { position, .. }
+            | UiEvent::MouseDown { position, button: MouseButton::Left, .. } => *position,
+            _ => return EventResult::Ignored,
+        };
+        if let (Some(open), Some(target)) =
+            (self.open_menu_index(), self.trigger_index_at(position))
+            && open != target
+        {
+            self.switch_open_menu_to(target, ctx);
+            return EventResult::Handled;
+        }
+        EventResult::Ignored
+    }
 }
 
 impl Widget for MenuBar {
+    fn is_command_menu(&self) -> bool {
+        true
+    }
+
     fn id(&self) -> WidgetId {
         self.id
     }
@@ -533,29 +570,39 @@ impl Widget for MenuBar {
         }
     }
 
-    fn event(&mut self, event: &UiEvent, ctx: &mut EventContext) -> EventResult {
-        if let UiEvent::MouseMove { position, .. } = event
-            && let (Some(open), Some(target)) =
-                (self.open_menu_index(), self.trigger_index_at(*position))
-            && open != target
-        {
-            self.switch_open_menu_to(target, ctx);
-            return EventResult::Handled;
-        }
+    fn before_child_event(&mut self, event: &UiEvent, ctx: &mut EventContext) -> EventResult {
+        self.coordinate_pointer_switch(event, ctx)
+    }
 
-        if let UiEvent::MouseDown { position, button: MouseButton::Left, .. } = event
-            && let (Some(open), Some(target)) =
-                (self.open_menu_index(), self.trigger_index_at(*position))
-            && open != target
-        {
-            self.close_other_menus(target, ctx);
-            return self.menus[target].event(event, ctx);
+    fn event(&mut self, event: &UiEvent, ctx: &mut EventContext) -> EventResult {
+        if self.coordinate_pointer_switch(event, ctx) == EventResult::Handled {
+            return EventResult::Handled;
         }
 
         for menu in &mut self.menus {
             if menu.event(event, ctx) == EventResult::Handled {
                 return EventResult::Handled;
             }
+        }
+        if let UiEvent::KeyDown { key: KeyCode::Left | KeyCode::Right, modifiers } = event
+            && *modifiers == Modifiers::none()
+            && let Some(open) = self.open_menu_index()
+        {
+            let reverse = matches!(event, UiEvent::KeyDown { key: KeyCode::Left, .. });
+            let count = self.menus.len();
+            let next = (1..=count)
+                .map(|step| {
+                    if reverse {
+                        (open + count - step) % count
+                    } else {
+                        (open + step) % count
+                    }
+                })
+                .find(|index| self.menus[*index].can_focus());
+            if let Some(next) = next {
+                self.switch_open_menu_to(next, ctx);
+            }
+            return EventResult::Handled;
         }
         EventResult::Ignored
     }
@@ -871,12 +918,21 @@ mod tests {
             Some(&layout),
         );
 
-        assert!(menu_item(&menu_items, "窗口", "素材").checked);
-        assert!(menu_item(&menu_items, "窗口", "效果").checked);
-        assert!(menu_item(&menu_items, "窗口", "预览").checked);
-        assert!(!menu_item(&menu_items, "窗口", "时间线").checked);
-        assert!(submenu_item(&menu_items, "窗口", "工作区", "编辑").checked);
-        assert!(!submenu_item(&menu_items, "窗口", "工作区", "调色").checked);
+        assert_eq!(menu_item(&menu_items, "窗口", "素材").checked, Some(true));
+        assert_eq!(menu_item(&menu_items, "窗口", "效果").checked, Some(true));
+        assert_eq!(menu_item(&menu_items, "窗口", "预览").checked, Some(true));
+        assert_eq!(
+            menu_item(&menu_items, "窗口", "时间线").checked,
+            Some(false)
+        );
+        assert_eq!(
+            submenu_item(&menu_items, "窗口", "工作区", "编辑").checked,
+            Some(true)
+        );
+        assert_eq!(
+            submenu_item(&menu_items, "窗口", "工作区", "调色").checked,
+            Some(false)
+        );
     }
 
     #[test]
@@ -904,11 +960,17 @@ mod tests {
             Some(&layout),
         );
 
-        assert!(menu_item(&menu_items, "窗口", "素材").checked);
-        assert!(!menu_item(&menu_items, "窗口", "效果").checked);
-        assert!(menu_item(&menu_items, "窗口", "预览").checked);
-        assert!(!submenu_item(&menu_items, "窗口", "工作区", "编辑").checked);
-        assert!(!submenu_item(&menu_items, "窗口", "工作区", "导出").checked);
+        assert_eq!(menu_item(&menu_items, "窗口", "素材").checked, Some(true));
+        assert_eq!(menu_item(&menu_items, "窗口", "效果").checked, Some(false));
+        assert_eq!(menu_item(&menu_items, "窗口", "预览").checked, Some(true));
+        assert_eq!(
+            submenu_item(&menu_items, "窗口", "工作区", "编辑").checked,
+            Some(false)
+        );
+        assert_eq!(
+            submenu_item(&menu_items, "窗口", "工作区", "导出").checked,
+            Some(false)
+        );
     }
 
     #[test]
@@ -1371,6 +1433,57 @@ mod tests {
     }
 
     #[test]
+    fn menu_bar_direct_keyboard_navigation_respects_submenu_before_siblings() {
+        let mut menu = MenuBar::default();
+        menu.menus[0].set_model(
+            "File",
+            vec![MenuItem::submenu(
+                "Import",
+                vec![MenuItem::new("Media", Action::SaveProject)],
+            )],
+        );
+        menu.layout(Rect::new(0.0, 0.0, 900.0, MENU_BAR_HEIGHT));
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let actions = RefCell::new(Vec::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut ctx = event_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+        menu.menus[0].open_menu(&mut ctx);
+        for key in [KeyCode::Right, KeyCode::Left] {
+            assert_eq!(
+                menu.event(
+                    &UiEvent::KeyDown { key, modifiers: Modifiers::none() },
+                    &mut ctx
+                ),
+                EventResult::Handled
+            );
+            assert_eq!(
+                menu.open_menu_index(),
+                Some(0),
+                "entering/leaving a submenu cannot switch the root menu"
+            );
+        }
+        assert_eq!(
+            menu.event(
+                &UiEvent::KeyDown { key: KeyCode::Left, modifiers: Modifiers::none() },
+                &mut ctx
+            ),
+            EventResult::Handled
+        );
+        assert_eq!(menu.open_menu_index(), Some(menu.menus.len() - 1));
+        assert!(actions.borrow().is_empty());
+        assert!(ctx.requests.menu_command.is_none());
+    }
+
+    #[test]
     fn menu_bar_switches_open_menu_on_trigger_click() {
         let mut menu = MenuBar::default();
         menu.layout(Rect::new(0.0, 0.0, 720.0, MENU_BAR_HEIGHT));
@@ -1398,9 +1511,16 @@ mod tests {
         click_menu(&mut menu, &mut ctx, help_trigger);
         assert_eq!(press_enter(&mut menu, &mut ctx), EventResult::Handled);
 
-        assert_eq!(dispatched.borrow().len(), 1);
-        let action = dispatched.borrow()[0].clone();
-        match &action {
+        assert!(
+            dispatched.borrow().is_empty(),
+            "router confirms the editor before dispatch"
+        );
+        let Some(mondrian_ui_core::widget::MenuCommand::Action(action)) =
+            ctx.requests.menu_command.as_ref()
+        else {
+            panic!("expected a confirmed menu action request");
+        };
+        match action {
             Action::Custom { namespace, name, .. } => {
                 assert_eq!(namespace, APP_SHELL_NAMESPACE);
                 assert_eq!(name, APP_SHELL_ABOUT);
@@ -1483,9 +1603,16 @@ mod tests {
         );
         assert_eq!(press_enter(&mut menu, &mut ctx), EventResult::Handled);
 
-        assert_eq!(dispatched.borrow().len(), 1);
-        let action = dispatched.borrow()[0].clone();
-        match &action {
+        assert!(
+            dispatched.borrow().is_empty(),
+            "router confirms the editor before dispatch"
+        );
+        let Some(mondrian_ui_core::widget::MenuCommand::Action(action)) =
+            ctx.requests.menu_command.as_ref()
+        else {
+            panic!("expected a confirmed menu action request");
+        };
+        match action {
             Action::Custom { namespace, name, .. } => {
                 assert_eq!(namespace, APP_SHELL_NAMESPACE);
                 assert_eq!(name, APP_SHELL_ABOUT);

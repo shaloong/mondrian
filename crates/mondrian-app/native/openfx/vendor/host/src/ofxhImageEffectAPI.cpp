@@ -69,21 +69,7 @@ namespace OFX {
 
       ImageEffectPlugin::~ImageEffectPlugin()
       {
-        _contexts.clear();
-        if(_pluginHandle) {
-          OfxPlugin *op = _pluginHandle->getOfxPlugin();
-          OfxStatus stat;
-          try {
-#           ifdef OFX_DEBUG_ACTIONS
-              std::cout << "OFX: "<<(void*)op<<"->"<<kOfxActionUnload<<"()"<<std::endl;
-#           endif
-            stat = op->mainEntry(kOfxActionUnload, 0, 0, 0);
-#           ifdef OFX_DEBUG_ACTIONS
-              std::cout << "OFX: "<<(void*)op<<"->"<<kOfxActionUnload<<"()->"<<StatStr(stat)<<std::endl;
-#           endif
-          } CatchAllSetStatus(stat, gImageEffectHost, op, kOfxActionUnload);
-          (void)stat;
-        }
+        unload();
         delete _baseDescriptor;
       }
 
@@ -144,53 +130,60 @@ namespace OFX {
 
       PluginHandle *ImageEffectPlugin::getPluginHandle()
       {
-        if(!_pluginHandle) {
+        // State precedes the nonnull-handle shortcut: Loaded is not Ready, and
+        // Closed must reject reentry from Unload and every later retry.
+        if (_loadState == LoadState::Ready) { return _pluginHandle.get(); }
+        if (_loadState != LoadState::Unattempted) { return nullptr; }
+        _loadState = LoadState::Loading;
+        try {
           _pluginHandle.reset(new OFX::Host::PluginHandle(this, _pc.getHost()));
-
-          OfxPlugin *op = _pluginHandle->getOfxPlugin();
-
-          if (!op) {
-            _pluginHandle.reset();
-            return nullptr;
-          }
-
-          OfxStatus stat;
-          try {
-#           ifdef OFX_DEBUG_ACTIONS
-              std::cout << "OFX: "<<(void*)op<<"->"<<kOfxActionLoad<<"()"<<std::endl;
-#           endif
-            stat = op->mainEntry(kOfxActionLoad, 0, 0, 0);
-#           ifdef OFX_DEBUG_ACTIONS
-              std::cout << "OFX: "<<(void*)op<<"->"<<kOfxActionLoad<<"()->"<<StatStr(stat)<<std::endl;
-#           endif
-          } CatchAllSetStatus(stat, gImageEffectHost, op, kOfxActionLoad);
-
-          if (stat != kOfxStatOK && stat != kOfxStatReplyDefault) {
-            _pluginHandle.reset();
-            return nullptr;
-          }
-
-          try {
-#           ifdef OFX_DEBUG_ACTIONS
-              std::cout << "OFX: "<<(void*)op<<"->"<<kOfxActionDescribe<<"()"<<std::endl;
-#           endif
-            stat = op->mainEntry(kOfxActionDescribe, getDescriptor().getHandle(), 0, 0);
-#           ifdef OFX_DEBUG_ACTIONS
-              std::cout << "OFX: "<<(void*)op<<"->"<<kOfxActionDescribe<<"()->"<<StatStr(stat)<<std::endl;
-#           endif
-          } CatchAllSetStatus(stat, gImageEffectHost, op, kOfxActionDescribe);
-
-          if (stat != kOfxStatOK && stat != kOfxStatReplyDefault) {
-            _pluginHandle.reset();
-            return nullptr;
-          }
+        } catch (...) {
+          _loadState = LoadState::Closed;
+          throw;
         }
+        OfxPlugin *op = _pluginHandle->getOfxPlugin();
+        if (!op) { unload(); return nullptr; }
 
+        OfxStatus stat;
+        try {
+#         ifdef OFX_DEBUG_ACTIONS
+            std::cout << "OFX: "<<(void*)op<<"->"<<kOfxActionLoad<<"()"<<std::endl;
+#         endif
+          stat = op->mainEntry(kOfxActionLoad, 0, 0, 0);
+#         ifdef OFX_DEBUG_ACTIONS
+            std::cout << "OFX: "<<(void*)op<<"->"<<kOfxActionLoad<<"()->"<<StatStr(stat)<<std::endl;
+#         endif
+        } CatchAllSetStatus(stat, gImageEffectHost, op, kOfxActionLoad);
+        if (stat != kOfxStatOK && stat != kOfxStatReplyDefault) {
+          // Load failed: no successful Load obligation and no further action.
+          unload();
+          return nullptr;
+        }
+        if (_loadState != LoadState::Loading) { return nullptr; }
+        _loadState = LoadState::Loaded;
+        try {
+#         ifdef OFX_DEBUG_ACTIONS
+            std::cout << "OFX: "<<(void*)op<<"->"<<kOfxActionDescribe<<"()"<<std::endl;
+#         endif
+          stat = op->mainEntry(kOfxActionDescribe, getDescriptor().getHandle(), 0, 0);
+#         ifdef OFX_DEBUG_ACTIONS
+            std::cout << "OFX: "<<(void*)op<<"->"<<kOfxActionDescribe<<"()->"<<StatStr(stat)<<std::endl;
+#         endif
+        } CatchAllSetStatus(stat, gImageEffectHost, op, kOfxActionDescribe);
+        if (stat != kOfxStatOK && stat != kOfxStatReplyDefault) {
+          // Successful Load still owes exactly one Unload on Describe failure.
+          unload();
+          return nullptr;
+        }
+        if (_loadState != LoadState::Loaded) { return nullptr; }
+        _loadState = LoadState::Ready;
         return _pluginHandle.get();
       }
 
       Descriptor *ImageEffectPlugin::getContext(const std::string &context)
       {
+        PluginHandle *ph = getPluginHandle();
+        if (!ph) { return nullptr; }
         std::map<std::string, std::unique_ptr<Descriptor>>::iterator it = _contexts.find(context);
 
         if (it != _contexts.end()) {
@@ -198,7 +191,8 @@ namespace OFX {
           return it->second.get();
         }
 
-        if (_knownContexts.find(context) == _knownContexts.end()) {
+        const auto& knownContexts = getContexts();
+        if (knownContexts.find(context) == knownContexts.end()) {
           return nullptr;
         }
 
@@ -211,7 +205,6 @@ namespace OFX {
 
         OFX::Host::Property::Set inarg(inargspec);
 
-        PluginHandle *ph = getPluginHandle();
         std::unique_ptr<ImageEffect::Descriptor> newContext( gImageEffectHost->makeDescriptor(getDescriptor(), this));
 
         OfxStatus stat;
@@ -225,7 +218,7 @@ namespace OFX {
 #         endif
         } CatchAllSetStatus(stat, gImageEffectHost, ph->getOfxPlugin(), kOfxImageEffectActionDescribeInContext);
 
-        if (stat == kOfxStatOK || stat == kOfxStatReplyDefault) {
+        if ((stat == kOfxStatOK || stat == kOfxStatReplyDefault) && _loadState == LoadState::Ready) {
           _contexts[context] = std::move(newContext);
           return _contexts[context].get();
         }
@@ -235,11 +228,7 @@ namespace OFX {
       ImageEffect::Instance* ImageEffectPlugin::createInstance(const std::string &context, void *clientData)
       {
 
-        /// todo - we need to make sure action:load is called, then action:describe again
-        /// (not because we are expecting the results to change, but because plugin
-        /// might get confused otherwise), then a describe_in_context
-
-        getPluginHandle();
+        if (!getPluginHandle()) { return nullptr; }
 
         Descriptor *desc = getContext(context);
 
@@ -255,19 +244,27 @@ namespace OFX {
       }
 
       void ImageEffectPlugin::unload() {
-        if (_pluginHandle) {
+        if (_loadState == LoadState::Closed) { return; }
+        const bool owesUnload = _loadState == LoadState::Loaded || _loadState == LoadState::Ready;
+        // Close admission before foreign code can reenter. Keep the native
+        // handle and all descriptors alive until that callback has returned.
+        _loadState = LoadState::Closed;
+        if (owesUnload && _pluginHandle) {
+          OfxPlugin *op = _pluginHandle->getOfxPlugin();
           OfxStatus stat;
           try {
 #           ifdef OFX_DEBUG_ACTIONS
-              std::cout << "OFX: "<<(void*)_pluginHandle->getOfxPlugin()<<"->"<<kOfxActionUnload<<"()"<<std::endl;
+              std::cout << "OFX: "<<(void*)op<<"->"<<kOfxActionUnload<<"()"<<std::endl;
 #           endif
-            stat = (*_pluginHandle)->mainEntry(kOfxActionUnload, 0, 0, 0);
+            stat = op->mainEntry(kOfxActionUnload, 0, 0, 0);
 #           ifdef OFX_DEBUG_ACTIONS
-              std::cout << "OFX: "<<(void*)_pluginHandle->getOfxPlugin()<<"->"<<kOfxActionUnload<<"()->"<<StatStr(stat)<<std::endl;
+              std::cout << "OFX: "<<(void*)op<<"->"<<kOfxActionUnload<<"()->"<<StatStr(stat)<<std::endl;
 #           endif
-          } CatchAllSetStatus(stat, gImageEffectHost, (*_pluginHandle), kOfxActionUnload);
+          } CatchAllSetStatus(stat, gImageEffectHost, op, kOfxActionUnload);
           (void)stat;
         }
+        _contexts.clear();
+        _pluginHandle.reset();
       }
 
       PluginCache::PluginCache(OFX::Host::ImageEffect::Host &host)

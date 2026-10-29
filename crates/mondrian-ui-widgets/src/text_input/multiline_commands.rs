@@ -1,70 +1,6 @@
 use mondrian_ui_core::types::{KeyCode, Modifiers};
 
-// ── Platform Keymap ────────────────────────────────────────────────────────────
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum PlatformKeymap {
-    Windows,
-    Linux,
-    MacOs,
-}
-
-impl PlatformKeymap {
-    pub fn current() -> Self {
-        if cfg!(target_os = "macos") {
-            PlatformKeymap::MacOs
-        } else if cfg!(target_os = "linux") {
-            PlatformKeymap::Linux
-        } else {
-            PlatformKeymap::Windows
-        }
-    }
-
-    /// The primary modifier used for clipboard and document-level shortcuts.
-    fn is_primary(&self, modifiers: Modifiers) -> bool {
-        match self {
-            PlatformKeymap::Windows | PlatformKeymap::Linux => modifiers.ctrl,
-            PlatformKeymap::MacOs => modifiers.meta,
-        }
-    }
-
-    /// Whether modifiers represent "exact primary" (primary only, no alt/shift/secondary).
-    pub(super) fn is_exact_primary(&self, modifiers: Modifiers) -> bool {
-        match self {
-            PlatformKeymap::Windows | PlatformKeymap::Linux => {
-                modifiers.ctrl && !modifiers.shift && !modifiers.alt && !modifiers.meta
-            }
-            PlatformKeymap::MacOs => {
-                modifiers.meta && !modifiers.shift && !modifiers.alt && !modifiers.ctrl
-            }
-        }
-    }
-
-    /// Word navigation modifier: Ctrl on Win/Linux, Option on macOS.
-    pub(super) fn is_word_nav(&self, modifiers: Modifiers) -> bool {
-        match self {
-            PlatformKeymap::Windows | PlatformKeymap::Linux => {
-                modifiers.ctrl && !modifiers.alt && !modifiers.meta
-            }
-            PlatformKeymap::MacOs => modifiers.alt && !modifiers.ctrl && !modifiers.meta,
-        }
-    }
-
-    /// Local navigation: no primary modifiers.
-    pub(super) fn is_local_nav(&self, modifiers: Modifiers) -> bool {
-        match self {
-            PlatformKeymap::Windows | PlatformKeymap::Linux => {
-                !modifiers.ctrl && !modifiers.alt && !modifiers.meta
-            }
-            PlatformKeymap::MacOs => !modifiers.meta && !modifiers.ctrl && !modifiers.alt,
-        }
-    }
-
-    /// Command with optional Shift selects a line or document boundary on macOS.
-    pub(super) fn is_mac_primary_nav(&self, modifiers: Modifiers) -> bool {
-        *self == PlatformKeymap::MacOs && modifiers.meta && !modifiers.ctrl && !modifiers.alt
-    }
-}
+use super::keymap::PlatformKeymap;
 
 // ── Tab Behavior ────────────────────────────────────────────────────────────────
 
@@ -127,6 +63,8 @@ pub(super) enum MultilineTextKeyCommand {
     // Delete
     DeleteBackward,
     DeleteForward,
+    DeleteWordBackward,
+    DeleteWordForward,
     // Newline
     NewLine,
     // Undo/Redo (text-local)
@@ -158,21 +96,34 @@ pub(super) fn classify_key_command(
         KeyCode::X if keymap.is_exact_primary(modifiers) => Some(MultilineTextKeyCommand::Cut),
 
         // ── Undo/Redo (primary modifier) ──
-        KeyCode::Z if keymap.is_primary(modifiers) && !modifiers.shift && !modifiers.alt => {
+        KeyCode::Z
+            if keymap.is_exact_primary(Modifiers { shift: false, ..modifiers })
+                && !modifiers.shift =>
+        {
             Some(MultilineTextKeyCommand::Undo)
         }
-        KeyCode::Z if keymap.is_primary(modifiers) && modifiers.shift && !modifiers.alt => {
+        KeyCode::Z
+            if keymap.is_exact_primary(Modifiers { shift: false, ..modifiers })
+                && modifiers.shift =>
+        {
             Some(MultilineTextKeyCommand::Redo)
         }
 
-        // ── Left/Right: Command reaches line edges on macOS ──
-        KeyCode::Left if keymap.is_mac_primary_nav(modifiers) => {
+        // macOS Command arrows address line/document boundaries.
+        KeyCode::Left if keymap.is_command_nav(modifiers) => {
             Some(MultilineTextKeyCommand::MoveLineStart { extend_selection: shift })
         }
-        KeyCode::Right if keymap.is_mac_primary_nav(modifiers) => {
+        KeyCode::Right if keymap.is_command_nav(modifiers) => {
             Some(MultilineTextKeyCommand::MoveLineEnd { extend_selection: shift })
         }
-        // ── Word nav on word_modifier, local otherwise ──
+        KeyCode::Up if keymap.is_command_nav(modifiers) => {
+            Some(MultilineTextKeyCommand::MoveDocStart { extend_selection: shift })
+        }
+        KeyCode::Down if keymap.is_command_nav(modifiers) => {
+            Some(MultilineTextKeyCommand::MoveDocEnd { extend_selection: shift })
+        }
+
+        // ── Left/Right: word nav on word_modifier, local otherwise ──
         KeyCode::Left if keymap.is_word_nav(modifiers) => {
             Some(MultilineTextKeyCommand::MoveLeft { word: true, extend_selection: shift })
         }
@@ -200,20 +151,13 @@ pub(super) fn classify_key_command(
             Some(MultilineTextKeyCommand::MoveLineEnd { extend_selection: shift })
         }
         // Also accept word_nav for Home/End (macOS Ctrl+A/Ctrl+E style)
-        KeyCode::Home if keymap.is_word_nav(modifiers) && cfg!(not(target_os = "macos")) => {
+        KeyCode::Home if keymap.is_word_nav(modifiers) && keymap != PlatformKeymap::MacOs => {
             Some(MultilineTextKeyCommand::MoveLineStart { extend_selection: shift })
         }
-        KeyCode::End if keymap.is_word_nav(modifiers) && cfg!(not(target_os = "macos")) => {
+        KeyCode::End if keymap.is_word_nav(modifiers) && keymap != PlatformKeymap::MacOs => {
             Some(MultilineTextKeyCommand::MoveLineEnd { extend_selection: shift })
         }
 
-        // ── Command+Up/Down reaches document edges on macOS ──
-        KeyCode::Up if keymap.is_mac_primary_nav(modifiers) => {
-            Some(MultilineTextKeyCommand::MoveDocStart { extend_selection: shift })
-        }
-        KeyCode::Down if keymap.is_mac_primary_nav(modifiers) => {
-            Some(MultilineTextKeyCommand::MoveDocEnd { extend_selection: shift })
-        }
         // ── Up/Down (local only) ──
         KeyCode::Up if keymap.is_local_nav(modifiers) => {
             Some(MultilineTextKeyCommand::MoveUp { extend_selection: shift })
@@ -228,6 +172,13 @@ pub(super) fn classify_key_command(
         }
         KeyCode::PageDown if keymap.is_local_nav(modifiers) => {
             Some(MultilineTextKeyCommand::PageDown { extend_selection: shift })
+        }
+
+        KeyCode::Backspace if keymap.is_word_nav(modifiers) && !shift => {
+            Some(MultilineTextKeyCommand::DeleteWordBackward)
+        }
+        KeyCode::Delete if keymap.is_word_nav(modifiers) && !shift => {
+            Some(MultilineTextKeyCommand::DeleteWordForward)
         }
 
         // ── Delete (plain, no modifiers) ──
@@ -523,7 +474,7 @@ mod tests {
     }
 
     #[test]
-    fn delete_requires_no_modifiers() {
+    fn delete_commands_reject_conflicting_modifiers() {
         let km = win();
         assert_eq!(
             classify_key_command(KeyCode::Backspace, Modifiers::none(), km, mb()),
@@ -534,7 +485,12 @@ mod tests {
             Some(MultilineTextKeyCommand::DeleteForward)
         );
         assert_eq!(
-            classify_key_command(KeyCode::Backspace, Modifiers::ctrl(), km, mb()),
+            classify_key_command(
+                KeyCode::Backspace,
+                Modifiers { ctrl: true, alt: true, ..Modifiers::none() },
+                km,
+                mb()
+            ),
             None
         );
     }
@@ -570,5 +526,83 @@ mod tests {
             classify_key_command(KeyCode::Tab, Modifiers::shift(), km, mb()),
             None
         );
+    }
+
+    #[test]
+    fn macos_multiline_command_arrows_preserve_line_and_selection_intent() {
+        for shift in [false, true] {
+            let modifiers = Modifiers { meta: true, shift, ..Modifiers::none() };
+            assert_eq!(
+                classify_key_command(KeyCode::Left, modifiers, mac(), mb()),
+                Some(MultilineTextKeyCommand::MoveLineStart { extend_selection: shift })
+            );
+            assert_eq!(
+                classify_key_command(KeyCode::Right, modifiers, mac(), mb()),
+                Some(MultilineTextKeyCommand::MoveLineEnd { extend_selection: shift })
+            );
+        }
+    }
+
+    #[test]
+    fn macos_multiline_command_arrows_preserve_document_and_selection_intent() {
+        for shift in [false, true] {
+            let modifiers = Modifiers { meta: true, shift, ..Modifiers::none() };
+            assert_eq!(
+                classify_key_command(KeyCode::Up, modifiers, mac(), mb()),
+                Some(MultilineTextKeyCommand::MoveDocStart { extend_selection: shift })
+            );
+            assert_eq!(
+                classify_key_command(KeyCode::Down, modifiers, mac(), mb()),
+                Some(MultilineTextKeyCommand::MoveDocEnd { extend_selection: shift })
+            );
+        }
+    }
+
+    #[test]
+    fn portable_multiline_history_chords_refuse_secondary_modifiers() {
+        for keymap in [
+            PlatformKeymap::Windows,
+            PlatformKeymap::Linux,
+            PlatformKeymap::MacOs,
+        ] {
+            assert!(
+                classify_key_command(
+                    KeyCode::Z,
+                    Modifiers { ctrl: true, meta: true, ..Modifiers::none() },
+                    keymap,
+                    mb()
+                )
+                .is_none(),
+                "mixed primary/secondary chords must not be claimed by text history"
+            );
+        }
+    }
+    #[test]
+    fn portable_multiline_word_delete_admits_control_or_option_without_secondary_or_shift() {
+        for keymap in [
+            PlatformKeymap::Windows,
+            PlatformKeymap::Linux,
+            PlatformKeymap::MacOs,
+        ] {
+            let word = if keymap == PlatformKeymap::MacOs {
+                Modifiers { alt: true, ..Modifiers::none() }
+            } else {
+                Modifiers::ctrl()
+            };
+            for key in [KeyCode::Backspace, KeyCode::Delete] {
+                assert!(
+                    classify_key_command(key, word, keymap, mb()).is_some(),
+                    "{keymap:?} multiline word deletion"
+                );
+                assert!(
+                    classify_key_command(key, Modifiers { shift: true, ..word }, keymap, mb())
+                        .is_none()
+                );
+                assert!(
+                    classify_key_command(key, Modifiers { meta: true, ..word }, keymap, mb())
+                        .is_none()
+                );
+            }
+        }
     }
 }

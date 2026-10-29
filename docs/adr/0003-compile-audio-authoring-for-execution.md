@@ -17,6 +17,20 @@ same three-stage Interface:
 3. `AudioRenderSession` owns exclusive mutable buffers and processor state for
    one run. It renders exact integer-sample windows into caller-owned storage.
 
+A retained native owner can remain valid while its processing capability is
+stopped. Configuration refusals and pending installation must preserve control
+queries, retry, seed, GUI service and Shutdown. The same command dispatcher then
+borrows only that owner's main role; it neither starts a DSP scope nor resumes
+processing to keep the connection alive. The main borrow ends before exclusive
+lifecycle commands execute. Its actual allocations retain the original grant.
+
+VST3 capability comes from the internal lifecycle that guards its real role
+split, rather than a facade's cached processing flag. CLAP initially permits a
+Stopped processing handle for its existing Ready/first-signal contract; a
+committed seed waits for explicit Enter. Adapters derive these distinctions
+from their existing lifecycle and seed owners, with no second state authority,
+dispatcher, routing graph or wire protocol.
+
 The Render Contract carries one canonical `AudioChannelLayout`, never a bare
 channel count. The value is Mono, a validated named-speaker set in canonical
 interleaving order, or a bounded Discrete bus with deliberately absent speaker
@@ -25,11 +39,63 @@ their extents match another layout. Representability does not grant execution:
 media, plugin, device, and export Adapters must negotiate an exact layout or
 fail closed, and may not select a matrix from channel count alone.
 
+Auxiliary inputs retain their own semantic layouts and per-processor packed
+channel prefixes in the existing prepared schedule. Track/Bus taps still use
+the Render Contract layout. Their existing standard channel matrix is resolved
+at preparation, applied before destination-width PDC, and followed by Route gain
+at target signal time. Unconnected ports own zero-filled PCM. Equal layouts keep
+the direct path; connected mixed layouts reuse one preallocated, charged mapping
+buffer. This changes neither author state nor the routing/execution authority.
+Additional outputs retain their current Main-layout restriction. IPC22 derives
+shared input capacity from the actual ordered port layouts at both ends, packs
+short blocks at their current frame count, and charges the existing shared-region
+byte extent. Equal-layout regions keep their former offsets; older protocol
+versions refuse. Generic Worker views retain each input width. CLAP admits
+independently typed Mono/Stereo auxiliary inputs and preserves their widths in
+metadata, native planes, SDK capacity and declared/actual storage fees; its Main
+and all outputs retain the render layout. VST3 likewise retains each auxiliary
+input's exact Mono/Stereo Speaker Arrangement in cold and stopped retained
+metadata. It reuses the SDK's existing per-bus planes and arrangement negotiation;
+its native resource bound includes the widest admitted input. Both formats
+validate counts and prepared storage against semantic layouts before processing.
+
 `AudioProgramRuntime` is the shared high-level Implementation used by playback
 and export. It recursively instantiates nested public outputs and binds media
 through the narrow `AudioMediaResolver`/`AudioDecodedSource` Adapter Seam.
 FFmpeg paths, asset databases, CPAL devices, export files, and UI state do not
 enter the compiler or DSP core.
+
+Timeline transport activity is an explicit consumer-declared fact for a rendered
+window, independent of sample coordinates, realtime/offline scheduling, and
+whether a device has started consuming PCM. `TimelineTransportActivity` has
+explicit Playing/Stopped values; absence remains None. Playback preroll requests
+carry Playing because their PCM is rendered for future advancing playback and
+must remain valid when the same generation starts consuming. Idle/control callers
+must not infer Stopped merely from a disabled device. This adds no clock, author
+parameter, routing graph or project-file field.
+
+The same optional fact now travels through the existing Render Request, PDC and
+Scope windows, nested Runtime, isolated Process command, and format adapters.
+Export supplies Playing; the App forwards the PCM consumer's fact. Independent
+paused warmup owns a separate Runtime and supplies None, with no DSP/PCM promotion
+to Playback. No device or processing-mode inference supplies transport state.
+
+An entered epoch binds its exact optional activity on the first successful
+render. A change refuses before native callbacks, PCM publication or history
+consumption and requires a fresh epoch. Unentered stateless evaluation can change
+activity, invalidating nested prefetched PCM through the existing cache owner.
+IPC22 preserves None/Stopped/Playing in fixed 32-byte Process tags; old
+helpers refuse. The VST3 borrowed processing role updates only its ProcessContext,
+after canonical time installation, honoring requested/available validity. CLAP
+sets IS_PLAYING only for explicit Playing. Ordinary Audio/SDK tests and App/Export
+test-target compilation pass. Four Windows owned native gates verify actual flags,
+PCM and Scope/retime/PDC for all three activities; each format has twelve canonical
+rate/music/activity conditions and two epochs per condition. Separate bounded
+Windows owned gates now verify actual App Media software-preroll PCM and public
+Export Main/stem artifacts, including Source/child closure. App Note/author CAS
+regressions also pass; see the compatibility matrix for exact conditions.
+Complete product/device workflows, third-party Playing response, dynamic activity
+events, signatures, loops and realtime behavior remain separate work.
 
 Compilation derives every generated contribution's Track ID, Sequence range,
 source mapping, and nested placement from the real `Track -> Clip` hierarchy.
@@ -37,6 +103,158 @@ It combines those facts with the attached `AudioComponentEdit` and referenced
 `AudioProcessingScope`. Generated contributions and stages are immutable IR,
 not persistent routable entities. Every generated operation retains typed
 author origins for diagnostics and future state allocation.
+
+Compilation retains nonempty Note lanes only for their actual selected active
+Track rack processors, ordered by stable author IDs. Unselected/bypassed score
+intent remains in the author aggregate. In the model-only M1 implementation,
+Plan preparation checks event-count overflow and projects both endpoints with
+the existing Ceil sample conversion; collapsed or overflowing endpoints are
+typed errors. It then explicitly refuses selected Note execution before that
+Plan's schedule/factory preparation. Empty or unselected score retains the
+existing path. This per-Plan guard is not a whole-root no-media-I/O guarantee
+for nested preparation. Executable events must later deepen the same pipeline
+with explicit port, occurrence, epoch and resource admission; they cannot use
+a separate vendor Timeline or bypass the existing Routing DAG.
+
+The first M2 infrastructure slice adds concrete Note input and copied End
+observations to the existing processor block IO and supervised process command,
+without changing the processor invocation or parameter transaction stream.
+An immutable factory Note contract binds definition-owned port keys, native
+stable IDs/current indexes and finite input/output/retained-record/voice extents.
+Its default is explicit zero support. Seed replacement and instance creation
+recheck that same contract; existing allocation visitation observes its actual
+Vec/String owners. Protocol v9 uses the reserved command count field and checked
+appended shared regions; Note-free PCM/parameter offsets and total bytes remain
+unchanged. A successful Note-mode Process returns its actual bounded End count
+alongside any pending reprepare request through the same inline/scoped completion.
+
+CLAP typed input retains exact f64 velocity, including zero On, and sorts sample
+offset, parameter/Off/On phase, then source order using actual charged owner
+layouts. Core NoteEnd is extent-checked before payload access and before the
+parameter clock path: its time and velocity are unusable, while concrete Note ID,
+original input P/C/K address (including those wildcards) and raw flags are copied.
+Callbacks return no voice credit. End refusal is sticky through native return;
+parent rejection after DSP permanently fails that adapter, preventing repeated
+delivery. Flush preserves unconsumed Process End observations. The sole Hosted
+ledger, prepared score and whole-root admission were still pending in that
+carrier-only slice: selected scores retained the M1 refusal, native CLAP/VST3
+Note requests were explicitly refused and HostNotePorts was not advertised.
+Carrier controls alone grant no instrument, realtime or third-party qualification.
+
+The next finite M2 slice projects checked Note endpoints once onto the Render
+Contract grid and binds definition-owned port keys to cached native IDs/current
+indexes at the exact selected Track rack occurrence. One Hosted processor owns
+one non-cloneable Note ledger and bounded input, copied-End and admission scratch.
+All targeted storage is prepared unbound before factory creation; only successful
+existing Installed-root binding and entry establish its origin. Native Note IDs
+are monotonically issued and never reused across cold epochs. Original input
+tuples survive release-pending and early-End phases until their authored Off;
+future Off/End events cannot finance current voice or record admission.
+
+Root/Session window admission accounts for every priming and requested call,
+subtracts the prepared stage's input-signal delay once, and checks all occurrences
+before destination clearing, media access or DSP. Cold Note entry currently
+requires public origin zero; nested Note entry and destructive state/reconfiguration
+are explicitly refused. Inputs and copied Ends use the existing processor call.
+Unrecoverable partial delivery or rejected output poisons that owner rather than
+allowing a retry. Continuing parameter handoff prevalidates the unchanged score
+and every bound peer, then publishes the new existing lease origin under the
+Source guard while retaining record phases, tuples, counters and native IDs.
+
+The shared Note contract now requires an admitted channel width and immutable
+completion policy. `NativeEnd` retains its original voice/End rules;
+`SuccessfulOffBlock` retires only original Off pairing records after that actual
+call and all returned facts succeed, with no claim about DSP release voices.
+Whole-root admission uses real priming/public call boundaries and grants no
+same-call Off credit. Cached-IR identity checks still scan prior window events
+and can take quadratic work; this foundation grants no RT/performance scope.
+IPC15, full CLAP offer 5 and independent Note probe 2 reject older shapes;
+CLAP remains explicitly NativeEnd/16 channels. VST3/canonical Note admission
+is unchanged.
+
+`AudioProgram` owns one optional validated `MusicalTimeReference`: the
+Sequence-second position of quarter-note zero, a positive quarter-note duration,
+and an optional constant `MusicalTimeSignature`. Positive u16 meter scalars are
+an explicit product range, not VST3's entire int32 range. Bar zero starts at
+quarter-note zero; negative bar selection uses exact floor. Unknown meter never
+implies 4/4. Maps and an independent pickup/bar origin remain unavailable.
+
+Existing author/sample time and Note coordinates remain unchanged. The entire
+reference participates in compiled/closure identity, preparation, Ready and
+callback binding; parameter handoffs/configuration seeds cannot replace it.
+Document schema35 preserves unknown meter when migrating schema34 and refuses
+nonnull meter mislabeled as legacy. The prior reference migration remains
+chained; container/library versions are unchanged. IPC22 carries a required
+nullable reference without a second clock registry.
+
+Both adapters floor bars before format rounding. CLAP independently checks its
+i32 bar number and i64 beat ticks. VST3 rounds the full rational bar start to
+binary64 without CLAP's integer limit and advances it at each native chunk.
+An anchored SDK meter refuses an independent signature setter. Optional validity
+follows supplied facts and each format's contract. Scope parameters retain local
+time; DSP transport retains Sequence signal time after PDC, without multiplying
+Tempo by source retiming. Selected nested musical execution remains refused.
+
+Meter implementation has Windows ordinary and owned-DLL SDK lifecycle/setter
+qualification; matching current-worker/native meter DSP/PCM and third-party
+workflows remain pending. Prior Tempo/PPQ/activity qualifications retain their
+separate sources and conditions in the compatibility report. They do not qualify
+the new meter workflow or realtime/performance/other-platform execution.
+
+Note-enabled CLAP probes/workers now offer the actual shared NotePorts callback
+table and validate the restored, render-bound port cohort. Raw rescan flags and
+wrong-thread/unsupported observations stay bounded and sticky. Metadata-only
+probes retain their original unsupported service. ProbeNotes schema 1 remains
+the original Note-only offer. Schema 2 captures audio layout, parameters,
+latency, tail, render mode and Notes from one restored, Notes-enabled native
+instance; its public facade borrows the captured processing facts. The
+application Resolver must consume this coherent offer before author Notes can
+be enabled, rather than combining ordinary and Notes probe results.
+
+The schema-2 query validates inactive metadata before activation and after
+deactivation, without starting DSP. Existing unsupported callback, thread,
+parameter-source or port-cohort observations cause refusal. Only this query
+retains the same native-services owner beyond destruction, so callbacks during
+destroy remain observable through the original source. Default probes and
+workers keep inline services. This adds no second mutable authority; it also
+does not establish complete accounting for SDK wrapper layouts, Arc ownership
+or physical memory.
+
+For empty selected scores, Runtime preparation projects a borrowed upper bound
+using the existing prepared-logical policy before media resolution or processor
+creation. The existing closure ledger charges that local Plan while children
+are prepared; pending ancestors and completed siblings remain charged. A private
+non-cloneable receipt is consumed once by the synchronous builder. Completion
+requires actual policy bytes not to exceed the projection, then atomically
+replaces the local reservation using the unchanged Session admission checks.
+This is policy accounting, not a native execution permit or allocator/RSS bound.
+Before auxiliary metadata exists, sidechain counting is conservative and can
+reject a graph whose eventual actual policy would fit. Existing final footprint
+values and limits are preserved.
+
+Preserved native parameter preparation also borrows the entire retained Runtime
+tree before its first local schedule clone or scratch allocation. It adds the
+current Root closure's logical footprint once, then only the requested weights
+of actual replacement local Plans. An equal nonselected peer contributes no new
+Plan; the selected Session retains the existing forced-replacement rule. The
+estimator first checks existing canonical Program compatibility, including the
+bitwise immutable Note score, and reuses current cached Note storage without
+reprojecting endpoints. It consults the same frozen Root grant. The final actual
+owner-union/overlap checks and Source installation, Drop, CAS and Ack semantics
+remain authoritative and unchanged. This preflight is a policy check, not a new
+reservation or lifetime-accounting issuer. StateEntry preparation and all
+externally retained new/retired Preserved handles still require their own
+admission work; this change does not close those frontiers.
+
+Public nonempty-score Plan preparation still runs the allocation-free M1
+validation and returns typed Unsupported before projection/factory resolution.
+Initial Note IR preparation peak and author-handoff clone admission, including
+all externally retained prepared handoff handles, must be charged to the existing
+prepared-resource grant before lifting this gate. Empty-score policy admission
+does not discharge those obligations. Owned model
+tests and direct fixture-DLL processing verify only their named boundaries;
+they do not establish production Timeline Notes, Parent IPC, instruments,
+realtime safety, comparative performance or third-party compatibility.
 
 An authored Processor Instance is unique across all Sequence insertion points.
 Preparation preserves Rack order and materializes generated processor
@@ -175,6 +393,59 @@ law may gate the Scope tail without changing processor lifetime semantics.
 
 ## Consequences
 
+An ordinary native parameter replacement must remove the parameter component
+actually charged to its current Session. Initial Session admission retains
+the conservative Plan model; a successful ordinary replacement publishes the
+complete new scratch layouts and retains that charged value beside the Plan
+and scratch owners. The private local projection adjusts parameter and fixed
+weights by the same checked delta. StateEntry uses this projection for old
+storage and the initial model for its newly allocated destination. This local
+fact belongs to the existing resource grant; it creates no new budget issuer
+or claim of complete physical ownership.
+
+Before native Bind, ordinary preparation computes every retained Runtime's
+next subtree footprint and requires the Root result to equal existing overlap
+admission. Final Source publication moves prevalidated Plan/scratch/charge
+owners and publishes those cached subtree values together. All fallible
+arithmetic remains before the final guards. Caller-owned retirement and exact
+native Ack keep their existing lifecycle.
+
+The original Root also retains a private, lazily allocated subtotal H for
+logical Plan roles owned by actual pending and retired handoffs. Its published
+steady footprint C and frozen grant G remain distinct: preparation checks
+C+H+prospective N against G before ordinary local cloning. A receipt on the
+actual owner enrolls N after all preparation gates; successful installation
+checks C'=C-O+N and H'=H-N+O before Source guards, then applies one bounded atomic
+delta with the ownership swap. The receipt is the last owner field and credits
+only after preceding Plan/scratch owners finish destruction. Ack cannot retire
+an externally retained Preserved handoff. The actual Root-owned StateEntry
+cohort carries its own receipt through partial errors and retries, and exact
+Ack releases its storage on the existing lifecycle path.
+
+This is a logical-role policy, not an allocator union or a second state/grant
+authority. Only exclusive Root operations can increase H; concurrent receipt
+Drop can decrease it, so role changes use atomic RMW rather than stale stores.
+Owned Preserved and private receipt controls have actual finite qualification.
+Two repeated Windows owned VST3 editor scenarios also qualify real StateEntry
+cohort fees through partial preparation, cancellation/retry, metadata Drop,
+installation and exact Ack, plus pending nested Runtime destruction. They use
+actual unequal new/old weights and count the unchanged root Session role.
+Initial StateEntry preparation now borrows the complete retained tree to bound
+new local roles R before the first clone or Plan retain. Every affected local
+uses the existing requested logical policy, including equal/nonselected peers;
+unaffected locals contribute their local Plan weight once. Checked C+R goes
+through the original Root checker, which adds H once. Actual N must fit R before
+source inspection. Persisted-cohort retries keep their existing C+H validation
+without another R or enrollment. Repeated real Windows VST3 controls qualify
+root/nested tight logical rejection with zero measured host-thread allocations
+and root exact-grant partial retry/install/Ack/PCM. The finite native family has
+H0 initially and no sidechain, transitions or Notes; conservative R can exceed N
+in other shapes. This does not establish physical, fixed-budget or SDK bounds.
+Opaque native destructor ordering, installed Runtime-first destruction,
+same-Source Superseded CAS, native Ack refusal, additional native budget shapes,
+accounting-metadata/fixed/physical completeness and real-time performance still
+require separate acceptance.
+
 - `mondrian-timeline` owns author data and validation only.
 - `mondrian-audio` owns compiler, immutable plan, common DSP, recursive runtime,
   and source interfaces; it has no FFmpeg, CPAL, UI, or export dependency.
@@ -188,3 +459,124 @@ law may gate the Scope tail without changing processor lifetime semantics.
   lowering, processor sidechains, true-peak/loudness observation, and further
   stateful/lookahead processors must deepen this pipeline. They must not create
   alternate author or execution paths.
+
+## Retained compiled Note payload logical accounting
+
+The immutable Program's selected Note arrays and port-key strings contribute
+one actual retained payload A to each prepared Plan role. If any lane has a
+note, A is the checked outer CompiledNoteLane capacity layout plus every retained
+row's AudioNote capacity layout and raw key-byte capacity. Initialized empty
+rows are included in that case. An all-empty execution score contributes A0;
+retained empty caller metadata is explicitly outside this logical policy and
+must not be described as absent physical storage.
+
+The common local weight is B0 + actual prepared Note payload S + A. Existing
+Session projections, original Root C/H/G ceilings, overlap O/N roles and retained
+fees consume that same weight. Multiple Plan roles sharing one Program Arc can
+conservatively charge A per role; this is not exact physical union accounting
+and needs no separate Note ledger or identity registry.
+
+Native-author requested preparation reads next_program A after its original
+bitwise score/topology eligibility and original B0+cached-S checked sum. It does
+not replace a larger next owner with old-program capacity. Its generic schedule
+clone is checked immediately afterward: actual cloned S must fit the old actual
+S upper before processor rebind/foreign interaction. This is post-allocation
+logical acceptance; detail-string refusals can allocate.
+
+This accounting does not grant public nonempty Note execution. Compiler
+clone/sort allocation, simultaneous lowering arrays, initial original-ledger
+reservation, Hosted/factory peaks, coherent offers/IPC/lifetime and complete
+physical/native/RT qualification remain separate prerequisites. Public unsupported
+and endpoint errors keep their established order. No live Plan migration or
+grandfathered fee policy is introduced.
+
+## Processor output routing contract (2026-10-16)
+
+The native lane's fixed owners also include `AdapterResident`: the complete
+concrete retained Worker Box header, including inline adapter metadata. Its real
+type layout enters the existing Factory session reservation and sole Root
+`FixedResident` grant; the child compares its pure type profile before native
+preparation and checks the actual dynamic Box layout before Ready. IPC13 requires
+all eight owner layouts and refuses the old profile. This does not account for
+nested cold heap owners or qualify whole-process residency. Resolver validation
+and discovery cold peaks precede the final Session grant; non-Windows adapters
+without a native lane profile do not acquire this qualification.
+
+Approved for implementation; this section does not claim completed native
+multi-output support. The current single mutable Main bus and strip taps cannot
+represent independent plugin outputs. Relaxing a format's output-count check
+would give it incorrect buffers and erase signal identity. Extend the existing
+Main/auxiliary model and sole Route/DAG instead of replacing either executor.
+
+Factories declare ordered, stable-keyed auxiliary output contracts, validated
+against the Render Contract and revalidated for seeds and instance creation.
+An empty auxiliary contract preserves the existing single-Main behavior.
+Callbacks borrow Session-owned mutable auxiliary PCM beside the existing Main.
+Every admitted native output receives real storage, connected or otherwise;
+unconnected outputs never implicitly sum into Main.
+
+An authored Processor-output Route names the unique Sequence-local processor
+ID and either Main or an auxiliary bus key. Preparation derives its existing
+occurrence; it does not persist another owner/instance registry. The first
+slice admits Track/Bus racks only. Scope-generated and Output-rack sources are
+rejected explicitly. Bypassed routed producers retain author intent but fail
+execution preparation; they cannot fabricate auxiliary output. A raw tap is
+captured immediately after that processor returns, before subsequent Rack
+processing, before the owner mute stage. Audition Solo filtering applies to
+Track-owned processor sources just as for pre-mute Track sends; Bus owners
+follow the existing Bus rules. Processor execution adds no separate mute/Solo
+gate.
+
+Reuse the existing pre/post stage DAG, including its conservative rejection of
+same-stage feedback. Routes and sidechains resolve to dense prepared source
+slots. A processor tap's arrival is its aligned input delay plus its own
+algorithmic latency, not the remaining Rack latency. Fanout executes the
+producer once per window. All auxiliary buffers and referenced Main snapshots
+survive until their final consumers and are preallocated/charged through the
+existing storage visitors, FixedResident and Root grant; no second budget is
+introduced. Failed processing must not publish partially updated or stale PCM.
+Replacement overlap uses a conservative allocation union: metadata already in
+the current fixed footprint can be charged again while its owner is retained.
+This is an upper bound, not qualification of a minimum peak grant or physical heap.
+
+The additive author endpoint requires document schema33 and a value-preserving
+32-to-33 migration that rejects new endpoints mislabeled as legacy. Archive and
+library formats remain unchanged. Clone/remap, strong references, node removal,
+cycle checks and authoring footprint migrate with the endpoint. Shared-DAG
+literal PCM, intermediate taps, PDC, fanout, partitioning, budget boundaries and
+project roundtrips qualify the first slice; independent native fixtures and
+real plugins qualify subsequent format adapters. Existing VST3/CLAP guards
+remain until their complete native buffers, IPC and contracts are implemented.
+
+### Retained restart and native I/O migration boundary
+
+Retained restart installation still preserves every port contract and shared
+mapping. CLAP can now retain a bounded inline input proposal after legal
+deactivation, using actual native IDs/order, declared Mono/Stereo meaning,
+cohort and control token. Main/output compatibility remains frozen. IPC24
+transfers this observation into the existing Root-owned attempt; its inline
+layout is charged before service. The proposal cannot activate, consume a
+cohort, issue a seed or unblock DSP. Reading it requires the exact original
+ticket and a still-valid Source claim. Native I/O migration remains an open gap.
+
+IPC24 adds a separate input-buffer stage. The original Root admits the complete
+replacement Box, nested PCM vectors and SDK port storage together with every
+retained owner before allocation. Cold and staged planes share the same pure
+reservation and actual-capacity model. The stopped child revalidates the exact
+proposal, native cohort and block extent, retains the new owners and returns
+their capacities; cancellation, failure or an unconfirmed operation cannot
+credit the reservation. Staged inputs have no ready token or seed authority.
+This stage neither activates the plugin nor replaces the shared mapping or
+canonical processing contract. Those owners must be coordinated before DSP can
+use the replacement planes.
+
+Future migration must reuse the existing joined native processing scope and
+Root transaction. Inactive native metadata supplies a typed proposal using the
+existing ordered port contracts. Before allocating replacement planes or a
+shared mapping, admit their peak together with all retained owners under the
+original grant. Rebuild routes and PDC from the unchanged author Program; an
+unresolvable referenced port must refuse preparation. State/configuration and
+mapping installation must identify the same observed native candidate and
+Source permission, retain old owners through acknowledgement, and require Fresh
+Enter. Do not relax transfer port equality or resume the old mapping in isolation.
+IPC22 currently provides none of this topology migration.

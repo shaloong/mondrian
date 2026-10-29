@@ -1,13 +1,13 @@
 # Mondrian 产品路线图
 
-> 更新日期：2026-10-03
+> 更新日期：2026-10-08
 >
-> 当前状态：M1 Windows Alpha 收口中（核心实现与历史验证已有基线，当前候选资格尚待重跑）
+> 当前状态：M1 Windows Alpha 收口中（具名完整 Golden 与 CLAP／VST3 具名侧链、历史及资源输出参考已通过；CI、设备和完整工作区测试资格待补）
 >
 > 当前主线：完成 M1 当前候选资格收口，再推进 M2 的产品可靠性与交互完整性
 
 ROADMAP 只记录产品范围、里程碑状态和退出门槛。实现细节放在
-[`CONTEXT.md`](../CONTEXT.md) 与 [`docs/architecture/`](architecture/)；测试命令、
+[`CONTEXT.md`](../CONTEXT.md) 与 [`docs/architecture/`](architecture)；测试命令、
 报告和历史运行放在 [`docs/dev/reference-validation.md`](dev/reference-validation.md)
 与 [`docs/dev/performance-profiling.md`](dev/performance-profiling.md)。已完成能力不在
 这里复制类名、内部账本、逐次性能样本或调试过程。
@@ -56,10 +56,32 @@ M1 的目标是 L1，不要求所有高级组合都可执行。暂未实现的�
 | 里程碑 | 状态 | 结果 |
 | --- | --- | --- |
 | M0 核心契约与架构收敛 | **完成** | 项目、时间、编辑、音频、色彩、执行与验证权威已收敛到唯一生产路径 |
-| M1 Windows Alpha | **收口中** | 核心工作流、作者级 Crop 与 HLG 独立 reference 已闭合；当前候选资格尚待重跑 |
+| M1 Windows Alpha | **收口中** | 核心工作流已有具名基线；3b44084 完整 Golden 已通过；CI、设备和完整工作区门禁仍待验收 |
 | M2 Beta | **下一阶段** | 产品交互、恢复、复杂项目、设备矩阵、独立色彩资格和发布工程 |
 | M3 专业能力与互操作 | **后续** | 高级效果、响度、插件、跟踪、交换格式 |
 | M4 多平台实机资格 | **后续** | macOS/Linux 真实设备、打包、签名与长期维护 |
+
+### 旧阶段 2–4 清单核查（`feat/nle-backlog`，2026-10-08）
+
+这里的“已接入”表示当前源码有产品路径和针对性测试，不等于完成跨厂商、跨设备的发布资格。
+每次平台实机或插件矩阵资格仍须绑定当时的源码版本重新验证。
+
+| 原需求 | 当前代码状态 | 下一步 |
+| --- | --- | --- |
+| Dropdown 更新标签、分隔行与混合模式分组 | 已接入 `set_label`、递归标签本地化、非动作分隔行与类型化混合模式顺序；菜单三态勾选、稳定语义身份、父子关系及本地化名称已验证，输入仍由原控件处理 | 原生屏幕阅读器与物理输入验收 |
+| 外部媒体拖入素材库/轨道 | 已接入轨道与素材库单事务提交，取消或未落在轨道不留新素材 | macOS 文件拖入实机验收 |
+| Viewer 实时变换、锚点与蒙版编辑 | 已接入位置/缩放/旋转/锚点手柄、Power Window 形状与贝塞尔点插入 | 高分屏、代理/原片和多层项目实机验收 |
+| 约束贝塞尔关键帧 | Auto/Continuous 作者约束、稳定 ID 的点与手柄编辑、多选、框选及整组时间／数值／插值／剪切粘贴／鼠标拖动已接入；参数重置使用当前定义默认值，一次清除动画并保留稳定身份，覆盖视觉与音频；框选支持替换／追加／切换、只读检查、取消及布局变化恢复；视觉与音频共用原子准入、作者手势和 Undo，支持取消恢复、保存后保留 Redo 及 Unicode 重开；参数重置与整组编辑的原生参考输出按具体验收版本记录 | 完整作者范围与多键组拖动原生输出、高分屏／性能／平台矩阵；见 [验收记录](dev/modal-resource-lut-acceptance.md) |
+| 模态与资源编辑 | 实际路由限制 Tab／Shift+Tab 和后台输入，等待检查的确认按钮退出焦点顺序，超时后可重试；取消／过期／锁定／Save As 目录变化不能提交旧资源草稿；确认通过作者事务，单步 Undo／Redo、保存撤销状态和 Unicode 项目重开已验证 | 原生文件选择器与物理键盘、macOS 实机验收；见 [验收记录](dev/modal-resource-lut-acceptance.md) |
+| 通知 | 终态通知与键盘历史已接入；完整本地化无障碍文本、分页／边界／失焦、窄宽度伪语言绘制及高负载优先级已验证；最多两条弹出，错误优先，持续进度不弹出 | 原生屏幕阅读器、物理输入与跨平台验收；见 [验收记录](dev/modal-resource-lut-acceptance.md) |
+| 运动跟踪蒙版 | 目标平移/平面单应跟踪、取消、重算、源指纹及原子结果发布已接入 | 遮挡、失焦、长片段和真实素材矩阵 |
+| 插件抽象 | 视觉 Effect Definition/Compiled Graph、执行会话独占的有界处理器资源、机器分级驻留配额与隔离音频 Worker 已接入 | 驻留压力/多效果性能资格、插件管理、能力协商与厂商矩阵 |
+| 特效库 | 19 个内建视觉效果和统一 Effect Browser 已接入 | 按真实剪辑工作流补齐效果与独立像素参考 |
+| 项目打包 | `.mdp`、媒体、LUT 与 OCIO 依赖盘点、搬迁和重开验证已接入 | 大项目、缺失资源和跨平台搬迁实机验收 |
+| i18n | Fluent 中英文、伪语言和主要界面路径已接入；状态提示与历史保存消息 ID/参数并即时切换语言，159 个非测试模块调用点已迁移；内置特效、Title、Mask 的参数名称、分组和枚举选项按稳定定义地址展示本地化文本，作者键值保持不变 | 清除剩余用户可见字面量，类型化内部诊断原因并补齐语言验收 |
+| 参数数值输入 | Rack、Mixer 和组件参数保留 f64；整数拒绝小数，JSON 保存重开保持浮点位值；文本草稿在确认前不写入项目，Escape 取消不产生关键帧或撤销记录；Inspector 位置/缩放/锚点与通用 Vec2/Vec3/Vec4 控件只提交变化分量，保留其他分量、独立关键帧及未修改曲线的共享存储；Clip/Effect/Mask 统一参数写入契约；Undo/Redo 保留当前编辑时间，跨帧率按真实播放时间重新绑定；撤销删除当前序列时恢复原序列导航，后续 Viewer 完整变换可精确撤销重做；Inspector 滑块拖动保留捕获并持续刷新 Viewer；数值曲线点／手柄拖动持续更新 canonical 作者状态与 Viewer，结束时保留一个历史项，取消和回到原点不留历史 | 完整键盘操作、厂商参数与平台矩阵 |
+| CLAP / VST3 | 用户选择的 Float32 音频效果可隔离处理；自有参考插件的约束曲线、剪贴板、参数重置与 Undo／保存后 Redo／Unicode 重开已通过逐样本输出验收；b5eb715 的 CLAP／VST3 同主布局辅助输入已通过真实打包 worker、自有立体声侧链、激活／状态／分块／重置、PDC 与保存重开参考验收；Mixer 总线删除投影已统一领域依赖检查，启用／禁用侧链连接与锁定来源回归通过 | Mixer／Inspector 侧链来源、启用、静态增益与断开控件已接入当前观察绑定；同通道与双通道前向侧链的阶段调度已接入，84e6eff 通过原生／Golden 验收，123a186 的真实输入名称、重名／无名恢复、具名控件观察绑定连接及 Undo／重开输出通过当前具名验收；9f0183a 的晚到辅助信号主输入补偿、Scope 边界、原生历史与三轮完整 Golden 已通过；718696e 的具名共享 Rack 原子来源切换、保留控制及原生 PCM／四档案重开参考已通过；538ae61 的共享侧链增益曲线、序列／Scope 时间域、真实控件取消／提交、原生逐采样斜坡／seek／历史及资源输出专项已通过；e65a1c2 的单个／共享 Scope 原生工作流、14 项错误／删除／重新绑定拒绝、三语言实际曲线控件及当前模态／资源／LUT／历史输出 14 门禁已通过；多布局、完整 Host／Scope 指针、MIDI／编辑器、厂商状态／参数及性能资格待推进 |
+| OpenFX | Filter / RGBA Float32 / Double/Boolean/Integer 子集接入共享效果图，插件声明的默认插值贯通新关键帧与数值写入，视觉参数 Inspector 按数值声明保留整数与 Double 输入精度；工厂绑定作者实例与执行会话，普通 CPU 合成/时间采样/混合执行取消及逻辑帧预算贯通；原生图像按 action 借用并检查释放，UHD 参考路径在 768 MiB 逻辑工作预算内通过；Preview/CPU-prefix/fallback/Export 已接入原生驻留配额并跨帧复用，取消及故障仍回收；canonical 常量／曲线的完整值、导数、积分和关键帧查询已通过真实 SDK；拒绝未支持的有序/时间采样契约 | 插件发起的持久作者写入、更多上下文／像素格式、厂商／平台与性能矩阵 |
 
 ---
 
@@ -91,17 +113,33 @@ Linux/macOS 共享生产 Interface 和常规 CI，但实机发布资格属于 M4
 
 ### 4.2 收口矩阵
 
-| 能力 | Engineering state | 当前候选资格 |
+资格以具体源码和报告为准；下表区分已验收基线与最新修订待补项。`0adaea304c6d6f672ef61c43c0ea4a9f668971fa`
+曾在 2026-10-08 完成 Windows 产品重建、CLAP／VST3 自有单主总线参考验收与完整
+Golden 连续三轮；源码起止干净且一致，产品哈希全程一致。见
+[验收记录](dev/modal-resource-lut-acceptance.md#clean-native-audio-reset-and-current-candidate-qualification)。
+这份候选尚未推送，不能继承 2026-08 历史版本的三平台 CI、4K／设备或完整工作区
+测试资格。最新原生 CLAP 修订 `ae3c78f` 已通过激活生命周期、辅助输入、PDC、
+Undo／保存重开与逐样本输出参考，见
+[侧链验收](dev/modal-resource-lut-acceptance.md#clean-activated-latency-clap-auxiliary-qualification)。
+随后 3b44084 完整 Golden 通过 3/3，模态 Tab、资源事务、LUT 输出／打包搬迁和
+原生音频历史专项通过，见
+[当前完整验收](dev/modal-resource-lut-acceptance.md#current-activated-host-modal-resource-and-lut-acceptance)。
+当前 `b5eb715` 已通过 CLAP／VST3 原生侧链及三项主输入参数／状态回归、完整
+Golden 连续 3/3，以及模态／资源／LUT／打包／音频历史专项。源码和二进制身份
+稳定，见 [当前验收](dev/modal-resource-lut-acceptance.md#current-vst3-auxiliary-modal-resource-and-lut-acceptance)。
+历史记录继续保留其原始版本；下表分别列出实现状态与实际资格。
+
+| 能力 | Engineering state | 具名资格与待补项 |
 | --- | --- | --- |
-| 项目与恢复 | 实现闭合：durable save/autosave、SQLite snapshot、非阻塞 close、恢复确认和故障注入不覆盖源 | 当前 Golden v14 已通过 3/3 |
-| 素材与代理 | 实现闭合：有界 probe、fingerprint、稳定 AssetId、离线/重连、proxy/original 与 cache revision | Golden Proxy/Relink 已覆盖 |
-| 编辑 | M1 核心操作、Link、Lift/Extract、T/S、snapping、常速/反向/hold 与 Transition 已接入 | Golden Editorial/Transport 与 Retime 已覆盖 |
-| 播放 | 实现闭合：Clock、latest-wins、严格帧覆盖、取消、CPU/native decode 与 Viewer completion | 当前源码 v7 4K Main10 gate 已重跑通过（passed-baseline） |
-| 音频 | 实现闭合：gain/pan/fade、mute/solo、meter、automation、PDC、limiter、嵌套与共享 Runtime | 当前源码 CPAL A/V recovery gate 已通过（passed-baseline） |
-| 视觉 | 作者级 Crop、基础算子、Basic Title、Cross Dissolve 与 Hold/Linear/Bezier 作者语义已接入 | 当前 Golden 与 CPU/GPU reference 已闭合 |
-| 色彩 | Rec.709/sRGB、PQ、HLG 与 straight Alpha 已有独立 reference；未知解释会阻止或要求 override | M1 色彩资格闭合；Camera Log 属于 M2 |
-| 导出 | H.264 High/AAC SDR、HEVC Main10、不可变 snapshot、取消、失败清理与完成前 probe 已接入 | 当前 Golden 与长 Work Area 候选证据均已闭合 |
-| 平台与质量 | 三平台生产入口和 Adapter 已进入 CI 配置；本地 workspace 门禁可执行 | Windows/Linux/macOS native CI 通过（1.97.1） |
+| 项目与恢复 | 实现闭合：durable save/autosave、SQLite snapshot、非阻塞 close、恢复确认和故障注入不覆盖源 | b5eb715 完整 Golden 已通过 3/3，资源事务／原生重开专项通过 |
+| 素材与代理 | 实现闭合：有界 probe、fingerprint、稳定 AssetId、离线/重连、proxy/original 与 cache revision | b5eb715 Golden Proxy/Relink 已覆盖 |
+| 编辑 | M1 核心操作、Link、Lift/Extract、T/S、snapping、常速/反向/hold 与 Transition 已接入 | b5eb715 Golden Editorial/Transport 阶段已通过；专项 Retime 矩阵保留具名历史记录并随候选验收 |
+| 播放 | 实现闭合：Clock、latest-wins、严格帧覆盖、取消、CPU/native decode 与 Viewer completion | 历史 v7 4K Main10 基线已通过；当前候选专门矩阵待验收 |
+| 音频 | 实现闭合：gain/pan/fade、mute/solo、meter、automation、PDC、limiter、嵌套与共享 Runtime | b5eb715 CLAP／VST3 侧链、主输入参数／状态、历史／PCM 和 Golden 参考已通过；历史 CPAL A/V recovery 基线保留，当前设备矩阵待验收 |
+| 视觉 | 作者级 Crop、基础算子、Basic Title、Cross Dissolve 与 Hold/Linear/Bezier 作者语义已接入 | b5eb715 Golden 视觉阶段已通过；完整 CPU/GPU reference 矩阵保留历史基线，当前专项待验收 |
+| 色彩 | Rec.709/sRGB、PQ、HLG 与 straight Alpha 已有独立 reference；未知解释会阻止或要求 override | b5eb715 Golden 色彩／媒体阶段与 LUT 资源输出专项已通过；完整独立 reference 矩阵保留历史基线，当前专项待验收；Camera Log 属于 M2 |
+| 导出 | H.264 High/AAC SDR、HEVC Main10、不可变 snapshot、取消、失败清理与完成前 probe 已接入 | b5eb715 Golden 交付／重开阶段已通过；历史长 Work Area 基线保留，当前专项待验收 |
+| 平台与质量 | 三平台生产入口和 Adapter 已进入 CI 配置；本地 workspace 门禁可执行 | 历史三平台 CI 基线保留；当前未推送候选的三平台 CI 与完整工作区测试待验收 |
 
 ### 4.3 退出门槛
 
@@ -109,11 +147,12 @@ Linux/macOS 共享生产 Interface 和常规 CI，但实机发布资格属于 M4
 - [x] 一个参数与一个音频编辑从作者命令贯通 Undo/Redo、保存重开、Preview/Export 和 cache invalidation。
 - [x] 同一 Hero Sequence 完成编辑、代理/重连、嵌套、恢复、标题、转场、效果、音频和两种交付。
 - [x] 作者级 Crop 贯通 stable ParameterId、动画、Inspector、Undo/Redo、持久化、Preview/Export、cache identity 与 CPU/GPU reference。
-- [x] HLG 通过独立 1000-nit 绝对 reference；PQ、Rec.709/sRGB/Alpha 的既有证据保持通过。
-- [x] 当前源码完成 v7 4K Main10 播放/seek/supersession和真实 CPAL A/V recovery；历史报告只作回归基线。
+- [ ] 当前候选 HLG 1000-nit、PQ、Rec.709/sRGB/Alpha 的独立 reference 矩阵验收；既有具名基线继续保留。
+- [ ] 当前候选完成 v7 4K Main10 播放/seek/supersession 和真实 CPAL A/V recovery；历史具名报告只作回归基线。
 - [x] 所有生产结果归类为 `Verified`、`ExplicitlyDegraded` 或 `Blocked/Unresolved`；没有隐式 RGBA8、错误源帧、Video Master 或静默效果旁路。
-- [x] 当前源码的 Windows/Linux/macOS native CI 通过，平台专属类型不泄漏到共享语义。
-- [x] 当前源码 `windows-alpha-golden-v14` 连续三轮通过，并完成 workspace fmt/clippy/test。
+- [ ] 当前候选的 Windows/Linux/macOS native CI 通过，平台专属类型不泄漏到共享语义。
+- [x] 具名 b5eb715 完整 Golden 连续三轮通过；保留源码、二进制与各阶段报告身份。后续源码修订须重新验收。
+- [ ] 当前候选完整 workspace fmt/clippy/test 与专门设备门禁收口；已通过的针对性库回归和严格 Clippy 不替代全部矩阵。
 
 ### 4.4 已接受的 Alpha 限制
 
@@ -182,7 +221,7 @@ M2 把 M1 的可用闭环提升为可长期日用的 Windows Beta。顺序固定
   不允许以 RGBA8 临时旁路或整图 CPU 重跑掩盖半途失败。
 - 完成自由 Path/Bezier Mask 的产品级编辑、羽化/扩张交互和缓存失效；tracking、warp、
   temporal/stateful 专业效果仍属于 M3。
-- Effect 浏览、Inspector、节点诊断和插件缺失状态必须从同一 Definition/Compiled Graph 投影，
+- Effect 浏览、Inspector、节点诊断和效果依赖缺失状态必须从同一 Definition/Compiled Graph 投影，
   不创建另一套“UI 可用效果”清单。
 
 ### 5.5 色彩、音频与交付
@@ -243,11 +282,11 @@ M2 把 M1 的可用闭环提升为可长期日用的 Windows Beta。顺序固定
 - VST3/CLAP Adapter 必须具备进程/线程隔离、deadline、state migration、bus negotiation、
   latency/PDC、crash quarantine 和缺失插件恢复；插件不得直接成为作者权威。
 
-### 6.3 Effect 插件平台
+### 6.3 Effect 扩展与原生格式插件宿主
 
 - 内建效果与至少一个受控第三方 Adapter 共用 Definition、Parameter Schema、Compiled Graph、
   capability、缓存、失败隔离和 Preview/Export 解释后，才评估 OpenFX 等更广 ABI。
-- 插件版本、资源、GPU/CPU 能力、确定性、temporal extent 和 state migration 必须持久化为
+- 效果扩展与原生格式插件的版本、资源、GPU/CPU 能力、确定性、temporal extent 和 state migration 必须持久化为
   可诊断合同；未知能力失败关闭，不能假定“像素大概兼容”。
 
 ### 6.4 交换格式、专业媒体与 QC
@@ -265,6 +304,15 @@ M2 把 M1 的可用闭环提升为可长期日用的 Windows Beta。顺序固定
 - 第三方插件崩溃、超时、缺失、升级和 state 迁移不会破坏 Project、实时线程或 Export job；
   Preview/Export 对相同插件状态具有一致结论。
 - 已声明可往返的交换子集通过版本化 corpus；未支持语义全部显式保留或报告，无静默数据丢失。
+
+### 6.6 通用 Extension 平台（音视频插件宿主之后）
+
+先完成预定 OpenFX/VST3/CLAP 宿主范围，再推进通用 Extension。该平台覆盖资源包、
+命令、真实 HTML/CSS/DOM 面板、Rust/Web 受限运行和统一授权；完整编辑器替换及
+第三方新创作类型是长期目标。Alpha API 允许调整，成熟后逐项稳定。
+这里不把 Extension 记为已实现，也不把原生格式插件统称改名。范围与验收见
+[Extension 架构](architecture/extension-system.md) 和
+[ADR 0011](adr/0011-use-managed-extension-platform.md)。
 
 ---
 

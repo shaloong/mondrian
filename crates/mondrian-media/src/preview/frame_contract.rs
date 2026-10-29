@@ -298,7 +298,7 @@ pub(super) fn resolve_cpu_rgba_contract_from_metadata(
         } else {
             resolved
         };
-        return Ok(DecodedRgbaFrameContract::source_encoded(
+        return Ok(DecodedRgbaFrameContract::source_rgb(
             source,
             DecodedVideoMatrix::Rgb,
             range,
@@ -354,9 +354,7 @@ pub(super) fn resolve_cpu_rgba_contract_from_metadata(
                 .to_owned(),
         });
     }
-    Ok(DecodedRgbaFrameContract::source_encoded(
-        source, matrix, range,
-    ))
+    Ok(DecodedRgbaFrameContract::source_rgb(source, matrix, range))
 }
 
 pub(super) fn configure_preview_rgba_scaler(

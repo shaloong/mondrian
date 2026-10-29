@@ -5,7 +5,6 @@ version = 4
 [[package]]
 name = "com-scrape-types"
 version = "0.1.1"
-source = "git+https://github.com/coupler-rs/vst3-rs.git?rev=b2a45f2d40e602eff5a224b41613735388868590#b2a45f2d40e602eff5a224b41613735388868590"
 
 [[package]]
 name = "mondrian-vst3-stateful-gain-fixture"
@@ -17,7 +16,6 @@ dependencies = [
 [[package]]
 name = "vst3"
 version = "0.3.0"
-source = "git+https://github.com/coupler-rs/vst3-rs.git?rev=b2a45f2d40e602eff5a224b41613735388868590#b2a45f2d40e602eff5a224b41613735388868590"
 dependencies = [
  "com-scrape-types",
 ]

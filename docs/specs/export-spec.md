@@ -124,6 +124,12 @@ video cadence and A/V duration semantics; it cannot merely replace the FFmpeg
 `ResolvedExportDeliveryContract` before admission. The resolved contract has an
 exact color target/output-transform intent, raster, bit depth, range, chroma
 sampling, and FFmpeg pixel format.
+Hardware encoder admission probes that frozen raster, exact rational cadence,
+pixel format, profile and coding structure with one finite input frame. A
+reference-size success cannot admit a different delivery. The current Matroska
+PCM Adapter preserves channel count without independently verifiable speaker
+identity, so admission rejects that combination and offers MOV + PCM; final
+layout validation remains exact, including the two distinct 5.1 layouts.
 Execution, internal frame precision, FFmpeg arguments, and post-encode probe
 expectations consume that same result. Nested Sequences contribute
 working-domain pixels but cannot replace the root job's resolved delivery

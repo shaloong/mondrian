@@ -384,6 +384,25 @@ fn grapheme_column_for_relative_byte(line: &str, relative_byte: usize) -> usize 
     line.graphemes(true).count()
 }
 
+impl super::history::TextHistoryState for MultilineTextEditState {
+    type Position = TextPosition;
+    fn history_text(&self) -> &str {
+        self.text()
+    }
+    fn history_cursor(&self) -> TextPosition {
+        self.cursor
+    }
+    fn history_anchor(&self) -> Option<TextPosition> {
+        self.selection_anchor
+    }
+    fn history_restore(text: &str, cursor: TextPosition, anchor: Option<TextPosition>) -> Self {
+        let mut restored = Self::with_text(text);
+        restored.move_to(cursor, false);
+        restored.selection_anchor = anchor.map(|position| restored.clamp_position(position));
+        restored
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

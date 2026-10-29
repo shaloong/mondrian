@@ -629,7 +629,7 @@ pub enum FlatVideoTransitionDefinition {
     /// Scene-linear, coverage-correct two-input Cross Dissolve.
     CrossDissolve,
     /// Recoverable author intent for an externally supplied definition.
-    Plugin { definition_id: String },
+    External { definition_id: String },
 }
 
 /// Immutable execution snapshot of one visual Transition definition instance.

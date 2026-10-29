@@ -7,6 +7,7 @@
 
 use super::product_action::TimelinePrecomposeSelectionPayload;
 use super::{expand_clip_selection_units, AppState};
+use crate::app::AppMessage;
 use mondrian_core::{
     AudioTransitionId, ClipId, ClipLinkGroupId, MondrianError, TimelineTime, TimelineTimeRange,
     VideoTransitionId,
@@ -52,7 +53,10 @@ impl AppState {
         let clip_ids = self.selected_clips().iter().map(|item| item.clip_id).collect::<Vec<_>>();
         let nested_clip_id = self.precompose_clips_as_sequence(&clip_ids, name)?;
         self.select_clip_for_action(PRECOMPOSE_STEP, nested_clip_id)?;
-        self.set_status_hint(format!("已创建嵌套序列“{name}”"), false);
+        self.set_status_hint(
+            AppMessage::new("status-precomposed").with_text("name", name),
+            false,
+        );
         Ok(())
     }
 

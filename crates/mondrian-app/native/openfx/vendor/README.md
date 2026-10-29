@@ -15,4 +15,45 @@ Mondrian changes to upstream source:
   the unused Expat XML cache reader. The selected-binary render path does
   not use the XML plugin cache, and OCIO already bundles Expat.
 
+- `host/src/ofxhHost.cpp` marks Host identity and the private Host pointer
+  read-only to plugins; host-internal construction still assigns their values.
+
+- `host/src/ofxhImageEffect.cpp` retains fallback image-memory owners with
+  RAII until byte allocation succeeds, so allocation failure releases the owner.
+
 The product filter host is maintained separately in `../host`.
+
+- `host/src/ofxhParam.cpp` registers the OFX scalar Integer/Double default
+  interpolation property, including the normative Linear default.
+
+- Numeric interpolation metadata is read-only on parameter instances.
+  `host/src/ofxhPropertySuite.cpp` enforces existing read-only flags for scalar,
+  array and reset operations at the plugin suite boundary.
+  Its typed property constructor also forwards the declared `pluginReadOnly`
+  flag to the base property; host-internal property writes remain available.
+  Scalar and array reads validate their complete effective dimension before
+  hook dispatch or raw copying, returning BadIndex without partial output for
+  invalid requests. Fixed, variable and chained properties share this boundary.
+
+- `host/src/ofxhImageEffect.cpp` preserves the installed host clip defaults
+  when GetClipPreferences returns ReplyDefault, ignoring action-output residuals.
+
+- `host/src/ofxhPluginCache.cpp` checks the live export's full API/identifier/
+  major/minor identity and entry pointers before SetHost, and releases its binary
+  reference when a PluginHandle constructor unwinds. Foreign constructor
+  exceptions become host-owned errors before enclosing module owners retire.
+
+- `getFrameNeededAction` replaces its complete input range map atomically on
+  OK/ReplyDefault; errors preserve the caller's map without publishing defaults.
+  It validates finite ordered pairs, preserves disjoint/fractional/empty requests
+  and limits returned metadata to 256 pairs across inputs (a product limit).
+  An opt-in property write bound rejects excessive indices/counts before growth;
+  its sticky refusal survives reset/copy. Other properties retain their existing
+  write policy. This is not a native heap/RSS or requested-frame-count limit.
+  Dependency action tests do not enable temporal rendering in the product.
+
+- `clipGetRegionOfDefinition` reports a valid clip's query failure as Failed,
+  preserves allocation failures as ErrMemory and clears rejected bounds. Invalid
+  handles still report BadHandle; nonfinite/inverted regions cannot return OK.
+  `clipGetImage` uses the same error distinction for valid clips, including
+  upstream delivery failures; a failed fetch cannot publish an image handle.

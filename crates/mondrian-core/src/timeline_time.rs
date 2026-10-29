@@ -164,6 +164,17 @@ impl TimelineTime {
     pub fn to_f64(self) -> f64 {
         self.numerator as f64 / self.denominator as f64
     }
+
+    /// Project the signed distance from another author coordinate after exact
+    /// subtraction. Unlike subtracting absolute floating projections, this
+    /// retains short spans at large origins. The derived distance need not fit
+    /// a persisted `TimelineTime` numerator or denominator.
+    pub fn distance_from_f64(self, other: Self) -> f64 {
+        let numerator = i128::from(self.numerator) * i128::from(other.denominator)
+            - i128::from(other.numerator) * i128::from(self.denominator);
+        let denominator = i128::from(self.denominator) * i128::from(other.denominator);
+        numerator as f64 / denominator as f64
+    }
 }
 
 /// Policy for resolving exact author time onto an integer frame grid.

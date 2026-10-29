@@ -1,6 +1,6 @@
 //! Stable-identity authoring for Clip-owned numeric automation.
 //!
-//! UI Adapters submit one normalized control-point intent. This module resolves
+//! UI Adapters submit exact typed insertion and move targets. This module resolves
 //! the current property path and keyframe time from stable identities, prepares
 //! the smallest exact mutation set, and commits it through one Author
 //! Transaction. Widgets never replace an entire curve or infer author identity
@@ -8,52 +8,96 @@
 
 use super::{AppState, SelectedClipRef};
 use mondrian_core::automation::{
-    AnimatedProperty, AnimationParameterAddress, InterpolationType, Keyframe,
-    ParameterInterpolation, PropertyBag, PropertyHost, PropertyMutation, PropertyValue,
-    PropertyValueType,
+    AnimationChannelValue, AnimationParameterAddress, InterpolationType, Keyframe,
+    ParameterInterpolation, PropertyBag, PropertyHost, PropertyMutation, PropertyValueType,
 };
 use mondrian_core::{EffectId, KeyframeId, MondrianError, Result, TimeScale, TimelineTime};
 
 const CURVE_QUANTIZATION_DENOMINATOR: u32 = 1_000_000;
 
-/// One normalized point in an owner-local curve viewport.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct NormalizedCurvePoint {
-    /// Relative position across the visible Clip author span.
-    pub time_ratio: f64,
-    /// Relative value across the Parameter Schema soft range.
-    pub value_ratio: f64,
-}
-
-impl NormalizedCurvePoint {
-    /// Construct a finite point inside the inclusive unit square.
-    pub fn new(time_ratio: f64, value_ratio: f64) -> Result<Self> {
-        if !time_ratio.is_finite()
-            || !value_ratio.is_finite()
-            || !(0.0..=1.0).contains(&time_ratio)
-            || !(0.0..=1.0).contains(&value_ratio)
-        {
-            return Err(curve_error(
-                "normalized curve coordinates must be finite values inside 0..=1",
-            ));
-        }
-        Ok(Self { time_ratio, value_ratio })
-    }
+/// Exact Clip-owner coordinates submitted by a product author adapter.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ClipCurveAuthorPoint {
+    /// Absolute author time in the owning Clip domain.
+    pub time: TimelineTime,
+    /// Canonical scalar channel value; evaluation derives the native scalar type.
+    pub value: AnimationChannelValue,
 }
 
 /// One stable-identity curve edit requested by a product Adapter.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ClipNumericCurveEdit {
+    /// Transform complete stable keys from one gesture origin in a single candidate.
+    TransformMany {
+        /// Nonempty unique complete key identities.
+        keyframe_ids: Vec<KeyframeId>,
+        /// Signed exact owner-time translation.
+        time_delta: TimelineTime,
+        /// Finite common displacement in author value units.
+        value_delta: f64,
+        /// Signed value increment count.
+        steps: i8,
+    },
+
+    /// Offset complete stable keys with one common numeric displacement.
+    OffsetValuesMany {
+        /// Nonempty unique complete key identities.
+        keyframe_ids: Vec<KeyframeId>,
+        /// Finite increment in author value units.
+        delta: f64,
+        /// Signed increment count.
+        steps: i8,
+    },
+    /// Translate complete stable keys together in their exact owner-time domain.
+    ShiftMany {
+        /// Nonempty unique complete canonical key identities.
+        keyframe_ids: Vec<KeyframeId>,
+        /// Signed exact owner-time translation.
+        delta: TimelineTime,
+    },
+    /// Remove a unique nonempty key set in one author transaction.
+    RemoveMany {
+        /// Complete canonical key identities.
+        keyframe_ids: Vec<KeyframeId>,
+        /// Exact owner time whose original evaluation survives deletion of all keys.
+        retain_time: TimelineTime,
+    },
+    /// Move an existing key without reconstructing untouched coordinates.
+    Move {
+        /// Stable identity of the existing complete key.
+        keyframe_id: KeyframeId,
+        /// Absolute owner time; absence retains the current exact time.
+        time: Option<TimelineTime>,
+        /// Canonical scalar author value; absence retains the current channel value.
+        value: Option<AnimationChannelValue>,
+    },
     /// Insert a key, or edit the key with the supplied stable identity.
     Upsert {
-        /// Existing identity for a move/value edit; `None` inserts at the
+        /// Reserved or existing identity; `None` inserts at the
         /// requested time or updates the existing key already at that time.
         keyframe_id: Option<KeyframeId>,
-        /// New normalized time and value.
-        point: NormalizedCurvePoint,
+        /// Exact owner time and typed author value.
+        point: ClipCurveAuthorPoint,
+    },
+    /// Edit supplied exact coordinates of one canonical Bezier control.
+    EditHandle {
+        /// Stable identity of the owning key.
+        keyframe_id: KeyframeId,
+        /// Temporal side of the control being edited.
+        side: mondrian_core::BezierHandleSide,
+        /// Exact supplied coordinates; omitted axes retain current author values.
+        edit: mondrian_core::ExactBezierHandleEdit,
     },
     /// Remove one existing key by stable identity.
     Remove { keyframe_id: KeyframeId },
+    /// Set one preset on a complete stable key selection in one transaction.
+    SetInterpolations {
+        /// Nonempty unique complete key identities.
+        keyframe_ids: Vec<KeyframeId>,
+        /// Current-schema interpolation preset.
+        interpolation: InterpolationType,
+    },
     /// Change one complete key's interpolation using its stable identity.
     SetInterpolation {
         keyframe_id: KeyframeId,
@@ -66,7 +110,7 @@ pub enum ClipNumericCurveEdit {
 pub struct ClipNumericCurveEditOutcome {
     /// Whether an Author Transaction committed.
     pub changed: bool,
-    /// Stable identity created, edited, or removed.
+    /// Stable identity created, edited, or removed; the first supplied key for a batch.
     pub keyframe_id: KeyframeId,
 }
 
@@ -77,7 +121,7 @@ struct PreparedCurveEdit {
 }
 
 impl AppState {
-    /// Apply one normalized numeric curve edit through stable author identities.
+    /// Apply one exact numeric curve edit through stable author identities.
     ///
     /// The current property path and key time are resolved from the canonical
     /// Sequence snapshot. A stale or ambiguous identity fails before the Author
@@ -89,17 +133,30 @@ impl AppState {
         address: AnimationParameterAddress,
         edit: ClipNumericCurveEdit,
     ) -> Result<ClipNumericCurveEditOutcome> {
-        let (selection, clip) = numeric_curve_target(self, clip_id)?;
-        let prepared = prepare_curve_edit(&clip.intrinsic_parameter_bag(), clip, &address, edit)?;
-        if prepared.mutations.is_empty() {
-            return Ok(ClipNumericCurveEditOutcome {
-                changed: false,
-                keyframe_id: prepared.keyframe_id,
-            });
-        }
-
-        self.mutate_clip_properties(selection, prepared.mutations, "调整关键帧")?;
-        Ok(ClipNumericCurveEditOutcome { changed: true, keyframe_id: prepared.keyframe_id })
+        let (_, clip) = numeric_curve_target(self, clip_id)?;
+        let (edit, source_key) =
+            complete_curve_targets(&clip.intrinsic_parameter_bag(), &address, edit)?;
+        let generation = self.project_author_generation();
+        let keyframe_id = self.commit_active_sequence_edit("调整关键帧", |sequence| {
+            let clip = sequence
+                .find_clip_mut(clip_id)
+                .ok_or_else(|| MondrianError::ClipNotFound { clip_id: clip_id.to_string() })?;
+            let prepared = prepare_resolved_curve_edit(
+                &clip.intrinsic_parameter_bag(),
+                clip,
+                &address,
+                edit,
+                source_key,
+            )?;
+            for mutation in prepared.mutations {
+                clip.apply_property_mutation(mutation)?;
+            }
+            Ok(prepared.keyframe_id)
+        })?;
+        Ok(ClipNumericCurveEditOutcome {
+            changed: self.project_author_generation() != generation,
+            keyframe_id,
+        })
     }
 
     /// Return whether one stable-identity numeric curve edit would commit.
@@ -125,38 +182,41 @@ impl AppState {
         address: AnimationParameterAddress,
         edit: ClipNumericCurveEdit,
     ) -> Result<ClipNumericCurveEditOutcome> {
-        let (selection, clip) = numeric_curve_target(self, clip_id)?;
+        let (_, clip) = numeric_curve_target(self, clip_id)?;
         let effect =
             clip.effects.iter().find(|effect| effect.id == effect_id).ok_or_else(|| {
                 curve_error(format!(
                     "Effect {effect_id} does not belong to Clip {clip_id}"
                 ))
             })?;
-        let prepared = prepare_curve_edit(&effect.properties, clip, &address, edit)?;
-        if prepared.mutations.is_empty() {
-            return Ok(ClipNumericCurveEditOutcome {
-                changed: false,
-                keyframe_id: prepared.keyframe_id,
-            });
-        }
-        let sequence_id =
-            self.active_sequence_id().ok_or_else(|| curve_error("no active Sequence"))?;
-        self.commit_sequence_edit(sequence_id, "调整特效关键帧", |sequence| {
+        let (edit, source_key) = complete_curve_targets(&effect.properties, &address, edit)?;
+        let generation = self.project_author_generation();
+        let keyframe_id = self.commit_active_sequence_edit("调整特效关键帧", |sequence| {
             let clip = sequence
-                .find_clip_mut(selection.clip_id)
+                .find_clip_mut(clip_id)
                 .ok_or_else(|| MondrianError::ClipNotFound { clip_id: clip_id.to_string() })?;
-            let effect =
-                clip.effects.iter_mut().find(|effect| effect.id == effect_id).ok_or_else(|| {
+            let index =
+                clip.effects.iter().position(|effect| effect.id == effect_id).ok_or_else(|| {
                     curve_error(format!(
                         "Effect {effect_id} does not belong to Clip {clip_id}"
                     ))
                 })?;
+            let prepared = prepare_resolved_curve_edit(
+                &clip.effects[index].properties,
+                clip,
+                &address,
+                edit,
+                source_key,
+            )?;
             for mutation in prepared.mutations {
-                effect.apply_property_mutation(mutation)?;
+                clip.effects[index].apply_property_mutation(mutation)?;
             }
-            Ok(sequence.id)
+            Ok(prepared.keyframe_id)
         })?;
-        Ok(ClipNumericCurveEditOutcome { changed: true, keyframe_id: prepared.keyframe_id })
+        Ok(ClipNumericCurveEditOutcome {
+            changed: self.project_author_generation() != generation,
+            keyframe_id,
+        })
     }
 
     /// Return whether an Effect curve edit would commit, including lock and stale-ID checks.
@@ -201,7 +261,7 @@ impl AppState {
             && property.channel_count() == 1
             && matches!(
                 property.value_type(),
-                PropertyValueType::Float | PropertyValueType::Double
+                PropertyValueType::Float | PropertyValueType::Double | PropertyValueType::Int
             )
             && property.descriptor.schema.numeric.is_some()
             && !property.descriptor.schema.allowed_interpolations.is_empty()
@@ -237,7 +297,7 @@ impl AppState {
             || property.channel_count() != 1
             || !matches!(
                 property.value_type(),
-                PropertyValueType::Float | PropertyValueType::Double
+                PropertyValueType::Float | PropertyValueType::Double | PropertyValueType::Int
             )
             || property.descriptor.schema.numeric.is_none()
         {
@@ -257,7 +317,7 @@ impl AppState {
                 keyframe: Keyframe::from_preset(
                     time,
                     property.evaluate(time),
-                    default_curve_interpolation(property)?,
+                    property.default_interpolation()?,
                 ),
             }
         };
@@ -306,6 +366,143 @@ fn numeric_curve_target(
     ))
 }
 
+// Resolve identity and omitted axes against the current author state before
+// deriving an absolute gesture candidate from its original geometry.
+fn complete_curve_targets(
+    properties: &PropertyBag,
+    address: &AnimationParameterAddress,
+    edit: ClipNumericCurveEdit,
+) -> Result<(
+    ClipNumericCurveEdit,
+    Option<Keyframe<AnimationChannelValue>>,
+)> {
+    let (_, property) = properties
+        .property_by_address(address)
+        .ok_or_else(|| curve_error("curve parameter is not owned by this target"))?;
+    match edit {
+        ClipNumericCurveEdit::EditHandle { keyframe_id, side, edit } => {
+            let handle = property
+                .channel_keyframe_handle(0, keyframe_id, side)
+                .ok_or_else(|| curve_error("Bezier owner or temporal side is stale"))?;
+            if edit.time_offset.is_none() && edit.value_offset.is_none() {
+                return Err(curve_error("Bezier edit has no coordinates"));
+            }
+            Ok((
+                ClipNumericCurveEdit::EditHandle {
+                    keyframe_id,
+                    side,
+                    edit: mondrian_core::ExactBezierHandleEdit {
+                        time_offset: Some(edit.time_offset.unwrap_or(handle.time_offset)),
+                        value_offset: Some(edit.value_offset.unwrap_or(handle.value_offset)),
+                    },
+                },
+                None,
+            ))
+        }
+        ClipNumericCurveEdit::Move { keyframe_id, time, value } => {
+            validate_numeric_curve_property(property, address)?;
+            let author_key = property
+                .channel(0)
+                .and_then(|channel| {
+                    channel.keyframes().iter().find(|candidate| candidate.id == keyframe_id)
+                })
+                .cloned()
+                .ok_or_else(|| curve_error("canonical channel key is missing"))?;
+            Ok((
+                ClipNumericCurveEdit::Move {
+                    keyframe_id,
+                    time: Some(time.unwrap_or(author_key.time)),
+                    value: Some(value.unwrap_or(author_key.value)),
+                },
+                Some(author_key),
+            ))
+        }
+        ClipNumericCurveEdit::Upsert { keyframe_id: None, point } => {
+            let time = point.time;
+            Ok((
+                ClipNumericCurveEdit::Upsert {
+                    keyframe_id: property.keyframe_at(time).map(|key| key.id),
+                    point,
+                },
+                None,
+            ))
+        }
+        edit => Ok((edit, None)),
+    }
+}
+
+// A valid current key may have been inserted after the gesture began. Carry its
+// author metadata into the origin candidate at the requested final position.
+fn prepare_resolved_curve_edit(
+    properties: &PropertyBag,
+    clip: &mondrian_timeline::Clip,
+    address: &AnimationParameterAddress,
+    edit: ClipNumericCurveEdit,
+    source_key: Option<Keyframe<AnimationChannelValue>>,
+) -> Result<PreparedCurveEdit> {
+    if let ClipNumericCurveEdit::Move { keyframe_id, time: Some(time), value: Some(value) } = edit
+        && let Some(mut key) = source_key
+        && key.id == keyframe_id
+    {
+        let (path, property) = properties
+            .property_by_address(address)
+            .ok_or_else(|| curve_error("curve parameter is not owned by this target"))?;
+        validate_numeric_curve_property(property, address)?;
+        let range = numeric_curve_owner_range(clip)?;
+        if time < range.start || time > range.end()? {
+            return Err(curve_error("curve move time is outside the owner interval"));
+        }
+        // Existing gesture keys retain origin controls; a late inserted key
+        // carries its current metadata because the origin has no such key.
+        key = property
+            .channel(0)
+            .and_then(|channel| {
+                channel.keyframes().iter().find(|original| original.id == keyframe_id)
+            })
+            .cloned()
+            .unwrap_or(key);
+        key.time = time;
+        key.value = value;
+        return prepare_channel_key_position_edit(property, path, key);
+    }
+    prepare_curve_edit(properties, clip, address, edit)
+}
+
+fn prepare_channel_key_position_edit(
+    property: &mondrian_core::automation::AnimatedProperty,
+    path: &str,
+    key: Keyframe<AnimationChannelValue>,
+) -> Result<PreparedCurveEdit> {
+    let channel = property.channel(0).ok_or_else(|| curve_error("author channel is missing"))?;
+    if channel.keyframe_at(key.time).is_some_and(|current| current.id != key.id) {
+        return Err(curve_error(
+            "keyframe cannot move onto an occupied author time",
+        ));
+    }
+    let keyframe_id = key.id;
+    let unchanged = channel.keyframes().iter().any(|current| current == &key);
+    let mutations = if unchanged {
+        Vec::new()
+    } else {
+        vec![PropertyMutation::SetChannelKeyframe {
+            path: path.to_owned(),
+            channel_index: 0,
+            keyframe: key,
+        }]
+    };
+    Ok(PreparedCurveEdit { mutations, keyframe_id })
+}
+
+fn numeric_curve_owner_range(
+    clip: &mondrian_timeline::Clip,
+) -> Result<mondrian_core::TimelineTimeRange> {
+    mondrian_core::TimelineTimeRange::new(
+        clip.clip_time_in,
+        clip.clip_time_out()?.checked_sub(clip.clip_time_in)?,
+    )
+    .map_err(Into::into)
+}
+
 fn prepare_curve_edit(
     properties: &PropertyBag,
     clip: &mondrian_timeline::Clip,
@@ -318,6 +515,37 @@ fn prepare_curve_edit(
             address.animation_track_id, address.parameter_id, clip.id
         ))
     })?;
+    let range = numeric_curve_owner_range(clip)?;
+    prepare_property_curve_edit(path, property, range, address, edit)
+}
+
+/// Derive display author state through the same preparation used by visual author commands.
+pub(crate) fn preview_numeric_curve_edit(
+    property: &mondrian_core::automation::AnimatedProperty,
+    range: mondrian_core::TimelineTimeRange,
+    edit: &crate::app::product_action::ClipCurveEditPayload,
+) -> Result<mondrian_core::automation::AnimatedProperty> {
+    property.validate()?;
+    let edit = super::clip_authoring::numeric_curve_edit_from_payload(edit)?;
+    let prepared = prepare_property_curve_edit(
+        &property.descriptor.path,
+        property,
+        range,
+        &property.address(),
+        edit,
+    )?;
+    let mut candidate = property.clone();
+    for mutation in prepared.mutations {
+        candidate.apply_mutation(mutation)?;
+    }
+    candidate.validate()?;
+    Ok(candidate)
+}
+
+fn validate_numeric_curve_property(
+    property: &mondrian_core::automation::AnimatedProperty,
+    address: &AnimationParameterAddress,
+) -> Result<()> {
     if !property.descriptor.schema.is_animatable || property.channel_count() != 1 {
         return Err(curve_error(format!(
             "parameter {} is not a single-channel animatable curve",
@@ -327,29 +555,175 @@ fn prepare_curve_edit(
     let value_type = property.value_type();
     if !matches!(
         value_type,
-        PropertyValueType::Float | PropertyValueType::Double
+        PropertyValueType::Float | PropertyValueType::Double | PropertyValueType::Int
     ) {
         return Err(curve_error(format!(
             "parameter {} is not a floating-point curve",
             address.parameter_id
         )));
     }
-    let numeric = property.descriptor.schema.numeric.ok_or_else(|| {
-        curve_error(format!(
-            "parameter {} has no finite numeric editor range",
-            address.parameter_id
-        ))
-    })?;
-    let value_span = numeric.soft_range.max - numeric.soft_range.min;
-    if !value_span.is_finite() || value_span <= 0.0 {
-        return Err(curve_error(format!(
-            "parameter {} has an unusable numeric editor range",
-            address.parameter_id
-        )));
-    }
+    Ok(())
+}
 
+fn validate_curve_group_times(
+    property: &mondrian_core::automation::AnimatedProperty,
+    ids: &[KeyframeId],
+    range: mondrian_core::TimelineTimeRange,
+) -> Result<()> {
+    let end = range.end()?;
+    let identities = ids.iter().copied().collect::<std::collections::HashSet<_>>();
+    if property.channels()[0]
+        .keyframes()
+        .iter()
+        .filter(|key| identities.contains(&key.id))
+        .any(|key| key.time < range.start || key.time > end)
+    {
+        return Err(curve_error("transformed key is outside the owner interval"));
+    }
+    Ok(())
+}
+
+fn prepare_property_curve_edit(
+    path: &str,
+    property: &mondrian_core::automation::AnimatedProperty,
+    range: mondrian_core::TimelineTimeRange,
+    address: &AnimationParameterAddress,
+    edit: ClipNumericCurveEdit,
+) -> Result<PreparedCurveEdit> {
+    validate_numeric_curve_property(property, address)?;
     match edit {
+        ClipNumericCurveEdit::TransformMany { keyframe_ids, time_delta, value_delta, steps } => {
+            let keyframe_id = keyframe_ids
+                .first()
+                .copied()
+                .ok_or_else(|| curve_error("key selection is empty"))?;
+            let mut candidate = property.clone();
+            candidate.transform_keyframes(&keyframe_ids, 0, time_delta, value_delta, steps)?;
+            validate_curve_group_times(&candidate, &keyframe_ids, range)?;
+            Ok(PreparedCurveEdit {
+                mutations: vec![PropertyMutation::TransformKeyframes {
+                    path: path.to_owned(),
+                    channel_index: 0,
+                    keyframe_ids,
+                    time_delta,
+                    value_delta,
+                    steps,
+                }],
+                keyframe_id,
+            })
+        }
+        ClipNumericCurveEdit::OffsetValuesMany { keyframe_ids, delta, steps } => {
+            let keyframe_id = keyframe_ids
+                .first()
+                .copied()
+                .ok_or_else(|| curve_error("key selection is empty"))?;
+            let mut candidate = property.clone();
+            candidate.offset_keyframe_values(&keyframe_ids, 0, delta, steps)?;
+            Ok(PreparedCurveEdit {
+                mutations: vec![PropertyMutation::OffsetKeyframeValues {
+                    path: path.to_owned(),
+                    channel_index: 0,
+                    keyframe_ids,
+                    delta,
+                    steps,
+                }],
+                keyframe_id,
+            })
+        }
+        ClipNumericCurveEdit::ShiftMany { keyframe_ids, delta } => {
+            let keyframe_id = keyframe_ids
+                .first()
+                .copied()
+                .ok_or_else(|| curve_error("key selection is empty"))?;
+            let mut candidate = property.clone();
+            candidate.shift_keyframes(&keyframe_ids, delta)?;
+            validate_curve_group_times(&candidate, &keyframe_ids, range)?;
+            Ok(PreparedCurveEdit {
+                mutations: vec![PropertyMutation::ShiftKeyframes {
+                    path: path.to_owned(),
+                    keyframe_ids,
+                    delta,
+                }],
+                keyframe_id,
+            })
+        }
+        ClipNumericCurveEdit::RemoveMany { keyframe_ids, retain_time } => {
+            if retain_time < range.start || retain_time > range.end()? {
+                return Err(curve_error(
+                    "retained evaluation time is outside the owner interval",
+                ));
+            }
+            let keyframe_id = keyframe_ids
+                .first()
+                .copied()
+                .ok_or_else(|| curve_error("key selection is empty"))?;
+            let mut candidate = property.clone();
+            candidate.remove_keyframes(&keyframe_ids, retain_time)?;
+            Ok(PreparedCurveEdit {
+                mutations: vec![PropertyMutation::RemoveKeyframes {
+                    path: path.to_owned(),
+                    keyframe_ids,
+                    retain_time,
+                }],
+                keyframe_id,
+            })
+        }
+        ClipNumericCurveEdit::EditHandle { keyframe_id, side, edit } => {
+            let key = property.channels()[0]
+                .keyframes()
+                .iter()
+                .find(|key| key.id == keyframe_id)
+                .ok_or_else(|| curve_error("Bezier owner key is stale"))?;
+            let original = property
+                .channel_keyframe_handle(0, keyframe_id, side)
+                .ok_or_else(|| curve_error("Bezier handle has no editable segment"))?;
+            if edit.time_offset.is_none() && edit.value_offset.is_none() {
+                return Err(curve_error("Bezier edit has no coordinates"));
+            }
+            let handle = mondrian_core::ExactBezierHandle {
+                time_offset: edit.time_offset.unwrap_or(original.time_offset),
+                value_offset: edit.value_offset.unwrap_or(original.value_offset),
+            };
+            let mutations = if handle == original {
+                Vec::new()
+            } else {
+                let (interp_in, interp_out) = match side {
+                    mondrian_core::BezierHandleSide::Incoming => (
+                        mondrian_core::KeyframeInterpolation::Bezier(handle),
+                        key.interp_out,
+                    ),
+                    mondrian_core::BezierHandleSide::Outgoing => (
+                        key.interp_in,
+                        mondrian_core::KeyframeInterpolation::Bezier(handle),
+                    ),
+                };
+                vec![PropertyMutation::UpdateChannelKeyframeHandles {
+                    path: path.to_owned(),
+                    time: key.time,
+                    channel_index: 0,
+                    interp_in,
+                    interp_out,
+                }]
+            };
+            Ok(PreparedCurveEdit { mutations, keyframe_id })
+        }
         ClipNumericCurveEdit::SetInterpolation { keyframe_id, interpolation } => {
+            prepare_property_curve_edit(
+                path,
+                property,
+                range,
+                address,
+                ClipNumericCurveEdit::SetInterpolations {
+                    keyframe_ids: vec![keyframe_id],
+                    interpolation,
+                },
+            )
+        }
+        ClipNumericCurveEdit::SetInterpolations { keyframe_ids, interpolation } => {
+            let keyframe_id = keyframe_ids
+                .first()
+                .copied()
+                .ok_or_else(|| curve_error("interpolation selection is empty"))?;
             if !property
                 .descriptor
                 .schema
@@ -361,71 +735,15 @@ fn prepare_curve_edit(
                     address.parameter_id
                 )));
             }
-            let keyframe = property.keyframe_by_id(keyframe_id).ok_or_else(|| {
-                curve_error(format!(
-                    "keyframe {keyframe_id} is stale or is not a complete key of parameter {}",
-                    address.parameter_id
-                ))
-            })?;
-            let unchanged = match interpolation {
-                InterpolationType::Hold => {
-                    matches!(
-                        keyframe.interp_in,
-                        mondrian_core::automation::KeyframeInterpolation::Hold
-                    ) && matches!(
-                        keyframe.interp_out,
-                        mondrian_core::automation::KeyframeInterpolation::Hold
-                    )
-                }
-                InterpolationType::Linear => {
-                    matches!(
-                        keyframe.interp_in,
-                        mondrian_core::automation::KeyframeInterpolation::Linear
-                    ) && matches!(
-                        keyframe.interp_out,
-                        mondrian_core::automation::KeyframeInterpolation::Linear
-                    )
-                }
-                InterpolationType::AutoBezier => keyframe.temporal_flags.auto_bezier,
-                InterpolationType::ContinuousBezier => {
-                    keyframe.temporal_flags.continuous
-                        && !keyframe.temporal_flags.auto_bezier
-                        && !keyframe.temporal_flags.broken_handles
-                }
-                InterpolationType::Bezier => {
-                    !keyframe.temporal_flags.auto_bezier
-                        && !keyframe.temporal_flags.continuous
-                        && matches!(
-                            keyframe.interp_in,
-                            mondrian_core::automation::KeyframeInterpolation::Bezier(_)
-                        )
-                        && matches!(
-                            keyframe.interp_out,
-                            mondrian_core::automation::KeyframeInterpolation::Bezier(_)
-                        )
-                }
-                InterpolationType::EaseIn => matches!(
-                    (keyframe.interp_in, keyframe.interp_out),
-                    (
-                        mondrian_core::automation::KeyframeInterpolation::Linear,
-                        mondrian_core::automation::KeyframeInterpolation::Bezier(_)
-                    )
-                ),
-                InterpolationType::EaseOut => matches!(
-                    (keyframe.interp_in, keyframe.interp_out),
-                    (
-                        mondrian_core::automation::KeyframeInterpolation::Bezier(_),
-                        mondrian_core::automation::KeyframeInterpolation::Linear
-                    )
-                ),
-            };
+            let mut candidate = property.clone();
+            candidate.update_keyframes_interpolation(&keyframe_ids, interpolation)?;
             Ok(PreparedCurveEdit {
-                mutations: if unchanged {
+                mutations: if candidate == *property {
                     Vec::new()
                 } else {
-                    vec![PropertyMutation::UpdateKeyframeInterpolation {
+                    vec![PropertyMutation::UpdateKeyframesInterpolation {
                         path: path.to_owned(),
-                        time: keyframe.time,
+                        keyframe_ids,
                         interpolation,
                     }]
                 },
@@ -446,63 +764,77 @@ fn prepare_curve_edit(
             };
             Ok(PreparedCurveEdit { mutations: vec![mutation], keyframe_id })
         }
-        ClipNumericCurveEdit::Upsert { keyframe_id, point } => {
-            let target_time = curve_time(clip, point.time_ratio)?;
-            let target_value = curve_value(
-                value_type,
-                numeric.soft_range.min + value_span * point.value_ratio,
-            )?;
-
-            let existing = if let Some(keyframe_id) = keyframe_id {
-                let keyframe = property.keyframe_by_id(keyframe_id).ok_or_else(|| {
-                    curve_error(format!(
-                        "keyframe {keyframe_id} is stale or is not a complete key of parameter {}",
-                        address.parameter_id
-                    ))
-                })?;
-                if property
-                    .keyframe_at(target_time)
-                    .is_some_and(|candidate| candidate.id != keyframe_id)
-                {
-                    return Err(curve_error(format!(
-                        "keyframe {keyframe_id} cannot move onto an occupied author time"
-                    )));
+        ClipNumericCurveEdit::Move { keyframe_id, time, value } => {
+            let mut keyframe = property
+                .channel(0)
+                .and_then(|channel| channel.keyframes().iter().find(|key| key.id == keyframe_id))
+                .cloned()
+                .ok_or_else(|| curve_error("canonical channel key is stale"))?;
+            if let Some(time) = time {
+                let end = range.start.checked_add(range.duration)?;
+                if time < range.start || time > end {
+                    return Err(curve_error("curve move time is outside the owner interval"));
                 }
-                Some(keyframe)
-            } else {
-                property.keyframe_at(target_time)
-            };
-
-            if let Some(keyframe) = existing {
-                if keyframe.time == target_time && keyframe.value == target_value {
-                    return Ok(PreparedCurveEdit {
-                        mutations: Vec::new(),
-                        keyframe_id: keyframe.id,
-                    });
-                }
-                return Ok(PreparedCurveEdit {
-                    mutations: vec![PropertyMutation::EditKeyframe {
-                        path: path.to_owned(),
-                        keyframe_id: keyframe.id,
-                        time: target_time,
-                        value: target_value,
-                    }],
-                    keyframe_id: keyframe.id,
-                });
             }
-
-            let keyframe = Keyframe::from_preset(
-                target_time,
-                target_value,
-                default_curve_interpolation(property)?,
-            );
-            let keyframe_id = keyframe.id;
-            Ok(PreparedCurveEdit {
-                mutations: vec![PropertyMutation::SetKeyframe { path: path.to_owned(), keyframe }],
-                keyframe_id,
-            })
+            keyframe.time = time.unwrap_or(keyframe.time);
+            keyframe.value = value.unwrap_or(keyframe.value);
+            prepare_channel_key_position_edit(property, path, keyframe)
+        }
+        ClipNumericCurveEdit::Upsert { keyframe_id, point } => {
+            if point.time < range.start || point.time > range.end()? {
+                return Err(curve_error(
+                    "curve insert time is outside the owner interval",
+                ));
+            }
+            prepare_key_position_edit(property, path, keyframe_id, point.time, point.value)
         }
     }
+}
+
+fn prepare_key_position_edit(
+    property: &mondrian_core::automation::AnimatedProperty,
+    path: &str,
+    keyframe_id: Option<KeyframeId>,
+    target_time: TimelineTime,
+    target_value: AnimationChannelValue,
+) -> Result<PreparedCurveEdit> {
+    let channel = property.channel(0).ok_or_else(|| curve_error("author channel is missing"))?;
+    let existing = if let Some(keyframe_id) = keyframe_id {
+        let keyframe = channel.keyframes().iter().find(|key| key.id == keyframe_id).cloned();
+        if property
+            .channel(0)
+            .and_then(|channel| channel.keyframe_at(target_time))
+            .is_some_and(|candidate| candidate.id != keyframe_id)
+        {
+            return Err(curve_error(format!(
+                "keyframe {keyframe_id} cannot move onto an occupied author time"
+            )));
+        }
+        keyframe
+    } else {
+        channel.keyframe_at(target_time).cloned()
+    };
+
+    if let Some(mut keyframe) = existing {
+        keyframe.time = target_time;
+        keyframe.value = target_value;
+        return prepare_channel_key_position_edit(property, path, keyframe);
+    }
+
+    let mut keyframe =
+        Keyframe::from_preset(target_time, target_value, property.default_interpolation()?);
+    if let Some(reserved_id) = keyframe_id {
+        keyframe.id = reserved_id;
+    }
+    let keyframe_id = keyframe.id;
+    Ok(PreparedCurveEdit {
+        mutations: vec![PropertyMutation::SetChannelKeyframe {
+            path: path.to_owned(),
+            channel_index: 0,
+            keyframe,
+        }],
+        keyframe_id,
+    })
 }
 
 fn schema_interpolation(interpolation: InterpolationType) -> ParameterInterpolation {
@@ -517,41 +849,46 @@ fn schema_interpolation(interpolation: InterpolationType) -> ParameterInterpolat
     }
 }
 
-fn default_curve_interpolation(property: &AnimatedProperty) -> Result<InterpolationType> {
-    let allowed = &property.descriptor.schema.allowed_interpolations;
-    if allowed.contains(&ParameterInterpolation::Linear) {
-        Ok(InterpolationType::Linear)
-    } else {
-        allowed
-            .first()
-            .map(|interpolation| match interpolation {
-                ParameterInterpolation::Hold => InterpolationType::Hold,
-                ParameterInterpolation::Linear => InterpolationType::Linear,
-                ParameterInterpolation::Bezier => InterpolationType::Bezier,
-            })
-            .ok_or_else(|| curve_error("parameter admits no interpolation"))
+/// Map a changed viewport time through the canonical owner interval.
+pub(crate) fn numeric_curve_author_time(
+    range: mondrian_core::TimelineTimeRange,
+    ratio: f64,
+) -> Result<TimelineTime> {
+    if !ratio.is_finite() || !(0.0..=1.0).contains(&ratio) {
+        return Err(curve_error("invalid viewport time coordinate"));
     }
-}
-
-fn curve_time(clip: &mondrian_timeline::Clip, ratio: f64) -> Result<TimelineTime> {
     let ratio = TimelineTime::from_f64_quantized(ratio, CURVE_QUANTIZATION_DENOMINATOR)?;
     let scale = TimeScale::try_from(ratio)?;
-    let duration = clip.clip_time_out()?.checked_sub(clip.clip_time_in)?;
-    clip.clip_time_in
-        .checked_add(duration.checked_scale(scale)?)
+    range
+        .start
+        .checked_add(range.duration.checked_scale(scale)?)
         .map_err(Into::into)
 }
 
-fn curve_value(value_type: PropertyValueType, value: f64) -> Result<PropertyValue> {
+/// Lower an absolute UI value to the canonical scalar channel author kind.
+pub(crate) fn numeric_curve_author_value(
+    property: &mondrian_core::automation::AnimatedProperty,
+    value: f64,
+) -> Result<AnimationChannelValue> {
+    curve_value(property.value_type(), value)
+}
+
+fn curve_value(value_type: PropertyValueType, value: f64) -> Result<AnimationChannelValue> {
     if !value.is_finite() {
         return Err(curve_error(
             "curve value mapping produced a non-finite number",
         ));
     }
     match value_type {
-        PropertyValueType::Float => Ok(PropertyValue::Float(value as f32)),
-        PropertyValueType::Double => Ok(PropertyValue::Double(value)),
-        _ => Err(curve_error("curve value mapping requires Float or Double")),
+        PropertyValueType::Float | PropertyValueType::Double => {
+            Ok(AnimationChannelValue::Number(value))
+        }
+        PropertyValueType::Int if value.round().abs() <= 9_007_199_254_740_992.0 => {
+            Ok(AnimationChannelValue::Integer(value.round() as i64))
+        }
+        _ => Err(curve_error(
+            "curve value mapping requires an exactly representable numeric value",
+        )),
     }
 }
 
@@ -565,13 +902,959 @@ fn curve_error(reason: impl Into<String>) -> MondrianError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mondrian_core::automation::PropertyValue;
     use mondrian_core::automation::{
-        BezierHandle, KeyframeInterpolation, KeyframeTemporalFlags, PropertyHost,
+        ExactBezierHandle, KeyframeInterpolation, KeyframeTemporalFlags, PropertyHost,
     };
     use mondrian_core::{AssetId, Rational};
     use mondrian_effects::{EffectNodeExt, EffectType};
     use mondrian_timeline::clip::Transform2D;
     use mondrian_timeline::{Clip, Sequence};
+
+    #[test]
+    fn batch_key_removal_product_action_is_atomic_and_one_reversible_edit() {
+        use super::super::product_action::{ClipCurveEditPayload, ClipEditNumericCurvePayload};
+        use super::super::ui_actions::clip_edit_numeric_curve_action;
+        for preset in [
+            InterpolationType::AutoBezier,
+            InterpolationType::ContinuousBezier,
+        ] {
+            let mut sequence = Sequence::new("Batch keys");
+            let time_base = sequence.time_base();
+            let clip =
+                Clip::new_basic_title("Batch", "Arial", TimelineTime::ZERO, tt(20, time_base))
+                    .expect("title");
+            let selection = SelectedClipRef {
+                clip_id: clip.id,
+                track_id: sequence.video_tracks[0].id,
+                is_video_track: true,
+            };
+            sequence.video_tracks[0].add_clip(clip).expect("place");
+            let mut state = AppState::new();
+            state.test_set_sequence(Some(sequence));
+            let mut ids = Vec::new();
+            for (frame, value) in [(0, 0.1), (5, 0.7), (10, 0.4), (15, 0.9), (20, 0.2)] {
+                let key = Keyframe::from_preset(
+                    tt(frame, time_base),
+                    PropertyValue::Float(value),
+                    preset,
+                );
+                ids.push(key.id);
+                state
+                    .mutate_clip_property(
+                        selection,
+                        PropertyMutation::SetKeyframe {
+                            path: Transform2D::OPACITY_PATH.into(),
+                            keyframe: key,
+                        },
+                        "seed",
+                    )
+                    .expect("seed");
+            }
+            let address = opacity_address(&state, selection);
+            state.set_animation_keyframe_selection(
+                ids.iter()
+                    .map(|id| super::super::AnimationKeyframeSelection {
+                        property: super::super::AnimationPropertySelection {
+                            clip_id: selection.clip_id,
+                            property: address.clone(),
+                        },
+                        keyframe_id: *id,
+                    })
+                    .collect(),
+            );
+            let selected = |state: &AppState| {
+                state
+                    .selected_animation_keyframes_for_clip(selection.clip_id)
+                    .into_iter()
+                    .map(|key| key.keyframe_id)
+                    .collect::<std::collections::HashSet<_>>()
+            };
+            let original = state.active_sequence().expect("origin").clone();
+            let history = state.authoring_history().expect("history").diagnostics();
+            let generation = state.project_author_generation();
+            let action = |keyframe_ids| {
+                clip_edit_numeric_curve_action(ClipEditNumericCurvePayload {
+                    clip_id: selection.clip_id,
+                    parameter: address.clone(),
+                    edit: ClipCurveEditPayload::RemoveMany {
+                        keyframe_ids,
+                        retain_time: tt(7, time_base),
+                    },
+                })
+            };
+            for invalid in [
+                vec![],
+                vec![ids[1], ids[1]],
+                vec![ids[1], KeyframeId::new()],
+            ] {
+                state.dispatch_action(action(invalid)).expect_err("reject batch");
+                assert!(state
+                    .active_sequence()
+                    .expect("unchanged")
+                    .author_state_eq_ignoring_revision(&original));
+                assert_eq!(state.project_author_generation(), generation);
+                assert_eq!(
+                    selected(&state),
+                    ids.iter().copied().collect(),
+                    "invalid selection cannot alter current selection"
+                );
+                assert_eq!(
+                    state.authoring_history().expect("unchanged history").diagnostics(),
+                    history
+                );
+            }
+            state
+                .dispatch_action(action(vec![ids[3], ids[1]]))
+                .expect("remove selected keys");
+            let changed = state.active_sequence().expect("changed").clone();
+            let bag = state.clip_snapshot(selection).expect("clip").property_bag().expect("bag");
+            let property = bag.property(Transform2D::OPACITY_PATH).expect("opacity");
+            assert_eq!(
+                property
+                    .channel(0)
+                    .expect("channel")
+                    .keyframes()
+                    .iter()
+                    .map(|key| key.id)
+                    .collect::<Vec<_>>(),
+                [ids[0], ids[2], ids[4]]
+            );
+            property.validate().expect("constraints");
+            assert_eq!(
+                selected(&state),
+                [ids[0], ids[2], ids[4]].into_iter().collect(),
+                "only surviving author keys may stay selected"
+            );
+            let directory = tempfile::tempdir().expect("archives");
+            let changed_path = directory.path().join("批量删除🙂.mdp");
+            state.save_project_file_as(changed_path.clone()).expect("save batch");
+            let mut reopened = AppState::new();
+            reopened.open_project_file(changed_path).expect("fresh batch reopen");
+            assert!(reopened
+                .active_sequence()
+                .expect("saved batch")
+                .author_state_eq_ignoring_revision(&changed));
+            assert!(!reopened.can_undo_action() && !reopened.can_redo_action());
+            drop(reopened);
+
+            assert!(state.undo_timeline().expect("one undo"));
+            assert!(state
+                .active_sequence()
+                .expect("origin after undo")
+                .author_state_eq_ignoring_revision(&original));
+            let undone_path = directory.path().join("批量撤销🙂.mdp");
+            state.save_project_file_as(undone_path.clone()).expect("save undo");
+            let mut reopened = AppState::new();
+            reopened.open_project_file(undone_path).expect("fresh undone reopen");
+            assert!(reopened
+                .active_sequence()
+                .expect("saved origin")
+                .author_state_eq_ignoring_revision(&original));
+            assert!(!reopened.can_undo_action() && !reopened.can_redo_action());
+            drop(reopened);
+            assert!(state.redo_timeline().expect("one redo"));
+            assert!(state
+                .active_sequence()
+                .expect("changed after redo")
+                .author_state_eq_ignoring_revision(&changed));
+            let retained = state
+                .clip_snapshot(selection)
+                .expect("clip")
+                .property_bag()
+                .expect("bag")
+                .property(Transform2D::OPACITY_PATH)
+                .expect("property")
+                .evaluate(tt(7, time_base));
+            state
+                .dispatch_action(action(vec![ids[0], ids[2], ids[4]]))
+                .expect("remove every surviving key");
+            let cleared = state.active_sequence().expect("cleared").clone();
+            let bag = state.clip_snapshot(selection).expect("clip").property_bag().expect("bag");
+            let property = bag.property(Transform2D::OPACITY_PATH).expect("property");
+            assert!(property.channel(0).expect("channel").keyframes().is_empty());
+            assert_eq!(property.evaluate(TimelineTime::ZERO), retained);
+            assert!(selected(&state).is_empty());
+            let path = directory.path().join("清空后保留求值🙂.mdp");
+            state.save_project_file_as(path.clone()).expect("save unkeyed");
+            let mut reopened = AppState::new();
+            reopened.open_project_file(path).expect("fresh unkeyed reopen");
+            assert!(reopened
+                .active_sequence()
+                .expect("saved unkeyed")
+                .author_state_eq_ignoring_revision(&cleared));
+            assert!(!reopened.can_undo_action() && !reopened.can_redo_action());
+            drop(reopened);
+            assert!(state.undo_timeline().expect("one undo all-delete"));
+            assert!(state
+                .active_sequence()
+                .expect("restore constrained keys")
+                .author_state_eq_ignoring_revision(&changed));
+            assert!(state.redo_timeline().expect("one redo all-delete"));
+            assert!(state
+                .active_sequence()
+                .expect("restore retained value")
+                .author_state_eq_ignoring_revision(&cleared));
+        }
+    }
+
+    #[test]
+    fn exact_curve_insert_codec_preserves_values_outside_soft_and_rejects_invalid_requests() {
+        use crate::app::product_action::ClipCurveEditPayload;
+        use mondrian_core::automation::{
+            AnimatedProperty, ParameterInvalidValuePolicy, ParameterNumericContract,
+            ParameterNumericRange, ParameterUnit, PropertyDescriptor,
+        };
+        let range = mondrian_core::TimelineTimeRange::new(TimelineTime::ZERO, TimelineTime::ONE)
+            .expect("owner range");
+        for (default, value, author_value, invalid) in [
+            (
+                PropertyValue::Double(0.5),
+                PropertyValue::Double(1.5000000000000002),
+                AnimationChannelValue::Number(1.5000000000000002),
+                AnimationChannelValue::Number(3.0),
+            ),
+            (
+                PropertyValue::Float(0.5),
+                PropertyValue::Float(1.5),
+                AnimationChannelValue::Number(1.5),
+                AnimationChannelValue::Number(3.0),
+            ),
+            (
+                PropertyValue::Int(1),
+                PropertyValue::Int(2),
+                AnimationChannelValue::Integer(2),
+                AnimationChannelValue::Integer(3),
+            ),
+        ] {
+            let mut numeric = ParameterNumericContract::closed(
+                0.0,
+                2.0,
+                None,
+                ParameterInvalidValuePolicy::Reject,
+            )
+            .expect("hard contract");
+            numeric.soft_range = ParameterNumericRange::new(0.0, 1.0).expect("soft view");
+            let property = AnimatedProperty::from_descriptor(
+                PropertyDescriptor::new("test.author.value", "Value", default)
+                    .with_animatable(true)
+                    .with_numeric_contract(ParameterUnit::Unitless, numeric),
+            );
+            let original = property.clone();
+            let id = KeyframeId::new();
+            let time = TimelineTime::new(1, 7).expect("free exact time");
+            let payload = ClipCurveEditPayload::Upsert {
+                keyframe_id: Some(id),
+                point: ClipCurveAuthorPoint { time, value: author_value },
+            };
+            let decoded: ClipCurveEditPayload =
+                serde_json::from_value(serde_json::to_value(&payload).expect("encode"))
+                    .expect("decode exact coordinates");
+            assert_eq!(decoded, payload);
+            let preview = preview_numeric_curve_edit(&property, range, &decoded)
+                .expect("legal absolute value beyond soft view");
+            let key = preview.keyframe_by_id(id).expect("reserved stable key");
+            assert_eq!(key.time, time);
+            assert_eq!(key.value, value);
+            assert_eq!(preview.evaluate(time), value);
+            assert!(preview_numeric_curve_edit(
+                &property,
+                range,
+                &ClipCurveEditPayload::Upsert {
+                    keyframe_id: None,
+                    point: ClipCurveAuthorPoint { time, value: invalid }
+                }
+            )
+            .is_err());
+            assert!(preview_numeric_curve_edit(
+                &property,
+                range,
+                &ClipCurveEditPayload::Upsert {
+                    keyframe_id: None,
+                    point: ClipCurveAuthorPoint {
+                        time: TimelineTime::new(2, 1).expect("outside"),
+                        value: author_value
+                    }
+                }
+            )
+            .is_err());
+            assert_eq!(
+                property, original,
+                "invalid requests never mutate the author source"
+            );
+        }
+        assert!(serde_json::from_value::<ClipCurveEditPayload>(serde_json::json!({"kind":"upsert", "keyframe_id":null, "point":{"time_ratio":0.5,"value_ratio":0.5}})).is_err(), "alpha has no obsolete normalized action parser");
+    }
+
+    #[test]
+    fn exact_curve_insert_does_not_require_a_numeric_editor_range() {
+        use crate::app::product_action::ClipCurveEditPayload;
+        use mondrian_core::automation::{AnimatedProperty, PropertyDescriptor};
+        let property = AnimatedProperty::from_descriptor(
+            PropertyDescriptor::new("test.author.no_editor", "Value", PropertyValue::Double(0.0))
+                .with_animatable(true),
+        );
+        assert!(property.descriptor.schema.numeric.is_none());
+        let time = TimelineTime::new(1, 3).expect("exact time");
+        for author_value in [0.12345678901234568, f64::MAX, -f64::MAX, -0.0] {
+            let value = AnimationChannelValue::Number(author_value);
+            let preview = preview_numeric_curve_edit(
+                &property,
+                mondrian_core::TimelineTimeRange::new(TimelineTime::ZERO, TimelineTime::ONE)
+                    .expect("owner range"),
+                &ClipCurveEditPayload::Upsert {
+                    keyframe_id: None,
+                    point: ClipCurveAuthorPoint { time, value },
+                },
+            )
+            .expect("typed author admission independent of editor projection");
+            assert_eq!(preview.evaluate(time), PropertyValue::Double(author_value));
+            assert_eq!(
+                preview.evaluate(time).as_f64().expect("Double").to_bits(),
+                author_value.to_bits()
+            );
+            assert!(property.keyframe_at(time).is_none());
+        }
+    }
+
+    #[test]
+    #[ignore = "requires current product and SessionProbe mode curve_authoring"]
+    fn native_effect_curve_author_edit_undo_saved_redo_and_reopen_preserve_output() {
+        use super::super::ui_actions::{
+            visual_effect_edit_numeric_curve_action, ClipCurveEditPayload,
+            VisualEffectEditNumericCurvePayload,
+        };
+        use mondrian_core::{SampleAspectRatio, TimelineTimeRange, WorkingColorSpace};
+        use mondrian_effects::{EffectFrameContext, LutPreparationCache, PreparedEffectProgram};
+        use std::path::PathBuf;
+        let _guard = crate::app_ui::test_utils::theme_test_guard();
+        assert_eq!(
+            std::env::var("MONDRIAN_OPENFX_SESSION_PROBE_MODE").expect("mode"),
+            "curve_authoring"
+        );
+        let helper =
+            PathBuf::from(std::env::var_os("MONDRIAN_OPENFX_PRODUCT_BINARY").expect("product"));
+        let binary =
+            PathBuf::from(std::env::var_os("MONDRIAN_OPENFX_SESSION_PROBE_BINARY").expect("probe"));
+        let inspection =
+            crate::openfx_adapter::inspect_openfx_binary(&helper, &binary).expect("inspect");
+        let kind = crate::openfx_effect::register_selected_openfx_filter(
+            &helper,
+            &inspection,
+            "uk.co.thefoundry.BasicGainPlugin",
+        )
+        .expect("register");
+        let description = crate::openfx_host::describe_openfx_filter(
+            &helper,
+            &inspection,
+            "uk.co.thefoundry.BasicGainPlugin",
+        )
+        .expect("describe");
+        let label =
+            &description.parameters.iter().find(|p| p.name == "scale").expect("scale").label;
+        let mut effect = mondrian_effects::instantiate_effect_node(kind).expect("effect");
+        let mut property = effect
+            .properties
+            .iter()
+            .find(|(_, p)| &p.descriptor.display_name == label)
+            .expect("canonical property")
+            .1
+            .clone();
+        property.set_animation_enabled(true);
+        property
+            .write_channels(TimelineTime::ZERO, &[(0, 1.0)], InterpolationType::Linear)
+            .expect("start");
+        property
+            .write_channels(TimelineTime::ONE, &[(0, 2.0)], InterpolationType::Linear)
+            .expect("end");
+        let endpoint_id = property.keyframe_at(TimelineTime::ONE).expect("endpoint").id;
+        let parameter = property.address();
+        effect.properties.upsert(property);
+        let effect_id = effect.id;
+        let mut clip = Clip::new_basic_title(
+            "Curve",
+            "Arial",
+            TimelineTime::ZERO,
+            TimelineTime::new(2, 1).expect("duration"),
+        )
+        .expect("title");
+        let clip_id = clip.id;
+        clip.add_effect_node(effect);
+        let mut sequence = Sequence::new("Native curve authoring");
+        sequence.video_tracks[0].add_clip(clip).expect("clip");
+        let mut state = AppState::new();
+        state.test_set_sequence(Some(sequence));
+        let snapshot = |state: &AppState| {
+            state
+                .active_sequence()
+                .expect("sequence")
+                .find_clip(clip_id)
+                .expect("clip")
+                .effects
+                .iter()
+                .find(|effect| effect.id == effect_id)
+                .expect("effect")
+                .properties
+                .property_by_address(&parameter)
+                .expect("property")
+                .1
+                .clone()
+        };
+        let execute = |state: &AppState, gain: f32| {
+            let clip = state.active_sequence().expect("sequence").find_clip(clip_id).expect("clip");
+            let range = TimelineTimeRange::new(
+                TimelineTime::ZERO,
+                TimelineTime::new(2, 1).expect("duration"),
+            )
+            .expect("range");
+            let context = EffectFrameContext::new(
+                Rational::FPS_24,
+                mondrian_effects::EffectProjectGeometry::new(
+                    state.active_sequence().unwrap().settings.resolution.width,
+                    state.active_sequence().unwrap().settings.resolution.height,
+                    SampleAspectRatio::SQUARE,
+                )
+                .expect("explicit owner project geometry"),
+                range,
+            )
+            .expect("context");
+            let program = PreparedEffectProgram::prepare_hierarchical_with_frame_context(
+                &clip.effects,
+                &[],
+                &[],
+                &[],
+                WorkingColorSpace::LinearRec709,
+                context,
+                &LutPreparationCache::uncached(),
+            )
+            .expect("production graph");
+            let graph = program.evaluate(TimelineTime::ZERO).expect("author evaluation");
+            let input = vec![[-0.25, 0.5, 2.0, 0.25]; 4];
+            let pixels = mondrian_effects::apply_compiled_effect_graph_rgba_f32(
+                mondrian_effects::EffectFloatFrameView::new(
+                    mondrian_effects::EffectFrameExtent::new(2, 2),
+                    mondrian_effects::EffectValueFormat::new(
+                        mondrian_effects::EffectWorkingPrecision::Float32,
+                        mondrian_effects::EffectColorDomain::SceneLinearRgb,
+                        mondrian_core::ColorFrameAlpha::StraightCoverage,
+                    ),
+                    mondrian_core::ImageSampling::UNIT_SQUARE,
+                    &input,
+                ),
+                &graph,
+                0,
+            )
+            .expect("actual native queries/output");
+            assert_eq!(
+                pixels.pixels(),
+                input.iter().map(|pixel| pixel.map(|value| value * gain)).collect::<Vec<_>>()
+            );
+            pixels
+        };
+        let original = snapshot(&state);
+        let before = execute(&state, 2.0);
+        let generation = state.project_author_generation();
+        let action = visual_effect_edit_numeric_curve_action(VisualEffectEditNumericCurvePayload {
+            clip_id,
+            effect_id,
+            parameter: parameter.clone(),
+            edit: ClipCurveEditPayload::Move {
+                keyframe_id: endpoint_id,
+                time: None,
+                value: Some(AnimationChannelValue::Number(3.0)),
+            },
+        });
+        state.dispatch_action(action.clone()).expect("author commit");
+        assert_eq!(state.project_author_generation(), generation + 1);
+        let edited = snapshot(&state);
+        assert_eq!(
+            edited.keyframe_at(TimelineTime::ONE).expect("endpoint").id,
+            endpoint_id
+        );
+        let after = execute(&state, 3.0);
+        assert_ne!(before, after);
+        assert!(matches!(
+            state.dispatch_action(action),
+            Err(MondrianError::ActionNotExecuted { action, .. })
+                if action == "visual_effect_edit_numeric_curve"
+        ));
+        assert_eq!(state.project_author_generation(), generation + 1);
+        assert!(state.undo_timeline().expect("undo"));
+        assert_eq!(snapshot(&state), original);
+        assert_eq!(execute(&state, 2.0), before);
+        assert!(!state.can_undo_action());
+        assert!(state.can_redo_action());
+        let temp = tempfile::tempdir().expect("workspace");
+        let undone_path = temp.path().join("撤销后的曲线🙂.mdp");
+        state.save_project_file_as(undone_path.clone()).expect("durable undone save");
+        assert!(state.can_redo_action());
+        let mut reopened = AppState::new();
+        reopened.open_project_file(undone_path).expect("fresh undone reopen");
+        assert!(!reopened.can_undo_action());
+        assert!(!reopened.can_redo_action());
+        assert_eq!(snapshot(&reopened), original);
+        assert_eq!(execute(&reopened, 2.0), before);
+        drop(reopened);
+        assert!(state.redo_timeline().expect("redo after save"));
+        assert_eq!(snapshot(&state), edited);
+        assert_eq!(execute(&state, 3.0), after);
+        let edited_path = temp.path().join("重做后的曲线🙂.mdp");
+        state.save_project_file_as(edited_path.clone()).expect("durable edited save");
+        drop(state);
+        let mut reopened = AppState::new();
+        reopened.open_project_file(edited_path).expect("fresh edited reopen");
+        assert_eq!(snapshot(&reopened), edited);
+        assert_eq!(execute(&reopened, 3.0), after);
+        assert!(!reopened.can_undo_action());
+        assert!(!reopened.can_redo_action());
+        assert_eq!(
+            reopened.asset_library().expect("library").list_assets().expect("assets").len(),
+            0
+        );
+    }
+
+    #[test]
+    #[ignore = "requires current product and SessionProbe mode curve_group_authoring"]
+    fn native_effect_group_time_undo_save_reopen_preserves_queries_and_output() {
+        qualify_native_effect_curve_history(NativeCurveHistoryEdit::Time);
+    }
+
+    #[test]
+    #[ignore = "requires current product and SessionProbe mode curve_group_value_authoring"]
+    fn native_effect_group_value_undo_save_reopen_preserves_queries_and_output() {
+        qualify_native_effect_curve_history(NativeCurveHistoryEdit::Value);
+    }
+
+    #[test]
+    #[ignore = "requires current product and SessionProbe mode curve_group_transform_authoring"]
+    fn native_effect_group_transform_undo_save_reopen_preserves_queries_and_output() {
+        qualify_native_effect_curve_history(NativeCurveHistoryEdit::Transform);
+    }
+
+    #[test]
+    #[ignore = "requires current product and SessionProbe mode curve_group_interpolation_authoring"]
+    fn native_effect_group_interpolation_undo_save_reopen_preserves_queries_and_output() {
+        qualify_native_effect_curve_history(NativeCurveHistoryEdit::Interpolation);
+    }
+
+    #[test]
+    #[ignore = "requires current product and SessionProbe mode curve_reset_authoring"]
+    fn native_effect_parameter_reset_undo_save_reopen_preserves_queries_and_output() {
+        qualify_native_effect_curve_history(NativeCurveHistoryEdit::Reset);
+    }
+
+    #[derive(Clone, Copy)]
+    enum NativeCurveHistoryEdit {
+        Time,
+        Value,
+        Transform,
+        Interpolation,
+        Reset,
+    }
+
+    impl NativeCurveHistoryEdit {
+        fn fixture_mode(self) -> &'static str {
+            match self {
+                Self::Time => "curve_group_authoring",
+                Self::Value => "curve_group_value_authoring",
+                Self::Transform => "curve_group_transform_authoring",
+                Self::Interpolation => "curve_group_interpolation_authoring",
+                Self::Reset => "curve_reset_authoring",
+            }
+        }
+    }
+
+    fn qualify_native_effect_curve_history(edit: NativeCurveHistoryEdit) {
+        let reset = matches!(edit, NativeCurveHistoryEdit::Reset);
+        let value_edit = matches!(
+            edit,
+            NativeCurveHistoryEdit::Value | NativeCurveHistoryEdit::Transform
+        );
+        let interpolation_edit = matches!(edit, NativeCurveHistoryEdit::Interpolation);
+        let time_edit = matches!(
+            edit,
+            NativeCurveHistoryEdit::Time | NativeCurveHistoryEdit::Transform
+        );
+        let transform_edit = matches!(edit, NativeCurveHistoryEdit::Transform);
+        use super::super::ui_actions::{
+            visual_effect_edit_numeric_curve_action, ClipCurveEditPayload,
+            VisualEffectEditNumericCurvePayload,
+        };
+        use mondrian_core::{SampleAspectRatio, TimelineTimeRange, WorkingColorSpace};
+        use mondrian_effects::{EffectFrameContext, LutPreparationCache, PreparedEffectProgram};
+        use std::path::PathBuf;
+        let _guard = crate::app_ui::test_utils::theme_test_guard();
+        assert_eq!(
+            std::env::var("MONDRIAN_OPENFX_SESSION_PROBE_MODE").expect("mode"),
+            edit.fixture_mode()
+        );
+        let helper =
+            PathBuf::from(std::env::var_os("MONDRIAN_OPENFX_PRODUCT_BINARY").expect("product"));
+        let binary =
+            PathBuf::from(std::env::var_os("MONDRIAN_OPENFX_SESSION_PROBE_BINARY").expect("probe"));
+        let inspection =
+            crate::openfx_adapter::inspect_openfx_binary(&helper, &binary).expect("inspect");
+        let kind = crate::openfx_effect::register_selected_openfx_filter(
+            &helper,
+            &inspection,
+            "uk.co.thefoundry.BasicGainPlugin",
+        )
+        .expect("register");
+        let description = crate::openfx_host::describe_openfx_filter(
+            &helper,
+            &inspection,
+            "uk.co.thefoundry.BasicGainPlugin",
+        )
+        .expect("describe");
+        let label =
+            &description.parameters.iter().find(|p| p.name == "scale").expect("scale").label;
+        for mode in [
+            InterpolationType::AutoBezier,
+            InterpolationType::ContinuousBezier,
+        ] {
+            let mut effect =
+                mondrian_effects::instantiate_effect_node(kind.clone()).expect("effect");
+            let mut property = effect
+                .properties
+                .iter()
+                .find(|(_, p)| &p.descriptor.display_name == label)
+                .expect("canonical property")
+                .1
+                .clone();
+            property.set_animation_enabled(true);
+            let times = [
+                TimelineTime::ZERO,
+                TimelineTime::new(1, 4).expect("six frames"),
+                TimelineTime::new(1, 2).expect("twelve frames"),
+            ];
+            let mut ids = Vec::new();
+            for (index, time) in times.iter().copied().enumerate() {
+                let value = if interpolation_edit && index == 1 {
+                    2.5
+                } else {
+                    index as f64 + 1.0
+                };
+                property
+                    .write_channels(time, &[(0, value)], InterpolationType::Linear)
+                    .expect("seed key");
+                ids.push(property.keyframe_at(time).expect("key").id);
+            }
+            if !interpolation_edit {
+                for time in times {
+                    property.update_keyframe_interpolation(time, mode).expect("constraint");
+                }
+            }
+            let parameter = property.address();
+            effect.properties.upsert(property);
+            let effect_id = effect.id;
+            let mut clip = Clip::new_basic_title(
+                "Group curve",
+                "Arial",
+                TimelineTime::ZERO,
+                TimelineTime::new(2, 1).expect("duration"),
+            )
+            .expect("title");
+            let clip_id = clip.id;
+            clip.add_effect_node(effect);
+            let mut sequence = Sequence::new("Native group curve");
+            sequence.video_tracks[0].add_clip(clip).expect("clip");
+            let mut state = AppState::new();
+            state.test_set_sequence(Some(sequence));
+            let snapshot = |state: &AppState| {
+                state
+                    .active_sequence()
+                    .expect("sequence")
+                    .find_clip(clip_id)
+                    .expect("clip")
+                    .effects
+                    .iter()
+                    .find(|effect| effect.id == effect_id)
+                    .expect("effect")
+                    .properties
+                    .property_by_address(&parameter)
+                    .expect("property")
+                    .1
+                    .clone()
+            };
+            let execute = |state: &AppState, gain: f32| {
+                let curve = snapshot(state);
+                let numeric = |time| match curve.evaluate(time) {
+                    mondrian_core::PropertyValue::Double(value) => value,
+                    mondrian_core::PropertyValue::Float(value) => f64::from(value),
+                    other => panic!("native scale must stay numeric: {other:?}"),
+                };
+                assert_eq!(
+                    numeric(TimelineTime::new(1, 2).expect("frame twelve")) as f32,
+                    gain
+                );
+                let sample = numeric(TimelineTime::new(1, 8).expect("off-key frame three"));
+                if reset && curve.is_at_default() {
+                    assert_eq!(sample, 1.0, "declared default at off-key native query");
+                } else if interpolation_edit {
+                    let first = curve.keyframe_at(TimelineTime::ZERO).expect("first key");
+                    if first.temporal_flags.auto_bezier {
+                        assert!(
+                            (sample - 1.75).abs() > 1e-6,
+                            "Auto must reshape the nonuniform linear source"
+                        );
+                    } else if !first.temporal_flags.continuous {
+                        assert!((sample - 1.75).abs() < 1e-12, "original linear source");
+                    }
+                } else if transform_edit && gain == 2.5 {
+                    assert!(
+                        (sample - 1.5).abs() > 1e-6,
+                        "joint time/value edit must affect off-key native output"
+                    );
+                } else if value_edit && gain == 3.5 {
+                    assert!(
+                        sample > 1.5,
+                        "selected value edit must affect off-key native output"
+                    );
+                } else if curve
+                    .keyframe_at(TimelineTime::new(1, 4).expect("original middle"))
+                    .is_none()
+                {
+                    assert!(
+                        (sample - 1.25).abs() > 1e-6,
+                        "moved constrained curve must differ from linear interpolation"
+                    );
+                } else {
+                    assert!((sample - 1.5).abs() < 1e-12, "original uniform curve");
+                }
+                let sampled_gain = sample as f32;
+                let clip =
+                    state.active_sequence().expect("sequence").find_clip(clip_id).expect("clip");
+                let context = EffectFrameContext::new(
+                    Rational::FPS_24,
+                    mondrian_effects::EffectProjectGeometry::new(
+                        state.active_sequence().unwrap().settings.resolution.width,
+                        state.active_sequence().unwrap().settings.resolution.height,
+                        SampleAspectRatio::SQUARE,
+                    )
+                    .expect("explicit owner project geometry"),
+                    TimelineTimeRange::new(
+                        TimelineTime::ZERO,
+                        TimelineTime::new(2, 1).expect("duration"),
+                    )
+                    .expect("range"),
+                )
+                .expect("context");
+                let program = PreparedEffectProgram::prepare_hierarchical_with_frame_context(
+                    &clip.effects,
+                    &[],
+                    &[],
+                    &[],
+                    WorkingColorSpace::LinearRec709,
+                    context,
+                    &LutPreparationCache::uncached(),
+                )
+                .expect("shared production graph");
+                let graph = program.evaluate(TimelineTime::ZERO).expect("author evaluation");
+                let input = vec![[-0.25, 0.5, 2.0, 0.25]; 4];
+                let pixels = mondrian_effects::apply_compiled_effect_graph_rgba_f32(
+                    mondrian_effects::EffectFloatFrameView::new(
+                        mondrian_effects::EffectFrameExtent::new(2, 2),
+                        mondrian_effects::EffectValueFormat::new(
+                            mondrian_effects::EffectWorkingPrecision::Float32,
+                            mondrian_effects::EffectColorDomain::SceneLinearRgb,
+                            mondrian_core::ColorFrameAlpha::StraightCoverage,
+                        ),
+                        mondrian_core::ImageSampling::UNIT_SQUARE,
+                        &input,
+                    ),
+                    &graph,
+                    0,
+                )
+                .expect("native group queries/output");
+                assert_eq!(
+                    pixels.pixels(),
+                    input
+                        .iter()
+                        .map(|pixel| pixel.map(|value| value * sampled_gain))
+                        .collect::<Vec<_>>()
+                );
+                pixels
+            };
+            let original = snapshot(&state);
+            let before = execute(&state, 3.0);
+            let generation = state.project_author_generation();
+            let action = |valid| {
+                if reset {
+                    let parameter = if valid {
+                        parameter.clone()
+                    } else {
+                        AnimationParameterAddress {
+                            animation_track_id: mondrian_core::AnimationTrackId::new(),
+                            ..parameter.clone()
+                        }
+                    };
+                    return super::super::ui_actions::visual_effect_set_parameter_value_action(
+                        super::super::ui_actions::VisualEffectSetParameterValuePayload {
+                            clip_id,
+                            effect_id,
+                            write: mondrian_core::automation::ParameterValueWrite::ResetToDefault {
+                                parameter,
+                            },
+                        },
+                    );
+                }
+                let edit = if interpolation_edit {
+                    ClipCurveEditPayload::SetInterpolations {
+                        keyframe_ids: if valid {
+                            ids.clone()
+                        } else {
+                            vec![ids[1], KeyframeId::new()]
+                        },
+                        interpolation: mode,
+                    }
+                } else if transform_edit {
+                    ClipCurveEditPayload::TransformMany {
+                        keyframe_ids: ids[1..].to_vec(),
+                        time_delta: TimelineTime::new(if valid { 1 } else { -1 }, 4)
+                            .expect("joint group delta"),
+                        value_delta: 0.5,
+                        steps: 1,
+                    }
+                } else if value_edit {
+                    ClipCurveEditPayload::OffsetValuesMany {
+                        keyframe_ids: if valid {
+                            ids[1..].to_vec()
+                        } else {
+                            vec![ids[1], KeyframeId::new()]
+                        },
+                        delta: 0.5,
+                        steps: 1,
+                    }
+                } else {
+                    ClipCurveEditPayload::ShiftMany {
+                        keyframe_ids: ids[1..].to_vec(),
+                        delta: TimelineTime::new(if valid { 1 } else { -1 }, 4)
+                            .expect("group delta"),
+                    }
+                };
+                visual_effect_edit_numeric_curve_action(VisualEffectEditNumericCurvePayload {
+                    clip_id,
+                    effect_id,
+                    parameter: parameter.clone(),
+                    edit,
+                })
+            };
+            if reset {
+                state.active_sequence_mut_uncommitted().expect("lock").video_tracks[0].is_locked =
+                    true;
+                state.dispatch_action(action(true)).expect_err("locked reset");
+                assert_eq!(snapshot(&state), original);
+                assert_eq!(state.project_author_generation(), generation);
+                assert!(!state.can_undo_action() && !state.can_redo_action());
+                assert_eq!(execute(&state, 3.0), before);
+                state.active_sequence_mut_uncommitted().expect("unlock").video_tracks[0]
+                    .is_locked = false;
+            }
+            state
+                .dispatch_action(action(false))
+                .expect_err("invalid complete group must refuse atomically");
+            assert_eq!(snapshot(&state), original);
+            assert_eq!(state.project_author_generation(), generation);
+            assert!(!state.can_undo_action() && !state.can_redo_action());
+            assert_eq!(execute(&state, 3.0), before);
+            state.dispatch_action(action(true)).expect("one group author transaction");
+            assert_eq!(state.project_author_generation(), generation + 1);
+            let edited = snapshot(&state);
+            let edited_times = if time_edit {
+                [
+                    TimelineTime::ZERO,
+                    TimelineTime::new(1, 2).expect("middle"),
+                    TimelineTime::new(3, 4).expect("end"),
+                ]
+            } else {
+                times
+            };
+            if reset {
+                assert!(edited.is_at_default());
+                assert_eq!(edited.address(), original.address());
+                assert_eq!(edited.descriptor, original.descriptor);
+                let after_generation = state.project_author_generation();
+                let after_history = state.authoring_history().expect("history").diagnostics();
+                state.dispatch_action(action(true)).expect_err("default reset is a no-op");
+                assert_eq!(snapshot(&state), edited);
+                assert_eq!(state.project_author_generation(), after_generation);
+                assert_eq!(
+                    state.authoring_history().expect("history").diagnostics(),
+                    after_history
+                );
+            } else {
+                for (index, time) in edited_times.iter().copied().enumerate() {
+                    let key = edited.keyframe_at(time).expect("moved key");
+                    assert_eq!(key.id, ids[index]);
+                    assert_eq!(
+                        key.value.as_numeric_f64().expect("numeric"),
+                        if interpolation_edit && index == 1 {
+                            2.5
+                        } else {
+                            index as f64 + 1.0 + if value_edit && index > 0 { 0.5 } else { 0.0 }
+                        }
+                    );
+                    if interpolation_edit {
+                        assert_eq!(
+                            mondrian_core::automation::interpolation_mode_from_keyframe(
+                                key.interp_in,
+                                key.interp_out,
+                                key.temporal_flags,
+                            ),
+                            mode,
+                            "every selected key retains its exact constraint intent"
+                        );
+                    }
+                }
+            }
+            let edited_gain = if reset {
+                1.0
+            } else if transform_edit {
+                2.5
+            } else if value_edit {
+                3.5
+            } else if interpolation_edit {
+                3.0
+            } else {
+                2.0
+            };
+            let after = execute(&state, edited_gain);
+            if !interpolation_edit || mode == InterpolationType::AutoBezier {
+                assert_ne!(before, after);
+            }
+            assert!(state.undo_timeline().expect("single Undo"));
+            assert_eq!(snapshot(&state), original);
+            assert!(!state.can_undo_action() && state.can_redo_action());
+            assert_eq!(execute(&state, 3.0), before);
+            let directory = tempfile::tempdir().expect("archives");
+            let undone_path = directory.path().join("分组撤销🙂.mdp");
+            state.save_project_file_as(undone_path.clone()).expect("save undone");
+            assert!(state.can_redo_action());
+            let mut reopened = AppState::new();
+            reopened.open_project_file(undone_path).expect("fresh undone reopen");
+            assert_eq!(snapshot(&reopened), original);
+            assert!(!reopened.can_undo_action() && !reopened.can_redo_action());
+            assert_eq!(execute(&reopened, 3.0), before);
+            drop(reopened);
+            assert!(state.redo_timeline().expect("Redo after save"));
+            assert_eq!(snapshot(&state), edited);
+            assert_eq!(execute(&state, edited_gain), after);
+            let edited_path = directory.path().join("分组重做🙂.mdp");
+            state.save_project_file_as(edited_path.clone()).expect("save edited");
+            drop(state);
+            let mut reopened = AppState::new();
+            reopened.open_project_file(edited_path).expect("fresh edited reopen");
+            assert_eq!(snapshot(&reopened), edited);
+            assert!(!reopened.can_undo_action() && !reopened.can_redo_action());
+            assert_eq!(execute(&reopened, edited_gain), after);
+            assert!(reopened
+                .asset_library()
+                .expect("SQLite library")
+                .list_assets()
+                .expect("assets")
+                .is_empty());
+        }
+    }
 
     fn tt(frame: i64, time_base: Rational) -> TimelineTime {
         TimelineTime::new(
@@ -636,7 +1919,9 @@ mod tests {
                     && property.channel_count() == 1
                     && matches!(
                         property.value_type(),
-                        PropertyValueType::Float | PropertyValueType::Double
+                        PropertyValueType::Float
+                            | PropertyValueType::Double
+                            | PropertyValueType::Int
                     )
             })
             .expect("scalar effect parameter");
@@ -666,6 +1951,197 @@ mod tests {
     }
 
     #[test]
+    fn live_curve_insert_retains_identity_and_one_reversible_history_entry() {
+        use crate::app::parameter_gesture::{
+            ParameterCurveGestureTarget, ParameterGestureAction, ParameterGestureEdit,
+        };
+        use crate::app::product_action::{ClipCurveEditPayload, ClipEditNumericCurvePayload};
+        for cancel in [false, true] {
+            let (mut state, selection, _) = state_with_clip();
+            state.select_clip_by_id(selection.clip_id).expect("select owner");
+            let parameter = opacity_address(&state, selection);
+            let original = state.active_sequence().unwrap().clone();
+            let id = mondrian_core::AuthoringGestureId::new();
+            let keyframe_id = KeyframeId::new();
+            state
+                .dispatch_action(
+                    ParameterGestureAction::BeginCurve {
+                        gesture_id: id,
+                        target: ParameterCurveGestureTarget::Clip {
+                            clip_id: selection.clip_id,
+                            parameter: parameter.clone(),
+                        },
+                    }
+                    .action(),
+                )
+                .unwrap();
+            for (time_ratio, value_ratio) in [(0.25, 0.2), (0.5, 0.4), (0.75, 0.6)] {
+                state
+                    .dispatch_action(
+                        ParameterGestureAction::Update {
+                            gesture_id: id,
+                            edit: ParameterGestureEdit::ClipCurve(ClipEditNumericCurvePayload {
+                                clip_id: selection.clip_id,
+                                parameter: parameter.clone(),
+                                edit: ClipCurveEditPayload::Upsert {
+                                    keyframe_id: Some(keyframe_id),
+                                    point: crate::app::test_curve_authoring::curve_author_point(
+                                        &state,
+                                        selection.clip_id,
+                                        &parameter,
+                                        time_ratio,
+                                        value_ratio,
+                                    ),
+                                },
+                            }),
+                        }
+                        .action(),
+                    )
+                    .unwrap();
+                let property = state.clip_snapshot(selection).unwrap().property_bag().unwrap();
+                assert_eq!(
+                    property.property(Transform2D::OPACITY_PATH).unwrap().keyframe_times().len(),
+                    1
+                );
+                let key = opacity_key(&state, selection, keyframe_id);
+                assert_eq!(key.id, keyframe_id);
+                assert_eq!(key.value, PropertyValue::Float(value_ratio as f32));
+                assert!(state.parameter_gesture_is_current());
+            }
+            let live = state.active_sequence().unwrap().clone();
+            state
+                .dispatch_action(
+                    if cancel {
+                        ParameterGestureAction::Cancel { gesture_id: id }
+                    } else {
+                        ParameterGestureAction::Finish { gesture_id: id }
+                    }
+                    .action(),
+                )
+                .unwrap();
+            if cancel {
+                assert!(state
+                    .active_sequence()
+                    .unwrap()
+                    .author_state_eq_ignoring_revision(&original));
+                assert!(
+                    !state.undo_timeline().unwrap(),
+                    "cancel leaves no history entry"
+                );
+            } else {
+                assert!(state.undo_timeline().unwrap());
+                assert!(state
+                    .active_sequence()
+                    .unwrap()
+                    .author_state_eq_ignoring_revision(&original));
+                assert!(
+                    !state.undo_timeline().unwrap(),
+                    "one drag must produce only one Undo"
+                );
+                assert!(state.redo_timeline().unwrap());
+                assert!(state.active_sequence().unwrap().author_state_eq_ignoring_revision(&live));
+            }
+        }
+    }
+
+    #[test]
+    fn integer_effect_curve_rounds_keys_and_preserves_undo_identity() {
+        use mondrian_core::automation::{
+            ParameterInvalidValuePolicy, ParameterNumericContract, ParameterUnit,
+            PropertyDescriptor,
+        };
+        use mondrian_effects::{
+            instantiate_effect_node, register_effect_definition, EffectColorDomainContract,
+            EffectDeterminism, EffectExecutionContract, EffectExecutionModes,
+            EffectExtensionDefinitionBuilder, EffectGraphTopology, EffectRenderOp,
+            EffectResourceLifetime, EffectRoiPropagation, EffectStateModel,
+            EffectTemporalInputExtent,
+        };
+        let kind = EffectType::External("plugin.test.integer_author_curve".to_owned());
+        let path = "plugin.test.integer_author_curve.count";
+        let mut descriptor = PropertyDescriptor::new(path, "Count", PropertyValue::Int(2))
+            .with_parameter_id(kind.parameter_id("count").expect("parameter"))
+            .with_numeric_contract(
+                ParameterUnit::Unitless,
+                ParameterNumericContract::closed(
+                    0.0,
+                    9.0,
+                    Some(1.0),
+                    ParameterInvalidValuePolicy::Reject,
+                )
+                .expect("range"),
+            );
+        descriptor.schema.allowed_interpolations = vec![
+            ParameterInterpolation::Linear,
+            ParameterInterpolation::Hold,
+            ParameterInterpolation::Bezier,
+        ];
+        let definition = EffectExtensionDefinitionBuilder::new(
+            kind.key(),
+            "Integer curve",
+            EffectColorDomainContract::SCENE_LINEAR,
+        )
+        .with_execution_contract(EffectExecutionContract {
+            execution_modes: EffectExecutionModes::CPU_F32,
+            determinism: EffectDeterminism::Deterministic,
+            state_model: EffectStateModel::Stateless,
+            temporal_input: EffectTemporalInputExtent::CURRENT_FRAME,
+            roi_propagation: EffectRoiPropagation::UnknownRequiresFullFrame,
+            resource_lifetime: EffectResourceLifetime::Frame,
+            topology: EffectGraphTopology::LinearChain,
+        })
+        .property(descriptor)
+        .with_branching_graph(|_, _, graph| {
+            graph.apply(EffectRenderOp::Sharpen { amount: 0.0 });
+        })
+        .build();
+        register_effect_definition(definition).expect("register definition");
+        let effect = instantiate_effect_node(kind).expect("effect");
+        let effect_id = effect.id;
+        let address = effect.properties.property(path).expect("count").address();
+        let (mut state, selection, _) = state_with_clip();
+        state
+            .active_sequence_mut_uncommitted()
+            .expect("sequence")
+            .find_clip_mut(selection.clip_id)
+            .expect("clip")
+            .add_effect_node(effect);
+        let before = effect_property(&state, selection, effect_id, &address);
+        let inserted = state
+            .edit_effect_numeric_curve(
+                selection.clip_id,
+                effect_id,
+                address.clone(),
+                ClipNumericCurveEdit::Upsert {
+                    keyframe_id: None,
+                    point: crate::app::test_curve_authoring::curve_author_point(
+                        &state,
+                        selection.clip_id,
+                        &address,
+                        0.5,
+                        0.5,
+                    ),
+                },
+            )
+            .expect("integer curve insert");
+        let after = effect_property(&state, selection, effect_id, &address);
+        let key = after.keyframe_by_id(inserted.keyframe_id).expect("key");
+        assert_eq!(key.value, PropertyValue::Int(5));
+        assert_eq!(key.interp_in, KeyframeInterpolation::Linear);
+        assert_eq!(key.interp_out, KeyframeInterpolation::Linear);
+        assert!(state.undo_timeline().expect("undo"));
+        assert_eq!(
+            effect_property(&state, selection, effect_id, &address),
+            before
+        );
+        assert!(state.redo_timeline().expect("redo"));
+        assert_eq!(
+            effect_property(&state, selection, effect_id, &address),
+            after
+        );
+    }
+
+    #[test]
     fn effect_curve_supports_stable_keys_constrained_bezier_and_undo() {
         let (mut state, selection, _) = state_with_clip();
         let (effect_id, address) = effect_curve_target(&mut state, selection);
@@ -677,7 +2153,13 @@ mod tests {
                 address.clone(),
                 ClipNumericCurveEdit::Upsert {
                     keyframe_id: None,
-                    point: NormalizedCurvePoint::new(0.5, 0.5).expect("point"),
+                    point: crate::app::test_curve_authoring::curve_author_point(
+                        &state,
+                        selection.clip_id,
+                        &address,
+                        0.5,
+                        0.5,
+                    ),
                 },
             )
             .expect("insert key");
@@ -759,7 +2241,13 @@ mod tests {
                 address.clone(),
                 ClipNumericCurveEdit::Upsert {
                     keyframe_id: None,
-                    point: NormalizedCurvePoint::new(0.5, 0.5).expect("point"),
+                    point: crate::app::test_curve_authoring::curve_author_point(
+                        &state,
+                        selection.clip_id,
+                        &address,
+                        0.5,
+                        0.5,
+                    ),
                 },
             )
             .expect_err("stale effect");
@@ -849,11 +2337,11 @@ mod tests {
             id: middle_id,
             time: tt(10, time_base),
             value: PropertyValue::Float(0.5),
-            interp_in: KeyframeInterpolation::Bezier(BezierHandle {
+            interp_in: KeyframeInterpolation::Bezier(ExactBezierHandle {
                 time_offset: TimelineTime::from_f64_quantized(-0.2, 1_000_000).expect("handle"),
                 value_offset: -0.1,
             }),
-            interp_out: KeyframeInterpolation::Bezier(BezierHandle {
+            interp_out: KeyframeInterpolation::Bezier(ExactBezierHandle {
                 time_offset: TimelineTime::from_f64_quantized(0.3, 1_000_000).expect("handle"),
                 value_offset: 0.2,
             }),
@@ -883,10 +2371,16 @@ mod tests {
         let outcome = state
             .edit_clip_numeric_curve(
                 selection.clip_id,
-                address,
+                address.clone(),
                 ClipNumericCurveEdit::Upsert {
                     keyframe_id: Some(middle_id),
-                    point: NormalizedCurvePoint::new(0.6, 0.75).expect("point"),
+                    point: crate::app::test_curve_authoring::curve_author_point(
+                        &state,
+                        selection.clip_id,
+                        &address,
+                        0.6,
+                        0.75,
+                    ),
                 },
             )
             .expect("edit curve");
@@ -911,6 +2405,145 @@ mod tests {
         assert_eq!(restored.value, middle.value);
         assert_eq!(restored.interp_in, middle.interp_in);
         assert_eq!(restored.interp_out, middle.interp_out);
+        assert!(state.redo_timeline().expect("redo"));
+        assert_eq!(opacity_key(&state, selection, middle_id), edited);
+    }
+
+    #[test]
+    fn sparse_curve_product_codec_rejects_invalid_axes_without_partial_publication() {
+        use crate::app::product_action::{ClipCurveEditPayload, ClipEditNumericCurvePayload};
+        use crate::app::ui_actions::clip_edit_numeric_curve_action;
+        let (mut state, selection, _) = state_with_clip();
+        let keyframe = Keyframe::linear(
+            TimelineTime::new(1, 3).expect("third"),
+            PropertyValue::Float(0.5),
+        );
+        let keyframe_id = keyframe.id;
+        state
+            .mutate_clip_property(
+                selection,
+                PropertyMutation::SetKeyframe {
+                    path: Transform2D::OPACITY_PATH.to_owned(),
+                    keyframe,
+                },
+                "seed",
+            )
+            .expect("key");
+        let address = opacity_address(&state, selection);
+        let before = state.active_sequence().expect("before").clone();
+        let generation = state.project_author_generation();
+        let history = state.authoring_history().expect("history").diagnostics();
+        for invalid in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            for invalid_time in [true, false] {
+                let mut action = clip_edit_numeric_curve_action(ClipEditNumericCurvePayload {
+                    clip_id: selection.clip_id,
+                    parameter: address.clone(),
+                    edit: ClipCurveEditPayload::Move {
+                        keyframe_id,
+                        time: Some(TimelineTime::new(1, 2).expect("valid owner time")),
+                        value: Some(AnimationChannelValue::Number(if invalid_time {
+                            0.75
+                        } else {
+                            invalid
+                        })),
+                    },
+                });
+                if invalid_time {
+                    let mondrian_editor_state::Action::Custom { payload, .. } = &mut action else {
+                        panic!("typed curve action");
+                    };
+                    payload["edit"]["time"] =
+                        serde_json::to_value(invalid).expect("invalid supplied wire coordinate");
+                }
+                assert!(state.dispatch_action(action).is_err(),
+                    "A supplied invalid axis must not be decoded as omission while the other axis commits");
+                assert!(state
+                    .active_sequence()
+                    .expect("unchanged")
+                    .author_state_eq_ignoring_revision(&before));
+                assert_eq!(state.project_author_generation(), generation);
+                assert_eq!(
+                    state.authoring_history().expect("history").diagnostics(),
+                    history
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn sparse_curve_moves_reject_invalid_coordinates_and_preserve_noop_history() {
+        let (mut state, selection, _) = state_with_clip();
+        let keyframe = Keyframe::linear(
+            TimelineTime::new(1, 3).expect("third"),
+            PropertyValue::Float(0.25),
+        );
+        let keyframe_id = keyframe.id;
+        state
+            .mutate_clip_property(
+                selection,
+                PropertyMutation::SetKeyframe {
+                    path: Transform2D::OPACITY_PATH.to_owned(),
+                    keyframe,
+                },
+                "seed",
+            )
+            .expect("key");
+        let address = opacity_address(&state, selection);
+        let before = state.active_sequence().expect("before").clone();
+        let history = state.authoring_history().expect("history").diagnostics();
+        let generation = state.project_author_generation();
+        assert!(
+            !state
+                .edit_clip_numeric_curve(
+                    selection.clip_id,
+                    address.clone(),
+                    ClipNumericCurveEdit::Move { keyframe_id, time: None, value: None }
+                )
+                .expect("unchanged move")
+                .changed
+        );
+        for invalid in [TimelineTime::new(-1, 10).unwrap(), TimelineTime::ONE] {
+            state
+                .edit_clip_numeric_curve(
+                    selection.clip_id,
+                    address.clone(),
+                    ClipNumericCurveEdit::Move { keyframe_id, time: Some(invalid), value: None },
+                )
+                .expect_err("time outside the owner interval rejects");
+        }
+        for invalid in [f64::NAN, f64::INFINITY, -0.1, 1.1] {
+            state
+                .edit_clip_numeric_curve(
+                    selection.clip_id,
+                    address.clone(),
+                    ClipNumericCurveEdit::Move {
+                        keyframe_id,
+                        time: None,
+                        value: Some(AnimationChannelValue::Number(invalid)),
+                    },
+                )
+                .expect_err("invalid supplied numeric value rejects");
+        }
+        state
+            .edit_clip_numeric_curve(
+                selection.clip_id,
+                address,
+                ClipNumericCurveEdit::Move {
+                    keyframe_id: KeyframeId::new(),
+                    time: None,
+                    value: Some(AnimationChannelValue::Number(0.5)),
+                },
+            )
+            .expect_err("stale key rejects");
+        assert!(state
+            .active_sequence()
+            .expect("unchanged")
+            .author_state_eq_ignoring_revision(&before));
+        assert_eq!(
+            state.authoring_history().expect("history").diagnostics(),
+            history
+        );
+        assert_eq!(state.project_author_generation(), generation);
     }
 
     #[test]
@@ -946,7 +2579,13 @@ mod tests {
                 address.clone(),
                 ClipNumericCurveEdit::Upsert {
                     keyframe_id: Some(first_id),
-                    point: NormalizedCurvePoint::new(0.5, 0.5).expect("point"),
+                    point: crate::app::test_curve_authoring::curve_author_point(
+                        &state,
+                        selection.clip_id,
+                        &address,
+                        0.5,
+                        0.5,
+                    ),
                 },
             )
             .expect_err("occupied time rejects");
@@ -984,7 +2623,13 @@ mod tests {
                 address.clone(),
                 ClipNumericCurveEdit::Upsert {
                     keyframe_id: None,
-                    point: NormalizedCurvePoint::new(0.25, 0.4).expect("point"),
+                    point: crate::app::test_curve_authoring::curve_author_point(
+                        &state,
+                        selection.clip_id,
+                        &address,
+                        0.25,
+                        0.4,
+                    ),
                 },
             )
             .expect("insert");

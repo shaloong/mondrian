@@ -30,6 +30,9 @@ use super::preview_media_residency::PreviewMediaResidencyGuard;
 #[derive(Debug, Clone)]
 pub(crate) struct MediaPreviewFrame {
     payload: MediaPreviewPayload,
+    /// Complete key admitted with this allocation; no later Asset lookup may
+    /// replace its file/stream, RAW, picture or input-color interpretation.
+    source_key: Option<Arc<super::preview_access_mode::MediaPreviewKey>>,
     sampled_resolution: Resolution,
     logical_resolution: Resolution,
     source_to_display_affine: [f32; 6],
@@ -51,6 +54,18 @@ enum MediaPreviewPayload {
 }
 
 impl MediaPreviewFrame {
+    pub(crate) fn with_source_key(
+        mut self,
+        key: super::preview_access_mode::MediaPreviewKey,
+    ) -> Self {
+        self.source_key = Some(Arc::new(key));
+        self
+    }
+
+    pub(crate) fn source_key(&self) -> Option<&super::preview_access_mode::MediaPreviewKey> {
+        self.source_key.as_deref()
+    }
+
     pub(crate) fn from_working(
         frame: CpuColorFrame,
         logical_resolution: Resolution,
@@ -61,6 +76,7 @@ impl MediaPreviewFrame {
         let descriptor = frame.descriptor();
         Self {
             payload: MediaPreviewPayload::Working(frame),
+            source_key: None,
             sampled_resolution: Resolution { width: descriptor.width, height: descriptor.height },
             logical_resolution,
             source_to_display_affine: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
@@ -84,6 +100,7 @@ impl MediaPreviewFrame {
         let (width, height) = source.prepared_source.extent();
         Self {
             payload: MediaPreviewPayload::Source(Box::new(source)),
+            source_key: None,
             sampled_resolution: Resolution { width, height },
             logical_resolution,
             source_to_display_affine: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
@@ -107,6 +124,7 @@ impl MediaPreviewFrame {
     ) -> Self {
         Self {
             payload: MediaPreviewPayload::Native(source),
+            source_key: None,
             sampled_resolution,
             logical_resolution,
             source_to_display_affine: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
@@ -130,6 +148,7 @@ impl MediaPreviewFrame {
     ) -> Self {
         Self {
             payload: MediaPreviewPayload::CpuYuv(source),
+            source_key: None,
             sampled_resolution,
             logical_resolution,
             source_to_display_affine: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
@@ -183,6 +202,7 @@ impl MediaPreviewFrame {
         };
         source.temporal_selection = Some(Arc::new(selection));
         frame.identity = super::preview_media_task::media_preview_frame_identity(key, evidence);
+        frame.source_key = Some(Arc::new(key.clone()));
         frame.render_cache_source_fingerprint = Some(Arc::new(
             super::preview_render_cache_identity::canonical_media_source_fingerprint(key).ok()?,
         ));
@@ -209,6 +229,16 @@ impl MediaPreviewFrame {
     /// Bind resolved source picture geometry before Clip-local authoring transforms.
     pub(crate) fn with_picture_geometry(mut self, geometry: ResolvedPictureGeometry) -> Self {
         self.source_to_display_affine = geometry.source_to_display_affine();
+        self
+    }
+
+    /// Preserve the already-resolved source mapping when Effects replace pixels.
+    pub(crate) fn source_to_display_affine(&self) -> [f32; 6] {
+        self.source_to_display_affine
+    }
+
+    pub(crate) fn with_source_to_display_affine(mut self, affine: [f32; 6]) -> Self {
+        self.source_to_display_affine = affine;
         self
     }
 
@@ -283,6 +313,30 @@ impl MediaPreviewFrame {
 
     pub(crate) fn height(&self) -> u32 {
         self.sampled_resolution.height
+    }
+
+    /// The selected CPU image plane; querying it does not convert or copy pixels.
+    pub(crate) fn cpu_image_domain(
+        &self,
+    ) -> Option<(
+        mondrian_effects::EffectFrameExtent,
+        mondrian_core::ImageSampling,
+    )> {
+        let (width, height, sampling) = match &self.payload {
+            MediaPreviewPayload::Working(frame) => {
+                let payload = frame.rgba_f32();
+                (payload.width, payload.height, payload.sampling)
+            }
+            MediaPreviewPayload::Source(source) => {
+                let (width, height) = source.prepared_source.extent();
+                (width, height, source.prepared_source.sampling())
+            }
+            MediaPreviewPayload::CpuYuv(_) | MediaPreviewPayload::Native(_) => return None,
+        };
+        Some((
+            mondrian_effects::EffectFrameExtent::new(width, height),
+            sampling,
+        ))
     }
 
     pub(crate) fn logical_resolution(&self) -> Resolution {
@@ -588,7 +642,11 @@ impl MediaPreviewGpuSourceFrame {
         input_transform: RenderInputTransform,
     ) -> Self {
         Self {
-            prepared_source: PreparedSourceFrame::from_typed_source(source, input_transform),
+            prepared_source: PreparedSourceFrame::from_typed_source(
+                source,
+                input_transform,
+                mondrian_core::ImageSampling::UNIT_SQUARE,
+            ),
             decoder_residency: DecodedFrameResidency::CpuRgba,
             decoder_handle_kind: None,
             decoded_surface_format: DecodedVideoSurfaceFormat::Unknown,
@@ -640,4 +698,66 @@ struct MediaPreviewWorkingFrameCacheEntry {
     frame: CpuColorFrame,
     color_diagnostics: Option<RenderColorTransformDiagnostics>,
     stage_diagnostics: RenderColorStageDiagnostics,
+}
+
+#[cfg(test)]
+mod sampling_tests {
+    use super::*;
+
+    #[test]
+    fn lazy_media_working_cache_preserves_actual_source_sampling() {
+        let geometry = mondrian_core::ResolvedPictureGeometry::resolve(
+            Resolution { width: 1921, height: 1081 },
+            mondrian_core::PictureStreamMetadata {
+                sample_aspect_ratio: mondrian_core::SampleAspectRatio::new(4, 3),
+                orientation: mondrian_core::PictureOrientation::RotateClockwise90,
+                ..Default::default()
+            },
+            None,
+            None,
+        )
+        .unwrap();
+        let sampling = geometry.image_sampling(Resolution { width: 3, height: 5 }).unwrap();
+        let encoded = mondrian_renderer::CpuEncodedColorFrame::source_rgba8(
+            3,
+            5,
+            ColorSpace::Rec709,
+            [0_u8, 0, 0, 255].repeat(15),
+        );
+        let transform = RenderInputTransform::to_working(
+            mondrian_core::WorkingColorSpace::LinearRec709,
+            false,
+            mondrian_core::ColorEngine::mondrian_standard(),
+        );
+        let mut source = MediaPreviewGpuSourceFrame::new(encoded.clone(), transform.clone());
+        source.prepared_source =
+            PreparedSourceFrame::from_typed_source(encoded, transform, sampling);
+        let frame = MediaPreviewFrame::from_source(
+            source,
+            geometry.encoded_resolution(),
+            PreviewSemanticIdentity::from_complete_fingerprint([19; 32]),
+            FramePresentationQuality::Ready,
+            PreviewDecodeExecutionSummary::default(),
+        )
+        .with_picture_geometry(geometry);
+        let first = frame.working_frame().unwrap();
+        let cached = frame.working_frame().unwrap();
+        assert_eq!(
+            first.frame.rgba_f32().sampling.sample_aspect_ratio(),
+            mondrian_core::SampleAspectRatio::new(4, 3).unwrap()
+        );
+        assert_eq!(
+            first.frame.rgba_f32().sampling.render_scale(),
+            [
+                mondrian_core::Rational::new(3, 1921),
+                mondrian_core::Rational::new(5, 1081)
+            ]
+        );
+        assert_eq!(cached.frame.rgba_f32().sampling, sampling);
+        assert!(
+            std::ptr::eq(first.frame.rgba_f32(), cached.frame.rgba_f32()),
+            "the original lazy cache retains the same working value"
+        );
+        assert_eq!(first.frame.rgba_f32().data.len(), 15);
+    }
 }

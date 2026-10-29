@@ -36,12 +36,14 @@ pub enum ButtonStyle {
 /// Button Widget —— 可点击的标签按钮
 pub struct Button {
     id: WidgetId,
+    inspection_identity: crate::control_inspection::ControlInspectionIdentity,
     label: String,
     leading_icon: Option<VectorIcon>,
     bounds: Rect,
     state: ButtonState,
     enabled: bool,
     pub on_click: Option<Action>,
+    local_activation: Option<Box<dyn Fn()>>,
     focused: bool,
     focus_visible: bool,
     visual: Cell<ButtonVisualTokens>,
@@ -81,15 +83,23 @@ impl Default for ButtonVisualTokens {
 }
 
 impl Button {
+    /// Address this control independently of labels, ordering and current value.
+    pub fn with_control_inspection_key(mut self, key: Option<String>) -> Self {
+        self.inspection_identity.set_key(key);
+        self
+    }
+
     pub fn new(label: impl Into<String>) -> Self {
         Self {
             id: WidgetId::new(),
+            inspection_identity: crate::control_inspection::ControlInspectionIdentity::default(),
             label: label.into(),
             leading_icon: None,
             bounds: Rect::ZERO,
             state: ButtonState::Normal,
             enabled: true,
             on_click: None,
+            local_activation: None,
             focused: false,
             focus_visible: false,
             visual: Cell::new(ButtonVisualTokens::default()),
@@ -107,18 +117,36 @@ impl Button {
 
     pub fn on_click(mut self, action: impl Into<Option<Action>>) -> Self {
         self.on_click = action.into();
+        self.local_activation = None;
+        self
+    }
+
+    /// React to real button activation with a local, nonserialized callback.
+    ///
+    /// This replaces the action binding. The same enabled, matching pointer
+    /// release and focused keyboard-activation rules apply as ordinary buttons.
+    /// A local callback cannot be invoked by dispatching an application action.
+    pub fn on_local_activate(mut self, callback: impl Fn() + 'static) -> Self {
+        self.on_click = None;
+        self.local_activation = Some(Box::new(callback));
         self
     }
 
     /// Set whether the button accepts user input and participates in focus.
     pub fn enabled(mut self, enabled: bool) -> Self {
+        self.set_enabled(enabled);
+        self
+    }
+
+    /// Update input and focus availability without replacing the widget.
+    /// Disabling clears a pending press so re-enabling cannot emit a stale click.
+    pub fn set_enabled(&mut self, enabled: bool) {
         self.enabled = enabled;
         if !enabled {
             self.state = ButtonState::Normal;
             self.focused = false;
             self.focus_visible = false;
         }
-        self
     }
 
     /// Disable the button.
@@ -129,6 +157,11 @@ impl Button {
     /// Whether the button is enabled.
     pub fn is_enabled(&self) -> bool {
         self.enabled
+    }
+
+    /// Replace the caption while retaining identity, focus and interaction state.
+    pub fn set_label(&mut self, label: impl Into<String>) {
+        self.label = label.into();
     }
 
     /// Use minimal style (transparent bg, hover highlight, active state).
@@ -159,7 +192,9 @@ impl Button {
     }
 
     fn activate(&self, ctx: &mut EventContext) {
-        if let Some(action) = &self.on_click {
+        if let Some(callback) = &self.local_activation {
+            callback();
+        } else if let Some(action) = &self.on_click {
             (ctx.dispatch)(action.clone());
         }
     }
@@ -360,6 +395,36 @@ impl Widget for Button {
 
     fn can_focus(&self) -> bool {
         self.enabled
+    }
+
+    fn set_control_inspection_key(&mut self, key: Option<String>) -> bool {
+        self.inspection_identity.set_key(key);
+        true
+    }
+
+    fn control_inspection_state(&self) -> Option<mondrian_ui_core::ControlInspectionState> {
+        self.inspection_identity.inspect(
+            self.id,
+            AccessibilityRole::Button,
+            self.focused,
+            self.focus_visible,
+            self.enabled,
+        )
+    }
+
+    fn restore_control_inspection_state(
+        &mut self,
+        state: &mondrian_ui_core::ControlInspectionState,
+    ) -> bool {
+        let Some((id, focused, focus_visible)) =
+            self.inspection_identity.restore(state, AccessibilityRole::Button, self.enabled)
+        else {
+            return false;
+        };
+        self.id = id;
+        self.focused = focused;
+        self.focus_visible = focus_visible;
+        true
     }
 
     fn accessibility(&self) -> Option<AccessibilityNode> {
@@ -618,6 +683,41 @@ mod tests {
         );
         assert_eq!(b.state(), ButtonState::Pressed);
         assert!(ctx.requests.repaint);
+    }
+
+    #[test]
+    fn button_disabling_during_a_press_cannot_click_after_reenable() {
+        let mut button = Button::new("Apply").on_click(Some(Action::Undo));
+        let id = button.id();
+        button.layout(Rect::new(0.0, 0.0, 100.0, 30.0));
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let actions = RefCell::new(Vec::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut ctx = event_ctx_with_capture(&mut focus, &mut shortcut, &mut tooltip, &dispatch);
+        button.event(
+            &UiEvent::MouseDown {
+                position: Point::new(50.0, 15.0),
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        button.set_enabled(false);
+        assert!(!button.can_focus());
+        assert!(button.accessibility().expect("button").state.disabled);
+        button.set_enabled(true);
+        button.event(
+            &UiEvent::MouseUp {
+                position: Point::new(50.0, 15.0),
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        assert_eq!(button.id(), id);
+        assert!(actions.borrow().is_empty());
     }
 
     #[test]

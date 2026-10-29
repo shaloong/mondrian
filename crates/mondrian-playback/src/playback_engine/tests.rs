@@ -2593,3 +2593,558 @@ fn priming_timeout_starts_at_deadline_and_catches_up_without_extra_drift() {
     assert_eq!(snapshot.clock_master, Some(ClockMaster::Synthetic));
     assert_eq!(snapshot.position.frame, 6);
 }
+
+fn native_hold_audio_engine() -> PlaybackEngine {
+    let mut value = engine();
+    value.play(1_000, ts(0)).expect("play");
+    value.complete_priming(ClockMaster::Synthetic, ts(0)).expect("prime");
+    value
+        .observe_audio_device_clock(audio_observation(&value, 1_000, ts(0)))
+        .expect("handoff");
+    let mut observation = audio_observation(&value, 2_400, ts(40));
+    observation.estimated_latency_frames = 480;
+    value
+        .observe_audio_device_clock(observation)
+        .expect("qualified 1920-sample phase");
+    assert_eq!(
+        value.snapshot().clock_master,
+        Some(ClockMaster::AudioDevice)
+    );
+    value
+}
+
+fn native_hold_sample(value: &PlaybackEngine, at: MonotonicTimestamp) -> i64 {
+    value
+        .authoritative_audio_sample_position_at(
+            value.snapshot().epoch,
+            at,
+            AudioSampleRate::new(48_000).expect("sample rate"),
+        )
+        .expect("exact held sample")
+        .sample()
+}
+
+#[test]
+fn native_audio_control_hold_keeps_exact_phase_intent_and_pending_output_wake() {
+    let mut value = native_hold_audio_engine();
+    let epoch = value.snapshot().epoch;
+    let ticket = value.hold_for_native_audio_control(17, None, ts(40)).expect("hold");
+    assert_eq!(ticket.epoch(), epoch);
+    assert_eq!(ticket.pending_generation(), 17);
+    let target = value.frame_demand().expect("held picture").target;
+    for now in [ts(1_000), ts(30_000), ts(120_000)] {
+        let held = value.tick(now).expect("held clock");
+        assert_eq!(held.state, TransportState::HoldingForNativeAudioControl);
+        assert_eq!(held.clock_master, None);
+        assert_eq!(held.epoch, epoch);
+        assert_eq!(native_hold_sample(&value, now), 1_920);
+        assert_eq!(
+            value.frame_demand().expect("same held picture").target,
+            target
+        );
+        let wake = value.next_wake(now).expect("quiescence wake").expect("bounded pending wake");
+        assert_eq!(
+            wake.reason(),
+            PlaybackWakeReason::NativeAudioOutputQuiescence
+        );
+        assert_eq!(wake.after(), Duration::from_millis(2));
+    }
+}
+
+#[test]
+fn author_revision_preserves_native_hold_still_and_output_retirement() {
+    for consumed in [false, true] {
+        for finalized in [false, true] {
+            let mut value = native_hold_audio_engine();
+            let ticket = value.hold_for_native_audio_control(17, None, ts(40)).expect("hold");
+            if consumed {
+                assert!(value
+                    .observe_frame_delivery(current_delivery(
+                        &value,
+                        FrameDeliveryKind::Ready,
+                        ts(45),
+                    ))
+                    .expect("consume held still")
+                    .accepted());
+            }
+            if finalized {
+                assert!(value
+                    .finalize_native_audio_control_hold(ticket, None, ts(50))
+                    .expect("controlled output-retirement proof"));
+                if consumed {
+                    // Finalization publishes a fresh still. Consume that demand
+                    // too so revision is exercised against a consumed picture.
+                    assert!(value
+                        .observe_frame_delivery(current_delivery(
+                            &value,
+                            FrameDeliveryKind::Ready,
+                            ts(55),
+                        ))
+                        .expect("consume finalized held still")
+                        .accepted());
+                }
+            }
+            let before = value.snapshot();
+            let sample = native_hold_sample(&value, ts(60));
+            let old = value.frame_demand().expect("held still before revision");
+            assert_eq!(before.state, TransportState::HoldingForNativeAudioControl);
+            assert_eq!(before.clock_master, None);
+            assert_eq!(sample, 1_920);
+            assert_eq!(value.native_audio_control_hold_ticket(), Some(ticket));
+            assert_eq!(old.kind, FrameDemandKind::PersistentStill);
+            assert_eq!(old.deadline, None);
+            assert_eq!(value.pending_frame_demand().is_none(), consumed);
+            assert_eq!(
+                value.native_audio_control_hold.expect("retained native hold").finalized,
+                finalized
+            );
+            let binding = PlaybackTimelineBinding::new(
+                value.sequence_id,
+                2,
+                before.position.time_base,
+                value.end_frame,
+            )
+            .expect("same Sequence and grid, revised author content");
+            assert_eq!(
+                value.revise_timeline(binding, ts(60)).expect("revision"),
+                before
+            );
+            assert_eq!(value.native_audio_control_hold_ticket(), Some(ticket));
+            assert_eq!(native_hold_sample(&value, ts(60)), sample);
+            let revised = value.pending_frame_demand().expect("revised held still");
+            assert_ne!(revised.identity(), old.identity());
+            assert_eq!(revised.timeline_revision, 2);
+            assert_eq!(revised.epoch, before.epoch);
+            assert_eq!(revised.target, before.position);
+            assert_eq!(revised.kind, FrameDemandKind::PersistentStill);
+            assert_eq!(revised.deadline, None);
+            assert!(!value
+                .observe_frame_delivery(
+                    FrameDeliveryCandidate::for_demand(old.identity(), FrameDeliveryKind::Ready)
+                        .complete_at(ts(65)),
+                )
+                .expect("reject old still authority")
+                .accepted());
+            assert_eq!(value.pending_frame_demand(), Some(revised));
+            assert_eq!(value.tick(ts(120_000)).expect("frozen native wait"), before);
+            assert_eq!(value.native_audio_control_hold_ticket(), Some(ticket));
+            assert_eq!(native_hold_sample(&value, ts(120_000)), sample);
+            let wake = value.next_wake(ts(120_000)).expect("output-retirement wake");
+            if finalized {
+                assert_eq!(wake, None);
+            } else {
+                let wake = wake.expect("pending callback retirement");
+                assert_eq!(
+                    wake.reason(),
+                    PlaybackWakeReason::NativeAudioOutputQuiescence
+                );
+                assert_eq!(wake.after(), Duration::from_millis(2));
+            }
+        }
+    }
+}
+
+#[test]
+fn native_audio_control_hold_finalizes_only_matching_quiesced_device_evidence() {
+    let mut value = native_hold_audio_engine();
+    let ticket = value.hold_for_native_audio_control(17, None, ts(40)).expect("hold");
+    let mut final_observation = audio_observation(&value, 2_880, ts(50));
+    final_observation.estimated_latency_frames = 480;
+    let mut wrong_stream = final_observation;
+    wrong_stream.stream_generation += 1;
+    assert!(!value
+        .finalize_native_audio_control_hold(ticket, Some(wrong_stream), ts(50))
+        .expect("reject wrong stream"));
+    assert_eq!(native_hold_sample(&value, ts(50)), 1_920);
+    final_observation.observed_at = ts(60);
+    assert!(value
+        .finalize_native_audio_control_hold(ticket, Some(final_observation), ts(60))
+        .expect("quiesced final"));
+    assert_eq!(native_hold_sample(&value, ts(60)), 2_400);
+    assert_eq!(
+        value.snapshot().state,
+        TransportState::HoldingForNativeAudioControl
+    );
+    assert_eq!(value.snapshot().clock_master, None);
+    assert_eq!(value.next_wake(ts(60)).expect("final wait"), None);
+    assert!(!value
+        .finalize_native_audio_control_hold(ticket, None, ts(70))
+        .expect("final proof is one-shot"));
+    value.tick(ts(120_000)).expect("cannot resume");
+    assert_eq!(native_hold_sample(&value, ts(120_000)), 2_400);
+}
+
+#[test]
+fn native_audio_control_hold_ignores_ordinary_device_observations() {
+    let mut value = native_hold_audio_engine();
+    value.hold_for_native_audio_control(17, None, ts(40)).expect("hold");
+    value
+        .observe_audio_device_clock(audio_observation(&value, 48_000, ts(1_000)))
+        .expect("ordinary callback cannot release");
+    value
+        .complete_priming(ClockMaster::Synthetic, ts(1_000))
+        .expect("readiness is not candidate installation");
+    value.tick(ts(120_000)).expect("remains held");
+    assert_eq!(
+        value.snapshot().state,
+        TransportState::HoldingForNativeAudioControl
+    );
+    assert_eq!(native_hold_sample(&value, ts(120_000)), 1_920);
+}
+
+#[test]
+fn native_audio_control_hold_preserves_phase_floor_until_device_catches_up() {
+    let mut value = native_hold_audio_engine();
+    value.audio_device_anchor.as_mut().expect("device anchor").phase_floor_ns = Some(41_000_000);
+    let mut observation = audio_observation(&value, 2_400, ts(40));
+    observation.estimated_latency_frames = 480;
+    let ticket = value
+        .hold_for_native_audio_control(17, Some(observation), ts(40))
+        .expect("hold keeps published floor");
+    assert_eq!(native_hold_sample(&value, ts(40)), 1_968);
+    let mut final_observation = audio_observation(&value, 2_496, ts(42));
+    final_observation.estimated_latency_frames = 480;
+    assert!(value
+        .finalize_native_audio_control_hold(ticket, Some(final_observation), ts(42))
+        .expect("device catches up"));
+    assert_eq!(native_hold_sample(&value, ts(42)), 2_016);
+}
+
+#[test]
+fn native_audio_control_hold_superseding_generation_retires_old_ticket_without_advancing() {
+    let mut value = native_hold_audio_engine();
+    let old = value.hold_for_native_audio_control(17, None, ts(40)).expect("first hold");
+    let next = value
+        .hold_for_native_audio_control(18, None, ts(50))
+        .expect("new pending Media generation");
+    assert_ne!(old, next);
+    assert_eq!(old.epoch(), next.epoch());
+    assert_eq!(native_hold_sample(&value, ts(50)), 1_920);
+    assert!(!value
+        .finalize_native_audio_control_hold(old, None, ts(60))
+        .expect("stale pending generation"));
+    assert!(value
+        .finalize_native_audio_control_hold(next, None, ts(70))
+        .expect("current no-device retirement"));
+    assert_eq!(
+        value.snapshot().state,
+        TransportState::HoldingForNativeAudioControl
+    );
+}
+
+#[test]
+fn native_audio_control_hold_user_seek_starts_new_epoch_and_rejects_old_final_anchor() {
+    let mut value = native_hold_audio_engine();
+    let old = value.hold_for_native_audio_control(17, None, ts(40)).expect("hold");
+    let seek = value
+        .seek_timeline(
+            timeline_binding(1_000),
+            FramePosition::new(9, Rational::new(1, 25)),
+            ts(50),
+        )
+        .expect("user seek retains play intent");
+    assert_ne!(seek.epoch, old.epoch());
+    assert_eq!(seek.state, TransportState::Priming);
+    let current = value
+        .hold_for_native_audio_control(18, None, ts(50))
+        .expect("seek pending hold");
+    assert!(!value
+        .finalize_native_audio_control_hold(old, None, ts(60))
+        .expect("stale epoch"));
+    assert!(value
+        .finalize_native_audio_control_hold(current, None, ts(70))
+        .expect("new exact anchor"));
+    assert_eq!(native_hold_sample(&value, ts(70)), 17_280);
+}
+
+#[test]
+fn native_audio_control_hold_pause_and_stop_retire_wait_identity() {
+    let mut value = native_hold_audio_engine();
+    let ticket = value.hold_for_native_audio_control(17, None, ts(40)).expect("hold");
+    assert_eq!(
+        value.pause(ts(50)).expect("user pause").state,
+        TransportState::Paused
+    );
+    assert_eq!(value.native_audio_control_hold_ticket(), None);
+    assert!(!value
+        .finalize_native_audio_control_hold(ticket, None, ts(60))
+        .expect("paused ticket is stale"));
+    value.stop(ts(70)).expect("stop");
+    assert_eq!(value.snapshot().position.frame, 0);
+    assert_eq!(value.snapshot().state, TransportState::Stopped);
+}
+
+#[test]
+fn native_audio_control_hold_priming_never_expires_into_synthetic_clock() {
+    let mut value = engine();
+    value.play(1_000, ts(0)).expect("prime");
+    let ticket = value.hold_for_native_audio_control(31, None, ts(0)).expect("pending startup");
+    value.tick(ts(120_000)).expect("expired startup timer has no hold authority");
+    assert_eq!(
+        value.snapshot().state,
+        TransportState::HoldingForNativeAudioControl
+    );
+    assert_eq!(native_hold_sample(&value, ts(120_000)), 0);
+    assert!(value
+        .finalize_native_audio_control_hold(ticket, None, ts(120_000))
+        .expect("no-device acknowledgement"));
+    assert_eq!(value.next_wake(ts(120_000)).expect("no spin"), None);
+}
+
+#[test]
+fn native_audio_control_hold_rejects_stale_or_unqualified_evidence_without_phase_change() {
+    let mut value = native_hold_audio_engine();
+    let ticket = value.hold_for_native_audio_control(17, None, ts(40)).expect("hold");
+    let mut observation = audio_observation(&value, 2_880, ts(50));
+    observation.estimated_latency_frames = 480;
+    let mut wrong_epoch = observation;
+    wrong_epoch.epoch = PlaybackEpoch(999);
+    let mut counter_regression = observation;
+    counter_regression.consumed_frames = 2_399;
+    let mut uncertainty = observation;
+    uncertainty.uncertainty_frames = u32::MAX;
+    let mut wrong_grid = observation;
+    wrong_grid.media_anchor =
+        AudioSamplePosition::new(0, AudioSampleRate::new(44_100).expect("different grid"));
+    let mut stale_capture = observation;
+    stale_capture.observed_at = ts(39);
+    for rejected in [
+        wrong_epoch,
+        counter_regression,
+        uncertainty,
+        wrong_grid,
+        stale_capture,
+    ] {
+        assert!(!value
+            .finalize_native_audio_control_hold(ticket, Some(rejected), ts(50))
+            .expect("unqualified final snapshot"));
+        assert_eq!(native_hold_sample(&value, ts(50)), 1_920);
+    }
+    assert_eq!(
+        value.hold_for_native_audio_control(16, None, ts(50)),
+        Err(PlaybackError::InvalidNativeAudioControlHold)
+    );
+    assert_eq!(value.native_audio_control_hold_ticket(), Some(ticket));
+    assert!(value
+        .finalize_native_audio_control_hold(ticket, None, ts(60))
+        .expect("acknowledged retirement without usable clock proof"));
+    assert_eq!(
+        value.next_wake(ts(60)).expect("retirement polling complete"),
+        None
+    );
+    assert_eq!(native_hold_sample(&value, ts(60)), 1_920);
+}
+
+#[test]
+fn native_audio_control_hold_rejects_implausible_forward_callback_jump() {
+    let mut value = native_hold_audio_engine();
+    let ticket = value.hold_for_native_audio_control(17, None, ts(40)).expect("hold");
+    let mut observation = audio_observation(&value, 48_000_000, ts(50));
+    observation.estimated_latency_frames = 480;
+    assert!(!value
+        .finalize_native_audio_control_hold(ticket, Some(observation), ts(50))
+        .expect("elapsed/rate bound"));
+    assert_eq!(native_hold_sample(&value, ts(50)), 1_920);
+    assert!(value
+        .finalize_native_audio_control_hold(ticket, None, ts(50))
+        .expect("actual ack retains accepted phase"));
+    assert!(value.next_wake(ts(50)).expect("final wait").is_none());
+}
+
+#[test]
+fn native_configuration_paused_exit_keeps_final_subframe_sample_without_a_running_clock() {
+    let mut value = native_hold_audio_engine();
+    let ticket = value.hold_for_native_audio_control(17, None, ts(40)).expect("hold");
+    let mut observation = audio_observation(&value, 2_401, ts(50));
+    observation.estimated_latency_frames = 480;
+    assert!(value
+        .finalize_native_audio_control_hold(ticket, Some(observation), ts(50))
+        .expect("actual final phase"));
+    assert_eq!(native_hold_sample(&value, ts(50)), 1_921);
+    assert!(value
+        .finish_native_audio_control_hold_paused(ticket, ts(60))
+        .expect("matching configured owner"));
+    assert_eq!(value.snapshot().state, TransportState::Paused);
+    assert_eq!(value.snapshot().clock_master, None);
+    assert_eq!(value.native_audio_control_hold_ticket(), None);
+    assert_eq!(value.active_playback_demand(), None);
+    for now in [ts(60), ts(1_000), ts(120_000)] {
+        value.tick(now).expect("paused clock");
+        assert_eq!(native_hold_sample(&value, now), 1_921);
+        assert_eq!(value.snapshot().clock_master, None);
+    }
+    let time_base = value.snapshot().position.time_base;
+    let binding = PlaybackTimelineBinding::new(
+        value.sequence_id,
+        value.timeline_revision,
+        time_base,
+        value.end_frame,
+    )
+    .expect("current paused binding");
+    value
+        .seek_timeline(binding, FramePosition::new(10, time_base), ts(120_001))
+        .expect("later paused seek owns a fresh anchor");
+    assert_eq!(native_hold_sample(&value, ts(120_001)), 19_200);
+    assert_eq!(value.snapshot().clock_master, None);
+}
+
+#[test]
+fn native_configuration_paused_exit_refuses_unfinalized_current_ticket() {
+    let mut value = native_hold_audio_engine();
+    let ticket = value.hold_for_native_audio_control(17, None, ts(40)).expect("hold");
+    let before = value.snapshot();
+    assert!(!value
+        .finish_native_audio_control_hold_paused(ticket, ts(50))
+        .expect("no callback finalization"));
+    assert_eq!(value.snapshot(), before);
+    assert_eq!(value.native_audio_control_hold_ticket(), Some(ticket));
+    assert_eq!(native_hold_sample(&value, ts(50)), 1_920);
+}
+
+#[test]
+fn native_configuration_paused_exit_cannot_consume_a_superseding_ticket() {
+    let mut value = native_hold_audio_engine();
+    let old = value.hold_for_native_audio_control(17, None, ts(40)).expect("old hold");
+    let current = value.hold_for_native_audio_control(18, None, ts(50)).expect("new exact hold");
+    assert!(value
+        .finalize_native_audio_control_hold(current, None, ts(60))
+        .expect("current retirement"));
+    assert!(!value
+        .finish_native_audio_control_hold_paused(old, ts(70))
+        .expect("old service result"));
+    assert_eq!(value.native_audio_control_hold_ticket(), Some(current));
+    assert_eq!(
+        value.snapshot().state,
+        TransportState::HoldingForNativeAudioControl
+    );
+    assert!(value
+        .finish_native_audio_control_hold_paused(current, ts(80))
+        .expect("current configured result"));
+    assert_eq!(value.snapshot().state, TransportState::Paused);
+}
+
+#[test]
+fn native_configuration_paused_exit_is_once_only_and_explicit_play_is_fresh_priming() {
+    let mut value = native_hold_audio_engine();
+    let ticket = value.hold_for_native_audio_control(17, None, ts(40)).expect("hold");
+    assert!(value
+        .finalize_native_audio_control_hold(ticket, None, ts(50))
+        .expect("output retired"));
+    let old_epoch = value.snapshot().epoch;
+    assert!(value
+        .finish_native_audio_control_hold_paused(ticket, ts(60))
+        .expect("applied paused"));
+    assert!(!value
+        .finish_native_audio_control_hold_paused(ticket, ts(70))
+        .expect("duplicate service completion"));
+    value.play(1_000, ts(80)).expect("explicit user play");
+    assert_ne!(value.snapshot().epoch, old_epoch);
+    assert_eq!(value.snapshot().state, TransportState::Priming);
+    assert_eq!(value.snapshot().clock_master, Some(ClockMaster::Synthetic));
+    assert_eq!(value.native_audio_control_hold_ticket(), None);
+}
+
+#[test]
+fn native_scope_reprime_only_current_finalized_transport_intent() {
+    let mut value = native_hold_audio_engine();
+    let ticket = value.hold_for_native_audio_control(31, None, ts(40)).expect("hold");
+    let old_epoch = value.snapshot().epoch;
+    assert!(value
+        .finalize_native_audio_control_hold(ticket, None, ts(50))
+        .expect("actual output quiesced"));
+    let binding = PlaybackTimelineBinding::new(
+        value.sequence_id,
+        value.timeline_revision + 1,
+        value.position.time_base,
+        value.end_frame,
+    )
+    .expect("accepted canonical revision");
+    assert!(value
+        .finish_native_audio_control_hold_reprime(ticket, binding, ts(60))
+        .expect("current intent"));
+    assert_eq!(value.snapshot().state, TransportState::Priming);
+    assert_eq!(value.snapshot().clock_master, Some(ClockMaster::Synthetic));
+    assert_ne!(value.snapshot().epoch, old_epoch);
+    assert_eq!(
+        native_hold_sample(&value, ts(60)),
+        1920,
+        "exact finalized subframe phase"
+    );
+    assert!(!value
+        .finish_native_audio_control_hold_reprime(ticket, binding, ts(60))
+        .expect("one-shot old ticket"));
+}
+
+#[test]
+fn native_scope_reprime_refuses_unfinalized_output_and_wrong_sequence_without_mutation() {
+    let mut value = native_hold_audio_engine();
+    let ticket = value.hold_for_native_audio_control(31, None, ts(40)).expect("hold");
+    let binding = PlaybackTimelineBinding::new(
+        value.sequence_id,
+        value.timeline_revision + 1,
+        value.position.time_base,
+        value.end_frame,
+    )
+    .expect("revision");
+    assert!(!value
+        .finish_native_audio_control_hold_reprime(ticket, binding, ts(50))
+        .expect("output still live"));
+    assert_eq!(
+        value.snapshot().state,
+        TransportState::HoldingForNativeAudioControl
+    );
+    assert!(value
+        .finalize_native_audio_control_hold(ticket, None, ts(60))
+        .expect("quiesced"));
+    let wrong = PlaybackTimelineBinding::new(
+        Some(SequenceId::new()),
+        value.timeline_revision + 1,
+        value.position.time_base,
+        value.end_frame,
+    )
+    .expect("foreign Sequence metadata");
+    assert_eq!(
+        value.finish_native_audio_control_hold_reprime(ticket, wrong, ts(70)),
+        Err(PlaybackError::InvalidNativeAudioControlHold)
+    );
+    assert_eq!(value.native_audio_control_hold_ticket(), Some(ticket));
+    assert_eq!(native_hold_sample(&value, ts(70)), 1920);
+}
+
+#[test]
+fn native_scope_reprime_cannot_restart_later_user_pause_seek_or_stop() {
+    for choice in 0..3 {
+        let mut value = native_hold_audio_engine();
+        let ticket = value.hold_for_native_audio_control(31, None, ts(40)).expect("hold");
+        assert!(value
+            .finalize_native_audio_control_hold(ticket, None, ts(50))
+            .expect("quiesced"));
+        let binding = PlaybackTimelineBinding::new(
+            value.sequence_id,
+            value.timeline_revision + 1,
+            value.position.time_base,
+            value.end_frame,
+        )
+        .expect("revision");
+        match choice {
+            0 => {
+                value.pause(ts(60)).expect("human pause");
+            }
+            1 => {
+                value
+                    .seek(FramePosition::new(17, value.position.time_base), ts(60))
+                    .expect("human seek");
+            }
+            _ => {
+                value.stop(ts(60)).expect("human stop");
+            }
+        }
+        let snapshot = value.snapshot();
+        assert!(!value
+            .finish_native_audio_control_hold_reprime(ticket, binding, ts(70))
+            .expect("historical completion is not current intent"));
+        assert_eq!(value.snapshot().state, snapshot.state);
+        assert_eq!(value.snapshot().epoch, snapshot.epoch);
+        assert_eq!(value.snapshot().position, snapshot.position);
+    }
+}

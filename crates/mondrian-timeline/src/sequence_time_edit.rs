@@ -66,6 +66,27 @@ fn edit_audio_program(
         }
     }
 
+    let processor_owners = program
+        .track_channels
+        .iter()
+        .map(|(id, channel)| {
+            (
+                crate::AudioChannelStripOwner::Track { track_id: *id },
+                &channel.strip,
+            )
+        })
+        .chain(program.buses.iter().map(|bus| {
+            (
+                crate::AudioChannelStripOwner::Bus { bus_id: bus.id },
+                &bus.strip,
+            )
+        }))
+        .flat_map(|(owner, strip)| {
+            [&strip.pre_fader, &strip.post_fader].into_iter().flat_map(move |rack| {
+                rack.processors.iter().map(move |processor| (processor.id, owner))
+            })
+        })
+        .collect::<std::collections::BTreeMap<_, _>>();
     let mut edited_buses = BTreeSet::new();
     loop {
         let mut changed = false;
@@ -77,12 +98,12 @@ fn edit_audio_program(
                 .routes
                 .iter()
                 .filter(|route| route.destination == AudioRouteDestination::Bus(bus.id))
-                .map(|route| route.source)
+                .map(|route| &route.source)
                 .collect::<Vec<_>>();
             if !sources.is_empty()
-                && sources
-                    .iter()
-                    .all(|source| source_follows(*source, edited_tracks, &edited_buses))
+                && sources.iter().all(|source| {
+                    source_follows(source, edited_tracks, &edited_buses, &processor_owners)
+                })
             {
                 edited_buses.insert(bus.id);
                 changed = true;
@@ -99,7 +120,12 @@ fn edit_audio_program(
         }
     }
     for route in &mut program.routes {
-        if source_follows(route.source, edited_tracks, &edited_buses) {
+        if source_follows(
+            &route.source,
+            edited_tracks,
+            &edited_buses,
+            &processor_owners,
+        ) {
             edit_optional_curve(&mut route.gain_automation, edit)?;
         }
     }
@@ -111,12 +137,12 @@ fn edit_audio_program(
                     .routes
                     .iter()
                     .filter(|route| route.destination == AudioRouteDestination::Output(output.id))
-                    .map(|route| route.source)
+                    .map(|route| &route.source)
                     .collect::<Vec<_>>();
                 !sources.is_empty()
-                    && sources
-                        .iter()
-                        .all(|source| source_follows(*source, edited_tracks, &edited_buses))
+                    && sources.iter().all(|source| {
+                        source_follows(source, edited_tracks, &edited_buses, &processor_owners)
+                    })
             }
             ProgramOutputMainSource::SemanticProjection { .. } => {
                 audio_track_count > 0 && edited_tracks.len() == audio_track_count
@@ -130,13 +156,26 @@ fn edit_audio_program(
 }
 
 fn source_follows(
-    source: AudioRouteSource,
+    source: &AudioRouteSource,
     edited_tracks: &BTreeSet<TrackId>,
     edited_buses: &BTreeSet<mondrian_core::MixBusId>,
+    processor_owners: &std::collections::BTreeMap<
+        mondrian_core::AudioProcessorInstanceId,
+        crate::AudioChannelStripOwner,
+    >,
 ) -> bool {
     match source {
-        AudioRouteSource::Track { track_id, .. } => edited_tracks.contains(&track_id),
-        AudioRouteSource::Bus { bus_id, .. } => edited_buses.contains(&bus_id),
+        AudioRouteSource::Track { track_id, .. } => edited_tracks.contains(track_id),
+        AudioRouteSource::Bus { bus_id, .. } => edited_buses.contains(bus_id),
+        AudioRouteSource::ProcessorOutput { processor_id, .. } => match processor_owners
+            .get(processor_id)
+        {
+            Some(crate::AudioChannelStripOwner::Track { track_id }) => {
+                edited_tracks.contains(track_id)
+            }
+            Some(crate::AudioChannelStripOwner::Bus { bus_id }) => edited_buses.contains(bus_id),
+            _ => false,
+        },
     }
 }
 
@@ -152,7 +191,9 @@ fn edit_channel_strip(
 fn edit_rack(rack: &mut AudioProcessorRack, edit: SequenceTimeEdit) -> mondrian_core::Result<()> {
     for processor in &mut rack.processors {
         for parameter in processor.parameters.values_mut() {
-            edit_exact_curve(&mut parameter.automation, edit)?;
+            if let Some(curve) = &mut parameter.automation {
+                edit_exact_curve(curve, edit)?;
+            }
         }
     }
     Ok(())

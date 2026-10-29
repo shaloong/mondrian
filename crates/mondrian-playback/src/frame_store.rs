@@ -359,6 +359,8 @@ pub struct PreviewFrameStoreDiagnostics {
     pub viewer_entries: usize,
     /// Reserved CPU bytes for final Viewer rasters.
     pub viewer_reserved_bytes: usize,
+    /// Store raster bytes plus every live owned working allocation, including detached GPU candidates.
+    pub viewer_aggregate_reserved_bytes: usize,
     /// Maximum final Viewer raster bytes.
     pub viewer_byte_budget: usize,
     /// Viewer rasters evicted by count or byte pressure.
@@ -469,6 +471,7 @@ impl PreviewFrameStoreDiagnostics {
     /// Return whether final Viewer cache and stale continuity residency obey policy.
     pub const fn viewer_residency_within_policy(self) -> bool {
         self.viewer_reserved_bytes <= self.viewer_byte_budget
+            && self.viewer_aggregate_reserved_bytes <= self.viewer_byte_budget
             && self.pinned_viewer_bytes <= self.viewer_byte_budget
     }
 
@@ -1096,11 +1099,78 @@ impl MediaWorkResourceLease {
     }
 }
 
+/// A pre-allocation Viewer pixel reservation issued by the sole Frame Store.
+///
+/// It is move-only. A Busy/disconnected/cancelled request releases its charge;
+/// completion must prove actual allocation capacity before publishing pixels.
+#[derive(Debug)]
+pub struct ViewerFrameWorkLease {
+    resource: ViewerFrameResourceLease,
+}
+
+impl ViewerFrameWorkLease {
+    /// Bind actual retained pixel capacity, rejecting growth beyond admission.
+    pub fn finish(self, actual_bytes: usize) -> Result<ViewerFrameResourceLease, Self> {
+        let reserved = self.resource.reserved_bytes();
+        if actual_bytes > reserved {
+            return Err(self);
+        }
+        if actual_bytes < reserved {
+            let mut ledger = self
+                .resource
+                .allocation
+                .ledger
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
+            *ledger = ledger.saturating_sub(reserved - actual_bytes);
+            self.resource
+                .allocation
+                .bytes
+                .store(actual_bytes, std::sync::atomic::Ordering::Release);
+        }
+        Ok(self.resource)
+    }
+}
+
+/// Shared charge for one actual immutable Viewer pixel allocation.
+///
+/// Store eviction and detachment do not release external candidate/submission
+/// ownership. The final owner releases the charge, including after Store drop.
+#[derive(Debug, Clone)]
+pub struct ViewerFrameResourceLease {
+    allocation: Arc<ViewerFrameAllocation>,
+}
+
+impl ViewerFrameResourceLease {
+    /// Actual retained pixel capacity after completion, or admitted work bytes.
+    pub fn reserved_bytes(&self) -> usize {
+        self.allocation.bytes.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    fn store_is_exclusive_owner(&self) -> bool {
+        Arc::strong_count(&self.allocation) == 1
+    }
+}
+
+#[derive(Debug)]
+struct ViewerFrameAllocation {
+    ledger: Arc<Mutex<usize>>,
+    bytes: std::sync::atomic::AtomicUsize,
+}
+
+impl Drop for ViewerFrameAllocation {
+    fn drop(&mut self) {
+        let mut ledger = self.ledger.lock().unwrap_or_else(|poison| poison.into_inner());
+        *ledger = ledger.saturating_sub(self.bytes.load(std::sync::atomic::Ordering::Acquire));
+    }
+}
+
 /// Deep Module owning Preview Frame Store residency and failure invariants.
 pub struct PreviewFrameStore<MK, M, VK, V, S, F> {
     media: WeightedLruCache<MK, M>,
     media_ledger: Arc<Mutex<MediaResourceLedger>>,
     viewer: WeightedLruCache<VK, V>,
+    viewer_ledger: Arc<Mutex<usize>>,
     failures: BoundedLruMap<MK, F>,
     current_media_overflow: HashMap<MK, CurrentMediaOverflow<M>>,
     current_media_overflow_lru: VecDeque<MK>,
@@ -1149,6 +1219,7 @@ where
                 config.viewer_byte_budget,
                 usize::MAX,
             ),
+            viewer_ledger: Arc::new(Mutex::new(0)),
             failures: BoundedLruMap::new(config.failure_entry_capacity),
             current_media_overflow: HashMap::new(),
             current_media_overflow_lru: VecDeque::new(),
@@ -1192,6 +1263,11 @@ where
             config.viewer_byte_budget,
             usize::MAX,
         );
+        while self.viewer_aggregate_reserved_bytes() > self.viewer.byte_budget {
+            if !self.viewer.evict_oldest_releasable(None) {
+                break;
+            }
+        }
         self.failures.reconfigure(config.failure_entry_capacity);
     }
 
@@ -1450,10 +1526,114 @@ where
         payload: V,
         reserved_bytes: usize,
     ) -> FrameStoreAdmission {
-        if self.viewer.insert(key, payload, reserved_bytes, 0) {
+        if self.make_viewer_room(reserved_bytes, Some(&key))
+            && self.viewer.insert(key, payload, reserved_bytes, 0)
+        {
             FrameStoreAdmission::Resident
         } else {
             FrameStoreAdmission::RejectedCapacity
+        }
+    }
+
+    /// Reserve working-result pixels before the CPU request is queued.
+    pub fn reserve_viewer_work(&mut self, reserved_bytes: usize) -> Option<ViewerFrameWorkLease> {
+        if reserved_bytes > self.viewer.byte_budget {
+            self.viewer.oversize_rejections = self.viewer.oversize_rejections.saturating_add(1);
+            return None;
+        }
+        if self.viewer.entry_capacity == 0 || !self.make_viewer_room(reserved_bytes, None) {
+            return None;
+        }
+        let resource = {
+            let mut ledger = self.viewer_ledger.lock().unwrap_or_else(|poison| poison.into_inner());
+            *ledger = ledger.checked_add(reserved_bytes)?;
+            ViewerFrameResourceLease {
+                allocation: Arc::new(ViewerFrameAllocation {
+                    ledger: Arc::clone(&self.viewer_ledger),
+                    bytes: std::sync::atomic::AtomicUsize::new(reserved_bytes),
+                }),
+            }
+        };
+        Some(ViewerFrameWorkLease { resource })
+    }
+
+    /// Publish one completed allocation under its original Store-issued charge.
+    pub fn admit_owned_viewer_frame(
+        &mut self,
+        key: VK,
+        payload: V,
+        resource: ViewerFrameResourceLease,
+    ) -> FrameStoreAdmission {
+        if !Arc::ptr_eq(&resource.allocation.ledger, &self.viewer_ledger) {
+            drop(payload);
+            drop(resource);
+            return FrameStoreAdmission::RejectedCapacity;
+        }
+        let bytes = resource.reserved_bytes();
+        if !self.make_viewer_room(0, None) {
+            drop(payload);
+            drop(resource);
+            return FrameStoreAdmission::RejectedCapacity;
+        }
+        if !self.viewer.insert(key.clone(), payload, bytes, 0) {
+            return FrameStoreAdmission::RejectedCapacity;
+        }
+        if let Some(entry) = self.viewer.entries.get_mut(&key) {
+            entry.viewer_resource = Some(resource);
+        }
+        FrameStoreAdmission::Resident
+    }
+
+    /// Borrow an owned working result with the same allocation reservation.
+    /// The payload's Clone implementation must share the immutable allocation;
+    /// independent pixel copies require a new work reservation.
+    pub fn owned_viewer_frame(&mut self, key: &VK) -> Option<(V, ViewerFrameResourceLease)> {
+        let entry = self.viewer.entries.get(key)?;
+        let result = (entry.payload.clone(), entry.viewer_resource.clone()?);
+        self.viewer.touch(key);
+        Some(result)
+    }
+
+    /// Consume exactly one completed result; detached owners remain charged.
+    pub fn detach_owned_viewer_frame(&mut self, key: &VK) -> Option<(V, ViewerFrameResourceLease)> {
+        self.viewer.entries.get(key)?.viewer_resource.as_ref()?;
+        let entry = self.viewer.entries.remove(key)?;
+        self.viewer.reserved_bytes =
+            self.viewer.reserved_bytes.saturating_sub(entry.reserved_bytes);
+        self.viewer.resource_units =
+            self.viewer.resource_units.saturating_sub(entry.resource_units);
+        self.viewer.lru.retain(|candidate| candidate != key);
+        Some((entry.payload, entry.viewer_resource?))
+    }
+
+    fn viewer_aggregate_reserved_bytes(&self) -> usize {
+        let owned = *self.viewer_ledger.lock().unwrap_or_else(|poison| poison.into_inner());
+        self.viewer
+            .entries
+            .values()
+            .filter(|entry| entry.viewer_resource.is_none())
+            .fold(owned, |bytes, entry| {
+                bytes.saturating_add(entry.reserved_bytes)
+            })
+    }
+
+    fn make_viewer_room(&mut self, added: usize, replacement: Option<&VK>) -> bool {
+        loop {
+            let replaced = replacement
+                .and_then(|key| self.viewer.entries.get(key))
+                .filter(|entry| entry.viewer_resource.is_none())
+                .map_or(0, |entry| entry.reserved_bytes);
+            if self
+                .viewer_aggregate_reserved_bytes()
+                .saturating_sub(replaced)
+                .checked_add(added)
+                .is_some_and(|bytes| bytes <= self.viewer.byte_budget)
+            {
+                return true;
+            }
+            if !self.viewer.evict_oldest_releasable(None) {
+                return false;
+            }
         }
     }
 
@@ -1610,6 +1790,7 @@ where
             media_oversize_rejections: self.media.oversize_rejections,
             viewer_entries: self.viewer.len(),
             viewer_reserved_bytes: self.viewer.reserved_bytes,
+            viewer_aggregate_reserved_bytes: self.viewer_aggregate_reserved_bytes(),
             viewer_byte_budget: self.viewer.byte_budget,
             viewer_evictions: self.viewer.evictions,
             viewer_oversize_rejections: self.viewer.oversize_rejections,
@@ -1729,6 +1910,7 @@ struct PinnedViewer<S, V> {
 struct WeightedEntry<V> {
     payload: V,
     media_resource: Option<MediaFrameResourceLease>,
+    viewer_resource: Option<ViewerFrameResourceLease>,
     reserved_bytes: usize,
     resource_units: usize,
 }
@@ -1847,6 +2029,7 @@ where
             WeightedEntry {
                 payload,
                 media_resource,
+                viewer_resource: None,
                 reserved_bytes,
                 resource_units,
             },
@@ -2012,6 +2195,10 @@ fn entry_is_releasable_for<V>(
         .media_resource
         .as_ref()
         .is_none_or(|resource| resource.store_is_releasable_for(retaining_demand))
+        && entry
+            .viewer_resource
+            .as_ref()
+            .is_none_or(ViewerFrameResourceLease::store_is_exclusive_owner)
 }
 
 fn entry_is_releasable<V>(entry: &WeightedEntry<V>) -> bool {
@@ -2933,5 +3120,191 @@ mod tests {
         assert_eq!(cleared.viewer_entries, 0);
         assert_eq!(cleared.pinned_viewer_bytes, 0);
         assert_eq!(cleared.failure_entries, 0);
+    }
+
+    type OwnedViewerStore =
+        PreviewFrameStore<u64, Vec<u8>, u64, Arc<[u8]>, (u64, u32, u32), String>;
+
+    #[test]
+    fn viewer_owned_work_detach_retains_shared_budget_until_last_retirement() {
+        let mut store = OwnedViewerStore::new(config(32));
+        let work = store.reserve_viewer_work(32).expect("one actual admitted allocation");
+        let resource = work.finish(32).expect("actual capacity");
+        assert_eq!(
+            store.admit_owned_viewer_frame(1, Arc::from(vec![7; 32]), resource),
+            FrameStoreAdmission::Resident
+        );
+        let (pixels, owner) =
+            store.detach_owned_viewer_frame(&1).expect("consume exact result once");
+        assert!(store.detach_owned_viewer_frame(&1).is_none());
+        assert_eq!(store.diagnostics().viewer_reserved_bytes, 0);
+        assert_eq!(store.diagnostics().viewer_aggregate_reserved_bytes, 32);
+        store.clear_viewer_frames();
+        assert!(
+            store.reserve_viewer_work(1).is_none(),
+            "external candidate still owns all headroom"
+        );
+        assert_eq!(pixels.as_ref(), &[7; 32]);
+        drop((pixels, owner));
+        assert_eq!(store.diagnostics().viewer_aggregate_reserved_bytes, 0);
+        assert!(store.reserve_viewer_work(32).is_some());
+    }
+
+    #[test]
+    fn viewer_owned_work_binds_actual_capacity_and_releases_failed_completion() {
+        let mut store = OwnedViewerStore::new(config(32));
+        let work = store.reserve_viewer_work(16).expect("admitted work");
+        let refused = work.finish(17).expect_err("growth is not authorized by the work grant");
+        assert_eq!(store.diagnostics().viewer_aggregate_reserved_bytes, 16);
+        drop(refused);
+        assert_eq!(store.diagnostics().viewer_aggregate_reserved_bytes, 0);
+        let resource = store
+            .reserve_viewer_work(32)
+            .expect("restored full headroom")
+            .finish(8)
+            .expect("smaller actual capacity");
+        assert_eq!(resource.reserved_bytes(), 8);
+        assert_eq!(store.diagnostics().viewer_aggregate_reserved_bytes, 8);
+        assert!(store.reserve_viewer_work(24).is_some());
+        assert_eq!(
+            store.diagnostics().viewer_aggregate_reserved_bytes,
+            8,
+            "dropped queued work releases its charge"
+        );
+        drop(resource);
+        assert_eq!(store.diagnostics().viewer_aggregate_reserved_bytes, 0);
+    }
+
+    #[test]
+    fn viewer_owned_work_refuses_foreign_ledger_and_reports_external_trim() {
+        let mut source = OwnedViewerStore::new(config(32));
+        let mut destination = OwnedViewerStore::new(config(32));
+        let resource = source
+            .reserve_viewer_work(32)
+            .expect("source admission")
+            .finish(32)
+            .expect("actual capacity");
+        let external = resource.clone();
+        assert_eq!(
+            destination.admit_owned_viewer_frame(1, Arc::from(vec![1; 32]), resource),
+            FrameStoreAdmission::RejectedCapacity
+        );
+        assert_eq!(destination.diagnostics().viewer_aggregate_reserved_bytes, 0);
+        assert_eq!(source.diagnostics().viewer_aggregate_reserved_bytes, 32);
+        let mut smaller = config(32);
+        smaller.viewer_byte_budget = 8;
+        source.reconfigure(smaller);
+        assert!(
+            !source.diagnostics().viewer_residency_within_policy(),
+            "trim cannot erase a live allocation"
+        );
+        assert!(source.reserve_viewer_work(1).is_none());
+        drop(external);
+        assert!(source.diagnostics().viewer_residency_within_policy());
+        assert!(source.reserve_viewer_work(8).is_some());
+    }
+
+    #[test]
+    fn viewer_owned_work_evicts_completed_unpinned_pixels_before_next_allocation() {
+        let mut store = OwnedViewerStore::new(config(32));
+        let first = store
+            .reserve_viewer_work(32)
+            .expect("one-frame grant")
+            .finish(32)
+            .expect("first actual capacity");
+        assert_eq!(
+            store.admit_owned_viewer_frame(1, Arc::from(vec![1; 32]), first),
+            FrameStoreAdmission::Resident
+        );
+        let external = store.owned_viewer_frame(&1).expect("actual candidate borrower");
+        assert!(
+            store.reserve_viewer_work(32).is_none(),
+            "an external borrower is not evictable"
+        );
+        assert_eq!(external.0.as_ref(), &[1; 32]);
+        drop(external);
+        let next = store.reserve_viewer_work(32).expect("unpinned completed cache can retire");
+        assert!(store.owned_viewer_frame(&1).is_none());
+        assert_eq!(store.diagnostics().viewer_reserved_bytes, 0);
+        assert_eq!(store.diagnostics().viewer_aggregate_reserved_bytes, 32);
+        drop(next);
+        assert_eq!(store.diagnostics().viewer_aggregate_reserved_bytes, 0);
+    }
+    #[derive(Clone)]
+    struct ViewerRetirementObservedPixels {
+        pixels: Arc<[u8]>,
+        ledger: Arc<Mutex<usize>>,
+        observed_at_retirement: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl Drop for ViewerRetirementObservedPixels {
+        fn drop(&mut self) {
+            assert_eq!(self.pixels.len(), 32);
+            self.observed_at_retirement.store(
+                *self.ledger.lock().expect("actual Viewer residency ledger"),
+                std::sync::atomic::Ordering::Release,
+            );
+        }
+    }
+
+    #[test]
+    fn viewer_owned_work_refusal_retires_pixels_before_the_last_charge() {
+        type ObservedStore = PreviewFrameStore<
+            u64,
+            Vec<u8>,
+            u64,
+            ViewerRetirementObservedPixels,
+            (u64, u32, u32),
+            String,
+        >;
+        let mut source = OwnedViewerStore::new(config(32));
+        let mut foreign = ObservedStore::new(config(32));
+        let observed = Arc::new(std::sync::atomic::AtomicUsize::new(usize::MAX));
+        let pixels = ViewerRetirementObservedPixels {
+            pixels: Arc::from(vec![7; 32]),
+            ledger: Arc::clone(&source.viewer_ledger),
+            observed_at_retirement: Arc::clone(&observed),
+        };
+        let resource = source
+            .reserve_viewer_work(32)
+            .expect("source admission")
+            .finish(32)
+            .expect("actual capacity");
+        assert_eq!(
+            foreign.admit_owned_viewer_frame(1, pixels, resource),
+            FrameStoreAdmission::RejectedCapacity
+        );
+        assert_eq!(
+            observed.load(std::sync::atomic::Ordering::Acquire),
+            32,
+            "foreign-ledger refusal must destroy the allocation while still charged"
+        );
+        assert_eq!(source.diagnostics().viewer_aggregate_reserved_bytes, 0);
+
+        let mut trimmed = ObservedStore::new(config(32));
+        let resource = trimmed
+            .reserve_viewer_work(32)
+            .expect("initial admitted extent")
+            .finish(32)
+            .expect("actual capacity");
+        let observed = Arc::new(std::sync::atomic::AtomicUsize::new(usize::MAX));
+        let pixels = ViewerRetirementObservedPixels {
+            pixels: Arc::from(vec![9; 32]),
+            ledger: Arc::clone(&trimmed.viewer_ledger),
+            observed_at_retirement: Arc::clone(&observed),
+        };
+        let mut smaller = config(32);
+        smaller.viewer_byte_budget = 8;
+        trimmed.reconfigure(smaller);
+        assert_eq!(
+            trimmed.admit_owned_viewer_frame(2, pixels, resource),
+            FrameStoreAdmission::RejectedCapacity
+        );
+        assert_eq!(
+            observed.load(std::sync::atomic::Ordering::Acquire),
+            32,
+            "trim refusal must destroy the allocation while still charged"
+        );
+        assert_eq!(trimmed.diagnostics().viewer_aggregate_reserved_bytes, 0);
     }
 }

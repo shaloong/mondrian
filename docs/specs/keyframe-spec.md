@@ -75,7 +75,7 @@ Hold/Linear/Bezier mathematics.
 Product edits flow through `PropertyMutation` and `PropertyHost`, then through
 the owning Sequence command transaction. Constructors and narrowly scoped
 domain helpers may initialize fields directly; UI panels, renderers, audio
-runtimes, and plugins may not bypass validation or create a second static value
+runtimes, and Extension Adapters may not bypass validation or create a second static value
 beside the curve default.
 
 Animation enable/disable, key insertion/removal/move, interpolation changes,

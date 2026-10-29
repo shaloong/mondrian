@@ -274,6 +274,49 @@ fn resource_pause_retains_bounded_user_work_and_resumes_dispatch() {
 }
 
 #[test]
+fn golden_proxy_wait_resumes_paused_demand_without_a_new_model_event() {
+    use crate::app::execution_resource_coordination::{
+        ExecutionResourceCoordinator, MachineResourceProfile,
+    };
+    let backend = FakeBackend::new();
+    let service = ProxyGenerationService::with_backend(1, backend.clone());
+    service.bind_project(Some(ProjectId::new()));
+    service.set_resource_policy(false, 1, false);
+    let mut files = TestFiles(Vec::new());
+    let asset_id = AssetId::new();
+    assert!(matches!(
+        service.request(
+            asset_id,
+            files.create(100),
+            config(),
+            color(),
+            ProxyGenerationOrigin::Import,
+        ),
+        ProxyGenerationRequestOutcome::Admitted { .. }
+    ));
+    // The preceding product stage already observed admission. Resource-policy
+    // suspension deliberately does not manufacture another author/model event.
+    assert!(service.poll_finished());
+    assert!(!service.poll_finished());
+    backend.release(1);
+    let mut state = AppState::new();
+    state.execution_resources = ExecutionResourceCoordinator::new(
+        MachineResourceProfile::from_capacity(Some(32 * 1024 * 1024 * 1024), 4),
+    );
+    state.proxy_generation = service;
+    let completed = crate::app::golden_project_acceptance::wait_for_proxy_quiescence_until(
+        &mut state,
+        Instant::now() + Duration::from_secs(2),
+    )
+    .expect("the actual Golden wait must re-admit paused background demand");
+    assert_eq!(completed.completions, 1);
+    assert_eq!(completed.failures, 0);
+    assert_eq!(backend.started(), vec![asset_id]);
+    assert_eq!(completed.queued, 0);
+    assert_eq!(completed.running, 0);
+}
+
+#[test]
 fn resource_pause_yields_a_running_attempt_and_resumes_the_same_demand() {
     let backend = FakeBackend::new();
     let service = ProxyGenerationService::with_backend(1, backend.clone());
@@ -1281,7 +1324,9 @@ fn app_poll_projects_only_executed_background_failure() {
     assert!(state.poll_proxy_generation());
     assert!(
         state.status_hint.as_ref().is_some_and(|(message, is_error)| {
-            *is_error && message.contains("synthetic worker failure")
+            *is_error
+                && crate::app_ui::localization::chinese_product_message(message)
+                    .contains("synthetic worker failure")
         })
     );
     assert!(state

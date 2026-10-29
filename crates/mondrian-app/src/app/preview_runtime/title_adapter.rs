@@ -16,6 +16,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         let outcome = self.title_task.borrow_mut().resolve(PreviewTitleRasterRequest {
             title: request.title,
             author_resolution: request.author_resolution,
+            sample_aspect_ratio: request.sample_aspect_ratio,
             title_safe_margin: request.title_safe_margin,
             sampled_resolution: request.target_resolution,
             working_color_space: request.working_color_space,

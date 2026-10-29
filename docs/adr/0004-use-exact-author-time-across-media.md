@@ -32,7 +32,7 @@ Source-local time remains the independent media/nested sampling coordinate.
 This separation is intentional: changing which source pixels are sampled does
 not implicitly retime or reverse downstream Clip-owned visual processing.
 
-Video frame positions, audio sample positions, shutter samples, and plugin
+Video frame positions, audio sample positions, shutter samples, and processor
 parameter-event offsets are derived evaluation coordinates. Conversion happens
 at a declared boundary with an explicit rounding/sampling policy and the
 resolved integer coordinate is then carried through that execution path. UI

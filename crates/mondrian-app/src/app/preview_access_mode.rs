@@ -23,6 +23,17 @@ pub(crate) const MEDIA_PREVIEW_DECODE_SESSION_IDLE_TIMEOUT: Duration = Duration:
 const MEDIA_PREVIEW_MAX_DECODE_WORKERS: usize = 3;
 const MEDIA_PREVIEW_MAX_PENDING_REQUESTS: usize = MEDIA_PREVIEW_JOB_QUEUE_CAPACITY;
 
+/// Scheduling facts frozen with an actual Preview job. Source dependencies use
+/// the same media intent/lane and absolute deadline as their originating job.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct PreviewMediaWorkPolicy {
+    pub(crate) intent: MediaPreviewRequestIntent,
+    pub(crate) access_mode: PreviewDecodeAccessMode,
+    pub(crate) deadline: Option<Instant>,
+    pub(crate) demand_identity: Option<mondrian_playback::FrameDemandIdentity>,
+    pub(crate) direction: mondrian_media::PreviewPlaybackDirection,
+}
+
 /// Stable identity for one decoded media preview request.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct MediaPreviewKey {

@@ -9,6 +9,117 @@ use mondrian_ui_renderer::command::DrawCommand;
 use crate::atlas::{GlyphAtlas, GlyphRasterizeOutcome};
 use crate::font::FontManager;
 use crate::layout::TextLayout;
+use crate::single_line::{
+    single_line_request_admitted, SingleLineTextCaret, SingleLineTextNavigation,
+    SingleLineTextProjection,
+};
+
+/// Geometry from one complete advanced single-line shaping pass.
+///
+/// Caret and pointer coordinates refer to the same shaped text as its width;
+/// kerning, ligatures and bidirectional runs are never measured as isolated prefixes.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SingleLineTextGeometry {
+    /// Complete shaped line width in logical pixels.
+    pub width: f32,
+    /// Complete shaped line height in logical pixels.
+    pub height: f32,
+    /// Visual caret x for the requested logical boundary and cluster association.
+    pub caret_x: f32,
+    /// Logical boundary and cluster association hit by the optional pointer x coordinate.
+    pub hit_caret: Option<SingleLineTextCaret>,
+}
+
+/// One visual selected span from the complete advanced single-line layout.
+///
+/// Coordinates are relative to the complete line origin; disjoint BiDi spans
+/// remain separate and contextual glyphs are not reshaped as substrings.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SingleLineTextSelectionSpan {
+    /// Visual left edge in logical pixels.
+    pub x: f32,
+    /// Positive visual advance width in logical pixels.
+    pub width: f32,
+}
+
+/// Caret, hit and selection geometry from one complete advanced shaping pass.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SingleLineTextSelectionGeometry {
+    /// Complete line metrics and requested caret/pointer geometry.
+    pub line: SingleLineTextGeometry,
+    /// Selected visual advance spans, ordered from left to right.
+    pub spans: Vec<SingleLineTextSelectionSpan>,
+}
+
+#[derive(Clone, Copy)]
+struct GlyphRenderPolicy {
+    allow_atlas_page_reset: bool,
+    clip: Option<Rect>,
+}
+
+#[derive(Default)]
+struct TextResolveViewport {
+    clips: Vec<Rect>,
+    translations: Vec<Point>,
+}
+
+impl TextResolveViewport {
+    fn translation(&self) -> Point {
+        self.translations.iter().fold(Point::ZERO, |sum, offset| {
+            Point::new(sum.x + offset.x, sum.y + offset.y)
+        })
+    }
+    fn apply(&mut self, command: &DrawCommand) {
+        match command {
+            DrawCommand::PushClip { bounds } => {
+                let translation = self.translation();
+                let physical = Rect::new(
+                    bounds.x + translation.x,
+                    bounds.y + translation.y,
+                    bounds.width,
+                    bounds.height,
+                );
+                let valid = physical.x.is_finite()
+                    && physical.y.is_finite()
+                    && physical.width.is_finite()
+                    && physical.height.is_finite()
+                    && physical.width > 0.0
+                    && physical.height > 0.0;
+                let clip = if valid {
+                    self.clips.last().map_or(physical, |parent| parent.intersection(&physical))
+                } else {
+                    Rect::ZERO
+                };
+                self.clips.push(clip);
+            }
+            DrawCommand::PopClip => {
+                self.clips.pop();
+            }
+            DrawCommand::PushTranslate { offset } => {
+                self.translations.push(if offset.x.is_finite() && offset.y.is_finite() {
+                    Point::new(offset.x, offset.y)
+                } else {
+                    Point::ZERO
+                });
+            }
+            DrawCommand::PopTransform => {
+                self.translations.pop();
+            }
+            _ => {}
+        }
+    }
+    fn local_clip(&self) -> Option<Rect> {
+        let translation = self.translation();
+        self.clips.last().map(|clip| {
+            Rect::new(
+                clip.x - translation.x,
+                clip.y - translation.y,
+                clip.width,
+                clip.height,
+            )
+        })
+    }
+}
 
 pub struct TextRenderer {
     pub font_manager: FontManager,
@@ -81,6 +192,34 @@ impl TextRenderer {
         max_width: Option<f32>,
         allow_atlas_page_reset: bool,
     ) -> ResolvedTextCommands {
+        self.layout_and_render_with_policy(
+            text,
+            font_size,
+            position,
+            color,
+            max_width,
+            GlyphRenderPolicy { allow_atlas_page_reset, clip: None },
+        )
+    }
+
+    fn layout_and_render_with_policy(
+        &mut self,
+        text: &str,
+        font_size: f32,
+        position: Point,
+        color: Color,
+        max_width: Option<f32>,
+        policy: GlyphRenderPolicy,
+    ) -> ResolvedTextCommands {
+        if policy.clip.is_some_and(|clip| clip.width <= 0.0 || clip.height <= 0.0) {
+            return ResolvedTextCommands {
+                commands: Vec::new(),
+                stats: TextResolveStats {
+                    atlas_generation: self.atlas.generation(),
+                    ..TextResolveStats::default()
+                },
+            };
+        }
         let attrs = cosmic_text::Attrs::new()
             .family(cosmic_text::Family::SansSerif)
             .weight(cosmic_text::Weight::NORMAL);
@@ -121,10 +260,12 @@ impl TextRenderer {
         });
         for (line_y, glyph) in atlas_glyphs {
             stats.glyphs_requested = stats.glyphs_requested.saturating_add(1);
-            match self.atlas.get_or_rasterize_with_policy(
+            match self.atlas.get_or_rasterize_with_clip(
                 font_system,
                 glyph,
-                allow_atlas_page_reset,
+                policy.allow_atlas_page_reset,
+                Point::new(position.x, position.y + line_y),
+                policy.clip,
             ) {
                 GlyphRasterizeOutcome::Resolved(uv_rect, bmp_w, bmp_h, top, left) => {
                     let bitmap_x = position.x + glyph.x + left as f32;
@@ -141,6 +282,7 @@ impl TextRenderer {
                     stats.atlas_generation = self.atlas.generation();
                     return ResolvedTextCommands { commands: Vec::new(), stats };
                 }
+                GlyphRasterizeOutcome::Clipped => {}
                 GlyphRasterizeOutcome::Missing => {
                     stats.missing_glyphs = stats.missing_glyphs.saturating_add(1);
                 }
@@ -148,6 +290,110 @@ impl TextRenderer {
         }
         stats.atlas_generation = self.atlas.generation();
         ResolvedTextCommands { commands, stats }
+    }
+
+    /// Shape the complete single-line display projection once, returning exact source carets.
+    ///
+    /// Invalid grapheme/association/font requests return `None` before shaping.
+    /// Line metrics and resulting geometry must be representable finite pixels.
+    pub fn single_line_geometry(
+        &mut self,
+        text: &str,
+        font_size: f32,
+        caret: SingleLineTextCaret,
+        pointer_x: Option<f32>,
+    ) -> Option<SingleLineTextGeometry> {
+        self.single_line_selection_geometry(text, font_size, caret, pointer_x, None)
+            .map(|geometry| geometry.line)
+    }
+
+    /// Obtain associated caret, pointer and visual selection spans from one complete layout.
+    ///
+    /// Every logical caret/selection endpoint addresses the original source.
+    /// Its complete display projection is shaped once; glyph clusters map back
+    /// to source EGC intervals, including ligatures/BiDi and separator-only
+    /// display joins. Invalid or unrepresentable requests/geometry return `None`;
+    /// no source context is truncated or normalized into an author value.
+    pub fn single_line_selection_geometry(
+        &mut self,
+        text: &str,
+        font_size: f32,
+        caret: SingleLineTextCaret,
+        pointer_x: Option<f32>,
+        selection_byte_range: Option<std::ops::Range<usize>>,
+    ) -> Option<SingleLineTextSelectionGeometry> {
+        if !single_line_request_admitted(text, font_size, caret, selection_byte_range.as_ref()) {
+            return None;
+        }
+        if text.is_empty() {
+            return Some(SingleLineTextSelectionGeometry {
+                line: SingleLineTextGeometry {
+                    width: 0.0,
+                    height: 0.0,
+                    caret_x: 0.0,
+                    hit_caret: pointer_x.map(|_| SingleLineTextCaret::before_next(0)),
+                },
+                spans: Vec::new(),
+            });
+        }
+        let attrs = cosmic_text::Attrs::new()
+            .family(cosmic_text::Family::SansSerif)
+            .weight(cosmic_text::Weight::NORMAL);
+        let projection = SingleLineTextProjection::new(text);
+        let layout = TextLayout::new_single_line(
+            &mut self.font_manager.font_system,
+            projection.display_text(),
+            attrs,
+            font_size,
+        );
+        crate::single_line::complete_geometry(
+            &layout,
+            &projection,
+            caret,
+            pointer_x,
+            selection_byte_range.as_ref(),
+        )
+    }
+
+    /// Navigate complete shaped visual grapheme cells with logical cluster association.
+    ///
+    /// An optional nonempty selection collapses at the requested visual edge for
+    /// arrows. Home/End address logical boundaries. Word arrows reuse the existing
+    /// whitespace policy in visual source-cell order. Separator projection does
+    /// not erase source EGC stops. Invalid/unrepresentable requests return `None`;
+    /// valid empty or exhausted navigation is an owned no-op.
+    pub fn navigate_single_line(
+        &mut self,
+        text: &str,
+        font_size: f32,
+        caret: SingleLineTextCaret,
+        navigation: SingleLineTextNavigation,
+        collapse_selection: Option<std::ops::Range<usize>>,
+    ) -> Option<SingleLineTextCaret> {
+        if !single_line_request_admitted(text, font_size, caret, collapse_selection.as_ref()) {
+            return None;
+        }
+        if text.is_empty() {
+            return Some(SingleLineTextCaret::before_next(0));
+        }
+        let attrs = cosmic_text::Attrs::new()
+            .family(cosmic_text::Family::SansSerif)
+            .weight(cosmic_text::Weight::NORMAL);
+        let projection = SingleLineTextProjection::new(text);
+        let layout = TextLayout::new_single_line(
+            &mut self.font_manager.font_system,
+            projection.display_text(),
+            attrs,
+            font_size,
+        );
+        crate::single_line::navigate_complete(
+            &layout,
+            &projection,
+            caret,
+            navigation,
+            collapse_selection.as_ref(),
+        )
+        .filter(|next| next.is_valid_for(text))
     }
 
     pub fn measure_text(&mut self, text: &str, font_size: f32) -> (f32, f32) {
@@ -197,16 +443,21 @@ pub fn resolve_text_commands(
         let mut resolved = Vec::with_capacity(commands.len());
         let mut stats = TextResolveStats::default();
         let mut restart_after_page_reset = false;
+        let mut viewport = TextResolveViewport::default();
         for cmd in commands.iter().cloned() {
+            viewport.apply(&cmd);
             match cmd {
                 DrawCommand::Text { text, style, position, max_width, color } => {
-                    let mut glyph_result = text_renderer.layout_and_render_with_stats(
+                    let mut glyph_result = text_renderer.layout_and_render_with_policy(
                         &text,
                         style.font_size,
                         position,
                         color,
                         max_width,
-                        allow_atlas_page_reset,
+                        GlyphRenderPolicy {
+                            allow_atlas_page_reset,
+                            clip: viewport.local_clip(),
+                        },
                     );
                     glyph_result.stats.text_commands =
                         glyph_result.stats.text_commands.saturating_add(1);
@@ -1335,6 +1586,513 @@ mod tests {
             drop(mapped);
             readback.unmap();
             out
+        }
+    }
+
+    #[test]
+    fn complete_large_single_line_keeps_every_glyph_and_finite_metrics() {
+        let text = "x".repeat(512 * 1024);
+        let mut renderer = TextRenderer::new();
+        let (width, height) = renderer.measure_text(&text, 14.0);
+        assert!(width.is_finite() && width > 100_000.0);
+        assert!(height.is_finite() && height > 0.0);
+        let layout = TextLayout::new_single_line(
+            &mut renderer.font_manager.font_system,
+            &text,
+            cosmic_text::Attrs::new().family(cosmic_text::Family::SansSerif),
+            14.0,
+        );
+        let glyphs = layout.glyphs();
+        assert_eq!(
+            glyphs.len(),
+            text.len(),
+            "the complete draft must remain shaped"
+        );
+        assert_eq!(glyphs.iter().map(|glyph| glyph.end).max(), Some(text.len()));
+        assert_eq!(text.len(), 512 * 1024);
+    }
+
+    #[test]
+    fn clipped_long_line_emits_only_visible_ink_with_nested_transforms() {
+        let mut renderer = TextRenderer::new();
+        let text = "MW".repeat(4096);
+        let style = mondrian_ui_theme::typography::TextStyle {
+            font_size: 14.0,
+            line_height: 18.2,
+            font_weight: mondrian_ui_theme::typography::FontWeight::Regular,
+            letter_spacing: 0.0,
+        };
+        let outer = Rect::new(100.0, 200.0, 240.0, 80.0);
+        let inner_local = Rect::new(20.0, 10.0, 100.0, 40.0);
+        let translation = Point::new(100.0, 200.0);
+        let expected_clip = Rect::new(120.0, 210.0, 100.0, 40.0);
+        let resolved = resolve_text_commands(
+            vec![
+                DrawCommand::PushClip { bounds: outer },
+                DrawCommand::PushTranslate { offset: [translation.x, translation.y].into() },
+                DrawCommand::PushClip { bounds: inner_local },
+                DrawCommand::Text {
+                    text,
+                    style,
+                    position: Point::new(-20_000.0, 30.0),
+                    max_width: None,
+                    color: Color::WHITE,
+                },
+                DrawCommand::PopClip,
+                DrawCommand::PopTransform,
+                DrawCommand::PopClip,
+            ],
+            &mut renderer,
+        );
+        let images = image_bounds(&resolved.commands);
+        assert!(
+            !images.is_empty(),
+            "visible middle of complete shaped line must render"
+        );
+        assert!(
+            images.len() <= 32,
+            "clip must bound draw commands, got {}",
+            images.len()
+        );
+        for bounds in &images {
+            let physical = Rect::new(
+                bounds.x + translation.x,
+                bounds.y + translation.y,
+                bounds.width,
+                bounds.height,
+            );
+            assert!(
+                physical.intersects(&expected_clip),
+                "ink outside nested viewport was emitted: {physical:?}"
+            );
+        }
+        assert_eq!(resolved.stats.missing_glyphs, 0);
+        assert_eq!(resolved.stats.atlas_page_resets, 0);
+        assert_eq!(
+            resolved
+                .commands
+                .iter()
+                .filter(|command| matches!(command, DrawCommand::PushClip { .. }))
+                .count(),
+            2
+        );
+        assert_eq!(
+            resolved
+                .commands
+                .iter()
+                .filter(|command| matches!(command, DrawCommand::PopClip))
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn empty_effective_clip_does_not_shape_or_allocate_large_text() {
+        let mut renderer = TextRenderer::new();
+        let style = mondrian_ui_theme::typography::TextStyle {
+            font_size: 14.0,
+            line_height: 18.2,
+            font_weight: mondrian_ui_theme::typography::FontWeight::Regular,
+            letter_spacing: 0.0,
+        };
+        let resolved = resolve_text_commands(
+            vec![
+                DrawCommand::PushClip { bounds: Rect::new(0.0, 0.0, 100.0, 40.0) },
+                DrawCommand::PushClip { bounds: Rect::new(500.0, 500.0, 100.0, 40.0) },
+                DrawCommand::Text {
+                    text: "x".repeat(512 * 1024),
+                    style,
+                    position: Point::new(0.0, 20.0),
+                    max_width: None,
+                    color: Color::WHITE,
+                },
+                DrawCommand::PopClip,
+                DrawCommand::PopClip,
+            ],
+            &mut renderer,
+        );
+        assert!(image_bounds(&resolved.commands).is_empty());
+        assert_eq!(resolved.stats.glyphs_requested, 0);
+        assert!(renderer.take_pending_uploads().is_empty());
+    }
+
+    #[test]
+    fn complete_line_geometry_rejects_invalid_cursor_and_font_before_shaping() {
+        let mut renderer = TextRenderer::new();
+        for (text, cursor) in [("你", 1), ("你", 2), ("你", 4), ("x", usize::MAX), ("", 1)] {
+            assert!(
+                renderer
+                    .single_line_geometry(
+                        text,
+                        14.0,
+                        SingleLineTextCaret::at_logical_boundary(cursor),
+                        Some(2.0)
+                    )
+                    .is_none(),
+                "invalid UTF-8/extent cannot masquerade as caret zero"
+            );
+        }
+        for size in [0.0, -1.0, f32::NAN, f32::INFINITY] {
+            assert!(renderer
+                .single_line_geometry("x", size, SingleLineTextCaret::at_logical_boundary(0), None)
+                .is_none());
+        }
+        let empty = renderer
+            .single_line_geometry(
+                "",
+                14.0,
+                SingleLineTextCaret::at_logical_boundary(0),
+                Some(0.0),
+            )
+            .expect("valid empty line");
+        assert_eq!(
+            empty,
+            SingleLineTextGeometry {
+                width: 0.0,
+                height: 0.0,
+                caret_x: 0.0,
+                hit_caret: Some(SingleLineTextCaret::before_next(0))
+            }
+        );
+    }
+
+    #[test]
+    fn complete_line_geometry_preserves_rtl_caret_and_grapheme_hit_boundaries() {
+        let mut renderer = TextRenderer::new();
+        let text = "שלום";
+        let end = renderer
+            .single_line_geometry(
+                text,
+                14.0,
+                SingleLineTextCaret::at_logical_boundary(text.len()),
+                Some(0.1),
+            )
+            .expect("valid complete line");
+        assert!(end.width > 0.0 && end.height > 0.0);
+        assert!(end.caret_x.abs() <= 0.1);
+        assert_eq!(
+            end.hit_caret.map(|caret| caret.byte_index),
+            Some(text.len())
+        );
+        let start = renderer
+            .single_line_geometry(
+                text,
+                14.0,
+                SingleLineTextCaret::at_logical_boundary(0),
+                None,
+            )
+            .expect("valid logical start");
+        assert!((start.caret_x - start.width).abs() <= 0.1);
+        let text = "A👩‍💻e\u{301}B";
+        let end = renderer
+            .single_line_geometry(
+                text,
+                14.0,
+                SingleLineTextCaret::at_logical_boundary(text.len()),
+                Some(f32::INFINITY),
+            )
+            .expect("valid emoji line");
+        assert!((end.caret_x - end.width).abs() <= 0.1);
+        assert!(end
+            .hit_caret
+            .map(|caret| caret.byte_index)
+            .is_some_and(|index| text.is_char_boundary(index)));
+    }
+
+    #[test]
+    fn complete_selected_geometry_rejects_invalid_range_before_shape() {
+        let mut renderer = TextRenderer::new();
+        for range in [1..3, 0..4, std::ops::Range { start: 3, end: 0 }] {
+            assert!(renderer
+                .single_line_selection_geometry(
+                    "你",
+                    14.0,
+                    SingleLineTextCaret::at_logical_boundary(0),
+                    None,
+                    Some(range)
+                )
+                .is_none());
+        }
+        assert!(renderer
+            .single_line_selection_geometry(
+                "你",
+                f32::NAN,
+                SingleLineTextCaret::at_logical_boundary(0),
+                None,
+                Some(0..3)
+            )
+            .is_none());
+        let empty = renderer
+            .single_line_selection_geometry(
+                "",
+                14.0,
+                SingleLineTextCaret::at_logical_boundary(0),
+                None,
+                Some(0..0),
+            )
+            .expect("valid empty line and selection");
+        assert!(empty.spans.is_empty());
+        assert_eq!(empty.line.width, 0.0);
+    }
+
+    #[test]
+    fn complete_selected_geometry_arabic_partial_cluster_matches_complete_caret_advances() {
+        let mut renderer = TextRenderer::new();
+        let text = "لا";
+        let start = renderer
+            .single_line_geometry(
+                text,
+                24.0,
+                SingleLineTextCaret::at_logical_boundary(0),
+                None,
+            )
+            .expect("RTL line start");
+        let end = renderer
+            .single_line_geometry(
+                text,
+                24.0,
+                SingleLineTextCaret::at_logical_boundary("ل".len()),
+                None,
+            )
+            .expect("RTL grapheme boundary");
+        let selected = renderer
+            .single_line_selection_geometry(
+                text,
+                24.0,
+                SingleLineTextCaret::at_logical_boundary("ل".len()),
+                None,
+                Some(0.."ل".len()),
+            )
+            .expect("complete partial RTL selection");
+        assert!(
+            start.caret_x > end.caret_x,
+            "the actual complete Arabic glyph run must be RTL"
+        );
+        assert_eq!(selected.spans.len(), 1);
+        assert!((selected.spans[0].x - end.caret_x).abs() <= 0.1);
+        assert!(
+            (selected.spans[0].width - (start.caret_x - end.caret_x)).abs() <= 0.1,
+            "partial ligature coverage must agree with full cluster caret geometry"
+        );
+        assert_eq!(selected.line, end);
+    }
+
+    #[test]
+    fn complete_selected_geometry_coalesces_long_contiguous_advances() {
+        let mut renderer = TextRenderer::new();
+        let text = "x".repeat(131_072);
+        let selected = renderer
+            .single_line_selection_geometry(
+                &text,
+                14.0,
+                SingleLineTextCaret::at_logical_boundary(text.len()),
+                None,
+                Some(0..text.len()),
+            )
+            .expect("complete large selected line");
+        assert_eq!(
+            selected.spans.len(),
+            1,
+            "a contiguous large selection must not return a rectangle per glyph"
+        );
+        assert!(selected.line.width.is_finite() && selected.line.width > 0.0);
+        assert!((selected.spans[0].x).abs() <= 0.1);
+        assert!((selected.spans[0].width - selected.line.width).abs() <= 0.1);
+    }
+
+    #[test]
+    fn associated_single_line_unrepresentable_complete_output_refuses_geometry_and_navigation() {
+        let text = "MMMMMMMMMMMMMMMM";
+        let size = f32::MAX / 2.0;
+        let start = SingleLineTextCaret::before_next(0);
+        assert!(
+            single_line_request_admitted(text, size, start, None),
+            "line metrics themselves remain representable"
+        );
+        let mut renderer = TextRenderer::new();
+        assert!(renderer.single_line_geometry(text, size, start, None).is_none());
+        assert!(renderer
+            .single_line_selection_geometry(text, size, start, None, Some(0..text.len()))
+            .is_none());
+        assert!(renderer.navigate_single_line(text, size, start, SingleLineTextNavigation::Home, None).is_none(),
+            "a finite request does not turn a nonrepresentable complete layout into a valid cursor result");
+    }
+
+    #[test]
+    fn associated_single_line_shared_bidi_boundary_keeps_both_complete_visual_associations() {
+        let text = "abc אבג xyz";
+        let font_size = 14.0;
+        let mut renderer = TextRenderer::new();
+        let attrs_owner = FontManager::new();
+        let mut reference_owner = FontManager::new();
+        let layout = TextLayout::new_single_line(
+            &mut reference_owner.font_system,
+            text,
+            attrs_owner.default_attrs(),
+            font_size,
+        );
+        let runs = layout.runs();
+        let space = runs[0]
+            .glyphs
+            .iter()
+            .find(|glyph| glyph.start == 3 && glyph.end == 4)
+            .expect("complete LTR whitespace");
+        let alef = runs[0]
+            .glyphs
+            .iter()
+            .find(|glyph| glyph.start == 4 && glyph.end == 6)
+            .expect("complete first logical Hebrew grapheme");
+        assert!(!space.level.is_rtl() && alef.level.is_rtl());
+        let after_ltr = SingleLineTextCaret::after_previous(4);
+        let before_rtl = SingleLineTextCaret::before_next(4);
+        let ltr = renderer
+            .single_line_geometry(text, font_size, after_ltr, Some(space.x + space.w * 0.9))
+            .expect("LTR associated seam");
+        let rtl = renderer
+            .single_line_geometry(text, font_size, before_rtl, Some(alef.x + alef.w * 0.9))
+            .expect("RTL associated seam");
+        assert!((ltr.caret_x - space.x - space.w).abs() <= 0.1);
+        assert!((rtl.caret_x - alef.x - alef.w).abs() <= 0.1);
+        assert!(
+            rtl.caret_x > ltr.caret_x,
+            "one logical seam has two distinct complete run associations"
+        );
+        assert_eq!(ltr.hit_caret, Some(after_ltr));
+        assert_eq!(rtl.hit_caret, Some(before_rtl));
+        let left = renderer
+            .navigate_single_line(
+                text,
+                font_size,
+                before_rtl,
+                SingleLineTextNavigation::Left { word: false },
+                None,
+            )
+            .expect("one visual cell to the left");
+        assert_eq!(left, SingleLineTextCaret::after_previous(6));
+        let left_geometry = renderer
+            .single_line_geometry(text, font_size, left, None)
+            .expect("left endpoint");
+        assert!((left_geometry.caret_x - alef.x).abs() <= 0.1);
+        assert!(left_geometry.caret_x.is_finite() && left_geometry.width.is_finite());
+    }
+
+    #[test]
+    fn associated_single_line_rtl_ligature_navigation_uses_complete_grapheme_advances() {
+        let mut renderer = TextRenderer::new();
+        let text = "لا";
+        let end = SingleLineTextCaret::after_previous(text.len());
+        let middle = renderer
+            .navigate_single_line(
+                text,
+                24.0,
+                end,
+                SingleLineTextNavigation::Right { word: false },
+                None,
+            )
+            .expect("complete RTL grapheme step");
+        assert_eq!(middle, SingleLineTextCaret::before_next("ل".len()));
+        let selected = renderer
+            .single_line_selection_geometry(text, 24.0, middle, None, Some("ل".len()..text.len()))
+            .expect("one selected RTL grapheme from complete layout");
+        let edge = renderer.single_line_geometry(text, 24.0, end, None).expect("logical end");
+        assert_eq!(selected.spans.len(), 1);
+        assert!((selected.spans[0].x - edge.caret_x).abs() <= 0.1);
+        assert!((selected.spans[0].width - (selected.line.caret_x - edge.caret_x)).abs() <= 0.1);
+        let exhausted = renderer
+            .navigate_single_line(
+                text,
+                24.0,
+                end,
+                SingleLineTextNavigation::Left { word: false },
+                None,
+            )
+            .expect("valid exhausted navigation is owned");
+        assert_eq!(exhausted, end);
+    }
+    #[test]
+    fn source_single_line_public_geometry_maps_crlf_selection_and_pointer_to_original_bytes() {
+        let mut renderer = TextRenderer::new();
+        let raw = "ab\r\ncd";
+        let displayed = "ab cd";
+        let reference = renderer
+            .single_line_selection_geometry(
+                displayed,
+                24.0,
+                SingleLineTextCaret::after_previous(3),
+                None,
+                Some(2..3),
+            )
+            .expect("complete projected reference");
+        let actual = renderer
+            .single_line_selection_geometry(
+                raw,
+                24.0,
+                SingleLineTextCaret::after_previous(4),
+                None,
+                Some(2..4),
+            )
+            .expect("complete raw source must have a representable single-line projection");
+        assert_eq!(actual.line.width, reference.line.width);
+        assert_eq!(actual.line.height, reference.line.height);
+        assert_eq!(actual.line.caret_x, reference.line.caret_x);
+        assert_eq!(
+            actual.spans, reference.spans,
+            "source CRLF selection covers the one display separator advance"
+        );
+        let span = actual.spans.first().expect("visible separator");
+        for (fraction, expected) in [(0.1, 2), (0.9, 4)] {
+            let hit = renderer
+                .single_line_geometry(
+                    raw,
+                    24.0,
+                    SingleLineTextCaret::after_previous(4),
+                    Some(span.x + span.width * fraction),
+                )
+                .expect("source pointer geometry")
+                .hit_caret
+                .expect("source hit");
+            assert_eq!(
+                hit.byte_index, expected,
+                "pointer hit never selects inside original CRLF"
+            );
+            assert!(hit.is_valid_for(raw));
+        }
+        assert!(
+            renderer
+                .single_line_geometry(raw, 24.0, SingleLineTextCaret::after_previous(3), None)
+                .is_none(),
+            "interior CRLF is not admitted source caret"
+        );
+    }
+
+    #[test]
+    fn source_single_line_public_navigation_does_not_drop_egc_stops_joined_only_in_display() {
+        use unicode_segmentation::UnicodeSegmentation;
+        let mut renderer = TextRenderer::new();
+        for raw in ["a\r\n\u{301}b", "a\u{2028}\u{301}b", "a\u{2029}\u{200d}b"] {
+            let mut caret = SingleLineTextCaret::before_next(0);
+            let expected: Vec<_> = raw
+                .grapheme_indices(true)
+                .map(|(start, grapheme)| start + grapheme.len())
+                .collect();
+            for byte in expected {
+                caret = renderer
+                    .navigate_single_line(
+                        raw,
+                        24.0,
+                        caret,
+                        SingleLineTextNavigation::Right { word: false },
+                        None,
+                    )
+                    .expect("source navigation is admitted");
+                assert_eq!(
+                    caret.byte_index, byte,
+                    "complete source grapheme must remain a distinct reachable stop: {raw:?}"
+                );
+                assert!(caret.is_valid_for(raw));
+                assert!(renderer.single_line_geometry(raw, 24.0, caret, None).is_some());
+            }
+            assert_eq!(caret.byte_index, raw.len());
         }
     }
 }

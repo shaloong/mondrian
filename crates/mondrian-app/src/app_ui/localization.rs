@@ -11,6 +11,7 @@ use unic_langid::LanguageIdentifier;
 const ZH_CN_CATALOG: &str = include_str!("../../locales/zh-CN.ftl");
 const EN_US_CATALOG: &str = include_str!("../../locales/en-US.ftl");
 static ZH_CN_RESOURCE: OnceLock<Result<Arc<FluentResource>, String>> = OnceLock::new();
+static PSEUDO_RESOURCE: OnceLock<Result<Arc<FluentResource>, String>> = OnceLock::new();
 static EN_US_RESOURCE: OnceLock<Result<Arc<FluentResource>, String>> = OnceLock::new();
 
 /// A supported product UI locale, independent of Project language metadata.
@@ -52,9 +53,6 @@ pub enum AppUiLocalePreference {
     EnUs,
     /// Expand translated text to expose insufficient layout space.
     Pseudo,
-    /// A preference written by a newer release falls back safely.
-    #[serde(other)]
-    Unknown,
 }
 
 impl AppUiLocalePreference {
@@ -64,7 +62,7 @@ impl AppUiLocalePreference {
             Self::ZhCn => AppUiLocale::ZhCn,
             Self::EnUs => AppUiLocale::EnUs,
             Self::Pseudo => AppUiLocale::Pseudo,
-            Self::System | Self::Unknown => match system_tag {
+            Self::System => match system_tag {
                 Some(tag)
                     if tag
                         .split(['-', '_'])
@@ -123,14 +121,59 @@ impl Localizer {
     /// Format one message with named Fluent arguments. Missing or invalid
     /// requested messages fall back to Chinese, then to the stable message ID.
     pub fn format(&self, message_id: &str, args: Option<&FluentArgs<'_>>) -> String {
-        let value = format_from(&self.requested, message_id, args)
+        format_from(&self.requested, message_id, args)
             .or_else(|| format_from(&self.fallback, message_id, args))
-            .unwrap_or_else(|| message_id.to_owned());
-        if self.locale == AppUiLocale::Pseudo {
-            pseudo_expand(&value)
-        } else {
-            value
+            .unwrap_or_else(|| message_id.to_owned())
+    }
+
+    /// Resolve a parameter presentation address without changing its author key.
+    /// Unknown vendor addresses retain their declared display fallback.
+    pub(crate) fn parameter_text(&self, address: &str, fallback: &str) -> String {
+        let direct = format_from(&self.requested, address, None)
+            .or_else(|| format_from(&self.fallback, address, None));
+        if let Some(text) = direct {
+            return text;
         }
+        if address.starts_with("mondrian.title.")
+            || address.starts_with("mondrian.mask.")
+            || address.starts_with("mondrian.effect.builtin.")
+            || address.starts_with("mondrian.effect.curves.")
+            || address.starts_with("mondrian.effect.qualifier.")
+            || address.starts_with("builtin.lut_3d.")
+        {
+            let message_id = format!("parameter-{}", address.replace(['.', '_'], "-"));
+            return format_from(&self.requested, &message_id, None)
+                .or_else(|| format_from(&self.fallback, &message_id, None))
+                .unwrap_or_else(|| fallback.to_owned());
+        }
+        fallback.to_owned()
+    }
+
+    /// Localize a built-in group heading while retaining its definition identity.
+    pub(crate) fn parameter_group_text(&self, parameter_id: &str, group: &str) -> String {
+        if parameter_id.starts_with("mondrian.effect.builtin.")
+            && let Some(message_id) = builtin_parameter_group_message_id(group)
+        {
+            return self.text(message_id);
+        }
+        group.to_owned()
+    }
+
+    /// Resolve language-neutral status or notification data in this UI locale.
+    pub fn message(&self, message: &crate::app::AppMessage) -> String {
+        use crate::app::AppMessageValue;
+        let mut args = FluentArgs::new();
+        for (name, value) in &message.args {
+            match value {
+                AppMessageValue::Number(value) if value.unsigned_abs() <= (1_u64 << 53) => {
+                    args.set(*name, *value as f64);
+                }
+                AppMessageValue::Number(value) => args.set(*name, value.to_string()),
+                AppMessageValue::Text(value) => args.set(*name, value.as_str()),
+                AppMessageValue::Message(value) => args.set(*name, self.message(value)),
+            }
+        }
+        self.format(message.id, Some(&args))
     }
 
     /// Format one display-only text argument for a UI message.
@@ -138,6 +181,43 @@ impl Localizer {
         let mut args = FluentArgs::new();
         args.set(argument, value);
         self.format(message_id, Some(&args))
+    }
+}
+
+/// Render retained product facts explicitly for Chinese UI assertions in App tests.
+#[cfg(test)]
+pub(crate) fn chinese_product_message(message: &crate::app::AppMessage) -> String {
+    Localizer::new(AppUiLocale::ZhCn).expect("Chinese catalog").message(message)
+}
+
+/// App-owned caption identity for a typed keyframe interpolation mode.
+pub(crate) fn keyframe_interpolation_message_id(
+    interpolation: mondrian_core::automation::InterpolationType,
+) -> &'static str {
+    use mondrian_core::automation::InterpolationType;
+    match interpolation {
+        InterpolationType::Hold => "keyframe-interpolation-hold",
+        InterpolationType::Linear => "keyframe-interpolation-linear",
+        InterpolationType::Bezier => "keyframe-interpolation-bezier",
+        InterpolationType::AutoBezier => "keyframe-interpolation-auto-bezier",
+        InterpolationType::ContinuousBezier => "keyframe-interpolation-continuous-bezier",
+        InterpolationType::EaseIn => "keyframe-interpolation-ease-in",
+        InterpolationType::EaseOut => "keyframe-interpolation-ease-out",
+    }
+}
+
+/// Shared product message ID for the exact Export lifecycle phase.
+pub(crate) fn export_progress_phase_message_id(
+    phase: mondrian_export::ExportProgressPhase,
+) -> &'static str {
+    use mondrian_export::ExportProgressPhase;
+    match phase {
+        ExportProgressPhase::Preparing => "export-job-preparing",
+        ExportProgressPhase::Rendering => "export-job-rendering",
+        ExportProgressPhase::Encoding => "export-job-encoding",
+        ExportProgressPhase::Packaging => "export-job-packaging",
+        ExportProgressPhase::Validating => "export-job-validating",
+        ExportProgressPhase::Publishing => "export-job-publishing",
     }
 }
 
@@ -159,6 +239,40 @@ pub(crate) fn effect_category_message_id(category: &str) -> Option<&'static str>
         "变换" => Some("effect-category-transform"),
         "抠像" => Some("effect-category-keying"),
         "插件" => Some("effect-category-plugins"),
+        "外部效果" => Some("effect-category-external"),
+        _ => None,
+    }
+}
+
+fn builtin_parameter_group_message_id(group: &str) -> Option<&'static str> {
+    match group {
+        "ASC CDL" => Some("parameter-group-asc-cdl"),
+        "HDR · Blacks" => Some("parameter-group-hdr-blacks"),
+        "HDR · Dark" => Some("parameter-group-hdr-dark"),
+        "HDR · Global" => Some("parameter-group-hdr-global"),
+        "HDR · Highlights" => Some("parameter-group-hdr-highlights"),
+        "HDR · Light" => Some("parameter-group-hdr-light"),
+        "HDR · Shadows" => Some("parameter-group-hdr-shadows"),
+        "HDR · Specular" => Some("parameter-group-hdr-specular"),
+        "HSL" => Some("parameter-group-hsl"),
+        "LUT" => Some("parameter-group-lut"),
+        "Primaries" => Some("parameter-group-primaries"),
+        "Qualifier" => Some("parameter-group-qualifier"),
+        "Qualifier · 3D" => Some("parameter-group-qualifier-3d"),
+        "Qualifier · Matte" => Some("parameter-group-qualifier-matte"),
+        "亮度键" => Some("parameter-group-luma-key"),
+        "基础校正" => Some("parameter-group-basic-correction"),
+        "抠像" => Some("parameter-group-chroma-key"),
+        "暗角" => Some("parameter-group-vignette"),
+        "曲线" => Some("parameter-group-curves"),
+        "模糊" => Some("parameter-group-blur"),
+        "白平衡" => Some("parameter-group-white-balance"),
+        "色域压缩" => Some("parameter-group-gamut-compression"),
+        "色差" => Some("parameter-group-chromatic-aberration"),
+        "裁切" => Some("parameter-group-crop"),
+        "锐化" => Some("parameter-group-sharpen"),
+        "颗粒" => Some("parameter-group-grain"),
+        "高光恢复" => Some("parameter-group-highlight-recovery"),
         _ => None,
     }
 }
@@ -170,12 +284,18 @@ fn build_bundle(
     let langid: LanguageIdentifier =
         tag.parse().map_err(|_| LocalizationError::InvalidLocale(tag.to_owned()))?;
     let cached = match locale {
-        AppUiLocale::ZhCn | AppUiLocale::Pseudo => &ZH_CN_RESOURCE,
+        AppUiLocale::ZhCn => &ZH_CN_RESOURCE,
+        AppUiLocale::Pseudo => &PSEUDO_RESOURCE,
         AppUiLocale::EnUs => &EN_US_RESOURCE,
     };
     let resource = cached
         .get_or_init(|| {
-            FluentResource::try_new(locale.catalog().to_owned())
+            let catalog = if locale == AppUiLocale::Pseudo {
+                pseudo_catalog(locale.catalog())?
+            } else {
+                locale.catalog().to_owned()
+            };
+            FluentResource::try_new(catalog)
                 .map(Arc::new)
                 .map_err(|(_, errors)| format!("{errors:?}"))
         })
@@ -205,22 +325,157 @@ fn format_from(
     errors.is_empty().then(|| text.into_owned())
 }
 
-fn pseudo_expand(text: &str) -> String {
-    let mut expanded = String::with_capacity(text.len().saturating_mul(2).saturating_add(6));
-    expanded.push('⟦');
-    for character in text.chars() {
-        expanded.push(character);
-        if character.is_alphabetic() {
-            expanded.push('·');
+// Expand catalog literals once; runtime arguments and Fluent expression
+// identities remain exact, including nested already-localized messages.
+fn pseudo_catalog(catalog: &str) -> Result<String, String> {
+    use fluent_syntax::ast::Entry;
+    let mut resource = fluent_syntax::parser::parse(catalog.to_owned())
+        .map_err(|(_, errors)| format!("{errors:?}"))?;
+    for entry in &mut resource.body {
+        match entry {
+            Entry::Message(message) => {
+                if let Some(value) = &mut message.value {
+                    pseudo_pattern(value, true);
+                }
+                for attribute in &mut message.attributes {
+                    pseudo_pattern(&mut attribute.value, true);
+                }
+            }
+            Entry::Term(term) => {
+                pseudo_pattern(&mut term.value, false);
+                for attribute in &mut term.attributes {
+                    pseudo_pattern(&mut attribute.value, false);
+                }
+            }
+            _ => {}
         }
     }
-    expanded.push('⟧');
-    expanded
+    Ok(fluent_syntax::serializer::serialize(&resource))
+}
+
+fn pseudo_pattern(pattern: &mut fluent_syntax::ast::Pattern<String>, boundaries: bool) {
+    use fluent_syntax::ast::PatternElement;
+    for element in &mut pattern.elements {
+        match element {
+            PatternElement::TextElement { value } => {
+                let mut expanded = String::with_capacity(value.len().saturating_mul(2));
+                for character in value.chars() {
+                    expanded.push(character);
+                    if character.is_alphabetic() {
+                        expanded.push('·');
+                    }
+                }
+                *value = expanded;
+            }
+            PatternElement::Placeable { expression } => pseudo_expression(expression),
+        }
+    }
+    if boundaries {
+        pattern
+            .elements
+            .insert(0, PatternElement::TextElement { value: "⟦".to_owned() });
+        pattern.elements.push(PatternElement::TextElement { value: "⟧".to_owned() });
+    }
+}
+
+fn pseudo_expression(expression: &mut fluent_syntax::ast::Expression<String>) {
+    use fluent_syntax::ast::{Expression, InlineExpression};
+    match expression {
+        Expression::Select { variants, .. } => {
+            for variant in variants {
+                pseudo_pattern(&mut variant.value, false);
+            }
+        }
+        Expression::Inline(InlineExpression::Placeable { expression }) => {
+            pseudo_expression(expression)
+        }
+        Expression::Inline(_) => {}
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn builtin_parameter_presentations_cover_registered_schemas() {
+        use std::collections::BTreeMap;
+        let mut declared = BTreeMap::new();
+        for kind in mondrian_effects::effect_library_types() {
+            if !kind.key().starts_with("builtin.") {
+                continue;
+            }
+            let effect = mondrian_effects::instantiate_effect_node(kind).expect("builtin schema");
+            for (_, property) in effect.properties.iter() {
+                declared.insert(
+                    property.descriptor.schema.message_id.clone(),
+                    (
+                        property.descriptor.display_name.clone(),
+                        property.descriptor.ui_metadata.group_name.clone(),
+                    ),
+                );
+                for option in &property.descriptor.schema.enum_options {
+                    declared.insert(
+                        option.message_id.clone(),
+                        (option.display_name.clone(), None),
+                    );
+                }
+            }
+        }
+        let mut presentation_addresses = BTreeMap::new();
+        for address in declared.keys() {
+            let message_id = format!("parameter-{}", address.replace(['.', '_'], "-"));
+            assert!(
+                presentation_addresses.insert(message_id, address).is_none(),
+                "parameter presentation address collision: {address}"
+            );
+        }
+        for locale in [AppUiLocale::EnUs, AppUiLocale::ZhCn, AppUiLocale::Pseudo] {
+            let localizer = Localizer::new(locale).expect("catalog");
+            assert_eq!(
+                localizer.parameter_text("vendor.custom.mode", "Vendor mode"),
+                "Vendor mode"
+            );
+            let missing = declared
+                .iter()
+                .filter(|(address, _)| {
+                    let message_id = format!("parameter-{}", address.replace(['.', '_'], "-"));
+                    localizer
+                        .requested
+                        .get_message(&message_id)
+                        .and_then(|message| message.value())
+                        .is_none()
+                })
+                .collect::<BTreeMap<_, _>>();
+            for (address, (_, group)) in &declared {
+                if let Some(group) = group {
+                    let message_id = builtin_parameter_group_message_id(group)
+                        .expect("registered builtin group");
+                    assert!(
+                        localizer
+                            .requested
+                            .get_message(message_id)
+                            .and_then(|message| message.value())
+                            .is_some(),
+                        "missing {locale:?} group {message_id}"
+                    );
+                    assert_eq!(
+                        localizer.parameter_group_text(address, group),
+                        localizer.text(message_id)
+                    );
+                }
+            }
+            assert_eq!(
+                localizer.parameter_group_text("vendor.param", "曲线"),
+                "曲线"
+            );
+            assert!(
+                missing.is_empty(),
+                "missing registered parameter presentations for {locale:?}: {}",
+                serde_json::to_string(&missing).expect("missing presentation diagnostics")
+            );
+        }
+    }
 
     #[test]
     fn bundled_catalogs_have_identical_message_ids() {
@@ -641,7 +896,7 @@ mod tests {
                 );
             }
         }
-        for id in ["effect-empty", "effect-search"] {
+        for id in ["effect-empty", "effect-search", "effect-category-external"] {
             assert!(
                 chinese.requested.get_message(id).is_some(),
                 "missing zh-CN: {id}"
@@ -680,6 +935,28 @@ mod tests {
         let english = Localizer::new(AppUiLocale::EnUs).expect("English catalog");
         for (_, items) in crate::app_ui::menu_bar::default_menu_items() {
             visit(&items, &chinese, &english);
+        }
+        use mondrian_core::automation::InterpolationType;
+        for interpolation in [
+            InterpolationType::Hold,
+            InterpolationType::Linear,
+            InterpolationType::Bezier,
+            InterpolationType::AutoBezier,
+            InterpolationType::ContinuousBezier,
+            InterpolationType::EaseIn,
+            InterpolationType::EaseOut,
+        ] {
+            let id = keyframe_interpolation_message_id(interpolation);
+            visit(
+                &[MenuItem::inert(chinese.text(id)).with_message_id(id)],
+                &chinese,
+                &english,
+            );
+            assert_ne!(
+                chinese.text(id),
+                english.text(id),
+                "each keyframe mode must have localized copy"
+            );
         }
     }
 
@@ -727,6 +1004,356 @@ mod tests {
     }
 
     #[test]
+    fn exact_time_reasons_localize_without_losing_rational_coordinates() {
+        use crate::app::AppMessage;
+        use mondrian_core::{timeline_time::TimelineTimeError, MondrianError};
+        for reason in [
+            TimelineTimeError::ZeroDenominator,
+            TimelineTimeError::Overflow,
+            TimelineTimeError::InvalidLegacyTimeBase { numerator: i64::MIN, denominator: i64::MAX },
+            TimelineTimeError::InvalidFrameRate { numerator: i64::MAX, denominator: i64::MIN },
+            TimelineTimeError::DomainMismatch,
+            TimelineTimeError::NonInvertibleTransform,
+            TimelineTimeError::NegativeDuration,
+            TimelineTimeError::NonFiniteInput,
+        ] {
+            let message = AppMessage::from_error(&MondrianError::InvalidTimelineTime(reason));
+            let chinese = Localizer::new(AppUiLocale::ZhCn).expect("Chinese").message(&message);
+            for locale in [AppUiLocale::ZhCn, AppUiLocale::EnUs, AppUiLocale::Pseudo] {
+                let localizer = Localizer::new(locale).expect("catalog");
+                let text = localizer.message(&message);
+                assert!(!text.contains("reason-time-"));
+                if locale != AppUiLocale::ZhCn {
+                    assert_ne!(text, chinese);
+                }
+                if matches!(
+                    reason,
+                    TimelineTimeError::InvalidLegacyTimeBase { .. }
+                        | TimelineTimeError::InvalidFrameRate { .. }
+                ) {
+                    assert!(text.contains(&i64::MIN.to_string()));
+                    assert!(text.contains(&i64::MAX.to_string()));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn typed_core_failures_resolve_in_all_locales_without_parsing_diagnostics() {
+        use crate::app::AppMessage;
+        use mondrian_core::MondrianError;
+        let failures = vec![
+            MondrianError::MediaOpen {
+                path: "native detail / {file}".to_owned(),
+                reason: "native detail / {file}".to_owned(),
+            },
+            MondrianError::DecodeFailed {
+                asset_id: "native detail / {file}".to_owned(),
+                reason: "native detail / {file}".to_owned(),
+            },
+            MondrianError::UnsupportedFormat { format: "native detail / {file}".to_owned() },
+            MondrianError::ProxyGenerationFailed { reason: "native detail / {file}".to_owned() },
+            MondrianError::TrackNotFound { track_id: "native detail / {file}".to_owned() },
+            MondrianError::ClipNotFound { clip_id: "native detail / {file}".to_owned() },
+            MondrianError::TimecodeOutOfRange { timecode: "native detail / {file}".to_owned() },
+            MondrianError::TrackLocked { track_id: "native detail / {file}".to_owned() },
+            MondrianError::ActionNotExecuted {
+                action: "native detail / {file}".to_owned(),
+                reason: "native detail / {file}".to_owned(),
+            },
+            MondrianError::GpuInitFailed { reason: "native detail / {file}".to_owned() },
+            MondrianError::ShaderCompileFailed {
+                shader_name: "native detail / {file}".to_owned(),
+                reason: "native detail / {file}".to_owned(),
+            },
+            MondrianError::TextureUploadFailed { reason: "native detail / {file}".to_owned() },
+            MondrianError::EffectGraphEvaluationFailed {
+                reason: "native detail / {file}".to_owned(),
+            },
+            MondrianError::AssetNotFound { asset_id: "native detail / {file}".to_owned() },
+            MondrianError::AssetFileMissing { path: "native detail / {file}".to_owned() },
+            MondrianError::AssetDbError { reason: "native detail / {file}".to_owned() },
+            MondrianError::AiProviderFailed {
+                provider: "native detail / {file}".to_owned(),
+                reason: "native detail / {file}".to_owned(),
+            },
+            MondrianError::AiRateLimited { provider: "native detail / {file}".to_owned() },
+            MondrianError::WorkflowStepFailed {
+                step_id: "native detail / {file}".to_owned(),
+                reason: "native detail / {file}".to_owned(),
+            },
+            MondrianError::WorkflowParseFailed { reason: "native detail / {file}".to_owned() },
+            MondrianError::ExportFailed { reason: "native detail / {file}".to_owned() },
+            MondrianError::HwEncoderUnavailable { encoder: "native detail / {file}".to_owned() },
+            MondrianError::MediaSourceRevisionUnavailable {
+                path: "E:/素材/{file}".to_owned(),
+                reason: "native detail".to_owned(),
+            },
+            MondrianError::MediaSourceRevisionChanged {
+                path: "E:/素材/{file}".to_owned(),
+                expected: Box::default(),
+                actual: Box::default(),
+            },
+            MondrianError::MediaExecutionResourceUnavailable {
+                operation: "decode",
+                source: std::io::Error::other("native detail"),
+                cleanup: None,
+            },
+            MondrianError::MediaExecutionResourceUnavailable {
+                operation: "decode",
+                source: std::io::Error::other("native detail"),
+                cleanup: Some("cleanup detail".to_owned()),
+            },
+            MondrianError::DecodeTimeout {
+                asset_id: "asset".to_owned(),
+                access_mode: "preview".to_owned(),
+                budget_ms: u64::MAX,
+                frame: u64::MAX,
+                secs: 1.25,
+            },
+            MondrianError::DecodeBudgetExhausted {
+                asset_id: "asset".to_owned(),
+                access_mode: "seek".to_owned(),
+                decoded_frames: u64::MAX,
+                budget_frames: u64::MAX,
+                target_pts: i64::MIN,
+            },
+            MondrianError::DecodeTemporalMismatch {
+                asset_id: "asset".to_owned(),
+                access_mode: "seek".to_owned(),
+                requested_pts: Some(i64::MIN),
+                selected_pts: None,
+                selected_duration_pts: Some(i64::MAX),
+            },
+            MondrianError::InvalidTimelineTime(
+                mondrian_core::TimelineTime::new(1, 0).expect_err("invalid denominator"),
+            ),
+            MondrianError::Io(std::io::Error::other("native detail")),
+            MondrianError::Serialization(
+                serde_json::from_str::<serde_json::Value>("{").expect_err("invalid JSON"),
+            ),
+            MondrianError::Cancelled,
+            MondrianError::Other(anyhow::anyhow!("native detail")),
+        ];
+        for failure in &failures {
+            let message = AppMessage::from_error(failure);
+            for locale in [AppUiLocale::ZhCn, AppUiLocale::EnUs, AppUiLocale::Pseudo] {
+                let localizer = Localizer::new(locale).expect("catalog");
+                assert!(
+                    localizer.requested.get_message(message.id).is_some(),
+                    "missing {}",
+                    message.id
+                );
+                let text = localizer.message(&message);
+                assert_ne!(text, message.id, "unresolved {failure:?}");
+                if locale == AppUiLocale::EnUs {
+                    assert!(text.chars().next().is_some_and(|c| c.is_ascii()), "{text}");
+                }
+                if matches!(failure, MondrianError::DecodeTimeout { .. }) {
+                    assert!(text.contains(&u64::MAX.to_string()));
+                    assert!(text.contains("1.250"));
+                }
+                if matches!(failure, MondrianError::DecodeTemporalMismatch { .. }) {
+                    assert!(text.contains(&i64::MIN.to_string()));
+                    assert!(text.contains(&i64::MAX.to_string()));
+                    if locale == AppUiLocale::EnUs {
+                        assert!(text.contains("not supplied"));
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn contextual_core_failure_retains_context_and_typed_source_in_each_locale() {
+        use crate::app::{AppMessage, AppMessageValue};
+        use mondrian_core::MondrianError;
+        let source = MondrianError::AssetFileMissing { path: "E:/素材/{file}.mov".to_owned() };
+        let error = anyhow::Error::new(source).context("mount metadata").context("project open");
+        let message = AppMessage::from_anyhow(&error);
+        assert_eq!(message.id, "error-context");
+        assert_eq!(
+            message.args.get("context"),
+            Some(&AppMessageValue::Text("project open".to_owned()))
+        );
+        for locale in [AppUiLocale::ZhCn, AppUiLocale::EnUs, AppUiLocale::Pseudo] {
+            let localizer = Localizer::new(locale).expect("catalog");
+            let text = localizer.message(&message);
+            assert!(text.contains("project open"));
+            assert!(text.contains("mount metadata"));
+            assert!(text.contains("E:/素材/{file}.mov"));
+            if locale == AppUiLocale::EnUs {
+                assert!(text.contains("Asset file moved or deleted"));
+            }
+        }
+        let opaque = anyhow::anyhow!("decoder detail").context("container detail");
+        let english = Localizer::new(AppUiLocale::EnUs).expect("English");
+        let text = english.message(&AppMessage::from_anyhow(&opaque));
+        assert!(text.contains("container detail: decoder detail"));
+        let wrapped = MondrianError::Other(error);
+        assert_eq!(AppMessage::from_error(&wrapped), message);
+    }
+
+    #[test]
+    fn source_revision_evidence_distinguishes_failures_with_the_same_path() {
+        use crate::app::AppMessage;
+        use mondrian_core::{MediaFileFingerprint, MondrianError};
+        let first = MondrianError::MediaSourceRevisionChanged {
+            path: "source.mov".to_owned(),
+            expected: Box::default(),
+            actual: Box::default(),
+        };
+        let changed = MondrianError::MediaSourceRevisionChanged {
+            path: "source.mov".to_owned(),
+            expected: Box::default(),
+            actual: Box::new(MediaFileFingerprint { len: Some(20), ..Default::default() }),
+        };
+        assert_ne!(
+            AppMessage::from_error(&first),
+            AppMessage::from_error(&changed)
+        );
+        let english = Localizer::new(AppUiLocale::EnUs).expect("English");
+        assert_eq!(
+            english.message(&AppMessage::from_error(&first)),
+            english.message(&AppMessage::from_error(&changed))
+        );
+    }
+
+    #[test]
+    fn import_summary_variants_localize_counts_without_empty_interpolations() {
+        use crate::app::AppMessage;
+        for (id, proxies, failed) in [
+            ("status-import-summary", 0, 0),
+            ("status-import-summary-proxies", 1, 0),
+            ("status-import-summary-partial", 0, 1),
+            ("status-import-summary-proxies-partial", 1, 1),
+        ] {
+            for count in [1, 2] {
+                let message = AppMessage::new(id)
+                    .with_count("imported", count)
+                    .with_count("proxies", proxies * count)
+                    .with_count("failed", failed * count);
+                for locale in [AppUiLocale::ZhCn, AppUiLocale::EnUs, AppUiLocale::Pseudo] {
+                    let localizer = Localizer::new(locale).expect("catalog");
+                    let text = localizer.message(&message);
+                    assert!(!text.contains("status-import-"), "unresolved: {text}");
+                    assert!(
+                        !text.contains("\u{2068}\u{2069}"),
+                        "empty interpolation: {text}"
+                    );
+                    if locale == AppUiLocale::EnUs {
+                        if count == 1 {
+                            assert!(text.contains("Imported one media file"));
+                        } else {
+                            assert!(text.contains("media files") && text.contains('2'));
+                        }
+                        assert_eq!(text.contains("generating"), proxies > 0);
+                        assert_eq!(text.contains("failed"), failed > 0);
+                        if proxies > 0 {
+                            assert!(text.contains(if count == 1 {
+                                "one proxy"
+                            } else {
+                                "proxies"
+                            }));
+                        }
+                        if failed > 0 && count == 1 {
+                            assert!(text.contains("one failed"));
+                        }
+                    }
+                }
+            }
+        }
+        let english = Localizer::new(AppUiLocale::EnUs).expect("English");
+        assert_eq!(
+            english.message(&AppMessage::new("status-import-summary").with_count("imported", 1)),
+            "Imported one media file"
+        );
+    }
+
+    #[test]
+    fn product_message_resolves_nested_copy_on_each_locale_projection() {
+        use crate::app::AppMessage;
+        let nested = AppMessage::new("notification-import-complete").with_number("count", 1);
+        let message = AppMessage::new("export-status-error").with_message("error", nested.clone());
+        let original = message.clone();
+        for locale in [AppUiLocale::ZhCn, AppUiLocale::EnUs, AppUiLocale::Pseudo] {
+            let localizer = Localizer::new(locale).expect("catalog");
+            let inner = localizer.message(&nested);
+            let outer = localizer.message(&message);
+            assert_eq!(
+                outer,
+                localizer.format_text("export-status-error", "error", &inner)
+            );
+            assert!(outer.contains(&inner), "{outer}");
+        }
+        let english = Localizer::new(AppUiLocale::EnUs).expect("English");
+        // Fluent isolates interpolated text for correct bidirectional rendering.
+        assert_eq!(
+            english.message(&message),
+            "Error: \u{2068}Imported one media file\u{2069}"
+        );
+        assert_eq!(message, original);
+    }
+
+    #[test]
+    fn product_message_preserves_large_integers_and_opaque_details() {
+        use crate::app::AppMessage;
+        let detail = "E:/项目/Mixed Case/{clip}.mdp";
+        for locale in [AppUiLocale::ZhCn, AppUiLocale::EnUs, AppUiLocale::Pseudo] {
+            let localizer = Localizer::new(locale).expect("catalog");
+            for value in [i64::MIN, i64::MAX, (1_i64 << 53) + 1] {
+                let message = AppMessage::new("export-status-error").with_number("error", value);
+                assert!(localizer.message(&message).contains(&value.to_string()));
+            }
+            let largest_count =
+                AppMessage::new("export-status-error").with_count("error", usize::MAX);
+            assert!(localizer.message(&largest_count).contains(&usize::MAX.to_string()));
+            let message = AppMessage::new("export-status-error").with_text("error", detail);
+            assert!(localizer.message(&message).contains(detail));
+        }
+    }
+
+    #[test]
+    fn pseudo_locale_preserves_opaque_arguments_and_nested_status_text() {
+        let pseudo = Localizer::new(AppUiLocale::Pseudo).expect("pseudo");
+        let status = pseudo.text("status-ready");
+        let accessible = pseudo.format_text("status-history-accessibility", "status", &status);
+        assert!(accessible.contains(&status), "{accessible}");
+        let detail = "E:/项目/Mixed Case/{clip}.mdp · 18446744073709551615";
+        let formatted = pseudo.format_text("export-status-error", "error", detail);
+        assert!(formatted.contains(detail), "{formatted}");
+    }
+
+    #[test]
+    fn pseudo_catalog_preserves_selectors_references_and_attributes() {
+        let catalog = "-shared = Ready\nnotice = { $count ->\n    [1] Single { $name } { -shared }\n   *[other] Many { $name } { -shared }\n    }\n    .tip = Hint { $name }\n";
+        let source = pseudo_catalog(catalog).expect("expand Fluent AST");
+        let resource = FluentResource::try_new(source).expect("valid transformed resource");
+        let mut bundle = FluentBundle::new(vec!["en-US".parse().expect("locale")]);
+        bundle.add_resource(Arc::new(resource)).expect("resource");
+        let name = "Untouched File.mdp";
+        for (count, literal) in [(1, "S·i·n·g·l·e·"), (2, "M·a·n·y·")] {
+            let mut args = FluentArgs::new();
+            args.set("count", count);
+            args.set("name", name);
+            let result = format_from(&bundle, "notice", Some(&args)).expect("selector resolves");
+            assert!(result.contains(literal), "{result}");
+            assert!(result.contains(name), "{result}");
+            assert!(result.contains("R·e·a·d·y·"), "term reference resolves");
+            let attribute = bundle
+                .get_message("notice")
+                .expect("message")
+                .get_attribute("tip")
+                .expect("attribute");
+            let mut errors = Vec::new();
+            let tip = bundle.format_pattern(attribute.value(), Some(&args), &mut errors);
+            assert!(errors.is_empty(), "{errors:?}");
+            assert!(tip.contains(name));
+            assert!(tip.contains("H·i·n·t·"));
+        }
+    }
+
+    #[test]
     fn pseudo_locale_marks_and_expands_boundaries() {
         let pseudo = Localizer::new(AppUiLocale::Pseudo).expect("pseudo catalog");
         let text = pseudo.text("preferences-language");
@@ -738,5 +1365,35 @@ mod tests {
                     .text("preferences-language")
                     .len()
         );
+    }
+
+    #[test]
+    fn owned_panel_status_catalog_table_is_complete_in_every_requested_locale() {
+        for locale in [AppUiLocale::ZhCn, AppUiLocale::EnUs, AppUiLocale::Pseudo] {
+            let localizer = Localizer::new(locale).expect("catalog");
+            for id in [
+                "timeline-empty-no-sequence",
+                "timeline-empty-no-tracks",
+                "timeline-invalid-display",
+                "inspector-empty-selection",
+            ] {
+                assert!(
+                    localizer
+                        .requested
+                        .get_message(id)
+                        .and_then(|message| message.value())
+                        .is_some(),
+                    "missing {locale:?} owned panel status {id}; fallback is not coverage"
+                );
+            }
+            let opaque = "vendor.reason 用户🙂 / source=file://camera/name\nnot a catalog address";
+            let message =
+                crate::app::AppMessage::new("timeline-invalid-display").with_text("reason", opaque);
+            let rendered = localizer.message(&message);
+            assert!(
+                rendered.contains(opaque),
+                "opaque reason survives every requested locale including pseudo"
+            );
+        }
     }
 }

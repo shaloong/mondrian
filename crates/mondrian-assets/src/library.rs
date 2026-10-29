@@ -377,20 +377,21 @@ impl AssetLibrary {
     /// Rebind byte-identical file sources while opening a verified portable package.
     ///
     /// The caller must first verify each bundled file against the package
-    /// manifest. This transaction preserves Asset IDs, probe facts, and logical
+    /// manifest. Source strings are exact persisted UTF-8 coordinates, never
+    /// local filesystem inputs. This transaction preserves Asset IDs, probe facts, and logical
     /// audio components while refreshing only filesystem revision evidence.
     /// It is intended for a private, not-yet-installed Library generation.
-    pub fn rebind_verified_package_sources(&self, bindings: &[(PathBuf, PathBuf)]) -> Result<()> {
+    pub fn rebind_verified_package_sources(&self, bindings: &[(String, PathBuf)]) -> Result<()> {
         let mut seen = BTreeSet::new();
         let mut replacements = Vec::with_capacity(bindings.len());
         for (source, bundled) in bindings {
-            let source_text =
-                persisted_path_text(source).map_err(|error| MondrianError::AssetDbError {
-                    reason: format!("invalid package source path: {error}"),
-                })?;
-            if !seen.insert(source_text.clone()) {
+            let source_text = source.clone();
+            if source_text.is_empty()
+                || source_text.contains('\0')
+                || !seen.insert(source_text.clone())
+            {
                 return Err(MondrianError::AssetDbError {
-                    reason: format!("duplicate package source path: {}", source.display()),
+                    reason: "invalid or duplicate package source coordinate".into(),
                 });
             }
             let target =
@@ -1908,7 +1909,7 @@ mod tests {
 
         library
             .rebind_verified_package_sources(&[(
-                before.file_path().expect("source path").to_path_buf(),
+                before.file_path().expect("source path").to_str().expect("UTF-8").to_owned(),
                 packaged.clone(),
             )])
             .expect("rebind package source");

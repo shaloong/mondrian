@@ -73,32 +73,42 @@ pub struct PreparedVisualNestedInstanceStep {
 /// execution-admission evidence. Evidence that depends on exact child bindings
 /// is finalized atomically through [`PreparedVisualFrameClosure::try_map_payload`]
 /// after canonical recursion, without interpreting nesting a second time.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct PreparedVisualFrameEvaluation<T> {
-    plan: TimelineRenderPlan,
-    temporal_batches: Vec<TimelineTemporalDemandBatch>,
+    frame: crate::PreparedTimelineFrameExecution,
     payload: T,
 }
 
 impl<T> PreparedVisualFrameEvaluation<T> {
     /// Bind one evaluated per-Sequence plan to its temporal demands and
     /// consumer-owned execution evidence.
-    pub fn new(
-        plan: TimelineRenderPlan,
-        temporal_batches: Vec<TimelineTemporalDemandBatch>,
-        payload: T,
-    ) -> Self {
-        Self { plan, temporal_batches, payload }
+    pub fn new(frame: crate::PreparedTimelineFrameExecution, payload: T) -> Self {
+        Self { frame, payload }
     }
 
     /// Evaluated per-Sequence Render Plan.
     pub const fn plan(&self) -> &TimelineRenderPlan {
-        &self.plan
+        self.frame.execution_plan()
     }
 
     /// Temporal source batches removed from the ordinary compositing plan.
     pub fn temporal_batches(&self) -> &[TimelineTemporalDemandBatch] {
-        &self.temporal_batches
+        self.frame.batches()
+    }
+
+    /// File inputs retained until their producer supplies an actual image domain.
+    pub fn temporal_media_inputs(&self) -> &[crate::PreparedTimelineTemporalMediaInput] {
+        self.frame.temporal_media_inputs()
+    }
+
+    /// True until every file-backed temporal input has an admitted batch.
+    pub fn has_unbound_temporal_media(&self) -> bool {
+        self.frame.has_unbound_temporal_media()
+    }
+
+    /// Exact originating request, including its cancellation authority.
+    pub const fn execution_request(&self) -> &crate::TimelineFrameExecutionRequest {
+        self.frame.request()
     }
 
     /// Consumer-owned execution evidence.
@@ -107,11 +117,7 @@ impl<T> PreparedVisualFrameEvaluation<T> {
     }
 
     fn with_payload<U>(self, payload: U) -> PreparedVisualFrameEvaluation<U> {
-        PreparedVisualFrameEvaluation {
-            plan: self.plan,
-            temporal_batches: self.temporal_batches,
-            payload,
-        }
+        PreparedVisualFrameEvaluation { frame: self.frame, payload }
     }
 }
 
@@ -236,7 +242,7 @@ impl PreparedVisualNestedBinding {
 }
 
 /// One prepared Sequence instance in the recursive frame closure.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct PreparedVisualFrameNode<T> {
     id: PreparedVisualFrameNodeId,
     program: Arc<PreparedVisualProgram>,
@@ -360,7 +366,7 @@ impl<T> PreparedVisualFrameNode<T> {
 }
 
 /// Immutable recursive closure consumed by Preview or Export materialization.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct PreparedVisualFrameClosure<T> {
     root: PreparedVisualFrameNodeId,
     nodes: Vec<PreparedVisualFrameNode<T>>,
@@ -391,6 +397,47 @@ impl<T> PreparedVisualFrameClosure<T> {
     /// Deterministic pre-order node sequence.
     pub fn nodes(&self) -> &[PreparedVisualFrameNode<T>] {
         &self.nodes
+    }
+
+    /// Bind each temporal file Clip to its actual selected CPU image plane.
+    /// This is preparation only: root/child canvases, evaluation times, instance
+    /// paths and cancellation authority are never changed. The transactional
+    /// update changes only frame metadata; it duplicates no source pixels.
+    /// The source set is already frozen. Binding adds no source work; consumers
+    /// validate all Ready source domains and admit pixel coverage before DSP.
+    pub fn bind_temporal_media_image_domains(
+        &mut self,
+        mut image_domain: impl FnMut(
+            &PreparedVisualFrameNode<T>,
+            &crate::PreparedTimelineTemporalMediaInput,
+        ) -> Result<
+            (
+                mondrian_effects::EffectFrameExtent,
+                mondrian_core::ImageSampling,
+            ),
+            crate::TimelineTemporalPreparationError,
+        >,
+    ) -> Result<(), crate::TimelineTemporalPreparationError> {
+        if !self.nodes.iter().any(|node| node.evaluation.has_unbound_temporal_media()) {
+            return Ok(());
+        }
+        let mut frames = Vec::new();
+        for (index, original) in self.nodes.iter().enumerate() {
+            if !original.evaluation.has_unbound_temporal_media() {
+                continue;
+            }
+            frames.push((
+                index,
+                original
+                    .evaluation
+                    .frame
+                    .bind_temporal_media_image_domains(|batch| image_domain(original, batch))?,
+            ));
+        }
+        for (index, frame) in frames {
+            self.nodes[index].evaluation.frame = frame;
+        }
+        Ok(())
     }
 
     /// Replace every consumer payload after the complete recursive closure and
@@ -453,26 +500,45 @@ impl<T> PreparedVisualFrameClosure<T> {
         const WORST_LOCAL_COMPOSITOR_CANVASES: u64 = 4;
 
         let mut retained_outputs = 0_u64;
-        let mut largest_output = 0_u64;
+        let mut largest_local_work = 0_u64;
         for node in &self.nodes {
-            if !include_root && node.id == self.root {
-                continue;
+            let mut largest_output = 0_u64;
+            let mut temporal_outputs = 0_u64;
+            // Temporal images are CPU values even when root compositing is
+            // deferred to GPU. Their Clip plane can exceed the node canvas.
+            for batch in node.evaluation.temporal_batches() {
+                let extent = batch.execution_request().frame_extent();
+                let bytes = u64::from(extent.width())
+                    .checked_mul(u64::from(extent.height()))
+                    .and_then(|pixels| pixels.checked_mul(FLOAT_PIXEL_BYTES))
+                    .ok_or(PreparedVisualFrameClosureError::CpuMaterializationEstimateOverflow)?;
+                temporal_outputs = temporal_outputs
+                    .checked_add(bytes)
+                    .ok_or(PreparedVisualFrameClosureError::CpuMaterializationEstimateOverflow)?;
+                largest_output = largest_output.max(bytes);
             }
-            let resolution = node.execution_resolution;
-            let bytes = u64::from(resolution.width)
-                .checked_mul(u64::from(resolution.height))
-                .and_then(|pixels| pixels.checked_mul(FLOAT_PIXEL_BYTES))
+            // Source tiles of one node are prepared together; child tiles have
+            // retired by the time a parent materializes its own batch.
+            if include_root || node.id != self.root {
+                let resolution = node.execution_resolution;
+                let bytes = u64::from(resolution.width)
+                    .checked_mul(u64::from(resolution.height))
+                    .and_then(|pixels| pixels.checked_mul(FLOAT_PIXEL_BYTES))
+                    .ok_or(PreparedVisualFrameClosureError::CpuMaterializationEstimateOverflow)?;
+                retained_outputs = retained_outputs
+                    .checked_add(bytes)
+                    .ok_or(PreparedVisualFrameClosureError::CpuMaterializationEstimateOverflow)?;
+                largest_output = largest_output.max(bytes);
+            }
+            let local_work = largest_output
+                .checked_mul(WORST_LOCAL_COMPOSITOR_CANVASES)
+                .and_then(|bytes| bytes.checked_add(temporal_outputs))
+                .and_then(|bytes| bytes.checked_add(node.evaluation.frame.source_coverage_bytes()))
                 .ok_or(PreparedVisualFrameClosureError::CpuMaterializationEstimateOverflow)?;
-            retained_outputs = retained_outputs
-                .checked_add(bytes)
-                .ok_or(PreparedVisualFrameClosureError::CpuMaterializationEstimateOverflow)?;
-            largest_output = largest_output.max(bytes);
+            largest_local_work = largest_local_work.max(local_work);
         }
-        let local_compositor = largest_output
-            .checked_mul(WORST_LOCAL_COMPOSITOR_CANVASES)
-            .ok_or(PreparedVisualFrameClosureError::CpuMaterializationEstimateOverflow)?;
         retained_outputs
-            .checked_add(local_compositor)
+            .checked_add(largest_local_work)
             .ok_or(PreparedVisualFrameClosureError::CpuMaterializationEstimateOverflow)
     }
 }
@@ -668,8 +734,8 @@ where
                 frame: position.frame,
                 reason,
             })?;
-            validate_evaluation(sequence, position, &evaluation.plan)?;
-            let demands = collect_nested_demands(&evaluation.plan, &evaluation.temporal_batches);
+            validate_evaluation(sequence, position, evaluation.plan())?;
+            let demands = collect_nested_demands(evaluation.plan(), evaluation.temporal_batches());
             let node_index = u32::try_from(self.nodes.len())
                 .map_err(|_| PreparedVisualFrameClosureError::NodeCapacityExceeded)?;
             let id = PreparedVisualFrameNodeId(node_index);
@@ -780,7 +846,7 @@ where
                     return Err(PreparedVisualFrameClosureError::DuplicateNestedBinding {
                         parent_sequence_id: sequence.id,
                         placement: Box::new(demand.placement),
-                        sample: demand.sample,
+                        sample: Box::new(demand.sample),
                     });
                 }
                 node.bindings.push(binding);
@@ -1156,8 +1222,8 @@ pub enum PreparedVisualFrameClosureError {
         parent_sequence_id: SequenceId,
         /// Exact placement.
         placement: Box<TimelineClipExecutionRef>,
-        /// Current or temporal sample identity.
-        sample: PreparedVisualNestedSample,
+        /// Current or temporal sample identity, allocated only on failure.
+        sample: Box<PreparedVisualNestedSample>,
     },
     /// Closure exceeded its typed node-index capacity.
     NodeCapacityExceeded,
@@ -1392,13 +1458,25 @@ mod tests {
                     .map(Arc::new)
                     .map_err(|error| error.to_string())
             },
-            |program, position, _, _, _| {
+            |program, position, resolution, _, _| {
                 let plan = evaluate_prepared_visual_program(
                     program,
                     crate::TimelineEvaluationRequest::export(position),
                 )
                 .map_err(|error| error.to_string())?;
-                Ok(PreparedVisualFrameEvaluation::new(plan, Vec::new(), ()))
+                let extent =
+                    mondrian_effects::EffectFrameExtent::new(resolution.width, resolution.height);
+                let prepared = crate::timeline_temporal::prepare_timeline_temporal_execution(
+                    program,
+                    &plan,
+                    7,
+                    mondrian_effects::EffectExecutionContinuity::Discontinuous,
+                    extent,
+                    extent.full_frame_roi(),
+                    mondrian_core::ExecutionCancellationToken::new(),
+                )
+                .map_err(|error| error.to_string())?;
+                Ok(PreparedVisualFrameEvaluation::new(prepared, ()))
             },
         )
     }
@@ -1451,7 +1529,8 @@ mod tests {
     fn temporal_effect(offset: TimelineTime) -> EffectNode {
         static NEXT: AtomicU64 = AtomicU64::new(1);
         let id = NEXT.fetch_add(1, Ordering::Relaxed);
-        let effect_type = EffectType::Plugin(format!("test.prepared-visual-closure.temporal.{id}"));
+        let effect_type =
+            EffectType::External(format!("test.prepared-visual-closure.temporal.{id}"));
         register_effect_definition(
             EffectDefinition::new(
                 effect_type.key(),
@@ -1521,12 +1600,7 @@ mod tests {
                     ExecutionCancellationToken::new(),
                 )
                 .map_err(|error| error.to_string())?;
-                let (plan, temporal_batches) = prepared.into_parts();
-                Ok(PreparedVisualFrameEvaluation::new(
-                    plan,
-                    temporal_batches,
-                    (),
-                ))
+                Ok(PreparedVisualFrameEvaluation::new(prepared, ()))
             },
         )
     }
@@ -1623,14 +1697,26 @@ mod tests {
                     .map(Arc::new)
                     .map_err(|error| error.to_string())
             },
-            |program, position, _, _, _| {
+            |program, position, resolution, _, _| {
                 let mut plan = evaluate_prepared_visual_program(
                     program,
                     crate::TimelineEvaluationRequest::export(position),
                 )
                 .map_err(|error| error.to_string())?;
                 plan.position.time_base = equivalent_but_not_identical;
-                Ok(PreparedVisualFrameEvaluation::new(plan, Vec::new(), ()))
+                let extent =
+                    mondrian_effects::EffectFrameExtent::new(resolution.width, resolution.height);
+                let prepared = crate::timeline_temporal::prepare_timeline_temporal_execution(
+                    program,
+                    &plan,
+                    7,
+                    mondrian_effects::EffectExecutionContinuity::Discontinuous,
+                    extent,
+                    extent.full_frame_roi(),
+                    mondrian_core::ExecutionCancellationToken::new(),
+                )
+                .map_err(|error| error.to_string())?;
+                Ok(PreparedVisualFrameEvaluation::new(prepared, ()))
             },
         )
         .expect_err("closure must reject an evaluator plan on another grid");
@@ -2234,5 +2320,36 @@ mod tests {
         scratch
             .admit_cpu_active_working_set(required, TimelineCpuCompositePrecision::Float32)
             .expect("exact hard grant");
+    }
+    #[test]
+    fn original_frame_request_survives_payload_mapping() {
+        let sequence = Sequence::new("payload mapping owner");
+        let closure = prepare_direct_closure(
+            &sequence,
+            &[],
+            3,
+            Resolution { width: 12, height: 8 },
+            PreparedVisualChildCanvasPolicy::Authored,
+        )
+        .unwrap();
+        let request =
+            closure.node(closure.root()).unwrap().evaluation().execution_request().clone();
+        let mapped = closure
+            .try_map_payload(|node, _| {
+                Ok::<_, ()>(node.evaluation().execution_request().generation())
+            })
+            .unwrap();
+        request.cancellation().cancel();
+        let evaluated = mapped.node(mapped.root()).unwrap().evaluation();
+        assert!(evaluated.execution_request().cancellation().is_canceled());
+        assert_eq!(
+            evaluated.execution_request().evaluation(),
+            request.evaluation()
+        );
+        assert_eq!(
+            evaluated.execution_request().frame_extent(),
+            request.frame_extent()
+        );
+        assert_eq!(*evaluated.payload(), request.generation());
     }
 }

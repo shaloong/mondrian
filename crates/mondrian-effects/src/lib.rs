@@ -3,14 +3,31 @@
 //! 高级效果系统：LUT 调色 / 滤镜 / 转场 / 蒙版
 
 pub mod adjustment;
+pub use mondrian_core::EffectPassBlendPolicy;
+pub mod alpha_contract;
+mod float_frame;
+pub use alpha_contract::{
+    ColorFrameAlphaFormats, EffectAlphaConsumer, EffectAlphaContract, EffectAlphaOutputContract,
+};
+pub use float_frame::{
+    blend_float_frames_controlled, blend_float_frames_in_place, convert_alpha_sample,
+    materialize_finite_coverage_controlled, materialize_straight_coverage,
+    mix_float_frames_controlled, normal_over_output_alpha, over_float_sample,
+    validate_float32_frame_storage, EffectAlphaConversionFailure, EffectFloatFrame,
+    EffectFloatFrameError, EffectFloatFrameView,
+};
 pub mod chroma_key;
 pub mod color_curves;
 pub mod coverage;
 pub mod effect;
+mod project_properties;
+pub use project_properties::{rebind_effect_project_geometry, EffectProjectPropertyInitializer};
 pub mod execution;
 pub mod execution_contract;
 pub mod execution_planning;
 mod execution_session;
+pub mod extension_contract;
+pub mod extension_sdk;
 pub mod gamut_mapping;
 pub mod gpu_plan;
 pub mod graph;
@@ -20,10 +37,21 @@ pub mod hsl;
 pub mod lut;
 pub mod mask;
 pub mod mask_raster;
-pub mod plugin_contract;
-pub mod plugin_sdk;
 pub mod prepared;
 pub mod primary_grade;
+mod processor_feedback;
+mod processor_question;
+pub use processor_feedback::*;
+mod processor_residency;
+pub use processor_residency::{
+    EffectFloatProcessorFactory, EffectFloatProcessorInputRole, EffectFloatProcessorInstance,
+    EffectFloatProcessorPreparation, EffectFloatProcessorSizing, EffectFloatProcessorStorage,
+    EffectImageScaleRequirement, EffectProcessorControl, EffectProcessorHostResourceRefusal,
+    EffectProcessorHostResourceRefusalReceipt, EffectProcessorInputRequest,
+    EffectProcessorInputService, EffectProcessorInvocationError, EffectProcessorResources,
+    EffectProcessorRetention, EffectProcessorStopReason, EffectProcessorTransientMemoryRefusal,
+    PreparedEffectProcessorInput,
+};
 pub mod qualifier;
 pub mod temporal_execution;
 pub mod tracking;
@@ -41,11 +69,12 @@ pub use coverage::{has_positive_coverage, mix_straight_rgba, straight_rgba_from_
 pub use effect::{
     build_effect_render_graph, compile_clip_effect_graph, effect_category_tree, effect_definition,
     effect_display_name, effect_library_types, effect_registry_revision, instantiate_effect_node,
-    register_effect_definition, CustomEffectProcessorBinding, EffectCacheKeyBuilder,
-    EffectCachePolicy, EffectCategoryNode, EffectColorDomain, EffectColorDomainContract,
-    EffectDefinition, EffectDefinitionError, EffectEvalContext, EffectFrameContext,
-    EffectFrameContextError, EffectGraphBuildError, EffectGraphBuilder, EffectGraphPreparer,
-    EffectInstantiationError, EffectNode, EffectNodeExt, EffectPreparationContext, EffectRenderOp,
+    instantiate_effect_node_with_project_geometry, register_effect_definition,
+    CustomEffectProcessorBinding, EffectCacheKeyBuilder, EffectCachePolicy, EffectCategoryNode,
+    EffectColorDomain, EffectColorDomainContract, EffectDefinition, EffectDefinitionError,
+    EffectEvalContext, EffectFrameContext, EffectFrameContextError, EffectGraphBuildError,
+    EffectGraphBuilder, EffectGraphPreparer, EffectInstantiationError, EffectNode, EffectNodeExt,
+    EffectPreparationContext, EffectProjectGeometry, EffectProjectGeometryError, EffectRenderOp,
     EffectRenderParamsBuilder, EffectRenderPlan, EffectResourceDependency, EffectResourceRecovery,
     EffectType, PreparedEffectEvaluator, PreparedLut3D,
 };
@@ -79,6 +108,12 @@ pub use execution_planning::{
 pub use execution_session::{
     EffectExecutionSession, EffectExecutionSessionConfig, EffectExecutionSessionDiagnostics,
 };
+pub use extension_contract::{
+    effect_extension_runtime_status, EffectExtensionApiVersion, EffectExtensionContract,
+    EffectExtensionLibraryPolicy, EffectExtensionRuntimeFailurePolicy,
+    EffectExtensionRuntimeStatus, CURRENT_EFFECT_EXTENSION_API_VERSION,
+};
+pub use extension_sdk::{EffectExtensionDefinitionBuilder, EffectGraphDsl};
 pub use gamut_mapping::{GamutCompressionGrade, GamutMappingError, HighlightRecoveryGrade};
 pub use gpu_plan::{
     get_or_lower_effect_graph_to_gpu_plan, lower_effect_graph_node_to_gpu_point_plan,
@@ -99,10 +134,11 @@ pub use hdr_grading::{
     HDR_GRADING_SAMPLE_ROWS, HDR_GRADING_ZONE_COUNT,
 };
 pub use heterogeneous_execution::{
-    plan_effect_graph_value_execution, CompiledEffectValueExecutionPlan, EffectCompletionToken,
-    EffectGraphExecutionBudget, EffectGraphExecutionBudgetKind, EffectGraphExecutionPlanError,
-    EffectGraphExecutionRequest, EffectGraphExecutionStep, EffectMaterializationId,
-    EffectValueFormat, EffectValueMaterialization, EffectValueResidency,
+    plan_effect_graph_value_execution, CompiledEffectValueExecutionPlan,
+    EffectAlphaMaterializationAdmission, EffectCompletionToken, EffectGraphExecutionBudget,
+    EffectGraphExecutionBudgetKind, EffectGraphExecutionPlanError, EffectGraphExecutionRequest,
+    EffectGraphExecutionStep, EffectMaterializationId, EffectPlannedAlpha,
+    EffectPlannedValueFormat, EffectValueFormat, EffectValueMaterialization, EffectValueResidency,
     HeterogeneousCpuCompletionEvidence, HeterogeneousCpuExecutionStopReason,
     HeterogeneousCpuTransferEvidence, HeterogeneousEffectShapeIdentity,
     PreparedHeterogeneousCpuCompletion, PreparedHeterogeneousEffectWork,
@@ -119,15 +155,9 @@ pub use mask::{
     MaskShapeKeyframe, MAX_MASK_PATH_POINTS,
 };
 pub use mask_raster::{rasterize_mask_shape, MaskRasterError, PreparedMaskRaster};
-pub use plugin_contract::{
-    effect_plugin_runtime_status, EffectPluginApiVersion, EffectPluginContract,
-    EffectPluginLibraryPolicy, EffectPluginRuntimeFailurePolicy, EffectPluginRuntimeStatus,
-    CURRENT_EFFECT_PLUGIN_API_VERSION,
-};
-pub use plugin_sdk::{EffectGraphDsl, EffectPluginDefinitionBuilder};
 pub use prepared::{
-    EffectDependencyCheckError, EffectProgramDependencyIdentity, PreparedEffectProgram,
-    PreparedEffectStack, PreparedGradeGraph,
+    EffectDependencyCheckError, EffectProgramDependencyIdentity, PreparedEffectInput,
+    PreparedEffectProgram, PreparedEffectStack, PreparedGradeGraph,
 };
 pub use primary_grade::{AscCdlGrade, PrimariesGrade, PrimaryGradeError, WhiteBalanceGrade};
 pub use qualifier::{
@@ -135,14 +165,25 @@ pub use qualifier::{
     MAX_QUALIFIER_BLUR_RADIUS, MAX_QUALIFIER_DENOISE_RADIUS,
 };
 pub use temporal_execution::{
-    collect_temporal_frame_demands, prepare_temporal_frame_execution, EffectExecutionContinuity,
-    EffectFrameTileF32, EffectTemporalExecutionError, EffectTemporalExecutionOutput,
-    EffectTemporalExecutionRequest, EffectTemporalFrameDemandBatch, EffectTemporalFrameProvider,
-    EffectTemporalFrameProviderError, EffectTemporalFrameRequest, EffectTemporalSourceIdentity,
-    PreparedEffectTemporalExecution, PreparedTemporalFrameSet, PreparedTemporalFrameSetError,
+    collect_temporal_frame_demands, prepare_temporal_frame_execution,
+    prepare_temporal_frame_program, EffectExecutionContinuity, EffectFrameTileF32,
+    EffectTemporalExecutionError, EffectTemporalExecutionOutput, EffectTemporalExecutionRequest,
+    EffectTemporalFrameDemandBatch, EffectTemporalFrameProvider, EffectTemporalFrameProviderError,
+    EffectTemporalFrameRequest, EffectTemporalSourceIdentity, PreparedEffectTemporalExecution,
+    PreparedEffectTemporalProgram, PreparedTemporalFrameSet, PreparedTemporalFrameSetError,
 };
 pub use tracking::{
     canonicalize_tracking_shape, track_frame_pair, transform_tracking_shape, TrackingError,
     TrackingFrame, TrackingObservation, TrackingQuality, TrackingRegion, TrackingTransform,
 };
 pub use transition::Transition;
+
+pub use processor_question::{
+    EffectProcessorGuiActionFeedback, EffectProcessorGuiActionReceipt, EffectProcessorGuiAdmission,
+    EffectProcessorGuiPresence, EffectProcessorGuiState, EffectProcessorLiveQuestion,
+    EffectProcessorQuestionId, EffectProcessorQuestionReceipt, EffectProcessorQuestionReply,
+    EffectProcessorQuestionService, EffectProcessorQuestionState, EffectProcessorQuestionView,
+};
+
+#[cfg(test)]
+mod image_scale_admission_tests;

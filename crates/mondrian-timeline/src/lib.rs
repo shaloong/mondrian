@@ -11,6 +11,7 @@
 
 pub mod audio;
 pub mod audio_automation_edit;
+pub mod audio_automation_time;
 pub mod audio_channel_strip_edit;
 pub mod audio_component_edit;
 pub mod audio_processor_edit;
@@ -36,9 +37,12 @@ pub mod visual_schedule;
 pub use audio::*;
 pub use audio_automation_edit::{
     apply_audio_automation_edit, inspect_audio_automation, AudioAutomationAddressError,
-    AudioAutomationEdit, AudioAutomationEditBlocker, AudioAutomationEditError,
-    AudioAutomationEditOutcome, AudioAutomationEditRequest, AudioAutomationInspection,
-    AudioAutomationTarget, AudioAutomationValueContract,
+    AudioAutomationCurveContract, AudioAutomationEdit, AudioAutomationEditBlocker,
+    AudioAutomationEditError, AudioAutomationEditOutcome, AudioAutomationEditRequest,
+    AudioAutomationInspection, AudioAutomationTarget, AudioAutomationValueContract,
+};
+pub use audio_automation_time::{
+    audio_automation_author_time, audio_automation_execution_time, AudioAutomationTimeError,
 };
 pub use audio_channel_strip_edit::{
     apply_audio_channel_strip_edit, audio_channel_strip, inspect_audio_channel_strip,
@@ -54,13 +58,16 @@ pub use audio_component_edit::{
 };
 pub use audio_processor_edit::{
     apply_audio_processor_rack_edit, audio_processor_rack, inspect_audio_processor_rack,
-    AudioChannelStripRack, AudioProcessorRackAddress, AudioProcessorRackEdit,
-    AudioProcessorRackEditError, AudioProcessorRackEditOutcome, AudioProcessorRackEditRequest,
-    AudioProcessorRackInspection, AudioProcessorRackPlacement,
+    inspect_native_audio_authoring, AudioChannelStripRack, AudioProcessorRackAddress,
+    AudioProcessorRackEdit, AudioProcessorRackEditError, AudioProcessorRackEditOutcome,
+    AudioProcessorRackEditRequest, AudioProcessorRackInspection, AudioProcessorRackPlacement,
+    NativeAudioAuthorUpdate, NativeAudioParameterOperation, NativeAudioParameterWrite,
+    NativeAudioParameterWriteMode,
 };
 pub use audio_routing_edit::{
-    apply_audio_routing_edit, inspect_audio_mix_bus, inspect_audio_route,
-    inspect_audio_route_candidates, AudioBusRemovalPolicy, AudioMixBusInspection,
+    apply_audio_routing_edit, inspect_audio_mix_bus, inspect_audio_mix_buses,
+    inspect_audio_processor_sidechain, inspect_audio_route, inspect_audio_route_candidates,
+    AudioBusRemovalPolicy, AudioMixBusInspection, AudioProcessorSidechainInspection,
     AudioRouteCandidateInspection, AudioRouteInspection, AudioRoutingAddressError,
     AudioRoutingEdit, AudioRoutingEditBlocker, AudioRoutingEditError, AudioRoutingEditOutcome,
     AudioRoutingEditRequest,
@@ -87,7 +94,7 @@ pub use insert_edit::{
     InsertEditPlacement, InsertEditRequest, InsertSplitOutcome, InsertTimelineStatePolicy,
     InsertTransitionPolicy,
 };
-pub use keyframe::{InterpolationType, Keyframe, KeyframeTrack};
+pub use keyframe::{InterpolationType, Keyframe};
 pub use overwrite_edit::{
     apply_overwrite_conflicts, apply_sequence_track_conflicts_for_focus_group,
     apply_track_conflicts_for_focus_group, resolve_track_conflicts, resolve_track_overlaps,

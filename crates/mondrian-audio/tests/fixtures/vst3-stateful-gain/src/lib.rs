@@ -12,6 +12,8 @@ use std::{ptr, slice};
 
 use vst3::{uid, Class, ComRef, ComWrapper, Steinberg::Vst::*, Steinberg::*};
 
+mod event_oracle;
+
 fn copy_cstring(src: &str, dst: &mut [c_char]) {
     let c_string = CString::new(src).unwrap_or_else(|_| CString::default());
     let bytes = c_string.as_bytes_with_nul();
@@ -294,31 +296,6 @@ impl IAudioProcessorTrait for GainProcessor {
     unsafe fn process(&self, data: *mut ProcessData) -> tresult {
         let process_data = &*data;
 
-        if let Some(param_changes) = ComRef::from_raw(process_data.inputParameterChanges) {
-            let param_count = param_changes.getParameterCount();
-            for param_index in 0..param_count {
-                if let Some(param_queue) =
-                    ComRef::from_raw(param_changes.getParameterData(param_index))
-                {
-                    let param_id = param_queue.getParameterId();
-                    let point_count = param_queue.getPointCount();
-
-                    if param_id == 0 && point_count > 0 {
-                        let mut sample_offset = 0;
-                        let mut value = 0.0;
-                        let result =
-                            param_queue.getPoint(point_count - 1, &mut sample_offset, &mut value);
-
-                        if result == kResultTrue {
-                            self.gain.store(value.to_bits(), Ordering::Relaxed);
-                        }
-                    }
-                }
-            }
-        }
-
-        let gain = f64::from_bits(self.gain.load(Ordering::Relaxed)) as f32;
-
         let num_samples = process_data.numSamples as usize;
 
         if process_data.numInputs != 1 || process_data.numOutputs != 1 {
@@ -348,10 +325,51 @@ impl IAudioProcessorTrait for GainProcessor {
         let output_l = slice::from_raw_parts_mut(output_channels[0], num_samples);
         let output_r = slice::from_raw_parts_mut(output_channels[1], num_samples);
 
-        for i in 0..num_samples {
-            output_l[i] = gain * input_l[i];
-            output_r[i] = gain * input_r[i];
+        // SDK queue values define linear segments, with the previous block's
+        // final value at implicit sample -1. Process every point in one pass;
+        // no curve implementation or per-process allocation belongs here.
+        let mut gain = f64::from_bits(self.gain.load(Ordering::Relaxed));
+        let mut previous_offset = -1_i32;
+        let mut write_frame = |index: usize, value: f64| {
+            output_l[index] = value as f32 * input_l[index];
+            output_r[index] = value as f32 * input_r[index];
+        };
+        if let Some(param_changes) = ComRef::from_raw(process_data.inputParameterChanges) {
+            for param_index in 0..param_changes.getParameterCount() {
+                let Some(queue) = ComRef::from_raw(param_changes.getParameterData(param_index))
+                else {
+                    continue;
+                };
+                if queue.getParameterId() != 0 {
+                    continue;
+                }
+                for point_index in 0..queue.getPointCount() {
+                    let mut offset = 0;
+                    let mut value = 0.0;
+                    if queue.getPoint(point_index, &mut offset, &mut value) != kResultOk
+                        || offset <= previous_offset
+                        || offset < 0
+                        || offset >= process_data.numSamples
+                        || !value.is_finite()
+                        || !(0.0..=1.0).contains(&value)
+                    {
+                        return kInvalidArgument;
+                    }
+                    for sample in (previous_offset + 1)..=offset {
+                        let ratio = f64::from(sample - previous_offset)
+                            / f64::from(offset - previous_offset);
+                        write_frame(sample as usize, gain + (value - gain) * ratio);
+                    }
+                    previous_offset = offset;
+                    gain = value;
+                }
+                break;
+            }
         }
+        for sample in (previous_offset + 1) as usize..num_samples {
+            write_frame(sample, gain);
+        }
+        self.gain.store(gain.to_bits(), Ordering::Relaxed);
 
         kResultOk
     }
@@ -362,6 +380,251 @@ impl IAudioProcessorTrait for GainProcessor {
 }
 
 impl IProcessContextRequirementsTrait for GainProcessor {
+    unsafe fn getProcessContextRequirements(&self) -> u32 {
+        0
+    }
+}
+
+// A separate, always-Float64 class. The original Gain class and its state/PCM
+// behavior remain unchanged. Mode-specific signed half-ulp offsets witness
+// native input/output conversion and the actual setup/process mode.
+struct Float64GainProcessor {
+    inner: GainProcessor,
+    process_mode: std::sync::atomic::AtomicI32,
+}
+
+impl Float64GainProcessor {
+    const CID: TUID = uid(0xB64C8B19, 0x10234F81, 0x9CA26D31, 0x5F8702A1);
+    fn new() -> Self {
+        Self {
+            inner: GainProcessor::new(),
+            process_mode: std::sync::atomic::AtomicI32::new(-1),
+        }
+    }
+}
+
+impl Class for Float64GainProcessor {
+    type Interfaces = (IComponent, IAudioProcessor, IProcessContextRequirements);
+}
+impl IPluginBaseTrait for Float64GainProcessor {
+    unsafe fn initialize(&self, context: *mut FUnknown) -> tresult {
+        self.inner.initialize(context)
+    }
+    unsafe fn terminate(&self) -> tresult {
+        self.inner.terminate()
+    }
+}
+impl IComponentTrait for Float64GainProcessor {
+    unsafe fn getControllerClassId(&self, id: *mut TUID) -> tresult {
+        self.inner.getControllerClassId(id)
+    }
+    unsafe fn setIoMode(&self, mode: IoMode) -> tresult {
+        self.inner.setIoMode(mode)
+    }
+    unsafe fn getBusCount(&self, media: MediaType, direction: BusDirection) -> i32 {
+        self.inner.getBusCount(media, direction)
+    }
+    unsafe fn getBusInfo(
+        &self,
+        media: MediaType,
+        direction: BusDirection,
+        index: i32,
+        info: *mut BusInfo,
+    ) -> tresult {
+        self.inner.getBusInfo(media, direction, index, info)
+    }
+    unsafe fn getRoutingInfo(&self, input: *mut RoutingInfo, output: *mut RoutingInfo) -> tresult {
+        self.inner.getRoutingInfo(input, output)
+    }
+    unsafe fn activateBus(
+        &self,
+        media: MediaType,
+        direction: BusDirection,
+        index: i32,
+        active: TBool,
+    ) -> tresult {
+        self.inner.activateBus(media, direction, index, active)
+    }
+    unsafe fn setActive(&self, active: TBool) -> tresult {
+        self.inner.setActive(active)
+    }
+    unsafe fn setState(&self, state: *mut IBStream) -> tresult {
+        self.inner.setState(state)
+    }
+    unsafe fn getState(&self, state: *mut IBStream) -> tresult {
+        self.inner.getState(state)
+    }
+}
+impl IAudioProcessorTrait for Float64GainProcessor {
+    unsafe fn setBusArrangements(
+        &self,
+        inputs: *mut SpeakerArrangement,
+        input_count: i32,
+        outputs: *mut SpeakerArrangement,
+        output_count: i32,
+    ) -> tresult {
+        self.inner.setBusArrangements(inputs, input_count, outputs, output_count)
+    }
+    unsafe fn getBusArrangement(
+        &self,
+        direction: BusDirection,
+        index: i32,
+        arrangement: *mut SpeakerArrangement,
+    ) -> tresult {
+        self.inner.getBusArrangement(direction, index, arrangement)
+    }
+    unsafe fn canProcessSampleSize(&self, size: i32) -> tresult {
+        match size as SymbolicSampleSizes {
+            SymbolicSampleSizes_::kSample32 => kResultFalse,
+            SymbolicSampleSizes_::kSample64 => kResultOk,
+            _ => kInvalidArgument,
+        }
+    }
+    unsafe fn getLatencySamples(&self) -> u32 {
+        0
+    }
+    unsafe fn setupProcessing(&self, setup: *mut ProcessSetup) -> tresult {
+        let Some(setup) = setup.as_ref() else {
+            return kInvalidArgument;
+        };
+        if setup.symbolicSampleSize != SymbolicSampleSizes_::kSample64
+            || !matches!(
+                setup.processMode,
+                ProcessModes_::kRealtime | ProcessModes_::kOffline
+            )
+            || setup.sampleRate != 48_000.0
+            || setup.maxSamplesPerBlock != 4
+        {
+            return kInvalidArgument;
+        }
+        self.process_mode.store(setup.processMode, Ordering::Relaxed);
+        kResultOk
+    }
+    unsafe fn setProcessing(&self, state: TBool) -> tresult {
+        self.inner.setProcessing(state)
+    }
+    unsafe fn process(&self, data: *mut ProcessData) -> tresult {
+        let Some(data) = data.as_ref() else {
+            return kInvalidArgument;
+        };
+        if data.symbolicSampleSize != SymbolicSampleSizes_::kSample64
+            || data.processMode != self.process_mode.load(Ordering::Relaxed)
+            || !(0..=4).contains(&data.numSamples)
+        {
+            return kInvalidArgument;
+        }
+        let mut gain = f64::from_bits(self.inner.gain.load(Ordering::Relaxed));
+        // Legal control-scoped zero-sample delivery has no audio buffers.
+        if data.numSamples == 0 {
+            if let Some(changes) = ComRef::from_raw(data.inputParameterChanges) {
+                for index in 0..changes.getParameterCount() {
+                    let Some(queue) = ComRef::from_raw(changes.getParameterData(index)) else {
+                        return kInvalidArgument;
+                    };
+                    if queue.getParameterId() != 0 {
+                        return kInvalidArgument;
+                    }
+                    for point in 0..queue.getPointCount() {
+                        let mut offset = -1;
+                        if queue.getPoint(point, &mut offset, &mut gain) != kResultOk
+                            || offset != 0
+                            || !gain.is_finite()
+                            || !(0.0..=1.0).contains(&gain)
+                        {
+                            return kInvalidArgument;
+                        }
+                    }
+                }
+            }
+            self.inner.gain.store(gain.to_bits(), Ordering::Relaxed);
+            return kResultOk;
+        }
+        if data.numInputs != 1
+            || data.numOutputs != 1
+            || data.inputs.is_null()
+            || data.outputs.is_null()
+        {
+            return kInvalidArgument;
+        }
+        let input = &*data.inputs;
+        let output = &*data.outputs;
+        if input.numChannels != 2
+            || output.numChannels != 2
+            || input.__field0.channelBuffers64.is_null()
+            || output.__field0.channelBuffers64.is_null()
+        {
+            return kInvalidArgument;
+        }
+        let input_channels = slice::from_raw_parts(input.__field0.channelBuffers64, 2);
+        let output_channels = slice::from_raw_parts(output.__field0.channelBuffers64, 2);
+        if input_channels.iter().any(|p| p.is_null()) || output_channels.iter().any(|p| p.is_null())
+        {
+            return kInvalidArgument;
+        }
+        let frames = data.numSamples as usize;
+        let input_l = slice::from_raw_parts(input_channels[0], frames);
+        let input_r = slice::from_raw_parts(input_channels[1], frames);
+        let output_l = slice::from_raw_parts_mut(output_channels[0], frames);
+        let output_r = slice::from_raw_parts_mut(output_channels[1], frames);
+        let bias: f64 = match data.processMode {
+            ProcessModes_::kRealtime => 1.0 / 16_777_216.0,
+            ProcessModes_::kOffline => 3.0 / 16_777_216.0,
+            _ => return kInvalidArgument,
+        };
+        let transform = |sample: f64, gain: f64| {
+            let shifted = if sample == 0.0 {
+                sample
+            } else {
+                sample + bias.copysign(sample)
+            };
+            shifted * gain
+        };
+        let mut write_frame = |index: usize, value: f64| {
+            output_l[index] = transform(input_l[index], value);
+            output_r[index] = transform(input_r[index], value);
+        };
+        let mut previous_offset = -1_i32;
+        if let Some(changes) = ComRef::from_raw(data.inputParameterChanges) {
+            for index in 0..changes.getParameterCount() {
+                let Some(queue) = ComRef::from_raw(changes.getParameterData(index)) else {
+                    return kInvalidArgument;
+                };
+                if queue.getParameterId() != 0 {
+                    return kInvalidArgument;
+                }
+                for point in 0..queue.getPointCount() {
+                    let mut offset = 0;
+                    let mut value = 0.0;
+                    if queue.getPoint(point, &mut offset, &mut value) != kResultOk
+                        || offset <= previous_offset
+                        || offset < 0
+                        || offset >= data.numSamples
+                        || !value.is_finite()
+                        || !(0.0..=1.0).contains(&value)
+                    {
+                        return kInvalidArgument;
+                    }
+                    for sample in (previous_offset + 1)..=offset {
+                        let ratio = f64::from(sample - previous_offset)
+                            / f64::from(offset - previous_offset);
+                        write_frame(sample as usize, gain + (value - gain) * ratio);
+                    }
+                    previous_offset = offset;
+                    gain = value;
+                }
+            }
+        }
+        for sample in (previous_offset + 1) as usize..frames {
+            write_frame(sample, gain);
+        }
+        self.inner.gain.store(gain.to_bits(), Ordering::Relaxed);
+        kResultOk
+    }
+    unsafe fn getTailSamples(&self) -> u32 {
+        0
+    }
+}
+impl IProcessContextRequirementsTrait for Float64GainProcessor {
     unsafe fn getProcessContextRequirements(&self) -> u32 {
         0
     }
@@ -538,7 +801,7 @@ impl IPluginFactoryTrait for Factory {
     }
 
     unsafe fn countClasses(&self) -> i32 {
-        2
+        5
     }
 
     unsafe fn getClassInfo(&self, index: i32, info: *mut PClassInfo) -> tresult {
@@ -561,6 +824,15 @@ impl IPluginFactoryTrait for Factory {
 
                 kResultOk
             }
+            2 | 3 => event_oracle::class_info(index - 2, info),
+            4 => {
+                let info = &mut *info;
+                info.cid = Float64GainProcessor::CID;
+                info.cardinality = PClassInfo_::ClassCardinality_::kManyInstances as int32;
+                copy_cstring("Audio Module Class", &mut info.category);
+                copy_cstring("Mondrian Float64 Gain Qualification", &mut info.name);
+                kResultOk
+            }
             _ => kInvalidArgument,
         }
     }
@@ -578,7 +850,10 @@ impl IPluginFactoryTrait for Factory {
             GainController::CID => {
                 Some(ComWrapper::new(GainController::new()).to_com_ptr::<FUnknown>().unwrap())
             }
-            _ => None,
+            Float64GainProcessor::CID => {
+                Some(ComWrapper::new(Float64GainProcessor::new()).to_com_ptr::<FUnknown>().unwrap())
+            }
+            cid => event_oracle::create_instance(cid),
         };
 
         if let Some(instance) = instance {

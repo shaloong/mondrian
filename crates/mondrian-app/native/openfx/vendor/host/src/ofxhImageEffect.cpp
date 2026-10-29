@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
 #include <math.h>
+#include <cmath>
 
 // ofx
 #include "ofxCore.h"
@@ -29,6 +30,8 @@
 
 #include <string.h>
 #include <stdarg.h>
+#include <memory>
+#include <new>
 
 namespace OFX {
 
@@ -496,33 +499,33 @@ namespace OFX {
       double Instance::getDoubleProperty(const std::string &name, int index) const
       {
         if(name==kOfxImageEffectPropProjectSize){
-          if(index>=2) throw Property::Exception(kOfxStatErrBadIndex);
+          if(index<0 || index>=2) throw Property::Exception(kOfxStatErrBadIndex);
           double values[2];
           getProjectSize(values[0],values[1]);
           return values[index];
         }
         else if(name==kOfxImageEffectPropProjectOffset){
-          if(index>=2) throw Property::Exception(kOfxStatErrBadIndex);
+          if(index<0 || index>=2) throw Property::Exception(kOfxStatErrBadIndex);
           double values[2];
           getProjectOffset(values[0],values[1]);
           return values[index];
         }
         else if(name==kOfxImageEffectPropProjectExtent){
-          if(index>=2) throw Property::Exception(kOfxStatErrBadIndex);
+          if(index<0 || index>=2) throw Property::Exception(kOfxStatErrBadIndex);
           double values[2];
           getProjectExtent(values[0],values[1]);
           return values[index];
         }
         else if(name==kOfxImageEffectPropProjectPixelAspectRatio){
-          if(index>=1) throw Property::Exception(kOfxStatErrBadIndex);
+          if(index<0 || index>=1) throw Property::Exception(kOfxStatErrBadIndex);
           return getProjectPixelAspectRatio();
         }
         else if(name==kOfxImageEffectInstancePropEffectDuration){
-          if(index>=1) throw Property::Exception(kOfxStatErrBadIndex);
+          if(index<0 || index>=1) throw Property::Exception(kOfxStatErrBadIndex);
           return getEffectDuration();
         }
         else if(name==kOfxImageEffectPropFrameRate){
-          if(index>=1) throw Property::Exception(kOfxStatErrBadIndex);
+          if(index<0 || index>=1) throw Property::Exception(kOfxStatErrBadIndex);
           return getFrameRate();
         }
         else
@@ -532,28 +535,37 @@ namespace OFX {
       void Instance::getDoublePropertyN(const std::string &name, double* first, int n) const
       {
         if(name==kOfxImageEffectPropProjectSize){
-          if(n>2) throw Property::Exception(kOfxStatErrBadIndex);
-          getProjectSize(first[0],first[1]);
+          if(n<0 || n>2) throw Property::Exception(kOfxStatErrBadIndex);
+          if(n==0) return;
+          double values[2];
+          getProjectSize(values[0],values[1]);
+          for(int i=0; i<n; ++i) first[i] = values[i];
         }
         else if(name==kOfxImageEffectPropProjectOffset){
-          if(n>2) throw Property::Exception(kOfxStatErrBadIndex);
-          getProjectOffset(first[0],first[1]);
+          if(n<0 || n>2) throw Property::Exception(kOfxStatErrBadIndex);
+          if(n==0) return;
+          double values[2];
+          getProjectOffset(values[0],values[1]);
+          for(int i=0; i<n; ++i) first[i] = values[i];
         }
         else if(name==kOfxImageEffectPropProjectExtent){
-          if(n>2) throw Property::Exception(kOfxStatErrBadIndex);
-          getProjectExtent(first[0],first[1]);
+          if(n<0 || n>2) throw Property::Exception(kOfxStatErrBadIndex);
+          if(n==0) return;
+          double values[2];
+          getProjectExtent(values[0],values[1]);
+          for(int i=0; i<n; ++i) first[i] = values[i];
         }
         else if(name==kOfxImageEffectPropProjectPixelAspectRatio){
-          if(n>1) throw Property::Exception(kOfxStatErrBadIndex);
-          *first = getProjectPixelAspectRatio();
+          if(n<0 || n>1) throw Property::Exception(kOfxStatErrBadIndex);
+          if(n==1) *first = getProjectPixelAspectRatio();
         }
         else if(name==kOfxImageEffectInstancePropEffectDuration){
-          if(n>1) throw Property::Exception(kOfxStatErrBadIndex);
-          *first = getEffectDuration();
+          if(n<0 || n>1) throw Property::Exception(kOfxStatErrBadIndex);
+          if(n==1) *first = getEffectDuration();
         }
         else if(name==kOfxImageEffectPropFrameRate){
-          if(n>1) throw Property::Exception(kOfxStatErrBadIndex);
-          *first = getFrameRate();
+          if(n<0 || n>1) throw Property::Exception(kOfxStatErrBadIndex);
+          if(n==1) *first = getFrameRate();
         }
         else
           throw Property::Exception(kOfxStatErrUnknown);
@@ -624,9 +636,9 @@ namespace OFX {
         if(instance)
           return instance;
         else{
-          Memory::Instance* instance = new Memory::Instance;
+          auto instance = std::make_unique<Memory::Instance>();
           instance->alloc(nBytes);
-          return instance;
+          return instance.release();
         }
       }
 
@@ -1279,6 +1291,7 @@ namespace OFX {
       OfxStatus Instance::getFrameNeededAction(OfxTime time,
                                                RangeMap &rangeMap)
       {
+        if (!std::isfinite(time)) { return kOfxStatErrValue; }
         OfxStatus stat = kOfxStatReplyDefault;
         Property::Set outArgs;
 
@@ -1304,6 +1317,9 @@ namespace OFX {
               s.readonly = false;
               s.defaultValue = "";
               outArgs.createProperty(s);
+              // Keep this OFX variable property variable, but refuse excessive
+              // setter indices/counts before storage grows or input is copied.
+              outArgs.fetchProperty(name)->setMaximumDimension(2 * kMaximumFrameNeededRanges);
               /// initialise it to the current frame
               outArgs.setDoubleProperty(name, time, 0);
               outArgs.setDoubleProperty(name, time, 1);
@@ -1319,38 +1335,17 @@ namespace OFX {
                            &outArgs);
 #         ifdef OFX_DEBUG_ACTIONS
             std::cout << "OFX: "<<(void*)this<<"->"<<kOfxImageEffectActionGetFramesNeeded<<"("<<time<<")->"<<StatStr(stat);
-            if (stat == kOfxStatOK) {
-                std::cout << ": ";
-                for(std::map<std::string, ClipInstance*>::iterator it=_clips.begin();
-                    it!=_clips.end();
-                    ++it) {
-                    ClipInstance *clip = it->second;
-
-                    if(!clip->isOutput()) {
-                        std::string name = "OfxImageClipPropFrameRange_"+it->first;
-                        std::cout << it->first << "->[";
-
-                        int nRanges = outArgs.getDimension(name);
-                        for(int r=0;r<nRanges;){
-                            double min = outArgs.getDoubleProperty(name,r);
-                            double max = outArgs.getDoubleProperty(name,r+1);
-                            r += 2;
-                            std::cout <<"("<<min<<","<<max<<")";
-                            if (r < nRanges-1) {
-                                std::cout << ",";
-                            }
-                        }
-                        std::cout << "]";
-                    }
-                }
-            }
+            // Returned dimensions/endpoints are untrusted until validated below.
             std::cout << std::endl;
 #         endif
         }
 
-        OfxRangeD defaultRange;
-        defaultRange.min =
-          defaultRange.max = time;
+        // A failed action has no usable request, even if it wrote plausible
+        // ranges. Never append defaults/partial values to the caller's map.
+        if (stat != kOfxStatOK && stat != kOfxStatReplyDefault) { return stat; }
+        RangeMap prepared;
+        const OfxRangeD defaultRange{time, time};
+        size_t totalRanges = 0;
 
         for(std::map<std::string, ClipInstance*>::iterator it=_clips.begin();
             it!=_clips.end();
@@ -1358,35 +1353,40 @@ namespace OFX {
           ClipInstance *clip = it->second;
 
           if(!clip->isOutput()) {
-            if(stat != kOfxStatOK) {
-              rangeMap[clip].push_back(defaultRange);
+            if(stat == kOfxStatReplyDefault) {
+              // Residual outArgs, including malformed or refused writes, are
+              // irrelevant when the action requests the normative defaults.
+              if (++totalRanges > kMaximumFrameNeededRanges) { return kOfxStatErrUnsupported; }
+              prepared[clip].push_back(defaultRange);
             }
             else {
               std::string name = "OfxImageClipPropFrameRange_"+it->first;
-
+              if (outArgs.fetchProperty(name)->writeLimitExceeded()) { return kOfxStatErrUnsupported; }
               int nRanges = outArgs.getDimension(name);
-              if(nRanges%2 != 0)
+              if(nRanges < 0 || nRanges%2 != 0)
                 return kOfxStatFailed; // bad! needs to be divisible by 2
-
-              if(nRanges == 0) {
-                rangeMap[clip].push_back(defaultRange);
-              }
-              else {
-                for(int r=0;r<nRanges;){
+              const size_t pairs = static_cast<size_t>(nRanges / 2);
+              if (pairs > kMaximumFrameNeededRanges - totalRanges) { return kOfxStatErrUnsupported; }
+              totalRanges += pairs;
+              // Zero dimensions on OK explicitly request no frames. Preserve
+              // that empty input entry; do not invent a current-frame read.
+              auto& ranges = prepared[clip];
+              ranges.reserve(pairs);
+              for(int r=0;r<nRanges;){
                   double min = outArgs.getDoubleProperty(name,r);
                   double max = outArgs.getDoubleProperty(name,r+1);
                   r += 2;
-
+                  if (!std::isfinite(min) || !std::isfinite(max) || min > max) { return kOfxStatFailed; }
                   OfxRangeD range;
                   range.min = min;
                   range.max = max;
-                  rangeMap[clip].push_back(range);
-                }
+                  ranges.push_back(range);
               }
             }
           }
         }
 
+        rangeMap.swap(prepared);
         return stat;
       }
 
@@ -1725,6 +1725,13 @@ namespace OFX {
           return false;
         }
 
+        // setupClipPreferencesArgs already installed the host defaults.
+        // ReplyDefault leaves them in effect; outArgs may contain residual writes.
+        if(st == kOfxStatReplyDefault) {
+          _clipPrefsDirty = false;
+          return true;
+        }
+
 #       ifdef OFX_DEBUG_ACTIONS
           std::cout << ": ";
 #       endif
@@ -2025,9 +2032,16 @@ namespace OFX {
           return kOfxStatErrBadHandle;
         }
 
-        ClipInstance *clipInstance = reinterpret_cast<ClipInstance*>(h1);
+        ClipBase *clipBase = reinterpret_cast<ClipBase*>(h1);
 
-        if (!clipInstance || !clipInstance->verifyMagic()) {
+        if (!clipBase || !clipBase->verifyMagic()) {
+          *h3 = NULL;
+          return kOfxStatErrBadHandle;
+        }
+
+        // A live ClipDescriptor is a ClipBase, but cannot fetch an image.
+        ClipInstance *clipInstance = dynamic_cast<ClipInstance*>(clipBase);
+        if (!clipInstance) {
           *h3 = NULL;
           return kOfxStatErrBadHandle;
         }
@@ -2042,10 +2056,16 @@ namespace OFX {
         *h3 = image->getPropHandle();
 
         return kOfxStatOK;
+        } catch (const Property::Exception& error) {
+          if (h3) { *h3 = NULL; }
+          return error.getStatus() == kOfxStatErrMemory ? kOfxStatErrMemory : kOfxStatFailed;
+        } catch (const std::bad_alloc&) {
+          *h3 = NULL;
+          return kOfxStatErrMemory;
         } catch (...) {
           *h3 = NULL;
 
-          return kOfxStatErrBadHandle;
+          return kOfxStatFailed;
         }
       }
 
@@ -2082,6 +2102,8 @@ namespace OFX {
         if (!clip) {
           return kOfxStatErrBadHandle;
         }
+        *clip = NULL;
+        if (propertySet) { *propertySet = NULL; }
 
         ImageEffect::Base *effectBase = reinterpret_cast<ImageEffect::Base*>(imageEffect);
 
@@ -2089,7 +2111,8 @@ namespace OFX {
           return kOfxStatErrBadHandle;
         }
 
-        ImageEffect::Instance *effectInstance = reinterpret_cast<ImageEffect::Instance*>(effectBase);
+        // Descriptor is also a valid Base, but cannot supply instance clips.
+        ImageEffect::Instance *effectInstance = dynamic_cast<ImageEffect::Instance*>(effectBase);
 
         if(effectInstance){
           ClipInstance* instance = effectInstance->getClip(name);
@@ -2103,6 +2126,8 @@ namespace OFX {
 
         return kOfxStatErrBadHandle;
         } catch (...) {
+          if (clip) { *clip = NULL; }
+          if (propertySet) { *propertySet = NULL; }
           return kOfxStatErrBadHandle;
         }
       }
@@ -2116,24 +2141,40 @@ namespace OFX {
           return kOfxStatErrBadHandle;
         }
 
-        ClipInstance *clipInstance = reinterpret_cast<ClipInstance*>(clip);
+        ClipBase *clipBase = reinterpret_cast<ClipBase*>(clip);
 
-        if (!clipInstance || !clipInstance->verifyMagic()) {
+        if (!clipBase || !clipBase->verifyMagic()) {
           bounds->x1 = bounds->y1 = bounds->x2 = bounds->y2 = 0.;
 
           return kOfxStatErrBadHandle;
         }
 
-        *bounds = clipInstance->getRegionOfDefinition(time);
-        if (bounds->x2 < bounds->x1 || bounds->y2 < bounds->y1) {
-          // the RoD is invalid (empty is OK)
+        // Region queries also require an instance, not a live descriptor.
+        ClipInstance *clipInstance = dynamic_cast<ClipInstance*>(clipBase);
+        if (!clipInstance) {
+          bounds->x1 = bounds->y1 = bounds->x2 = bounds->y2 = 0.;
+          return kOfxStatErrBadHandle;
+        }
 
+        *bounds = clipInstance->getRegionOfDefinition(time);
+        if (!std::isfinite(bounds->x1) || !std::isfinite(bounds->y1) ||
+            !std::isfinite(bounds->x2) || !std::isfinite(bounds->y2) ||
+            bounds->x2 < bounds->x1 || bounds->y2 < bounds->y1) {
+          // the RoD is invalid (empty is OK)
+          *bounds = {};
           return kOfxStatFailed;
         }
 
         return kOfxStatOK;
+        } catch (const Property::Exception& error) {
+          if (bounds) { *bounds = {}; }
+          return error.getStatus() == kOfxStatErrMemory ? kOfxStatErrMemory : kOfxStatFailed;
+        } catch (const std::bad_alloc&) {
+          if (bounds) { *bounds = {}; }
+          return kOfxStatErrMemory;
         } catch (...) {
-          return kOfxStatErrBadHandle;
+          if (bounds) { *bounds = {}; }
+          return kOfxStatFailed;
         }
       }
 
@@ -2168,12 +2209,17 @@ namespace OFX {
         }
 
         ImageEffect::Base *effectBase = reinterpret_cast<ImageEffect::Base*>(instanceHandle);
-        ImageEffect::Instance *effectInstance = reinterpret_cast<ImageEffect::Instance*>(effectBase);
         Memory::Instance* memory;
 
-        if(effectInstance){
-
-          if (!effectInstance->verifyMagic()) {
+        if(effectBase){
+          if (!effectBase->verifyMagic()) {
+            *memoryHandle = NULL;
+            return kOfxStatErrBadHandle;
+          }
+          // A live descriptor is also a Base handle, but cannot own an
+          // instance allocation. Admit its actual type before instance calls.
+          ImageEffect::Instance *effectInstance = dynamic_cast<ImageEffect::Instance*>(effectBase);
+          if (!effectInstance) {
             *memoryHandle = NULL;
             return kOfxStatErrBadHandle;
           }
@@ -2698,6 +2744,8 @@ namespace OFX {
         { kOfxParamHostPropSupportsCustomInteract, Property::eInt, 1, true, "0" },
         { kOfxParamHostPropSupportsStringAnimation, Property::eInt, 1, true, "0" },
         { kOfxParamHostPropSupportsChoiceAnimation, Property::eInt, 1, true, "0"  },
+        { kOfxParamHostPropSupportsStrChoice, Property::eInt, 1, true, "0" },
+        { kOfxParamHostPropSupportsStrChoiceAnimation, Property::eInt, 1, true, "0" },
         { kOfxParamHostPropSupportsBooleanAnimation, Property::eInt, 1, true, "0" },
         { kOfxParamHostPropSupportsCustomAnimation, Property::eInt, 1, true, "0" },
         { kOfxPropHostOSHandle, Property::ePointer, 1, true, NULL },
@@ -2753,9 +2801,9 @@ namespace OFX {
         if(instance)
           return instance;
         else{
-          Memory::Instance* instance = new Memory::Instance;
+          auto instance = std::make_unique<Memory::Instance>();
           instance->alloc(nBytes);
-          return instance;
+          return instance.release();
         }
       }
 
