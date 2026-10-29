@@ -13691,6 +13691,60 @@ mod restored_audio_activation_tests {
             std::path::Path::new("COM lifecycle control")
         }
     }
+
+    struct ModuleRetirementWitness {
+        component: ComPtr<IComponent>,
+        refs_at_retirement: Arc<std::sync::atomic::AtomicU32>,
+    }
+    impl VstModule for ModuleRetirementWitness {
+        fn visit_owned_storage(
+            &self,
+            _: &mut dyn crate::host_storage::HostStorageVisitor,
+        ) -> std::result::Result<(), crate::host_storage::HostStorageError> {
+            Ok(())
+        }
+        fn get_factory(&self) -> Result<*mut IPluginFactory> {
+            panic!("no factory in module retirement witness")
+        }
+        fn path(&self) -> &std::path::Path {
+            std::path::Path::new("COM retirement witness")
+        }
+    }
+    impl Drop for ModuleRetirementWitness {
+        fn drop(&mut self) {
+            // This witness retains the one reference needed to inspect the
+            // real COM count safely. All instance/temporary refs must be gone.
+            let count = unsafe { self.component.addRef() };
+            unsafe { self.component.release() };
+            self.refs_at_retirement.store(count - 1, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    #[test]
+    fn completed_construction_handoff_retires_guard_refs_before_module_owner() {
+        let mut fixture = Fixture::with_preparation(
+            vec![true],
+            vec![true],
+            crate::host::PluginLoadPreparation::Deferred,
+            None,
+        );
+        let observed = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        fixture.plugin._module = Box::new(ModuleRetirementWitness {
+            component: fixture.plugin.component.clone(),
+            refs_at_retirement: Arc::clone(&observed),
+        });
+        let mut guard = InitializedComponent::new(fixture.plugin.component.clone());
+        guard.attach_controller(None, false);
+        // Exercise the actual load constructor's ownership handoff. Dropping
+        // the assembled owner models a fallible final load-preparation step.
+        let _connection = guard.take_connection();
+        drop(fixture);
+        assert_eq!(
+            observed.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "only the witness reference may remain when module ownership retires"
+        );
+    }
     struct Fixture {
         plugin: PluginImpl,
         probe: Arc<Mutex<Probe>>,
