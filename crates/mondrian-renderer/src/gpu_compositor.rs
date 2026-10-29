@@ -6500,7 +6500,7 @@ mod tests {
         assert_eq!(uniforms[0].header, [17, 0, 0, 0]);
         assert_eq!(uniforms[0].params, [0.0, 100.0, 0.0, 0.0]);
         assert_eq!(uniforms[0].color, [0.0, 100.0, 0.0, 0.0]);
-        assert_eq!(uniforms[0].extra0, [0.0, 100.0, 25.0, 0.0]);
+        assert_eq!(uniforms[0].extra0, [0.0, 0.0, 100.0, 25.0]);
         assert_eq!(uniforms[0].extra1, [1.0, 0.0, 0.0, 0.0]);
         assert_eq!(uniforms[1].header[0], 0);
     }
@@ -7019,6 +7019,152 @@ mod tests {
                 "GPU point-effect accuracy budget exceeded: {report:#?}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn gpu_builtin_point_effects_match_cpu_float_reference_on_real_wgpu_device() {
+        use crate::color_accuracy::{
+            compare_linear_rgba, LinearAccuracyBudget, LinearRgbaAccuracyBudget,
+        };
+        use mondrian_effects::{
+            apply_compiled_effect_graph_rgba_f32, compile_reference_render_graph,
+            lower_effect_graph_to_gpu_plan, BlackAndWhiteGrade, ChannelMixerGrade, ChannelSource,
+            EffectGraphBuilderState, EffectRenderOp, HueBand, HueSaturationGrade, InvertChannels,
+            ShiftChannelsGrade,
+        };
+
+        let Ok(context) = crate::GpuContext::new().await else {
+            eprintln!("skipping GPU built-in point-effect parity test: no GPU adapter available");
+            return;
+        };
+        let data = vec![
+            [0.25_f32, 0.5, 0.75, 1.0],
+            [0.9, 0.1, 0.2, 1.0],
+            [0.5, 0.5, 0.5, 1.0],
+            [-0.2, 1.4, 0.35, 1.0],
+            [0.05, 0.07, 0.9, 0.6],
+            [1.6, 0.0, 0.0, 0.25],
+        ];
+        let frame = CpuColorFrame::working(WorkingRgbaF32Frame {
+            sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
+            alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
+            width: 3,
+            height: 2,
+            color_space: WorkingColorSpace::LinearRec709,
+            data,
+        });
+        let mut builder = EffectGraphBuilderState::new();
+        builder.append_unary(EffectRenderOp::Invert {
+            channels: InvertChannels::RedGreen,
+            blend_with_original: 0.0,
+        });
+        builder.append_unary(EffectRenderOp::Invert {
+            channels: InvertChannels::Hls,
+            blend_with_original: 0.35,
+        });
+        builder.append_unary(EffectRenderOp::HueSaturation {
+            grade: HueSaturationGrade::new(
+                HueBand::Reds,
+                45.0,
+                30.0,
+                -10.0,
+                0.25,
+                150.0,
+                40.0,
+                5.0,
+            )
+            .expect("valid red band grade"),
+        });
+        builder.append_unary(EffectRenderOp::HueSaturation {
+            grade: HueSaturationGrade::new(
+                HueBand::Master,
+                -30.0,
+                -20.0,
+                15.0,
+                0.0,
+                0.0,
+                25.0,
+                0.0,
+            )
+            .expect("valid master band grade"),
+        });
+        builder.append_unary(EffectRenderOp::BlackAndWhite {
+            grade: BlackAndWhiteGrade::new(
+                [40.0, 60.0, 40.0, 60.0, 20.0, 80.0],
+                0.35,
+                [0.9, 0.8, 0.6],
+            )
+            .expect("valid black and white grade"),
+        });
+        builder.append_unary(EffectRenderOp::ShiftChannels {
+            grade: ShiftChannelsGrade::new(
+                ChannelSource::Green,
+                ChannelSource::Luminance,
+                ChannelSource::Blue,
+                ChannelSource::Alpha,
+                [0.2126, 0.7152, 0.0722],
+            ),
+        });
+        builder.append_unary(EffectRenderOp::ChannelMixer {
+            grade: ChannelMixerGrade::new(
+                [
+                    90.0, 20.0, 0.0, 0.0, 0.0, 110.0, 0.0, -10.0, 0.0, 0.0, 100.0, 5.0,
+                ],
+                false,
+            )
+            .expect("valid channel mixer"),
+        });
+        let graph = compile_reference_render_graph(builder.finish()).expect("valid built-in graph");
+        let plan =
+            lower_effect_graph_to_gpu_plan(&graph).expect("supported built-in point effects");
+        assert_eq!(plan.operations().len(), 7);
+
+        let expected = apply_compiled_effect_graph_rgba_f32(
+            mondrian_effects::EffectFloatFrameView::new(
+                mondrian_effects::EffectFrameExtent::new(3, 2),
+                mondrian_effects::EffectValueFormat::new(
+                    mondrian_effects::EffectWorkingPrecision::Float32,
+                    mondrian_effects::EffectColorDomain::SceneLinearRgb,
+                    mondrian_core::ColorFrameAlpha::StraightCoverage,
+                ),
+                mondrian_core::ImageSampling::UNIT_SQUARE,
+                &frame.rgba_f32().data,
+            ),
+            &graph,
+            0,
+        )
+        .expect("CPU float reference");
+
+        let layer = GpuCompositeLayer {
+            source: GpuCompositeLayerSource::CpuFrame(&frame),
+            opacity: 1.0,
+            blend_policy: mondrian_effects::EffectPassBlendPolicy::Blend(BlendMode::Normal),
+            transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+            effect_plan: Some(&plan),
+            frame_seed: 0,
+        };
+        let (actual, diagnostics) = readback_test_composite_with_diagnostics(
+            &context,
+            &[layer],
+            3,
+            2,
+            WorkingColorSpace::LinearRec709,
+        );
+        assert_eq!(diagnostics.execution.fused_layer_passes, 1);
+        assert_eq!(diagnostics.execution.fused_point_operations, 7);
+        let report = compare_linear_rgba(
+            expected.pixels(),
+            &actual,
+            LinearRgbaAccuracyBudget {
+                rgb: LinearAccuracyBudget::finite(1.0e-4, 1.0e-5, 2.0e-5),
+                alpha: LinearAccuracyBudget::finite(1.0e-6, 1.0e-7, 1.0e-6),
+            },
+        )
+        .expect("matching GPU and CPU frame shapes");
+        assert!(
+            report.within_budget,
+            "GPU built-in point-effect accuracy budget exceeded: {report:#?}"
+        );
     }
 
     #[tokio::test]
