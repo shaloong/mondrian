@@ -1698,6 +1698,17 @@ fn render_op_requirements(op: &EffectRenderOp) -> EffectImplementationRequiremen
             roi_from_effect_input: finite_radius_roi(*radius),
             ..cpu_float
         },
+        EffectRenderOp::DropShadow { grade } => EffectImplementationRequirements {
+            execution_modes: EffectExecutionModes::CPU_F32,
+            roi_from_effect_input: grade.input_halo().map_or(
+                EffectRoiPropagation::FullFrame,
+                |(horizontal_pixels, vertical_pixels)| EffectRoiPropagation::Expand {
+                    horizontal_pixels,
+                    vertical_pixels,
+                },
+            ),
+            ..cpu_float
+        },
         EffectRenderOp::ChannelMixer { .. } => EffectImplementationRequirements {
             execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
             ..cpu_float

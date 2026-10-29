@@ -42,6 +42,7 @@ pub enum EffectType {
     ShiftChannels,
     DirectionalBlur,
     ChannelMixer,
+    DropShadow,
     /// Externally registered effect definition, including native-format adapters.
     /// This is a domain definition reference, not an Extension package identity.
     /// The serde name preserves the existing project wire representation.
@@ -79,6 +80,7 @@ impl EffectType {
             Self::ShiftChannels => "builtin.shift_channels".to_string(),
             Self::DirectionalBlur => "builtin.directional_blur".to_string(),
             Self::ChannelMixer => "builtin.channel_mixer".to_string(),
+            Self::DropShadow => "builtin.drop_shadow".to_string(),
             Self::External(key) => key.clone(),
         }
     }
@@ -112,6 +114,7 @@ impl EffectType {
             "builtin.shift_channels" => Self::ShiftChannels,
             "builtin.directional_blur" => Self::DirectionalBlur,
             "builtin.channel_mixer" => Self::ChannelMixer,
+            "builtin.drop_shadow" => Self::DropShadow,
             other => Self::External(other.to_string()),
         }
     }
@@ -145,6 +148,7 @@ impl EffectType {
             Self::ShiftChannels => "转换通道",
             Self::DirectionalBlur => "方向模糊",
             Self::ChannelMixer => "通道混合器",
+            Self::DropShadow => "投影",
             Self::External(name) => name,
         }
     }
@@ -176,6 +180,7 @@ impl EffectType {
             Self::Vignette | Self::ChromaticAberration | Self::Grain => vec!["颜色", "风格化"],
             Self::Qualifier | Self::ChromaKey | Self::LumaKey => vec!["抠像"],
             Self::Invert => vec!["通道"],
+            Self::DropShadow => vec!["光效"],
             Self::External(_) => vec!["外部效果"],
         }
     }
@@ -209,6 +214,7 @@ impl EffectType {
             Self::ShiftChannels => "shift_channels".to_string(),
             Self::DirectionalBlur => "directional_blur".to_string(),
             Self::ChannelMixer => "channel_mixer".to_string(),
+            Self::DropShadow => "drop_shadow".to_string(),
             Self::External(key) => key.clone(),
         }
     }
@@ -502,6 +508,7 @@ impl crate::AuthoringFootprint for EffectType {
             Self::ShiftChannels => Ok(()),
             Self::DirectionalBlur => Ok(()),
             Self::ChannelMixer => Ok(()),
+            Self::DropShadow => Ok(()),
         }
     }
 }

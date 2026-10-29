@@ -206,6 +206,12 @@ pub(crate) fn apply_render_op(
                 parameter: "requires_float32",
             });
         }
+        EffectRenderOp::DropShadow { .. } => {
+            return Err(EffectExecutionError::InvalidRenderParameter {
+                op: "drop_shadow",
+                parameter: "requires_float32",
+            });
+        }
         EffectRenderOp::ChannelMixer { .. } => {
             return Err(EffectExecutionError::InvalidRenderParameter {
                 op: "channel_mixer",
@@ -653,6 +659,7 @@ pub(crate) const fn render_op_f32_scratch_frames(op: &EffectRenderOp) -> usize {
         | EffectRenderOp::ShiftChannels { .. }
         | EffectRenderOp::DirectionalBlur { .. }
         | EffectRenderOp::ChannelMixer { .. }
+        | EffectRenderOp::DropShadow { .. }
         | EffectRenderOp::ChromaKey { .. }
         | EffectRenderOp::MattePreview { .. }
         | EffectRenderOp::Vignette { .. }
@@ -842,6 +849,15 @@ pub(crate) fn apply_render_op_f32_region_controlled<E>(
         EffectRenderOp::BlackAndWhite { grade } => {
             apply_point_grade_rgba_f32_controlled(working, checkpoint, |rgb| grade.apply(rgb))?;
             Ok(true)
+        }
+        EffectRenderOp::DropShadow { grade } => {
+            crate::drop_shadow::apply_drop_shadow_f32_controlled(
+                working,
+                width as usize,
+                height as usize,
+                *grade,
+                checkpoint,
+            )
         }
         EffectRenderOp::ChannelMixer { grade } => {
             apply_point_grade_rgba_f32_controlled(working, checkpoint, |rgb| grade.apply(rgb))?;

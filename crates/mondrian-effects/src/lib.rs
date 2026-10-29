@@ -23,6 +23,7 @@ pub mod chroma_key;
 pub mod color_curves;
 pub mod coverage;
 pub mod directional_blur;
+pub mod drop_shadow;
 pub mod effect;
 mod project_properties;
 pub use project_properties::{rebind_effect_project_geometry, EffectProjectPropertyInitializer};
@@ -215,5 +216,9 @@ pub use channel_mixer::{
 pub use directional_blur::{
     directional_blur_step, directional_blur_taps, DIRECTIONAL_BLUR_AUTHOR_MAX_LENGTH_PIXELS,
     MAX_DIRECTIONAL_BLUR_TAPS,
+};
+pub use drop_shadow::{
+    DropShadowError, DropShadowGrade, DROP_SHADOW_AUTHOR_MAX_DISTANCE_PIXELS,
+    DROP_SHADOW_AUTHOR_MAX_OPACITY, DROP_SHADOW_AUTHOR_MAX_SOFTNESS_PIXELS,
 };
 pub use shift_channels::{ChannelSource, ShiftChannelsGrade};

@@ -849,6 +849,13 @@ pub enum EffectRenderOp {
     ChannelMixer {
         grade: crate::ChannelMixerGrade,
     },
+    /// Drop shadow: the source coverage is offset, softened and tinted, then
+    /// composited underneath (or instead of) the source. The shadow reads complete
+    /// coverage from outside the frame as transparent, and the grade carries the
+    /// final scene-linear shadow color.
+    DropShadow {
+        grade: crate::DropShadowGrade,
+    },
     /// Source-relative hard crop expressed as normalized edge insets.
     ///
     /// Pixels outside the remaining rectangle become transparent black before
@@ -979,6 +986,9 @@ impl std::fmt::Debug for EffectRenderOp {
             }
             Self::ShiftChannels { grade } => {
                 formatter.debug_struct("ShiftChannels").field("grade", grade).finish()
+            }
+            Self::DropShadow { grade } => {
+                formatter.debug_struct("DropShadow").field("grade", grade).finish()
             }
             Self::ChannelMixer { grade } => {
                 formatter.debug_struct("ChannelMixer").field("grade", grade).finish()
@@ -1375,6 +1385,17 @@ impl EffectRenderOp {
                     value.to_bits().hash(state);
                 }
             }
+            EffectRenderOp::DropShadow { grade } => {
+                29u8.hash(state);
+                for value in grade.color() {
+                    value.to_bits().hash(state);
+                }
+                grade.opacity().to_bits().hash(state);
+                grade.direction_degrees().to_bits().hash(state);
+                grade.distance().to_bits().hash(state);
+                grade.softness().to_bits().hash(state);
+                u8::from(grade.shadow_only()).hash(state);
+            }
             EffectRenderOp::ChannelMixer { grade } => {
                 28u8.hash(state);
                 for value in grade.weights() {
@@ -1499,6 +1520,7 @@ impl EffectRenderOp {
             EffectRenderOp::ShiftChannels { .. } => 1,
             EffectRenderOp::DirectionalBlur { .. } => 4,
             EffectRenderOp::ChannelMixer { .. } => 2,
+            EffectRenderOp::DropShadow { .. } => 6,
             EffectRenderOp::HueSaturation { .. } => 2,
             EffectRenderOp::UnsharpMask { .. } => 4,
             EffectRenderOp::Lut3D { .. } => 2,
@@ -2032,7 +2054,7 @@ impl EffectDefinition {
     }
 }
 
-fn builtin_effect_types() -> [EffectType; 27] {
+fn builtin_effect_types() -> [EffectType; 28] {
     [
         EffectType::BasicCorrection,
         EffectType::WhiteBalance,
@@ -2061,6 +2083,7 @@ fn builtin_effect_types() -> [EffectType; 27] {
         EffectType::ShiftChannels,
         EffectType::DirectionalBlur,
         EffectType::ChannelMixer,
+        EffectType::DropShadow,
     ]
 }
 
@@ -3165,6 +3188,74 @@ fn default_properties_for(effect_type: EffectType) -> PropertyBag {
                 Some(1.0),
             );
         }
+        EffectType::DropShadow => {
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "color",
+                "投影",
+                "阴影颜色",
+                PropertyValue::Color(mondrian_core::Color { r: 0.0, g: 0.0, b: 0.0, a: 1.0 }),
+                None,
+                None,
+                None,
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "opacity",
+                "投影",
+                "不透明度",
+                PropertyValue::Float(127.5),
+                Some(0.0),
+                Some(crate::DROP_SHADOW_AUTHOR_MAX_OPACITY as f64),
+                Some(0.5),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "direction",
+                "投影",
+                "方向",
+                PropertyValue::Float(135.0),
+                None,
+                None,
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "distance",
+                "投影",
+                "距离",
+                PropertyValue::Float(5.0),
+                Some(0.0),
+                Some(crate::DROP_SHADOW_AUTHOR_MAX_DISTANCE_PIXELS as f64),
+                Some(0.1),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "softness",
+                "投影",
+                "柔和度",
+                PropertyValue::Float(0.0),
+                Some(0.0),
+                Some(crate::DROP_SHADOW_AUTHOR_MAX_SOFTNESS_PIXELS as f64),
+                Some(0.1),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "shadow_only",
+                "投影",
+                "仅阴影",
+                PropertyValue::Bool(false),
+                None,
+                None,
+                None,
+            );
+        }
         EffectType::ChannelMixer => {
             define_builtin_property(
                 &mut properties,
@@ -3606,6 +3697,8 @@ fn builtin_parameter_unit(effect_type: &EffectType, parameter: &str) -> Paramete
         (EffectType::Invert, "blend_with_original") => ParameterUnit::Percent,
         (EffectType::BoxBlur, "radius") => ParameterUnit::Pixels,
         (EffectType::DirectionalBlur, "length") => ParameterUnit::Pixels,
+        (EffectType::DropShadow, "direction") => ParameterUnit::Degrees,
+        (EffectType::DropShadow, "distance" | "softness") => ParameterUnit::Pixels,
         (EffectType::ChannelMixer, "red_red" | "red_green" | "red_blue" | "red_constant")
         | (
             EffectType::ChannelMixer,
@@ -3769,6 +3862,11 @@ fn builtin_effect_execution_contract(effect_type: &EffectType) -> EffectExecutio
             // The authored radius can exceed any bounded expansion, so the
             // definition-level envelope is a full-frame input. The graph
             // planner still narrows it per instance from the authored radius.
+            roi_propagation: EffectRoiPropagation::FullFrame,
+            ..cpu_linear
+        },
+        EffectType::DropShadow => EffectExecutionContract {
+            execution_modes: EffectExecutionModes::CPU_F32,
             roi_propagation: EffectRoiPropagation::FullFrame,
             ..cpu_linear
         },
@@ -4641,6 +4739,57 @@ fn builtin_graph_builder_for(effect_type: &EffectType) -> Option<EffectGraphBuil
                 Ok(())
             }))
         }
+        EffectType::DropShadow => {
+            let color_id = builtin_parameter_id(effect_type, "color");
+            let opacity_id = builtin_parameter_id(effect_type, "opacity");
+            let direction_id = builtin_parameter_id(effect_type, "direction");
+            let distance_id = builtin_parameter_id(effect_type, "distance");
+            let softness_id = builtin_parameter_id(effect_type, "softness");
+            let shadow_only_id = builtin_parameter_id(effect_type, "shadow_only");
+            Some(Arc::new(move |effect, context, graph| {
+                let Some(PropertyValue::Color(color)) =
+                    effect.evaluate_parameter(&color_id, context.time)
+                else {
+                    return Err(EffectGraphBuildError::InvalidAuthorState {
+                        effect_key: effect.effect_type.key(),
+                        effect_id: effect.id,
+                        reason: "drop shadow requires a shadow color".to_owned(),
+                    });
+                };
+                let opacity = effect.evaluate_f32_parameter(&opacity_id, context.time, 127.5);
+                let direction = effect.evaluate_f32_parameter(&direction_id, context.time, 135.0);
+                let distance = effect.evaluate_f32_parameter(&distance_id, context.time, 5.0);
+                let softness = effect.evaluate_f32_parameter(&softness_id, context.time, 0.0);
+                let shadow_only = match effect.evaluate_parameter(&shadow_only_id, context.time) {
+                    Some(PropertyValue::Bool(value)) => value,
+                    None => false,
+                    Some(_) => {
+                        return Err(EffectGraphBuildError::InvalidAuthorState {
+                            effect_key: effect.effect_type.key(),
+                            effect_id: effect.id,
+                            reason: "drop shadow shadow_only must be a boolean".to_owned(),
+                        });
+                    }
+                };
+                let grade = crate::DropShadowGrade::new(
+                    color,
+                    opacity,
+                    direction,
+                    distance,
+                    softness,
+                    shadow_only,
+                )
+                .map_err(|error| EffectGraphBuildError::InvalidAuthorState {
+                    effect_key: effect.effect_type.key(),
+                    effect_id: effect.id,
+                    reason: error.to_string(),
+                })?;
+                if !grade.is_identity() {
+                    graph.append_unary(EffectRenderOp::DropShadow { grade });
+                }
+                Ok(())
+            }))
+        }
         EffectType::ChannelMixer => {
             let weights = [
                 builtin_parameter_id(effect_type, "red_red"),
@@ -4889,6 +5038,7 @@ fn builtin_display_name(effect_type: &EffectType) -> &'static str {
         EffectType::ShiftChannels => "转换通道",
         EffectType::DirectionalBlur => "方向模糊",
         EffectType::ChannelMixer => "通道混合器",
+        EffectType::DropShadow => "投影",
         EffectType::External(_) => "外部效果",
     }
 }
@@ -5545,6 +5695,177 @@ mod tests {
         );
     }
 
+    fn drop_shadow_op(graph: &EffectRenderGraph) -> Option<crate::DropShadowGrade> {
+        graph.nodes.iter().find_map(|node| match &node.kind {
+            EffectGraphNodeKind::UnaryEffect {
+                op: EffectRenderOp::DropShadow { grade }, ..
+            }
+            | EffectGraphNodeKind::DomainEffect {
+                op: EffectRenderOp::DropShadow { grade }, ..
+            } => Some(*grade),
+            _ => None,
+        })
+    }
+
+    #[test]
+    fn drop_shadow_defaults_compile_to_the_listed_shadow() {
+        let effect = instantiate_effect_node(EffectType::DropShadow)
+            .expect("registered Drop Shadow definition");
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("evaluate default Drop Shadow");
+        let grade = drop_shadow_op(&graph).expect("the listed defaults produce a shadow");
+
+        assert_eq!(grade.color(), [0.0, 0.0, 0.0]);
+        assert!((grade.opacity() - 0.5).abs() < 1.0e-6);
+        assert_eq!(grade.direction_degrees(), 135.0);
+        assert_eq!(grade.distance(), 5.0);
+        assert_eq!(grade.softness(), 0.0);
+        assert!(!grade.shadow_only());
+    }
+
+    #[test]
+    fn drop_shadow_authored_state_reaches_the_operation() {
+        let mut effect = instantiate_effect_node(EffectType::DropShadow)
+            .expect("registered Drop Shadow definition");
+        for (parameter, value) in [
+            (
+                "color",
+                PropertyValue::Color(mondrian_core::Color { r: 0.25, g: 0.5, b: 0.75, a: 1.0 }),
+            ),
+            ("opacity", PropertyValue::Float(51.0)),
+            ("direction", PropertyValue::Float(90.0)),
+            ("distance", PropertyValue::Float(12.5)),
+            ("softness", PropertyValue::Float(8.0)),
+            ("shadow_only", PropertyValue::Bool(true)),
+        ] {
+            effect
+                .apply_property_mutation(PropertyMutation::SetStaticValue {
+                    path: EffectType::DropShadow.property_path(parameter),
+                    value,
+                })
+                .unwrap_or_else(|error| panic!("author Drop Shadow {parameter}: {error}"));
+        }
+
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("evaluate authored Drop Shadow");
+        let grade = drop_shadow_op(&graph).expect("drop shadow state reaches the op");
+        assert_eq!(grade.color(), [0.25, 0.5, 0.75]);
+        assert!((grade.opacity() - 0.2).abs() < 1.0e-6);
+        assert_eq!(grade.direction_degrees(), 90.0);
+        assert_eq!(grade.distance(), 12.5);
+        assert_eq!(grade.softness(), 8.0);
+        assert!(grade.shadow_only());
+    }
+
+    #[test]
+    fn drop_shadow_rejects_author_values_outside_the_declared_ranges() {
+        let mut effect = instantiate_effect_node(EffectType::DropShadow)
+            .expect("registered Drop Shadow definition");
+        for (parameter, value) in [
+            ("opacity", PropertyValue::Float(255.5)),
+            ("distance", PropertyValue::Float(4_001.0)),
+            ("softness", PropertyValue::Float(-1.0)),
+        ] {
+            let rejected = effect.apply_property_mutation(PropertyMutation::SetStaticValue {
+                path: EffectType::DropShadow.property_path(parameter),
+                value,
+            });
+            assert!(
+                rejected.is_err(),
+                "Drop Shadow {parameter} outside its range must not be authorable"
+            );
+        }
+    }
+
+    #[test]
+    fn drop_shadow_composites_the_offset_shadow_under_the_source() {
+        let mut effect = instantiate_effect_node(EffectType::DropShadow)
+            .expect("registered Drop Shadow definition");
+        for (parameter, value) in [
+            ("opacity", PropertyValue::Float(255.0)),
+            ("direction", PropertyValue::Float(90.0)),
+            ("distance", PropertyValue::Float(1.0)),
+            ("softness", PropertyValue::Float(0.0)),
+            (
+                "color",
+                PropertyValue::Color(mondrian_core::Color { r: 2.0, g: 0.5, b: 0.0, a: 1.0 }),
+            ),
+        ] {
+            effect
+                .apply_property_mutation(PropertyMutation::SetStaticValue {
+                    path: EffectType::DropShadow.property_path(parameter),
+                    value,
+                })
+                .expect("author Drop Shadow");
+        }
+
+        // The white pixel keeps its color on top of the shadow; the empty second pixel
+        // receives the offset shadow, whose extended-range red proves the op does not clamp.
+        let input = [
+            [1.0, 1.0, 1.0, 1.0],
+            [0.0, 0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0, 0.0],
+        ];
+        let view = || {
+            crate::EffectFloatFrameView::new(
+                crate::EffectFrameExtent::new(3, 1),
+                crate::EffectValueFormat::new(
+                    crate::EffectWorkingPrecision::Float32,
+                    crate::EffectColorDomain::SceneLinearRgb,
+                    mondrian_core::ColorFrameAlpha::StraightCoverage,
+                ),
+                mondrian_core::ImageSampling::UNIT_SQUARE,
+                &input,
+            )
+        };
+
+        let compiled = compile_clip_effect_graph(&[effect], &[], tt(0), TEST_WORKING_SPACE)
+            .expect("compile Drop Shadow");
+        let output =
+            crate::apply_compiled_effect_graph_rgba_f32(view(), &compiled, 0).expect("execute");
+
+        assert_eq!(output[0], [1.0, 1.0, 1.0, 1.0]);
+        for (channel, expected) in [2.0_f32, 0.5, 0.0, 1.0].into_iter().enumerate() {
+            assert!(
+                (output[1][channel] - expected).abs() < 1.0e-5,
+                "channel {channel}: {} != {expected}",
+                output[1][channel]
+            );
+        }
+        assert_eq!(output[2], [0.0, 0.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn drop_shadow_authored_state_survives_project_serialization_round_trip() {
+        let mut effect = instantiate_effect_node(EffectType::DropShadow)
+            .expect("registered Drop Shadow definition");
+        for (parameter, value) in [
+            ("distance", PropertyValue::Float(21.0)),
+            ("softness", PropertyValue::Float(6.0)),
+            ("shadow_only", PropertyValue::Bool(true)),
+        ] {
+            effect
+                .apply_property_mutation(PropertyMutation::SetStaticValue {
+                    path: EffectType::DropShadow.property_path(parameter),
+                    value,
+                })
+                .expect("author Drop Shadow");
+        }
+
+        let wire = serde_json::to_string(&effect).expect("serialize the Drop Shadow node");
+        let restored: EffectNode =
+            serde_json::from_str(&wire).expect("restore the Drop Shadow node");
+        assert_eq!(restored.effect_type, EffectType::DropShadow);
+        assert_eq!(restored, effect);
+
+        let graph = build_effect_render_graph(&[restored], tt(0), TEST_WORKING_SPACE)
+            .expect("evaluate the restored Drop Shadow node");
+        let grade = drop_shadow_op(&graph).expect("restored state reaches the op");
+        assert_eq!(grade.distance(), 21.0);
+        assert_eq!(grade.softness(), 6.0);
+        assert!(grade.shadow_only());
+    }
+
     fn channel_mixer_op(graph: &EffectRenderGraph) -> Option<crate::ChannelMixerGrade> {
         graph.nodes.iter().find_map(|node| match &node.kind {
             EffectGraphNodeKind::UnaryEffect {
@@ -5899,6 +6220,7 @@ mod tests {
             EffectType::ShiftChannels,
             EffectType::DirectionalBlur,
             EffectType::ChannelMixer,
+            EffectType::DropShadow,
         ]
         .into_iter()
         .map(|effect_type| effect_type.key())
