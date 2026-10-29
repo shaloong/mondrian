@@ -5431,14 +5431,11 @@ mod musical_effect_tests {
                     assert_eq!(result.unwrap_err(), unavailable(expected));
                     continue;
                 }
-                if !cfg!(windows) {
-                    assert_eq!(
-                        result.unwrap_err(),
-                        unavailable("VST3 Note input requires the scoped native lane")
-                    );
-                    continue;
-                }
                 let spec = result.unwrap();
+                assert!(
+                    spec.native_lane.is_some(),
+                    "every desktop admits and charges its native lane"
+                );
                 let decoded = decode_payload(&spec.preparation_payload).unwrap();
                 assert_eq!(decoded.main_audio_input, Vst3MainAudioInput::Absent);
                 assert_eq!(spec.note_input_contract.ports.len(), 1);
@@ -5546,14 +5543,11 @@ mod musical_effect_tests {
                     );
                     continue;
                 }
-                if requested && !cfg!(windows) {
-                    assert_eq!(
-                        result.unwrap_err(),
-                        unavailable("VST3 Note input requires the scoped native lane")
-                    );
-                    continue;
-                }
                 let spec = result.unwrap();
+                assert!(
+                    spec.native_lane.is_some(),
+                    "auxiliary-only processing retains its native lane"
+                );
                 assert_eq!(spec.auxiliary_inputs, auxiliary);
                 let child = IsolatedAudioProcessorWorkerPrepareRequest {
                     musical_time_reference: spec.musical_time_reference,

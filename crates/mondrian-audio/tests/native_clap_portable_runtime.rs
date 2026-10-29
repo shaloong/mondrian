@@ -2,152 +2,20 @@
 //! The corpus is explicit; no native implementation or synthesized opaque state.
 
 use mondrian_audio::{
-    probe_clap_plugin_registration, AudioContinuityEpoch, AudioDecodedSource, AudioExecutionError,
-    AudioMediaResolver, AudioProcessingMode, AudioProgramRuntime, AudioRenderContract,
-    AudioRenderRequest, AudioRuntimeResourceGrant, AudioStateEntry,
-    DiscoveredClapAudioProcessorSpecResolver, IsolatedAudioProcessorResolver, ResolvedAudioSource,
+    probe_clap_plugin_registration, AudioContinuityEpoch, AudioExecutionError, AudioProcessingMode,
+    AudioProgramRuntime, AudioRenderContract, AudioRenderRequest, AudioRuntimeResourceGrant,
+    AudioStateEntry, DiscoveredClapAudioProcessorSpecResolver, IsolatedAudioProcessorResolver,
 };
 use mondrian_core::{
     AssetId, AudioChannelLayout, AudioOwnerInstallationSource, AudioSourceComponentId,
-    ExecutionCancellationToken, NativeChildSettlement, NativeChildSettlementError,
-    NativeChildSettlementRegistrar, NativeChildSettlementReporter, TimelineTime,
+    ExecutionCancellationToken, NativeChildSettlementRegistrar, TimelineTime,
 };
 use mondrian_timeline::{Clip, Sequence};
-use std::{
-    path::PathBuf,
-    sync::{Arc, Mutex},
-};
+use std::{path::PathBuf, sync::Arc};
 
-#[derive(Clone)]
-struct Signal {
-    asset: AssetId,
-    layout: AudioChannelLayout,
-    rate: u32,
-}
-
-fn sample(frame: i64, channel: usize) -> f32 {
-    if frame < 0 {
-        return 0.0;
-    }
-    (((frame as usize * 29 + channel * 11) % 113) as f32 - 56.0) / 256.0
-}
-
-impl AudioMediaResolver for Signal {
-    fn resolve(
-        &self,
-        asset: AssetId,
-        component: AudioSourceComponentId,
-        rate: u32,
-    ) -> Result<ResolvedAudioSource, String> {
-        assert_eq!(
-            (asset, component, rate),
-            (self.asset, AudioSourceComponentId::primary(), self.rate)
-        );
-        Ok(ResolvedAudioSource::new(
-            self.layout,
-            Arc::new(self.clone()),
-        ))
-    }
-}
-
-impl AudioDecodedSource for Signal {
-    fn read_interleaved(
-        &self,
-        start: i64,
-        frames: usize,
-        output: &mut [f32],
-        cancel: &ExecutionCancellationToken,
-    ) -> Result<(), String> {
-        assert!(!cancel.is_canceled());
-        let channels = self.layout.channel_count();
-        assert_eq!(output.len(), frames * channels);
-        for (index, frame) in output.chunks_exact_mut(channels).enumerate() {
-            for (channel, value) in frame.iter_mut().enumerate() {
-                *value = sample(start + index as i64, channel);
-            }
-        }
-        Ok(())
-    }
-}
-
-// Observe the original cross-platform child owners. No PID polling or second
-// process owner; this evidence does not certify graceful-shutdown timing.
-#[derive(Default)]
-struct Counts {
-    scopes: usize,
-    children: usize,
-    settled: usize,
-    unavailable: bool,
-}
-#[derive(Default)]
-struct Census(Mutex<Counts>);
-impl Census {
-    fn lock(&self) -> std::sync::MutexGuard<'_, Counts> {
-        match self.0.lock() {
-            Ok(state) => state,
-            Err(poisoned) => {
-                let mut state = poisoned.into_inner();
-                state.unavailable = true;
-                state
-            }
-        }
-    }
-    fn begin(&self, child: bool) -> Result<(), NativeChildSettlementError> {
-        let mut state = self.lock();
-        if state.unavailable {
-            return Err(NativeChildSettlementError::Unavailable);
-        }
-        let count = if child {
-            &mut state.children
-        } else {
-            &mut state.scopes
-        };
-        match count.checked_add(1) {
-            Some(next) => {
-                *count = next;
-                Ok(())
-            }
-            None => {
-                state.unavailable = true;
-                Err(NativeChildSettlementError::Overflow)
-            }
-        }
-    }
-    fn end(&self, child: bool) {
-        let mut state = self.lock();
-        let count = if child {
-            &mut state.children
-        } else {
-            &mut state.scopes
-        };
-        match count.checked_sub(1) {
-            Some(next) => *count = next,
-            None => state.unavailable = true,
-        }
-    }
-}
-impl NativeChildSettlementReporter for Census {
-    fn begin_scope(&self) -> Result<(), NativeChildSettlementError> {
-        self.begin(false)
-    }
-    fn end_scope(&self) {
-        self.end(false);
-    }
-    fn begin_child(&self) -> Result<(), NativeChildSettlementError> {
-        self.begin(true)
-    }
-    fn end_child(&self, outcome: NativeChildSettlement) {
-        self.end(true);
-        let mut state = self.lock();
-        match (outcome, state.settled.checked_add(1)) {
-            (NativeChildSettlement::Settled, Some(next)) => state.settled = next,
-            _ => state.unavailable = true,
-        }
-    }
-    fn unavailable(&self) {
-        self.lock().unavailable = true;
-    }
-}
+#[path = "support/portable_native_runtime.rs"]
+mod support;
+use support::{sample, Census, Signal};
 
 #[test]
 #[ignore = "requires the matching normal Product, official Ring Out CLAP and its actual -6dB state in MONDRIAN_CLAP_TEST_HELPER / MONDRIAN_CLAP_TEST_PLUGIN / MONDRIAN_CLAP_TEST_STATE"]
