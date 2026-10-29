@@ -43,6 +43,7 @@ pub(crate) enum EffectSpatialGpuError {
 pub(crate) struct EffectSpatialGpu {
     box_blur: wgpu::RenderPipeline,
     find_edges: wgpu::RenderPipeline,
+    emboss: wgpu::RenderPipeline,
     bindings: wgpu::BindGroupLayout,
 }
 
@@ -143,7 +144,37 @@ impl EffectSpatialGpu {
             multiview_mask: None,
             cache: None,
         });
-        Self { box_blur, find_edges, bindings }
+        let emboss = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("mondrian.effect-spatial.emboss"),
+            layout: Some(&layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                buffers: &[],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_emboss"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: wgpu::TextureFormat::Rgba32Float,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleStrip,
+                strip_index_format: None,
+                cull_mode: None,
+                ..wgpu::PrimitiveState::default()
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+        Self { box_blur, emboss, find_edges, bindings }
     }
 
     /// Number of texture passes one spatial pass expands into.
@@ -282,6 +313,44 @@ impl EffectSpatialGpu {
             device,
             encoder,
             &self.find_edges,
+            &input_view,
+            &output_view,
+            &uniform,
+        );
+        Ok(destination.clone())
+    }
+
+    pub(crate) fn record_emboss(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
+        controls: [f32; 4],
+        luminance_coefficients: [f32; 3],
+        source: &wgpu::Texture,
+        destination: &wgpu::Texture,
+        width: u32,
+        height: u32,
+    ) -> Result<wgpu::Texture, EffectSpatialGpuError> {
+        if width == 0 || height == 0 {
+            return Err(EffectSpatialGpuError::EmptyFrame);
+        }
+        let uniform = SpatialPassUniform {
+            size: [width as f32, height as f32, 0.0, 0.0],
+            params: controls,
+            extra: [
+                luminance_coefficients[0],
+                luminance_coefficients[1],
+                luminance_coefficients[2],
+                0.0,
+            ],
+            aces: [0.0; 4],
+        };
+        let input_view = source.create_view(&wgpu::TextureViewDescriptor::default());
+        let output_view = destination.create_view(&wgpu::TextureViewDescriptor::default());
+        self.record_pass(
+            device,
+            encoder,
+            &self.emboss,
             &input_view,
             &output_view,
             &uniform,
@@ -510,6 +579,42 @@ fn fs_find_edges(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f3
     let edge = select(1.0 - magnitude, magnitude, uniforms.params.y > 0.5);
     let blend = clamp(uniforms.params.x, 0.0, 1.0);
     let mixed = edge * (1.0 - blend) + center.rgb * blend;
+    return unpremultiply(vec4<f32>(mixed, center.a));
+}
+
+@fragment
+fn fs_emboss(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
+    let dims = frame_dims();
+    let pixel = vec2<i32>(floor(position.xy));
+    let center = premultiply(load_clamped(pixel));
+    if (center.a <= 0.0) {
+        return vec4<f32>(0.0);
+    }
+    let coefficients = uniforms.extra.xyz;
+    var derivative = 0.0;
+    let left = premultiply(load_clamped(pixel + vec2<i32>(-1, 0)));
+    let right = premultiply(load_clamped(pixel + vec2<i32>(1, 0)));
+    let top = premultiply(load_clamped(pixel + vec2<i32>(0, -1)));
+    let bottom = premultiply(load_clamped(pixel + vec2<i32>(0, 1)));
+    let top_left = premultiply(load_clamped(pixel + vec2<i32>(-1, -1)));
+    let top_right = premultiply(load_clamped(pixel + vec2<i32>(1, -1)));
+    let bottom_left = premultiply(load_clamped(pixel + vec2<i32>(-1, 1)));
+    let bottom_right = premultiply(load_clamped(pixel + vec2<i32>(1, 1)));
+    var horizontal = 0.0;
+    var vertical = 0.0;
+    for (var channel = 0; channel < 3; channel = channel + 1) {
+        let weight = coefficients[channel];
+        horizontal = horizontal
+            + weight * ((top_right[channel] + 2.0 * right[channel] + bottom_right[channel])
+                - (top_left[channel] + 2.0 * left[channel] + bottom_left[channel]));
+        vertical = vertical
+            + weight * ((bottom_left[channel] + 2.0 * bottom[channel] + bottom_right[channel])
+                - (top_left[channel] + 2.0 * top[channel] + top_right[channel]));
+    }
+    derivative = horizontal * uniforms.params.x - vertical * uniforms.params.y;
+    let value = 0.5 + derivative * uniforms.params.z;
+    let blend = clamp(uniforms.params.w, 0.0, 1.0);
+    let mixed = vec3<f32>(value) * (1.0 - blend) + center.rgb * blend;
     return unpremultiply(vec4<f32>(mixed, center.a));
 }
 
@@ -774,6 +879,68 @@ fn cs_main(@builtin(local_invocation_id) lid: vec3<u32>) {
             value.count_ones() > 1,
             "compute workgroup executed {value:?} (single-lane masks mean the toolchain collapsed the workgroup)"
         );
+    }
+
+    #[test]
+    fn gpu_emboss_matches_the_cpu_kernel() {
+        let Ok(context) = block_on(crate::GpuContext::new()) else {
+            eprintln!("skipping GPU emboss parity test: no GPU adapter available");
+            return;
+        };
+        let width = 6_u32;
+        let height = 4_u32;
+        let mut pixels = vec![[0.0_f32, 0.0, 0.0, 1.0]; (width * height) as usize];
+        for y in 0..height as usize {
+            for x in 0..width as usize {
+                let value = 0.05 * (x + y) as f32;
+                pixels[y * width as usize + x] = [value, value * 0.5, 0.75 - value * 0.1, 1.0];
+            }
+        }
+        pixels[5] = [0.0, 0.0, 0.0, 0.0];
+        let grade = mondrian_effects::emboss::EmbossGrade::for_space(
+            45.0,
+            4.0,
+            200.0,
+            0.25,
+            mondrian_core::WorkingColorSpace::LinearRec709,
+        )
+        .expect("grade");
+        let mut cpu = pixels.clone();
+        assert!(mondrian_effects::emboss::emboss_frame_f32(
+            &mut cpu,
+            width as usize,
+            height as usize,
+            grade
+        ));
+        let executor = EffectSpatialGpu::new(&context.device);
+        let source = upload(&context, &pixels, width, height);
+        let destination = scratch(&context, width, height, 1);
+        let mut encoder = context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("mondrian.effect-spatial.emboss-encoder"),
+        });
+        let output = executor
+            .record_emboss(
+                &context.device,
+                &mut encoder,
+                grade.gpu_controls(),
+                grade.luminance_coefficients(),
+                &source,
+                &destination[0],
+                width,
+                height,
+            )
+            .expect("recorded emboss");
+        context.queue.submit(Some(encoder.finish()));
+        let gpu = readback(&context, &output, width, height);
+        for (index, (cpu_pixel, gpu_pixel)) in cpu.iter().zip(gpu.iter()).enumerate() {
+            for channel in 0..4 {
+                let difference = (cpu_pixel[channel] - gpu_pixel[channel]).abs();
+                assert!(
+                    difference <= 1.0e-4,
+                    "pixel {index} channel {channel}: cpu {cpu_pixel:?} gpu {gpu_pixel:?}"
+                );
+            }
+        }
     }
 
     #[test]
