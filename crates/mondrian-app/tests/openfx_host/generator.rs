@@ -53,6 +53,236 @@ fn literal(output: &EffectFloatFrame, frame: f32, gain: f32) {
 }
 
 #[test]
+#[ignore = "requires normal Product and MONDRIAN_OPENFX_RECTANGLE_BINARY=official Rectangle.ofx.bundle binary"]
+fn official_rectangle_generator_preserves_geometry_parameters_and_output_signal() {
+    official_rectangle_generator(&[(
+        [Rational::new(1, 1); 2],
+        [[1, 1, 5, 4], [2, 2, 7, 5], [1, 1, 5, 4]],
+    )]);
+}
+
+#[test]
+#[ignore = "requires normal Product and MONDRIAN_OPENFX_RECTANGLE_BINARY=official Rectangle.ofx.bundle binary"]
+fn official_rectangle_generator_changes_sampling_without_changing_project_or_native_owner() {
+    // Independent raster boxes for the explicit canonical corners below. Half
+    // scale is first to exercise native Create as well as later scale changes.
+    official_rectangle_generator(&[
+        (
+            [Rational::new(1, 2); 2],
+            [[0, 0, 2, 2], [1, 1, 3, 2], [0, 0, 2, 2]],
+        ),
+        (
+            [Rational::new(3, 4), Rational::new(1, 2)],
+            [[0, 0, 3, 2], [1, 1, 5, 2], [0, 0, 3, 2]],
+        ),
+        (
+            [Rational::new(1, 1); 2],
+            [[1, 1, 5, 4], [2, 2, 7, 5], [1, 1, 5, 4]],
+        ),
+        (
+            [Rational::new(1, 2); 2],
+            [[0, 0, 2, 2], [1, 1, 3, 2], [0, 0, 2, 2]],
+        ),
+    ]);
+}
+
+fn official_rectangle_generator(grids: &[([Rational; 2], [[u32; 4]; 3])]) {
+    use mondrian_effects::{
+        instantiate_effect_node_with_project_geometry, EffectProcessorExecutionOrigin,
+        EffectProjectGeometry,
+    };
+
+    let binary = PathBuf::from(
+        std::env::var_os("MONDRIAN_OPENFX_RECTANGLE_BINARY").expect("official Rectangle reference"),
+    );
+    let inspection = inspect_openfx_binary(product_executable(), &binary).expect("real discovery");
+    let identifier = "uk.co.thefoundry.GeneratorExample";
+    let description = describe_openfx_generator(product_executable(), &inspection, identifier)
+        .expect("independently selected Output-only context");
+    let kind = register_selected_openfx_generator(product_executable(), &inspection, identifier)
+        .expect("native Generator registration");
+    let (width, height) = (8, 6);
+    let par = SampleAspectRatio::new(2, 1).unwrap();
+    let geometry = EffectProjectGeometry::new(width, height, par).unwrap();
+    let mut effect = instantiate_effect_node_with_project_geometry(kind, geometry)
+        .expect("canonical project-relative parameter initialization");
+    let context = EffectFrameContext::new(
+        Rational::FPS_24,
+        geometry,
+        TimelineTimeRange::new(TimelineTime::ZERO, TimelineTime::new(13, 24).unwrap()).unwrap(),
+    )
+    .unwrap();
+    // Explicit canonical corners and colours, independent of project or SDK
+    // defaults. At PAR2, canonical X coordinates are twice raster X coordinates.
+    let cases = [
+        ([2.0, 1.0], [10.0, 4.0], [0.25, 0.5, 0.75, 1.0]),
+        ([4.0, 2.0], [14.0, 5.0], [0.5, 0.25, 0.125, 0.5]),
+        ([2.0, 1.0], [10.0, 4.0], [0.25, 0.5, 0.75, 0.0]),
+    ];
+    let mut programs = Vec::new();
+    for (corner1, corner2, colour) in cases {
+        for (name, value) in [
+            ("corner1", PropertyValue::DoubleVec2(corner1)),
+            ("corner2", PropertyValue::DoubleVec2(corner2)),
+            ("colour", PropertyValue::DoubleColor(colour)),
+        ] {
+            // Resolve the actual descriptor label rather than duplicating the
+            // adapter's private native-name-to-ParameterId encoding.
+            let native = description.parameters.iter().find(|p| p.name == name).unwrap();
+            let id = {
+                let mut matches = effect
+                    .properties
+                    .iter()
+                    .filter(|(_, p)| p.descriptor.display_name == native.label);
+                let id =
+                    matches.next().expect("authored parameter").1.descriptor.parameter_id().clone();
+                assert!(
+                    matches.next().is_none(),
+                    "reference labels must be unambiguous"
+                );
+                id
+            };
+            effect
+                .set_static_value_by_parameter(&id, value)
+                .expect("canonical parameter edit");
+        }
+        programs.push(
+            PreparedEffectProgram::prepare_hierarchical_with_frame_context(
+                &[effect.clone()],
+                &[],
+                &[],
+                &[],
+                WorkingColorSpace::LinearRec709,
+                context,
+                &LutPreparationCache::uncached(),
+            )
+            .expect("source-free native program"),
+        );
+    }
+    let author = serde_json::to_value(&effect).unwrap();
+    let mut session = EffectExecutionSession::new(EffectExecutionSessionConfig {
+        max_processor_instances: 1,
+        max_processor_bytes: 512 * 1024 * 1024,
+        ..EffectExecutionSessionConfig::uncached(512 * 1024 * 1024)
+    });
+    let mut identity = None;
+    let mut invocation = 0;
+    #[cfg(target_os = "linux")]
+    let mut process_start = None;
+    let target = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        for (scale, boxes) in grids {
+            let sampling = mondrian_core::ImageSampling::new(par, *scale).unwrap();
+            for (frame, case) in [(0, 0), (6, 1), (3, 0), (9, 2), (6, 1)] {
+                let graph = programs[case].evaluate(TimelineTime::new(frame, 24).unwrap()).unwrap();
+                assert!(graph.node_profiles().keys().all(|id| !matches!(
+                    graph.graph().node(*id).unwrap().kind,
+                    EffectGraphNodeKind::Source
+                )));
+                let mut control = EffectProcessorControl::uncancelled();
+                let output = session
+                    .generate_compiled_rgba_f32(
+                        EffectFrameExtent::new(width, height),
+                        format(),
+                        sampling,
+                        &graph,
+                        -999,
+                        &mut control,
+                    )
+                    .expect("actual Output-only native Render");
+                assert_eq!(output.extent(), EffectFrameExtent::new(width, height));
+                assert_eq!(output.format().alpha(), ColorFrameAlpha::PremultipliedFloat);
+                assert_eq!(output.sampling(), sampling);
+                let (_, _, colour) = cases[case];
+                let [x1, y1, x2, y2] = boxes[case];
+                for (index, actual) in output.pixels().iter().enumerate() {
+                    let x = index as u32 % width;
+                    let y = height - 1 - index as u32 / width;
+                    // This SDK example declares PM output and emits literal RGBA
+                    // parameter values without further scaling. Preserve that
+                    // producer signal, including nonzero RGB at zero alpha; do not
+                    // infer its colour-picker semantics from a host pixel result.
+                    let expected = if x >= x1 && x < x2 && y >= y1 && y < y2 {
+                        colour.map(|v| v as f32)
+                    } else {
+                        [0.0; 4]
+                    };
+                    assert_eq!(
+                        actual.map(f32::to_bits),
+                        expected.map(f32::to_bits),
+                        "frame{frame} pixel{index}"
+                    );
+                }
+                let batch = control.take_feedback().expect("actual native invocation");
+                assert_eq!(batch.len(), 1);
+                let receipt = batch.iter().next().unwrap();
+                assert_eq!(
+                    receipt.preparation.input_role,
+                    mondrian_effects::EffectFloatProcessorInputRole::NoImage
+                );
+                let observed = (
+                    receipt.feedback.owner,
+                    receipt.feedback.origin,
+                    receipt.feedback.snapshot.native_owner(),
+                );
+                if let Some(expected) = identity {
+                    assert_eq!(
+                        observed, expected,
+                        "parameter/Seek changes retain one native owner"
+                    );
+                } else {
+                    identity = Some(observed);
+                    let EffectProcessorExecutionOrigin::SupervisedChild { process_id } =
+                        receipt.feedback.origin
+                    else {
+                        panic!("real reference must execute in Product child");
+                    };
+                    #[cfg(target_os = "linux")]
+                    {
+                        let pid = process_id.get();
+                        assert_selected_product_worker_image(pid);
+                        let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap();
+                        let start = stat
+                            .rsplit_once(')')
+                            .unwrap()
+                            .1
+                            .split_whitespace()
+                            .nth(19)
+                            .unwrap()
+                            .to_owned();
+                        process_start = Some((pid, start));
+                    }
+                    #[cfg(not(target_os = "linux"))]
+                    let _ = process_id;
+                }
+                assert!(receipt.feedback.snapshot.invocation() > invocation);
+                invocation = receipt.feedback.snapshot.invocation();
+                assert_eq!(session.diagnostics().processor_instances, 1);
+                assert_eq!(session.diagnostics().cache_entries, 0);
+            }
+        }
+    }));
+    session.retire_processor_resources();
+    assert_eq!(session.diagnostics().processor_instances, 0);
+    drop(session);
+    if let Err(panic) = target {
+        std::panic::resume_unwind(panic);
+    }
+    assert_eq!(serde_json::to_value(&effect).unwrap(), author);
+    #[cfg(target_os = "linux")]
+    if let Some((pid, start)) = process_start {
+        match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+            Err(error) if matches!(error.raw_os_error(), Some(libc::ENOENT | libc::ESRCH)) => {}
+            Ok(stat) => assert_ne!(
+                stat.rsplit_once(')').unwrap().1.split_whitespace().nth(19).unwrap(),
+                start,
+                "original native child must be reaped"
+            ),
+            Err(error) => panic!("native retirement observation failed: {error}"),
+        }
+    }
+}
+
+#[test]
 #[ignore = "requires rebuilt normal product and MONDRIAN_OPENFX_GENERATOR_BINARY=GeneratorProbe; no fault mode"]
 fn output_only_generator_direct_and_prepared_graph_preserve_time_extent_and_owner() {
     assert!(std::env::var_os("MONDRIAN_OPENFX_GENERATOR_MODE").is_none());

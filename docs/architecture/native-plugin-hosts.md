@@ -140,9 +140,17 @@ label and rich-text authoring need additional contracts. Numeric curve queries
 come from the canonical author evaluator; constants and current-frame samples
 retain distinct native query authority rather than pretending to be history.
 
-The parent supplies pinned binary identity, explicit time/rate/range/PAR and
+The parent supplies pinned binary identity, explicit time/rate/range and actual
+Core `ImageSampling` (PAR and independent render-scale axes), together with
 complete Float32 RGBA values with canonical Core association metadata for Filter.
 Explicit Generator requests carry Output staging format and no incoming image.
+The existing lazy native Create consumes the first actual invocation's sampling;
+later density changes retain its owner when the prepared raster extent is unchanged.
+Native actions, image properties and canonical/pixel RoD/RoI mappings use that
+same sampling. Canonical X is pixel X × PAR / SX; canonical Y is pixel Y / SY
+for the progressive CPU path. Project geometry and spatial parameter defaults
+remain independent of raster density. Temporal Source delivery requires the
+invocation's sampling, with independently declared pixel bounds and origin.
 Resident instances reuse supervised workers and exact-sized shared mappings
 (Filter Source/Output, Generator Output only), with strict sequenced control packets
 and borrowed cancellation/deadline authority. Native code borrows mapped rasters
@@ -152,23 +160,18 @@ a process nor serialize frame files. The graph executor owns native factory
 instances and charges controlled shared/executor storage; arbitrary private
 plugin allocations are not a bounded-RSS promise.
 
-Native qualification covers the CPU Float32/RGBA Filter/current-frame subset and
-limited Windows owned Output-only Generator Direct/real NoImage graph execution.
-The GeneratorProbe passes literal RGBA, retained-owner and pre-native frame13 refusal
-checks; a separate unfetched-Output negative also passes. Untouched official Basic
-authored/resident and SessionProbe capabilities regressions pass under their original
-supervision with empty stderr and clean owners. This is not a fully verified Generator
-context or third-party qualification; spatial Double/Normalised defaults required by
-official Rectangle remain unsupported.
-It uses owner-supplied extent/PAR/time without a fake Source. Catalog/Effect Browser
-insertion remains Filter-only. Renderer CPU-plan admission and typed composition
-reject reachable CustomSource nodes with `SourceMaterializationUnsupported` before
-their provider/raster work; a compositor caller may already have materialized media.
-Preview root/nested routes reject through their CPU blocker (`NoCompleteRootRoute`
-at root). Export uses the shared plan preflight and converts its error to text;
-that path is source-reviewed, without an independent negative runtime gate.
-Dead source nodes remain admitted.
-This does not add a Timeline source content type. Tiles, temporal access, GPU,
+Native CPU qualification includes finite official Basic Filter and Rectangle
+Output-only Generator cases on Linux, through the normal Product and existing
+graph/residency path. They cover explicit authored values, full/reduced/nonuniform
+sampling, pixels and retained owners; the compatibility matrix records their
+conditions. Spatial Double/Normalised defaults are implemented, but explicit
+Rectangle corner edits alone do not qualify its untouched contextual defaults.
+It uses owner-supplied extent/PAR/time without a fake Source. The existing visual
+Effect catalog supports explicit Filter/Generator selection; Generator factories
+declare `NoImage`. Browser, project restoration and Preview/Export qualification
+remain specific to their recorded consumer tests. A standalone NoImage graph
+qualification alone does not qualify those complete workflows or introduce a new
+Timeline media type. Tiles, GPU,
 General/Transition/Paint/Retimer and custom/overlay interactions remain unavailable.
 The untouched pinned official Basic and the separately owned SessionProbe
 qualify actual pixels, automation, instance reuse, edits/seeks, cancellation,

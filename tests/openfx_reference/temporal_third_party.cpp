@@ -87,6 +87,7 @@ int main(int argc, char** argv) {
     info.width = info.project_width = 3;
     info.height = info.project_height = 2;
     info.pixel_aspect_ratio = info.project_pixel_aspect_ratio = 1;
+    info.render_scale[0] = info.render_scale[1] = 1;
     info.frame = 2; info.frame_rate = 24; info.first_frame = 0; info.last_frame = 10;
     Pixels current = signal(2, 0), output{};
     const std::array<uint8_t, 16> identity{9, 8, 7, 6};

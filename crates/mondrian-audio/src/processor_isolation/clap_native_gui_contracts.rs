@@ -1120,7 +1120,7 @@ fn static_parameter_worker(mode: usize) -> Box<ClapWorker> {
         PluginEntry::load_from_clack::<SinglePluginEntry<GuiPlugin>>(c"/test/native-gui").unwrap();
     let native_main = Rc::new(vst3_host::window::WindowsEditorMainThread::initialize().unwrap());
     let mut worker = prepare_loaded_on_main(
-        native_main,
+        Some(native_main),
         IsolatedAudioProcessorWorkerPrepareRequest {
             musical_time_reference: None,
             auxiliary_outputs: Default::default(),

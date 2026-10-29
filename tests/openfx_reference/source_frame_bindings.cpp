@@ -30,19 +30,21 @@ int abortBinding(const void* context) {
   return ++probe.calls >= probe.stopAt;
 }
 Observation fetch(const OfxImageEffectSuiteV1& image, const OfxPropertySuiteV1& property,
-                  OfxImageClipHandle clip, const SourceFrameView& expected) {
+                  OfxImageClipHandle clip, const SourceFrameView& expected, OfxPointD expectedScale = {1, 1}) {
   OfxPropertySetHandle handle = nullptr;
   require(image.clipGetImage(clip, expected.time, nullptr, &handle) == kOfxStatOK && handle, "actual image handle");
   void* pixels = nullptr;
   int row = 0, bounds[4]{}, rod[4]{};
   char* id = nullptr;
-  double par = 0;
+  double par = 0, scale[2]{};
   require(property.propGetPointer(handle, kOfxImagePropData, 0, &pixels) == kOfxStatOK &&
       property.propGetInt(handle, kOfxImagePropRowBytes, 0, &row) == kOfxStatOK &&
       property.propGetIntN(handle, kOfxImagePropBounds, 4, bounds) == kOfxStatOK &&
       property.propGetIntN(handle, kOfxImagePropRegionOfDefinition, 4, rod) == kOfxStatOK &&
       property.propGetString(handle, kOfxImagePropUniqueIdentifier, 0, &id) == kOfxStatOK && id &&
-      property.propGetDouble(handle, kOfxImagePropPixelAspectRatio, 0, &par) == kOfxStatOK,
+      property.propGetDouble(handle, kOfxImagePropPixelAspectRatio, 0, &par) == kOfxStatOK &&
+      property.propGetDoubleN(handle, kOfxImageEffectPropRenderScale, 2, scale) == kOfxStatOK &&
+      scale[0] == expectedScale.x && scale[1] == expectedScale.y,
       "complete actual image metadata");
   const int domain[]{expected.x, expected.y, expected.x + expected.width, expected.y + expected.height};
   require(!std::memcmp(bounds, domain, sizeof(domain)) && !std::memcmp(rod, domain, sizeof(domain)) &&
@@ -55,8 +57,8 @@ Observation fetch(const OfxImageEffectSuiteV1& image, const OfxPropertySuiteV1& 
   }
   OfxRectD canonical{};
   require(image.clipGetRegionOfDefinition(clip, expected.time, &canonical) == kOfxStatOK &&
-      canonical.x1 == expected.x * par && canonical.x2 == (expected.x + expected.width) * par &&
-      canonical.y1 == expected.y && canonical.y2 == expected.y + expected.height, "exact canonical RoD at sample time");
+      canonical.x1 == expected.x * par / expectedScale.x && canonical.x2 == (expected.x + expected.width) * par / expectedScale.x &&
+      canonical.y1 == expected.y / expectedScale.y && canonical.y2 == (expected.y + expected.height) / expectedScale.y, "exact canonical RoD at sample time");
   return {handle, pixels, id};
 }
 int exercise(MondrianOpenFx::Host& host, const char* binaryPath, const char* bundlePath) {
@@ -75,6 +77,7 @@ int exercise(MondrianOpenFx::Host& host, const char* binaryPath, const char* bun
   }
   const auto savedCurrent = current, savedPast = past, savedFuture = future;
   MondrianOpenFx::FrameState frame;
+  frame.info.render_scale[0] = frame.info.render_scale[1] = 1;
   frame.info.width = 3; frame.info.height = 2; frame.info.frame = .25;
   frame.info.first_frame = -1000; frame.info.last_frame = 1000;
   frame.info.frame_rate = 24; frame.info.pixel_aspect_ratio = 2;
@@ -191,6 +194,20 @@ int exercise(MondrianOpenFx::Host& host, const char* binaryPath, const char* bun
     MondrianOpenFx::ImageAccess access(frame, true);
     auto again = fetch(image, property, source, values[0]);
     require(again.id != firstId && image.clipReleaseImage(again.handle) == kOfxStatOK, "reused backing cannot retain stale image identity");
+  }
+  // Density changes retain this exact instance and all temporal pixel origins.
+  // Only metadata and canonical geometry change; row bytes and pixels do not.
+  for (const auto scale : {OfxPointD{.5,.5}, OfxPointD{.75,.5}, OfxPointD{1,1}}) {
+    frame.info.render_scale[0] = scale.x; frame.info.render_scale[1] = scale.y;
+    MondrianOpenFx::FrameBorrow borrow(frame);
+    frame.input = current.data(); frame.pixelCount = 6;
+    require(frame.beginImageBinding() && frame.bindSourceFrames(values.data(),values.size()), "sampled immutable temporal set");
+    MondrianOpenFx::ImageAccess access(frame,true);
+    for (const auto& value : {now,values[0],values[1]}) {
+      const auto observed = fetch(image,property,source,value,scale);
+      require(image.clipReleaseImage(observed.handle) == kOfxStatOK, "sampled image release");
+    }
+    require(frame.imageHandles == 0 && !frame.invalidImageLifetime, "sampled leases settle on their original owner");
   }
   require(!std::memcmp(current.data(), savedCurrent.data(), sizeof(current)) &&
       !std::memcmp(past.data(), savedPast.data(), sizeof(past)) && !std::memcmp(future.data(), savedFuture.data(), sizeof(future)),

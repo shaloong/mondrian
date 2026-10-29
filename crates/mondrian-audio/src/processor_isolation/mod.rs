@@ -8,7 +8,7 @@
 mod clap_audio_config;
 mod clap_audio_role;
 mod clap_discovery;
-#[cfg(windows)]
+#[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
 mod clap_gui_owner;
 mod clap_gui_requests;
 mod clap_main_services;

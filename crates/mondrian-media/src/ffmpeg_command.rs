@@ -515,6 +515,28 @@ mod unix_process_group {
         }
     }
 
+    #[cfg(target_os = "linux")]
+    fn process_group_member_is_live(stat: &[u8], leader: u32) -> io::Result<bool> {
+        // comm may contain spaces, parentheses and non-UTF8 bytes.
+        let end = stat
+            .iter()
+            .rposition(|byte| *byte == b')')
+            .ok_or_else(|| io::Error::other(InvalidProcessRecord))?;
+        let fields = std::str::from_utf8(&stat[end + 1..])
+            .map_err(|_| io::Error::other(InvalidProcessRecord))?;
+        let mut fields = fields.split_whitespace();
+        let state = fields.next();
+        let _parent = fields.next();
+        let group = fields
+            .next()
+            .and_then(|field| field.parse::<libc::pid_t>().ok())
+            .ok_or_else(|| io::Error::other(InvalidProcessRecord))?;
+        // Linux do_task_stat initializes pgid to -1. When exit/reap has removed
+        // sighand, lock_task_sighand fails and that signed sentinel is emitted.
+        // Such a task cannot run; it is not a member of this pinned group.
+        Ok(group == leader as libc::pid_t && !matches!(state, Some("Z" | "X")))
+    }
+
     impl ProcessGroup {
         pub(super) fn new(leader: u32) -> Self {
             Self { leader }
@@ -571,21 +593,7 @@ mod unix_process_group {
                 else {
                     continue;
                 };
-                // comm may contain spaces, parentheses and non-UTF8 bytes.
-                let end = stat
-                    .iter()
-                    .rposition(|byte| *byte == b')')
-                    .ok_or_else(|| io::Error::other(InvalidProcessRecord))?;
-                let fields = std::str::from_utf8(&stat[end + 1..])
-                    .map_err(|_| io::Error::other(InvalidProcessRecord))?;
-                let mut fields = fields.split_whitespace();
-                let state = fields.next();
-                let _parent = fields.next();
-                let group = fields
-                    .next()
-                    .and_then(|field| field.parse::<u32>().ok())
-                    .ok_or_else(|| io::Error::other(InvalidProcessRecord))?;
-                if group == self.leader && !matches!(state, Some("Z" | "X")) {
+                if process_group_member_is_live(&stat, self.leader)? {
                     return Ok(false);
                 }
             }
@@ -699,6 +707,46 @@ mod unix_process_group {
     mod tests {
         use super::*;
         use std::io::Read;
+
+        #[test]
+        fn retiring_process_with_signed_group_sentinel_is_not_an_inventory_failure() {
+            for state in ['R', 'Z', 'X'] {
+                // State is sampled before sighand is locked, so the record may
+                // still carry the state from before concurrent exit/reap.
+                let stat = format!("4321 (retiring helper) {state} 0 -1 -1 0");
+                assert!(!process_group_member_is_live(stat.as_bytes(), 4321).unwrap());
+            }
+        }
+
+        #[test]
+        fn group_inventory_keeps_live_members_and_ignores_other_or_dead_members() {
+            let leader = 4321;
+            for (stat, expected) in [
+                (&b"7654 (name ) (\xff) S 4321 4321 4321 0"[..], true),
+                (&b"7654 (other group) R 4321 7654 7654 0"[..], false),
+                (&b"7654 (zombie member) Z 4321 4321 4321 0"[..], false),
+                (&b"7654 (dead member) X 4321 4321 4321 0"[..], false),
+                (&b"7654 (no group) R 0 0 0 0"[..], false),
+            ] {
+                assert_eq!(
+                    process_group_member_is_live(stat, leader).unwrap(),
+                    expected
+                );
+            }
+        }
+
+        #[test]
+        fn malformed_group_inventory_remains_an_error() {
+            for stat in [
+                &b""[..],
+                &b"7654 (truncated) S 4321"[..],
+                &b"7654 (invalid group) S 4321 invalid"[..],
+                &b"7654 (overflow group) S 4321 2147483648"[..],
+                &b"7654 (invalid fields) S 4321 \xff"[..],
+            ] {
+                assert!(process_group_member_is_live(stat, 4321).is_err());
+            }
+        }
 
         #[test]
         fn reaped_process_stat_is_absent_even_after_successful_open() {

@@ -1223,7 +1223,7 @@ mod tests {
             serde_json::from_value::<Response>(null),
             Ok(Response::GuiClosed { feedback: None, .. })
         ));
-        assert_eq!(VERSION, 17);
+        assert_eq!(VERSION, 18);
     }
 
     #[test]
@@ -1780,6 +1780,7 @@ mod tests {
             first_frame: 0.0,
             last_frame: 100.0,
             pixel_aspect_ratio: 1.0,
+            render_scale: [1.0; 2],
 
             project_width: 1,
             project_height: 1,

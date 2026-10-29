@@ -444,10 +444,39 @@ jobs:
       - name: 测试
         run: cargo test --workspace --exclude mondrian-app
 
+      - name: Build official OpenFX references
+        shell: python
+        run: |
+          import json, os, pathlib, subprocess, sys
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as environment:
+              for example, variable in [("Basic", "MONDRIAN_OPENFX_REFERENCE_BINARY"), ("Rectangle", "MONDRIAN_OPENFX_RECTANGLE_BINARY")]:
+                  output = pathlib.Path(os.environ["RUNNER_TEMP"]) / "mondrian-openfx-reference" / example
+                  command = [sys.executable, "scripts/validation/build-openfx-reference.py", "--output-dir", str(output)]
+                  if example != "Basic":
+                      command += ["--example", example]
+                  subprocess.run(command, check=True)
+                  reference = json.loads((output / "reference.json").read_text(encoding="utf-8"))
+                  environment.write(variable + "=" + reference["binary"] + "\n")
+
       - name: 编译默认 App 产品入口
         env:
           CARGO_INCREMENTAL: "0"
-        run: cargo build -p mondrian-app --bin mondrian -j1
+        shell: python
+        run: |
+          import json, os, pathlib, shutil, subprocess
+          metadata = json.loads(subprocess.check_output(["cargo", "metadata", "--locked", "--offline", "--no-deps", "--format-version=1"], text=True))
+          directory = pathlib.Path(metadata["target_directory"]) / "debug"
+          suffix = ".exe" if os.name == "nt" else ""
+          executable = directory / ("mondrian" + suffix)
+          # A cached Cargo companion can occupy the same pathname. Materialize
+          # the normal build explicitly before retaining its stable test copy.
+          executable.unlink(missing_ok=True)
+          subprocess.run(["cargo", "build", "--locked", "-p", "mondrian-app", "--bin", "mondrian", "-j1"], check=True)
+          product = directory / ("mondrian-native-ofx-product" + suffix)
+          # A sibling retains Windows DLL lookup without replacing any Cargo output.
+          shutil.copy2(executable, product)
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as environment:
+              environment.write("MONDRIAN_OPENFX_TEST_HELPER=" + str(product.resolve()) + "\n")
 
       - name: 测试完整 App 产品路径
         env:
@@ -456,6 +485,50 @@ jobs:
         # Runtime/deadline scopes. Isolate fixtures; their explicit worker and
         # child-process concurrency remains exercised inside each test.
         run: cargo test -p mondrian-app --all-targets -j1 -- --test-threads=1
+
+      # Keep compilation outside the original 180s native case budgets. These
+      # select only the finite Basic correctness/lifecycle gates, not the separate
+      # performance matrix. Every gate retains its original numeric assertions.
+      - name: Prepare native OpenFX parent
+        env:
+          CARGO_INCREMENTAL: "0"
+        run: cargo test --locked -p mondrian-app --test openfx_host --no-run -j1
+
+      - name: Native OpenFX Basic authored Float32
+        timeout-minutes: 3
+        env:
+          CARGO_INCREMENTAL: "0"
+        run: cargo test --locked -p mondrian-app --test openfx_host -j1 -- --exact official_basic_filter_renders_authored_float32_pixels_in_child --ignored --test-threads=1
+
+      - name: Native OpenFX Basic resident ownership
+        timeout-minutes: 3
+        env:
+          CARGO_INCREMENTAL: "0"
+        run: cargo test --locked -p mondrian-app --test openfx_host -j1 -- --exact official_basic_resident_sessions_reuse_workers_and_isolate_frames --ignored --test-threads=1
+
+      - name: Native OpenFX Basic partial transfer
+        timeout-minutes: 3
+        env:
+          CARGO_INCREMENTAL: "0"
+        run: cargo test --locked -p mondrian-app --test openfx_host -j1 -- --exact official_basic_resident_transfer_preserves_partial_blocks_and_changed_rasters --ignored --test-threads=1
+
+      - name: Native OpenFX Rectangle output-only Generator
+        timeout-minutes: 3
+        env:
+          CARGO_INCREMENTAL: "0"
+        run: cargo test --locked -p mondrian-app --test openfx_host -j1 -- --exact generator::official_rectangle_generator_preserves_geometry_parameters_and_output_signal --ignored --test-threads=1
+
+      - name: Native OpenFX Rectangle sampling and owner continuity
+        timeout-minutes: 3
+        env:
+          CARGO_INCREMENTAL: "0"
+        run: cargo test --locked -p mondrian-app --test openfx_host -j1 -- --exact generator::official_rectangle_generator_changes_sampling_without_changing_project_or_native_owner --ignored --test-threads=1
+
+      - name: Native OpenFX Basic sampling and identity
+        timeout-minutes: 3
+        env:
+          CARGO_INCREMENTAL: "0"
+        run: cargo test --locked -p mondrian-app --test openfx_host -j1 -- --exact sampling::official_basic_filter_preserves_sampling_pixels_and_identity_in_one_native_owner --ignored --test-threads=1
 
       - name: 编译 Golden 验证入口 (Windows)
         if: runner.os == 'Windows'

@@ -316,7 +316,7 @@ bool canonicalProgressiveContract(const void* handle, OfxPropertySetHandle in) {
 
 // Independent two-window oracle, separate from the 3x5 Source/Output raster.
 std::map<const void*, std::array<double, 3>> ownerProjects;
-bool ownerProjectContract(const void* handle, OfxPropertySetHandle in) {
+bool ownerProjectContract(const void* handle, OfxPropertySetHandle in, OfxPointD scale = {1, 1}) {
   OfxPropertySetHandle props = nullptr, sourceProps = nullptr;
   OfxImageClipHandle source = nullptr;
   const auto* timeline = static_cast<const OfxTimeLineSuiteV1*>(gHost->fetchSuite(gHost->host, kOfxTimeLineSuite, 1));
@@ -334,7 +334,7 @@ bool ownerProjectContract(const void* handle, OfxPropertySetHandle in) {
       gEffectHost->clipGetHandle((OfxImageEffectHandle)handle, "Source", &source, &sourceProps) != kOfxStatOK ||
       gPropHost->propGetDouble(sourceProps, kOfxImagePropPixelAspectRatio, 0, &imagePar) != kOfxStatOK ||
       gEffectHost->clipGetRegionOfDefinition(source, time, &rod) != kOfxStatOK ||
-      rod.x1 != 0.0 || rod.y1 != 0.0 || rod.x2 != 3.0 * imagePar || rod.y2 != 5.0) { return false; }
+      rod.x1 != 0.0 || rod.y1 != 0.0 || rod.x2 != 3.0 * imagePar / scale.x || rod.y2 != 5.0 / scale.y) { return false; }
   const std::array<double, 3> project{size[0], size[1], par};
   const auto admitted = ownerProjects.emplace(handle, project);
   if (!admitted.second && admitted.first->second != project) { return false; }
@@ -348,8 +348,9 @@ bool ownerProjectContract(const void* handle, OfxPropertySetHandle in) {
 bool ownerProjectOutput(const void* handle, OfxPropertySetHandle in) {
   OfxImageClipHandle output = nullptr;
   OfxPropertySetHandle image = nullptr;
-  double time = 0.0, par = 0.0;
-  if (!ownerProjectContract(handle, in) ||
+  double time = 0.0, par = 0.0, scale[2]{}, imageScale[2]{};
+  if (gPropHost->propGetDoubleN(in, kOfxImageEffectPropRenderScale, 2, scale) != kOfxStatOK ||
+      !ownerProjectContract(handle, in, {scale[0], scale[1]}) ||
       gPropHost->propGetDouble(in, kOfxPropTime, 0, &time) != kOfxStatOK ||
       gEffectHost->clipGetHandle((OfxImageEffectHandle)handle, "Output", &output, nullptr) != kOfxStatOK ||
       gEffectHost->clipGetImage(output, time, nullptr, &image) != kOfxStatOK) { return false; }
@@ -359,6 +360,8 @@ bool ownerProjectOutput(const void* handle, OfxPropertySetHandle in) {
       gPropHost->propGetIntN(image, kOfxImagePropBounds, 4, bounds) == kOfxStatOK &&
       gPropHost->propGetInt(image, kOfxImagePropRowBytes, 0, &stride) == kOfxStatOK &&
       gPropHost->propGetDouble(image, kOfxImagePropPixelAspectRatio, 0, &par) == kOfxStatOK &&
+      gPropHost->propGetDoubleN(image, kOfxImageEffectPropRenderScale, 2, imageScale) == kOfxStatOK &&
+      imageScale[0] == scale[0] && imageScale[1] == scale[1] &&
       bounds[0] == 0 && bounds[1] == 0 && bounds[2] == 3 && bounds[3] == 5;
   if (valid) {
     const auto& project = ownerProjects.at(handle);
@@ -3553,20 +3556,30 @@ OfxStatus probeAction(const char* action, const void* handle,
   if (selected == "project_geometry" &&
       (operation == kOfxActionCreateInstance || operation == kOfxImageEffectActionRender) &&
       !ownerProjectContract(handle, in)) { return kOfxStatFailed; }
+  const bool samplingAction = operation == kOfxImageEffectActionRender ||
+      operation == kOfxImageEffectActionBeginSequenceRender || operation == kOfxImageEffectActionEndSequenceRender ||
+      operation == kOfxImageEffectActionGetRegionOfDefinition || operation == kOfxImageEffectActionGetRegionsOfInterest ||
+      operation == kOfxImageEffectActionIsIdentity || operation == kOfxActionInstanceChanged;
   if ((selected == "image_sampling" || selected == "image_sampling_media") &&
-      (operation == kOfxActionCreateInstance || operation == kOfxImageEffectActionGetClipPreferences || operation == kOfxImageEffectActionRender)) {
+      (operation == kOfxActionCreateInstance || operation == kOfxImageEffectActionGetClipPreferences || samplingAction)) {
     const bool rendering = operation == kOfxImageEffectActionRender;
-    if (!ownerProjectContract(handle, rendering ? in : nullptr)) { return kOfxStatFailed; }
+    double time = 0;
+    const auto* timeline = static_cast<const OfxTimeLineSuiteV1*>(gHost->fetchSuite(gHost->host, kOfxTimeLineSuite, 1));
+    if (!timeline || timeline->getTime(const_cast<void*>(handle), &time) != kOfxStatOK ||
+        (selected == "image_sampling" && (time < 0 || time > 100 || time != std::floor(time)))) { return kOfxStatFailed; }
+    const OfxPointD scales[] = {{.5, .5}, {.5, .75}, {1, 1}};
+    const auto expected = selected == "image_sampling" ? scales[int(time) % 3] : OfxPointD{1, 1};
+    if (!ownerProjectContract(handle, rendering ? in : nullptr, expected)) { return kOfxStatFailed; }
     OfxImageClipHandle source = nullptr;
     OfxPropertySetHandle sourceProps = nullptr;
     double imagePar = 0.0;
     if (gEffectHost->clipGetHandle((OfxImageEffectHandle)handle, "Source", &source, &sourceProps) != kOfxStatOK ||
         gPropHost->propGetDouble(sourceProps, kOfxImagePropPixelAspectRatio, 0, &imagePar) != kOfxStatOK ||
         (operation == kOfxActionCreateInstance && imagePar != (selected == "image_sampling_media" ? 4.0 / 3.0 : 1.2))) { return kOfxStatFailed; }
-    if (rendering) {
+    if (samplingAction) {
       double scale[2]{};
       if (gPropHost->propGetDoubleN(in, kOfxImageEffectPropRenderScale, 2, scale) != kOfxStatOK ||
-          scale[0] != 1.0 || scale[1] != 1.0) { return kOfxStatFailed; }
+          scale[0] != expected.x || scale[1] != expected.y) { return kOfxStatFailed; }
     }
   }
   if (selected == "canonical_progressive" &&

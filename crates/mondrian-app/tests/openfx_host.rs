@@ -43,6 +43,9 @@ mod checkerboard;
 #[path = "openfx_host/image_domain.rs"]
 mod image_domain;
 
+#[path = "openfx_host/sampling.rs"]
+mod sampling;
+
 fn constant_parameters<const N: usize>(
     values: [(String, OpenFxParameterValue); N],
 ) -> BTreeMap<String, OpenFxParameterBinding> {
@@ -392,7 +395,29 @@ fn curve_source_lifecycle(expected_mode: &str) {
 }
 
 fn product_executable() -> &'static Path {
-    Path::new(env!("CARGO_BIN_EXE_mondrian"))
+    // A native lab can select the separately built normal Product without
+    // replacing Cargo's feature-unified integration-test companion in place.
+    static PRODUCT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    PRODUCT
+        .get_or_init(|| {
+            std::env::var_os("MONDRIAN_OPENFX_TEST_HELPER")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from(env!("CARGO_BIN_EXE_mondrian")))
+        })
+        .as_path()
+}
+
+#[cfg(target_os = "linux")]
+fn assert_selected_product_worker_image(pid: u32) {
+    if let Some(expected) = std::env::var_os("MONDRIAN_OPENFX_TEST_HELPER") {
+        let expected = PathBuf::from(expected).canonicalize().expect("explicit normal Product");
+        let actual = std::fs::read_link(format!("/proc/{pid}/exe"))
+            .expect("actual retained native worker executable");
+        assert_eq!(
+            actual, expected,
+            "resident owner must execute the selected Product"
+        );
+    }
 }
 
 #[test]
@@ -1029,6 +1054,12 @@ fn official_basic_resident_sessions_reuse_workers_and_isolate_frames() {
     let preview_id = preview.worker_process_id();
     let export_id = export.worker_process_id();
     assert_ne!(preview_id, export_id);
+    #[cfg(target_os = "linux")]
+    {
+        for pid in [preview_id, export_id] {
+            assert_selected_product_worker_image(pid);
+        }
+    }
     let mut timing = OpenFxRenderTiming {
         frame: 0.0,
         frame_rate: 24.0,
@@ -2654,25 +2685,23 @@ fn qualify_cpu_contract_resident_and_graph(mode: &str, coordinate_output: bool) 
             );
         }
         let invalid = cpu_contract_timing();
-        let reduced = EffectFloatFrame::from_pixels(
-            input.extent(),
+        // Density is now supported. The immutable prepared raster dimensions
+        // remain a genuine admission boundary and must preserve the owner.
+        let incompatible = EffectFloatFrame::from_pixels(
+            mondrian_effects::EffectFrameExtent::new(input.width() + 1, input.height()),
             input.format(),
-            mondrian_core::ImageSampling::new(
-                input.sampling().sample_aspect_ratio(),
-                [Rational::new(1, 2); 2],
-            )
-            .unwrap(),
-            input.pixels().to_vec(),
+            input.sampling(),
+            vec![[0.0; 4]; (input.width() as usize + 1) * input.height() as usize],
         )
         .unwrap();
         assert!(matches!(
             session.render(
                 &invalid,
                 &BTreeMap::new(),
-                &reduced,
+                &incompatible,
                 &mut checkpoint(&cancellation)
             ),
-            Err(OpenFxHostError::UnsupportedImageSampling { .. })
+            Err(OpenFxHostError::Invalid(_))
         ));
         let valid = cpu_contract_timing();
         let parameters =

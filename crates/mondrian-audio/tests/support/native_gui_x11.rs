@@ -165,6 +165,33 @@ impl Probe {
         false
     }
 
+    pub fn foreign_view_fills_parent(&self, window: x::Window) -> bool {
+        let size = self.size(window);
+        let tree = self
+            .connection
+            .wait_for_reply(self.connection.send_request(&x::QueryTree { window }))
+            .expect("live actual parent");
+        tree.children().iter().any(|child| {
+            let geometry = self
+                .connection
+                .wait_for_reply(
+                    self.connection
+                        .send_request(&x::GetGeometry { drawable: x::Drawable::Window(*child) }),
+                )
+                .expect("actual foreign child geometry");
+            let attributes = self
+                .connection
+                .wait_for_reply(
+                    self.connection.send_request(&x::GetWindowAttributes { window: *child }),
+                )
+                .expect("actual foreign child visibility");
+            attributes.map_state() == x::MapState::Viewable
+                && geometry.x() == 0
+                && geometry.y() == 0
+                && (u32::from(geometry.width()), u32::from(geometry.height())) == size
+        })
+    }
+
     pub fn request_resize(&self, window: x::Window, width: u32, height: u32) {
         self.connection
             .send_and_check_request(&x::ConfigureWindow {

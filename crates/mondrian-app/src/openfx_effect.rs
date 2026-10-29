@@ -107,9 +107,6 @@ impl EffectFloatProcessorFactory for OpenFxProcessorFactory {
     fn requires_input_service(&self) -> bool {
         matches!(self.context, OpenFxContext::Filter)
     }
-    fn image_scale_requirement(&self) -> mondrian_effects::EffectImageScaleRequirement {
-        mondrian_effects::EffectImageScaleRequirement::Unit
-    }
     fn input_role(&self) -> mondrian_effects::EffectFloatProcessorInputRole {
         match self.context {
             OpenFxContext::Filter => mondrian_effects::EffectFloatProcessorInputRole::SingleImage,
@@ -773,10 +770,10 @@ fn build_definition_in_context(
         },
     );
 
-    // Native selection semantics changed; invalidate old execution identities
+    // Native sampling semantics changed; invalidate old execution identities
     // without changing authored Effect keys or any unrelated graph identity.
     let version = format!(
-        "ofx-exact-version-v1:{}.{}:{}",
+        "ofx-exact-version-v2:{}.{}:{}",
         plugin.version_major, plugin.version_minor, inspection.binary_sha256
     );
     let processor = Arc::new(OpenFxProcessorFactory {
