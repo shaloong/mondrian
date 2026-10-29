@@ -55,6 +55,38 @@ fn literal(output: &EffectFloatFrame, frame: f32, gain: f32) {
 #[test]
 #[ignore = "requires normal Product and MONDRIAN_OPENFX_RECTANGLE_BINARY=official Rectangle.ofx.bundle binary"]
 fn official_rectangle_generator_preserves_geometry_parameters_and_output_signal() {
+    official_rectangle_generator(&[(
+        [Rational::new(1, 1); 2],
+        [[1, 1, 5, 4], [2, 2, 7, 5], [1, 1, 5, 4]],
+    )]);
+}
+
+#[test]
+#[ignore = "requires normal Product and MONDRIAN_OPENFX_RECTANGLE_BINARY=official Rectangle.ofx.bundle binary"]
+fn official_rectangle_generator_changes_sampling_without_changing_project_or_native_owner() {
+    // Independent raster boxes for the explicit canonical corners below. Half
+    // scale is first to exercise native Create as well as later scale changes.
+    official_rectangle_generator(&[
+        (
+            [Rational::new(1, 2); 2],
+            [[0, 0, 2, 2], [1, 1, 3, 2], [0, 0, 2, 2]],
+        ),
+        (
+            [Rational::new(3, 4), Rational::new(1, 2)],
+            [[0, 0, 3, 2], [1, 1, 5, 2], [0, 0, 3, 2]],
+        ),
+        (
+            [Rational::new(1, 1); 2],
+            [[1, 1, 5, 4], [2, 2, 7, 5], [1, 1, 5, 4]],
+        ),
+        (
+            [Rational::new(1, 2); 2],
+            [[0, 0, 2, 2], [1, 1, 3, 2], [0, 0, 2, 2]],
+        ),
+    ]);
+}
+
+fn official_rectangle_generator(grids: &[([Rational; 2], [[u32; 4]; 3])]) {
     use mondrian_effects::{
         instantiate_effect_node_with_project_geometry, EffectProcessorExecutionOrigin,
         EffectProjectGeometry,
@@ -153,91 +185,95 @@ fn official_rectangle_generator_preserves_geometry_parameters_and_output_signal(
     #[cfg(target_os = "linux")]
     let mut process_start = None;
     let target = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        for (frame, case) in [(0, 0), (6, 1), (3, 0), (9, 2), (6, 1)] {
-            let graph = programs[case].evaluate(TimelineTime::new(frame, 24).unwrap()).unwrap();
-            assert!(graph.node_profiles().keys().all(|id| !matches!(
-                graph.graph().node(*id).unwrap().kind,
-                EffectGraphNodeKind::Source
-            )));
-            let mut control = EffectProcessorControl::uncancelled();
-            let output = session
-                .generate_compiled_rgba_f32(
-                    EffectFrameExtent::new(width, height),
-                    format(),
-                    cpu_contract_sampling(par.to_f64()),
-                    &graph,
-                    -999,
-                    &mut control,
-                )
-                .expect("actual Output-only native Render");
-            assert_eq!(output.extent(), EffectFrameExtent::new(width, height));
-            assert_eq!(output.format().alpha(), ColorFrameAlpha::PremultipliedFloat);
-            assert_eq!(output.sampling(), cpu_contract_sampling(par.to_f64()));
-            let (_, _, colour, [x1, y1, x2, y2]) = cases[case];
-            for (index, actual) in output.pixels().iter().enumerate() {
-                let x = index as u32 % width;
-                let y = height - 1 - index as u32 / width;
-                // This SDK example declares PM output and emits literal RGBA
-                // parameter values without further scaling. Preserve that
-                // producer signal, including nonzero RGB at zero alpha; do not
-                // infer its colour-picker semantics from a host pixel result.
-                let expected = if x >= x1 && x < x2 && y >= y1 && y < y2 {
-                    colour.map(|v| v as f32)
-                } else {
-                    [0.0; 4]
-                };
-                assert_eq!(
-                    actual.map(f32::to_bits),
-                    expected.map(f32::to_bits),
-                    "frame{frame} pixel{index}"
-                );
-            }
-            let batch = control.take_feedback().expect("actual native invocation");
-            assert_eq!(batch.len(), 1);
-            let receipt = batch.iter().next().unwrap();
-            assert_eq!(
-                receipt.preparation.input_role,
-                mondrian_effects::EffectFloatProcessorInputRole::NoImage
-            );
-            let observed = (
-                receipt.feedback.owner,
-                receipt.feedback.origin,
-                receipt.feedback.snapshot.native_owner(),
-            );
-            if let Some(expected) = identity {
-                assert_eq!(
-                    observed, expected,
-                    "parameter/Seek changes retain one native owner"
-                );
-            } else {
-                identity = Some(observed);
-                let EffectProcessorExecutionOrigin::SupervisedChild { process_id } =
-                    receipt.feedback.origin
-                else {
-                    panic!("real reference must execute in Product child");
-                };
-                #[cfg(target_os = "linux")]
-                {
-                    let pid = process_id.get();
-                    assert_selected_product_worker_image(pid);
-                    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap();
-                    let start = stat
-                        .rsplit_once(')')
-                        .unwrap()
-                        .1
-                        .split_whitespace()
-                        .nth(19)
-                        .unwrap()
-                        .to_owned();
-                    process_start = Some((pid, start));
+        for (scale, boxes) in grids {
+            let sampling = mondrian_core::ImageSampling::new(par, *scale).unwrap();
+            for (frame, case) in [(0, 0), (6, 1), (3, 0), (9, 2), (6, 1)] {
+                let graph = programs[case].evaluate(TimelineTime::new(frame, 24).unwrap()).unwrap();
+                assert!(graph.node_profiles().keys().all(|id| !matches!(
+                    graph.graph().node(*id).unwrap().kind,
+                    EffectGraphNodeKind::Source
+                )));
+                let mut control = EffectProcessorControl::uncancelled();
+                let output = session
+                    .generate_compiled_rgba_f32(
+                        EffectFrameExtent::new(width, height),
+                        format(),
+                        sampling,
+                        &graph,
+                        -999,
+                        &mut control,
+                    )
+                    .expect("actual Output-only native Render");
+                assert_eq!(output.extent(), EffectFrameExtent::new(width, height));
+                assert_eq!(output.format().alpha(), ColorFrameAlpha::PremultipliedFloat);
+                assert_eq!(output.sampling(), sampling);
+                let (_, _, colour, _) = cases[case];
+                let [x1, y1, x2, y2] = boxes[case];
+                for (index, actual) in output.pixels().iter().enumerate() {
+                    let x = index as u32 % width;
+                    let y = height - 1 - index as u32 / width;
+                    // This SDK example declares PM output and emits literal RGBA
+                    // parameter values without further scaling. Preserve that
+                    // producer signal, including nonzero RGB at zero alpha; do not
+                    // infer its colour-picker semantics from a host pixel result.
+                    let expected = if x >= x1 && x < x2 && y >= y1 && y < y2 {
+                        colour.map(|v| v as f32)
+                    } else {
+                        [0.0; 4]
+                    };
+                    assert_eq!(
+                        actual.map(f32::to_bits),
+                        expected.map(f32::to_bits),
+                        "frame{frame} pixel{index}"
+                    );
                 }
-                #[cfg(not(target_os = "linux"))]
-                let _ = process_id;
+                let batch = control.take_feedback().expect("actual native invocation");
+                assert_eq!(batch.len(), 1);
+                let receipt = batch.iter().next().unwrap();
+                assert_eq!(
+                    receipt.preparation.input_role,
+                    mondrian_effects::EffectFloatProcessorInputRole::NoImage
+                );
+                let observed = (
+                    receipt.feedback.owner,
+                    receipt.feedback.origin,
+                    receipt.feedback.snapshot.native_owner(),
+                );
+                if let Some(expected) = identity {
+                    assert_eq!(
+                        observed, expected,
+                        "parameter/Seek changes retain one native owner"
+                    );
+                } else {
+                    identity = Some(observed);
+                    let EffectProcessorExecutionOrigin::SupervisedChild { process_id } =
+                        receipt.feedback.origin
+                    else {
+                        panic!("real reference must execute in Product child");
+                    };
+                    #[cfg(target_os = "linux")]
+                    {
+                        let pid = process_id.get();
+                        assert_selected_product_worker_image(pid);
+                        let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap();
+                        let start = stat
+                            .rsplit_once(')')
+                            .unwrap()
+                            .1
+                            .split_whitespace()
+                            .nth(19)
+                            .unwrap()
+                            .to_owned();
+                        process_start = Some((pid, start));
+                    }
+                    #[cfg(not(target_os = "linux"))]
+                    let _ = process_id;
+                }
+                assert!(receipt.feedback.snapshot.invocation() > invocation);
+                invocation = receipt.feedback.snapshot.invocation();
+                assert_eq!(session.diagnostics().processor_instances, 1);
+                assert_eq!(session.diagnostics().cache_entries, 0);
             }
-            assert!(receipt.feedback.snapshot.invocation() > invocation);
-            invocation = receipt.feedback.snapshot.invocation();
-            assert_eq!(session.diagnostics().processor_instances, 1);
-            assert_eq!(session.diagnostics().cache_entries, 0);
         }
     }));
     session.retire_processor_resources();
