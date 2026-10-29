@@ -1194,47 +1194,83 @@ fn run_clap_discovery_worker_inner(
     *stage = DiscoveryErrorStage::LibraryLoad;
     let entry = unsafe { PluginEntry::load(request.library_path.as_os_str()) }
         .map_err(|error| unavailable(format!("CLAP library load failed: {error}")))?;
-    let response = match request.operation {
-        DiscoveryOperation::List => {
-            *stage = DiscoveryErrorStage::List;
-            let descriptors = list_loaded(&entry)?;
-            *stage = DiscoveryErrorStage::ResponseEncoding;
-            serde_json::to_vec(&DiscoveryResponse { descriptors, probe: None })
-        }
-        DiscoveryOperation::NoteInputMetadata(query) => {
-            *stage = DiscoveryErrorStage::NoteInputMetadata;
-            let fingerprint = metadata_fingerprint
-                .ok_or_else(|| invalid("CLAP note metadata fingerprint is missing"))?;
-            let metadata = super::clap_note_input_metadata::inspect_loaded(
-                &entry,
-                &query.plugin_id,
-                fingerprint,
-                query.state.as_deref(),
-            )?;
-            *stage = DiscoveryErrorStage::BinaryFingerprint;
-            if fingerprint_clap_binary(&request.library_path)? != fingerprint {
-                return Err(unavailable(
-                    "CLAP binary changed during native note metadata inspection",
-                ));
+    // The entry stays outside this scope, including all native failure cleanup.
+    let response = super::worker::with_native_control_pool(|| {
+        match request.operation {
+            DiscoveryOperation::List => {
+                *stage = DiscoveryErrorStage::List;
+                let descriptors = list_loaded(&entry)?;
+                *stage = DiscoveryErrorStage::ResponseEncoding;
+                serde_json::to_vec(&DiscoveryResponse { descriptors, probe: None })
             }
-            *stage = DiscoveryErrorStage::ResponseEncoding;
-            serde_json::to_vec(&metadata)
-        }
-        DiscoveryOperation::ProbeProcessing {
-            schema_version: _,
-            plugin_id,
-            sample_rate,
-            channel_layout,
-            max_block_frames,
-            offline,
-            state,
-            capture_default_state,
-        } => {
-            *stage = DiscoveryErrorStage::Probe;
-            let probe = probe_loaded_with_names(
-                &entry,
-                &plugin_id,
-                AudioRenderContract {
+            DiscoveryOperation::NoteInputMetadata(query) => {
+                *stage = DiscoveryErrorStage::NoteInputMetadata;
+                let fingerprint = metadata_fingerprint
+                    .ok_or_else(|| invalid("CLAP note metadata fingerprint is missing"))?;
+                let metadata = super::clap_note_input_metadata::inspect_loaded(
+                    &entry,
+                    &query.plugin_id,
+                    fingerprint,
+                    query.state.as_deref(),
+                )?;
+                *stage = DiscoveryErrorStage::BinaryFingerprint;
+                if fingerprint_clap_binary(&request.library_path)? != fingerprint {
+                    return Err(unavailable(
+                        "CLAP binary changed during native note metadata inspection",
+                    ));
+                }
+                *stage = DiscoveryErrorStage::ResponseEncoding;
+                serde_json::to_vec(&metadata)
+            }
+            DiscoveryOperation::ProbeProcessing {
+                schema_version: _,
+                plugin_id,
+                sample_rate,
+                channel_layout,
+                max_block_frames,
+                offline,
+                state,
+                capture_default_state,
+            } => {
+                *stage = DiscoveryErrorStage::Probe;
+                let probe = probe_loaded_with_names(
+                    &entry,
+                    &plugin_id,
+                    AudioRenderContract {
+                        sample_rate,
+                        channel_layout,
+                        max_block_frames,
+                        processing_mode: if offline {
+                            AudioProcessingMode::Offline
+                        } else {
+                            AudioProcessingMode::Realtime
+                        },
+                        processor_session_scratch_budget_bytes: usize::MAX,
+                        public_output_lookahead_budget_frames: usize::MAX,
+                        compensation_delay_scratch_budget_bytes: usize::MAX,
+                    },
+                    state.as_deref(),
+                    capture_default_state,
+                )?;
+                *stage = DiscoveryErrorStage::ResponseEncoding;
+                serde_json::to_vec(&DiscoveryResponse {
+                    descriptors: Vec::new(),
+                    probe: Some(probe),
+                })
+            }
+            DiscoveryOperation::ProbeNotes {
+                schema_version,
+                plugin_id,
+                sample_rate,
+                channel_layout,
+                max_block_frames,
+                offline,
+                state,
+            } => {
+                *stage = DiscoveryErrorStage::NoteInputContract;
+                let fingerprint = metadata_fingerprint
+                    .ok_or_else(|| invalid("CLAP Note probe fingerprint is missing"))?;
+                let render = AudioRenderContract {
                     sample_rate,
                     channel_layout,
                     max_block_frames,
@@ -1246,77 +1282,47 @@ fn run_clap_discovery_worker_inner(
                     processor_session_scratch_budget_bytes: usize::MAX,
                     public_output_lookahead_budget_frames: usize::MAX,
                     compensation_delay_scratch_budget_bytes: usize::MAX,
-                },
-                state.as_deref(),
-                capture_default_state,
-            )?;
-            *stage = DiscoveryErrorStage::ResponseEncoding;
-            serde_json::to_vec(&DiscoveryResponse { descriptors: Vec::new(), probe: Some(probe) })
-        }
-        DiscoveryOperation::ProbeNotes {
-            schema_version,
-            plugin_id,
-            sample_rate,
-            channel_layout,
-            max_block_frames,
-            offline,
-            state,
-        } => {
-            *stage = DiscoveryErrorStage::NoteInputContract;
-            let fingerprint = metadata_fingerprint
-                .ok_or_else(|| invalid("CLAP Note probe fingerprint is missing"))?;
-            let render = AudioRenderContract {
-                sample_rate,
-                channel_layout,
-                max_block_frames,
-                processing_mode: if offline {
-                    AudioProcessingMode::Offline
+                };
+                if schema_version == 2 {
+                    // Standalone explicit Note contract, separate from full processing.
+                    let result = super::clap_note_input_contract::probe_loaded(
+                        &entry,
+                        &plugin_id,
+                        fingerprint,
+                        state.as_deref(),
+                        render,
+                    )?;
+                    *stage = DiscoveryErrorStage::BinaryFingerprint;
+                    if fingerprint_clap_binary(&request.library_path)? != fingerprint {
+                        return Err(unavailable(
+                            "CLAP binary changed during native Note contract negotiation",
+                        ));
+                    }
+                    *stage = DiscoveryErrorStage::ResponseEncoding;
+                    serde_json::to_vec(&result)
                 } else {
-                    AudioProcessingMode::Realtime
-                },
-                processor_session_scratch_budget_bytes: usize::MAX,
-                public_output_lookahead_budget_frames: usize::MAX,
-                compensation_delay_scratch_budget_bytes: usize::MAX,
-            };
-            if schema_version == 2 {
-                // Standalone explicit Note contract, separate from full processing.
-                let result = super::clap_note_input_contract::probe_loaded(
-                    &entry,
-                    &plugin_id,
-                    fingerprint,
-                    state.as_deref(),
-                    render,
-                )?;
-                *stage = DiscoveryErrorStage::BinaryFingerprint;
-                if fingerprint_clap_binary(&request.library_path)? != fingerprint {
-                    return Err(unavailable(
-                        "CLAP binary changed during native Note contract negotiation",
-                    ));
+                    // The complete offer is captured from one actual Notes-enabled
+                    // restored/render-configured/activated instance, then destroyed.
+                    let result = super::clap_note_input_contract::probe_loaded_processing_v6(
+                        &entry,
+                        &plugin_id,
+                        fingerprint,
+                        state.as_deref(),
+                        render,
+                    )?;
+                    *stage = DiscoveryErrorStage::BinaryFingerprint;
+                    if fingerprint_clap_binary(&request.library_path)? != fingerprint {
+                        return Err(unavailable(
+                            "CLAP binary changed during native Note processing negotiation",
+                        ));
+                    }
+                    *stage = DiscoveryErrorStage::ResponseEncoding;
+                    Ok(encode_processing_offer_v6(&result)?)
                 }
-                *stage = DiscoveryErrorStage::ResponseEncoding;
-                serde_json::to_vec(&result)
-            } else {
-                // The complete offer is captured from one actual Notes-enabled
-                // restored/render-configured/activated instance, then destroyed.
-                let result = super::clap_note_input_contract::probe_loaded_processing_v6(
-                    &entry,
-                    &plugin_id,
-                    fingerprint,
-                    state.as_deref(),
-                    render,
-                )?;
-                *stage = DiscoveryErrorStage::BinaryFingerprint;
-                if fingerprint_clap_binary(&request.library_path)? != fingerprint {
-                    return Err(unavailable(
-                        "CLAP binary changed during native Note processing negotiation",
-                    ));
-                }
-                *stage = DiscoveryErrorStage::ResponseEncoding;
-                Ok(encode_processing_offer_v6(&result)?)
             }
         }
-    }
-    .map_err(|error| invalid(format!("CLAP discovery response encoding failed: {error}")))?;
+        .map_err(|error| invalid(format!("CLAP discovery response encoding failed: {error}")))
+    })?;
     if response.len() as u64 > MAX_RESPONSE_BYTES {
         return Err(invalid(
             "CLAP discovery response exceeds the metadata limit",
