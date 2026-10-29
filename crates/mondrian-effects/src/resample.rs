@@ -80,6 +80,24 @@ pub(crate) fn sample_bilinear_wrapped(
     sample
 }
 
+/// Nearest sample whose integer coordinates clamp to the frame edges.
+///
+/// The rounding is `floor(value + 0.5)` rather than a language-provided round:
+/// WGSL rounds half-way cases to even while Rust rounds them away from zero, so
+/// spelling the direction out keeps the CPU kernel and the WGSL pass on the same
+/// texel for every input.
+pub(crate) fn sample_nearest_clamped(
+    source: &[[f32; 4]],
+    width: usize,
+    height: usize,
+    x: f64,
+    y: f64,
+) -> [f32; 4] {
+    let column = (x + 0.5).floor().clamp(0.0, (width - 1) as f64) as usize;
+    let row = (y + 0.5).floor().clamp(0.0, (height - 1) as f64) as usize;
+    source[row * width + column]
+}
+
 /// Wraps a signed index into `0..limit`.
 pub(crate) fn wrap_index(index: i64, limit: usize) -> usize {
     let limit = limit as i64;
@@ -137,6 +155,15 @@ mod tests {
                 / 4.0;
             assert!((sample[channel] - expected).abs() <= 1.0e-6);
         }
+    }
+
+    #[test]
+    fn nearest_sampling_rounds_half_up_and_clamps() {
+        let pixels = ramp(4, 3);
+        assert_eq!(sample_nearest_clamped(&pixels, 4, 3, 1.5, 0.0), pixels[2]);
+        assert_eq!(sample_nearest_clamped(&pixels, 4, 3, 1.4, 0.0), pixels[1]);
+        assert_eq!(sample_nearest_clamped(&pixels, 4, 3, -2.0, -2.0), pixels[0]);
+        assert_eq!(sample_nearest_clamped(&pixels, 4, 3, 9.0, 9.0), pixels[11]);
     }
 
     #[test]

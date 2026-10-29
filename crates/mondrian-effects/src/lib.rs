@@ -82,6 +82,7 @@ pub mod motion_tile;
 pub mod noise;
 pub mod offset;
 pub(crate) mod parallel;
+pub mod polar_coordinates;
 pub mod posterize;
 pub mod qualifier;
 pub mod scatter;
@@ -238,6 +239,9 @@ pub use noise::{
 };
 pub use offset::{
     offset_frame_f32, OffsetError, OffsetGrade, OFFSET_MAX_BLEND_PERCENT, OFFSET_MAX_SHIFT_PIXELS,
+};
+pub use polar_coordinates::{
+    polar_coordinates_frame_f32, PolarConversion, PolarCoordinatesGrade, PolarInterpolation,
 };
 pub use posterize::{
     posterize_frame_f32, PosterizeError, PosterizeGrade, POSTERIZE_MAX_LEVELS, POSTERIZE_MIN_LEVELS,

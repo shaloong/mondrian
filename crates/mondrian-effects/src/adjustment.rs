@@ -224,6 +224,12 @@ pub(crate) fn apply_render_op(
                 parameter: "requires_float32",
             })
         }
+        EffectRenderOp::PolarCoordinates { .. } => {
+            return Err(EffectExecutionError::InvalidRenderParameter {
+                op: "polar_coordinates",
+                parameter: "requires_float32",
+            })
+        }
         EffectRenderOp::Mirror { .. } => {
             return Err(EffectExecutionError::InvalidRenderParameter {
                 op: "mirror",
@@ -775,6 +781,7 @@ pub(crate) const fn render_op_f32_scratch_frames(op: &EffectRenderOp) -> usize {
         EffectRenderOp::Tritone { .. } => 0,
         EffectRenderOp::RadialBlur { .. } => 0,
         EffectRenderOp::Mirror { .. } => 0,
+        EffectRenderOp::PolarCoordinates { .. } => 0,
         EffectRenderOp::Convolution { .. } => 0,
         EffectRenderOp::Offset { .. } => 0,
         EffectRenderOp::Twirl { .. } => 0,
@@ -1013,6 +1020,15 @@ pub(crate) fn apply_render_op_f32_region_controlled<E>(
         ),
         EffectRenderOp::RadialBlur { grade } => {
             crate::radial_blur::apply_radial_blur_f32_controlled(
+                working,
+                region.width as usize,
+                region.height as usize,
+                *grade,
+                checkpoint,
+            )
+        }
+        EffectRenderOp::PolarCoordinates { grade } => {
+            crate::polar_coordinates::apply_polar_coordinates_f32_controlled(
                 working,
                 region.width as usize,
                 region.height as usize,

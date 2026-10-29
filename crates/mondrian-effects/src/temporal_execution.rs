@@ -2813,6 +2813,7 @@ fn render_op_name(op: &crate::EffectRenderOp) -> &'static str {
         crate::EffectRenderOp::Tritone { .. } => "tritone",
         crate::EffectRenderOp::RadialBlur { .. } => "radial_blur",
         crate::EffectRenderOp::Mirror { .. } => "mirror",
+        crate::EffectRenderOp::PolarCoordinates { .. } => "polar_coordinates",
         crate::EffectRenderOp::Convolution { .. } => "convolution",
         crate::EffectRenderOp::Offset { .. } => "offset",
         crate::EffectRenderOp::Twirl { .. } => "twirl",

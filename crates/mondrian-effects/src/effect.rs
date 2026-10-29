@@ -916,6 +916,11 @@ pub enum EffectRenderOp {
     Convolution {
         grade: crate::ConvolutionGrade,
     },
+    /// Polar coordinates: reinterprets the frame as an angle-radius pair or the
+    /// inverse, sampling the source with the authored interpolation.
+    PolarCoordinates {
+        grade: crate::PolarCoordinatesGrade,
+    },
     /// Offset: translates the frame by an authored shift and wraps the pixels
     /// that leave one edge back onto the opposite edge.
     Offset {
@@ -1119,6 +1124,9 @@ impl std::fmt::Debug for EffectRenderOp {
             }
             Self::Convolution { grade } => {
                 formatter.debug_struct("Convolution").field("grade", grade).finish()
+            }
+            Self::PolarCoordinates { grade } => {
+                formatter.debug_struct("PolarCoordinates").field("grade", grade).finish()
             }
             Self::Offset { grade } => {
                 formatter.debug_struct("Offset").field("grade", grade).finish()
@@ -1668,6 +1676,12 @@ impl EffectRenderOp {
                 grade.absolute_values().hash(state);
                 grade.blend_with_original().to_bits().hash(state);
             }
+            EffectRenderOp::PolarCoordinates { grade } => {
+                51u8.hash(state);
+                for value in grade.gpu_controls() {
+                    value.to_bits().hash(state);
+                }
+            }
             EffectRenderOp::Offset { grade } => {
                 46u8.hash(state);
                 for value in grade.gpu_controls() {
@@ -1851,6 +1865,7 @@ impl EffectRenderOp {
             EffectRenderOp::RadialBlur { .. } => 5,
             EffectRenderOp::Mirror { .. } => 3,
             EffectRenderOp::Convolution { .. } => 3,
+            EffectRenderOp::PolarCoordinates { .. } => 3,
             EffectRenderOp::Offset { .. } => 2,
             EffectRenderOp::Twirl { .. } => 3,
             EffectRenderOp::Noise { .. } => 1,
@@ -2397,7 +2412,7 @@ impl EffectDefinition {
     }
 }
 
-fn builtin_effect_types() -> [EffectType; 49] {
+fn builtin_effect_types() -> [EffectType; 50] {
     [
         EffectType::BasicCorrection,
         EffectType::WhiteBalance,
@@ -2448,6 +2463,7 @@ fn builtin_effect_types() -> [EffectType; 49] {
         EffectType::Spherize,
         EffectType::Noise,
         EffectType::Mirror,
+        EffectType::PolarCoordinates,
     ]
 }
 
@@ -4426,6 +4442,48 @@ fn default_properties_for(effect_type: EffectType) -> PropertyBag {
                 Some(1.0),
             );
         }
+        EffectType::PolarCoordinates => {
+            define_builtin_enum_property(
+                &mut properties,
+                &effect_type,
+                "conversion",
+                "极坐标",
+                "转换类型",
+                "rect_to_polar",
+                vec![
+                    ParameterEnumOption::new(
+                        "rect_to_polar",
+                        "直角坐标转极坐标",
+                        "mondrian.effect.polar_coordinates.conversion.rect_to_polar",
+                    ),
+                    ParameterEnumOption::new(
+                        "polar_to_rect",
+                        "极坐标转直角坐标",
+                        "mondrian.effect.polar_coordinates.conversion.polar_to_rect",
+                    ),
+                ],
+            );
+            define_builtin_enum_property(
+                &mut properties,
+                &effect_type,
+                "interpolation",
+                "极坐标",
+                "插值",
+                "bilinear",
+                vec![
+                    ParameterEnumOption::new(
+                        "nearest",
+                        "最近像素",
+                        "mondrian.effect.polar_coordinates.interpolation.nearest",
+                    ),
+                    ParameterEnumOption::new(
+                        "bilinear",
+                        "双线性",
+                        "mondrian.effect.polar_coordinates.interpolation.bilinear",
+                    ),
+                ],
+            );
+        }
         EffectType::Spherize => {
             define_builtin_property(
                 &mut properties,
@@ -5296,6 +5354,11 @@ fn builtin_effect_execution_contract(effect_type: &EffectType) -> EffectExecutio
             ..cpu_linear
         },
         EffectType::RadialBlur => EffectExecutionContract {
+            execution_modes: EffectExecutionModes::CPU_F32,
+            roi_propagation: EffectRoiPropagation::FullFrame,
+            ..cpu_linear
+        },
+        EffectType::PolarCoordinates => EffectExecutionContract {
             execution_modes: EffectExecutionModes::CPU_F32,
             roi_propagation: EffectRoiPropagation::FullFrame,
             ..cpu_linear
@@ -6800,6 +6863,57 @@ fn builtin_graph_builder_for(effect_type: &EffectType) -> Option<EffectGraphBuil
                 Ok(())
             }))
         }
+        EffectType::PolarCoordinates => {
+            let conversion_id = builtin_parameter_id(effect_type, "conversion");
+            let interpolation_id = builtin_parameter_id(effect_type, "interpolation");
+            Some(Arc::new(move |effect, context, graph| {
+                let conversion = match effect.evaluate_parameter(&conversion_id, context.time) {
+                    Some(PropertyValue::Enum(key)) => crate::PolarConversion::from_key(&key)
+                        .ok_or_else(|| EffectGraphBuildError::InvalidAuthorState {
+                            effect_key: effect.effect_type.key(),
+                            effect_id: effect.id,
+                            reason: format!(
+                                "polar coordinates conversion {key} is not a declared option"
+                            ),
+                        })?,
+                    Some(_) => {
+                        return Err(EffectGraphBuildError::InvalidAuthorState {
+                            effect_key: effect.effect_type.key(),
+                            effect_id: effect.id,
+                            reason: "polar coordinates conversion must be an enumeration"
+                                .to_owned(),
+                        })
+                    }
+                    None => crate::PolarConversion::RectToPolar,
+                };
+                let interpolation = match effect.evaluate_parameter(&interpolation_id, context.time)
+                {
+                    Some(PropertyValue::Enum(key)) => crate::PolarInterpolation::from_key(&key)
+                        .ok_or_else(|| EffectGraphBuildError::InvalidAuthorState {
+                            effect_key: effect.effect_type.key(),
+                            effect_id: effect.id,
+                            reason: format!(
+                                "polar coordinates interpolation {key} is not a declared option"
+                            ),
+                        })?,
+                    Some(_) => {
+                        return Err(EffectGraphBuildError::InvalidAuthorState {
+                            effect_key: effect.effect_type.key(),
+                            effect_id: effect.id,
+                            reason: "polar coordinates interpolation must be an enumeration"
+                                .to_owned(),
+                        })
+                    }
+                    None => crate::PolarInterpolation::Bilinear,
+                };
+                // Both directions always reinterpret the frame, so the node is
+                // always kept instead of being dropped as an identity.
+                graph.append_unary(EffectRenderOp::PolarCoordinates {
+                    grade: crate::PolarCoordinatesGrade::new(conversion, interpolation),
+                });
+                Ok(())
+            }))
+        }
         EffectType::Mirror => {
             let centre_x_id = builtin_parameter_id(effect_type, "centre_x");
             let centre_y_id = builtin_parameter_id(effect_type, "centre_y");
@@ -7371,6 +7485,7 @@ fn builtin_display_name(effect_type: &EffectType) -> &'static str {
         EffectType::Spherize => "球面化",
         EffectType::Noise => "噪点",
         EffectType::Mirror => "镜像",
+        EffectType::PolarCoordinates => "极坐标",
         EffectType::ColorEmboss => "色彩浮雕",
         EffectType::Emboss => "浮雕",
         EffectType::External(_) => "外部效果",
@@ -8656,6 +8771,7 @@ mod tests {
             EffectType::Spherize,
             EffectType::Noise,
             EffectType::Mirror,
+            EffectType::PolarCoordinates,
         ]
         .into_iter()
         .map(|effect_type| effect_type.key())
@@ -12796,6 +12912,103 @@ mod tests {
             .expect("builds restored mirror graph");
         let grade = mirror_op(&graph).expect("mirror op");
         assert_eq!(grade.angle_degrees(), -12.0);
+    }
+
+    fn polar_coordinates_op(graph: &EffectRenderGraph) -> Option<crate::PolarCoordinatesGrade> {
+        graph.nodes.iter().find_map(|node| match &node.kind {
+            EffectGraphNodeKind::UnaryEffect {
+                op: EffectRenderOp::PolarCoordinates { grade },
+                ..
+            }
+            | EffectGraphNodeKind::DomainEffect {
+                op: EffectRenderOp::PolarCoordinates { grade },
+                ..
+            } => Some(*grade),
+            _ => None,
+        })
+    }
+
+    fn author_polar_coordinates(parameter: &str, value: PropertyValue) -> EffectNode {
+        let mut effect = instantiate_effect_node(EffectType::PolarCoordinates)
+            .expect("registered polar coordinates definition");
+        effect
+            .apply_property_mutation(PropertyMutation::SetStaticValue {
+                path: EffectType::PolarCoordinates.property_path(parameter),
+                value,
+            })
+            .expect("authors polar coordinates parameter");
+        effect
+    }
+
+    #[test]
+    fn polar_coordinates_defaults_reach_the_operation() {
+        let effect = instantiate_effect_node(EffectType::PolarCoordinates)
+            .expect("registered polar coordinates definition");
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("builds polar coordinates graph");
+        let grade = polar_coordinates_op(&graph).expect("polar coordinates op");
+        assert_eq!(grade.conversion(), crate::PolarConversion::RectToPolar);
+        assert_eq!(grade.interpolation(), crate::PolarInterpolation::Bilinear);
+    }
+
+    #[test]
+    fn polar_coordinates_always_emits_a_node() {
+        // Both directions reinterpret every pixel, so even the default state has
+        // to reach the execution path instead of being dropped as an identity.
+        let effect = instantiate_effect_node(EffectType::PolarCoordinates)
+            .expect("registered polar coordinates definition");
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("builds polar coordinates graph");
+        assert!(polar_coordinates_op(&graph).is_some());
+    }
+
+    #[test]
+    fn polar_coordinates_authored_state_reaches_the_operation() {
+        let mut effect = author_polar_coordinates(
+            "conversion",
+            PropertyValue::Enum("polar_to_rect".to_owned()),
+        );
+        effect
+            .apply_property_mutation(PropertyMutation::SetStaticValue {
+                path: EffectType::PolarCoordinates.property_path("interpolation"),
+                value: PropertyValue::Enum("nearest".to_owned()),
+            })
+            .expect("authors polar coordinates parameter");
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("builds polar coordinates graph");
+        let grade = polar_coordinates_op(&graph).expect("polar coordinates op");
+        assert_eq!(grade.conversion(), crate::PolarConversion::PolarToRect);
+        assert_eq!(grade.interpolation(), crate::PolarInterpolation::Nearest);
+    }
+
+    #[test]
+    fn polar_coordinates_rejects_options_that_are_not_declared() {
+        // The schema owns the declared option keys, so an undeclared one is
+        // rejected when it is authored instead of reaching the graph builder.
+        let mut effect = instantiate_effect_node(EffectType::PolarCoordinates)
+            .expect("registered polar coordinates definition");
+        let _error = effect
+            .apply_property_mutation(PropertyMutation::SetStaticValue {
+                path: EffectType::PolarCoordinates.property_path("interpolation"),
+                value: PropertyValue::Enum("cubic".to_owned()),
+            })
+            .expect_err("rejects an interpolation the schema does not declare");
+    }
+
+    #[test]
+    fn polar_coordinates_authored_state_survives_project_serialization_round_trip() {
+        let effect = author_polar_coordinates(
+            "conversion",
+            PropertyValue::Enum("polar_to_rect".to_owned()),
+        );
+        let wire = serde_json::to_string(&effect).expect("serializes polar coordinates effect");
+        let restored: EffectNode =
+            serde_json::from_str(&wire).expect("restores polar coordinates effect");
+        assert_eq!(restored, effect);
+        let graph = build_effect_render_graph(&[restored], tt(0), TEST_WORKING_SPACE)
+            .expect("builds restored polar coordinates graph");
+        let grade = polar_coordinates_op(&graph).expect("polar coordinates op");
+        assert_eq!(grade.conversion(), crate::PolarConversion::PolarToRect);
     }
 
     fn radial_blur_op(graph: &EffectRenderGraph) -> Option<crate::RadialBlurGrade> {
