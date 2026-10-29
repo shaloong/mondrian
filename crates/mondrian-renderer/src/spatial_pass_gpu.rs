@@ -48,6 +48,7 @@ pub(crate) struct EffectSpatialGpu {
     radial_blur: wgpu::RenderPipeline,
     offset: wgpu::RenderPipeline,
     twirl: wgpu::RenderPipeline,
+    spherize: wgpu::RenderPipeline,
     convolution: wgpu::RenderPipeline,
     bindings: wgpu::BindGroupLayout,
 }
@@ -329,6 +330,36 @@ impl EffectSpatialGpu {
             multiview_mask: None,
             cache: None,
         });
+        let spherize = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("mondrian.effect-spatial.spherize"),
+            layout: Some(&layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                buffers: &[],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_spherize"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: wgpu::TextureFormat::Rgba32Float,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleStrip,
+                strip_index_format: None,
+                cull_mode: None,
+                ..wgpu::PrimitiveState::default()
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
         Self {
             box_blur,
             emboss,
@@ -336,6 +367,7 @@ impl EffectSpatialGpu {
             radial_blur,
             offset,
             twirl,
+            spherize,
             convolution,
             find_edges,
             bindings,
@@ -567,6 +599,43 @@ impl EffectSpatialGpu {
     /// wraps around the frame exactly like the CPU kernel, and the blend works
     /// on premultiplied colour so transparent neighbours cannot tint the
     /// result.
+    /// Records the spherize distortion.
+    ///
+    /// `params` carries the centre and the sphere radius in pixels. The
+    /// inverse mapping uses the same `asin` falloff as the CPU kernel and
+    /// returns pixels at or beyond the rim untouched.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn record_spherize(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
+        params: [f32; 4],
+        source: &wgpu::Texture,
+        destination: &wgpu::Texture,
+        width: u32,
+        height: u32,
+    ) -> Result<wgpu::Texture, EffectSpatialGpuError> {
+        if width == 0 || height == 0 {
+            return Err(EffectSpatialGpuError::EmptyFrame);
+        }
+        let uniform = SpatialPassUniform {
+            size: [width as f32, height as f32, 0.0, 0.0],
+            params,
+            extra: [0.0; 4],
+            aces: [0.0; 4],
+        };
+        let input_view = source.create_view(&wgpu::TextureViewDescriptor::default());
+        let output_view = destination.create_view(&wgpu::TextureViewDescriptor::default());
+        self.record_pass(
+            device,
+            encoder,
+            &self.spherize,
+            &input_view,
+            &output_view,
+            &uniform,
+        );
+        Ok(destination.clone())
+    }
     /// Records the twirl distortion.
     ///
     /// `params` carries the centre, the radius as a fraction of the shorter
@@ -1079,6 +1148,23 @@ fn sample_bilinear_wrapped(fragment: vec2<f32>) -> vec4<f32> {
     return top + (bottom - top) * frac.y;
 }
 
+@fragment
+fn fs_spherize(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
+    let dims = frame_dims();
+    let pixel = vec2<i32>(position.xy);
+    let centre = uniforms.params.xy;
+    let radius = uniforms.params.z;
+    let delta = vec2<f32>(f32(pixel.x), f32(pixel.y)) - centre;
+    let distance = length(delta);
+    if (radius <= 0.0 || distance >= radius || distance <= 0.0) {
+        return load_clamped(pixel);
+    }
+    let sample_distance = radius * asin(distance / radius) / 1.5707963267948966;
+    let scale = sample_distance / distance;
+    let sample_x = centre.x + delta.x * scale;
+    let sample_y = centre.y + delta.y * scale;
+    return unpremultiply(sample_bilinear_premultiplied(sample_x, sample_y));
+}
 @fragment
 fn fs_twirl(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
     let dims = frame_dims();
@@ -1668,6 +1754,68 @@ fn cs_main(@builtin(local_invocation_id) lid: vec3<u32>) {
         }
     }
 
+    #[test]
+    fn gpu_spherize_matches_the_cpu_kernel() {
+        let Ok(context) = block_on(crate::GpuContext::new()) else {
+            eprintln!("skipping GPU spherize parity test: no GPU adapter available");
+            return;
+        };
+        let width = 13_u32;
+        let height = 11_u32;
+        let mut pixels = vec![[0.0_f32, 0.0, 0.0, 1.0]; (width * height) as usize];
+        for y in 0..height as usize {
+            for x in 0..width as usize {
+                let value = 0.05 * (x + 2 * y) as f32;
+                pixels[y * width as usize + x] = [value, 0.45 - value * 0.3, value * 1.6, 1.0];
+            }
+        }
+        pixels[30] = [0.0, 0.0, 0.0, 0.0];
+        pixels[61] = [2.5, -0.75, 1.25, 0.5];
+        for (radius, centre) in [
+            (5.5_f32, [6.0_f32, 5.0_f32]),
+            (4.0, [3.5, 7.25]),
+            (9.0, [0.0, 0.0]),
+        ] {
+            let grade =
+                mondrian_effects::SpherizeGrade::new(radius, centre).expect("spherize grade");
+            let mut cpu = pixels.clone();
+            assert!(mondrian_effects::spherize_frame_f32(
+                &mut cpu,
+                width as usize,
+                height as usize,
+                grade,
+            ));
+            let executor = EffectSpatialGpu::new(&context.device);
+            let source = upload(&context, &pixels, width, height);
+            let destination = scratch(&context, width, height, 1);
+            let mut encoder =
+                context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("mondrian.effect-spatial.spherize-encoder"),
+                });
+            let output = executor
+                .record_spherize(
+                    &context.device,
+                    &mut encoder,
+                    grade.gpu_controls(),
+                    &source,
+                    &destination[0],
+                    width,
+                    height,
+                )
+                .expect("recorded spherize");
+            context.queue.submit(Some(encoder.finish()));
+            let gpu = readback(&context, &output, width, height);
+            for (index, (cpu_pixel, gpu_pixel)) in cpu.iter().zip(gpu.iter()).enumerate() {
+                for channel in 0..4 {
+                    let difference = (cpu_pixel[channel] - gpu_pixel[channel]).abs();
+                    assert!(
+                        difference <= 1.0e-4,
+                        "radius {radius} pixel {index} channel {channel}: cpu {cpu_pixel:?} gpu {gpu_pixel:?}"
+                    );
+                }
+            }
+        }
+    }
     #[test]
     fn gpu_twirl_matches_the_cpu_kernel() {
         let Ok(context) = block_on(crate::GpuContext::new()) else {
