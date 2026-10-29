@@ -263,6 +263,7 @@ pub fn emboss_frame_f32(
 }
 
 #[cfg(test)]
+#[test]
 fn emboss_frame_is_order_independent() {
     // Two neighbouring highlights produce the same result whether the kernel is
     // applied to the whole frame or to a padded region of it, because the read
