@@ -94,25 +94,69 @@ pub(crate) fn apply_directional_blur_f32_controlled<E>(
     let half = length * 0.5;
     let weight = 1.0 / taps as f32;
 
+    // The tap grid is identical for every pixel, so hoist it out of the pixel
+    // loop instead of recomputing the trig-derived offsets per sample.
+    let deltas = (0..taps)
+        .map(|tap| {
+            let offset = -half + step * (tap as f32 + 0.5);
+            [step_x * offset, step_y * offset]
+        })
+        .collect::<Vec<_>>();
+    let (max_dx, max_dy) = deltas.iter().fold((0.0_f32, 0.0_f32), |acc, delta| {
+        (acc.0.max(delta[0].abs()), acc.1.max(delta[1].abs()))
+    });
+    // Pixels at least this far from the border never need coordinate clamping;
+    // they take the branch-free path below. Everything else keeps the clamped
+    // bilinear path, so border handling is bit-identical to before.
+    let margin_x = max_dx.ceil() as usize + 1;
+    let margin_y = max_dy.ceil() as usize + 1;
+
     for (row, chunk) in frame.chunks_mut(width).enumerate() {
         checkpoint()?;
         let base_y = row as f32;
+        let interior_row = row >= margin_y && row + margin_y < height;
         for (column, pixel) in chunk.iter_mut().enumerate() {
             let base_x = column as f32;
             let mut sum = [0.0_f32; 4];
-            for tap in 0..taps {
-                let offset = -half + step * (tap as f32 + 0.5);
-                let sample = sample_bilinear(
-                    &source,
-                    width,
-                    height,
-                    base_x + step_x * offset,
-                    base_y + step_y * offset,
-                );
-                sum[0] += sample[0];
-                sum[1] += sample[1];
-                sum[2] += sample[2];
-                sum[3] += sample[3];
+            if interior_row && column >= margin_x && column + margin_x < width {
+                for delta in &deltas {
+                    let x = base_x + delta[0];
+                    let y = base_y + delta[1];
+                    let x0 = x as usize;
+                    let y0 = y as usize;
+                    let frac_x = x - x0 as f32;
+                    let frac_y = y - y0 as f32;
+                    let x1 = (x0 + 1).min(width - 1);
+                    let y1 = (y0 + 1).min(height - 1);
+                    let top_left = source[y0 * width + x0];
+                    let top_right = source[y0 * width + x1];
+                    let bottom_left = source[y1 * width + x0];
+                    let bottom_right = source[y1 * width + x1];
+                    let w00 = (1.0 - frac_x) * (1.0 - frac_y);
+                    let w10 = frac_x * (1.0 - frac_y);
+                    let w01 = (1.0 - frac_x) * frac_y;
+                    let w11 = frac_x * frac_y;
+                    for channel in 0..4 {
+                        sum[channel] += top_left[channel] * w00
+                            + top_right[channel] * w10
+                            + bottom_left[channel] * w01
+                            + bottom_right[channel] * w11;
+                    }
+                }
+            } else {
+                for delta in &deltas {
+                    let sample = sample_bilinear(
+                        &source,
+                        width,
+                        height,
+                        base_x + delta[0],
+                        base_y + delta[1],
+                    );
+                    sum[0] += sample[0];
+                    sum[1] += sample[1];
+                    sum[2] += sample[2];
+                    sum[3] += sample[3];
+                }
             }
             *pixel = [
                 sum[0] * weight,
