@@ -31,6 +31,7 @@ pub mod emboss;
 pub mod find_edges;
 mod project_properties;
 pub mod radial_blur;
+pub(crate) mod resample;
 pub mod spherize;
 pub mod threshold;
 pub mod tint;

@@ -10,6 +10,7 @@
 //! straight-alpha contract of every other effect: coverage is capped at one by
 //! the shared unpremultiply helper and colour is never clamped.
 
+use crate::resample::sample_bilinear_wrapped;
 use crate::straight_alpha::{premultiply_rgba_controlled, unpremultiply_rgba_controlled};
 
 /// Author ceiling for the blend back to the original image, in percent.
@@ -185,43 +186,6 @@ pub(crate) fn apply_offset_f32_controlled<E>(
     unpremultiply_rgba_controlled(frame, checkpoint)?;
     checkpoint()?;
     Ok(true)
-}
-
-/// Bilinear sample whose integer coordinates wrap around the frame edges.
-fn sample_bilinear_wrapped(
-    source: &[[f32; 4]],
-    width: usize,
-    height: usize,
-    x: f64,
-    y: f64,
-) -> [f32; 4] {
-    let base_x = x.floor();
-    let base_y = y.floor();
-    let frac_x = (x - base_x) as f32;
-    let frac_y = (y - base_y) as f32;
-    let x0 = wrap_index(base_x as i64, width);
-    let y0 = wrap_index(base_y as i64, height);
-    let x1 = wrap_index(base_x as i64 + 1, width);
-    let y1 = wrap_index(base_y as i64 + 1, height);
-
-    let top_left = source[y0 * width + x0];
-    let top_right = source[y0 * width + x1];
-    let bottom_left = source[y1 * width + x0];
-    let bottom_right = source[y1 * width + x1];
-
-    let mut sample = [0.0_f32; 4];
-    for (channel, value) in sample.iter_mut().enumerate() {
-        let top = top_left[channel] + (top_right[channel] - top_left[channel]) * frac_x;
-        let bottom = bottom_left[channel] + (bottom_right[channel] - bottom_left[channel]) * frac_x;
-        *value = top + (bottom - top) * frac_y;
-    }
-    sample
-}
-
-/// Wraps a signed index into `0..limit`.
-fn wrap_index(index: i64, limit: usize) -> usize {
-    let limit = limit as i64;
-    index.rem_euclid(limit) as usize
 }
 
 #[cfg(test)]

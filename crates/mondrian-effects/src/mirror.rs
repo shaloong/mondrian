@@ -16,6 +16,7 @@
 //! and never clamps colour; coverage is capped at one by the shared
 //! unpremultiply helper.
 
+use crate::resample::sample_bilinear_clamped;
 use crate::straight_alpha::{premultiply_rgba_controlled, unpremultiply_rgba_controlled};
 
 /// Largest magnitude accepted for the authored axis angle, in degrees.
@@ -178,41 +179,6 @@ pub(crate) fn apply_mirror_f32_controlled<E>(
     unpremultiply_rgba_controlled(frame, checkpoint)?;
     checkpoint()?;
     Ok(true)
-}
-
-/// Bilinear sample whose integer coordinates clamp to the frame edges.
-fn sample_bilinear_clamped(
-    source: &[[f32; 4]],
-    width: usize,
-    height: usize,
-    x: f64,
-    y: f64,
-) -> [f32; 4] {
-    let limit_x = (width - 1) as f64;
-    let limit_y = (height - 1) as f64;
-    let clamped_x = x.clamp(0.0, limit_x);
-    let clamped_y = y.clamp(0.0, limit_y);
-    let base_x = clamped_x.floor();
-    let base_y = clamped_y.floor();
-    let frac_x = (clamped_x - base_x) as f32;
-    let frac_y = (clamped_y - base_y) as f32;
-    let x0 = base_x as usize;
-    let y0 = base_y as usize;
-    let x1 = (x0 + 1).min(width - 1);
-    let y1 = (y0 + 1).min(height - 1);
-
-    let top_left = source[y0 * width + x0];
-    let top_right = source[y0 * width + x1];
-    let bottom_left = source[y1 * width + x0];
-    let bottom_right = source[y1 * width + x1];
-
-    let mut sample = [0.0_f32; 4];
-    for (channel, value) in sample.iter_mut().enumerate() {
-        let top = top_left[channel] + (top_right[channel] - top_left[channel]) * frac_x;
-        let bottom = bottom_left[channel] + (bottom_right[channel] - bottom_left[channel]) * frac_x;
-        *value = top + (bottom - top) * frac_y;
-    }
-    sample
 }
 
 #[cfg(test)]
