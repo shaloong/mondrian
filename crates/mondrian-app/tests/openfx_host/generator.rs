@@ -112,16 +112,19 @@ fn official_rectangle_generator_preserves_geometry_parameters_and_output_signal(
             // Resolve the actual descriptor label rather than duplicating the
             // adapter's private native-name-to-ParameterId encoding.
             let native = description.parameters.iter().find(|p| p.name == name).unwrap();
-            let mut matches = effect
-                .properties
-                .iter()
-                .filter(|(_, p)| p.descriptor.display_name == native.label);
-            let id =
-                matches.next().expect("authored parameter").1.descriptor.parameter_id().clone();
-            assert!(
-                matches.next().is_none(),
-                "reference labels must be unambiguous"
-            );
+            let id = {
+                let mut matches = effect
+                    .properties
+                    .iter()
+                    .filter(|(_, p)| p.descriptor.display_name == native.label);
+                let id =
+                    matches.next().expect("authored parameter").1.descriptor.parameter_id().clone();
+                assert!(
+                    matches.next().is_none(),
+                    "reference labels must be unambiguous"
+                );
+                id
+            };
             effect
                 .set_static_value_by_parameter(&id, value)
                 .expect("canonical parameter edit");
