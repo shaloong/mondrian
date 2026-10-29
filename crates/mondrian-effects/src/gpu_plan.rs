@@ -518,7 +518,7 @@ fn lower_effect_graph_nodes_to_gpu_plan_inner(
     })
 }
 
-fn merge_processing_domain(
+pub(crate) fn merge_processing_domain(
     current: &mut Option<EffectColorDomain>,
     next: EffectColorDomain,
 ) -> Result<(), EffectGpuPlanBlocker> {
@@ -738,7 +738,7 @@ fn gpu_plan_cache_entry_bytes(
         .saturating_add(result_bytes)
 }
 
-fn lower_point_op(
+pub(crate) fn lower_point_op(
     node_id: EffectGraphNodeId,
     op: &EffectRenderOp,
 ) -> Result<EffectGpuPointOp, EffectGpuPlanBlocker> {
@@ -811,7 +811,7 @@ fn lower_point_op(
     }
 }
 
-fn node_kind_name(kind: &EffectGraphNodeKind) -> &'static str {
+pub(crate) fn node_kind_name(kind: &EffectGraphNodeKind) -> &'static str {
     match kind {
         EffectGraphNodeKind::Source => "source",
         EffectGraphNodeKind::CustomSource { .. } => "custom_source",

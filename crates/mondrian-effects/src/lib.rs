@@ -34,6 +34,7 @@ mod execution_session;
 pub mod extension_contract;
 pub mod extension_sdk;
 pub mod gamut_mapping;
+pub mod gpu_pipeline;
 pub mod gpu_plan;
 pub mod graph;
 pub mod hdr_grading;
@@ -133,6 +134,10 @@ pub use extension_contract::{
 };
 pub use extension_sdk::{EffectExtensionDefinitionBuilder, EffectGraphDsl};
 pub use gamut_mapping::{GamutCompressionGrade, GamutMappingError, HighlightRecoveryGrade};
+pub use gpu_pipeline::{
+    lower_effect_graph_to_gpu_pipeline, spatial_pass_for, CompiledEffectGpuPipeline,
+    EffectGpuSpatialPass, EffectGpuStage,
+};
 pub use gpu_plan::{
     get_or_lower_effect_graph_to_gpu_plan, lower_effect_graph_node_to_gpu_point_plan,
     lower_effect_graph_nodes_to_gpu_plan, lower_effect_graph_to_gpu_plan, CompiledEffectGpuPlan,
