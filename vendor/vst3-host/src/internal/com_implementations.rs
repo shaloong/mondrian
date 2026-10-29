@@ -1456,7 +1456,10 @@ impl HostPlugFrame {
         requested: Arc<Mutex<Option<(i32, i32)>>>,
         run_loop: Arc<Mutex<RunLoopRegistry>>,
     ) -> Self {
-        Self { requested, run_loop }
+        Self {
+            requested,
+            run_loop,
+        }
     }
 
     #[cfg(not(target_os = "linux"))]

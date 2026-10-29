@@ -5345,8 +5345,8 @@ impl PluginImpl {
                         bounds.total(total)?;
                     }
                 }
-                let active = status == kResultOk
-                    && (info.flags & sdk_flag_bits::DEFAULT_BUS_ACTIVE) != 0;
+                let active =
+                    status == kResultOk && (info.flags & sdk_flag_bits::DEFAULT_BUS_ACTIVE) != 0;
                 if active {
                     let result = component.activateBus(media, direction, index, 1);
                     if result != kResultOk {
@@ -7373,8 +7373,7 @@ impl PluginProcessFields<'_> {
                         .as_ptr()
                 || (context.state & sdk_flag_bits::TEMPO_VALID != 0
                     && (!context.tempo.is_finite() || context.tempo <= 0.0))
-                || (context.state & sdk_flag_bits::PROJECT_MUSIC_VALID
-                    != 0
+                || (context.state & sdk_flag_bits::PROJECT_MUSIC_VALID != 0
                     && !context.projectTimeMusic.is_finite())
             {
                 return Err(Failure::InvalidContext);
@@ -8182,7 +8181,6 @@ impl PluginEditorFields<'_> {
         }
         super::run_loop::service(self.run_loop)
     }
-
 }
 
 fn has_editor_view(
@@ -8913,7 +8911,9 @@ mod editor_detach_failure_tests {
             for timer in &mut factory.lock().unwrap().timers {
                 timer.due = std::time::Instant::now();
             }
-            let other = std::thread::spawn(|| std::thread::current().id()).join().unwrap();
+            let other = std::thread::spawn(|| std::thread::current().id())
+                .join()
+                .unwrap();
             let mut fields = fixture.fields();
             fields.control_thread = other;
             fields.factory_run_loop = Some(&factory);
@@ -9003,8 +9003,13 @@ mod editor_detach_failure_tests {
                 action: None,
                 on_drop: Some(Box::new(move || {
                     release_observed.set(true);
-                    unlock_observed
-                        .set(weak_registry.upgrade().expect("live registry").try_lock().is_ok());
+                    unlock_observed.set(
+                        weak_registry
+                            .upgrade()
+                            .expect("live registry")
+                            .try_lock()
+                            .is_ok(),
+                    );
                 })),
             })
             .to_com_ptr::<ITimerHandler>()
@@ -9050,7 +9055,9 @@ mod editor_detach_failure_tests {
             let run_loop = Rc::new(fixture.frame.to_com_ptr::<IRunLoop>().expect("run loop"));
             let mut peers = [UnixStream::pair().unwrap(), UnixStream::pair().unwrap()];
             for (_, writer) in &mut peers {
-                writer.write_all(b"ready").expect("make each descriptor readable");
+                writer
+                    .write_all(b"ready")
+                    .expect("make each descriptor readable");
             }
             let victim_fd = peers[1].0.as_raw_fd();
             let victim_calls = Rc::new(Cell::new(0));
@@ -9186,7 +9193,10 @@ mod editor_detach_failure_tests {
                     ),
                 ]
             };
-            let mut coverage = Coverage { wanted, seen: [false; 2] };
+            let mut coverage = Coverage {
+                wanted,
+                seen: [false; 2],
+            };
             fixture.frame.visit_owned_storage(&mut coverage).unwrap();
             assert_eq!(
                 coverage.seen, [true; 2],
@@ -13721,7 +13731,8 @@ mod restored_audio_activation_tests {
             // an independent reference across both balanced native calls.
             let count = unsafe { ((*(*parent).vtbl).addRef)(parent) };
             unsafe { ((*(*parent).vtbl).release)(parent) };
-            self.refs_at_retirement.store(count - 1, std::sync::atomic::Ordering::SeqCst);
+            self.refs_at_retirement
+                .store(count - 1, std::sync::atomic::Ordering::SeqCst);
         }
     }
 

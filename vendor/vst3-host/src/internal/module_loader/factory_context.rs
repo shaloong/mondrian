@@ -112,7 +112,9 @@ fn contexts() -> &'static Mutex<ContextIndex> {
 
 impl Drop for FactoryContextState {
     fn drop(&mut self) {
-        let mut index = contexts().lock().unwrap_or_else(|poison| poison.into_inner());
+        let mut index = contexts()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
         index.retain(|(identity, entry)| {
             *identity != self.identity || entry.as_ptr() != std::ptr::from_ref(self)
         });
@@ -189,7 +191,11 @@ impl FactoryModule {
                 (state, true)
             }
         };
-        let module = Self { factory, native, services };
+        let module = Self {
+            factory,
+            native,
+            services,
+        };
         if first {
             if let Some(factory3) = module.factory.cast::<IPluginFactory3>() {
                 let context = module
@@ -222,7 +228,9 @@ impl VstModule for FactoryModule {
         self.services.context.visit_owned_storage(visitor)?;
         // The shared index is host-owned storage too. Its actual capacity is
         // observable; no opaque tree-node heap is hidden behind this inventory.
-        let index = contexts().lock().map_err(|_| HostStorageError::PoisonedOwner)?;
+        let index = contexts()
+            .lock()
+            .map_err(|_| HostStorageError::PoisonedOwner)?;
         visitor.visit(HostStorageRef::vector(&index)?)
     }
 
@@ -243,7 +251,9 @@ impl VstModule for FactoryModule {
 impl Drop for FactoryModule {
     fn drop(&mut self) {
         let last = {
-            let _index = contexts().lock().unwrap_or_else(|poison| poison.into_inner());
+            let _index = contexts()
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
             self.services.modules.fetch_sub(1, Ordering::AcqRel) == 1
         };
         if last {
@@ -324,7 +334,11 @@ mod tests {
             Ok(())
         }
         fn get_factory(&self) -> Result<*mut IPluginFactory> {
-            Ok(self.factory.to_com_ptr::<IPluginFactory>().unwrap().into_raw())
+            Ok(self
+                .factory
+                .to_com_ptr::<IPluginFactory>()
+                .unwrap()
+                .into_raw())
         }
         fn path(&self) -> &Path {
             Path::new("native-factory-ABI-probe")
@@ -406,7 +420,8 @@ mod tests {
                 &mut self,
                 value: HostStorageRef<'_>,
             ) -> std::result::Result<(), HostStorageError> {
-                self.0.push((value.address(), value.layout().size(), value.kind()));
+                self.0
+                    .push((value.address(), value.layout().size(), value.kind()));
                 Ok(())
             }
         }
@@ -467,9 +482,13 @@ mod tests {
                 .unwrap();
             let mut instance = host.load_plugin_class(&path, &info.uid).unwrap();
             let other_instance = host.load_plugin_class(&path, &info.uid).unwrap();
-            let state = instance.save_state().expect("real reference instance state");
+            let state = instance
+                .save_state()
+                .expect("real reference instance state");
             assert!(!state.is_empty());
-            instance.load_state(&state).expect("same-instance state restore");
+            instance
+                .load_state(&state)
+                .expect("same-instance state restore");
             assert_eq!(instance.save_state().unwrap(), state);
             assert_eq!(other_instance.info().uid, info.uid);
             drop(instance);
@@ -523,7 +542,11 @@ mod tests {
         let observed = Arc::new(Observed::default());
         let factory = ComWrapper::new(FactoryProbe(Arc::clone(&observed)));
         let module = attach(&factory, &observed).unwrap();
-        let run_loop = module.services.context.to_com_ptr::<Linux::IRunLoop>().unwrap();
+        let run_loop = module
+            .services
+            .context
+            .to_com_ptr::<Linux::IRunLoop>()
+            .unwrap();
         let (read, mut write) = UnixStream::pair().unwrap();
         let actual = Arc::new(AtomicI32::new(-1));
         let event = ComWrapper::new(EventProbe(Arc::clone(&actual)))
@@ -589,7 +612,11 @@ mod tests {
         let factory = ComWrapper::new(FactoryProbe(Arc::clone(&observed)));
         let first = attach(&factory, &observed).unwrap();
         let second = attach(&factory, &observed).unwrap();
-        let run_loop = first.services.context.to_com_ptr::<Linux::IRunLoop>().unwrap();
+        let run_loop = first
+            .services
+            .context
+            .to_com_ptr::<Linux::IRunLoop>()
+            .unwrap();
         let hits = Arc::new(AtomicUsize::new(0));
         let timer = ComWrapper::new(TimerProbe {
             hits: Arc::clone(&hits),
@@ -652,7 +679,11 @@ mod tests {
         })
         .to_com_ptr::<Linux::ITimerHandler>()
         .unwrap();
-        let run_loop = module.services.context.to_com_ptr::<Linux::IRunLoop>().unwrap();
+        let run_loop = module
+            .services
+            .context
+            .to_com_ptr::<Linux::IRunLoop>()
+            .unwrap();
         assert_eq!(
             unsafe { run_loop.registerTimer(timer.as_ptr(), 1) },
             kResultOk

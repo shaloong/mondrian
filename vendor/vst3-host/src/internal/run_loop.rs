@@ -153,7 +153,11 @@ impl RunLoopRegistry {
         });
         match registry.lock() {
             Ok(mut reg) if !reg.closed => {
-                reg.timers.push(RunLoopTimer { registration, interval_ms, due });
+                reg.timers.push(RunLoopTimer {
+                    registration,
+                    interval_ms,
+                    due,
+                });
                 kResultOk
             }
             Ok(reg) => {
@@ -207,7 +211,9 @@ pub(crate) fn visit_owned_storage(
 ) -> Result<(), crate::host_storage::HostStorageError> {
     use crate::host_storage::{HostStorageError, HostStorageRef};
     visitor.visit(HostStorageRef::arc(registry))?;
-    let state = registry.lock().map_err(|_| HostStorageError::PoisonedOwner)?;
+    let state = registry
+        .lock()
+        .map_err(|_| HostStorageError::PoisonedOwner)?;
     visitor.visit(HostStorageRef::vector(&state.handlers)?)?;
     visitor.visit(HostStorageRef::vector(&state.timers)?)?;
     for entry in &state.handlers {
@@ -261,7 +267,11 @@ pub(crate) fn service(registry: &Mutex<RunLoopRegistry>) -> crate::Result<()> {
     }
     let mut fds: Vec<libc::pollfd> = handlers
         .iter()
-        .map(|entry| libc::pollfd { fd: entry.fd, events: libc::POLLIN, revents: 0 })
+        .map(|entry| libc::pollfd {
+            fd: entry.fd,
+            events: libc::POLLIN,
+            revents: 0,
+        })
         .collect();
     let ready = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as _, 0) };
     if ready < 0 {

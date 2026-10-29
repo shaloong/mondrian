@@ -39,7 +39,9 @@ mod entry_abi_tests {
         // SAFETY: the owned C fixture exports this exact function signature,
         // and the retained module keeps its code mapped throughout this call.
         let matched = unsafe {
-            module.library.get::<unsafe extern "C" fn() -> bool>(b"MondrianEntryMatched")
+            module
+                .library
+                .get::<unsafe extern "C" fn() -> bool>(b"MondrianEntryMatched")
         }
         .unwrap();
         assert!(unsafe { matched() });
