@@ -4692,7 +4692,9 @@ fn effect_node_accent(effect_type: &EffectType) -> Color {
     let colors = current_theme().colors.clone();
     match effect_type {
         EffectType::External(_) => colors.effect_external,
-        EffectType::GaussianBlur | EffectType::Sharpen => colors.effect_filter,
+        EffectType::GaussianBlur | EffectType::Sharpen | EffectType::BoxBlur => {
+            colors.effect_filter
+        }
         EffectType::Lut3D => colors.effect_lut,
         EffectType::ChromaKey | EffectType::LumaKey => colors.effect_key,
         _ => colors.effect_default,

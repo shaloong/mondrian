@@ -265,6 +265,23 @@ pub(crate) fn apply_render_op(
                 ));
             }
         }
+        EffectRenderOp::BoxBlur { radius, iterations, direction, repeat_edge_pixels } => {
+            let Some(blurred) = crate::box_blur::box_blur_frame_u8(
+                working,
+                width as usize,
+                height as usize,
+                *radius,
+                *iterations,
+                *direction,
+                *repeat_edge_pixels,
+            ) else {
+                return Err(EffectExecutionError::InvalidRenderParameter {
+                    op: "box_blur",
+                    parameter: "radius",
+                });
+            };
+            *working = blurred;
+        }
         EffectRenderOp::Crop { left, top, right, bottom } => {
             let Some(bounds) = normalized_crop_bounds(width, height, *left, *top, *right, *bottom)
             else {
@@ -600,6 +617,7 @@ pub(crate) fn apply_render_op_f32(
 pub(crate) const fn render_op_f32_scratch_frames(op: &EffectRenderOp) -> usize {
     match op {
         EffectRenderOp::GaussianBlur { .. } | EffectRenderOp::Qualifier { .. } => 1,
+        EffectRenderOp::BoxBlur { .. } => 1,
         EffectRenderOp::Sharpen { .. } => 2,
         EffectRenderOp::ChromaticAberration { .. } | EffectRenderOp::Custom { .. } => 1,
         EffectRenderOp::ColorAdjust { .. }
@@ -894,6 +912,18 @@ pub(crate) fn apply_render_op_f32_region_controlled<E>(
             }
             checkpoint()?;
             Ok(true)
+        }
+        EffectRenderOp::BoxBlur { radius, iterations, direction, repeat_edge_pixels } => {
+            crate::box_blur::apply_box_blur_f32_controlled(
+                working,
+                width as usize,
+                height as usize,
+                *radius,
+                *iterations,
+                *direction,
+                *repeat_edge_pixels,
+                checkpoint,
+            )
         }
         EffectRenderOp::Crop { left, top, right, bottom } => {
             let Some(bounds) = normalized_crop_bounds(

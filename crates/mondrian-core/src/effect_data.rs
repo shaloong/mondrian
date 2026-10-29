@@ -35,6 +35,7 @@ pub enum EffectType {
     ChromaKey,
     LumaKey,
     Invert,
+    BoxBlur,
     /// Externally registered effect definition, including native-format adapters.
     /// This is a domain definition reference, not an Extension package identity.
     /// The serde name preserves the existing project wire representation.
@@ -65,6 +66,7 @@ impl EffectType {
             Self::ChromaKey => "builtin.chroma_key".to_string(),
             Self::LumaKey => "builtin.luma_key".to_string(),
             Self::Invert => "builtin.invert".to_string(),
+            Self::BoxBlur => "builtin.box_blur".to_string(),
             Self::External(key) => key.clone(),
         }
     }
@@ -91,6 +93,7 @@ impl EffectType {
             "builtin.chroma_key" => Self::ChromaKey,
             "builtin.luma_key" => Self::LumaKey,
             "builtin.invert" => Self::Invert,
+            "builtin.box_blur" => Self::BoxBlur,
             other => Self::External(other.to_string()),
         }
     }
@@ -117,6 +120,7 @@ impl EffectType {
             Self::ChromaKey => "色度抠像",
             Self::LumaKey => "亮度抠像",
             Self::Invert => "反转",
+            Self::BoxBlur => "方框模糊",
             Self::External(name) => name,
         }
     }
@@ -134,7 +138,7 @@ impl EffectType {
             | Self::HighlightRecovery
             | Self::HueSaturationLightness => vec!["颜色", "调色"],
             Self::Crop => vec!["变换"],
-            Self::GaussianBlur | Self::Sharpen => vec!["颜色", "模糊与锐化"],
+            Self::GaussianBlur | Self::Sharpen | Self::BoxBlur => vec!["颜色", "模糊与锐化"],
             Self::Vignette | Self::ChromaticAberration | Self::Grain => vec!["颜色", "风格化"],
             Self::Qualifier | Self::ChromaKey | Self::LumaKey => vec!["抠像"],
             Self::Invert => vec!["通道"],
@@ -164,6 +168,7 @@ impl EffectType {
             Self::ChromaKey => "chroma_key".to_string(),
             Self::LumaKey => "luma_key".to_string(),
             Self::Invert => "invert".to_string(),
+            Self::BoxBlur => "box_blur".to_string(),
             Self::External(key) => key.clone(),
         }
     }
@@ -449,7 +454,8 @@ impl crate::AuthoringFootprint for EffectType {
             | Self::Grain
             | Self::ChromaKey
             | Self::LumaKey
-            | Self::Invert => Ok(()),
+            | Self::Invert
+            | Self::BoxBlur => Ok(()),
         }
     }
 }

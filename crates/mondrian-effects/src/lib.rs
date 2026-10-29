@@ -16,6 +16,7 @@ pub use float_frame::{
     validate_float32_frame_storage, EffectAlphaConversionFailure, EffectFloatFrame,
     EffectFloatFrameError, EffectFloatFrameView,
 };
+pub mod box_blur;
 pub mod chroma_key;
 pub mod color_curves;
 pub mod coverage;
@@ -60,6 +61,9 @@ pub mod transition;
 
 pub use adjustment::{
     blend_rgba_f32_pixel, blend_rgba_f32_pixel_seeded, blend_rgba_pixel, blend_rgba_pixel_seeded,
+};
+pub use box_blur::{
+    box_blur_frame_f32, box_blur_frame_u8, BoxBlurDirection, BOX_BLUR_AUTHOR_MAX_RADIUS_PIXELS,
 };
 pub use chroma_key::{ChromaKeyError, PreparedChromaKey};
 pub use color_curves::{

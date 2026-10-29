@@ -780,6 +780,20 @@ pub enum EffectRenderOp {
         channels: crate::InvertChannels,
         blend_with_original: f32,
     },
+    /// Separable box blur repeated over the selected axes.
+    ///
+    /// One pass is a normalized box average over `radius` pixels; repeating it
+    /// `iterations` times approximates a Gaussian kernel with a triangular
+    /// response. `radius` is the authored pixel radius, so the read extent is
+    /// `ceil(radius) * iterations` and the graph declares that halo. Samples the
+    /// kernel reaches beyond the frame either repeat the boundary pixel or count
+    /// as transparent coverage, matching `repeat_edge_pixels`.
+    BoxBlur {
+        radius: f32,
+        iterations: u32,
+        direction: crate::BoxBlurDirection,
+        repeat_edge_pixels: bool,
+    },
     /// Source-relative hard crop expressed as normalized edge insets.
     ///
     /// Pixels outside the remaining rectangle become transparent black before
@@ -897,6 +911,13 @@ impl std::fmt::Debug for EffectRenderOp {
                 .debug_struct("Invert")
                 .field("channels", channels)
                 .field("blend_with_original", blend_with_original)
+                .finish(),
+            Self::BoxBlur { radius, iterations, direction, repeat_edge_pixels } => formatter
+                .debug_struct("BoxBlur")
+                .field("radius", radius)
+                .field("iterations", iterations)
+                .field("direction", direction)
+                .field("repeat_edge_pixels", repeat_edge_pixels)
                 .finish(),
             Self::Crop { left, top, right, bottom } => formatter
                 .debug_struct("Crop")
@@ -1263,6 +1284,13 @@ impl EffectRenderOp {
                 channels.hash(state);
                 blend_with_original.to_bits().hash(state);
             }
+            EffectRenderOp::BoxBlur { radius, iterations, direction, repeat_edge_pixels } => {
+                22u8.hash(state);
+                radius.to_bits().hash(state);
+                iterations.hash(state);
+                direction.hash(state);
+                u8::from(*repeat_edge_pixels).hash(state);
+            }
             EffectRenderOp::Crop { left, top, right, bottom } => {
                 9u8.hash(state);
                 left.to_bits().hash(state);
@@ -1350,6 +1378,7 @@ impl EffectRenderOp {
             EffectRenderOp::Grain { .. } => 2,
             EffectRenderOp::Crop { .. } => 1,
             EffectRenderOp::Invert { .. } => 1,
+            EffectRenderOp::BoxBlur { .. } => 4,
             EffectRenderOp::Lut3D { .. } => 2,
             EffectRenderOp::GaussianBlur { .. } => 4,
             EffectRenderOp::Sharpen { .. } => 4,
@@ -1881,7 +1910,7 @@ impl EffectDefinition {
     }
 }
 
-fn builtin_effect_types() -> [EffectType; 20] {
+fn builtin_effect_types() -> [EffectType; 21] {
     [
         EffectType::BasicCorrection,
         EffectType::WhiteBalance,
@@ -1903,6 +1932,7 @@ fn builtin_effect_types() -> [EffectType; 20] {
         EffectType::ChromaKey,
         EffectType::LumaKey,
         EffectType::Invert,
+        EffectType::BoxBlur,
     ]
 }
 
@@ -2821,6 +2851,60 @@ fn default_properties_for(effect_type: EffectType) -> PropertyBag {
                 Some(1.0),
             );
         }
+        EffectType::BoxBlur => {
+            let directions = crate::BoxBlurDirection::ALL
+                .into_iter()
+                .map(|direction| {
+                    ParameterEnumOption::new(
+                        direction.key(),
+                        direction.label(),
+                        format!("builtin.box_blur.direction.{}", direction.key()),
+                    )
+                })
+                .collect();
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "radius",
+                "方框模糊",
+                "模糊半径",
+                PropertyValue::Float(0.0),
+                Some(0.0),
+                Some(crate::BOX_BLUR_AUTHOR_MAX_RADIUS_PIXELS as f64),
+                Some(0.1),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "iterations",
+                "方框模糊",
+                "迭代",
+                PropertyValue::Int(3),
+                Some(crate::box_blur::BOX_BLUR_AUTHOR_MIN_ITERATIONS as f64),
+                Some(crate::box_blur::BOX_BLUR_AUTHOR_MAX_ITERATIONS as f64),
+                Some(1.0),
+            );
+            define_builtin_enum_property(
+                &mut properties,
+                &effect_type,
+                "direction",
+                "方框模糊",
+                "模糊方向",
+                "horizontal_and_vertical",
+                directions,
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "repeat_edge_pixels",
+                "方框模糊",
+                "重复边缘像素",
+                PropertyValue::Bool(true),
+                None,
+                None,
+                None,
+            );
+        }
         EffectType::External(_) => {}
     }
 
@@ -3020,6 +3104,7 @@ fn builtin_parameter_unit(effect_type: &EffectType, parameter: &str) -> Paramete
         (EffectType::Crop, "left" | "top" | "right" | "bottom") => ParameterUnit::Percent,
         (EffectType::GaussianBlur, "radius") => ParameterUnit::Pixels,
         (EffectType::Invert, "blend_with_original") => ParameterUnit::Percent,
+        (EffectType::BoxBlur, "radius") => ParameterUnit::Pixels,
         _ => ParameterUnit::Unitless,
     }
 }
@@ -3152,6 +3237,14 @@ fn builtin_effect_execution_contract(effect_type: &EffectType) -> EffectExecutio
         },
         EffectType::Invert => EffectExecutionContract {
             execution_modes: EffectExecutionModes::CPU_F32,
+            ..cpu_linear
+        },
+        EffectType::BoxBlur => EffectExecutionContract {
+            execution_modes: EffectExecutionModes::CPU_F32,
+            // The authored radius can exceed any bounded expansion, so the
+            // definition-level envelope is a full-frame input. The graph
+            // planner still narrows it per instance from the authored radius.
+            roi_propagation: EffectRoiPropagation::FullFrame,
             ..cpu_linear
         },
     }
@@ -3876,6 +3969,83 @@ fn builtin_graph_builder_for(effect_type: &EffectType) -> Option<EffectGraphBuil
                 Ok(())
             }))
         }
+        EffectType::BoxBlur => {
+            let radius_id = builtin_parameter_id(effect_type, "radius");
+            let iterations_id = builtin_parameter_id(effect_type, "iterations");
+            let direction_id = builtin_parameter_id(effect_type, "direction");
+            let repeat_edge_pixels_id = builtin_parameter_id(effect_type, "repeat_edge_pixels");
+            Some(Arc::new(move |effect, context, graph| {
+                let radius = effect.evaluate_f32_parameter(&radius_id, context.time, 0.0);
+                if radius.abs() <= 1.0e-4 {
+                    return Ok(());
+                }
+                let Some(radius) = crate::box_blur::valid_box_blur_radius(radius) else {
+                    return Err(EffectGraphBuildError::InvalidAuthorState {
+                        effect_key: effect.effect_type.key(),
+                        effect_id: effect.id,
+                        reason: format!(
+                            "box blur radius {radius} is outside 0..={}",
+                            crate::BOX_BLUR_AUTHOR_MAX_RADIUS_PIXELS
+                        ),
+                    });
+                };
+                let iterations = match effect.evaluate_parameter(&iterations_id, context.time) {
+                    Some(PropertyValue::Int(iterations)) => iterations,
+                    Some(_) => {
+                        return Err(EffectGraphBuildError::InvalidAuthorState {
+                            effect_key: effect.effect_type.key(),
+                            effect_id: effect.id,
+                            reason: "box blur iterations must be an integer".to_owned(),
+                        });
+                    }
+                    None => 3,
+                };
+                if !(crate::box_blur::BOX_BLUR_AUTHOR_MIN_ITERATIONS
+                    ..=crate::box_blur::BOX_BLUR_AUTHOR_MAX_ITERATIONS)
+                    .contains(&iterations)
+                {
+                    return Err(EffectGraphBuildError::InvalidAuthorState {
+                        effect_key: effect.effect_type.key(),
+                        effect_id: effect.id,
+                        reason: format!("box blur iterations {iterations} is outside 1..=50"),
+                    });
+                }
+                let direction_key = effect
+                    .evaluate_enum_parameter(&direction_id, context.time)
+                    .ok_or_else(|| EffectGraphBuildError::InvalidAuthorState {
+                        effect_key: effect.effect_type.key(),
+                        effect_id: effect.id,
+                        reason: "box blur direction is not authored".to_owned(),
+                    })?;
+                let direction =
+                    crate::BoxBlurDirection::from_key(&direction_key).ok_or_else(|| {
+                        EffectGraphBuildError::InvalidAuthorState {
+                            effect_key: effect.effect_type.key(),
+                            effect_id: effect.id,
+                            reason: format!("unknown box blur direction `{direction_key}`"),
+                        }
+                    })?;
+                let repeat_edge_pixels =
+                    match effect.evaluate_parameter(&repeat_edge_pixels_id, context.time) {
+                        Some(PropertyValue::Bool(repeat_edge_pixels)) => repeat_edge_pixels,
+                        Some(_) => {
+                            return Err(EffectGraphBuildError::InvalidAuthorState {
+                                effect_key: effect.effect_type.key(),
+                                effect_id: effect.id,
+                                reason: "box blur repeat edge pixels must be a boolean".to_owned(),
+                            });
+                        }
+                        None => true,
+                    };
+                graph.append_unary(EffectRenderOp::BoxBlur {
+                    radius,
+                    iterations: iterations as u32,
+                    direction,
+                    repeat_edge_pixels,
+                });
+                Ok(())
+            }))
+        }
         _ => None,
     }
 }
@@ -3902,6 +4072,7 @@ fn builtin_display_name(effect_type: &EffectType) -> &'static str {
         EffectType::ChromaKey => "色度抠像",
         EffectType::LumaKey => "亮度键",
         EffectType::Invert => "反转",
+        EffectType::BoxBlur => "方框模糊",
         EffectType::External(_) => "外部效果",
     }
 }
@@ -4263,6 +4434,7 @@ mod tests {
             EffectType::ChromaticAberration,
             EffectType::Grain,
             EffectType::Invert,
+            EffectType::BoxBlur,
         ]
         .into_iter()
         .map(|effect_type| effect_type.key())
@@ -5189,6 +5361,181 @@ mod tests {
             _ => None,
         });
         assert_eq!(op, Some((crate::InvertChannels::GreenBlue, 40)));
+    }
+
+    #[test]
+    fn box_blur_defaults_compile_to_identity() {
+        let effect =
+            instantiate_effect_node(EffectType::BoxBlur).expect("registered Box Blur definition");
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("evaluate default Box Blur");
+
+        assert!(
+            !graph.nodes.iter().any(|node| matches!(
+                &node.kind,
+                EffectGraphNodeKind::UnaryEffect { op: EffectRenderOp::BoxBlur { .. }, .. }
+            )),
+            "a zero authored radius is the identity and must not emit an operation"
+        );
+    }
+
+    #[test]
+    fn box_blur_authored_state_reaches_the_operation() {
+        let mut effect =
+            instantiate_effect_node(EffectType::BoxBlur).expect("registered Box Blur definition");
+        for (parameter, value) in [
+            ("radius", PropertyValue::Float(4.0)),
+            ("iterations", PropertyValue::Int(2)),
+            ("direction", PropertyValue::Enum("horizontal".to_string())),
+            ("repeat_edge_pixels", PropertyValue::Bool(false)),
+        ] {
+            effect
+                .apply_property_mutation(PropertyMutation::SetStaticValue {
+                    path: EffectType::BoxBlur.property_path(parameter),
+                    value,
+                })
+                .unwrap_or_else(|error| panic!("author Box Blur {parameter}: {error}"));
+        }
+
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("evaluate authored Box Blur");
+        let op = graph.nodes.iter().find_map(|node| match &node.kind {
+            EffectGraphNodeKind::UnaryEffect {
+                op: EffectRenderOp::BoxBlur { radius, iterations, direction, repeat_edge_pixels },
+                ..
+            }
+            | EffectGraphNodeKind::DomainEffect {
+                op: EffectRenderOp::BoxBlur { radius, iterations, direction, repeat_edge_pixels },
+                ..
+            } => Some((*radius, *iterations, *direction, *repeat_edge_pixels)),
+            _ => None,
+        });
+
+        assert_eq!(
+            op,
+            Some((4.0, 2, crate::BoxBlurDirection::Horizontal, false))
+        );
+    }
+
+    #[test]
+    fn box_blur_rejects_author_values_outside_the_declared_ranges() {
+        let mut effect =
+            instantiate_effect_node(EffectType::BoxBlur).expect("registered Box Blur definition");
+        assert!(
+            effect
+                .apply_property_mutation(PropertyMutation::SetStaticValue {
+                    path: EffectType::BoxBlur.property_path("radius"),
+                    value: PropertyValue::Float(crate::BOX_BLUR_AUTHOR_MAX_RADIUS_PIXELS + 1.0),
+                })
+                .is_err(),
+            "the numeric contract rejects a radius above the authored maximum"
+        );
+        assert!(
+            effect
+                .apply_property_mutation(PropertyMutation::SetStaticValue {
+                    path: EffectType::BoxBlur.property_path("iterations"),
+                    value: PropertyValue::Int(0),
+                })
+                .is_err(),
+            "the numeric contract rejects fewer than one iteration"
+        );
+    }
+
+    #[test]
+    fn box_blur_executes_a_normalized_average_on_scene_linear_float_frames() {
+        let mut effect =
+            instantiate_effect_node(EffectType::BoxBlur).expect("registered Box Blur definition");
+        for (parameter, value) in [
+            ("radius", PropertyValue::Float(1.0)),
+            ("iterations", PropertyValue::Int(1)),
+            ("direction", PropertyValue::Enum("horizontal".to_string())),
+        ] {
+            effect
+                .apply_property_mutation(PropertyMutation::SetStaticValue {
+                    path: EffectType::BoxBlur.property_path(parameter),
+                    value,
+                })
+                .expect("author Box Blur");
+        }
+
+        let input = [
+            [0.0, 0.0, 0.0, 1.0],
+            [0.0, 2.0, 0.0, 1.0],
+            [0.0, 0.0, 0.0, 1.0],
+            [0.0, 4.0, 0.0, 1.0],
+        ];
+        let view = || {
+            crate::EffectFloatFrameView::new(
+                crate::EffectFrameExtent::new(4, 1),
+                crate::EffectValueFormat::new(
+                    crate::EffectWorkingPrecision::Float32,
+                    crate::EffectColorDomain::SceneLinearRgb,
+                    mondrian_core::ColorFrameAlpha::StraightCoverage,
+                ),
+                mondrian_core::ImageSampling::UNIT_SQUARE,
+                &input,
+            )
+        };
+
+        let compiled = compile_clip_effect_graph(&[effect], &[], tt(0), TEST_WORKING_SPACE)
+            .expect("compile Box Blur");
+        assert!(crate::compiled_effect_graph_supports_rgba_f32(&compiled));
+        let output = crate::apply_compiled_effect_graph_rgba_f32(view(), &compiled, 0)
+            .expect("execute Box Blur");
+
+        // A radius-one horizontal pass averages three samples with replicated
+        // edges, and values above one pass through unclamped.
+        for (index, expected) in [2.0 / 3.0, 2.0 / 3.0, 2.0, 8.0 / 3.0].into_iter().enumerate() {
+            assert!(
+                (output[index][1] - expected).abs() <= 1.0e-6,
+                "{index}: {:?}",
+                output[index]
+            );
+            assert!(
+                (output[index][3] - 1.0).abs() <= 1.0e-6,
+                "{index}: {:?}",
+                output[index]
+            );
+        }
+    }
+
+    #[test]
+    fn box_blur_authored_state_survives_project_serialization_round_trip() {
+        let mut effect =
+            instantiate_effect_node(EffectType::BoxBlur).expect("registered Box Blur definition");
+        for (parameter, value) in [
+            ("radius", PropertyValue::Float(6.5)),
+            ("iterations", PropertyValue::Int(5)),
+            ("direction", PropertyValue::Enum("vertical".to_string())),
+            ("repeat_edge_pixels", PropertyValue::Bool(false)),
+        ] {
+            effect
+                .apply_property_mutation(PropertyMutation::SetStaticValue {
+                    path: EffectType::BoxBlur.property_path(parameter),
+                    value,
+                })
+                .expect("author Box Blur");
+        }
+
+        let wire = serde_json::to_string(&effect).expect("serialize the Box Blur node");
+        let restored: EffectNode = serde_json::from_str(&wire).expect("restore the Box Blur node");
+        assert_eq!(restored.effect_type, EffectType::BoxBlur);
+        assert_eq!(restored, effect);
+
+        let graph = build_effect_render_graph(&[restored], tt(0), TEST_WORKING_SPACE)
+            .expect("evaluate the restored Box Blur node");
+        let op = graph.nodes.iter().find_map(|node| match &node.kind {
+            EffectGraphNodeKind::UnaryEffect {
+                op: EffectRenderOp::BoxBlur { radius, iterations, direction, repeat_edge_pixels },
+                ..
+            }
+            | EffectGraphNodeKind::DomainEffect {
+                op: EffectRenderOp::BoxBlur { radius, iterations, direction, repeat_edge_pixels },
+                ..
+            } => Some((*radius, *iterations, *direction, *repeat_edge_pixels)),
+            _ => None,
+        });
+        assert_eq!(op, Some((6.5, 5, crate::BoxBlurDirection::Vertical, false)));
     }
 
     #[test]

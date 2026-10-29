@@ -2725,6 +2725,7 @@ const fn effect_operation_shape_tag(operation: &EffectRenderOp) -> u8 {
         EffectRenderOp::HueSaturationLightness { .. } => 20,
         EffectRenderOp::ChromaKey { .. } => 21,
         EffectRenderOp::Invert { .. } => 22,
+        EffectRenderOp::BoxBlur { .. } => 23,
     }
 }
 
@@ -4747,6 +4748,7 @@ fn cpu_node_scratch_frames(
             | crate::EffectRenderOp::Vignette { .. }
             | crate::EffectRenderOp::Grain { .. }
             | crate::EffectRenderOp::Invert { .. }
+            | crate::EffectRenderOp::BoxBlur { .. }
             | crate::EffectRenderOp::Crop { .. }
             | crate::EffectRenderOp::Lut3D { .. }
             | crate::EffectRenderOp::Custom { processor: Some(_), .. } => {

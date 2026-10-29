@@ -781,6 +781,7 @@ fn operation_name(op: &EffectRenderOp) -> &'static str {
         EffectRenderOp::ChromaticAberration { .. } => "chromatic_aberration",
         EffectRenderOp::Grain { .. } => "grain",
         EffectRenderOp::Invert { .. } => "invert",
+        EffectRenderOp::BoxBlur { .. } => "box_blur",
         EffectRenderOp::Crop { .. } => "crop",
         EffectRenderOp::TemporalFrameBlend { .. } => "temporal_frame_blend",
         EffectRenderOp::Lut3D { .. } => "lut_3d",
