@@ -1706,6 +1706,11 @@ fn render_op_requirements(op: &EffectRenderOp) -> EffectImplementationRequiremen
             },
             ..cpu_float
         },
+        EffectRenderOp::Spherize { .. } => EffectImplementationRequirements {
+            execution_modes: EffectExecutionModes::CPU_F32,
+            roi_from_effect_input: EffectRoiPropagation::FullFrame,
+            ..cpu_float
+        },
         EffectRenderOp::Twirl { .. } => EffectImplementationRequirements {
             execution_modes: EffectExecutionModes::CPU_F32,
             roi_from_effect_input: EffectRoiPropagation::FullFrame,

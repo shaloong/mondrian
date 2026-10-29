@@ -921,6 +921,10 @@ pub enum EffectRenderOp {
     Twirl {
         grade: crate::TwirlGrade,
     },
+    /// Spherize distortion: bulges a circular region into a sphere (DST-05).
+    Spherize {
+        grade: crate::SpherizeGrade,
+    },
     /// ColorEmboss: per-channel relief computed from the Sobel gradient of
     /// the working-space colour.
     ColorEmboss {
@@ -1108,6 +1112,9 @@ impl std::fmt::Debug for EffectRenderOp {
                 formatter.debug_struct("Offset").field("grade", grade).finish()
             }
             Self::Twirl { grade } => formatter.debug_struct("Twirl").field("grade", grade).finish(),
+            Self::Spherize { grade } => {
+                formatter.debug_struct("Spherize").field("grade", grade).finish()
+            }
             Self::ColorEmboss { grade } => {
                 formatter.debug_struct("ColorEmboss").field("grade", grade).finish()
             }
@@ -1653,6 +1660,12 @@ impl EffectRenderOp {
                     value.to_bits().hash(state);
                 }
             }
+            EffectRenderOp::Spherize { grade } => {
+                48u8.hash(state);
+                for value in grade.gpu_controls() {
+                    value.to_bits().hash(state);
+                }
+            }
             EffectRenderOp::ColorEmboss { grade } => {
                 32u8.hash(state);
                 for value in grade.gpu_controls() {
@@ -1813,6 +1826,7 @@ impl EffectRenderOp {
             EffectRenderOp::Convolution { .. } => 3,
             EffectRenderOp::Offset { .. } => 2,
             EffectRenderOp::Twirl { .. } => 3,
+            EffectRenderOp::Spherize { .. } => 3,
             EffectRenderOp::Mosaic { .. } => 2,
             EffectRenderOp::Posterize { .. } => 1,
             EffectRenderOp::MotionTile { .. } => 3,
@@ -2355,7 +2369,7 @@ impl EffectDefinition {
     }
 }
 
-fn builtin_effect_types() -> [EffectType; 46] {
+fn builtin_effect_types() -> [EffectType; 47] {
     [
         EffectType::BasicCorrection,
         EffectType::WhiteBalance,
@@ -2403,6 +2417,7 @@ fn builtin_effect_types() -> [EffectType; 46] {
         EffectType::Convolution,
         EffectType::Offset,
         EffectType::Twirl,
+        EffectType::Spherize,
     ]
 }
 
@@ -4308,6 +4323,42 @@ fn default_properties_for(effect_type: EffectType) -> PropertyBag {
                 Some(1.0),
             );
         }
+
+        EffectType::Spherize => {
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "radius",
+                "球面化",
+                "半径",
+                PropertyValue::Float(0.0),
+                Some(crate::SPHERIZE_MIN_RADIUS_PIXELS as f64),
+                Some(crate::SPHERIZE_MAX_RADIUS_PIXELS as f64),
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "centre_x",
+                "球面化",
+                "中心 X",
+                PropertyValue::Float(128.0),
+                None,
+                None,
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "centre_y",
+                "球面化",
+                "中心 Y",
+                PropertyValue::Float(128.0),
+                None,
+                None,
+                Some(1.0),
+            );
+        }
         EffectType::ColorEmboss => {
             define_builtin_property(
                 &mut properties,
@@ -4951,6 +5002,9 @@ fn builtin_parameter_unit(effect_type: &EffectType, parameter: &str) -> Paramete
         (EffectType::Twirl, "radius") => ParameterUnit::Percent,
         (EffectType::Twirl, "centre_x") => ParameterUnit::Pixels,
         (EffectType::Twirl, "centre_y") => ParameterUnit::Pixels,
+        (EffectType::Spherize, "radius") => ParameterUnit::Pixels,
+        (EffectType::Spherize, "centre_x") => ParameterUnit::Pixels,
+        (EffectType::Spherize, "centre_y") => ParameterUnit::Pixels,
         (EffectType::Bevel, "thickness") => ParameterUnit::Pixels,
         (EffectType::Bevel, "angle") => ParameterUnit::Degrees,
         (EffectType::Bevel, "intensity") => ParameterUnit::Normalized,
@@ -5149,6 +5203,11 @@ fn builtin_effect_execution_contract(effect_type: &EffectType) -> EffectExecutio
             ..cpu_linear
         },
         EffectType::Offset => EffectExecutionContract {
+            execution_modes: EffectExecutionModes::CPU_F32,
+            roi_propagation: EffectRoiPropagation::FullFrame,
+            ..cpu_linear
+        },
+        EffectType::Spherize => EffectExecutionContract {
             execution_modes: EffectExecutionModes::CPU_F32,
             roi_propagation: EffectRoiPropagation::FullFrame,
             ..cpu_linear
@@ -6711,6 +6770,29 @@ fn builtin_graph_builder_for(effect_type: &EffectType) -> Option<EffectGraphBuil
                 Ok(())
             }))
         }
+        EffectType::Spherize => {
+            let radius_id = builtin_parameter_id(effect_type, "radius");
+            let centre_x_id = builtin_parameter_id(effect_type, "centre_x");
+            let centre_y_id = builtin_parameter_id(effect_type, "centre_y");
+            Some(Arc::new(move |effect, context, graph| {
+                let radius = effect.evaluate_f32_parameter(&radius_id, context.time, 0.0);
+                let centre_x = effect.evaluate_f32_parameter(&centre_x_id, context.time, 128.0);
+                let centre_y = effect.evaluate_f32_parameter(&centre_y_id, context.time, 128.0);
+                let grade = crate::SpherizeGrade::new(radius, [centre_x, centre_y]);
+                let Ok(grade) = grade else {
+                    return Err(EffectGraphBuildError::InvalidAuthorState {
+                        effect_key: effect.effect_type.key(),
+                        effect_id: effect.id,
+                        reason: "spherize radius or centre is outside the declared range"
+                            .to_owned(),
+                    });
+                };
+                if !grade.is_identity() {
+                    graph.append_unary(EffectRenderOp::Spherize { grade });
+                }
+                Ok(())
+            }))
+        }
         EffectType::Twirl => {
             let angle_id = builtin_parameter_id(effect_type, "angle");
             let radius_id = builtin_parameter_id(effect_type, "radius");
@@ -7099,6 +7181,7 @@ fn builtin_display_name(effect_type: &EffectType) -> &'static str {
         EffectType::Convolution => "卷积核",
         EffectType::Offset => "偏移",
         EffectType::Twirl => "旋转扭曲",
+        EffectType::Spherize => "球面化",
         EffectType::ColorEmboss => "色彩浮雕",
         EffectType::Emboss => "浮雕",
         EffectType::External(_) => "外部效果",
@@ -8381,6 +8464,7 @@ mod tests {
             EffectType::Convolution,
             EffectType::Offset,
             EffectType::Twirl,
+            EffectType::Spherize,
         ]
         .into_iter()
         .map(|effect_type| effect_type.key())
@@ -11940,6 +12024,99 @@ mod tests {
             .expect("builds restored tritone graph");
         let grade = tritone_op(&graph).expect("tritone op");
         assert_eq!(grade.midtones(), [0.2, 0.5, 0.1]);
+    }
+
+    fn spherize_op(graph: &EffectRenderGraph) -> Option<crate::SpherizeGrade> {
+        graph.nodes.iter().find_map(|node| match &node.kind {
+            EffectGraphNodeKind::UnaryEffect { op: EffectRenderOp::Spherize { grade }, .. } => {
+                Some(*grade)
+            }
+            _ => None,
+        })
+    }
+
+    fn author_spherize(parameter: &str, value: PropertyValue) -> EffectNode {
+        let mut effect =
+            instantiate_effect_node(EffectType::Spherize).expect("registered spherize definition");
+        effect
+            .apply_property_mutation(PropertyMutation::SetStaticValue {
+                path: EffectType::Spherize.property_path(parameter),
+                value,
+            })
+            .expect("authors spherize parameter");
+        effect
+    }
+
+    fn author_spherize_more(
+        mut effect: EffectNode,
+        parameter: &str,
+        value: PropertyValue,
+    ) -> EffectNode {
+        effect
+            .apply_property_mutation(PropertyMutation::SetStaticValue {
+                path: EffectType::Spherize.property_path(parameter),
+                value,
+            })
+            .expect("authors spherize parameter");
+        effect
+    }
+
+    #[test]
+    fn spherize_defaults_compile_to_identity() {
+        let effect =
+            instantiate_effect_node(EffectType::Spherize).expect("registered spherize definition");
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("builds spherize graph");
+        assert!(spherize_op(&graph).is_none());
+    }
+
+    #[test]
+    fn spherize_authored_state_reaches_the_operation() {
+        let effect = author_spherize("radius", PropertyValue::Float(12.5));
+        let effect = author_spherize_more(effect, "centre_x", PropertyValue::Float(40.0));
+        let effect = author_spherize_more(effect, "centre_y", PropertyValue::Float(70.0));
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("builds spherize graph");
+        let grade = spherize_op(&graph).expect("spherize op");
+        assert!((grade.radius_pixels() - 12.5).abs() < 1.0e-5);
+        assert_eq!(grade.centre(), [40.0, 70.0]);
+    }
+
+    #[test]
+    fn spherize_zero_radius_compiles_to_identity() {
+        let effect = author_spherize("radius", PropertyValue::Float(0.0));
+        let effect = author_spherize_more(effect, "centre_x", PropertyValue::Float(4.0));
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("builds spherize graph");
+        assert!(spherize_op(&graph).is_none());
+    }
+
+    #[test]
+    fn spherize_rejects_author_values_outside_the_declared_ranges() {
+        for value in [2_501.0_f32, -1.0] {
+            let mut effect = instantiate_effect_node(EffectType::Spherize)
+                .expect("registered spherize definition");
+            let _error = effect
+                .apply_property_mutation(PropertyMutation::SetStaticValue {
+                    path: EffectType::Spherize.property_path("radius"),
+                    value: PropertyValue::Float(value),
+                })
+                .expect_err("rejects an out-of-range spherize radius");
+        }
+    }
+
+    #[test]
+    fn spherize_authored_state_survives_project_serialization_round_trip() {
+        let effect = author_spherize("radius", PropertyValue::Float(88.0));
+        let effect = author_spherize_more(effect, "centre_y", PropertyValue::Float(-16.0));
+        let wire = serde_json::to_string(&effect).expect("serializes spherize effect");
+        let restored: EffectNode = serde_json::from_str(&wire).expect("restores spherize effect");
+        assert_eq!(restored, effect);
+        let graph = build_effect_render_graph(&[restored], tt(0), TEST_WORKING_SPACE)
+            .expect("builds restored spherize graph");
+        let grade = spherize_op(&graph).expect("spherize op");
+        assert!((grade.radius_pixels() - 88.0).abs() < 1.0e-5);
+        assert_eq!(grade.centre()[1], -16.0);
     }
 
     fn twirl_op(graph: &EffectRenderGraph) -> Option<crate::TwirlGrade> {

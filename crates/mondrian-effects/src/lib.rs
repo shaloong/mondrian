@@ -31,6 +31,7 @@ pub mod emboss;
 pub mod find_edges;
 mod project_properties;
 pub mod radial_blur;
+pub mod spherize;
 pub mod threshold;
 pub mod tint;
 pub mod tritone;
@@ -245,6 +246,10 @@ pub use radial_blur::{
 };
 pub use scatter::{
     scatter_frame_f32, ScatterError, ScatterGrade, SCATTER_MAX_AMOUNT_PIXELS, SCATTER_MAX_COPIES,
+};
+pub use spherize::{
+    spherize_frame_f32, SpherizeError, SpherizeGrade, SPHERIZE_MAX_RADIUS_PIXELS,
+    SPHERIZE_MIN_RADIUS_PIXELS,
 };
 pub use temporal_execution::{
     collect_temporal_frame_demands, prepare_temporal_frame_execution,
