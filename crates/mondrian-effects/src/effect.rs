@@ -880,6 +880,11 @@ pub enum EffectRenderOp {
     Scatter {
         grade: crate::ScatterGrade,
     },
+    /// Brush strokes: averages a short line of samples running along the
+    /// authored stroke direction, with position-hashed phase and jitter.
+    BrushStrokes {
+        grade: crate::BrushStrokesGrade,
+    },
     /// Threshold: black or white depending on the working-space luminance.
     Threshold {
         grade: crate::ThresholdGrade,
@@ -1044,6 +1049,9 @@ impl std::fmt::Debug for EffectRenderOp {
             Self::Bevel { grade } => formatter.debug_struct("Bevel").field("grade", grade).finish(),
             Self::Scatter { grade } => {
                 formatter.debug_struct("Scatter").field("grade", grade).finish()
+            }
+            Self::BrushStrokes { grade } => {
+                formatter.debug_struct("BrushStrokes").field("grade", grade).finish()
             }
             Self::Mosaic { grade } => {
                 formatter.debug_struct("Mosaic").field("grade", grade).finish()
@@ -1470,6 +1478,16 @@ impl EffectRenderOp {
                 grade.copies().hash(state);
                 grade.randomness().to_bits().hash(state);
             }
+            EffectRenderOp::BrushStrokes { grade } => {
+                40u8.hash(state);
+                grade.angle_degrees().to_bits().hash(state);
+                grade.size().to_bits().hash(state);
+                grade.length().to_bits().hash(state);
+                grade.density().to_bits().hash(state);
+                grade.randomness().to_bits().hash(state);
+                grade.surface().hash(state);
+                grade.blend_with_original().to_bits().hash(state);
+            }
             EffectRenderOp::Bevel { grade } => {
                 38u8.hash(state);
                 grade.thickness().to_bits().hash(state);
@@ -1678,6 +1696,7 @@ impl EffectRenderOp {
             EffectRenderOp::Kaleidoscope { .. } => 3,
             EffectRenderOp::Bevel { .. } => 2,
             EffectRenderOp::Scatter { .. } => 3,
+            EffectRenderOp::BrushStrokes { .. } => 5,
             EffectRenderOp::ColorEmboss { .. } => 4,
             EffectRenderOp::Emboss { .. } => 4,
             EffectRenderOp::HueSaturation { .. } => 2,
@@ -2213,7 +2232,7 @@ impl EffectDefinition {
     }
 }
 
-fn builtin_effect_types() -> [EffectType; 38] {
+fn builtin_effect_types() -> [EffectType; 39] {
     [
         EffectType::BasicCorrection,
         EffectType::WhiteBalance,
@@ -2253,6 +2272,7 @@ fn builtin_effect_types() -> [EffectType; 38] {
         EffectType::Kaleidoscope,
         EffectType::Bevel,
         EffectType::Scatter,
+        EffectType::BrushStrokes,
     ]
 }
 
@@ -3578,6 +3598,85 @@ fn default_properties_for(effect_type: EffectType) -> PropertyBag {
                 Some(0.01),
             );
         }
+        EffectType::BrushStrokes => {
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "angle",
+                "画笔描边",
+                "描边方向",
+                PropertyValue::Float(135.0),
+                None,
+                None,
+                None,
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "size",
+                "画笔描边",
+                "画笔大小",
+                PropertyValue::Float(2.0),
+                Some(0.0),
+                Some(crate::BRUSH_STROKES_MAX_SIZE as f64),
+                Some(0.1),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "length",
+                "画笔描边",
+                "画笔长度",
+                PropertyValue::Float(5.0),
+                Some(0.0),
+                Some(crate::BRUSH_STROKES_MAX_LENGTH as f64),
+                Some(0.1),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "density",
+                "画笔描边",
+                "画笔密度",
+                PropertyValue::Float(1.0),
+                Some(0.0),
+                Some(crate::BRUSH_STROKES_MAX_DENSITY as f64),
+                Some(0.01),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "randomness",
+                "画笔描边",
+                "随机性",
+                PropertyValue::Float(1.0),
+                Some(0.0),
+                Some(crate::BRUSH_STROKES_MAX_RANDOMNESS as f64),
+                Some(0.01),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "surface",
+                "画笔描边",
+                "画笔表面",
+                PropertyValue::Int(1),
+                Some(1.0),
+                Some(crate::BRUSH_STROKES_SURFACE_COUNT as f64),
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "blend_with_original",
+                "画笔描边",
+                "与原始图像混合",
+                PropertyValue::Float(0.0),
+                Some(0.0),
+                Some(1.0),
+                Some(0.01),
+            );
+        }
         EffectType::MotionTile => {
             define_builtin_property(
                 &mut properties,
@@ -4317,6 +4416,11 @@ fn builtin_parameter_unit(effect_type: &EffectType, parameter: &str) -> Paramete
         (EffectType::Kaleidoscope, "size") => ParameterUnit::Percent,
         (EffectType::Kaleidoscope, "rotation") => ParameterUnit::Degrees,
         (EffectType::Scatter, "amount") => ParameterUnit::Pixels,
+        (EffectType::BrushStrokes, "size") | (EffectType::BrushStrokes, "length") => {
+            ParameterUnit::Pixels
+        }
+        (EffectType::BrushStrokes, "angle") => ParameterUnit::Degrees,
+        (EffectType::BrushStrokes, "blend_with_original") => ParameterUnit::Normalized,
         (EffectType::Bevel, "thickness") => ParameterUnit::Pixels,
         (EffectType::Bevel, "angle") => ParameterUnit::Degrees,
         (EffectType::Bevel, "intensity") => ParameterUnit::Normalized,
@@ -4499,6 +4603,11 @@ fn builtin_effect_execution_contract(effect_type: &EffectType) -> EffectExecutio
             ..cpu_linear
         },
         EffectType::Scatter => EffectExecutionContract {
+            execution_modes: EffectExecutionModes::CPU_F32,
+            roi_propagation: EffectRoiPropagation::FullFrame,
+            ..cpu_linear
+        },
+        EffectType::BrushStrokes => EffectExecutionContract {
             execution_modes: EffectExecutionModes::CPU_F32,
             roi_propagation: EffectRoiPropagation::FullFrame,
             ..cpu_linear
@@ -5662,6 +5771,52 @@ fn builtin_graph_builder_for(effect_type: &EffectType) -> Option<EffectGraphBuil
                 Ok(())
             }))
         }
+        EffectType::BrushStrokes => {
+            let angle_id = builtin_parameter_id(effect_type, "angle");
+            let size_id = builtin_parameter_id(effect_type, "size");
+            let length_id = builtin_parameter_id(effect_type, "length");
+            let density_id = builtin_parameter_id(effect_type, "density");
+            let randomness_id = builtin_parameter_id(effect_type, "randomness");
+            let surface_id = builtin_parameter_id(effect_type, "surface");
+            let blend_id = builtin_parameter_id(effect_type, "blend_with_original");
+            Some(Arc::new(move |effect, context, graph| {
+                let surface = match effect.evaluate_parameter(&surface_id, context.time) {
+                    Some(PropertyValue::Int(value)) => u32::try_from(value).map_err(|_| {
+                        EffectGraphBuildError::InvalidAuthorState {
+                            effect_key: effect.effect_type.key(),
+                            effect_id: effect.id,
+                            reason: "brush strokes surface must be a positive integer".to_owned(),
+                        }
+                    })?,
+                    Some(_) => {
+                        return Err(EffectGraphBuildError::InvalidAuthorState {
+                            effect_key: effect.effect_type.key(),
+                            effect_id: effect.id,
+                            reason: "brush strokes surface must be an integer".to_owned(),
+                        })
+                    }
+                    None => 1,
+                };
+                let grade = crate::BrushStrokesGrade::new(
+                    effect.evaluate_f32_parameter(&angle_id, context.time, 135.0),
+                    effect.evaluate_f32_parameter(&size_id, context.time, 2.0),
+                    effect.evaluate_f32_parameter(&length_id, context.time, 5.0),
+                    effect.evaluate_f32_parameter(&density_id, context.time, 1.0),
+                    effect.evaluate_f32_parameter(&randomness_id, context.time, 1.0),
+                    surface,
+                    effect.evaluate_f32_parameter(&blend_id, context.time, 0.0),
+                )
+                .map_err(|error| EffectGraphBuildError::InvalidAuthorState {
+                    effect_key: effect.effect_type.key(),
+                    effect_id: effect.id,
+                    reason: error.to_string(),
+                })?;
+                if !grade.is_identity() {
+                    graph.append_unary(EffectRenderOp::BrushStrokes { grade });
+                }
+                Ok(())
+            }))
+        }
         EffectType::MotionTile => {
             let center_x_id = builtin_parameter_id(effect_type, "center_x");
             let center_y_id = builtin_parameter_id(effect_type, "center_y");
@@ -6079,6 +6234,7 @@ fn builtin_display_name(effect_type: &EffectType) -> &'static str {
         EffectType::Kaleidoscope => "万花筒",
         EffectType::Bevel => "斜面与浮雕",
         EffectType::Scatter => "散射",
+        EffectType::BrushStrokes => "画笔描边",
         EffectType::ColorEmboss => "色彩浮雕",
         EffectType::Emboss => "浮雕",
         EffectType::External(_) => "外部效果",
@@ -7353,6 +7509,7 @@ mod tests {
             EffectType::Kaleidoscope,
             EffectType::Bevel,
             EffectType::Scatter,
+            EffectType::BrushStrokes,
         ]
         .into_iter()
         .map(|effect_type| effect_type.key())
@@ -10470,6 +10627,136 @@ mod tests {
             .expect("builds restored scatter graph");
         let grade = scatter_op(&graph).expect("scatter op");
         assert_eq!(grade.amount_pixels(), 30.0);
+    }
+
+    fn brush_strokes_op(graph: &EffectRenderGraph) -> Option<crate::BrushStrokesGrade> {
+        graph.nodes.iter().find_map(|node| match &node.kind {
+            EffectGraphNodeKind::UnaryEffect {
+                op: EffectRenderOp::BrushStrokes { grade }, ..
+            }
+            | EffectGraphNodeKind::DomainEffect {
+                op: EffectRenderOp::BrushStrokes { grade },
+                ..
+            } => Some(*grade),
+            _ => None,
+        })
+    }
+
+    #[test]
+    fn brush_strokes_defaults_reach_the_operation() {
+        let effect = instantiate_effect_node(EffectType::BrushStrokes)
+            .expect("registered brush strokes definition");
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("builds brush strokes graph");
+        let grade = brush_strokes_op(&graph).expect("brush strokes op");
+        assert_eq!(grade.angle_degrees(), 135.0);
+        assert_eq!(grade.size(), 2.0);
+        assert_eq!(grade.length(), 5.0);
+        assert_eq!(grade.density(), 1.0);
+        assert_eq!(grade.randomness(), 1.0);
+        assert_eq!(grade.surface(), 1);
+        assert_eq!(grade.blend_with_original(), 0.0);
+    }
+
+    #[test]
+    fn brush_strokes_authored_state_reaches_the_operation() {
+        let mut effect = instantiate_effect_node(EffectType::BrushStrokes)
+            .expect("registered brush strokes definition");
+        for (parameter, value) in [
+            ("angle", 30.0_f32),
+            ("size", 4.0),
+            ("length", 24.0),
+            ("density", 1.5),
+            ("randomness", 0.25),
+            ("blend_with_original", 0.5),
+        ] {
+            effect
+                .apply_property_mutation(PropertyMutation::SetStaticValue {
+                    path: EffectType::BrushStrokes.property_path(parameter),
+                    value: PropertyValue::Float(value),
+                })
+                .expect("authors brush strokes parameter");
+        }
+        effect
+            .apply_property_mutation(PropertyMutation::SetStaticValue {
+                path: EffectType::BrushStrokes.property_path("surface"),
+                value: PropertyValue::Int(3),
+            })
+            .expect("authors brush strokes surface");
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("builds brush strokes graph");
+        let grade = brush_strokes_op(&graph).expect("brush strokes op");
+        assert_eq!(grade.angle_degrees(), 30.0);
+        assert_eq!(grade.size(), 4.0);
+        assert_eq!(grade.length(), 24.0);
+        assert_eq!(grade.density(), 1.5);
+        assert_eq!(grade.randomness(), 0.25);
+        assert_eq!(grade.surface(), 3);
+        assert_eq!(grade.blend_with_original(), 0.5);
+    }
+
+    #[test]
+    fn brush_strokes_full_original_blend_compiles_to_identity() {
+        let mut effect = instantiate_effect_node(EffectType::BrushStrokes)
+            .expect("registered brush strokes definition");
+        effect
+            .apply_property_mutation(PropertyMutation::SetStaticValue {
+                path: EffectType::BrushStrokes.property_path("blend_with_original"),
+                value: PropertyValue::Float(1.0),
+            })
+            .expect("authors brush strokes blend");
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("builds brush strokes graph");
+        assert!(brush_strokes_op(&graph).is_none());
+    }
+
+    #[test]
+    fn brush_strokes_reject_author_values_outside_the_declared_ranges() {
+        for (parameter, value) in [
+            ("size", PropertyValue::Float(6.0)),
+            ("length", PropertyValue::Float(41.0)),
+            ("density", PropertyValue::Float(2.5)),
+            ("blend_with_original", PropertyValue::Float(1.5)),
+        ] {
+            let mut effect = instantiate_effect_node(EffectType::BrushStrokes)
+                .expect("registered brush strokes definition");
+            effect
+                .apply_property_mutation(PropertyMutation::SetStaticValue {
+                    path: EffectType::BrushStrokes.property_path(parameter),
+                    value,
+                })
+                .expect_err("rejects out of range brush strokes parameter");
+        }
+        for value in [0, 5] {
+            let mut effect = instantiate_effect_node(EffectType::BrushStrokes)
+                .expect("registered brush strokes definition");
+            effect
+                .apply_property_mutation(PropertyMutation::SetStaticValue {
+                    path: EffectType::BrushStrokes.property_path("surface"),
+                    value: PropertyValue::Int(value),
+                })
+                .expect_err("rejects out of range brush strokes surface");
+        }
+    }
+
+    #[test]
+    fn brush_strokes_authored_state_survives_project_serialization_round_trip() {
+        let mut effect = instantiate_effect_node(EffectType::BrushStrokes)
+            .expect("registered brush strokes definition");
+        effect
+            .apply_property_mutation(PropertyMutation::SetStaticValue {
+                path: EffectType::BrushStrokes.property_path("length"),
+                value: PropertyValue::Float(18.0),
+            })
+            .expect("authors brush strokes length");
+        let wire = serde_json::to_string(&effect).expect("serializes brush strokes effect");
+        let restored: EffectNode =
+            serde_json::from_str(&wire).expect("restores brush strokes effect");
+        assert_eq!(restored, effect);
+        let graph = build_effect_render_graph(&[restored], tt(0), TEST_WORKING_SPACE)
+            .expect("builds restored brush strokes graph");
+        let grade = brush_strokes_op(&graph).expect("brush strokes op");
+        assert_eq!(grade.length(), 18.0);
     }
 }
 

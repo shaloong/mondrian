@@ -66,6 +66,7 @@ pub use processor_residency::{
     PreparedEffectProcessorInput,
 };
 pub mod bevel;
+pub mod brush_strokes;
 pub mod kaleidoscope;
 pub mod mosaic;
 pub mod motion_tile;
@@ -100,6 +101,11 @@ pub use color_emboss::{
 };
 
 pub use bevel::{bevel_frame_f32, BevelError, BevelGrade, BEVEL_HALO_PIXELS, BEVEL_MAX_THICKNESS};
+pub use brush_strokes::{
+    brush_strokes_frame_f32, BrushStrokesError, BrushStrokesGrade, BRUSH_STROKES_MAX_DENSITY,
+    BRUSH_STROKES_MAX_LENGTH, BRUSH_STROKES_MAX_RANDOMNESS, BRUSH_STROKES_MAX_SIZE,
+    BRUSH_STROKES_SURFACE_COUNT,
+};
 pub use coverage::{has_positive_coverage, mix_straight_rgba, straight_rgba_from_premultiplied};
 pub use effect::{
     build_effect_render_graph, compile_clip_effect_graph, effect_category_tree, effect_definition,

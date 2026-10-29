@@ -1715,6 +1715,11 @@ fn render_op_requirements(op: &EffectRenderOp) -> EffectImplementationRequiremen
             roi_from_effect_input: EffectRoiPropagation::FullFrame,
             ..cpu_float
         },
+        EffectRenderOp::BrushStrokes { .. } => EffectImplementationRequirements {
+            execution_modes: EffectExecutionModes::CPU_F32,
+            roi_from_effect_input: EffectRoiPropagation::FullFrame,
+            ..cpu_float
+        },
         EffectRenderOp::Bevel { .. } => EffectImplementationRequirements {
             execution_modes: EffectExecutionModes::CPU_F32,
             roi_from_effect_input: EffectRoiPropagation::Expand {

@@ -51,6 +51,7 @@ pub enum EffectType {
     Kaleidoscope,
     Bevel,
     Scatter,
+    BrushStrokes,
     Posterize,
     Emboss,
     /// Externally registered effect definition, including native-format adapters.
@@ -100,6 +101,7 @@ impl EffectType {
             Self::Kaleidoscope => "builtin.kaleidoscope".to_string(),
             Self::Bevel => "builtin.bevel".to_string(),
             Self::Scatter => "builtin.scatter".to_string(),
+            Self::BrushStrokes => "builtin.brush_strokes".to_string(),
             Self::Posterize => "builtin.posterize".to_string(),
             Self::External(key) => key.clone(),
         }
@@ -144,6 +146,7 @@ impl EffectType {
             "builtin.kaleidoscope" => Self::Kaleidoscope,
             "builtin.bevel" => Self::Bevel,
             "builtin.scatter" => Self::Scatter,
+            "builtin.brush_strokes" => Self::BrushStrokes,
             "builtin.posterize" => Self::Posterize,
             other => Self::External(other.to_string()),
         }
@@ -188,6 +191,7 @@ impl EffectType {
             Self::Kaleidoscope => "万花筒",
             Self::Bevel => "斜面与浮雕",
             Self::Scatter => "散射",
+            Self::BrushStrokes => "画笔描边",
             Self::Posterize => "色调分离",
             Self::External(name) => name,
         }
@@ -230,6 +234,7 @@ impl EffectType {
             Self::Kaleidoscope => vec!["风格化"],
             Self::Bevel => vec!["边缘效果"],
             Self::Scatter => vec!["风格化"],
+            Self::BrushStrokes => vec!["风格化"],
             Self::Posterize => vec!["风格化"],
             Self::External(_) => vec!["外部效果"],
         }
@@ -274,6 +279,7 @@ impl EffectType {
             Self::Kaleidoscope => "kaleidoscope".to_string(),
             Self::Bevel => "bevel".to_string(),
             Self::Scatter => "scatter".to_string(),
+            Self::BrushStrokes => "brush_strokes".to_string(),
             Self::Posterize => "posterize".to_string(),
             Self::External(key) => key.clone(),
         }
@@ -573,7 +579,7 @@ impl crate::AuthoringFootprint for EffectType {
             Self::Emboss => Ok(()),
             Self::ColorEmboss => Ok(()),
             Self::Threshold | Self::Mosaic | Self::MotionTile | Self::Kaleidoscope => Ok(()),
-            Self::Posterize | Self::Bevel | Self::Scatter => Ok(()),
+            Self::Posterize | Self::Bevel | Self::Scatter | Self::BrushStrokes => Ok(()),
         }
     }
 }

@@ -2738,6 +2738,7 @@ const fn effect_operation_shape_tag(operation: &EffectRenderOp) -> u8 {
         EffectRenderOp::Kaleidoscope { .. } => 38,
         EffectRenderOp::Bevel { .. } => 39,
         EffectRenderOp::Scatter { .. } => 40,
+        EffectRenderOp::BrushStrokes { .. } => 41,
         EffectRenderOp::ColorEmboss { .. } => 33,
         EffectRenderOp::Emboss { .. } => 32,
         EffectRenderOp::DropShadow { .. } => 30,
@@ -4781,6 +4782,7 @@ fn cpu_node_scratch_frames(
             | crate::EffectRenderOp::Kaleidoscope { .. }
             | crate::EffectRenderOp::Bevel { .. }
             | crate::EffectRenderOp::Scatter { .. }
+            | crate::EffectRenderOp::BrushStrokes { .. }
             | crate::EffectRenderOp::ColorEmboss { .. }
             | crate::EffectRenderOp::Emboss { .. }
             | crate::EffectRenderOp::Crop { .. }

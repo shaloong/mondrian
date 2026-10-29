@@ -877,6 +877,7 @@ fn operation_name(op: &EffectRenderOp) -> &'static str {
         EffectRenderOp::Kaleidoscope { .. } => "kaleidoscope",
         EffectRenderOp::Bevel { .. } => "bevel",
         EffectRenderOp::Scatter { .. } => "scatter",
+        EffectRenderOp::BrushStrokes { .. } => "brush_strokes",
         EffectRenderOp::ColorEmboss { .. } => "color_emboss",
         EffectRenderOp::Emboss { .. } => "emboss",
         EffectRenderOp::DropShadow { .. } => "drop_shadow",

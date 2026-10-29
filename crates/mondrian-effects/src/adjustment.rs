@@ -218,6 +218,12 @@ pub(crate) fn apply_render_op(
                 parameter: "requires_float32",
             })
         }
+        EffectRenderOp::BrushStrokes { .. } => {
+            return Err(EffectExecutionError::InvalidRenderParameter {
+                op: "brush_strokes",
+                parameter: "requires_float32",
+            })
+        }
         EffectRenderOp::Bevel { .. } => {
             return Err(EffectExecutionError::InvalidRenderParameter {
                 op: "bevel",
@@ -706,6 +712,7 @@ pub(crate) const fn render_op_f32_scratch_frames(op: &EffectRenderOp) -> usize {
         EffectRenderOp::Threshold { .. } => 0,
         EffectRenderOp::Mosaic { .. } => 0,
         EffectRenderOp::Scatter { .. } => 0,
+        EffectRenderOp::BrushStrokes { .. } => 0,
         EffectRenderOp::Bevel { .. } => 0,
         EffectRenderOp::Kaleidoscope { .. } => 0,
         EffectRenderOp::MotionTile { .. } => 0,
@@ -934,6 +941,15 @@ pub(crate) fn apply_render_op_f32_region_controlled<E>(
             grade,
             checkpoint,
         ),
+        EffectRenderOp::BrushStrokes { grade } => {
+            crate::brush_strokes::apply_brush_strokes_f32_controlled(
+                working,
+                region.width as usize,
+                region.height as usize,
+                grade,
+                checkpoint,
+            )
+        }
         EffectRenderOp::Bevel { grade } => crate::bevel::apply_bevel_f32_controlled(
             working,
             region.width as usize,

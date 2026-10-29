@@ -2812,6 +2812,7 @@ fn render_op_name(op: &crate::EffectRenderOp) -> &'static str {
         crate::EffectRenderOp::Kaleidoscope { .. } => "kaleidoscope",
         crate::EffectRenderOp::Bevel { .. } => "bevel",
         crate::EffectRenderOp::Scatter { .. } => "scatter",
+        crate::EffectRenderOp::BrushStrokes { .. } => "brush_strokes",
         crate::EffectRenderOp::ColorEmboss { .. } => "color_emboss",
         crate::EffectRenderOp::Emboss { .. } => "emboss",
         crate::EffectRenderOp::DropShadow { .. } => "drop_shadow",
