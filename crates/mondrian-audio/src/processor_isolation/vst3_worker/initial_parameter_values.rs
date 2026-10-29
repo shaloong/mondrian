@@ -2,11 +2,9 @@
 use super::*;
 use vst3_host::controller_parameters::ControllerParameterQueryFrame;
 use vst3_host::initial_parameter_input::InitialParameterStorage;
-#[cfg(target_os = "windows")]
 use vst3_host::initial_parameter_input::InitialParameterValue;
 
 /// Fixed bounded metadata observation scratch; charged as main inline storage.
-#[cfg(target_os = "windows")]
 pub(super) struct InitialParameterFrame {
     values: [InitialParameterValue; MAX_PARAMETERS],
 }
@@ -30,7 +28,6 @@ impl Vst3Worker {
     }
 
     /// Fresh loader calls only after proving a strictly new native incarnation.
-    #[cfg(target_os = "windows")]
     pub(super) fn service_fresh_parameter_values(
         &mut self,
         author_entry: Option<&crate::NativeAudioAuthorStateEntryRequest<'_>>,
@@ -109,91 +106,6 @@ impl Vst3Worker {
                 InitialParameterStorage { vector_bytes, com_payload_bytes },
             )
             .is_ok()
-    }
-    // Inline platforms retain their existing flags4-only consumer. No scoped
-    // storage grant or newly supported baseline transfer is invented here.
-    #[cfg(not(target_os = "windows"))]
-    pub(super) fn service_fresh_parameter_values(
-        &mut self,
-        _author_entry: Option<&crate::NativeAudioAuthorStateEntryRequest<'_>>,
-    ) -> bool {
-        if !matches!(
-            self.configuration_phase,
-            super::super::native_configuration_control::NativeConfigurationPhase::Admitted
-        ) || self.native_author_delivery.is_some()
-            || self.last_parameter_values.iter().any(Option::is_some)
-        {
-            return true;
-        }
-        let Some(plugin) = self.plugin.as_mut() else {
-            return true;
-        };
-        let Some(cohort) = plugin.pending_restart_cohort() else {
-            return true;
-        };
-        if cohort.flags().bits() != 4 || cohort.exhausted() {
-            return true;
-        }
-        let Ok(source) = plugin.editor_event_source_status() else {
-            return true;
-        };
-        if source.failure().is_some()
-            || source.open_parameter_edits() != 0
-            || source.group_depth() != 0
-            || source.pending_dsp_feedback_values() != 0
-        {
-            return true;
-        }
-        let admitted = &self.payload.parameters;
-        if admitted.len() > MAX_PARAMETERS {
-            return true;
-        }
-        let mut frame = ControllerParameterQueryFrame::default();
-        let count = plugin.visit_controller_parameters_bounded(
-            admitted.len(),
-            &mut frame,
-            &mut |index, observed| {
-                let expected = admitted.get(index).ok_or_else(|| {
-                    vst3_host::Error::InvalidParameter("unadmitted controller parameter".to_owned())
-                })?;
-                if observed.id() != expected.id
-                    || validate_parameter(expected).is_err()
-                    || !retained_parameter_fields_valid(
-                        observed.title_utf16(),
-                        observed.default_normalized(),
-                        observed.step_count(),
-                    )
-                    || observed.default_normalized() != expected.default_normalized
-                    || observed.step_count() != expected.step_count
-                    || observed.flags() != expected.flags
-                    || !observed.normalized().is_finite()
-                    || !(0.0..=1.0).contains(&observed.normalized())
-                {
-                    return Err(vst3_host::Error::InvalidParameter(
-                        "controller identity or normalized value changed".to_owned(),
-                    ));
-                }
-                Ok(())
-            },
-        );
-        if !matches!(count, Ok(count) if count == admitted.len()) {
-            return true;
-        }
-        // Reentrant edits and repeated same-bit callbacks are later obligations.
-        // The SDK consumes only a proved intact marker-only initial prefix,
-        // with zero input storage under the same source/feedback/input locks.
-        if !matches!(plugin.editor_event_source_status(), Ok(after) if after == source)
-            || plugin.pending_restart_cohort() != Some(cohort)
-        {
-            return true;
-        }
-        let _ = plugin.handoff_initial_parameter_input(
-            cohort,
-            source,
-            &[],
-            InitialParameterStorage::default(),
-        );
-        true
     }
 }
 fn invalid_native_parameter() -> vst3_host::Error {
