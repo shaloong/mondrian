@@ -2685,25 +2685,23 @@ fn qualify_cpu_contract_resident_and_graph(mode: &str, coordinate_output: bool) 
             );
         }
         let invalid = cpu_contract_timing();
-        let reduced = EffectFloatFrame::from_pixels(
-            input.extent(),
+        // Density is now supported. The immutable prepared raster dimensions
+        // remain a genuine admission boundary and must preserve the owner.
+        let incompatible = EffectFloatFrame::from_pixels(
+            mondrian_effects::EffectFrameExtent::new(input.width() + 1, input.height()),
             input.format(),
-            mondrian_core::ImageSampling::new(
-                input.sampling().sample_aspect_ratio(),
-                [Rational::new(1, 2); 2],
-            )
-            .unwrap(),
-            input.pixels().to_vec(),
+            input.sampling(),
+            vec![[0.0; 4]; (input.width() as usize + 1) * input.height() as usize],
         )
         .unwrap();
         assert!(matches!(
             session.render(
                 &invalid,
                 &BTreeMap::new(),
-                &reduced,
+                &incompatible,
                 &mut checkpoint(&cancellation)
             ),
-            Err(OpenFxHostError::UnsupportedImageSampling { .. })
+            Err(OpenFxHostError::Invalid(_))
         ));
         let valid = cpu_contract_timing();
         let parameters =
