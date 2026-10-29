@@ -13714,8 +13714,11 @@ mod restored_audio_activation_tests {
         fn drop(&mut self) {
             // This witness retains the one reference needed to inspect the
             // real COM count safely. All instance/temporary refs must be gone.
-            let count = unsafe { self.component.addRef() };
-            unsafe { self.component.release() };
+            let parent = self.component.as_ptr().cast::<FUnknown>();
+            // SAFETY: IComponent has the FUnknown prefix and this witness owns
+            // an independent reference across both balanced native calls.
+            let count = unsafe { ((*(*parent).vtbl).addRef)(parent) };
+            unsafe { ((*(*parent).vtbl).release)(parent) };
             self.refs_at_retirement.store(count - 1, std::sync::atomic::Ordering::SeqCst);
         }
     }
