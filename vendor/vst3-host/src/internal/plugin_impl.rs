@@ -274,7 +274,7 @@ pub struct PluginImpl {
     // writes requested sizes into (drained via take_editor_resize_request).
     plug_frame: ComWrapper<HostPlugFrame>,
     editor_resize: Arc<Mutex<Option<(i32, i32)>>>,
-    // Linux IRunLoop registrations from the plugin's editor (fd handlers +
+    // Editor-scoped Linux IRunLoop registrations (fd handlers +
     // timers), serviced on the host UI thread via `service_run_loop`.
     #[cfg(target_os = "linux")]
     run_loop: Arc<Mutex<RunLoopRegistry>>,
@@ -288,11 +288,8 @@ pub struct PluginImpl {
     // those are released while the module's vtables still exist, and before `_host_app` below.
     _module: Box<dyn VstModule>,
 
-    // Host application context passed to initialize() — kept alive for the plugin's lifetime
-    // because the plugin may retain a reference to it. It has to outlive `_module`: the SDK's
-    // `CPluginFactory::setHostContext` parks this pointer in a module-global (`gPluginContext`)
-    // without an addRef, and module teardown — static destructors, `DeinitModule` — still reads
-    // it. Rust drops fields in declaration order, so this one is declared last.
+    // Instance context remains distinct from shared factory services. Keep it
+    // alive through module teardown; native components may retain or borrow it.
     _host_app: ComWrapper<HostApplication>,
 
     // Thread which initialized the component/controller. Lifecycle-sensitive restart handling
@@ -1564,8 +1561,17 @@ impl PluginImpl {
             log::info!("=== PLUGIN LOADING START ===");
             log::info!("Loading plugin from: {}", path.display());
 
-            // Load the VST3 module using platform-specific loader. Declared first so it drops
-            // LAST: everything below lives in the module's address space, and the COM teardown
+            // Instance services are distinct from the factory context. Declare
+            // first so every failed construction keeps them alive through unload.
+            let host_app = create_host_application_with_interfaces(interfaces);
+            let host_ctx = host_app.to_com_ptr::<IHostApplication>();
+            let context = host_ctx
+                .as_ref()
+                .map(|p| p.as_ptr() as *mut FUnknown)
+                .unwrap_or(ptr::null_mut());
+
+            // Load before plugin-side COM owners, but after instance services. Everything
+            // below lives in the module's address space, and the COM teardown
             // (whether via `InitializedComponent` or `Drop for PluginImpl`) must complete before
             // the module unmaps.
             log::debug!("Step 1: Loading VST3 module...");
@@ -1588,20 +1594,6 @@ impl PluginImpl {
             })?;
             log::debug!("Factory wrapped successfully");
 
-            // Factory3 must receive the host context before any class is instantiated. Keep the
-            // same context alive for the complete component/controller lifetime.
-            let host_app = create_host_application_with_interfaces(interfaces);
-            let host_ctx = host_app.to_com_ptr::<IHostApplication>();
-            let context = host_ctx
-                .as_ref()
-                .map(|p| p.as_ptr() as *mut FUnknown)
-                .unwrap_or(ptr::null_mut());
-            if let Some(factory3) = factory.cast::<IPluginFactory3>() {
-                let result = factory3.setHostContext(context);
-                if result != kResultOk && result != kResultTrue {
-                    log::warn!("IPluginFactory3::setHostContext failed: {result:#x}");
-                }
-            }
             let compatibility = match module_info.as_ref() {
                 Some(module_info) => module_info.compatibility.clone(),
                 None => crate::internal::module_info::read_factory_compatibility(&factory)?,
@@ -2817,6 +2809,8 @@ impl PluginInternal for PluginImpl {
             control_thread: self.control_thread,
             #[cfg(target_os = "linux")]
             run_loop: &self.run_loop,
+            #[cfg(target_os = "linux")]
+            factory_run_loop: self._module.factory_run_loop(),
         };
         let processor = PluginProcessFields {
             processor: &self.processor,
@@ -3875,7 +3869,9 @@ impl PluginInternal for PluginImpl {
 
     #[cfg(target_os = "linux")]
     fn service_run_loop(&mut self) {
-        self.editor_fields().service_run_loop()
+        if let Err(error) = self.editor_fields().service_run_loop() {
+            log::error!("failed to service native run loop: {error}");
+        }
     }
 
     fn get_editor_size(&self) -> Result<(i32, i32)> {
@@ -7235,6 +7231,8 @@ struct PluginEditorFields<'a> {
     control_thread: ThreadId,
     #[cfg(target_os = "linux")]
     run_loop: &'a Arc<Mutex<RunLoopRegistry>>,
+    #[cfg(target_os = "linux")]
+    factory_run_loop: Option<&'a Arc<Mutex<RunLoopRegistry>>>,
 }
 
 impl PluginImpl {
@@ -7274,6 +7272,8 @@ impl PluginImpl {
             control_thread: self.control_thread,
             #[cfg(target_os = "linux")]
             run_loop: &self.run_loop,
+            #[cfg(target_os = "linux")]
+            factory_run_loop: self._module.factory_run_loop(),
         }
     }
 }
@@ -8174,53 +8174,13 @@ impl PluginEditorFields<'_> {
     }
 
     #[cfg(target_os = "linux")]
-    fn service_run_loop(&mut self) {
-        use std::sync::atomic::Ordering;
-        use vst3::Steinberg::Linux::{IEventHandlerTrait, ITimerHandlerTrait};
-
-        // Fire due timers. Snapshot the handlers, then invoke with the lock
-        // RELEASED: a callback may re-enter registerTimer/unregisterTimer
-        // (VSTGUI does), which takes the same lock.
-        let now = std::time::Instant::now();
-        let mut due = Vec::new();
-        if let Ok(mut reg) = self.run_loop.lock() {
-            for timer in reg.timers.iter_mut() {
-                if now >= timer.due {
-                    timer.due = now + std::time::Duration::from_millis(timer.interval_ms);
-                    due.push(Arc::clone(&timer.registration));
-                }
-            }
+    fn service_run_loop(&mut self) -> Result<()> {
+        if let Some(registry) = self.factory_run_loop {
+            super::run_loop::service(registry)?;
         }
-        for registration in due {
-            if registration.active.load(Ordering::Acquire) {
-                unsafe { registration.handler.onTimer() };
-            }
-        }
-
-        // Poll registered fds (zero timeout - never blocks the UI thread)
-        // and notify ready ones. Same snapshot-then-invoke pattern.
-        let handlers: Vec<_> = match self.run_loop.lock() {
-            Ok(reg) => reg.handlers.clone(),
-            Err(_) => return,
-        };
-        if handlers.is_empty() {
-            return;
-        }
-        let mut fds: Vec<libc::pollfd> = handlers
-            .iter()
-            .map(|entry| libc::pollfd { fd: entry.fd, events: libc::POLLIN, revents: 0 })
-            .collect();
-        let ready = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as _, 0) };
-        if ready > 0 {
-            for (pfd, entry) in fds.iter().zip(handlers.iter()) {
-                if pfd.revents & (libc::POLLIN | libc::POLLERR | libc::POLLHUP) != 0
-                    && entry.active.load(Ordering::Acquire)
-                {
-                    unsafe { entry.handler.onFDIsSet(entry.fd) };
-                }
-            }
-        }
+        super::run_loop::service(self.run_loop)
     }
+
 }
 
 fn has_editor_view(
@@ -8574,7 +8534,7 @@ impl crate::plugin::PluginEditorRole for PluginEditorFields<'_> {
     fn service_run_loop(&mut self) -> Result<()> {
         self.ensure_control_thread()?;
         #[cfg(target_os = "linux")]
-        PluginEditorFields::service_run_loop(self);
+        PluginEditorFields::service_run_loop(self)?;
         Ok(())
     }
 }
@@ -8839,6 +8799,8 @@ mod editor_detach_failure_tests {
                 control_thread: thread::current().id(),
                 #[cfg(target_os = "linux")]
                 run_loop: &self.run_loop,
+                #[cfg(target_os = "linux")]
+                factory_run_loop: None,
             }
         }
         fn close(&mut self) -> Result<()> {
@@ -8890,6 +8852,73 @@ mod editor_detach_failure_tests {
             }
             crate::plugin::PluginEditorRole::service_run_loop(&mut fixture.fields())
                 .expect("service on the initializing thread");
+        }
+
+        #[test]
+        fn closing_editor_retires_only_its_scope_and_services_factory_without_view() {
+            let mut fixture = Fixture::new(kResultOk, kResultOk);
+            let factory = Arc::new(Mutex::new(RunLoopRegistry::new()));
+            let calls = Rc::new(Cell::new(0));
+            let timer = ComWrapper::new(TimerProbe {
+                calls: Rc::clone(&calls),
+                action: None,
+                on_drop: None,
+            })
+            .to_com_ptr::<ITimerHandler>()
+            .unwrap();
+            assert_eq!(
+                unsafe { RunLoopRegistry::register_timer(&factory, timer.as_ptr(), 1) },
+                kResultOk
+            );
+            assert_eq!(
+                unsafe { RunLoopRegistry::register_timer(&fixture.run_loop, timer.as_ptr(), 1) },
+                kResultOk
+            );
+            {
+                let mut fields = fixture.fields();
+                fields.factory_run_loop = Some(&factory);
+                crate::plugin::PluginEditorRole::close_editor(&mut fields).unwrap();
+                assert!(!fields.plugin_view.is_present());
+            }
+            assert!(fixture.run_loop.lock().unwrap().timers.is_empty());
+            assert_eq!(factory.lock().unwrap().timers.len(), 1);
+            for timer in &mut factory.lock().unwrap().timers {
+                timer.due = std::time::Instant::now();
+            }
+            let mut fields = fixture.fields();
+            fields.factory_run_loop = Some(&factory);
+            crate::plugin::PluginEditorRole::service_run_loop(&mut fields).unwrap();
+            assert_eq!(calls.get(), 1);
+            RunLoopRegistry::shutdown(&factory);
+        }
+
+        #[test]
+        fn main_role_refuses_factory_callbacks_on_another_control_thread() {
+            let mut fixture = Fixture::new(kResultOk, kResultOk);
+            let factory = Arc::new(Mutex::new(RunLoopRegistry::new()));
+            let calls = Rc::new(Cell::new(0));
+            let timer = ComWrapper::new(TimerProbe {
+                calls: Rc::clone(&calls),
+                action: None,
+                on_drop: None,
+            })
+            .to_com_ptr::<ITimerHandler>()
+            .unwrap();
+            assert_eq!(
+                unsafe { RunLoopRegistry::register_timer(&factory, timer.as_ptr(), 1) },
+                kResultOk
+            );
+            for timer in &mut factory.lock().unwrap().timers {
+                timer.due = std::time::Instant::now();
+            }
+            let other = std::thread::spawn(|| std::thread::current().id()).join().unwrap();
+            let mut fields = fixture.fields();
+            fields.control_thread = other;
+            fields.factory_run_loop = Some(&factory);
+            assert!(crate::plugin::PluginEditorRole::service_run_loop(&mut fields).is_err());
+            assert_eq!(calls.get(), 0);
+            RunLoopRegistry::shutdown(&factory);
+            fixture.close().unwrap();
         }
 
         fn callback_retires_later_timer(re_register: bool) -> (usize, usize) {

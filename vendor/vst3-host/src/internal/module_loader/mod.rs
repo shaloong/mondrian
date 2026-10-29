@@ -16,6 +16,14 @@ pub trait VstModule: Send {
     /// Get the plugin factory from the module
     fn get_factory(&self) -> Result<*mut IPluginFactory>;
 
+    /// Module-scoped timers must continue when no instance editor is open.
+    #[cfg(target_os = "linux")]
+    fn factory_run_loop(
+        &self,
+    ) -> Option<&std::sync::Arc<std::sync::Mutex<super::run_loop::RunLoopRegistry>>> {
+        None
+    }
+
     /// Get the path to the module (diagnostics / config record)
     #[allow(dead_code)]
     fn path(&self) -> &Path;
@@ -54,6 +62,13 @@ fn requires_private_namespace(path: &Path) -> bool {
 
 /// Load a VST3 module using the appropriate platform-specific loader
 pub fn load_module(path: &Path) -> Result<Box<dyn VstModule>> {
+    let native = load_native_module(path)?;
+    Ok(Box::new(factory_context::FactoryModule::attach(native)?))
+}
+
+mod factory_context;
+
+fn load_native_module(path: &Path) -> Result<Box<dyn VstModule>> {
     #[cfg(target_os = "macos")]
     {
         if requires_private_namespace(path) {
