@@ -67,6 +67,7 @@ pub use processor_residency::{
 };
 pub mod mosaic;
 pub(crate) mod parallel;
+pub mod posterize;
 pub mod qualifier;
 pub mod shift_channels;
 pub(crate) mod straight_alpha;
@@ -193,6 +194,9 @@ pub use mask_raster::{rasterize_mask_shape, MaskRasterError, PreparedMaskRaster}
 pub use mosaic::{
     apply_mosaic_f32_controlled, mosaic_frame_f32, MosaicError, MosaicGrade,
     MOSAIC_MAX_BLOCK_PIXELS, MOSAIC_MIN_BLOCK_PIXELS,
+};
+pub use posterize::{
+    posterize_frame_f32, PosterizeError, PosterizeGrade, POSTERIZE_MAX_LEVELS, POSTERIZE_MIN_LEVELS,
 };
 pub use prepared::{
     EffectDependencyCheckError, EffectProgramDependencyIdentity, PreparedEffectInput,

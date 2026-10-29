@@ -212,6 +212,12 @@ pub(crate) fn apply_render_op(
                 parameter: "requires_float32",
             });
         }
+        EffectRenderOp::Posterize { .. } => {
+            return Err(EffectExecutionError::InvalidRenderParameter {
+                op: "posterize",
+                parameter: "requires_float32",
+            });
+        }
         EffectRenderOp::Mosaic { .. } => {
             return Err(EffectExecutionError::InvalidRenderParameter {
                 op: "mosaic",
@@ -675,6 +681,7 @@ pub(crate) const fn render_op_f32_scratch_frames(op: &EffectRenderOp) -> usize {
         EffectRenderOp::UnsharpMask { .. } => 1,
         EffectRenderOp::Threshold { .. } => 0,
         EffectRenderOp::Mosaic { .. } => 0,
+        EffectRenderOp::Posterize { .. } => 0,
         EffectRenderOp::ColorEmboss { .. } => 1,
         EffectRenderOp::Emboss { .. } => 1,
         EffectRenderOp::Sharpen { .. } => 2,
@@ -892,6 +899,10 @@ pub(crate) fn apply_render_op_f32_region_controlled<E>(
             *grade,
             checkpoint,
         ),
+        EffectRenderOp::Posterize { grade } => {
+            apply_point_grade_rgba_f32_controlled(working, checkpoint, |rgb| grade.apply_rgb(rgb))?;
+            Ok(true)
+        }
         EffectRenderOp::Mosaic { grade } => crate::mosaic::apply_mosaic_f32_controlled(
             working,
             width as usize,

@@ -856,6 +856,10 @@ pub enum EffectRenderOp {
     FindEdges {
         grade: crate::FindEdgesGrade,
     },
+    /// Posterize: quantise each channel into the authored number of levels.
+    Posterize {
+        grade: crate::PosterizeGrade,
+    },
     /// Mosaic: one colour per block of the authored pixel grid.
     Mosaic {
         grade: crate::MosaicGrade,
@@ -1011,6 +1015,9 @@ impl std::fmt::Debug for EffectRenderOp {
             }
             Self::FindEdges { grade } => {
                 formatter.debug_struct("FindEdges").field("grade", grade).finish()
+            }
+            Self::Posterize { grade } => {
+                formatter.debug_struct("Posterize").field("grade", grade).finish()
             }
             Self::Mosaic { grade } => {
                 formatter.debug_struct("Mosaic").field("grade", grade).finish()
@@ -1427,6 +1434,10 @@ impl EffectRenderOp {
                 grade.blend_with_original().to_bits().hash(state);
                 u8::from(grade.invert()).hash(state);
             }
+            EffectRenderOp::Posterize { grade } => {
+                35u8.hash(state);
+                grade.levels().hash(state);
+            }
             EffectRenderOp::Mosaic { grade } => {
                 34u8.hash(state);
                 grade.horizontal().hash(state);
@@ -1594,6 +1605,7 @@ impl EffectRenderOp {
             EffectRenderOp::FindEdges { .. } => 4,
             EffectRenderOp::Threshold { .. } => 1,
             EffectRenderOp::Mosaic { .. } => 2,
+            EffectRenderOp::Posterize { .. } => 1,
             EffectRenderOp::ColorEmboss { .. } => 4,
             EffectRenderOp::Emboss { .. } => 4,
             EffectRenderOp::HueSaturation { .. } => 2,
@@ -2129,7 +2141,7 @@ impl EffectDefinition {
     }
 }
 
-fn builtin_effect_types() -> [EffectType; 33] {
+fn builtin_effect_types() -> [EffectType; 34] {
     [
         EffectType::BasicCorrection,
         EffectType::WhiteBalance,
@@ -2164,6 +2176,7 @@ fn builtin_effect_types() -> [EffectType; 33] {
         EffectType::ColorEmboss,
         EffectType::Threshold,
         EffectType::Mosaic,
+        EffectType::Posterize,
     ]
 }
 
@@ -3292,6 +3305,19 @@ fn default_properties_for(effect_type: EffectType) -> PropertyBag {
                 None,
             );
         }
+        EffectType::Posterize => {
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "levels",
+                "色调分离",
+                "级别",
+                PropertyValue::Int(7),
+                Some(crate::POSTERIZE_MIN_LEVELS as f64),
+                Some(crate::POSTERIZE_MAX_LEVELS as f64),
+                Some(1.0),
+            );
+        }
         EffectType::Mosaic => {
             define_builtin_property(
                 &mut properties,
@@ -4115,6 +4141,10 @@ fn builtin_effect_execution_contract(effect_type: &EffectType) -> EffectExecutio
                 horizontal_pixels: crate::FIND_EDGES_HALO_PIXELS,
                 vertical_pixels: crate::FIND_EDGES_HALO_PIXELS,
             },
+            ..cpu_linear
+        },
+        EffectType::Posterize => EffectExecutionContract {
+            execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
             ..cpu_linear
         },
         EffectType::Mosaic => EffectExecutionContract {
@@ -5044,6 +5074,37 @@ fn builtin_graph_builder_for(effect_type: &EffectType) -> Option<EffectGraphBuil
                 Ok(())
             }))
         }
+        EffectType::Posterize => {
+            let levels_id = builtin_parameter_id(effect_type, "levels");
+            Some(Arc::new(move |effect, context, graph| {
+                let levels = match effect.evaluate_parameter(&levels_id, context.time) {
+                    Some(PropertyValue::Int(value)) => value,
+                    _ => {
+                        return Err(EffectGraphBuildError::InvalidAuthorState {
+                            effect_key: effect.effect_type.key(),
+                            effect_id: effect.id,
+                            reason: "posterize levels must be an integer".to_owned(),
+                        });
+                    }
+                };
+                let levels = u32::try_from(levels).map_err(|_| {
+                    EffectGraphBuildError::InvalidAuthorState {
+                        effect_key: effect.effect_type.key(),
+                        effect_id: effect.id,
+                        reason: "posterize levels must be positive".to_owned(),
+                    }
+                })?;
+                let grade = crate::PosterizeGrade::new(levels).map_err(|error| {
+                    EffectGraphBuildError::InvalidAuthorState {
+                        effect_key: effect.effect_type.key(),
+                        effect_id: effect.id,
+                        reason: error.to_string(),
+                    }
+                })?;
+                graph.append_unary(EffectRenderOp::Posterize { grade });
+                Ok(())
+            }))
+        }
         EffectType::Mosaic => {
             let horizontal_id = builtin_parameter_id(effect_type, "horizontal");
             let vertical_id = builtin_parameter_id(effect_type, "vertical");
@@ -5473,6 +5534,7 @@ fn builtin_display_name(effect_type: &EffectType) -> &'static str {
         EffectType::FindEdges => "查找边缘",
         EffectType::Threshold => "阈值",
         EffectType::Mosaic => "马赛克",
+        EffectType::Posterize => "色调分离",
         EffectType::ColorEmboss => "色彩浮雕",
         EffectType::Emboss => "浮雕",
         EffectType::External(_) => "外部效果",
@@ -6742,6 +6804,7 @@ mod tests {
             EffectType::ColorEmboss,
             EffectType::Threshold,
             EffectType::Mosaic,
+            EffectType::Posterize,
         ]
         .into_iter()
         .map(|effect_type| effect_type.key())
@@ -9406,6 +9469,88 @@ mod tests {
         let grade = mosaic_op(&graph).expect("mosaic op");
         assert_eq!((grade.horizontal(), grade.vertical()), (3, 5));
         assert!(grade.sharp_colors());
+    }
+    fn posterize_op(graph: &EffectRenderGraph) -> Option<crate::PosterizeGrade> {
+        graph.nodes.iter().find_map(|node| match &node.kind {
+            EffectGraphNodeKind::UnaryEffect {
+                op: EffectRenderOp::Posterize { grade }, ..
+            }
+            | EffectGraphNodeKind::DomainEffect {
+                op: EffectRenderOp::Posterize { grade }, ..
+            } => Some(*grade),
+            _ => None,
+        })
+    }
+
+    #[test]
+    fn posterize_defaults_compile_to_the_listed_levels() {
+        let effect = instantiate_effect_node(EffectType::Posterize)
+            .expect("registered posterize definition");
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("evaluate default posterize");
+        assert_eq!(posterize_op(&graph).expect("posterize op").levels(), 7);
+    }
+
+    #[test]
+    fn posterize_rejects_level_counts_outside_the_declared_window() {
+        let effect = instantiate_effect_node(EffectType::Posterize)
+            .expect("registered posterize definition");
+        for levels in [1_i64, 256] {
+            let mut effect = effect.clone();
+            assert!(
+                effect
+                    .apply_property_mutation(PropertyMutation::SetStaticValue {
+                        path: EffectType::Posterize.property_path("levels"),
+                        value: PropertyValue::Int(levels),
+                    })
+                    .is_err(),
+                "the numeric contract rejects {levels} levels"
+            );
+        }
+    }
+
+    #[test]
+    fn posterize_quantises_scene_linear_float_frames() {
+        let effect = instantiate_effect_node(EffectType::Posterize)
+            .expect("registered posterize definition");
+        let compiled = compile_clip_effect_graph(&[effect], &[], tt(0), TEST_WORKING_SPACE)
+            .expect("compile posterize");
+        let input = [[0.1, 0.5, 0.9, 1.0], [2.0, -0.5, 1.75, 0.25]];
+        let output = crate::apply_compiled_effect_graph_rgba_f32(emboss_view(&input), &compiled, 0)
+            .expect("execute posterize");
+        let pixels = output.pixels();
+        // Seven levels means six steps: 1/6, 5/6 and 11/6 are the nearest levels.
+        for (index, expected) in [
+            (0, [1.0 / 6.0_f32, 0.5, 5.0 / 6.0, 1.0]),
+            (1, [2.0, -0.5, 11.0 / 6.0, 0.25]),
+        ] {
+            for channel in 0..4 {
+                assert!(
+                    (pixels[index][channel] - expected[channel]).abs() < 1.0e-6,
+                    "pixel {index} channel {channel}: {:?}",
+                    pixels[index]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn posterize_authored_state_survives_project_serialization_round_trip() {
+        let mut effect = instantiate_effect_node(EffectType::Posterize)
+            .expect("registered posterize definition");
+        effect
+            .apply_property_mutation(PropertyMutation::SetStaticValue {
+                path: EffectType::Posterize.property_path("levels"),
+                value: PropertyValue::Int(3),
+            })
+            .expect("author the level count");
+        let encoded = serde_json::to_string(&effect).expect("serialize posterize");
+        let restored: crate::EffectNode =
+            serde_json::from_str(&encoded).expect("deserialize posterize");
+        assert_eq!(restored, effect);
+        let graph = build_effect_render_graph(&[restored], tt(0), TEST_WORKING_SPACE)
+            .expect("evaluate restored posterize");
+        assert_eq!(posterize_op(&graph).expect("posterize op").levels(), 3);
     }
 }
 

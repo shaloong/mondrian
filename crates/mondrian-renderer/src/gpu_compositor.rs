@@ -1190,6 +1190,13 @@ fn apply_effects(input: vec4<f32>, position: vec2<f32>) -> vec4<f32> {
             let luminance = dot(pixel.rgb, effect.color.xyz);
             let value = select(0.0, 1.0, luminance >= effect.params.x);
             pixel = vec4<f32>(value, value, value, pixel.a);
+        } else if (effect.header.x == 19u) {
+            // `PosterizeGrade`: params.x is the level count per channel.
+            let steps = max(effect.params.x - 1.0, 1.0);
+            // Round half away from zero, matching f32::round on the CPU side.
+            let scaled = pixel.rgb * steps;
+            let magnitude = floor(abs(scaled) + 0.5) * sign(scaled);
+            pixel = vec4<f32>(magnitude / steps, pixel.a);
         } else if (effect.header.x == 16u) {
             // `ShiftChannelsGrade`: header.y packs the four 4-bit source tags
             // (red, green, blue, alpha) and params.xyz carries the working-space
@@ -4311,6 +4318,13 @@ fn effect_uniforms(
                 extra0: [0.0; 4],
                 extra1: [0.0; 4],
             },
+            EffectGpuPointOp::Posterize { levels } => GpuEffectUniform {
+                header: [19, 0, 0, 0],
+                params: [*levels, 0.0, 0.0, 0.0],
+                color: [0.0; 4],
+                extra0: [0.0; 4],
+                extra1: [0.0; 4],
+            },
             EffectGpuPointOp::ChannelMixer { grade } => {
                 let (params, color, extra0, extra1) = grade.gpu_controls();
                 GpuEffectUniform {
@@ -7037,6 +7051,88 @@ mod tests {
                 "GPU point-effect accuracy budget exceeded: {report:#?}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn gpu_posterize_matches_the_cpu_reference_on_real_wgpu_device() {
+        use crate::color_accuracy::{
+            compare_linear_rgba, LinearAccuracyBudget, LinearRgbaAccuracyBudget,
+        };
+        use mondrian_effects::{
+            apply_compiled_effect_graph_rgba_f32, compile_reference_render_graph,
+            lower_effect_graph_to_gpu_plan, EffectGraphBuilderState, EffectRenderOp,
+            PosterizeGrade,
+        };
+
+        let Ok(context) = crate::GpuContext::new().await else {
+            eprintln!("skipping GPU posterize parity test: no GPU adapter available");
+            return;
+        };
+        let data = vec![
+            [0.1_f32, 0.5, 0.9, 1.0],
+            [0.04, 0.08, 0.5, 1.0],
+            [2.0, -0.5, 1.75, 0.5],
+            [0.0, 1.0, 0.25, 0.25],
+        ];
+        let frame = CpuColorFrame::working(WorkingRgbaF32Frame {
+            sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
+            alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
+            width: 2,
+            height: 2,
+            color_space: WorkingColorSpace::LinearRec709,
+            data,
+        });
+        let mut builder = EffectGraphBuilderState::new();
+        builder.append_unary(EffectRenderOp::Posterize {
+            grade: PosterizeGrade::new(7).expect("valid posterize"),
+        });
+        let graph = compile_reference_render_graph(builder.finish()).expect("valid graph");
+        let plan = lower_effect_graph_to_gpu_plan(&graph).expect("supported point effect");
+        assert_eq!(plan.operations().len(), 1);
+        let expected = apply_compiled_effect_graph_rgba_f32(
+            mondrian_effects::EffectFloatFrameView::new(
+                mondrian_effects::EffectFrameExtent::new(2, 2),
+                mondrian_effects::EffectValueFormat::new(
+                    mondrian_effects::EffectWorkingPrecision::Float32,
+                    mondrian_effects::EffectColorDomain::SceneLinearRgb,
+                    mondrian_core::ColorFrameAlpha::StraightCoverage,
+                ),
+                mondrian_core::ImageSampling::UNIT_SQUARE,
+                &frame.rgba_f32().data,
+            ),
+            &graph,
+            0,
+        )
+        .expect("CPU float reference");
+        let layer = GpuCompositeLayer {
+            source: GpuCompositeLayerSource::CpuFrame(&frame),
+            opacity: 1.0,
+            blend_policy: mondrian_effects::EffectPassBlendPolicy::Blend(BlendMode::Normal),
+            transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+            effect_plan: Some(&plan),
+            frame_seed: 0,
+        };
+        let (actual, diagnostics) = readback_test_composite_with_diagnostics(
+            &context,
+            &[layer],
+            2,
+            2,
+            WorkingColorSpace::LinearRec709,
+        );
+        assert_eq!(diagnostics.execution.fused_point_operations, 1);
+        let report = compare_linear_rgba(
+            expected.pixels(),
+            &actual,
+            LinearRgbaAccuracyBudget {
+                rgb: LinearAccuracyBudget::finite(1.0e-6, 1.0e-7, 1.0e-7),
+                alpha: LinearAccuracyBudget::finite(1.0e-6, 1.0e-7, 1.0e-6),
+            },
+        )
+        .expect("comparable frames");
+        assert!(
+            report.within_budget,
+            "GPU posterize accuracy budget exceeded: {report:#?}"
+        );
     }
 
     #[tokio::test]

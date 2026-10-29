@@ -47,6 +47,7 @@ pub enum EffectType {
     ColorEmboss,
     Threshold,
     Mosaic,
+    Posterize,
     Emboss,
     /// Externally registered effect definition, including native-format adapters.
     /// This is a domain definition reference, not an Extension package identity.
@@ -91,6 +92,7 @@ impl EffectType {
             Self::ColorEmboss => "builtin.color_emboss".to_string(),
             Self::Threshold => "builtin.threshold".to_string(),
             Self::Mosaic => "builtin.mosaic".to_string(),
+            Self::Posterize => "builtin.posterize".to_string(),
             Self::External(key) => key.clone(),
         }
     }
@@ -130,6 +132,7 @@ impl EffectType {
             "builtin.color_emboss" => Self::ColorEmboss,
             "builtin.threshold" => Self::Threshold,
             "builtin.mosaic" => Self::Mosaic,
+            "builtin.posterize" => Self::Posterize,
             other => Self::External(other.to_string()),
         }
     }
@@ -169,6 +172,7 @@ impl EffectType {
             Self::ColorEmboss => "色彩浮雕",
             Self::Threshold => "阈值",
             Self::Mosaic => "马赛克",
+            Self::Posterize => "色调分离",
             Self::External(name) => name,
         }
     }
@@ -206,6 +210,7 @@ impl EffectType {
             Self::ColorEmboss => vec!["风格化"],
             Self::Threshold => vec!["风格化"],
             Self::Mosaic => vec!["风格化"],
+            Self::Posterize => vec!["风格化"],
             Self::External(_) => vec!["外部效果"],
         }
     }
@@ -245,6 +250,7 @@ impl EffectType {
             Self::ColorEmboss => "color_emboss".to_string(),
             Self::Threshold => "threshold".to_string(),
             Self::Mosaic => "mosaic".to_string(),
+            Self::Posterize => "posterize".to_string(),
             Self::External(key) => key.clone(),
         }
     }
@@ -543,6 +549,7 @@ impl crate::AuthoringFootprint for EffectType {
             Self::Emboss => Ok(()),
             Self::ColorEmboss => Ok(()),
             Self::Threshold | Self::Mosaic => Ok(()),
+            Self::Posterize => Ok(()),
         }
     }
 }
