@@ -183,7 +183,6 @@ pub(crate) fn apply_box_blur_f32_controlled<E>(
 
     crate::straight_alpha::premultiply_rgba_controlled(&mut working[..pixel_count], checkpoint)?;
     let mut scratch = vec![[0.0_f32; 4]; pixel_count];
-    let mut prefix = vec![[0.0_f64; 4]; width.max(height) + 1];
     let mut working_is_source = true;
     for _ in 0..iterations {
         if direction.blurs_horizontal() {
@@ -191,7 +190,6 @@ pub(crate) fn apply_box_blur_f32_controlled<E>(
                 blur_axis_controlled(
                     &working[..pixel_count],
                     &mut scratch,
-                    &mut prefix,
                     Axis::Horizontal,
                     width,
                     height,
@@ -203,7 +201,6 @@ pub(crate) fn apply_box_blur_f32_controlled<E>(
                 blur_axis_controlled(
                     &scratch,
                     &mut working[..pixel_count],
-                    &mut prefix,
                     Axis::Horizontal,
                     width,
                     height,
@@ -219,7 +216,6 @@ pub(crate) fn apply_box_blur_f32_controlled<E>(
                 blur_axis_controlled(
                     &working[..pixel_count],
                     &mut scratch,
-                    &mut prefix,
                     Axis::Vertical,
                     width,
                     height,
@@ -231,7 +227,6 @@ pub(crate) fn apply_box_blur_f32_controlled<E>(
                 blur_axis_controlled(
                     &scratch,
                     &mut working[..pixel_count],
-                    &mut prefix,
                     Axis::Vertical,
                     width,
                     height,
@@ -289,7 +284,6 @@ enum Axis {
 fn blur_axis_controlled<E>(
     source: &[[f32; 4]],
     destination: &mut [[f32; 4]],
-    prefix: &mut Vec<[f64; 4]>,
     axis: Axis,
     width: usize,
     height: usize,
@@ -297,39 +291,76 @@ fn blur_axis_controlled<E>(
     repeat_edge_pixels: bool,
     checkpoint: &mut impl FnMut() -> Result<(), E>,
 ) -> Result<(), E> {
-    let (lines, extent, origin_step, stride) = match axis {
-        Axis::Horizontal => (height, width, width, 1),
-        Axis::Vertical => (width, height, 1, width),
-    };
-    prefix.resize(extent + 1, [0.0; 4]);
-    for line in 0..lines {
-        checkpoint()?;
-        let origin = line * origin_step;
-        prefix[0] = [0.0; 4];
-        for index in 0..extent {
-            let pixel = source[origin + index * stride];
-            let previous = prefix[index];
-            prefix[index + 1] = [
-                previous[0] + f64::from(pixel[0]),
-                previous[1] + f64::from(pixel[1]),
-                previous[2] + f64::from(pixel[2]),
-                previous[3] + f64::from(pixel[3]),
-            ];
+    // Rows are independent, so a horizontal pass fills row bands in parallel; a
+    // vertical pass walks one column at a time and stays on this thread because
+    // the columns interleave in memory and cannot be split without aliasing.
+    match axis {
+        Axis::Horizontal => {
+            let extent = width;
+            crate::parallel::for_each_row_band(destination, width, 0..height, |first_row, band| {
+                let mut prefix = vec![[0.0_f64; 4]; extent + 1];
+                for (offset, row) in band.chunks_mut(width).enumerate() {
+                    let origin = (first_row + offset) * width;
+                    fill_prefix(source, &mut prefix, origin, 1, extent);
+                    for (index, pixel) in row.iter_mut().enumerate() {
+                        *pixel = sample_box(
+                            source,
+                            prefix.as_slice(),
+                            origin,
+                            1,
+                            extent,
+                            index,
+                            kernel,
+                            repeat_edge_pixels,
+                        );
+                    }
+                }
+            });
         }
-        for index in 0..extent {
-            destination[origin + index * stride] = sample_box(
-                source,
-                prefix.as_slice(),
-                origin,
-                stride,
-                extent,
-                index,
-                kernel,
-                repeat_edge_pixels,
-            );
+        Axis::Vertical => {
+            let extent = height;
+            let mut prefix = vec![[0.0_f64; 4]; extent + 1];
+            for column in 0..width {
+                checkpoint()?;
+                let origin = column;
+                fill_prefix(source, &mut prefix, origin, width, extent);
+                for index in 0..extent {
+                    destination[origin + index * width] = sample_box(
+                        source,
+                        prefix.as_slice(),
+                        origin,
+                        width,
+                        extent,
+                        index,
+                        kernel,
+                        repeat_edge_pixels,
+                    );
+                }
+            }
         }
     }
     checkpoint()
+}
+
+/// Fills `prefix` with the running f64 sum of one row or column.
+fn fill_prefix(
+    source: &[[f32; 4]],
+    prefix: &mut [[f64; 4]],
+    origin: usize,
+    stride: usize,
+    extent: usize,
+) {
+    prefix[0] = [0.0; 4];
+    for index in 0..extent {
+        let pixel = source[origin + index * stride];
+        let previous = prefix[index];
+        prefix[index + 1] = [
+            previous[0] + f64::from(pixel[0]),
+            previous[1] + f64::from(pixel[1]),
+            previous[2] + f64::from(pixel[2]),
+            previous[3] + f64::from(pixel[3]),
+        ];
+    }
 }
 
 /// One normalized box sample.
