@@ -35,7 +35,7 @@ impl ParameterSignature {
         info.flags.bits() & !ParamInfoFlags::all().bits() == 0 && *self == signature(info)
     }
 
-    #[cfg(windows)]
+    #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
     pub(super) const fn id(self) -> u32 {
         self.id
     }
