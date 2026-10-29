@@ -1813,6 +1813,10 @@ impl PluginImpl {
                 updated_info.vendor
             );
 
+            // The module retains its own factory reference. Retire this local
+            // before transferring the module into an owner whose final setup
+            // can still fail and destroy it inside this stack frame.
+            drop(factory);
             let mut plugin = Self {
                 component,
                 processor,
@@ -1845,7 +1849,6 @@ impl PluginImpl {
                 processing_resource_bounds: bounds,
                 load_preparation: preparation,
                 component_handler: Some(component_handler),
-                connection: initialized.take_connection(),
                 pending_param_changes: Vec::with_capacity(MAX_PENDING_PARAM_CHANGES),
                 dropped_param_changes: 0,
                 gui_param_changes_for_host: Arc::new(Mutex::new(Vec::with_capacity(
@@ -1864,13 +1867,15 @@ impl PluginImpl {
                 editor_resize,
                 #[cfg(target_os = "linux")]
                 run_loop,
+                // All host storage has been allocated. Consume the guard while
+                // the module is still local: no temporary native reference may
+                // outlive a failed final setup of the assembled owner.
+                connection: initialized.take_connection(),
                 _module: module,
                 _host_app: host_app,
                 control_thread: thread::current().id(),
             };
-            // From here on `plugin` owns the teardown: dropping it runs the same ordered
-            // sequence the guard would.
-            initialized.disarm();
+            // The consumed guard has transferred teardown to this owner.
 
             // IMidiMapping and unit/program metadata are controller calls and therefore belong
             // here on the loading thread, never in process() or a playback command drain.
@@ -5928,13 +5933,10 @@ impl InitializedComponent {
         self.connection = connection;
     }
 
-    fn take_connection(&mut self) -> Option<ConnectionPair> {
-        self.connection.take()
-    }
-
-    /// Cancel the teardown: the finished `PluginImpl` owns the lifecycle from here.
-    fn disarm(&mut self) {
+    /// Transfer teardown and release temporary COM refs before module handoff.
+    fn take_connection(mut self) -> Option<ConnectionPair> {
         self.armed = false;
+        self.connection.take()
     }
 }
 
