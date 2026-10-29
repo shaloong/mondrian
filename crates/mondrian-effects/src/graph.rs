@@ -1698,6 +1698,17 @@ fn render_op_requirements(op: &EffectRenderOp) -> EffectImplementationRequiremen
             roi_from_effect_input: finite_radius_roi(*radius),
             ..cpu_float
         },
+        EffectRenderOp::DirectionalBlur { length, .. } => EffectImplementationRequirements {
+            execution_modes: EffectExecutionModes::CPU_F32,
+            roi_from_effect_input: crate::directional_blur::directional_blur_axis_halo(*length)
+                .map_or(EffectRoiPropagation::FullFrame, |(horizontal, vertical)| {
+                    EffectRoiPropagation::Expand {
+                        horizontal_pixels: horizontal,
+                        vertical_pixels: vertical,
+                    }
+                }),
+            ..cpu_float
+        },
         EffectRenderOp::BoxBlur { radius, iterations, direction, .. } => {
             EffectImplementationRequirements {
                 execution_modes: EffectExecutionModes::CPU_F32,

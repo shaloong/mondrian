@@ -21,6 +21,7 @@ pub mod box_blur;
 pub mod chroma_key;
 pub mod color_curves;
 pub mod coverage;
+pub mod directional_blur;
 pub mod effect;
 mod project_properties;
 pub use project_properties::{rebind_effect_project_geometry, EffectProjectPropertyInitializer};
@@ -59,6 +60,7 @@ pub use processor_residency::{
 };
 pub mod qualifier;
 pub mod shift_channels;
+pub(crate) mod straight_alpha;
 pub mod temporal_execution;
 pub mod tracking;
 pub mod unsharp_mask;
@@ -205,4 +207,8 @@ pub use processor_question::{
 #[cfg(test)]
 mod image_scale_admission_tests;
 
+pub use directional_blur::{
+    directional_blur_step, directional_blur_taps, DIRECTIONAL_BLUR_AUTHOR_MAX_LENGTH_PIXELS,
+    MAX_DIRECTIONAL_BLUR_TAPS,
+};
 pub use shift_channels::{ChannelSource, ShiftChannelsGrade};

@@ -181,7 +181,7 @@ pub(crate) fn apply_box_blur_f32_controlled<E>(
     }
     let iterations = iterations.max(1);
 
-    premultiply_rgba_controlled(&mut working[..pixel_count], checkpoint)?;
+    crate::straight_alpha::premultiply_rgba_controlled(&mut working[..pixel_count], checkpoint)?;
     let mut scratch = vec![[0.0_f32; 4]; pixel_count];
     let mut prefix = vec![[0.0_f64; 4]; width.max(height) + 1];
     let mut working_is_source = true;
@@ -246,7 +246,7 @@ pub(crate) fn apply_box_blur_f32_controlled<E>(
     if !working_is_source {
         working[..pixel_count].copy_from_slice(&scratch);
     }
-    unpremultiply_rgba_controlled(&mut working[..pixel_count], checkpoint)?;
+    crate::straight_alpha::unpremultiply_rgba_controlled(&mut working[..pixel_count], checkpoint)?;
     Ok(true)
 }
 
@@ -400,36 +400,6 @@ fn sample_box(
         (sum[2] / normalization) as f32,
         (sum[3] / normalization) as f32,
     ]
-}
-
-fn premultiply_rgba_controlled<E>(
-    pixels: &mut [[f32; 4]],
-    checkpoint: &mut impl FnMut() -> Result<(), E>,
-) -> Result<(), E> {
-    for chunk in pixels.chunks_mut(4_096) {
-        checkpoint()?;
-        for pixel in chunk {
-            let alpha = pixel[3].clamp(0.0, 1.0);
-            pixel[0] *= alpha;
-            pixel[1] *= alpha;
-            pixel[2] *= alpha;
-            pixel[3] = alpha;
-        }
-    }
-    checkpoint()
-}
-
-fn unpremultiply_rgba_controlled<E>(
-    pixels: &mut [[f32; 4]],
-    checkpoint: &mut impl FnMut() -> Result<(), E>,
-) -> Result<(), E> {
-    for chunk in pixels.chunks_mut(4_096) {
-        checkpoint()?;
-        for pixel in chunk {
-            *pixel = crate::coverage::straight_rgba_from_premultiplied(*pixel);
-        }
-    }
-    checkpoint()
 }
 
 #[cfg(test)]

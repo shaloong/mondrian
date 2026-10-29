@@ -40,6 +40,7 @@ pub enum EffectType {
     HueSaturation,
     BlackAndWhite,
     ShiftChannels,
+    DirectionalBlur,
     /// Externally registered effect definition, including native-format adapters.
     /// This is a domain definition reference, not an Extension package identity.
     /// The serde name preserves the existing project wire representation.
@@ -75,6 +76,7 @@ impl EffectType {
             Self::HueSaturation => "builtin.hue_saturation".to_string(),
             Self::BlackAndWhite => "builtin.black_and_white".to_string(),
             Self::ShiftChannels => "builtin.shift_channels".to_string(),
+            Self::DirectionalBlur => "builtin.directional_blur".to_string(),
             Self::External(key) => key.clone(),
         }
     }
@@ -106,6 +108,7 @@ impl EffectType {
             "builtin.hue_saturation" => Self::HueSaturation,
             "builtin.black_and_white" => Self::BlackAndWhite,
             "builtin.shift_channels" => Self::ShiftChannels,
+            "builtin.directional_blur" => Self::DirectionalBlur,
             other => Self::External(other.to_string()),
         }
     }
@@ -137,6 +140,7 @@ impl EffectType {
             Self::HueSaturation => "色相饱和度",
             Self::BlackAndWhite => "黑白",
             Self::ShiftChannels => "转换通道",
+            Self::DirectionalBlur => "方向模糊",
             Self::External(name) => name,
         }
     }
@@ -157,7 +161,11 @@ impl EffectType {
             | Self::BlackAndWhite => vec!["颜色", "调色"],
             Self::ShiftChannels => vec!["通道"],
             Self::Crop => vec!["变换"],
-            Self::GaussianBlur | Self::Sharpen | Self::BoxBlur | Self::UnsharpMask => {
+            Self::GaussianBlur
+            | Self::Sharpen
+            | Self::BoxBlur
+            | Self::UnsharpMask
+            | Self::DirectionalBlur => {
                 vec!["颜色", "模糊与锐化"]
             }
             Self::Vignette | Self::ChromaticAberration | Self::Grain => vec!["颜色", "风格化"],
@@ -194,6 +202,7 @@ impl EffectType {
             Self::HueSaturation => "hue_saturation".to_string(),
             Self::BlackAndWhite => "black_and_white".to_string(),
             Self::ShiftChannels => "shift_channels".to_string(),
+            Self::DirectionalBlur => "directional_blur".to_string(),
             Self::External(key) => key.clone(),
         }
     }
@@ -485,6 +494,7 @@ impl crate::AuthoringFootprint for EffectType {
             | Self::HueSaturation
             | Self::BlackAndWhite => Ok(()),
             Self::ShiftChannels => Ok(()),
+            Self::DirectionalBlur => Ok(()),
         }
     }
 }

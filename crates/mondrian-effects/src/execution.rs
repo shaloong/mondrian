@@ -2320,6 +2320,7 @@ fn effect_render_op_name(op: &EffectRenderOp) -> &'static str {
         EffectRenderOp::HueSaturation { .. } => "hue_saturation",
         EffectRenderOp::BlackAndWhite { .. } => "black_and_white",
         EffectRenderOp::ShiftChannels { .. } => "shift_channels",
+        EffectRenderOp::DirectionalBlur { .. } => "directional_blur",
         EffectRenderOp::UnsharpMask { .. } => "unsharp_mask",
         EffectRenderOp::Crop { .. } => "crop",
         EffectRenderOp::TemporalFrameBlend { .. } => "temporal_frame_blend",

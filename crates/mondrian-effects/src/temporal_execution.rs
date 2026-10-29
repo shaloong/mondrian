@@ -2802,6 +2802,7 @@ fn render_op_name(op: &crate::EffectRenderOp) -> &'static str {
         crate::EffectRenderOp::HueSaturation { .. } => "hue_saturation",
         crate::EffectRenderOp::BlackAndWhite { .. } => "black_and_white",
         crate::EffectRenderOp::ShiftChannels { .. } => "shift_channels",
+        crate::EffectRenderOp::DirectionalBlur { .. } => "directional_blur",
         crate::EffectRenderOp::UnsharpMask { .. } => "unsharp_mask",
         crate::EffectRenderOp::Crop { .. } => "crop",
         crate::EffectRenderOp::TemporalFrameBlend { .. } => "temporal_frame_blend",

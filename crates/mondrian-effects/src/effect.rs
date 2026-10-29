@@ -835,6 +835,14 @@ pub enum EffectRenderOp {
     ShiftChannels {
         grade: crate::ShiftChannelsGrade,
     },
+    /// Directional (motion) blur: averages the frame along `direction_degrees` over a
+    /// `length` pixel long smear. Angles rotate clockwise in screen coordinates, so 0
+    /// smears to the right and 90 downwards. Colour is filtered with its coverage and
+    /// values are never clamped.
+    DirectionalBlur {
+        length: f32,
+        direction_degrees: f32,
+    },
     /// Source-relative hard crop expressed as normalized edge insets.
     ///
     /// Pixels outside the remaining rectangle become transparent black before
@@ -966,6 +974,11 @@ impl std::fmt::Debug for EffectRenderOp {
             Self::ShiftChannels { grade } => {
                 formatter.debug_struct("ShiftChannels").field("grade", grade).finish()
             }
+            Self::DirectionalBlur { length, direction_degrees } => formatter
+                .debug_struct("DirectionalBlur")
+                .field("length", length)
+                .field("direction_degrees", direction_degrees)
+                .finish(),
             Self::HueSaturation { grade } => {
                 formatter.debug_struct("HueSaturation").field("grade", grade).finish()
             }
@@ -1353,6 +1366,11 @@ impl EffectRenderOp {
                     value.to_bits().hash(state);
                 }
             }
+            EffectRenderOp::DirectionalBlur { length, direction_degrees } => {
+                27u8.hash(state);
+                length.to_bits().hash(state);
+                direction_degrees.to_bits().hash(state);
+            }
             EffectRenderOp::ShiftChannels { grade } => {
                 26u8.hash(state);
                 grade.packed_sources().hash(state);
@@ -1463,6 +1481,7 @@ impl EffectRenderOp {
             EffectRenderOp::BoxBlur { .. } => 4,
             EffectRenderOp::BlackAndWhite { .. } => 2,
             EffectRenderOp::ShiftChannels { .. } => 1,
+            EffectRenderOp::DirectionalBlur { .. } => 4,
             EffectRenderOp::HueSaturation { .. } => 2,
             EffectRenderOp::UnsharpMask { .. } => 4,
             EffectRenderOp::Lut3D { .. } => 2,
@@ -1996,7 +2015,7 @@ impl EffectDefinition {
     }
 }
 
-fn builtin_effect_types() -> [EffectType; 25] {
+fn builtin_effect_types() -> [EffectType; 26] {
     [
         EffectType::BasicCorrection,
         EffectType::WhiteBalance,
@@ -2023,6 +2042,7 @@ fn builtin_effect_types() -> [EffectType; 25] {
         EffectType::HueSaturation,
         EffectType::BlackAndWhite,
         EffectType::ShiftChannels,
+        EffectType::DirectionalBlur,
     ]
 }
 
@@ -3127,6 +3147,30 @@ fn default_properties_for(effect_type: EffectType) -> PropertyBag {
                 Some(1.0),
             );
         }
+        EffectType::DirectionalBlur => {
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "length",
+                "方向模糊",
+                "模糊长度",
+                PropertyValue::Float(0.0),
+                Some(0.0),
+                Some(crate::DIRECTIONAL_BLUR_AUTHOR_MAX_LENGTH_PIXELS as f64),
+                Some(0.1),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "direction",
+                "方向模糊",
+                "方向",
+                PropertyValue::Float(0.0),
+                None,
+                None,
+                None,
+            );
+        }
         EffectType::ShiftChannels => {
             for (parameter, label, default) in [
                 ("red", "红色取自", "red"),
@@ -3398,6 +3442,8 @@ fn builtin_parameter_unit(effect_type: &EffectType, parameter: &str) -> Paramete
         (EffectType::GaussianBlur, "radius") => ParameterUnit::Pixels,
         (EffectType::Invert, "blend_with_original") => ParameterUnit::Percent,
         (EffectType::BoxBlur, "radius") => ParameterUnit::Pixels,
+        (EffectType::DirectionalBlur, "length") => ParameterUnit::Pixels,
+        (EffectType::DirectionalBlur, "direction") => ParameterUnit::Degrees,
         (EffectType::UnsharpMask, "amount") => ParameterUnit::Percent,
         (EffectType::UnsharpMask, "radius") => ParameterUnit::Pixels,
         (EffectType::HueSaturation, "hue") => ParameterUnit::Degrees,
@@ -3552,6 +3598,14 @@ fn builtin_effect_execution_contract(effect_type: &EffectType) -> EffectExecutio
             // The authored radius can exceed any bounded expansion, so the
             // definition-level envelope is a full-frame input. The graph
             // planner still narrows it per instance from the authored radius.
+            roi_propagation: EffectRoiPropagation::FullFrame,
+            ..cpu_linear
+        },
+        EffectType::DirectionalBlur => EffectExecutionContract {
+            execution_modes: EffectExecutionModes::CPU_F32,
+            // The authored length can exceed any bounded expansion, so the
+            // definition-level envelope is a full-frame input. The graph planner
+            // still narrows it per instance from the authored length.
             roi_propagation: EffectRoiPropagation::FullFrame,
             ..cpu_linear
         },
@@ -4412,6 +4466,43 @@ fn builtin_graph_builder_for(effect_type: &EffectType) -> Option<EffectGraphBuil
                 Ok(())
             }))
         }
+        EffectType::DirectionalBlur => {
+            let length_id = builtin_parameter_id(effect_type, "length");
+            let direction_id = builtin_parameter_id(effect_type, "direction");
+            Some(Arc::new(move |effect, context, graph| {
+                let length = effect.evaluate_f32_parameter(&length_id, context.time, 0.0);
+                if !length.is_finite()
+                    || !(0.0..=crate::DIRECTIONAL_BLUR_AUTHOR_MAX_LENGTH_PIXELS).contains(&length)
+                {
+                    return Err(EffectGraphBuildError::InvalidAuthorState {
+                        effect_key: effect.effect_type.key(),
+                        effect_id: effect.id,
+                        reason: format!(
+                            "directional blur length {length} is outside 0..={}",
+                            crate::DIRECTIONAL_BLUR_AUTHOR_MAX_LENGTH_PIXELS
+                        ),
+                    });
+                }
+                let direction_degrees =
+                    effect.evaluate_f32_parameter(&direction_id, context.time, 0.0);
+                if !direction_degrees.is_finite() {
+                    return Err(EffectGraphBuildError::InvalidAuthorState {
+                        effect_key: effect.effect_type.key(),
+                        effect_id: effect.id,
+                        reason: format!(
+                            "directional blur direction {direction_degrees} is not a finite angle"
+                        ),
+                    });
+                }
+                if length > 1.0e-4 {
+                    graph.append_unary(EffectRenderOp::DirectionalBlur {
+                        length,
+                        direction_degrees,
+                    });
+                }
+                Ok(())
+            }))
+        }
         EffectType::ShiftChannels => {
             let ids = [
                 builtin_parameter_id(effect_type, "red"),
@@ -4570,6 +4661,7 @@ fn builtin_display_name(effect_type: &EffectType) -> &'static str {
         EffectType::HueSaturation => "色相饱和度",
         EffectType::BlackAndWhite => "黑白",
         EffectType::ShiftChannels => "转换通道",
+        EffectType::DirectionalBlur => "方向模糊",
         EffectType::External(_) => "外部效果",
     }
 }
@@ -5432,6 +5524,7 @@ mod tests {
             EffectType::HueSaturation,
             EffectType::BlackAndWhite,
             EffectType::ShiftChannels,
+            EffectType::DirectionalBlur,
         ]
         .into_iter()
         .map(|effect_type| effect_type.key())
@@ -6547,6 +6640,173 @@ mod tests {
             } => Some((*gain, *radius, *threshold)),
             _ => None,
         })
+    }
+
+    #[test]
+    fn directional_blur_defaults_compile_to_identity() {
+        let effect = instantiate_effect_node(EffectType::DirectionalBlur)
+            .expect("registered Directional Blur definition");
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("evaluate default Directional Blur");
+
+        assert!(
+            !graph.nodes.iter().any(|node| matches!(
+                &node.kind,
+                EffectGraphNodeKind::UnaryEffect { op: EffectRenderOp::DirectionalBlur { .. }, .. }
+            )),
+            "a zero authored length is the identity and must not emit an operation"
+        );
+    }
+
+    #[test]
+    fn directional_blur_authored_state_reaches_the_operation() {
+        let mut effect = instantiate_effect_node(EffectType::DirectionalBlur)
+            .expect("registered Directional Blur definition");
+        for (parameter, value) in [
+            ("length", PropertyValue::Float(6.5)),
+            ("direction", PropertyValue::Float(30.0)),
+        ] {
+            effect
+                .apply_property_mutation(PropertyMutation::SetStaticValue {
+                    path: EffectType::DirectionalBlur.property_path(parameter),
+                    value,
+                })
+                .unwrap_or_else(|error| panic!("author Directional Blur {parameter}: {error}"));
+        }
+
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("evaluate authored Directional Blur");
+        let op = graph.nodes.iter().find_map(|node| match &node.kind {
+            EffectGraphNodeKind::UnaryEffect {
+                op: EffectRenderOp::DirectionalBlur { length, direction_degrees },
+                ..
+            }
+            | EffectGraphNodeKind::DomainEffect {
+                op: EffectRenderOp::DirectionalBlur { length, direction_degrees },
+                ..
+            } => Some((*length, *direction_degrees)),
+            _ => None,
+        });
+
+        assert_eq!(op, Some((6.5, 30.0)));
+    }
+
+    #[test]
+    fn directional_blur_rejects_author_values_outside_the_declared_range() {
+        let mut effect = instantiate_effect_node(EffectType::DirectionalBlur)
+            .expect("registered Directional Blur definition");
+        for length in [crate::DIRECTIONAL_BLUR_AUTHOR_MAX_LENGTH_PIXELS + 1.0, -1.0] {
+            assert!(
+                effect
+                    .apply_property_mutation(PropertyMutation::SetStaticValue {
+                        path: EffectType::DirectionalBlur.property_path("length"),
+                        value: PropertyValue::Float(length),
+                    })
+                    .is_err(),
+                "the numeric contract rejects length {length}"
+            );
+        }
+    }
+
+    #[test]
+    fn directional_blur_smears_along_the_authored_direction_only() {
+        let mut effect = instantiate_effect_node(EffectType::DirectionalBlur)
+            .expect("registered Directional Blur definition");
+        for (parameter, value) in [
+            ("length", PropertyValue::Float(2.0)),
+            ("direction", PropertyValue::Float(90.0)),
+        ] {
+            effect
+                .apply_property_mutation(PropertyMutation::SetStaticValue {
+                    path: EffectType::DirectionalBlur.property_path(parameter),
+                    value,
+                })
+                .expect("author Directional Blur");
+        }
+
+        let mut input = [[0.0_f32, 0.0, 0.0, 1.0]; 25];
+        input[2 * 5 + 2] = [1.0, 1.0, 1.0, 1.0];
+        let view = || {
+            crate::EffectFloatFrameView::new(
+                crate::EffectFrameExtent::new(5, 5),
+                crate::EffectValueFormat::new(
+                    crate::EffectWorkingPrecision::Float32,
+                    crate::EffectColorDomain::SceneLinearRgb,
+                    mondrian_core::ColorFrameAlpha::StraightCoverage,
+                ),
+                mondrian_core::ImageSampling::UNIT_SQUARE,
+                &input,
+            )
+        };
+
+        let compiled = compile_clip_effect_graph(&[effect], &[], tt(0), TEST_WORKING_SPACE)
+            .expect("compile Directional Blur");
+        let output = crate::apply_compiled_effect_graph_rgba_f32(view(), &compiled, 0)
+            .expect("execute Directional Blur");
+        let pixels = output.pixels();
+
+        // A vertical smear of length two reads half a pixel above and below each sample, so the
+        // impulse spreads over its own column and never into the columns beside it.
+        assert!(pixels[2 * 5 + 2][0] > 0.0, "the impulse stays in place");
+        for row in 1..=3 {
+            assert!(
+                pixels[row * 5 + 2][0] > 0.0,
+                "row {row} of the smeared column"
+            );
+        }
+        assert_eq!(pixels[2][0], 0.0, "the smear stops halfway into row zero");
+        assert_eq!(pixels[4 * 5 + 2][0], 0.0, "the smear stops before row four");
+        for row in 0..5 {
+            for column in [0, 1, 3, 4] {
+                assert_eq!(
+                    pixels[row * 5 + column][0],
+                    0.0,
+                    "row {row} column {column} must not receive the vertical smear"
+                );
+            }
+        }
+        assert!(
+            (pixels[2 * 5 + 2][3] - 1.0).abs() < 1.0e-6,
+            "fully covered columns keep their coverage"
+        );
+    }
+
+    #[test]
+    fn directional_blur_authored_state_survives_project_serialization_round_trip() {
+        let mut effect = instantiate_effect_node(EffectType::DirectionalBlur)
+            .expect("registered Directional Blur definition");
+        for (parameter, value) in [
+            ("length", PropertyValue::Float(12.5)),
+            ("direction", PropertyValue::Float(135.0)),
+        ] {
+            effect
+                .apply_property_mutation(PropertyMutation::SetStaticValue {
+                    path: EffectType::DirectionalBlur.property_path(parameter),
+                    value,
+                })
+                .expect("author Directional Blur");
+        }
+
+        let wire = serde_json::to_string(&effect).expect("serialize the Directional Blur node");
+        let restored: EffectNode =
+            serde_json::from_str(&wire).expect("restore the Directional Blur node");
+        assert_eq!(restored.effect_type, EffectType::DirectionalBlur);
+        assert_eq!(restored, effect);
+
+        let graph = build_effect_render_graph(&[restored], tt(0), TEST_WORKING_SPACE)
+            .expect("evaluate the restored Directional Blur node");
+        let op = graph.nodes.iter().find_map(|node| match &node.kind {
+            EffectGraphNodeKind::UnaryEffect {
+                op: EffectRenderOp::DirectionalBlur { length, direction_degrees },
+                ..
+            }
+            | EffectGraphNodeKind::DomainEffect {
+                op: EffectRenderOp::DirectionalBlur { length, direction_degrees },
+                ..
+            } => Some((*length, *direction_degrees)),
+            _ => None,
+        });
+        assert_eq!(op, Some((12.5, 135.0)));
     }
 
     #[test]

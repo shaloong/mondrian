@@ -2728,6 +2728,7 @@ const fn effect_operation_shape_tag(operation: &EffectRenderOp) -> u8 {
         EffectRenderOp::BoxBlur { .. } => 23,
         EffectRenderOp::BlackAndWhite { .. } => 26,
         EffectRenderOp::ShiftChannels { .. } => 27,
+        EffectRenderOp::DirectionalBlur { .. } => 28,
         EffectRenderOp::HueSaturation { .. } => 25,
         EffectRenderOp::UnsharpMask { .. } => 24,
     }
@@ -4756,6 +4757,7 @@ fn cpu_node_scratch_frames(
             | crate::EffectRenderOp::HueSaturation { .. }
             | crate::EffectRenderOp::BlackAndWhite { .. }
             | crate::EffectRenderOp::ShiftChannels { .. }
+            | crate::EffectRenderOp::DirectionalBlur { .. }
             | crate::EffectRenderOp::UnsharpMask { .. }
             | crate::EffectRenderOp::Crop { .. }
             | crate::EffectRenderOp::Lut3D { .. }
