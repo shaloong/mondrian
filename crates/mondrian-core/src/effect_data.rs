@@ -37,6 +37,7 @@ pub enum EffectType {
     Invert,
     BoxBlur,
     UnsharpMask,
+    HueSaturation,
     /// Externally registered effect definition, including native-format adapters.
     /// This is a domain definition reference, not an Extension package identity.
     /// The serde name preserves the existing project wire representation.
@@ -69,6 +70,7 @@ impl EffectType {
             Self::Invert => "builtin.invert".to_string(),
             Self::BoxBlur => "builtin.box_blur".to_string(),
             Self::UnsharpMask => "builtin.unsharp_mask".to_string(),
+            Self::HueSaturation => "builtin.hue_saturation".to_string(),
             Self::External(key) => key.clone(),
         }
     }
@@ -97,6 +99,7 @@ impl EffectType {
             "builtin.invert" => Self::Invert,
             "builtin.box_blur" => Self::BoxBlur,
             "builtin.unsharp_mask" => Self::UnsharpMask,
+            "builtin.hue_saturation" => Self::HueSaturation,
             other => Self::External(other.to_string()),
         }
     }
@@ -125,6 +128,7 @@ impl EffectType {
             Self::Invert => "反转",
             Self::BoxBlur => "方框模糊",
             Self::UnsharpMask => "钝化蒙版",
+            Self::HueSaturation => "色相饱和度",
             Self::External(name) => name,
         }
     }
@@ -140,7 +144,8 @@ impl EffectType {
             | Self::Curves
             | Self::GamutCompression
             | Self::HighlightRecovery
-            | Self::HueSaturationLightness => vec!["颜色", "调色"],
+            | Self::HueSaturationLightness
+            | Self::HueSaturation => vec!["颜色", "调色"],
             Self::Crop => vec!["变换"],
             Self::GaussianBlur | Self::Sharpen | Self::BoxBlur | Self::UnsharpMask => {
                 vec!["颜色", "模糊与锐化"]
@@ -176,6 +181,7 @@ impl EffectType {
             Self::Invert => "invert".to_string(),
             Self::BoxBlur => "box_blur".to_string(),
             Self::UnsharpMask => "unsharp_mask".to_string(),
+            Self::HueSaturation => "hue_saturation".to_string(),
             Self::External(key) => key.clone(),
         }
     }
@@ -463,7 +469,8 @@ impl crate::AuthoringFootprint for EffectType {
             | Self::LumaKey
             | Self::Invert
             | Self::BoxBlur
-            | Self::UnsharpMask => Ok(()),
+            | Self::UnsharpMask
+            | Self::HueSaturation => Ok(()),
         }
     }
 }

@@ -924,6 +924,36 @@ fn invert_saturation(rgb: vec3<f32>) -> vec3<f32> {
     return vec3<f32>(lightness) + (rgb - vec3<f32>(lightness)) * scale;
 }
 
+fn hue_saturation_band_weight(rgb: vec3<f32>, center: f32) -> f32 {
+    if (center < 0.0) { return 1.0; }
+    let extremes = invert_extremes(rgb);
+    let chroma = extremes.x - extremes.y;
+    if (!(chroma > 1.0e-6)) { return 0.0; }
+    let hue = invert_hue_of(rgb, extremes.x, chroma);
+    let difference = fract(hue - center);
+    var distance = difference;
+    if (difference > 0.5) { distance = 1.0 - difference; }
+    return 1.0 - smoothstep(1.0 / 12.0, 1.0 / 6.0, distance);
+}
+
+fn hue_saturation_shifted(rgb: vec3<f32>, controls: vec4<f32>) -> vec3<f32> {
+    // controls = [hue turns, saturation scale, lightness offset, colorize amount]
+    let extremes = invert_extremes(rgb);
+    let lightness = (extremes.x + extremes.y) * 0.5 + controls.z;
+    let chroma = extremes.x - extremes.y;
+    if (!(chroma > 1.0e-6)) { return rgb + vec3<f32>(controls.z); }
+    let hue = invert_hue_of(rgb, extremes.x, chroma) + controls.x;
+    return invert_rgb_from_hue_chroma_lightness(hue, chroma * controls.y, lightness);
+}
+
+fn hue_saturation_tinted(rgb: vec3<f32>, tint: vec4<f32>) -> vec3<f32> {
+    // tint = [tint hue turns, tint saturation fraction, tint lightness offset, band center]
+    let extremes = invert_extremes(rgb);
+    let lightness = (extremes.x + extremes.y) * 0.5 + tint.z;
+    let range = max(1.0 - abs(2.0 * lightness - 1.0), 0.0);
+    return invert_rgb_from_hue_chroma_lightness(tint.x, range * tint.y, lightness);
+}
+
 fn apply_effects(input: vec4<f32>, position: vec2<f32>) -> vec4<f32> {
     if (input.a <= 0.0) { return input; }
     var pixel = input;
@@ -1045,6 +1075,20 @@ fn apply_effects(input: vec4<f32>, position: vec2<f32>) -> vec4<f32> {
             } else if (retained < 1.0) {
                 pixel = mix(inverted, pixel, vec4<f32>(retained));
             }
+        } else if (effect.header.x == 14u) {
+            // `HueSaturationGrade::gpu_controls`: params carries the hue turns,
+            // saturation scale, lightness offset, and colorize amount; color
+            // carries the tint hue, tint saturation, tint lightness, and the band
+            // center in turns (negative selects the master band).
+            let weight = hue_saturation_band_weight(pixel.rgb, effect.color.w);
+            var rgb = pixel.rgb;
+            if (weight > 0.0) {
+                rgb = mix(rgb, hue_saturation_shifted(rgb, effect.params), weight);
+            }
+            if (effect.params.w > 0.0) {
+                rgb = mix(rgb, hue_saturation_tinted(rgb, effect.color), effect.params.w);
+            }
+            pixel = vec4<f32>(rgb, pixel.a);
         }
     }
     return pixel;
@@ -4119,6 +4163,16 @@ fn effect_uniforms(
                     extra1: [0.0; 4],
                 }
             }
+            EffectGpuPointOp::HueSaturation { grade } => {
+                let controls = grade.gpu_controls();
+                GpuEffectUniform {
+                    header: [14, 0, 0, 0],
+                    params: [controls[0], controls[1], controls[2], controls[3]],
+                    color: [controls[4], controls[5], controls[6], controls[7]],
+                    extra0: [0.0; 4],
+                    extra1: [0.0; 4],
+                }
+            }
             EffectGpuPointOp::Lut3D { lut, intensity } => {
                 let effective_intensity = intensity.clamp(0.0, 1.0);
                 let location = if effective_intensity <= 1.0e-4 {
@@ -6202,6 +6256,48 @@ mod tests {
         let plan = lower_effect_graph_to_gpu_plan(&graph).expect("hls GPU plan");
         let uniforms = effect_uniforms(Some(&plan), None).expect("hls uniforms");
         assert_eq!(uniforms[0].header, [13, 0, 0b1110, 0]);
+    }
+
+    #[test]
+    fn gpu_effect_uniforms_carry_the_hue_saturation_controls() {
+        use mondrian_effects::{
+            compile_reference_render_graph, lower_effect_graph_to_gpu_plan,
+            EffectGraphBuilderState, EffectRenderOp, HueBand, HueSaturationGrade,
+        };
+
+        let grade =
+            HueSaturationGrade::new(HueBand::Greens, -90.0, 25.0, -12.0, 0.5, 45.0, 60.0, 8.0)
+                .expect("valid hue/saturation grade");
+        let mut builder = EffectGraphBuilderState::new();
+        builder.append_unary(EffectRenderOp::HueSaturation { grade });
+        let graph = compile_reference_render_graph(builder.finish()).expect("hue/saturation graph");
+        let plan = lower_effect_graph_to_gpu_plan(&graph).expect("hue/saturation GPU plan");
+        assert_eq!(plan.operations().len(), 1);
+
+        let uniforms = effect_uniforms(Some(&plan), None).expect("hue/saturation uniforms");
+        let controls = grade.gpu_controls();
+        assert_eq!(uniforms[0].header, [14, 0, 0, 0]);
+        assert_eq!(
+            uniforms[0].params,
+            [controls[0], controls[1], controls[2], controls[3]]
+        );
+        assert_eq!(
+            uniforms[0].color,
+            [controls[4], controls[5], controls[6], controls[7]]
+        );
+        assert_eq!(uniforms[1].header[0], 0);
+
+        let master = HueSaturationGrade::new(HueBand::Master, 0.0, 0.0, 0.0, 0.0, 0.0, 25.0, 0.0)
+            .expect("valid master grade");
+        let mut builder = EffectGraphBuilderState::new();
+        builder.append_unary(EffectRenderOp::HueSaturation { grade: master });
+        let graph = compile_reference_render_graph(builder.finish()).expect("master graph");
+        let plan = lower_effect_graph_to_gpu_plan(&graph).expect("master GPU plan");
+        let uniforms = effect_uniforms(Some(&plan), None).expect("master uniforms");
+        assert!(
+            uniforms[0].color[3] < 0.0,
+            "master band packs a negative center"
+        );
     }
 
     #[test]

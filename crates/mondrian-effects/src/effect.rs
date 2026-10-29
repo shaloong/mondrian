@@ -807,6 +807,15 @@ pub enum EffectRenderOp {
         radius: f32,
         threshold: f32,
     },
+    /// Hue, saturation, and lightness adjustment scoped to one authored hue band.
+    ///
+    /// The grade carries the band selection, the hue turn, chroma scale, and
+    /// lightness offset, plus the optional colorize stage. It is evaluated on
+    /// unclamped working-space RGB, so extended-range and negative channels keep
+    /// their meaning and neutral pixels only receive the lightness offset.
+    HueSaturation {
+        grade: crate::HueSaturationGrade,
+    },
     /// Source-relative hard crop expressed as normalized edge insets.
     ///
     /// Pixels outside the remaining rectangle become transparent black before
@@ -932,6 +941,9 @@ impl std::fmt::Debug for EffectRenderOp {
                 .field("direction", direction)
                 .field("repeat_edge_pixels", repeat_edge_pixels)
                 .finish(),
+            Self::HueSaturation { grade } => {
+                formatter.debug_struct("HueSaturation").field("grade", grade).finish()
+            }
             Self::UnsharpMask { gain, radius, threshold } => formatter
                 .debug_struct("UnsharpMask")
                 .field("gain", gain)
@@ -1310,6 +1322,13 @@ impl EffectRenderOp {
                 direction.hash(state);
                 u8::from(*repeat_edge_pixels).hash(state);
             }
+            EffectRenderOp::HueSaturation { grade } => {
+                24u8.hash(state);
+                grade.band().key().hash(state);
+                for value in grade.author_controls() {
+                    value.to_bits().hash(state);
+                }
+            }
             EffectRenderOp::UnsharpMask { gain, radius, threshold } => {
                 23u8.hash(state);
                 gain.to_bits().hash(state);
@@ -1404,6 +1423,7 @@ impl EffectRenderOp {
             EffectRenderOp::Crop { .. } => 1,
             EffectRenderOp::Invert { .. } => 1,
             EffectRenderOp::BoxBlur { .. } => 4,
+            EffectRenderOp::HueSaturation { .. } => 2,
             EffectRenderOp::UnsharpMask { .. } => 4,
             EffectRenderOp::Lut3D { .. } => 2,
             EffectRenderOp::GaussianBlur { .. } => 4,
@@ -1936,7 +1956,7 @@ impl EffectDefinition {
     }
 }
 
-fn builtin_effect_types() -> [EffectType; 22] {
+fn builtin_effect_types() -> [EffectType; 23] {
     [
         EffectType::BasicCorrection,
         EffectType::WhiteBalance,
@@ -1960,6 +1980,7 @@ fn builtin_effect_types() -> [EffectType; 22] {
         EffectType::Invert,
         EffectType::BoxBlur,
         EffectType::UnsharpMask,
+        EffectType::HueSaturation,
     ]
 }
 
@@ -2967,6 +2988,103 @@ fn default_properties_for(effect_type: EffectType) -> PropertyBag {
                 Some(0.01),
             );
         }
+        EffectType::HueSaturation => {
+            define_builtin_enum_property(
+                &mut properties,
+                &effect_type,
+                "band",
+                "色相饱和度",
+                "通道控制",
+                "master",
+                crate::HueBand::ALL
+                    .into_iter()
+                    .map(|band| {
+                        ParameterEnumOption::new(
+                            band.key(),
+                            band.label(),
+                            format!("builtin.hue_saturation.band.{}", band.key()),
+                        )
+                    })
+                    .collect(),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "hue",
+                "色相饱和度",
+                "色相",
+                PropertyValue::Float(0.0),
+                Some(-180.0),
+                Some(180.0),
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "saturation",
+                "色相饱和度",
+                "饱和度",
+                PropertyValue::Float(0.0),
+                Some(-100.0),
+                Some(100.0),
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "lightness",
+                "色相饱和度",
+                "亮度",
+                PropertyValue::Float(0.0),
+                Some(-100.0),
+                Some(100.0),
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "colorize",
+                "色相饱和度",
+                "彩色化",
+                PropertyValue::Float(0.0),
+                Some(0.0),
+                Some(1.0),
+                Some(0.01),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "tint_hue",
+                "色相饱和度",
+                "着色色相",
+                PropertyValue::Float(0.0),
+                Some(-180.0),
+                Some(180.0),
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "tint_saturation",
+                "色相饱和度",
+                "着色饱和度",
+                PropertyValue::Float(25.0),
+                Some(0.0),
+                Some(100.0),
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "tint_lightness",
+                "色相饱和度",
+                "着色亮度",
+                PropertyValue::Float(0.0),
+                Some(-100.0),
+                Some(100.0),
+                Some(1.0),
+            );
+        }
         EffectType::External(_) => {}
     }
 
@@ -3169,6 +3287,12 @@ fn builtin_parameter_unit(effect_type: &EffectType, parameter: &str) -> Paramete
         (EffectType::BoxBlur, "radius") => ParameterUnit::Pixels,
         (EffectType::UnsharpMask, "amount") => ParameterUnit::Percent,
         (EffectType::UnsharpMask, "radius") => ParameterUnit::Pixels,
+        (EffectType::HueSaturation, "hue") => ParameterUnit::Degrees,
+        (EffectType::HueSaturation, "saturation") => ParameterUnit::Percent,
+        (EffectType::HueSaturation, "lightness") => ParameterUnit::Percent,
+        (EffectType::HueSaturation, "tint_hue") => ParameterUnit::Degrees,
+        (EffectType::HueSaturation, "tint_saturation") => ParameterUnit::Percent,
+        (EffectType::HueSaturation, "tint_lightness") => ParameterUnit::Percent,
         _ => ParameterUnit::Unitless,
     }
 }
@@ -3309,6 +3433,10 @@ fn builtin_effect_execution_contract(effect_type: &EffectType) -> EffectExecutio
             // definition-level envelope is a full-frame input. The graph
             // planner still narrows it per instance from the authored radius.
             roi_propagation: EffectRoiPropagation::FullFrame,
+            ..cpu_linear
+        },
+        EffectType::HueSaturation => EffectExecutionContract {
+            execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
             ..cpu_linear
         },
         EffectType::UnsharpMask => EffectExecutionContract {
@@ -4156,6 +4284,52 @@ fn builtin_graph_builder_for(effect_type: &EffectType) -> Option<EffectGraphBuil
                 Ok(())
             }))
         }
+        EffectType::HueSaturation => {
+            let band_id = builtin_parameter_id(effect_type, "band");
+            let hue_id = builtin_parameter_id(effect_type, "hue");
+            let saturation_id = builtin_parameter_id(effect_type, "saturation");
+            let lightness_id = builtin_parameter_id(effect_type, "lightness");
+            let colorize_id = builtin_parameter_id(effect_type, "colorize");
+            let tint_hue_id = builtin_parameter_id(effect_type, "tint_hue");
+            let tint_saturation_id = builtin_parameter_id(effect_type, "tint_saturation");
+            let tint_lightness_id = builtin_parameter_id(effect_type, "tint_lightness");
+            Some(Arc::new(move |effect, context, graph| {
+                let band_key =
+                    effect.evaluate_enum_parameter(&band_id, context.time).ok_or_else(|| {
+                        EffectGraphBuildError::InvalidAuthorState {
+                            effect_key: effect.effect_type.key(),
+                            effect_id: effect.id,
+                            reason: "hue/saturation band is not authored".to_owned(),
+                        }
+                    })?;
+                let band = crate::HueBand::from_key(&band_key).ok_or_else(|| {
+                    EffectGraphBuildError::InvalidAuthorState {
+                        effect_key: effect.effect_type.key(),
+                        effect_id: effect.id,
+                        reason: format!("unknown hue/saturation band `{band_key}`"),
+                    }
+                })?;
+                let grade = crate::HueSaturationGrade::new(
+                    band,
+                    effect.evaluate_f32_parameter(&hue_id, context.time, 0.0),
+                    effect.evaluate_f32_parameter(&saturation_id, context.time, 0.0),
+                    effect.evaluate_f32_parameter(&lightness_id, context.time, 0.0),
+                    effect.evaluate_f32_parameter(&colorize_id, context.time, 0.0),
+                    effect.evaluate_f32_parameter(&tint_hue_id, context.time, 0.0),
+                    effect.evaluate_f32_parameter(&tint_saturation_id, context.time, 25.0),
+                    effect.evaluate_f32_parameter(&tint_lightness_id, context.time, 0.0),
+                )
+                .map_err(|error| EffectGraphBuildError::InvalidAuthorState {
+                    effect_key: effect.effect_type.key(),
+                    effect_id: effect.id,
+                    reason: error.to_string(),
+                })?;
+                if !grade.is_identity() {
+                    graph.append_unary(EffectRenderOp::HueSaturation { grade });
+                }
+                Ok(())
+            }))
+        }
         _ => None,
     }
 }
@@ -4184,6 +4358,7 @@ fn builtin_display_name(effect_type: &EffectType) -> &'static str {
         EffectType::Invert => "反转",
         EffectType::BoxBlur => "方框模糊",
         EffectType::UnsharpMask => "钝化蒙版",
+        EffectType::HueSaturation => "色相饱和度",
         EffectType::External(_) => "外部效果",
     }
 }
@@ -4522,6 +4697,198 @@ mod tests {
         }
     }
 
+    fn hue_saturation_op(graph: &EffectRenderGraph) -> Option<(crate::HueBand, [f32; 7])> {
+        graph.nodes.iter().find_map(|node| match &node.kind {
+            EffectGraphNodeKind::UnaryEffect {
+                op: EffectRenderOp::HueSaturation { grade },
+                ..
+            }
+            | EffectGraphNodeKind::DomainEffect {
+                op: EffectRenderOp::HueSaturation { grade },
+                ..
+            } => Some((grade.band(), grade.author_controls())),
+            _ => None,
+        })
+    }
+
+    #[test]
+    fn hue_saturation_defaults_compile_to_identity() {
+        let effect = instantiate_effect_node(EffectType::HueSaturation)
+            .expect("registered Hue/Saturation definition");
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("evaluate default Hue/Saturation");
+
+        assert_eq!(hue_saturation_op(&graph), None);
+    }
+
+    #[test]
+    fn hue_saturation_authored_state_reaches_the_operation() {
+        let mut effect = instantiate_effect_node(EffectType::HueSaturation)
+            .expect("registered Hue/Saturation definition");
+        for (parameter, value) in [
+            ("band", PropertyValue::Enum("greens".to_owned())),
+            ("hue", PropertyValue::Float(90.0)),
+            ("saturation", PropertyValue::Float(50.0)),
+            ("lightness", PropertyValue::Float(-20.0)),
+            ("tint_hue", PropertyValue::Float(-30.0)),
+            ("tint_saturation", PropertyValue::Float(40.0)),
+            ("tint_lightness", PropertyValue::Float(10.0)),
+        ] {
+            effect
+                .apply_property_mutation(PropertyMutation::SetStaticValue {
+                    path: EffectType::HueSaturation.property_path(parameter),
+                    value,
+                })
+                .unwrap_or_else(|error| panic!("author Hue/Saturation {parameter}: {error}"));
+        }
+
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("evaluate authored Hue/Saturation");
+        assert_eq!(
+            hue_saturation_op(&graph),
+            Some((
+                crate::HueBand::Greens,
+                [90.0, 50.0, -20.0, 0.0, -30.0, 40.0, 10.0]
+            ))
+        );
+    }
+
+    #[test]
+    fn hue_saturation_rejects_an_unknown_band_key_at_authoring() {
+        let mut effect = instantiate_effect_node(EffectType::HueSaturation)
+            .expect("registered Hue/Saturation definition");
+
+        // The typed parameter schema rejects out-of-menu keys before the graph
+        // builder runs; the builder keeps the same check as a defensive backstop
+        // for state restored from an older or hand-edited project.
+        assert!(
+            effect
+                .apply_property_mutation(PropertyMutation::SetStaticValue {
+                    path: EffectType::HueSaturation.property_path("band"),
+                    value: PropertyValue::Enum("teal".to_owned()),
+                })
+                .is_err(),
+            "an unregistered band key must fail closed instead of grading every hue"
+        );
+        assert_eq!(
+            hue_saturation_op(
+                &build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+                    .expect("default state still compiles")
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn hue_saturation_rejects_author_values_outside_the_declared_ranges() {
+        let effect = instantiate_effect_node(EffectType::HueSaturation)
+            .expect("registered Hue/Saturation definition");
+        for (parameter, value) in [
+            ("hue", PropertyValue::Float(181.0)),
+            ("saturation", PropertyValue::Float(101.0)),
+            ("lightness", PropertyValue::Float(-101.0)),
+            ("colorize", PropertyValue::Float(1.5)),
+            ("tint_saturation", PropertyValue::Float(-1.0)),
+        ] {
+            let mut effect = effect.clone();
+            assert!(
+                effect
+                    .apply_property_mutation(PropertyMutation::SetStaticValue {
+                        path: EffectType::HueSaturation.property_path(parameter),
+                        value,
+                    })
+                    .is_err(),
+                "the numeric contract rejects {parameter} outside its authored range"
+            );
+        }
+    }
+
+    #[test]
+    fn hue_saturation_master_band_executes_on_scene_linear_float_frames() {
+        let mut effect = instantiate_effect_node(EffectType::HueSaturation)
+            .expect("registered Hue/Saturation definition");
+        effect
+            .apply_property_mutation(PropertyMutation::SetStaticValue {
+                path: EffectType::HueSaturation.property_path("hue"),
+                value: PropertyValue::Float(180.0),
+            })
+            .expect("author a half-turn hue rotation");
+
+        let input = [[0.8, 0.3, 0.1, 1.0], [1.6, 0.6, 0.2, 0.5]];
+        let view = || {
+            crate::EffectFloatFrameView::new(
+                crate::EffectFrameExtent::new(2, 1),
+                crate::EffectValueFormat::new(
+                    crate::EffectWorkingPrecision::Float32,
+                    crate::EffectColorDomain::SceneLinearRgb,
+                    mondrian_core::ColorFrameAlpha::StraightCoverage,
+                ),
+                mondrian_core::ImageSampling::UNIT_SQUARE,
+                &input,
+            )
+        };
+
+        let compiled = compile_clip_effect_graph(&[effect], &[], tt(0), TEST_WORKING_SPACE)
+            .expect("compile Hue/Saturation");
+        let output =
+            crate::apply_compiled_effect_graph_rgba_f32(view(), &compiled, 0).expect("execute");
+        let pixels = output.pixels();
+        assert_eq!(pixels.len(), 2);
+
+        // The master band must agree with the established HSL rotation, and the
+        // extended-range pixel must keep its coverage and stay off the [0, 1] clamp.
+        let grade = crate::HslGrade::new(180.0, 1.0, 0.0).expect("hsl");
+        for (pixel, source) in pixels.iter().zip(input.iter()) {
+            let expected = grade.apply([source[0], source[1], source[2]]);
+            for channel in 0..3 {
+                assert!(
+                    (pixel[channel] - expected[channel]).abs() <= 1.0e-6,
+                    "master band reproduced {pixel:?} instead of {expected:?}"
+                );
+            }
+            assert_eq!(pixel[3], source[3]);
+        }
+    }
+
+    #[test]
+    fn hue_saturation_authored_state_survives_project_serialization_round_trip() {
+        let mut effect = instantiate_effect_node(EffectType::HueSaturation)
+            .expect("registered Hue/Saturation definition");
+        for (parameter, value) in [
+            ("band", PropertyValue::Enum("blues".to_owned())),
+            ("hue", PropertyValue::Float(-45.0)),
+            ("saturation", PropertyValue::Float(35.0)),
+            ("lightness", PropertyValue::Float(12.0)),
+            ("colorize", PropertyValue::Float(0.25)),
+            ("tint_hue", PropertyValue::Float(120.0)),
+            ("tint_saturation", PropertyValue::Float(60.0)),
+            ("tint_lightness", PropertyValue::Float(-15.0)),
+        ] {
+            effect
+                .apply_property_mutation(PropertyMutation::SetStaticValue {
+                    path: EffectType::HueSaturation.property_path(parameter),
+                    value,
+                })
+                .unwrap_or_else(|error| panic!("author Hue/Saturation {parameter}: {error}"));
+        }
+
+        let wire = serde_json::to_string(&effect).expect("serialize the Hue/Saturation node");
+        let restored: EffectNode =
+            serde_json::from_str(&wire).expect("restore the Hue/Saturation node");
+        assert_eq!(restored.effect_type, EffectType::HueSaturation);
+        assert_eq!(restored, effect);
+
+        let graph = build_effect_render_graph(&[restored], tt(0), TEST_WORKING_SPACE)
+            .expect("evaluate the restored Hue/Saturation node");
+        assert_eq!(
+            hue_saturation_op(&graph),
+            Some((
+                crate::HueBand::Blues,
+                [-45.0, 35.0, 12.0, 0.25, 120.0, 60.0, -15.0]
+            ))
+        );
+    }
+
     #[test]
     fn effect_library_exposes_only_builtins_with_executable_graphs() {
         let expected = [
@@ -4547,6 +4914,7 @@ mod tests {
             EffectType::Invert,
             EffectType::BoxBlur,
             EffectType::UnsharpMask,
+            EffectType::HueSaturation,
         ]
         .into_iter()
         .map(|effect_type| effect_type.key())

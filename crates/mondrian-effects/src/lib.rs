@@ -35,6 +35,8 @@ pub mod graph;
 pub mod hdr_grading;
 pub mod heterogeneous_execution;
 pub mod hsl;
+pub(crate) mod hsl_space;
+pub mod hue_saturation;
 pub mod invert;
 pub mod lut;
 pub mod mask;
@@ -152,6 +154,7 @@ pub use heterogeneous_execution::{
     PreparedHeterogeneousGpuStep, PreparedHeterogeneousGpuSuffix,
 };
 pub use hsl::{HslGrade, HslGradeError};
+pub use hue_saturation::{HueBand, HueSaturationError, HueSaturationGrade};
 pub use invert::{invert_rgba_f32, invert_rgba_u8, InvertChannels};
 pub use lut::{
     Lut3D, LutLibrary, LutLibraryEntry, LutPreparationCache, LutPreparationCacheConfig,

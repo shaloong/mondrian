@@ -71,6 +71,11 @@ pub enum EffectGpuPointOp {
         flags: u32,
         blend_with_original: f32,
     },
+    /// Hue, saturation, and lightness adjustment scoped to one authored hue band.
+    ///
+    /// The grade is carried whole and backends read exact controls through
+    /// [`crate::HueSaturationGrade::gpu_controls`], so no backend re-derives them.
+    HueSaturation { grade: crate::HueSaturationGrade },
     /// Prepared creative 3D LUT sampled in its explicitly authored processing domain.
     ///
     /// The backend-neutral plan retains the immutable semantic payload only;
@@ -749,6 +754,9 @@ fn lower_point_op(
         EffectRenderOp::Lut3D { lut, intensity } => {
             Ok(EffectGpuPointOp::Lut3D { lut: Arc::clone(lut), intensity: *intensity })
         }
+        EffectRenderOp::HueSaturation { grade } => {
+            Ok(EffectGpuPointOp::HueSaturation { grade: *grade })
+        }
         EffectRenderOp::Invert { channels, blend_with_original } => {
             let (color_mask, flags) = channels.gpu_scope();
             Ok(EffectGpuPointOp::Invert {
@@ -800,6 +808,7 @@ fn operation_name(op: &EffectRenderOp) -> &'static str {
         EffectRenderOp::Grain { .. } => "grain",
         EffectRenderOp::Invert { .. } => "invert",
         EffectRenderOp::BoxBlur { .. } => "box_blur",
+        EffectRenderOp::HueSaturation { .. } => "hue_saturation",
         EffectRenderOp::UnsharpMask { .. } => "unsharp_mask",
         EffectRenderOp::Crop { .. } => "crop",
         EffectRenderOp::TemporalFrameBlend { .. } => "temporal_frame_blend",
@@ -856,6 +865,31 @@ mod tests {
                 flags: crate::invert::INVERT_GPU_FLAG_ALPHA,
                 blend_with_original: 0.5,
             }
+        );
+        assert_eq!(plan.processing_domain(), EffectColorDomain::SceneLinearRgb);
+    }
+
+    #[test]
+    fn lowers_hue_saturation_bands_to_one_packed_point_op() {
+        let grade = crate::HueSaturationGrade::new(
+            crate::HueBand::Greens,
+            -90.0,
+            25.0,
+            -12.0,
+            0.5,
+            45.0,
+            60.0,
+            8.0,
+        )
+        .expect("valid hue/saturation grade");
+        let mut builder = EffectGraphBuilderState::new();
+        builder.append_unary(EffectRenderOp::HueSaturation { grade });
+        let compiled = compile_reference_render_graph(builder.finish()).expect("valid graph");
+        let plan = lower_effect_graph_to_gpu_plan(&compiled).expect("hue/saturation is pointwise");
+        assert_eq!(plan.operations().len(), 1);
+        assert_eq!(
+            plan.operations()[0],
+            EffectGpuPointOp::HueSaturation { grade }
         );
         assert_eq!(plan.processing_domain(), EffectColorDomain::SceneLinearRgb);
     }

@@ -194,6 +194,12 @@ pub(crate) fn apply_render_op(
                 parameter: "requires_float32",
             });
         }
+        EffectRenderOp::HueSaturation { .. } => {
+            return Err(EffectExecutionError::InvalidRenderParameter {
+                op: "hue_saturation",
+                parameter: "requires_float32",
+            });
+        }
         EffectRenderOp::ChromaKey { .. } => {
             return Err(EffectExecutionError::InvalidRenderParameter {
                 op: "chroma_key",
@@ -663,6 +669,7 @@ pub(crate) const fn render_op_f32_scratch_frames(op: &EffectRenderOp) -> usize {
         | EffectRenderOp::HighlightRecovery { .. }
         | EffectRenderOp::ColorCurves { .. }
         | EffectRenderOp::HueSaturationLightness { .. }
+        | EffectRenderOp::HueSaturation { .. }
         | EffectRenderOp::ChromaKey { .. }
         | EffectRenderOp::MattePreview { .. }
         | EffectRenderOp::Vignette { .. }
@@ -842,6 +849,10 @@ pub(crate) fn apply_render_op_f32_region_controlled<E>(
             Ok(true)
         }
         EffectRenderOp::HueSaturationLightness { grade } => {
+            apply_point_grade_rgba_f32_controlled(working, checkpoint, |rgb| grade.apply(rgb))?;
+            Ok(true)
+        }
+        EffectRenderOp::HueSaturation { grade } => {
             apply_point_grade_rgba_f32_controlled(working, checkpoint, |rgb| grade.apply(rgb))?;
             Ok(true)
         }

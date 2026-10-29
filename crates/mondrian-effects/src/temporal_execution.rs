@@ -2799,6 +2799,7 @@ fn render_op_name(op: &crate::EffectRenderOp) -> &'static str {
         crate::EffectRenderOp::Grain { .. } => "grain",
         crate::EffectRenderOp::Invert { .. } => "invert",
         crate::EffectRenderOp::BoxBlur { .. } => "box_blur",
+        crate::EffectRenderOp::HueSaturation { .. } => "hue_saturation",
         crate::EffectRenderOp::UnsharpMask { .. } => "unsharp_mask",
         crate::EffectRenderOp::Crop { .. } => "crop",
         crate::EffectRenderOp::TemporalFrameBlend { .. } => "temporal_frame_blend",

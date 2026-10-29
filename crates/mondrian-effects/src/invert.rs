@@ -22,12 +22,7 @@
 
 use serde::{Deserialize, Serialize};
 
-/// Chroma below this value is treated as neutral, where hue and saturation are
-/// undefined.
-const NEUTRAL_CHROMA: f32 = 1.0e-6;
-
-/// One half turn of the hue circle.
-const HALF_TURN: f32 = 0.5;
+use crate::hsl_space::{opposite_chroma, opposite_hue, opposite_lightness};
 
 /// Channel scope of the `Invert` effect.
 ///
@@ -225,19 +220,19 @@ pub fn invert_rgba_f32(
     let mut inverted = pixel;
 
     if channels.inverts_hue() {
-        let rgb = invert_hue([pixel[0], pixel[1], pixel[2]]);
+        let rgb = opposite_hue([pixel[0], pixel[1], pixel[2]]);
         inverted[0] = rgb[0];
         inverted[1] = rgb[1];
         inverted[2] = rgb[2];
     }
     if channels.inverts_saturation() {
-        let rgb = invert_saturation([inverted[0], inverted[1], inverted[2]]);
+        let rgb = opposite_chroma([inverted[0], inverted[1], inverted[2]]);
         inverted[0] = rgb[0];
         inverted[1] = rgb[1];
         inverted[2] = rgb[2];
     }
     if channels.inverts_lightness() {
-        let rgb = invert_lightness([inverted[0], inverted[1], inverted[2]]);
+        let rgb = opposite_lightness([inverted[0], inverted[1], inverted[2]]);
         inverted[0] = rgb[0];
         inverted[1] = rgb[1];
         inverted[2] = rgb[2];
@@ -305,95 +300,6 @@ fn mix_with_original(original: [f32; 4], inverted: [f32; 4], blend_with_original
     result
 }
 
-fn extremes(rgb: [f32; 3]) -> (f32, f32) {
-    let high = rgb[0].max(rgb[1]).max(rgb[2]);
-    let low = rgb[0].min(rgb[1]).min(rgb[2]);
-    (high, low)
-}
-
-/// Hue of a non-neutral color in `[0, 1)`.
-fn hue_of(rgb: [f32; 3], high: f32, chroma: f32) -> f32 {
-    let hue = if high == rgb[0] {
-        (rgb[1] - rgb[2]) / chroma
-    } else if high == rgb[1] {
-        (rgb[2] - rgb[0]) / chroma + 2.0
-    } else {
-        (rgb[0] - rgb[1]) / chroma + 4.0
-    };
-    (hue / 6.0).rem_euclid(1.0)
-}
-
-/// Rebuild a color from hue, chroma and lightness.
-///
-/// The reconstruction is exact for any lightness, including values outside
-/// `[0, 1]`, because it only adds the common offset `lightness - chroma / 2`.
-fn rgb_from_hue_chroma_lightness(hue: f32, chroma: f32, lightness: f32) -> [f32; 3] {
-    let sextant = hue.rem_euclid(1.0) * 6.0;
-    let second = chroma * (1.0 - (sextant.rem_euclid(2.0) - 1.0).abs());
-    let (red, green, blue) = if sextant < 1.0 {
-        (chroma, second, 0.0)
-    } else if sextant < 2.0 {
-        (second, chroma, 0.0)
-    } else if sextant < 3.0 {
-        (0.0, chroma, second)
-    } else if sextant < 4.0 {
-        (0.0, second, chroma)
-    } else if sextant < 5.0 {
-        (second, 0.0, chroma)
-    } else {
-        (chroma, 0.0, second)
-    };
-    let offset = lightness - chroma * 0.5;
-    [red + offset, green + offset, blue + offset]
-}
-
-/// Rotate the hue by half a turn, preserving lightness and chroma.
-fn invert_hue(rgb: [f32; 3]) -> [f32; 3] {
-    let (high, low) = extremes(rgb);
-    let chroma = high - low;
-    if chroma <= NEUTRAL_CHROMA {
-        return rgb;
-    }
-    let hue = hue_of(rgb, high, chroma);
-    let lightness = (high + low) * 0.5;
-    rgb_from_hue_chroma_lightness(hue + HALF_TURN, chroma, lightness)
-}
-
-/// Reflect lightness around `0.5`, preserving chroma.
-fn invert_lightness(rgb: [f32; 3]) -> [f32; 3] {
-    let (high, low) = extremes(rgb);
-    let lightness = (high + low) * 0.5;
-    let shift = 1.0 - 2.0 * lightness;
-    [rgb[0] + shift, rgb[1] + shift, rgb[2] + shift]
-}
-
-/// Reflect HSL saturation around `0.5`, preserving hue and lightness.
-///
-/// HSL saturation is `chroma / (1 - |2L - 1|)`. Outside the unit cube that
-/// denominator is not a positive color range, so out-of-domain pixels keep
-/// their value instead of being forced into the cube.
-fn invert_saturation(rgb: [f32; 3]) -> [f32; 3] {
-    let (high, low) = extremes(rgb);
-    let chroma = high - low;
-    if chroma <= NEUTRAL_CHROMA {
-        return rgb;
-    }
-    let lightness = (high + low) * 0.5;
-    let range = 1.0 - (2.0 * lightness - 1.0).abs();
-    if range <= NEUTRAL_CHROMA || chroma > range {
-        return rgb;
-    }
-    // Reflecting saturation around 0.5 reflects chroma inside the color range
-    // of that lightness. Computing the reflected chroma by subtraction keeps
-    // the move involutive to within one rounding step.
-    let scale = (range - chroma) / chroma;
-    [
-        lightness + (rgb[0] - lightness) * scale,
-        lightness + (rgb[1] - lightness) * scale,
-        lightness + (rgb[2] - lightness) * scale,
-    ]
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -412,12 +318,12 @@ mod tests {
     }
 
     fn lightness(rgb: [f32; 3]) -> f32 {
-        let (high, low) = extremes(rgb);
+        let (high, low) = crate::hsl_space::extremes(rgb);
         (high + low) * 0.5
     }
 
     fn chroma(rgb: [f32; 3]) -> f32 {
-        let (high, low) = extremes(rgb);
+        let (high, low) = crate::hsl_space::extremes(rgb);
         high - low
     }
 
@@ -619,15 +525,15 @@ mod tests {
         ) -> [f32; 4] {
             let mut inverted = pixel;
             if flags & INVERT_GPU_FLAG_HUE != 0 {
-                let rgb = invert_hue([pixel[0], pixel[1], pixel[2]]);
+                let rgb = opposite_hue([pixel[0], pixel[1], pixel[2]]);
                 inverted[0..3].copy_from_slice(&rgb);
             }
             if flags & INVERT_GPU_FLAG_SATURATION != 0 {
-                let rgb = invert_saturation([inverted[0], inverted[1], inverted[2]]);
+                let rgb = opposite_chroma([inverted[0], inverted[1], inverted[2]]);
                 inverted[0..3].copy_from_slice(&rgb);
             }
             if flags & INVERT_GPU_FLAG_LIGHTNESS != 0 {
-                let rgb = invert_lightness([inverted[0], inverted[1], inverted[2]]);
+                let rgb = opposite_lightness([inverted[0], inverted[1], inverted[2]]);
                 inverted[0..3].copy_from_slice(&rgb);
             }
             let mask_bits = [1, 2, 4];
