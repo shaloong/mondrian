@@ -206,6 +206,12 @@ pub(crate) fn apply_render_op(
                 parameter: "requires_float32",
             });
         }
+        EffectRenderOp::ShiftChannels { .. } => {
+            return Err(EffectExecutionError::InvalidRenderParameter {
+                op: "shift_channels",
+                parameter: "requires_float32",
+            });
+        }
         EffectRenderOp::ChromaKey { .. } => {
             return Err(EffectExecutionError::InvalidRenderParameter {
                 op: "chroma_key",
@@ -632,6 +638,7 @@ pub(crate) const fn render_op_f32_scratch_frames(op: &EffectRenderOp) -> usize {
         | EffectRenderOp::HueSaturationLightness { .. }
         | EffectRenderOp::HueSaturation { .. }
         | EffectRenderOp::BlackAndWhite { .. }
+        | EffectRenderOp::ShiftChannels { .. }
         | EffectRenderOp::ChromaKey { .. }
         | EffectRenderOp::MattePreview { .. }
         | EffectRenderOp::Vignette { .. }
@@ -820,6 +827,18 @@ pub(crate) fn apply_render_op_f32_region_controlled<E>(
         }
         EffectRenderOp::BlackAndWhite { grade } => {
             apply_point_grade_rgba_f32_controlled(working, checkpoint, |rgb| grade.apply(rgb))?;
+            Ok(true)
+        }
+        EffectRenderOp::ShiftChannels { grade } => {
+            for chunk in working.chunks_mut(512) {
+                checkpoint()?;
+                for pixel in chunk {
+                    if !crate::coverage::has_positive_coverage(pixel[3].clamp(0.0, 1.0)) {
+                        continue;
+                    }
+                    *pixel = grade.apply(*pixel);
+                }
+            }
             Ok(true)
         }
         EffectRenderOp::ChromaKey { keyer } => {

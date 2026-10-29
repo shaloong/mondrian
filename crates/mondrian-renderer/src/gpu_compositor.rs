@@ -988,6 +988,38 @@ fn black_and_white(rgb: vec3<f32>, head: vec4<f32>, tail: vec2<f32>, tint_amount
     return tinted;
 }
 
+// CHN-07 samples one of ten per-pixel scalars. Hue turns reuse the HSL helper
+// above; neutral pixels report zero hue and saturation because neither is
+// defined once chroma vanishes.
+fn shift_channels_source(
+    rgb: vec3<f32>,
+    alpha: f32,
+    tag: u32,
+    coefficients: vec3<f32>,
+) -> f32 {
+    if (tag == 0u) { return rgb.r; }
+    if (tag == 1u) { return rgb.g; }
+    if (tag == 2u) { return rgb.b; }
+    if (tag == 3u) { return alpha; }
+    if (tag == 4u) { return dot(rgb, coefficients); }
+    let high = max(rgb.r, max(rgb.g, rgb.b));
+    let low = min(rgb.r, min(rgb.g, rgb.b));
+    let chroma = high - low;
+    let lightness = (high + low) * 0.5;
+    if (tag == 5u) {
+        if (chroma <= 1.0e-6) { return 0.0; }
+        return invert_hue_of(rgb, high, chroma);
+    }
+    if (tag == 6u) {
+        let span = 1.0 - abs(2.0 * lightness - 1.0);
+        if (chroma <= 1.0e-6 || span <= 1.0e-6) { return 0.0; }
+        return chroma / span;
+    }
+    if (tag == 7u) { return lightness; }
+    if (tag == 8u) { return high; }
+    return low;
+}
+
 fn apply_effects(input: vec4<f32>, position: vec2<f32>) -> vec4<f32> {
     if (input.a <= 0.0) { return input; }
     var pixel = input;
@@ -1135,6 +1167,21 @@ fn apply_effects(input: vec4<f32>, position: vec2<f32>) -> vec4<f32> {
                 effect.extra0.xyz,
             );
             pixel = vec4<f32>(gray, pixel.a);
+        } else if (effect.header.x == 16u) {
+            // `ShiftChannelsGrade`: header.y packs the four 4-bit source tags
+            // (red, green, blue, alpha) and params.xyz carries the working-space
+            // CIE Y coefficients.
+            let coefficients = effect.params.xyz;
+            let packed = effect.header.y;
+            let red = shift_channels_source(pixel.rgb, pixel.a, packed & 15u, coefficients);
+            let green =
+                shift_channels_source(pixel.rgb, pixel.a, (packed >> 4u) & 15u, coefficients);
+            let blue =
+                shift_channels_source(pixel.rgb, pixel.a, (packed >> 8u) & 15u, coefficients);
+            let alpha =
+                shift_channels_source(pixel.rgb, pixel.a, (packed >> 12u) & 15u, coefficients);
+            pixel = vec4<f32>(red, green, blue, alpha);
+
         }
     }
     return pixel;
@@ -4229,6 +4276,16 @@ fn effect_uniforms(
                     extra1: [0.0; 4],
                 }
             }
+            EffectGpuPointOp::ShiftChannels { grade } => GpuEffectUniform {
+                header: [16, grade.packed_sources(), 0, 0],
+                params: {
+                    let coefficients = grade.luminance_coefficients();
+                    [coefficients[0], coefficients[1], coefficients[2], 0.0]
+                },
+                color: [0.0; 4],
+                extra0: [0.0; 4],
+                extra1: [0.0; 4],
+            },
             EffectGpuPointOp::Lut3D { lut, intensity } => {
                 let effective_intensity = intensity.clamp(0.0, 1.0);
                 let location = if effective_intensity <= 1.0e-4 {
@@ -6391,6 +6448,33 @@ mod tests {
             uniforms[0].extra0,
             [controls[7], controls[8], controls[9], 0.0]
         );
+        assert_eq!(uniforms[1].header[0], 0);
+    }
+
+    #[test]
+    fn gpu_effect_uniforms_carry_the_shift_channels_sources() {
+        use mondrian_effects::{
+            compile_reference_render_graph, lower_effect_graph_to_gpu_plan, ChannelSource,
+            EffectGraphBuilderState, EffectRenderOp, ShiftChannelsGrade,
+        };
+
+        let grade = ShiftChannelsGrade::new(
+            ChannelSource::Green,
+            ChannelSource::Red,
+            ChannelSource::Alpha,
+            ChannelSource::Luminance,
+            [0.2126, 0.7152, 0.0722],
+        );
+        let mut builder = EffectGraphBuilderState::new();
+        builder.append_unary(EffectRenderOp::ShiftChannels { grade });
+        let graph = compile_reference_render_graph(builder.finish()).expect("shift channels graph");
+        let plan = lower_effect_graph_to_gpu_plan(&graph).expect("shift channels GPU plan");
+        assert_eq!(plan.operations().len(), 1);
+
+        let uniforms = effect_uniforms(Some(&plan), None).expect("shift channels uniforms");
+        assert_eq!(uniforms[0].header, [16, grade.packed_sources(), 0, 0]);
+        assert_eq!(uniforms[0].params, [0.2126, 0.7152, 0.0722, 0.0]);
+        assert_eq!(uniforms[0].header[0], 16);
         assert_eq!(uniforms[1].header[0], 0);
     }
 

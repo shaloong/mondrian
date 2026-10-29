@@ -39,6 +39,7 @@ pub enum EffectType {
     UnsharpMask,
     HueSaturation,
     BlackAndWhite,
+    ShiftChannels,
     /// Externally registered effect definition, including native-format adapters.
     /// This is a domain definition reference, not an Extension package identity.
     /// The serde name preserves the existing project wire representation.
@@ -73,6 +74,7 @@ impl EffectType {
             Self::UnsharpMask => "builtin.unsharp_mask".to_string(),
             Self::HueSaturation => "builtin.hue_saturation".to_string(),
             Self::BlackAndWhite => "builtin.black_and_white".to_string(),
+            Self::ShiftChannels => "builtin.shift_channels".to_string(),
             Self::External(key) => key.clone(),
         }
     }
@@ -103,6 +105,7 @@ impl EffectType {
             "builtin.unsharp_mask" => Self::UnsharpMask,
             "builtin.hue_saturation" => Self::HueSaturation,
             "builtin.black_and_white" => Self::BlackAndWhite,
+            "builtin.shift_channels" => Self::ShiftChannels,
             other => Self::External(other.to_string()),
         }
     }
@@ -133,6 +136,7 @@ impl EffectType {
             Self::UnsharpMask => "钝化蒙版",
             Self::HueSaturation => "色相饱和度",
             Self::BlackAndWhite => "黑白",
+            Self::ShiftChannels => "转换通道",
             Self::External(name) => name,
         }
     }
@@ -151,6 +155,7 @@ impl EffectType {
             | Self::HueSaturationLightness
             | Self::HueSaturation
             | Self::BlackAndWhite => vec!["颜色", "调色"],
+            Self::ShiftChannels => vec!["通道"],
             Self::Crop => vec!["变换"],
             Self::GaussianBlur | Self::Sharpen | Self::BoxBlur | Self::UnsharpMask => {
                 vec!["颜色", "模糊与锐化"]
@@ -188,6 +193,7 @@ impl EffectType {
             Self::UnsharpMask => "unsharp_mask".to_string(),
             Self::HueSaturation => "hue_saturation".to_string(),
             Self::BlackAndWhite => "black_and_white".to_string(),
+            Self::ShiftChannels => "shift_channels".to_string(),
             Self::External(key) => key.clone(),
         }
     }
@@ -478,6 +484,7 @@ impl crate::AuthoringFootprint for EffectType {
             | Self::UnsharpMask
             | Self::HueSaturation
             | Self::BlackAndWhite => Ok(()),
+            Self::ShiftChannels => Ok(()),
         }
     }
 }

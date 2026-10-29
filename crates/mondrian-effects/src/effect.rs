@@ -825,6 +825,16 @@ pub enum EffectRenderOp {
     BlackAndWhite {
         grade: crate::BlackAndWhiteGrade,
     },
+    /// Channel rewiring driven by ten per-pixel scalars (CHN-07).
+    ///
+    /// Each output channel copies one scalar sampled from the incoming pixel:
+    /// a color channel, alpha, the working-space CIE Y, an HSL component, or
+    /// the pixel's maximum/minimum. Values are copied without clamping, and
+    /// neutral pixels report hue 0 and saturation 0 because neither is defined
+    /// once chroma vanishes.
+    ShiftChannels {
+        grade: crate::ShiftChannelsGrade,
+    },
     /// Source-relative hard crop expressed as normalized edge insets.
     ///
     /// Pixels outside the remaining rectangle become transparent black before
@@ -952,6 +962,9 @@ impl std::fmt::Debug for EffectRenderOp {
                 .finish(),
             Self::BlackAndWhite { grade } => {
                 formatter.debug_struct("BlackAndWhite").field("grade", grade).finish()
+            }
+            Self::ShiftChannels { grade } => {
+                formatter.debug_struct("ShiftChannels").field("grade", grade).finish()
             }
             Self::HueSaturation { grade } => {
                 formatter.debug_struct("HueSaturation").field("grade", grade).finish()
@@ -1340,6 +1353,13 @@ impl EffectRenderOp {
                     value.to_bits().hash(state);
                 }
             }
+            EffectRenderOp::ShiftChannels { grade } => {
+                26u8.hash(state);
+                grade.packed_sources().hash(state);
+                for value in grade.luminance_coefficients() {
+                    value.to_bits().hash(state);
+                }
+            }
             EffectRenderOp::HueSaturation { grade } => {
                 24u8.hash(state);
                 grade.band().key().hash(state);
@@ -1442,6 +1462,7 @@ impl EffectRenderOp {
             EffectRenderOp::Invert { .. } => 1,
             EffectRenderOp::BoxBlur { .. } => 4,
             EffectRenderOp::BlackAndWhite { .. } => 2,
+            EffectRenderOp::ShiftChannels { .. } => 1,
             EffectRenderOp::HueSaturation { .. } => 2,
             EffectRenderOp::UnsharpMask { .. } => 4,
             EffectRenderOp::Lut3D { .. } => 2,
@@ -1975,7 +1996,7 @@ impl EffectDefinition {
     }
 }
 
-fn builtin_effect_types() -> [EffectType; 24] {
+fn builtin_effect_types() -> [EffectType; 25] {
     [
         EffectType::BasicCorrection,
         EffectType::WhiteBalance,
@@ -2001,6 +2022,7 @@ fn builtin_effect_types() -> [EffectType; 24] {
         EffectType::UnsharpMask,
         EffectType::HueSaturation,
         EffectType::BlackAndWhite,
+        EffectType::ShiftChannels,
     ]
 }
 
@@ -3105,6 +3127,33 @@ fn default_properties_for(effect_type: EffectType) -> PropertyBag {
                 Some(1.0),
             );
         }
+        EffectType::ShiftChannels => {
+            for (parameter, label, default) in [
+                ("red", "红色取自", "red"),
+                ("green", "绿色取自", "green"),
+                ("blue", "蓝色取自", "blue"),
+                ("alpha", "Alpha 取自", "alpha"),
+            ] {
+                define_builtin_enum_property(
+                    &mut properties,
+                    &effect_type,
+                    parameter,
+                    "转换通道",
+                    label,
+                    default,
+                    crate::ChannelSource::ALL
+                        .into_iter()
+                        .map(|source| {
+                            ParameterEnumOption::new(
+                                source.key(),
+                                source.label(),
+                                format!("builtin.shift_channels.{parameter}.{}", source.key()),
+                            )
+                        })
+                        .collect(),
+                );
+            }
+        }
         EffectType::BlackAndWhite => {
             for (parameter, label, default) in [
                 ("red", "红色", 40.0),
@@ -3504,6 +3553,10 @@ fn builtin_effect_execution_contract(effect_type: &EffectType) -> EffectExecutio
             // definition-level envelope is a full-frame input. The graph
             // planner still narrows it per instance from the authored radius.
             roi_propagation: EffectRoiPropagation::FullFrame,
+            ..cpu_linear
+        },
+        EffectType::ShiftChannels => EffectExecutionContract {
+            execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
             ..cpu_linear
         },
         EffectType::BlackAndWhite => EffectExecutionContract {
@@ -4359,6 +4412,45 @@ fn builtin_graph_builder_for(effect_type: &EffectType) -> Option<EffectGraphBuil
                 Ok(())
             }))
         }
+        EffectType::ShiftChannels => {
+            let ids = [
+                builtin_parameter_id(effect_type, "red"),
+                builtin_parameter_id(effect_type, "green"),
+                builtin_parameter_id(effect_type, "blue"),
+                builtin_parameter_id(effect_type, "alpha"),
+            ];
+            Some(Arc::new(move |effect, context, graph| {
+                let mut outputs = [crate::ChannelSource::Red; 4];
+                for (index, id) in ids.iter().enumerate() {
+                    let key =
+                        effect.evaluate_enum_parameter(id, context.time).ok_or_else(|| {
+                            EffectGraphBuildError::InvalidAuthorState {
+                                effect_key: effect.effect_type.key(),
+                                effect_id: effect.id,
+                                reason: "shift channels source is not authored".to_owned(),
+                            }
+                        })?;
+                    outputs[index] = crate::ChannelSource::from_key(&key).ok_or_else(|| {
+                        EffectGraphBuildError::InvalidAuthorState {
+                            effect_key: effect.effect_type.key(),
+                            effect_id: effect.id,
+                            reason: format!("unknown shift channels source `{key}`"),
+                        }
+                    })?;
+                }
+                let grade = crate::ShiftChannelsGrade::new(
+                    outputs[0],
+                    outputs[1],
+                    outputs[2],
+                    outputs[3],
+                    context.working_color_space.luminance_coefficients(),
+                );
+                if !grade.is_identity() {
+                    graph.append_unary(EffectRenderOp::ShiftChannels { grade });
+                }
+                Ok(())
+            }))
+        }
         EffectType::BlackAndWhite => {
             let weights = [
                 builtin_parameter_id(effect_type, "red"),
@@ -4477,6 +4569,7 @@ fn builtin_display_name(effect_type: &EffectType) -> &'static str {
         EffectType::UnsharpMask => "钝化蒙版",
         EffectType::HueSaturation => "色相饱和度",
         EffectType::BlackAndWhite => "黑白",
+        EffectType::ShiftChannels => "转换通道",
         EffectType::External(_) => "外部效果",
     }
 }
@@ -4985,6 +5078,154 @@ mod tests {
         assert_eq!(grade.tint_amount(), 0.4);
     }
 
+    fn shift_channels_op(graph: &EffectRenderGraph) -> Option<crate::ShiftChannelsGrade> {
+        graph.nodes.iter().find_map(|node| match &node.kind {
+            EffectGraphNodeKind::UnaryEffect {
+                op: EffectRenderOp::ShiftChannels { grade },
+                ..
+            }
+            | EffectGraphNodeKind::DomainEffect {
+                op: EffectRenderOp::ShiftChannels { grade },
+                ..
+            } => Some(*grade),
+            _ => None,
+        })
+    }
+
+    #[test]
+    fn shift_channels_defaults_compile_to_identity() {
+        let effect = instantiate_effect_node(EffectType::ShiftChannels)
+            .expect("registered Shift Channels definition");
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("evaluate default Shift Channels");
+
+        assert!(
+            shift_channels_op(&graph).is_none(),
+            "the listed defaults are the identity rewire"
+        );
+    }
+
+    #[test]
+    fn shift_channels_authored_state_reaches_the_operation() {
+        let mut effect = instantiate_effect_node(EffectType::ShiftChannels)
+            .expect("registered Shift Channels definition");
+        for (parameter, source) in [("red", "green"), ("blue", "alpha"), ("alpha", "luminance")] {
+            effect
+                .apply_property_mutation(PropertyMutation::SetStaticValue {
+                    path: EffectType::ShiftChannels.property_path(parameter),
+                    value: PropertyValue::Enum(source.to_owned()),
+                })
+                .unwrap_or_else(|error| panic!("author Shift Channels {parameter}: {error}"));
+        }
+
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("evaluate authored Shift Channels");
+        let grade = shift_channels_op(&graph).expect("shift channels state reaches the op");
+        assert_eq!(
+            grade.outputs(),
+            [
+                crate::ChannelSource::Green,
+                crate::ChannelSource::Green,
+                crate::ChannelSource::Alpha,
+                crate::ChannelSource::Luminance,
+            ]
+        );
+        assert_eq!(
+            grade.luminance_coefficients(),
+            TEST_WORKING_SPACE.luminance_coefficients()
+        );
+    }
+
+    #[test]
+    fn shift_channels_rejects_an_unknown_source_at_authoring() {
+        let mut effect = instantiate_effect_node(EffectType::ShiftChannels)
+            .expect("registered Shift Channels definition");
+        let rejected = effect.apply_property_mutation(PropertyMutation::SetStaticValue {
+            path: EffectType::ShiftChannels.property_path("red"),
+            value: PropertyValue::Enum("magenta_plus".to_owned()),
+        });
+        assert!(
+            rejected.is_err(),
+            "unknown enum keys must not be authorable"
+        );
+    }
+
+    #[test]
+    fn shift_channels_swaps_channels_on_scene_linear_float_frames() {
+        let mut effect = instantiate_effect_node(EffectType::ShiftChannels)
+            .expect("registered Shift Channels definition");
+        for (parameter, source) in [
+            ("red", "green"),
+            ("green", "red"),
+            ("blue", "lightness"),
+            ("alpha", "blue"),
+        ] {
+            effect
+                .apply_property_mutation(PropertyMutation::SetStaticValue {
+                    path: EffectType::ShiftChannels.property_path(parameter),
+                    value: PropertyValue::Enum(source.to_owned()),
+                })
+                .expect("author Shift Channels");
+        }
+
+        // Channel copies are exact and unclamped: the extended-range pixel keeps
+        // -0.25 and 1.5 in its color channels, while HSL lightness feeds blue.
+        let input = [[0.25, 0.5, 0.75, 0.5], [1.5, -0.25, 0.5, 1.0]];
+        let view = || {
+            crate::EffectFloatFrameView::new(
+                crate::EffectFrameExtent::new(2, 1),
+                crate::EffectValueFormat::new(
+                    crate::EffectWorkingPrecision::Float32,
+                    crate::EffectColorDomain::SceneLinearRgb,
+                    mondrian_core::ColorFrameAlpha::StraightCoverage,
+                ),
+                mondrian_core::ImageSampling::UNIT_SQUARE,
+                &input,
+            )
+        };
+
+        let compiled = compile_clip_effect_graph(&[effect], &[], tt(0), TEST_WORKING_SPACE)
+            .expect("compile Shift Channels");
+        let output =
+            crate::apply_compiled_effect_graph_rgba_f32(view(), &compiled, 0).expect("execute");
+
+        assert_eq!(output[0], [0.5, 0.25, 0.5, 0.75]);
+        assert_eq!(output[1], [-0.25, 1.5, 0.625, 0.5]);
+    }
+
+    #[test]
+    fn shift_channels_authored_state_survives_project_serialization_round_trip() {
+        let mut effect = instantiate_effect_node(EffectType::ShiftChannels)
+            .expect("registered Shift Channels definition");
+        for (parameter, source) in [("red", "blue"), ("alpha", "saturation")] {
+            effect
+                .apply_property_mutation(PropertyMutation::SetStaticValue {
+                    path: EffectType::ShiftChannels.property_path(parameter),
+                    value: PropertyValue::Enum(source.to_owned()),
+                })
+                .expect("author Shift Channels");
+        }
+
+        let wire = serde_json::to_string(&effect).expect("serialize the Shift Channels node");
+        let restored: EffectNode =
+            serde_json::from_str(&wire).expect("restore the Shift Channels node");
+        assert_eq!(restored.effect_type, EffectType::ShiftChannels);
+        assert_eq!(restored, effect);
+
+        let graph = build_effect_render_graph(&[restored], tt(0), TEST_WORKING_SPACE)
+            .expect("evaluate the restored Shift Channels node");
+        let grades = shift_channels_op(&graph).expect("restored state reaches the op");
+        assert_eq!(
+            grades.outputs(),
+            [
+                crate::ChannelSource::Blue,
+                crate::ChannelSource::Green,
+                crate::ChannelSource::Blue,
+                crate::ChannelSource::Saturation,
+            ]
+        );
+    }
+
     #[test]
     fn hue_saturation_defaults_compile_to_identity() {
         let effect = instantiate_effect_node(EffectType::HueSaturation)
@@ -5190,6 +5431,7 @@ mod tests {
             EffectType::UnsharpMask,
             EffectType::HueSaturation,
             EffectType::BlackAndWhite,
+            EffectType::ShiftChannels,
         ]
         .into_iter()
         .map(|effect_type| effect_type.key())

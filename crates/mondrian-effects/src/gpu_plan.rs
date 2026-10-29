@@ -81,6 +81,9 @@ pub enum EffectGpuPointOp {
     /// The grade is carried whole and backends read exact controls through
     /// [`crate::BlackAndWhiteGrade::gpu_controls`], so no backend re-derives them.
     BlackAndWhite { grade: crate::BlackAndWhiteGrade },
+    /// Channel rewiring with the four packed source tags and the CIE Y
+    /// coefficients resolved on the CPU, so the shader never re-derives them.
+    ShiftChannels { grade: crate::ShiftChannelsGrade },
     /// Prepared creative 3D LUT sampled in its explicitly authored processing domain.
     ///
     /// The backend-neutral plan retains the immutable semantic payload only;
@@ -765,6 +768,9 @@ fn lower_point_op(
         EffectRenderOp::BlackAndWhite { grade } => {
             Ok(EffectGpuPointOp::BlackAndWhite { grade: *grade })
         }
+        EffectRenderOp::ShiftChannels { grade } => {
+            Ok(EffectGpuPointOp::ShiftChannels { grade: *grade })
+        }
         EffectRenderOp::Invert { channels, blend_with_original } => {
             let (color_mask, flags) = channels.gpu_scope();
             Ok(EffectGpuPointOp::Invert {
@@ -818,6 +824,7 @@ fn operation_name(op: &EffectRenderOp) -> &'static str {
         EffectRenderOp::BoxBlur { .. } => "box_blur",
         EffectRenderOp::HueSaturation { .. } => "hue_saturation",
         EffectRenderOp::BlackAndWhite { .. } => "black_and_white",
+        EffectRenderOp::ShiftChannels { .. } => "shift_channels",
         EffectRenderOp::UnsharpMask { .. } => "unsharp_mask",
         EffectRenderOp::Crop { .. } => "crop",
         EffectRenderOp::TemporalFrameBlend { .. } => "temporal_frame_blend",
@@ -919,6 +926,27 @@ mod tests {
         assert_eq!(
             plan.operations()[0],
             EffectGpuPointOp::BlackAndWhite { grade }
+        );
+        assert_eq!(plan.processing_domain(), EffectColorDomain::SceneLinearRgb);
+    }
+
+    #[test]
+    fn lowers_shift_channels_to_one_packed_point_op() {
+        let grade = crate::ShiftChannelsGrade::new(
+            crate::ChannelSource::Green,
+            crate::ChannelSource::Red,
+            crate::ChannelSource::Alpha,
+            crate::ChannelSource::Luminance,
+            [0.2126, 0.7152, 0.0722],
+        );
+        let mut builder = EffectGraphBuilderState::new();
+        builder.append_unary(EffectRenderOp::ShiftChannels { grade });
+        let compiled = compile_reference_render_graph(builder.finish()).expect("valid graph");
+        let plan = lower_effect_graph_to_gpu_plan(&compiled).expect("shift channels is pointwise");
+        assert_eq!(plan.operations().len(), 1);
+        assert_eq!(
+            plan.operations()[0],
+            EffectGpuPointOp::ShiftChannels { grade }
         );
         assert_eq!(plan.processing_domain(), EffectColorDomain::SceneLinearRgb);
     }

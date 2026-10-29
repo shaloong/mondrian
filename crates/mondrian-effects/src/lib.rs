@@ -58,6 +58,7 @@ pub use processor_residency::{
     PreparedEffectProcessorInput,
 };
 pub mod qualifier;
+pub mod shift_channels;
 pub mod temporal_execution;
 pub mod tracking;
 pub mod unsharp_mask;
@@ -203,3 +204,5 @@ pub use processor_question::{
 
 #[cfg(test)]
 mod image_scale_admission_tests;
+
+pub use shift_channels::{ChannelSource, ShiftChannelsGrade};
