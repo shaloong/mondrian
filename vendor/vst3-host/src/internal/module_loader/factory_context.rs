@@ -456,8 +456,25 @@ mod tests {
                 factory.cast::<FUnknown>().unwrap().as_ptr() as usize
             };
             assert_eq!(before, after);
+            let mut host = crate::Vst3Host::builder()
+                .with_process_isolation(false)
+                .initial_process_mode(crate::plugin::ProcessMode::Offline)
+                .sample_rate(48_000.0)
+                .block_size(64)
+                .input_channels(2)
+                .output_channels(2)
+                .build()
+                .unwrap();
+            let mut instance = host.load_plugin_class(&path, &info.uid).unwrap();
+            let other_instance = host.load_plugin_class(&path, &info.uid).unwrap();
+            let state = instance.save_state().expect("real reference instance state");
+            assert!(!state.is_empty());
+            instance.load_state(&state).expect("same-instance state restore");
+            assert_eq!(instance.save_state().unwrap(), state);
+            assert_eq!(other_instance.info().uid, info.uid);
+            drop(instance);
             drop(first);
-            // No editor is created. Actual native SDK factory retains the Linux
+            // No view is attached. Actual native SDK factory retains the Linux
             // context, while this callback probes the host ABI/service lifetime.
             let calls = Arc::new(AtomicUsize::new(0));
             let record = Arc::new(Observed::default());
@@ -483,6 +500,8 @@ mod tests {
                 kResultOk
             );
             drop(timer);
+            drop(other_instance);
+            drop(host);
             drop(peer);
         }
     }
