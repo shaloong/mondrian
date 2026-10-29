@@ -53,8 +53,11 @@ Scoped X11 and Cocoa parent primitives are also implemented in the SDK, separate
 from Product GUI adapters. On Ubuntu, an authenticated private Xvfb gate passes
 three create/resize/deferred-close/retirement cycles with empty test stderr and
 settled process ownership; the complete SDK library passes 439 tests (16 ignored).
-The separate parent-foundation candidate's Cocoa actual-main probe and all three
-standalone SDK routes pass CI216. These parent probes load no foreign view.
+The parent foundation's Cocoa actual-main probe and all three standalone SDK
+routes pass CI216. Parent and Product slices are integrated through
+[PR33](https://github.com/shaloong/mondrian/pull/33) and
+[PR34](https://github.com/shaloong/mondrian/pull/34), each after all13 desktop CI
+checks and required CLA pass. Parent probes load no foreign view.
 
 Product VST3 GUI adapters now reuse one attachment owner over the concrete
 Windows, X11 or Cocoa container; temporary Main/DSP borrows retain the view.
@@ -64,8 +67,9 @@ same-instance DSP, both detach failures and state roundtrip. Author observation
 consumption is distinct from DSP delivery: the roundtrip checks GUI-to-PCM before
 capture and pending-host-input refusal before native delivery and restore.
 Windows SDK ordinary tests pass416 (13 ignored); the finite Linux ADelay and
-Ring Out cases above also pass on this Product implementation. CLAP's Product GUI
-adapter remains Windows. macOS foreign views, broader Product/UI integration,
+Ring Out cases above also pass on this Product implementation. CLAP consumers
+also target the same container family, with separate qualification below.
+macOS/Windows foreign views, broader Product/UI integration,
 input/focus, full heap/resource, realtime/performance and physical displays remain
 open; basic parent or ordinary tests do not close them.
 
@@ -95,6 +99,36 @@ Product and `MONDRIAN_VST3_GUI_TEST_PLUGIN` with the selected actual AGain modul
 then run `cargo test --locked -p mondrian-audio --test native_vst3_gui_runtime -- --ignored --test-threads=1`.
 Linux additionally requires an authenticated X11 display. Record the GUI dependency
 version; the plugin's SDK version alone does not distinguish the two inputs above.
+
+CLAP retains its original GUI create/show/hide/destroy owner over Win32, X11 or
+Cocoa. Cocoa uses logical sizes and requires actual process main; a headless CLAP
+logical-main thread is not Cocoa affinity proof. Control/lifecycle autorelease
+scopes drain while the entry or instance still retains native code, including
+initialization failure and destruction. A worker-wide pool cannot provide that
+unload guarantee. macOS Objective-C release-order controls cover successful
+lifecycles and both entry/instance initialization failures, separately from GUI.
+
+The official Ring Out release `ring-out-v1.0.0` (GPLv3 or later) passes the
+[CLAP installed GUI case](../../crates/mondrian-audio/tests/native_clap_gui_runtime.rs)
+on Ubuntu24.04.5/x86_64:20 independent bare cases,60 GUI open/close cycles and all
+9220 PCM frames against independent gain math. A native saved -6dB state, bypass
+off and empty filters are explicit inputs. Actual child painting, negotiated
+child/parent dimensions, native user close, stable process/load identity,
+unchanged serialized author data, SourceClosed and original child settlement pass.
+Conditions: Rust1.97.1, private patched FFmpeg8.1.2, authenticated private
+Xvfb1920x1200x24/TCP-off, offline48k/Stereo/max64, normal Product opt0/debug0 and
+test opt1/debug0. Original180s/2s bounds, exit0 and empty stderr are retained.
+The plugin's SDK build and graphics renderer are unreported. This does not qualify
+GUI parameter editing, full input/focus, foreign macOS/Windows GUI, physical
+devices, full heap, realtime or performance. The shared fixed-view AGain regression
+also passes after extracting the common Runtime/Graph GUI assertions.
+
+To repeat, set `MONDRIAN_CLAP_TEST_HELPER` to the matching normal Product,
+`MONDRIAN_CLAP_TEST_PLUGIN` to the actual Ring Out module and
+`MONDRIAN_CLAP_TEST_STATE` to its native -6dB state; run
+`cargo test --locked -p mondrian-audio --test native_clap_gui_runtime -- --ignored --test-threads=1`.
+Linux requires an authenticated X11 display with working GLX and enough space for
+the actual editor; sizes are queried, not assumed from plugin defaults.
 
 ## Implementation boundary
 

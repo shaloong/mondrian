@@ -14,6 +14,20 @@ use std::fs::OpenOptions;
 use std::net::TcpStream;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 
+/// Drain control-call temporaries while the caller still retains the native module.
+/// Do not wrap an owner replacement or unload: its module could drop before the
+/// pool drains. This scope does not establish Cocoa main-thread affinity.
+pub(super) fn with_native_control_pool<T>(action: impl FnOnce() -> T) -> T {
+    #[cfg(target_os = "macos")]
+    {
+        objc2::rc::autoreleasepool(|_| action())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        action()
+    }
+}
+
 pub(super) fn run_worker(
     factory: &dyn IsolatedAudioProcessorWorkerFactory,
 ) -> Result<(), AudioProcessorHostError> {

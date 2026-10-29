@@ -543,7 +543,7 @@ mod installed {
         let native_main =
             std::rc::Rc::new(vst3_host::window::WindowsEditorMainThread::initialize().unwrap());
         prepare_loaded_on_main(
-            native_main,
+            Some(native_main),
             request,
             entry,
             std::ffi::CString::new(ID).unwrap().as_c_str(),

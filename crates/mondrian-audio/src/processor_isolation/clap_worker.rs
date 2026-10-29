@@ -67,7 +67,7 @@ mod beat_position;
 mod native_author;
 #[path = "clap_worker/parameter_observations.rs"]
 mod parameter_observations;
-#[cfg(windows)]
+#[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
 #[path = "clap_worker/static_parameters.rs"]
 mod static_parameters;
 
@@ -206,7 +206,7 @@ impl HostHandlers for ClapHost {
             // One same-ID raw/shared table, never also legacy HostNotePorts.
             builder.register::<clack_extensions::note_ports::HostNotePortsRaw>();
         }
-        #[cfg(windows)]
+        #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
         builder.register::<clack_extensions::gui::HostGui>();
         builder
             .register::<clack_extensions::timer::HostTimer>()
@@ -1082,16 +1082,12 @@ impl IsolatedAudioProcessorWorkerFactory for ClapAudioProcessorWorkerFactory {
         }
         let plugin_id = CString::new(payload.plugin_id)
             .map_err(|_| invalid("CLAP plugin ID contains a NUL byte"))?;
-        #[cfg(windows)]
-        let native_main = std::rc::Rc::new(
-            vst3_host::window::WindowsEditorMainThread::initialize().map_err(|error| {
-                unavailable(format!("CLAP native main initialization failed: {error}"))
-            })?,
-        );
+        #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
+        let native_main = initialize_native_main()?;
         let entry = unsafe { PluginEntry::load(payload.library_path.as_os_str()) }
             .map_err(|error| unavailable(format!("CLAP library load failed: {error}")))?;
         prepare_loaded_on_main(
-            #[cfg(windows)]
+            #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
             native_main,
             request,
             entry,
@@ -1289,16 +1285,10 @@ fn prepare_loaded_with_audio_input(
     expected_parameters: &[super::ClapParameterDescriptor],
     parameter_ids: &[u32],
 ) -> Result<Box<dyn IsolatedAudioProcessorWorker>, AudioProcessorHostError> {
-    #[cfg(windows)]
-    let native_main = std::rc::Rc::new(
-        vst3_host::window::WindowsEditorMainThread::initialize().map_err(|error| {
-            unavailable(format!(
-                "CLAP owned native main initialization failed: {error}"
-            ))
-        })?,
-    );
+    #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
+    let native_main = initialize_native_main()?;
     prepare_loaded_on_main(
-        #[cfg(windows)]
+        #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
         native_main,
         request,
         entry,
@@ -1312,8 +1302,24 @@ fn prepare_loaded_with_audio_input(
     .map(|worker| worker as Box<dyn IsolatedAudioProcessorWorker>)
 }
 
+/// CLAP's logical main can be a headless control thread. Actual Cocoa views
+/// additionally require process main; never swallow other initialization errors.
+#[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
+fn initialize_native_main(
+) -> Result<Option<std::rc::Rc<vst3_host::window::NativeEditorMainThread>>, AudioProcessorHostError>
+{
+    #[cfg(target_os = "macos")]
+    if objc2::MainThreadMarker::new().is_none() {
+        return Ok(None);
+    }
+    vst3_host::window::NativeEditorMainThread::initialize()
+        .map(|main| Some(std::rc::Rc::new(main)))
+        .map_err(|error| unavailable(format!("CLAP native main initialization failed: {error}")))
+}
+
 fn prepare_loaded_on_main(
-    #[cfg(windows)] native_main: std::rc::Rc<vst3_host::window::WindowsEditorMainThread>,
+    #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
+    native_main: Option<std::rc::Rc<vst3_host::window::NativeEditorMainThread>>,
     request: IsolatedAudioProcessorWorkerPrepareRequest,
     entry: PluginEntry,
     plugin_id: &CStr,
@@ -1323,336 +1329,355 @@ fn prepare_loaded_on_main(
     expected_parameters: &[super::ClapParameterDescriptor],
     parameter_ids: &[u32],
 ) -> Result<Box<ClapWorker>, AudioProcessorHostError> {
-    let event_capacity = parameter_input_capacity(request.render_contract(), parameter_ids.len())?;
-    super::clap_note_input_contract::validate_clap_contract(request.note_input_contract())?;
-    let notes_enabled = !request.note_input_contract().ports.is_empty();
-    let note_limits = request.note_input_contract().limits;
-    let input_events =
-        ClapInputEvents::try_with_note_capacity(event_capacity, note_limits.input_events)?;
-    if note_source_reservation_bytes(expected_parameters.len(), request.note_input_contract())?
-        .checked_add(input_events.allocated_bytes()?)
-        .ok_or_else(|| invalid("CLAP input/output owner reservation overflowed"))?
-        > request.render_contract().processor_session_scratch_budget_bytes
-    {
-        return Err(invalid(
-            "CLAP output owner exceeds the current Session scratch ceiling",
-        ));
-    }
-    let factory = entry
-        .get_plugin_factory()
-        .ok_or_else(|| unavailable("CLAP library has no plugin factory"))?;
-    super::clap_note_input_metadata::validate_factory_plugin_id(&factory, plugin_id)?;
-    let info = HostInfo::new(
-        "Mondrian",
-        "Mondrian",
-        "https://github.com/shaloong/mondrian",
-        env!("CARGO_PKG_VERSION"),
-    )
-    .map_err(|error| invalid(format!("invalid CLAP host identity: {error}")))?;
-    let shared = if notes_enabled {
-        ClapHostShared::new_with_note_input()
-    } else {
-        ClapHostShared::new()
-    };
-    let mut output_events = ClapOutputEvents::new_with_note_capacity(
-        expected_parameters,
-        Arc::clone(&shared.parameter_source),
-        note_limits.output_ends,
-    )
-    .map_err(|error| parameter_refusal_at_site(error, "expected_output_contract"))?;
-    let native_shared = shared.clone().with_native_logs()?;
-    let mut instance = PluginInstance::<ClapHost>::new(
-        |_| native_shared,
-        |shared| ClapHostMainThread::new(shared),
-        &entry,
-        plugin_id,
-        &info,
-    )
-    .map_err(|error| unavailable(format!("CLAP instance creation failed: {error}")))?;
-    let log_receiver = instance
-        .access_shared_handler(|host| host.logs.claim_receiver())
-        .ok_or_else(|| invalid("CLAP native log receiver already claimed"))?;
-    shared.service_callbacks(&mut instance)?;
-    let inactive = instance
-        .inactive_plugin_handle()
-        .ok_or_else(|| invalid("CLAP cold worker is active"))?;
-    if super::clap_audio_config::negotiate_initial(
-        &inactive,
-        request.render_contract().channel_layout,
-    )? {
+    // Keep the same initialized entry alive through all constructor/error
+    // cleanup and pool drainage. This is a temporary code-lifetime guard.
+    let _entry_guard = entry.clone();
+    super::worker::with_native_control_pool(|| {
+        let event_capacity =
+            parameter_input_capacity(request.render_contract(), parameter_ids.len())?;
+        super::clap_note_input_contract::validate_clap_contract(request.note_input_contract())?;
+        let notes_enabled = !request.note_input_contract().ports.is_empty();
+        let note_limits = request.note_input_contract().limits;
+        let input_events =
+            ClapInputEvents::try_with_note_capacity(event_capacity, note_limits.input_events)?;
+        if note_source_reservation_bytes(expected_parameters.len(), request.note_input_contract())?
+            .checked_add(input_events.allocated_bytes()?)
+            .ok_or_else(|| invalid("CLAP input/output owner reservation overflowed"))?
+            > request.render_contract().processor_session_scratch_budget_bytes
+        {
+            return Err(invalid(
+                "CLAP output owner exceeds the current Session scratch ceiling",
+            ));
+        }
+        let factory = entry
+            .get_plugin_factory()
+            .ok_or_else(|| unavailable("CLAP library has no plugin factory"))?;
+        super::clap_note_input_metadata::validate_factory_plugin_id(&factory, plugin_id)?;
+        let info = HostInfo::new(
+            "Mondrian",
+            "Mondrian",
+            "https://github.com/shaloong/mondrian",
+            env!("CARGO_PKG_VERSION"),
+        )
+        .map_err(|error| invalid(format!("invalid CLAP host identity: {error}")))?;
+        let shared = if notes_enabled {
+            ClapHostShared::new_with_note_input()
+        } else {
+            ClapHostShared::new()
+        };
+        let mut output_events = ClapOutputEvents::new_with_note_capacity(
+            expected_parameters,
+            Arc::clone(&shared.parameter_source),
+            note_limits.output_ends,
+        )
+        .map_err(|error| parameter_refusal_at_site(error, "expected_output_contract"))?;
+        let native_shared = shared.clone().with_native_logs()?;
+        let mut instance = PluginInstance::<ClapHost>::new(
+            |_| native_shared,
+            |shared| ClapHostMainThread::new(shared),
+            &entry,
+            plugin_id,
+            &info,
+        )
+        .map_err(|error| unavailable(format!("CLAP instance creation failed: {error}")))?;
+        let log_receiver = instance
+            .access_shared_handler(|host| host.logs.claim_receiver())
+            .ok_or_else(|| invalid("CLAP native log receiver already claimed"))?;
         shared.service_callbacks(&mut instance)?;
-    }
-    if let Some(state) = state {
-        let handle = instance.plugin_handle();
-        let extension = handle
-            .get_extension::<PluginState>()
-            .ok_or_else(|| unavailable("CLAP plugin does not support state restoration"))?;
-        let mut reader = state;
-        extension
-            .load(&handle, &mut reader)
-            .map_err(|error| unavailable(format!("CLAP state restore failed: {error}")))?;
-    }
+        let inactive = instance
+            .inactive_plugin_handle()
+            .ok_or_else(|| invalid("CLAP cold worker is active"))?;
+        if super::clap_audio_config::negotiate_initial(
+            &inactive,
+            request.render_contract().channel_layout,
+        )? {
+            shared.service_callbacks(&mut instance)?;
+        }
+        if let Some(state) = state {
+            let handle = instance.plugin_handle();
+            let extension = handle
+                .get_extension::<PluginState>()
+                .ok_or_else(|| unavailable("CLAP plugin does not support state restoration"))?;
+            let mut reader = state;
+            extension
+                .load(&handle, &mut reader)
+                .map_err(|error| unavailable(format!("CLAP state restore failed: {error}")))?;
+        }
 
-    shared.service_callbacks(&mut instance)?;
-    configure_render_mode(
-        &instance.plugin_handle(),
-        request.render_contract().processing_mode,
-    )?;
-    shared.service_callbacks(&mut instance)?;
-    let channel_count = request.render_contract().channel_count();
-    let initial_parameter_source = shared.parameter_source.snapshot();
-    {
-        let handle = instance.plugin_handle();
-        // Own the one existing query snapshot only through the original check;
-        // its Vec is dropped before signature/port/activation work as before.
-        let mut capture = ParameterQueryCapture::from_environment();
-        let parameters = list_parameters_observed(&handle, capture.as_mut())
-            .map_err(|error| parameter_refusal_at_site(error, "native_after_state_render_mode"))?;
-        if !same_clap_parameter_structure(&parameters, expected_parameters) {
-            let detail = match capture.as_ref() {
-                Some(capture) => first_clap_parameter_structure_mismatch_observed(
-                    &parameters,
-                    expected_parameters,
-                    Some(capture),
-                ),
-                None => first_clap_parameter_structure_mismatch(&parameters, expected_parameters),
+        shared.service_callbacks(&mut instance)?;
+        configure_render_mode(
+            &instance.plugin_handle(),
+            request.render_contract().processing_mode,
+        )?;
+        shared.service_callbacks(&mut instance)?;
+        let channel_count = request.render_contract().channel_count();
+        let initial_parameter_source = shared.parameter_source.snapshot();
+        {
+            let handle = instance.plugin_handle();
+            // Own the one existing query snapshot only through the original check;
+            // its Vec is dropped before signature/port/activation work as before.
+            let mut capture = ParameterQueryCapture::from_environment();
+            let parameters =
+                list_parameters_observed(&handle, capture.as_mut()).map_err(|error| {
+                    parameter_refusal_at_site(error, "native_after_state_render_mode")
+                })?;
+            if !same_clap_parameter_structure(&parameters, expected_parameters) {
+                let detail = match capture.as_ref() {
+                    Some(capture) => first_clap_parameter_structure_mismatch_observed(
+                        &parameters,
+                        expected_parameters,
+                        Some(capture),
+                    ),
+                    None => {
+                        first_clap_parameter_structure_mismatch(&parameters, expected_parameters)
+                    }
+                }
+                .unwrap_or_else(|| {
+                    "CLAP parameter metadata changed since contract probe".to_owned()
+                });
+                return Err(invalid(detail));
             }
-            .unwrap_or_else(|| "CLAP parameter metadata changed since contract probe".to_owned());
-            return Err(invalid(detail));
+            if parameters.iter().zip(expected_parameters).all(|(actual, expected)| {
+                actual.read_only
+                    || actual.current_value.to_bits() == expected.current_value.to_bits()
+            }) {
+                // This is the completion of the parent's cold native restore, before
+                // activation or publication of any editor/signal owner. Host curves
+                // remain authoritative; unrelated source work is never cleared.
+                instance.access_handler(|main| {
+                    main.acknowledge_initial_parameter_rescans(
+                        initial_parameter_source,
+                        &mut output_events,
+                    )
+                });
+            }
         }
-        if parameters.iter().zip(expected_parameters).all(|(actual, expected)| {
-            actual.read_only || actual.current_value.to_bits() == expected.current_value.to_bits()
-        }) {
-            // This is the completion of the parent's cold native restore, before
-            // activation or publication of any editor/signal owner. Host curves
-            // remain authoritative; unrelated source work is never cleared.
-            instance.access_handler(|main| {
-                main.acknowledge_initial_parameter_rescans(
-                    initial_parameter_source,
-                    &mut output_events,
-                )
-            });
-        }
-    }
-    let handle = instance.plugin_handle();
-    let parameter_signatures = parameter_observations::capture_signatures(&handle)?;
-    let signature_bytes = std::alloc::Layout::array::<parameter_observations::ParameterSignature>(
-        parameter_signatures.capacity(),
-    )
-    .map_err(|_| invalid("CLAP actual parameter signature allocation overflow"))?
-    .size();
-    if output_events
-        .allocated_bytes()?
-        .checked_add(input_events.allocated_bytes()?)
-        .and_then(|bytes| bytes.checked_add(signature_bytes))
-        .and_then(|bytes| bytes.checked_add(std::mem::size_of::<ClapWorker>()))
-        .and_then(|bytes| {
-            bytes.checked_add(std::mem::size_of::<
-                super::clap_parameter_source::ClapParameterSource,
-            >())
-        })
-        .and_then(|bytes| {
-            bytes.checked_add(std::mem::size_of::<
-                super::clap_parameter_source::ClapParameterControlSource<'static>,
-            >())
-        })
-        .is_none_or(|bytes| {
-            bytes > request.render_contract().processor_session_scratch_budget_bytes
-        })
-    {
-        return Err(invalid(
-            "CLAP source/signature owners exceed current Session scratch ceiling",
-        ));
-    }
-    let audio_metadata = inspect_audio_ports(&handle, request.render_contract().channel_layout)?;
-    let auxiliary_inputs = audio_metadata.contract;
-    main_audio_input.validate(request.auxiliary_inputs())?;
-    if audio_metadata.main_audio_input != main_audio_input
-        || &auxiliary_inputs != request.auxiliary_inputs()
-        || audio_metadata.main_audio_output_id != main_audio_output_id
-        || &audio_metadata.outputs != request.auxiliary_outputs()
-    {
-        return Err(invalid("CLAP audio ports changed since contract probe"));
-    }
-
-    let note_inputs = if notes_enabled {
-        Some(super::clap_note_input_contract::negotiate_restored(
-            &mut instance,
-            request.note_input_contract(),
-        )?)
-    } else {
-        None
-    };
-    if note_inputs.as_ref().map_or(Ok(0), |inputs| inputs.allocated_bytes())?
-        > super::clap_note_input_contract::RestoredNoteInputs::reservation_bytes(
-            request.note_input_contract().ports.len(),
-        )?
-    {
-        return Err(invalid(
-            "CLAP restored Note binding exceeds admitted storage",
-        ));
-    }
-
-    let render = request.render_contract();
-    let configuration = PluginAudioConfiguration {
-        sample_rate: f64::from(render.sample_rate),
-        min_frames_count: 1,
-        max_frames_count: u32::try_from(render.max_block_frames)
-            .map_err(|_| invalid("CLAP block size exceeds u32"))?,
-    };
-    let mut processor: PluginAudioProcessor<ClapHost> = instance
-        .activate(|_, _| (), configuration)
-        .map_err(|error| unavailable(format!("CLAP activation failed: {error}")))?
-        .into();
-    instance.access_shared_handler(|host| host.services.active.store(true, Ordering::Release));
-    if let Some(inputs) = &note_inputs
-        && let Err(error) = super::clap_note_input_contract::service_names(&mut instance, inputs)
-    {
+        let handle = instance.plugin_handle();
+        let parameter_signatures = parameter_observations::capture_signatures(&handle)?;
+        let signature_bytes =
+            std::alloc::Layout::array::<parameter_observations::ParameterSignature>(
+                parameter_signatures.capacity(),
+            )
+            .map_err(|_| invalid("CLAP actual parameter signature allocation overflow"))?
+            .size();
+        if output_events
+            .allocated_bytes()?
+            .checked_add(input_events.allocated_bytes()?)
+            .and_then(|bytes| bytes.checked_add(signature_bytes))
+            .and_then(|bytes| bytes.checked_add(std::mem::size_of::<ClapWorker>()))
+            .and_then(|bytes| {
+                bytes.checked_add(std::mem::size_of::<
+                    super::clap_parameter_source::ClapParameterSource,
+                >())
+            })
+            .and_then(|bytes| {
+                bytes.checked_add(std::mem::size_of::<
+                    super::clap_parameter_source::ClapParameterControlSource<'static>,
+                >())
+            })
+            .is_none_or(|bytes| {
+                bytes > request.render_contract().processor_session_scratch_budget_bytes
+            })
         {
-            let _audio_role = shared.enter_audio_thread();
-            processor.ensure_processing_stopped();
+            return Err(invalid(
+                "CLAP source/signature owners exceed current Session scratch ceiling",
+            ));
         }
-        drop(processor);
-        // ALL is explicitly legal from the native deactivate callback.
-        instance.access_shared_handler(|host| host.services.active.store(false, Ordering::Release));
-        instance.try_deactivate().map_err(|cleanup| {
-            unavailable(format!("CLAP Note activation cleanup failed: {cleanup}"))
-        })?;
-        return Err(error);
-    }
-    let handle = instance.plugin_handle();
-    let latency = handle
-        .get_extension::<PluginLatency>()
-        .map(|extension| extension.get(&handle) as usize)
-        .unwrap_or(0);
-    let tail = {
-        let _audio_role = shared.enter_audio_thread();
-        processor
-            .plugin_handle()
-            .get_extension::<PluginTail>()
-            .map(|extension| extension.get(&processor.plugin_handle()))
-            .unwrap_or(TailLength::Finite(0))
-    };
-    let admitted_tail = match tail {
-        TailLength::Finite(0) => crate::AudioProcessorTail::None,
-        TailLength::Finite(frames) => crate::AudioProcessorTail::Finite(frames as usize),
-        TailLength::Infinite => crate::AudioProcessorTail::Infinite,
-    };
-    if latency != request.plugin_execution_contract().algorithmic_latency_frames()
-        || admitted_tail != request.plugin_execution_contract().tail()
-    {
+        let audio_metadata =
+            inspect_audio_ports(&handle, request.render_contract().channel_layout)?;
+        let auxiliary_inputs = audio_metadata.contract;
+        main_audio_input.validate(request.auxiliary_inputs())?;
+        if audio_metadata.main_audio_input != main_audio_input
+            || &auxiliary_inputs != request.auxiliary_inputs()
+            || audio_metadata.main_audio_output_id != main_audio_output_id
+            || &audio_metadata.outputs != request.auxiliary_outputs()
         {
-            let _audio_role = shared.enter_audio_thread();
-            processor.ensure_processing_stopped();
+            return Err(invalid("CLAP audio ports changed since contract probe"));
         }
-        drop(processor);
-        let _ = instance.try_deactivate();
-        return Err(invalid(
-            if latency != request.plugin_execution_contract().algorithmic_latency_frames() {
-                "CLAP latency differs from the admitted execution contract"
-            } else {
-                "CLAP tail differs from the admitted execution contract"
-            },
-        ));
-    }
-    let frames = render.max_block_frames;
-    let parameter_lanes = parameter_ids
-        .iter()
-        .map(|id| {
-            let descriptor = expected_parameters
-                .iter()
-                .find(|parameter| parameter.id == *id)
-                .ok_or_else(|| invalid("CLAP parameter lane is missing"))?;
-            let clap_id = ClapId::from_raw(*id)
-                .ok_or_else(|| invalid("CLAP parameter lane ID is invalid"))?;
-            Ok((
-                clap_id,
-                descriptor.min_value,
-                descriptor.max_value,
-                descriptor.stepped,
-            ))
-        })
-        .collect::<Result<Vec<_>, AudioProcessorHostError>>()?;
-    let (input_port_count, input_channels) =
-        clap_input_audio_shape(render.channel_layout, main_audio_input, &auxiliary_inputs)?;
-    // Allocate only actual native ports, each at its own validated width.
-    let input = (main_audio_input == ClapMainAudioInput::Present)
-        .then_some(render.channel_layout)
-        .into_iter()
-        .chain(auxiliary_inputs.buses.iter().map(|bus| bus.channel_layout))
-        .map(|layout| vec![vec![0.0; frames]; layout.channel_count()])
-        .collect::<Vec<_>>();
-    let output =
-        vec![vec![vec![0.0; frames]; channel_count]; 1 + request.auxiliary_outputs().buses.len()];
-    let input_ports = AudioPorts::with_capacity(input_channels, input_port_count);
-    let output_ports = AudioPorts::with_capacity(channel_count * output.len(), output.len());
-    let auxiliary_outputs = request.auxiliary_outputs().clone();
-    let actual_audio_bytes = clap_actual_audio_storage(
-        &input,
-        &output,
-        input
-            .capacity()
-            .checked_add(output.capacity())
-            .ok_or_else(|| invalid("CLAP outer audio owner overflowed"))?,
-        &input_ports,
-        &output_ports,
-        &auxiliary_outputs,
-    )?;
-    let reserved_audio_bytes = clap_audio_storage_reservation(
-        render,
-        main_audio_input,
-        &auxiliary_inputs,
-        request.auxiliary_outputs(),
-    )?;
-    if actual_audio_bytes > reserved_audio_bytes {
-        return Err(invalid(
-            "CLAP actual audio owners exceed their admitted capacity",
-        ));
-    }
-    let native_object = next_clap_native_object()?;
-    Ok(Box::new(ClapWorker {
-        native_lane: request.native_worker_lane_resources(),
-        native_object,
-        native_binding: None,
-        native_author_delivery: None,
-        parameter_signatures,
-        parameter_observation_revision: None,
-        #[cfg(windows)]
-        gui: super::clap_gui_owner::ClapGuiOwner::new(std::rc::Rc::clone(&native_main)),
-        #[cfg(windows)]
-        _native_main: native_main,
-        render,
-        expected_parameters: expected_parameters.to_vec(),
-        configuration_phase:
-            super::native_configuration_control::NativeConfigurationPhase::Admitted,
-        configuration_seed: None,
-        staged_audio_inputs: None,
-        processor: Some(processor),
-        instance,
-        contract: request.plugin_execution_contract(),
-        input,
-        output,
-        main_audio_input,
-        main_audio_output_id,
-        auxiliary_outputs,
-        auxiliary_inputs,
-        note_inputs,
-        input_names: audio_metadata.names,
-        input_ports,
-        output_ports,
-        parameter_lanes,
-        input_events,
-        output_events,
-        last_end: None,
-        fresh_activation_available: true,
-        log_receiver,
-        shared,
-    }))
+
+        let note_inputs = if notes_enabled {
+            Some(super::clap_note_input_contract::negotiate_restored(
+                &mut instance,
+                request.note_input_contract(),
+            )?)
+        } else {
+            None
+        };
+        if note_inputs.as_ref().map_or(Ok(0), |inputs| inputs.allocated_bytes())?
+            > super::clap_note_input_contract::RestoredNoteInputs::reservation_bytes(
+                request.note_input_contract().ports.len(),
+            )?
+        {
+            return Err(invalid(
+                "CLAP restored Note binding exceeds admitted storage",
+            ));
+        }
+
+        let render = request.render_contract();
+        let configuration = PluginAudioConfiguration {
+            sample_rate: f64::from(render.sample_rate),
+            min_frames_count: 1,
+            max_frames_count: u32::try_from(render.max_block_frames)
+                .map_err(|_| invalid("CLAP block size exceeds u32"))?,
+        };
+        let mut processor: PluginAudioProcessor<ClapHost> = instance
+            .activate(|_, _| (), configuration)
+            .map_err(|error| unavailable(format!("CLAP activation failed: {error}")))?
+            .into();
+        instance.access_shared_handler(|host| host.services.active.store(true, Ordering::Release));
+        if let Some(inputs) = &note_inputs
+            && let Err(error) =
+                super::clap_note_input_contract::service_names(&mut instance, inputs)
+        {
+            {
+                let _audio_role = shared.enter_audio_thread();
+                processor.ensure_processing_stopped();
+            }
+            drop(processor);
+            // ALL is explicitly legal from the native deactivate callback.
+            instance
+                .access_shared_handler(|host| host.services.active.store(false, Ordering::Release));
+            instance.try_deactivate().map_err(|cleanup| {
+                unavailable(format!("CLAP Note activation cleanup failed: {cleanup}"))
+            })?;
+            return Err(error);
+        }
+        let handle = instance.plugin_handle();
+        let latency = handle
+            .get_extension::<PluginLatency>()
+            .map(|extension| extension.get(&handle) as usize)
+            .unwrap_or(0);
+        let tail = {
+            let _audio_role = shared.enter_audio_thread();
+            processor
+                .plugin_handle()
+                .get_extension::<PluginTail>()
+                .map(|extension| extension.get(&processor.plugin_handle()))
+                .unwrap_or(TailLength::Finite(0))
+        };
+        let admitted_tail = match tail {
+            TailLength::Finite(0) => crate::AudioProcessorTail::None,
+            TailLength::Finite(frames) => crate::AudioProcessorTail::Finite(frames as usize),
+            TailLength::Infinite => crate::AudioProcessorTail::Infinite,
+        };
+        if latency != request.plugin_execution_contract().algorithmic_latency_frames()
+            || admitted_tail != request.plugin_execution_contract().tail()
+        {
+            {
+                let _audio_role = shared.enter_audio_thread();
+                processor.ensure_processing_stopped();
+            }
+            drop(processor);
+            let _ = instance.try_deactivate();
+            return Err(invalid(
+                if latency != request.plugin_execution_contract().algorithmic_latency_frames() {
+                    "CLAP latency differs from the admitted execution contract"
+                } else {
+                    "CLAP tail differs from the admitted execution contract"
+                },
+            ));
+        }
+        let frames = render.max_block_frames;
+        let parameter_lanes = parameter_ids
+            .iter()
+            .map(|id| {
+                let descriptor = expected_parameters
+                    .iter()
+                    .find(|parameter| parameter.id == *id)
+                    .ok_or_else(|| invalid("CLAP parameter lane is missing"))?;
+                let clap_id = ClapId::from_raw(*id)
+                    .ok_or_else(|| invalid("CLAP parameter lane ID is invalid"))?;
+                Ok((
+                    clap_id,
+                    descriptor.min_value,
+                    descriptor.max_value,
+                    descriptor.stepped,
+                ))
+            })
+            .collect::<Result<Vec<_>, AudioProcessorHostError>>()?;
+        let (input_port_count, input_channels) =
+            clap_input_audio_shape(render.channel_layout, main_audio_input, &auxiliary_inputs)?;
+        // Allocate only actual native ports, each at its own validated width.
+        let input = (main_audio_input == ClapMainAudioInput::Present)
+            .then_some(render.channel_layout)
+            .into_iter()
+            .chain(auxiliary_inputs.buses.iter().map(|bus| bus.channel_layout))
+            .map(|layout| vec![vec![0.0; frames]; layout.channel_count()])
+            .collect::<Vec<_>>();
+        let output = vec![
+            vec![vec![0.0; frames]; channel_count];
+            1 + request.auxiliary_outputs().buses.len()
+        ];
+        let input_ports = AudioPorts::with_capacity(input_channels, input_port_count);
+        let output_ports = AudioPorts::with_capacity(channel_count * output.len(), output.len());
+        let auxiliary_outputs = request.auxiliary_outputs().clone();
+        let actual_audio_bytes = clap_actual_audio_storage(
+            &input,
+            &output,
+            input
+                .capacity()
+                .checked_add(output.capacity())
+                .ok_or_else(|| invalid("CLAP outer audio owner overflowed"))?,
+            &input_ports,
+            &output_ports,
+            &auxiliary_outputs,
+        )?;
+        let reserved_audio_bytes = clap_audio_storage_reservation(
+            render,
+            main_audio_input,
+            &auxiliary_inputs,
+            request.auxiliary_outputs(),
+        )?;
+        if actual_audio_bytes > reserved_audio_bytes {
+            return Err(invalid(
+                "CLAP actual audio owners exceed their admitted capacity",
+            ));
+        }
+        let native_object = next_clap_native_object()?;
+        Ok(Box::new(ClapWorker {
+            native_lane: request.native_worker_lane_resources(),
+            native_object,
+            native_binding: None,
+            native_author_delivery: None,
+            parameter_signatures,
+            parameter_observation_revision: None,
+            #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
+            gui: super::clap_gui_owner::ClapGuiOwner::new(native_main.clone()),
+            #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
+            _native_main: native_main,
+            render,
+            expected_parameters: expected_parameters.to_vec(),
+            configuration_phase:
+                super::native_configuration_control::NativeConfigurationPhase::Admitted,
+            configuration_seed: None,
+            staged_audio_inputs: None,
+            processor: Some(processor),
+            instance,
+            contract: request.plugin_execution_contract(),
+            input,
+            output,
+            main_audio_input,
+            main_audio_output_id,
+            auxiliary_outputs,
+            auxiliary_inputs,
+            note_inputs,
+            input_names: audio_metadata.names,
+            input_ports,
+            output_ports,
+            parameter_lanes,
+            input_events,
+            output_events,
+            last_end: None,
+            fresh_activation_available: true,
+            log_receiver,
+            shared,
+        }))
+    })
 }
 
 struct ClapWorker {
     note_inputs: Option<super::clap_note_input_contract::RestoredNoteInputs>,
-    #[cfg(windows)]
+    #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
     gui: super::clap_gui_owner::ClapGuiOwner,
     native_lane: Option<crate::NativeWorkerLaneResourceProfile>,
     native_object: crate::NativeAudioObjectObservation,
@@ -1688,8 +1713,8 @@ struct ClapWorker {
     log_receiver: super::native_audio_log::NativeAudioLogReceiver,
     shared: ClapHostShared,
     // Last: OLE/main lifetime outlives every native GUI/processor/instance drop.
-    #[cfg(windows)]
-    _native_main: std::rc::Rc<vst3_host::window::WindowsEditorMainThread>,
+    #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
+    _native_main: Option<std::rc::Rc<vst3_host::window::NativeEditorMainThread>>,
 }
 
 impl ClapWorker {
@@ -1934,7 +1959,7 @@ impl ClapWorker {
         }
         Ok(())
     }
-    #[cfg(windows)]
+    #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
     fn native_editor_binding_matches(&self, request: crate::NativeAudioObjectBindRequest) -> bool {
         self.native_binding.is_some_and(|receipt| {
             receipt.binding() == request.binding
@@ -1989,7 +2014,7 @@ impl IsolatedAudioProcessorWorker for ClapWorker {
         Ok(Some(Box::new(ClapMainRole {
             note_inputs: self.note_inputs.as_ref(),
             instance: &mut self.instance,
-            #[cfg(windows)]
+            #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
             gui: &mut self.gui,
             shared: &self.shared,
             phase: &self.configuration_phase,
@@ -2024,7 +2049,7 @@ impl IsolatedAudioProcessorWorker for ClapWorker {
             main: Box::new(ClapMainRole {
                 note_inputs: self.note_inputs.as_ref(),
                 instance: &mut self.instance,
-                #[cfg(windows)]
+                #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
                 gui: &mut self.gui,
                 shared: &self.shared,
                 phase: &self.configuration_phase,
@@ -2060,56 +2085,63 @@ impl IsolatedAudioProcessorWorker for ClapWorker {
         }
     }
 
-    #[cfg(windows)]
+    #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
     fn open_native_audio_editor(
         &mut self,
         request: crate::NativeAudioEditorOpenRequest,
     ) -> Result<crate::NativeAudioEditorOutcome, AudioProcessorHostError> {
-        use crate::{NativeAudioEditorOutcome as Outcome, NativeAudioEditorRefusal as Refusal};
-        let binding = request.binding();
-        if !self.native_editor_binding_matches(binding) {
-            return Ok(Outcome::Refused(Refusal::OwnerChanged));
-        }
-        if self.pending_reprepare().is_some()
-            || self.configuration_phase.ready_token().is_some()
-            || self.gui.close_requested()?
-            || self.instance.access_shared_handler(|host| host.services.close_requested())
-        {
-            return Ok(Outcome::Refused(Refusal::ConfigurationPending));
-        }
-        let preflight = self.gui.prepare_open(&mut self.instance);
-        match preflight {
-            super::clap_gui_owner::ClapGuiOpenPreflight::Unavailable => {
+        // self retains its original instance/module throughout this control call.
+        super::worker::with_native_control_pool(|| {
+            use crate::{NativeAudioEditorOutcome as Outcome, NativeAudioEditorRefusal as Refusal};
+            let binding = request.binding();
+            if !self.native_editor_binding_matches(binding) {
+                return Ok(Outcome::Refused(Refusal::OwnerChanged));
+            }
+            if self.pending_reprepare().is_some()
+                || self.configuration_phase.ready_token().is_some()
+                || self.gui.close_requested()?
+                || self.instance.access_shared_handler(|host| host.services.close_requested())
+            {
+                return Ok(Outcome::Refused(Refusal::ConfigurationPending));
+            }
+            let preflight = self.gui.prepare_open(&mut self.instance)?;
+            match preflight {
+                super::clap_gui_owner::ClapGuiOpenPreflight::Unavailable => {
+                    return Ok(Outcome::Refused(Refusal::NoEditor));
+                }
+                super::clap_gui_owner::ClapGuiOpenPreflight::UnsupportedApi => {
+                    return Ok(Outcome::Refused(Refusal::UnsupportedAdapter));
+                }
+                super::clap_gui_owner::ClapGuiOpenPreflight::Attached(size) => {
+                    // Preserve live Open idempotence; this synchronization slice
+                    // initializes only a genuinely new surface, never re-flushes it.
+                    self.parameter_observation_revision = None;
+                    return Ok(Outcome::Opened { binding, width: size.width, height: size.height });
+                }
+                super::clap_gui_owner::ClapGuiOpenPreflight::Create(_) => {}
+            }
+            if let Some(refusal) = self.project_idle_static_parameters(&request)? {
+                return Ok(Outcome::Refused(refusal));
+            }
+            let projected = !request.static_parameter_values().is_empty();
+            let Some(size) =
+                self.gui.open_prepared(&mut self.instance, request.title(), preflight)?
+            else {
+                if projected {
+                    return Err(invalid(
+                        "CLAP native GUI create failed after static parameter exchange",
+                    ));
+                }
                 return Ok(Outcome::Refused(Refusal::NoEditor));
-            }
-            super::clap_gui_owner::ClapGuiOpenPreflight::Attached(size) => {
-                // Preserve live Open idempotence; this synchronization slice
-                // initializes only a genuinely new surface, never re-flushes it.
-                self.parameter_observation_revision = None;
-                return Ok(Outcome::Opened { binding, width: size.width, height: size.height });
-            }
-            super::clap_gui_owner::ClapGuiOpenPreflight::Create(_) => {}
-        }
-        if let Some(refusal) = self.project_idle_static_parameters(&request)? {
-            return Ok(Outcome::Refused(refusal));
-        }
-        let projected = !request.static_parameter_values().is_empty();
-        let Some(size) = self.gui.open_prepared(&mut self.instance, request.title(), preflight)?
-        else {
-            if projected {
-                return Err(invalid(
-                    "CLAP native GUI create failed after static parameter exchange",
-                ));
-            }
-            return Ok(Outcome::Refused(Refusal::NoEditor));
-        };
-        // A newly opened surface gets one actual presentation query even when
-        // no native source callbacks were needed to create its view.
-        self.parameter_observation_revision = None;
-        Ok(Outcome::Opened { binding, width: size.width, height: size.height })
+            };
+            // A newly opened surface gets one actual presentation query even when
+            // no native source callbacks were needed to create its view.
+            self.parameter_observation_revision = None;
+            Ok(Outcome::Opened { binding, width: size.width, height: size.height })
+        })
     }
 
-    #[cfg(windows)]
+    #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
     fn close_native_audio_editor(
         &mut self,
         binding: crate::NativeAudioObjectBindRequest,
@@ -2122,12 +2154,12 @@ impl IsolatedAudioProcessorWorker for ClapWorker {
         Ok(Outcome::Closed { binding })
     }
 
-    #[cfg(windows)]
+    #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
     fn close_native_editor_owner(&mut self) -> Result<(), AudioProcessorHostError> {
         self.gui.close(&mut self.instance)
     }
 
-    #[cfg(windows)]
+    #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
     fn service_native_editor_close_request(
         &mut self,
     ) -> Result<crate::NativeAudioEditorOutcome, AudioProcessorHostError> {
@@ -2147,18 +2179,22 @@ impl IsolatedAudioProcessorWorker for ClapWorker {
         &mut self,
         consumption: crate::NativeAudioObservationConsumption,
     ) -> Result<crate::NativeAudioObservations, AudioProcessorHostError> {
-        // Only the actual child main/control path drains the one receiver.
-        let logs = self.instance.access_shared_handler(|host| {
-            self.log_receiver.observations(&host.logs, consumption)
-        })?;
-        let (author, parameter_revision, parameters) = self.observe_native_author(consumption)?;
-        Ok(crate::NativeAudioObservations {
-            object: Some(self.native_object),
-            logs,
-            author: Some(author),
-            parameter_revision,
-            parameters,
-            ..Default::default()
+        // self retains its original instance/module throughout this control call.
+        super::worker::with_native_control_pool(|| {
+            // Only the actual child main/control path drains the one receiver.
+            let logs = self.instance.access_shared_handler(|host| {
+                self.log_receiver.observations(&host.logs, consumption)
+            })?;
+            let (author, parameter_revision, parameters) =
+                self.observe_native_author(consumption)?;
+            Ok(crate::NativeAudioObservations {
+                object: Some(self.native_object),
+                logs,
+                author: Some(author),
+                parameter_revision,
+                parameters,
+                ..Default::default()
+            })
         })
     }
 
@@ -2170,172 +2206,178 @@ impl IsolatedAudioProcessorWorker for ClapWorker {
         &mut self,
         request: super::NativeConfigurationControlRequest<'_>,
     ) -> Result<super::NativeConfigurationControlOutcome, AudioProcessorHostError> {
-        if self.note_inputs.is_some() {
-            // This slice never reuses a Note binding across native reactivation.
-            // Root's coordinated configuration/contract migration remains an
-            // explicit subsequent consumer; no cohort/marker is cleared here.
-            return Ok(super::NativeConfigurationControlOutcome::CapabilityRefused(
-                super::NativeConfigurationRefusal::UnsupportedAdapter,
-            ));
-        }
-        use super::native_configuration_control::{
-            FixedConfigurationWriter, NativeConfigurationPhase as Phase,
-        };
-        use super::{
-            NativeConfigurationControlOutcome as Outcome, NativeConfigurationRefusal as Refusal,
-        };
-        if self.staged_audio_inputs.is_some()
-            || self.configuration_phase.ready_token().is_some()
-            || matches!(self.configuration_phase, Phase::AudioInputsProposed(_))
-        {
-            return Ok(Outcome::CapabilityRefused(Refusal::AwaitingInstallation));
-        }
-        let expected_native = self.shared.restart_cohort();
-        let actual = expected_native.pending().then_some(super::NativeRequestCohort {
-            serial: expected_native.serial(),
-            request: mondrian_core::NativeAudioReprepareRequest::ClapRestart,
-        });
-        if actual != Some(request.expected_cohort) {
-            return Ok(Outcome::StillPending(actual));
-        }
-        self.configuration_phase = Phase::Blocked(request.expected_cohort.request);
-        if request.expected_cohort.exhausted() {
-            return Ok(Outcome::CapabilityRefused(Refusal::SerialExhausted));
-        }
-        if request.expected_cohort.request
-            != mondrian_core::NativeAudioReprepareRequest::ClapRestart
-        {
-            return Err(invalid(
-                "CLAP configuration control received a different ABI cohort",
-            ));
-        }
-        if let Err(refusal) = self.validate_configuration_profile(&request) {
-            return Ok(Outcome::CapabilityRefused(refusal));
-        }
-        // Grant every state byte before entering the native lifecycle/state code.
-        let writer = match FixedConfigurationWriter::new(
-            request.configuration_limit_bytes,
-            request.control_buffer_grant_bytes,
-        ) {
-            Ok(writer) => writer,
-            Err(refusal) => return Ok(Outcome::CapabilityRefused(refusal)),
-        };
-        self.fresh_activation_available = false;
-        if let Some(mut processor) = self.processor.take() {
-            {
-                let _audio_role = self.shared.enter_audio_thread();
-                processor.ensure_processing_stopped();
+        // self retains its original instance/module throughout this control call.
+        super::worker::with_native_control_pool(|| {
+            if self.note_inputs.is_some() {
+                // This slice never reuses a Note binding across native reactivation.
+                // Root's coordinated configuration/contract migration remains an
+                // explicit subsequent consumer; no cohort/marker is cleared here.
+                return Ok(super::NativeConfigurationControlOutcome::CapabilityRefused(
+                    super::NativeConfigurationRefusal::UnsupportedAdapter,
+                ));
             }
-            drop(processor);
-        }
-        self.instance.try_deactivate().map_err(|error| {
-            unavailable(format!("CLAP configuration deactivation failed: {error}"))
-        })?;
-        self.instance
-            .access_shared_handler(|host| host.services.active.store(false, Ordering::Release));
-        self.flush_inactive_configuration(&request)?;
-        let handle = self.instance.plugin_handle();
-        let mut metadata_scratch = super::clap_metadata::MetadataScanScratch::new();
-        // Current values change after a valid flush; structural metadata must not.
-        if !super::clap_metadata::revalidate_parameter_structure(
-            &handle,
-            &self.expected_parameters,
-            &mut metadata_scratch,
-        )? {
-            return Ok(Outcome::CapabilityRefused(Refusal::MetadataChanged));
-        }
-        let mut proposal =
-            super::ClapAudioInputProposal::new(request.expected_cohort, request.control_token)
-                .map_err(invalid)?;
-        let mut proposal_error = None;
-        let (inputs_match, main_and_outputs_match) =
-            super::clap_metadata::inspect_audio_port_configuration(
-                &handle,
-                self.render.channel_layout,
-                self.main_audio_input,
-                &self.auxiliary_inputs,
-                self.main_audio_output_id,
-                &self.auxiliary_outputs,
-                &mut metadata_scratch,
-                |port| {
-                    if let Err(error) = proposal.push(port) {
-                        proposal_error.get_or_insert(error);
-                    }
-                },
-            )?;
-        if let Some(error) = proposal_error {
-            return Err(invalid(error));
-        }
-        if !main_and_outputs_match {
-            return Ok(Outcome::CapabilityRefused(Refusal::MetadataChanged));
-        }
-        if !inputs_match {
-            // No native plane allocation, activation or cohort retirement. The
-            // existing owner remains stopped; Root must admit and coordinate
-            // the prospective geometry before any further lifecycle action.
-            let actual = self.native_configuration_cohort();
+            use super::native_configuration_control::{
+                FixedConfigurationWriter, NativeConfigurationPhase as Phase,
+            };
+            use super::{
+                NativeConfigurationControlOutcome as Outcome, NativeConfigurationRefusal as Refusal,
+            };
+            if self.staged_audio_inputs.is_some()
+                || self.configuration_phase.ready_token().is_some()
+                || matches!(self.configuration_phase, Phase::AudioInputsProposed(_))
+            {
+                return Ok(Outcome::CapabilityRefused(Refusal::AwaitingInstallation));
+            }
+            let expected_native = self.shared.restart_cohort();
+            let actual = expected_native.pending().then_some(super::NativeRequestCohort {
+                serial: expected_native.serial(),
+                request: mondrian_core::NativeAudioReprepareRequest::ClapRestart,
+            });
             if actual != Some(request.expected_cohort) {
                 return Ok(Outcome::StillPending(actual));
             }
-            self.configuration_phase = Phase::AudioInputsProposed(proposal);
-            return Ok(Outcome::ClapAudioInputsChanged(proposal));
-        }
-        self.activate_and_capture_configuration(request, writer, None)
+            self.configuration_phase = Phase::Blocked(request.expected_cohort.request);
+            if request.expected_cohort.exhausted() {
+                return Ok(Outcome::CapabilityRefused(Refusal::SerialExhausted));
+            }
+            if request.expected_cohort.request
+                != mondrian_core::NativeAudioReprepareRequest::ClapRestart
+            {
+                return Err(invalid(
+                    "CLAP configuration control received a different ABI cohort",
+                ));
+            }
+            if let Err(refusal) = self.validate_configuration_profile(&request) {
+                return Ok(Outcome::CapabilityRefused(refusal));
+            }
+            // Grant every state byte before entering the native lifecycle/state code.
+            let writer = match FixedConfigurationWriter::new(
+                request.configuration_limit_bytes,
+                request.control_buffer_grant_bytes,
+            ) {
+                Ok(writer) => writer,
+                Err(refusal) => return Ok(Outcome::CapabilityRefused(refusal)),
+            };
+            self.fresh_activation_available = false;
+            if let Some(mut processor) = self.processor.take() {
+                {
+                    let _audio_role = self.shared.enter_audio_thread();
+                    processor.ensure_processing_stopped();
+                }
+                drop(processor);
+            }
+            self.instance.try_deactivate().map_err(|error| {
+                unavailable(format!("CLAP configuration deactivation failed: {error}"))
+            })?;
+            self.instance
+                .access_shared_handler(|host| host.services.active.store(false, Ordering::Release));
+            self.flush_inactive_configuration(&request)?;
+            let handle = self.instance.plugin_handle();
+            let mut metadata_scratch = super::clap_metadata::MetadataScanScratch::new();
+            // Current values change after a valid flush; structural metadata must not.
+            if !super::clap_metadata::revalidate_parameter_structure(
+                &handle,
+                &self.expected_parameters,
+                &mut metadata_scratch,
+            )? {
+                return Ok(Outcome::CapabilityRefused(Refusal::MetadataChanged));
+            }
+            let mut proposal =
+                super::ClapAudioInputProposal::new(request.expected_cohort, request.control_token)
+                    .map_err(invalid)?;
+            let mut proposal_error = None;
+            let (inputs_match, main_and_outputs_match) =
+                super::clap_metadata::inspect_audio_port_configuration(
+                    &handle,
+                    self.render.channel_layout,
+                    self.main_audio_input,
+                    &self.auxiliary_inputs,
+                    self.main_audio_output_id,
+                    &self.auxiliary_outputs,
+                    &mut metadata_scratch,
+                    |port| {
+                        if let Err(error) = proposal.push(port) {
+                            proposal_error.get_or_insert(error);
+                        }
+                    },
+                )?;
+            if let Some(error) = proposal_error {
+                return Err(invalid(error));
+            }
+            if !main_and_outputs_match {
+                return Ok(Outcome::CapabilityRefused(Refusal::MetadataChanged));
+            }
+            if !inputs_match {
+                // No native plane allocation, activation or cohort retirement. The
+                // existing owner remains stopped; Root must admit and coordinate
+                // the prospective geometry before any further lifecycle action.
+                let actual = self.native_configuration_cohort();
+                if actual != Some(request.expected_cohort) {
+                    return Ok(Outcome::StillPending(actual));
+                }
+                self.configuration_phase = Phase::AudioInputsProposed(proposal);
+                return Ok(Outcome::ClapAudioInputsChanged(proposal));
+            }
+            self.activate_and_capture_configuration(request, writer, None)
+        })
     }
     fn capture_clap_audio_input_configuration(
         &mut self,
         mapping: super::ClapAudioInputMappingRequest,
         request: super::NativeConfigurationControlRequest<'_>,
     ) -> Result<super::NativeConfigurationControlOutcome, AudioProcessorHostError> {
-        use super::native_configuration_control::{
-            FixedConfigurationWriter, NativeConfigurationPhase as Phase,
-        };
-        use super::{
-            NativeConfigurationControlOutcome as Outcome, NativeConfigurationRefusal as Refusal,
-        };
-        if !mapping
-            .buffers
-            .request
-            .proposal
-            .preserves_auxiliary_keys(&self.auxiliary_inputs)
-        {
-            return Ok(Outcome::CapabilityRefused(Refusal::UnsupportedRequest));
-        }
-        if self.configuration_phase.ready_token().is_some() {
-            return Ok(Outcome::CapabilityRefused(Refusal::AwaitingInstallation));
-        }
-        if self.staged_clap_audio_input_buffers() != Some(mapping.buffers)
-            || request.expected_cohort != mapping.buffers.request.proposal.observed_cohort
-            || request.control_token != mapping.buffers.request.proposal.control_token
-        {
-            return Ok(Outcome::CapabilityRefused(Refusal::MetadataChanged));
-        }
-        let actual = self.native_configuration_cohort();
-        if actual != Some(request.expected_cohort) {
-            return Ok(Outcome::StillPending(actual));
-        }
-        if let Err(refusal) = self.validate_configuration_profile(&request) {
-            return Ok(Outcome::CapabilityRefused(refusal));
-        }
-        let writer = match FixedConfigurationWriter::new(
-            request.configuration_limit_bytes,
-            request.control_buffer_grant_bytes,
-        ) {
-            Ok(writer) => writer,
-            Err(refusal) => return Ok(Outcome::CapabilityRefused(refusal)),
-        };
-        // After this point an error is a held attempt, never permission to redo
-        // destructive native work. Both input geometries and maps stay retained.
-        self.configuration_phase = Phase::Blocked(request.expected_cohort.request);
-        self.flush_inactive_configuration(&request)?;
-        if !self.staged_input_geometry_matches(&mapping.buffers.request.proposal)? {
-            return Ok(Outcome::CapabilityRefused(Refusal::MetadataChanged));
-        }
-        self.activate_and_capture_configuration(
-            request,
-            writer,
-            Some(mapping.buffers.request.proposal),
-        )
+        // self retains its original instance/module throughout this control call.
+        super::worker::with_native_control_pool(|| {
+            use super::native_configuration_control::{
+                FixedConfigurationWriter, NativeConfigurationPhase as Phase,
+            };
+            use super::{
+                NativeConfigurationControlOutcome as Outcome, NativeConfigurationRefusal as Refusal,
+            };
+            if !mapping
+                .buffers
+                .request
+                .proposal
+                .preserves_auxiliary_keys(&self.auxiliary_inputs)
+            {
+                return Ok(Outcome::CapabilityRefused(Refusal::UnsupportedRequest));
+            }
+            if self.configuration_phase.ready_token().is_some() {
+                return Ok(Outcome::CapabilityRefused(Refusal::AwaitingInstallation));
+            }
+            if self.staged_clap_audio_input_buffers() != Some(mapping.buffers)
+                || request.expected_cohort != mapping.buffers.request.proposal.observed_cohort
+                || request.control_token != mapping.buffers.request.proposal.control_token
+            {
+                return Ok(Outcome::CapabilityRefused(Refusal::MetadataChanged));
+            }
+            let actual = self.native_configuration_cohort();
+            if actual != Some(request.expected_cohort) {
+                return Ok(Outcome::StillPending(actual));
+            }
+            if let Err(refusal) = self.validate_configuration_profile(&request) {
+                return Ok(Outcome::CapabilityRefused(refusal));
+            }
+            let writer = match FixedConfigurationWriter::new(
+                request.configuration_limit_bytes,
+                request.control_buffer_grant_bytes,
+            ) {
+                Ok(writer) => writer,
+                Err(refusal) => return Ok(Outcome::CapabilityRefused(refusal)),
+            };
+            // After this point an error is a held attempt, never permission to redo
+            // destructive native work. Both input geometries and maps stay retained.
+            self.configuration_phase = Phase::Blocked(request.expected_cohort.request);
+            self.flush_inactive_configuration(&request)?;
+            if !self.staged_input_geometry_matches(&mapping.buffers.request.proposal)? {
+                return Ok(Outcome::CapabilityRefused(Refusal::MetadataChanged));
+            }
+            self.activate_and_capture_configuration(
+                request,
+                writer,
+                Some(mapping.buffers.request.proposal),
+            )
+        })
     }
 
     fn staged_clap_audio_input_buffers(&mut self) -> Option<super::ClapAudioInputBufferReceipt> {
@@ -2636,7 +2678,7 @@ fn first_clap_parameter_structure_mismatch_observed(
 
 impl Drop for ClapWorker {
     fn drop(&mut self) {
-        #[cfg(windows)]
+        #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
         if self.gui.close(&mut self.instance).is_err() {
             // An attached/indeterminate foreign GUI must not outlive its DLL.
             // The parent supervised connection observes this isolated retirement.
@@ -3977,7 +4019,7 @@ mod tests {
                 Some(cohort),
                 "refusal must not consume the actual request"
             );
-            #[cfg(windows)]
+            #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
             {
                 let object = worker.native_audio_object_observation().unwrap();
                 assert!(matches!(worker.split_native_processing(),
@@ -5955,11 +5997,10 @@ mod tests {
             state.extend_from_slice(&(if mode == 4 { 0.125_f64 } else { 0.25 }).to_le_bytes());
             state.extend_from_slice(&0.75_f64.to_le_bytes());
             state.push(mode);
-            #[cfg(windows)]
-            let native_main =
-                std::rc::Rc::new(vst3_host::window::WindowsEditorMainThread::initialize().unwrap());
+            #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
+            let native_main = initialize_native_main().unwrap();
             let mut worker = prepare_loaded_on_main(
-                #[cfg(windows)]
+                #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
                 native_main,
                 request,
                 entry,
@@ -6054,13 +6095,10 @@ mod tests {
             )
             .unwrap();
             let parameters = lifecycle_parameters();
-            #[cfg(windows)]
-            let native_main = std::rc::Rc::new(
-                vst3_host::window::WindowsEditorMainThread::initialize()
-                    .expect("same existing owned native-main initialization"),
-            );
+            #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
+            let native_main = initialize_native_main().unwrap();
             let mut worker = prepare_loaded_on_main(
-                #[cfg(windows)]
+                #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
                 native_main,
                 request,
                 entry,
@@ -6608,11 +6646,10 @@ mod tests {
             parameter_ids: Vec::new(),
             render_contract: render,
         };
-        #[cfg(windows)]
-        let native_main =
-            std::rc::Rc::new(vst3_host::window::WindowsEditorMainThread::initialize().unwrap());
+        #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
+        let native_main = initialize_native_main().unwrap();
         let mut worker = prepare_loaded_on_main(
-            #[cfg(windows)]
+            #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
             native_main,
             request,
             entry,
@@ -6763,7 +6800,7 @@ mod clap_output_owner_contracts;
 struct ClapMainRole<'a> {
     note_inputs: Option<&'a super::clap_note_input_contract::RestoredNoteInputs>,
     instance: &'a mut PluginInstance<ClapHost>,
-    #[cfg(windows)]
+    #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
     gui: &'a mut super::clap_gui_owner::ClapGuiOwner,
     shared: &'a ClapHostShared,
     phase: &'a super::native_configuration_control::NativeConfigurationPhase,
@@ -6784,12 +6821,14 @@ impl super::IsolatedAudioProcessorMainRole for ClapMainRole<'_> {
     }
 
     fn service_native_main_thread(&mut self) -> Result<(), AudioProcessorHostError> {
-        if let Some(inputs) = self.note_inputs {
-            super::clap_note_input_contract::service_names(self.instance, inputs)?;
-        }
-        #[cfg(windows)]
-        self.gui.service(self.instance)?;
-        super::clap_main_services::service_main_tick(self.shared, self.instance)
+        super::worker::with_native_control_pool(|| {
+            if let Some(inputs) = self.note_inputs {
+                super::clap_note_input_contract::service_names(self.instance, inputs)?;
+            }
+            #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
+            self.gui.service(self.instance)?;
+            super::clap_main_services::service_main_tick(self.shared, self.instance)
+        })
     }
 
     fn finish_processing_scope(&mut self) -> Result<(), AudioProcessorHostError> {
@@ -6855,7 +6894,7 @@ impl super::IsolatedAudioProcessorMainRole for ClapMainRole<'_> {
     }
 
     fn native_editor_close_requested(&self) -> Result<bool, AudioProcessorHostError> {
-        #[cfg(windows)]
+        #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
         if self.gui.close_requested()? {
             return Ok(true);
         }

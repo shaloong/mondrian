@@ -34,58 +34,62 @@ impl<H: HostHandlers> PluginInstanceInner<H> {
             &'s <H as HostHandlers>::Shared<'s>,
         ) -> <H as HostHandlers>::MainThread<'s>,
     {
-        let plugin_factory = plugin_entry
-            .get_plugin_factory()
-            .ok_or(PluginInstanceError::MissingPluginFactory)?;
+        // The caller's entry borrow keeps native code available even if the
+        // partially built instance is destroyed before this pool drains.
+        crate::util::with_native_control_pool(|| {
+            let plugin_factory = plugin_entry
+                .get_plugin_factory()
+                .ok_or(PluginInstanceError::MissingPluginFactory)?;
 
-        let host_wrapper = HostWrapper::new(shared, main_thread);
-        let host_descriptor = Box::pin(RawHostDescriptor::new::<H>(host_info));
+            let host_wrapper = HostWrapper::new(shared, main_thread);
+            let host_descriptor = Box::pin(RawHostDescriptor::new::<H>(host_info));
 
-        let mut instance = Arc::new(Self {
-            host_wrapper,
-            host_descriptor,
-            plugin_ptr: None,
-            plugin_entry: plugin_entry.clone(),
-            is_started: AtomicBool::new(false),
-        });
+            let mut instance = Arc::new(Self {
+                host_wrapper,
+                host_descriptor,
+                plugin_ptr: None,
+                plugin_entry: plugin_entry.clone(),
+                is_started: AtomicBool::new(false),
+            });
 
-        {
-            let instance = Arc::get_mut(&mut instance).unwrap();
-            instance.host_descriptor.set_wrapper(&instance.host_wrapper);
+            {
+                let instance = Arc::get_mut(&mut instance).unwrap();
+                instance.host_descriptor.set_wrapper(&instance.host_wrapper);
 
-            let raw_descriptor = instance.host_descriptor.raw();
+                let raw_descriptor = instance.host_descriptor.raw();
 
-            // SAFETY: the host pointer comes from a valid allocation that is pinned for the
-            // lifetime of the instance
-            let plugin_instance_ptr =
-                unsafe { create_plugin(plugin_factory, raw_descriptor, plugin_id)? };
+                // SAFETY: the host pointer comes from a valid allocation that is pinned for the
+                // lifetime of the instance
+                let plugin_instance_ptr =
+                    unsafe { create_plugin(plugin_factory, raw_descriptor, plugin_id)? };
 
-            // SAFETY: The pointer comes from the plugin factory
-            unsafe {
-                instance.host_wrapper.created(plugin_instance_ptr);
-            }
+                // SAFETY: The pointer comes from the plugin factory
+                unsafe {
+                    instance.host_wrapper.created(plugin_instance_ptr);
+                }
 
-            // Now instantiate the plugin
-            // SAFETY: The CLAP spec requires those function pointers to be valid to call
-            unsafe {
-                if let Some(init) = plugin_instance_ptr.as_ref().init {
-                    if !init(plugin_instance_ptr.as_ptr()) {
-                        instance.host_wrapper.start_instance_destroy();
-                        if let Some(destroy) = plugin_instance_ptr.as_ref().destroy {
-                            destroy(plugin_instance_ptr.as_ptr());
+                // Now instantiate the plugin
+                // SAFETY: The CLAP spec requires those function pointers to be valid to call
+                unsafe {
+                    if let Some(init) = plugin_instance_ptr.as_ref().init {
+                        if !init(plugin_instance_ptr.as_ptr()) {
+                            instance.host_wrapper.start_instance_destroy();
+                            if let Some(destroy) = plugin_instance_ptr.as_ref().destroy {
+                                destroy(plugin_instance_ptr.as_ptr());
+                            }
+
+                            return Err(PluginInstanceError::InstantiationFailed);
                         }
-
-                        return Err(PluginInstanceError::InstantiationFailed);
                     }
                 }
+
+                // SAFETY: The pointer comes from the plugin factory
+                unsafe { instance.host_wrapper.instantiated() };
+                instance.plugin_ptr = Some(plugin_instance_ptr);
             }
 
-            // SAFETY: The pointer comes from the plugin factory
-            unsafe { instance.host_wrapper.instantiated() };
-            instance.plugin_ptr = Some(plugin_instance_ptr);
-        }
-
-        Ok(instance)
+            Ok(instance)
+        })
     }
 
     pub(crate) fn sdk_owned_storage(&self) -> [crate::storage::HostStorageRef<'_>; 8] {
@@ -148,14 +152,14 @@ impl<H: HostHandlers> PluginInstanceInner<H> {
         }
 
         // SAFETY: this type ensures the function pointer is valid
-        let success = unsafe {
+        let success = crate::util::with_native_control_pool(|| unsafe {
             activate(
                 self.raw_instance(),
                 configuration.sample_rate,
                 configuration.min_frames_count,
                 configuration.max_frames_count,
             )
-        };
+        });
 
         if !success {
             // SAFETY: this method being &mut guarantees nothing can call any other main-thread method
@@ -179,23 +183,26 @@ impl<H: HostHandlers> PluginInstanceInner<H> {
             &<H as HostHandlers>::MainThread<'s>,
         ) -> T,
     ) -> Result<T, PluginInstanceError> {
-        if !self.is_active() {
-            return Err(PluginInstanceError::DeactivatedPlugin);
-        }
+        // self retains plugin_entry through native stop/deactivate and drainage.
+        crate::util::with_native_control_pool(|| {
+            if !self.is_active() {
+                return Err(PluginInstanceError::DeactivatedPlugin);
+            }
 
-        if self.is_started.load(Ordering::Acquire) {
+            if self.is_started.load(Ordering::Acquire) {
+                // SAFETY: this method being &mut guarantees nothing can call any other main-thread method
+                unsafe { self.stop_processing() }
+            }
+
+            if let Some(deactivate) = self.raw_instance().deactivate {
+                // SAFETY: this type ensures the function pointer is valid.
+                // We just checked the instance is in an active state.
+                unsafe { deactivate(self.raw_instance()) };
+            }
+
             // SAFETY: this method being &mut guarantees nothing can call any other main-thread method
-            unsafe { self.stop_processing() }
-        }
-
-        if let Some(deactivate) = self.raw_instance().deactivate {
-            // SAFETY: this type ensures the function pointer is valid.
-            // We just checked the instance is in an active state.
-            unsafe { deactivate(self.raw_instance()) };
-        }
-
-        // SAFETY: this method being &mut guarantees nothing can call any other main-thread method
-        unsafe { self.host_wrapper.teardown_audio_processor(drop) }
+            unsafe { self.host_wrapper.teardown_audio_processor(drop) }
+        })
     }
 
     /// # Safety
@@ -248,25 +255,28 @@ impl<H: HostHandlers> PluginInstanceInner<H> {
 impl<H: HostHandlers> Drop for PluginInstanceInner<H> {
     #[inline]
     fn drop(&mut self) {
-        // Happens only if instantiate didn't complete
-        let Some(plugin_ptr) = self.plugin_ptr else {
-            return;
-        };
+        // Drain inside Drop, before Rust drops plugin_entry and its module.
+        crate::util::with_native_control_pool(|| {
+            // Happens only if instantiate didn't complete
+            let Some(plugin_ptr) = self.plugin_ptr else {
+                return;
+            };
 
-        // Check if instance hasn't been properly deactivated
-        if self.is_active() {
-            let _ = self.deactivate_with(|_, _| ());
-        }
-
-        self.host_wrapper.start_instance_destroy();
-        // SAFETY: we are in the drop impl, so this can only be called once and without any
-        // other concurrent calls.
-        // This type also ensures the function pointer type is valid.
-        unsafe {
-            if let Some(destroy) = plugin_ptr.as_ref().destroy {
-                destroy(plugin_ptr.as_ptr())
+            // Check if instance hasn't been properly deactivated
+            if self.is_active() {
+                let _ = self.deactivate_with(|_, _| ());
             }
-        }
+
+            self.host_wrapper.start_instance_destroy();
+            // SAFETY: we are in the drop impl, so this can only be called once and without any
+            // other concurrent calls.
+            // This type also ensures the function pointer type is valid.
+            unsafe {
+                if let Some(destroy) = plugin_ptr.as_ref().destroy {
+                    destroy(plugin_ptr.as_ptr())
+                }
+            }
+        });
     }
 }
 
