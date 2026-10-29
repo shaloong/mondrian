@@ -34,6 +34,7 @@ pub mod radial_blur;
 pub mod threshold;
 pub mod tint;
 pub mod tritone;
+pub mod twirl;
 pub mod vibrance;
 pub use project_properties::{rebind_effect_project_geometry, EffectProjectPropertyInitializer};
 pub mod execution;
@@ -260,6 +261,10 @@ pub use tracking::{
     TrackingFrame, TrackingObservation, TrackingQuality, TrackingRegion, TrackingTransform,
 };
 pub use tritone::{tritone_frame_f32, TritoneError, TritoneGrade};
+pub use twirl::{
+    twirl_frame_f32, TwirlError, TwirlGrade, TWIRL_MAX_ANGLE_DEGREES, TWIRL_MAX_RADIUS_PERCENT,
+    TWIRL_MIN_RADIUS_PERCENT,
+};
 pub use unsharp_mask::{
     apply_unsharp_mask_f32, sharpened_channel, unsharp_mask_gain,
     UNSHARP_MASK_AUTHOR_MAX_AMOUNT_PERCENT, UNSHARP_MASK_AUTHOR_MAX_RADIUS_PIXELS,
