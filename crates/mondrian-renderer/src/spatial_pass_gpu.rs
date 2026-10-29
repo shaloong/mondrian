@@ -46,6 +46,7 @@ pub(crate) struct EffectSpatialGpu {
     emboss: wgpu::RenderPipeline,
     color_emboss: wgpu::RenderPipeline,
     radial_blur: wgpu::RenderPipeline,
+    convolution: wgpu::RenderPipeline,
     bindings: wgpu::BindGroupLayout,
 }
 
@@ -206,6 +207,36 @@ impl EffectSpatialGpu {
             multiview_mask: None,
             cache: None,
         });
+        let convolution = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("mondrian.effect-spatial.convolution"),
+            layout: Some(&layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                buffers: &[],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_convolution"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: wgpu::TextureFormat::Rgba32Float,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleStrip,
+                strip_index_format: None,
+                cull_mode: None,
+                ..wgpu::PrimitiveState::default()
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
         let radial_blur = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("mondrian.effect-spatial.radial-blur"),
             layout: Some(&layout),
@@ -241,6 +272,7 @@ impl EffectSpatialGpu {
             emboss,
             color_emboss,
             radial_blur,
+            convolution,
             find_edges,
             bindings,
         }
@@ -499,6 +531,46 @@ impl EffectSpatialGpu {
         Ok(destination.clone())
     }
 
+    /// Records the general 3×3 convolution.
+    ///
+    /// `params` and `extra` carry the first eight kernel cells, `aces` carries
+    /// the ninth cell, the absolute flag and the blend. The pass samples the
+    /// same clamped neighbourhood as the CPU kernel, filters premultiplied
+    /// colour, and returns to straight alpha.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn record_convolution(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
+        params: [f32; 4],
+        extra: [f32; 4],
+        aces: [f32; 4],
+        source: &wgpu::Texture,
+        destination: &wgpu::Texture,
+        width: u32,
+        height: u32,
+    ) -> Result<wgpu::Texture, EffectSpatialGpuError> {
+        if width == 0 || height == 0 {
+            return Err(EffectSpatialGpuError::EmptyFrame);
+        }
+        let uniform = SpatialPassUniform {
+            size: [width as f32, height as f32, 0.0, 0.0],
+            params,
+            extra,
+            aces,
+        };
+        let input_view = source.create_view(&wgpu::TextureViewDescriptor::default());
+        let output_view = destination.create_view(&wgpu::TextureViewDescriptor::default());
+        self.record_pass(
+            device,
+            encoder,
+            &self.convolution,
+            &input_view,
+            &output_view,
+            &uniform,
+        );
+        Ok(destination.clone())
+    }
     fn record_pass(
         &self,
         device: &wgpu::Device,
@@ -630,12 +702,12 @@ fn premultiply(sample: vec4<f32>) -> vec4<f32> {
     let alpha = clamp(sample.a, 0.0, 1.0);
     return vec4<f32>(sample.rgb * alpha, alpha);
 }
-
 fn unpremultiply(sample: vec4<f32>) -> vec4<f32> {
-    if (sample.a <= 0.0) {
+    let alpha = clamp(sample.a, 0.0, 1.0);
+    if (alpha <= 0.0) {
         return vec4<f32>(0.0);
     }
-    return vec4<f32>(sample.rgb / sample.a, sample.a);
+    return vec4<f32>(sample.rgb / alpha, alpha);
 }
 
 @fragment
@@ -813,6 +885,33 @@ fn sample_bilinear_premultiplied(x: f32, y: f32) -> vec4<f32> {
     return top + (bottom - top) * frac.y;
 }
 
+@fragment
+fn fs_convolution(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
+    let pixel = vec2<i32>(floor(position.xy));
+    let centre = premultiply(load_clamped(pixel));
+    let kernel = array<f32, 9>(
+        uniforms.params.x,
+        uniforms.params.y,
+        uniforms.params.z,
+        uniforms.params.w,
+        uniforms.extra.x,
+        uniforms.extra.y,
+        uniforms.extra.z,
+        uniforms.extra.w,
+        uniforms.aces.x,
+    );
+    var filtered = vec4<f32>(0.0);
+    for (var index = 0; index < 9; index = index + 1) {
+        let offset = vec2<i32>(index % 3 - 1, index / 3 - 1);
+        filtered = filtered + kernel[index] * premultiply(load_clamped(pixel + offset));
+    }
+    if (uniforms.aces.y > 0.5) {
+        filtered = abs(filtered);
+    }
+    let blend = clamp(uniforms.aces.z, 0.0, 1.0);
+    let mixed = filtered * (1.0 - blend) + centre * blend;
+    return unpremultiply(mixed);
+}
 @fragment
 fn fs_radial_blur(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
     let pixel = vec2<i32>(floor(position.xy));
@@ -1225,6 +1324,7 @@ fn cs_main(@builtin(local_invocation_id) lid: vec3<u32>) {
         }
     }
 
+    #[test]
     fn gpu_find_edges_matches_the_cpu_kernel() {
         let Ok(context) = block_on(crate::GpuContext::new()) else {
             eprintln!("skipping GPU find edges parity test: no GPU adapter available");
@@ -1368,6 +1468,80 @@ fn cs_main(@builtin(local_invocation_id) lid: vec3<u32>) {
                     expected[component],
                     actual[component]
                 );
+            }
+        }
+    }
+
+    #[test]
+    fn gpu_convolution_matches_the_cpu_kernel() {
+        let Ok(context) = block_on(crate::GpuContext::new()) else {
+            eprintln!("skipping GPU convolution parity test: no GPU adapter available");
+            return;
+        };
+        let width = 8_u32;
+        let height = 6_u32;
+        let mut pixels = vec![[0.0_f32, 0.0, 0.0, 1.0]; (width * height) as usize];
+        for y in 0..height as usize {
+            for x in 0..width as usize {
+                let value = 0.06 * (x * 2 + y) as f32;
+                pixels[y * width as usize + x] = [value, 0.4 - value * 0.5, value * 1.5, 1.0];
+            }
+        }
+        pixels[17] = [0.0, 0.0, 0.0, 0.0];
+        pixels[30] = [2.5, -0.75, 1.25, 0.5];
+        for (kernel, absolute_values, blend) in [
+            (
+                [0.0_f32, -1.0, 0.0, -1.0, 5.0, -1.0, 0.0, -1.0, 0.0],
+                false,
+                0.0_f32,
+            ),
+            ([1.0_f32 / 9.0; 9], true, 0.35),
+            (
+                [0.0_f32, 1.0, -1.0, 2.0, -2.0, 1.0, -1.0, 0.5, 0.25],
+                true,
+                0.75,
+            ),
+        ] {
+            let grade = mondrian_effects::ConvolutionGrade::new(kernel, absolute_values, blend)
+                .expect("convolution grade");
+            let mut cpu = pixels.clone();
+            assert!(mondrian_effects::convolution_frame_f32(
+                &mut cpu,
+                width as usize,
+                height as usize,
+                grade,
+            ));
+            let executor = EffectSpatialGpu::new(&context.device);
+            let source = upload(&context, &pixels, width, height);
+            let destination = scratch(&context, width, height, 1);
+            let mut encoder =
+                context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("mondrian.effect-spatial.convolution-encoder"),
+                });
+            let (params, extra, aces) = grade.gpu_controls();
+            let output = executor
+                .record_convolution(
+                    &context.device,
+                    &mut encoder,
+                    params,
+                    extra,
+                    aces,
+                    &source,
+                    &destination[0],
+                    width,
+                    height,
+                )
+                .expect("recorded convolution");
+            context.queue.submit(Some(encoder.finish()));
+            let gpu = readback(&context, &output, width, height);
+            for (index, (cpu_pixel, gpu_pixel)) in cpu.iter().zip(gpu.iter()).enumerate() {
+                for channel in 0..4 {
+                    let difference = (cpu_pixel[channel] - gpu_pixel[channel]).abs();
+                    assert!(
+                        difference <= 1.0e-4,
+                        "kernel {kernel:?} pixel {index} channel {channel}: cpu {cpu_pixel:?} gpu {gpu_pixel:?}"
+                    );
+                }
             }
         }
     }
