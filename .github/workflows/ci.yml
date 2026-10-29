@@ -163,6 +163,60 @@ jobs:
   # ───────────────────────────────────────────────────────────────────────────
   # 测试（Windows + Linux + macOS；实机硬件资格仍由专用 Windows 门禁负责）
   # ───────────────────────────────────────────────────────────────────────────
+  # Standalone SDK contracts do not depend on FFmpeg or the root workspace.
+  # Keep platform feedback independent from unrelated media downloads.
+  native-host:
+    name: Native Host (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/vendor/vst3-host/target
+      CARGO_BUILD_JOBS: "1"
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
+        with:
+          toolchain: 1.97.1
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          cache-on-failure: true
+          workspaces: vendor/vst3-host -> target
+
+      - name: Install X11 test provider
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libxcb1-dev xvfb xauth
+
+      - name: Test vendored VST3 host contracts
+        run: cargo test --manifest-path vendor/vst3-host/Cargo.toml --locked --no-default-features --lib -j1 -- --test-threads=1
+
+      - name: Test actual macOS plugin main services
+        if: runner.os == 'macOS'
+        timeout-minutes: 5
+        run: cargo run --manifest-path vendor/vst3-host/Cargo.toml --locked --no-default-features --example macos_main_services -j1
+
+      - name: Test actual macOS editor parent ownership
+        if: runner.os == 'macOS'
+        timeout-minutes: 5
+        run: cargo run --manifest-path vendor/vst3-host/Cargo.toml --locked --no-default-features --example macos_editor_parent -j1
+
+      - name: Test actual X11 editor parent ownership
+        if: runner.os == 'Linux'
+        timeout-minutes: 5
+        run: xvfb-run --auto-servernum --server-args="-screen 0 640x480x24 -nolisten tcp" cargo test --manifest-path vendor/vst3-host/Cargo.toml --locked --no-default-features --lib -j1 window::linux_scoped::tests::real_parent_preserves_close_intent_until_explicit_retirement -- --exact --ignored --test-threads=1
+
   test:
     name: Test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
@@ -389,47 +443,6 @@ jobs:
 
       - name: 测试
         run: cargo test --workspace --exclude mondrian-app
-
-      # This vendored host is a standalone workspace: the root workspace test
-      # does not execute its library tests. Match the product's feature closure
-      # on all three desktop runners, without requiring audio devices or GUIs.
-      - name: Test vendored VST3 host contracts
-        env:
-          CARGO_TARGET_DIR: ${{ github.workspace }}/target
-          CARGO_INCREMENTAL: "0"
-          CARGO_PROFILE_DEV_DEBUG: "0"
-          CARGO_PROFILE_TEST_DEBUG: "0"
-        run: cargo test --manifest-path vendor/vst3-host/Cargo.toml --locked --no-default-features --lib -j1 -- --test-threads=1
-
-      - name: Test actual macOS plugin main services
-        if: runner.os == 'macOS'
-        timeout-minutes: 5
-        env:
-          CARGO_TARGET_DIR: ${{ github.workspace }}/target
-          CARGO_INCREMENTAL: "0"
-          CARGO_PROFILE_DEV_DEBUG: "0"
-        run: cargo run --manifest-path vendor/vst3-host/Cargo.toml --locked --no-default-features --example macos_main_services -j1
-
-      - name: Test actual macOS editor parent ownership
-        if: runner.os == 'macOS'
-        timeout-minutes: 5
-        env:
-          CARGO_TARGET_DIR: ${{ github.workspace }}/target
-          CARGO_INCREMENTAL: "0"
-          CARGO_PROFILE_DEV_DEBUG: "0"
-        run: cargo run --manifest-path vendor/vst3-host/Cargo.toml --locked --no-default-features --example macos_editor_parent -j1
-
-      - name: Test actual X11 editor parent ownership
-        if: runner.os == 'Linux'
-        timeout-minutes: 5
-        env:
-          CARGO_TARGET_DIR: ${{ github.workspace }}/target
-          CARGO_INCREMENTAL: "0"
-          CARGO_PROFILE_TEST_DEBUG: "0"
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y xvfb xauth
-          xvfb-run --auto-servernum --server-args="-screen 0 640x480x24 -nolisten tcp" cargo test --manifest-path vendor/vst3-host/Cargo.toml --locked --no-default-features --lib -j1 window::linux_scoped::tests::real_parent_preserves_close_intent_until_explicit_retirement -- --exact --ignored --test-threads=1
 
       - name: 编译默认 App 产品入口
         env:
