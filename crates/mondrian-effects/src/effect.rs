@@ -856,6 +856,12 @@ pub enum EffectRenderOp {
     FindEdges {
         grade: crate::FindEdgesGrade,
     },
+    /// Emboss: directional relief computed from the Sobel gradient of the
+    /// scene-linear luminance, blended over the source. The gradient reads the
+    /// unmodified frame, so repeated passes are order independent.
+    Emboss {
+        grade: crate::EmbossGrade,
+    },
     DropShadow {
         grade: crate::DropShadowGrade,
     },
@@ -992,6 +998,9 @@ impl std::fmt::Debug for EffectRenderOp {
             }
             Self::FindEdges { grade } => {
                 formatter.debug_struct("FindEdges").field("grade", grade).finish()
+            }
+            Self::Emboss { grade } => {
+                formatter.debug_struct("Emboss").field("grade", grade).finish()
             }
             Self::DropShadow { grade } => {
                 formatter.debug_struct("DropShadow").field("grade", grade).finish()
@@ -1396,6 +1405,15 @@ impl EffectRenderOp {
                 grade.blend_with_original().to_bits().hash(state);
                 u8::from(grade.invert()).hash(state);
             }
+            EffectRenderOp::Emboss { grade } => {
+                31u8.hash(state);
+                for value in grade.gpu_controls() {
+                    value.to_bits().hash(state);
+                }
+                for value in grade.luminance_coefficients() {
+                    value.to_bits().hash(state);
+                }
+            }
             EffectRenderOp::DropShadow { grade } => {
                 29u8.hash(state);
                 for value in grade.color() {
@@ -1533,6 +1551,7 @@ impl EffectRenderOp {
             EffectRenderOp::ChannelMixer { .. } => 2,
             EffectRenderOp::DropShadow { .. } => 6,
             EffectRenderOp::FindEdges { .. } => 4,
+            EffectRenderOp::Emboss { .. } => 4,
             EffectRenderOp::HueSaturation { .. } => 2,
             EffectRenderOp::UnsharpMask { .. } => 4,
             EffectRenderOp::Lut3D { .. } => 2,
@@ -2066,7 +2085,7 @@ impl EffectDefinition {
     }
 }
 
-fn builtin_effect_types() -> [EffectType; 29] {
+fn builtin_effect_types() -> [EffectType; 30] {
     [
         EffectType::BasicCorrection,
         EffectType::WhiteBalance,
@@ -2097,6 +2116,7 @@ fn builtin_effect_types() -> [EffectType; 29] {
         EffectType::ChannelMixer,
         EffectType::DropShadow,
         EffectType::FindEdges,
+        EffectType::Emboss,
     ]
 }
 
@@ -3225,6 +3245,52 @@ fn default_properties_for(effect_type: EffectType) -> PropertyBag {
                 None,
             );
         }
+        EffectType::Emboss => {
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "direction",
+                "浮雕",
+                "方向",
+                PropertyValue::Float(45.0),
+                None,
+                None,
+                None,
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "relief",
+                "浮雕",
+                "凸出",
+                PropertyValue::Float(1.0),
+                Some(0.0),
+                Some(crate::EMBOSS_MAX_RELIEF as f64),
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "contrast",
+                "浮雕",
+                "对比度",
+                PropertyValue::Float(100.0),
+                Some(0.0),
+                Some(crate::EMBOSS_MAX_CONTRAST_PERCENT as f64),
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "blend_with_original",
+                "浮雕",
+                "与原始图像混合",
+                PropertyValue::Float(0.0),
+                Some(0.0),
+                Some(1.0),
+                Some(0.01),
+            );
+        }
         EffectType::DropShadow => {
             define_builtin_property(
                 &mut properties,
@@ -3907,6 +3973,14 @@ fn builtin_effect_execution_contract(effect_type: &EffectType) -> EffectExecutio
             roi_propagation: EffectRoiPropagation::Expand {
                 horizontal_pixels: crate::FIND_EDGES_HALO_PIXELS,
                 vertical_pixels: crate::FIND_EDGES_HALO_PIXELS,
+            },
+            ..cpu_linear
+        },
+        EffectType::Emboss => EffectExecutionContract {
+            execution_modes: EffectExecutionModes::CPU_F32,
+            roi_propagation: EffectRoiPropagation::Expand {
+                horizontal_pixels: crate::EMBOSS_HALO_PIXELS,
+                vertical_pixels: crate::EMBOSS_HALO_PIXELS,
             },
             ..cpu_linear
         },
@@ -4813,6 +4887,30 @@ fn builtin_graph_builder_for(effect_type: &EffectType) -> Option<EffectGraphBuil
                 Ok(())
             }))
         }
+        EffectType::Emboss => {
+            let direction_id = builtin_parameter_id(effect_type, "direction");
+            let relief_id = builtin_parameter_id(effect_type, "relief");
+            let contrast_id = builtin_parameter_id(effect_type, "contrast");
+            let blend_id = builtin_parameter_id(effect_type, "blend_with_original");
+            Some(Arc::new(move |effect, context, graph| {
+                let grade = crate::EmbossGrade::for_space(
+                    effect.evaluate_f32_parameter(&direction_id, context.time, 45.0),
+                    effect.evaluate_f32_parameter(&relief_id, context.time, 1.0),
+                    effect.evaluate_f32_parameter(&contrast_id, context.time, 100.0),
+                    effect.evaluate_f32_parameter(&blend_id, context.time, 0.0),
+                    context.working_color_space,
+                )
+                .map_err(|error| EffectGraphBuildError::InvalidAuthorState {
+                    effect_key: effect.effect_type.key(),
+                    effect_id: effect.id,
+                    reason: error.to_string(),
+                })?;
+                if !grade.is_identity() {
+                    graph.append_unary(EffectRenderOp::Emboss { grade });
+                }
+                Ok(())
+            }))
+        }
         EffectType::DropShadow => {
             let color_id = builtin_parameter_id(effect_type, "color");
             let opacity_id = builtin_parameter_id(effect_type, "opacity");
@@ -5114,6 +5212,7 @@ fn builtin_display_name(effect_type: &EffectType) -> &'static str {
         EffectType::ChannelMixer => "通道混合器",
         EffectType::DropShadow => "投影",
         EffectType::FindEdges => "查找边缘",
+        EffectType::Emboss => "浮雕",
         EffectType::External(_) => "外部效果",
     }
 }
@@ -6377,6 +6476,7 @@ mod tests {
             EffectType::ChannelMixer,
             EffectType::DropShadow,
             EffectType::FindEdges,
+            EffectType::Emboss,
         ]
         .into_iter()
         .map(|effect_type| effect_type.key())
@@ -8577,6 +8677,141 @@ mod tests {
             Some("effect graph builder panicked")
         );
         assert!(!effect_library_types().contains(&extension_type));
+    }
+
+    fn emboss_view(input: &[[f32; 4]]) -> crate::EffectFloatFrameView<'_> {
+        crate::EffectFloatFrameView::new(
+            crate::EffectFrameExtent::new(input.len() as u32, 1),
+            crate::EffectValueFormat::new(
+                crate::EffectWorkingPrecision::Float32,
+                crate::EffectColorDomain::SceneLinearRgb,
+                mondrian_core::ColorFrameAlpha::StraightCoverage,
+            ),
+            mondrian_core::ImageSampling::UNIT_SQUARE,
+            input,
+        )
+    }
+
+    #[test]
+    fn emboss_defaults_compile_to_a_visible_relief() {
+        let effect =
+            instantiate_effect_node(EffectType::Emboss).expect("registered emboss definition");
+        let compiled = compile_clip_effect_graph(&[effect], &[], tt(0), TEST_WORKING_SPACE)
+            .expect("compile emboss");
+        let input = [[0.25, 0.25, 0.25, 1.0]; 3];
+        let output = crate::apply_compiled_effect_graph_rgba_f32(emboss_view(&input), &compiled, 0)
+            .expect("execute emboss");
+        let pixels = output.pixels();
+        assert_eq!(pixels.len(), 3);
+        // A flat frame has no gradient, so the default relief is the neutral mid grey.
+        for pixel in pixels {
+            for channel in 0..3 {
+                assert!(
+                    (pixel[channel] - 0.5).abs() <= 1.0e-6,
+                    "flat frame produced {pixel:?}"
+                );
+            }
+            assert_eq!(pixel[3], 1.0);
+        }
+    }
+
+    #[test]
+    fn emboss_full_mix_compiles_to_identity() {
+        let mut effect =
+            instantiate_effect_node(EffectType::Emboss).expect("registered emboss definition");
+        effect
+            .apply_property_mutation(PropertyMutation::SetStaticValue {
+                path: EffectType::Emboss.property_path("blend_with_original"),
+                value: PropertyValue::Float(1.0),
+            })
+            .expect("author a full source mix");
+        let compiled = compile_clip_effect_graph(&[effect], &[], tt(0), TEST_WORKING_SPACE)
+            .expect("compile emboss identity");
+        let input = [[0.1, 0.4, 0.9, 0.5], [1.5, 0.2, 0.3, 1.0]];
+        let output = crate::apply_compiled_effect_graph_rgba_f32(emboss_view(&input), &compiled, 0)
+            .expect("execute emboss identity");
+        assert_eq!(output.pixels(), &input[..]);
+    }
+
+    #[test]
+    fn emboss_rejects_author_values_outside_the_declared_ranges() {
+        let effect =
+            instantiate_effect_node(EffectType::Emboss).expect("registered emboss definition");
+        for (parameter, value) in [
+            ("relief", PropertyValue::Float(1_001.0)),
+            ("relief", PropertyValue::Float(-1.0)),
+            ("contrast", PropertyValue::Float(-1.0)),
+            ("blend_with_original", PropertyValue::Float(1.5)),
+        ] {
+            let mut effect = effect.clone();
+            assert!(
+                effect
+                    .apply_property_mutation(PropertyMutation::SetStaticValue {
+                        path: EffectType::Emboss.property_path(parameter),
+                        value,
+                    })
+                    .is_err(),
+                "the numeric contract rejects {parameter} outside its authored range"
+            );
+        }
+    }
+
+    #[test]
+    fn emboss_relief_follows_the_authored_direction_without_clamping() {
+        let mut effect =
+            instantiate_effect_node(EffectType::Emboss).expect("registered emboss definition");
+        effect
+            .apply_property_mutation(PropertyMutation::SetStaticValue {
+                path: EffectType::Emboss.property_path("blend_with_original"),
+                value: PropertyValue::Float(0.5),
+            })
+            .expect("author a half source mix");
+        let compiled = compile_clip_effect_graph(&[effect], &[], tt(0), TEST_WORKING_SPACE)
+            .expect("compile emboss");
+        let input = [
+            [0.0, 0.0, 0.0, 1.0],
+            [0.0, 0.0, 0.0, 1.0],
+            [2.0, 2.0, 2.0, 1.0],
+        ];
+        let output = crate::apply_compiled_effect_graph_rgba_f32(emboss_view(&input), &compiled, 0)
+            .expect("execute emboss");
+        let pixels = output.pixels();
+        // A step from black to an extended-range white lights the middle pixel above the
+        // neutral 0.5 relief, and half of the 2.0 source keeps the result above 1.0.
+        assert!(
+            pixels[1][0] > 0.5 + 1.0e-3,
+            "expected a lit ramp, got {:?}",
+            pixels[1]
+        );
+        assert!(
+            pixels[2][0] > 1.0,
+            "extended-range source must not be clamped, got {:?}",
+            pixels[2]
+        );
+        assert_eq!(pixels[2][3], 1.0);
+    }
+
+    #[test]
+    fn emboss_authored_state_survives_project_serialization_round_trip() {
+        let mut effect =
+            instantiate_effect_node(EffectType::Emboss).expect("registered emboss definition");
+        for (parameter, value) in [
+            ("direction", PropertyValue::Float(135.0)),
+            ("relief", PropertyValue::Float(12.5)),
+            ("contrast", PropertyValue::Float(240.0)),
+            ("blend_with_original", PropertyValue::Float(0.35)),
+        ] {
+            effect
+                .apply_property_mutation(PropertyMutation::SetStaticValue {
+                    path: EffectType::Emboss.property_path(parameter),
+                    value,
+                })
+                .expect("author emboss state");
+        }
+        let encoded = serde_json::to_string(&effect).expect("serialize emboss state");
+        let restored: EffectNode =
+            serde_json::from_str(&encoded).expect("deserialize emboss state");
+        assert_eq!(restored, effect);
     }
 }
 

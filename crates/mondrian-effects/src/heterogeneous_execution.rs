@@ -2731,6 +2731,7 @@ const fn effect_operation_shape_tag(operation: &EffectRenderOp) -> u8 {
         EffectRenderOp::DirectionalBlur { .. } => 28,
         EffectRenderOp::ChannelMixer { .. } => 29,
         EffectRenderOp::FindEdges { .. } => 31,
+        EffectRenderOp::Emboss { .. } => 32,
         EffectRenderOp::DropShadow { .. } => 30,
         EffectRenderOp::HueSaturation { .. } => 25,
         EffectRenderOp::UnsharpMask { .. } => 24,
@@ -4765,6 +4766,7 @@ fn cpu_node_scratch_frames(
             | crate::EffectRenderOp::FindEdges { .. }
             | crate::EffectRenderOp::DropShadow { .. }
             | crate::EffectRenderOp::UnsharpMask { .. }
+            | crate::EffectRenderOp::Emboss { .. }
             | crate::EffectRenderOp::Crop { .. }
             | crate::EffectRenderOp::Lut3D { .. }
             | crate::EffectRenderOp::Custom { processor: Some(_), .. } => {

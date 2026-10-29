@@ -44,6 +44,7 @@ pub enum EffectType {
     ChannelMixer,
     DropShadow,
     FindEdges,
+    Emboss,
     /// Externally registered effect definition, including native-format adapters.
     /// This is a domain definition reference, not an Extension package identity.
     /// The serde name preserves the existing project wire representation.
@@ -83,6 +84,7 @@ impl EffectType {
             Self::ChannelMixer => "builtin.channel_mixer".to_string(),
             Self::DropShadow => "builtin.drop_shadow".to_string(),
             Self::FindEdges => "builtin.find_edges".to_string(),
+            Self::Emboss => "builtin.emboss".to_string(),
             Self::External(key) => key.clone(),
         }
     }
@@ -118,6 +120,7 @@ impl EffectType {
             "builtin.channel_mixer" => Self::ChannelMixer,
             "builtin.drop_shadow" => Self::DropShadow,
             "builtin.find_edges" => Self::FindEdges,
+            "builtin.emboss" => Self::Emboss,
             other => Self::External(other.to_string()),
         }
     }
@@ -153,6 +156,7 @@ impl EffectType {
             Self::ChannelMixer => "通道混合器",
             Self::DropShadow => "投影",
             Self::FindEdges => "查找边缘",
+            Self::Emboss => "浮雕",
             Self::External(name) => name,
         }
     }
@@ -186,6 +190,7 @@ impl EffectType {
             Self::Invert => vec!["通道"],
             Self::DropShadow => vec!["光效"],
             Self::FindEdges => vec!["风格化"],
+            Self::Emboss => vec!["风格化"],
             Self::External(_) => vec!["外部效果"],
         }
     }
@@ -221,6 +226,7 @@ impl EffectType {
             Self::ChannelMixer => "channel_mixer".to_string(),
             Self::DropShadow => "drop_shadow".to_string(),
             Self::FindEdges => "find_edges".to_string(),
+            Self::Emboss => "emboss".to_string(),
             Self::External(key) => key.clone(),
         }
     }
@@ -516,6 +522,7 @@ impl crate::AuthoringFootprint for EffectType {
             Self::ChannelMixer => Ok(()),
             Self::DropShadow => Ok(()),
             Self::FindEdges => Ok(()),
+            Self::Emboss => Ok(()),
         }
     }
 }

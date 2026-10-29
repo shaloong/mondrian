@@ -1706,6 +1706,14 @@ fn render_op_requirements(op: &EffectRenderOp) -> EffectImplementationRequiremen
             },
             ..cpu_float
         },
+        EffectRenderOp::Emboss { .. } => EffectImplementationRequirements {
+            execution_modes: EffectExecutionModes::CPU_F32,
+            roi_from_effect_input: EffectRoiPropagation::Expand {
+                horizontal_pixels: crate::EMBOSS_HALO_PIXELS,
+                vertical_pixels: crate::EMBOSS_HALO_PIXELS,
+            },
+            ..cpu_float
+        },
         EffectRenderOp::DropShadow { grade } => EffectImplementationRequirements {
             execution_modes: EffectExecutionModes::CPU_F32,
             roi_from_effect_input: grade.input_halo().map_or(

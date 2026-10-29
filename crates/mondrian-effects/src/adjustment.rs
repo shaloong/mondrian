@@ -212,6 +212,12 @@ pub(crate) fn apply_render_op(
                 parameter: "requires_float32",
             });
         }
+        EffectRenderOp::Emboss { .. } => {
+            return Err(EffectExecutionError::InvalidRenderParameter {
+                op: "emboss",
+                parameter: "requires_float32",
+            });
+        }
         EffectRenderOp::DropShadow { .. } => {
             return Err(EffectExecutionError::InvalidRenderParameter {
                 op: "drop_shadow",
@@ -649,6 +655,7 @@ pub(crate) const fn render_op_f32_scratch_frames(op: &EffectRenderOp) -> usize {
         EffectRenderOp::GaussianBlur { .. } | EffectRenderOp::Qualifier { .. } => 1,
         EffectRenderOp::BoxBlur { .. } => 1,
         EffectRenderOp::UnsharpMask { .. } => 1,
+        EffectRenderOp::Emboss { .. } => 1,
         EffectRenderOp::Sharpen { .. } => 2,
         EffectRenderOp::ChromaticAberration { .. } | EffectRenderOp::Custom { .. } => 1,
         EffectRenderOp::ColorAdjust { .. }
@@ -858,6 +865,13 @@ pub(crate) fn apply_render_op_f32_region_controlled<E>(
             Ok(true)
         }
         EffectRenderOp::FindEdges { grade } => crate::find_edges::apply_find_edges_f32_controlled(
+            working,
+            width as usize,
+            height as usize,
+            *grade,
+            checkpoint,
+        ),
+        EffectRenderOp::Emboss { grade } => crate::emboss::apply_emboss_f32_controlled(
             working,
             width as usize,
             height as usize,
