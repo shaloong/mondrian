@@ -2478,7 +2478,7 @@ dependencies = [
  "mondrian-core",
  "mondrian-media",
  "mondrian-timeline",
- "objc2",
+ "objc2 0.6.4",
  "pulp",
  "serde",
  "serde_json",
