@@ -856,6 +856,10 @@ pub enum EffectRenderOp {
     FindEdges {
         grade: crate::FindEdgesGrade,
     },
+    /// Threshold: black or white depending on the working-space luminance.
+    Threshold {
+        grade: crate::ThresholdGrade,
+    },
     /// ColorEmboss: per-channel relief computed from the Sobel gradient of
     /// the working-space colour.
     ColorEmboss {
@@ -1003,6 +1007,9 @@ impl std::fmt::Debug for EffectRenderOp {
             }
             Self::FindEdges { grade } => {
                 formatter.debug_struct("FindEdges").field("grade", grade).finish()
+            }
+            Self::Threshold { grade } => {
+                formatter.debug_struct("Threshold").field("grade", grade).finish()
             }
             Self::ColorEmboss { grade } => {
                 formatter.debug_struct("ColorEmboss").field("grade", grade).finish()
@@ -1413,6 +1420,13 @@ impl EffectRenderOp {
                 grade.blend_with_original().to_bits().hash(state);
                 u8::from(grade.invert()).hash(state);
             }
+            EffectRenderOp::Threshold { grade } => {
+                33u8.hash(state);
+                grade.level().to_bits().hash(state);
+                for value in grade.luminance_coefficients() {
+                    value.to_bits().hash(state);
+                }
+            }
             EffectRenderOp::ColorEmboss { grade } => {
                 32u8.hash(state);
                 for value in grade.gpu_controls() {
@@ -1565,6 +1579,7 @@ impl EffectRenderOp {
             EffectRenderOp::ChannelMixer { .. } => 2,
             EffectRenderOp::DropShadow { .. } => 6,
             EffectRenderOp::FindEdges { .. } => 4,
+            EffectRenderOp::Threshold { .. } => 1,
             EffectRenderOp::ColorEmboss { .. } => 4,
             EffectRenderOp::Emboss { .. } => 4,
             EffectRenderOp::HueSaturation { .. } => 2,
@@ -2100,7 +2115,7 @@ impl EffectDefinition {
     }
 }
 
-fn builtin_effect_types() -> [EffectType; 31] {
+fn builtin_effect_types() -> [EffectType; 32] {
     [
         EffectType::BasicCorrection,
         EffectType::WhiteBalance,
@@ -2133,6 +2148,7 @@ fn builtin_effect_types() -> [EffectType; 31] {
         EffectType::FindEdges,
         EffectType::Emboss,
         EffectType::ColorEmboss,
+        EffectType::Threshold,
     ]
 }
 
@@ -3261,6 +3277,19 @@ fn default_properties_for(effect_type: EffectType) -> PropertyBag {
                 None,
             );
         }
+        EffectType::Threshold => {
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "level",
+                "阈值",
+                "阈值",
+                PropertyValue::Float(0.5),
+                Some(crate::THRESHOLD_MIN_LEVEL as f64),
+                Some(crate::THRESHOLD_MAX_LEVEL as f64),
+                Some(0.01),
+            );
+        }
         EffectType::ColorEmboss => {
             define_builtin_property(
                 &mut properties,
@@ -4036,6 +4065,10 @@ fn builtin_effect_execution_contract(effect_type: &EffectType) -> EffectExecutio
                 horizontal_pixels: crate::FIND_EDGES_HALO_PIXELS,
                 vertical_pixels: crate::FIND_EDGES_HALO_PIXELS,
             },
+            ..cpu_linear
+        },
+        EffectType::Threshold => EffectExecutionContract {
+            execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
             ..cpu_linear
         },
         EffectType::ColorEmboss => EffectExecutionContract {
@@ -4957,6 +4990,22 @@ fn builtin_graph_builder_for(effect_type: &EffectType) -> Option<EffectGraphBuil
                 Ok(())
             }))
         }
+        EffectType::Threshold => {
+            let level_id = builtin_parameter_id(effect_type, "level");
+            Some(Arc::new(move |effect, context, graph| {
+                let grade = crate::ThresholdGrade::for_space(
+                    effect.evaluate_f32_parameter(&level_id, context.time, 0.5),
+                    context.working_color_space,
+                )
+                .map_err(|error| EffectGraphBuildError::InvalidAuthorState {
+                    effect_key: effect.effect_type.key(),
+                    effect_id: effect.id,
+                    reason: error.to_string(),
+                })?;
+                graph.append_unary(EffectRenderOp::Threshold { grade });
+                Ok(())
+            }))
+        }
         EffectType::ColorEmboss => {
             let direction_id = builtin_parameter_id(effect_type, "direction");
             let relief_id = builtin_parameter_id(effect_type, "relief");
@@ -5305,6 +5354,7 @@ fn builtin_display_name(effect_type: &EffectType) -> &'static str {
         EffectType::ChannelMixer => "通道混合器",
         EffectType::DropShadow => "投影",
         EffectType::FindEdges => "查找边缘",
+        EffectType::Threshold => "阈值",
         EffectType::ColorEmboss => "色彩浮雕",
         EffectType::Emboss => "浮雕",
         EffectType::External(_) => "外部效果",
@@ -6572,6 +6622,7 @@ mod tests {
             EffectType::FindEdges,
             EffectType::Emboss,
             EffectType::ColorEmboss,
+            EffectType::Threshold,
         ]
         .into_iter()
         .map(|effect_type| effect_type.key())
@@ -9030,6 +9081,96 @@ mod tests {
         assert_eq!(grade.relief(), 2.5);
         assert_eq!(grade.contrast_percent(), 150.0);
         assert_eq!(grade.blend_with_original(), 0.25);
+    }
+    fn threshold_op(graph: &EffectRenderGraph) -> Option<crate::ThresholdGrade> {
+        graph.nodes.iter().find_map(|node| match &node.kind {
+            EffectGraphNodeKind::UnaryEffect {
+                op: EffectRenderOp::Threshold { grade }, ..
+            }
+            | EffectGraphNodeKind::DomainEffect {
+                op: EffectRenderOp::Threshold { grade }, ..
+            } => Some(*grade),
+            _ => None,
+        })
+    }
+
+    #[test]
+    fn threshold_defaults_compile_to_the_listed_level() {
+        let effect = instantiate_effect_node(EffectType::Threshold)
+            .expect("registered threshold definition");
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("evaluate default threshold");
+        let grade = threshold_op(&graph).expect("threshold always quantises");
+        assert_eq!(grade.level(), 0.5);
+        assert_eq!(
+            grade.luminance_coefficients(),
+            TEST_WORKING_SPACE.luminance_coefficients()
+        );
+    }
+
+    #[test]
+    fn threshold_rejects_levels_outside_the_declared_window() {
+        let effect = instantiate_effect_node(EffectType::Threshold)
+            .expect("registered threshold definition");
+        for level in [30_001.0, -30_001.0] {
+            let mut effect = effect.clone();
+            assert!(
+                effect
+                    .apply_property_mutation(PropertyMutation::SetStaticValue {
+                        path: EffectType::Threshold.property_path("level"),
+                        value: PropertyValue::Float(level),
+                    })
+                    .is_err(),
+                "the numeric contract rejects level {level}"
+            );
+        }
+    }
+
+    #[test]
+    fn threshold_quantizes_scene_linear_float_frames() {
+        let effect = instantiate_effect_node(EffectType::Threshold)
+            .expect("registered threshold definition");
+        let compiled = compile_clip_effect_graph(&[effect], &[], tt(0), TEST_WORKING_SPACE)
+            .expect("compile threshold");
+        let input = [[0.2, 0.2, 0.2, 1.0], [0.8, 0.8, 0.8, 0.5]];
+        let output = crate::apply_compiled_effect_graph_rgba_f32(emboss_view(&input), &compiled, 0)
+            .expect("execute threshold");
+        let pixels = output.pixels();
+        assert_eq!(pixels[0], [0.0, 0.0, 0.0, 1.0]);
+        assert_eq!(pixels[1], [1.0, 1.0, 1.0, 0.5]);
+    }
+
+    #[test]
+    fn threshold_reads_the_working_space_luminance() {
+        let effect = instantiate_effect_node(EffectType::Threshold)
+            .expect("registered threshold definition");
+        let compiled = compile_clip_effect_graph(&[effect], &[], tt(0), TEST_WORKING_SPACE)
+            .expect("compile threshold");
+        let input = [[0.0, 0.8, 0.0, 1.0], [0.0, 0.0, 1.0, 1.0]];
+        let output = crate::apply_compiled_effect_graph_rgba_f32(emboss_view(&input), &compiled, 0)
+            .expect("execute threshold");
+        let pixels = output.pixels();
+        assert_eq!(pixels[0][0], 1.0, "bright green passes the level");
+        assert_eq!(pixels[1][0], 0.0, "bright blue does not");
+    }
+
+    #[test]
+    fn threshold_authored_state_survives_project_serialization_round_trip() {
+        let mut effect = instantiate_effect_node(EffectType::Threshold)
+            .expect("registered threshold definition");
+        effect
+            .apply_property_mutation(PropertyMutation::SetStaticValue {
+                path: EffectType::Threshold.property_path("level"),
+                value: PropertyValue::Float(0.25),
+            })
+            .expect("author a level");
+        let encoded = serde_json::to_string(&effect).expect("serialize threshold");
+        let restored: crate::EffectNode =
+            serde_json::from_str(&encoded).expect("deserialize threshold");
+        assert_eq!(restored, effect);
+        let graph = build_effect_render_graph(&[restored], tt(0), TEST_WORKING_SPACE)
+            .expect("evaluate restored threshold");
+        assert_eq!(threshold_op(&graph).expect("threshold op").level(), 0.25);
     }
 }
 

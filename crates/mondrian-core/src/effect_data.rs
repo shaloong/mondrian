@@ -45,6 +45,7 @@ pub enum EffectType {
     DropShadow,
     FindEdges,
     ColorEmboss,
+    Threshold,
     Emboss,
     /// Externally registered effect definition, including native-format adapters.
     /// This is a domain definition reference, not an Extension package identity.
@@ -87,6 +88,7 @@ impl EffectType {
             Self::FindEdges => "builtin.find_edges".to_string(),
             Self::Emboss => "builtin.emboss".to_string(),
             Self::ColorEmboss => "builtin.color_emboss".to_string(),
+            Self::Threshold => "builtin.threshold".to_string(),
             Self::External(key) => key.clone(),
         }
     }
@@ -124,6 +126,7 @@ impl EffectType {
             "builtin.find_edges" => Self::FindEdges,
             "builtin.emboss" => Self::Emboss,
             "builtin.color_emboss" => Self::ColorEmboss,
+            "builtin.threshold" => Self::Threshold,
             other => Self::External(other.to_string()),
         }
     }
@@ -161,6 +164,7 @@ impl EffectType {
             Self::FindEdges => "查找边缘",
             Self::Emboss => "浮雕",
             Self::ColorEmboss => "色彩浮雕",
+            Self::Threshold => "阈值",
             Self::External(name) => name,
         }
     }
@@ -196,6 +200,7 @@ impl EffectType {
             Self::FindEdges => vec!["风格化"],
             Self::Emboss => vec!["风格化"],
             Self::ColorEmboss => vec!["风格化"],
+            Self::Threshold => vec!["风格化"],
             Self::External(_) => vec!["外部效果"],
         }
     }
@@ -233,6 +238,7 @@ impl EffectType {
             Self::FindEdges => "find_edges".to_string(),
             Self::Emboss => "emboss".to_string(),
             Self::ColorEmboss => "color_emboss".to_string(),
+            Self::Threshold => "threshold".to_string(),
             Self::External(key) => key.clone(),
         }
     }
@@ -530,6 +536,7 @@ impl crate::AuthoringFootprint for EffectType {
             Self::FindEdges => Ok(()),
             Self::Emboss => Ok(()),
             Self::ColorEmboss => Ok(()),
+            Self::Threshold => Ok(()),
         }
     }
 }

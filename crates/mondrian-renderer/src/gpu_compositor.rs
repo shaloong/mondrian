@@ -1184,6 +1184,12 @@ fn apply_effects(input: vec4<f32>, position: vec2<f32>) -> vec4<f32> {
                 } else {
                     pixel = vec4<f32>(red.r, red.g, red.b, pixel.a);
                 }
+        } else if (effect.header.x == 18u) {
+            // `ThresholdGrade`: params.x is the level and color.xyz the
+            // working-space luminance coefficients.
+            let luminance = dot(pixel.rgb, effect.color.xyz);
+            let value = select(0.0, 1.0, luminance >= effect.params.x);
+            pixel = vec4<f32>(value, value, value, pixel.a);
         } else if (effect.header.x == 16u) {
             // `ShiftChannelsGrade`: header.y packs the four 4-bit source tags
             // (red, green, blue, alpha) and params.xyz carries the working-space
@@ -4293,6 +4299,18 @@ fn effect_uniforms(
                     extra1: [0.0; 4],
                 }
             }
+            EffectGpuPointOp::Threshold { level, luminance_coefficients } => GpuEffectUniform {
+                header: [18, 0, 0, 0],
+                params: [*level, 0.0, 0.0, 0.0],
+                color: [
+                    luminance_coefficients[0],
+                    luminance_coefficients[1],
+                    luminance_coefficients[2],
+                    0.0,
+                ],
+                extra0: [0.0; 4],
+                extra1: [0.0; 4],
+            },
             EffectGpuPointOp::ChannelMixer { grade } => {
                 let (params, color, extra0, extra1) = grade.gpu_controls();
                 GpuEffectUniform {
@@ -7019,6 +7037,94 @@ mod tests {
                 "GPU point-effect accuracy budget exceeded: {report:#?}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn gpu_threshold_matches_the_cpu_reference_on_real_wgpu_device() {
+        use crate::color_accuracy::{
+            compare_linear_rgba, LinearAccuracyBudget, LinearRgbaAccuracyBudget,
+        };
+        use mondrian_effects::{
+            apply_compiled_effect_graph_rgba_f32, compile_reference_render_graph,
+            lower_effect_graph_to_gpu_plan, EffectGraphBuilderState, EffectRenderOp,
+            ThresholdGrade,
+        };
+
+        let Ok(context) = crate::GpuContext::new().await else {
+            eprintln!("skipping GPU threshold parity test: no GPU adapter available");
+            return;
+        };
+        let data = vec![
+            [0.2_f32, 0.2, 0.2, 1.0],
+            [0.8, 0.8, 0.8, 1.0],
+            [0.0, 0.9, 0.0, 1.0],
+            [0.0, 0.0, 1.0, 1.0],
+            [-0.4, 1.6, 0.5, 0.5],
+            [0.95, 0.05, 0.05, 0.25],
+        ];
+        let frame = CpuColorFrame::working(WorkingRgbaF32Frame {
+            sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
+            alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
+            width: 3,
+            height: 2,
+            color_space: WorkingColorSpace::LinearRec709,
+            data,
+        });
+        let mut builder = EffectGraphBuilderState::new();
+        builder.append_unary(EffectRenderOp::Threshold {
+            grade: ThresholdGrade::new(
+                0.5,
+                WorkingColorSpace::LinearRec709.luminance_coefficients(),
+            )
+            .expect("valid threshold"),
+        });
+        let graph = compile_reference_render_graph(builder.finish()).expect("valid graph");
+        let plan = lower_effect_graph_to_gpu_plan(&graph).expect("supported point effect");
+        assert_eq!(plan.operations().len(), 1);
+        let expected = apply_compiled_effect_graph_rgba_f32(
+            mondrian_effects::EffectFloatFrameView::new(
+                mondrian_effects::EffectFrameExtent::new(3, 2),
+                mondrian_effects::EffectValueFormat::new(
+                    mondrian_effects::EffectWorkingPrecision::Float32,
+                    mondrian_effects::EffectColorDomain::SceneLinearRgb,
+                    mondrian_core::ColorFrameAlpha::StraightCoverage,
+                ),
+                mondrian_core::ImageSampling::UNIT_SQUARE,
+                &frame.rgba_f32().data,
+            ),
+            &graph,
+            0,
+        )
+        .expect("CPU float reference");
+        let layer = GpuCompositeLayer {
+            source: GpuCompositeLayerSource::CpuFrame(&frame),
+            opacity: 1.0,
+            blend_policy: mondrian_effects::EffectPassBlendPolicy::Blend(BlendMode::Normal),
+            transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+            effect_plan: Some(&plan),
+            frame_seed: 0,
+        };
+        let (actual, diagnostics) = readback_test_composite_with_diagnostics(
+            &context,
+            &[layer],
+            3,
+            2,
+            WorkingColorSpace::LinearRec709,
+        );
+        assert_eq!(diagnostics.execution.fused_point_operations, 1);
+        let report = compare_linear_rgba(
+            expected.pixels(),
+            &actual,
+            LinearRgbaAccuracyBudget {
+                rgb: LinearAccuracyBudget::finite(1.0e-6, 1.0e-7, 1.0e-7),
+                alpha: LinearAccuracyBudget::finite(1.0e-6, 1.0e-7, 1.0e-6),
+            },
+        )
+        .expect("comparable frames");
+        assert!(
+            report.within_budget,
+            "GPU threshold accuracy budget exceeded: {report:#?}"
+        );
     }
 
     #[tokio::test]

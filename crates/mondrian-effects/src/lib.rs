@@ -29,6 +29,7 @@ pub mod effect;
 pub mod emboss;
 pub mod find_edges;
 mod project_properties;
+pub mod threshold;
 pub use project_properties::{rebind_effect_project_geometry, EffectProjectPropertyInitializer};
 pub mod execution;
 pub mod execution_contract;
@@ -91,6 +92,7 @@ pub use color_emboss::{
     ColorEmbossError, ColorEmbossGrade, COLOR_EMBOSS_HALO_PIXELS,
     COLOR_EMBOSS_MAX_CONTRAST_PERCENT, COLOR_EMBOSS_MAX_RELIEF,
 };
+
 pub use coverage::{has_positive_coverage, mix_straight_rgba, straight_rgba_from_premultiplied};
 pub use effect::{
     build_effect_render_graph, compile_clip_effect_graph, effect_category_tree, effect_definition,
@@ -204,6 +206,7 @@ pub use temporal_execution::{
     EffectTemporalFrameRequest, EffectTemporalSourceIdentity, PreparedEffectTemporalExecution,
     PreparedEffectTemporalProgram, PreparedTemporalFrameSet, PreparedTemporalFrameSetError,
 };
+pub use threshold::{ThresholdError, ThresholdGrade, THRESHOLD_MAX_LEVEL, THRESHOLD_MIN_LEVEL};
 pub use tracking::{
     canonicalize_tracking_shape, track_frame_pair, transform_tracking_shape, TrackingError,
     TrackingFrame, TrackingObservation, TrackingQuality, TrackingRegion, TrackingTransform,
