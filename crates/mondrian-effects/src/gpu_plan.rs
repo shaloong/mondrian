@@ -780,6 +780,7 @@ fn operation_name(op: &EffectRenderOp) -> &'static str {
         EffectRenderOp::Vignette { .. } => "vignette",
         EffectRenderOp::ChromaticAberration { .. } => "chromatic_aberration",
         EffectRenderOp::Grain { .. } => "grain",
+        EffectRenderOp::Invert { .. } => "invert",
         EffectRenderOp::Crop { .. } => "crop",
         EffectRenderOp::TemporalFrameBlend { .. } => "temporal_frame_blend",
         EffectRenderOp::Lut3D { .. } => "lut_3d",

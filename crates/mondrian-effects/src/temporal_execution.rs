@@ -2797,6 +2797,7 @@ fn render_op_name(op: &crate::EffectRenderOp) -> &'static str {
         crate::EffectRenderOp::Vignette { .. } => "vignette",
         crate::EffectRenderOp::ChromaticAberration { .. } => "chromatic_aberration",
         crate::EffectRenderOp::Grain { .. } => "grain",
+        crate::EffectRenderOp::Invert { .. } => "invert",
         crate::EffectRenderOp::Crop { .. } => "crop",
         crate::EffectRenderOp::TemporalFrameBlend { .. } => "temporal_frame_blend",
         crate::EffectRenderOp::Lut3D { .. } => "lut3d",

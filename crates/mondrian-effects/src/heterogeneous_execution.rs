@@ -2724,6 +2724,7 @@ const fn effect_operation_shape_tag(operation: &EffectRenderOp) -> u8 {
         EffectRenderOp::HighlightRecovery { .. } => 18,
         EffectRenderOp::HueSaturationLightness { .. } => 20,
         EffectRenderOp::ChromaKey { .. } => 21,
+        EffectRenderOp::Invert { .. } => 22,
     }
 }
 
@@ -4745,6 +4746,7 @@ fn cpu_node_scratch_frames(
             | crate::EffectRenderOp::MattePreview { .. }
             | crate::EffectRenderOp::Vignette { .. }
             | crate::EffectRenderOp::Grain { .. }
+            | crate::EffectRenderOp::Invert { .. }
             | crate::EffectRenderOp::Crop { .. }
             | crate::EffectRenderOp::Lut3D { .. }
             | crate::EffectRenderOp::Custom { processor: Some(_), .. } => {

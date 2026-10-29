@@ -770,6 +770,16 @@ pub enum EffectRenderOp {
     Grain {
         amount: f32,
     },
+    /// Channel-scope invert evaluated on scene-linear RGB(A).
+    ///
+    /// `blend_with_original` is the retained fraction of the input pixel in
+    /// `[0, 1]`: `0.0` keeps the inverted result and `1.0` is the identity. The
+    /// graph builder never emits this operation for the identity, and pixels
+    /// without positive coverage are left untouched by every scope.
+    Invert {
+        channels: crate::InvertChannels,
+        blend_with_original: f32,
+    },
     /// Source-relative hard crop expressed as normalized edge insets.
     ///
     /// Pixels outside the remaining rectangle become transparent black before
@@ -883,6 +893,11 @@ impl std::fmt::Debug for EffectRenderOp {
             Self::Grain { amount } => {
                 formatter.debug_struct("Grain").field("amount", amount).finish()
             }
+            Self::Invert { channels, blend_with_original } => formatter
+                .debug_struct("Invert")
+                .field("channels", channels)
+                .field("blend_with_original", blend_with_original)
+                .finish(),
             Self::Crop { left, top, right, bottom } => formatter
                 .debug_struct("Crop")
                 .field("left", left)
@@ -1243,6 +1258,11 @@ impl EffectRenderOp {
                 5u8.hash(state);
                 amount.to_bits().hash(state);
             }
+            EffectRenderOp::Invert { channels, blend_with_original } => {
+                21u8.hash(state);
+                channels.hash(state);
+                blend_with_original.to_bits().hash(state);
+            }
             EffectRenderOp::Crop { left, top, right, bottom } => {
                 9u8.hash(state);
                 left.to_bits().hash(state);
@@ -1329,6 +1349,7 @@ impl EffectRenderOp {
             EffectRenderOp::Vignette { .. } => 1,
             EffectRenderOp::Grain { .. } => 2,
             EffectRenderOp::Crop { .. } => 1,
+            EffectRenderOp::Invert { .. } => 1,
             EffectRenderOp::Lut3D { .. } => 2,
             EffectRenderOp::GaussianBlur { .. } => 4,
             EffectRenderOp::Sharpen { .. } => 4,
@@ -1860,7 +1881,7 @@ impl EffectDefinition {
     }
 }
 
-fn builtin_effect_types() -> [EffectType; 19] {
+fn builtin_effect_types() -> [EffectType; 20] {
     [
         EffectType::BasicCorrection,
         EffectType::WhiteBalance,
@@ -1881,6 +1902,7 @@ fn builtin_effect_types() -> [EffectType; 19] {
         EffectType::Grain,
         EffectType::ChromaKey,
         EffectType::LumaKey,
+        EffectType::Invert,
     ]
 }
 
@@ -2767,6 +2789,38 @@ fn default_properties_for(effect_type: EffectType) -> PropertyBag {
                 None,
             );
         }
+        EffectType::Invert => {
+            let channels = crate::InvertChannels::ALL
+                .into_iter()
+                .map(|scope| {
+                    ParameterEnumOption::new(
+                        scope.key(),
+                        scope.label(),
+                        format!("builtin.invert.channels.{}", scope.key()),
+                    )
+                })
+                .collect();
+            define_builtin_enum_property(
+                &mut properties,
+                &effect_type,
+                "channels",
+                "反转",
+                "通道",
+                "rgb",
+                channels,
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "blend_with_original",
+                "反转",
+                "与原始图像混合",
+                PropertyValue::Float(0.0),
+                Some(0.0),
+                Some(100.0),
+                Some(1.0),
+            );
+        }
         EffectType::External(_) => {}
     }
 
@@ -2965,6 +3019,7 @@ fn builtin_parameter_unit(effect_type: &EffectType, parameter: &str) -> Paramete
         (EffectType::Qualifier, "blur_radius" | "denoise_radius") => ParameterUnit::Pixels,
         (EffectType::Crop, "left" | "top" | "right" | "bottom") => ParameterUnit::Percent,
         (EffectType::GaussianBlur, "radius") => ParameterUnit::Pixels,
+        (EffectType::Invert, "blend_with_original") => ParameterUnit::Percent,
         _ => ParameterUnit::Unitless,
     }
 }
@@ -3092,6 +3147,10 @@ fn builtin_effect_execution_contract(effect_type: &EffectType) -> EffectExecutio
             ..cpu_linear
         },
         EffectType::HueSaturationLightness => EffectExecutionContract {
+            execution_modes: EffectExecutionModes::CPU_F32,
+            ..cpu_linear
+        },
+        EffectType::Invert => EffectExecutionContract {
             execution_modes: EffectExecutionModes::CPU_F32,
             ..cpu_linear
         },
@@ -3791,6 +3850,32 @@ fn builtin_graph_builder_for(effect_type: &EffectType) -> Option<EffectGraphBuil
                 Ok(())
             }))
         }
+        EffectType::Invert => {
+            let channels_id = builtin_parameter_id(effect_type, "channels");
+            let blend_id = builtin_parameter_id(effect_type, "blend_with_original");
+            Some(Arc::new(move |effect, context, graph| {
+                let channels_key = effect
+                    .evaluate_enum_parameter(&channels_id, context.time)
+                    .ok_or_else(|| EffectGraphBuildError::InvalidAuthorState {
+                        effect_key: effect.effect_type.key(),
+                        effect_id: effect.id,
+                        reason: "invert channel scope is not authored".to_owned(),
+                    })?;
+                let channels = crate::InvertChannels::from_key(&channels_key).ok_or_else(|| {
+                    EffectGraphBuildError::InvalidAuthorState {
+                        effect_key: effect.effect_type.key(),
+                        effect_id: effect.id,
+                        reason: format!("unknown invert channel scope `{channels_key}`"),
+                    }
+                })?;
+                let blend_with_original =
+                    effect.evaluate_f32_parameter(&blend_id, context.time, 0.0) / 100.0;
+                if blend_with_original < 1.0 - 1.0e-6 {
+                    graph.append_unary(EffectRenderOp::Invert { channels, blend_with_original });
+                }
+                Ok(())
+            }))
+        }
         _ => None,
     }
 }
@@ -3816,6 +3901,7 @@ fn builtin_display_name(effect_type: &EffectType) -> &'static str {
         EffectType::Grain => "颗粒",
         EffectType::ChromaKey => "色度抠像",
         EffectType::LumaKey => "亮度键",
+        EffectType::Invert => "反转",
         EffectType::External(_) => "外部效果",
     }
 }
@@ -4176,6 +4262,7 @@ mod tests {
             EffectType::Vignette,
             EffectType::ChromaticAberration,
             EffectType::Grain,
+            EffectType::Invert,
         ]
         .into_iter()
         .map(|effect_type| effect_type.key())
@@ -4870,6 +4957,238 @@ mod tests {
         });
 
         assert_eq!(crop, Some((0.25, 0.0, 0.0, 0.0)));
+    }
+
+    #[test]
+    fn invert_defaults_compile_to_rgb_channel_inversion() {
+        let effect =
+            instantiate_effect_node(EffectType::Invert).expect("registered Invert definition");
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("evaluate default Invert");
+
+        let op = graph.nodes.iter().find_map(|node| match &node.kind {
+            EffectGraphNodeKind::UnaryEffect {
+                op: EffectRenderOp::Invert { channels, blend_with_original },
+                ..
+            }
+            | EffectGraphNodeKind::DomainEffect {
+                op: EffectRenderOp::Invert { channels, blend_with_original },
+                ..
+            } => Some((*channels, *blend_with_original)),
+            _ => None,
+        });
+
+        assert_eq!(op, Some((crate::InvertChannels::Rgb, 0.0)));
+    }
+
+    #[test]
+    fn invert_channel_scope_is_authorable_and_reaches_the_op() {
+        let mut effect =
+            instantiate_effect_node(EffectType::Invert).expect("registered Invert definition");
+        let channels_path = EffectType::Invert.property_path("channels");
+        effect
+            .apply_property_mutation(PropertyMutation::SetStaticValue {
+                path: channels_path,
+                value: PropertyValue::Enum("hue".to_string()),
+            })
+            .expect("author the hue channel scope");
+
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("evaluate Invert with the hue scope");
+        let op = graph.nodes.iter().find_map(|node| match &node.kind {
+            EffectGraphNodeKind::UnaryEffect {
+                op: EffectRenderOp::Invert { channels, .. },
+                ..
+            }
+            | EffectGraphNodeKind::DomainEffect {
+                op: EffectRenderOp::Invert { channels, .. },
+                ..
+            } => Some(*channels),
+            _ => None,
+        });
+
+        assert_eq!(op, Some(crate::InvertChannels::Hue));
+    }
+
+    #[test]
+    fn invert_mix_is_authored_in_percent_and_animates_into_the_op() {
+        let mut effect =
+            instantiate_effect_node(EffectType::Invert).expect("registered Invert definition");
+        let blend_path = EffectType::Invert.property_path("blend_with_original");
+        effect
+            .apply_property_mutation(PropertyMutation::SetKeyframe {
+                path: blend_path.clone(),
+                keyframe: Keyframe::linear(tt(0), PropertyValue::Float(0.0)),
+            })
+            .expect("set Invert blend start keyframe");
+        effect
+            .apply_property_mutation(PropertyMutation::SetKeyframe {
+                path: blend_path,
+                keyframe: Keyframe::linear(tt(10), PropertyValue::Float(100.0)),
+            })
+            .expect("set Invert blend end keyframe");
+
+        let graph = build_effect_render_graph(&[effect], tt(5), TEST_WORKING_SPACE)
+            .expect("evaluate animated Invert blend");
+        let blend = graph.nodes.iter().find_map(|node| match &node.kind {
+            EffectGraphNodeKind::UnaryEffect {
+                op: EffectRenderOp::Invert { blend_with_original, .. },
+                ..
+            }
+            | EffectGraphNodeKind::DomainEffect {
+                op: EffectRenderOp::Invert { blend_with_original, .. },
+                ..
+            } => Some(*blend_with_original),
+            _ => None,
+        });
+
+        assert_eq!(blend, Some(0.5));
+    }
+
+    #[test]
+    fn invert_full_original_blend_compiles_to_identity() {
+        let mut effect =
+            instantiate_effect_node(EffectType::Invert).expect("registered Invert definition");
+        effect
+            .apply_property_mutation(PropertyMutation::SetStaticValue {
+                path: EffectType::Invert.property_path("blend_with_original"),
+                value: PropertyValue::Float(100.0),
+            })
+            .expect("author a full original-image blend");
+
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("evaluate fully blended Invert");
+
+        assert!(
+            !graph.nodes.iter().any(|node| matches!(
+                &node.kind,
+                EffectGraphNodeKind::UnaryEffect { op: EffectRenderOp::Invert { .. }, .. }
+            )),
+            "a fully retained original image must not emit an Invert operation"
+        );
+    }
+
+    #[test]
+    fn invert_channel_menu_exposes_sixteen_distinct_scopes() {
+        let definition = effect_definition(&EffectType::Invert).expect("Invert definition");
+        let channels_id = builtin_parameter_id(&EffectType::Invert, "channels");
+        let channels = definition
+            .default_properties()
+            .iter()
+            .find(|(_, property)| property.descriptor.parameter_id() == &channels_id)
+            .expect("Invert channel property");
+
+        let options = &channels.1.descriptor.schema.enum_options;
+        let keys: Vec<&str> = options.iter().map(|option| option.key.as_str()).collect();
+
+        assert_eq!(keys.len(), crate::InvertChannels::ALL.len());
+        assert_eq!(keys.len(), 16);
+        for scope in crate::InvertChannels::ALL {
+            assert!(
+                keys.contains(&scope.key()),
+                "missing invert channel scope `{}`",
+                scope.key()
+            );
+        }
+        let mut unique = keys.clone();
+        unique.sort_unstable();
+        unique.dedup();
+        assert_eq!(
+            unique.len(),
+            keys.len(),
+            "invert channel scopes must be unique"
+        );
+    }
+
+    #[test]
+    fn invert_executes_channel_inversion_on_scene_linear_float_frames() {
+        let mut effect =
+            instantiate_effect_node(EffectType::Invert).expect("registered Invert definition");
+        let input = [[0.25, 2.0, -0.5, 0.75], [0.0, 0.0, 0.0, 0.0]];
+        let view = || {
+            crate::EffectFloatFrameView::new(
+                crate::EffectFrameExtent::new(2, 1),
+                crate::EffectValueFormat::new(
+                    crate::EffectWorkingPrecision::Float32,
+                    crate::EffectColorDomain::SceneLinearRgb,
+                    mondrian_core::ColorFrameAlpha::StraightCoverage,
+                ),
+                mondrian_core::ImageSampling::UNIT_SQUARE,
+                &input,
+            )
+        };
+
+        let compiled = compile_clip_effect_graph(&[effect.clone()], &[], tt(0), TEST_WORKING_SPACE)
+            .expect("compile default Invert");
+        assert!(crate::compiled_effect_graph_supports_rgba_f32(&compiled));
+        let output = crate::apply_compiled_effect_graph_rgba_f32(view(), &compiled, 0)
+            .expect("execute default Invert");
+        assert!((output[0][0] - 0.75).abs() <= 1.0e-6);
+        assert!((output[0][1] + 1.0).abs() <= 1.0e-6);
+        assert!((output[0][2] - 1.5).abs() <= 1.0e-6);
+        assert!((output[0][3] - 0.75).abs() <= 1.0e-6);
+        assert_eq!(
+            output[1],
+            [0.0, 0.0, 0.0, 0.0],
+            "pixels without positive coverage stay untouched"
+        );
+
+        effect
+            .apply_property_mutation(PropertyMutation::SetStaticValue {
+                path: EffectType::Invert.property_path("channels"),
+                value: PropertyValue::Enum("alpha".to_string()),
+            })
+            .expect("author the alpha channel scope");
+        effect
+            .apply_property_mutation(PropertyMutation::SetStaticValue {
+                path: EffectType::Invert.property_path("blend_with_original"),
+                value: PropertyValue::Float(50.0),
+            })
+            .expect("author a half blend");
+        let compiled = compile_clip_effect_graph(&[effect], &[], tt(0), TEST_WORKING_SPACE)
+            .expect("compile alpha Invert");
+        let output = crate::apply_compiled_effect_graph_rgba_f32(view(), &compiled, 0)
+            .expect("execute alpha Invert");
+        assert!((output[0][0] - 0.25).abs() <= 1.0e-6);
+        assert!((output[0][3] - 0.5).abs() <= 1.0e-6);
+    }
+
+    #[test]
+    fn invert_authored_state_survives_project_serialization_round_trip() {
+        let mut effect =
+            instantiate_effect_node(EffectType::Invert).expect("registered Invert definition");
+        effect
+            .apply_property_mutation(PropertyMutation::SetStaticValue {
+                path: EffectType::Invert.property_path("channels"),
+                value: PropertyValue::Enum("green_blue".to_string()),
+            })
+            .expect("author the green/blue channel scope");
+        effect
+            .apply_property_mutation(PropertyMutation::SetStaticValue {
+                path: EffectType::Invert.property_path("blend_with_original"),
+                value: PropertyValue::Float(40.0),
+            })
+            .expect("author a 40 percent blend");
+
+        let wire = serde_json::to_string(&effect).expect("serialize the Invert node");
+        let restored: EffectNode = serde_json::from_str(&wire).expect("restore the Invert node");
+        assert_eq!(restored.effect_type, EffectType::Invert);
+        assert_eq!(restored, effect);
+
+        let graph = build_effect_render_graph(&[restored], tt(0), TEST_WORKING_SPACE)
+            .expect("evaluate the restored Invert node");
+        let op = graph.nodes.iter().find_map(|node| match &node.kind {
+            EffectGraphNodeKind::UnaryEffect {
+                op: EffectRenderOp::Invert { channels, blend_with_original },
+                ..
+            }
+            | EffectGraphNodeKind::DomainEffect {
+                op: EffectRenderOp::Invert { channels, blend_with_original },
+                ..
+            } => Some((*channels, (*blend_with_original * 100.0).round() as i32)),
+            _ => None,
+        });
+        assert_eq!(op, Some((crate::InvertChannels::GreenBlue, 40)));
     }
 
     #[test]

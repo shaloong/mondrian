@@ -34,6 +34,7 @@ pub enum EffectType {
     Grain,
     ChromaKey,
     LumaKey,
+    Invert,
     /// Externally registered effect definition, including native-format adapters.
     /// This is a domain definition reference, not an Extension package identity.
     /// The serde name preserves the existing project wire representation.
@@ -63,6 +64,7 @@ impl EffectType {
             Self::Grain => "builtin.grain".to_string(),
             Self::ChromaKey => "builtin.chroma_key".to_string(),
             Self::LumaKey => "builtin.luma_key".to_string(),
+            Self::Invert => "builtin.invert".to_string(),
             Self::External(key) => key.clone(),
         }
     }
@@ -88,6 +90,7 @@ impl EffectType {
             "builtin.grain" => Self::Grain,
             "builtin.chroma_key" => Self::ChromaKey,
             "builtin.luma_key" => Self::LumaKey,
+            "builtin.invert" => Self::Invert,
             other => Self::External(other.to_string()),
         }
     }
@@ -113,6 +116,7 @@ impl EffectType {
             Self::Grain => "颗粒",
             Self::ChromaKey => "色度抠像",
             Self::LumaKey => "亮度抠像",
+            Self::Invert => "反转",
             Self::External(name) => name,
         }
     }
@@ -133,6 +137,7 @@ impl EffectType {
             Self::GaussianBlur | Self::Sharpen => vec!["颜色", "模糊与锐化"],
             Self::Vignette | Self::ChromaticAberration | Self::Grain => vec!["颜色", "风格化"],
             Self::Qualifier | Self::ChromaKey | Self::LumaKey => vec!["抠像"],
+            Self::Invert => vec!["通道"],
             Self::External(_) => vec!["外部效果"],
         }
     }
@@ -158,6 +163,7 @@ impl EffectType {
             Self::Grain => "grain".to_string(),
             Self::ChromaKey => "chroma_key".to_string(),
             Self::LumaKey => "luma_key".to_string(),
+            Self::Invert => "invert".to_string(),
             Self::External(key) => key.clone(),
         }
     }
@@ -442,7 +448,8 @@ impl crate::AuthoringFootprint for EffectType {
             | Self::ChromaticAberration
             | Self::Grain
             | Self::ChromaKey
-            | Self::LumaKey => Ok(()),
+            | Self::LumaKey
+            | Self::Invert => Ok(()),
         }
     }
 }

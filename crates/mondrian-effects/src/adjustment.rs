@@ -252,6 +252,19 @@ pub(crate) fn apply_render_op(
                 );
             }
         }
+        EffectRenderOp::Invert { channels, blend_with_original } => {
+            for pixel in working.chunks_exact_mut(4) {
+                if pixel[3] == 0 {
+                    continue;
+                }
+                let source = [pixel[0], pixel[1], pixel[2], pixel[3]];
+                pixel.copy_from_slice(&crate::invert::invert_rgba_u8(
+                    source,
+                    *channels,
+                    *blend_with_original,
+                ));
+            }
+        }
         EffectRenderOp::Crop { left, top, right, bottom } => {
             let Some(bounds) = normalized_crop_bounds(width, height, *left, *top, *right, *bottom)
             else {
@@ -602,6 +615,7 @@ pub(crate) const fn render_op_f32_scratch_frames(op: &EffectRenderOp) -> usize {
         | EffectRenderOp::MattePreview { .. }
         | EffectRenderOp::Vignette { .. }
         | EffectRenderOp::Grain { .. }
+        | EffectRenderOp::Invert { .. }
         | EffectRenderOp::Crop { .. }
         | EffectRenderOp::TemporalFrameBlend { .. }
         | EffectRenderOp::Lut3D { .. } => 0,
@@ -865,6 +879,20 @@ pub(crate) fn apply_render_op_f32_region_controlled<E>(
             if amount > 1.0e-4 {
                 apply_grain_f32_region_controlled(working, region, amount, frame_seed, checkpoint)?;
             }
+            Ok(true)
+        }
+        EffectRenderOp::Invert { channels, blend_with_original } => {
+            for chunk in working.chunks_mut(4_096) {
+                checkpoint()?;
+                for pixel in chunk {
+                    if !has_positive_coverage(pixel[3].clamp(0.0, 1.0)) {
+                        continue;
+                    }
+                    *pixel =
+                        crate::invert::invert_rgba_f32(*pixel, *channels, *blend_with_original);
+                }
+            }
+            checkpoint()?;
             Ok(true)
         }
         EffectRenderOp::Crop { left, top, right, bottom } => {
