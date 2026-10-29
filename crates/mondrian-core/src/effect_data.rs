@@ -44,6 +44,7 @@ pub enum EffectType {
     ChannelMixer,
     DropShadow,
     FindEdges,
+    ColorEmboss,
     Emboss,
     /// Externally registered effect definition, including native-format adapters.
     /// This is a domain definition reference, not an Extension package identity.
@@ -85,6 +86,7 @@ impl EffectType {
             Self::DropShadow => "builtin.drop_shadow".to_string(),
             Self::FindEdges => "builtin.find_edges".to_string(),
             Self::Emboss => "builtin.emboss".to_string(),
+            Self::ColorEmboss => "builtin.color_emboss".to_string(),
             Self::External(key) => key.clone(),
         }
     }
@@ -121,6 +123,7 @@ impl EffectType {
             "builtin.drop_shadow" => Self::DropShadow,
             "builtin.find_edges" => Self::FindEdges,
             "builtin.emboss" => Self::Emboss,
+            "builtin.color_emboss" => Self::ColorEmboss,
             other => Self::External(other.to_string()),
         }
     }
@@ -157,6 +160,7 @@ impl EffectType {
             Self::DropShadow => "投影",
             Self::FindEdges => "查找边缘",
             Self::Emboss => "浮雕",
+            Self::ColorEmboss => "色彩浮雕",
             Self::External(name) => name,
         }
     }
@@ -191,6 +195,7 @@ impl EffectType {
             Self::DropShadow => vec!["光效"],
             Self::FindEdges => vec!["风格化"],
             Self::Emboss => vec!["风格化"],
+            Self::ColorEmboss => vec!["风格化"],
             Self::External(_) => vec!["外部效果"],
         }
     }
@@ -227,6 +232,7 @@ impl EffectType {
             Self::DropShadow => "drop_shadow".to_string(),
             Self::FindEdges => "find_edges".to_string(),
             Self::Emboss => "emboss".to_string(),
+            Self::ColorEmboss => "color_emboss".to_string(),
             Self::External(key) => key.clone(),
         }
     }
@@ -523,6 +529,7 @@ impl crate::AuthoringFootprint for EffectType {
             Self::DropShadow => Ok(()),
             Self::FindEdges => Ok(()),
             Self::Emboss => Ok(()),
+            Self::ColorEmboss => Ok(()),
         }
     }
 }

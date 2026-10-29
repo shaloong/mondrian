@@ -2323,6 +2323,7 @@ fn effect_render_op_name(op: &EffectRenderOp) -> &'static str {
         EffectRenderOp::DirectionalBlur { .. } => "directional_blur",
         EffectRenderOp::ChannelMixer { .. } => "channel_mixer",
         EffectRenderOp::FindEdges { .. } => "find_edges",
+        EffectRenderOp::ColorEmboss { .. } => "color_emboss",
         EffectRenderOp::Emboss { .. } => "emboss",
         EffectRenderOp::DropShadow { .. } => "drop_shadow",
         EffectRenderOp::UnsharpMask { .. } => "unsharp_mask",

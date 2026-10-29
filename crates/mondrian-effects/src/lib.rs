@@ -21,6 +21,7 @@ pub mod box_blur;
 pub mod channel_mixer;
 pub mod chroma_key;
 pub mod color_curves;
+pub mod color_emboss;
 pub mod coverage;
 pub mod directional_blur;
 pub mod drop_shadow;
@@ -85,6 +86,10 @@ pub use chroma_key::{ChromaKeyError, PreparedChromaKey};
 pub use color_curves::{
     ColorCurvesAuthoring, ColorCurvesMode, PreparedColorCurves, COLOR_CURVE_SAMPLE_COUNT,
     COLOR_CURVE_SAMPLE_ROWS,
+};
+pub use color_emboss::{
+    ColorEmbossError, ColorEmbossGrade, COLOR_EMBOSS_HALO_PIXELS,
+    COLOR_EMBOSS_MAX_CONTRAST_PERCENT, COLOR_EMBOSS_MAX_RELIEF,
 };
 pub use coverage::{has_positive_coverage, mix_straight_rgba, straight_rgba_from_premultiplied};
 pub use effect::{

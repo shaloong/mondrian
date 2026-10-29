@@ -44,6 +44,7 @@ pub(crate) struct EffectSpatialGpu {
     box_blur: wgpu::RenderPipeline,
     find_edges: wgpu::RenderPipeline,
     emboss: wgpu::RenderPipeline,
+    color_emboss: wgpu::RenderPipeline,
     bindings: wgpu::BindGroupLayout,
 }
 
@@ -174,7 +175,43 @@ impl EffectSpatialGpu {
             multiview_mask: None,
             cache: None,
         });
-        Self { box_blur, emboss, find_edges, bindings }
+        let color_emboss = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("mondrian.effect-spatial.color-emboss"),
+            layout: Some(&layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                buffers: &[],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_color_emboss"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: wgpu::TextureFormat::Rgba32Float,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleStrip,
+                strip_index_format: None,
+                cull_mode: None,
+                ..wgpu::PrimitiveState::default()
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+        Self {
+            box_blur,
+            emboss,
+            color_emboss,
+            find_edges,
+            bindings,
+        }
     }
 
     /// Number of texture passes one spatial pass expands into.
@@ -351,6 +388,38 @@ impl EffectSpatialGpu {
             device,
             encoder,
             &self.emboss,
+            &input_view,
+            &output_view,
+            &uniform,
+        );
+        Ok(destination.clone())
+    }
+
+    pub(crate) fn record_color_emboss(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
+        controls: [f32; 4],
+        source: &wgpu::Texture,
+        destination: &wgpu::Texture,
+        width: u32,
+        height: u32,
+    ) -> Result<wgpu::Texture, EffectSpatialGpuError> {
+        if width == 0 || height == 0 {
+            return Err(EffectSpatialGpuError::EmptyFrame);
+        }
+        let uniform = SpatialPassUniform {
+            size: [width as f32, height as f32, 0.0, 0.0],
+            params: controls,
+            extra: [0.0; 4],
+            aces: [0.0; 4],
+        };
+        let input_view = source.create_view(&wgpu::TextureViewDescriptor::default());
+        let output_view = destination.create_view(&wgpu::TextureViewDescriptor::default());
+        self.record_pass(
+            device,
+            encoder,
+            &self.color_emboss,
             &input_view,
             &output_view,
             &uniform,
@@ -615,6 +684,32 @@ fn fs_emboss(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
     let value = 0.5 + derivative * uniforms.params.z;
     let blend = clamp(uniforms.params.w, 0.0, 1.0);
     let mixed = vec3<f32>(value) * (1.0 - blend) + center.rgb * blend;
+    return unpremultiply(vec4<f32>(mixed, center.a));
+}
+
+@fragment
+fn fs_color_emboss(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
+    let pixel = vec2<i32>(floor(position.xy));
+    let center = premultiply(load_clamped(pixel));
+    if (center.a <= 0.0) {
+        return vec4<f32>(0.0);
+    }
+    let left = premultiply(load_clamped(pixel + vec2<i32>(-1, 0)));
+    let right = premultiply(load_clamped(pixel + vec2<i32>(1, 0)));
+    let top = premultiply(load_clamped(pixel + vec2<i32>(0, -1)));
+    let bottom = premultiply(load_clamped(pixel + vec2<i32>(0, 1)));
+    let top_left = premultiply(load_clamped(pixel + vec2<i32>(-1, -1)));
+    let top_right = premultiply(load_clamped(pixel + vec2<i32>(1, -1)));
+    let bottom_left = premultiply(load_clamped(pixel + vec2<i32>(-1, 1)));
+    let bottom_right = premultiply(load_clamped(pixel + vec2<i32>(1, 1)));
+    let horizontal = (top_right.rgb + 2.0 * right.rgb + bottom_right.rgb)
+        - (top_left.rgb + 2.0 * left.rgb + bottom_left.rgb);
+    let vertical = (bottom_left.rgb + 2.0 * bottom.rgb + bottom_right.rgb)
+        - (top_left.rgb + 2.0 * top.rgb + top_right.rgb);
+    let derivative = horizontal * uniforms.params.x - vertical * uniforms.params.y;
+    let value = vec3<f32>(0.5) + derivative * uniforms.params.z;
+    let blend = clamp(uniforms.params.w, 0.0, 1.0);
+    let mixed = value * (1.0 - blend) + center.rgb * blend;
     return unpremultiply(vec4<f32>(mixed, center.a));
 }
 
@@ -944,6 +1039,60 @@ fn cs_main(@builtin(local_invocation_id) lid: vec3<u32>) {
     }
 
     #[test]
+    #[test]
+    fn gpu_color_emboss_matches_the_cpu_kernel() {
+        let Ok(context) = block_on(crate::GpuContext::new()) else {
+            eprintln!("skipping GPU colour emboss parity test: no GPU adapter available");
+            return;
+        };
+        let width = 6_u32;
+        let height = 4_u32;
+        let mut pixels = vec![[0.0_f32, 0.0, 0.0, 1.0]; (width * height) as usize];
+        for y in 0..height as usize {
+            for x in 0..width as usize {
+                let value = 0.05 * (x + y) as f32;
+                pixels[y * width as usize + x] = [value, value * 0.5, 0.75 - value * 0.1, 1.0];
+            }
+        }
+        pixels[5] = [0.0, 0.0, 0.0, 0.0];
+        let grade = mondrian_effects::ColorEmbossGrade::new(45.0, 4.0, 200.0, 0.25).expect("grade");
+        let mut cpu = pixels.clone();
+        assert!(mondrian_effects::color_emboss::color_emboss_frame_f32(
+            &mut cpu,
+            width as usize,
+            height as usize,
+            grade
+        ));
+        let executor = EffectSpatialGpu::new(&context.device);
+        let source = upload(&context, &pixels, width, height);
+        let destination = scratch(&context, width, height, 1);
+        let mut encoder = context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("mondrian.effect-spatial.color-emboss-encoder"),
+        });
+        let output = executor
+            .record_color_emboss(
+                &context.device,
+                &mut encoder,
+                grade.gpu_controls(),
+                &source,
+                &destination[0],
+                width,
+                height,
+            )
+            .expect("recorded colour emboss");
+        context.queue.submit(Some(encoder.finish()));
+        let gpu = readback(&context, &output, width, height);
+        for (index, (cpu_pixel, gpu_pixel)) in cpu.iter().zip(gpu.iter()).enumerate() {
+            for channel in 0..4 {
+                let difference = (cpu_pixel[channel] - gpu_pixel[channel]).abs();
+                assert!(
+                    difference <= 1.0e-4,
+                    "pixel {index} channel {channel}: cpu {cpu_pixel:?} gpu {gpu_pixel:?}"
+                );
+            }
+        }
+    }
+
     fn gpu_find_edges_matches_the_cpu_kernel() {
         let Ok(context) = block_on(crate::GpuContext::new()) else {
             eprintln!("skipping GPU find edges parity test: no GPU adapter available");

@@ -212,6 +212,12 @@ pub(crate) fn apply_render_op(
                 parameter: "requires_float32",
             });
         }
+        EffectRenderOp::ColorEmboss { .. } => {
+            return Err(EffectExecutionError::InvalidRenderParameter {
+                op: "color_emboss",
+                parameter: "requires_float32",
+            });
+        }
         EffectRenderOp::Emboss { .. } => {
             return Err(EffectExecutionError::InvalidRenderParameter {
                 op: "emboss",
@@ -655,6 +661,7 @@ pub(crate) const fn render_op_f32_scratch_frames(op: &EffectRenderOp) -> usize {
         EffectRenderOp::GaussianBlur { .. } | EffectRenderOp::Qualifier { .. } => 1,
         EffectRenderOp::BoxBlur { .. } => 1,
         EffectRenderOp::UnsharpMask { .. } => 1,
+        EffectRenderOp::ColorEmboss { .. } => 1,
         EffectRenderOp::Emboss { .. } => 1,
         EffectRenderOp::Sharpen { .. } => 2,
         EffectRenderOp::ChromaticAberration { .. } | EffectRenderOp::Custom { .. } => 1,
@@ -871,6 +878,15 @@ pub(crate) fn apply_render_op_f32_region_controlled<E>(
             *grade,
             checkpoint,
         ),
+        EffectRenderOp::ColorEmboss { grade } => {
+            crate::color_emboss::apply_color_emboss_f32_controlled(
+                working,
+                width as usize,
+                height as usize,
+                *grade,
+                checkpoint,
+            )
+        }
         EffectRenderOp::Emboss { grade } => crate::emboss::apply_emboss_f32_controlled(
             working,
             width as usize,

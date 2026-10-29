@@ -856,6 +856,11 @@ pub enum EffectRenderOp {
     FindEdges {
         grade: crate::FindEdgesGrade,
     },
+    /// ColorEmboss: per-channel relief computed from the Sobel gradient of
+    /// the working-space colour.
+    ColorEmboss {
+        grade: crate::ColorEmbossGrade,
+    },
     /// Emboss: directional relief computed from the Sobel gradient of the
     /// scene-linear luminance, blended over the source. The gradient reads the
     /// unmodified frame, so repeated passes are order independent.
@@ -998,6 +1003,9 @@ impl std::fmt::Debug for EffectRenderOp {
             }
             Self::FindEdges { grade } => {
                 formatter.debug_struct("FindEdges").field("grade", grade).finish()
+            }
+            Self::ColorEmboss { grade } => {
+                formatter.debug_struct("ColorEmboss").field("grade", grade).finish()
             }
             Self::Emboss { grade } => {
                 formatter.debug_struct("Emboss").field("grade", grade).finish()
@@ -1405,6 +1413,12 @@ impl EffectRenderOp {
                 grade.blend_with_original().to_bits().hash(state);
                 u8::from(grade.invert()).hash(state);
             }
+            EffectRenderOp::ColorEmboss { grade } => {
+                32u8.hash(state);
+                for value in grade.gpu_controls() {
+                    value.to_bits().hash(state);
+                }
+            }
             EffectRenderOp::Emboss { grade } => {
                 31u8.hash(state);
                 for value in grade.gpu_controls() {
@@ -1551,6 +1565,7 @@ impl EffectRenderOp {
             EffectRenderOp::ChannelMixer { .. } => 2,
             EffectRenderOp::DropShadow { .. } => 6,
             EffectRenderOp::FindEdges { .. } => 4,
+            EffectRenderOp::ColorEmboss { .. } => 4,
             EffectRenderOp::Emboss { .. } => 4,
             EffectRenderOp::HueSaturation { .. } => 2,
             EffectRenderOp::UnsharpMask { .. } => 4,
@@ -2085,7 +2100,7 @@ impl EffectDefinition {
     }
 }
 
-fn builtin_effect_types() -> [EffectType; 30] {
+fn builtin_effect_types() -> [EffectType; 31] {
     [
         EffectType::BasicCorrection,
         EffectType::WhiteBalance,
@@ -2117,6 +2132,7 @@ fn builtin_effect_types() -> [EffectType; 30] {
         EffectType::DropShadow,
         EffectType::FindEdges,
         EffectType::Emboss,
+        EffectType::ColorEmboss,
     ]
 }
 
@@ -3245,6 +3261,52 @@ fn default_properties_for(effect_type: EffectType) -> PropertyBag {
                 None,
             );
         }
+        EffectType::ColorEmboss => {
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "direction",
+                "色彩浮雕",
+                "方向",
+                PropertyValue::Float(45.0),
+                None,
+                None,
+                None,
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "relief",
+                "色彩浮雕",
+                "幅度",
+                PropertyValue::Float(1.0),
+                Some(0.0),
+                Some(crate::COLOR_EMBOSS_MAX_RELIEF as f64),
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "contrast",
+                "色彩浮雕",
+                "对比度",
+                PropertyValue::Float(100.0),
+                Some(0.0),
+                Some(crate::COLOR_EMBOSS_MAX_CONTRAST_PERCENT as f64),
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "blend_with_original",
+                "色彩浮雕",
+                "与原图像混合",
+                PropertyValue::Float(0.0),
+                Some(0.0),
+                Some(100.0),
+                Some(1.0),
+            );
+        }
         EffectType::Emboss => {
             define_builtin_property(
                 &mut properties,
@@ -3973,6 +4035,14 @@ fn builtin_effect_execution_contract(effect_type: &EffectType) -> EffectExecutio
             roi_propagation: EffectRoiPropagation::Expand {
                 horizontal_pixels: crate::FIND_EDGES_HALO_PIXELS,
                 vertical_pixels: crate::FIND_EDGES_HALO_PIXELS,
+            },
+            ..cpu_linear
+        },
+        EffectType::ColorEmboss => EffectExecutionContract {
+            execution_modes: EffectExecutionModes::CPU_F32,
+            roi_propagation: EffectRoiPropagation::Expand {
+                horizontal_pixels: crate::COLOR_EMBOSS_HALO_PIXELS,
+                vertical_pixels: crate::COLOR_EMBOSS_HALO_PIXELS,
             },
             ..cpu_linear
         },
@@ -4887,6 +4957,29 @@ fn builtin_graph_builder_for(effect_type: &EffectType) -> Option<EffectGraphBuil
                 Ok(())
             }))
         }
+        EffectType::ColorEmboss => {
+            let direction_id = builtin_parameter_id(effect_type, "direction");
+            let relief_id = builtin_parameter_id(effect_type, "relief");
+            let contrast_id = builtin_parameter_id(effect_type, "contrast");
+            let blend_id = builtin_parameter_id(effect_type, "blend_with_original");
+            Some(Arc::new(move |effect, context, graph| {
+                let grade = crate::ColorEmbossGrade::new(
+                    effect.evaluate_f32_parameter(&direction_id, context.time, 45.0),
+                    effect.evaluate_f32_parameter(&relief_id, context.time, 1.0),
+                    effect.evaluate_f32_parameter(&contrast_id, context.time, 100.0),
+                    effect.evaluate_f32_parameter(&blend_id, context.time, 0.0) / 100.0,
+                )
+                .map_err(|error| EffectGraphBuildError::InvalidAuthorState {
+                    effect_key: effect.effect_type.key(),
+                    effect_id: effect.id,
+                    reason: error.to_string(),
+                })?;
+                if !grade.is_identity() {
+                    graph.append_unary(EffectRenderOp::ColorEmboss { grade });
+                }
+                Ok(())
+            }))
+        }
         EffectType::Emboss => {
             let direction_id = builtin_parameter_id(effect_type, "direction");
             let relief_id = builtin_parameter_id(effect_type, "relief");
@@ -5212,6 +5305,7 @@ fn builtin_display_name(effect_type: &EffectType) -> &'static str {
         EffectType::ChannelMixer => "通道混合器",
         EffectType::DropShadow => "投影",
         EffectType::FindEdges => "查找边缘",
+        EffectType::ColorEmboss => "色彩浮雕",
         EffectType::Emboss => "浮雕",
         EffectType::External(_) => "外部效果",
     }
@@ -6477,6 +6571,7 @@ mod tests {
             EffectType::DropShadow,
             EffectType::FindEdges,
             EffectType::Emboss,
+            EffectType::ColorEmboss,
         ]
         .into_iter()
         .map(|effect_type| effect_type.key())
@@ -8812,6 +8907,129 @@ mod tests {
         let restored: EffectNode =
             serde_json::from_str(&encoded).expect("deserialize emboss state");
         assert_eq!(restored, effect);
+    }
+    fn color_emboss_op(graph: &EffectRenderGraph) -> Option<crate::ColorEmbossGrade> {
+        graph.nodes.iter().find_map(|node| match &node.kind {
+            EffectGraphNodeKind::UnaryEffect {
+                op: EffectRenderOp::ColorEmboss { grade }, ..
+            }
+            | EffectGraphNodeKind::DomainEffect {
+                op: EffectRenderOp::ColorEmboss { grade }, ..
+            } => Some(*grade),
+            _ => None,
+        })
+    }
+
+    #[test]
+    fn color_emboss_defaults_compile_to_a_visible_relief() {
+        let effect = instantiate_effect_node(EffectType::ColorEmboss)
+            .expect("registered color emboss definition");
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("evaluate default color emboss");
+        let grade = color_emboss_op(&graph).expect("the listed defaults produce a relief");
+        assert_eq!(grade.direction_degrees(), 45.0);
+        assert_eq!(grade.relief(), 1.0);
+        assert_eq!(grade.contrast_percent(), 100.0);
+        assert_eq!(grade.blend_with_original(), 0.0);
+    }
+
+    #[test]
+    fn color_emboss_full_mix_compiles_to_identity() {
+        let mut effect = instantiate_effect_node(EffectType::ColorEmboss)
+            .expect("registered color emboss definition");
+        effect
+            .apply_property_mutation(PropertyMutation::SetStaticValue {
+                path: EffectType::ColorEmboss.property_path("blend_with_original"),
+                value: PropertyValue::Float(100.0),
+            })
+            .expect("author a full source mix");
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("evaluate identity color emboss");
+        assert!(color_emboss_op(&graph).is_none());
+    }
+
+    #[test]
+    fn color_emboss_rejects_author_values_outside_the_declared_ranges() {
+        let effect = instantiate_effect_node(EffectType::ColorEmboss)
+            .expect("registered color emboss definition");
+        for (parameter, value) in [
+            ("relief", PropertyValue::Float(1_001.0)),
+            ("relief", PropertyValue::Float(-1.0)),
+            ("contrast", PropertyValue::Float(-1.0)),
+            ("blend_with_original", PropertyValue::Float(101.0)),
+        ] {
+            let mut effect = effect.clone();
+            assert!(
+                effect
+                    .apply_property_mutation(PropertyMutation::SetStaticValue {
+                        path: EffectType::ColorEmboss.property_path(parameter),
+                        value,
+                    })
+                    .is_err(),
+                "the numeric contract rejects {parameter} outside its authored range"
+            );
+        }
+    }
+
+    #[test]
+    fn color_emboss_relief_keeps_channels_independent() {
+        let mut effect = instantiate_effect_node(EffectType::ColorEmboss)
+            .expect("registered color emboss definition");
+        effect
+            .apply_property_mutation(PropertyMutation::SetStaticValue {
+                path: EffectType::ColorEmboss.property_path("relief"),
+                value: PropertyValue::Float(4.0),
+            })
+            .expect("author a taller relief");
+        let compiled = compile_clip_effect_graph(&[effect], &[], tt(0), TEST_WORKING_SPACE)
+            .expect("compile color emboss");
+        let input = [
+            [0.0, 0.0, 0.0, 1.0],
+            [0.0, 0.0, 0.0, 1.0],
+            [1.0, 0.0, 0.0, 1.0],
+        ];
+        let output = crate::apply_compiled_effect_graph_rgba_f32(emboss_view(&input), &compiled, 0)
+            .expect("execute color emboss");
+        let pixels = output.pixels();
+        // Only the red channel carries the step, so green and blue stay neutral.
+        assert!(
+            pixels[1][0] > 0.5,
+            "expected a lit red relief, got {:?}",
+            pixels[1]
+        );
+        assert_eq!(pixels[1][1], 0.5);
+        assert_eq!(pixels[1][2], 0.5);
+        assert_eq!(pixels[1][3], 1.0);
+    }
+
+    #[test]
+    fn color_emboss_authored_state_survives_project_serialization_round_trip() {
+        let mut effect = instantiate_effect_node(EffectType::ColorEmboss)
+            .expect("registered color emboss definition");
+        for (parameter, value) in [
+            ("direction", PropertyValue::Float(120.0)),
+            ("relief", PropertyValue::Float(2.5)),
+            ("contrast", PropertyValue::Float(150.0)),
+            ("blend_with_original", PropertyValue::Float(25.0)),
+        ] {
+            effect
+                .apply_property_mutation(PropertyMutation::SetStaticValue {
+                    path: EffectType::ColorEmboss.property_path(parameter),
+                    value,
+                })
+                .expect("author color emboss");
+        }
+        let encoded = serde_json::to_string(&effect).expect("serialize color emboss");
+        let restored: crate::EffectNode =
+            serde_json::from_str(&encoded).expect("deserialize color emboss");
+        assert_eq!(restored, effect);
+        let graph = build_effect_render_graph(&[restored], tt(0), TEST_WORKING_SPACE)
+            .expect("evaluate restored color emboss");
+        let grade = color_emboss_op(&graph).expect("the restored state produces a relief");
+        assert_eq!(grade.direction_degrees(), 120.0);
+        assert_eq!(grade.relief(), 2.5);
+        assert_eq!(grade.contrast_percent(), 150.0);
+        assert_eq!(grade.blend_with_original(), 0.25);
     }
 }
 
