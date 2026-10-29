@@ -14,6 +14,9 @@ pub struct MacosPluginMainThread {
 }
 
 impl MacosPluginMainThread {
+    /// Retain proof of the current process main thread before loading plugin code.
+    ///
+    /// Returns an error when called from any background thread.
     pub fn initialize() -> Result<Self> {
         let main = MainThreadMarker::new().ok_or_else(|| {
             Error::Other("native plugin control requires the macOS main thread".to_owned())
