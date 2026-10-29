@@ -1020,6 +1020,23 @@ fn shift_channels_source(
     return low;
 }
 
+// FLM-02 grain: the hash constants are shared verbatim with the CPU kernel so
+// both paths produce bit-identical noise for the same pixel.
+const NOISE_SALT_RED: u32 = 0x9E3779B9u;
+const NOISE_SALT_GREEN: u32 = 0x85EBCA6Bu;
+const NOISE_SALT_BLUE: u32 = 0x27D4EB2Fu;
+const NOISE_SALT_LUMINANCE: u32 = 0xC2B2AE35u;
+
+fn noise_signed_grain(x: u32, y: u32, salt: u32) -> f32 {
+    var hash = x * 0x9E3779B9u ^ y * 0x85EBCA6Bu ^ salt;
+    hash = hash ^ (hash >> 16u);
+    hash = hash * 0x7FEB352Du;
+    hash = hash ^ (hash >> 15u);
+    hash = hash * 0x846CA68Bu;
+    hash = hash ^ (hash >> 16u);
+    let bits = (hash >> 8u) & 65535u;
+    return f32(bits) / 65535.0 * 2.0 - 1.0;
+}
 fn apply_effects(input: vec4<f32>, position: vec2<f32>) -> vec4<f32> {
     if (input.a <= 0.0) { return input; }
     var pixel = input;
@@ -1237,7 +1254,27 @@ fn apply_effects(input: vec4<f32>, position: vec2<f32>) -> vec4<f32> {
                 position <= 0.5
             );
             pixel = vec4<f32>(mix(ramp, pixel.rgb, effect.params.x), pixel.a);
-        } else if (effect.header.x == 16u) {
+        } else if (effect.header.x == 23u) {
+            // `NoiseGrade`: params.x is the amount as a fraction of the full
+            // signed range, params.y the grain type and params.z the clipping
+            // toggle. The grain only depends on the integer pixel position.
+            let coords = vec2<u32>(floor(max(position, vec2<f32>(0.0)) + vec2<f32>(0.5)));
+            var grain: vec3<f32>;
+            if (effect.params.y < 0.5) {
+                grain = vec3<f32>(
+                    noise_signed_grain(coords.x, coords.y, NOISE_SALT_RED),
+                    noise_signed_grain(coords.x, coords.y, NOISE_SALT_GREEN),
+                    noise_signed_grain(coords.x, coords.y, NOISE_SALT_BLUE)
+                );
+            } else {
+                let delta = noise_signed_grain(coords.x, coords.y, NOISE_SALT_LUMINANCE);
+                grain = vec3<f32>(delta);
+            }
+            var noisy = pixel.rgb + grain * effect.params.x;
+            if (effect.params.z > 0.5) {
+                noisy = clamp(noisy, vec3<f32>(0.0), vec3<f32>(1.0));
+            }
+            pixel = vec4<f32>(noisy, pixel.a);        } else if (effect.header.x == 16u) {
             // `ShiftChannelsGrade`: header.y packs the four 4-bit source tags
             // (red, green, blue, alpha) and params.xyz carries the working-space
             // CIE Y coefficients.
@@ -4385,6 +4422,13 @@ fn effect_uniforms(
                     extra1: [0.0; 4],
                 }
             }
+            EffectGpuPointOp::Noise { grade } => GpuEffectUniform {
+                header: [23, 0, 0, 0],
+                params: grade.gpu_controls(),
+                color: [0.0; 4],
+                extra0: [0.0; 4],
+                extra1: [0.0; 4],
+            },
             EffectGpuPointOp::Tritone { grade } => {
                 let (params, color, extra0, extra1) = grade.gpu_controls();
                 GpuEffectUniform {
@@ -7205,6 +7249,92 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn gpu_noise_matches_the_cpu_reference_on_real_wgpu_device() {
+        use crate::color_accuracy::{
+            compare_linear_rgba, LinearAccuracyBudget, LinearRgbaAccuracyBudget,
+        };
+        use mondrian_effects::{
+            apply_compiled_effect_graph_rgba_f32, compile_reference_render_graph,
+            lower_effect_graph_to_gpu_plan, EffectGraphBuilderState, EffectRenderOp, NoiseGrade,
+            NoiseType,
+        };
+
+        let Ok(context) = crate::GpuContext::new().await else {
+            eprintln!("skipping GPU noise parity test: no GPU adapter available");
+            return;
+        };
+        // Every pixel starts from the same value, so any difference between the
+        // two frames is produced by the positional grain itself.
+        let mut data = vec![[0.35_f32, 0.5, 0.65, 1.0]; 40];
+        data[7] = [2.0, -0.5, 1.75, 0.5];
+        data[23] = [0.0, 0.0, 0.0, 0.0];
+        let frame = CpuColorFrame::working(WorkingRgbaF32Frame {
+            sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
+            alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
+            width: 8,
+            height: 5,
+            color_space: WorkingColorSpace::LinearRec709,
+            data,
+        });
+        for (amount, noise_type, clip_output) in [
+            (0.55_f32, NoiseType::Rgb, false),
+            (0.9, NoiseType::Hls, false),
+            (1.0, NoiseType::Rgb, true),
+        ] {
+            let grade =
+                NoiseGrade::new(amount, noise_type, clip_output).expect("valid noise grade");
+            let mut builder = EffectGraphBuilderState::new();
+            builder.append_unary(EffectRenderOp::Noise { grade });
+            let graph = compile_reference_render_graph(builder.finish()).expect("valid graph");
+            let plan = lower_effect_graph_to_gpu_plan(&graph).expect("supported point effect");
+            assert_eq!(plan.operations().len(), 1);
+            let expected = apply_compiled_effect_graph_rgba_f32(
+                mondrian_effects::EffectFloatFrameView::new(
+                    mondrian_effects::EffectFrameExtent::new(8, 5),
+                    mondrian_effects::EffectValueFormat::new(
+                        mondrian_effects::EffectWorkingPrecision::Float32,
+                        mondrian_effects::EffectColorDomain::SceneLinearRgb,
+                        mondrian_core::ColorFrameAlpha::StraightCoverage,
+                    ),
+                    mondrian_core::ImageSampling::UNIT_SQUARE,
+                    &frame.rgba_f32().data,
+                ),
+                &graph,
+                0,
+            )
+            .expect("CPU float reference");
+            let layer = GpuCompositeLayer {
+                source: GpuCompositeLayerSource::CpuFrame(&frame),
+                opacity: 1.0,
+                blend_policy: mondrian_effects::EffectPassBlendPolicy::Blend(BlendMode::Normal),
+                transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+                effect_plan: Some(&plan),
+                frame_seed: 0,
+            };
+            let (actual, diagnostics) = readback_test_composite_with_diagnostics(
+                &context,
+                &[layer],
+                8,
+                5,
+                WorkingColorSpace::LinearRec709,
+            );
+            assert_eq!(diagnostics.execution.fused_point_operations, 1);
+            let report = compare_linear_rgba(
+                expected.pixels(),
+                &actual,
+                LinearRgbaAccuracyBudget {
+                    rgb: LinearAccuracyBudget::finite(1.0e-6, 1.0e-7, 1.0e-6),
+                    alpha: LinearAccuracyBudget::finite(1.0e-6, 1.0e-7, 1.0e-6),
+                },
+            )
+            .expect("comparable frames");
+            assert!(
+                report.within_budget,
+                "GPU noise accuracy budget exceeded for {noise_type:?}: {report:#?}"
+            );
+        }
+    }
     #[tokio::test]
     async fn gpu_tint_matches_the_cpu_reference_on_real_wgpu_device() {
         use crate::color_accuracy::{
