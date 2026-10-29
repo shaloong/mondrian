@@ -843,6 +843,12 @@ pub enum EffectRenderOp {
         length: f32,
         direction_degrees: f32,
     },
+    /// Linear channel mixer: every output channel is a weighted sum of the three input
+    /// channels plus a constant, authored in percent. Mixing is linear, so it runs in the
+    /// scene-linear working domain without clamping.
+    ChannelMixer {
+        grade: crate::ChannelMixerGrade,
+    },
     /// Source-relative hard crop expressed as normalized edge insets.
     ///
     /// Pixels outside the remaining rectangle become transparent black before
@@ -973,6 +979,9 @@ impl std::fmt::Debug for EffectRenderOp {
             }
             Self::ShiftChannels { grade } => {
                 formatter.debug_struct("ShiftChannels").field("grade", grade).finish()
+            }
+            Self::ChannelMixer { grade } => {
+                formatter.debug_struct("ChannelMixer").field("grade", grade).finish()
             }
             Self::DirectionalBlur { length, direction_degrees } => formatter
                 .debug_struct("DirectionalBlur")
@@ -1366,6 +1375,13 @@ impl EffectRenderOp {
                     value.to_bits().hash(state);
                 }
             }
+            EffectRenderOp::ChannelMixer { grade } => {
+                28u8.hash(state);
+                for value in grade.weights() {
+                    value.to_bits().hash(state);
+                }
+                u8::from(grade.monochrome()).hash(state);
+            }
             EffectRenderOp::DirectionalBlur { length, direction_degrees } => {
                 27u8.hash(state);
                 length.to_bits().hash(state);
@@ -1482,6 +1498,7 @@ impl EffectRenderOp {
             EffectRenderOp::BlackAndWhite { .. } => 2,
             EffectRenderOp::ShiftChannels { .. } => 1,
             EffectRenderOp::DirectionalBlur { .. } => 4,
+            EffectRenderOp::ChannelMixer { .. } => 2,
             EffectRenderOp::HueSaturation { .. } => 2,
             EffectRenderOp::UnsharpMask { .. } => 4,
             EffectRenderOp::Lut3D { .. } => 2,
@@ -2015,7 +2032,7 @@ impl EffectDefinition {
     }
 }
 
-fn builtin_effect_types() -> [EffectType; 26] {
+fn builtin_effect_types() -> [EffectType; 27] {
     [
         EffectType::BasicCorrection,
         EffectType::WhiteBalance,
@@ -2043,6 +2060,7 @@ fn builtin_effect_types() -> [EffectType; 26] {
         EffectType::BlackAndWhite,
         EffectType::ShiftChannels,
         EffectType::DirectionalBlur,
+        EffectType::ChannelMixer,
     ]
 }
 
@@ -3147,6 +3165,151 @@ fn default_properties_for(effect_type: EffectType) -> PropertyBag {
                 Some(1.0),
             );
         }
+        EffectType::ChannelMixer => {
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "red_red",
+                "通道混合器",
+                "红 - 红",
+                PropertyValue::Float(100.0),
+                Some(crate::CHANNEL_MIXER_WEIGHT_MIN as f64),
+                Some(crate::CHANNEL_MIXER_WEIGHT_MAX as f64),
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "red_green",
+                "通道混合器",
+                "红 - 绿",
+                PropertyValue::Float(0.0),
+                Some(crate::CHANNEL_MIXER_WEIGHT_MIN as f64),
+                Some(crate::CHANNEL_MIXER_WEIGHT_MAX as f64),
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "red_blue",
+                "通道混合器",
+                "红 - 蓝",
+                PropertyValue::Float(0.0),
+                Some(crate::CHANNEL_MIXER_WEIGHT_MIN as f64),
+                Some(crate::CHANNEL_MIXER_WEIGHT_MAX as f64),
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "red_constant",
+                "通道混合器",
+                "红 - 常量",
+                PropertyValue::Float(0.0),
+                Some(crate::CHANNEL_MIXER_WEIGHT_MIN as f64),
+                Some(crate::CHANNEL_MIXER_WEIGHT_MAX as f64),
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "green_red",
+                "通道混合器",
+                "绿 - 红",
+                PropertyValue::Float(0.0),
+                Some(crate::CHANNEL_MIXER_WEIGHT_MIN as f64),
+                Some(crate::CHANNEL_MIXER_WEIGHT_MAX as f64),
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "green_green",
+                "通道混合器",
+                "绿 - 绿",
+                PropertyValue::Float(100.0),
+                Some(crate::CHANNEL_MIXER_WEIGHT_MIN as f64),
+                Some(crate::CHANNEL_MIXER_WEIGHT_MAX as f64),
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "green_blue",
+                "通道混合器",
+                "绿 - 蓝",
+                PropertyValue::Float(0.0),
+                Some(crate::CHANNEL_MIXER_WEIGHT_MIN as f64),
+                Some(crate::CHANNEL_MIXER_WEIGHT_MAX as f64),
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "green_constant",
+                "通道混合器",
+                "绿 - 常量",
+                PropertyValue::Float(0.0),
+                Some(crate::CHANNEL_MIXER_WEIGHT_MIN as f64),
+                Some(crate::CHANNEL_MIXER_WEIGHT_MAX as f64),
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "blue_red",
+                "通道混合器",
+                "蓝 - 红",
+                PropertyValue::Float(0.0),
+                Some(crate::CHANNEL_MIXER_WEIGHT_MIN as f64),
+                Some(crate::CHANNEL_MIXER_WEIGHT_MAX as f64),
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "blue_green",
+                "通道混合器",
+                "蓝 - 绿",
+                PropertyValue::Float(0.0),
+                Some(crate::CHANNEL_MIXER_WEIGHT_MIN as f64),
+                Some(crate::CHANNEL_MIXER_WEIGHT_MAX as f64),
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "blue_blue",
+                "通道混合器",
+                "蓝 - 蓝",
+                PropertyValue::Float(100.0),
+                Some(crate::CHANNEL_MIXER_WEIGHT_MIN as f64),
+                Some(crate::CHANNEL_MIXER_WEIGHT_MAX as f64),
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "blue_constant",
+                "通道混合器",
+                "蓝 - 常量",
+                PropertyValue::Float(0.0),
+                Some(crate::CHANNEL_MIXER_WEIGHT_MIN as f64),
+                Some(crate::CHANNEL_MIXER_WEIGHT_MAX as f64),
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "monochrome",
+                "通道混合器",
+                "单色",
+                PropertyValue::Bool(false),
+                None,
+                None,
+                None,
+            );
+        }
         EffectType::DirectionalBlur => {
             define_builtin_property(
                 &mut properties,
@@ -3443,6 +3606,14 @@ fn builtin_parameter_unit(effect_type: &EffectType, parameter: &str) -> Paramete
         (EffectType::Invert, "blend_with_original") => ParameterUnit::Percent,
         (EffectType::BoxBlur, "radius") => ParameterUnit::Pixels,
         (EffectType::DirectionalBlur, "length") => ParameterUnit::Pixels,
+        (EffectType::ChannelMixer, "red_red" | "red_green" | "red_blue" | "red_constant")
+        | (
+            EffectType::ChannelMixer,
+            "green_red" | "green_green" | "green_blue" | "green_constant",
+        )
+        | (EffectType::ChannelMixer, "blue_red" | "blue_green" | "blue_blue" | "blue_constant") => {
+            ParameterUnit::Percent
+        }
         (EffectType::DirectionalBlur, "direction") => ParameterUnit::Degrees,
         (EffectType::UnsharpMask, "amount") => ParameterUnit::Percent,
         (EffectType::UnsharpMask, "radius") => ParameterUnit::Pixels,
@@ -3599,6 +3770,10 @@ fn builtin_effect_execution_contract(effect_type: &EffectType) -> EffectExecutio
             // definition-level envelope is a full-frame input. The graph
             // planner still narrows it per instance from the authored radius.
             roi_propagation: EffectRoiPropagation::FullFrame,
+            ..cpu_linear
+        },
+        EffectType::ChannelMixer => EffectExecutionContract {
+            execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
             ..cpu_linear
         },
         EffectType::DirectionalBlur => EffectExecutionContract {
@@ -4466,6 +4641,57 @@ fn builtin_graph_builder_for(effect_type: &EffectType) -> Option<EffectGraphBuil
                 Ok(())
             }))
         }
+        EffectType::ChannelMixer => {
+            let weights = [
+                builtin_parameter_id(effect_type, "red_red"),
+                builtin_parameter_id(effect_type, "red_green"),
+                builtin_parameter_id(effect_type, "red_blue"),
+                builtin_parameter_id(effect_type, "red_constant"),
+                builtin_parameter_id(effect_type, "green_red"),
+                builtin_parameter_id(effect_type, "green_green"),
+                builtin_parameter_id(effect_type, "green_blue"),
+                builtin_parameter_id(effect_type, "green_constant"),
+                builtin_parameter_id(effect_type, "blue_red"),
+                builtin_parameter_id(effect_type, "blue_green"),
+                builtin_parameter_id(effect_type, "blue_blue"),
+                builtin_parameter_id(effect_type, "blue_constant"),
+            ];
+            let defaults = [
+                100.0_f32, 0.0_f32, 0.0_f32, 0.0_f32, 0.0_f32, 100.0_f32, 0.0_f32, 0.0_f32,
+                0.0_f32, 0.0_f32, 100.0_f32, 0.0_f32,
+            ];
+            let monochrome_id = builtin_parameter_id(effect_type, "monochrome");
+            Some(Arc::new(move |effect, context, graph| {
+                let mut authored = [0.0_f32; crate::CHANNEL_MIXER_WEIGHT_COUNT];
+                for (index, weight_id) in weights.iter().enumerate() {
+                    authored[index] =
+                        effect.evaluate_f32_parameter(weight_id, context.time, defaults[index]);
+                }
+                let monochrome = match effect.evaluate_parameter(&monochrome_id, context.time) {
+                    Some(PropertyValue::Bool(value)) => value,
+                    None => false,
+                    Some(_) => {
+                        return Err(EffectGraphBuildError::InvalidAuthorState {
+                            effect_key: effect.effect_type.key(),
+                            effect_id: effect.id,
+                            reason: "channel mixer monochrome must be a boolean".to_owned(),
+                        });
+                    }
+                };
+                let grade =
+                    crate::ChannelMixerGrade::new(authored, monochrome).map_err(|error| {
+                        EffectGraphBuildError::InvalidAuthorState {
+                            effect_key: effect.effect_type.key(),
+                            effect_id: effect.id,
+                            reason: error.to_string(),
+                        }
+                    })?;
+                if !grade.is_identity() {
+                    graph.append_unary(EffectRenderOp::ChannelMixer { grade });
+                }
+                Ok(())
+            }))
+        }
         EffectType::DirectionalBlur => {
             let length_id = builtin_parameter_id(effect_type, "length");
             let direction_id = builtin_parameter_id(effect_type, "direction");
@@ -4662,6 +4888,7 @@ fn builtin_display_name(effect_type: &EffectType) -> &'static str {
         EffectType::BlackAndWhite => "黑白",
         EffectType::ShiftChannels => "转换通道",
         EffectType::DirectionalBlur => "方向模糊",
+        EffectType::ChannelMixer => "通道混合器",
         EffectType::External(_) => "外部效果",
     }
 }
@@ -5318,6 +5545,152 @@ mod tests {
         );
     }
 
+    fn channel_mixer_op(graph: &EffectRenderGraph) -> Option<crate::ChannelMixerGrade> {
+        graph.nodes.iter().find_map(|node| match &node.kind {
+            EffectGraphNodeKind::UnaryEffect {
+                op: EffectRenderOp::ChannelMixer { grade }, ..
+            }
+            | EffectGraphNodeKind::DomainEffect {
+                op: EffectRenderOp::ChannelMixer { grade },
+                ..
+            } => Some(*grade),
+            _ => None,
+        })
+    }
+
+    #[test]
+    fn channel_mixer_defaults_compile_to_identity() {
+        let effect = instantiate_effect_node(EffectType::ChannelMixer)
+            .expect("registered Channel Mixer definition");
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("evaluate default Channel Mixer");
+
+        assert!(
+            channel_mixer_op(&graph).is_none(),
+            "the listed diagonal weights are the identity"
+        );
+    }
+
+    #[test]
+    fn channel_mixer_authored_state_reaches_the_operation() {
+        let mut effect = instantiate_effect_node(EffectType::ChannelMixer)
+            .expect("registered Channel Mixer definition");
+        for (parameter, value) in [
+            ("red_red", PropertyValue::Float(0.0)),
+            ("red_green", PropertyValue::Float(100.0)),
+            ("blue_constant", PropertyValue::Float(25.0)),
+            ("monochrome", PropertyValue::Bool(true)),
+        ] {
+            effect
+                .apply_property_mutation(PropertyMutation::SetStaticValue {
+                    path: EffectType::ChannelMixer.property_path(parameter),
+                    value,
+                })
+                .unwrap_or_else(|error| panic!("author Channel Mixer {parameter}: {error}"));
+        }
+
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("evaluate authored Channel Mixer");
+        let grade = channel_mixer_op(&graph).expect("channel mixer state reaches the op");
+        let mut expected = [0.0_f32; 12];
+        expected[1] = 100.0;
+        expected[5] = 100.0;
+        expected[10] = 100.0;
+        expected[11] = 25.0;
+        assert_eq!(grade.weights(), expected);
+        assert!(grade.monochrome());
+    }
+
+    #[test]
+    fn channel_mixer_rejects_author_values_outside_the_declared_range() {
+        let mut effect = instantiate_effect_node(EffectType::ChannelMixer)
+            .expect("registered Channel Mixer definition");
+        for weight in [201.0_f32, -201.0] {
+            let rejected = effect.apply_property_mutation(PropertyMutation::SetStaticValue {
+                path: EffectType::ChannelMixer.property_path("green_blue"),
+                value: PropertyValue::Float(weight),
+            });
+            assert!(
+                rejected.is_err(),
+                "weights outside -200..=200 must not be authorable"
+            );
+        }
+    }
+
+    #[test]
+    fn channel_mixer_mixes_channels_on_scene_linear_float_frames() {
+        let mut effect = instantiate_effect_node(EffectType::ChannelMixer)
+            .expect("registered Channel Mixer definition");
+        for (parameter, value) in [
+            ("red_red", PropertyValue::Float(0.0)),
+            ("red_green", PropertyValue::Float(100.0)),
+            ("blue_blue", PropertyValue::Float(0.0)),
+            ("blue_constant", PropertyValue::Float(50.0)),
+        ] {
+            effect
+                .apply_property_mutation(PropertyMutation::SetStaticValue {
+                    path: EffectType::ChannelMixer.property_path(parameter),
+                    value,
+                })
+                .expect("author Channel Mixer");
+        }
+
+        // Red comes from green, blue is a constant offset, and the extended-range
+        // second pixel proves the linear mix never clamps to the unit interval.
+        let input = [[0.25, 0.5, 0.75, 1.0], [2.0, -1.0, 0.25, 0.5]];
+        let view = || {
+            crate::EffectFloatFrameView::new(
+                crate::EffectFrameExtent::new(2, 1),
+                crate::EffectValueFormat::new(
+                    crate::EffectWorkingPrecision::Float32,
+                    crate::EffectColorDomain::SceneLinearRgb,
+                    mondrian_core::ColorFrameAlpha::StraightCoverage,
+                ),
+                mondrian_core::ImageSampling::UNIT_SQUARE,
+                &input,
+            )
+        };
+
+        let compiled = compile_clip_effect_graph(&[effect], &[], tt(0), TEST_WORKING_SPACE)
+            .expect("compile Channel Mixer");
+        let output =
+            crate::apply_compiled_effect_graph_rgba_f32(view(), &compiled, 0).expect("execute");
+
+        assert_eq!(output[0], [0.5, 0.5, 0.5, 1.0]);
+        assert_eq!(output[1], [-1.0, -1.0, 0.5, 0.5]);
+    }
+
+    #[test]
+    fn channel_mixer_authored_state_survives_project_serialization_round_trip() {
+        let mut effect = instantiate_effect_node(EffectType::ChannelMixer)
+            .expect("registered Channel Mixer definition");
+        for (parameter, value) in [
+            ("red_green", PropertyValue::Float(100.0)),
+            ("blue_constant", PropertyValue::Float(25.0)),
+            ("monochrome", PropertyValue::Bool(true)),
+        ] {
+            effect
+                .apply_property_mutation(PropertyMutation::SetStaticValue {
+                    path: EffectType::ChannelMixer.property_path(parameter),
+                    value,
+                })
+                .expect("author Channel Mixer");
+        }
+
+        let wire = serde_json::to_string(&effect).expect("serialize the Channel Mixer node");
+        let restored: EffectNode =
+            serde_json::from_str(&wire).expect("restore the Channel Mixer node");
+        assert_eq!(restored.effect_type, EffectType::ChannelMixer);
+        assert_eq!(restored, effect);
+
+        let graph = build_effect_render_graph(&[restored], tt(0), TEST_WORKING_SPACE)
+            .expect("evaluate the restored Channel Mixer node");
+        let grade = channel_mixer_op(&graph).expect("restored state reaches the op");
+        assert_eq!(grade.weights()[1], 100.0);
+        assert_eq!(grade.weights()[11], 25.0);
+        assert!(grade.monochrome());
+    }
+
     #[test]
     fn hue_saturation_defaults_compile_to_identity() {
         let effect = instantiate_effect_node(EffectType::HueSaturation)
@@ -5525,6 +5898,7 @@ mod tests {
             EffectType::BlackAndWhite,
             EffectType::ShiftChannels,
             EffectType::DirectionalBlur,
+            EffectType::ChannelMixer,
         ]
         .into_iter()
         .map(|effect_type| effect_type.key())

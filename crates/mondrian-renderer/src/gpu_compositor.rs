@@ -1167,6 +1167,23 @@ fn apply_effects(input: vec4<f32>, position: vec2<f32>) -> vec4<f32> {
                 effect.extra0.xyz,
             );
             pixel = vec4<f32>(gray, pixel.a);
+        } else if (effect.header.x == 17u) {
+                // `ChannelMixerGrade`: params/color/extra0 hold the three output rows in
+                // percent, extra1.x flags monochrome output.
+                let red = vec3<f32>(
+                    dot(pixel.rgb, vec3<f32>(effect.params.x, effect.params.y, effect.params.z))
+                        + effect.params.w,
+                    dot(pixel.rgb, vec3<f32>(effect.color.x, effect.color.y, effect.color.z))
+                        + effect.color.w,
+                    dot(pixel.rgb, vec3<f32>(effect.extra0.x, effect.extra0.y, effect.extra0.z))
+                        + effect.extra0.w,
+                ) / 100.0;
+                if (effect.extra1.x > 0.5) {
+                    let gray = red.r;
+                    pixel = vec4<f32>(gray, gray, gray, pixel.a);
+                } else {
+                    pixel = vec4<f32>(red.r, red.g, red.b, pixel.a);
+                }
         } else if (effect.header.x == 16u) {
             // `ShiftChannelsGrade`: header.y packs the four 4-bit source tags
             // (red, green, blue, alpha) and params.xyz carries the working-space
@@ -4276,6 +4293,16 @@ fn effect_uniforms(
                     extra1: [0.0; 4],
                 }
             }
+            EffectGpuPointOp::ChannelMixer { grade } => {
+                let (params, color, extra0, extra1) = grade.gpu_controls();
+                GpuEffectUniform {
+                    header: [17, 0, 0, 0],
+                    params,
+                    color,
+                    extra0,
+                    extra1,
+                }
+            }
             EffectGpuPointOp::ShiftChannels { grade } => GpuEffectUniform {
                 header: [16, grade.packed_sources(), 0, 0],
                 params: {
@@ -6448,6 +6475,33 @@ mod tests {
             uniforms[0].extra0,
             [controls[7], controls[8], controls[9], 0.0]
         );
+        assert_eq!(uniforms[1].header[0], 0);
+    }
+
+    #[test]
+    fn gpu_effect_uniforms_carry_the_channel_mixer_rows() {
+        use mondrian_effects::{
+            compile_reference_render_graph, lower_effect_graph_to_gpu_plan, ChannelMixerGrade,
+            EffectGraphBuilderState, EffectRenderOp,
+        };
+
+        let mut weights = [0.0_f32; 12];
+        weights[1] = 100.0;
+        weights[5] = 100.0;
+        weights[10] = 100.0;
+        weights[11] = 25.0;
+        let grade = ChannelMixerGrade::new(weights, true).expect("valid mixer");
+        let mut builder = EffectGraphBuilderState::new();
+        builder.append_unary(EffectRenderOp::ChannelMixer { grade });
+        let graph = compile_reference_render_graph(builder.finish()).expect("channel mixer graph");
+        let plan = lower_effect_graph_to_gpu_plan(&graph).expect("channel mixer GPU plan");
+
+        let uniforms = effect_uniforms(Some(&plan), None).expect("channel mixer uniforms");
+        assert_eq!(uniforms[0].header, [17, 0, 0, 0]);
+        assert_eq!(uniforms[0].params, [0.0, 100.0, 0.0, 0.0]);
+        assert_eq!(uniforms[0].color, [0.0, 100.0, 0.0, 0.0]);
+        assert_eq!(uniforms[0].extra0, [0.0, 100.0, 25.0, 0.0]);
+        assert_eq!(uniforms[0].extra1, [1.0, 0.0, 0.0, 0.0]);
         assert_eq!(uniforms[1].header[0], 0);
     }
 

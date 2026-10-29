@@ -18,6 +18,7 @@ pub use float_frame::{
 };
 pub mod black_white;
 pub mod box_blur;
+pub mod channel_mixer;
 pub mod chroma_key;
 pub mod color_curves;
 pub mod coverage;
@@ -207,6 +208,10 @@ pub use processor_question::{
 #[cfg(test)]
 mod image_scale_admission_tests;
 
+pub use channel_mixer::{
+    ChannelMixerError, ChannelMixerGrade, CHANNEL_MIXER_WEIGHT_COUNT, CHANNEL_MIXER_WEIGHT_MAX,
+    CHANNEL_MIXER_WEIGHT_MIN,
+};
 pub use directional_blur::{
     directional_blur_step, directional_blur_taps, DIRECTIONAL_BLUR_AUTHOR_MAX_LENGTH_PIXELS,
     MAX_DIRECTIONAL_BLUR_TAPS,

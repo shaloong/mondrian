@@ -206,6 +206,12 @@ pub(crate) fn apply_render_op(
                 parameter: "requires_float32",
             });
         }
+        EffectRenderOp::ChannelMixer { .. } => {
+            return Err(EffectExecutionError::InvalidRenderParameter {
+                op: "channel_mixer",
+                parameter: "requires_float32",
+            });
+        }
         EffectRenderOp::DirectionalBlur { .. } => {
             return Err(EffectExecutionError::InvalidRenderParameter {
                 op: "directional_blur",
@@ -646,6 +652,7 @@ pub(crate) const fn render_op_f32_scratch_frames(op: &EffectRenderOp) -> usize {
         | EffectRenderOp::BlackAndWhite { .. }
         | EffectRenderOp::ShiftChannels { .. }
         | EffectRenderOp::DirectionalBlur { .. }
+        | EffectRenderOp::ChannelMixer { .. }
         | EffectRenderOp::ChromaKey { .. }
         | EffectRenderOp::MattePreview { .. }
         | EffectRenderOp::Vignette { .. }
@@ -833,6 +840,10 @@ pub(crate) fn apply_render_op_f32_region_controlled<E>(
             Ok(true)
         }
         EffectRenderOp::BlackAndWhite { grade } => {
+            apply_point_grade_rgba_f32_controlled(working, checkpoint, |rgb| grade.apply(rgb))?;
+            Ok(true)
+        }
+        EffectRenderOp::ChannelMixer { grade } => {
             apply_point_grade_rgba_f32_controlled(working, checkpoint, |rgb| grade.apply(rgb))?;
             Ok(true)
         }

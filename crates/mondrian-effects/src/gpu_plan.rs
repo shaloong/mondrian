@@ -31,17 +31,25 @@ pub enum EffectGpuPointOp {
         luminance_coefficients: [f32; 3],
     },
     /// Working-space Bradford white-balance matrix.
-    WhiteBalance { grade: crate::WhiteBalanceGrade },
+    WhiteBalance {
+        grade: crate::WhiteBalanceGrade,
+    },
     /// Lift/Gamma/Gain/Offset primary correction.
-    Primaries { grade: crate::PrimariesGrade },
+    Primaries {
+        grade: crate::PrimariesGrade,
+    },
     /// Sampled six-zone scene-linear HDR correction.
     HdrGrading {
         grade: Arc<crate::PreparedHdrGrading>,
     },
     /// ASC CDL v1.2 no-clamp correction.
-    AscCdl { grade: crate::AscCdlGrade },
+    AscCdl {
+        grade: crate::AscCdlGrade,
+    },
     /// ACES 1.3 Reference Gamut Compression.
-    GamutCompression { grade: crate::GamutCompressionGrade },
+    GamutCompression {
+        grade: crate::GamutCompressionGrade,
+    },
     /// Scene-linear highlight chroma reconstruction.
     HighlightRecovery {
         grade: crate::HighlightRecoveryGrade,
@@ -51,9 +59,14 @@ pub enum EffectGpuPointOp {
         curves: Arc<crate::PreparedColorCurves>,
     },
     /// Source-relative radial vignette.
-    Vignette { intensity: f32, feather: f32 },
+    Vignette {
+        intensity: f32,
+        feather: f32,
+    },
     /// Deterministic monochromatic grain.
-    Grain { amount: f32 },
+    Grain {
+        amount: f32,
+    },
     /// Hard source-frame crop using normalized edge insets.
     Crop {
         left: f32,
@@ -75,15 +88,24 @@ pub enum EffectGpuPointOp {
     ///
     /// The grade is carried whole and backends read exact controls through
     /// [`crate::HueSaturationGrade::gpu_controls`], so no backend re-derives them.
-    HueSaturation { grade: crate::HueSaturationGrade },
+    HueSaturation {
+        grade: crate::HueSaturationGrade,
+    },
     /// Hue-keyed black and white conversion.
     ///
     /// The grade is carried whole and backends read exact controls through
     /// [`crate::BlackAndWhiteGrade::gpu_controls`], so no backend re-derives them.
-    BlackAndWhite { grade: crate::BlackAndWhiteGrade },
+    BlackAndWhite {
+        grade: crate::BlackAndWhiteGrade,
+    },
     /// Channel rewiring with the four packed source tags and the CIE Y
     /// coefficients resolved on the CPU, so the shader never re-derives them.
-    ShiftChannels { grade: crate::ShiftChannelsGrade },
+    ShiftChannels {
+        grade: crate::ShiftChannelsGrade,
+    },
+    ChannelMixer {
+        grade: crate::ChannelMixerGrade,
+    },
     /// Prepared creative 3D LUT sampled in its explicitly authored processing domain.
     ///
     /// The backend-neutral plan retains the immutable semantic payload only;
@@ -768,6 +790,9 @@ fn lower_point_op(
         EffectRenderOp::BlackAndWhite { grade } => {
             Ok(EffectGpuPointOp::BlackAndWhite { grade: *grade })
         }
+        EffectRenderOp::ChannelMixer { grade } => {
+            Ok(EffectGpuPointOp::ChannelMixer { grade: *grade })
+        }
         EffectRenderOp::ShiftChannels { grade } => {
             Ok(EffectGpuPointOp::ShiftChannels { grade: *grade })
         }
@@ -826,6 +851,7 @@ fn operation_name(op: &EffectRenderOp) -> &'static str {
         EffectRenderOp::BlackAndWhite { .. } => "black_and_white",
         EffectRenderOp::ShiftChannels { .. } => "shift_channels",
         EffectRenderOp::DirectionalBlur { .. } => "directional_blur",
+        EffectRenderOp::ChannelMixer { .. } => "channel_mixer",
         EffectRenderOp::UnsharpMask { .. } => "unsharp_mask",
         EffectRenderOp::Crop { .. } => "crop",
         EffectRenderOp::TemporalFrameBlend { .. } => "temporal_frame_blend",
@@ -927,6 +953,27 @@ mod tests {
         assert_eq!(
             plan.operations()[0],
             EffectGpuPointOp::BlackAndWhite { grade }
+        );
+        assert_eq!(plan.processing_domain(), EffectColorDomain::SceneLinearRgb);
+    }
+
+    #[test]
+    fn lowers_channel_mixer_to_one_packed_point_op() {
+        let mut weights = [0.0_f32; 12];
+        weights[1] = 100.0;
+        weights[5] = 100.0;
+        weights[10] = 100.0;
+        weights[11] = 25.0;
+        let grade = crate::ChannelMixerGrade::new(weights, true).expect("valid mixer");
+        let mut builder = EffectGraphBuilderState::new();
+        builder.append_unary(EffectRenderOp::ChannelMixer { grade });
+        let compiled = compile_reference_render_graph(builder.finish()).expect("valid graph");
+        let plan = lower_effect_graph_to_gpu_plan(&compiled).expect("channel mixer is pointwise");
+
+        assert_eq!(plan.operations().len(), 1);
+        assert_eq!(
+            plan.operations()[0],
+            EffectGpuPointOp::ChannelMixer { grade }
         );
         assert_eq!(plan.processing_domain(), EffectColorDomain::SceneLinearRgb);
     }

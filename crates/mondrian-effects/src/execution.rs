@@ -2321,6 +2321,7 @@ fn effect_render_op_name(op: &EffectRenderOp) -> &'static str {
         EffectRenderOp::BlackAndWhite { .. } => "black_and_white",
         EffectRenderOp::ShiftChannels { .. } => "shift_channels",
         EffectRenderOp::DirectionalBlur { .. } => "directional_blur",
+        EffectRenderOp::ChannelMixer { .. } => "channel_mixer",
         EffectRenderOp::UnsharpMask { .. } => "unsharp_mask",
         EffectRenderOp::Crop { .. } => "crop",
         EffectRenderOp::TemporalFrameBlend { .. } => "temporal_frame_blend",
