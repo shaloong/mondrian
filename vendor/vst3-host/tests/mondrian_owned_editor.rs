@@ -61,6 +61,17 @@ struct ActualOwnedFixture {
 }
 
 impl ActualOwnedFixture {
+    fn load_idle(case: &str) -> Self {
+        let mut fixture = Self::load(case);
+        // These gates require only controller/view access. Make their stopped
+        // lifecycle explicit instead of depending on the host's load default.
+        fixture
+            .plugin
+            .stop_processing()
+            .expect("explicit idle editor fixture");
+        fixture
+    }
+
     fn load(case: &str) -> Self {
         let path = PathBuf::from(
             std::env::var_os("MONDRIAN_VST3_EDITOR_FIXTURE")
@@ -134,19 +145,15 @@ fn actual_owned_vst3_editor_main_messages_preserve_group_and_same_controller() {
     ) {
         return;
     }
-    let mut fixture = ActualOwnedFixture::load("group");
+    let mut fixture = ActualOwnedFixture::load_idle("group");
     let original_owner = fixture
         .plugin
         .native_editor_attachment_owner()
         .expect("real loaded instance");
-    let PluginEditorProcessingSplit {
-        mut editor,
-        processor,
-    } = fixture
+    let mut editor = fixture
         .plugin
-        .split_editor_processing()
-        .expect("same-instance scoped roles");
-    drop(processor);
+        .borrow_editor_control()
+        .expect("same-instance idle controller");
     let mut parent =
         WindowsPluginEditorParent::open(Rc::clone(&fixture.main), &mut editor, &fixture.title)
             .expect("attach actual IPlugView");
@@ -257,19 +264,15 @@ fn actual_owned_vst3_editor_remove_failure_keeps_attachment_without_repeating_re
     ) {
         return;
     }
-    let mut fixture = ActualOwnedFixture::load("remove-failure");
+    let mut fixture = ActualOwnedFixture::load_idle("remove-failure");
     fixture
         .plugin
         .set_parameter(2, 0.5)
         .expect("owned fixture removal failure mode");
-    let PluginEditorProcessingSplit {
-        mut editor,
-        processor,
-    } = fixture
+    let mut editor = fixture
         .plugin
-        .split_editor_processing()
-        .expect("same actual object");
-    drop(processor);
+        .borrow_editor_control()
+        .expect("same actual idle controller");
     let mut parent =
         WindowsPluginEditorParent::open(Rc::clone(&fixture.main), &mut editor, &fixture.title)
             .expect("actual view attach");
@@ -316,19 +319,15 @@ fn actual_owned_vst3_editor_frame_clear_failure_never_repeats_removed() {
     if !isolated_native_gate("actual_owned_vst3_editor_frame_clear_failure_never_repeats_removed") {
         return;
     }
-    let mut fixture = ActualOwnedFixture::load("frame-clear-failure");
+    let mut fixture = ActualOwnedFixture::load_idle("frame-clear-failure");
     fixture
         .plugin
         .set_parameter(2, 1.0)
         .expect("owned fixture frame cleanup failure mode");
-    let PluginEditorProcessingSplit {
-        mut editor,
-        processor,
-    } = fixture
+    let mut editor = fixture
         .plugin
-        .split_editor_processing()
-        .expect("same actual object");
-    drop(processor);
+        .borrow_editor_control()
+        .expect("same actual idle controller");
     let mut parent =
         WindowsPluginEditorParent::open(Rc::clone(&fixture.main), &mut editor, &fixture.title)
             .expect("actual view attach");
