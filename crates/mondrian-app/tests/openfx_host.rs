@@ -392,7 +392,16 @@ fn curve_source_lifecycle(expected_mode: &str) {
 }
 
 fn product_executable() -> &'static Path {
-    Path::new(env!("CARGO_BIN_EXE_mondrian"))
+    // A native lab can select the separately built normal Product without
+    // replacing Cargo's feature-unified integration-test companion in place.
+    static PRODUCT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    PRODUCT
+        .get_or_init(|| {
+            std::env::var_os("MONDRIAN_OPENFX_TEST_HELPER")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from(env!("CARGO_BIN_EXE_mondrian")))
+        })
+        .as_path()
 }
 
 #[test]
@@ -1029,6 +1038,18 @@ fn official_basic_resident_sessions_reuse_workers_and_isolate_frames() {
     let preview_id = preview.worker_process_id();
     let export_id = export.worker_process_id();
     assert_ne!(preview_id, export_id);
+    #[cfg(target_os = "linux")]
+    if let Some(expected) = std::env::var_os("MONDRIAN_OPENFX_TEST_HELPER") {
+        let expected = PathBuf::from(expected).canonicalize().expect("explicit normal Product");
+        for pid in [preview_id, export_id] {
+            let actual = std::fs::read_link(format!("/proc/{pid}/exe"))
+                .expect("actual retained native worker executable");
+            assert_eq!(
+                actual, expected,
+                "resident owner must execute the selected Product"
+            );
+        }
+    }
     let mut timing = OpenFxRenderTiming {
         frame: 0.0,
         frame_rate: 24.0,
