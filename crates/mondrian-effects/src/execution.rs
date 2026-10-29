@@ -2317,6 +2317,7 @@ fn effect_render_op_name(op: &EffectRenderOp) -> &'static str {
         EffectRenderOp::Grain { .. } => "grain",
         EffectRenderOp::Invert { .. } => "invert",
         EffectRenderOp::BoxBlur { .. } => "box_blur",
+        EffectRenderOp::UnsharpMask { .. } => "unsharp_mask",
         EffectRenderOp::Crop { .. } => "crop",
         EffectRenderOp::TemporalFrameBlend { .. } => "temporal_frame_blend",
         EffectRenderOp::Lut3D { .. } => "lut3d",

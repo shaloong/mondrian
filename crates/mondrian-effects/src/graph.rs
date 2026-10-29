@@ -1705,6 +1705,17 @@ fn render_op_requirements(op: &EffectRenderOp) -> EffectImplementationRequiremen
             roi_from_effect_input: finite_radius_roi(crate::effect::SHARPEN_BLUR_RADIUS_PIXELS),
             ..cpu_float
         },
+        EffectRenderOp::UnsharpMask { radius, .. } => EffectImplementationRequirements {
+            execution_modes: EffectExecutionModes::CPU_F32,
+            roi_from_effect_input: crate::adjustment::gaussian_blur_input_halo(*radius).map_or(
+                EffectRoiPropagation::FullFrame,
+                |halo| EffectRoiPropagation::Expand {
+                    horizontal_pixels: halo,
+                    vertical_pixels: halo,
+                },
+            ),
+            ..cpu_float
+        },
         EffectRenderOp::ChromaticAberration { .. } => EffectImplementationRequirements {
             roi_from_effect_input: EffectRoiPropagation::FullFrame,
             ..cpu_float

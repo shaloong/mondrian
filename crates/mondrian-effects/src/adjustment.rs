@@ -282,6 +282,39 @@ pub(crate) fn apply_render_op(
             };
             *working = blurred;
         }
+        EffectRenderOp::UnsharpMask { gain, radius, threshold } => {
+            let Some(radius) = crate::unsharp_mask::valid_unsharp_mask_radius(*radius) else {
+                return Err(EffectExecutionError::InvalidRenderParameter {
+                    op: "unsharp_mask",
+                    parameter: "radius",
+                });
+            };
+            if *gain > 1.0e-4 {
+                let floats = working
+                    .chunks_exact(4)
+                    .map(|pixel| {
+                        [
+                            f32::from(pixel[0]) / 255.0,
+                            f32::from(pixel[1]) / 255.0,
+                            f32::from(pixel[2]) / 255.0,
+                            f32::from(pixel[3]) / 255.0,
+                        ]
+                    })
+                    .collect::<Vec<[f32; 4]>>();
+                let blurred =
+                    gaussian_blur_rgba_f32(&floats, width as usize, height as usize, radius);
+                let mut sharpened = floats;
+                crate::unsharp_mask::apply_unsharp_mask_f32(
+                    &mut sharpened,
+                    &blurred,
+                    *gain,
+                    *threshold,
+                );
+                for (pixel, value) in working.chunks_exact_mut(4).zip(sharpened) {
+                    pixel.copy_from_slice(&value.map(unit_to_u8));
+                }
+            }
+        }
         EffectRenderOp::Crop { left, top, right, bottom } => {
             let Some(bounds) = normalized_crop_bounds(width, height, *left, *top, *right, *bottom)
             else {
@@ -618,6 +651,7 @@ pub(crate) const fn render_op_f32_scratch_frames(op: &EffectRenderOp) -> usize {
     match op {
         EffectRenderOp::GaussianBlur { .. } | EffectRenderOp::Qualifier { .. } => 1,
         EffectRenderOp::BoxBlur { .. } => 1,
+        EffectRenderOp::UnsharpMask { .. } => 1,
         EffectRenderOp::Sharpen { .. } => 2,
         EffectRenderOp::ChromaticAberration { .. } | EffectRenderOp::Custom { .. } => 1,
         EffectRenderOp::ColorAdjust { .. }
@@ -924,6 +958,24 @@ pub(crate) fn apply_render_op_f32_region_controlled<E>(
                 *repeat_edge_pixels,
                 checkpoint,
             )
+        }
+        EffectRenderOp::UnsharpMask { gain, radius, threshold } => {
+            let Some(radius) = crate::unsharp_mask::valid_unsharp_mask_radius(*radius) else {
+                return Ok(false);
+            };
+            if *gain <= 1.0e-4 {
+                return Ok(true);
+            }
+            let blurred = gaussian_blur_rgba_f32_controlled(
+                working,
+                width as usize,
+                height as usize,
+                radius,
+                checkpoint,
+            )?;
+            crate::unsharp_mask::apply_unsharp_mask_f32(working, &blurred, *gain, *threshold);
+            checkpoint()?;
+            Ok(true)
         }
         EffectRenderOp::Crop { left, top, right, bottom } => {
             let Some(bounds) = normalized_crop_bounds(

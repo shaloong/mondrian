@@ -4695,6 +4695,7 @@ fn effect_node_accent(effect_type: &EffectType) -> Color {
         EffectType::GaussianBlur | EffectType::Sharpen | EffectType::BoxBlur => {
             colors.effect_filter
         }
+        EffectType::UnsharpMask => colors.effect_filter,
         EffectType::Lut3D => colors.effect_lut,
         EffectType::ChromaKey | EffectType::LumaKey => colors.effect_key,
         _ => colors.effect_default,

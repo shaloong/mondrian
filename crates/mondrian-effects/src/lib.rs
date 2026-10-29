@@ -58,6 +58,7 @@ pub mod qualifier;
 pub mod temporal_execution;
 pub mod tracking;
 pub mod transition;
+pub mod unsharp_mask;
 
 pub use adjustment::{
     blend_rgba_f32_pixel, blend_rgba_f32_pixel_seeded, blend_rgba_pixel, blend_rgba_pixel_seeded,
@@ -183,6 +184,11 @@ pub use tracking::{
     TrackingFrame, TrackingObservation, TrackingQuality, TrackingRegion, TrackingTransform,
 };
 pub use transition::Transition;
+pub use unsharp_mask::{
+    apply_unsharp_mask_f32, sharpened_channel, unsharp_mask_gain,
+    UNSHARP_MASK_AUTHOR_MAX_AMOUNT_PERCENT, UNSHARP_MASK_AUTHOR_MAX_RADIUS_PIXELS,
+    UNSHARP_MASK_AUTHOR_MIN_RADIUS_PIXELS,
+};
 
 pub use processor_question::{
     EffectProcessorGuiActionFeedback, EffectProcessorGuiActionReceipt, EffectProcessorGuiAdmission,

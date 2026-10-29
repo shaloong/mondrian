@@ -794,6 +794,19 @@ pub enum EffectRenderOp {
         direction: crate::BoxBlurDirection,
         repeat_edge_pixels: bool,
     },
+    /// Unsharp mask: amplifies the difference against a Gaussian-blurred copy.
+    ///
+    /// `gain` is the dimensionless amount (`amount_percent / 100`, so `0` is
+    /// identity and `5` is the authored maximum of 500%). `radius` is the
+    /// Gaussian radius in pixels and `threshold` is the difference dead-zone in
+    /// the effect working domain: per-channel differences whose magnitude is at
+    /// or below it are left alone. Colors are not clamped, so HDR values keep
+    /// their range.
+    UnsharpMask {
+        gain: f32,
+        radius: f32,
+        threshold: f32,
+    },
     /// Source-relative hard crop expressed as normalized edge insets.
     ///
     /// Pixels outside the remaining rectangle become transparent black before
@@ -918,6 +931,12 @@ impl std::fmt::Debug for EffectRenderOp {
                 .field("iterations", iterations)
                 .field("direction", direction)
                 .field("repeat_edge_pixels", repeat_edge_pixels)
+                .finish(),
+            Self::UnsharpMask { gain, radius, threshold } => formatter
+                .debug_struct("UnsharpMask")
+                .field("gain", gain)
+                .field("radius", radius)
+                .field("threshold", threshold)
                 .finish(),
             Self::Crop { left, top, right, bottom } => formatter
                 .debug_struct("Crop")
@@ -1291,6 +1310,12 @@ impl EffectRenderOp {
                 direction.hash(state);
                 u8::from(*repeat_edge_pixels).hash(state);
             }
+            EffectRenderOp::UnsharpMask { gain, radius, threshold } => {
+                23u8.hash(state);
+                gain.to_bits().hash(state);
+                radius.to_bits().hash(state);
+                threshold.to_bits().hash(state);
+            }
             EffectRenderOp::Crop { left, top, right, bottom } => {
                 9u8.hash(state);
                 left.to_bits().hash(state);
@@ -1379,6 +1404,7 @@ impl EffectRenderOp {
             EffectRenderOp::Crop { .. } => 1,
             EffectRenderOp::Invert { .. } => 1,
             EffectRenderOp::BoxBlur { .. } => 4,
+            EffectRenderOp::UnsharpMask { .. } => 4,
             EffectRenderOp::Lut3D { .. } => 2,
             EffectRenderOp::GaussianBlur { .. } => 4,
             EffectRenderOp::Sharpen { .. } => 4,
@@ -1910,7 +1936,7 @@ impl EffectDefinition {
     }
 }
 
-fn builtin_effect_types() -> [EffectType; 21] {
+fn builtin_effect_types() -> [EffectType; 22] {
     [
         EffectType::BasicCorrection,
         EffectType::WhiteBalance,
@@ -1933,6 +1959,7 @@ fn builtin_effect_types() -> [EffectType; 21] {
         EffectType::LumaKey,
         EffectType::Invert,
         EffectType::BoxBlur,
+        EffectType::UnsharpMask,
     ]
 }
 
@@ -2905,6 +2932,41 @@ fn default_properties_for(effect_type: EffectType) -> PropertyBag {
                 None,
             );
         }
+        EffectType::UnsharpMask => {
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "amount",
+                "钝化蒙版",
+                "数量",
+                PropertyValue::Float(50.0),
+                Some(0.0),
+                Some(crate::unsharp_mask::UNSHARP_MASK_AUTHOR_MAX_AMOUNT_PERCENT as f64),
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "radius",
+                "钝化蒙版",
+                "半径",
+                PropertyValue::Float(1.0),
+                Some(crate::unsharp_mask::UNSHARP_MASK_AUTHOR_MIN_RADIUS_PIXELS as f64),
+                Some(crate::unsharp_mask::UNSHARP_MASK_AUTHOR_MAX_RADIUS_PIXELS as f64),
+                Some(0.1),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "threshold",
+                "钝化蒙版",
+                "阈值",
+                PropertyValue::Float(0.0),
+                Some(0.0),
+                Some(1.0),
+                Some(0.01),
+            );
+        }
         EffectType::External(_) => {}
     }
 
@@ -3105,6 +3167,8 @@ fn builtin_parameter_unit(effect_type: &EffectType, parameter: &str) -> Paramete
         (EffectType::GaussianBlur, "radius") => ParameterUnit::Pixels,
         (EffectType::Invert, "blend_with_original") => ParameterUnit::Percent,
         (EffectType::BoxBlur, "radius") => ParameterUnit::Pixels,
+        (EffectType::UnsharpMask, "amount") => ParameterUnit::Percent,
+        (EffectType::UnsharpMask, "radius") => ParameterUnit::Pixels,
         _ => ParameterUnit::Unitless,
     }
 }
@@ -3245,6 +3309,15 @@ fn builtin_effect_execution_contract(effect_type: &EffectType) -> EffectExecutio
             // definition-level envelope is a full-frame input. The graph
             // planner still narrows it per instance from the authored radius.
             roi_propagation: EffectRoiPropagation::FullFrame,
+            ..cpu_linear
+        },
+        EffectType::UnsharpMask => EffectExecutionContract {
+            execution_modes: EffectExecutionModes::CPU_F32,
+            // Same bounded-expansion envelope as the Gaussian blur it compares
+            // against; the radius parameter is capped at 500 pixels.
+            roi_propagation: finite_kernel_roi_contract(
+                crate::unsharp_mask::UNSHARP_MASK_AUTHOR_MAX_RADIUS_PIXELS,
+            ),
             ..cpu_linear
         },
     }
@@ -4046,6 +4119,43 @@ fn builtin_graph_builder_for(effect_type: &EffectType) -> Option<EffectGraphBuil
                 Ok(())
             }))
         }
+        EffectType::UnsharpMask => {
+            let amount_id = builtin_parameter_id(effect_type, "amount");
+            let radius_id = builtin_parameter_id(effect_type, "radius");
+            let threshold_id = builtin_parameter_id(effect_type, "threshold");
+            Some(Arc::new(move |effect, context, graph| {
+                let gain = crate::unsharp_mask::unsharp_mask_gain(effect.evaluate_f32_parameter(
+                    &amount_id,
+                    context.time,
+                    50.0,
+                ));
+                if gain <= 1.0e-4 {
+                    return Ok(());
+                }
+                let radius = effect.evaluate_f32_parameter(&radius_id, context.time, 1.0);
+                let Some(radius) = crate::unsharp_mask::valid_unsharp_mask_radius(radius) else {
+                    return Err(EffectGraphBuildError::InvalidAuthorState {
+                        effect_key: effect.effect_type.key(),
+                        effect_id: effect.id,
+                        reason: format!(
+                            "unsharp mask radius {radius} is outside {}..={}",
+                            crate::unsharp_mask::UNSHARP_MASK_AUTHOR_MIN_RADIUS_PIXELS,
+                            crate::unsharp_mask::UNSHARP_MASK_AUTHOR_MAX_RADIUS_PIXELS
+                        ),
+                    });
+                };
+                let threshold = effect.evaluate_f32_parameter(&threshold_id, context.time, 0.0);
+                if !threshold.is_finite() || !(0.0..=1.0).contains(&threshold) {
+                    return Err(EffectGraphBuildError::InvalidAuthorState {
+                        effect_key: effect.effect_type.key(),
+                        effect_id: effect.id,
+                        reason: format!("unsharp mask threshold {threshold} is outside 0..=1"),
+                    });
+                }
+                graph.append_unary(EffectRenderOp::UnsharpMask { gain, radius, threshold });
+                Ok(())
+            }))
+        }
         _ => None,
     }
 }
@@ -4073,6 +4183,7 @@ fn builtin_display_name(effect_type: &EffectType) -> &'static str {
         EffectType::LumaKey => "亮度键",
         EffectType::Invert => "反转",
         EffectType::BoxBlur => "方框模糊",
+        EffectType::UnsharpMask => "钝化蒙版",
         EffectType::External(_) => "外部效果",
     }
 }
@@ -4435,6 +4546,7 @@ mod tests {
             EffectType::Grain,
             EffectType::Invert,
             EffectType::BoxBlur,
+            EffectType::UnsharpMask,
         ]
         .into_iter()
         .map(|effect_type| effect_type.key())
@@ -5536,6 +5648,214 @@ mod tests {
             _ => None,
         });
         assert_eq!(op, Some((6.5, 5, crate::BoxBlurDirection::Vertical, false)));
+    }
+
+    fn unsharp_mask_op(graph: &EffectRenderGraph) -> Option<(f32, f32, f32)> {
+        graph.nodes.iter().find_map(|node| match &node.kind {
+            EffectGraphNodeKind::UnaryEffect {
+                op: EffectRenderOp::UnsharpMask { gain, radius, threshold },
+                ..
+            }
+            | EffectGraphNodeKind::DomainEffect {
+                op: EffectRenderOp::UnsharpMask { gain, radius, threshold },
+                ..
+            } => Some((*gain, *radius, *threshold)),
+            _ => None,
+        })
+    }
+
+    #[test]
+    fn unsharp_mask_defaults_compile_to_the_authored_default_gain() {
+        let effect = instantiate_effect_node(EffectType::UnsharpMask)
+            .expect("registered Unsharp Mask definition");
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("evaluate default Unsharp Mask");
+
+        // The list default is 50% amount at a 1 px radius and no threshold, so
+        // the default state is a real operation rather than the identity.
+        assert_eq!(unsharp_mask_op(&graph), Some((0.5, 1.0, 0.0)));
+    }
+
+    #[test]
+    fn unsharp_mask_authored_state_reaches_the_operation() {
+        let mut effect = instantiate_effect_node(EffectType::UnsharpMask)
+            .expect("registered Unsharp Mask definition");
+        for (parameter, value) in [
+            ("amount", PropertyValue::Float(150.0)),
+            ("radius", PropertyValue::Float(3.5)),
+            ("threshold", PropertyValue::Float(0.25)),
+        ] {
+            effect
+                .apply_property_mutation(PropertyMutation::SetStaticValue {
+                    path: EffectType::UnsharpMask.property_path(parameter),
+                    value,
+                })
+                .unwrap_or_else(|error| panic!("author Unsharp Mask {parameter}: {error}"));
+        }
+
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("evaluate authored Unsharp Mask");
+        assert_eq!(unsharp_mask_op(&graph), Some((1.5, 3.5, 0.25)));
+    }
+
+    #[test]
+    fn unsharp_mask_zero_amount_compiles_to_identity() {
+        let mut effect = instantiate_effect_node(EffectType::UnsharpMask)
+            .expect("registered Unsharp Mask definition");
+        effect
+            .apply_property_mutation(PropertyMutation::SetStaticValue {
+                path: EffectType::UnsharpMask.property_path("amount"),
+                value: PropertyValue::Float(0.0),
+            })
+            .expect("author zero amount");
+
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("evaluate zero-amount Unsharp Mask");
+        assert_eq!(unsharp_mask_op(&graph), None);
+    }
+
+    #[test]
+    fn unsharp_mask_rejects_author_values_outside_the_declared_ranges() {
+        let effect = instantiate_effect_node(EffectType::UnsharpMask)
+            .expect("registered Unsharp Mask definition");
+        for (parameter, value) in [
+            ("amount", PropertyValue::Float(501.0)),
+            ("radius", PropertyValue::Float(600.0)),
+            ("threshold", PropertyValue::Float(1.5)),
+        ] {
+            let mut effect = effect.clone();
+            assert!(
+                effect
+                    .apply_property_mutation(PropertyMutation::SetStaticValue {
+                        path: EffectType::UnsharpMask.property_path(parameter),
+                        value,
+                    })
+                    .is_err(),
+                "the numeric contract rejects {parameter} outside its authored range"
+            );
+        }
+    }
+
+    #[test]
+    fn unsharp_mask_leaves_a_flat_frame_unchanged() {
+        let mut effect = instantiate_effect_node(EffectType::UnsharpMask)
+            .expect("registered Unsharp Mask definition");
+        for (parameter, value) in [
+            ("amount", PropertyValue::Float(100.0)),
+            ("radius", PropertyValue::Float(6.0)),
+            ("threshold", PropertyValue::Float(0.0)),
+        ] {
+            effect
+                .apply_property_mutation(PropertyMutation::SetStaticValue {
+                    path: EffectType::UnsharpMask.property_path(parameter),
+                    value,
+                })
+                .expect("author Unsharp Mask");
+        }
+
+        let input = [[0.25, 0.25, 0.25, 1.0]; 8];
+        let view = || {
+            crate::EffectFloatFrameView::new(
+                crate::EffectFrameExtent::new(8, 1),
+                crate::EffectValueFormat::new(
+                    crate::EffectWorkingPrecision::Float32,
+                    crate::EffectColorDomain::SceneLinearRgb,
+                    mondrian_core::ColorFrameAlpha::StraightCoverage,
+                ),
+                mondrian_core::ImageSampling::UNIT_SQUARE,
+                &input,
+            )
+        };
+
+        let compiled = compile_clip_effect_graph(&[effect], &[], tt(0), TEST_WORKING_SPACE)
+            .expect("compile Unsharp Mask");
+        let output =
+            crate::apply_compiled_effect_graph_rgba_f32(view(), &compiled, 0).expect("execute");
+        for pixel in output.pixels() {
+            assert!(
+                (pixel[0] - 0.25).abs() <= 1.0e-6,
+                "a flat frame has no difference to amplify: {pixel:?}"
+            );
+            assert!((pixel[3] - 1.0).abs() <= 1.0e-6, "{pixel:?}");
+        }
+    }
+
+    #[test]
+    fn unsharp_mask_amplifies_the_peak_of_an_impulse_without_clamping() {
+        let mut effect = instantiate_effect_node(EffectType::UnsharpMask)
+            .expect("registered Unsharp Mask definition");
+        for (parameter, value) in [
+            ("amount", PropertyValue::Float(100.0)),
+            ("radius", PropertyValue::Float(6.0)),
+            ("threshold", PropertyValue::Float(0.0)),
+        ] {
+            effect
+                .apply_property_mutation(PropertyMutation::SetStaticValue {
+                    path: EffectType::UnsharpMask.property_path(parameter),
+                    value,
+                })
+                .expect("author Unsharp Mask");
+        }
+
+        let mut input = [[0.0, 0.0, 0.0, 1.0]; 9];
+        input[4] = [1.0, 1.0, 1.0, 1.0];
+        let view = || {
+            crate::EffectFloatFrameView::new(
+                crate::EffectFrameExtent::new(9, 1),
+                crate::EffectValueFormat::new(
+                    crate::EffectWorkingPrecision::Float32,
+                    crate::EffectColorDomain::SceneLinearRgb,
+                    mondrian_core::ColorFrameAlpha::StraightCoverage,
+                ),
+                mondrian_core::ImageSampling::UNIT_SQUARE,
+                &input,
+            )
+        };
+
+        let compiled = compile_clip_effect_graph(&[effect], &[], tt(0), TEST_WORKING_SPACE)
+            .expect("compile Unsharp Mask");
+        let output =
+            crate::apply_compiled_effect_graph_rgba_f32(view(), &compiled, 0).expect("execute");
+
+        // The Gaussian-blurred peak stays below the source peak, so a 100%
+        // amount pushes the sharpened peak above the scene-linear range instead
+        // of clamping it back to one.
+        assert!(
+            output[4][0] > 1.0 + 1.0e-3,
+            "the isolated peak must be amplified: {:?}",
+            output[4]
+        );
+        for pixel in output.pixels() {
+            assert!(pixel[0].is_finite() && pixel[3] == 1.0, "{pixel:?}");
+        }
+    }
+
+    #[test]
+    fn unsharp_mask_authored_state_survives_project_serialization_round_trip() {
+        let mut effect = instantiate_effect_node(EffectType::UnsharpMask)
+            .expect("registered Unsharp Mask definition");
+        for (parameter, value) in [
+            ("amount", PropertyValue::Float(150.0)),
+            ("radius", PropertyValue::Float(3.5)),
+            ("threshold", PropertyValue::Float(0.25)),
+        ] {
+            effect
+                .apply_property_mutation(PropertyMutation::SetStaticValue {
+                    path: EffectType::UnsharpMask.property_path(parameter),
+                    value,
+                })
+                .expect("author Unsharp Mask");
+        }
+
+        let wire = serde_json::to_string(&effect).expect("serialize the Unsharp Mask node");
+        let restored: EffectNode =
+            serde_json::from_str(&wire).expect("restore the Unsharp Mask node");
+        assert_eq!(restored.effect_type, EffectType::UnsharpMask);
+        assert_eq!(restored, effect);
+
+        let graph = build_effect_render_graph(&[restored], tt(0), TEST_WORKING_SPACE)
+            .expect("evaluate the restored Unsharp Mask node");
+        assert_eq!(unsharp_mask_op(&graph), Some((1.5, 3.5, 0.25)));
     }
 
     #[test]
