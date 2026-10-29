@@ -236,6 +236,12 @@ pub(crate) fn apply_render_op(
                 parameter: "requires_float32",
             })
         }
+        EffectRenderOp::Noise { .. } => {
+            return Err(EffectExecutionError::InvalidRenderParameter {
+                op: "noise",
+                parameter: "requires_float32",
+            })
+        }
         EffectRenderOp::Spherize { .. } => {
             return Err(EffectExecutionError::InvalidRenderParameter {
                 op: "spherize",
@@ -766,6 +772,7 @@ pub(crate) const fn render_op_f32_scratch_frames(op: &EffectRenderOp) -> usize {
         EffectRenderOp::Offset { .. } => 0,
         EffectRenderOp::Twirl { .. } => 0,
         EffectRenderOp::Spherize { .. } => 0,
+        EffectRenderOp::Noise { .. } => 0,
         EffectRenderOp::Mosaic { .. } => 0,
         EffectRenderOp::Scatter { .. } => 0,
         EffectRenderOp::BrushStrokes { .. } => 0,
@@ -1006,6 +1013,13 @@ pub(crate) fn apply_render_op_f32_region_controlled<E>(
                 checkpoint,
             )
         }
+        EffectRenderOp::Noise { grade } => crate::noise::apply_noise_f32_controlled(
+            working,
+            region.width as usize,
+            region.height as usize,
+            *grade,
+            checkpoint,
+        ),
         EffectRenderOp::Spherize { grade } => crate::spherize::apply_spherize_f32_controlled(
             working,
             region.width as usize,

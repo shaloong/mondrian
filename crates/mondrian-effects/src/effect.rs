@@ -925,6 +925,10 @@ pub enum EffectRenderOp {
     Spherize {
         grade: crate::SpherizeGrade,
     },
+    /// Film-style grain keyed off the integer pixel position (FLM-02).
+    Noise {
+        grade: crate::NoiseGrade,
+    },
     /// ColorEmboss: per-channel relief computed from the Sobel gradient of
     /// the working-space colour.
     ColorEmboss {
@@ -1115,6 +1119,7 @@ impl std::fmt::Debug for EffectRenderOp {
             Self::Spherize { grade } => {
                 formatter.debug_struct("Spherize").field("grade", grade).finish()
             }
+            Self::Noise { grade } => formatter.debug_struct("Noise").field("grade", grade).finish(),
             Self::ColorEmboss { grade } => {
                 formatter.debug_struct("ColorEmboss").field("grade", grade).finish()
             }
@@ -1660,6 +1665,12 @@ impl EffectRenderOp {
                     value.to_bits().hash(state);
                 }
             }
+            EffectRenderOp::Noise { grade } => {
+                49u8.hash(state);
+                for value in grade.gpu_controls() {
+                    value.to_bits().hash(state);
+                }
+            }
             EffectRenderOp::Spherize { grade } => {
                 48u8.hash(state);
                 for value in grade.gpu_controls() {
@@ -1826,6 +1837,7 @@ impl EffectRenderOp {
             EffectRenderOp::Convolution { .. } => 3,
             EffectRenderOp::Offset { .. } => 2,
             EffectRenderOp::Twirl { .. } => 3,
+            EffectRenderOp::Noise { .. } => 1,
             EffectRenderOp::Spherize { .. } => 3,
             EffectRenderOp::Mosaic { .. } => 2,
             EffectRenderOp::Posterize { .. } => 1,
@@ -2369,7 +2381,7 @@ impl EffectDefinition {
     }
 }
 
-fn builtin_effect_types() -> [EffectType; 47] {
+fn builtin_effect_types() -> [EffectType; 48] {
     [
         EffectType::BasicCorrection,
         EffectType::WhiteBalance,
@@ -2418,6 +2430,7 @@ fn builtin_effect_types() -> [EffectType; 47] {
         EffectType::Offset,
         EffectType::Twirl,
         EffectType::Spherize,
+        EffectType::Noise,
     ]
 }
 
@@ -4324,6 +4337,42 @@ fn default_properties_for(effect_type: EffectType) -> PropertyBag {
             );
         }
 
+        EffectType::Noise => {
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "amount",
+                "噪点",
+                "杂色数量",
+                PropertyValue::Float(0.0),
+                Some(0.0),
+                Some(crate::NOISE_MAX_AMOUNT_PERCENT as f64),
+                Some(0.1),
+            );
+            define_builtin_enum_property(
+                &mut properties,
+                &effect_type,
+                "noise_type",
+                "噪点",
+                "杂色类型",
+                "rgb",
+                vec![
+                    ParameterEnumOption::new("rgb", "RGB 噪波", "mondrian.effect.noise.type.rgb"),
+                    ParameterEnumOption::new("hls", "亮度噪波", "mondrian.effect.noise.type.hls"),
+                ],
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "clip",
+                "噪点",
+                "剪切",
+                PropertyValue::Int(1),
+                Some(0.0),
+                Some(1.0),
+                Some(1.0),
+            );
+        }
         EffectType::Spherize => {
             define_builtin_property(
                 &mut properties,
@@ -5005,6 +5054,7 @@ fn builtin_parameter_unit(effect_type: &EffectType, parameter: &str) -> Paramete
         (EffectType::Spherize, "radius") => ParameterUnit::Pixels,
         (EffectType::Spherize, "centre_x") => ParameterUnit::Pixels,
         (EffectType::Spherize, "centre_y") => ParameterUnit::Pixels,
+        (EffectType::Noise, "amount") => ParameterUnit::Percent,
         (EffectType::Bevel, "thickness") => ParameterUnit::Pixels,
         (EffectType::Bevel, "angle") => ParameterUnit::Degrees,
         (EffectType::Bevel, "intensity") => ParameterUnit::Normalized,
@@ -5205,6 +5255,10 @@ fn builtin_effect_execution_contract(effect_type: &EffectType) -> EffectExecutio
         EffectType::Offset => EffectExecutionContract {
             execution_modes: EffectExecutionModes::CPU_F32,
             roi_propagation: EffectRoiPropagation::FullFrame,
+            ..cpu_linear
+        },
+        EffectType::Noise => EffectExecutionContract {
+            execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
             ..cpu_linear
         },
         EffectType::Spherize => EffectExecutionContract {
@@ -6770,6 +6824,55 @@ fn builtin_graph_builder_for(effect_type: &EffectType) -> Option<EffectGraphBuil
                 Ok(())
             }))
         }
+        EffectType::Noise => {
+            let amount_id = builtin_parameter_id(effect_type, "amount");
+            let noise_type_id = builtin_parameter_id(effect_type, "noise_type");
+            let clip_id = builtin_parameter_id(effect_type, "clip");
+            Some(Arc::new(move |effect, context, graph| {
+                let amount = effect.evaluate_f32_parameter(&amount_id, context.time, 0.0)
+                    / crate::NOISE_MAX_AMOUNT_PERCENT;
+                let noise_type =
+                    match effect.evaluate_parameter(&noise_type_id, context.time) {
+                        Some(PropertyValue::Enum(key)) => crate::NoiseType::from_key(&key)
+                            .ok_or_else(|| EffectGraphBuildError::InvalidAuthorState {
+                                effect_key: effect.effect_type.key(),
+                                effect_id: effect.id,
+                                reason: format!("noise type {key} is not a declared option"),
+                            })?,
+                        Some(_) => {
+                            return Err(EffectGraphBuildError::InvalidAuthorState {
+                                effect_key: effect.effect_type.key(),
+                                effect_id: effect.id,
+                                reason: "noise type must be an enumeration".to_owned(),
+                            })
+                        }
+                        None => crate::NoiseType::Rgb,
+                    };
+                let clip_output = match effect.evaluate_parameter(&clip_id, context.time) {
+                    Some(PropertyValue::Int(value)) => value >= 1,
+                    Some(_) => {
+                        return Err(EffectGraphBuildError::InvalidAuthorState {
+                            effect_key: effect.effect_type.key(),
+                            effect_id: effect.id,
+                            reason: "noise clipping must be an integer toggle".to_owned(),
+                        })
+                    }
+                    None => true,
+                };
+                let grade = crate::NoiseGrade::new(amount, noise_type, clip_output);
+                let Ok(grade) = grade else {
+                    return Err(EffectGraphBuildError::InvalidAuthorState {
+                        effect_key: effect.effect_type.key(),
+                        effect_id: effect.id,
+                        reason: "noise amount is outside the declared range".to_owned(),
+                    });
+                };
+                if !grade.is_identity() {
+                    graph.append_unary(EffectRenderOp::Noise { grade });
+                }
+                Ok(())
+            }))
+        }
         EffectType::Spherize => {
             let radius_id = builtin_parameter_id(effect_type, "radius");
             let centre_x_id = builtin_parameter_id(effect_type, "centre_x");
@@ -7182,6 +7285,7 @@ fn builtin_display_name(effect_type: &EffectType) -> &'static str {
         EffectType::Offset => "偏移",
         EffectType::Twirl => "旋转扭曲",
         EffectType::Spherize => "球面化",
+        EffectType::Noise => "噪点",
         EffectType::ColorEmboss => "色彩浮雕",
         EffectType::Emboss => "浮雕",
         EffectType::External(_) => "外部效果",
@@ -8465,6 +8569,7 @@ mod tests {
             EffectType::Offset,
             EffectType::Twirl,
             EffectType::Spherize,
+            EffectType::Noise,
         ]
         .into_iter()
         .map(|effect_type| effect_type.key())
@@ -12026,6 +12131,101 @@ mod tests {
         assert_eq!(grade.midtones(), [0.2, 0.5, 0.1]);
     }
 
+    fn noise_op(graph: &EffectRenderGraph) -> Option<crate::NoiseGrade> {
+        graph.nodes.iter().find_map(|node| match &node.kind {
+            EffectGraphNodeKind::UnaryEffect { op: EffectRenderOp::Noise { grade }, .. } => {
+                Some(*grade)
+            }
+            _ => None,
+        })
+    }
+
+    fn author_noise(parameter: &str, value: PropertyValue) -> EffectNode {
+        let mut effect =
+            instantiate_effect_node(EffectType::Noise).expect("registered noise definition");
+        effect
+            .apply_property_mutation(PropertyMutation::SetStaticValue {
+                path: EffectType::Noise.property_path(parameter),
+                value,
+            })
+            .expect("authors noise parameter");
+        effect
+    }
+
+    fn author_noise_more(
+        mut effect: EffectNode,
+        parameter: &str,
+        value: PropertyValue,
+    ) -> EffectNode {
+        effect
+            .apply_property_mutation(PropertyMutation::SetStaticValue {
+                path: EffectType::Noise.property_path(parameter),
+                value,
+            })
+            .expect("authors noise parameter");
+        effect
+    }
+
+    #[test]
+    fn noise_defaults_compile_to_identity() {
+        // The list declares a zero default amount, so a fresh effect must not
+        // add a render node at all.
+        let effect =
+            instantiate_effect_node(EffectType::Noise).expect("registered noise definition");
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("builds noise graph");
+        assert!(noise_op(&graph).is_none());
+    }
+
+    #[test]
+    fn noise_authored_state_reaches_the_operation() {
+        let effect = author_noise("amount", PropertyValue::Float(60.0));
+        let effect = author_noise_more(effect, "noise_type", PropertyValue::Enum("hls".to_owned()));
+        let effect = author_noise_more(effect, "clip", PropertyValue::Int(0));
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("builds noise graph");
+        let grade = noise_op(&graph).expect("noise op");
+        assert!((grade.amount() - 0.6).abs() < 1.0e-6);
+        assert_eq!(grade.noise_type(), crate::NoiseType::Hls);
+        assert!(!grade.clips_output());
+    }
+
+    #[test]
+    fn noise_zero_amount_compiles_to_identity() {
+        let effect = author_noise("amount", PropertyValue::Float(0.0));
+        let effect = author_noise_more(effect, "noise_type", PropertyValue::Enum("rgb".to_owned()));
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("builds noise graph");
+        assert!(noise_op(&graph).is_none());
+    }
+
+    #[test]
+    fn noise_rejects_author_values_outside_the_declared_ranges() {
+        for value in [101.0_f32, -1.0] {
+            let mut effect =
+                instantiate_effect_node(EffectType::Noise).expect("registered noise definition");
+            let _error = effect
+                .apply_property_mutation(PropertyMutation::SetStaticValue {
+                    path: EffectType::Noise.property_path("amount"),
+                    value: PropertyValue::Float(value),
+                })
+                .expect_err("rejects an out-of-range noise amount");
+        }
+    }
+
+    #[test]
+    fn noise_authored_state_survives_project_serialization_round_trip() {
+        let effect = author_noise("amount", PropertyValue::Float(35.0));
+        let effect = author_noise_more(effect, "noise_type", PropertyValue::Enum("hls".to_owned()));
+        let wire = serde_json::to_string(&effect).expect("serializes noise effect");
+        let restored: EffectNode = serde_json::from_str(&wire).expect("restores noise effect");
+        assert_eq!(restored, effect);
+        let graph = build_effect_render_graph(&[restored], tt(0), TEST_WORKING_SPACE)
+            .expect("builds restored noise graph");
+        let grade = noise_op(&graph).expect("noise op");
+        assert!((grade.amount() - 0.35).abs() < 1.0e-6);
+        assert_eq!(grade.noise_type(), crate::NoiseType::Hls);
+    }
     fn spherize_op(graph: &EffectRenderGraph) -> Option<crate::SpherizeGrade> {
         graph.nodes.iter().find_map(|node| match &node.kind {
             EffectGraphNodeKind::UnaryEffect { op: EffectRenderOp::Spherize { grade }, .. } => {

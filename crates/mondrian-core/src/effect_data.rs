@@ -59,6 +59,7 @@ pub enum EffectType {
     Offset,
     Twirl,
     Spherize,
+    Noise,
     BrushStrokes,
     Posterize,
     Emboss,
@@ -116,6 +117,7 @@ impl EffectType {
             Self::Offset => "builtin.offset".to_string(),
             Self::Twirl => "builtin.twirl".to_string(),
             Self::Spherize => "builtin.spherize".to_string(),
+            Self::Noise => "builtin.noise".to_string(),
             Self::Scatter => "builtin.scatter".to_string(),
             Self::BrushStrokes => "builtin.brush_strokes".to_string(),
             Self::Posterize => "builtin.posterize".to_string(),
@@ -169,6 +171,7 @@ impl EffectType {
             "builtin.offset" => Self::Offset,
             "builtin.twirl" => Self::Twirl,
             "builtin.spherize" => Self::Spherize,
+            "builtin.noise" => Self::Noise,
             "builtin.scatter" => Self::Scatter,
             "builtin.brush_strokes" => Self::BrushStrokes,
             "builtin.posterize" => Self::Posterize,
@@ -225,6 +228,7 @@ impl EffectType {
             Self::Offset => "偏移",
             Self::Twirl => "旋转扭曲",
             Self::Spherize => "球面化",
+            Self::Noise => "噪点",
             Self::External(name) => name,
         }
     }
@@ -276,6 +280,7 @@ impl EffectType {
             Self::Offset => vec!["变换与尺寸"],
             Self::Twirl => vec!["变形"],
             Self::Spherize => vec!["变形"],
+            Self::Noise => vec!["胶片质感"],
             Self::External(_) => vec!["外部效果"],
         }
     }
@@ -329,6 +334,7 @@ impl EffectType {
             Self::Offset => "offset".to_string(),
             Self::Twirl => "twirl".to_string(),
             Self::Spherize => "spherize".to_string(),
+            Self::Noise => "noise".to_string(),
             Self::External(key) => key.clone(),
         }
     }
@@ -634,6 +640,7 @@ impl crate::AuthoringFootprint for EffectType {
             Self::Convolution => Ok(()),
             Self::Offset => Ok(()),
             Self::Twirl => Ok(()),
+            Self::Noise => Ok(()),
             Self::Spherize => Ok(()),
         }
     }

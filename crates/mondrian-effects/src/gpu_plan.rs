@@ -116,6 +116,10 @@ pub enum EffectGpuPointOp {
     Tritone {
         grade: crate::TritoneGrade,
     },
+    /// Film grain keyed off the integer pixel position.
+    Noise {
+        grade: crate::NoiseGrade,
+    },
     Threshold {
         level: f32,
         luminance_coefficients: [f32; 3],
@@ -815,6 +819,7 @@ pub(crate) fn lower_point_op(
         EffectRenderOp::Posterize { grade } => {
             Ok(EffectGpuPointOp::Posterize { levels: grade.levels() as f32 })
         }
+        EffectRenderOp::Noise { grade } => Ok(EffectGpuPointOp::Noise { grade: *grade }),
         EffectRenderOp::Threshold { grade } => Ok(EffectGpuPointOp::Threshold {
             level: grade.level(),
             luminance_coefficients: grade.luminance_coefficients(),
@@ -899,6 +904,7 @@ fn operation_name(op: &EffectRenderOp) -> &'static str {
         EffectRenderOp::Offset { .. } => "offset",
         EffectRenderOp::Twirl { .. } => "twirl",
         EffectRenderOp::Spherize { .. } => "spherize",
+        EffectRenderOp::Noise { .. } => "noise",
         EffectRenderOp::MotionTile { .. } => "motion_tile",
         EffectRenderOp::Kaleidoscope { .. } => "kaleidoscope",
         EffectRenderOp::Bevel { .. } => "bevel",

@@ -2747,6 +2747,7 @@ const fn effect_operation_shape_tag(operation: &EffectRenderOp) -> u8 {
         EffectRenderOp::Offset { .. } => 47,
         EffectRenderOp::Twirl { .. } => 48,
         EffectRenderOp::Spherize { .. } => 49,
+        EffectRenderOp::Noise { .. } => 50,
         EffectRenderOp::ColorEmboss { .. } => 33,
         EffectRenderOp::Emboss { .. } => 32,
         EffectRenderOp::DropShadow { .. } => 30,
@@ -4797,6 +4798,7 @@ fn cpu_node_scratch_frames(
             | crate::EffectRenderOp::Convolution { .. }
             | crate::EffectRenderOp::Offset { .. }
             | crate::EffectRenderOp::Twirl { .. }
+            | crate::EffectRenderOp::Noise { .. }
             | crate::EffectRenderOp::Spherize { .. }
             | crate::EffectRenderOp::BrushStrokes { .. }
             | crate::EffectRenderOp::ColorEmboss { .. }

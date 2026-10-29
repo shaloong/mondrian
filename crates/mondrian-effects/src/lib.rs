@@ -77,6 +77,7 @@ pub mod brush_strokes;
 pub mod kaleidoscope;
 pub mod mosaic;
 pub mod motion_tile;
+pub mod noise;
 pub mod offset;
 pub(crate) mod parallel;
 pub mod posterize;
@@ -224,6 +225,11 @@ pub use mosaic::{
 };
 pub use motion_tile::{
     motion_tile_frame_f32, MotionTileError, MotionTileGrade, MOTION_TILE_MAX_PERCENT,
+};
+pub use noise::{
+    noise_frame_f32, noise_hash, noise_sample, NoiseError, NoiseGrade, NoiseType,
+    NOISE_MAX_AMOUNT_PERCENT, NOISE_SALT_BLUE, NOISE_SALT_GREEN, NOISE_SALT_LUMINANCE,
+    NOISE_SALT_RED,
 };
 pub use offset::{
     offset_frame_f32, OffsetError, OffsetGrade, OFFSET_MAX_BLEND_PERCENT, OFFSET_MAX_SHIFT_PIXELS,
