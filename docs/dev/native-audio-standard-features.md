@@ -1,7 +1,7 @@
 # Native audio standard features
 
 Standards reviewed on 2026-10-10. Scoped product-capability notes include accepted
-updates through 2026-10-25. This document separates the
+updates through 2026-10-29. This document separates the
 negotiated product implementation from vendor APIs, unavailable services and
 remaining work. Qualification states the tested inputs, builds, platform and limits in
 [Native plugin compatibility and qualification](native-plugin-compatibility.md).
@@ -46,7 +46,8 @@ canonical execution and authoring boundaries.
   Enabled extensions include audio-ports, latency, tail, state, params, render,
   thread-check, log, gui, timer-support, note-ports and audio-ports-config (bounded
   cold render-context negotiation). The actual CLAP host declares
-  thread-check and log, plus Windows GUI/timer services;
+  thread-check, log and timer services on desktop platforms; native GUI services
+  currently use the Windows owner;
   enabling an SDK Cargo feature does not expose the corresponding host service.
   Admitted CLAP Note processing conditionally exposes HostNotePorts;
   HostAudioPortsConfig is not registered.
@@ -76,13 +77,13 @@ method/thread/lifetime obligations become binding when exposed or consumed.
 
 | Key | Actual source / owner |
 | --- | --- |
-| CW | `crates/mondrian-audio/src/processor_isolation/{clap_worker,clap_parameter_events,clap_output_events,clap_audio_role,clap_main_services,clap_gui_owner,clap_gui_requests}.rs`: host, lifecycle, owned scalar input/output, native processing and Windows main/GUI/timer roles |
+| CW | `crates/mondrian-audio/src/processor_isolation/{clap_worker,clap_parameter_events,clap_output_events,clap_audio_role,clap_main_services,clap_gui_owner,clap_gui_requests}.rs`: host, lifecycle, owned scalar input/output, desktop Main/DSP/timer roles and Windows GUI owner |
 | CD | `crates/mondrian-audio/src/processor_isolation/{clap_discovery,clap_note_input_metadata}.rs`: identity/state/mode/ports/parameters probe and separate inactive input-note facts |
-| VW | `crates/mondrian-audio/src/processor_isolation/vst3_worker.rs`: native prepare/reset/process/buses |
+| VW | `crates/mondrian-audio/src/processor_isolation/vst3_worker.rs`: native prepare/reset/process/buses, desktop Main/DSP roles and one bounded initial parameter handoff |
 | VD | `crates/mondrian-audio/src/processor_isolation/{vst3_discovery,vst3_processing_metadata}.rs`: class/state/mode probe and bounded event-bus constraints |
 | IP | `crates/mondrian-audio/src/processor_isolation/{mod,protocol,worker,supervisor}.rs`: immutable payload, mapping, bounded process transport |
 | PH | `crates/mondrian-audio/src/{processor,processor_host,processor_parameters,schedule,latency,render,runtime,delivery}.rs`: exact occurrences, canonical curves, prepared PDC and runtime admission |
-| VL | `vendor/vst3-host/src/internal/plugin_impl.rs`: native component/controller, setup, queues and vendor control methods |
+| VL | `vendor/vst3-host/src/internal/{plugin_impl,run_loop,module_loader/factory_context}.rs`: native component/controller, setup, queues, factory/editor callback scopes and module ownership |
 | VC | `vendor/vst3-host/src/internal/com_implementations.rs`: host interfaces, messages, streams, parameter/event lists and callbacks |
 | VE | `vendor/vst3-host/src/midi.rs` and `src/internal/data_exchange.rs`: owned rich events and exchange queues |
 | SDK | `vendor/vst3-sdk/{src,com-scrape-types,PROVENANCE.json,GENERATION-SOURCES.json}`: one generated ABI/runtime |
@@ -302,7 +303,7 @@ vendor MIDI/event methods alone are not product feature support.
 | [Output events/SysEx](https://github.com/steinbergmedia/vst3_pluginterfaces/blob/4f547e8e102b47de4a8b8aaf343c73b700786372/vst/ivstevents.h) | G/V: native addEvent has explicit caps/refusal; vendor subsequent output queue drops oldest on overflow. Product does not drain/route output events | Exact bounded output ownership and overflow policy; no silent accepted event loss. |
 | [IPlugView/IPlugFrame editor](https://github.com/steinbergmedia/vst3_pluginterfaces/blob/4f547e8e102b47de4a8b8aaf343c73b700786372/gui/iplugview.h) | S/Q owned Windows: same loaded object and HWND main pump; one actual App open, grouped author transaction, same-Source installation/Preserved Ack and close passes with the normal Product child, fixed PID/serial, current parameter facts and finite resource retirement. A separate real Surge XT1.3.4 App Idle gate passes Opened/Closed and Source cleanup at Realtime48k/block4 with all2855 schema/UI/None parameters preserved. A separate owned first-Idle-Open gate now projects only empty-key Some from the exact installed Plan before the view opens: Host gain .25 versus opaque .5 yields natural MainQuery .25/.5/0, retaining two None lanes, native object, Source/claim, Unentered and author state. CLAP uses a separate same-object GUI implementation. | The owned test uses a Win32 message, zero PCM and software output. The Surge lifecycle has zero proposals/installations/Acks and no attachment-object observation; actual native edits, parameter query/Adopt, physical interaction and same-PID/object are not qualified by it. Static projection does not cover keyed curves (including one key), playhead/seek policy, native process-call counts or DSP/PCM behavior. Broader vendor editors, removal/frame-clear failure recovery, resize/DPI/focus, complete owner-resource/deadline acceptance and other platform loops remain unqualified. |
 | [Content scale/parameter finder/context menu](https://github.com/steinbergmedia/vst3_pluginterfaces/blob/4f547e8e102b47de4a8b8aaf343c73b700786372/gui/iplugviewcontentscalesupport.h) | S/V: Windows native main/editor lane carries actual resize/scale requests; vendor menu registry exists; product menu selection and parameter finder remain absent | Real monitor scale and independent resize/focus/key acceptance, exact popup targets and canonical author transactions. |
-| [Linux runloop/Wayland](https://github.com/steinbergmedia/vst3_pluginterfaces/blob/4f547e8e102b47de4a8b8aaf343c73b700786372/gui/iplugview.h) | Conditional V/N: vendor Linux timer/FD primitives not pumped by product protocol loop; Wayland host/frame absent | Native supported-platform editor event loop and independent platform acceptance. |
+| [Linux runloop/Wayland](https://github.com/steinbergmedia/vst3_pluginterfaces/blob/4f547e8e102b47de4a8b8aaf343c73b700786372/gui/iplugview.h) | S/N: factory and editor scopes share the existing dispatcher, now serviced by the Product Main role without a view. Registration cancellation, same-object ABA and unlocked native retirement have SDK coverage; Wayland host/frame remains absent. | Product-native timer/FD concurrency, X11/Wayland views and platform lifecycle qualification; finite ADelay PCM/state acceptance is not a callback/GUI or realtime claim. |
 | [Data exchange](https://github.com/steinbergmedia/vst3_pluginterfaces/blob/4f547e8e102b47de4a8b8aaf343c73b700786372/vst/ivstdataexchange.h) | S/V: aligned bounded native queues, background delivery and actual main-role dispatch exist; full product observation consumer remains incomplete | Requested thread delivery/lifetime, all host-owned nested queue/snapshot/worker storage and current native deadline qualification. |
 | [Progress/context menus/unit notifications](https://github.com/steinbergmedia/vst3_pluginterfaces/blob/4f547e8e102b47de4a8b8aaf343c73b700786372/vst/ivsteditcontroller.h) | G/V: exposed vendor callbacks queue requests; App consumes none of these as complete workflows | Truthful capability exposure and typed product control outcomes. |
 | [IPlugInterfaceSupport](https://github.com/steinbergmedia/vst3_pluginterfaces/blob/4f547e8e102b47de4a8b8aaf343c73b700786372/vst/ivstpluginterfacesupport.h) | P source: immutable instance-local product declarations before native initialization; core component/processor/controller, connection and ProcessContext requirements; Windows actual view/content-scale and processor-to-controller DataExchange consumers. Discovery and processing/reload use the same policy; standalone vendor defaults are retained. | COM acceptance/refusal/null/unknown/context-isolation and unchanged standalone default tests; current slice needs matching execution receipt and native vendor qualification. MIDI/unit/program/host-edit/automation-state/expression/prefetch/remap remain undeclared by the product. Custom policy with the standalone vendor isolation helper is explicitly refused, not lost. |
