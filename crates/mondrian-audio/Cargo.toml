@@ -31,6 +31,10 @@ vst3-host.workspace = true
 # Actual pthread identity for the scoped CLAP audio role; already used by the workspace.
 libc = "0.2"
 
+[target.'cfg(target_os = "macos")'.dependencies]
+# Bound autoreleased foreign objects across native load, main service and unload.
+objc2 = "0.6"
+
 [dev-dependencies]
 crossbeam-queue.workspace = true
 libloading.workspace = true

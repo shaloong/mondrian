@@ -146,7 +146,7 @@ fn prepare_gate() -> Box<dyn IsolatedAudioProcessorWorker> {
     let native_main =
         std::rc::Rc::new(vst3_host::window::WindowsEditorMainThread::initialize().unwrap());
     let mut worker = prepare_loaded_on_main(
-        native_main,
+        Some(native_main),
         request,
         entry,
         c"org.mondrian.fixture.note-gate",

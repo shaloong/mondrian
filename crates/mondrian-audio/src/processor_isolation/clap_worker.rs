@@ -67,7 +67,7 @@ mod beat_position;
 mod native_author;
 #[path = "clap_worker/parameter_observations.rs"]
 mod parameter_observations;
-#[cfg(windows)]
+#[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
 #[path = "clap_worker/static_parameters.rs"]
 mod static_parameters;
 
@@ -206,7 +206,7 @@ impl HostHandlers for ClapHost {
             // One same-ID raw/shared table, never also legacy HostNotePorts.
             builder.register::<clack_extensions::note_ports::HostNotePortsRaw>();
         }
-        #[cfg(windows)]
+        #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
         builder.register::<clack_extensions::gui::HostGui>();
         builder
             .register::<clack_extensions::timer::HostTimer>()
@@ -1082,16 +1082,12 @@ impl IsolatedAudioProcessorWorkerFactory for ClapAudioProcessorWorkerFactory {
         }
         let plugin_id = CString::new(payload.plugin_id)
             .map_err(|_| invalid("CLAP plugin ID contains a NUL byte"))?;
-        #[cfg(windows)]
-        let native_main = std::rc::Rc::new(
-            vst3_host::window::WindowsEditorMainThread::initialize().map_err(|error| {
-                unavailable(format!("CLAP native main initialization failed: {error}"))
-            })?,
-        );
+        #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
+        let native_main = initialize_native_main()?;
         let entry = unsafe { PluginEntry::load(payload.library_path.as_os_str()) }
             .map_err(|error| unavailable(format!("CLAP library load failed: {error}")))?;
         prepare_loaded_on_main(
-            #[cfg(windows)]
+            #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
             native_main,
             request,
             entry,
@@ -1289,16 +1285,10 @@ fn prepare_loaded_with_audio_input(
     expected_parameters: &[super::ClapParameterDescriptor],
     parameter_ids: &[u32],
 ) -> Result<Box<dyn IsolatedAudioProcessorWorker>, AudioProcessorHostError> {
-    #[cfg(windows)]
-    let native_main = std::rc::Rc::new(
-        vst3_host::window::WindowsEditorMainThread::initialize().map_err(|error| {
-            unavailable(format!(
-                "CLAP owned native main initialization failed: {error}"
-            ))
-        })?,
-    );
+    #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
+    let native_main = initialize_native_main()?;
     prepare_loaded_on_main(
-        #[cfg(windows)]
+        #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
         native_main,
         request,
         entry,
@@ -1312,8 +1302,24 @@ fn prepare_loaded_with_audio_input(
     .map(|worker| worker as Box<dyn IsolatedAudioProcessorWorker>)
 }
 
+/// CLAP's logical main can be a headless control thread. Actual Cocoa views
+/// additionally require process main; never swallow other initialization errors.
+#[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
+fn initialize_native_main(
+) -> Result<Option<std::rc::Rc<vst3_host::window::NativeEditorMainThread>>, AudioProcessorHostError>
+{
+    #[cfg(target_os = "macos")]
+    if objc2::MainThreadMarker::new().is_none() {
+        return Ok(None);
+    }
+    vst3_host::window::NativeEditorMainThread::initialize()
+        .map(|main| Some(std::rc::Rc::new(main)))
+        .map_err(|error| unavailable(format!("CLAP native main initialization failed: {error}")))
+}
+
 fn prepare_loaded_on_main(
-    #[cfg(windows)] native_main: std::rc::Rc<vst3_host::window::WindowsEditorMainThread>,
+    #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
+    native_main: Option<std::rc::Rc<vst3_host::window::NativeEditorMainThread>>,
     request: IsolatedAudioProcessorWorkerPrepareRequest,
     entry: PluginEntry,
     plugin_id: &CStr,
@@ -1617,9 +1623,9 @@ fn prepare_loaded_on_main(
         native_author_delivery: None,
         parameter_signatures,
         parameter_observation_revision: None,
-        #[cfg(windows)]
-        gui: super::clap_gui_owner::ClapGuiOwner::new(std::rc::Rc::clone(&native_main)),
-        #[cfg(windows)]
+        #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
+        gui: super::clap_gui_owner::ClapGuiOwner::new(native_main.clone()),
+        #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
         _native_main: native_main,
         render,
         expected_parameters: expected_parameters.to_vec(),
@@ -1652,7 +1658,7 @@ fn prepare_loaded_on_main(
 
 struct ClapWorker {
     note_inputs: Option<super::clap_note_input_contract::RestoredNoteInputs>,
-    #[cfg(windows)]
+    #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
     gui: super::clap_gui_owner::ClapGuiOwner,
     native_lane: Option<crate::NativeWorkerLaneResourceProfile>,
     native_object: crate::NativeAudioObjectObservation,
@@ -1688,8 +1694,8 @@ struct ClapWorker {
     log_receiver: super::native_audio_log::NativeAudioLogReceiver,
     shared: ClapHostShared,
     // Last: OLE/main lifetime outlives every native GUI/processor/instance drop.
-    #[cfg(windows)]
-    _native_main: std::rc::Rc<vst3_host::window::WindowsEditorMainThread>,
+    #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
+    _native_main: Option<std::rc::Rc<vst3_host::window::NativeEditorMainThread>>,
 }
 
 impl ClapWorker {
@@ -1934,7 +1940,7 @@ impl ClapWorker {
         }
         Ok(())
     }
-    #[cfg(windows)]
+    #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
     fn native_editor_binding_matches(&self, request: crate::NativeAudioObjectBindRequest) -> bool {
         self.native_binding.is_some_and(|receipt| {
             receipt.binding() == request.binding
@@ -1989,7 +1995,7 @@ impl IsolatedAudioProcessorWorker for ClapWorker {
         Ok(Some(Box::new(ClapMainRole {
             note_inputs: self.note_inputs.as_ref(),
             instance: &mut self.instance,
-            #[cfg(windows)]
+            #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
             gui: &mut self.gui,
             shared: &self.shared,
             phase: &self.configuration_phase,
@@ -2024,7 +2030,7 @@ impl IsolatedAudioProcessorWorker for ClapWorker {
             main: Box::new(ClapMainRole {
                 note_inputs: self.note_inputs.as_ref(),
                 instance: &mut self.instance,
-                #[cfg(windows)]
+                #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
                 gui: &mut self.gui,
                 shared: &self.shared,
                 phase: &self.configuration_phase,
@@ -2060,7 +2066,7 @@ impl IsolatedAudioProcessorWorker for ClapWorker {
         }
     }
 
-    #[cfg(windows)]
+    #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
     fn open_native_audio_editor(
         &mut self,
         request: crate::NativeAudioEditorOpenRequest,
@@ -2077,10 +2083,13 @@ impl IsolatedAudioProcessorWorker for ClapWorker {
         {
             return Ok(Outcome::Refused(Refusal::ConfigurationPending));
         }
-        let preflight = self.gui.prepare_open(&mut self.instance);
+        let preflight = self.gui.prepare_open(&mut self.instance)?;
         match preflight {
             super::clap_gui_owner::ClapGuiOpenPreflight::Unavailable => {
                 return Ok(Outcome::Refused(Refusal::NoEditor));
+            }
+            super::clap_gui_owner::ClapGuiOpenPreflight::UnsupportedApi => {
+                return Ok(Outcome::Refused(Refusal::UnsupportedAdapter));
             }
             super::clap_gui_owner::ClapGuiOpenPreflight::Attached(size) => {
                 // Preserve live Open idempotence; this synchronization slice
@@ -2109,7 +2118,7 @@ impl IsolatedAudioProcessorWorker for ClapWorker {
         Ok(Outcome::Opened { binding, width: size.width, height: size.height })
     }
 
-    #[cfg(windows)]
+    #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
     fn close_native_audio_editor(
         &mut self,
         binding: crate::NativeAudioObjectBindRequest,
@@ -2122,12 +2131,12 @@ impl IsolatedAudioProcessorWorker for ClapWorker {
         Ok(Outcome::Closed { binding })
     }
 
-    #[cfg(windows)]
+    #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
     fn close_native_editor_owner(&mut self) -> Result<(), AudioProcessorHostError> {
         self.gui.close(&mut self.instance)
     }
 
-    #[cfg(windows)]
+    #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
     fn service_native_editor_close_request(
         &mut self,
     ) -> Result<crate::NativeAudioEditorOutcome, AudioProcessorHostError> {
@@ -2636,7 +2645,7 @@ fn first_clap_parameter_structure_mismatch_observed(
 
 impl Drop for ClapWorker {
     fn drop(&mut self) {
-        #[cfg(windows)]
+        #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
         if self.gui.close(&mut self.instance).is_err() {
             // An attached/indeterminate foreign GUI must not outlive its DLL.
             // The parent supervised connection observes this isolated retirement.
@@ -3977,7 +3986,7 @@ mod tests {
                 Some(cohort),
                 "refusal must not consume the actual request"
             );
-            #[cfg(windows)]
+            #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
             {
                 let object = worker.native_audio_object_observation().unwrap();
                 assert!(matches!(worker.split_native_processing(),
@@ -5955,11 +5964,10 @@ mod tests {
             state.extend_from_slice(&(if mode == 4 { 0.125_f64 } else { 0.25 }).to_le_bytes());
             state.extend_from_slice(&0.75_f64.to_le_bytes());
             state.push(mode);
-            #[cfg(windows)]
-            let native_main =
-                std::rc::Rc::new(vst3_host::window::WindowsEditorMainThread::initialize().unwrap());
+            #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
+            let native_main = initialize_native_main().unwrap();
             let mut worker = prepare_loaded_on_main(
-                #[cfg(windows)]
+                #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
                 native_main,
                 request,
                 entry,
@@ -6054,13 +6062,10 @@ mod tests {
             )
             .unwrap();
             let parameters = lifecycle_parameters();
-            #[cfg(windows)]
-            let native_main = std::rc::Rc::new(
-                vst3_host::window::WindowsEditorMainThread::initialize()
-                    .expect("same existing owned native-main initialization"),
-            );
+            #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
+            let native_main = initialize_native_main().unwrap();
             let mut worker = prepare_loaded_on_main(
-                #[cfg(windows)]
+                #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
                 native_main,
                 request,
                 entry,
@@ -6608,11 +6613,10 @@ mod tests {
             parameter_ids: Vec::new(),
             render_contract: render,
         };
-        #[cfg(windows)]
-        let native_main =
-            std::rc::Rc::new(vst3_host::window::WindowsEditorMainThread::initialize().unwrap());
+        #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
+        let native_main = initialize_native_main().unwrap();
         let mut worker = prepare_loaded_on_main(
-            #[cfg(windows)]
+            #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
             native_main,
             request,
             entry,
@@ -6763,7 +6767,7 @@ mod clap_output_owner_contracts;
 struct ClapMainRole<'a> {
     note_inputs: Option<&'a super::clap_note_input_contract::RestoredNoteInputs>,
     instance: &'a mut PluginInstance<ClapHost>,
-    #[cfg(windows)]
+    #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
     gui: &'a mut super::clap_gui_owner::ClapGuiOwner,
     shared: &'a ClapHostShared,
     phase: &'a super::native_configuration_control::NativeConfigurationPhase,
@@ -6784,12 +6788,14 @@ impl super::IsolatedAudioProcessorMainRole for ClapMainRole<'_> {
     }
 
     fn service_native_main_thread(&mut self) -> Result<(), AudioProcessorHostError> {
-        if let Some(inputs) = self.note_inputs {
-            super::clap_note_input_contract::service_names(self.instance, inputs)?;
-        }
-        #[cfg(windows)]
-        self.gui.service(self.instance)?;
-        super::clap_main_services::service_main_tick(self.shared, self.instance)
+        super::worker::with_native_control_pool(|| {
+            if let Some(inputs) = self.note_inputs {
+                super::clap_note_input_contract::service_names(self.instance, inputs)?;
+            }
+            #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
+            self.gui.service(self.instance)?;
+            super::clap_main_services::service_main_tick(self.shared, self.instance)
+        })
     }
 
     fn finish_processing_scope(&mut self) -> Result<(), AudioProcessorHostError> {
@@ -6855,7 +6861,7 @@ impl super::IsolatedAudioProcessorMainRole for ClapMainRole<'_> {
     }
 
     fn native_editor_close_requested(&self) -> Result<bool, AudioProcessorHostError> {
-        #[cfg(windows)]
+        #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
         if self.gui.close_requested()? {
             return Ok(true);
         }
