@@ -45,6 +45,7 @@ pub(crate) struct EffectSpatialGpu {
     find_edges: wgpu::RenderPipeline,
     emboss: wgpu::RenderPipeline,
     color_emboss: wgpu::RenderPipeline,
+    radial_blur: wgpu::RenderPipeline,
     bindings: wgpu::BindGroupLayout,
 }
 
@@ -205,10 +206,41 @@ impl EffectSpatialGpu {
             multiview_mask: None,
             cache: None,
         });
+        let radial_blur = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("mondrian.effect-spatial.radial-blur"),
+            layout: Some(&layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                buffers: &[],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_radial_blur"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: wgpu::TextureFormat::Rgba32Float,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleStrip,
+                strip_index_format: None,
+                cull_mode: None,
+                ..wgpu::PrimitiveState::default()
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
         Self {
             box_blur,
             emboss,
             color_emboss,
+            radial_blur,
             find_edges,
             bindings,
         }
@@ -420,6 +452,46 @@ impl EffectSpatialGpu {
             device,
             encoder,
             &self.color_emboss,
+            &input_view,
+            &output_view,
+            &uniform,
+        );
+        Ok(destination.clone())
+    }
+
+    /// Records the radial blur pass.
+    ///
+    /// `params` carries the centre, the tap count and the mode tag (`1` spin,
+    /// `2` zoom); `extra` carries the authored amount and the jitter seed. The
+    /// tap positions and the jitter hash are byte-for-byte the CPU kernel's, so
+    /// the two paths sample the same points.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn record_radial_blur(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
+        params: [f32; 4],
+        extra: [f32; 4],
+        source: &wgpu::Texture,
+        destination: &wgpu::Texture,
+        width: u32,
+        height: u32,
+    ) -> Result<wgpu::Texture, EffectSpatialGpuError> {
+        if width == 0 || height == 0 {
+            return Err(EffectSpatialGpuError::EmptyFrame);
+        }
+        let uniform = SpatialPassUniform {
+            size: [width as f32, height as f32, 0.0, 0.0],
+            params,
+            extra,
+            aces: [0.0; 4],
+        };
+        let input_view = source.create_view(&wgpu::TextureViewDescriptor::default());
+        let output_view = destination.create_view(&wgpu::TextureViewDescriptor::default());
+        self.record_pass(
+            device,
+            encoder,
+            &self.radial_blur,
             &input_view,
             &output_view,
             &uniform,
@@ -713,7 +785,68 @@ fn fs_color_emboss(@builtin(position) position: vec4<f32>) -> @location(0) vec4<
     return unpremultiply(vec4<f32>(mixed, center.a));
 }
 
-"#;
+
+fn radial_hash_jitter(seed: u32, x: u32, y: u32) -> f32 {
+    var hash = seed + x * 0x9E3779B9u + y * 0x85EBCA6Bu;
+    hash = hash ^ (hash >> 16u);
+    hash = hash * 0x7FEB352Du;
+    hash = hash ^ (hash >> 15u);
+    return f32((hash >> 8u) & 0xFFFFu) / 65535.0 - 0.5;
+}
+
+fn sample_bilinear_premultiplied(x: f32, y: f32) -> vec4<f32> {
+    let limit = frame_dims() - vec2<i32>(1);
+    let limit_f = vec2<f32>(f32(limit.x), f32(limit.y));
+    let p = clamp(vec2<f32>(x, y), vec2<f32>(0.0), limit_f);
+    let base = floor(p);
+    let frac = p - base;
+    let x0 = i32(base.x);
+    let y0 = i32(base.y);
+    let x1 = min(x0 + 1, limit.x);
+    let y1 = min(y0 + 1, limit.y);
+    let top_left = premultiply(textureLoad(src, vec2<i32>(x0, y0), 0));
+    let top_right = premultiply(textureLoad(src, vec2<i32>(x1, y0), 0));
+    let bottom_left = premultiply(textureLoad(src, vec2<i32>(x0, y1), 0));
+    let bottom_right = premultiply(textureLoad(src, vec2<i32>(x1, y1), 0));
+    let top = top_left + (top_right - top_left) * frac.x;
+    let bottom = bottom_left + (bottom_right - bottom_left) * frac.x;
+    return top + (bottom - top) * frac.y;
+}
+
+@fragment
+fn fs_radial_blur(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
+    let pixel = vec2<i32>(floor(position.xy));
+    let centre = uniforms.params.xy;
+    let mode = uniforms.params.w;
+    let amount = uniforms.extra.x;
+    let seed = u32(max(uniforms.extra.y, 0.0));
+    let taps = max(i32(uniforms.params.z), 1);
+    let weight = 1.0 / f32(taps);
+    let tap_step = 2.0 / f32(taps);
+    // Half of the authored sweep, in the same units as the CPU kernel:
+    // 0.36 degrees per amount unit for spin, ln(1 + 0.002 * amount) for zoom.
+    let half_span = amount * 0.003141592653589793;
+    let log_span = log(1.0 + amount * 0.002) * 0.5;
+    let delta = vec2<f32>(f32(pixel.x), f32(pixel.y)) - centre;
+    let jitter = radial_hash_jitter(seed, u32(pixel.x), u32(pixel.y));
+    var sum = vec4<f32>(0.0);
+    for (var tap = 0; tap < taps; tap = tap + 1) {
+        let base = (f32(tap) + 0.5) * tap_step - 1.0;
+        let along = clamp(base + jitter * tap_step, -1.0, 1.0);
+        var sample_at = vec2<f32>(0.0);
+        if (mode < 1.5) {
+            let angle = along * half_span;
+            let c = cos(angle);
+            let s = sin(angle);
+            sample_at = centre + vec2<f32>(delta.x * c - delta.y * s, delta.x * s + delta.y * c);
+        } else {
+            let scale = exp(along * log_span);
+            sample_at = centre + delta * scale;
+        }
+        sum = sum + sample_bilinear_premultiplied(sample_at.x, sample_at.y);
+    }
+    return unpremultiply(sum * weight);
+}"#;
 
 #[cfg(test)]
 mod tests {
@@ -1235,6 +1368,73 @@ fn cs_main(@builtin(local_invocation_id) lid: vec3<u32>) {
                     expected[component],
                     actual[component]
                 );
+            }
+        }
+    }
+
+    #[test]
+    fn gpu_radial_blur_matches_the_cpu_kernel() {
+        let Ok(context) = block_on(crate::GpuContext::new()) else {
+            eprintln!("skipping GPU radial blur parity test: no GPU adapter available");
+            return;
+        };
+        let width = 9_u32;
+        let height = 7_u32;
+        let mut pixels = vec![[0.0_f32, 0.0, 0.0, 1.0]; (width * height) as usize];
+        for y in 0..height as usize {
+            for x in 0..width as usize {
+                let value = 0.08 * (x + y) as f32;
+                pixels[y * width as usize + x] = [value, value * 0.5 + 0.1, 0.6 - value, 1.0];
+            }
+        }
+        pixels[20] = [0.0, 0.0, 0.0, 0.0];
+        for mode in [
+            mondrian_effects::RadialBlurMode::Spin,
+            mondrian_effects::RadialBlurMode::Zoom,
+        ] {
+            let grade = mondrian_effects::RadialBlurGrade::new(250.0, [3.5, 3.0], mode, true, 11)
+                .expect("radial blur grade");
+            let mut cpu = pixels.clone();
+            assert!(mondrian_effects::radial_blur_frame_f32(
+                &mut cpu,
+                width as usize,
+                height as usize,
+                grade,
+            ));
+            let executor = EffectSpatialGpu::new(&context.device);
+            let source = upload(&context, &pixels, width, height);
+            let destination = scratch(&context, width, height, 1);
+            let mut encoder =
+                context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("mondrian.effect-spatial.radial-blur-encoder"),
+                });
+            let output = executor
+                .record_radial_blur(
+                    &context.device,
+                    &mut encoder,
+                    [
+                        grade.centre()[0],
+                        grade.centre()[1],
+                        grade.taps() as f32,
+                        f32::from(grade.mode().as_u8()),
+                    ],
+                    [grade.amount(), grade.seed() as f32, 0.0, 0.0],
+                    &source,
+                    &destination[0],
+                    width,
+                    height,
+                )
+                .expect("recorded radial blur");
+            context.queue.submit(Some(encoder.finish()));
+            let gpu = readback(&context, &output, width, height);
+            for (index, (cpu_pixel, gpu_pixel)) in cpu.iter().zip(gpu.iter()).enumerate() {
+                for channel in 0..4 {
+                    let difference = (cpu_pixel[channel] - gpu_pixel[channel]).abs();
+                    assert!(
+                        difference <= 1.0e-4,
+                        "mode {mode:?} pixel {index} channel {channel}: cpu {cpu_pixel:?} gpu {gpu_pixel:?}"
+                    );
+                }
             }
         }
     }
