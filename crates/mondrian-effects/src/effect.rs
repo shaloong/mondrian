@@ -907,6 +907,10 @@ pub enum EffectRenderOp {
     RadialBlur {
         grade: crate::RadialBlurGrade,
     },
+    /// Convolution: a general 3x3 linear filter authored as nine cells.
+    Convolution {
+        grade: crate::ConvolutionGrade,
+    },
     /// ColorEmboss: per-channel relief computed from the Sobel gradient of
     /// the working-space colour.
     ColorEmboss {
@@ -1086,6 +1090,9 @@ impl std::fmt::Debug for EffectRenderOp {
             }
             Self::RadialBlur { grade } => {
                 formatter.debug_struct("RadialBlur").field("grade", grade).finish()
+            }
+            Self::Convolution { grade } => {
+                formatter.debug_struct("Convolution").field("grade", grade).finish()
             }
             Self::ColorEmboss { grade } => {
                 formatter.debug_struct("ColorEmboss").field("grade", grade).finish()
@@ -1612,6 +1619,14 @@ impl EffectRenderOp {
                 grade.antialiasing().hash(state);
                 grade.seed().hash(state);
             }
+            EffectRenderOp::Convolution { grade } => {
+                45u8.hash(state);
+                for value in grade.kernel() {
+                    value.to_bits().hash(state);
+                }
+                grade.absolute_values().hash(state);
+                grade.blend_with_original().to_bits().hash(state);
+            }
             EffectRenderOp::ColorEmboss { grade } => {
                 32u8.hash(state);
                 for value in grade.gpu_controls() {
@@ -1769,6 +1784,7 @@ impl EffectRenderOp {
             EffectRenderOp::Vibrance { .. } => 1,
             EffectRenderOp::Tritone { .. } => 1,
             EffectRenderOp::RadialBlur { .. } => 5,
+            EffectRenderOp::Convolution { .. } => 3,
             EffectRenderOp::Mosaic { .. } => 2,
             EffectRenderOp::Posterize { .. } => 1,
             EffectRenderOp::MotionTile { .. } => 3,
@@ -2311,7 +2327,7 @@ impl EffectDefinition {
     }
 }
 
-fn builtin_effect_types() -> [EffectType; 43] {
+fn builtin_effect_types() -> [EffectType; 44] {
     [
         EffectType::BasicCorrection,
         EffectType::WhiteBalance,
@@ -2356,6 +2372,7 @@ fn builtin_effect_types() -> [EffectType; 43] {
         EffectType::Vibrance,
         EffectType::Tritone,
         EffectType::RadialBlur,
+        EffectType::Convolution,
     ]
 }
 
@@ -4057,6 +4074,129 @@ fn default_properties_for(effect_type: EffectType) -> PropertyBag {
                 Some(1.0),
             );
         }
+        EffectType::Convolution => {
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "cell_1",
+                "卷积核",
+                "1 - L1",
+                PropertyValue::Float(0.0),
+                Some(crate::CONVOLUTION_MIN_CELL as f64),
+                Some(crate::CONVOLUTION_MAX_CELL as f64),
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "cell_2",
+                "卷积核",
+                "2 - L1",
+                PropertyValue::Float(0.0),
+                Some(crate::CONVOLUTION_MIN_CELL as f64),
+                Some(crate::CONVOLUTION_MAX_CELL as f64),
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "cell_3",
+                "卷积核",
+                "3 - L1",
+                PropertyValue::Float(0.0),
+                Some(crate::CONVOLUTION_MIN_CELL as f64),
+                Some(crate::CONVOLUTION_MAX_CELL as f64),
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "cell_4",
+                "卷积核",
+                "1 - L2",
+                PropertyValue::Float(0.0),
+                Some(crate::CONVOLUTION_MIN_CELL as f64),
+                Some(crate::CONVOLUTION_MAX_CELL as f64),
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "cell_5",
+                "卷积核",
+                "2 - L2",
+                PropertyValue::Float(1.0),
+                Some(crate::CONVOLUTION_MIN_CELL as f64),
+                Some(crate::CONVOLUTION_MAX_CELL as f64),
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "cell_6",
+                "卷积核",
+                "3 - L2",
+                PropertyValue::Float(0.0),
+                Some(crate::CONVOLUTION_MIN_CELL as f64),
+                Some(crate::CONVOLUTION_MAX_CELL as f64),
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "cell_7",
+                "卷积核",
+                "1 - L3",
+                PropertyValue::Float(0.0),
+                Some(crate::CONVOLUTION_MIN_CELL as f64),
+                Some(crate::CONVOLUTION_MAX_CELL as f64),
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "cell_8",
+                "卷积核",
+                "2 - L3",
+                PropertyValue::Float(0.0),
+                Some(crate::CONVOLUTION_MIN_CELL as f64),
+                Some(crate::CONVOLUTION_MAX_CELL as f64),
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "cell_9",
+                "卷积核",
+                "3 - L3",
+                PropertyValue::Float(0.0),
+                Some(crate::CONVOLUTION_MIN_CELL as f64),
+                Some(crate::CONVOLUTION_MAX_CELL as f64),
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "absolute_values",
+                "卷积核",
+                "绝对值",
+                PropertyValue::Bool(false),
+                None,
+                None,
+                None,
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "blend_with_original",
+                "卷积核",
+                "与原图像混合",
+                PropertyValue::Float(0.0),
+                Some(0.0),
+                Some(100.0),
+                Some(1.0),
+            );
+        }
         EffectType::ColorEmboss => {
             define_builtin_property(
                 &mut properties,
@@ -4693,6 +4833,7 @@ fn builtin_parameter_unit(effect_type: &EffectType, parameter: &str) -> Paramete
         (EffectType::Tritone, "blend_with_original") => ParameterUnit::Percent,
         (EffectType::RadialBlur, "centre_x") => ParameterUnit::Pixels,
         (EffectType::RadialBlur, "centre_y") => ParameterUnit::Pixels,
+        (EffectType::Convolution, "blend_with_original") => ParameterUnit::Percent,
         (EffectType::Bevel, "thickness") => ParameterUnit::Pixels,
         (EffectType::Bevel, "angle") => ParameterUnit::Degrees,
         (EffectType::Bevel, "intensity") => ParameterUnit::Normalized,
@@ -4880,6 +5021,14 @@ fn builtin_effect_execution_contract(effect_type: &EffectType) -> EffectExecutio
         EffectType::RadialBlur => EffectExecutionContract {
             execution_modes: EffectExecutionModes::CPU_F32,
             roi_propagation: EffectRoiPropagation::FullFrame,
+            ..cpu_linear
+        },
+        EffectType::Convolution => EffectExecutionContract {
+            execution_modes: EffectExecutionModes::CPU_F32,
+            roi_propagation: EffectRoiPropagation::Expand {
+                horizontal_pixels: crate::CONVOLUTION_HALO_PIXELS,
+                vertical_pixels: crate::CONVOLUTION_HALO_PIXELS,
+            },
             ..cpu_linear
         },
         EffectType::Mosaic => EffectExecutionContract {
@@ -6350,6 +6499,69 @@ fn builtin_graph_builder_for(effect_type: &EffectType) -> Option<EffectGraphBuil
                 Ok(())
             }))
         }
+        EffectType::Convolution => {
+            let cell_1_id = builtin_parameter_id(effect_type, "cell_1");
+            let cell_2_id = builtin_parameter_id(effect_type, "cell_2");
+            let cell_3_id = builtin_parameter_id(effect_type, "cell_3");
+            let cell_4_id = builtin_parameter_id(effect_type, "cell_4");
+            let cell_5_id = builtin_parameter_id(effect_type, "cell_5");
+            let cell_6_id = builtin_parameter_id(effect_type, "cell_6");
+            let cell_7_id = builtin_parameter_id(effect_type, "cell_7");
+            let cell_8_id = builtin_parameter_id(effect_type, "cell_8");
+            let cell_9_id = builtin_parameter_id(effect_type, "cell_9");
+            let absolute_values_id = builtin_parameter_id(effect_type, "absolute_values");
+            let blend_id = builtin_parameter_id(effect_type, "blend_with_original");
+            Some(Arc::new(move |effect, context, graph| {
+                let absolute_values =
+                    match effect.evaluate_parameter(&absolute_values_id, context.time) {
+                        Some(PropertyValue::Bool(value)) => value,
+                        Some(_) => {
+                            return Err(EffectGraphBuildError::InvalidAuthorState {
+                                effect_key: effect.effect_type.key(),
+                                effect_id: effect.id,
+                                reason: "convolution absolute values must be a boolean".to_owned(),
+                            })
+                        }
+                        None => false,
+                    };
+                let blend = match effect.evaluate_parameter(&blend_id, context.time) {
+                    Some(PropertyValue::Float(value)) => value / 100.0,
+                    Some(PropertyValue::Int(value)) => (value as f32) / 100.0,
+                    Some(_) => {
+                        return Err(EffectGraphBuildError::InvalidAuthorState {
+                            effect_key: effect.effect_type.key(),
+                            effect_id: effect.id,
+                            reason: "convolution blend must be a number".to_owned(),
+                        })
+                    }
+                    None => 0.0,
+                };
+                let grade = crate::ConvolutionGrade::new(
+                    [
+                        effect.evaluate_f32_parameter(&cell_1_id, context.time, 0.0),
+                        effect.evaluate_f32_parameter(&cell_2_id, context.time, 0.0),
+                        effect.evaluate_f32_parameter(&cell_3_id, context.time, 0.0),
+                        effect.evaluate_f32_parameter(&cell_4_id, context.time, 0.0),
+                        effect.evaluate_f32_parameter(&cell_5_id, context.time, 1.0),
+                        effect.evaluate_f32_parameter(&cell_6_id, context.time, 0.0),
+                        effect.evaluate_f32_parameter(&cell_7_id, context.time, 0.0),
+                        effect.evaluate_f32_parameter(&cell_8_id, context.time, 0.0),
+                        effect.evaluate_f32_parameter(&cell_9_id, context.time, 0.0),
+                    ],
+                    absolute_values,
+                    blend,
+                )
+                .map_err(|error| EffectGraphBuildError::InvalidAuthorState {
+                    effect_key: effect.effect_type.key(),
+                    effect_id: effect.id,
+                    reason: error.to_string(),
+                })?;
+                if !grade.is_identity() {
+                    graph.append_unary(EffectRenderOp::Convolution { grade });
+                }
+                Ok(())
+            }))
+        }
         EffectType::ColorEmboss => {
             let direction_id = builtin_parameter_id(effect_type, "direction");
             let relief_id = builtin_parameter_id(effect_type, "relief");
@@ -6710,6 +6922,7 @@ fn builtin_display_name(effect_type: &EffectType) -> &'static str {
         EffectType::Vibrance => "自然饱和度",
         EffectType::Tritone => "三色调",
         EffectType::RadialBlur => "径向模糊",
+        EffectType::Convolution => "卷积核",
         EffectType::ColorEmboss => "色彩浮雕",
         EffectType::Emboss => "浮雕",
         EffectType::External(_) => "外部效果",
@@ -7989,6 +8202,7 @@ mod tests {
             EffectType::Vibrance,
             EffectType::Tritone,
             EffectType::RadialBlur,
+            EffectType::Convolution,
         ]
         .into_iter()
         .map(|effect_type| effect_type.key())
@@ -11550,6 +11764,115 @@ mod tests {
         assert_eq!(grade.midtones(), [0.2, 0.5, 0.1]);
     }
 
+    fn convolution_op(graph: &EffectRenderGraph) -> Option<crate::ConvolutionGrade> {
+        graph.nodes.iter().find_map(|node| match &node.kind {
+            EffectGraphNodeKind::UnaryEffect {
+                op: EffectRenderOp::Convolution { grade }, ..
+            }
+            | EffectGraphNodeKind::DomainEffect {
+                op: EffectRenderOp::Convolution { grade }, ..
+            } => Some(*grade),
+            _ => None,
+        })
+    }
+
+    fn author_convolution(parameter: &str, value: PropertyValue) -> EffectNode {
+        let mut effect = instantiate_effect_node(EffectType::Convolution)
+            .expect("registered convolution definition");
+        effect
+            .apply_property_mutation(PropertyMutation::SetStaticValue {
+                path: EffectType::Convolution.property_path(parameter),
+                value,
+            })
+            .expect("authors convolution parameter");
+        effect
+    }
+
+    #[test]
+    fn convolution_defaults_compile_to_identity() {
+        // The declared defaults are the neutral matrix, so the effect drops out of
+        // the graph instead of copying every frame.
+        let effect = instantiate_effect_node(EffectType::Convolution)
+            .expect("registered convolution definition");
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("builds convolution graph");
+        assert!(convolution_op(&graph).is_none());
+    }
+
+    #[test]
+    fn convolution_authored_state_reaches_the_operation() {
+        let mut effect = author_convolution("cell_2", PropertyValue::Float(-1.0));
+        for (parameter, value) in [
+            ("cell_4", PropertyValue::Float(-1.0)),
+            ("cell_5", PropertyValue::Float(5.0)),
+            ("cell_6", PropertyValue::Float(-1.0)),
+            ("cell_8", PropertyValue::Float(-1.0)),
+            ("absolute_values", PropertyValue::Bool(true)),
+            ("blend_with_original", PropertyValue::Float(25.0)),
+        ] {
+            effect
+                .apply_property_mutation(PropertyMutation::SetStaticValue {
+                    path: EffectType::Convolution.property_path(parameter),
+                    value,
+                })
+                .expect("authors convolution parameter");
+        }
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("builds convolution graph");
+        let grade = convolution_op(&graph).expect("convolution op");
+        assert_eq!(
+            grade.kernel(),
+            [0.0, -1.0, 0.0, -1.0, 5.0, -1.0, 0.0, -1.0, 0.0]
+        );
+        assert!(grade.absolute_values());
+        assert!((grade.blend_with_original() - 0.25).abs() <= 1.0e-6);
+        assert!(!grade.is_identity());
+    }
+
+    #[test]
+    fn convolution_full_blend_compiles_to_identity() {
+        let effect = author_convolution("blend_with_original", PropertyValue::Float(100.0));
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("builds convolution graph");
+        assert!(convolution_op(&graph).is_none());
+    }
+
+    #[test]
+    fn convolution_rejects_author_values_outside_the_declared_ranges() {
+        let mut effect = instantiate_effect_node(EffectType::Convolution)
+            .expect("registered convolution definition");
+        for (parameter, value) in [
+            ("cell_1", PropertyValue::Float(101.0_f32)),
+            ("cell_1", PropertyValue::Float(-101.0_f32)),
+            ("blend_with_original", PropertyValue::Float(150.0_f32)),
+        ] {
+            let _error = effect
+                .apply_property_mutation(PropertyMutation::SetStaticValue {
+                    path: EffectType::Convolution.property_path(parameter),
+                    value,
+                })
+                .expect_err("rejects an out-of-range convolution value");
+        }
+    }
+
+    #[test]
+    fn convolution_authored_state_survives_project_serialization_round_trip() {
+        let mut effect = author_convolution("cell_9", PropertyValue::Float(-2.0));
+        effect
+            .apply_property_mutation(PropertyMutation::SetStaticValue {
+                path: EffectType::Convolution.property_path("absolute_values"),
+                value: PropertyValue::Bool(true),
+            })
+            .expect("authors absolute values");
+        let encoded = serde_json::to_string(&effect).expect("serializes convolution effect");
+        let decoded: EffectNode =
+            serde_json::from_str(&encoded).expect("deserializes convolution effect");
+        let graph = build_effect_render_graph(&[decoded], tt(0), TEST_WORKING_SPACE)
+            .expect("builds convolution graph");
+        let grade = convolution_op(&graph).expect("convolution op");
+        assert_eq!(grade.kernel()[8], -2.0);
+        assert!(grade.absolute_values());
+    }
     fn radial_blur_op(graph: &EffectRenderGraph) -> Option<crate::RadialBlurGrade> {
         graph.nodes.iter().find_map(|node| match &node.kind {
             EffectGraphNodeKind::UnaryEffect {

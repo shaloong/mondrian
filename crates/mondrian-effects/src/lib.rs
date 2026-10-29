@@ -22,6 +22,7 @@ pub mod channel_mixer;
 pub mod chroma_key;
 pub mod color_curves;
 pub mod color_emboss;
+pub mod convolution;
 pub mod coverage;
 pub mod directional_blur;
 pub mod drop_shadow;
@@ -109,6 +110,10 @@ pub use brush_strokes::{
     brush_strokes_frame_f32, BrushStrokesError, BrushStrokesGrade, BRUSH_STROKES_MAX_DENSITY,
     BRUSH_STROKES_MAX_LENGTH, BRUSH_STROKES_MAX_RANDOMNESS, BRUSH_STROKES_MAX_SIZE,
     BRUSH_STROKES_SURFACE_COUNT,
+};
+pub use convolution::{
+    convolution_frame_f32, ConvolutionError, ConvolutionGrade, CONVOLUTION_HALO_PIXELS,
+    CONVOLUTION_MAX_CELL, CONVOLUTION_MIN_CELL,
 };
 pub use coverage::{has_positive_coverage, mix_straight_rgba, straight_rgba_from_premultiplied};
 pub use effect::{

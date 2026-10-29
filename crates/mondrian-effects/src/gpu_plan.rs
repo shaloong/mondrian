@@ -895,6 +895,7 @@ fn operation_name(op: &EffectRenderOp) -> &'static str {
         EffectRenderOp::Vibrance { .. } => "vibrance",
         EffectRenderOp::Tritone { .. } => "tritone",
         EffectRenderOp::RadialBlur { .. } => "radial_blur",
+        EffectRenderOp::Convolution { .. } => "convolution",
         EffectRenderOp::MotionTile { .. } => "motion_tile",
         EffectRenderOp::Kaleidoscope { .. } => "kaleidoscope",
         EffectRenderOp::Bevel { .. } => "bevel",

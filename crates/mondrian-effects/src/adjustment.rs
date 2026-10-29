@@ -224,6 +224,12 @@ pub(crate) fn apply_render_op(
                 parameter: "requires_float32",
             })
         }
+        EffectRenderOp::Convolution { .. } => {
+            return Err(EffectExecutionError::InvalidRenderParameter {
+                op: "convolution",
+                parameter: "requires_float32",
+            })
+        }
         EffectRenderOp::BrushStrokes { .. } => {
             return Err(EffectExecutionError::InvalidRenderParameter {
                 op: "brush_strokes",
@@ -738,6 +744,7 @@ pub(crate) const fn render_op_f32_scratch_frames(op: &EffectRenderOp) -> usize {
         EffectRenderOp::Vibrance { .. } => 0,
         EffectRenderOp::Tritone { .. } => 0,
         EffectRenderOp::RadialBlur { .. } => 0,
+        EffectRenderOp::Convolution { .. } => 0,
         EffectRenderOp::Mosaic { .. } => 0,
         EffectRenderOp::Scatter { .. } => 0,
         EffectRenderOp::BrushStrokes { .. } => 0,
@@ -971,6 +978,15 @@ pub(crate) fn apply_render_op_f32_region_controlled<E>(
         ),
         EffectRenderOp::RadialBlur { grade } => {
             crate::radial_blur::apply_radial_blur_f32_controlled(
+                working,
+                region.width as usize,
+                region.height as usize,
+                *grade,
+                checkpoint,
+            )
+        }
+        EffectRenderOp::Convolution { grade } => {
+            crate::convolution::apply_convolution_f32_controlled(
                 working,
                 region.width as usize,
                 region.height as usize,

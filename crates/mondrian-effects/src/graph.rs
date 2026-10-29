@@ -1698,6 +1698,14 @@ fn render_op_requirements(op: &EffectRenderOp) -> EffectImplementationRequiremen
             roi_from_effect_input: finite_radius_roi(*radius),
             ..cpu_float
         },
+        EffectRenderOp::Convolution { .. } => EffectImplementationRequirements {
+            execution_modes: EffectExecutionModes::CPU_F32,
+            roi_from_effect_input: EffectRoiPropagation::Expand {
+                horizontal_pixels: crate::CONVOLUTION_HALO_PIXELS,
+                vertical_pixels: crate::CONVOLUTION_HALO_PIXELS,
+            },
+            ..cpu_float
+        },
         EffectRenderOp::FindEdges { .. } => EffectImplementationRequirements {
             execution_modes: EffectExecutionModes::CPU_F32,
             roi_from_effect_input: EffectRoiPropagation::Expand {
