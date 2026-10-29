@@ -15,7 +15,7 @@ use vst3::Steinberg::IPluginFactory;
 use libloading::{Library, Symbol};
 
 /// Function signature for ModuleEntry
-type ModuleEntryFunc = unsafe extern "C" fn() -> bool;
+type ModuleEntryFunc = unsafe extern "C" fn(*mut std::ffi::c_void) -> bool;
 
 /// Function signature for ModuleExit
 type ModuleExitFunc = unsafe extern "C" fn() -> bool;
@@ -97,6 +97,13 @@ impl LinuxModule {
             })?;
             log::debug!("Shared object loaded successfully");
 
+            // ModuleEntry receives the actual dlopen handle, not a filename,
+            // symbol address, or pointer to the Rust Library wrapper. Transfer
+            // ownership out and immediately back into the portable wrapper;
+            // exactly one Library still owns the matching dlclose.
+            let module_handle = libloading::os::unix::Library::from(library).into_raw();
+            let library = Library::from(libloading::os::unix::Library::from_raw(module_handle));
+
             // Step 2: Get ModuleEntry function (REQUIRED)
             log::debug!("Step 2: Getting ModuleEntry function...");
             let module_entry = library
@@ -120,7 +127,7 @@ impl LinuxModule {
 
             // Step 4: Call ModuleEntry (MUST be called before GetPluginFactory)
             log::debug!("Step 4: Calling ModuleEntry...");
-            let entry_result = module_entry();
+            let entry_result = module_entry(module_handle);
             if !entry_result {
                 return Err(Error::PluginLoadFailed(
                     "ModuleEntry function returned false".to_string(),
