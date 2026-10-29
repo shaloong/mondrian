@@ -161,6 +161,22 @@ impl RadialBlurGrade {
         self.amount <= AMOUNT_EPSILON
     }
 
+    /// Packs the values the GPU pass needs.
+    ///
+    /// The first vector carries the centre, the tap count and the mode; the
+    /// second carries the amount and the deterministic jitter seed.
+    pub fn gpu_controls(self) -> ([f32; 4], [f32; 4]) {
+        (
+            [
+                self.centre[0],
+                self.centre[1],
+                self.taps() as f32,
+                self.mode.as_u8() as f32,
+            ],
+            [self.amount, self.seed as f32, 0.0, 0.0],
+        )
+    }
+
     /// Number of samples averaged for one blurred pixel.
     pub fn taps(self) -> u32 {
         if self.is_identity() {

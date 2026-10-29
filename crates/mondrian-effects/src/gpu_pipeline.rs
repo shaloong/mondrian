@@ -52,6 +52,56 @@ pub enum EffectGpuSpatialPass {
         /// Compass direction of the streak in degrees.
         direction_degrees: f32,
     },
+    /// Edge magnitude from a Sobel operator.
+    FindEdges {
+        /// Authored edge parameters.
+        grade: crate::FindEdgesGrade,
+    },
+    /// Directional luminance relief.
+    Emboss {
+        /// Authored relief parameters.
+        grade: crate::EmbossGrade,
+    },
+    /// Per-channel directional relief.
+    ColorEmboss {
+        /// Authored relief parameters.
+        grade: crate::ColorEmbossGrade,
+    },
+    /// Spin or zoom radial blur.
+    RadialBlur {
+        /// Authored radial blur parameters.
+        grade: crate::RadialBlurGrade,
+    },
+    /// Wrapping translation.
+    Offset {
+        /// Authored offset parameters.
+        grade: crate::OffsetGrade,
+    },
+    /// Radial twist around a centre.
+    Twirl {
+        /// Authored twirl parameters.
+        grade: crate::TwirlGrade,
+    },
+    /// Spherical lens remap.
+    Spherize {
+        /// Authored spherize parameters.
+        grade: crate::SpherizeGrade,
+    },
+    /// Arbitrary three by three convolution.
+    Convolution {
+        /// Authored convolution parameters.
+        grade: crate::ConvolutionGrade,
+    },
+    /// Angular mirror reflection.
+    Mirror {
+        /// Authored mirror parameters.
+        grade: crate::MirrorGrade,
+    },
+    /// Cartesian to polar conversion and its inverse.
+    PolarCoordinates {
+        /// Authored conversion parameters.
+        grade: crate::PolarCoordinatesGrade,
+    },
 }
 
 impl EffectGpuSpatialPass {
@@ -60,6 +110,16 @@ impl EffectGpuSpatialPass {
         match self {
             Self::BoxBlur { .. } => "box_blur",
             Self::DirectionalBlur { .. } => "directional_blur",
+            Self::FindEdges { .. } => "find_edges",
+            Self::Emboss { .. } => "emboss",
+            Self::ColorEmboss { .. } => "color_emboss",
+            Self::RadialBlur { .. } => "radial_blur",
+            Self::Offset { .. } => "offset",
+            Self::Twirl { .. } => "twirl",
+            Self::Spherize { .. } => "spherize",
+            Self::Convolution { .. } => "convolution",
+            Self::Mirror { .. } => "mirror",
+            Self::PolarCoordinates { .. } => "polar_coordinates",
         }
     }
 
@@ -80,6 +140,18 @@ impl EffectGpuSpatialPass {
                     .map(|(horizontal, _)| horizontal)
                     .unwrap_or(u32::MAX)
             }
+            Self::FindEdges { .. } => crate::find_edges::FIND_EDGES_HALO_PIXELS,
+            Self::Emboss { .. } => crate::emboss::EMBOSS_HALO_PIXELS,
+            Self::ColorEmboss { .. } => crate::color_emboss::COLOR_EMBOSS_HALO_PIXELS,
+            Self::Convolution { .. } => crate::convolution::CONVOLUTION_HALO_PIXELS,
+            // Remapping kernels may read any pixel of the frame, so no local
+            // halo can bound them; a full-frame raster is always required.
+            Self::RadialBlur { .. }
+            | Self::Offset { .. }
+            | Self::Twirl { .. }
+            | Self::Spherize { .. }
+            | Self::Mirror { .. }
+            | Self::PolarCoordinates { .. } => u32::MAX,
         }
     }
 
@@ -96,6 +168,16 @@ impl EffectGpuSpatialPass {
                     .map(|(_, vertical)| vertical)
                     .unwrap_or(u32::MAX)
             }
+            Self::FindEdges { .. } => crate::find_edges::FIND_EDGES_HALO_PIXELS,
+            Self::Emboss { .. } => crate::emboss::EMBOSS_HALO_PIXELS,
+            Self::ColorEmboss { .. } => crate::color_emboss::COLOR_EMBOSS_HALO_PIXELS,
+            Self::Convolution { .. } => crate::convolution::CONVOLUTION_HALO_PIXELS,
+            Self::RadialBlur { .. }
+            | Self::Offset { .. }
+            | Self::Twirl { .. }
+            | Self::Spherize { .. }
+            | Self::Mirror { .. }
+            | Self::PolarCoordinates { .. } => u32::MAX,
         }
     }
 }
@@ -339,6 +421,28 @@ pub fn spatial_pass_for(op: &EffectRenderOp) -> Option<EffectGpuSpatialPass> {
                 direction_degrees: *direction_degrees,
             })
         }
+        EffectRenderOp::FindEdges { grade } => {
+            Some(EffectGpuSpatialPass::FindEdges { grade: *grade })
+        }
+        EffectRenderOp::Emboss { grade } => Some(EffectGpuSpatialPass::Emboss { grade: *grade }),
+        EffectRenderOp::ColorEmboss { grade } => {
+            Some(EffectGpuSpatialPass::ColorEmboss { grade: *grade })
+        }
+        EffectRenderOp::RadialBlur { grade } => {
+            Some(EffectGpuSpatialPass::RadialBlur { grade: *grade })
+        }
+        EffectRenderOp::Offset { grade } => Some(EffectGpuSpatialPass::Offset { grade: *grade }),
+        EffectRenderOp::Twirl { grade } => Some(EffectGpuSpatialPass::Twirl { grade: *grade }),
+        EffectRenderOp::Spherize { grade } => {
+            Some(EffectGpuSpatialPass::Spherize { grade: *grade })
+        }
+        EffectRenderOp::Convolution { grade } => {
+            Some(EffectGpuSpatialPass::Convolution { grade: *grade })
+        }
+        EffectRenderOp::Mirror { grade } => Some(EffectGpuSpatialPass::Mirror { grade: *grade }),
+        EffectRenderOp::PolarCoordinates { grade } => {
+            Some(EffectGpuSpatialPass::PolarCoordinates { grade: *grade })
+        }
         _ => None,
     }
 }
@@ -473,6 +577,43 @@ mod tests {
         );
     }
 
+    #[test]
+    fn remapping_kernels_lower_to_their_own_spatial_stages() {
+        let mut builder = EffectGraphBuilderState::new();
+        builder.append_unary(invert());
+        builder.append_unary(EffectRenderOp::Twirl {
+            grade: crate::TwirlGrade::new(180.0, 50.0, [8.0, 6.0]).expect("valid twirl"),
+        });
+        builder.append_unary(EffectRenderOp::PolarCoordinates {
+            grade: crate::PolarCoordinatesGrade::new(
+                crate::PolarConversion::RectToPolar,
+                crate::PolarInterpolation::Bilinear,
+            ),
+        });
+        let pipeline =
+            lower_effect_graph_to_gpu_pipeline(&compile(builder)).expect("remap pipeline");
+
+        assert_eq!(pipeline.stages().len(), 3);
+        assert_eq!(pipeline.spatial_stage_count(), 2);
+        let names: Vec<&'static str> = pipeline
+            .stages()
+            .iter()
+            .filter_map(|stage| match stage {
+                EffectGpuStage::Spatial { pass, .. } => Some(pass.name()),
+                EffectGpuStage::PointOps { .. } => None,
+            })
+            .collect();
+        assert_eq!(names, ["twirl", "polar_coordinates"]);
+        for stage in pipeline.stages().iter().filter(|stage| stage.is_spatial()) {
+            let EffectGpuStage::Spatial { pass, .. } = stage else {
+                unreachable!("filtered to spatial stages");
+            };
+            // Remapping kernels read anywhere in the frame, so no local halo
+            // can describe them.
+            assert_eq!(pass.horizontal_halo(), u32::MAX);
+            assert_eq!(pass.vertical_halo(), u32::MAX);
+        }
+    }
     #[test]
     fn spatial_halo_reports_the_kernel_reach() {
         let pass = EffectGpuSpatialPass::BoxBlur {
