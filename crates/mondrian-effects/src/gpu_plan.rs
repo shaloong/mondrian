@@ -874,6 +874,7 @@ fn operation_name(op: &EffectRenderOp) -> &'static str {
         EffectRenderOp::Mosaic { .. } => "mosaic",
         EffectRenderOp::Posterize { .. } => "posterize",
         EffectRenderOp::MotionTile { .. } => "motion_tile",
+        EffectRenderOp::Kaleidoscope { .. } => "kaleidoscope",
         EffectRenderOp::ColorEmboss { .. } => "color_emboss",
         EffectRenderOp::Emboss { .. } => "emboss",
         EffectRenderOp::DropShadow { .. } => "drop_shadow",

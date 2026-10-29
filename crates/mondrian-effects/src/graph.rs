@@ -1710,6 +1710,11 @@ fn render_op_requirements(op: &EffectRenderOp) -> EffectImplementationRequiremen
             execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
             ..cpu_float
         },
+        EffectRenderOp::Kaleidoscope { .. } => EffectImplementationRequirements {
+            execution_modes: EffectExecutionModes::CPU_F32,
+            roi_from_effect_input: EffectRoiPropagation::FullFrame,
+            ..cpu_float
+        },
         EffectRenderOp::MotionTile { .. } => EffectImplementationRequirements {
             execution_modes: EffectExecutionModes::CPU_F32,
             roi_from_effect_input: EffectRoiPropagation::FullFrame,

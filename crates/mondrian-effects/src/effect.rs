@@ -868,6 +868,10 @@ pub enum EffectRenderOp {
     MotionTile {
         grade: crate::MotionTileGrade,
     },
+    /// Kaleidoscope: folds the frame into radial mirror wedges.
+    Kaleidoscope {
+        grade: crate::KaleidoscopeGrade,
+    },
     /// Threshold: black or white depending on the working-space luminance.
     Threshold {
         grade: crate::ThresholdGrade,
@@ -1025,6 +1029,9 @@ impl std::fmt::Debug for EffectRenderOp {
             }
             Self::MotionTile { grade } => {
                 formatter.debug_struct("MotionTile").field("grade", grade).finish()
+            }
+            Self::Kaleidoscope { grade } => {
+                formatter.debug_struct("Kaleidoscope").field("grade", grade).finish()
             }
             Self::Mosaic { grade } => {
                 formatter.debug_struct("Mosaic").field("grade", grade).finish()
@@ -1445,6 +1452,16 @@ impl EffectRenderOp {
                 35u8.hash(state);
                 grade.levels().hash(state);
             }
+            EffectRenderOp::Kaleidoscope { grade } => {
+                37u8.hash(state);
+                for value in grade.center() {
+                    value.to_bits().hash(state);
+                }
+                grade.size_percent().to_bits().hash(state);
+                grade.mirroring().hash(state);
+                grade.rotation_degrees().to_bits().hash(state);
+                u8::from(grade.floating_center()).hash(state);
+            }
             EffectRenderOp::MotionTile { grade } => {
                 36u8.hash(state);
                 for value in grade.center() {
@@ -1631,6 +1648,7 @@ impl EffectRenderOp {
             EffectRenderOp::Mosaic { .. } => 2,
             EffectRenderOp::Posterize { .. } => 1,
             EffectRenderOp::MotionTile { .. } => 3,
+            EffectRenderOp::Kaleidoscope { .. } => 3,
             EffectRenderOp::ColorEmboss { .. } => 4,
             EffectRenderOp::Emboss { .. } => 4,
             EffectRenderOp::HueSaturation { .. } => 2,
@@ -2166,7 +2184,7 @@ impl EffectDefinition {
     }
 }
 
-fn builtin_effect_types() -> [EffectType; 35] {
+fn builtin_effect_types() -> [EffectType; 36] {
     [
         EffectType::BasicCorrection,
         EffectType::WhiteBalance,
@@ -2203,6 +2221,7 @@ fn builtin_effect_types() -> [EffectType; 35] {
         EffectType::Mosaic,
         EffectType::Posterize,
         EffectType::MotionTile,
+        EffectType::Kaleidoscope,
     ]
 }
 
@@ -3379,6 +3398,74 @@ fn default_properties_for(effect_type: EffectType) -> PropertyBag {
                 None,
             );
         }
+        EffectType::Kaleidoscope => {
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "center_x",
+                "万花筒",
+                "Center X",
+                PropertyValue::Float(128.0),
+                None,
+                None,
+                None,
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "center_y",
+                "万花筒",
+                "Center Y",
+                PropertyValue::Float(128.0),
+                None,
+                None,
+                None,
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "size",
+                "万花筒",
+                "尺寸",
+                PropertyValue::Float(20.0),
+                Some(crate::KALEIDOSCOPE_MIN_SIZE as f64),
+                Some(crate::KALEIDOSCOPE_MAX_SIZE as f64),
+                Some(0.1),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "mirroring",
+                "万花筒",
+                "镜像",
+                PropertyValue::Int(6),
+                Some(crate::KALEIDOSCOPE_MIN_MIRRORING as f64),
+                Some(crate::KALEIDOSCOPE_MAX_MIRRORING as f64),
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "rotation",
+                "万花筒",
+                "旋转",
+                PropertyValue::Float(0.0),
+                None,
+                None,
+                None,
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "floating_center",
+                "万花筒",
+                "浮动中心",
+                PropertyValue::Bool(false),
+                None,
+                None,
+                None,
+            );
+        }
         EffectType::MotionTile => {
             define_builtin_property(
                 &mut properties,
@@ -4113,6 +4200,10 @@ fn builtin_parameter_unit(effect_type: &EffectType, parameter: &str) -> Paramete
         (EffectType::HueSaturation, "tint_hue") => ParameterUnit::Degrees,
         (EffectType::HueSaturation, "tint_saturation") => ParameterUnit::Percent,
         (EffectType::HueSaturation, "tint_lightness") => ParameterUnit::Percent,
+        (EffectType::Kaleidoscope, "center_x") => ParameterUnit::Pixels,
+        (EffectType::Kaleidoscope, "center_y") => ParameterUnit::Pixels,
+        (EffectType::Kaleidoscope, "size") => ParameterUnit::Percent,
+        (EffectType::Kaleidoscope, "rotation") => ParameterUnit::Degrees,
         (EffectType::MotionTile, "center_x") => ParameterUnit::Pixels,
         (EffectType::MotionTile, "center_y") => ParameterUnit::Pixels,
         (EffectType::MotionTile, "tile_width") => ParameterUnit::Percent,
@@ -4284,6 +4375,11 @@ fn builtin_effect_execution_contract(effect_type: &EffectType) -> EffectExecutio
         },
         EffectType::Mosaic => EffectExecutionContract {
             execution_modes: EffectExecutionModes::CPU_F32,
+            ..cpu_linear
+        },
+        EffectType::Kaleidoscope => EffectExecutionContract {
+            execution_modes: EffectExecutionModes::CPU_F32,
+            roi_propagation: EffectRoiPropagation::FullFrame,
             ..cpu_linear
         },
         EffectType::MotionTile => EffectExecutionContract {
@@ -5308,6 +5404,63 @@ fn builtin_graph_builder_for(effect_type: &EffectType) -> Option<EffectGraphBuil
                 Ok(())
             }))
         }
+        EffectType::Kaleidoscope => {
+            let center_x_id = builtin_parameter_id(effect_type, "center_x");
+            let center_y_id = builtin_parameter_id(effect_type, "center_y");
+            let size_id = builtin_parameter_id(effect_type, "size");
+            let mirroring_id = builtin_parameter_id(effect_type, "mirroring");
+            let rotation_id = builtin_parameter_id(effect_type, "rotation");
+            let floating_id = builtin_parameter_id(effect_type, "floating_center");
+            Some(Arc::new(move |effect, context, graph| {
+                let mirroring = match effect.evaluate_parameter(&mirroring_id, context.time) {
+                    Some(PropertyValue::Int(value)) => u32::try_from(value).map_err(|_| {
+                        EffectGraphBuildError::InvalidAuthorState {
+                            effect_key: effect.effect_type.key(),
+                            effect_id: effect.id,
+                            reason: "kaleidoscope mirroring must be a positive integer".to_owned(),
+                        }
+                    })?,
+                    Some(_) => {
+                        return Err(EffectGraphBuildError::InvalidAuthorState {
+                            effect_key: effect.effect_type.key(),
+                            effect_id: effect.id,
+                            reason: "kaleidoscope mirroring must be an integer".to_owned(),
+                        })
+                    }
+                    None => 6,
+                };
+                let floating_center = match effect.evaluate_parameter(&floating_id, context.time) {
+                    Some(PropertyValue::Bool(value)) => value,
+                    Some(_) => {
+                        return Err(EffectGraphBuildError::InvalidAuthorState {
+                            effect_key: effect.effect_type.key(),
+                            effect_id: effect.id,
+                            reason: "kaleidoscope floating centre must be a boolean".to_owned(),
+                        })
+                    }
+                    None => false,
+                };
+                let grade = crate::KaleidoscopeGrade::new(
+                    [
+                        effect.evaluate_f32_parameter(&center_x_id, context.time, 128.0),
+                        effect.evaluate_f32_parameter(&center_y_id, context.time, 128.0),
+                    ],
+                    effect.evaluate_f32_parameter(&size_id, context.time, 20.0),
+                    mirroring,
+                    effect.evaluate_f32_parameter(&rotation_id, context.time, 0.0),
+                    floating_center,
+                )
+                .map_err(|error| EffectGraphBuildError::InvalidAuthorState {
+                    effect_key: effect.effect_type.key(),
+                    effect_id: effect.id,
+                    reason: error.to_string(),
+                })?;
+                if !grade.is_identity() {
+                    graph.append_unary(EffectRenderOp::Kaleidoscope { grade });
+                }
+                Ok(())
+            }))
+        }
         EffectType::MotionTile => {
             let center_x_id = builtin_parameter_id(effect_type, "center_x");
             let center_y_id = builtin_parameter_id(effect_type, "center_y");
@@ -5722,6 +5875,7 @@ fn builtin_display_name(effect_type: &EffectType) -> &'static str {
         EffectType::Mosaic => "马赛克",
         EffectType::Posterize => "色调分离",
         EffectType::MotionTile => "动态拼贴",
+        EffectType::Kaleidoscope => "万花筒",
         EffectType::ColorEmboss => "色彩浮雕",
         EffectType::Emboss => "浮雕",
         EffectType::External(_) => "外部效果",
@@ -6993,6 +7147,7 @@ mod tests {
             EffectType::Mosaic,
             EffectType::Posterize,
             EffectType::MotionTile,
+            EffectType::Kaleidoscope,
         ]
         .into_iter()
         .map(|effect_type| effect_type.key())
@@ -9836,6 +9991,106 @@ mod tests {
         let graph = build_effect_render_graph(&[restored], tt(0), TEST_WORKING_SPACE)
             .expect("evaluate restored posterize");
         assert_eq!(posterize_op(&graph).expect("posterize op").levels(), 3);
+    }
+    fn kaleidoscope_op(graph: &EffectRenderGraph) -> Option<crate::KaleidoscopeGrade> {
+        graph.nodes.iter().find_map(|node| match &node.kind {
+            EffectGraphNodeKind::UnaryEffect {
+                op: EffectRenderOp::Kaleidoscope { grade }, ..
+            }
+            | EffectGraphNodeKind::DomainEffect {
+                op: EffectRenderOp::Kaleidoscope { grade },
+                ..
+            } => Some(*grade),
+            _ => None,
+        })
+    }
+
+    #[test]
+    fn kaleidoscope_defaults_compile_to_the_listed_wedges() {
+        let effect = instantiate_effect_node(EffectType::Kaleidoscope)
+            .expect("registered kaleidoscope definition");
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("builds kaleidoscope graph");
+        let grade = kaleidoscope_op(&graph).expect("kaleidoscope op");
+        assert_eq!(grade.center(), [128.0, 128.0]);
+        assert_eq!(grade.size_percent(), 20.0);
+        assert_eq!(grade.mirroring(), 6);
+        assert_eq!(grade.rotation_degrees(), 0.0);
+        assert!(!grade.floating_center());
+    }
+
+    #[test]
+    fn kaleidoscope_authored_state_reaches_the_operation() {
+        let mut effect = instantiate_effect_node(EffectType::Kaleidoscope)
+            .expect("registered kaleidoscope definition");
+        for (parameter, value) in [("size", 50.0_f32), ("rotation", 30.0)] {
+            effect
+                .apply_property_mutation(PropertyMutation::SetStaticValue {
+                    path: EffectType::Kaleidoscope.property_path(parameter),
+                    value: PropertyValue::Float(value),
+                })
+                .expect("authors kaleidoscope parameter");
+        }
+        effect
+            .apply_property_mutation(PropertyMutation::SetStaticValue {
+                path: EffectType::Kaleidoscope.property_path("mirroring"),
+                value: PropertyValue::Int(4),
+            })
+            .expect("authors kaleidoscope mirroring");
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("builds kaleidoscope graph");
+        let grade = kaleidoscope_op(&graph).expect("kaleidoscope op");
+        assert_eq!(grade.mirroring(), 4);
+        assert_eq!(grade.size_percent(), 50.0);
+        assert_eq!(grade.rotation_degrees(), 30.0);
+    }
+
+    #[test]
+    fn kaleidoscope_rejects_author_values_outside_the_declared_ranges() {
+        for (parameter, value) in [
+            ("size", PropertyValue::Float(0.5)),
+            ("mirroring", PropertyValue::Int(10)),
+        ] {
+            let mut effect = instantiate_effect_node(EffectType::Kaleidoscope)
+                .expect("registered kaleidoscope definition");
+            let error = effect
+                .apply_property_mutation(PropertyMutation::SetStaticValue {
+                    path: EffectType::Kaleidoscope.property_path(parameter),
+                    value,
+                })
+                .expect_err("rejects out of range kaleidoscope parameter");
+            assert!(
+                format!("{error}").contains(parameter),
+                "unexpected error: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn kaleidoscope_authored_state_survives_project_serialization_round_trip() {
+        let mut effect = instantiate_effect_node(EffectType::Kaleidoscope)
+            .expect("registered kaleidoscope definition");
+        effect
+            .apply_property_mutation(PropertyMutation::SetStaticValue {
+                path: EffectType::Kaleidoscope.property_path("mirroring"),
+                value: PropertyValue::Int(3),
+            })
+            .expect("authors kaleidoscope mirroring");
+        effect
+            .apply_property_mutation(PropertyMutation::SetStaticValue {
+                path: EffectType::Kaleidoscope.property_path("size"),
+                value: PropertyValue::Float(75.0),
+            })
+            .expect("authors kaleidoscope size");
+        let wire = serde_json::to_string(&effect).expect("serializes kaleidoscope effect");
+        let restored: EffectNode =
+            serde_json::from_str(&wire).expect("restores kaleidoscope effect");
+        assert_eq!(restored, effect);
+        let graph = build_effect_render_graph(&[restored], tt(0), TEST_WORKING_SPACE)
+            .expect("builds restored kaleidoscope graph");
+        let grade = kaleidoscope_op(&graph).expect("kaleidoscope op");
+        assert_eq!(grade.mirroring(), 3);
+        assert_eq!(grade.size_percent(), 75.0);
     }
 }
 

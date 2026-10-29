@@ -65,6 +65,7 @@ pub use processor_residency::{
     EffectProcessorRetention, EffectProcessorStopReason, EffectProcessorTransientMemoryRefusal,
     PreparedEffectProcessorInput,
 };
+pub mod kaleidoscope;
 pub mod mosaic;
 pub mod motion_tile;
 pub(crate) mod parallel;
@@ -183,6 +184,10 @@ pub use heterogeneous_execution::{
 pub use hsl::{HslGrade, HslGradeError};
 pub use hue_saturation::{HueBand, HueSaturationError, HueSaturationGrade};
 pub use invert::{invert_rgba_f32, InvertChannels};
+pub use kaleidoscope::{
+    kaleidoscope_frame_f32, KaleidoscopeError, KaleidoscopeGrade, KALEIDOSCOPE_MAX_MIRRORING,
+    KALEIDOSCOPE_MAX_SIZE, KALEIDOSCOPE_MIN_MIRRORING, KALEIDOSCOPE_MIN_SIZE,
+};
 pub use lut::{
     Lut3D, LutLibrary, LutLibraryEntry, LutPreparationCache, LutPreparationCacheConfig,
     LutPreparationCacheDiagnostics,

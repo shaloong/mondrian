@@ -48,6 +48,7 @@ pub enum EffectType {
     Threshold,
     Mosaic,
     MotionTile,
+    Kaleidoscope,
     Posterize,
     Emboss,
     /// Externally registered effect definition, including native-format adapters.
@@ -94,6 +95,7 @@ impl EffectType {
             Self::Threshold => "builtin.threshold".to_string(),
             Self::Mosaic => "builtin.mosaic".to_string(),
             Self::MotionTile => "builtin.motion_tile".to_string(),
+            Self::Kaleidoscope => "builtin.kaleidoscope".to_string(),
             Self::Posterize => "builtin.posterize".to_string(),
             Self::External(key) => key.clone(),
         }
@@ -135,6 +137,7 @@ impl EffectType {
             "builtin.threshold" => Self::Threshold,
             "builtin.mosaic" => Self::Mosaic,
             "builtin.motion_tile" => Self::MotionTile,
+            "builtin.kaleidoscope" => Self::Kaleidoscope,
             "builtin.posterize" => Self::Posterize,
             other => Self::External(other.to_string()),
         }
@@ -176,6 +179,7 @@ impl EffectType {
             Self::Threshold => "阈值",
             Self::Mosaic => "马赛克",
             Self::MotionTile => "动态拼贴",
+            Self::Kaleidoscope => "万花筒",
             Self::Posterize => "色调分离",
             Self::External(name) => name,
         }
@@ -215,6 +219,7 @@ impl EffectType {
             Self::Threshold => vec!["风格化"],
             Self::Mosaic => vec!["风格化"],
             Self::MotionTile => vec!["风格化"],
+            Self::Kaleidoscope => vec!["风格化"],
             Self::Posterize => vec!["风格化"],
             Self::External(_) => vec!["外部效果"],
         }
@@ -256,6 +261,7 @@ impl EffectType {
             Self::Threshold => "threshold".to_string(),
             Self::Mosaic => "mosaic".to_string(),
             Self::MotionTile => "motion_tile".to_string(),
+            Self::Kaleidoscope => "kaleidoscope".to_string(),
             Self::Posterize => "posterize".to_string(),
             Self::External(key) => key.clone(),
         }
@@ -554,7 +560,7 @@ impl crate::AuthoringFootprint for EffectType {
             Self::FindEdges => Ok(()),
             Self::Emboss => Ok(()),
             Self::ColorEmboss => Ok(()),
-            Self::Threshold | Self::Mosaic | Self::MotionTile => Ok(()),
+            Self::Threshold | Self::Mosaic | Self::MotionTile | Self::Kaleidoscope => Ok(()),
             Self::Posterize => Ok(()),
         }
     }

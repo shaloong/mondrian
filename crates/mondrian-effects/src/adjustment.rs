@@ -212,6 +212,12 @@ pub(crate) fn apply_render_op(
                 parameter: "requires_float32",
             });
         }
+        EffectRenderOp::Kaleidoscope { .. } => {
+            return Err(EffectExecutionError::InvalidRenderParameter {
+                op: "kaleidoscope",
+                parameter: "requires_float32",
+            })
+        }
         EffectRenderOp::MotionTile { .. } => {
             return Err(EffectExecutionError::InvalidRenderParameter {
                 op: "motion_tile",
@@ -687,6 +693,7 @@ pub(crate) const fn render_op_f32_scratch_frames(op: &EffectRenderOp) -> usize {
         EffectRenderOp::UnsharpMask { .. } => 1,
         EffectRenderOp::Threshold { .. } => 0,
         EffectRenderOp::Mosaic { .. } => 0,
+        EffectRenderOp::Kaleidoscope { .. } => 0,
         EffectRenderOp::MotionTile { .. } => 0,
         EffectRenderOp::Posterize { .. } => 0,
         EffectRenderOp::ColorEmboss { .. } => 1,
@@ -906,6 +913,15 @@ pub(crate) fn apply_render_op_f32_region_controlled<E>(
             *grade,
             checkpoint,
         ),
+        EffectRenderOp::Kaleidoscope { grade } => {
+            crate::kaleidoscope::apply_kaleidoscope_f32_controlled(
+                working,
+                region.width as usize,
+                region.height as usize,
+                grade,
+                checkpoint,
+            )
+        }
         EffectRenderOp::MotionTile { grade } => {
             crate::motion_tile::apply_motion_tile_f32_controlled(
                 working,

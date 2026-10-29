@@ -2809,6 +2809,7 @@ fn render_op_name(op: &crate::EffectRenderOp) -> &'static str {
         crate::EffectRenderOp::Mosaic { .. } => "mosaic",
         crate::EffectRenderOp::Posterize { .. } => "posterize",
         crate::EffectRenderOp::MotionTile { .. } => "motion_tile",
+        crate::EffectRenderOp::Kaleidoscope { .. } => "kaleidoscope",
         crate::EffectRenderOp::ColorEmboss { .. } => "color_emboss",
         crate::EffectRenderOp::Emboss { .. } => "emboss",
         crate::EffectRenderOp::DropShadow { .. } => "drop_shadow",
