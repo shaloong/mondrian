@@ -9,7 +9,6 @@ use super::VstModule;
 use crate::error::{Error, Result};
 use crate::host_storage::{HostStorageError, HostStorageRef, HostStorageVisitor};
 use crate::internal::{com_implementations, host_storage::RetainedComStorage};
-use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
@@ -105,20 +104,21 @@ struct FactoryContextState {
 
 // This is an ownership index, not a module/DSP cache. Weak entries cannot retain
 // plugins or their contexts, and are removed after the final module unloads.
-type ContextIndex = BTreeMap<usize, Weak<FactoryContextState>>;
+type ContextIndex = Vec<(usize, Weak<FactoryContextState>)>;
 fn contexts() -> &'static Mutex<ContextIndex> {
     static CONTEXTS: OnceLock<Mutex<ContextIndex>> = OnceLock::new();
-    CONTEXTS.get_or_init(|| Mutex::new(BTreeMap::new()))
+    CONTEXTS.get_or_init(|| Mutex::new(Vec::new()))
 }
 
 impl Drop for FactoryContextState {
     fn drop(&mut self) {
         let mut index = contexts().lock().unwrap_or_else(|poison| poison.into_inner());
-        if index
-            .get(&self.identity)
-            .is_some_and(|entry| entry.as_ptr() == std::ptr::from_ref(self))
-        {
-            index.remove(&self.identity);
+        index.retain(|(identity, entry)| {
+            *identity != self.identity || entry.as_ptr() != std::ptr::from_ref(self)
+        });
+        // Release peak ownership-index capacity when the last factory retires.
+        if index.is_empty() {
+            *index = Vec::new();
         }
     }
 }
@@ -147,7 +147,12 @@ impl FactoryModule {
             let mut index = contexts().lock().map_err(|_| {
                 Error::PluginLoadFailed("factory context ownership is poisoned".to_string())
             })?;
-            if let Some(state) = index.get(&key).and_then(Weak::upgrade) {
+            index.retain(|(_, entry)| entry.strong_count() != 0);
+            if let Some(state) = index
+                .iter()
+                .find(|(identity, _)| *identity == key)
+                .and_then(|(_, value)| value.upgrade())
+            {
                 if state.owner_thread != thread::current().id() {
                     // Drop the guard before dropping a possible last state reference.
                     drop(index);
@@ -180,7 +185,7 @@ impl FactoryModule {
                     bound: AtomicBool::new(false),
                     context: ComWrapper::new(FactoryHostContext::new()),
                 });
-                index.insert(key, Arc::downgrade(&state));
+                index.push((key, Arc::downgrade(&state)));
                 (state, true)
             }
         };
@@ -214,7 +219,11 @@ impl VstModule for FactoryModule {
         self.native.visit_owned_storage(visitor)?;
         visitor.visit(HostStorageRef::arc(&self.services))?;
         visitor.visit(HostStorageRef::com(&self.services.context))?;
-        self.services.context.visit_owned_storage(visitor)
+        self.services.context.visit_owned_storage(visitor)?;
+        // The shared index is host-owned storage too. Its actual capacity is
+        // observable; no opaque tree-node heap is hidden behind this inventory.
+        let index = contexts().lock().map_err(|_| HostStorageError::PoisonedOwner)?;
+        visitor.visit(HostStorageRef::vector(&index)?)
     }
 
     fn get_factory(&self) -> Result<*mut IPluginFactory> {
@@ -356,11 +365,11 @@ mod tests {
         assert_eq!(observed.context.load(Ordering::SeqCst), pointer);
         drop(first);
         assert!(observed.host.lock().unwrap().as_ref().unwrap().is_alive());
-        assert!(contexts().lock().unwrap().contains_key(&key));
+        assert!(contexts().lock().unwrap().iter().any(|(id, _)| *id == key));
         drop(second);
         assert_eq!(*observed.at_unload.lock().unwrap(), [(true, 0), (true, 0)]);
         assert!(!observed.host.lock().unwrap().as_ref().unwrap().is_alive());
-        assert!(!contexts().lock().unwrap().contains_key(&key));
+        assert!(!contexts().lock().unwrap().iter().any(|(id, _)| *id == key));
     }
 
     #[test]
