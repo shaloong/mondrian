@@ -900,6 +900,7 @@ fn operation_name(op: &EffectRenderOp) -> &'static str {
         EffectRenderOp::Vibrance { .. } => "vibrance",
         EffectRenderOp::Tritone { .. } => "tritone",
         EffectRenderOp::RadialBlur { .. } => "radial_blur",
+        EffectRenderOp::Mirror { .. } => "mirror",
         EffectRenderOp::Convolution { .. } => "convolution",
         EffectRenderOp::Offset { .. } => "offset",
         EffectRenderOp::Twirl { .. } => "twirl",

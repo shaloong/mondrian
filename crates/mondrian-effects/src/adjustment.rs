@@ -224,6 +224,12 @@ pub(crate) fn apply_render_op(
                 parameter: "requires_float32",
             })
         }
+        EffectRenderOp::Mirror { .. } => {
+            return Err(EffectExecutionError::InvalidRenderParameter {
+                op: "mirror",
+                parameter: "requires_float32",
+            })
+        }
         EffectRenderOp::Convolution { .. } => {
             return Err(EffectExecutionError::InvalidRenderParameter {
                 op: "convolution",
@@ -768,6 +774,7 @@ pub(crate) const fn render_op_f32_scratch_frames(op: &EffectRenderOp) -> usize {
         EffectRenderOp::Vibrance { .. } => 0,
         EffectRenderOp::Tritone { .. } => 0,
         EffectRenderOp::RadialBlur { .. } => 0,
+        EffectRenderOp::Mirror { .. } => 0,
         EffectRenderOp::Convolution { .. } => 0,
         EffectRenderOp::Offset { .. } => 0,
         EffectRenderOp::Twirl { .. } => 0,
@@ -1013,6 +1020,13 @@ pub(crate) fn apply_render_op_f32_region_controlled<E>(
                 checkpoint,
             )
         }
+        EffectRenderOp::Mirror { grade } => crate::mirror::apply_mirror_f32_controlled(
+            working,
+            region.width as usize,
+            region.height as usize,
+            *grade,
+            checkpoint,
+        ),
         EffectRenderOp::Noise { grade } => crate::noise::apply_noise_f32_controlled(
             working,
             region.width as usize,

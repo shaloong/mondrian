@@ -75,6 +75,7 @@ pub use processor_residency::{
 pub mod bevel;
 pub mod brush_strokes;
 pub mod kaleidoscope;
+pub mod mirror;
 pub mod mosaic;
 pub mod motion_tile;
 pub mod noise;
@@ -219,6 +220,9 @@ pub use mask::{
     MaskShapeKeyframe, MAX_MASK_PATH_POINTS,
 };
 pub use mask_raster::{rasterize_mask_shape, MaskRasterError, PreparedMaskRaster};
+pub use mirror::{
+    mirror_frame_f32, MirrorError, MirrorGrade, MIRROR_MAX_ANGLE_DEGREES, MIRROR_MAX_CENTRE_PIXELS,
+};
 pub use mosaic::{
     apply_mosaic_f32_controlled, mosaic_frame_f32, MosaicError, MosaicGrade,
     MOSAIC_MAX_BLOCK_PIXELS, MOSAIC_MIN_BLOCK_PIXELS,

@@ -907,6 +907,11 @@ pub enum EffectRenderOp {
     RadialBlur {
         grade: crate::RadialBlurGrade,
     },
+    /// Mirror: reflects the half plane opposite the authored axis, producing a
+    /// picture that is symmetric about that axis.
+    Mirror {
+        grade: crate::MirrorGrade,
+    },
     /// Convolution: a general 3x3 linear filter authored as nine cells.
     Convolution {
         grade: crate::ConvolutionGrade,
@@ -1108,6 +1113,9 @@ impl std::fmt::Debug for EffectRenderOp {
             }
             Self::RadialBlur { grade } => {
                 formatter.debug_struct("RadialBlur").field("grade", grade).finish()
+            }
+            Self::Mirror { grade } => {
+                formatter.debug_struct("Mirror").field("grade", grade).finish()
             }
             Self::Convolution { grade } => {
                 formatter.debug_struct("Convolution").field("grade", grade).finish()
@@ -1645,6 +1653,13 @@ impl EffectRenderOp {
                 grade.antialiasing().hash(state);
                 grade.seed().hash(state);
             }
+            EffectRenderOp::Mirror { grade } => {
+                50u8.hash(state);
+                grade.angle_degrees().to_bits().hash(state);
+                for value in grade.centre() {
+                    value.to_bits().hash(state);
+                }
+            }
             EffectRenderOp::Convolution { grade } => {
                 45u8.hash(state);
                 for value in grade.kernel() {
@@ -1834,6 +1849,7 @@ impl EffectRenderOp {
             EffectRenderOp::Vibrance { .. } => 1,
             EffectRenderOp::Tritone { .. } => 1,
             EffectRenderOp::RadialBlur { .. } => 5,
+            EffectRenderOp::Mirror { .. } => 3,
             EffectRenderOp::Convolution { .. } => 3,
             EffectRenderOp::Offset { .. } => 2,
             EffectRenderOp::Twirl { .. } => 3,
@@ -2381,7 +2397,7 @@ impl EffectDefinition {
     }
 }
 
-fn builtin_effect_types() -> [EffectType; 48] {
+fn builtin_effect_types() -> [EffectType; 49] {
     [
         EffectType::BasicCorrection,
         EffectType::WhiteBalance,
@@ -2431,6 +2447,7 @@ fn builtin_effect_types() -> [EffectType; 48] {
         EffectType::Twirl,
         EffectType::Spherize,
         EffectType::Noise,
+        EffectType::Mirror,
     ]
 }
 
@@ -4337,6 +4354,42 @@ fn default_properties_for(effect_type: EffectType) -> PropertyBag {
             );
         }
 
+        EffectType::Mirror => {
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "centre_x",
+                "镜像",
+                "反射中心 X",
+                PropertyValue::Float(128.0),
+                None,
+                None,
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "centre_y",
+                "镜像",
+                "反射中心 Y",
+                PropertyValue::Float(128.0),
+                None,
+                None,
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "angle",
+                "镜像",
+                "反射角度",
+                PropertyValue::Float(0.0),
+                None,
+                None,
+                Some(1.0),
+            );
+        }
+
         EffectType::Noise => {
             define_builtin_property(
                 &mut properties,
@@ -5020,6 +5073,9 @@ fn builtin_parameter_unit(effect_type: &EffectType, parameter: &str) -> Paramete
             ParameterUnit::Percent
         }
         (EffectType::DirectionalBlur, "direction") => ParameterUnit::Degrees,
+        (EffectType::Mirror, "angle") => ParameterUnit::Degrees,
+        (EffectType::Mirror, "centre_x") => ParameterUnit::Pixels,
+        (EffectType::Mirror, "centre_y") => ParameterUnit::Pixels,
         (EffectType::UnsharpMask, "amount") => ParameterUnit::Percent,
         (EffectType::UnsharpMask, "radius") => ParameterUnit::Pixels,
         (EffectType::HueSaturation, "hue") => ParameterUnit::Degrees,
@@ -5240,6 +5296,11 @@ fn builtin_effect_execution_contract(effect_type: &EffectType) -> EffectExecutio
             ..cpu_linear
         },
         EffectType::RadialBlur => EffectExecutionContract {
+            execution_modes: EffectExecutionModes::CPU_F32,
+            roi_propagation: EffectRoiPropagation::FullFrame,
+            ..cpu_linear
+        },
+        EffectType::Mirror => EffectExecutionContract {
             execution_modes: EffectExecutionModes::CPU_F32,
             roi_propagation: EffectRoiPropagation::FullFrame,
             ..cpu_linear
@@ -6739,6 +6800,29 @@ fn builtin_graph_builder_for(effect_type: &EffectType) -> Option<EffectGraphBuil
                 Ok(())
             }))
         }
+        EffectType::Mirror => {
+            let centre_x_id = builtin_parameter_id(effect_type, "centre_x");
+            let centre_y_id = builtin_parameter_id(effect_type, "centre_y");
+            let angle_id = builtin_parameter_id(effect_type, "angle");
+            Some(Arc::new(move |effect, context, graph| {
+                let grade = crate::MirrorGrade::new(
+                    effect.evaluate_f32_parameter(&angle_id, context.time, 0.0),
+                    [
+                        effect.evaluate_f32_parameter(&centre_x_id, context.time, 128.0),
+                        effect.evaluate_f32_parameter(&centre_y_id, context.time, 128.0),
+                    ],
+                )
+                .map_err(|error| EffectGraphBuildError::InvalidAuthorState {
+                    effect_key: effect.effect_type.key(),
+                    effect_id: effect.id,
+                    reason: error.to_string(),
+                })?;
+                // The mirror has no blend term: whether a pixel is reflected
+                // depends on the frame geometry, so the node is always kept.
+                graph.append_unary(EffectRenderOp::Mirror { grade });
+                Ok(())
+            }))
+        }
         EffectType::Convolution => {
             let cell_1_id = builtin_parameter_id(effect_type, "cell_1");
             let cell_2_id = builtin_parameter_id(effect_type, "cell_2");
@@ -7286,6 +7370,7 @@ fn builtin_display_name(effect_type: &EffectType) -> &'static str {
         EffectType::Twirl => "旋转扭曲",
         EffectType::Spherize => "球面化",
         EffectType::Noise => "噪点",
+        EffectType::Mirror => "镜像",
         EffectType::ColorEmboss => "色彩浮雕",
         EffectType::Emboss => "浮雕",
         EffectType::External(_) => "外部效果",
@@ -8570,6 +8655,7 @@ mod tests {
             EffectType::Twirl,
             EffectType::Spherize,
             EffectType::Noise,
+            EffectType::Mirror,
         ]
         .into_iter()
         .map(|effect_type| effect_type.key())
@@ -12625,6 +12711,93 @@ mod tests {
         assert_eq!(grade.kernel()[8], -2.0);
         assert!(grade.absolute_values());
     }
+    fn mirror_op(graph: &EffectRenderGraph) -> Option<crate::MirrorGrade> {
+        graph.nodes.iter().find_map(|node| match &node.kind {
+            EffectGraphNodeKind::UnaryEffect { op: EffectRenderOp::Mirror { grade }, .. }
+            | EffectGraphNodeKind::DomainEffect { op: EffectRenderOp::Mirror { grade }, .. } => {
+                Some(*grade)
+            }
+            _ => None,
+        })
+    }
+
+    fn author_mirror(parameter: &str, value: PropertyValue) -> EffectNode {
+        let mut effect =
+            instantiate_effect_node(EffectType::Mirror).expect("registered mirror definition");
+        effect
+            .apply_property_mutation(PropertyMutation::SetStaticValue {
+                path: EffectType::Mirror.property_path(parameter),
+                value,
+            })
+            .expect("authors mirror parameter");
+        effect
+    }
+
+    #[test]
+    fn mirror_defaults_reach_the_operation() {
+        let effect =
+            instantiate_effect_node(EffectType::Mirror).expect("registered mirror definition");
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("builds mirror graph");
+        let grade = mirror_op(&graph).expect("mirror op");
+        assert_eq!(grade.centre(), [128.0, 128.0]);
+        assert_eq!(grade.angle_degrees(), 0.0);
+    }
+
+    #[test]
+    fn mirror_always_emits_a_node() {
+        // Whether a pixel falls on the reflected side depends on the frame
+        // geometry rather than on the authored state, so even the default state
+        // has to reach the execution path.
+        let effect =
+            instantiate_effect_node(EffectType::Mirror).expect("registered mirror definition");
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("builds mirror graph");
+        assert!(mirror_op(&graph).is_some());
+    }
+
+    #[test]
+    fn mirror_authored_state_reaches_the_operation() {
+        let mut effect = author_mirror("angle", PropertyValue::Float(37.5));
+        for (parameter, value) in [
+            ("centre_x", PropertyValue::Float(24.0)),
+            ("centre_y", PropertyValue::Float(-8.0)),
+        ] {
+            effect
+                .apply_property_mutation(PropertyMutation::SetStaticValue {
+                    path: EffectType::Mirror.property_path(parameter),
+                    value,
+                })
+                .expect("authors mirror parameter");
+        }
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("builds mirror graph");
+        let grade = mirror_op(&graph).expect("mirror op");
+        assert_eq!(grade.angle_degrees(), 37.5);
+        assert_eq!(grade.centre(), [24.0, -8.0]);
+    }
+
+    #[test]
+    fn mirror_rejects_author_values_outside_the_declared_ranges() {
+        // The list leaves the angle unbounded, so the graph builder is the place
+        // that has to reject an angle the trigonometric reduction cannot carry.
+        let effect = author_mirror("angle", PropertyValue::Float(400_000.0));
+        let _error = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect_err("rejects an unrepresentable axis angle");
+    }
+
+    #[test]
+    fn mirror_authored_state_survives_project_serialization_round_trip() {
+        let effect = author_mirror("angle", PropertyValue::Float(-12.0));
+        let wire = serde_json::to_string(&effect).expect("serializes mirror effect");
+        let restored: EffectNode = serde_json::from_str(&wire).expect("restores mirror effect");
+        assert_eq!(restored, effect);
+        let graph = build_effect_render_graph(&[restored], tt(0), TEST_WORKING_SPACE)
+            .expect("builds restored mirror graph");
+        let grade = mirror_op(&graph).expect("mirror op");
+        assert_eq!(grade.angle_degrees(), -12.0);
+    }
+
     fn radial_blur_op(graph: &EffectRenderGraph) -> Option<crate::RadialBlurGrade> {
         graph.nodes.iter().find_map(|node| match &node.kind {
             EffectGraphNodeKind::UnaryEffect {

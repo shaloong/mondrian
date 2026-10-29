@@ -2743,6 +2743,7 @@ const fn effect_operation_shape_tag(operation: &EffectRenderOp) -> u8 {
         EffectRenderOp::Vibrance { .. } => 43,
         EffectRenderOp::Tritone { .. } => 44,
         EffectRenderOp::RadialBlur { .. } => 45,
+        EffectRenderOp::Mirror { .. } => 51,
         EffectRenderOp::Convolution { .. } => 46,
         EffectRenderOp::Offset { .. } => 47,
         EffectRenderOp::Twirl { .. } => 48,
@@ -4795,6 +4796,7 @@ fn cpu_node_scratch_frames(
             | crate::EffectRenderOp::Bevel { .. }
             | crate::EffectRenderOp::Scatter { .. }
             | crate::EffectRenderOp::RadialBlur { .. }
+            | crate::EffectRenderOp::Mirror { .. }
             | crate::EffectRenderOp::Convolution { .. }
             | crate::EffectRenderOp::Offset { .. }
             | crate::EffectRenderOp::Twirl { .. }
