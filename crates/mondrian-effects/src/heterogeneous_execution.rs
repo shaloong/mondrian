@@ -2734,6 +2734,7 @@ const fn effect_operation_shape_tag(operation: &EffectRenderOp) -> u8 {
         EffectRenderOp::Threshold { .. } => 34,
         EffectRenderOp::Mosaic { .. } => 35,
         EffectRenderOp::Posterize { .. } => 36,
+        EffectRenderOp::MotionTile { .. } => 37,
         EffectRenderOp::ColorEmboss { .. } => 33,
         EffectRenderOp::Emboss { .. } => 32,
         EffectRenderOp::DropShadow { .. } => 30,
@@ -4773,6 +4774,7 @@ fn cpu_node_scratch_frames(
             | crate::EffectRenderOp::Threshold { .. }
             | crate::EffectRenderOp::Mosaic { .. }
             | crate::EffectRenderOp::Posterize { .. }
+            | crate::EffectRenderOp::MotionTile { .. }
             | crate::EffectRenderOp::ColorEmboss { .. }
             | crate::EffectRenderOp::Emboss { .. }
             | crate::EffectRenderOp::Crop { .. }

@@ -212,6 +212,12 @@ pub(crate) fn apply_render_op(
                 parameter: "requires_float32",
             });
         }
+        EffectRenderOp::MotionTile { .. } => {
+            return Err(EffectExecutionError::InvalidRenderParameter {
+                op: "motion_tile",
+                parameter: "requires_float32",
+            })
+        }
         EffectRenderOp::Posterize { .. } => {
             return Err(EffectExecutionError::InvalidRenderParameter {
                 op: "posterize",
@@ -681,6 +687,7 @@ pub(crate) const fn render_op_f32_scratch_frames(op: &EffectRenderOp) -> usize {
         EffectRenderOp::UnsharpMask { .. } => 1,
         EffectRenderOp::Threshold { .. } => 0,
         EffectRenderOp::Mosaic { .. } => 0,
+        EffectRenderOp::MotionTile { .. } => 0,
         EffectRenderOp::Posterize { .. } => 0,
         EffectRenderOp::ColorEmboss { .. } => 1,
         EffectRenderOp::Emboss { .. } => 1,
@@ -899,6 +906,15 @@ pub(crate) fn apply_render_op_f32_region_controlled<E>(
             *grade,
             checkpoint,
         ),
+        EffectRenderOp::MotionTile { grade } => {
+            crate::motion_tile::apply_motion_tile_f32_controlled(
+                working,
+                region.width as usize,
+                region.height as usize,
+                grade,
+                checkpoint,
+            )
+        }
         EffectRenderOp::Posterize { grade } => {
             apply_point_grade_rgba_f32_controlled(working, checkpoint, |rgb| grade.apply_rgb(rgb))?;
             Ok(true)

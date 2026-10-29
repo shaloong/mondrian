@@ -873,6 +873,7 @@ fn operation_name(op: &EffectRenderOp) -> &'static str {
         EffectRenderOp::Threshold { .. } => "threshold",
         EffectRenderOp::Mosaic { .. } => "mosaic",
         EffectRenderOp::Posterize { .. } => "posterize",
+        EffectRenderOp::MotionTile { .. } => "motion_tile",
         EffectRenderOp::ColorEmboss { .. } => "color_emboss",
         EffectRenderOp::Emboss { .. } => "emboss",
         EffectRenderOp::DropShadow { .. } => "drop_shadow",

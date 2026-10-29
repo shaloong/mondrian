@@ -864,6 +864,10 @@ pub enum EffectRenderOp {
     Mosaic {
         grade: crate::MosaicGrade,
     },
+    /// Motion tile: repeats the frame over a tiled, optionally mirrored field.
+    MotionTile {
+        grade: crate::MotionTileGrade,
+    },
     /// Threshold: black or white depending on the working-space luminance.
     Threshold {
         grade: crate::ThresholdGrade,
@@ -1018,6 +1022,9 @@ impl std::fmt::Debug for EffectRenderOp {
             }
             Self::Posterize { grade } => {
                 formatter.debug_struct("Posterize").field("grade", grade).finish()
+            }
+            Self::MotionTile { grade } => {
+                formatter.debug_struct("MotionTile").field("grade", grade).finish()
             }
             Self::Mosaic { grade } => {
                 formatter.debug_struct("Mosaic").field("grade", grade).finish()
@@ -1438,6 +1445,23 @@ impl EffectRenderOp {
                 35u8.hash(state);
                 grade.levels().hash(state);
             }
+            EffectRenderOp::MotionTile { grade } => {
+                36u8.hash(state);
+                for value in grade.center() {
+                    value.to_bits().hash(state);
+                }
+                for value in [
+                    grade.tile_width_percent(),
+                    grade.tile_height_percent(),
+                    grade.output_width_percent(),
+                    grade.output_height_percent(),
+                    grade.phase(),
+                    grade.horizontal_phase(),
+                ] {
+                    value.to_bits().hash(state);
+                }
+                u8::from(grade.mirror_edges()).hash(state);
+            }
             EffectRenderOp::Mosaic { grade } => {
                 34u8.hash(state);
                 grade.horizontal().hash(state);
@@ -1606,6 +1630,7 @@ impl EffectRenderOp {
             EffectRenderOp::Threshold { .. } => 1,
             EffectRenderOp::Mosaic { .. } => 2,
             EffectRenderOp::Posterize { .. } => 1,
+            EffectRenderOp::MotionTile { .. } => 3,
             EffectRenderOp::ColorEmboss { .. } => 4,
             EffectRenderOp::Emboss { .. } => 4,
             EffectRenderOp::HueSaturation { .. } => 2,
@@ -2141,7 +2166,7 @@ impl EffectDefinition {
     }
 }
 
-fn builtin_effect_types() -> [EffectType; 34] {
+fn builtin_effect_types() -> [EffectType; 35] {
     [
         EffectType::BasicCorrection,
         EffectType::WhiteBalance,
@@ -2177,6 +2202,7 @@ fn builtin_effect_types() -> [EffectType; 34] {
         EffectType::Threshold,
         EffectType::Mosaic,
         EffectType::Posterize,
+        EffectType::MotionTile,
     ]
 }
 
@@ -3353,6 +3379,107 @@ fn default_properties_for(effect_type: EffectType) -> PropertyBag {
                 None,
             );
         }
+        EffectType::MotionTile => {
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "center_x",
+                "拼贴",
+                "拼贴中心 X",
+                PropertyValue::Float(128.0),
+                None,
+                None,
+                None,
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "center_y",
+                "拼贴",
+                "拼贴中心 Y",
+                PropertyValue::Float(128.0),
+                None,
+                None,
+                None,
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "tile_width",
+                "拼贴",
+                "拼贴宽度",
+                PropertyValue::Float(100.0),
+                Some(0.0),
+                Some(crate::MOTION_TILE_MAX_PERCENT as f64),
+                Some(0.1),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "tile_height",
+                "拼贴",
+                "拼贴高度",
+                PropertyValue::Float(100.0),
+                Some(0.0),
+                Some(crate::MOTION_TILE_MAX_PERCENT as f64),
+                Some(0.1),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "output_width",
+                "输出",
+                "输出宽度",
+                PropertyValue::Float(100.0),
+                Some(0.0),
+                Some(crate::MOTION_TILE_MAX_PERCENT as f64),
+                Some(0.1),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "output_height",
+                "输出",
+                "输出高度",
+                PropertyValue::Float(100.0),
+                Some(0.0),
+                Some(crate::MOTION_TILE_MAX_PERCENT as f64),
+                Some(0.1),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "mirror_edges",
+                "拼贴",
+                "镜像边缘",
+                PropertyValue::Bool(false),
+                None,
+                None,
+                None,
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "phase",
+                "拼贴",
+                "相位",
+                PropertyValue::Float(0.0),
+                None,
+                None,
+                None,
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "horizontal_phase",
+                "拼贴",
+                "水平位移",
+                PropertyValue::Float(0.0),
+                Some(0.0),
+                Some(1.0),
+                Some(0.01),
+            );
+        }
         EffectType::Threshold => {
             define_builtin_property(
                 &mut properties,
@@ -3986,6 +4113,14 @@ fn builtin_parameter_unit(effect_type: &EffectType, parameter: &str) -> Paramete
         (EffectType::HueSaturation, "tint_hue") => ParameterUnit::Degrees,
         (EffectType::HueSaturation, "tint_saturation") => ParameterUnit::Percent,
         (EffectType::HueSaturation, "tint_lightness") => ParameterUnit::Percent,
+        (EffectType::MotionTile, "center_x") => ParameterUnit::Pixels,
+        (EffectType::MotionTile, "center_y") => ParameterUnit::Pixels,
+        (EffectType::MotionTile, "tile_width") => ParameterUnit::Percent,
+        (EffectType::MotionTile, "tile_height") => ParameterUnit::Percent,
+        (EffectType::MotionTile, "output_width") => ParameterUnit::Percent,
+        (EffectType::MotionTile, "output_height") => ParameterUnit::Percent,
+        (EffectType::MotionTile, "phase") => ParameterUnit::Pixels,
+        (EffectType::MotionTile, "horizontal_phase") => ParameterUnit::Normalized,
         (EffectType::BlackAndWhite, "red")
         | (EffectType::BlackAndWhite, "yellow")
         | (EffectType::BlackAndWhite, "green")
@@ -4149,6 +4284,11 @@ fn builtin_effect_execution_contract(effect_type: &EffectType) -> EffectExecutio
         },
         EffectType::Mosaic => EffectExecutionContract {
             execution_modes: EffectExecutionModes::CPU_F32,
+            ..cpu_linear
+        },
+        EffectType::MotionTile => EffectExecutionContract {
+            execution_modes: EffectExecutionModes::CPU_F32,
+            roi_propagation: EffectRoiPropagation::FullFrame,
             ..cpu_linear
         },
         EffectType::Threshold => EffectExecutionContract {
@@ -5168,6 +5308,52 @@ fn builtin_graph_builder_for(effect_type: &EffectType) -> Option<EffectGraphBuil
                 Ok(())
             }))
         }
+        EffectType::MotionTile => {
+            let center_x_id = builtin_parameter_id(effect_type, "center_x");
+            let center_y_id = builtin_parameter_id(effect_type, "center_y");
+            let tile_width_id = builtin_parameter_id(effect_type, "tile_width");
+            let tile_height_id = builtin_parameter_id(effect_type, "tile_height");
+            let output_width_id = builtin_parameter_id(effect_type, "output_width");
+            let output_height_id = builtin_parameter_id(effect_type, "output_height");
+            let mirror_id = builtin_parameter_id(effect_type, "mirror_edges");
+            let phase_id = builtin_parameter_id(effect_type, "phase");
+            let horizontal_phase_id = builtin_parameter_id(effect_type, "horizontal_phase");
+            Some(Arc::new(move |effect, context, graph| {
+                let mirror_edges = match effect.evaluate_parameter(&mirror_id, context.time) {
+                    Some(PropertyValue::Bool(value)) => value,
+                    Some(_) => {
+                        return Err(EffectGraphBuildError::InvalidAuthorState {
+                            effect_key: effect.effect_type.key(),
+                            effect_id: effect.id,
+                            reason: "motion tile mirror edges must be a boolean".to_owned(),
+                        })
+                    }
+                    None => false,
+                };
+                let grade = crate::MotionTileGrade::new(
+                    [
+                        effect.evaluate_f32_parameter(&center_x_id, context.time, 128.0),
+                        effect.evaluate_f32_parameter(&center_y_id, context.time, 128.0),
+                    ],
+                    effect.evaluate_f32_parameter(&tile_width_id, context.time, 100.0),
+                    effect.evaluate_f32_parameter(&tile_height_id, context.time, 100.0),
+                    effect.evaluate_f32_parameter(&output_width_id, context.time, 100.0),
+                    effect.evaluate_f32_parameter(&output_height_id, context.time, 100.0),
+                    mirror_edges,
+                    effect.evaluate_f32_parameter(&phase_id, context.time, 0.0),
+                    effect.evaluate_f32_parameter(&horizontal_phase_id, context.time, 0.0),
+                )
+                .map_err(|error| EffectGraphBuildError::InvalidAuthorState {
+                    effect_key: effect.effect_type.key(),
+                    effect_id: effect.id,
+                    reason: error.to_string(),
+                })?;
+                if !grade.is_identity() {
+                    graph.append_unary(EffectRenderOp::MotionTile { grade });
+                }
+                Ok(())
+            }))
+        }
         EffectType::Threshold => {
             let level_id = builtin_parameter_id(effect_type, "level");
             Some(Arc::new(move |effect, context, graph| {
@@ -5535,6 +5721,7 @@ fn builtin_display_name(effect_type: &EffectType) -> &'static str {
         EffectType::Threshold => "阈值",
         EffectType::Mosaic => "马赛克",
         EffectType::Posterize => "色调分离",
+        EffectType::MotionTile => "动态拼贴",
         EffectType::ColorEmboss => "色彩浮雕",
         EffectType::Emboss => "浮雕",
         EffectType::External(_) => "外部效果",
@@ -6805,6 +6992,7 @@ mod tests {
             EffectType::Threshold,
             EffectType::Mosaic,
             EffectType::Posterize,
+            EffectType::MotionTile,
         ]
         .into_iter()
         .map(|effect_type| effect_type.key())
@@ -9470,6 +9658,103 @@ mod tests {
         assert_eq!((grade.horizontal(), grade.vertical()), (3, 5));
         assert!(grade.sharp_colors());
     }
+    fn motion_tile_op(graph: &EffectRenderGraph) -> Option<crate::MotionTileGrade> {
+        graph.nodes.iter().find_map(|node| match &node.kind {
+            EffectGraphNodeKind::UnaryEffect {
+                op: EffectRenderOp::MotionTile { grade }, ..
+            }
+            | EffectGraphNodeKind::DomainEffect {
+                op: EffectRenderOp::MotionTile { grade }, ..
+            } => Some(*grade),
+            _ => None,
+        })
+    }
+
+    #[test]
+    fn motion_tile_defaults_compile_to_identity() {
+        let effect = instantiate_effect_node(EffectType::MotionTile)
+            .expect("registered motion tile definition");
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("builds motion tile graph");
+        assert!(motion_tile_op(&graph).is_none());
+    }
+
+    #[test]
+    fn motion_tile_authored_state_reaches_the_operation() {
+        let mut effect = instantiate_effect_node(EffectType::MotionTile)
+            .expect("registered motion tile definition");
+        for (parameter, value) in [
+            ("center_x", 0.0_f32),
+            ("center_y", 0.5),
+            ("tile_width", 50.0),
+        ] {
+            effect
+                .apply_property_mutation(PropertyMutation::SetStaticValue {
+                    path: EffectType::MotionTile.property_path(parameter),
+                    value: PropertyValue::Float(value),
+                })
+                .expect("authors motion tile parameter");
+        }
+        effect
+            .apply_property_mutation(PropertyMutation::SetStaticValue {
+                path: EffectType::MotionTile.property_path("mirror_edges"),
+                value: PropertyValue::Bool(true),
+            })
+            .expect("authors mirror edges");
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("builds motion tile graph");
+        let grade = motion_tile_op(&graph).expect("motion tile op");
+        assert_eq!(grade.tile_width_percent(), 50.0);
+        assert!(grade.mirror_edges());
+        assert_eq!(grade.source_pixel(2, 0, 8, 1), (7, 0));
+    }
+
+    #[test]
+    fn motion_tile_rejects_author_values_outside_the_declared_ranges() {
+        for (parameter, value) in [("tile_width", 30001.0_f32), ("horizontal_phase", 1.5)] {
+            let mut effect = instantiate_effect_node(EffectType::MotionTile)
+                .expect("registered motion tile definition");
+            let applied = effect.apply_property_mutation(PropertyMutation::SetStaticValue {
+                path: EffectType::MotionTile.property_path(parameter),
+                value: PropertyValue::Float(value),
+            });
+            assert!(applied.is_err(), "{parameter} must be rejected");
+        }
+    }
+
+    #[test]
+    fn motion_tile_repeats_the_frame_across_the_tiled_field() {
+        let grade =
+            crate::MotionTileGrade::new([0.0, 0.5], 50.0, 100.0, 100.0, 100.0, false, 0.0, 0.0)
+                .expect("tiled grade");
+        let mut frame: Vec<[f32; 4]> = (0..8).map(|index| [index as f32, 0.0, 0.0, 1.0]).collect();
+        assert!(crate::motion_tile_frame_f32(&mut frame, 8, 1, &grade));
+        let reds: Vec<f32> = frame.iter().map(|pixel| pixel[0]).collect();
+        assert_eq!(reds, vec![5.0, 7.0, 1.0, 3.0, 5.0, 7.0, 1.0, 3.0]);
+    }
+
+    #[test]
+    fn motion_tile_authored_state_survives_project_serialization_round_trip() {
+        let mut effect = instantiate_effect_node(EffectType::MotionTile)
+            .expect("registered motion tile definition");
+        for (parameter, value) in [("output_width", 200.0_f32), ("phase", 3.0_f32)] {
+            effect
+                .apply_property_mutation(PropertyMutation::SetStaticValue {
+                    path: EffectType::MotionTile.property_path(parameter),
+                    value: PropertyValue::Float(value),
+                })
+                .expect("authors motion tile parameter");
+        }
+        let wire = serde_json::to_string(&effect).expect("serializes");
+        let restored: EffectNode = serde_json::from_str(&wire).expect("deserializes");
+        assert_eq!(restored, effect);
+        let graph = build_effect_render_graph(&[restored], tt(0), TEST_WORKING_SPACE)
+            .expect("builds restored motion tile graph");
+        let grade = motion_tile_op(&graph).expect("motion tile op");
+        assert_eq!(grade.output_width_percent(), 200.0);
+        assert_eq!(grade.phase(), 3.0);
+    }
+
     fn posterize_op(graph: &EffectRenderGraph) -> Option<crate::PosterizeGrade> {
         graph.nodes.iter().find_map(|node| match &node.kind {
             EffectGraphNodeKind::UnaryEffect {
