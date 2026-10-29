@@ -1670,7 +1670,10 @@ fn render_op_requirements(op: &EffectRenderOp) -> EffectImplementationRequiremen
             execution_modes: EffectExecutionModes::CPU_F32,
             ..cpu_float
         },
-        EffectRenderOp::Invert { .. } => cpu_float,
+        EffectRenderOp::Invert { .. } => EffectImplementationRequirements {
+            execution_modes: cpu_float.execution_modes.union(EffectExecutionModes::GPU_F32),
+            ..cpu_float
+        },
         EffectRenderOp::Qualifier { qualifier } => EffectImplementationRequirements {
             execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
             roi_from_effect_input: EffectRoiPropagation::Expand {

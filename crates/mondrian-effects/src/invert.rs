@@ -176,7 +176,42 @@ impl InvertChannels {
     const fn inverts_saturation(self) -> bool {
         matches!(self, Self::Saturation | Self::Hls)
     }
+
+    /// Channel masks as the flat integers a pointwise GPU backend needs.
+    ///
+    /// Returns `(color_mask, flags)`: `color_mask` selects the RGB channels
+    /// inverted with `1 - x` and `flags` carries the remaining scope in its low
+    /// bits — alpha inversion, hue rotation, lightness reflection and
+    /// saturation reflection, in that order. A backend that decodes these two
+    /// integers reproduces [`invert_rgba_f32`] exactly, which keeps the fused
+    /// GPU path and the CPU kernel driven by the same authored scope.
+    pub const fn gpu_scope(self) -> (u32, u32) {
+        let color_mask = self.color_mask() as u32;
+        let mut flags = 0;
+        if self.channel_mask() & Self::ALPHA_BIT != 0 {
+            flags |= INVERT_GPU_FLAG_ALPHA;
+        }
+        if self.inverts_hue() {
+            flags |= INVERT_GPU_FLAG_HUE;
+        }
+        if self.inverts_saturation() {
+            flags |= INVERT_GPU_FLAG_SATURATION;
+        }
+        if self.inverts_lightness() {
+            flags |= INVERT_GPU_FLAG_LIGHTNESS;
+        }
+        (color_mask, flags)
+    }
 }
+
+/// GPU scope flag: invert coverage as well.
+pub const INVERT_GPU_FLAG_ALPHA: u32 = 0b0001;
+/// GPU scope flag: rotate hue by half a turn.
+pub const INVERT_GPU_FLAG_HUE: u32 = 0b0010;
+/// GPU scope flag: reflect saturation.
+pub const INVERT_GPU_FLAG_SATURATION: u32 = 0b0100;
+/// GPU scope flag: reflect lightness.
+pub const INVERT_GPU_FLAG_LIGHTNESS: u32 = 0b1000;
 
 /// Invert one straight-alpha, scene-linear RGBA pixel.
 ///
@@ -570,6 +605,101 @@ mod tests {
             InvertChannels::Saturation,
         ] {
             assert_eq!(inverted(pixel, scope)[3], 0.5);
+        }
+    }
+
+    #[test]
+    fn packed_scope_drives_the_same_result_as_the_enum_scope() {
+        // Mirror of the documented GPU contract: a backend that only receives
+        // the packed `(color_mask, flags)` pair must reproduce the CPU kernel.
+        fn decoded(
+            pixel: [f32; 4],
+            (color_mask, flags): (u32, u32),
+            blend_with_original: f32,
+        ) -> [f32; 4] {
+            let mut inverted = pixel;
+            if flags & INVERT_GPU_FLAG_HUE != 0 {
+                let rgb = invert_hue([pixel[0], pixel[1], pixel[2]]);
+                inverted[0..3].copy_from_slice(&rgb);
+            }
+            if flags & INVERT_GPU_FLAG_SATURATION != 0 {
+                let rgb = invert_saturation([inverted[0], inverted[1], inverted[2]]);
+                inverted[0..3].copy_from_slice(&rgb);
+            }
+            if flags & INVERT_GPU_FLAG_LIGHTNESS != 0 {
+                let rgb = invert_lightness([inverted[0], inverted[1], inverted[2]]);
+                inverted[0..3].copy_from_slice(&rgb);
+            }
+            let mask_bits = [1, 2, 4];
+            for (channel, bit) in mask_bits.into_iter().enumerate() {
+                if color_mask & bit != 0 {
+                    inverted[channel] = 1.0 - pixel[channel];
+                }
+            }
+            if flags & INVERT_GPU_FLAG_ALPHA != 0 {
+                inverted[3] = 1.0 - pixel[3];
+            }
+            mix_with_original(pixel, inverted, blend_with_original)
+        }
+
+        let samples = [
+            [0.25, 0.5, 0.75, 1.0],
+            [0.9, 0.1, 0.35, 0.5],
+            [1.5, -0.25, 2.0, 0.75],
+            [0.5, 0.5, 0.5, 0.25],
+            [0.0, 0.0, 0.0, 1.0],
+        ];
+        for scope in InvertChannels::ALL {
+            let packed = scope.gpu_scope();
+            for pixel in samples {
+                for blend in [0.0, 0.25, 1.0] {
+                    let expected = invert_rgba_f32(pixel, scope, blend);
+                    let actual = decoded(pixel, packed, blend);
+                    assert_eq!(
+                        actual.map(f32::to_bits),
+                        expected.map(f32::to_bits),
+                        "scope {} blend {blend} pixel {pixel:?}",
+                        scope.key()
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn gpu_scope_flags_are_disjoint_per_component() {
+        assert_eq!(InvertChannels::Red.gpu_scope(), (0b001, 0));
+        assert_eq!(InvertChannels::Green.gpu_scope(), (0b010, 0));
+        assert_eq!(InvertChannels::Blue.gpu_scope(), (0b100, 0));
+        assert_eq!(
+            InvertChannels::Rgb.gpu_scope(),
+            (0b111, 0),
+            "RGB selects every color channel"
+        );
+        assert_eq!(
+            InvertChannels::Alpha.gpu_scope(),
+            (0, INVERT_GPU_FLAG_ALPHA)
+        );
+        assert_eq!(
+            InvertChannels::RedGreenBlueAlpha.gpu_scope(),
+            (0b111, INVERT_GPU_FLAG_ALPHA)
+        );
+        assert_eq!(
+            InvertChannels::Hue.gpu_scope(),
+            (0, INVERT_GPU_FLAG_HUE),
+            "hue scopes carry no channel mask"
+        );
+        assert_eq!(
+            InvertChannels::Hls.gpu_scope(),
+            (
+                0,
+                INVERT_GPU_FLAG_HUE | INVERT_GPU_FLAG_SATURATION | INVERT_GPU_FLAG_LIGHTNESS
+            )
+        );
+        for scope in InvertChannels::ALL {
+            let (color_mask, flags) = scope.gpu_scope();
+            assert!(color_mask <= 0b111, "{}", scope.key());
+            assert!(flags <= 0b1111, "{}", scope.key());
         }
     }
 

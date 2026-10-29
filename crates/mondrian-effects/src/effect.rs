@@ -3300,7 +3300,7 @@ fn builtin_effect_execution_contract(effect_type: &EffectType) -> EffectExecutio
             ..cpu_linear
         },
         EffectType::Invert => EffectExecutionContract {
-            execution_modes: EffectExecutionModes::CPU_F32,
+            execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
             ..cpu_linear
         },
         EffectType::BoxBlur => EffectExecutionContract {

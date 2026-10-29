@@ -61,6 +61,16 @@ pub enum EffectGpuPointOp {
         right: f32,
         bottom: f32,
     },
+    /// Packed channel-scope inversion with an optional original-image blend.
+    ///
+    /// `color_mask` and `flags` are the exact flat encoding produced by
+    /// [`crate::InvertChannels::gpu_scope`]; `blend_with_original` retains that
+    /// fraction of the source pixel (1.0 is the identity).
+    Invert {
+        color_mask: u32,
+        flags: u32,
+        blend_with_original: f32,
+    },
     /// Prepared creative 3D LUT sampled in its explicitly authored processing domain.
     ///
     /// The backend-neutral plan retains the immutable semantic payload only;
@@ -739,6 +749,14 @@ fn lower_point_op(
         EffectRenderOp::Lut3D { lut, intensity } => {
             Ok(EffectGpuPointOp::Lut3D { lut: Arc::clone(lut), intensity: *intensity })
         }
+        EffectRenderOp::Invert { channels, blend_with_original } => {
+            let (color_mask, flags) = channels.gpu_scope();
+            Ok(EffectGpuPointOp::Invert {
+                color_mask,
+                flags,
+                blend_with_original: *blend_with_original,
+            })
+        }
         unsupported => Err(EffectGpuPlanBlocker::UnsupportedOperation {
             node_id,
             op: operation_name(unsupported),
@@ -819,6 +837,27 @@ mod tests {
             EffectGpuPointOp::Crop { left: 0.25, top: 0.0, right: 0.0, bottom: 0.25 }
         );
         assert_eq!(plan.graph_signature(), compiled.signature_hash());
+    }
+
+    #[test]
+    fn lowers_channel_inversion_to_the_packed_scope() {
+        let mut builder = EffectGraphBuilderState::new();
+        builder.append_unary(EffectRenderOp::Invert {
+            channels: crate::InvertChannels::GreenBlueAlpha,
+            blend_with_original: 0.5,
+        });
+        let compiled = compile_reference_render_graph(builder.finish()).expect("valid graph");
+        let plan = lower_effect_graph_to_gpu_plan(&compiled).expect("invert is pointwise");
+        assert_eq!(plan.operations().len(), 1);
+        assert_eq!(
+            plan.operations()[0],
+            EffectGpuPointOp::Invert {
+                color_mask: 0b110,
+                flags: crate::invert::INVERT_GPU_FLAG_ALPHA,
+                blend_with_original: 0.5,
+            }
+        );
+        assert_eq!(plan.processing_domain(), EffectColorDomain::SceneLinearRgb);
     }
 
     #[test]

@@ -857,6 +857,73 @@ fn apply_hdr_grading(effect: EffectUniform, rgb: vec3<f32>) -> vec3<f32> {
         (exposed - vec3<f32>(exposed_luma)) * primary.y;
 }
 
+fn invert_extremes(rgb: vec3<f32>) -> vec2<f32> {
+    return vec2<f32>(max(rgb.r, max(rgb.g, rgb.b)), min(rgb.r, min(rgb.g, rgb.b)));
+}
+
+fn invert_hue_of(rgb: vec3<f32>, high: f32, chroma: f32) -> f32 {
+    var hue = 0.0;
+    if (high == rgb.r) {
+        hue = (rgb.g - rgb.b) / chroma;
+    } else if (high == rgb.g) {
+        hue = (rgb.b - rgb.r) / chroma + 2.0;
+    } else {
+        hue = (rgb.r - rgb.g) / chroma + 4.0;
+    }
+    return fract(hue / 6.0);
+}
+
+fn invert_rgb_from_hue_chroma_lightness(
+    hue: f32,
+    chroma: f32,
+    lightness: f32,
+) -> vec3<f32> {
+    let sextant = fract(hue) * 6.0;
+    let second = chroma * (1.0 - abs(fract(sextant * 0.5) * 2.0 - 1.0));
+    var color = vec3<f32>(chroma, second, 0.0);
+    if (sextant < 1.0) {
+        color = vec3<f32>(chroma, second, 0.0);
+    } else if (sextant < 2.0) {
+        color = vec3<f32>(second, chroma, 0.0);
+    } else if (sextant < 3.0) {
+        color = vec3<f32>(0.0, chroma, second);
+    } else if (sextant < 4.0) {
+        color = vec3<f32>(0.0, second, chroma);
+    } else if (sextant < 5.0) {
+        color = vec3<f32>(second, 0.0, chroma);
+    } else {
+        color = vec3<f32>(chroma, 0.0, second);
+    }
+    return color + vec3<f32>(lightness - chroma * 0.5);
+}
+
+fn invert_hue(rgb: vec3<f32>) -> vec3<f32> {
+    let extremes = invert_extremes(rgb);
+    let chroma = extremes.x - extremes.y;
+    if (chroma <= 1.0e-6) { return rgb; }
+    let hue = invert_hue_of(rgb, extremes.x, chroma);
+    let lightness = (extremes.x + extremes.y) * 0.5;
+    return invert_rgb_from_hue_chroma_lightness(hue + 0.5, chroma, lightness);
+}
+
+fn invert_lightness(rgb: vec3<f32>) -> vec3<f32> {
+    let extremes = invert_extremes(rgb);
+    let lightness = (extremes.x + extremes.y) * 0.5;
+    let shift = 1.0 - 2.0 * lightness;
+    return rgb + vec3<f32>(shift);
+}
+
+fn invert_saturation(rgb: vec3<f32>) -> vec3<f32> {
+    let extremes = invert_extremes(rgb);
+    let chroma = extremes.x - extremes.y;
+    if (chroma <= 1.0e-6) { return rgb; }
+    let lightness = (extremes.x + extremes.y) * 0.5;
+    let range = 1.0 - abs(2.0 * lightness - 1.0);
+    if (range <= 1.0e-6 || chroma > range) { return rgb; }
+    let scale = (range - chroma) / chroma;
+    return vec3<f32>(lightness) + (rgb - vec3<f32>(lightness)) * scale;
+}
+
 fn apply_effects(input: vec4<f32>, position: vec2<f32>) -> vec4<f32> {
     if (input.a <= 0.0) { return input; }
     var pixel = input;
@@ -949,6 +1016,35 @@ fn apply_effects(input: vec4<f32>, position: vec2<f32>) -> vec4<f32> {
             }
         } else if (effect.header.x == 12u) {
             pixel = vec4<f32>(apply_hdr_grading(effect, pixel.rgb), pixel.a);
+        } else if (effect.header.x == 13u) {
+            // Packed `InvertChannels::gpu_scope`: header.y selects the RGB
+            // channels inverted with `1 - x`, header.z carries alpha/hue/
+            // saturation/lightness in bits 0..3, params.x retains that
+            // fraction of the source pixel.
+            let color_mask = effect.header.y;
+            let flags = effect.header.z;
+            var rgb = pixel.rgb;
+            if ((flags & 2u) != 0u) {
+                rgb = invert_hue(rgb);
+            }
+            if ((flags & 4u) != 0u) {
+                rgb = invert_saturation(rgb);
+            }
+            if ((flags & 8u) != 0u) {
+                rgb = invert_lightness(rgb);
+            }
+            var color = rgb;
+            if ((color_mask & 1u) != 0u) { color.r = 1.0 - pixel.r; }
+            if ((color_mask & 2u) != 0u) { color.g = 1.0 - pixel.g; }
+            if ((color_mask & 4u) != 0u) { color.b = 1.0 - pixel.b; }
+            let alpha = select(pixel.a, 1.0 - pixel.a, (flags & 1u) != 0u);
+            let retained = clamp(effect.params.x, 0.0, 1.0);
+            let inverted = vec4<f32>(color, alpha);
+            if (retained <= 0.0) {
+                pixel = inverted;
+            } else if (retained < 1.0) {
+                pixel = mix(inverted, pixel, vec4<f32>(retained));
+            }
         }
     }
     return pixel;
@@ -4014,6 +4110,15 @@ fn effect_uniforms(
                 extra0: [0.0; 4],
                 extra1: [0.0; 4],
             },
+            EffectGpuPointOp::Invert { color_mask, flags, blend_with_original } => {
+                GpuEffectUniform {
+                    header: [13, *color_mask, *flags, 0],
+                    params: [*blend_with_original, 0.0, 0.0, 0.0],
+                    color: [0.0; 4],
+                    extra0: [0.0; 4],
+                    extra1: [0.0; 4],
+                }
+            }
             EffectGpuPointOp::Lut3D { lut, intensity } => {
                 let effective_intensity = intensity.clamp(0.0, 1.0);
                 let location = if effective_intensity <= 1.0e-4 {
@@ -6065,6 +6170,38 @@ mod tests {
         assert_eq!(uniforms[4].header[0], 11);
         assert_eq!(uniforms[4].params[..3], [1.0, 0.75, 0.8]);
         assert_eq!(uniforms[4].color[..3], highlight.luminance_coefficients());
+    }
+
+    #[test]
+    fn gpu_effect_uniforms_carry_the_packed_invert_scope() {
+        use mondrian_effects::{
+            compile_reference_render_graph, lower_effect_graph_to_gpu_plan,
+            EffectGraphBuilderState, EffectRenderOp, InvertChannels,
+        };
+
+        let mut builder = EffectGraphBuilderState::new();
+        builder.append_unary(EffectRenderOp::Invert {
+            channels: InvertChannels::RedGreenAlpha,
+            blend_with_original: 0.25,
+        });
+        let graph = compile_reference_render_graph(builder.finish()).expect("invert graph");
+        let plan = lower_effect_graph_to_gpu_plan(&graph).expect("invert GPU plan");
+        assert_eq!(plan.operations().len(), 1);
+
+        let uniforms = effect_uniforms(Some(&plan), None).expect("invert uniforms");
+        assert_eq!(uniforms[0].header, [13, 0b011, 0b0001, 0]);
+        assert_eq!(uniforms[0].params, [0.25, 0.0, 0.0, 0.0]);
+        assert_eq!(uniforms[1].header[0], 0);
+
+        let mut hls = EffectGraphBuilderState::new();
+        hls.append_unary(EffectRenderOp::Invert {
+            channels: InvertChannels::Hls,
+            blend_with_original: 0.0,
+        });
+        let graph = compile_reference_render_graph(hls.finish()).expect("hls graph");
+        let plan = lower_effect_graph_to_gpu_plan(&graph).expect("hls GPU plan");
+        let uniforms = effect_uniforms(Some(&plan), None).expect("hls uniforms");
+        assert_eq!(uniforms[0].header, [13, 0, 0b1110, 0]);
     }
 
     #[test]
