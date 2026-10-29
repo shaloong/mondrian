@@ -842,3 +842,9 @@ mod linux_scoped;
 
 #[cfg(target_os = "linux")]
 pub use linux_scoped::{LinuxEditorMainThread, LinuxNativeEditorContainer};
+
+#[cfg(target_os = "macos")]
+mod macos_scoped;
+
+#[cfg(target_os = "macos")]
+pub use macos_scoped::MacosNativeEditorContainer;

@@ -410,6 +410,27 @@ jobs:
           CARGO_PROFILE_DEV_DEBUG: "0"
         run: cargo run --manifest-path vendor/vst3-host/Cargo.toml --locked --no-default-features --example macos_main_services -j1
 
+      - name: Test actual macOS editor parent ownership
+        if: runner.os == 'macOS'
+        timeout-minutes: 5
+        env:
+          CARGO_TARGET_DIR: ${{ github.workspace }}/target
+          CARGO_INCREMENTAL: "0"
+          CARGO_PROFILE_DEV_DEBUG: "0"
+        run: cargo run --manifest-path vendor/vst3-host/Cargo.toml --locked --no-default-features --example macos_editor_parent -j1
+
+      - name: Test actual X11 editor parent ownership
+        if: runner.os == 'Linux'
+        timeout-minutes: 5
+        env:
+          CARGO_TARGET_DIR: ${{ github.workspace }}/target
+          CARGO_INCREMENTAL: "0"
+          CARGO_PROFILE_TEST_DEBUG: "0"
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y xvfb xauth
+          xvfb-run --auto-servernum --server-args="-screen 0 640x480x24 -nolisten tcp" cargo test --manifest-path vendor/vst3-host/Cargo.toml --locked --no-default-features --lib -j1 window::linux_scoped::tests::real_parent_preserves_close_intent_until_explicit_retirement -- --exact --ignored --test-threads=1
+
       - name: 编译默认 App 产品入口
         env:
           CARGO_INCREMENTAL: "0"
