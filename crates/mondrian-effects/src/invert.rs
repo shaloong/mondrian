@@ -257,34 +257,6 @@ pub fn invert_rgba_f32(
     mix_with_original(pixel, inverted, blend_with_original)
 }
 
-/// Invert one straight-alpha 8-bit RGBA pixel.
-///
-/// This is the crate-local `u8` reference path. It runs the same float kernel
-/// and rounds once at the end, so both execution paths share one definition.
-pub fn invert_rgba_u8(
-    pixel: [u8; 4],
-    channels: InvertChannels,
-    blend_with_original: f32,
-) -> [u8; 4] {
-    let unit = [
-        f32::from(pixel[0]) / 255.0,
-        f32::from(pixel[1]) / 255.0,
-        f32::from(pixel[2]) / 255.0,
-        f32::from(pixel[3]) / 255.0,
-    ];
-    let inverted = invert_rgba_f32(unit, channels, blend_with_original);
-    [
-        unit_to_u8(inverted[0]),
-        unit_to_u8(inverted[1]),
-        unit_to_u8(inverted[2]),
-        unit_to_u8(inverted[3]),
-    ]
-}
-
-fn unit_to_u8(value: f32) -> u8 {
-    (value.clamp(0.0, 1.0) * 255.0).round() as u8
-}
-
 fn mix_with_original(original: [f32; 4], inverted: [f32; 4], blend_with_original: f32) -> [f32; 4] {
     let retained = blend_with_original.clamp(0.0, 1.0);
     if retained == 0.0 {
@@ -607,20 +579,5 @@ mod tests {
             assert!(color_mask <= 0b111, "{}", scope.key());
             assert!(flags <= 0b1111, "{}", scope.key());
         }
-    }
-
-    #[test]
-    fn u8_reference_path_matches_integer_inversion() {
-        for value in 0..=255u8 {
-            let pixel = [value, 255 - value, value / 2, 255];
-            assert_eq!(
-                invert_rgba_u8(pixel, InvertChannels::Rgb, 0.0),
-                [255 - pixel[0], 255 - pixel[1], 255 - pixel[2], 255]
-            );
-        }
-        assert_eq!(
-            invert_rgba_u8([10, 20, 30, 40], InvertChannels::Alpha, 0.0),
-            [10, 20, 30, 215]
-        );
     }
 }

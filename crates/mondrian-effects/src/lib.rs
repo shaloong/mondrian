@@ -60,7 +60,6 @@ pub use processor_residency::{
 pub mod qualifier;
 pub mod temporal_execution;
 pub mod tracking;
-pub mod transition;
 pub mod unsharp_mask;
 
 pub use adjustment::{
@@ -70,9 +69,7 @@ pub use black_white::{
     BlackAndWhiteError, BlackAndWhiteGrade, BLACK_WHITE_HUE_STOPS, BLACK_WHITE_NEUTRAL_WEIGHT,
     BLACK_WHITE_STOP_KEYS, BLACK_WHITE_WEIGHT_MAX, BLACK_WHITE_WEIGHT_MIN,
 };
-pub use box_blur::{
-    box_blur_frame_f32, box_blur_frame_u8, BoxBlurDirection, BOX_BLUR_AUTHOR_MAX_RADIUS_PIXELS,
-};
+pub use box_blur::{box_blur_frame_f32, BoxBlurDirection, BOX_BLUR_AUTHOR_MAX_RADIUS_PIXELS};
 pub use chroma_key::{ChromaKeyError, PreparedChromaKey};
 pub use color_curves::{
     ColorCurvesAuthoring, ColorCurvesMode, PreparedColorCurves, COLOR_CURVE_SAMPLE_COUNT,
@@ -160,7 +157,7 @@ pub use heterogeneous_execution::{
 };
 pub use hsl::{HslGrade, HslGradeError};
 pub use hue_saturation::{HueBand, HueSaturationError, HueSaturationGrade};
-pub use invert::{invert_rgba_f32, invert_rgba_u8, InvertChannels};
+pub use invert::{invert_rgba_f32, InvertChannels};
 pub use lut::{
     Lut3D, LutLibrary, LutLibraryEntry, LutPreparationCache, LutPreparationCacheConfig,
     LutPreparationCacheDiagnostics,
@@ -191,7 +188,6 @@ pub use tracking::{
     canonicalize_tracking_shape, track_frame_pair, transform_tracking_shape, TrackingError,
     TrackingFrame, TrackingObservation, TrackingQuality, TrackingRegion, TrackingTransform,
 };
-pub use transition::Transition;
 pub use unsharp_mask::{
     apply_unsharp_mask_f32, sharpened_channel, unsharp_mask_gain,
     UNSHARP_MASK_AUTHOR_MAX_AMOUNT_PERCENT, UNSHARP_MASK_AUTHOR_MAX_RADIUS_PIXELS,

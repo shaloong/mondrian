@@ -154,48 +154,6 @@ pub fn box_blur_frame_f32(
     .is_ok_and(|applied| applied)
 }
 
-/// Blurs one straight-alpha u8 frame, matching the f32 kernel through a single
-/// final rounding step.
-pub fn box_blur_frame_u8(
-    pixels: &[u8],
-    width: usize,
-    height: usize,
-    radius: f32,
-    iterations: u32,
-    direction: BoxBlurDirection,
-    repeat_edge_pixels: bool,
-) -> Option<Vec<u8>> {
-    let pixel_count = width.checked_mul(height)?;
-    if pixels.len() < pixel_count * 4 {
-        return None;
-    }
-    let mut floats = Vec::with_capacity(pixel_count);
-    for pixel in pixels[..pixel_count * 4].chunks_exact(4) {
-        floats.push([
-            f32::from(pixel[0]) / 255.0,
-            f32::from(pixel[1]) / 255.0,
-            f32::from(pixel[2]) / 255.0,
-            f32::from(pixel[3]) / 255.0,
-        ]);
-    }
-    if !box_blur_frame_f32(
-        &mut floats,
-        width,
-        height,
-        radius,
-        iterations,
-        direction,
-        repeat_edge_pixels,
-    ) {
-        return None;
-    }
-    let mut output = Vec::with_capacity(pixel_count * 4);
-    for pixel in floats {
-        output.extend(pixel.map(crate::adjustment::unit_to_u8));
-    }
-    Some(output)
-}
-
 /// Applies the blur to one region of a straight-alpha f32 frame.
 ///
 /// The caller owns the region extent and its halo; the kernel only needs the
@@ -675,17 +633,6 @@ mod tests {
             true,
         );
         assert!(output[1][0] > 2.6, "{output:?}");
-    }
-
-    #[test]
-    fn u8_path_matches_the_float_kernel_with_one_rounding() {
-        let source: Vec<u8> = [0_u8, 0, 0, 255, 255, 255, 255, 255, 0, 0, 0, 255].to_vec();
-        let output = box_blur_frame_u8(&source, 3, 1, 1.0, 1, BoxBlurDirection::Horizontal, true)
-            .expect("blur");
-        assert_eq!(output.len(), source.len());
-        for pixel in output.chunks_exact(4) {
-            assert_eq!(pixel[0], 85, "{pixel:?}");
-        }
     }
 
     #[test]
