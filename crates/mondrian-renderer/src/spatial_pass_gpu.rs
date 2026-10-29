@@ -1039,7 +1039,6 @@ fn cs_main(@builtin(local_invocation_id) lid: vec3<u32>) {
     }
 
     #[test]
-    #[test]
     fn gpu_color_emboss_matches_the_cpu_kernel() {
         let Ok(context) = block_on(crate::GpuContext::new()) else {
             eprintln!("skipping GPU colour emboss parity test: no GPU adapter available");
