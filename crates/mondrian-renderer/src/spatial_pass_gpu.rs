@@ -42,6 +42,7 @@ pub(crate) enum EffectSpatialGpuError {
 /// Reusable pipelines for GPU spatial effect passes.
 pub(crate) struct EffectSpatialGpu {
     box_blur: wgpu::RenderPipeline,
+    find_edges: wgpu::RenderPipeline,
     bindings: wgpu::BindGroupLayout,
 }
 
@@ -112,7 +113,37 @@ impl EffectSpatialGpu {
             multiview_mask: None,
             cache: None,
         });
-        Self { box_blur, bindings }
+        let find_edges = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("mondrian.effect-spatial.find-edges"),
+            layout: Some(&layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                buffers: &[],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_find_edges"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: wgpu::TextureFormat::Rgba32Float,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleStrip,
+                strip_index_format: None,
+                cull_mode: None,
+                ..wgpu::PrimitiveState::default()
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+        Self { box_blur, find_edges, bindings }
     }
 
     /// Number of texture passes one spatial pass expands into.
@@ -205,17 +236,64 @@ impl EffectSpatialGpu {
                 };
                 let output = &scratch[written];
                 let output_view = output.create_view(&wgpu::TextureViewDescriptor::default());
-                self.record_pass(device, encoder, input_view, &output_view, &uniform);
+                self.record_pass(
+                    device,
+                    encoder,
+                    &self.box_blur,
+                    input_view,
+                    &output_view,
+                    &uniform,
+                );
                 written += 1;
             }
         }
         Ok(scratch[written - 1].clone())
     }
 
+    /// Records the find edges pass: one fullscreen pass over the frame.
+    pub(crate) fn record_find_edges(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
+        blend_with_original: f32,
+        invert: bool,
+        source: &wgpu::Texture,
+        destination: &wgpu::Texture,
+        width: u32,
+        height: u32,
+    ) -> Result<wgpu::Texture, EffectSpatialGpuError> {
+        if width == 0 || height == 0 {
+            return Err(EffectSpatialGpuError::EmptyFrame);
+        }
+        let uniform = SpatialPassUniform {
+            size: [width as f32, height as f32, 0.0, 0.0],
+            params: [
+                blend_with_original.clamp(0.0, 1.0),
+                f32::from(u8::from(invert)),
+                0.0,
+                0.0,
+            ],
+            extra: [1.0, 1.0, 0.0, 1.0],
+            aces: [0.0; 4],
+        };
+        let input_view = source.create_view(&wgpu::TextureViewDescriptor::default());
+        let output_view = destination.create_view(&wgpu::TextureViewDescriptor::default());
+        self.record_pass(
+            device,
+            encoder,
+            &self.find_edges,
+            &input_view,
+            &output_view,
+            &uniform,
+        );
+        Ok(destination.clone())
+    }
+
     fn record_pass(
         &self,
         device: &wgpu::Device,
         encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
+        pipeline: &wgpu::RenderPipeline,
         input: &wgpu::TextureView,
         output: &wgpu::TextureView,
         uniforms: &SpatialPassUniform,
@@ -255,7 +333,7 @@ impl EffectSpatialGpu {
             occlusion_query_set: None,
             multiview_mask: None,
         });
-        pass.set_pipeline(&self.box_blur);
+        pass.set_pipeline(pipeline);
         pass.set_bind_group(0, &bind_group, &[]);
         pass.draw(0..4, 0..1);
     }
@@ -397,11 +475,50 @@ fn fs_box_blur(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32>
     }
     return result;
 }
+fn sobel_magnitude(pixel: vec2<i32>) -> f32 {
+    let top_left = premultiply(load_clamped(pixel + vec2<i32>(-1, -1)));
+    let top_center = premultiply(load_clamped(pixel + vec2<i32>(0, -1)));
+    let top_right = premultiply(load_clamped(pixel + vec2<i32>(1, -1)));
+    let middle_left = premultiply(load_clamped(pixel + vec2<i32>(-1, 0)));
+    let middle_right = premultiply(load_clamped(pixel + vec2<i32>(1, 0)));
+    let bottom_left = premultiply(load_clamped(pixel + vec2<i32>(-1, 1)));
+    let bottom_center = premultiply(load_clamped(pixel + vec2<i32>(0, 1)));
+    let bottom_right = premultiply(load_clamped(pixel + vec2<i32>(1, 1)));
+    var magnitude = 0.0;
+    for (var channel = 0; channel < 3; channel = channel + 1) {
+        let gx = (top_right[channel] + 2.0 * middle_right[channel] + bottom_right[channel])
+            - (top_left[channel] + 2.0 * middle_left[channel] + bottom_left[channel]);
+        let gy = (bottom_left[channel] + 2.0 * bottom_center[channel] + bottom_right[channel])
+            - (top_left[channel] + 2.0 * top_center[channel] + top_right[channel]);
+        magnitude = magnitude + gx * gx + gy * gy;
+    }
+    return sqrt(magnitude);
+}
+
+@fragment
+fn fs_find_edges(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
+    let dims = frame_dims();
+    let pixel = vec2<i32>(floor(position.xy));
+    let center = premultiply(load_clamped(pixel));
+    if (center.a <= 0.0) {
+        return vec4<f32>(0.0);
+    }
+    var magnitude = 0.0;
+    if (pixel.x > 0 && pixel.y > 0 && pixel.x + 1 < dims.x && pixel.y + 1 < dims.y) {
+        magnitude = sobel_magnitude(pixel);
+    }
+    let edge = select(1.0 - magnitude, magnitude, uniforms.params.y > 0.5);
+    let blend = clamp(uniforms.params.x, 0.0, 1.0);
+    let mixed = edge * (1.0 - blend) + center.rgb * blend;
+    return unpremultiply(vec4<f32>(mixed, center.a));
+}
+
 "#;
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mondrian_effects::find_edges::{find_edges_frame_f32, FindEdgesGrade};
     use mondrian_effects::{box_blur, BoxBlurDirection};
     use pollster::block_on;
 
@@ -567,6 +684,153 @@ mod tests {
             .expect("recorded box blur");
         context.queue.submit(Some(encoder.finish()));
         readback(context, &output, width, height)
+    }
+
+    #[test]
+    fn gpu_compute_workgroup_execution_probe() {
+        let Ok(context) = block_on(crate::GpuContext::new()) else {
+            eprintln!("skipping workgroup probe: no GPU adapter available");
+            return;
+        };
+        println!(
+            "adapter max_compute_workgroup_size_x={} max_invocations_per_workgroup={}",
+            context.device.limits().max_compute_workgroup_size_x,
+            context.device.limits().max_compute_invocations_per_workgroup
+        );
+        let shader = context.device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("mondrian.probe.shader"),
+            source: wgpu::ShaderSource::Wgsl(
+                r#"
+@group(0) @binding(0) var<storage, read_write> output: atomic<u32>;
+
+@compute @workgroup_size(64)
+fn cs_main(@builtin(local_invocation_id) lid: vec3<u32>) {
+    atomicOr(&output, 1u << (lid.x % 32u));
+}
+"#
+                .into(),
+            ),
+        });
+        let pipeline = context.device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("mondrian.probe.pipeline"),
+            layout: None,
+            module: &shader,
+            entry_point: Some("cs_main"),
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+            cache: None,
+        });
+        let buffer = context.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("mondrian.probe.buffer"),
+            size: 4,
+            usage: wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::COPY_SRC
+                | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        context.queue.write_buffer(&buffer, 0, bytemuck::bytes_of(&0_u32));
+        let readback = context.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("mondrian.probe.readback"),
+            size: 4,
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let mut encoder = context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("mondrian.probe.encoder"),
+        });
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("mondrian.probe.pass"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&pipeline);
+            pass.set_bind_group(
+                0,
+                &context.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("mondrian.probe.bind-group"),
+                    layout: &pipeline.get_bind_group_layout(0),
+                    entries: &[wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: buffer.as_entire_binding(),
+                    }],
+                }),
+                &[],
+            );
+            pass.dispatch_workgroups(1, 1, 1);
+        }
+        encoder.copy_buffer_to_buffer(&buffer, 0, &readback, 0, 4);
+        context.queue.submit(Some(encoder.finish()));
+        readback.slice(..).map_async(wgpu::MapMode::Read, |result| {
+            result.expect("probe readback");
+        });
+        context
+            .device
+            .poll(wgpu::PollType::Wait { submission_index: None, timeout: None })
+            .expect("poll");
+        let value = {
+            let range = readback.slice(..).get_mapped_range().expect("mapped probe range");
+            u32::from_le_bytes([range[0], range[1], range[2], range[3]])
+        };
+        assert!(
+            value.count_ones() > 1,
+            "compute workgroup executed {value:?} (single-lane masks mean the toolchain collapsed the workgroup)"
+        );
+    }
+
+    #[test]
+    fn gpu_find_edges_matches_the_cpu_kernel() {
+        let Ok(context) = block_on(crate::GpuContext::new()) else {
+            eprintln!("skipping GPU find edges parity test: no GPU adapter available");
+            return;
+        };
+        let width = 6_u32;
+        let height = 5_u32;
+        let pixel_count = (width * height) as usize;
+        let mut pixels = vec![[0.1_f32, 0.2, 0.3, 1.0]; pixel_count];
+        for y in 0..height as usize {
+            for x in 0..width as usize {
+                if x >= 3 {
+                    pixels[y * width as usize + x] = [1.5, 0.5, 0.25, 1.0];
+                }
+            }
+        }
+        pixels[2 * width as usize + 1] = [0.0, 0.0, 0.0, 0.0];
+        let grade = FindEdgesGrade::new(0.25, true).expect("grade");
+        let mut cpu = pixels.clone();
+        assert!(find_edges_frame_f32(
+            &mut cpu,
+            width as usize,
+            height as usize,
+            grade
+        ));
+        let executor = EffectSpatialGpu::new(&context.device);
+        let source = upload(&context, &pixels, width, height);
+        let destination = scratch(&context, width, height, 1);
+        let mut encoder = context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("mondrian.effect-spatial.find-edges-encoder"),
+        });
+        let output = executor
+            .record_find_edges(
+                &context.device,
+                &mut encoder,
+                grade.blend_with_original(),
+                grade.invert(),
+                &source,
+                &destination[0],
+                width,
+                height,
+            )
+            .expect("recorded find edges");
+        context.queue.submit(Some(encoder.finish()));
+        let gpu = readback(&context, &output, width, height);
+        for (index, (cpu_pixel, gpu_pixel)) in cpu.iter().zip(gpu.iter()).enumerate() {
+            for channel in 0..4 {
+                let difference = (cpu_pixel[channel] - gpu_pixel[channel]).abs();
+                assert!(
+                    difference <= 1.0e-4,
+                    "pixel {index} channel {channel}: cpu {cpu_pixel:?} gpu {gpu_pixel:?}"
+                );
+            }
+        }
     }
 
     #[test]

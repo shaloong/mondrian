@@ -139,6 +139,24 @@ fn sobel_magnitude(source: &[[f32; 4]], width: usize, x: usize, y: usize) -> f32
     magnitude.sqrt()
 }
 
+/// Applies the effect to a whole straight-alpha frame in place.
+///
+/// The frame owns its own border, so the outermost pixel ring reports no edge
+/// (the Sobel neighbourhood does not exist there). Executors that supply an ROI
+/// halo call the region kernel instead and get real edges on that ring.
+pub fn find_edges_frame_f32(
+    pixels: &mut [[f32; 4]],
+    width: usize,
+    height: usize,
+    grade: FindEdgesGrade,
+) -> bool {
+    let mut checkpoint = || Ok::<(), std::convert::Infallible>(());
+    matches!(
+        apply_find_edges_f32_controlled(pixels, width, height, grade, &mut checkpoint),
+        Ok(true)
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
