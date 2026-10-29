@@ -573,7 +573,7 @@ impl ConnectionProxy {
     /// [`DROP_LOG_INTERVAL`]-th one after it.
     fn record_off_thread_drop(&self) {
         let count = self.dropped.fetch_add(1, Ordering::Relaxed) + 1;
-        if count == 1 || count % DROP_LOG_INTERVAL == 0 {
+        if count == 1 || count.is_multiple_of(DROP_LOG_INTERVAL) {
             log::warn!(
                 "ConnectionProxy ({}): dropped an off-thread IConnectionPoint::notify \
                  ({count} so far). VST3 requires component↔controller messages on the UI \
@@ -1428,16 +1428,29 @@ pub fn create_state_restore_stream(
 /// the plugin impl (servicing, driven by the host each UI frame).
 #[cfg(target_os = "linux")]
 pub struct RunLoopRegistry {
-    pub handlers: Vec<(
-        vst3::ComPtr<vst3::Steinberg::Linux::IEventHandler>,
-        vst3::Steinberg::Linux::FileDescriptor,
-    )>,
+    pub handlers: Vec<Arc<RunLoopEventRegistration>>,
     pub timers: Vec<RunLoopTimer>,
+}
+
+// Each registration owns its cancellation state and native reference. A turn
+// captures Arc leases, so unregister/re-register cannot revive an old callback,
+// and snapshot capture never calls a plugin's AddRef while holding the mutex.
+#[cfg(target_os = "linux")]
+pub struct RunLoopEventRegistration {
+    pub handler: ComPtr<vst3::Steinberg::Linux::IEventHandler>,
+    pub fd: vst3::Steinberg::Linux::FileDescriptor,
+    pub active: AtomicBool,
+}
+
+#[cfg(target_os = "linux")]
+pub struct RunLoopTimerRegistration {
+    pub handler: ComPtr<vst3::Steinberg::Linux::ITimerHandler>,
+    pub active: AtomicBool,
 }
 
 #[cfg(target_os = "linux")]
 pub struct RunLoopTimer {
-    pub handler: vst3::ComPtr<vst3::Steinberg::Linux::ITimerHandler>,
+    pub registration: Arc<RunLoopTimerRegistration>,
     pub interval_ms: u64,
     pub due: std::time::Instant,
 }
@@ -1449,6 +1462,32 @@ impl RunLoopRegistry {
             handlers: Vec::new(),
             timers: Vec::new(),
         }
+    }
+
+    fn deactivate_all(&self) {
+        for entry in &self.handlers {
+            entry.active.store(false, Ordering::Release);
+        }
+        for timer in &self.timers {
+            timer.registration.active.store(false, Ordering::Release);
+        }
+    }
+
+    /// Return the retired native owners for release after unlocking the registry.
+    #[must_use]
+    pub fn take_retired(&mut self) -> (Vec<Arc<RunLoopEventRegistration>>, Vec<RunLoopTimer>) {
+        self.deactivate_all();
+        (
+            std::mem::take(&mut self.handlers),
+            std::mem::take(&mut self.timers),
+        )
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for RunLoopRegistry {
+    fn drop(&mut self) {
+        self.deactivate_all();
     }
 }
 
@@ -1491,6 +1530,14 @@ impl HostPlugFrame {
             visitor.visit(crate::host_storage::HostStorageRef::vector(
                 &run_loop.timers,
             )?)?;
+            for entry in &run_loop.handlers {
+                visitor.visit(crate::host_storage::HostStorageRef::arc(entry))?;
+            }
+            for timer in &run_loop.timers {
+                visitor.visit(crate::host_storage::HostStorageRef::arc(
+                    &timer.registration,
+                ))?;
+            }
         }
         Ok(())
     }
@@ -1532,12 +1579,23 @@ impl vst3::Steinberg::Linux::IRunLoopTrait for HostPlugFrame {
         let Some(handler) = vst3::ComRef::from_raw(handler) else {
             return kInvalidArgument;
         };
+        let registration = Arc::new(RunLoopEventRegistration {
+            handler: handler.to_com_ptr(),
+            fd,
+            active: AtomicBool::new(true),
+        });
         match self.run_loop.lock() {
             Ok(mut reg) => {
-                reg.handlers.push((handler.to_com_ptr(), fd));
+                reg.handlers.push(registration);
                 kResultOk
             }
-            Err(_) => kInternalError,
+            Err(poisoned) => {
+                // A tail-expression temporary can otherwise retain this guard
+                // until after the unused native registration is released.
+                drop(poisoned);
+                drop(registration);
+                kInternalError
+            }
         }
     }
 
@@ -1545,13 +1603,22 @@ impl vst3::Steinberg::Linux::IRunLoopTrait for HostPlugFrame {
         &self,
         handler: *mut vst3::Steinberg::Linux::IEventHandler,
     ) -> tresult {
-        match self.run_loop.lock() {
-            Ok(mut reg) => {
-                reg.handlers.retain(|(h, _)| h.as_ptr() != handler);
-                kResultOk
-            }
-            Err(_) => kInternalError,
-        }
+        let retired: Vec<_> = match self.run_loop.lock() {
+            Ok(mut reg) => reg
+                .handlers
+                .extract_if(.., |entry| {
+                    let matches = entry.handler.as_ptr() == handler;
+                    if matches {
+                        entry.active.store(false, Ordering::Release);
+                    }
+                    matches
+                })
+                .collect(),
+            Err(_) => return kInternalError,
+        };
+        // A final native Release may reenter IRunLoop.
+        drop(retired);
+        kResultOk
     }
 
     unsafe fn registerTimer(
@@ -1562,17 +1629,25 @@ impl vst3::Steinberg::Linux::IRunLoopTrait for HostPlugFrame {
         let Some(handler) = vst3::ComRef::from_raw(handler) else {
             return kInvalidArgument;
         };
+        let registration = Arc::new(RunLoopTimerRegistration {
+            handler: handler.to_com_ptr(),
+            active: AtomicBool::new(true),
+        });
         let interval_ms = milliseconds.max(1);
         match self.run_loop.lock() {
             Ok(mut reg) => {
                 reg.timers.push(RunLoopTimer {
-                    handler: handler.to_com_ptr(),
+                    registration,
                     interval_ms,
                     due: std::time::Instant::now() + std::time::Duration::from_millis(interval_ms),
                 });
                 kResultOk
             }
-            Err(_) => kInternalError,
+            Err(poisoned) => {
+                drop(poisoned);
+                drop(registration);
+                kInternalError
+            }
         }
     }
 
@@ -1580,13 +1655,21 @@ impl vst3::Steinberg::Linux::IRunLoopTrait for HostPlugFrame {
         &self,
         handler: *mut vst3::Steinberg::Linux::ITimerHandler,
     ) -> tresult {
-        match self.run_loop.lock() {
-            Ok(mut reg) => {
-                reg.timers.retain(|t| t.handler.as_ptr() != handler);
-                kResultOk
-            }
-            Err(_) => kInternalError,
-        }
+        let retired: Vec<_> = match self.run_loop.lock() {
+            Ok(mut reg) => reg
+                .timers
+                .extract_if(.., |timer| {
+                    let matches = timer.registration.handler.as_ptr() == handler;
+                    if matches {
+                        timer.registration.active.store(false, Ordering::Release);
+                    }
+                    matches
+                })
+                .collect(),
+            Err(_) => return kInternalError,
+        };
+        drop(retired);
+        kResultOk
     }
 }
 

@@ -36,6 +36,26 @@ use super::{
     module_loader::{load_module, VstModule},
 };
 
+// The SDK's DefaultEnumType is i32 on Windows and u32 on Unix. Normalize only
+// these native bit masks; removing casts based on Unix lint breaks Windows.
+#[cfg_attr(
+    not(target_os = "windows"),
+    expect(
+        clippy::unnecessary_cast,
+        reason = "SDK plain-enum signedness differs between Windows and Unix"
+    )
+)]
+mod sdk_flag_bits {
+    use vst3::Steinberg::Vst::{BusInfo_, ProcessContext_};
+
+    pub(super) const DEFAULT_BUS_ACTIVE: u32 = BusInfo_::BusFlags_::kDefaultActive as u32;
+    pub(super) const CONTINUOUS_TIME_VALID: u32 =
+        ProcessContext_::StatesAndFlags_::kContTimeValid as u32;
+    pub(super) const TEMPO_VALID: u32 = ProcessContext_::StatesAndFlags_::kTempoValid as u32;
+    pub(super) const PROJECT_MUSIC_VALID: u32 =
+        ProcessContext_::StatesAndFlags_::kProjectTimeMusicValid as u32;
+}
+
 /// Cap on the buffered output MIDI a plugin emits, so a host that never polls can't grow it
 /// forever. The buffer is pre-reserved to this size so steady-state pushes never reallocate.
 const MAX_OUTPUT_MIDI: usize = 4096;
@@ -1097,7 +1117,7 @@ impl PluginImpl {
                 IProcessContextRequirements_::Flags_::kNeedTempo as u32,
             ) {
                 data.process_context.tempo = bpm;
-                data.process_context.state |= ProcessContext_::StatesAndFlags_::kTempoValid as u32;
+                data.process_context.state |= sdk_flag_bits::TEMPO_VALID;
             }
         }
     }
@@ -3260,7 +3280,7 @@ impl PluginInternal for PluginImpl {
                     role,
                     name: crate::internal::utils::vst_string_to_string(&info.name),
                     channel_count: info.channelCount as usize,
-                    default_active: info.flags & BusInfo_::BusFlags_::kDefaultActive as u32 != 0,
+                    default_active: info.flags & sdk_flag_bits::DEFAULT_BUS_ACTIVE != 0,
                 });
             }
             Ok(result)
@@ -5325,7 +5345,7 @@ impl PluginImpl {
                     }
                 }
                 let active = status == kResultOk
-                    && (info.flags & BusInfo_::BusFlags_::kDefaultActive as u32) != 0;
+                    && (info.flags & sdk_flag_bits::DEFAULT_BUS_ACTIVE) != 0;
                 if active {
                     let result = component.activateBus(media, direction, index, 1);
                     if result != kResultOk {
@@ -5376,7 +5396,7 @@ impl PluginImpl {
                     );
                     let (role, channel_count) =
                         checked_event_bus_info(direction, index as i32, status, &info)?;
-                    let active = info.flags & BusInfo_::BusFlags_::kDefaultActive as u32 != 0;
+                    let active = info.flags & sdk_flag_bits::DEFAULT_BUS_ACTIVE != 0;
                     if active {
                         let status =
                             component.activateBus(kEvent as i32, native_direction, index as i32, 1);
@@ -5530,7 +5550,7 @@ fn reconcile_audio_bus_activation_with_bounds(
                         bounds.channels(info.channelCount.max(0) as usize)?;
                     }
                 }
-                status == kResultOk && info.flags & BusInfo_::BusFlags_::kDefaultActive as u32 != 0
+                status == kResultOk && info.flags & sdk_flag_bits::DEFAULT_BUS_ACTIVE != 0
             };
             // Both true and false policies need a fresh ACK: restoring state may
             // have changed native activation. Never infer an ACK by resizing.
@@ -5637,7 +5657,7 @@ fn walk_native_event_bus_constraints(
                     index,
                     role,
                     channel_count,
-                    info.flags & BusInfo_::BusFlags_::kDefaultActive as u32 != 0,
+                    info.flags & sdk_flag_bits::DEFAULT_BUS_ACTIVE != 0,
                     host_active,
                 )
             },
@@ -5667,7 +5687,7 @@ fn census_native_event_buses(
                     role,
                     name: crate::internal::utils::vst_string_to_string(&info.name),
                     channel_count,
-                    default_active: info.flags & BusInfo_::BusFlags_::kDefaultActive as u32 != 0,
+                    default_active: info.flags & sdk_flag_bits::DEFAULT_BUS_ACTIVE != 0,
                     host_active,
                 });
                 Ok(())
@@ -6089,7 +6109,7 @@ fn checked_process_sample_end(ctx: &ProcessContext, frames: usize) -> Result<(i6
         .projectTimeSamples
         .checked_add(frames)
         .ok_or(Error::NativeEvent(invalid))?;
-    let continuous = if ctx.state & ProcessContext_::StatesAndFlags_::kContTimeValid as u32 != 0 {
+    let continuous = if ctx.state & sdk_flag_bits::CONTINUOUS_TIME_VALID != 0 {
         Some(
             ctx.continousTimeSamples
                 .checked_add(frames)
@@ -7349,9 +7369,9 @@ impl PluginProcessFields<'_> {
                         .as_com_ref::<IEventList>()
                         .unwrap()
                         .as_ptr()
-                || (context.state & ProcessContext_::StatesAndFlags_::kTempoValid as u32 != 0
+                || (context.state & sdk_flag_bits::TEMPO_VALID != 0
                     && (!context.tempo.is_finite() || context.tempo <= 0.0))
-                || (context.state & ProcessContext_::StatesAndFlags_::kProjectTimeMusicValid as u32
+                || (context.state & sdk_flag_bits::PROJECT_MUSIC_VALID
                     != 0
                     && !context.projectTimeMusic.is_finite())
             {
@@ -8055,11 +8075,13 @@ impl PluginEditorFields<'_> {
         // On unknown removal it still owns its host frame and registrations.
         #[cfg(target_os = "linux")]
         if self.plugin_view.removal_complete() {
-            let mut registry = self.run_loop.lock().map_err(|_| {
-                Error::Other("editor run-loop state is poisoned during removal".to_string())
-            })?;
-            registry.handlers.clear();
-            registry.timers.clear();
+            let retired = {
+                let mut registry = self.run_loop.lock().map_err(|_| {
+                    Error::Other("editor run-loop state is poisoned during removal".to_string())
+                })?;
+                registry.take_retired()
+            };
+            drop(retired);
         }
         result
     }
@@ -8153,6 +8175,7 @@ impl PluginEditorFields<'_> {
 
     #[cfg(target_os = "linux")]
     fn service_run_loop(&mut self) {
+        use std::sync::atomic::Ordering;
         use vst3::Steinberg::Linux::{IEventHandlerTrait, ITimerHandlerTrait};
 
         // Fire due timers. Snapshot the handlers, then invoke with the lock
@@ -8164,12 +8187,14 @@ impl PluginEditorFields<'_> {
             for timer in reg.timers.iter_mut() {
                 if now >= timer.due {
                     timer.due = now + std::time::Duration::from_millis(timer.interval_ms);
-                    due.push(timer.handler.clone());
+                    due.push(Arc::clone(&timer.registration));
                 }
             }
         }
-        for handler in due {
-            unsafe { handler.onTimer() };
+        for registration in due {
+            if registration.active.load(Ordering::Acquire) {
+                unsafe { registration.handler.onTimer() };
+            }
         }
 
         // Poll registered fds (zero timeout - never blocks the UI thread)
@@ -8183,17 +8208,15 @@ impl PluginEditorFields<'_> {
         }
         let mut fds: Vec<libc::pollfd> = handlers
             .iter()
-            .map(|&(_, fd)| libc::pollfd {
-                fd,
-                events: libc::POLLIN,
-                revents: 0,
-            })
+            .map(|entry| libc::pollfd { fd: entry.fd, events: libc::POLLIN, revents: 0 })
             .collect();
         let ready = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as _, 0) };
         if ready > 0 {
-            for (pfd, (handler, fd)) in fds.iter().zip(handlers.iter()) {
-                if pfd.revents & (libc::POLLIN | libc::POLLERR | libc::POLLHUP) != 0 {
-                    unsafe { handler.onFDIsSet(*fd) };
+            for (pfd, entry) in fds.iter().zip(handlers.iter()) {
+                if pfd.revents & (libc::POLLIN | libc::POLLERR | libc::POLLHUP) != 0
+                    && entry.active.load(Ordering::Acquire)
+                {
+                    unsafe { entry.handler.onFDIsSet(entry.fd) };
                 }
             }
         }
@@ -8820,6 +8843,367 @@ mod editor_detach_failure_tests {
         }
         fn close(&mut self) -> Result<()> {
             self.fields().close_editor()
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    mod run_loop_snapshot_tests {
+        use super::*;
+        use std::{cell::Cell, io::Write, os::fd::AsRawFd, os::unix::net::UnixStream, rc::Rc};
+        use vst3::Steinberg::Linux::{
+            IEventHandler, IEventHandlerTrait, IRunLoop, IRunLoopTrait, ITimerHandler,
+            ITimerHandlerTrait,
+        };
+
+        struct TimerProbe {
+            calls: Rc<Cell<usize>>,
+            action: Option<Box<dyn Fn()>>,
+            on_drop: Option<Box<dyn Fn()>>,
+        }
+
+        impl Drop for TimerProbe {
+            fn drop(&mut self) {
+                if let Some(action) = self.on_drop.take() {
+                    action();
+                }
+            }
+        }
+
+        impl Class for TimerProbe {
+            type Interfaces = (ITimerHandler,);
+        }
+
+        impl ITimerHandlerTrait for TimerProbe {
+            unsafe fn onTimer(&self) {
+                self.calls.set(self.calls.get() + 1);
+                if let Some(action) = &self.action {
+                    action();
+                }
+            }
+        }
+
+        fn service_due_timers(fixture: &mut Fixture) {
+            // Drive the actual dispatcher without sleeps or a wall-clock race.
+            let now = std::time::Instant::now();
+            for timer in &mut fixture.run_loop.lock().unwrap().timers {
+                timer.due = now;
+            }
+            crate::plugin::PluginEditorRole::service_run_loop(&mut fixture.fields())
+                .expect("service on the initializing thread");
+        }
+
+        fn callback_retires_later_timer(re_register: bool) -> (usize, usize) {
+            let mut fixture = Fixture::new(kResultOk, kResultOk);
+            let run_loop = Rc::new(fixture.frame.to_com_ptr::<IRunLoop>().expect("run loop"));
+            let victim_calls = Rc::new(Cell::new(0));
+            let victim = ComWrapper::new(TimerProbe {
+                calls: Rc::clone(&victim_calls),
+                action: None,
+                on_drop: None,
+            })
+            .to_com_ptr::<ITimerHandler>()
+            .expect("victim timer");
+            // A weak host reference avoids a registry -> callback -> registry cycle.
+            let weak_loop = Rc::downgrade(&run_loop);
+            let callback_victim = victim.clone();
+            let retired = Cell::new(false);
+            let first = ComWrapper::new(TimerProbe {
+                calls: Rc::new(Cell::new(0)),
+                on_drop: None,
+                action: Some(Box::new(move || {
+                    if retired.replace(true) {
+                        return;
+                    }
+                    let run_loop = weak_loop.upgrade().expect("live host loop owner");
+                    unsafe {
+                        assert_eq!(
+                            run_loop.unregisterTimer(callback_victim.as_ptr()),
+                            kResultOk
+                        );
+                        if re_register {
+                            assert_eq!(
+                                run_loop.registerTimer(callback_victim.as_ptr(), 1),
+                                kResultOk
+                            );
+                        }
+                    }
+                })),
+            })
+            .to_com_ptr::<ITimerHandler>()
+            .expect("first timer");
+            unsafe {
+                assert_eq!(run_loop.registerTimer(first.as_ptr(), 1), kResultOk);
+                assert_eq!(run_loop.registerTimer(victim.as_ptr(), 1), kResultOk);
+            }
+
+            service_due_timers(&mut fixture);
+            let after_retirement = victim_calls.get();
+            service_due_timers(&mut fixture);
+            let after_next_turn = victim_calls.get();
+            unsafe {
+                run_loop.unregisterTimer(first.as_ptr());
+                run_loop.unregisterTimer(victim.as_ptr());
+            }
+            fixture.close().expect("settle the fixture attachment");
+            (after_retirement, after_next_turn)
+        }
+
+        #[test]
+        fn unregistering_a_due_timer_retires_its_captured_callback() {
+            assert_eq!(callback_retires_later_timer(false), (0, 0));
+        }
+
+        #[test]
+        fn registering_the_same_timer_again_does_not_revive_its_old_snapshot() {
+            assert_eq!(callback_retires_later_timer(true), (0, 1));
+        }
+
+        #[test]
+        fn unregistering_the_last_timer_reference_releases_native_code_after_unlock() {
+            let mut fixture = Fixture::new(kResultOk, kResultOk);
+            let run_loop = fixture.frame.to_com_ptr::<IRunLoop>().expect("run loop");
+            let released = Rc::new(Cell::new(false));
+            let unlocked = Rc::new(Cell::new(false));
+            let release_observed = Rc::clone(&released);
+            let unlock_observed = Rc::clone(&unlocked);
+            let weak_registry = Arc::downgrade(&fixture.run_loop);
+            let timer = ComWrapper::new(TimerProbe {
+                calls: Rc::new(Cell::new(0)),
+                action: None,
+                on_drop: Some(Box::new(move || {
+                    release_observed.set(true);
+                    unlock_observed
+                        .set(weak_registry.upgrade().expect("live registry").try_lock().is_ok());
+                })),
+            })
+            .to_com_ptr::<ITimerHandler>()
+            .expect("timer interface");
+            let native = timer.as_ptr();
+            unsafe {
+                assert_eq!(run_loop.registerTimer(native, 1), kResultOk);
+            }
+            drop(timer);
+            unsafe {
+                assert_eq!(run_loop.unregisterTimer(native), kResultOk);
+            }
+            fixture.close().expect("settle the fixture attachment");
+            assert!(
+                released.get(),
+                "unregister releases the last host reference"
+            );
+            assert!(unlocked.get(), "native Release may reenter the host");
+        }
+
+        struct EventProbe {
+            calls: Rc<Cell<usize>>,
+            fd: i32,
+            action: Option<Box<dyn Fn()>>,
+        }
+
+        impl Class for EventProbe {
+            type Interfaces = (IEventHandler,);
+        }
+
+        impl IEventHandlerTrait for EventProbe {
+            unsafe fn onFDIsSet(&self, fd: i32) {
+                assert_eq!(fd, self.fd, "deliver the registered native descriptor");
+                self.calls.set(self.calls.get() + 1);
+                if let Some(action) = &self.action {
+                    action();
+                }
+            }
+        }
+
+        fn callback_retires_later_fd(re_register: bool) -> (usize, usize) {
+            let mut fixture = Fixture::new(kResultOk, kResultOk);
+            let run_loop = Rc::new(fixture.frame.to_com_ptr::<IRunLoop>().expect("run loop"));
+            let mut peers = [UnixStream::pair().unwrap(), UnixStream::pair().unwrap()];
+            for (_, writer) in &mut peers {
+                writer.write_all(b"ready").expect("make each descriptor readable");
+            }
+            let victim_fd = peers[1].0.as_raw_fd();
+            let victim_calls = Rc::new(Cell::new(0));
+            let victim = ComWrapper::new(EventProbe {
+                calls: Rc::clone(&victim_calls),
+                fd: victim_fd,
+                action: None,
+            })
+            .to_com_ptr::<IEventHandler>()
+            .expect("victim event handler");
+            let callback_victim = victim.clone();
+            let weak_loop = Rc::downgrade(&run_loop);
+            let retired = Cell::new(false);
+            let first = ComWrapper::new(EventProbe {
+                calls: Rc::new(Cell::new(0)),
+                fd: peers[0].0.as_raw_fd(),
+                action: Some(Box::new(move || {
+                    if retired.replace(true) {
+                        return;
+                    }
+                    let run_loop = weak_loop.upgrade().expect("live host loop owner");
+                    unsafe {
+                        assert_eq!(
+                            run_loop.unregisterEventHandler(callback_victim.as_ptr()),
+                            kResultOk
+                        );
+                        if re_register {
+                            assert_eq!(
+                                run_loop.registerEventHandler(callback_victim.as_ptr(), victim_fd),
+                                kResultOk
+                            );
+                        }
+                    }
+                })),
+            })
+            .to_com_ptr::<IEventHandler>()
+            .expect("first event handler");
+            unsafe {
+                assert_eq!(
+                    run_loop.registerEventHandler(first.as_ptr(), peers[0].0.as_raw_fd()),
+                    kResultOk
+                );
+                assert_eq!(
+                    run_loop.registerEventHandler(victim.as_ptr(), victim_fd),
+                    kResultOk
+                );
+            }
+            crate::plugin::PluginEditorRole::service_run_loop(&mut fixture.fields()).unwrap();
+            let after_retirement = victim_calls.get();
+            crate::plugin::PluginEditorRole::service_run_loop(&mut fixture.fields()).unwrap();
+            let after_next_turn = victim_calls.get();
+            unsafe {
+                run_loop.unregisterEventHandler(first.as_ptr());
+                run_loop.unregisterEventHandler(victim.as_ptr());
+            }
+            fixture.close().expect("settle the fixture attachment");
+            (after_retirement, after_next_turn)
+        }
+
+        #[test]
+        fn unregistering_a_ready_fd_retires_its_captured_callback() {
+            assert_eq!(callback_retires_later_fd(false), (0, 0));
+        }
+
+        #[test]
+        fn registering_the_same_fd_handler_again_does_not_revive_its_old_snapshot() {
+            assert_eq!(callback_retires_later_fd(true), (0, 1));
+        }
+
+        #[test]
+        fn registered_callback_leases_participate_in_the_actual_host_storage_inventory() {
+            use crate::host_storage::{
+                HostStorageError, HostStorageKind, HostStorageRef, HostStorageVisitor,
+            };
+            use std::alloc::Layout;
+
+            struct Coverage {
+                wanted: [(usize, Layout); 2],
+                seen: [bool; 2],
+            }
+            impl HostStorageVisitor for Coverage {
+                fn visit(
+                    &mut self,
+                    storage: HostStorageRef<'_>,
+                ) -> std::result::Result<(), HostStorageError> {
+                    for (index, (address, layout)) in self.wanted.iter().enumerate() {
+                        if storage.address() == *address {
+                            assert_eq!(storage.kind(), HostStorageKind::ArcPayload);
+                            assert_eq!(storage.layout(), *layout);
+                            self.seen[index] = true;
+                        }
+                    }
+                    Ok(())
+                }
+            }
+            let mut fixture = Fixture::new(kResultOk, kResultOk);
+            let run_loop = fixture.frame.to_com_ptr::<IRunLoop>().expect("run loop");
+            let (read, _write) = UnixStream::pair().unwrap();
+            let calls = Rc::new(Cell::new(0));
+            let event = ComWrapper::new(EventProbe {
+                calls: Rc::clone(&calls),
+                fd: read.as_raw_fd(),
+                action: None,
+            })
+            .to_com_ptr::<IEventHandler>()
+            .unwrap();
+            let timer = ComWrapper::new(TimerProbe {
+                calls: Rc::clone(&calls),
+                action: None,
+                on_drop: None,
+            })
+            .to_com_ptr::<ITimerHandler>()
+            .unwrap();
+            unsafe {
+                assert_eq!(
+                    run_loop.registerEventHandler(event.as_ptr(), read.as_raw_fd()),
+                    kResultOk
+                );
+                assert_eq!(run_loop.registerTimer(timer.as_ptr(), 1), kResultOk);
+            }
+            let wanted = {
+                let registry = fixture.run_loop.lock().unwrap();
+                let event = &registry.handlers[0];
+                let timer = &registry.timers[0].registration;
+                [
+                    (
+                        Arc::as_ptr(event) as usize,
+                        Layout::for_value(event.as_ref()),
+                    ),
+                    (
+                        Arc::as_ptr(timer) as usize,
+                        Layout::for_value(timer.as_ref()),
+                    ),
+                ]
+            };
+            let mut coverage = Coverage { wanted, seen: [false; 2] };
+            fixture.frame.visit_owned_storage(&mut coverage).unwrap();
+            assert_eq!(
+                coverage.seen, [true; 2],
+                "observe both live callback owners"
+            );
+            unsafe {
+                run_loop.unregisterEventHandler(event.as_ptr());
+                run_loop.unregisterTimer(timer.as_ptr());
+            }
+            coverage.seen.fill(false);
+            fixture.frame.visit_owned_storage(&mut coverage).unwrap();
+            assert_eq!(
+                coverage.seen, [false; 2],
+                "retired leases leave the registry inventory"
+            );
+            assert_eq!(calls.get(), 0, "inventory never invokes native callbacks");
+            fixture.close().expect("settle the fixture attachment");
+        }
+
+        #[test]
+        fn failed_registration_does_not_retain_native_callback_ownership() {
+            let mut fixture = Fixture::new(kResultOk, kResultOk);
+            let run_loop = fixture.frame.to_com_ptr::<IRunLoop>().expect("run loop");
+            let poison = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _guard = fixture.run_loop.lock().unwrap();
+                panic!("controlled registry poison");
+            }));
+            assert!(poison.is_err());
+            let released = Rc::new(Cell::new(false));
+            let observed = Rc::clone(&released);
+            let timer = ComWrapper::new(TimerProbe {
+                calls: Rc::new(Cell::new(0)),
+                action: None,
+                on_drop: Some(Box::new(move || observed.set(true))),
+            })
+            .to_com_ptr::<ITimerHandler>()
+            .unwrap();
+            unsafe {
+                assert_eq!(run_loop.registerTimer(timer.as_ptr(), 1), kInternalError);
+            }
+            drop(timer);
+            assert!(
+                released.get(),
+                "the failed registration cannot keep a native owner"
+            );
+            fixture.run_loop.clear_poison();
+            assert!(fixture.run_loop.lock().unwrap().timers.is_empty());
+            fixture.close().expect("settle the fixture attachment");
         }
     }
 
@@ -10218,7 +10602,7 @@ mod checked_native_note_tests {
                 let context = &mut fixture.data.as_mut().unwrap().process_context;
                 context.projectTimeSamples = -17;
                 context.continousTimeSamples = -41;
-                context.state = ProcessContext_::StatesAndFlags_::kContTimeValid as u32;
+                context.state = sdk_flag_bits::CONTINUOUS_TIME_VALID;
                 fixture.parameters.push(ParameterChange {
                     id: 7,
                     value: 0.5,
@@ -12951,7 +13335,7 @@ mod restored_audio_activation_tests {
                 BusTypes_::kAux as i32
             };
             info.flags = if default_active {
-                BusInfo_::BusFlags_::kDefaultActive as u32
+                sdk_flag_bits::DEFAULT_BUS_ACTIVE
             } else {
                 0
             };
