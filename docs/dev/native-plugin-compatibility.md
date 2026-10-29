@@ -44,9 +44,9 @@ partitions. All3411 frames match the independent ring-buffer oracle; native
 opaque state, project serialization and original child settlement are checked.
 The original Ring Out CLAP Runtime/Graph case also passes after sharing its
 unchanged input/census helper. Both runs have exit0, empty stderr and settled
-process groups. Native GUI, product timer/FD concurrency, broader instruments,
-physical devices, realtime/performance, full heap/leaks and macOS native-plugin
-qualification remain open. The macOS actual-main CFRunLoop timer/retirement
+process groups. These DSP cases do not qualify GUI. Broader timer/FD concurrency,
+instruments, physical devices, realtime/performance, full heap/leaks and macOS
+native-plugin qualification remain open. The actual-main CFRunLoop timer/retirement
 probe passes CI214; this is separate from the native editor parent probe below.
 
 Scoped X11 and Cocoa parent primitives are also implemented in the SDK, separate
@@ -65,9 +65,36 @@ consumption is distinct from DSP delivery: the roundtrip checks GUI-to-PCM befor
 capture and pending-host-input refusal before native delivery and restore.
 Windows SDK ordinary tests pass416 (13 ignored); the finite Linux ADelay and
 Ring Out cases above also pass on this Product implementation. CLAP's Product GUI
-adapter remains Windows. Linux/macOS foreign view attachment and input/focus,
-Product GUI integration, full heap/resource, realtime/performance and physical
-display qualification remain open; basic parent or ordinary tests do not close them.
+adapter remains Windows. macOS foreign views, broader Product/UI integration,
+input/focus, full heap/resource, realtime/performance and physical displays remain
+open; basic parent or ordinary tests do not close them.
+
+The Linux [installed Runtime/Graph GUI case](../../crates/mondrian-audio/tests/native_vst3_gui_runtime.rs)
+exposed missing XEmbed negotiation/mapping in the shared native container. Its
+native parent regression now checks late/malformed metadata, map/unmap/remap,
+reparenting and destruction races. Plain X11 children retain their mapping policy.
+The original SDK3.8.0 AGain GUI then fails repeated Open inside Cairo, with
+SIGSEGV or the `_get_screen_index` assertion matching
+[VSTGUI issue377](https://github.com/steinbergmedia/vstgui/issues/377).
+Its shipped VSTGUI dependency is **not qualified**.
+
+A controlled unmodified upstream VSTGUI version (`9d589f09`, immediately before
+the reported regression) with the same SDK3.8.0 AGain DSP passes 20 independent
+cases through the same normal Product and test: 60 view open/close cycles, actual
+child painting, fixed-size negotiation, native user close, stable process/load
+identity, unchanged author data and all8560 PCM frames against the gain oracle.
+Conditions: Ubuntu24.04.5/x86_64, authenticated Xvfb640x480x24, Rust1.97.1,
+private patched FFmpeg8.1.2, offline48k/Stereo/max64; Product opt0/debug0 and
+test opt1/debug0. All cases retain the original180s/2s process-group bounds,
+exit0 and empty test stderr, without a debugger or source patches. This supports
+dependency-regression attribution; it does not turn the shipped sample's failure
+into a compatibility pass. The host adds no plugin-name or Cairo-lifetime workaround.
+
+To repeat the GUI case, supply `MONDRIAN_VST3_TEST_HELPER` with the matching normal
+Product and `MONDRIAN_VST3_GUI_TEST_PLUGIN` with the selected actual AGain module,
+then run `cargo test --locked -p mondrian-audio --test native_vst3_gui_runtime -- --ignored --test-threads=1`.
+Linux additionally requires an authenticated X11 display. Record the GUI dependency
+version; the plugin's SDK version alone does not distinguish the two inputs above.
 
 ## Implementation boundary
 
