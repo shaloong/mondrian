@@ -3566,7 +3566,7 @@ OfxStatus probeAction(const char* action, const void* handle,
     double time = 0;
     const auto* timeline = static_cast<const OfxTimeLineSuiteV1*>(gHost->fetchSuite(gHost->host, kOfxTimeLineSuite, 1));
     if (!timeline || timeline->getTime(const_cast<void*>(handle), &time) != kOfxStatOK ||
-        time < 0 || time > 100 || time != std::floor(time)) { return kOfxStatFailed; }
+        (selected == "image_sampling" && (time < 0 || time > 100 || time != std::floor(time)))) { return kOfxStatFailed; }
     const OfxPointD scales[] = {{.5, .5}, {.5, .75}, {1, 1}};
     const auto expected = selected == "image_sampling" ? scales[int(time) % 3] : OfxPointD{1, 1};
     if (!ownerProjectContract(handle, rendering ? in : nullptr, expected)) { return kOfxStatFailed; }

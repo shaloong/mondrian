@@ -518,6 +518,18 @@ jobs:
           CARGO_INCREMENTAL: "0"
         run: cargo test --locked -p mondrian-app --test openfx_host -j1 -- --exact generator::official_rectangle_generator_preserves_geometry_parameters_and_output_signal --ignored --test-threads=1
 
+      - name: Native OpenFX Rectangle sampling and owner continuity
+        timeout-minutes: 3
+        env:
+          CARGO_INCREMENTAL: "0"
+        run: cargo test --locked -p mondrian-app --test openfx_host -j1 -- --exact generator::official_rectangle_generator_changes_sampling_without_changing_project_or_native_owner --ignored --test-threads=1
+
+      - name: Native OpenFX Basic sampling and identity
+        timeout-minutes: 3
+        env:
+          CARGO_INCREMENTAL: "0"
+        run: cargo test --locked -p mondrian-app --test openfx_host -j1 -- --exact sampling::official_basic_filter_preserves_sampling_pixels_and_identity_in_one_native_owner --ignored --test-threads=1
+
       - name: 编译 Golden 验证入口 (Windows)
         if: runner.os == 'Windows'
         env:
