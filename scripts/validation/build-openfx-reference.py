@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build the official BSD-3-Clause Basic example for native host tests only."""
+"""Build official BSD-3-Clause OpenFX examples for native host tests only."""
 
 import argparse
 import json
@@ -11,16 +11,13 @@ import urllib.request
 
 
 SDK_REVISION = "e40728885390ec16276d11e00025de9b4282060c"
-REFERENCE_FILES = (
-    "Examples/Basic/basic.cpp",
-    "Examples/include/ofxUtilities.H",
-    "LICENSE.md",
-)
+EXAMPLES = {"Basic": "basic.cpp", "Rectangle": "rectangle.cpp"}
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output-dir", required=True, type=Path)
+    parser.add_argument("--example", choices=EXAMPLES, default="Basic")
     parser.add_argument(
         "--source-root",
         type=Path,
@@ -31,9 +28,14 @@ def main():
     output.mkdir(parents=True, exist_ok=True)
     receipt = output / "reference.json"
     receipt.unlink(missing_ok=True)
+    reference_files = (
+        f"Examples/{args.example}/{EXAMPLES[args.example]}",
+        "Examples/include/ofxUtilities.H",
+        "LICENSE.md",
+    )
     if args.source_root is None:
         source = output / "source"
-        for relative in REFERENCE_FILES:
+        for relative in reference_files:
             url = (
                 "https://raw.githubusercontent.com/AcademySoftwareFoundation/"
                 f"openfx/{SDK_REVISION}/{relative}"
@@ -49,7 +51,7 @@ def main():
     else:
         source = args.source_root.resolve(strict=True)
         origin = {"kind": "caller-provided source", "path": str(source)}
-    for relative in REFERENCE_FILES:
+    for relative in reference_files:
         if not (source / relative).is_file():
             raise FileNotFoundError(source / relative)
     # Keep the upstream license with the lab artifact. No plugin source or binary
@@ -59,7 +61,7 @@ def main():
         Path(__file__).resolve().parents[2]
         / "crates/mondrian-app/native/openfx/vendor/include"
     )
-    cpp = source / "Examples/Basic/basic.cpp"
+    cpp = source / reference_files[0]
     system = platform.system()
     machine = platform.machine().lower()
     if system == "Darwin":
@@ -75,16 +77,16 @@ def main():
         }.get((system, machine))
         if architecture is None:
             raise RuntimeError(f"Unsupported OFX bundle architecture: {system}/{machine}")
-    bundle = output / "Basic.ofx.bundle"
+    bundle = output / f"{args.example}.ofx.bundle"
     native_directory = bundle / "Contents" / architecture
     native_directory.mkdir(parents=True, exist_ok=True)
-    plugin = native_directory / "Basic.ofx"
+    plugin = native_directory / f"{args.example}.ofx"
     if system == "Windows":
         compiler = shutil.which("cl")
         command = [
             compiler, "/nologo", "/std:c++17", "/EHsc", "/utf-8", "/O2",
             "/DNDEBUG", "/MD", "/LD", f"/I{include}", str(cpp),
-            "/link", f"/OUT:{plugin}", f"/IMPLIB:{output / 'Basic.lib'}",
+            "/link", f"/OUT:{plugin}", f"/IMPLIB:{output / (args.example + '.lib')}",
         ]
     elif system in ("Linux", "Darwin"):
         compiler = shutil.which("c++")
@@ -103,6 +105,7 @@ def main():
     result = {
         "binary": str(plugin),
         "bundle": str(bundle),
+        "example": args.example,
         "source": origin,
         "headers": "repository-vendored OpenFX headers; whitespace normalized",
         "platform": system,

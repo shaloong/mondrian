@@ -404,6 +404,19 @@ fn product_executable() -> &'static Path {
         .as_path()
 }
 
+#[cfg(target_os = "linux")]
+fn assert_selected_product_worker_image(pid: u32) {
+    if let Some(expected) = std::env::var_os("MONDRIAN_OPENFX_TEST_HELPER") {
+        let expected = PathBuf::from(expected).canonicalize().expect("explicit normal Product");
+        let actual = std::fs::read_link(format!("/proc/{pid}/exe"))
+            .expect("actual retained native worker executable");
+        assert_eq!(
+            actual, expected,
+            "resident owner must execute the selected Product"
+        );
+    }
+}
+
 #[test]
 #[ignore = "set MONDRIAN_OPENFX_SESSION_PROBE_BINARY and mode compound_constant_animatable"]
 fn product_worker_preserves_animatable_constant_query_authority() {
@@ -1039,15 +1052,9 @@ fn official_basic_resident_sessions_reuse_workers_and_isolate_frames() {
     let export_id = export.worker_process_id();
     assert_ne!(preview_id, export_id);
     #[cfg(target_os = "linux")]
-    if let Some(expected) = std::env::var_os("MONDRIAN_OPENFX_TEST_HELPER") {
-        let expected = PathBuf::from(expected).canonicalize().expect("explicit normal Product");
+    {
         for pid in [preview_id, export_id] {
-            let actual = std::fs::read_link(format!("/proc/{pid}/exe"))
-                .expect("actual retained native worker executable");
-            assert_eq!(
-                actual, expected,
-                "resident owner must execute the selected Product"
-            );
+            assert_selected_product_worker_image(pid);
         }
     }
     let mut timing = OpenFxRenderTiming {
