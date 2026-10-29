@@ -320,15 +320,7 @@ pub struct WindowsNativeEditorContainer {
     hwnd: Option<HWND>,
 }
 
-/// Observed events from this exact native parent, after one bounded main batch.
-pub struct WindowsNativeEditorContainerEvents {
-    /// Actual main-queue state; Quit is not fabricated by an idle wait.
-    pub step: WindowsMessageStep,
-    /// The scale observed from this parent's actual DPI event.
-    pub scale: Option<f64>,
-    /// Physical client dimensions from this parent's actual WM_SIZE.
-    pub client_size: Option<(i32, i32)>,
-}
+pub use super::NativeEditorContainerEvents as WindowsNativeEditorContainerEvents;
 
 impl WindowsNativeEditorContainer {
     /// Create the format-neutral parent on its initializing STA/main thread.

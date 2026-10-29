@@ -7,6 +7,18 @@ use crate::error::{Error, Result};
 use crate::plugin::Plugin;
 use std::sync::{Arc, Mutex};
 
+/// Observations from one bounded turn of this exact native parent.
+/// The container never invokes a foreign plugin or grants an authoring lease.
+pub struct NativeEditorContainerEvents {
+    /// Actual Windows queue result, including a real WM_QUIT request.
+    #[cfg(target_os = "windows")]
+    pub step: WindowsMessageStep,
+    /// Native parent scaling, when the platform reports physical pixel scaling.
+    pub scale: Option<f64>,
+    /// Actual client size, in the platform's plugin embedding coordinates.
+    pub client_size: Option<(i32, i32)>,
+}
+
 #[cfg(target_os = "macos")]
 use objc2::{rc::Retained, MainThreadMarker, MainThreadOnly};
 #[cfg(target_os = "macos")]
@@ -824,3 +836,9 @@ pub use windows_scoped::{
     WindowsEditorMainThread, WindowsMainThreadWake, WindowsMessageStep,
     WindowsNativeEditorContainer, WindowsNativeEditorContainerEvents, WindowsPluginEditorParent,
 };
+
+#[cfg(target_os = "linux")]
+mod linux_scoped;
+
+#[cfg(target_os = "linux")]
+pub use linux_scoped::{LinuxEditorMainThread, LinuxNativeEditorContainer};
