@@ -132,7 +132,7 @@ pub(crate) fn box_blur_axis_halo(
 /// report the same unsupported-parameter path as other render ops instead of
 /// silently returning an unblurred frame.
 pub fn box_blur_frame_f32(
-    pixels: &mut Vec<[f32; 4]>,
+    pixels: &mut [[f32; 4]],
     width: usize,
     height: usize,
     radius: f32,
@@ -201,7 +201,7 @@ pub fn box_blur_frame_u8(
 /// The caller owns the region extent and its halo; the kernel only needs the
 /// buffer geometry, exactly like the Gaussian blur path.
 pub(crate) fn apply_box_blur_f32_controlled<E>(
-    working: &mut Vec<[f32; 4]>,
+    working: &mut [[f32; 4]],
     width: usize,
     height: usize,
     radius: f32,
