@@ -163,31 +163,15 @@ pub fn get_plugin_compatibility(path: &Path) -> Result<Vec<ClassCompatibility>> 
         return Ok(module_info.compatibility);
     }
 
-    use vst3::{ComPtr, Steinberg::Vst::IHostApplication, Steinberg::*};
+    use vst3::{ComPtr, Steinberg::*};
     unsafe {
-        // Declared first so it outlives the module and factory — see `get_plugin_info` for
-        // why `setHostContext` makes this ordering load-bearing.
-        let host_app = crate::internal::com_implementations::create_host_application();
-        let host_ctx = host_app.to_com_ptr::<IHostApplication>();
-        let context = host_ctx
-            .as_ref()
-            .map(|pointer| pointer.as_ptr() as *mut FUnknown)
-            .unwrap_or(ptr::null_mut());
-
+        // The loader binds stable factory services before any class query.
         let module = crate::internal::module_loader::load_module(path)?;
         let factory_ptr = module.get_factory()?;
         let factory = ComPtr::<IPluginFactory>::from_raw(factory_ptr).ok_or_else(|| {
             crate::Error::PluginLoadFailed("Failed to create factory ComPtr".to_string())
         })?;
-        if let Some(factory3) = factory.cast::<IPluginFactory3>() {
-            let result = factory3.setHostContext(context);
-            if result != kResultOk && result != kResultTrue {
-                log::warn!(
-                    "IPluginFactory3::setHostContext failed during compatibility discovery: \
-                     {result:#x}"
-                );
-            }
-        }
+
         crate::internal::module_info::read_factory_compatibility(&factory)
     }
 }
@@ -401,11 +385,8 @@ pub fn get_plugin_info(path: &Path) -> Result<PluginInfo> {
     use vst3::{ComPtr, Interface, Steinberg::Vst::*, Steinberg::*};
 
     unsafe {
-        // Declared before the module and factory so it drops *after* them: locals drop in
-        // reverse declaration order, and `IPluginFactory3::setHostContext` stores this pointer
-        // in a module-global without an addRef (the SDK's `CPluginFactory` keeps it in
-        // `gPluginContext`). Releasing the host application before the module unloads would
-        // leave that global dangling for the rest of the plugin's teardown.
+        // This per-scan instance context outlives native class teardown and
+        // stays separate from the loader-owned stable factory context.
         let host_app = crate::internal::com_implementations::create_host_application();
         let host_ctx = host_app.to_com_ptr::<IHostApplication>();
         let context = host_ctx
@@ -422,12 +403,6 @@ pub fn get_plugin_info(path: &Path) -> Result<PluginInfo> {
         let factory = ComPtr::<IPluginFactory>::from_raw(factory_ptr).ok_or_else(|| {
             crate::Error::PluginLoadFailed("Failed to create factory ComPtr".to_string())
         })?;
-        if let Some(factory3) = factory.cast::<IPluginFactory3>() {
-            let result = factory3.setHostContext(context);
-            if result != kResultOk && result != kResultTrue {
-                log::warn!("IPluginFactory3::setHostContext failed during discovery: {result:#x}");
-            }
-        }
 
         // Get factory info
         let mut factory_info: PFactoryInfo = std::mem::zeroed();
@@ -589,8 +564,7 @@ pub fn get_detailed_plugin_info(path: &Path) -> Result<DetailedPluginInfo> {
     let info = get_plugin_info(path)?;
 
     unsafe {
-        // Declared first so it outlives the module and factory — see `get_plugin_info` for
-        // why `setHostContext` makes this ordering load-bearing.
+        // Keep per-scan instance services alive through native module teardown.
         let host_app = crate::internal::com_implementations::create_host_application();
         let host_ctx = host_app.to_com_ptr::<IHostApplication>();
         let context = host_ctx
@@ -603,15 +577,7 @@ pub fn get_detailed_plugin_info(path: &Path) -> Result<DetailedPluginInfo> {
         let factory = ComPtr::<IPluginFactory>::from_raw(factory_ptr).ok_or_else(|| {
             crate::Error::PluginLoadFailed("Failed to create factory ComPtr".to_string())
         })?;
-        if let Some(factory3) = factory.cast::<IPluginFactory3>() {
-            let result = factory3.setHostContext(context);
-            if result != kResultOk && result != kResultTrue {
-                log::warn!(
-                    "IPluginFactory3::setHostContext failed during detailed discovery: \
-                     {result:#x}"
-                );
-            }
-        }
+
         let compatibility = match module_info.as_ref() {
             Some(module_info) => module_info.compatibility.clone(),
             None => crate::internal::module_info::read_factory_compatibility(&factory)?,

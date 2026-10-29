@@ -9,6 +9,8 @@ pub(crate) mod host_storage;
 pub(crate) mod module_info;
 pub(crate) mod module_loader;
 pub(crate) mod plugin_impl;
+#[cfg(target_os = "linux")]
+pub(crate) mod run_loop;
 pub(crate) mod utils;
 
 pub(crate) mod isolated_plugin_impl;

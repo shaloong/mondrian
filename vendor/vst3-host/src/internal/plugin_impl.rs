@@ -36,6 +36,26 @@ use super::{
     module_loader::{load_module, VstModule},
 };
 
+// The SDK's DefaultEnumType is i32 on Windows and u32 on Unix. Normalize only
+// these native bit masks; removing casts based on Unix lint breaks Windows.
+#[cfg_attr(
+    not(target_os = "windows"),
+    expect(
+        clippy::unnecessary_cast,
+        reason = "SDK plain-enum signedness differs between Windows and Unix"
+    )
+)]
+mod sdk_flag_bits {
+    use vst3::Steinberg::Vst::{BusInfo_, ProcessContext_};
+
+    pub(super) const DEFAULT_BUS_ACTIVE: u32 = BusInfo_::BusFlags_::kDefaultActive as u32;
+    pub(super) const CONTINUOUS_TIME_VALID: u32 =
+        ProcessContext_::StatesAndFlags_::kContTimeValid as u32;
+    pub(super) const TEMPO_VALID: u32 = ProcessContext_::StatesAndFlags_::kTempoValid as u32;
+    pub(super) const PROJECT_MUSIC_VALID: u32 =
+        ProcessContext_::StatesAndFlags_::kProjectTimeMusicValid as u32;
+}
+
 /// Cap on the buffered output MIDI a plugin emits, so a host that never polls can't grow it
 /// forever. The buffer is pre-reserved to this size so steady-state pushes never reallocate.
 const MAX_OUTPUT_MIDI: usize = 4096;
@@ -254,7 +274,7 @@ pub struct PluginImpl {
     // writes requested sizes into (drained via take_editor_resize_request).
     plug_frame: ComWrapper<HostPlugFrame>,
     editor_resize: Arc<Mutex<Option<(i32, i32)>>>,
-    // Linux IRunLoop registrations from the plugin's editor (fd handlers +
+    // Editor-scoped Linux IRunLoop registrations (fd handlers +
     // timers), serviced on the host UI thread via `service_run_loop`.
     #[cfg(target_os = "linux")]
     run_loop: Arc<Mutex<RunLoopRegistry>>,
@@ -268,11 +288,8 @@ pub struct PluginImpl {
     // those are released while the module's vtables still exist, and before `_host_app` below.
     _module: Box<dyn VstModule>,
 
-    // Host application context passed to initialize() — kept alive for the plugin's lifetime
-    // because the plugin may retain a reference to it. It has to outlive `_module`: the SDK's
-    // `CPluginFactory::setHostContext` parks this pointer in a module-global (`gPluginContext`)
-    // without an addRef, and module teardown — static destructors, `DeinitModule` — still reads
-    // it. Rust drops fields in declaration order, so this one is declared last.
+    // Instance context remains distinct from shared factory services. Keep it
+    // alive through module teardown; native components may retain or borrow it.
     _host_app: ComWrapper<HostApplication>,
 
     // Thread which initialized the component/controller. Lifecycle-sensitive restart handling
@@ -1097,7 +1114,7 @@ impl PluginImpl {
                 IProcessContextRequirements_::Flags_::kNeedTempo as u32,
             ) {
                 data.process_context.tempo = bpm;
-                data.process_context.state |= ProcessContext_::StatesAndFlags_::kTempoValid as u32;
+                data.process_context.state |= sdk_flag_bits::TEMPO_VALID;
             }
         }
     }
@@ -1544,8 +1561,17 @@ impl PluginImpl {
             log::info!("=== PLUGIN LOADING START ===");
             log::info!("Loading plugin from: {}", path.display());
 
-            // Load the VST3 module using platform-specific loader. Declared first so it drops
-            // LAST: everything below lives in the module's address space, and the COM teardown
+            // Instance services are distinct from the factory context. Declare
+            // first so every failed construction keeps them alive through unload.
+            let host_app = create_host_application_with_interfaces(interfaces);
+            let host_ctx = host_app.to_com_ptr::<IHostApplication>();
+            let context = host_ctx
+                .as_ref()
+                .map(|p| p.as_ptr() as *mut FUnknown)
+                .unwrap_or(ptr::null_mut());
+
+            // Load before plugin-side COM owners, but after instance services. Everything
+            // below lives in the module's address space, and the COM teardown
             // (whether via `InitializedComponent` or `Drop for PluginImpl`) must complete before
             // the module unmaps.
             log::debug!("Step 1: Loading VST3 module...");
@@ -1568,20 +1594,6 @@ impl PluginImpl {
             })?;
             log::debug!("Factory wrapped successfully");
 
-            // Factory3 must receive the host context before any class is instantiated. Keep the
-            // same context alive for the complete component/controller lifetime.
-            let host_app = create_host_application_with_interfaces(interfaces);
-            let host_ctx = host_app.to_com_ptr::<IHostApplication>();
-            let context = host_ctx
-                .as_ref()
-                .map(|p| p.as_ptr() as *mut FUnknown)
-                .unwrap_or(ptr::null_mut());
-            if let Some(factory3) = factory.cast::<IPluginFactory3>() {
-                let result = factory3.setHostContext(context);
-                if result != kResultOk && result != kResultTrue {
-                    log::warn!("IPluginFactory3::setHostContext failed: {result:#x}");
-                }
-            }
             let compatibility = match module_info.as_ref() {
                 Some(module_info) => module_info.compatibility.clone(),
                 None => crate::internal::module_info::read_factory_compatibility(&factory)?,
@@ -1801,6 +1813,10 @@ impl PluginImpl {
                 updated_info.vendor
             );
 
+            // The module retains its own factory reference. Retire this local
+            // before transferring the module into an owner whose final setup
+            // can still fail and destroy it inside this stack frame.
+            drop(factory);
             let mut plugin = Self {
                 component,
                 processor,
@@ -1833,7 +1849,6 @@ impl PluginImpl {
                 processing_resource_bounds: bounds,
                 load_preparation: preparation,
                 component_handler: Some(component_handler),
-                connection: initialized.take_connection(),
                 pending_param_changes: Vec::with_capacity(MAX_PENDING_PARAM_CHANGES),
                 dropped_param_changes: 0,
                 gui_param_changes_for_host: Arc::new(Mutex::new(Vec::with_capacity(
@@ -1852,13 +1867,15 @@ impl PluginImpl {
                 editor_resize,
                 #[cfg(target_os = "linux")]
                 run_loop,
+                // All host storage has been allocated. Consume the guard while
+                // the module is still local: no temporary native reference may
+                // outlive a failed final setup of the assembled owner.
+                connection: initialized.take_connection(),
                 _module: module,
                 _host_app: host_app,
                 control_thread: thread::current().id(),
             };
-            // From here on `plugin` owns the teardown: dropping it runs the same ordered
-            // sequence the guard would.
-            initialized.disarm();
+            // The consumed guard has transferred teardown to this owner.
 
             // IMidiMapping and unit/program metadata are controller calls and therefore belong
             // here on the loading thread, never in process() or a playback command drain.
@@ -2797,6 +2814,8 @@ impl PluginInternal for PluginImpl {
             control_thread: self.control_thread,
             #[cfg(target_os = "linux")]
             run_loop: &self.run_loop,
+            #[cfg(target_os = "linux")]
+            factory_run_loop: self._module.factory_run_loop(),
         };
         let processor = PluginProcessFields {
             processor: &self.processor,
@@ -3260,7 +3279,7 @@ impl PluginInternal for PluginImpl {
                     role,
                     name: crate::internal::utils::vst_string_to_string(&info.name),
                     channel_count: info.channelCount as usize,
-                    default_active: info.flags & BusInfo_::BusFlags_::kDefaultActive as u32 != 0,
+                    default_active: info.flags & sdk_flag_bits::DEFAULT_BUS_ACTIVE != 0,
                 });
             }
             Ok(result)
@@ -3855,7 +3874,9 @@ impl PluginInternal for PluginImpl {
 
     #[cfg(target_os = "linux")]
     fn service_run_loop(&mut self) {
-        self.editor_fields().service_run_loop()
+        if let Err(error) = self.editor_fields().service_run_loop() {
+            log::error!("failed to service native run loop: {error}");
+        }
     }
 
     fn get_editor_size(&self) -> Result<(i32, i32)> {
@@ -5324,8 +5345,8 @@ impl PluginImpl {
                         bounds.total(total)?;
                     }
                 }
-                let active = status == kResultOk
-                    && (info.flags & BusInfo_::BusFlags_::kDefaultActive as u32) != 0;
+                let active =
+                    status == kResultOk && (info.flags & sdk_flag_bits::DEFAULT_BUS_ACTIVE) != 0;
                 if active {
                     let result = component.activateBus(media, direction, index, 1);
                     if result != kResultOk {
@@ -5376,7 +5397,7 @@ impl PluginImpl {
                     );
                     let (role, channel_count) =
                         checked_event_bus_info(direction, index as i32, status, &info)?;
-                    let active = info.flags & BusInfo_::BusFlags_::kDefaultActive as u32 != 0;
+                    let active = info.flags & sdk_flag_bits::DEFAULT_BUS_ACTIVE != 0;
                     if active {
                         let status =
                             component.activateBus(kEvent as i32, native_direction, index as i32, 1);
@@ -5530,7 +5551,7 @@ fn reconcile_audio_bus_activation_with_bounds(
                         bounds.channels(info.channelCount.max(0) as usize)?;
                     }
                 }
-                status == kResultOk && info.flags & BusInfo_::BusFlags_::kDefaultActive as u32 != 0
+                status == kResultOk && info.flags & sdk_flag_bits::DEFAULT_BUS_ACTIVE != 0
             };
             // Both true and false policies need a fresh ACK: restoring state may
             // have changed native activation. Never infer an ACK by resizing.
@@ -5637,7 +5658,7 @@ fn walk_native_event_bus_constraints(
                     index,
                     role,
                     channel_count,
-                    info.flags & BusInfo_::BusFlags_::kDefaultActive as u32 != 0,
+                    info.flags & sdk_flag_bits::DEFAULT_BUS_ACTIVE != 0,
                     host_active,
                 )
             },
@@ -5667,7 +5688,7 @@ fn census_native_event_buses(
                     role,
                     name: crate::internal::utils::vst_string_to_string(&info.name),
                     channel_count,
-                    default_active: info.flags & BusInfo_::BusFlags_::kDefaultActive as u32 != 0,
+                    default_active: info.flags & sdk_flag_bits::DEFAULT_BUS_ACTIVE != 0,
                     host_active,
                 });
                 Ok(())
@@ -5912,13 +5933,10 @@ impl InitializedComponent {
         self.connection = connection;
     }
 
-    fn take_connection(&mut self) -> Option<ConnectionPair> {
-        self.connection.take()
-    }
-
-    /// Cancel the teardown: the finished `PluginImpl` owns the lifecycle from here.
-    fn disarm(&mut self) {
+    /// Transfer teardown and release temporary COM refs before module handoff.
+    fn take_connection(mut self) -> Option<ConnectionPair> {
         self.armed = false;
+        self.connection.take()
     }
 }
 
@@ -6089,7 +6107,7 @@ fn checked_process_sample_end(ctx: &ProcessContext, frames: usize) -> Result<(i6
         .projectTimeSamples
         .checked_add(frames)
         .ok_or(Error::NativeEvent(invalid))?;
-    let continuous = if ctx.state & ProcessContext_::StatesAndFlags_::kContTimeValid as u32 != 0 {
+    let continuous = if ctx.state & sdk_flag_bits::CONTINUOUS_TIME_VALID != 0 {
         Some(
             ctx.continousTimeSamples
                 .checked_add(frames)
@@ -7215,6 +7233,8 @@ struct PluginEditorFields<'a> {
     control_thread: ThreadId,
     #[cfg(target_os = "linux")]
     run_loop: &'a Arc<Mutex<RunLoopRegistry>>,
+    #[cfg(target_os = "linux")]
+    factory_run_loop: Option<&'a Arc<Mutex<RunLoopRegistry>>>,
 }
 
 impl PluginImpl {
@@ -7254,6 +7274,8 @@ impl PluginImpl {
             control_thread: self.control_thread,
             #[cfg(target_os = "linux")]
             run_loop: &self.run_loop,
+            #[cfg(target_os = "linux")]
+            factory_run_loop: self._module.factory_run_loop(),
         }
     }
 }
@@ -7349,10 +7371,9 @@ impl PluginProcessFields<'_> {
                         .as_com_ref::<IEventList>()
                         .unwrap()
                         .as_ptr()
-                || (context.state & ProcessContext_::StatesAndFlags_::kTempoValid as u32 != 0
+                || (context.state & sdk_flag_bits::TEMPO_VALID != 0
                     && (!context.tempo.is_finite() || context.tempo <= 0.0))
-                || (context.state & ProcessContext_::StatesAndFlags_::kProjectTimeMusicValid as u32
-                    != 0
+                || (context.state & sdk_flag_bits::PROJECT_MUSIC_VALID != 0
                     && !context.projectTimeMusic.is_finite())
             {
                 return Err(Failure::InvalidContext);
@@ -8055,11 +8076,13 @@ impl PluginEditorFields<'_> {
         // On unknown removal it still owns its host frame and registrations.
         #[cfg(target_os = "linux")]
         if self.plugin_view.removal_complete() {
-            let mut registry = self.run_loop.lock().map_err(|_| {
-                Error::Other("editor run-loop state is poisoned during removal".to_string())
-            })?;
-            registry.handlers.clear();
-            registry.timers.clear();
+            let retired = {
+                let mut registry = self.run_loop.lock().map_err(|_| {
+                    Error::Other("editor run-loop state is poisoned during removal".to_string())
+                })?;
+                registry.take_retired()
+            };
+            drop(retired);
         }
         result
     }
@@ -8152,51 +8175,11 @@ impl PluginEditorFields<'_> {
     }
 
     #[cfg(target_os = "linux")]
-    fn service_run_loop(&mut self) {
-        use vst3::Steinberg::Linux::{IEventHandlerTrait, ITimerHandlerTrait};
-
-        // Fire due timers. Snapshot the handlers, then invoke with the lock
-        // RELEASED: a callback may re-enter registerTimer/unregisterTimer
-        // (VSTGUI does), which takes the same lock.
-        let now = std::time::Instant::now();
-        let mut due = Vec::new();
-        if let Ok(mut reg) = self.run_loop.lock() {
-            for timer in reg.timers.iter_mut() {
-                if now >= timer.due {
-                    timer.due = now + std::time::Duration::from_millis(timer.interval_ms);
-                    due.push(timer.handler.clone());
-                }
-            }
+    fn service_run_loop(&mut self) -> Result<()> {
+        if let Some(registry) = self.factory_run_loop {
+            super::run_loop::service(registry)?;
         }
-        for handler in due {
-            unsafe { handler.onTimer() };
-        }
-
-        // Poll registered fds (zero timeout - never blocks the UI thread)
-        // and notify ready ones. Same snapshot-then-invoke pattern.
-        let handlers: Vec<_> = match self.run_loop.lock() {
-            Ok(reg) => reg.handlers.clone(),
-            Err(_) => return,
-        };
-        if handlers.is_empty() {
-            return;
-        }
-        let mut fds: Vec<libc::pollfd> = handlers
-            .iter()
-            .map(|&(_, fd)| libc::pollfd {
-                fd,
-                events: libc::POLLIN,
-                revents: 0,
-            })
-            .collect();
-        let ready = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as _, 0) };
-        if ready > 0 {
-            for (pfd, (handler, fd)) in fds.iter().zip(handlers.iter()) {
-                if pfd.revents & (libc::POLLIN | libc::POLLERR | libc::POLLHUP) != 0 {
-                    unsafe { handler.onFDIsSet(*fd) };
-                }
-            }
-        }
+        super::run_loop::service(self.run_loop)
     }
 }
 
@@ -8551,7 +8534,7 @@ impl crate::plugin::PluginEditorRole for PluginEditorFields<'_> {
     fn service_run_loop(&mut self) -> Result<()> {
         self.ensure_control_thread()?;
         #[cfg(target_os = "linux")]
-        PluginEditorFields::service_run_loop(self);
+        PluginEditorFields::service_run_loop(self)?;
         Ok(())
     }
 }
@@ -8816,10 +8799,452 @@ mod editor_detach_failure_tests {
                 control_thread: thread::current().id(),
                 #[cfg(target_os = "linux")]
                 run_loop: &self.run_loop,
+                #[cfg(target_os = "linux")]
+                factory_run_loop: None,
             }
         }
         fn close(&mut self) -> Result<()> {
             self.fields().close_editor()
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    mod run_loop_snapshot_tests {
+        use super::*;
+        use std::{cell::Cell, io::Write, os::fd::AsRawFd, os::unix::net::UnixStream, rc::Rc};
+        use vst3::Steinberg::Linux::{
+            IEventHandler, IEventHandlerTrait, IRunLoop, IRunLoopTrait, ITimerHandler,
+            ITimerHandlerTrait,
+        };
+
+        struct TimerProbe {
+            calls: Rc<Cell<usize>>,
+            action: Option<Box<dyn Fn()>>,
+            on_drop: Option<Box<dyn Fn()>>,
+        }
+
+        impl Drop for TimerProbe {
+            fn drop(&mut self) {
+                if let Some(action) = self.on_drop.take() {
+                    action();
+                }
+            }
+        }
+
+        impl Class for TimerProbe {
+            type Interfaces = (ITimerHandler,);
+        }
+
+        impl ITimerHandlerTrait for TimerProbe {
+            unsafe fn onTimer(&self) {
+                self.calls.set(self.calls.get() + 1);
+                if let Some(action) = &self.action {
+                    action();
+                }
+            }
+        }
+
+        fn service_due_timers(fixture: &mut Fixture) {
+            // Drive the actual dispatcher without sleeps or a wall-clock race.
+            let now = std::time::Instant::now();
+            for timer in &mut fixture.run_loop.lock().unwrap().timers {
+                timer.due = now;
+            }
+            crate::plugin::PluginEditorRole::service_run_loop(&mut fixture.fields())
+                .expect("service on the initializing thread");
+        }
+
+        #[test]
+        fn closing_editor_retires_only_its_scope_and_services_factory_without_view() {
+            let mut fixture = Fixture::new(kResultOk, kResultOk);
+            let factory = Arc::new(Mutex::new(RunLoopRegistry::new()));
+            let calls = Rc::new(Cell::new(0));
+            let timer = ComWrapper::new(TimerProbe {
+                calls: Rc::clone(&calls),
+                action: None,
+                on_drop: None,
+            })
+            .to_com_ptr::<ITimerHandler>()
+            .unwrap();
+            assert_eq!(
+                unsafe { RunLoopRegistry::register_timer(&factory, timer.as_ptr(), 1) },
+                kResultOk
+            );
+            assert_eq!(
+                unsafe { RunLoopRegistry::register_timer(&fixture.run_loop, timer.as_ptr(), 1) },
+                kResultOk
+            );
+            {
+                let mut fields = fixture.fields();
+                fields.factory_run_loop = Some(&factory);
+                crate::plugin::PluginEditorRole::close_editor(&mut fields).unwrap();
+                assert!(!fields.plugin_view.is_present());
+            }
+            assert!(fixture.run_loop.lock().unwrap().timers.is_empty());
+            assert_eq!(factory.lock().unwrap().timers.len(), 1);
+            for timer in &mut factory.lock().unwrap().timers {
+                timer.due = std::time::Instant::now();
+            }
+            let mut fields = fixture.fields();
+            fields.factory_run_loop = Some(&factory);
+            crate::plugin::PluginEditorRole::service_run_loop(&mut fields).unwrap();
+            assert_eq!(calls.get(), 1);
+            RunLoopRegistry::shutdown(&factory);
+        }
+
+        #[test]
+        fn main_role_refuses_factory_callbacks_on_another_control_thread() {
+            let mut fixture = Fixture::new(kResultOk, kResultOk);
+            let factory = Arc::new(Mutex::new(RunLoopRegistry::new()));
+            let calls = Rc::new(Cell::new(0));
+            let timer = ComWrapper::new(TimerProbe {
+                calls: Rc::clone(&calls),
+                action: None,
+                on_drop: None,
+            })
+            .to_com_ptr::<ITimerHandler>()
+            .unwrap();
+            assert_eq!(
+                unsafe { RunLoopRegistry::register_timer(&factory, timer.as_ptr(), 1) },
+                kResultOk
+            );
+            for timer in &mut factory.lock().unwrap().timers {
+                timer.due = std::time::Instant::now();
+            }
+            let other = std::thread::spawn(|| std::thread::current().id())
+                .join()
+                .unwrap();
+            let mut fields = fixture.fields();
+            fields.control_thread = other;
+            fields.factory_run_loop = Some(&factory);
+            assert!(crate::plugin::PluginEditorRole::service_run_loop(&mut fields).is_err());
+            assert_eq!(calls.get(), 0);
+            RunLoopRegistry::shutdown(&factory);
+            fixture.close().unwrap();
+        }
+
+        fn callback_retires_later_timer(re_register: bool) -> (usize, usize) {
+            let mut fixture = Fixture::new(kResultOk, kResultOk);
+            let run_loop = Rc::new(fixture.frame.to_com_ptr::<IRunLoop>().expect("run loop"));
+            let victim_calls = Rc::new(Cell::new(0));
+            let victim = ComWrapper::new(TimerProbe {
+                calls: Rc::clone(&victim_calls),
+                action: None,
+                on_drop: None,
+            })
+            .to_com_ptr::<ITimerHandler>()
+            .expect("victim timer");
+            // A weak host reference avoids a registry -> callback -> registry cycle.
+            let weak_loop = Rc::downgrade(&run_loop);
+            let callback_victim = victim.clone();
+            let retired = Cell::new(false);
+            let first = ComWrapper::new(TimerProbe {
+                calls: Rc::new(Cell::new(0)),
+                on_drop: None,
+                action: Some(Box::new(move || {
+                    if retired.replace(true) {
+                        return;
+                    }
+                    let run_loop = weak_loop.upgrade().expect("live host loop owner");
+                    unsafe {
+                        assert_eq!(
+                            run_loop.unregisterTimer(callback_victim.as_ptr()),
+                            kResultOk
+                        );
+                        if re_register {
+                            assert_eq!(
+                                run_loop.registerTimer(callback_victim.as_ptr(), 1),
+                                kResultOk
+                            );
+                        }
+                    }
+                })),
+            })
+            .to_com_ptr::<ITimerHandler>()
+            .expect("first timer");
+            unsafe {
+                assert_eq!(run_loop.registerTimer(first.as_ptr(), 1), kResultOk);
+                assert_eq!(run_loop.registerTimer(victim.as_ptr(), 1), kResultOk);
+            }
+
+            service_due_timers(&mut fixture);
+            let after_retirement = victim_calls.get();
+            service_due_timers(&mut fixture);
+            let after_next_turn = victim_calls.get();
+            unsafe {
+                run_loop.unregisterTimer(first.as_ptr());
+                run_loop.unregisterTimer(victim.as_ptr());
+            }
+            fixture.close().expect("settle the fixture attachment");
+            (after_retirement, after_next_turn)
+        }
+
+        #[test]
+        fn unregistering_a_due_timer_retires_its_captured_callback() {
+            assert_eq!(callback_retires_later_timer(false), (0, 0));
+        }
+
+        #[test]
+        fn registering_the_same_timer_again_does_not_revive_its_old_snapshot() {
+            assert_eq!(callback_retires_later_timer(true), (0, 1));
+        }
+
+        #[test]
+        fn unregistering_the_last_timer_reference_releases_native_code_after_unlock() {
+            let mut fixture = Fixture::new(kResultOk, kResultOk);
+            let run_loop = fixture.frame.to_com_ptr::<IRunLoop>().expect("run loop");
+            let released = Rc::new(Cell::new(false));
+            let unlocked = Rc::new(Cell::new(false));
+            let release_observed = Rc::clone(&released);
+            let unlock_observed = Rc::clone(&unlocked);
+            let weak_registry = Arc::downgrade(&fixture.run_loop);
+            let timer = ComWrapper::new(TimerProbe {
+                calls: Rc::new(Cell::new(0)),
+                action: None,
+                on_drop: Some(Box::new(move || {
+                    release_observed.set(true);
+                    unlock_observed.set(
+                        weak_registry
+                            .upgrade()
+                            .expect("live registry")
+                            .try_lock()
+                            .is_ok(),
+                    );
+                })),
+            })
+            .to_com_ptr::<ITimerHandler>()
+            .expect("timer interface");
+            let native = timer.as_ptr();
+            unsafe {
+                assert_eq!(run_loop.registerTimer(native, 1), kResultOk);
+            }
+            drop(timer);
+            unsafe {
+                assert_eq!(run_loop.unregisterTimer(native), kResultOk);
+            }
+            fixture.close().expect("settle the fixture attachment");
+            assert!(
+                released.get(),
+                "unregister releases the last host reference"
+            );
+            assert!(unlocked.get(), "native Release may reenter the host");
+        }
+
+        struct EventProbe {
+            calls: Rc<Cell<usize>>,
+            fd: i32,
+            action: Option<Box<dyn Fn()>>,
+        }
+
+        impl Class for EventProbe {
+            type Interfaces = (IEventHandler,);
+        }
+
+        impl IEventHandlerTrait for EventProbe {
+            unsafe fn onFDIsSet(&self, fd: i32) {
+                assert_eq!(fd, self.fd, "deliver the registered native descriptor");
+                self.calls.set(self.calls.get() + 1);
+                if let Some(action) = &self.action {
+                    action();
+                }
+            }
+        }
+
+        fn callback_retires_later_fd(re_register: bool) -> (usize, usize) {
+            let mut fixture = Fixture::new(kResultOk, kResultOk);
+            let run_loop = Rc::new(fixture.frame.to_com_ptr::<IRunLoop>().expect("run loop"));
+            let mut peers = [UnixStream::pair().unwrap(), UnixStream::pair().unwrap()];
+            for (_, writer) in &mut peers {
+                writer
+                    .write_all(b"ready")
+                    .expect("make each descriptor readable");
+            }
+            let victim_fd = peers[1].0.as_raw_fd();
+            let victim_calls = Rc::new(Cell::new(0));
+            let victim = ComWrapper::new(EventProbe {
+                calls: Rc::clone(&victim_calls),
+                fd: victim_fd,
+                action: None,
+            })
+            .to_com_ptr::<IEventHandler>()
+            .expect("victim event handler");
+            let callback_victim = victim.clone();
+            let weak_loop = Rc::downgrade(&run_loop);
+            let retired = Cell::new(false);
+            let first = ComWrapper::new(EventProbe {
+                calls: Rc::new(Cell::new(0)),
+                fd: peers[0].0.as_raw_fd(),
+                action: Some(Box::new(move || {
+                    if retired.replace(true) {
+                        return;
+                    }
+                    let run_loop = weak_loop.upgrade().expect("live host loop owner");
+                    unsafe {
+                        assert_eq!(
+                            run_loop.unregisterEventHandler(callback_victim.as_ptr()),
+                            kResultOk
+                        );
+                        if re_register {
+                            assert_eq!(
+                                run_loop.registerEventHandler(callback_victim.as_ptr(), victim_fd),
+                                kResultOk
+                            );
+                        }
+                    }
+                })),
+            })
+            .to_com_ptr::<IEventHandler>()
+            .expect("first event handler");
+            unsafe {
+                assert_eq!(
+                    run_loop.registerEventHandler(first.as_ptr(), peers[0].0.as_raw_fd()),
+                    kResultOk
+                );
+                assert_eq!(
+                    run_loop.registerEventHandler(victim.as_ptr(), victim_fd),
+                    kResultOk
+                );
+            }
+            crate::plugin::PluginEditorRole::service_run_loop(&mut fixture.fields()).unwrap();
+            let after_retirement = victim_calls.get();
+            crate::plugin::PluginEditorRole::service_run_loop(&mut fixture.fields()).unwrap();
+            let after_next_turn = victim_calls.get();
+            unsafe {
+                run_loop.unregisterEventHandler(first.as_ptr());
+                run_loop.unregisterEventHandler(victim.as_ptr());
+            }
+            fixture.close().expect("settle the fixture attachment");
+            (after_retirement, after_next_turn)
+        }
+
+        #[test]
+        fn unregistering_a_ready_fd_retires_its_captured_callback() {
+            assert_eq!(callback_retires_later_fd(false), (0, 0));
+        }
+
+        #[test]
+        fn registering_the_same_fd_handler_again_does_not_revive_its_old_snapshot() {
+            assert_eq!(callback_retires_later_fd(true), (0, 1));
+        }
+
+        #[test]
+        fn registered_callback_leases_participate_in_the_actual_host_storage_inventory() {
+            use crate::host_storage::{
+                HostStorageError, HostStorageKind, HostStorageRef, HostStorageVisitor,
+            };
+            use std::alloc::Layout;
+
+            struct Coverage {
+                wanted: [(usize, Layout); 2],
+                seen: [bool; 2],
+            }
+            impl HostStorageVisitor for Coverage {
+                fn visit(
+                    &mut self,
+                    storage: HostStorageRef<'_>,
+                ) -> std::result::Result<(), HostStorageError> {
+                    for (index, (address, layout)) in self.wanted.iter().enumerate() {
+                        if storage.address() == *address {
+                            assert_eq!(storage.kind(), HostStorageKind::ArcPayload);
+                            assert_eq!(storage.layout(), *layout);
+                            self.seen[index] = true;
+                        }
+                    }
+                    Ok(())
+                }
+            }
+            let mut fixture = Fixture::new(kResultOk, kResultOk);
+            let run_loop = fixture.frame.to_com_ptr::<IRunLoop>().expect("run loop");
+            let (read, _write) = UnixStream::pair().unwrap();
+            let calls = Rc::new(Cell::new(0));
+            let event = ComWrapper::new(EventProbe {
+                calls: Rc::clone(&calls),
+                fd: read.as_raw_fd(),
+                action: None,
+            })
+            .to_com_ptr::<IEventHandler>()
+            .unwrap();
+            let timer = ComWrapper::new(TimerProbe {
+                calls: Rc::clone(&calls),
+                action: None,
+                on_drop: None,
+            })
+            .to_com_ptr::<ITimerHandler>()
+            .unwrap();
+            unsafe {
+                assert_eq!(
+                    run_loop.registerEventHandler(event.as_ptr(), read.as_raw_fd()),
+                    kResultOk
+                );
+                assert_eq!(run_loop.registerTimer(timer.as_ptr(), 1), kResultOk);
+            }
+            let wanted = {
+                let registry = fixture.run_loop.lock().unwrap();
+                let event = &registry.handlers[0];
+                let timer = &registry.timers[0].registration;
+                [
+                    (
+                        Arc::as_ptr(event) as usize,
+                        Layout::for_value(event.as_ref()),
+                    ),
+                    (
+                        Arc::as_ptr(timer) as usize,
+                        Layout::for_value(timer.as_ref()),
+                    ),
+                ]
+            };
+            let mut coverage = Coverage {
+                wanted,
+                seen: [false; 2],
+            };
+            fixture.frame.visit_owned_storage(&mut coverage).unwrap();
+            assert_eq!(
+                coverage.seen, [true; 2],
+                "observe both live callback owners"
+            );
+            unsafe {
+                run_loop.unregisterEventHandler(event.as_ptr());
+                run_loop.unregisterTimer(timer.as_ptr());
+            }
+            coverage.seen.fill(false);
+            fixture.frame.visit_owned_storage(&mut coverage).unwrap();
+            assert_eq!(
+                coverage.seen, [false; 2],
+                "retired leases leave the registry inventory"
+            );
+            assert_eq!(calls.get(), 0, "inventory never invokes native callbacks");
+            fixture.close().expect("settle the fixture attachment");
+        }
+
+        #[test]
+        fn failed_registration_does_not_retain_native_callback_ownership() {
+            let mut fixture = Fixture::new(kResultOk, kResultOk);
+            let run_loop = fixture.frame.to_com_ptr::<IRunLoop>().expect("run loop");
+            let poison = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _guard = fixture.run_loop.lock().unwrap();
+                panic!("controlled registry poison");
+            }));
+            assert!(poison.is_err());
+            let released = Rc::new(Cell::new(false));
+            let observed = Rc::clone(&released);
+            let timer = ComWrapper::new(TimerProbe {
+                calls: Rc::new(Cell::new(0)),
+                action: None,
+                on_drop: Some(Box::new(move || observed.set(true))),
+            })
+            .to_com_ptr::<ITimerHandler>()
+            .unwrap();
+            unsafe {
+                assert_eq!(run_loop.registerTimer(timer.as_ptr(), 1), kInternalError);
+            }
+            drop(timer);
+            assert!(
+                released.get(),
+                "the failed registration cannot keep a native owner"
+            );
+            fixture.run_loop.clear_poison();
+            assert!(fixture.run_loop.lock().unwrap().timers.is_empty());
+            fixture.close().expect("settle the fixture attachment");
         }
     }
 
@@ -10218,7 +10643,7 @@ mod checked_native_note_tests {
                 let context = &mut fixture.data.as_mut().unwrap().process_context;
                 context.projectTimeSamples = -17;
                 context.continousTimeSamples = -41;
-                context.state = ProcessContext_::StatesAndFlags_::kContTimeValid as u32;
+                context.state = sdk_flag_bits::CONTINUOUS_TIME_VALID;
                 fixture.parameters.push(ParameterChange {
                     id: 7,
                     value: 0.5,
@@ -12951,7 +13376,7 @@ mod restored_audio_activation_tests {
                 BusTypes_::kAux as i32
             };
             info.flags = if default_active {
-                BusInfo_::BusFlags_::kDefaultActive as u32
+                sdk_flag_bits::DEFAULT_BUS_ACTIVE
             } else {
                 0
             };
@@ -13277,6 +13702,64 @@ mod restored_audio_activation_tests {
         fn path(&self) -> &std::path::Path {
             std::path::Path::new("COM lifecycle control")
         }
+    }
+
+    struct ModuleRetirementWitness {
+        component: ComPtr<IComponent>,
+        refs_at_retirement: Arc<std::sync::atomic::AtomicU32>,
+    }
+    impl VstModule for ModuleRetirementWitness {
+        fn visit_owned_storage(
+            &self,
+            _: &mut dyn crate::host_storage::HostStorageVisitor,
+        ) -> std::result::Result<(), crate::host_storage::HostStorageError> {
+            Ok(())
+        }
+        fn get_factory(&self) -> Result<*mut IPluginFactory> {
+            panic!("no factory in module retirement witness")
+        }
+        fn path(&self) -> &std::path::Path {
+            std::path::Path::new("COM retirement witness")
+        }
+    }
+    impl Drop for ModuleRetirementWitness {
+        fn drop(&mut self) {
+            // This witness retains the one reference needed to inspect the
+            // real COM count safely. All instance/temporary refs must be gone.
+            let parent = self.component.as_ptr().cast::<FUnknown>();
+            // SAFETY: IComponent has the FUnknown prefix and this witness owns
+            // an independent reference across both balanced native calls.
+            let count = unsafe { ((*(*parent).vtbl).addRef)(parent) };
+            unsafe { ((*(*parent).vtbl).release)(parent) };
+            self.refs_at_retirement
+                .store(count - 1, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    #[test]
+    fn completed_construction_handoff_retires_guard_refs_before_module_owner() {
+        let mut fixture = Fixture::with_preparation(
+            vec![true],
+            vec![true],
+            crate::host::PluginLoadPreparation::Deferred,
+            None,
+        );
+        let observed = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        fixture.plugin._module = Box::new(ModuleRetirementWitness {
+            component: fixture.plugin.component.clone(),
+            refs_at_retirement: Arc::clone(&observed),
+        });
+        let mut guard = InitializedComponent::new(fixture.plugin.component.clone());
+        guard.attach_controller(None, false);
+        // Exercise the actual load constructor's ownership handoff. Dropping
+        // the assembled owner models a fallible final load-preparation step.
+        let _connection = guard.take_connection();
+        drop(fixture);
+        assert_eq!(
+            observed.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "only the witness reference may remain when module ownership retires"
+        );
     }
     struct Fixture {
         plugin: PluginImpl,

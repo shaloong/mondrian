@@ -223,6 +223,8 @@ impl Fixture {
             control_thread: thread::current().id(),
             #[cfg(target_os = "linux")]
             run_loop: &self.run_loop,
+            #[cfg(target_os = "linux")]
+            factory_run_loop: None,
         }
     }
     fn query(&mut self, maximum: usize, ids: &[u32]) -> Result<Vec<ObservedPresentation>> {

@@ -15,13 +15,39 @@ use vst3::Steinberg::IPluginFactory;
 use libloading::{Library, Symbol};
 
 /// Function signature for ModuleEntry
-type ModuleEntryFunc = unsafe extern "C" fn() -> bool;
+type ModuleEntryFunc = unsafe extern "C" fn(*mut std::ffi::c_void) -> bool;
 
 /// Function signature for ModuleExit
 type ModuleExitFunc = unsafe extern "C" fn() -> bool;
 
 /// Function signature for GetPluginFactory
 type GetPluginFactoryFunc = unsafe extern "C" fn() -> *mut IPluginFactory;
+
+#[cfg(all(test, target_os = "linux"))]
+mod entry_abi_tests {
+    use super::*;
+
+    #[test]
+    #[ignore = "requires explicit freshly compiled MONDRIAN_VST3_ENTRY_ABI_FIXTURE ELF under process supervision"]
+    fn module_entry_receives_exact_native_loader_handle() {
+        let path = std::path::PathBuf::from(
+            std::env::var_os("MONDRIAN_VST3_ENTRY_ABI_FIXTURE").expect("explicit ELF ABI fixture"),
+        );
+        assert!(path.is_absolute() && path.is_file());
+        let module =
+            LinuxModule::load_internal(&path).expect("ModuleEntry must receive the dlopen handle");
+        // SAFETY: the owned C fixture exports this exact function signature,
+        // and the retained module keeps its code mapped throughout this call.
+        let matched = unsafe {
+            module
+                .library
+                .get::<unsafe extern "C" fn() -> bool>(b"MondrianEntryMatched")
+        }
+        .unwrap();
+        assert!(unsafe { matched() });
+        drop(module);
+    }
+}
 
 /// Linux VST3 module implementation
 pub struct LinuxModule {
@@ -73,6 +99,13 @@ impl LinuxModule {
             })?;
             log::debug!("Shared object loaded successfully");
 
+            // ModuleEntry receives the actual dlopen handle, not a filename,
+            // symbol address, or pointer to the Rust Library wrapper. Transfer
+            // ownership out and immediately back into the portable wrapper;
+            // exactly one Library still owns the matching dlclose.
+            let module_handle = libloading::os::unix::Library::from(library).into_raw();
+            let library = Library::from(libloading::os::unix::Library::from_raw(module_handle));
+
             // Step 2: Get ModuleEntry function (REQUIRED)
             log::debug!("Step 2: Getting ModuleEntry function...");
             let module_entry = library
@@ -96,7 +129,7 @@ impl LinuxModule {
 
             // Step 4: Call ModuleEntry (MUST be called before GetPluginFactory)
             log::debug!("Step 4: Calling ModuleEntry...");
-            let entry_result = module_entry();
+            let entry_result = module_entry(module_handle);
             if !entry_result {
                 return Err(Error::PluginLoadFailed(
                     "ModuleEntry function returned false".to_string(),

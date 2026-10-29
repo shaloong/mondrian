@@ -116,7 +116,7 @@ pub(crate) mod audio_codec {
     /// Decode one channel, rejecting anything that isn't well-formed base64 of whole samples.
     pub(super) fn decode_channel(encoded: &str) -> Option<Vec<f32>> {
         let bytes = encoded.as_bytes();
-        if bytes.len() % 4 != 0 {
+        if !bytes.len().is_multiple_of(4) {
             return None;
         }
         let mut raw = Vec::with_capacity(bytes.len() / 4 * 3);
@@ -240,7 +240,7 @@ pub(crate) mod state_codec {
 
     fn decode(encoded: &str) -> Option<Vec<u8>> {
         let bytes = encoded.as_bytes();
-        if bytes.len() > MAX_STATE_BASE64_BYTES || bytes.len() % 4 != 0 {
+        if bytes.len() > MAX_STATE_BASE64_BYTES || !bytes.len().is_multiple_of(4) {
             return None;
         }
         let mut raw = Vec::with_capacity(bytes.len() / 4 * 3);

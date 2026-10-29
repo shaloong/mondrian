@@ -74,6 +74,10 @@ impl<'a> HostStorageRef<'a> {
         })
     }
 
+    #[expect(
+        clippy::borrowed_box,
+        reason = "The Box borrow proves allocation ownership; &T could name stack or borrowed storage"
+    )]
     pub(crate) fn boxed<T: ?Sized>(value: &'a Box<T>) -> Self {
         Self {
             address: std::ptr::from_ref(value.as_ref()).cast::<()>() as usize,

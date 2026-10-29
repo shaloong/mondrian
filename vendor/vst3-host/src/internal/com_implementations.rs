@@ -333,66 +333,77 @@ impl IDataExchangeHandlerTrait for HostApplication {
     }
 }
 
+pub(crate) unsafe fn host_application_name(name: *mut String128) -> tresult {
+    if name.is_null() {
+        return kResultFalse;
+    }
+    let dst = &mut *name;
+    let mut i = 0;
+    for ch in "vst3-host".encode_utf16() {
+        if i + 1 >= dst.len() {
+            break;
+        }
+        dst[i] = ch;
+        i += 1;
+    }
+    dst[i] = 0;
+    kResultOk
+}
+
+pub(crate) unsafe fn host_application_create_instance(
+    storage: &super::host_storage::RetainedComStorage,
+    cid: *mut TUID,
+    iid: *mut TUID,
+    obj: *mut *mut std::ffi::c_void,
+) -> tresult {
+    // Vend the host-created objects plugins ask for (the SDK's HostApplication does
+    // this): IMessage and IAttributeList, used to pass data between a plugin's
+    // component and controller halves. Anything else fails cleanly.
+    if obj.is_null() || cid.is_null() || iid.is_null() {
+        return kInvalidArgument;
+    }
+    *obj = ptr::null_mut();
+
+    // IMessage and IAttributeList use their interface UID as their host-created class UID.
+    // Honour both inputs: returning an IMessage pointer for an unrelated requested IID is
+    // a COM type confusion bug even when the class id itself is valid.
+    let cid_bytes = std::slice::from_raw_parts(cid as *const u8, 16);
+    let iid_bytes = std::slice::from_raw_parts(iid as *const u8, 16);
+    let matches = |expected: &[u8; 16]| cid_bytes == &expected[..] && iid_bytes == &expected[..];
+
+    if matches(&IMessage::IID) {
+        let message = create_host_message();
+        if storage.register_message(&message).is_err() {
+            return kOutOfMemory;
+        }
+        if let Some(p) = message.to_com_ptr::<IMessage>() {
+            *obj = p.into_raw() as *mut std::ffi::c_void;
+            return kResultTrue;
+        }
+    } else if matches(&IAttributeList::IID) {
+        let attributes = create_host_attribute_list();
+        if storage.register_attributes(&attributes).is_err() {
+            return kOutOfMemory;
+        }
+        if let Some(p) = attributes.to_com_ptr::<IAttributeList>() {
+            *obj = p.into_raw() as *mut std::ffi::c_void;
+            return kResultTrue;
+        }
+    }
+    kNoInterface
+}
+
 impl IHostApplicationTrait for HostApplication {
     unsafe fn getName(&self, name: *mut String128) -> tresult {
-        if name.is_null() {
-            return kResultFalse;
-        }
-        let dst = &mut *name;
-        let mut i = 0;
-        for ch in "vst3-host".encode_utf16() {
-            if i + 1 >= dst.len() {
-                break;
-            }
-            dst[i] = ch;
-            i += 1;
-        }
-        dst[i] = 0;
-        kResultOk
+        host_application_name(name)
     }
-
     unsafe fn createInstance(
         &self,
         cid: *mut TUID,
         iid: *mut TUID,
         obj: *mut *mut std::ffi::c_void,
     ) -> tresult {
-        // Vend the host-created objects plugins ask for (the SDK's HostApplication does
-        // this): IMessage and IAttributeList, used to pass data between a plugin's
-        // component and controller halves. Anything else fails cleanly.
-        if obj.is_null() || cid.is_null() || iid.is_null() {
-            return kInvalidArgument;
-        }
-        *obj = ptr::null_mut();
-
-        // IMessage and IAttributeList use their interface UID as their host-created class UID.
-        // Honour both inputs: returning an IMessage pointer for an unrelated requested IID is
-        // a COM type confusion bug even when the class id itself is valid.
-        let cid_bytes = std::slice::from_raw_parts(cid as *const u8, 16);
-        let iid_bytes = std::slice::from_raw_parts(iid as *const u8, 16);
-        let matches =
-            |expected: &[u8; 16]| cid_bytes == &expected[..] && iid_bytes == &expected[..];
-
-        if matches(&IMessage::IID) {
-            let message = create_host_message();
-            if self.storage.register_message(&message).is_err() {
-                return kOutOfMemory;
-            }
-            if let Some(p) = message.to_com_ptr::<IMessage>() {
-                *obj = p.into_raw() as *mut std::ffi::c_void;
-                return kResultTrue;
-            }
-        } else if matches(&IAttributeList::IID) {
-            let attributes = create_host_attribute_list();
-            if self.storage.register_attributes(&attributes).is_err() {
-                return kOutOfMemory;
-            }
-            if let Some(p) = attributes.to_com_ptr::<IAttributeList>() {
-                *obj = p.into_raw() as *mut std::ffi::c_void;
-                return kResultTrue;
-            }
-        }
-        kNoInterface
+        host_application_create_instance(&self.storage, cid, iid, obj)
     }
 }
 
@@ -573,7 +584,7 @@ impl ConnectionProxy {
     /// [`DROP_LOG_INTERVAL`]-th one after it.
     fn record_off_thread_drop(&self) {
         let count = self.dropped.fetch_add(1, Ordering::Relaxed) + 1;
-        if count == 1 || count % DROP_LOG_INTERVAL == 0 {
+        if count == 1 || count.is_multiple_of(DROP_LOG_INTERVAL) {
             log::warn!(
                 "ConnectionProxy ({}): dropped an off-thread IConnectionPoint::notify \
                  ({count} so far). VST3 requires component↔controller messages on the UI \
@@ -1414,51 +1425,8 @@ pub fn create_state_restore_stream(
     ))
 }
 
-// --- Linux IRunLoop ------------------------------------------------------
-// VSTGUI-based editors (and most non-JUCE plugin UIs) strictly require the
-// host frame to also implement `Steinberg::Linux::IRunLoop`: the view
-// registers file-descriptor event handlers (its X11 connection) and
-// periodic timers with the host, and paints/responds ONLY when the host
-// services them. Without this the editor attaches but stays black. The host
-// must call `Plugin::service_run_loop()` on its UI thread regularly (every
-// frame) while an editor is open.
-
-/// What a plugin's editor registered with the host's run loop, shared
-/// between the frame (registration, called by the plugin during attach) and
-/// the plugin impl (servicing, driven by the host each UI frame).
 #[cfg(target_os = "linux")]
-pub struct RunLoopRegistry {
-    pub handlers: Vec<(
-        vst3::ComPtr<vst3::Steinberg::Linux::IEventHandler>,
-        vst3::Steinberg::Linux::FileDescriptor,
-    )>,
-    pub timers: Vec<RunLoopTimer>,
-}
-
-#[cfg(target_os = "linux")]
-pub struct RunLoopTimer {
-    pub handler: vst3::ComPtr<vst3::Steinberg::Linux::ITimerHandler>,
-    pub interval_ms: u64,
-    pub due: std::time::Instant,
-}
-
-#[cfg(target_os = "linux")]
-impl RunLoopRegistry {
-    pub fn new() -> Self {
-        Self {
-            handlers: Vec::new(),
-            timers: Vec::new(),
-        }
-    }
-}
-
-// The registry holds COM pointers into plugin code. They are only ever
-// touched from the host's UI thread (registration inside `open_editor`,
-// servicing inside `service_run_loop`, both UI-thread calls); the Send
-// bound is inherited from `PluginInternal: Send` storage, the same
-// pragmatics as the ComPtrs PluginImpl already holds.
-#[cfg(target_os = "linux")]
-unsafe impl Send for RunLoopRegistry {}
+pub use super::run_loop::RunLoopRegistry;
 
 // Host implementation of `IPlugFrame` (all platforms) plus
 // `Linux::IRunLoop` (Linux only). A plugin editor calls `resizeView` to ask
@@ -1479,19 +1447,7 @@ impl HostPlugFrame {
     ) -> Result<(), crate::host_storage::HostStorageError> {
         visitor.visit(crate::host_storage::HostStorageRef::arc(&self.requested))?;
         #[cfg(target_os = "linux")]
-        {
-            visitor.visit(crate::host_storage::HostStorageRef::arc(&self.run_loop))?;
-            let run_loop = self
-                .run_loop
-                .lock()
-                .map_err(|_| crate::host_storage::HostStorageError::PoisonedOwner)?;
-            visitor.visit(crate::host_storage::HostStorageRef::vector(
-                &run_loop.handlers,
-            )?)?;
-            visitor.visit(crate::host_storage::HostStorageRef::vector(
-                &run_loop.timers,
-            )?)?;
-        }
+        super::run_loop::visit_owned_storage(&self.run_loop, visitor)?;
         Ok(())
     }
 
@@ -1529,64 +1485,26 @@ impl vst3::Steinberg::Linux::IRunLoopTrait for HostPlugFrame {
         handler: *mut vst3::Steinberg::Linux::IEventHandler,
         fd: vst3::Steinberg::Linux::FileDescriptor,
     ) -> tresult {
-        let Some(handler) = vst3::ComRef::from_raw(handler) else {
-            return kInvalidArgument;
-        };
-        match self.run_loop.lock() {
-            Ok(mut reg) => {
-                reg.handlers.push((handler.to_com_ptr(), fd));
-                kResultOk
-            }
-            Err(_) => kInternalError,
-        }
+        RunLoopRegistry::register_event_handler(&self.run_loop, handler, fd)
     }
-
     unsafe fn unregisterEventHandler(
         &self,
         handler: *mut vst3::Steinberg::Linux::IEventHandler,
     ) -> tresult {
-        match self.run_loop.lock() {
-            Ok(mut reg) => {
-                reg.handlers.retain(|(h, _)| h.as_ptr() != handler);
-                kResultOk
-            }
-            Err(_) => kInternalError,
-        }
+        RunLoopRegistry::unregister_event_handler(&self.run_loop, handler)
     }
-
     unsafe fn registerTimer(
         &self,
         handler: *mut vst3::Steinberg::Linux::ITimerHandler,
         milliseconds: vst3::Steinberg::Linux::TimerInterval,
     ) -> tresult {
-        let Some(handler) = vst3::ComRef::from_raw(handler) else {
-            return kInvalidArgument;
-        };
-        let interval_ms = milliseconds.max(1);
-        match self.run_loop.lock() {
-            Ok(mut reg) => {
-                reg.timers.push(RunLoopTimer {
-                    handler: handler.to_com_ptr(),
-                    interval_ms,
-                    due: std::time::Instant::now() + std::time::Duration::from_millis(interval_ms),
-                });
-                kResultOk
-            }
-            Err(_) => kInternalError,
-        }
+        RunLoopRegistry::register_timer(&self.run_loop, handler, milliseconds)
     }
-
     unsafe fn unregisterTimer(
         &self,
         handler: *mut vst3::Steinberg::Linux::ITimerHandler,
     ) -> tresult {
-        match self.run_loop.lock() {
-            Ok(mut reg) => {
-                reg.timers.retain(|t| t.handler.as_ptr() != handler);
-                kResultOk
-            }
-            Err(_) => kInternalError,
-        }
+        RunLoopRegistry::unregister_timer(&self.run_loop, handler)
     }
 }
 

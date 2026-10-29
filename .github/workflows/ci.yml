@@ -390,6 +390,17 @@ jobs:
       - name: 测试
         run: cargo test --workspace --exclude mondrian-app
 
+      # This vendored host is a standalone workspace: the root workspace test
+      # does not execute its library tests. Match the product's feature closure
+      # on all three desktop runners, without requiring audio devices or GUIs.
+      - name: Test vendored VST3 host contracts
+        env:
+          CARGO_TARGET_DIR: ${{ github.workspace }}/target
+          CARGO_INCREMENTAL: "0"
+          CARGO_PROFILE_DEV_DEBUG: "0"
+          CARGO_PROFILE_TEST_DEBUG: "0"
+        run: cargo test --manifest-path vendor/vst3-host/Cargo.toml --locked --no-default-features --lib -j1 -- --test-threads=1
+
       - name: 编译默认 App 产品入口
         env:
           CARGO_INCREMENTAL: "0"
