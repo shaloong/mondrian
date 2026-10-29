@@ -743,6 +743,13 @@ impl Vst3AudioProcessorWorkerFactory {
                 ))
             })?,
         );
+        #[cfg(target_os = "macos")]
+        let native_main =
+            vst3_host::window::MacosPluginMainThread::initialize().map_err(|error| {
+                unavailable(format!(
+                    "VST3 actual native main initialization failed: {error}"
+                ))
+            })?;
         let mut host_builder = Vst3Host::builder()
             .plugin_interfaces(product_plugin_interfaces())
             .initial_process_mode(mode)
@@ -830,7 +837,7 @@ impl Vst3AudioProcessorWorkerFactory {
             native_binding: None,
             native_author_delivery: None,
             prepared_author_entry: None,
-            #[cfg(target_os = "windows")]
+            #[cfg(any(target_os = "windows", target_os = "macos"))]
             native_main,
             note_input_contract: request.note_input_contract,
         })
@@ -1011,10 +1018,12 @@ struct Vst3Worker {
     native_binding: Option<crate::NativeAudioObjectBindReceipt>,
     native_author_delivery: Option<native_author::PendingDelivery>,
     prepared_author_entry: Option<author_state_entry::PreparedAuthorEntry>,
-    // Last field: same-main OLE survives the plugin, controller, native module
-    // and any explicitly removed native parent. It is never sent to DSP.
+    // Last fields: native main services survive the plugin, controller, module
+    // and any explicitly removed native parent. They are never sent to DSP.
     #[cfg(target_os = "windows")]
     native_main: std::rc::Rc<vst3_host::window::WindowsEditorMainThread>,
+    #[cfg(target_os = "macos")]
+    native_main: vst3_host::window::MacosPluginMainThread,
 }
 
 #[cfg(target_os = "windows")]
@@ -1067,10 +1076,9 @@ impl IsolatedAudioProcessorWorker for Vst3Worker {
         crate::NativeHostBufferLayout { bytes, alignment: align_of::<u8>() }
     }
     fn uses_native_processing_split(&self) -> bool {
-        cfg!(target_os = "windows")
+        self.native_lane.is_some()
     }
 
-    #[cfg(target_os = "windows")]
     fn native_control_only_role(
         &mut self,
     ) -> Result<Option<Box<dyn super::IsolatedAudioProcessorMainRole + '_>>, AudioProcessorHostError>
@@ -1089,7 +1097,9 @@ impl IsolatedAudioProcessorWorker for Vst3Worker {
         })?;
         Ok(Some(Box::new(VstMainRole {
             editor,
+            #[cfg(any(target_os = "windows", target_os = "macos"))]
             native_main: &self.native_main,
+            #[cfg(target_os = "windows")]
             native_parent: &mut self.native_parent,
             configuration_phase: &self.configuration_phase,
             native_binding: &self.native_binding,
@@ -1098,7 +1108,6 @@ impl IsolatedAudioProcessorWorker for Vst3Worker {
         })))
     }
 
-    #[cfg(target_os = "windows")]
     fn split_native_processing(
         &mut self,
     ) -> Result<super::IsolatedAudioProcessorWorkerSplit<'_>, AudioProcessorHostError> {
@@ -1124,7 +1133,9 @@ impl IsolatedAudioProcessorWorker for Vst3Worker {
         Ok(super::IsolatedAudioProcessorWorkerSplit {
             main: Box::new(VstMainRole {
                 editor,
+                #[cfg(any(target_os = "windows", target_os = "macos"))]
                 native_main: &self.native_main,
+                #[cfg(target_os = "windows")]
                 native_parent: &mut self.native_parent,
                 configuration_phase: &self.configuration_phase,
                 native_binding: &self.native_binding,
@@ -2784,10 +2795,13 @@ fn native_editor_removal_failed(error: vst3_host::error::Error) -> AudioProcesso
 
 /// Same native controller/view storage remains confined to its real main.
 /// This role cannot reach the DSP processor or replacement/configuration APIs.
-#[cfg(target_os = "windows")]
 struct VstMainRole<'a> {
     editor: vst3_host::plugin::PluginEditorControl<'a>,
+    #[cfg(target_os = "windows")]
     native_main: &'a std::rc::Rc<vst3_host::window::WindowsEditorMainThread>,
+    #[cfg(target_os = "macos")]
+    native_main: &'a vst3_host::window::MacosPluginMainThread,
+    #[cfg(target_os = "windows")]
     native_parent: &'a mut Option<vst3_host::window::WindowsPluginEditorParent>,
     configuration_phase: &'a super::native_configuration_control::NativeConfigurationPhase,
     native_binding: &'a Option<crate::NativeAudioObjectBindReceipt>,
@@ -2795,7 +2809,6 @@ struct VstMainRole<'a> {
     prepared_author_entry: &'a Option<author_state_entry::PreparedAuthorEntry>,
 }
 
-#[cfg(target_os = "windows")]
 impl super::IsolatedAudioProcessorMainRole for VstMainRole<'_> {
     fn allocation_layouts(&self) -> Option<[crate::NativeHostBufferLayout; 2]> {
         Some([
@@ -2804,6 +2817,7 @@ impl super::IsolatedAudioProcessorMainRole for VstMainRole<'_> {
         ])
     }
     fn service_native_main_thread(&mut self) -> Result<(), AudioProcessorHostError> {
+        #[cfg(target_os = "windows")]
         let step = if let Some(parent) = self.native_parent.as_mut() {
             parent.service(&mut self.editor)
         } else {
@@ -2823,11 +2837,27 @@ impl super::IsolatedAudioProcessorMainRole for VstMainRole<'_> {
                 "VST3 actual native message service failed: {error}"
             ))
         })?;
+        #[cfg(target_os = "windows")]
         if let vst3_host::window::WindowsMessageStep::Quit { exit_code } = step {
             return Err(AudioProcessorHostError::WorkerFailed {
                 operation: "native main message service",
                 detail: format!("actual native WM_QUIT: {exit_code}"),
             });
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            #[cfg(target_os = "macos")]
+            self.native_main.dispatch_messages().map_err(|error| {
+                unavailable(format!("VST3 actual native main service failed: {error}"))
+            })?;
+            self.editor
+                .service_controller()
+                .and_then(|_| self.editor.service_run_loop())
+                .map_err(|error| {
+                    unavailable(format!(
+                        "VST3 actual controller main service failed: {error}"
+                    ))
+                })?;
         }
         Ok(())
     }
@@ -2930,6 +2960,7 @@ impl super::IsolatedAudioProcessorMainRole for VstMainRole<'_> {
             && !self.prepared_author_entry.as_ref().is_some_and(|entry| entry.awaiting_ack()))
     }
 
+    #[cfg(target_os = "windows")]
     fn native_editor_close_requested(&self) -> Result<bool, AudioProcessorHostError> {
         self.native_parent.as_ref().map_or(Ok(false), |parent| {
             parent.closed_by_user().map_err(|error| {
@@ -2943,13 +2974,11 @@ impl super::IsolatedAudioProcessorMainRole for VstMainRole<'_> {
 
 /// The one loaded processor and canonical signal fields, exclusively borrowed
 /// into the scoped DSP thread. No controller/window/main storage is reachable.
-#[cfg(target_os = "windows")]
 struct VstDspRole<'a> {
     native: vst3_host::plugin::PluginAudioProcessing<'a>,
     signal: VstSignalFields<'a>,
 }
 
-#[cfg(target_os = "windows")]
 impl super::IsolatedAudioProcessorProcessingRole for VstDspRole<'_> {
     fn allocation_layouts(&self) -> Option<[crate::NativeHostBufferLayout; 2]> {
         Some([
@@ -3029,7 +3058,6 @@ impl super::IsolatedAudioProcessorProcessingRole for VstDspRole<'_> {
     }
 }
 
-#[cfg(target_os = "windows")]
 fn native_layout(layout: std::alloc::Layout) -> crate::NativeHostBufferLayout {
     crate::NativeHostBufferLayout { bytes: layout.size(), alignment: layout.align() }
 }
@@ -3115,61 +3143,53 @@ fn native_worker_lane_profile_for_preparation(
 
 pub(super) fn native_worker_lane_profile(
 ) -> Result<Option<crate::NativeWorkerLaneResourceProfile>, AudioProcessorHostError> {
-    #[cfg(target_os = "windows")]
-    {
-        let [sdk_main, sdk_dsp] =
-            vst3_host::plugin::PluginEditorProcessingSplit::allocation_layouts();
-        let owners = crate::NativeWorkerLaneOwnedLayouts {
-            adapter_resident: native_layout(std::alloc::Layout::new::<Vst3Worker>()),
-            reader_slots: native_layout(std::alloc::Layout::new::<
-                super::native_worker_ingress::NativeReaderSlots,
-            >()),
-            processing_slots: native_layout(std::alloc::Layout::new::<
-                super::native_worker_processing::NativeProcessingSlots,
-            >()),
-            // Separately identified logical inline obligations. Compiler stack
-            // layout, thread TLS/bookkeeping and committed OS pages are frontier.
-            main_inline: native_layout(std::alloc::Layout::new::<(
-                super::native_worker_ingress::NativeCommandIngress<'static>,
-                super::worker::WorkerProcessContext<'static>,
-                super::native_worker_processing::NativeDspDispatch<'static>,
-                crate::NativeAudioObservations,
-                vst3_host::controller_parameters::ControllerParameterQueryFrame,
-                AudioBusQueryFrame,
-                initial_parameter_values::InitialParameterFrame,
-                parameter_observations::ParameterPresentationFrame,
-            )>()),
-            runtime_main_role: native_layout(std::alloc::Layout::new::<VstMainRole<'static>>()),
-            runtime_dsp_role: native_layout(std::alloc::Layout::new::<VstDspRole<'static>>()),
-            sdk_main_role: native_layout(sdk_main),
-            sdk_dsp_role: native_layout(sdk_dsp),
-        };
-        let byte_limit = crate::NativeHostBufferLayout {
-            bytes: super::protocol::MAX_CONTROL_FRAME_BYTES,
-            alignment: 1,
-        };
-        let control = crate::NativeWorkerControlOverlapLayout {
-            decoded_input: crate::NativeHostBufferLayout {
-                bytes: byte_limit.bytes,
-                alignment: align_of::<f64>(),
-            },
-            reply_storage: crate::NativeHostBufferLayout {
-                bytes: byte_limit.bytes,
-                alignment: align_of::<mondrian_core::NativeAudioParameterFact>(),
-            },
-            staged_seed: byte_limit,
-        };
-        Ok(Some(
-            crate::NativeWorkerLaneResourceProfile::scoped_main_dsp(owners, control)
-                .map_err(AudioProcessorHostError::from)?
-                .with_adapter_note_input_storage(note_storage_layout(0)?)
-                .map_err(AudioProcessorHostError::from)?,
-        ))
-    }
-    #[cfg(not(target_os = "windows"))]
-    {
-        Ok(None)
-    }
+    let [sdk_main, sdk_dsp] = vst3_host::plugin::PluginEditorProcessingSplit::allocation_layouts();
+    let owners = crate::NativeWorkerLaneOwnedLayouts {
+        adapter_resident: native_layout(std::alloc::Layout::new::<Vst3Worker>()),
+        reader_slots: native_layout(std::alloc::Layout::new::<
+            super::native_worker_ingress::NativeReaderSlots,
+        >()),
+        processing_slots: native_layout(std::alloc::Layout::new::<
+            super::native_worker_processing::NativeProcessingSlots,
+        >()),
+        // Actual platform layouts are charged on every desktop. Stack/TLS,
+        // committed OS pages and native framework allocations remain frontier.
+        main_inline: native_layout(std::alloc::Layout::new::<(
+            super::native_worker_ingress::NativeCommandIngress<'static>,
+            super::worker::WorkerProcessContext<'static>,
+            super::native_worker_processing::NativeDspDispatch<'static>,
+            crate::NativeAudioObservations,
+            vst3_host::controller_parameters::ControllerParameterQueryFrame,
+            AudioBusQueryFrame,
+            initial_parameter_values::InitialParameterFrame,
+            parameter_observations::ParameterPresentationFrame,
+        )>()),
+        runtime_main_role: native_layout(std::alloc::Layout::new::<VstMainRole<'static>>()),
+        runtime_dsp_role: native_layout(std::alloc::Layout::new::<VstDspRole<'static>>()),
+        sdk_main_role: native_layout(sdk_main),
+        sdk_dsp_role: native_layout(sdk_dsp),
+    };
+    let byte_limit = crate::NativeHostBufferLayout {
+        bytes: super::protocol::MAX_CONTROL_FRAME_BYTES,
+        alignment: 1,
+    };
+    let control = crate::NativeWorkerControlOverlapLayout {
+        decoded_input: crate::NativeHostBufferLayout {
+            bytes: byte_limit.bytes,
+            alignment: align_of::<f64>(),
+        },
+        reply_storage: crate::NativeHostBufferLayout {
+            bytes: byte_limit.bytes,
+            alignment: align_of::<mondrian_core::NativeAudioParameterFact>(),
+        },
+        staged_seed: byte_limit,
+    };
+    Ok(Some(
+        crate::NativeWorkerLaneResourceProfile::scoped_main_dsp(owners, control)
+            .map_err(AudioProcessorHostError::from)?
+            .with_adapter_note_input_storage(note_storage_layout(0)?)
+            .map_err(AudioProcessorHostError::from)?,
+    ))
 }
 
 impl Vst3Worker {
@@ -4090,7 +4110,6 @@ mod bus_contract_tests {
         }
     }
 
-    #[cfg(windows)]
     #[test]
     fn full_vst3_parameter_capacity_keeps_nonautomatable_input_and_complete_shared_storage() {
         let mut parameters = (0..2855)
@@ -4136,7 +4155,6 @@ mod bus_contract_tests {
         parameters.push(Vst3ParameterDescriptor { id: 4096, ..parameters[0].clone() });
         assert!(native_worker_lane_profile_for_parameters(&parameters).is_err());
     }
-    #[cfg(windows)]
     #[test]
     fn retained_vst3_bus_scratch_is_charged_once_in_original_main_inline() {
         use std::alloc::Layout;
@@ -4150,7 +4168,7 @@ mod bus_contract_tests {
             flags: 1,
         }])
         .unwrap()
-        .expect("Windows scoped lane");
+        .expect("scoped desktop lane");
         let original = Layout::new::<(
             super::super::native_worker_ingress::NativeCommandIngress<'static>,
             super::super::worker::WorkerProcessContext<'static>,
@@ -4273,7 +4291,6 @@ mod bus_contract_tests {
             )
             .unwrap()
         );
-        #[cfg(target_os = "windows")]
         {
             assert_ne!(expected, request.native_lane);
             let prepared = expected.unwrap();
@@ -5414,14 +5431,11 @@ mod musical_effect_tests {
                     assert_eq!(result.unwrap_err(), unavailable(expected));
                     continue;
                 }
-                if !cfg!(windows) {
-                    assert_eq!(
-                        result.unwrap_err(),
-                        unavailable("VST3 Note input requires the scoped native lane")
-                    );
-                    continue;
-                }
                 let spec = result.unwrap();
+                assert!(
+                    spec.native_lane.is_some(),
+                    "every desktop admits and charges its native lane"
+                );
                 let decoded = decode_payload(&spec.preparation_payload).unwrap();
                 assert_eq!(decoded.main_audio_input, Vst3MainAudioInput::Absent);
                 assert_eq!(spec.note_input_contract.ports.len(), 1);
@@ -5529,14 +5543,11 @@ mod musical_effect_tests {
                     );
                     continue;
                 }
-                if requested && !cfg!(windows) {
-                    assert_eq!(
-                        result.unwrap_err(),
-                        unavailable("VST3 Note input requires the scoped native lane")
-                    );
-                    continue;
-                }
                 let spec = result.unwrap();
+                assert!(
+                    spec.native_lane.is_some(),
+                    "auxiliary-only processing retains its native lane"
+                );
                 assert_eq!(spec.auxiliary_inputs, auxiliary);
                 let child = IsolatedAudioProcessorWorkerPrepareRequest {
                     musical_time_reference: spec.musical_time_reference,
@@ -5804,7 +5815,6 @@ mod musical_effect_tests {
         }
     }
 
-    #[cfg(target_os = "windows")]
     #[test]
     fn vst3_note_alignment_mismatch_refuses_before_allocation_or_native_binary_access() {
         let mut payload = payload();

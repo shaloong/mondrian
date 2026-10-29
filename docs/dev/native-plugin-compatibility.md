@@ -25,6 +25,27 @@ The detailed [audio standard matrix](native-audio-standard-features.md) and
 [OpenFX standard matrix](native-openfx-standard-features.md) identify actual
 product consumers and pending closure for each feature family.
 
+Current desktop audio checkpoint (2026-10-29): the factory/module ownership
+slice passed complete SDK library and App product CI on Windows, Linux and
+macOS before integration ([PR31](https://github.com/shaloong/mondrian/pull/31)).
+Factory contexts survive concurrent discovery/instances; editor retirement does
+not retire factory callbacks. The following Product slice uses the existing
+Main/DSP schedule and one bounded initial parameter handoff on every desktop.
+Its Linux Audio library passes 851 tests (65 ignored).
+
+Unmodified MIT-licensed SDK3.8.0 ADelay passes the
+[public Runtime/Graph case](../../crates/mondrian-audio/tests/native_vst3_portable_runtime.rs)
+on Ubuntu24.04.5, Rust1.97.1 and private patched FFmpeg8.1.2: explicit48k/Stereo,
+offline/max64, delays0 and1/64, three entries/seeks per delay and64/17/47
+partitions. All3411 frames match the independent ring-buffer oracle; native
+opaque state, project serialization and original child settlement are checked.
+The original Ring Out CLAP Runtime/Graph case also passes after sharing its
+unchanged input/census helper. Both runs have exit0, empty stderr and settled
+process groups. Native GUI, product timer/FD concurrency, broader instruments,
+physical devices, realtime/performance, full heap/leaks and macOS native-plugin
+qualification remain open. The new macOS actual-main CFRunLoop probe still
+requires its own CI acceptance; library/product CI is not that evidence.
+
 ## Implementation boundary
 
 | Feature family | Current implemented boundary | Remaining work |
