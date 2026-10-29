@@ -889,6 +889,11 @@ pub enum EffectRenderOp {
     Threshold {
         grade: crate::ThresholdGrade,
     },
+    /// Tint: duotone remap of the working-space luminance between two authored
+    /// targets.
+    Tint {
+        grade: crate::TintGrade,
+    },
     /// ColorEmboss: per-channel relief computed from the Sobel gradient of
     /// the working-space colour.
     ColorEmboss {
@@ -1059,6 +1064,7 @@ impl std::fmt::Debug for EffectRenderOp {
             Self::Threshold { grade } => {
                 formatter.debug_struct("Threshold").field("grade", grade).finish()
             }
+            Self::Tint { grade } => formatter.debug_struct("Tint").field("grade", grade).finish(),
             Self::ColorEmboss { grade } => {
                 formatter.debug_struct("ColorEmboss").field("grade", grade).finish()
             }
@@ -1537,6 +1543,19 @@ impl EffectRenderOp {
                     value.to_bits().hash(state);
                 }
             }
+            EffectRenderOp::Tint { grade } => {
+                41u8.hash(state);
+                for value in grade.black() {
+                    value.to_bits().hash(state);
+                }
+                for value in grade.white() {
+                    value.to_bits().hash(state);
+                }
+                grade.amount().to_bits().hash(state);
+                for value in grade.luminance_coefficients() {
+                    value.to_bits().hash(state);
+                }
+            }
             EffectRenderOp::ColorEmboss { grade } => {
                 32u8.hash(state);
                 for value in grade.gpu_controls() {
@@ -1690,6 +1709,7 @@ impl EffectRenderOp {
             EffectRenderOp::DropShadow { .. } => 6,
             EffectRenderOp::FindEdges { .. } => 4,
             EffectRenderOp::Threshold { .. } => 1,
+            EffectRenderOp::Tint { .. } => 1,
             EffectRenderOp::Mosaic { .. } => 2,
             EffectRenderOp::Posterize { .. } => 1,
             EffectRenderOp::MotionTile { .. } => 3,
@@ -2232,7 +2252,7 @@ impl EffectDefinition {
     }
 }
 
-fn builtin_effect_types() -> [EffectType; 39] {
+fn builtin_effect_types() -> [EffectType; 40] {
     [
         EffectType::BasicCorrection,
         EffectType::WhiteBalance,
@@ -2273,6 +2293,7 @@ fn builtin_effect_types() -> [EffectType; 39] {
         EffectType::Bevel,
         EffectType::Scatter,
         EffectType::BrushStrokes,
+        EffectType::Tint,
     ]
 }
 
@@ -3791,6 +3812,41 @@ fn default_properties_for(effect_type: EffectType) -> PropertyBag {
                 Some(0.01),
             );
         }
+        EffectType::Tint => {
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "map_black",
+                "色调",
+                "将黑色映射到",
+                PropertyValue::Color(Color { r: 0.0, g: 0.0, b: 0.0, a: 1.0 }),
+                None,
+                None,
+                None,
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "map_white",
+                "色调",
+                "将白色映射到",
+                PropertyValue::Color(Color { r: 1.0, g: 1.0, b: 1.0, a: 1.0 }),
+                None,
+                None,
+                None,
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "amount",
+                "色调",
+                "着色数量",
+                PropertyValue::Float(100.0),
+                Some(0.0),
+                Some(100.0),
+                Some(0.1),
+            );
+        }
         EffectType::ColorEmboss => {
             define_builtin_property(
                 &mut properties,
@@ -4421,6 +4477,7 @@ fn builtin_parameter_unit(effect_type: &EffectType, parameter: &str) -> Paramete
         }
         (EffectType::BrushStrokes, "angle") => ParameterUnit::Degrees,
         (EffectType::BrushStrokes, "blend_with_original") => ParameterUnit::Normalized,
+        (EffectType::Tint, "amount") => ParameterUnit::Percent,
         (EffectType::Bevel, "thickness") => ParameterUnit::Pixels,
         (EffectType::Bevel, "angle") => ParameterUnit::Degrees,
         (EffectType::Bevel, "intensity") => ParameterUnit::Normalized,
@@ -4590,6 +4647,10 @@ fn builtin_effect_execution_contract(effect_type: &EffectType) -> EffectExecutio
             ..cpu_linear
         },
         EffectType::Posterize => EffectExecutionContract {
+            execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
+            ..cpu_linear
+        },
+        EffectType::Tint => EffectExecutionContract {
             execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
             ..cpu_linear
         },
@@ -5879,6 +5940,41 @@ fn builtin_graph_builder_for(effect_type: &EffectType) -> Option<EffectGraphBuil
                 Ok(())
             }))
         }
+        EffectType::Tint => {
+            let black_id = builtin_parameter_id(effect_type, "map_black");
+            let white_id = builtin_parameter_id(effect_type, "map_white");
+            let amount_id = builtin_parameter_id(effect_type, "amount");
+            Some(Arc::new(move |effect, context, graph| {
+                let target = |parameter_id: &ParameterId,
+                              name: &str,
+                              fallback: [f32; 3]|
+                 -> Result<[f32; 3], EffectGraphBuildError> {
+                    match effect.evaluate_parameter(parameter_id, context.time) {
+                        Some(PropertyValue::Color(color)) => Ok([color.r, color.g, color.b]),
+                        Some(_) => Err(EffectGraphBuildError::InvalidAuthorState {
+                            effect_key: effect.effect_type.key(),
+                            effect_id: effect.id,
+                            reason: format!("tint {name} must be a colour"),
+                        }),
+                        None => Ok(fallback),
+                    }
+                };
+                let black = target(&black_id, "black target", [0.0, 0.0, 0.0])?;
+                let white = target(&white_id, "white target", [1.0, 1.0, 1.0])?;
+                let amount = effect.evaluate_f32_parameter(&amount_id, context.time, 100.0) / 100.0;
+                let grade =
+                    crate::TintGrade::for_space(black, white, amount, context.working_color_space)
+                        .map_err(|error| EffectGraphBuildError::InvalidAuthorState {
+                            effect_key: effect.effect_type.key(),
+                            effect_id: effect.id,
+                            reason: error.to_string(),
+                        })?;
+                if !grade.is_identity() {
+                    graph.append_unary(EffectRenderOp::Tint { grade });
+                }
+                Ok(())
+            }))
+        }
         EffectType::ColorEmboss => {
             let direction_id = builtin_parameter_id(effect_type, "direction");
             let relief_id = builtin_parameter_id(effect_type, "relief");
@@ -6235,6 +6331,7 @@ fn builtin_display_name(effect_type: &EffectType) -> &'static str {
         EffectType::Bevel => "斜面与浮雕",
         EffectType::Scatter => "散射",
         EffectType::BrushStrokes => "画笔描边",
+        EffectType::Tint => "色调",
         EffectType::ColorEmboss => "色彩浮雕",
         EffectType::Emboss => "浮雕",
         EffectType::External(_) => "外部效果",
@@ -7510,6 +7607,7 @@ mod tests {
             EffectType::Bevel,
             EffectType::Scatter,
             EffectType::BrushStrokes,
+            EffectType::Tint,
         ]
         .into_iter()
         .map(|effect_type| effect_type.key())
@@ -10757,6 +10855,120 @@ mod tests {
             .expect("builds restored brush strokes graph");
         let grade = brush_strokes_op(&graph).expect("brush strokes op");
         assert_eq!(grade.length(), 18.0);
+    }
+
+    fn tint_op(graph: &EffectRenderGraph) -> Option<crate::TintGrade> {
+        graph.nodes.iter().find_map(|node| match &node.kind {
+            EffectGraphNodeKind::UnaryEffect { op: EffectRenderOp::Tint { grade }, .. }
+            | EffectGraphNodeKind::DomainEffect { op: EffectRenderOp::Tint { grade }, .. } => {
+                Some(*grade)
+            }
+            _ => None,
+        })
+    }
+
+    fn author_tint(parameter: &str, value: PropertyValue) -> EffectNode {
+        let mut effect =
+            instantiate_effect_node(EffectType::Tint).expect("registered tint definition");
+        effect
+            .apply_property_mutation(PropertyMutation::SetStaticValue {
+                path: EffectType::Tint.property_path(parameter),
+                value,
+            })
+            .expect("authors tint parameter");
+        effect
+    }
+
+    #[test]
+    fn tint_defaults_reach_the_operation() {
+        // The declared defaults are the neutral duotone: black stays black and
+        // white stays white, so a 100% amount renders a luminance monochrome.
+        let effect = instantiate_effect_node(EffectType::Tint).expect("registered tint definition");
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("builds tint graph");
+        let grade = tint_op(&graph).expect("tint op");
+        assert_eq!(grade.black(), [0.0, 0.0, 0.0]);
+        assert_eq!(grade.white(), [1.0, 1.0, 1.0]);
+        assert_eq!(grade.amount(), 1.0);
+    }
+
+    #[test]
+    fn tint_authored_state_reaches_the_operation() {
+        let mut effect = author_tint(
+            "map_black",
+            PropertyValue::Color(Color { r: 0.1, g: 0.05, b: 0.3, a: 1.0 }),
+        );
+        effect
+            .apply_property_mutation(PropertyMutation::SetStaticValue {
+                path: EffectType::Tint.property_path("map_white"),
+                value: PropertyValue::Color(Color { r: 0.9, g: 0.9, b: 0.8, a: 1.0 }),
+            })
+            .expect("authors tint white target");
+        effect
+            .apply_property_mutation(PropertyMutation::SetStaticValue {
+                path: EffectType::Tint.property_path("amount"),
+                value: PropertyValue::Float(60.0),
+            })
+            .expect("authors tint amount");
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("builds tint graph");
+        let grade = tint_op(&graph).expect("tint op");
+        assert_eq!(grade.black(), [0.1, 0.05, 0.3]);
+        assert_eq!(grade.white(), [0.9, 0.9, 0.8]);
+        assert_eq!(grade.amount(), 0.6);
+    }
+
+    #[test]
+    fn tint_zero_amount_compiles_to_identity() {
+        let mut effect = author_tint(
+            "map_black",
+            PropertyValue::Color(Color { r: 0.2, g: 0.4, b: 0.1, a: 1.0 }),
+        );
+        effect
+            .apply_property_mutation(PropertyMutation::SetStaticValue {
+                path: EffectType::Tint.property_path("amount"),
+                value: PropertyValue::Float(0.0),
+            })
+            .expect("authors tint amount");
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("builds tint graph");
+        assert!(tint_op(&graph).is_none());
+    }
+
+    #[test]
+    fn tint_rejects_author_values_outside_the_declared_ranges() {
+        for value in [PropertyValue::Float(-1.0), PropertyValue::Float(101.0)] {
+            let mut effect =
+                instantiate_effect_node(EffectType::Tint).expect("registered tint definition");
+            effect
+                .apply_property_mutation(PropertyMutation::SetStaticValue {
+                    path: EffectType::Tint.property_path("amount"),
+                    value,
+                })
+                .expect_err("rejects out of range tint amount");
+        }
+    }
+
+    #[test]
+    fn tint_authored_state_survives_project_serialization_round_trip() {
+        let mut effect = author_tint(
+            "map_white",
+            PropertyValue::Color(Color { r: 0.7, g: 0.2, b: 0.1, a: 1.0 }),
+        );
+        effect
+            .apply_property_mutation(PropertyMutation::SetStaticValue {
+                path: EffectType::Tint.property_path("amount"),
+                value: PropertyValue::Float(35.0),
+            })
+            .expect("authors tint amount");
+        let wire = serde_json::to_string(&effect).expect("serializes tint effect");
+        let restored: EffectNode = serde_json::from_str(&wire).expect("restores tint effect");
+        assert_eq!(restored, effect);
+        let graph = build_effect_render_graph(&[restored], tt(0), TEST_WORKING_SPACE)
+            .expect("builds restored tint graph");
+        let grade = tint_op(&graph).expect("tint op");
+        assert_eq!(grade.white(), [0.7, 0.2, 0.1]);
+        assert_eq!(grade.amount(), 0.35);
     }
 }
 

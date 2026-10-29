@@ -101,6 +101,11 @@ pub enum EffectGpuPointOp {
     Posterize {
         levels: f32,
     },
+    /// Duotone remap carried whole; backends read exact controls through
+    /// [`crate::TintGrade::gpu_controls`], so no backend re-derives them.
+    Tint {
+        grade: crate::TintGrade,
+    },
     Threshold {
         level: f32,
         luminance_coefficients: [f32; 3],
@@ -804,6 +809,7 @@ pub(crate) fn lower_point_op(
             level: grade.level(),
             luminance_coefficients: grade.luminance_coefficients(),
         }),
+        EffectRenderOp::Tint { grade } => Ok(EffectGpuPointOp::Tint { grade: *grade }),
         EffectRenderOp::BlackAndWhite { grade } => {
             Ok(EffectGpuPointOp::BlackAndWhite { grade: *grade })
         }
@@ -873,6 +879,7 @@ fn operation_name(op: &EffectRenderOp) -> &'static str {
         EffectRenderOp::Threshold { .. } => "threshold",
         EffectRenderOp::Mosaic { .. } => "mosaic",
         EffectRenderOp::Posterize { .. } => "posterize",
+        EffectRenderOp::Tint { .. } => "tint",
         EffectRenderOp::MotionTile { .. } => "motion_tile",
         EffectRenderOp::Kaleidoscope { .. } => "kaleidoscope",
         EffectRenderOp::Bevel { .. } => "bevel",

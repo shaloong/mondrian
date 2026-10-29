@@ -30,6 +30,7 @@ pub mod emboss;
 pub mod find_edges;
 mod project_properties;
 pub mod threshold;
+pub mod tint;
 pub use project_properties::{rebind_effect_project_geometry, EffectProjectPropertyInitializer};
 pub mod execution;
 pub mod execution_contract;
@@ -237,6 +238,7 @@ pub use temporal_execution::{
     PreparedEffectTemporalProgram, PreparedTemporalFrameSet, PreparedTemporalFrameSetError,
 };
 pub use threshold::{ThresholdError, ThresholdGrade, THRESHOLD_MAX_LEVEL, THRESHOLD_MIN_LEVEL};
+pub use tint::{tint_frame_f32, TintError, TintGrade};
 pub use tracking::{
     canonicalize_tracking_shape, track_frame_pair, transform_tracking_shape, TrackingError,
     TrackingFrame, TrackingObservation, TrackingQuality, TrackingRegion, TrackingTransform,

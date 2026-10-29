@@ -2808,6 +2808,7 @@ fn render_op_name(op: &crate::EffectRenderOp) -> &'static str {
         crate::EffectRenderOp::Threshold { .. } => "threshold",
         crate::EffectRenderOp::Mosaic { .. } => "mosaic",
         crate::EffectRenderOp::Posterize { .. } => "posterize",
+        crate::EffectRenderOp::Tint { .. } => "tint",
         crate::EffectRenderOp::MotionTile { .. } => "motion_tile",
         crate::EffectRenderOp::Kaleidoscope { .. } => "kaleidoscope",
         crate::EffectRenderOp::Bevel { .. } => "bevel",

@@ -2739,6 +2739,7 @@ const fn effect_operation_shape_tag(operation: &EffectRenderOp) -> u8 {
         EffectRenderOp::Bevel { .. } => 39,
         EffectRenderOp::Scatter { .. } => 40,
         EffectRenderOp::BrushStrokes { .. } => 41,
+        EffectRenderOp::Tint { .. } => 42,
         EffectRenderOp::ColorEmboss { .. } => 33,
         EffectRenderOp::Emboss { .. } => 32,
         EffectRenderOp::DropShadow { .. } => 30,
@@ -4776,6 +4777,7 @@ fn cpu_node_scratch_frames(
             | crate::EffectRenderOp::DropShadow { .. }
             | crate::EffectRenderOp::UnsharpMask { .. }
             | crate::EffectRenderOp::Threshold { .. }
+            | crate::EffectRenderOp::Tint { .. }
             | crate::EffectRenderOp::Mosaic { .. }
             | crate::EffectRenderOp::Posterize { .. }
             | crate::EffectRenderOp::MotionTile { .. }
