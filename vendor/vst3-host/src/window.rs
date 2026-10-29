@@ -834,7 +834,7 @@ pub use macos_main::MacosPluginMainThread;
 #[cfg(target_os = "windows")]
 pub use windows_scoped::{
     WindowsEditorMainThread, WindowsMainThreadWake, WindowsMessageStep,
-    WindowsNativeEditorContainer, WindowsNativeEditorContainerEvents, WindowsPluginEditorParent,
+    WindowsNativeEditorContainer, WindowsNativeEditorContainerEvents,
 };
 
 #[cfg(target_os = "linux")]
@@ -848,3 +848,31 @@ mod macos_scoped;
 
 #[cfg(target_os = "macos")]
 pub use macos_scoped::MacosNativeEditorContainer;
+
+/// The concrete platform's original native control-thread lifetime.
+#[cfg(target_os = "linux")]
+pub use LinuxEditorMainThread as NativeEditorMainThread;
+/// The concrete platform's original native control-thread lifetime.
+#[cfg(target_os = "macos")]
+pub use MacosPluginMainThread as NativeEditorMainThread;
+/// The concrete platform's original native control-thread lifetime.
+#[cfg(target_os = "windows")]
+pub use WindowsEditorMainThread as NativeEditorMainThread;
+
+/// The concrete platform's parent, owning no foreign plugin or author authority.
+#[cfg(target_os = "linux")]
+pub use LinuxNativeEditorContainer as NativeEditorContainer;
+/// The concrete platform's parent, owning no foreign plugin or author authority.
+#[cfg(target_os = "macos")]
+pub use MacosNativeEditorContainer as NativeEditorContainer;
+/// The concrete platform's parent, owning no foreign plugin or author authority.
+#[cfg(target_os = "windows")]
+pub use WindowsNativeEditorContainer as NativeEditorContainer;
+
+#[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
+mod scoped_editor;
+#[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
+pub use scoped_editor::PluginEditorParent;
+/// Backward-compatible name for the shared scoped view attachment on Windows.
+#[cfg(target_os = "windows")]
+pub use PluginEditorParent as WindowsPluginEditorParent;

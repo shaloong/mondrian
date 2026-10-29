@@ -1,7 +1,7 @@
 //! VST3 audio effects run only inside the supervised native worker.
 
 mod author_state_entry;
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
 mod controller_projection;
 mod initial_parameter_values;
 #[cfg(test)]
@@ -145,7 +145,7 @@ pub(super) fn product_plugin_interfaces() -> vst3_host::PluginInterfaceSupport {
         .with(Interface::EditController)
         .with(Interface::ConnectionPoint)
         .with(Interface::ProcessContextRequirements);
-    #[cfg(windows)]
+    #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
     let interfaces = interfaces
         .with(Interface::PlugView)
         .with(Interface::PlugViewContentScaleSupport)
@@ -735,21 +735,14 @@ impl Vst3AudioProcessorWorkerFactory {
             AudioProcessingMode::Realtime => ProcessMode::Realtime,
             AudioProcessingMode::Offline => ProcessMode::Offline,
         };
-        #[cfg(target_os = "windows")]
+        #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
         let native_main = std::rc::Rc::new(
-            vst3_host::window::WindowsEditorMainThread::initialize().map_err(|error| {
+            vst3_host::window::NativeEditorMainThread::initialize().map_err(|error| {
                 unavailable(format!(
                     "VST3 actual native main initialization failed: {error}"
                 ))
             })?,
         );
-        #[cfg(target_os = "macos")]
-        let native_main =
-            vst3_host::window::MacosPluginMainThread::initialize().map_err(|error| {
-                unavailable(format!(
-                    "VST3 actual native main initialization failed: {error}"
-                ))
-            })?;
         let mut host_builder = Vst3Host::builder()
             .plugin_interfaces(product_plugin_interfaces())
             .initial_process_mode(mode)
@@ -822,7 +815,7 @@ impl Vst3AudioProcessorWorkerFactory {
             last_parameter_values: vec![None; payload.parameter_ids.len()],
             configuration_phase:
                 super::native_configuration_control::NativeConfigurationPhase::Admitted,
-            #[cfg(target_os = "windows")]
+            #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
             native_parent: None,
             plugin: Some(plugin),
             host,
@@ -837,7 +830,7 @@ impl Vst3AudioProcessorWorkerFactory {
             native_binding: None,
             native_author_delivery: None,
             prepared_author_entry: None,
-            #[cfg(any(target_os = "windows", target_os = "macos"))]
+            #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
             native_main,
             note_input_contract: request.note_input_contract,
         })
@@ -1002,8 +995,8 @@ struct Vst3Worker {
     note_input_contract: crate::AudioProcessorNoteInputContract,
     last_parameter_values: Vec<Option<f64>>,
     configuration_phase: super::native_configuration_control::NativeConfigurationPhase,
-    #[cfg(target_os = "windows")]
-    native_parent: Option<vst3_host::window::WindowsPluginEditorParent>,
+    #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
+    native_parent: Option<vst3_host::window::PluginEditorParent>,
     plugin: Option<Plugin>,
     host: Vst3Host,
     payload: Vst3Payload,
@@ -1020,13 +1013,11 @@ struct Vst3Worker {
     prepared_author_entry: Option<author_state_entry::PreparedAuthorEntry>,
     // Last fields: native main services survive the plugin, controller, module
     // and any explicitly removed native parent. They are never sent to DSP.
-    #[cfg(target_os = "windows")]
-    native_main: std::rc::Rc<vst3_host::window::WindowsEditorMainThread>,
-    #[cfg(target_os = "macos")]
-    native_main: vst3_host::window::MacosPluginMainThread,
+    #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
+    native_main: std::rc::Rc<vst3_host::window::NativeEditorMainThread>,
 }
 
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
 impl Vst3Worker {
     fn native_editor_binding_matches(
         &self,
@@ -1039,7 +1030,7 @@ impl Vst3Worker {
     }
 }
 
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
 fn classify_editor_close_error(
     binding: crate::NativeAudioObjectBindRequest,
     error: vst3_host::error::Error,
@@ -1097,9 +1088,9 @@ impl IsolatedAudioProcessorWorker for Vst3Worker {
         })?;
         Ok(Some(Box::new(VstMainRole {
             editor,
-            #[cfg(any(target_os = "windows", target_os = "macos"))]
+            #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
             native_main: &self.native_main,
-            #[cfg(target_os = "windows")]
+            #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
             native_parent: &mut self.native_parent,
             configuration_phase: &self.configuration_phase,
             native_binding: &self.native_binding,
@@ -1133,9 +1124,9 @@ impl IsolatedAudioProcessorWorker for Vst3Worker {
         Ok(super::IsolatedAudioProcessorWorkerSplit {
             main: Box::new(VstMainRole {
                 editor,
-                #[cfg(any(target_os = "windows", target_os = "macos"))]
+                #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
                 native_main: &self.native_main,
-                #[cfg(target_os = "windows")]
+                #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
                 native_parent: &mut self.native_parent,
                 configuration_phase: &self.configuration_phase,
                 native_binding: &self.native_binding,
@@ -1146,7 +1137,7 @@ impl IsolatedAudioProcessorWorker for Vst3Worker {
         })
     }
 
-    #[cfg(target_os = "windows")]
+    #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
     fn service_native_editor_close_request(
         &mut self,
     ) -> Result<crate::NativeAudioEditorOutcome, AudioProcessorHostError> {
@@ -1161,35 +1152,39 @@ impl IsolatedAudioProcessorWorker for Vst3Worker {
         })
     }
 
-    #[cfg(target_os = "windows")]
+    #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
     fn close_native_editor_owner(&mut self) -> Result<(), AudioProcessorHostError> {
-        let Some(plugin) = self.plugin.as_mut() else {
-            return if self.native_parent.is_some() {
-                Err(AudioProcessorHostError::WorkerFailed {
-                    operation: "native editor owner removal",
-                    detail: "same native parent outlived its processor owner".into(),
-                })
-            } else {
-                Ok(())
+        let main = std::rc::Rc::clone(&self.native_main);
+        main.with_native_scope(|| {
+            let Some(plugin) = self.plugin.as_mut() else {
+                return if self.native_parent.is_some() {
+                    Err(AudioProcessorHostError::WorkerFailed {
+                        operation: "native editor owner removal",
+                        detail: "same native parent outlived its processor owner".into(),
+                    })
+                } else {
+                    Ok(())
+                };
             };
-        };
-        if let Some(parent) = self.native_parent.as_mut() {
-            let mut editor =
-                plugin.borrow_editor_control().map_err(native_editor_removal_failed)?;
-            // DSP has joined; the same parent checks its private attachment
-            // identity without requiring this owner to resume processing.
-            parent.close(&mut editor).map_err(native_editor_removal_failed)?;
-            self.native_parent = None;
-        } else {
-            // An unsuccessful attach can retain only failed host-frame cleanup.
-            // The canonical attachment model decides the exact remaining step;
-            // absence of a parent must never invent successful native removal.
-            plugin.close_editor().map_err(native_editor_removal_failed)?;
-        }
-        Ok(())
+            if let Some(parent) = self.native_parent.as_mut() {
+                let mut editor =
+                    plugin.borrow_editor_control().map_err(native_editor_removal_failed)?;
+                // DSP has joined; the same parent checks its private attachment
+                // identity without requiring this owner to resume processing.
+                parent.close(&mut editor).map_err(native_editor_removal_failed)?;
+                self.native_parent = None;
+            } else {
+                // An unsuccessful attach can retain only failed host-frame cleanup.
+                // The canonical attachment model decides the exact remaining step;
+                // absence of a parent must never invent successful native removal.
+                plugin.close_editor().map_err(native_editor_removal_failed)?;
+            }
+            Ok(())
+        })
+        .map_err(native_editor_removal_failed)?
     }
 
-    #[cfg(target_os = "windows")]
+    #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
     fn native_editor_detach_stage(&self) -> Option<crate::NativeAudioEditorCloseStage> {
         self.plugin.as_ref()?.native_editor_pending_detach().map(|stage| match stage {
             vst3_host::error::EditorDetachStage::Removal => {
@@ -1201,94 +1196,105 @@ impl IsolatedAudioProcessorWorker for Vst3Worker {
         })
     }
 
-    #[cfg(target_os = "windows")]
+    #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
     fn open_native_audio_editor(
         &mut self,
         request: crate::NativeAudioEditorOpenRequest,
     ) -> Result<crate::NativeAudioEditorOutcome, AudioProcessorHostError> {
-        use crate::{NativeAudioEditorOutcome as Outcome, NativeAudioEditorRefusal as Refusal};
-        let binding = request.binding();
-        if !self.native_editor_binding_matches(binding)? {
-            return Ok(Outcome::Refused(Refusal::OwnerChanged));
-        }
-        if self.pending_reprepare().is_some() || self.configuration_phase.ready_token().is_some() {
-            return Ok(Outcome::Refused(Refusal::ConfigurationPending));
-        }
-        let plugin = self
-            .plugin
-            .as_mut()
-            .ok_or_else(|| unavailable("native editor processor owner is closed"))?;
-        if plugin.native_editor_pending_detach().is_some() {
-            return Ok(Outcome::Refused(Refusal::ConfigurationPending));
-        }
-        if !plugin.has_editor() {
-            return Ok(Outcome::Refused(Refusal::NoEditor));
-        }
-        if !self.project_idle_controller_values(&request)? {
-            return Ok(Outcome::Refused(Refusal::ConfigurationPending));
-        }
-        let projected = !request.static_parameter_values().is_empty();
-        let plugin = self
-            .plugin
-            .as_mut()
-            .ok_or_else(|| unavailable("native controller owner closed"))?;
-        let mut editor = plugin.borrow_editor_control().map_err(native_editor_removal_failed)?;
-        if self.native_parent.is_none() {
-            match vst3_host::window::WindowsPluginEditorParent::open(
-                std::rc::Rc::clone(&self.native_main),
-                &mut editor,
-                request.title(),
-            ) {
-                Ok(parent) => self.native_parent = Some(parent),
-                Err(error) if projected => return Err(native_editor_removal_failed(error)),
-                Err(vst3_host::error::Error::EditorUnavailable) => {
-                    return Ok(Outcome::Refused(Refusal::NoEditor))
-                }
-                Err(vst3_host::error::Error::EditorPlatformUnsupported) => {
-                    return Ok(Outcome::Refused(Refusal::UnsupportedAdapter))
-                }
-                Err(error) => return classify_editor_close_error(binding, error),
+        let main = std::rc::Rc::clone(&self.native_main);
+        main.with_native_scope(|| {
+            use crate::{NativeAudioEditorOutcome as Outcome, NativeAudioEditorRefusal as Refusal};
+            let binding = request.binding();
+            if !self.native_editor_binding_matches(binding)? {
+                return Ok(Outcome::Refused(Refusal::OwnerChanged));
             }
-        }
-        let (width, height) = editor.editor_size().map_err(native_editor_removal_failed)?;
-        let width = u32::try_from(width)
-            .ok()
-            .filter(|value| *value > 0)
-            .ok_or_else(|| invalid("native view width is not positive"))?;
-        let height = u32::try_from(height)
-            .ok()
-            .filter(|value| *value > 0)
-            .ok_or_else(|| invalid("native view height is not positive"))?;
-        Ok(Outcome::Opened { binding, width, height })
+            if self.pending_reprepare().is_some()
+                || self.configuration_phase.ready_token().is_some()
+            {
+                return Ok(Outcome::Refused(Refusal::ConfigurationPending));
+            }
+            let plugin = self
+                .plugin
+                .as_mut()
+                .ok_or_else(|| unavailable("native editor processor owner is closed"))?;
+            if plugin.native_editor_pending_detach().is_some() {
+                return Ok(Outcome::Refused(Refusal::ConfigurationPending));
+            }
+            if !plugin.has_editor() {
+                return Ok(Outcome::Refused(Refusal::NoEditor));
+            }
+            if !self.project_idle_controller_values(&request)? {
+                return Ok(Outcome::Refused(Refusal::ConfigurationPending));
+            }
+            let projected = !request.static_parameter_values().is_empty();
+            let plugin = self
+                .plugin
+                .as_mut()
+                .ok_or_else(|| unavailable("native controller owner closed"))?;
+            let mut editor =
+                plugin.borrow_editor_control().map_err(native_editor_removal_failed)?;
+            if self.native_parent.is_none() {
+                match vst3_host::window::PluginEditorParent::open(
+                    std::rc::Rc::clone(&self.native_main),
+                    &mut editor,
+                    request.title(),
+                ) {
+                    Ok(parent) => self.native_parent = Some(parent),
+                    Err(error) if projected => return Err(native_editor_removal_failed(error)),
+                    Err(vst3_host::error::Error::EditorUnavailable) => {
+                        return Ok(Outcome::Refused(Refusal::NoEditor))
+                    }
+                    Err(vst3_host::error::Error::EditorPlatformUnsupported) => {
+                        return Ok(Outcome::Refused(Refusal::UnsupportedAdapter))
+                    }
+                    Err(error) => return classify_editor_close_error(binding, error),
+                }
+            }
+            let (width, height) = editor.editor_size().map_err(native_editor_removal_failed)?;
+            let width = u32::try_from(width)
+                .ok()
+                .filter(|value| *value > 0)
+                .ok_or_else(|| invalid("native view width is not positive"))?;
+            let height = u32::try_from(height)
+                .ok()
+                .filter(|value| *value > 0)
+                .ok_or_else(|| invalid("native view height is not positive"))?;
+            Ok(Outcome::Opened { binding, width, height })
+        })
+        .map_err(native_editor_removal_failed)?
     }
 
-    #[cfg(target_os = "windows")]
+    #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
     fn close_native_audio_editor(
         &mut self,
         binding: crate::NativeAudioObjectBindRequest,
     ) -> Result<crate::NativeAudioEditorOutcome, AudioProcessorHostError> {
-        use crate::{NativeAudioEditorOutcome as Outcome, NativeAudioEditorRefusal as Refusal};
-        if !self.native_editor_binding_matches(binding)? {
-            return Ok(Outcome::Refused(Refusal::OwnerChanged));
-        }
-        let plugin = self
-            .plugin
-            .as_mut()
-            .ok_or_else(|| unavailable("native editor processor owner is closed"))?;
-        let result = if let Some(parent) = self.native_parent.as_mut() {
-            let mut editor =
-                plugin.borrow_editor_control().map_err(native_editor_removal_failed)?;
-            parent.close(&mut editor)
-        } else {
-            plugin.close_editor()
-        };
-        match result {
-            Ok(()) => {
-                self.native_parent = None;
-                Ok(Outcome::Closed { binding })
+        let main = std::rc::Rc::clone(&self.native_main);
+        main.with_native_scope(|| {
+            use crate::{NativeAudioEditorOutcome as Outcome, NativeAudioEditorRefusal as Refusal};
+            if !self.native_editor_binding_matches(binding)? {
+                return Ok(Outcome::Refused(Refusal::OwnerChanged));
             }
-            Err(error) => classify_editor_close_error(binding, error),
-        }
+            let plugin = self
+                .plugin
+                .as_mut()
+                .ok_or_else(|| unavailable("native editor processor owner is closed"))?;
+            let result = if let Some(parent) = self.native_parent.as_mut() {
+                let mut editor =
+                    plugin.borrow_editor_control().map_err(native_editor_removal_failed)?;
+                parent.close(&mut editor)
+            } else {
+                plugin.close_editor()
+            };
+            match result {
+                Ok(()) => {
+                    self.native_parent = None;
+                    Ok(Outcome::Closed { binding })
+                }
+                Err(error) => classify_editor_close_error(binding, error),
+            }
+        })
+        .map_err(native_editor_removal_failed)?
     }
 
     fn native_audio_object_observation(
@@ -1725,7 +1731,7 @@ impl IsolatedAudioProcessorWorker for Vst3Worker {
             // Last live check on the actual old producer. Preserve never drains
             // or acknowledges a batch arriving after the parent's preflight.
             // A closed author boundary is distinct from a closed native GUI.
-            #[cfg(target_os = "windows")]
+            #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
             if self.native_parent.is_some() || self.native_editor_detach_stage().is_some() {
                 return Err(AudioProcessorHostError::StateEntry(
                     "VST3 Note reentry has live editor/author/configuration work".to_owned(),
@@ -2785,7 +2791,7 @@ fn unavailable(detail: impl Into<String>) -> AudioProcessorHostError {
     AudioProcessorHostError::Unavailable(detail.into())
 }
 
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
 fn native_editor_removal_failed(error: vst3_host::error::Error) -> AudioProcessorHostError {
     AudioProcessorHostError::WorkerFailed {
         operation: "native editor owner removal",
@@ -2797,12 +2803,10 @@ fn native_editor_removal_failed(error: vst3_host::error::Error) -> AudioProcesso
 /// This role cannot reach the DSP processor or replacement/configuration APIs.
 struct VstMainRole<'a> {
     editor: vst3_host::plugin::PluginEditorControl<'a>,
-    #[cfg(target_os = "windows")]
-    native_main: &'a std::rc::Rc<vst3_host::window::WindowsEditorMainThread>,
-    #[cfg(target_os = "macos")]
-    native_main: &'a vst3_host::window::MacosPluginMainThread,
-    #[cfg(target_os = "windows")]
-    native_parent: &'a mut Option<vst3_host::window::WindowsPluginEditorParent>,
+    #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
+    native_main: &'a std::rc::Rc<vst3_host::window::NativeEditorMainThread>,
+    #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
+    native_parent: &'a mut Option<vst3_host::window::PluginEditorParent>,
     configuration_phase: &'a super::native_configuration_control::NativeConfigurationPhase,
     native_binding: &'a Option<crate::NativeAudioObjectBindReceipt>,
     native_author_delivery: &'a Option<native_author::PendingDelivery>,
@@ -2844,21 +2848,29 @@ impl super::IsolatedAudioProcessorMainRole for VstMainRole<'_> {
                 detail: format!("actual native WM_QUIT: {exit_code}"),
             });
         }
-        #[cfg(not(target_os = "windows"))]
-        {
-            #[cfg(target_os = "macos")]
-            self.native_main.dispatch_messages().map_err(|error| {
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        self.native_main
+            .with_native_scope(|| {
+                if let Some(parent) = self.native_parent.as_mut() {
+                    parent.service(&mut self.editor)
+                } else {
+                    #[cfg(target_os = "macos")]
+                    self.native_main.dispatch_messages()?;
+                    self.editor.service_controller()?;
+                    self.editor.service_run_loop()
+                }
+            })
+            .and_then(|result| result)
+            .map_err(|error| {
                 unavailable(format!("VST3 actual native main service failed: {error}"))
             })?;
-            self.editor
-                .service_controller()
-                .and_then(|_| self.editor.service_run_loop())
-                .map_err(|error| {
-                    unavailable(format!(
-                        "VST3 actual controller main service failed: {error}"
-                    ))
-                })?;
-        }
+        #[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
+        self.editor
+            .service_controller()
+            .and_then(|_| self.editor.service_run_loop())
+            .map_err(|error| {
+                unavailable(format!("VST3 actual controller service failed: {error}"))
+            })?;
         Ok(())
     }
 
@@ -2866,6 +2878,21 @@ impl super::IsolatedAudioProcessorMainRole for VstMainRole<'_> {
         // Flush processor-to-controller display/DataExchange updates on main
         // only after DSP join. No synthetic author End, frame removal or native
         // state/processor replacement is inferred from temporary role lifetime.
+        #[cfg(target_os = "macos")]
+        {
+            return self
+                .native_main
+                .with_native_scope(|| {
+                    self.editor.service_controller().and_then(|_| self.editor.service_run_loop())
+                })
+                .and_then(|result| result)
+                .map_err(|error| {
+                    unavailable(format!(
+                        "VST3 joined controller main finish failed: {error}"
+                    ))
+                });
+        }
+        #[cfg(not(target_os = "macos"))]
         self.editor
             .service_controller()
             .and_then(|_| self.editor.service_run_loop())
@@ -2960,7 +2987,7 @@ impl super::IsolatedAudioProcessorMainRole for VstMainRole<'_> {
             && !self.prepared_author_entry.as_ref().is_some_and(|entry| entry.awaiting_ack()))
     }
 
-    #[cfg(target_os = "windows")]
+    #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
     fn native_editor_close_requested(&self) -> Result<bool, AudioProcessorHostError> {
         self.native_parent.as_ref().map_or(Ok(false), |parent| {
             parent.closed_by_user().map_err(|error| {

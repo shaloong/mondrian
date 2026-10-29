@@ -36,6 +36,12 @@ impl LinuxEditorMainThread {
         }
         Ok(())
     }
+
+    /// Run native control work on the original initializing thread.
+    pub fn with_native_scope<T>(&self, action: impl FnOnce() -> T) -> Result<T> {
+        self.ensure_current()?;
+        Ok(action())
+    }
 }
 
 struct X11Parent {
@@ -50,7 +56,7 @@ struct X11Parent {
 /// The format adapter must remove its actual view before `destroy`. Drop cannot
 /// infer foreign view removal and retains an unresolved parent until process exit.
 pub struct LinuxNativeEditorContainer {
-    main: Rc<LinuxEditorMainThread>,
+    pub(super) main: Rc<LinuxEditorMainThread>,
     parent: Option<X11Parent>,
     close_requested: Cell<bool>,
 }

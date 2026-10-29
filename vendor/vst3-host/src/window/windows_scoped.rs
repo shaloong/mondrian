@@ -8,7 +8,7 @@ use super::{
     dpi_scale_factor, resize_windows_editor_container, windows_editor_client_resize_requests,
 };
 use crate::error::{Error, Result};
-use crate::plugin::{NativeEditorAttachmentOwner, PluginEditorControl, WindowHandle};
+use crate::plugin::WindowHandle;
 use std::marker::PhantomData;
 use std::rc::Rc;
 use std::thread::{self, ThreadId};
@@ -75,6 +75,12 @@ impl WindowsEditorMainThread {
             ));
         }
         Ok(())
+    }
+
+    /// Run native control work on the initializing STA/OLE thread.
+    pub fn with_native_scope<T>(&self, action: impl FnOnce() -> T) -> Result<T> {
+        self.ensure_current()?;
+        Ok(action())
     }
 
     /// A wake signal only; it carries no command, plugin pointer or owner lease.
@@ -181,142 +187,13 @@ pub enum WindowsMessageStep {
     },
 }
 
-/// Native HWND parent owned by the same child main/native-instance lifetime.
-///
-/// Temporary editor/processing borrows may end while this parent and its actual
-/// attached IPlugView remain live. This allows coherent control-side state
-/// capture after DSP join without closing and recreating the user's editor.
-/// Native instance replacement must explicitly remove the view and close this
-/// parent first. This type is !Send through its same-main OLE owner.
-pub struct WindowsPluginEditorParent {
-    main: Rc<WindowsEditorMainThread>,
-    hwnd: Option<HWND>,
-    owner: NativeEditorAttachmentOwner,
-    view_size: (i32, i32),
-}
-
-impl WindowsPluginEditorParent {
-    /// Create a native parent and attach the sole existing native instance.
-    pub fn open(
-        main: Rc<WindowsEditorMainThread>,
-        editor: &mut PluginEditorControl<'_>,
-        title: &str,
-    ) -> Result<Self> {
-        main.ensure_current()?;
-        let owner = editor.attachment_owner()?;
-        let (width, height) = editor.editor_size()?;
-        let hwnd = create_windows_editor_container(title, width, height)?;
-        let attached = (|| {
-            if let Some(scale) = dpi_scale_factor(unsafe { GetDpiForWindow(hwnd) }) {
-                editor.set_editor_scale_factor(scale)?;
-            }
-            // The exact native parent stays live until successful view removal.
-            editor.open_editor(unsafe { WindowHandle::from_hwnd(hwnd.cast()) })
-        })();
-        if let Err(error) = attached {
-            // A failed attached callback is never paired with removed. The sole
-            // native view model separately retains failed host-frame cleanup.
-            // Failure to destroy this un-attached parent is also explicit.
-            destroy_windows_editor_container(hwnd)?;
-            return Err(error);
-        }
-        unsafe {
-            ShowWindow(hwnd, SW_SHOW);
-            UpdateWindow(hwnd);
-        }
-        Ok(Self {
-            main,
-            hwnd: Some(hwnd),
-            owner,
-            view_size: (width, height),
-        })
-    }
-
-    /// Service the actual main message queue and this instance's borrowed role.
-    /// The parent does not clone a controller or own another callback queue.
-    pub fn service(&mut self, editor: &mut PluginEditorControl<'_>) -> Result<WindowsMessageStep> {
-        self.main.ensure_current()?;
-        if editor.attachment_owner()? != self.owner {
-            return Err(Error::EditorAttachmentOwnerMismatch);
-        }
-        let step = self.main.dispatch_messages()?;
-        editor.service_controller()?;
-        editor.service_run_loop()?;
-        if let Some(hwnd) = self.hwnd {
-            let dpi = dpi_changes()
-                .lock()
-                .map_err(|_| Error::Other("native editor DPI slot is poisoned".to_string()))?
-                .remove(&(hwnd as usize));
-            if let Some(scale) = dpi.and_then(dpi_scale_factor) {
-                editor.set_editor_scale_factor(scale)?;
-            }
-            let resized = windows_editor_client_resize_requests()
-                .lock()
-                .map_err(|_| {
-                    Error::Other("native editor client resize slot is poisoned".to_string())
-                })?
-                .remove(&(hwnd as usize));
-            if let Some((width, height)) = resized.filter(|size| *size != self.view_size) {
-                let accepted = editor.resize_editor(width, height)?;
-                self.view_size = accepted;
-                if accepted != (width, height) {
-                    resize_windows_editor_container(hwnd, accepted.0, accepted.1)?;
-                }
-            }
-            if let Some((width, height)) = editor.take_editor_resize_request()? {
-                resize_windows_editor_container(hwnd, width, height)?;
-                self.view_size = (width, height);
-            }
-        }
-        Ok(step)
-    }
-
-    /// Whether actual WM_CLOSE requested removal of this exact parent.
-    pub fn closed_by_user(&self) -> Result<bool> {
-        let Some(hwnd) = self.hwnd else {
-            return Ok(false);
-        };
-        close_requests()
-            .lock()
-            .map(|requests| requests.contains(&(hwnd as usize)))
-            .map_err(|_| Error::Other("native editor close slot is poisoned".to_string()))
-    }
-
-    /// Remove the current view, then destroy its exact parent on actual main.
-    /// An unresolved removal/frame cleanup leaves this parent live. The isolated
-    /// consumer must report/retire the child before native owner/module release.
-    pub fn close(&mut self, editor: &mut PluginEditorControl<'_>) -> Result<()> {
-        self.main.ensure_current()?;
-        if editor.attachment_owner()? != self.owner {
-            return Err(Error::EditorAttachmentOwnerMismatch);
-        }
-        if let Some(hwnd) = self.hwnd {
-            editor.close_editor()?;
-            destroy_windows_editor_container(hwnd)?;
-            self.hwnd = None;
-        }
-        Ok(())
-    }
-}
-
-impl Drop for WindowsPluginEditorParent {
-    fn drop(&mut self) {
-        if self.hwnd.is_some() {
-            // A parent owns native window storage, not a borrowed controller.
-            // It cannot guess view detachment during Drop. Isolated consumers
-            // explicitly close and then retire on failure before native unload.
-            log::error!("native editor parent dropped without confirmed view removal; HWND retained until isolated process exit");
-        }
-    }
-}
-
 /// A format-neutral native parent using the existing Windows container/WndProc.
 ///
 /// This owns no plugin/controller and issues no native binding or author lease.
 /// The attached format adapter must finish native GUI destruction before calling
 /// `destroy`; dropping this object cannot infer that foreign lifecycle step.
 pub struct WindowsNativeEditorContainer {
-    main: Rc<WindowsEditorMainThread>,
+    pub(super) main: Rc<WindowsEditorMainThread>,
     hwnd: Option<HWND>,
 }
 
@@ -345,6 +222,18 @@ impl WindowsNativeEditorContainer {
         self.hwnd
             .map(|hwnd| hwnd.cast())
             .ok_or_else(|| Error::Other("native editor parent is closed".to_string()))
+    }
+
+    /// Whether this owner still retains its native parent.
+    pub fn is_live(&self) -> Result<bool> {
+        self.main.ensure_current()?;
+        Ok(self.hwnd.is_some())
+    }
+
+    /// Borrow the existing VST3 HWND contract through confirmed view removal.
+    pub fn window_handle(&self) -> Result<WindowHandle> {
+        // SAFETY: this owner retains its HWND until the format acknowledges detach.
+        Ok(unsafe { WindowHandle::from_hwnd(self.hwnd()?) })
     }
 
     /// Current physical scaling of this exact native parent, when available.

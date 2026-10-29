@@ -46,6 +46,13 @@ impl MacosPluginMainThread {
             .ok_or_else(|| Error::Other("native plugin main service changed thread".to_owned()))
     }
 
+    /// Run native controller/view work on actual main inside an autorelease pool.
+    /// Retained native owners may outlive this temporary callback scope.
+    pub fn with_native_scope<T>(&self, action: impl FnOnce() -> T) -> Result<T> {
+        let _main = self.marker()?;
+        Ok(objc2::rc::autoreleasepool(|_| action()))
+    }
+
     // Opening an actual editor establishes AppKit. Headless timer/processing
     // services do not create an NSApplication or change an existing delegate.
     pub(super) fn gui_application(&self) -> Result<&NSApplication> {
