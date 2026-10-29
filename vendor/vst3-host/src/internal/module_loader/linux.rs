@@ -23,6 +23,30 @@ type ModuleExitFunc = unsafe extern "C" fn() -> bool;
 /// Function signature for GetPluginFactory
 type GetPluginFactoryFunc = unsafe extern "C" fn() -> *mut IPluginFactory;
 
+#[cfg(all(test, target_os = "linux"))]
+mod entry_abi_tests {
+    use super::*;
+
+    #[test]
+    #[ignore = "requires explicit freshly compiled MONDRIAN_VST3_ENTRY_ABI_FIXTURE ELF under process supervision"]
+    fn module_entry_receives_exact_native_loader_handle() {
+        let path = std::path::PathBuf::from(
+            std::env::var_os("MONDRIAN_VST3_ENTRY_ABI_FIXTURE").expect("explicit ELF ABI fixture"),
+        );
+        assert!(path.is_absolute() && path.is_file());
+        let module =
+            LinuxModule::load_internal(&path).expect("ModuleEntry must receive the dlopen handle");
+        // SAFETY: the owned C fixture exports this exact function signature,
+        // and the retained module keeps its code mapped throughout this call.
+        let matched = unsafe {
+            module.library.get::<unsafe extern "C" fn() -> bool>(b"MondrianEntryMatched")
+        }
+        .unwrap();
+        assert!(unsafe { matched() });
+        drop(module);
+    }
+}
+
 /// Linux VST3 module implementation
 pub struct LinuxModule {
     /// libloading Library handle. Never read directly, but MUST outlive the symbols below:

@@ -398,6 +398,137 @@ mod tests {
         assert!(context.to_com_ptr::<IPlugInterfaceSupport>().is_none());
     }
 
+    #[test]
+    fn module_inventory_includes_the_actual_shared_ownership_index() {
+        struct Inventory(Vec<(usize, usize, crate::host_storage::HostStorageKind)>);
+        impl HostStorageVisitor for Inventory {
+            fn visit(
+                &mut self,
+                value: HostStorageRef<'_>,
+            ) -> std::result::Result<(), HostStorageError> {
+                self.0.push((value.address(), value.layout().size(), value.kind()));
+                Ok(())
+            }
+        }
+        let observed = Arc::new(Observed::default());
+        let factory = ComWrapper::new(FactoryProbe(Arc::clone(&observed)));
+        let module = attach(&factory, &observed).unwrap();
+        let mut inventory = Inventory(Vec::new());
+        module.visit_owned_storage(&mut inventory).unwrap();
+        // The ownership index is visited last under its borrow. Do not compare
+        // a pointer captured before visiting: another factory may grow the
+        // shared vector concurrently, legitimately replacing that allocation.
+        let observed = inventory.0.last().unwrap();
+        assert_ne!(observed.0, 0);
+        assert!(observed.1 >= std::mem::size_of::<(usize, Weak<FactoryContextState>)>());
+        assert_eq!(
+            observed.2,
+            crate::host_storage::HostStorageKind::CompleteAllocation
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "requires explicit real MONDRIAN_VST3_FACTORY_PLUGIN ELF/bundle and supervised native execution"]
+    fn real_sdk_factory_context_survives_peer_instance_and_discovery_teardown() {
+        let path = std::path::PathBuf::from(
+            std::env::var_os("MONDRIAN_VST3_FACTORY_PLUGIN").expect("explicit native VST3"),
+        );
+        assert!(path.is_absolute() && path.exists());
+        let path = path.canonicalize().unwrap();
+        for _ in 0..4 {
+            let first = crate::internal::module_loader::load_module(&path).unwrap();
+            let peer = crate::internal::module_loader::load_module(&path).unwrap();
+            assert!(Arc::ptr_eq(
+                first.factory_run_loop().unwrap(),
+                peer.factory_run_loop().unwrap()
+            ));
+            let before = {
+                let factory = unsafe { ComPtr::from_raw(first.get_factory().unwrap()) }.unwrap();
+                factory.cast::<FUnknown>().unwrap().as_ptr() as usize
+            };
+            let info = crate::discovery::get_plugin_info(&path)
+                .expect("actual component/controller discovery while module owners are live");
+            assert_eq!(info.uid.len(), 32);
+            assert!(info.uid.bytes().all(|b| b.is_ascii_hexdigit()));
+            let after = {
+                let factory = unsafe { ComPtr::from_raw(peer.get_factory().unwrap()) }.unwrap();
+                factory.cast::<FUnknown>().unwrap().as_ptr() as usize
+            };
+            assert_eq!(before, after);
+            drop(first);
+            // No editor is created. Actual native SDK factory retains the Linux
+            // context, while this callback probes the host ABI/service lifetime.
+            let calls = Arc::new(AtomicUsize::new(0));
+            let record = Arc::new(Observed::default());
+            let timer = ComWrapper::new(TimerProbe {
+                hits: Arc::clone(&calls),
+                observed: record,
+                on_drop: None,
+            })
+            .to_com_ptr::<Linux::ITimerHandler>()
+            .unwrap();
+            let registry = peer.factory_run_loop().unwrap();
+            assert_eq!(
+                unsafe { RunLoopRegistry::register_timer(registry, timer.as_ptr(), 1) },
+                kResultOk
+            );
+            for timer in &mut registry.lock().unwrap().timers {
+                timer.due = std::time::Instant::now();
+            }
+            crate::internal::run_loop::service(registry).unwrap();
+            assert_eq!(calls.load(Ordering::SeqCst), 1);
+            assert_eq!(
+                unsafe { RunLoopRegistry::unregister_timer(registry, timer.as_ptr()) },
+                kResultOk
+            );
+            drop(timer);
+            drop(peer);
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn factory_fd_handler_uses_actual_readiness_and_unregisters_without_a_view() {
+        use std::{io::Write, os::fd::AsRawFd, os::unix::net::UnixStream};
+        use Linux::{IEventHandler, IEventHandlerTrait, IRunLoopTrait};
+        struct EventProbe(Arc<AtomicI32>);
+        impl Class for EventProbe {
+            type Interfaces = (IEventHandler,);
+        }
+        impl IEventHandlerTrait for EventProbe {
+            unsafe fn onFDIsSet(&self, fd: Linux::FileDescriptor) {
+                self.0.store(fd, Ordering::SeqCst);
+            }
+        }
+        let observed = Arc::new(Observed::default());
+        let factory = ComWrapper::new(FactoryProbe(Arc::clone(&observed)));
+        let module = attach(&factory, &observed).unwrap();
+        let run_loop = module.services.context.to_com_ptr::<Linux::IRunLoop>().unwrap();
+        let (read, mut write) = UnixStream::pair().unwrap();
+        let actual = Arc::new(AtomicI32::new(-1));
+        let event = ComWrapper::new(EventProbe(Arc::clone(&actual)))
+            .to_com_ptr::<IEventHandler>()
+            .unwrap();
+        assert_eq!(
+            unsafe { run_loop.registerEventHandler(event.as_ptr(), -1) },
+            kInvalidArgument
+        );
+        assert_eq!(
+            unsafe { run_loop.registerEventHandler(event.as_ptr(), read.as_raw_fd()) },
+            kResultOk
+        );
+        write.write_all(b"x").unwrap();
+        crate::internal::run_loop::service(module.factory_run_loop().unwrap()).unwrap();
+        assert_eq!(actual.swap(-1, Ordering::SeqCst), read.as_raw_fd());
+        assert_eq!(
+            unsafe { run_loop.unregisterEventHandler(event.as_ptr()) },
+            kResultOk
+        );
+        crate::internal::run_loop::service(module.factory_run_loop().unwrap()).unwrap();
+        assert_eq!(actual.load(Ordering::SeqCst), -1);
+    }
+
     #[cfg(target_os = "linux")]
     struct TimerProbe {
         hits: Arc<AtomicUsize>,
