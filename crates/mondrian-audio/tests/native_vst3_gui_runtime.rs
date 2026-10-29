@@ -226,7 +226,8 @@ fn again_gui_retains_installed_object_pcm_and_native_parent_through_repeated_clo
                 }
                 assert!(
                     Instant::now() < deadline,
-                    "real foreign child must paint through native main service"
+                    "real foreign child must paint through native main service: {:?}",
+                    probe.describe_windows()
                 );
                 std::thread::yield_now();
             }

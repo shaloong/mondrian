@@ -79,6 +79,31 @@ impl Probe {
         (u32::from(geometry.width()), u32::from(geometry.height()))
     }
 
+    pub fn describe_windows(&self) -> Vec<String> {
+        let mut pending = vec![self.root];
+        let mut descriptions = Vec::new();
+        while let Some(window) = pending.pop() {
+            assert!(descriptions.len() < 128, "bounded native lab window tree");
+            let tree = self
+                .connection
+                .wait_for_reply(self.connection.send_request(&x::QueryTree { window }))
+                .unwrap();
+            let attributes = self
+                .connection
+                .wait_for_reply(self.connection.send_request(&x::GetWindowAttributes { window }))
+                .unwrap();
+            descriptions.push(format!(
+                "{:#x}: {:?}, {:?}, children {:?}",
+                window.resource_id(),
+                self.size(window),
+                attributes.map_state(),
+                tree.children()
+            ));
+            pending.extend_from_slice(tree.children());
+        }
+        descriptions
+    }
+
     pub fn foreign_view_is_painted(&self, window: x::Window) -> bool {
         let tree = self
             .connection
