@@ -58,7 +58,7 @@ struct CocoaParent {
 /// The format adapter must acknowledge actual GUI destruction before `destroy`.
 /// An unresolved live parent is retained until its isolated process exits.
 pub struct MacosNativeEditorContainer {
-    main: Rc<MacosPluginMainThread>,
+    pub(super) main: Rc<MacosPluginMainThread>,
     parent: Option<CocoaParent>,
 }
 

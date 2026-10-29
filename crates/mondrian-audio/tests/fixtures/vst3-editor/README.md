@@ -52,6 +52,13 @@ controller configuration roundtrip, resize constraints, two close failures and
 actual separate-thread DSP using the same component/controller. Missing input
 artifacts are a test failure, not a successful skip.
 
+The three controller gates explicitly stop processing before GUI access and
+borrow the same controller. The state roundtrip delivers the GUI edits to PCM
+before capture, proves pending host input blocks restore, then delivers it
+through a native zero-sample process before restoring. The separate DSP gate
+starts processing before borrowing both roles; GUI access does not imply that a
+processing scope is active.
+
 Every gate uses an actual native test child process. The removal-failure gate
 checks that repeated host close remains refused without a second native
 `removed()` call, then retires the child without unloading an attached view's

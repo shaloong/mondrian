@@ -2,7 +2,7 @@
 
 use crate::error::{Error, Result};
 use crate::plugin::WindowHandle;
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::marker::PhantomData;
 use std::rc::Rc;
 use std::thread::{self, ThreadId};
@@ -36,6 +36,12 @@ impl LinuxEditorMainThread {
         }
         Ok(())
     }
+
+    /// Run native control work on the original initializing thread.
+    pub fn with_native_scope<T>(&self, action: impl FnOnce() -> T) -> Result<T> {
+        self.ensure_current()?;
+        Ok(action())
+    }
 }
 
 struct X11Parent {
@@ -43,6 +49,90 @@ struct X11Parent {
     window: x::Window,
     protocols: x::Atom,
     delete_window: x::Atom,
+    xembed: x::Atom,
+    xembed_info: x::Atom,
+    embedded: RefCell<Vec<x::Window>>,
+}
+
+impl X11Parent {
+    /// Negotiate only actual direct XEmbed children. Plain X11 children retain
+    /// their own mapping policy. All requests stay on the native control thread.
+    fn refresh_embedded_child(&self, window: x::Window) -> Result<()> {
+        let result = self.refresh_live_embedded_child(window);
+        if matches!(
+            result,
+            Err(xcb::Error::Protocol(xcb::ProtocolError::X(
+                x::Error::Window(_),
+                _
+            )))
+        ) {
+            // A client can destroy its own window between an event and a reply.
+            // Other protocol/connection failures must still fail native service.
+            self.embedded.borrow_mut().retain(|child| *child != window);
+            return Ok(());
+        }
+        result.map_err(native_error)
+    }
+
+    fn refresh_live_embedded_child(&self, window: x::Window) -> xcb::Result<()> {
+        let tree = self
+            .connection
+            .wait_for_reply(self.connection.send_request(&x::QueryTree { window }))?;
+        if tree.parent() != self.window {
+            self.embedded.borrow_mut().retain(|child| *child != window);
+            return Ok(());
+        }
+        // The property may be installed after CreateNotify. Subscribe before
+        // reading it so a subsequent mapping change cannot be lost.
+        self.connection
+            .send_and_check_request(&x::ChangeWindowAttributes {
+                window,
+                value_list: &[x::Cw::EventMask(
+                    x::EventMask::PROPERTY_CHANGE | x::EventMask::STRUCTURE_NOTIFY,
+                )],
+            })?;
+        let info = self
+            .connection
+            .wait_for_reply(self.connection.send_request(&x::GetProperty {
+                delete: false,
+                window,
+                property: self.xembed_info,
+                r#type: self.xembed_info,
+                long_offset: 0,
+                long_length: 2,
+            }))?;
+        // Missing or malformed optional metadata never grants embedding authority.
+        if info.r#type() != self.xembed_info
+            || info.format() != 32
+            || info.bytes_after() != 0
+            || info.value::<u32>().len() != 2
+        {
+            return Ok(());
+        }
+        if !self.embedded.borrow().contains(&window) {
+            // XEmbed v0: data1 is this embedder, data2 is the negotiated version.
+            let event = x::ClientMessageEvent::new(
+                window,
+                self.xembed,
+                x::ClientMessageData::Data32([x::CURRENT_TIME, 0, 0, self.window.resource_id(), 0]),
+            );
+            self.connection.send_and_check_request(&x::SendEvent {
+                propagate: false,
+                destination: x::SendEventDest::Window(window),
+                event_mask: x::EventMask::NO_EVENT,
+                event: &event,
+            })?;
+            self.embedded.borrow_mut().push(window);
+        }
+        if info.value::<u32>()[1] & 1 != 0 {
+            self.connection
+                .send_and_check_request(&x::MapWindow { window })?;
+        } else {
+            self.connection
+                .send_and_check_request(&x::UnmapWindow { window })?;
+        }
+        Ok(())
+    }
 }
 
 /// An X11 parent that owns no plugin, callback context or authoring authority.
@@ -50,7 +140,7 @@ struct X11Parent {
 /// The format adapter must remove its actual view before `destroy`. Drop cannot
 /// infer foreign view removal and retains an unresolved parent until process exit.
 pub struct LinuxNativeEditorContainer {
-    main: Rc<LinuxEditorMainThread>,
+    pub(super) main: Rc<LinuxEditorMainThread>,
     parent: Option<X11Parent>,
     close_requested: Cell<bool>,
 }
@@ -86,7 +176,9 @@ impl LinuxNativeEditorContainer {
                 visual: screen.root_visual(),
                 value_list: &[
                     x::Cw::BackPixel(screen.black_pixel()),
-                    x::Cw::EventMask(x::EventMask::STRUCTURE_NOTIFY),
+                    x::Cw::EventMask(
+                        x::EventMask::STRUCTURE_NOTIFY | x::EventMask::SUBSTRUCTURE_NOTIFY,
+                    ),
                 ],
             })
             .map_err(native_error)?;
@@ -105,6 +197,8 @@ impl LinuxNativeEditorContainer {
         let delete_window = atom(b"WM_DELETE_WINDOW")?;
         let utf8 = atom(b"UTF8_STRING")?;
         let net_name = atom(b"_NET_WM_NAME")?;
+        let xembed = atom(b"_XEMBED")?;
+        let xembed_info = atom(b"_XEMBED_INFO")?;
         connection
             .send_and_check_request(&x::ChangeProperty {
                 mode: x::PropMode::Replace,
@@ -132,6 +226,9 @@ impl LinuxNativeEditorContainer {
                 window,
                 protocols,
                 delete_window,
+                xembed,
+                xembed_info,
+                embedded: RefCell::new(Vec::new()),
             }),
             close_requested: Cell::new(false),
         })
@@ -228,6 +325,23 @@ impl LinuxNativeEditorContainer {
                         "native X11 parent destroyed before confirmed view removal".to_owned(),
                     ));
                 }
+                xcb::Event::X(x::Event::CreateNotify(event)) if event.parent() == parent.window => {
+                    parent.refresh_embedded_child(event.window())?;
+                }
+                xcb::Event::X(x::Event::ReparentNotify(event)) => {
+                    parent.refresh_embedded_child(event.window())?;
+                }
+                xcb::Event::X(x::Event::PropertyNotify(event))
+                    if event.atom() == parent.xembed_info =>
+                {
+                    parent.refresh_embedded_child(event.window())?;
+                }
+                xcb::Event::X(x::Event::DestroyNotify(event)) => {
+                    parent
+                        .embedded
+                        .borrow_mut()
+                        .retain(|child| *child != event.window());
+                }
                 _ => {}
             }
         }
@@ -293,6 +407,148 @@ fn native_error(error: impl std::fmt::Display) -> Error {
 mod tests {
     use super::*;
 
+    fn service_until(container: &LinuxNativeEditorContainer, mut observed: impl FnMut() -> bool) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            container.service().unwrap();
+            if observed() {
+                return;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "native XEmbed observation deadline"
+            );
+            std::thread::yield_now();
+        }
+    }
+
+    fn assert_xembed_mapping(container: &LinuxNativeEditorContainer) {
+        let parent = container.parent().unwrap();
+        let (client, screen) = xcb::Connection::connect(None).unwrap();
+        let root = client
+            .get_setup()
+            .roots()
+            .nth(screen as usize)
+            .unwrap()
+            .root();
+        let window = client.generate_id();
+        client
+            .send_and_check_request(&x::CreateWindow {
+                depth: x::COPY_FROM_PARENT as u8,
+                wid: window,
+                parent: parent.window,
+                x: 0,
+                y: 0,
+                width: 24,
+                height: 12,
+                border_width: 0,
+                class: x::WindowClass::InputOutput,
+                visual: x::COPY_FROM_PARENT,
+                value_list: &[],
+            })
+            .unwrap();
+        let state = || {
+            client
+                .wait_for_reply(client.send_request(&x::GetWindowAttributes { window }))
+                .unwrap()
+                .map_state()
+        };
+        // A plain child and malformed optional metadata must not be force-mapped.
+        container.service().unwrap();
+        assert_eq!(state(), x::MapState::Unmapped);
+        client
+            .send_and_check_request(&x::ChangeProperty {
+                mode: x::PropMode::Replace,
+                window,
+                property: parent.xembed_info,
+                r#type: parent.xembed_info,
+                data: &[1_u16, 1],
+            })
+            .unwrap();
+        container.service().unwrap();
+        assert_eq!(state(), x::MapState::Unmapped);
+        assert!(client.poll_for_event().unwrap().is_none());
+        let set_mapping = |flags| {
+            client
+                .send_and_check_request(&x::ChangeProperty {
+                    mode: x::PropMode::Replace,
+                    window,
+                    property: parent.xembed_info,
+                    r#type: parent.xembed_info,
+                    data: &[9_u32, flags],
+                })
+                .unwrap()
+        };
+        set_mapping(1);
+        let mut notification = None;
+        service_until(container, || {
+            if let Some(xcb::Event::X(x::Event::ClientMessage(event))) =
+                client.poll_for_event().unwrap()
+            {
+                assert_eq!((event.window(), event.r#type()), (window, parent.xembed));
+                notification = Some(event.data());
+            }
+            notification.is_some() && state() == x::MapState::Viewable
+        });
+        let Some(x::ClientMessageData::Data32(data)) = notification else {
+            panic!("XEmbed notification")
+        };
+        assert_eq!(
+            data,
+            [x::CURRENT_TIME, 0, 0, parent.window.resource_id(), 0]
+        );
+        set_mapping(0);
+        service_until(container, || state() == x::MapState::Unmapped);
+        set_mapping(1);
+        service_until(container, || state() == x::MapState::Viewable);
+        assert!(
+            client.poll_for_event().unwrap().is_none(),
+            "mapping changes do not repeat attachment"
+        );
+        client
+            .send_and_check_request(&x::ReparentWindow {
+                window,
+                parent: root,
+                x: 0,
+                y: 0,
+            })
+            .unwrap();
+        container.service().unwrap();
+        set_mapping(0);
+        container.service().unwrap();
+        assert_eq!(
+            state(),
+            x::MapState::Viewable,
+            "a reparented client is no longer controlled"
+        );
+        client
+            .send_and_check_request(&x::DestroyWindow { window })
+            .unwrap();
+        container.service().unwrap();
+        assert!(parent.embedded.borrow().is_empty());
+        // A queued create event can legitimately outlive its client window.
+        let transient = client.generate_id();
+        client
+            .send_and_check_request(&x::CreateWindow {
+                depth: x::COPY_FROM_PARENT as u8,
+                wid: transient,
+                parent: parent.window,
+                x: 0,
+                y: 0,
+                width: 1,
+                height: 1,
+                border_width: 0,
+                class: x::WindowClass::InputOutput,
+                visual: x::COPY_FROM_PARENT,
+                value_list: &[],
+            })
+            .unwrap();
+        client
+            .send_and_check_request(&x::DestroyWindow { window: transient })
+            .unwrap();
+        container.service().unwrap();
+    }
+
     #[test]
     fn invalid_dimensions_are_refused_before_opening_a_display() {
         let main = Rc::new(LinuxEditorMainThread::initialize().unwrap());
@@ -320,6 +576,7 @@ mod tests {
                     .unwrap();
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 container.set_visible(true).unwrap();
+                assert_xembed_mapping(&container);
                 container.resize(317, 193).unwrap();
                 let parent = container.parent().unwrap();
                 let geometry = parent

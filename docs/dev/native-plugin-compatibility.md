@@ -30,8 +30,11 @@ slice passed complete SDK library and App product CI on Windows, Linux and
 macOS before integration ([PR31](https://github.com/shaloong/mondrian/pull/31)).
 Factory contexts survive concurrent discovery/instances; editor retirement does
 not retire factory callbacks. The following Product slice uses the existing
-Main/DSP schedule and one bounded initial parameter handoff on every desktop.
-Its Linux Audio library passes 851 tests (65 ignored).
+Main/DSP schedule and one bounded initial parameter handoff on every desktop;
+it passed all three Product CI214 routes before integration
+([PR32](https://github.com/shaloong/mondrian/pull/32)). The subsequent VST3 editor
+adapter passes the Linux Audio library (852 tests, 65 ignored) and strict
+whole-Workspace/all-targets/all-features Clippy.
 
 Unmodified MIT-licensed SDK3.8.0 ADelay passes the
 [public Runtime/Graph case](../../crates/mondrian-audio/tests/native_vst3_portable_runtime.rs)
@@ -41,18 +44,57 @@ partitions. All3411 frames match the independent ring-buffer oracle; native
 opaque state, project serialization and original child settlement are checked.
 The original Ring Out CLAP Runtime/Graph case also passes after sharing its
 unchanged input/census helper. Both runs have exit0, empty stderr and settled
-process groups. Native GUI, product timer/FD concurrency, broader instruments,
-physical devices, realtime/performance, full heap/leaks and macOS native-plugin
-qualification remain open. The macOS actual-main CFRunLoop timer/retirement
+process groups. These DSP cases do not qualify GUI. Broader timer/FD concurrency,
+instruments, physical devices, realtime/performance, full heap/leaks and macOS
+native-plugin qualification remain open. The actual-main CFRunLoop timer/retirement
 probe passes CI214; this is separate from the native editor parent probe below.
 
 Scoped X11 and Cocoa parent primitives are also implemented in the SDK, separate
 from Product GUI adapters. On Ubuntu, an authenticated private Xvfb gate passes
 three create/resize/deferred-close/retirement cycles with empty test stderr and
 settled process ownership; the complete SDK library passes 439 tests (16 ignored).
-The Cocoa actual-main parent probe awaits CI. These gates load no foreign view:
-Product GUI still uses the Windows adapter, and cross-platform plugin attachment,
-native input, full heap/resource and physical-display qualification remain open.
+The separate parent-foundation candidate's Cocoa actual-main probe and all three
+standalone SDK routes pass CI216. These parent probes load no foreign view.
+
+Product VST3 GUI adapters now reuse one attachment owner over the concrete
+Windows, X11 or Cocoa container; temporary Main/DSP borrows retain the view.
+Foreign Cocoa GUI/controller calls run on actual main inside autorelease scopes.
+Four rebuilt owned Windows SDK IPlugView gates pass: native messages, resize,
+same-instance DSP, both detach failures and state roundtrip. Author observation
+consumption is distinct from DSP delivery: the roundtrip checks GUI-to-PCM before
+capture and pending-host-input refusal before native delivery and restore.
+Windows SDK ordinary tests pass416 (13 ignored); the finite Linux ADelay and
+Ring Out cases above also pass on this Product implementation. CLAP's Product GUI
+adapter remains Windows. macOS foreign views, broader Product/UI integration,
+input/focus, full heap/resource, realtime/performance and physical displays remain
+open; basic parent or ordinary tests do not close them.
+
+The Linux [installed Runtime/Graph GUI case](../../crates/mondrian-audio/tests/native_vst3_gui_runtime.rs)
+exposed missing XEmbed negotiation/mapping in the shared native container. Its
+native parent regression now checks late/malformed metadata, map/unmap/remap,
+reparenting and destruction races. Plain X11 children retain their mapping policy.
+The original SDK3.8.0 AGain GUI then fails repeated Open inside Cairo, with
+SIGSEGV or the `_get_screen_index` assertion matching
+[VSTGUI issue377](https://github.com/steinbergmedia/vstgui/issues/377).
+Its shipped VSTGUI dependency is **not qualified**.
+
+A controlled unmodified upstream VSTGUI version (`9d589f09`, immediately before
+the reported regression) with the same SDK3.8.0 AGain DSP passes 20 independent
+cases through the same normal Product and test: 60 view open/close cycles, actual
+child painting, fixed-size negotiation, native user close, stable process/load
+identity, unchanged author data and all8560 PCM frames against the gain oracle.
+Conditions: Ubuntu24.04.5/x86_64, authenticated Xvfb640x480x24, Rust1.97.1,
+private patched FFmpeg8.1.2, offline48k/Stereo/max64; Product opt0/debug0 and
+test opt1/debug0. All cases retain the original180s/2s process-group bounds,
+exit0 and empty test stderr, without a debugger or source patches. This supports
+dependency-regression attribution; it does not turn the shipped sample's failure
+into a compatibility pass. The host adds no plugin-name or Cairo-lifetime workaround.
+
+To repeat the GUI case, supply `MONDRIAN_VST3_TEST_HELPER` with the matching normal
+Product and `MONDRIAN_VST3_GUI_TEST_PLUGIN` with the selected actual AGain module,
+then run `cargo test --locked -p mondrian-audio --test native_vst3_gui_runtime -- --ignored --test-threads=1`.
+Linux additionally requires an authenticated X11 display. Record the GUI dependency
+version; the plugin's SDK version alone does not distinguish the two inputs above.
 
 ## Implementation boundary
 
