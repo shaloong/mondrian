@@ -23,6 +23,7 @@ mod creative_lut_gpu;
 pub mod cross_application_qualification;
 pub mod display_calibration;
 mod display_matte;
+mod spatial_pass_gpu;
 pub use display_matte::GpuDisplayCalibrationBackdrop;
 pub mod gpu_command;
 pub mod gpu_completion_wake;
