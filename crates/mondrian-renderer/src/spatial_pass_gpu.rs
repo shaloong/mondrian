@@ -454,6 +454,17 @@ impl EffectSpatialGpu {
             EffectGpuSpatialPass::DirectionalBlur { .. } => {
                 Err(EffectSpatialGpuError::UnsupportedPass("directional_blur"))
             }
+            // Every single-pass kernel needs one texture pass.
+            EffectGpuSpatialPass::FindEdges { .. }
+            | EffectGpuSpatialPass::Emboss { .. }
+            | EffectGpuSpatialPass::ColorEmboss { .. }
+            | EffectGpuSpatialPass::RadialBlur { .. }
+            | EffectGpuSpatialPass::Offset { .. }
+            | EffectGpuSpatialPass::Twirl { .. }
+            | EffectGpuSpatialPass::Spherize { .. }
+            | EffectGpuSpatialPass::Convolution { .. }
+            | EffectGpuSpatialPass::Mirror { .. }
+            | EffectGpuSpatialPass::PolarCoordinates { .. } => Ok(1),
         }
     }
 
@@ -475,6 +486,140 @@ impl EffectSpatialGpu {
     ) -> Result<wgpu::Texture, EffectSpatialGpuError> {
         if width == 0 || height == 0 {
             return Err(EffectSpatialGpuError::EmptyFrame);
+        }
+        // Single-pass kernels write one texture and need no scratch pool.
+        match pass {
+            EffectGpuSpatialPass::FindEdges { grade } => {
+                let destination = scratch.first().ok_or(EffectSpatialGpuError::EmptyFrame)?;
+                return self.record_find_edges(
+                    device,
+                    encoder,
+                    grade.blend_with_original(),
+                    grade.invert(),
+                    source,
+                    destination,
+                    width,
+                    height,
+                );
+            }
+            EffectGpuSpatialPass::Emboss { grade } => {
+                let destination = scratch.first().ok_or(EffectSpatialGpuError::EmptyFrame)?;
+                return self.record_emboss(
+                    device,
+                    encoder,
+                    grade.gpu_controls(),
+                    grade.luminance_coefficients(),
+                    source,
+                    destination,
+                    width,
+                    height,
+                );
+            }
+            EffectGpuSpatialPass::ColorEmboss { grade } => {
+                let destination = scratch.first().ok_or(EffectSpatialGpuError::EmptyFrame)?;
+                return self.record_color_emboss(
+                    device,
+                    encoder,
+                    grade.gpu_controls(),
+                    source,
+                    destination,
+                    width,
+                    height,
+                );
+            }
+            EffectGpuSpatialPass::RadialBlur { grade } => {
+                let destination = scratch.first().ok_or(EffectSpatialGpuError::EmptyFrame)?;
+                let (params, extra) = grade.gpu_controls();
+                return self.record_radial_blur(
+                    device,
+                    encoder,
+                    params,
+                    extra,
+                    source,
+                    destination,
+                    width,
+                    height,
+                );
+            }
+            EffectGpuSpatialPass::Offset { grade } => {
+                let destination = scratch.first().ok_or(EffectSpatialGpuError::EmptyFrame)?;
+                return self.record_offset(
+                    device,
+                    encoder,
+                    grade.gpu_controls(),
+                    source,
+                    destination,
+                    width,
+                    height,
+                );
+            }
+            EffectGpuSpatialPass::Twirl { grade } => {
+                let destination = scratch.first().ok_or(EffectSpatialGpuError::EmptyFrame)?;
+                return self.record_twirl(
+                    device,
+                    encoder,
+                    grade.gpu_controls(),
+                    source,
+                    destination,
+                    width,
+                    height,
+                );
+            }
+            EffectGpuSpatialPass::Spherize { grade } => {
+                let destination = scratch.first().ok_or(EffectSpatialGpuError::EmptyFrame)?;
+                return self.record_spherize(
+                    device,
+                    encoder,
+                    grade.gpu_controls(),
+                    source,
+                    destination,
+                    width,
+                    height,
+                );
+            }
+            EffectGpuSpatialPass::Convolution { grade } => {
+                let destination = scratch.first().ok_or(EffectSpatialGpuError::EmptyFrame)?;
+                let (params, extra, aces) = grade.gpu_controls();
+                return self.record_convolution(
+                    device,
+                    encoder,
+                    params,
+                    extra,
+                    aces,
+                    source,
+                    destination,
+                    width,
+                    height,
+                );
+            }
+            EffectGpuSpatialPass::Mirror { grade } => {
+                let destination = scratch.first().ok_or(EffectSpatialGpuError::EmptyFrame)?;
+                return self.record_mirror(
+                    device,
+                    encoder,
+                    grade.gpu_controls(),
+                    source,
+                    destination,
+                    width,
+                    height,
+                );
+            }
+            EffectGpuSpatialPass::PolarCoordinates { grade } => {
+                let destination = scratch.first().ok_or(EffectSpatialGpuError::EmptyFrame)?;
+                return self.record_polar_coordinates(
+                    device,
+                    encoder,
+                    grade.gpu_controls(),
+                    source,
+                    destination,
+                    width,
+                    height,
+                );
+            }
+            EffectGpuSpatialPass::BoxBlur { .. } => {}
+            EffectGpuSpatialPass::DirectionalBlur { .. } => {
+                return Err(EffectSpatialGpuError::UnsupportedPass(pass.name()));
+            }
         }
         let EffectGpuSpatialPass::BoxBlur { radius, iterations, direction, repeat_edge_pixels } =
             pass
@@ -1938,6 +2083,122 @@ fn cs_main(@builtin(local_invocation_id) lid: vec3<u32>) {
         }
     }
 
+    #[test]
+    fn a_lowered_spatial_chain_executes_every_stage_in_graph_order() {
+        let Ok(context) = block_on(crate::GpuContext::new()) else {
+            eprintln!("skipping GPU spatial chain test: no GPU adapter available");
+            return;
+        };
+        let width = 15_u32;
+        let height = 13_u32;
+        let mut pixels = vec![[0.0_f32, 0.0, 0.0, 1.0]; (width * height) as usize];
+        for y in 0..height as usize {
+            for x in 0..width as usize {
+                let value = 0.03 * (2 * x + 3 * y) as f32;
+                pixels[y * width as usize + x] = [value, 0.4 - value * 0.5, value * 1.4, 1.0];
+            }
+        }
+        pixels[24] = [0.0, 0.0, 0.0, 0.0];
+        pixels[97] = [2.0, -0.6, 1.5, 0.5];
+
+        let twirl =
+            mondrian_effects::TwirlGrade::new(180.0, 60.0, [7.5, 6.0]).expect("valid twirl grade");
+        let spherize =
+            mondrian_effects::SpherizeGrade::new(4.0, [6.0, 5.5]).expect("valid spherize grade");
+        let passes = [
+            mondrian_effects::EffectGpuSpatialPass::BoxBlur {
+                radius: 1.5,
+                iterations: 1,
+                direction: BoxBlurDirection::HorizontalAndVertical,
+                repeat_edge_pixels: true,
+            },
+            mondrian_effects::EffectGpuSpatialPass::Twirl { grade: twirl },
+            mondrian_effects::EffectGpuSpatialPass::Spherize { grade: spherize },
+        ];
+
+        let mut cpu = pixels.clone();
+        assert!(mondrian_effects::box_blur_frame_f32(
+            &mut cpu,
+            width as usize,
+            height as usize,
+            1.5,
+            1,
+            BoxBlurDirection::HorizontalAndVertical,
+            true,
+        ));
+        assert!(mondrian_effects::twirl_frame_f32(
+            &mut cpu,
+            width as usize,
+            height as usize,
+            twirl,
+        ));
+        assert!(mondrian_effects::spherize_frame_f32(
+            &mut cpu,
+            width as usize,
+            height as usize,
+            spherize,
+        ));
+
+        let executor = EffectSpatialGpu::new(&context.device);
+        let original = upload(&context, &pixels, width, height);
+        // Three rotating scratch textures keep every stage's destination out of
+        // its own source, which wgpu rejects as conflicting texture usage.
+        let pool: Vec<wgpu::Texture> =
+            (0..3).map(|_| scratch(&context, width, height, 1).remove(0)).collect();
+        let mut current: Option<usize> = None;
+        let mut encoder = context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("mondrian.effect-spatial.chain-encoder"),
+        });
+        for pass in &passes {
+            let needed =
+                EffectSpatialGpu::texture_pass_count(pass).expect("supported pass") as usize;
+            let available: Vec<usize> = (0..pool.len())
+                .filter(|index| Some(*index) != current)
+                .take(needed.max(1))
+                .collect();
+            assert_eq!(
+                available.len(),
+                needed.max(1),
+                "spatial chain needs more scratch"
+            );
+            let write_pool: Vec<wgpu::Texture> =
+                available.iter().map(|index| pool[*index].clone()).collect();
+            let source = current.map_or_else(|| original.clone(), |index| pool[index].clone());
+            let output = executor
+                .record(
+                    &context.device,
+                    &mut encoder,
+                    pass,
+                    &source,
+                    &write_pool,
+                    width,
+                    height,
+                )
+                .expect("recorded spatial stage");
+            let written = *available.last().expect("a write target");
+            assert_eq!(
+                output, pool[written],
+                "the stage must write its last pool texture"
+            );
+            current = Some(written);
+        }
+        context.queue.submit(Some(encoder.finish()));
+        let gpu = readback(
+            &context,
+            &pool[current.expect("a written stage")],
+            width,
+            height,
+        );
+        for (index, (cpu_pixel, gpu_pixel)) in cpu.iter().zip(gpu.iter()).enumerate() {
+            for channel in 0..4 {
+                let difference = (cpu_pixel[channel] - gpu_pixel[channel]).abs();
+                assert!(
+                    difference <= 1.0e-4,
+                    "pixel {index} channel {channel}: cpu {cpu_pixel:?} gpu {gpu_pixel:?}"
+                );
+            }
+        }
+    }
     #[test]
     fn gpu_polar_coordinates_match_the_cpu_kernel() {
         let Ok(context) = block_on(crate::GpuContext::new()) else {
