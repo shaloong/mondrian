@@ -29,6 +29,7 @@ pub mod effect;
 pub mod emboss;
 pub mod find_edges;
 mod project_properties;
+pub mod radial_blur;
 pub mod threshold;
 pub mod tint;
 pub mod tritone;
@@ -227,6 +228,10 @@ pub use primary_grade::{AscCdlGrade, PrimariesGrade, PrimaryGradeError, WhiteBal
 pub use qualifier::{
     PreparedQualifier, QualifierAuthoring, QualifierError, QualifierMode,
     MAX_QUALIFIER_BLUR_RADIUS, MAX_QUALIFIER_DENOISE_RADIUS,
+};
+pub use radial_blur::{
+    radial_blur_frame_f32, radial_blur_jitter, RadialBlurError, RadialBlurGrade, RadialBlurMode,
+    RADIAL_BLUR_AUTHOR_MAX_AMOUNT, RADIAL_BLUR_MAX_TAPS,
 };
 pub use scatter::{
     scatter_frame_f32, ScatterError, ScatterGrade, SCATTER_MAX_AMOUNT_PIXELS, SCATTER_MAX_COPIES,

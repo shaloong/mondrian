@@ -2329,6 +2329,7 @@ fn effect_render_op_name(op: &EffectRenderOp) -> &'static str {
         EffectRenderOp::Tint { .. } => "tint",
         EffectRenderOp::Vibrance { .. } => "vibrance",
         EffectRenderOp::Tritone { .. } => "tritone",
+        EffectRenderOp::RadialBlur { .. } => "radial_blur",
         EffectRenderOp::MotionTile { .. } => "motion_tile",
         EffectRenderOp::Kaleidoscope { .. } => "kaleidoscope",
         EffectRenderOp::Bevel { .. } => "bevel",

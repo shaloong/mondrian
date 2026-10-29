@@ -902,6 +902,11 @@ pub enum EffectRenderOp {
     Tritone {
         grade: crate::TritoneGrade,
     },
+    /// RadialBlur: a radial smear around an authored centre, either spinning
+    /// (constant radius) or zooming (constant angle).
+    RadialBlur {
+        grade: crate::RadialBlurGrade,
+    },
     /// ColorEmboss: per-channel relief computed from the Sobel gradient of
     /// the working-space colour.
     ColorEmboss {
@@ -1078,6 +1083,9 @@ impl std::fmt::Debug for EffectRenderOp {
             }
             Self::Tritone { grade } => {
                 formatter.debug_struct("Tritone").field("grade", grade).finish()
+            }
+            Self::RadialBlur { grade } => {
+                formatter.debug_struct("RadialBlur").field("grade", grade).finish()
             }
             Self::ColorEmboss { grade } => {
                 formatter.debug_struct("ColorEmboss").field("grade", grade).finish()
@@ -1594,6 +1602,16 @@ impl EffectRenderOp {
                     value.to_bits().hash(state);
                 }
             }
+            EffectRenderOp::RadialBlur { grade } => {
+                44u8.hash(state);
+                grade.amount().to_bits().hash(state);
+                for value in grade.centre() {
+                    value.to_bits().hash(state);
+                }
+                grade.mode().as_u8().hash(state);
+                grade.antialiasing().hash(state);
+                grade.seed().hash(state);
+            }
             EffectRenderOp::ColorEmboss { grade } => {
                 32u8.hash(state);
                 for value in grade.gpu_controls() {
@@ -1750,6 +1768,7 @@ impl EffectRenderOp {
             EffectRenderOp::Tint { .. } => 1,
             EffectRenderOp::Vibrance { .. } => 1,
             EffectRenderOp::Tritone { .. } => 1,
+            EffectRenderOp::RadialBlur { .. } => 5,
             EffectRenderOp::Mosaic { .. } => 2,
             EffectRenderOp::Posterize { .. } => 1,
             EffectRenderOp::MotionTile { .. } => 3,
@@ -2292,7 +2311,7 @@ impl EffectDefinition {
     }
 }
 
-fn builtin_effect_types() -> [EffectType; 42] {
+fn builtin_effect_types() -> [EffectType; 43] {
     [
         EffectType::BasicCorrection,
         EffectType::WhiteBalance,
@@ -2336,6 +2355,7 @@ fn builtin_effect_types() -> [EffectType; 42] {
         EffectType::Tint,
         EffectType::Vibrance,
         EffectType::Tritone,
+        EffectType::RadialBlur,
     ]
 }
 
@@ -3959,6 +3979,84 @@ fn default_properties_for(effect_type: EffectType) -> PropertyBag {
                 Some(0.1),
             );
         }
+        EffectType::RadialBlur => {
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "amount",
+                "径向模糊",
+                "数量",
+                PropertyValue::Float(10.0),
+                Some(0.0),
+                Some(1000.0),
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "centre_x",
+                "径向模糊",
+                "中心位置 X",
+                PropertyValue::Float(128.0),
+                None,
+                None,
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "centre_y",
+                "径向模糊",
+                "中心位置 Y",
+                PropertyValue::Float(128.0),
+                None,
+                None,
+                Some(1.0),
+            );
+            define_builtin_enum_property(
+                &mut properties,
+                &effect_type,
+                "mode",
+                "径向模糊",
+                "类型",
+                "spin",
+                vec![
+                    ParameterEnumOption::new("spin", "旋转", "builtin.radial_blur.mode.spin"),
+                    ParameterEnumOption::new("zoom", "推拉", "builtin.radial_blur.mode.zoom"),
+                ],
+            );
+            define_builtin_enum_property(
+                &mut properties,
+                &effect_type,
+                "antialiasing",
+                "径向模糊",
+                "消除锯齿（最佳品质）",
+                "fast",
+                vec![
+                    ParameterEnumOption::new(
+                        "fast",
+                        "快速",
+                        "builtin.radial_blur.antialiasing.fast",
+                    ),
+                    ParameterEnumOption::new(
+                        "best",
+                        "最佳品质",
+                        "builtin.radial_blur.antialiasing.best",
+                    ),
+                ],
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "seed",
+                "径向模糊",
+                "随机植入",
+                PropertyValue::Int(0),
+                Some(0.0),
+                Some(10000.0),
+                Some(1.0),
+            );
+        }
         EffectType::ColorEmboss => {
             define_builtin_property(
                 &mut properties,
@@ -4593,6 +4691,8 @@ fn builtin_parameter_unit(effect_type: &EffectType, parameter: &str) -> Paramete
         (EffectType::Vibrance, "vibrance") => ParameterUnit::Percent,
         (EffectType::Vibrance, "saturation") => ParameterUnit::Percent,
         (EffectType::Tritone, "blend_with_original") => ParameterUnit::Percent,
+        (EffectType::RadialBlur, "centre_x") => ParameterUnit::Pixels,
+        (EffectType::RadialBlur, "centre_y") => ParameterUnit::Pixels,
         (EffectType::Bevel, "thickness") => ParameterUnit::Pixels,
         (EffectType::Bevel, "angle") => ParameterUnit::Degrees,
         (EffectType::Bevel, "intensity") => ParameterUnit::Normalized,
@@ -4775,6 +4875,11 @@ fn builtin_effect_execution_contract(effect_type: &EffectType) -> EffectExecutio
         },
         EffectType::Tritone => EffectExecutionContract {
             execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
+            ..cpu_linear
+        },
+        EffectType::RadialBlur => EffectExecutionContract {
+            execution_modes: EffectExecutionModes::CPU_F32,
+            roi_propagation: EffectRoiPropagation::FullFrame,
             ..cpu_linear
         },
         EffectType::Mosaic => EffectExecutionContract {
@@ -6160,6 +6265,91 @@ fn builtin_graph_builder_for(effect_type: &EffectType) -> Option<EffectGraphBuil
                 Ok(())
             }))
         }
+        EffectType::RadialBlur => {
+            let amount_id = builtin_parameter_id(effect_type, "amount");
+            let centre_x_id = builtin_parameter_id(effect_type, "centre_x");
+            let centre_y_id = builtin_parameter_id(effect_type, "centre_y");
+            let mode_id = builtin_parameter_id(effect_type, "mode");
+            let antialiasing_id = builtin_parameter_id(effect_type, "antialiasing");
+            let seed_id = builtin_parameter_id(effect_type, "seed");
+            Some(Arc::new(move |effect, context, graph| {
+                let mode = match effect.evaluate_parameter(&mode_id, context.time) {
+                    Some(PropertyValue::Enum(key)) => crate::RadialBlurMode::from_key(&key)
+                        .ok_or_else(|| EffectGraphBuildError::InvalidAuthorState {
+                            effect_key: effect.effect_type.key(),
+                            effect_id: effect.id,
+                            reason: format!("radial blur type {key} is not a declared option"),
+                        })?,
+                    Some(_) => {
+                        return Err(EffectGraphBuildError::InvalidAuthorState {
+                            effect_key: effect.effect_type.key(),
+                            effect_id: effect.id,
+                            reason: "radial blur type must be an enumeration".to_owned(),
+                        })
+                    }
+                    None => crate::RadialBlurMode::Spin,
+                };
+                let antialiasing = match effect.evaluate_parameter(&antialiasing_id, context.time) {
+                    Some(PropertyValue::Enum(key)) => match key.as_str() {
+                        "fast" => false,
+                        "best" => true,
+                        other => {
+                            return Err(EffectGraphBuildError::InvalidAuthorState {
+                                effect_key: effect.effect_type.key(),
+                                effect_id: effect.id,
+                                reason: format!(
+                                    "radial blur antialiasing {other} is not a declared option"
+                                ),
+                            })
+                        }
+                    },
+                    Some(_) => {
+                        return Err(EffectGraphBuildError::InvalidAuthorState {
+                            effect_key: effect.effect_type.key(),
+                            effect_id: effect.id,
+                            reason: "radial blur antialiasing must be an enumeration".to_owned(),
+                        })
+                    }
+                    None => false,
+                };
+                let seed = match effect.evaluate_parameter(&seed_id, context.time) {
+                    Some(PropertyValue::Int(value)) => u32::try_from(value).map_err(|_| {
+                        EffectGraphBuildError::InvalidAuthorState {
+                            effect_key: effect.effect_type.key(),
+                            effect_id: effect.id,
+                            reason: "radial blur seed must be a non-negative integer".to_owned(),
+                        }
+                    })?,
+                    Some(_) => {
+                        return Err(EffectGraphBuildError::InvalidAuthorState {
+                            effect_key: effect.effect_type.key(),
+                            effect_id: effect.id,
+                            reason: "radial blur seed must be an integer".to_owned(),
+                        })
+                    }
+                    None => 0,
+                };
+                let grade = crate::RadialBlurGrade::new(
+                    effect.evaluate_f32_parameter(&amount_id, context.time, 10.0),
+                    [
+                        effect.evaluate_f32_parameter(&centre_x_id, context.time, 128.0),
+                        effect.evaluate_f32_parameter(&centre_y_id, context.time, 128.0),
+                    ],
+                    mode,
+                    antialiasing,
+                    seed,
+                )
+                .map_err(|error| EffectGraphBuildError::InvalidAuthorState {
+                    effect_key: effect.effect_type.key(),
+                    effect_id: effect.id,
+                    reason: error.to_string(),
+                })?;
+                if !grade.is_identity() {
+                    graph.append_unary(EffectRenderOp::RadialBlur { grade });
+                }
+                Ok(())
+            }))
+        }
         EffectType::ColorEmboss => {
             let direction_id = builtin_parameter_id(effect_type, "direction");
             let relief_id = builtin_parameter_id(effect_type, "relief");
@@ -6519,6 +6709,7 @@ fn builtin_display_name(effect_type: &EffectType) -> &'static str {
         EffectType::Tint => "色调",
         EffectType::Vibrance => "自然饱和度",
         EffectType::Tritone => "三色调",
+        EffectType::RadialBlur => "径向模糊",
         EffectType::ColorEmboss => "色彩浮雕",
         EffectType::Emboss => "浮雕",
         EffectType::External(_) => "外部效果",
@@ -7797,6 +7988,7 @@ mod tests {
             EffectType::Tint,
             EffectType::Vibrance,
             EffectType::Tritone,
+            EffectType::RadialBlur,
         ]
         .into_iter()
         .map(|effect_type| effect_type.key())
@@ -11356,6 +11548,106 @@ mod tests {
             .expect("builds restored tritone graph");
         let grade = tritone_op(&graph).expect("tritone op");
         assert_eq!(grade.midtones(), [0.2, 0.5, 0.1]);
+    }
+
+    fn radial_blur_op(graph: &EffectRenderGraph) -> Option<crate::RadialBlurGrade> {
+        graph.nodes.iter().find_map(|node| match &node.kind {
+            EffectGraphNodeKind::UnaryEffect {
+                op: EffectRenderOp::RadialBlur { grade }, ..
+            }
+            | EffectGraphNodeKind::DomainEffect {
+                op: EffectRenderOp::RadialBlur { grade }, ..
+            } => Some(*grade),
+            _ => None,
+        })
+    }
+
+    fn author_radial_blur(parameter: &str, value: PropertyValue) -> EffectNode {
+        let mut effect = instantiate_effect_node(EffectType::RadialBlur)
+            .expect("registered radial blur definition");
+        effect
+            .apply_property_mutation(PropertyMutation::SetStaticValue {
+                path: EffectType::RadialBlur.property_path(parameter),
+                value,
+            })
+            .expect("authors radial blur parameter");
+        effect
+    }
+
+    #[test]
+    fn radial_blur_defaults_reach_the_operation() {
+        // The declared defaults author the catalogue's spin preset: amount ten,
+        // the frame centre, cheapest sampling and no jitter seed.
+        let effect = instantiate_effect_node(EffectType::RadialBlur)
+            .expect("registered radial blur definition");
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("builds radial blur graph");
+        let grade = radial_blur_op(&graph).expect("radial blur op");
+        assert_eq!(grade.amount(), 10.0);
+        assert_eq!(grade.centre(), [128.0, 128.0]);
+        assert_eq!(grade.mode(), crate::RadialBlurMode::Spin);
+        assert!(!grade.antialiasing());
+        assert_eq!(grade.seed(), 0);
+    }
+
+    #[test]
+    fn radial_blur_authored_state_reaches_the_operation() {
+        let mut effect = author_radial_blur("amount", PropertyValue::Float(250.0));
+        for (parameter, value) in [
+            ("centre_x", PropertyValue::Float(40.0)),
+            ("centre_y", PropertyValue::Float(90.0)),
+            ("mode", PropertyValue::Enum("zoom".to_owned())),
+            ("antialiasing", PropertyValue::Enum("best".to_owned())),
+            ("seed", PropertyValue::Int(7)),
+        ] {
+            effect
+                .apply_property_mutation(PropertyMutation::SetStaticValue {
+                    path: EffectType::RadialBlur.property_path(parameter),
+                    value,
+                })
+                .expect("authors radial blur parameter");
+        }
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("builds radial blur graph");
+        let grade = radial_blur_op(&graph).expect("radial blur op");
+        assert_eq!(grade.amount(), 250.0);
+        assert_eq!(grade.centre(), [40.0, 90.0]);
+        assert_eq!(grade.mode(), crate::RadialBlurMode::Zoom);
+        assert!(grade.antialiasing());
+        assert_eq!(grade.seed(), 7);
+    }
+
+    #[test]
+    fn radial_blur_zero_amount_compiles_to_identity() {
+        let effect = author_radial_blur("amount", PropertyValue::Float(0.0));
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("builds radial blur graph");
+        assert!(radial_blur_op(&graph).is_none());
+    }
+
+    #[test]
+    fn radial_blur_rejects_author_values_outside_the_declared_ranges() {
+        let mut effect = instantiate_effect_node(EffectType::RadialBlur)
+            .expect("registered radial blur definition");
+        let _error = effect
+            .apply_property_mutation(PropertyMutation::SetStaticValue {
+                path: EffectType::RadialBlur.property_path("amount"),
+                value: PropertyValue::Float(1001.0),
+            })
+            .expect_err("rejects out of range radial blur amount");
+    }
+
+    #[test]
+    fn radial_blur_authored_state_survives_project_serialization_round_trip() {
+        let effect = author_radial_blur("mode", PropertyValue::Enum("zoom".to_owned()));
+        let wire = serde_json::to_string(&effect).expect("serializes radial blur effect");
+        let restored: EffectNode =
+            serde_json::from_str(&wire).expect("restores radial blur effect");
+        assert_eq!(restored, effect);
+        let graph = build_effect_render_graph(&[restored], tt(0), TEST_WORKING_SPACE)
+            .expect("builds restored radial blur graph");
+        let grade = radial_blur_op(&graph).expect("radial blur op");
+        assert_eq!(grade.mode(), crate::RadialBlurMode::Zoom);
     }
 }
 

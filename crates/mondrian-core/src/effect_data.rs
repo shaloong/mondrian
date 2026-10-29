@@ -54,6 +54,7 @@ pub enum EffectType {
     Tint,
     Vibrance,
     Tritone,
+    RadialBlur,
     BrushStrokes,
     Posterize,
     Emboss,
@@ -106,6 +107,7 @@ impl EffectType {
             Self::Tint => "builtin.tint".to_string(),
             Self::Vibrance => "builtin.vibrance".to_string(),
             Self::Tritone => "builtin.tritone".to_string(),
+            Self::RadialBlur => "builtin.radial_blur".to_string(),
             Self::Scatter => "builtin.scatter".to_string(),
             Self::BrushStrokes => "builtin.brush_strokes".to_string(),
             Self::Posterize => "builtin.posterize".to_string(),
@@ -154,6 +156,7 @@ impl EffectType {
             "builtin.tint" => Self::Tint,
             "builtin.vibrance" => Self::Vibrance,
             "builtin.tritone" => Self::Tritone,
+            "builtin.radial_blur" => Self::RadialBlur,
             "builtin.scatter" => Self::Scatter,
             "builtin.brush_strokes" => Self::BrushStrokes,
             "builtin.posterize" => Self::Posterize,
@@ -205,6 +208,7 @@ impl EffectType {
             Self::Tint => "色调",
             Self::Vibrance => "自然饱和度",
             Self::Tritone => "三色调",
+            Self::RadialBlur => "径向模糊",
             Self::External(name) => name,
         }
     }
@@ -251,6 +255,7 @@ impl EffectType {
             Self::Tint => vec!["颜色/调色"],
             Self::Vibrance => vec!["颜色/调色"],
             Self::Tritone => vec!["颜色/调色"],
+            Self::RadialBlur => vec!["颜色", "模糊与锐化"],
             Self::External(_) => vec!["外部效果"],
         }
     }
@@ -299,6 +304,7 @@ impl EffectType {
             Self::Tint => "tint".to_string(),
             Self::Vibrance => "vibrance".to_string(),
             Self::Tritone => "tritone".to_string(),
+            Self::RadialBlur => "radial_blur".to_string(),
             Self::External(key) => key.clone(),
         }
     }
@@ -600,6 +606,7 @@ impl crate::AuthoringFootprint for EffectType {
             Self::Posterize | Self::Bevel | Self::Scatter | Self::BrushStrokes => Ok(()),
             Self::Tint | Self::Vibrance => Ok(()),
             Self::Tritone => Ok(()),
+            Self::RadialBlur => Ok(()),
         }
     }
 }
