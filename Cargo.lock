@@ -615,6 +615,7 @@ dependencies = [
  "clack-plugin",
  "clap-sys",
  "libloading",
+ "objc2 0.6.4",
  "objc2-foundation 0.3.2",
 ]
 
@@ -2478,6 +2479,7 @@ dependencies = [
  "mondrian-core",
  "mondrian-media",
  "mondrian-timeline",
+ "objc2 0.6.4",
  "pulp",
  "serde",
  "serde_json",

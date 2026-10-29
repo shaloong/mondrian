@@ -27,8 +27,10 @@ impl<E: EntryProvider> LoadedEntry<E> {
             return Err(PluginEntryError::IncompatibleClapVersion { plugin_version });
         };
 
+        // Keep entry_provider outside the pool, even when native init fails.
         // SAFETY: Provided pointer comes from a valid C string.
-        let result = unsafe { init(bundle_path.as_ptr()) };
+        let result =
+            crate::util::with_native_control_pool(|| unsafe { init(bundle_path.as_ptr()) });
 
         if !result {
             return Err(PluginEntryError::EntryInitFailed);
@@ -47,7 +49,8 @@ impl<E: EntryProvider> Drop for LoadedEntry<E> {
             // called twice.
             // It is also necessarily called after a successful init, as checked by load() which is
             // the only constructor of this type
-            unsafe { deinit() };
+            // Drain before the EntryProvider field can unload the native module.
+            crate::util::with_native_control_pool(|| unsafe { deinit() });
         }
     }
 }

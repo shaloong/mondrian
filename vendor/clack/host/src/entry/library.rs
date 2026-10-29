@@ -22,7 +22,7 @@ impl LibraryEntry {
     pub(crate) fn resolve_path(path: &Path) -> Result<(Cow<'_, Path>, CString), PluginEntryError> {
         #[cfg(target_os = "macos")]
         {
-            macos_resolve::resolve_path(path)
+            crate::util::with_native_control_pool(|| macos_resolve::resolve_path(path))
         }
         #[cfg(not(target_os = "macos"))]
         {
@@ -46,7 +46,9 @@ impl LibraryEntry {
     ///
     /// Additionally, users
     pub unsafe fn load_from_path(path: impl AsRef<OsStr>) -> Result<Self, PluginEntryError> {
-        let library = Library::new(path).map_err(PluginEntryError::LibraryLoadingError)?;
+        // The returned Library remains live while constructor temporaries drain.
+        let library = crate::util::with_native_control_pool(|| unsafe { Library::new(path) })
+            .map_err(PluginEntryError::LibraryLoadingError)?;
 
         Self::load_from_library(library)
     }

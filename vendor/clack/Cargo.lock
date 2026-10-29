@@ -56,6 +56,7 @@ dependencies = [
  "clack-plugin",
  "clap-sys",
  "libloading",
+ "objc2",
  "objc2-foundation",
  "static_assertions",
 ]

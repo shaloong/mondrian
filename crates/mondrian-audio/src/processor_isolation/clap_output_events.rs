@@ -381,7 +381,7 @@ impl ClapOutputEvents {
 
     /// Local sticky rejections include failures which do not set the shared source.
     /// Reading this never clears the original accepted output prefix.
-    #[cfg(windows)]
+    #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
     pub(super) const fn has_refusals(&self) -> bool {
         self.refusals != 0
     }
