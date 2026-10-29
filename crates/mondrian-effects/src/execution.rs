@@ -2329,6 +2329,7 @@ fn effect_render_op_name(op: &EffectRenderOp) -> &'static str {
         EffectRenderOp::MotionTile { .. } => "motion_tile",
         EffectRenderOp::Kaleidoscope { .. } => "kaleidoscope",
         EffectRenderOp::Bevel { .. } => "bevel",
+        EffectRenderOp::Scatter { .. } => "scatter",
         EffectRenderOp::ColorEmboss { .. } => "color_emboss",
         EffectRenderOp::Emboss { .. } => "emboss",
         EffectRenderOp::DropShadow { .. } => "drop_shadow",

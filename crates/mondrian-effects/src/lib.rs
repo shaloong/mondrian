@@ -72,6 +72,7 @@ pub mod motion_tile;
 pub(crate) mod parallel;
 pub mod posterize;
 pub mod qualifier;
+pub mod scatter;
 pub mod shift_channels;
 pub(crate) mod straight_alpha;
 pub mod temporal_execution;
@@ -217,6 +218,9 @@ pub use primary_grade::{AscCdlGrade, PrimariesGrade, PrimaryGradeError, WhiteBal
 pub use qualifier::{
     PreparedQualifier, QualifierAuthoring, QualifierError, QualifierMode,
     MAX_QUALIFIER_BLUR_RADIUS, MAX_QUALIFIER_DENOISE_RADIUS,
+};
+pub use scatter::{
+    scatter_frame_f32, ScatterError, ScatterGrade, SCATTER_MAX_AMOUNT_PIXELS, SCATTER_MAX_COPIES,
 };
 pub use temporal_execution::{
     collect_temporal_frame_demands, prepare_temporal_frame_execution,

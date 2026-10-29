@@ -876,6 +876,10 @@ pub enum EffectRenderOp {
     Bevel {
         grade: crate::BevelGrade,
     },
+    /// Scatter: replicates the frame with position-hashed jitter.
+    Scatter {
+        grade: crate::ScatterGrade,
+    },
     /// Threshold: black or white depending on the working-space luminance.
     Threshold {
         grade: crate::ThresholdGrade,
@@ -1038,6 +1042,9 @@ impl std::fmt::Debug for EffectRenderOp {
                 formatter.debug_struct("Kaleidoscope").field("grade", grade).finish()
             }
             Self::Bevel { grade } => formatter.debug_struct("Bevel").field("grade", grade).finish(),
+            Self::Scatter { grade } => {
+                formatter.debug_struct("Scatter").field("grade", grade).finish()
+            }
             Self::Mosaic { grade } => {
                 formatter.debug_struct("Mosaic").field("grade", grade).finish()
             }
@@ -1457,6 +1464,12 @@ impl EffectRenderOp {
                 35u8.hash(state);
                 grade.levels().hash(state);
             }
+            EffectRenderOp::Scatter { grade } => {
+                39u8.hash(state);
+                grade.amount_pixels().to_bits().hash(state);
+                grade.copies().hash(state);
+                grade.randomness().to_bits().hash(state);
+            }
             EffectRenderOp::Bevel { grade } => {
                 38u8.hash(state);
                 grade.thickness().to_bits().hash(state);
@@ -1664,6 +1677,7 @@ impl EffectRenderOp {
             EffectRenderOp::MotionTile { .. } => 3,
             EffectRenderOp::Kaleidoscope { .. } => 3,
             EffectRenderOp::Bevel { .. } => 2,
+            EffectRenderOp::Scatter { .. } => 3,
             EffectRenderOp::ColorEmboss { .. } => 4,
             EffectRenderOp::Emboss { .. } => 4,
             EffectRenderOp::HueSaturation { .. } => 2,
@@ -2199,7 +2213,7 @@ impl EffectDefinition {
     }
 }
 
-fn builtin_effect_types() -> [EffectType; 37] {
+fn builtin_effect_types() -> [EffectType; 38] {
     [
         EffectType::BasicCorrection,
         EffectType::WhiteBalance,
@@ -2238,6 +2252,7 @@ fn builtin_effect_types() -> [EffectType; 37] {
         EffectType::MotionTile,
         EffectType::Kaleidoscope,
         EffectType::Bevel,
+        EffectType::Scatter,
     ]
 }
 
@@ -3528,6 +3543,41 @@ fn default_properties_for(effect_type: EffectType) -> PropertyBag {
                 Some(0.01),
             );
         }
+        EffectType::Scatter => {
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "amount",
+                "散射",
+                "散射数量",
+                PropertyValue::Float(0.0),
+                Some(0.0),
+                Some(crate::SCATTER_MAX_AMOUNT_PIXELS as f64),
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "copies",
+                "散射",
+                "副本",
+                PropertyValue::Int(1),
+                Some(1.0),
+                Some(crate::SCATTER_MAX_COPIES as f64),
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "randomness",
+                "散射",
+                "散射随机性",
+                PropertyValue::Float(0.0),
+                Some(0.0),
+                Some(1.0),
+                Some(0.01),
+            );
+        }
         EffectType::MotionTile => {
             define_builtin_property(
                 &mut properties,
@@ -4266,6 +4316,7 @@ fn builtin_parameter_unit(effect_type: &EffectType, parameter: &str) -> Paramete
         (EffectType::Kaleidoscope, "center_y") => ParameterUnit::Pixels,
         (EffectType::Kaleidoscope, "size") => ParameterUnit::Percent,
         (EffectType::Kaleidoscope, "rotation") => ParameterUnit::Degrees,
+        (EffectType::Scatter, "amount") => ParameterUnit::Pixels,
         (EffectType::Bevel, "thickness") => ParameterUnit::Pixels,
         (EffectType::Bevel, "angle") => ParameterUnit::Degrees,
         (EffectType::Bevel, "intensity") => ParameterUnit::Normalized,
@@ -4443,6 +4494,11 @@ fn builtin_effect_execution_contract(effect_type: &EffectType) -> EffectExecutio
             ..cpu_linear
         },
         EffectType::Kaleidoscope => EffectExecutionContract {
+            execution_modes: EffectExecutionModes::CPU_F32,
+            roi_propagation: EffectRoiPropagation::FullFrame,
+            ..cpu_linear
+        },
+        EffectType::Scatter => EffectExecutionContract {
             execution_modes: EffectExecutionModes::CPU_F32,
             roi_propagation: EffectRoiPropagation::FullFrame,
             ..cpu_linear
@@ -5568,6 +5624,44 @@ fn builtin_graph_builder_for(effect_type: &EffectType) -> Option<EffectGraphBuil
                 Ok(())
             }))
         }
+        EffectType::Scatter => {
+            let amount_id = builtin_parameter_id(effect_type, "amount");
+            let copies_id = builtin_parameter_id(effect_type, "copies");
+            let randomness_id = builtin_parameter_id(effect_type, "randomness");
+            Some(Arc::new(move |effect, context, graph| {
+                let copies = match effect.evaluate_parameter(&copies_id, context.time) {
+                    Some(PropertyValue::Int(value)) => u32::try_from(value).map_err(|_| {
+                        EffectGraphBuildError::InvalidAuthorState {
+                            effect_key: effect.effect_type.key(),
+                            effect_id: effect.id,
+                            reason: "scatter copies must be a positive integer".to_owned(),
+                        }
+                    })?,
+                    Some(_) => {
+                        return Err(EffectGraphBuildError::InvalidAuthorState {
+                            effect_key: effect.effect_type.key(),
+                            effect_id: effect.id,
+                            reason: "scatter copies must be an integer".to_owned(),
+                        })
+                    }
+                    None => 1,
+                };
+                let grade = crate::ScatterGrade::new(
+                    effect.evaluate_f32_parameter(&amount_id, context.time, 0.0),
+                    copies,
+                    effect.evaluate_f32_parameter(&randomness_id, context.time, 0.0),
+                )
+                .map_err(|error| EffectGraphBuildError::InvalidAuthorState {
+                    effect_key: effect.effect_type.key(),
+                    effect_id: effect.id,
+                    reason: error.to_string(),
+                })?;
+                if !grade.is_identity() {
+                    graph.append_unary(EffectRenderOp::Scatter { grade });
+                }
+                Ok(())
+            }))
+        }
         EffectType::MotionTile => {
             let center_x_id = builtin_parameter_id(effect_type, "center_x");
             let center_y_id = builtin_parameter_id(effect_type, "center_y");
@@ -5984,6 +6078,7 @@ fn builtin_display_name(effect_type: &EffectType) -> &'static str {
         EffectType::MotionTile => "动态拼贴",
         EffectType::Kaleidoscope => "万花筒",
         EffectType::Bevel => "斜面与浮雕",
+        EffectType::Scatter => "散射",
         EffectType::ColorEmboss => "色彩浮雕",
         EffectType::Emboss => "浮雕",
         EffectType::External(_) => "外部效果",
@@ -7257,6 +7352,7 @@ mod tests {
             EffectType::MotionTile,
             EffectType::Kaleidoscope,
             EffectType::Bevel,
+            EffectType::Scatter,
         ]
         .into_iter()
         .map(|effect_type| effect_type.key())
@@ -10289,6 +10385,91 @@ mod tests {
             .expect("builds restored bevel graph");
         let grade = bevel_op(&graph).expect("bevel op");
         assert_eq!(grade.thickness(), 12.0);
+    }
+    fn scatter_op(graph: &EffectRenderGraph) -> Option<crate::ScatterGrade> {
+        graph.nodes.iter().find_map(|node| match &node.kind {
+            EffectGraphNodeKind::UnaryEffect { op: EffectRenderOp::Scatter { grade }, .. }
+            | EffectGraphNodeKind::DomainEffect { op: EffectRenderOp::Scatter { grade }, .. } => {
+                Some(*grade)
+            }
+            _ => None,
+        })
+    }
+
+    #[test]
+    fn scatter_defaults_compile_to_identity() {
+        let effect =
+            instantiate_effect_node(EffectType::Scatter).expect("registered scatter definition");
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("builds scatter graph");
+        assert!(scatter_op(&graph).is_none());
+    }
+
+    #[test]
+    fn scatter_authored_state_reaches_the_operation() {
+        let mut effect =
+            instantiate_effect_node(EffectType::Scatter).expect("registered scatter definition");
+        for (parameter, value) in [("amount", 12.0_f32), ("randomness", 0.5)] {
+            effect
+                .apply_property_mutation(PropertyMutation::SetStaticValue {
+                    path: EffectType::Scatter.property_path(parameter),
+                    value: PropertyValue::Float(value),
+                })
+                .expect("authors scatter parameter");
+        }
+        effect
+            .apply_property_mutation(PropertyMutation::SetStaticValue {
+                path: EffectType::Scatter.property_path("copies"),
+                value: PropertyValue::Int(2),
+            })
+            .expect("authors scatter copies");
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("builds scatter graph");
+        let grade = scatter_op(&graph).expect("scatter op");
+        assert_eq!(grade.amount_pixels(), 12.0);
+        assert_eq!(grade.copies(), 2);
+        assert_eq!(grade.randomness(), 0.5);
+    }
+
+    #[test]
+    fn scatter_rejects_author_values_outside_the_declared_ranges() {
+        for (parameter, value) in [
+            ("amount", PropertyValue::Float(1001.0)),
+            ("copies", PropertyValue::Int(4)),
+            ("randomness", PropertyValue::Float(1.5)),
+        ] {
+            let mut effect = instantiate_effect_node(EffectType::Scatter)
+                .expect("registered scatter definition");
+            let error = effect
+                .apply_property_mutation(PropertyMutation::SetStaticValue {
+                    path: EffectType::Scatter.property_path(parameter),
+                    value,
+                })
+                .expect_err("rejects out of range scatter parameter");
+            assert!(
+                format!("{error}").contains(parameter),
+                "unexpected error: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn scatter_authored_state_survives_project_serialization_round_trip() {
+        let mut effect =
+            instantiate_effect_node(EffectType::Scatter).expect("registered scatter definition");
+        effect
+            .apply_property_mutation(PropertyMutation::SetStaticValue {
+                path: EffectType::Scatter.property_path("amount"),
+                value: PropertyValue::Float(30.0),
+            })
+            .expect("authors scatter amount");
+        let wire = serde_json::to_string(&effect).expect("serializes scatter effect");
+        let restored: EffectNode = serde_json::from_str(&wire).expect("restores scatter effect");
+        assert_eq!(restored, effect);
+        let graph = build_effect_render_graph(&[restored], tt(0), TEST_WORKING_SPACE)
+            .expect("builds restored scatter graph");
+        let grade = scatter_op(&graph).expect("scatter op");
+        assert_eq!(grade.amount_pixels(), 30.0);
     }
 }
 
