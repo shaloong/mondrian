@@ -235,14 +235,68 @@ fn actual_owned_vst3_editor_main_messages_preserve_group_and_same_controller() {
             .expect("original controller persists"),
         0.75
     );
+    // Consuming author observations does not deliver their separate DSP input.
+    // Establish coherent component/controller state before capturing it.
+    let mut buffers = fixture
+        .plugin
+        .create_bus_audio_buffers(1)
+        .expect("same component's bounded delivery buffer");
+    for channel in &mut buffers.inputs[0].channels {
+        channel.fill(1.0);
+    }
+    fixture
+        .plugin
+        .start_processing()
+        .expect("deliver actual GUI values");
+    fixture
+        .plugin
+        .process_bus_audio(&mut buffers)
+        .expect("actual native GUI input delivery before capture");
+    assert_eq!(buffers.outputs[0].channels[0], [1.125]);
+    assert_eq!(buffers.outputs[0].channels[1], [0.375]);
+    fixture
+        .plugin
+        .stop_processing()
+        .expect("join GUI input before capture");
     let configuration = fixture
         .plugin
         .save_state()
         .expect("coherent joined configuration snapshot");
     fixture
         .plugin
+        .start_processing()
+        .expect("prepare explicit parameter delivery before queuing host input");
+    fixture
+        .plugin
         .set_parameter(0, 0.1)
         .expect("control update");
+    assert!(
+        matches!(
+            fixture.plugin.load_state(&configuration),
+            Err(vst3_host::error::Error::PendingParameterDelivery)
+        ),
+        "state restore cannot silently discard the pending host parameter"
+    );
+    {
+        let PluginEditorProcessingSplit {
+            editor,
+            mut processor,
+        } = fixture
+            .plugin
+            .split_editor_processing()
+            .expect("same component's explicit delivery roles");
+        drop(editor);
+        assert_eq!(
+            processor
+                .flush_pending_parameter_changes()
+                .expect("actual native zero-sample parameter delivery"),
+            vst3_host::plugin::PendingParameterFlushOutcome::Flushed
+        );
+    }
+    fixture
+        .plugin
+        .stop_processing()
+        .expect("join parameter delivery before state restore");
     fixture
         .plugin
         .load_state(&configuration)
