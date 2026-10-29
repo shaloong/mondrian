@@ -3556,8 +3556,12 @@ OfxStatus probeAction(const char* action, const void* handle,
   if (selected == "project_geometry" &&
       (operation == kOfxActionCreateInstance || operation == kOfxImageEffectActionRender) &&
       !ownerProjectContract(handle, in)) { return kOfxStatFailed; }
+  const bool samplingAction = operation == kOfxImageEffectActionRender ||
+      operation == kOfxImageEffectActionBeginSequenceRender || operation == kOfxImageEffectActionEndSequenceRender ||
+      operation == kOfxImageEffectActionGetRegionOfDefinition || operation == kOfxImageEffectActionGetRegionsOfInterest ||
+      operation == kOfxImageEffectActionIsIdentity || operation == kOfxActionInstanceChanged;
   if ((selected == "image_sampling" || selected == "image_sampling_media") &&
-      (operation == kOfxActionCreateInstance || operation == kOfxImageEffectActionGetClipPreferences || operation == kOfxImageEffectActionRender)) {
+      (operation == kOfxActionCreateInstance || operation == kOfxImageEffectActionGetClipPreferences || samplingAction)) {
     const bool rendering = operation == kOfxImageEffectActionRender;
     double time = 0;
     const auto* timeline = static_cast<const OfxTimeLineSuiteV1*>(gHost->fetchSuite(gHost->host, kOfxTimeLineSuite, 1));
@@ -3572,7 +3576,7 @@ OfxStatus probeAction(const char* action, const void* handle,
     if (gEffectHost->clipGetHandle((OfxImageEffectHandle)handle, "Source", &source, &sourceProps) != kOfxStatOK ||
         gPropHost->propGetDouble(sourceProps, kOfxImagePropPixelAspectRatio, 0, &imagePar) != kOfxStatOK ||
         (operation == kOfxActionCreateInstance && imagePar != (selected == "image_sampling_media" ? 4.0 / 3.0 : 1.2))) { return kOfxStatFailed; }
-    if (rendering) {
+    if (samplingAction) {
       double scale[2]{};
       if (gPropHost->propGetDoubleN(in, kOfxImageEffectPropRenderScale, 2, scale) != kOfxStatOK ||
           scale[0] != expected.x || scale[1] != expected.y) { return kOfxStatFailed; }
