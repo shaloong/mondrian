@@ -60,6 +60,7 @@ pub use processor_residency::{
     EffectProcessorRetention, EffectProcessorStopReason, EffectProcessorTransientMemoryRefusal,
     PreparedEffectProcessorInput,
 };
+pub(crate) mod parallel;
 pub mod qualifier;
 pub mod shift_channels;
 pub(crate) mod straight_alpha;

@@ -1379,6 +1379,11 @@ fn apply_point_grade_rgba_f32_controlled<E>(
     checkpoint: &mut impl FnMut() -> Result<(), E>,
     grade: impl Fn([f32; 3]) -> [f32; 3],
 ) -> Result<(), E> {
+    // Point grades are bandwidth bound: measured on a 1280x720 frame they run at
+    // 300-890 MP/s, i.e. already at the single-thread DRAM stream rate, so
+    // splitting the frame across cores buys nothing and the per-call thread
+    // spawn costs more than it saves (channel mixer regressed 1.4 ms -> 3.1 ms).
+    // The 4096-pixel chunks exist purely for cancellation checkpoints.
     for chunk in buffer.chunks_mut(4_096) {
         checkpoint()?;
         for pixel in chunk {

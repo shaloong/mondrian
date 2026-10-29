@@ -111,61 +111,65 @@ pub(crate) fn apply_directional_blur_f32_controlled<E>(
     let margin_x = max_dx.ceil() as usize + 1;
     let margin_y = max_dy.ceil() as usize + 1;
 
-    for (row, chunk) in frame.chunks_mut(width).enumerate() {
-        checkpoint()?;
-        let base_y = row as f32;
-        let interior_row = row >= margin_y && row + margin_y < height;
-        for (column, pixel) in chunk.iter_mut().enumerate() {
-            let base_x = column as f32;
-            let mut sum = [0.0_f32; 4];
-            if interior_row && column >= margin_x && column + margin_x < width {
-                for delta in &deltas {
-                    let x = base_x + delta[0];
-                    let y = base_y + delta[1];
-                    let x0 = x as usize;
-                    let y0 = y as usize;
-                    let frac_x = x - x0 as f32;
-                    let frac_y = y - y0 as f32;
-                    let x1 = (x0 + 1).min(width - 1);
-                    let y1 = (y0 + 1).min(height - 1);
-                    let top_left = source[y0 * width + x0];
-                    let top_right = source[y0 * width + x1];
-                    let bottom_left = source[y1 * width + x0];
-                    let bottom_right = source[y1 * width + x1];
-                    let w00 = (1.0 - frac_x) * (1.0 - frac_y);
-                    let w10 = frac_x * (1.0 - frac_y);
-                    let w01 = (1.0 - frac_x) * frac_y;
-                    let w11 = frac_x * frac_y;
-                    for channel in 0..4 {
-                        sum[channel] += top_left[channel] * w00
-                            + top_right[channel] * w10
-                            + bottom_left[channel] * w01
-                            + bottom_right[channel] * w11;
+    checkpoint()?;
+    let rows = frame.len() / width;
+    crate::parallel::for_each_row_band(frame, width, 0..rows, |row_start, band| {
+        for (offset, chunk) in band.chunks_mut(width).enumerate() {
+            let row = row_start + offset;
+            let base_y = row as f32;
+            let interior_row = row >= margin_y && row + margin_y < height;
+            for (column, pixel) in chunk.iter_mut().enumerate() {
+                let base_x = column as f32;
+                let mut sum = [0.0_f32; 4];
+                if interior_row && column >= margin_x && column + margin_x < width {
+                    for delta in &deltas {
+                        let x = base_x + delta[0];
+                        let y = base_y + delta[1];
+                        let x0 = x as usize;
+                        let y0 = y as usize;
+                        let frac_x = x - x0 as f32;
+                        let frac_y = y - y0 as f32;
+                        let x1 = (x0 + 1).min(width - 1);
+                        let y1 = (y0 + 1).min(height - 1);
+                        let top_left = source[y0 * width + x0];
+                        let top_right = source[y0 * width + x1];
+                        let bottom_left = source[y1 * width + x0];
+                        let bottom_right = source[y1 * width + x1];
+                        let w00 = (1.0 - frac_x) * (1.0 - frac_y);
+                        let w10 = frac_x * (1.0 - frac_y);
+                        let w01 = (1.0 - frac_x) * frac_y;
+                        let w11 = frac_x * frac_y;
+                        for channel in 0..4 {
+                            sum[channel] += top_left[channel] * w00
+                                + top_right[channel] * w10
+                                + bottom_left[channel] * w01
+                                + bottom_right[channel] * w11;
+                        }
+                    }
+                } else {
+                    for delta in &deltas {
+                        let sample = sample_bilinear(
+                            &source,
+                            width,
+                            height,
+                            base_x + delta[0],
+                            base_y + delta[1],
+                        );
+                        sum[0] += sample[0];
+                        sum[1] += sample[1];
+                        sum[2] += sample[2];
+                        sum[3] += sample[3];
                     }
                 }
-            } else {
-                for delta in &deltas {
-                    let sample = sample_bilinear(
-                        &source,
-                        width,
-                        height,
-                        base_x + delta[0],
-                        base_y + delta[1],
-                    );
-                    sum[0] += sample[0];
-                    sum[1] += sample[1];
-                    sum[2] += sample[2];
-                    sum[3] += sample[3];
-                }
+                *pixel = [
+                    sum[0] * weight,
+                    sum[1] * weight,
+                    sum[2] * weight,
+                    sum[3] * weight,
+                ];
             }
-            *pixel = [
-                sum[0] * weight,
-                sum[1] * weight,
-                sum[2] * weight,
-                sum[3] * weight,
-            ];
         }
-    }
+    });
 
     crate::straight_alpha::unpremultiply_rgba_controlled(frame, checkpoint)?;
     checkpoint()?;
