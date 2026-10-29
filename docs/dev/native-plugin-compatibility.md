@@ -30,8 +30,11 @@ slice passed complete SDK library and App product CI on Windows, Linux and
 macOS before integration ([PR31](https://github.com/shaloong/mondrian/pull/31)).
 Factory contexts survive concurrent discovery/instances; editor retirement does
 not retire factory callbacks. The following Product slice uses the existing
-Main/DSP schedule and one bounded initial parameter handoff on every desktop.
-Its Linux Audio library passes 851 tests (65 ignored).
+Main/DSP schedule and one bounded initial parameter handoff on every desktop;
+it passed all three Product CI214 routes before integration
+([PR32](https://github.com/shaloong/mondrian/pull/32)). The subsequent VST3 editor
+adapter passes the Linux Audio library (852 tests, 65 ignored) and strict
+whole-Workspace/all-targets/all-features Clippy.
 
 Unmodified MIT-licensed SDK3.8.0 ADelay passes the
 [public Runtime/Graph case](../../crates/mondrian-audio/tests/native_vst3_portable_runtime.rs)
@@ -50,9 +53,21 @@ Scoped X11 and Cocoa parent primitives are also implemented in the SDK, separate
 from Product GUI adapters. On Ubuntu, an authenticated private Xvfb gate passes
 three create/resize/deferred-close/retirement cycles with empty test stderr and
 settled process ownership; the complete SDK library passes 439 tests (16 ignored).
-The Cocoa actual-main parent probe awaits CI. These gates load no foreign view:
-Product GUI still uses the Windows adapter, and cross-platform plugin attachment,
-native input, full heap/resource and physical-display qualification remain open.
+The separate parent-foundation candidate's Cocoa actual-main probe and all three
+standalone SDK routes pass CI216. These parent probes load no foreign view.
+
+Product VST3 GUI adapters now reuse one attachment owner over the concrete
+Windows, X11 or Cocoa container; temporary Main/DSP borrows retain the view.
+Foreign Cocoa GUI/controller calls run on actual main inside autorelease scopes.
+Four rebuilt owned Windows SDK IPlugView gates pass: native messages, resize,
+same-instance DSP, both detach failures and state roundtrip. Author observation
+consumption is distinct from DSP delivery: the roundtrip checks GUI-to-PCM before
+capture and pending-host-input refusal before native delivery and restore.
+Windows SDK ordinary tests pass416 (13 ignored); the finite Linux ADelay and
+Ring Out cases above also pass on this Product implementation. CLAP's Product GUI
+adapter remains Windows. Linux/macOS foreign view attachment and input/focus,
+Product GUI integration, full heap/resource, realtime/performance and physical
+display qualification remain open; basic parent or ordinary tests do not close them.
 
 ## Implementation boundary
 
