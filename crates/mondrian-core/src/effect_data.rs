@@ -49,6 +49,7 @@ pub enum EffectType {
     Mosaic,
     MotionTile,
     Kaleidoscope,
+    Bevel,
     Posterize,
     Emboss,
     /// Externally registered effect definition, including native-format adapters.
@@ -96,6 +97,7 @@ impl EffectType {
             Self::Mosaic => "builtin.mosaic".to_string(),
             Self::MotionTile => "builtin.motion_tile".to_string(),
             Self::Kaleidoscope => "builtin.kaleidoscope".to_string(),
+            Self::Bevel => "builtin.bevel".to_string(),
             Self::Posterize => "builtin.posterize".to_string(),
             Self::External(key) => key.clone(),
         }
@@ -138,6 +140,7 @@ impl EffectType {
             "builtin.mosaic" => Self::Mosaic,
             "builtin.motion_tile" => Self::MotionTile,
             "builtin.kaleidoscope" => Self::Kaleidoscope,
+            "builtin.bevel" => Self::Bevel,
             "builtin.posterize" => Self::Posterize,
             other => Self::External(other.to_string()),
         }
@@ -180,6 +183,7 @@ impl EffectType {
             Self::Mosaic => "马赛克",
             Self::MotionTile => "动态拼贴",
             Self::Kaleidoscope => "万花筒",
+            Self::Bevel => "斜面与浮雕",
             Self::Posterize => "色调分离",
             Self::External(name) => name,
         }
@@ -220,6 +224,7 @@ impl EffectType {
             Self::Mosaic => vec!["风格化"],
             Self::MotionTile => vec!["风格化"],
             Self::Kaleidoscope => vec!["风格化"],
+            Self::Bevel => vec!["边缘效果"],
             Self::Posterize => vec!["风格化"],
             Self::External(_) => vec!["外部效果"],
         }
@@ -262,6 +267,7 @@ impl EffectType {
             Self::Mosaic => "mosaic".to_string(),
             Self::MotionTile => "motion_tile".to_string(),
             Self::Kaleidoscope => "kaleidoscope".to_string(),
+            Self::Bevel => "bevel".to_string(),
             Self::Posterize => "posterize".to_string(),
             Self::External(key) => key.clone(),
         }
@@ -561,7 +567,7 @@ impl crate::AuthoringFootprint for EffectType {
             Self::Emboss => Ok(()),
             Self::ColorEmboss => Ok(()),
             Self::Threshold | Self::Mosaic | Self::MotionTile | Self::Kaleidoscope => Ok(()),
-            Self::Posterize => Ok(()),
+            Self::Posterize | Self::Bevel => Ok(()),
         }
     }
 }

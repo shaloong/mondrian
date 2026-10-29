@@ -65,6 +65,7 @@ pub use processor_residency::{
     EffectProcessorRetention, EffectProcessorStopReason, EffectProcessorTransientMemoryRefusal,
     PreparedEffectProcessorInput,
 };
+pub mod bevel;
 pub mod kaleidoscope;
 pub mod mosaic;
 pub mod motion_tile;
@@ -97,6 +98,7 @@ pub use color_emboss::{
     COLOR_EMBOSS_MAX_CONTRAST_PERCENT, COLOR_EMBOSS_MAX_RELIEF,
 };
 
+pub use bevel::{bevel_frame_f32, BevelError, BevelGrade, BEVEL_HALO_PIXELS, BEVEL_MAX_THICKNESS};
 pub use coverage::{has_positive_coverage, mix_straight_rgba, straight_rgba_from_premultiplied};
 pub use effect::{
     build_effect_render_graph, compile_clip_effect_graph, effect_category_tree, effect_definition,

@@ -872,6 +872,10 @@ pub enum EffectRenderOp {
     Kaleidoscope {
         grade: crate::KaleidoscopeGrade,
     },
+    /// Bevel: shades the coverage edge into a lit relief.
+    Bevel {
+        grade: crate::BevelGrade,
+    },
     /// Threshold: black or white depending on the working-space luminance.
     Threshold {
         grade: crate::ThresholdGrade,
@@ -1033,6 +1037,7 @@ impl std::fmt::Debug for EffectRenderOp {
             Self::Kaleidoscope { grade } => {
                 formatter.debug_struct("Kaleidoscope").field("grade", grade).finish()
             }
+            Self::Bevel { grade } => formatter.debug_struct("Bevel").field("grade", grade).finish(),
             Self::Mosaic { grade } => {
                 formatter.debug_struct("Mosaic").field("grade", grade).finish()
             }
@@ -1452,6 +1457,15 @@ impl EffectRenderOp {
                 35u8.hash(state);
                 grade.levels().hash(state);
             }
+            EffectRenderOp::Bevel { grade } => {
+                38u8.hash(state);
+                grade.thickness().to_bits().hash(state);
+                grade.angle_degrees().to_bits().hash(state);
+                for value in grade.light_color() {
+                    value.to_bits().hash(state);
+                }
+                grade.intensity().to_bits().hash(state);
+            }
             EffectRenderOp::Kaleidoscope { grade } => {
                 37u8.hash(state);
                 for value in grade.center() {
@@ -1649,6 +1663,7 @@ impl EffectRenderOp {
             EffectRenderOp::Posterize { .. } => 1,
             EffectRenderOp::MotionTile { .. } => 3,
             EffectRenderOp::Kaleidoscope { .. } => 3,
+            EffectRenderOp::Bevel { .. } => 2,
             EffectRenderOp::ColorEmboss { .. } => 4,
             EffectRenderOp::Emboss { .. } => 4,
             EffectRenderOp::HueSaturation { .. } => 2,
@@ -2184,7 +2199,7 @@ impl EffectDefinition {
     }
 }
 
-fn builtin_effect_types() -> [EffectType; 36] {
+fn builtin_effect_types() -> [EffectType; 37] {
     [
         EffectType::BasicCorrection,
         EffectType::WhiteBalance,
@@ -2222,6 +2237,7 @@ fn builtin_effect_types() -> [EffectType; 36] {
         EffectType::Posterize,
         EffectType::MotionTile,
         EffectType::Kaleidoscope,
+        EffectType::Bevel,
     ]
 }
 
@@ -3466,6 +3482,52 @@ fn default_properties_for(effect_type: EffectType) -> PropertyBag {
                 None,
             );
         }
+        EffectType::Bevel => {
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "thickness",
+                "斜面与浮雕",
+                "边缘厚度",
+                PropertyValue::Float(2.0),
+                Some(0.0),
+                Some(crate::BEVEL_MAX_THICKNESS as f64),
+                Some(0.1),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "angle",
+                "斜面与浮雕",
+                "灯光角度",
+                PropertyValue::Float(-60.0),
+                None,
+                None,
+                None,
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "light_color",
+                "斜面与浮雕",
+                "灯光颜色",
+                PropertyValue::Color(Color { r: 1.0, g: 1.0, b: 1.0, a: 1.0 }),
+                None,
+                None,
+                None,
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "intensity",
+                "斜面与浮雕",
+                "灯光强度",
+                PropertyValue::Float(0.4),
+                Some(0.0),
+                Some(1.0),
+                Some(0.01),
+            );
+        }
         EffectType::MotionTile => {
             define_builtin_property(
                 &mut properties,
@@ -4204,6 +4266,9 @@ fn builtin_parameter_unit(effect_type: &EffectType, parameter: &str) -> Paramete
         (EffectType::Kaleidoscope, "center_y") => ParameterUnit::Pixels,
         (EffectType::Kaleidoscope, "size") => ParameterUnit::Percent,
         (EffectType::Kaleidoscope, "rotation") => ParameterUnit::Degrees,
+        (EffectType::Bevel, "thickness") => ParameterUnit::Pixels,
+        (EffectType::Bevel, "angle") => ParameterUnit::Degrees,
+        (EffectType::Bevel, "intensity") => ParameterUnit::Normalized,
         (EffectType::MotionTile, "center_x") => ParameterUnit::Pixels,
         (EffectType::MotionTile, "center_y") => ParameterUnit::Pixels,
         (EffectType::MotionTile, "tile_width") => ParameterUnit::Percent,
@@ -4380,6 +4445,14 @@ fn builtin_effect_execution_contract(effect_type: &EffectType) -> EffectExecutio
         EffectType::Kaleidoscope => EffectExecutionContract {
             execution_modes: EffectExecutionModes::CPU_F32,
             roi_propagation: EffectRoiPropagation::FullFrame,
+            ..cpu_linear
+        },
+        EffectType::Bevel => EffectExecutionContract {
+            execution_modes: EffectExecutionModes::CPU_F32,
+            roi_propagation: EffectRoiPropagation::Expand {
+                horizontal_pixels: crate::BEVEL_HALO_PIXELS,
+                vertical_pixels: crate::BEVEL_HALO_PIXELS,
+            },
             ..cpu_linear
         },
         EffectType::MotionTile => EffectExecutionContract {
@@ -5461,6 +5534,40 @@ fn builtin_graph_builder_for(effect_type: &EffectType) -> Option<EffectGraphBuil
                 Ok(())
             }))
         }
+        EffectType::Bevel => {
+            let thickness_id = builtin_parameter_id(effect_type, "thickness");
+            let angle_id = builtin_parameter_id(effect_type, "angle");
+            let light_color_id = builtin_parameter_id(effect_type, "light_color");
+            let intensity_id = builtin_parameter_id(effect_type, "intensity");
+            Some(Arc::new(move |effect, context, graph| {
+                let light_color = match effect.evaluate_parameter(&light_color_id, context.time) {
+                    Some(PropertyValue::Color(color)) => [color.r, color.g, color.b],
+                    Some(_) => {
+                        return Err(EffectGraphBuildError::InvalidAuthorState {
+                            effect_key: effect.effect_type.key(),
+                            effect_id: effect.id,
+                            reason: "bevel light colour must be a colour".to_owned(),
+                        })
+                    }
+                    None => [1.0, 1.0, 1.0],
+                };
+                let grade = crate::BevelGrade::new(
+                    effect.evaluate_f32_parameter(&thickness_id, context.time, 2.0),
+                    effect.evaluate_f32_parameter(&angle_id, context.time, -60.0),
+                    light_color,
+                    effect.evaluate_f32_parameter(&intensity_id, context.time, 0.4),
+                )
+                .map_err(|error| EffectGraphBuildError::InvalidAuthorState {
+                    effect_key: effect.effect_type.key(),
+                    effect_id: effect.id,
+                    reason: error.to_string(),
+                })?;
+                if !grade.is_identity() {
+                    graph.append_unary(EffectRenderOp::Bevel { grade });
+                }
+                Ok(())
+            }))
+        }
         EffectType::MotionTile => {
             let center_x_id = builtin_parameter_id(effect_type, "center_x");
             let center_y_id = builtin_parameter_id(effect_type, "center_y");
@@ -5876,6 +5983,7 @@ fn builtin_display_name(effect_type: &EffectType) -> &'static str {
         EffectType::Posterize => "色调分离",
         EffectType::MotionTile => "动态拼贴",
         EffectType::Kaleidoscope => "万花筒",
+        EffectType::Bevel => "斜面与浮雕",
         EffectType::ColorEmboss => "色彩浮雕",
         EffectType::Emboss => "浮雕",
         EffectType::External(_) => "外部效果",
@@ -7148,6 +7256,7 @@ mod tests {
             EffectType::Posterize,
             EffectType::MotionTile,
             EffectType::Kaleidoscope,
+            EffectType::Bevel,
         ]
         .into_iter()
         .map(|effect_type| effect_type.key())
@@ -10091,6 +10200,95 @@ mod tests {
         let grade = kaleidoscope_op(&graph).expect("kaleidoscope op");
         assert_eq!(grade.mirroring(), 3);
         assert_eq!(grade.size_percent(), 75.0);
+    }
+    fn bevel_op(graph: &EffectRenderGraph) -> Option<crate::BevelGrade> {
+        graph.nodes.iter().find_map(|node| match &node.kind {
+            EffectGraphNodeKind::UnaryEffect { op: EffectRenderOp::Bevel { grade }, .. }
+            | EffectGraphNodeKind::DomainEffect { op: EffectRenderOp::Bevel { grade }, .. } => {
+                Some(*grade)
+            }
+            _ => None,
+        })
+    }
+
+    #[test]
+    fn bevel_defaults_compile_to_the_listed_light() {
+        let effect =
+            instantiate_effect_node(EffectType::Bevel).expect("registered bevel definition");
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("builds bevel graph");
+        let grade = bevel_op(&graph).expect("bevel op");
+        assert_eq!(grade.thickness(), 2.0);
+        assert_eq!(grade.angle_degrees(), -60.0);
+        assert_eq!(grade.light_color(), [1.0, 1.0, 1.0]);
+        assert_eq!(grade.intensity(), 0.4);
+    }
+
+    #[test]
+    fn bevel_authored_state_reaches_the_operation() {
+        let mut effect =
+            instantiate_effect_node(EffectType::Bevel).expect("registered bevel definition");
+        for (parameter, value) in [("thickness", 8.0_f32), ("angle", 45.0), ("intensity", 0.9)] {
+            effect
+                .apply_property_mutation(PropertyMutation::SetStaticValue {
+                    path: EffectType::Bevel.property_path(parameter),
+                    value: PropertyValue::Float(value),
+                })
+                .expect("authors bevel parameter");
+        }
+        effect
+            .apply_property_mutation(PropertyMutation::SetStaticValue {
+                path: EffectType::Bevel.property_path("light_color"),
+                value: PropertyValue::Color(Color { r: 1.0, g: 0.5, b: 0.25, a: 1.0 }),
+            })
+            .expect("authors bevel colour");
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("builds bevel graph");
+        let grade = bevel_op(&graph).expect("bevel op");
+        assert_eq!(grade.thickness(), 8.0);
+        assert_eq!(grade.angle_degrees(), 45.0);
+        assert_eq!(grade.intensity(), 0.9);
+        assert_eq!(grade.light_color(), [1.0, 0.5, 0.25]);
+    }
+
+    #[test]
+    fn bevel_rejects_author_values_outside_the_declared_ranges() {
+        for (parameter, value) in [
+            ("thickness", PropertyValue::Float(201.0)),
+            ("intensity", PropertyValue::Float(1.5)),
+        ] {
+            let mut effect =
+                instantiate_effect_node(EffectType::Bevel).expect("registered bevel definition");
+            let error = effect
+                .apply_property_mutation(PropertyMutation::SetStaticValue {
+                    path: EffectType::Bevel.property_path(parameter),
+                    value,
+                })
+                .expect_err("rejects out of range bevel parameter");
+            assert!(
+                format!("{error}").contains(parameter),
+                "unexpected error: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn bevel_authored_state_survives_project_serialization_round_trip() {
+        let mut effect =
+            instantiate_effect_node(EffectType::Bevel).expect("registered bevel definition");
+        effect
+            .apply_property_mutation(PropertyMutation::SetStaticValue {
+                path: EffectType::Bevel.property_path("thickness"),
+                value: PropertyValue::Float(12.0),
+            })
+            .expect("authors bevel thickness");
+        let wire = serde_json::to_string(&effect).expect("serializes bevel effect");
+        let restored: EffectNode = serde_json::from_str(&wire).expect("restores bevel effect");
+        assert_eq!(restored, effect);
+        let graph = build_effect_render_graph(&[restored], tt(0), TEST_WORKING_SPACE)
+            .expect("builds restored bevel graph");
+        let grade = bevel_op(&graph).expect("bevel op");
+        assert_eq!(grade.thickness(), 12.0);
     }
 }
 

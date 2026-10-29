@@ -212,6 +212,12 @@ pub(crate) fn apply_render_op(
                 parameter: "requires_float32",
             });
         }
+        EffectRenderOp::Bevel { .. } => {
+            return Err(EffectExecutionError::InvalidRenderParameter {
+                op: "bevel",
+                parameter: "requires_float32",
+            })
+        }
         EffectRenderOp::Kaleidoscope { .. } => {
             return Err(EffectExecutionError::InvalidRenderParameter {
                 op: "kaleidoscope",
@@ -693,6 +699,7 @@ pub(crate) const fn render_op_f32_scratch_frames(op: &EffectRenderOp) -> usize {
         EffectRenderOp::UnsharpMask { .. } => 1,
         EffectRenderOp::Threshold { .. } => 0,
         EffectRenderOp::Mosaic { .. } => 0,
+        EffectRenderOp::Bevel { .. } => 0,
         EffectRenderOp::Kaleidoscope { .. } => 0,
         EffectRenderOp::MotionTile { .. } => 0,
         EffectRenderOp::Posterize { .. } => 0,
@@ -911,6 +918,13 @@ pub(crate) fn apply_render_op_f32_region_controlled<E>(
             width as usize,
             height as usize,
             *grade,
+            checkpoint,
+        ),
+        EffectRenderOp::Bevel { grade } => crate::bevel::apply_bevel_f32_controlled(
+            working,
+            region.width as usize,
+            region.height as usize,
+            grade,
             checkpoint,
         ),
         EffectRenderOp::Kaleidoscope { grade } => {
