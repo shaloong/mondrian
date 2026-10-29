@@ -4,6 +4,19 @@ use std::ptr;
 use std::ptr::NonNull;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+/// Control/lifecycle calls only; the caller must retain the entry or library
+/// through pool drainage, including failure cleanup. Never use on the DSP path.
+pub(crate) fn with_native_control_pool<T>(action: impl FnOnce() -> T) -> T {
+    #[cfg(target_os = "macos")]
+    {
+        objc2::rc::autoreleasepool(|_| action())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        action()
+    }
+}
+
 /// Equivalent in spirit to `UnsafeCell<Option<T>>`, except you can read if the cell is set or not
 /// without invalidating potential active &mut references to the data.
 pub(crate) struct UnsafeOptionCell<T> {

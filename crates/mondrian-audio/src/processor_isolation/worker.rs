@@ -14,8 +14,9 @@ use std::fs::OpenOptions;
 use std::net::TcpStream;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 
-/// One control-call pool, with an outer worker pool covering load and teardown.
-/// This does not claim Cocoa affinity or change CLAP's logical main thread.
+/// Drain control-call temporaries while the caller still retains the native module.
+/// Do not wrap an owner replacement or unload: its module could drop before the
+/// pool drains. This scope does not establish Cocoa main-thread affinity.
 pub(super) fn with_native_control_pool<T>(action: impl FnOnce() -> T) -> T {
     #[cfg(target_os = "macos")]
     {
@@ -28,12 +29,6 @@ pub(super) fn with_native_control_pool<T>(action: impl FnOnce() -> T) -> T {
 }
 
 pub(super) fn run_worker(
-    factory: &dyn IsolatedAudioProcessorWorkerFactory,
-) -> Result<(), AudioProcessorHostError> {
-    with_native_control_pool(|| run_worker_inner(factory))
-}
-
-fn run_worker_inner(
     factory: &dyn IsolatedAudioProcessorWorkerFactory,
 ) -> Result<(), AudioProcessorHostError> {
     let endpoint = std::env::var(ISOLATED_AUDIO_PROCESSOR_ENDPOINT_ENV)
@@ -244,17 +239,6 @@ impl WorkerAudioIo {
 }
 
 fn dispatch_native_owner_with_io(
-    processor: &mut dyn IsolatedAudioProcessorWorker,
-    command: super::native_worker_command::NativeCommand,
-    control: &mut TcpStream,
-    io: &mut WorkerAudioIo,
-) -> Result<bool, AudioProcessorHostError> {
-    with_native_control_pool(|| {
-        dispatch_native_owner_with_io_inner(processor, command, control, io)
-    })
-}
-
-fn dispatch_native_owner_with_io_inner(
     processor: &mut dyn IsolatedAudioProcessorWorker,
     command: super::native_worker_command::NativeCommand,
     control: &mut TcpStream,

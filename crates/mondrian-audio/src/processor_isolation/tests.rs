@@ -8,6 +8,10 @@ use mondrian_core::{AudioSampleRate, ParameterId, ProgramOutputId};
 use std::ops::Range;
 use std::time::Duration;
 
+#[cfg(target_os = "macos")]
+#[path = "tests/clap_native_pools.rs"]
+mod clap_native_pools;
+
 const CHILD_TEST_NAME: &str = "processor_isolation::tests::isolated_worker_child_entry";
 
 #[cfg(windows)]

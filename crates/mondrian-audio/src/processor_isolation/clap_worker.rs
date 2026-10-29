@@ -1329,331 +1329,350 @@ fn prepare_loaded_on_main(
     expected_parameters: &[super::ClapParameterDescriptor],
     parameter_ids: &[u32],
 ) -> Result<Box<ClapWorker>, AudioProcessorHostError> {
-    let event_capacity = parameter_input_capacity(request.render_contract(), parameter_ids.len())?;
-    super::clap_note_input_contract::validate_clap_contract(request.note_input_contract())?;
-    let notes_enabled = !request.note_input_contract().ports.is_empty();
-    let note_limits = request.note_input_contract().limits;
-    let input_events =
-        ClapInputEvents::try_with_note_capacity(event_capacity, note_limits.input_events)?;
-    if note_source_reservation_bytes(expected_parameters.len(), request.note_input_contract())?
-        .checked_add(input_events.allocated_bytes()?)
-        .ok_or_else(|| invalid("CLAP input/output owner reservation overflowed"))?
-        > request.render_contract().processor_session_scratch_budget_bytes
-    {
-        return Err(invalid(
-            "CLAP output owner exceeds the current Session scratch ceiling",
-        ));
-    }
-    let factory = entry
-        .get_plugin_factory()
-        .ok_or_else(|| unavailable("CLAP library has no plugin factory"))?;
-    super::clap_note_input_metadata::validate_factory_plugin_id(&factory, plugin_id)?;
-    let info = HostInfo::new(
-        "Mondrian",
-        "Mondrian",
-        "https://github.com/shaloong/mondrian",
-        env!("CARGO_PKG_VERSION"),
-    )
-    .map_err(|error| invalid(format!("invalid CLAP host identity: {error}")))?;
-    let shared = if notes_enabled {
-        ClapHostShared::new_with_note_input()
-    } else {
-        ClapHostShared::new()
-    };
-    let mut output_events = ClapOutputEvents::new_with_note_capacity(
-        expected_parameters,
-        Arc::clone(&shared.parameter_source),
-        note_limits.output_ends,
-    )
-    .map_err(|error| parameter_refusal_at_site(error, "expected_output_contract"))?;
-    let native_shared = shared.clone().with_native_logs()?;
-    let mut instance = PluginInstance::<ClapHost>::new(
-        |_| native_shared,
-        |shared| ClapHostMainThread::new(shared),
-        &entry,
-        plugin_id,
-        &info,
-    )
-    .map_err(|error| unavailable(format!("CLAP instance creation failed: {error}")))?;
-    let log_receiver = instance
-        .access_shared_handler(|host| host.logs.claim_receiver())
-        .ok_or_else(|| invalid("CLAP native log receiver already claimed"))?;
-    shared.service_callbacks(&mut instance)?;
-    let inactive = instance
-        .inactive_plugin_handle()
-        .ok_or_else(|| invalid("CLAP cold worker is active"))?;
-    if super::clap_audio_config::negotiate_initial(
-        &inactive,
-        request.render_contract().channel_layout,
-    )? {
+    // Keep the same initialized entry alive through all constructor/error
+    // cleanup and pool drainage. This is a temporary code-lifetime guard.
+    let _entry_guard = entry.clone();
+    super::worker::with_native_control_pool(|| {
+        let event_capacity =
+            parameter_input_capacity(request.render_contract(), parameter_ids.len())?;
+        super::clap_note_input_contract::validate_clap_contract(request.note_input_contract())?;
+        let notes_enabled = !request.note_input_contract().ports.is_empty();
+        let note_limits = request.note_input_contract().limits;
+        let input_events =
+            ClapInputEvents::try_with_note_capacity(event_capacity, note_limits.input_events)?;
+        if note_source_reservation_bytes(expected_parameters.len(), request.note_input_contract())?
+            .checked_add(input_events.allocated_bytes()?)
+            .ok_or_else(|| invalid("CLAP input/output owner reservation overflowed"))?
+            > request.render_contract().processor_session_scratch_budget_bytes
+        {
+            return Err(invalid(
+                "CLAP output owner exceeds the current Session scratch ceiling",
+            ));
+        }
+        let factory = entry
+            .get_plugin_factory()
+            .ok_or_else(|| unavailable("CLAP library has no plugin factory"))?;
+        super::clap_note_input_metadata::validate_factory_plugin_id(&factory, plugin_id)?;
+        let info = HostInfo::new(
+            "Mondrian",
+            "Mondrian",
+            "https://github.com/shaloong/mondrian",
+            env!("CARGO_PKG_VERSION"),
+        )
+        .map_err(|error| invalid(format!("invalid CLAP host identity: {error}")))?;
+        let shared = if notes_enabled {
+            ClapHostShared::new_with_note_input()
+        } else {
+            ClapHostShared::new()
+        };
+        let mut output_events = ClapOutputEvents::new_with_note_capacity(
+            expected_parameters,
+            Arc::clone(&shared.parameter_source),
+            note_limits.output_ends,
+        )
+        .map_err(|error| parameter_refusal_at_site(error, "expected_output_contract"))?;
+        let native_shared = shared.clone().with_native_logs()?;
+        let mut instance = PluginInstance::<ClapHost>::new(
+            |_| native_shared,
+            |shared| ClapHostMainThread::new(shared),
+            &entry,
+            plugin_id,
+            &info,
+        )
+        .map_err(|error| unavailable(format!("CLAP instance creation failed: {error}")))?;
+        let log_receiver = instance
+            .access_shared_handler(|host| host.logs.claim_receiver())
+            .ok_or_else(|| invalid("CLAP native log receiver already claimed"))?;
         shared.service_callbacks(&mut instance)?;
-    }
-    if let Some(state) = state {
-        let handle = instance.plugin_handle();
-        let extension = handle
-            .get_extension::<PluginState>()
-            .ok_or_else(|| unavailable("CLAP plugin does not support state restoration"))?;
-        let mut reader = state;
-        extension
-            .load(&handle, &mut reader)
-            .map_err(|error| unavailable(format!("CLAP state restore failed: {error}")))?;
-    }
+        let inactive = instance
+            .inactive_plugin_handle()
+            .ok_or_else(|| invalid("CLAP cold worker is active"))?;
+        if super::clap_audio_config::negotiate_initial(
+            &inactive,
+            request.render_contract().channel_layout,
+        )? {
+            shared.service_callbacks(&mut instance)?;
+        }
+        if let Some(state) = state {
+            let handle = instance.plugin_handle();
+            let extension = handle
+                .get_extension::<PluginState>()
+                .ok_or_else(|| unavailable("CLAP plugin does not support state restoration"))?;
+            let mut reader = state;
+            extension
+                .load(&handle, &mut reader)
+                .map_err(|error| unavailable(format!("CLAP state restore failed: {error}")))?;
+        }
 
-    shared.service_callbacks(&mut instance)?;
-    configure_render_mode(
-        &instance.plugin_handle(),
-        request.render_contract().processing_mode,
-    )?;
-    shared.service_callbacks(&mut instance)?;
-    let channel_count = request.render_contract().channel_count();
-    let initial_parameter_source = shared.parameter_source.snapshot();
-    {
-        let handle = instance.plugin_handle();
-        // Own the one existing query snapshot only through the original check;
-        // its Vec is dropped before signature/port/activation work as before.
-        let mut capture = ParameterQueryCapture::from_environment();
-        let parameters = list_parameters_observed(&handle, capture.as_mut())
-            .map_err(|error| parameter_refusal_at_site(error, "native_after_state_render_mode"))?;
-        if !same_clap_parameter_structure(&parameters, expected_parameters) {
-            let detail = match capture.as_ref() {
-                Some(capture) => first_clap_parameter_structure_mismatch_observed(
-                    &parameters,
-                    expected_parameters,
-                    Some(capture),
-                ),
-                None => first_clap_parameter_structure_mismatch(&parameters, expected_parameters),
+        shared.service_callbacks(&mut instance)?;
+        configure_render_mode(
+            &instance.plugin_handle(),
+            request.render_contract().processing_mode,
+        )?;
+        shared.service_callbacks(&mut instance)?;
+        let channel_count = request.render_contract().channel_count();
+        let initial_parameter_source = shared.parameter_source.snapshot();
+        {
+            let handle = instance.plugin_handle();
+            // Own the one existing query snapshot only through the original check;
+            // its Vec is dropped before signature/port/activation work as before.
+            let mut capture = ParameterQueryCapture::from_environment();
+            let parameters =
+                list_parameters_observed(&handle, capture.as_mut()).map_err(|error| {
+                    parameter_refusal_at_site(error, "native_after_state_render_mode")
+                })?;
+            if !same_clap_parameter_structure(&parameters, expected_parameters) {
+                let detail = match capture.as_ref() {
+                    Some(capture) => first_clap_parameter_structure_mismatch_observed(
+                        &parameters,
+                        expected_parameters,
+                        Some(capture),
+                    ),
+                    None => {
+                        first_clap_parameter_structure_mismatch(&parameters, expected_parameters)
+                    }
+                }
+                .unwrap_or_else(|| {
+                    "CLAP parameter metadata changed since contract probe".to_owned()
+                });
+                return Err(invalid(detail));
             }
-            .unwrap_or_else(|| "CLAP parameter metadata changed since contract probe".to_owned());
-            return Err(invalid(detail));
+            if parameters.iter().zip(expected_parameters).all(|(actual, expected)| {
+                actual.read_only
+                    || actual.current_value.to_bits() == expected.current_value.to_bits()
+            }) {
+                // This is the completion of the parent's cold native restore, before
+                // activation or publication of any editor/signal owner. Host curves
+                // remain authoritative; unrelated source work is never cleared.
+                instance.access_handler(|main| {
+                    main.acknowledge_initial_parameter_rescans(
+                        initial_parameter_source,
+                        &mut output_events,
+                    )
+                });
+            }
         }
-        if parameters.iter().zip(expected_parameters).all(|(actual, expected)| {
-            actual.read_only || actual.current_value.to_bits() == expected.current_value.to_bits()
-        }) {
-            // This is the completion of the parent's cold native restore, before
-            // activation or publication of any editor/signal owner. Host curves
-            // remain authoritative; unrelated source work is never cleared.
-            instance.access_handler(|main| {
-                main.acknowledge_initial_parameter_rescans(
-                    initial_parameter_source,
-                    &mut output_events,
-                )
-            });
-        }
-    }
-    let handle = instance.plugin_handle();
-    let parameter_signatures = parameter_observations::capture_signatures(&handle)?;
-    let signature_bytes = std::alloc::Layout::array::<parameter_observations::ParameterSignature>(
-        parameter_signatures.capacity(),
-    )
-    .map_err(|_| invalid("CLAP actual parameter signature allocation overflow"))?
-    .size();
-    if output_events
-        .allocated_bytes()?
-        .checked_add(input_events.allocated_bytes()?)
-        .and_then(|bytes| bytes.checked_add(signature_bytes))
-        .and_then(|bytes| bytes.checked_add(std::mem::size_of::<ClapWorker>()))
-        .and_then(|bytes| {
-            bytes.checked_add(std::mem::size_of::<
-                super::clap_parameter_source::ClapParameterSource,
-            >())
-        })
-        .and_then(|bytes| {
-            bytes.checked_add(std::mem::size_of::<
-                super::clap_parameter_source::ClapParameterControlSource<'static>,
-            >())
-        })
-        .is_none_or(|bytes| {
-            bytes > request.render_contract().processor_session_scratch_budget_bytes
-        })
-    {
-        return Err(invalid(
-            "CLAP source/signature owners exceed current Session scratch ceiling",
-        ));
-    }
-    let audio_metadata = inspect_audio_ports(&handle, request.render_contract().channel_layout)?;
-    let auxiliary_inputs = audio_metadata.contract;
-    main_audio_input.validate(request.auxiliary_inputs())?;
-    if audio_metadata.main_audio_input != main_audio_input
-        || &auxiliary_inputs != request.auxiliary_inputs()
-        || audio_metadata.main_audio_output_id != main_audio_output_id
-        || &audio_metadata.outputs != request.auxiliary_outputs()
-    {
-        return Err(invalid("CLAP audio ports changed since contract probe"));
-    }
-
-    let note_inputs = if notes_enabled {
-        Some(super::clap_note_input_contract::negotiate_restored(
-            &mut instance,
-            request.note_input_contract(),
-        )?)
-    } else {
-        None
-    };
-    if note_inputs.as_ref().map_or(Ok(0), |inputs| inputs.allocated_bytes())?
-        > super::clap_note_input_contract::RestoredNoteInputs::reservation_bytes(
-            request.note_input_contract().ports.len(),
-        )?
-    {
-        return Err(invalid(
-            "CLAP restored Note binding exceeds admitted storage",
-        ));
-    }
-
-    let render = request.render_contract();
-    let configuration = PluginAudioConfiguration {
-        sample_rate: f64::from(render.sample_rate),
-        min_frames_count: 1,
-        max_frames_count: u32::try_from(render.max_block_frames)
-            .map_err(|_| invalid("CLAP block size exceeds u32"))?,
-    };
-    let mut processor: PluginAudioProcessor<ClapHost> = instance
-        .activate(|_, _| (), configuration)
-        .map_err(|error| unavailable(format!("CLAP activation failed: {error}")))?
-        .into();
-    instance.access_shared_handler(|host| host.services.active.store(true, Ordering::Release));
-    if let Some(inputs) = &note_inputs
-        && let Err(error) = super::clap_note_input_contract::service_names(&mut instance, inputs)
-    {
+        let handle = instance.plugin_handle();
+        let parameter_signatures = parameter_observations::capture_signatures(&handle)?;
+        let signature_bytes =
+            std::alloc::Layout::array::<parameter_observations::ParameterSignature>(
+                parameter_signatures.capacity(),
+            )
+            .map_err(|_| invalid("CLAP actual parameter signature allocation overflow"))?
+            .size();
+        if output_events
+            .allocated_bytes()?
+            .checked_add(input_events.allocated_bytes()?)
+            .and_then(|bytes| bytes.checked_add(signature_bytes))
+            .and_then(|bytes| bytes.checked_add(std::mem::size_of::<ClapWorker>()))
+            .and_then(|bytes| {
+                bytes.checked_add(std::mem::size_of::<
+                    super::clap_parameter_source::ClapParameterSource,
+                >())
+            })
+            .and_then(|bytes| {
+                bytes.checked_add(std::mem::size_of::<
+                    super::clap_parameter_source::ClapParameterControlSource<'static>,
+                >())
+            })
+            .is_none_or(|bytes| {
+                bytes > request.render_contract().processor_session_scratch_budget_bytes
+            })
         {
-            let _audio_role = shared.enter_audio_thread();
-            processor.ensure_processing_stopped();
+            return Err(invalid(
+                "CLAP source/signature owners exceed current Session scratch ceiling",
+            ));
         }
-        drop(processor);
-        // ALL is explicitly legal from the native deactivate callback.
-        instance.access_shared_handler(|host| host.services.active.store(false, Ordering::Release));
-        instance.try_deactivate().map_err(|cleanup| {
-            unavailable(format!("CLAP Note activation cleanup failed: {cleanup}"))
-        })?;
-        return Err(error);
-    }
-    let handle = instance.plugin_handle();
-    let latency = handle
-        .get_extension::<PluginLatency>()
-        .map(|extension| extension.get(&handle) as usize)
-        .unwrap_or(0);
-    let tail = {
-        let _audio_role = shared.enter_audio_thread();
-        processor
-            .plugin_handle()
-            .get_extension::<PluginTail>()
-            .map(|extension| extension.get(&processor.plugin_handle()))
-            .unwrap_or(TailLength::Finite(0))
-    };
-    let admitted_tail = match tail {
-        TailLength::Finite(0) => crate::AudioProcessorTail::None,
-        TailLength::Finite(frames) => crate::AudioProcessorTail::Finite(frames as usize),
-        TailLength::Infinite => crate::AudioProcessorTail::Infinite,
-    };
-    if latency != request.plugin_execution_contract().algorithmic_latency_frames()
-        || admitted_tail != request.plugin_execution_contract().tail()
-    {
+        let audio_metadata =
+            inspect_audio_ports(&handle, request.render_contract().channel_layout)?;
+        let auxiliary_inputs = audio_metadata.contract;
+        main_audio_input.validate(request.auxiliary_inputs())?;
+        if audio_metadata.main_audio_input != main_audio_input
+            || &auxiliary_inputs != request.auxiliary_inputs()
+            || audio_metadata.main_audio_output_id != main_audio_output_id
+            || &audio_metadata.outputs != request.auxiliary_outputs()
         {
-            let _audio_role = shared.enter_audio_thread();
-            processor.ensure_processing_stopped();
+            return Err(invalid("CLAP audio ports changed since contract probe"));
         }
-        drop(processor);
-        let _ = instance.try_deactivate();
-        return Err(invalid(
-            if latency != request.plugin_execution_contract().algorithmic_latency_frames() {
-                "CLAP latency differs from the admitted execution contract"
-            } else {
-                "CLAP tail differs from the admitted execution contract"
-            },
-        ));
-    }
-    let frames = render.max_block_frames;
-    let parameter_lanes = parameter_ids
-        .iter()
-        .map(|id| {
-            let descriptor = expected_parameters
-                .iter()
-                .find(|parameter| parameter.id == *id)
-                .ok_or_else(|| invalid("CLAP parameter lane is missing"))?;
-            let clap_id = ClapId::from_raw(*id)
-                .ok_or_else(|| invalid("CLAP parameter lane ID is invalid"))?;
-            Ok((
-                clap_id,
-                descriptor.min_value,
-                descriptor.max_value,
-                descriptor.stepped,
-            ))
-        })
-        .collect::<Result<Vec<_>, AudioProcessorHostError>>()?;
-    let (input_port_count, input_channels) =
-        clap_input_audio_shape(render.channel_layout, main_audio_input, &auxiliary_inputs)?;
-    // Allocate only actual native ports, each at its own validated width.
-    let input = (main_audio_input == ClapMainAudioInput::Present)
-        .then_some(render.channel_layout)
-        .into_iter()
-        .chain(auxiliary_inputs.buses.iter().map(|bus| bus.channel_layout))
-        .map(|layout| vec![vec![0.0; frames]; layout.channel_count()])
-        .collect::<Vec<_>>();
-    let output =
-        vec![vec![vec![0.0; frames]; channel_count]; 1 + request.auxiliary_outputs().buses.len()];
-    let input_ports = AudioPorts::with_capacity(input_channels, input_port_count);
-    let output_ports = AudioPorts::with_capacity(channel_count * output.len(), output.len());
-    let auxiliary_outputs = request.auxiliary_outputs().clone();
-    let actual_audio_bytes = clap_actual_audio_storage(
-        &input,
-        &output,
-        input
-            .capacity()
-            .checked_add(output.capacity())
-            .ok_or_else(|| invalid("CLAP outer audio owner overflowed"))?,
-        &input_ports,
-        &output_ports,
-        &auxiliary_outputs,
-    )?;
-    let reserved_audio_bytes = clap_audio_storage_reservation(
-        render,
-        main_audio_input,
-        &auxiliary_inputs,
-        request.auxiliary_outputs(),
-    )?;
-    if actual_audio_bytes > reserved_audio_bytes {
-        return Err(invalid(
-            "CLAP actual audio owners exceed their admitted capacity",
-        ));
-    }
-    let native_object = next_clap_native_object()?;
-    Ok(Box::new(ClapWorker {
-        native_lane: request.native_worker_lane_resources(),
-        native_object,
-        native_binding: None,
-        native_author_delivery: None,
-        parameter_signatures,
-        parameter_observation_revision: None,
-        #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
-        gui: super::clap_gui_owner::ClapGuiOwner::new(native_main.clone()),
-        #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
-        _native_main: native_main,
-        render,
-        expected_parameters: expected_parameters.to_vec(),
-        configuration_phase:
-            super::native_configuration_control::NativeConfigurationPhase::Admitted,
-        configuration_seed: None,
-        staged_audio_inputs: None,
-        processor: Some(processor),
-        instance,
-        contract: request.plugin_execution_contract(),
-        input,
-        output,
-        main_audio_input,
-        main_audio_output_id,
-        auxiliary_outputs,
-        auxiliary_inputs,
-        note_inputs,
-        input_names: audio_metadata.names,
-        input_ports,
-        output_ports,
-        parameter_lanes,
-        input_events,
-        output_events,
-        last_end: None,
-        fresh_activation_available: true,
-        log_receiver,
-        shared,
-    }))
+
+        let note_inputs = if notes_enabled {
+            Some(super::clap_note_input_contract::negotiate_restored(
+                &mut instance,
+                request.note_input_contract(),
+            )?)
+        } else {
+            None
+        };
+        if note_inputs.as_ref().map_or(Ok(0), |inputs| inputs.allocated_bytes())?
+            > super::clap_note_input_contract::RestoredNoteInputs::reservation_bytes(
+                request.note_input_contract().ports.len(),
+            )?
+        {
+            return Err(invalid(
+                "CLAP restored Note binding exceeds admitted storage",
+            ));
+        }
+
+        let render = request.render_contract();
+        let configuration = PluginAudioConfiguration {
+            sample_rate: f64::from(render.sample_rate),
+            min_frames_count: 1,
+            max_frames_count: u32::try_from(render.max_block_frames)
+                .map_err(|_| invalid("CLAP block size exceeds u32"))?,
+        };
+        let mut processor: PluginAudioProcessor<ClapHost> = instance
+            .activate(|_, _| (), configuration)
+            .map_err(|error| unavailable(format!("CLAP activation failed: {error}")))?
+            .into();
+        instance.access_shared_handler(|host| host.services.active.store(true, Ordering::Release));
+        if let Some(inputs) = &note_inputs
+            && let Err(error) =
+                super::clap_note_input_contract::service_names(&mut instance, inputs)
+        {
+            {
+                let _audio_role = shared.enter_audio_thread();
+                processor.ensure_processing_stopped();
+            }
+            drop(processor);
+            // ALL is explicitly legal from the native deactivate callback.
+            instance
+                .access_shared_handler(|host| host.services.active.store(false, Ordering::Release));
+            instance.try_deactivate().map_err(|cleanup| {
+                unavailable(format!("CLAP Note activation cleanup failed: {cleanup}"))
+            })?;
+            return Err(error);
+        }
+        let handle = instance.plugin_handle();
+        let latency = handle
+            .get_extension::<PluginLatency>()
+            .map(|extension| extension.get(&handle) as usize)
+            .unwrap_or(0);
+        let tail = {
+            let _audio_role = shared.enter_audio_thread();
+            processor
+                .plugin_handle()
+                .get_extension::<PluginTail>()
+                .map(|extension| extension.get(&processor.plugin_handle()))
+                .unwrap_or(TailLength::Finite(0))
+        };
+        let admitted_tail = match tail {
+            TailLength::Finite(0) => crate::AudioProcessorTail::None,
+            TailLength::Finite(frames) => crate::AudioProcessorTail::Finite(frames as usize),
+            TailLength::Infinite => crate::AudioProcessorTail::Infinite,
+        };
+        if latency != request.plugin_execution_contract().algorithmic_latency_frames()
+            || admitted_tail != request.plugin_execution_contract().tail()
+        {
+            {
+                let _audio_role = shared.enter_audio_thread();
+                processor.ensure_processing_stopped();
+            }
+            drop(processor);
+            let _ = instance.try_deactivate();
+            return Err(invalid(
+                if latency != request.plugin_execution_contract().algorithmic_latency_frames() {
+                    "CLAP latency differs from the admitted execution contract"
+                } else {
+                    "CLAP tail differs from the admitted execution contract"
+                },
+            ));
+        }
+        let frames = render.max_block_frames;
+        let parameter_lanes = parameter_ids
+            .iter()
+            .map(|id| {
+                let descriptor = expected_parameters
+                    .iter()
+                    .find(|parameter| parameter.id == *id)
+                    .ok_or_else(|| invalid("CLAP parameter lane is missing"))?;
+                let clap_id = ClapId::from_raw(*id)
+                    .ok_or_else(|| invalid("CLAP parameter lane ID is invalid"))?;
+                Ok((
+                    clap_id,
+                    descriptor.min_value,
+                    descriptor.max_value,
+                    descriptor.stepped,
+                ))
+            })
+            .collect::<Result<Vec<_>, AudioProcessorHostError>>()?;
+        let (input_port_count, input_channels) =
+            clap_input_audio_shape(render.channel_layout, main_audio_input, &auxiliary_inputs)?;
+        // Allocate only actual native ports, each at its own validated width.
+        let input = (main_audio_input == ClapMainAudioInput::Present)
+            .then_some(render.channel_layout)
+            .into_iter()
+            .chain(auxiliary_inputs.buses.iter().map(|bus| bus.channel_layout))
+            .map(|layout| vec![vec![0.0; frames]; layout.channel_count()])
+            .collect::<Vec<_>>();
+        let output = vec![
+            vec![vec![0.0; frames]; channel_count];
+            1 + request.auxiliary_outputs().buses.len()
+        ];
+        let input_ports = AudioPorts::with_capacity(input_channels, input_port_count);
+        let output_ports = AudioPorts::with_capacity(channel_count * output.len(), output.len());
+        let auxiliary_outputs = request.auxiliary_outputs().clone();
+        let actual_audio_bytes = clap_actual_audio_storage(
+            &input,
+            &output,
+            input
+                .capacity()
+                .checked_add(output.capacity())
+                .ok_or_else(|| invalid("CLAP outer audio owner overflowed"))?,
+            &input_ports,
+            &output_ports,
+            &auxiliary_outputs,
+        )?;
+        let reserved_audio_bytes = clap_audio_storage_reservation(
+            render,
+            main_audio_input,
+            &auxiliary_inputs,
+            request.auxiliary_outputs(),
+        )?;
+        if actual_audio_bytes > reserved_audio_bytes {
+            return Err(invalid(
+                "CLAP actual audio owners exceed their admitted capacity",
+            ));
+        }
+        let native_object = next_clap_native_object()?;
+        Ok(Box::new(ClapWorker {
+            native_lane: request.native_worker_lane_resources(),
+            native_object,
+            native_binding: None,
+            native_author_delivery: None,
+            parameter_signatures,
+            parameter_observation_revision: None,
+            #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
+            gui: super::clap_gui_owner::ClapGuiOwner::new(native_main.clone()),
+            #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
+            _native_main: native_main,
+            render,
+            expected_parameters: expected_parameters.to_vec(),
+            configuration_phase:
+                super::native_configuration_control::NativeConfigurationPhase::Admitted,
+            configuration_seed: None,
+            staged_audio_inputs: None,
+            processor: Some(processor),
+            instance,
+            contract: request.plugin_execution_contract(),
+            input,
+            output,
+            main_audio_input,
+            main_audio_output_id,
+            auxiliary_outputs,
+            auxiliary_inputs,
+            note_inputs,
+            input_names: audio_metadata.names,
+            input_ports,
+            output_ports,
+            parameter_lanes,
+            input_events,
+            output_events,
+            last_end: None,
+            fresh_activation_available: true,
+            log_receiver,
+            shared,
+        }))
+    })
 }
 
 struct ClapWorker {
