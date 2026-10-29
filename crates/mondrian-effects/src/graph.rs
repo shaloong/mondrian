@@ -1698,6 +1698,14 @@ fn render_op_requirements(op: &EffectRenderOp) -> EffectImplementationRequiremen
             roi_from_effect_input: finite_radius_roi(*radius),
             ..cpu_float
         },
+        EffectRenderOp::FindEdges { .. } => EffectImplementationRequirements {
+            execution_modes: EffectExecutionModes::CPU_F32,
+            roi_from_effect_input: EffectRoiPropagation::Expand {
+                horizontal_pixels: crate::FIND_EDGES_HALO_PIXELS,
+                vertical_pixels: crate::FIND_EDGES_HALO_PIXELS,
+            },
+            ..cpu_float
+        },
         EffectRenderOp::DropShadow { grade } => EffectImplementationRequirements {
             execution_modes: EffectExecutionModes::CPU_F32,
             roi_from_effect_input: grade.input_halo().map_or(

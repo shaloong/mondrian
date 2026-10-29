@@ -2804,6 +2804,7 @@ fn render_op_name(op: &crate::EffectRenderOp) -> &'static str {
         crate::EffectRenderOp::ShiftChannels { .. } => "shift_channels",
         crate::EffectRenderOp::DirectionalBlur { .. } => "directional_blur",
         crate::EffectRenderOp::ChannelMixer { .. } => "channel_mixer",
+        crate::EffectRenderOp::FindEdges { .. } => "find_edges",
         crate::EffectRenderOp::DropShadow { .. } => "drop_shadow",
         crate::EffectRenderOp::UnsharpMask { .. } => "unsharp_mask",
         crate::EffectRenderOp::Crop { .. } => "crop",

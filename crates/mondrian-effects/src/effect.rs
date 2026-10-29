@@ -853,6 +853,9 @@ pub enum EffectRenderOp {
     /// composited underneath (or instead of) the source. The shadow reads complete
     /// coverage from outside the frame as transparent, and the grade carries the
     /// final scene-linear shadow color.
+    FindEdges {
+        grade: crate::FindEdgesGrade,
+    },
     DropShadow {
         grade: crate::DropShadowGrade,
     },
@@ -986,6 +989,9 @@ impl std::fmt::Debug for EffectRenderOp {
             }
             Self::ShiftChannels { grade } => {
                 formatter.debug_struct("ShiftChannels").field("grade", grade).finish()
+            }
+            Self::FindEdges { grade } => {
+                formatter.debug_struct("FindEdges").field("grade", grade).finish()
             }
             Self::DropShadow { grade } => {
                 formatter.debug_struct("DropShadow").field("grade", grade).finish()
@@ -1385,6 +1391,11 @@ impl EffectRenderOp {
                     value.to_bits().hash(state);
                 }
             }
+            EffectRenderOp::FindEdges { grade } => {
+                30u8.hash(state);
+                grade.blend_with_original().to_bits().hash(state);
+                u8::from(grade.invert()).hash(state);
+            }
             EffectRenderOp::DropShadow { grade } => {
                 29u8.hash(state);
                 for value in grade.color() {
@@ -1521,6 +1532,7 @@ impl EffectRenderOp {
             EffectRenderOp::DirectionalBlur { .. } => 4,
             EffectRenderOp::ChannelMixer { .. } => 2,
             EffectRenderOp::DropShadow { .. } => 6,
+            EffectRenderOp::FindEdges { .. } => 4,
             EffectRenderOp::HueSaturation { .. } => 2,
             EffectRenderOp::UnsharpMask { .. } => 4,
             EffectRenderOp::Lut3D { .. } => 2,
@@ -2054,7 +2066,7 @@ impl EffectDefinition {
     }
 }
 
-fn builtin_effect_types() -> [EffectType; 28] {
+fn builtin_effect_types() -> [EffectType; 29] {
     [
         EffectType::BasicCorrection,
         EffectType::WhiteBalance,
@@ -2084,6 +2096,7 @@ fn builtin_effect_types() -> [EffectType; 28] {
         EffectType::DirectionalBlur,
         EffectType::ChannelMixer,
         EffectType::DropShadow,
+        EffectType::FindEdges,
     ]
 }
 
@@ -3188,6 +3201,30 @@ fn default_properties_for(effect_type: EffectType) -> PropertyBag {
                 Some(1.0),
             );
         }
+        EffectType::FindEdges => {
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "blend_with_original",
+                "查找边缘",
+                "与原始图像混合",
+                PropertyValue::Float(0.0),
+                Some(0.0),
+                Some(1.0),
+                Some(0.01),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "invert",
+                "查找边缘",
+                "反转",
+                PropertyValue::Bool(false),
+                None,
+                None,
+                None,
+            );
+        }
         EffectType::DropShadow => {
             define_builtin_property(
                 &mut properties,
@@ -3863,6 +3900,14 @@ fn builtin_effect_execution_contract(effect_type: &EffectType) -> EffectExecutio
             // definition-level envelope is a full-frame input. The graph
             // planner still narrows it per instance from the authored radius.
             roi_propagation: EffectRoiPropagation::FullFrame,
+            ..cpu_linear
+        },
+        EffectType::FindEdges => EffectExecutionContract {
+            execution_modes: EffectExecutionModes::CPU_F32,
+            roi_propagation: EffectRoiPropagation::Expand {
+                horizontal_pixels: crate::FIND_EDGES_HALO_PIXELS,
+                vertical_pixels: crate::FIND_EDGES_HALO_PIXELS,
+            },
             ..cpu_linear
         },
         EffectType::DropShadow => EffectExecutionContract {
@@ -4739,6 +4784,35 @@ fn builtin_graph_builder_for(effect_type: &EffectType) -> Option<EffectGraphBuil
                 Ok(())
             }))
         }
+        EffectType::FindEdges => {
+            let blend_id = builtin_parameter_id(effect_type, "blend_with_original");
+            let invert_id = builtin_parameter_id(effect_type, "invert");
+            Some(Arc::new(move |effect, context, graph| {
+                let blend = effect.evaluate_f32_parameter(&blend_id, context.time, 0.0);
+                let invert = match effect.evaluate_parameter(&invert_id, context.time) {
+                    Some(PropertyValue::Bool(value)) => value,
+                    Some(_) => {
+                        return Err(EffectGraphBuildError::InvalidAuthorState {
+                            effect_key: effect.effect_type.key(),
+                            effect_id: effect.id,
+                            reason: "find edges invert must be a boolean".to_owned(),
+                        });
+                    }
+                    None => false,
+                };
+                let grade = crate::FindEdgesGrade::new(blend, invert).map_err(|error| {
+                    EffectGraphBuildError::InvalidAuthorState {
+                        effect_key: effect.effect_type.key(),
+                        effect_id: effect.id,
+                        reason: error.to_string(),
+                    }
+                })?;
+                if !grade.is_identity() {
+                    graph.append_unary(EffectRenderOp::FindEdges { grade });
+                }
+                Ok(())
+            }))
+        }
         EffectType::DropShadow => {
             let color_id = builtin_parameter_id(effect_type, "color");
             let opacity_id = builtin_parameter_id(effect_type, "opacity");
@@ -5039,6 +5113,7 @@ fn builtin_display_name(effect_type: &EffectType) -> &'static str {
         EffectType::DirectionalBlur => "方向模糊",
         EffectType::ChannelMixer => "通道混合器",
         EffectType::DropShadow => "投影",
+        EffectType::FindEdges => "查找边缘",
         EffectType::External(_) => "外部效果",
     }
 }
@@ -6190,6 +6265,86 @@ mod tests {
         );
     }
 
+    fn find_edges_op(graph: &EffectRenderGraph) -> Option<crate::FindEdgesGrade> {
+        graph.nodes.iter().find_map(|node| match &node.kind {
+            EffectGraphNodeKind::UnaryEffect {
+                op: EffectRenderOp::FindEdges { grade }, ..
+            }
+            | EffectGraphNodeKind::DomainEffect {
+                op: EffectRenderOp::FindEdges { grade }, ..
+            } => Some(*grade),
+            _ => None,
+        })
+    }
+
+    #[test]
+    fn find_edges_defaults_compile_to_the_listed_mix() {
+        let effect = instantiate_effect_node(EffectType::FindEdges)
+            .expect("registered Find Edges definition");
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("evaluate default Find Edges");
+        let grade = find_edges_op(&graph).expect("the listed defaults produce edges");
+        assert_eq!(grade.blend_with_original(), 0.0);
+        assert!(!grade.invert());
+    }
+
+    #[test]
+    fn find_edges_authored_state_reaches_the_operation() {
+        let mut effect = instantiate_effect_node(EffectType::FindEdges)
+            .expect("registered Find Edges definition");
+        effect
+            .apply_property_mutation(PropertyMutation::SetStaticValue {
+                path: EffectType::FindEdges.property_path("blend_with_original"),
+                value: PropertyValue::Float(0.25),
+            })
+            .expect("set blend");
+        effect
+            .apply_property_mutation(PropertyMutation::SetStaticValue {
+                path: EffectType::FindEdges.property_path("invert"),
+                value: PropertyValue::Bool(true),
+            })
+            .expect("set invert");
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("evaluate authored Find Edges");
+        let grade = find_edges_op(&graph).expect("authored state reaches the op");
+        assert!((grade.blend_with_original() - 0.25).abs() < 1.0e-6);
+        assert!(grade.invert());
+    }
+
+    #[test]
+    fn find_edges_full_mix_compiles_to_identity() {
+        let mut effect = instantiate_effect_node(EffectType::FindEdges)
+            .expect("registered Find Edges definition");
+        effect
+            .apply_property_mutation(PropertyMutation::SetStaticValue {
+                path: EffectType::FindEdges.property_path("blend_with_original"),
+                value: PropertyValue::Float(1.0),
+            })
+            .expect("set blend");
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("evaluate identity Find Edges");
+        assert!(find_edges_op(&graph).is_none());
+    }
+
+    #[test]
+    fn find_edges_authored_state_survives_project_serialization_round_trip() {
+        let mut effect = instantiate_effect_node(EffectType::FindEdges)
+            .expect("registered Find Edges definition");
+        effect
+            .apply_property_mutation(PropertyMutation::SetStaticValue {
+                path: EffectType::FindEdges.property_path("blend_with_original"),
+                value: PropertyValue::Float(0.4),
+            })
+            .expect("set blend");
+        let wire = serde_json::to_string(&effect).expect("serialize effect");
+        let restored: crate::EffectNode = serde_json::from_str(&wire).expect("deserialize effect");
+        assert_eq!(restored, effect);
+        let graph = build_effect_render_graph(&[restored], tt(0), TEST_WORKING_SPACE)
+            .expect("evaluate restored Find Edges");
+        let grade = find_edges_op(&graph).expect("restored state reaches the op");
+        assert!((grade.blend_with_original() - 0.4).abs() < 1.0e-6);
+    }
+
     #[test]
     fn effect_library_exposes_only_builtins_with_executable_graphs() {
         let expected = [
@@ -6221,6 +6376,7 @@ mod tests {
             EffectType::DirectionalBlur,
             EffectType::ChannelMixer,
             EffectType::DropShadow,
+            EffectType::FindEdges,
         ]
         .into_iter()
         .map(|effect_type| effect_type.key())

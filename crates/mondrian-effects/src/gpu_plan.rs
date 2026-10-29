@@ -852,6 +852,7 @@ fn operation_name(op: &EffectRenderOp) -> &'static str {
         EffectRenderOp::ShiftChannels { .. } => "shift_channels",
         EffectRenderOp::DirectionalBlur { .. } => "directional_blur",
         EffectRenderOp::ChannelMixer { .. } => "channel_mixer",
+        EffectRenderOp::FindEdges { .. } => "find_edges",
         EffectRenderOp::DropShadow { .. } => "drop_shadow",
         EffectRenderOp::UnsharpMask { .. } => "unsharp_mask",
         EffectRenderOp::Crop { .. } => "crop",

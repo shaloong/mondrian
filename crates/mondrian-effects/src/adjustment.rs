@@ -206,6 +206,12 @@ pub(crate) fn apply_render_op(
                 parameter: "requires_float32",
             });
         }
+        EffectRenderOp::FindEdges { .. } => {
+            return Err(EffectExecutionError::InvalidRenderParameter {
+                op: "find_edges",
+                parameter: "requires_float32",
+            });
+        }
         EffectRenderOp::DropShadow { .. } => {
             return Err(EffectExecutionError::InvalidRenderParameter {
                 op: "drop_shadow",
@@ -660,6 +666,7 @@ pub(crate) const fn render_op_f32_scratch_frames(op: &EffectRenderOp) -> usize {
         | EffectRenderOp::DirectionalBlur { .. }
         | EffectRenderOp::ChannelMixer { .. }
         | EffectRenderOp::DropShadow { .. }
+        | EffectRenderOp::FindEdges { .. }
         | EffectRenderOp::ChromaKey { .. }
         | EffectRenderOp::MattePreview { .. }
         | EffectRenderOp::Vignette { .. }
@@ -850,6 +857,13 @@ pub(crate) fn apply_render_op_f32_region_controlled<E>(
             apply_point_grade_rgba_f32_controlled(working, checkpoint, |rgb| grade.apply(rgb))?;
             Ok(true)
         }
+        EffectRenderOp::FindEdges { grade } => crate::find_edges::apply_find_edges_f32_controlled(
+            working,
+            width as usize,
+            height as usize,
+            *grade,
+            checkpoint,
+        ),
         EffectRenderOp::DropShadow { grade } => {
             crate::drop_shadow::apply_drop_shadow_f32_controlled(
                 working,

@@ -25,6 +25,7 @@ pub mod coverage;
 pub mod directional_blur;
 pub mod drop_shadow;
 pub mod effect;
+pub mod find_edges;
 mod project_properties;
 pub use project_properties::{rebind_effect_project_geometry, EffectProjectPropertyInitializer};
 pub mod execution;
@@ -228,5 +229,8 @@ pub use directional_blur::{
 pub use drop_shadow::{
     DropShadowError, DropShadowGrade, DROP_SHADOW_AUTHOR_MAX_DISTANCE_PIXELS,
     DROP_SHADOW_AUTHOR_MAX_OPACITY, DROP_SHADOW_AUTHOR_MAX_SOFTNESS_PIXELS,
+};
+pub use find_edges::{
+    FindEdgesError, FindEdgesGrade, FIND_EDGES_HALO_PIXELS, FIND_EDGES_MAX_HALO_PIXELS,
 };
 pub use shift_channels::{ChannelSource, ShiftChannelsGrade};

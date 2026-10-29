@@ -43,6 +43,7 @@ pub enum EffectType {
     DirectionalBlur,
     ChannelMixer,
     DropShadow,
+    FindEdges,
     /// Externally registered effect definition, including native-format adapters.
     /// This is a domain definition reference, not an Extension package identity.
     /// The serde name preserves the existing project wire representation.
@@ -81,6 +82,7 @@ impl EffectType {
             Self::DirectionalBlur => "builtin.directional_blur".to_string(),
             Self::ChannelMixer => "builtin.channel_mixer".to_string(),
             Self::DropShadow => "builtin.drop_shadow".to_string(),
+            Self::FindEdges => "builtin.find_edges".to_string(),
             Self::External(key) => key.clone(),
         }
     }
@@ -115,6 +117,7 @@ impl EffectType {
             "builtin.directional_blur" => Self::DirectionalBlur,
             "builtin.channel_mixer" => Self::ChannelMixer,
             "builtin.drop_shadow" => Self::DropShadow,
+            "builtin.find_edges" => Self::FindEdges,
             other => Self::External(other.to_string()),
         }
     }
@@ -149,6 +152,7 @@ impl EffectType {
             Self::DirectionalBlur => "方向模糊",
             Self::ChannelMixer => "通道混合器",
             Self::DropShadow => "投影",
+            Self::FindEdges => "查找边缘",
             Self::External(name) => name,
         }
     }
@@ -181,6 +185,7 @@ impl EffectType {
             Self::Qualifier | Self::ChromaKey | Self::LumaKey => vec!["抠像"],
             Self::Invert => vec!["通道"],
             Self::DropShadow => vec!["光效"],
+            Self::FindEdges => vec!["风格化"],
             Self::External(_) => vec!["外部效果"],
         }
     }
@@ -215,6 +220,7 @@ impl EffectType {
             Self::DirectionalBlur => "directional_blur".to_string(),
             Self::ChannelMixer => "channel_mixer".to_string(),
             Self::DropShadow => "drop_shadow".to_string(),
+            Self::FindEdges => "find_edges".to_string(),
             Self::External(key) => key.clone(),
         }
     }
@@ -509,6 +515,7 @@ impl crate::AuthoringFootprint for EffectType {
             Self::DirectionalBlur => Ok(()),
             Self::ChannelMixer => Ok(()),
             Self::DropShadow => Ok(()),
+            Self::FindEdges => Ok(()),
         }
     }
 }
