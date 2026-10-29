@@ -12,7 +12,7 @@ use mondrian_audio::{
 use mondrian_core::{
     AssetId, AudioChannelLayout, AudioOwnerInstallationSource, AudioSourceComponentId,
     AutomationSegmentInterpolation, ExactAutomationCurve, ExactAutomationKeyframe,
-    ExecutionCancellationToken, FrameRate, NativeChildSettlementRegistrar, TimelineTime,
+    ExecutionCancellationToken, NativeChildSettlementRegistrar, Rational, TimelineTime,
 };
 use mondrian_timeline::{Clip, Sequence};
 use std::{path::PathBuf, sync::Arc};
@@ -77,7 +77,7 @@ fn adelay_runtime_restores_state_processes_delayed_pcm_across_seek_and_retires_c
         let instance = author.id;
         let asset = AssetId::new();
         let mut sequence = Sequence::new("Portable official ADelay Runtime");
-        sequence.settings.frame_rate = FrameRate::new(24, 1).unwrap();
+        sequence.settings.frame_rate = Rational::FPS_24;
         sequence.settings.audio_channel_layout = render.channel_layout;
         sequence.settings.audio_sample_rate = render.sample_rate;
         for channel in sequence.audio_program.track_channels.values_mut() {
