@@ -2741,6 +2741,7 @@ const fn effect_operation_shape_tag(operation: &EffectRenderOp) -> u8 {
         EffectRenderOp::BrushStrokes { .. } => 41,
         EffectRenderOp::Tint { .. } => 42,
         EffectRenderOp::Vibrance { .. } => 43,
+        EffectRenderOp::Tritone { .. } => 44,
         EffectRenderOp::ColorEmboss { .. } => 33,
         EffectRenderOp::Emboss { .. } => 32,
         EffectRenderOp::DropShadow { .. } => 30,
@@ -4780,6 +4781,7 @@ fn cpu_node_scratch_frames(
             | crate::EffectRenderOp::Threshold { .. }
             | crate::EffectRenderOp::Tint { .. }
             | crate::EffectRenderOp::Vibrance { .. }
+            | crate::EffectRenderOp::Tritone { .. }
             | crate::EffectRenderOp::Mosaic { .. }
             | crate::EffectRenderOp::Posterize { .. }
             | crate::EffectRenderOp::MotionTile { .. }

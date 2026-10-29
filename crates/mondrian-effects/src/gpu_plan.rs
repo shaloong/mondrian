@@ -111,6 +111,11 @@ pub enum EffectGpuPointOp {
     Vibrance {
         grade: crate::VibranceGrade,
     },
+    /// Tritone: a three-colour luminance ramp packed by
+    /// [`crate::TritoneGrade::gpu_controls`].
+    Tritone {
+        grade: crate::TritoneGrade,
+    },
     Threshold {
         level: f32,
         luminance_coefficients: [f32; 3],
@@ -816,6 +821,7 @@ pub(crate) fn lower_point_op(
         }),
         EffectRenderOp::Tint { grade } => Ok(EffectGpuPointOp::Tint { grade: *grade }),
         EffectRenderOp::Vibrance { grade } => Ok(EffectGpuPointOp::Vibrance { grade: *grade }),
+        EffectRenderOp::Tritone { grade } => Ok(EffectGpuPointOp::Tritone { grade: *grade }),
         EffectRenderOp::BlackAndWhite { grade } => {
             Ok(EffectGpuPointOp::BlackAndWhite { grade: *grade })
         }
@@ -887,6 +893,7 @@ fn operation_name(op: &EffectRenderOp) -> &'static str {
         EffectRenderOp::Posterize { .. } => "posterize",
         EffectRenderOp::Tint { .. } => "tint",
         EffectRenderOp::Vibrance { .. } => "vibrance",
+        EffectRenderOp::Tritone { .. } => "tritone",
         EffectRenderOp::MotionTile { .. } => "motion_tile",
         EffectRenderOp::Kaleidoscope { .. } => "kaleidoscope",
         EffectRenderOp::Bevel { .. } => "bevel",

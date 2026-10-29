@@ -53,6 +53,7 @@ pub enum EffectType {
     Scatter,
     Tint,
     Vibrance,
+    Tritone,
     BrushStrokes,
     Posterize,
     Emboss,
@@ -104,6 +105,7 @@ impl EffectType {
             Self::Bevel => "builtin.bevel".to_string(),
             Self::Tint => "builtin.tint".to_string(),
             Self::Vibrance => "builtin.vibrance".to_string(),
+            Self::Tritone => "builtin.tritone".to_string(),
             Self::Scatter => "builtin.scatter".to_string(),
             Self::BrushStrokes => "builtin.brush_strokes".to_string(),
             Self::Posterize => "builtin.posterize".to_string(),
@@ -151,6 +153,7 @@ impl EffectType {
             "builtin.bevel" => Self::Bevel,
             "builtin.tint" => Self::Tint,
             "builtin.vibrance" => Self::Vibrance,
+            "builtin.tritone" => Self::Tritone,
             "builtin.scatter" => Self::Scatter,
             "builtin.brush_strokes" => Self::BrushStrokes,
             "builtin.posterize" => Self::Posterize,
@@ -201,6 +204,7 @@ impl EffectType {
             Self::Posterize => "色调分离",
             Self::Tint => "色调",
             Self::Vibrance => "自然饱和度",
+            Self::Tritone => "三色调",
             Self::External(name) => name,
         }
     }
@@ -246,6 +250,7 @@ impl EffectType {
             Self::Posterize => vec!["风格化"],
             Self::Tint => vec!["颜色/调色"],
             Self::Vibrance => vec!["颜色/调色"],
+            Self::Tritone => vec!["颜色/调色"],
             Self::External(_) => vec!["外部效果"],
         }
     }
@@ -293,6 +298,7 @@ impl EffectType {
             Self::Posterize => "posterize".to_string(),
             Self::Tint => "tint".to_string(),
             Self::Vibrance => "vibrance".to_string(),
+            Self::Tritone => "tritone".to_string(),
             Self::External(key) => key.clone(),
         }
     }
@@ -593,6 +599,7 @@ impl crate::AuthoringFootprint for EffectType {
             Self::Threshold | Self::Mosaic | Self::MotionTile | Self::Kaleidoscope => Ok(()),
             Self::Posterize | Self::Bevel | Self::Scatter | Self::BrushStrokes => Ok(()),
             Self::Tint | Self::Vibrance => Ok(()),
+            Self::Tritone => Ok(()),
         }
     }
 }

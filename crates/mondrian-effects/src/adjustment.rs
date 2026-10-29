@@ -272,6 +272,12 @@ pub(crate) fn apply_render_op(
                 parameter: "requires_float32",
             });
         }
+        EffectRenderOp::Tritone { .. } => {
+            return Err(EffectExecutionError::InvalidRenderParameter {
+                op: "tritone",
+                parameter: "requires_float32",
+            });
+        }
         EffectRenderOp::ColorEmboss { .. } => {
             return Err(EffectExecutionError::InvalidRenderParameter {
                 op: "color_emboss",
@@ -724,6 +730,7 @@ pub(crate) const fn render_op_f32_scratch_frames(op: &EffectRenderOp) -> usize {
         EffectRenderOp::Threshold { .. } => 0,
         EffectRenderOp::Tint { .. } => 0,
         EffectRenderOp::Vibrance { .. } => 0,
+        EffectRenderOp::Tritone { .. } => 0,
         EffectRenderOp::Mosaic { .. } => 0,
         EffectRenderOp::Scatter { .. } => 0,
         EffectRenderOp::BrushStrokes { .. } => 0,
@@ -1009,6 +1016,10 @@ pub(crate) fn apply_render_op_f32_region_controlled<E>(
             Ok(true)
         }
         EffectRenderOp::Vibrance { grade } => {
+            apply_point_grade_rgba_f32_controlled(working, checkpoint, |rgb| grade.apply_rgb(rgb))?;
+            Ok(true)
+        }
+        EffectRenderOp::Tritone { grade } => {
             apply_point_grade_rgba_f32_controlled(working, checkpoint, |rgb| grade.apply_rgb(rgb))?;
             Ok(true)
         }

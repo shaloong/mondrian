@@ -31,6 +31,7 @@ pub mod find_edges;
 mod project_properties;
 pub mod threshold;
 pub mod tint;
+pub mod tritone;
 pub mod vibrance;
 pub use project_properties::{rebind_effect_project_geometry, EffectProjectPropertyInitializer};
 pub mod execution;
@@ -244,6 +245,7 @@ pub use tracking::{
     canonicalize_tracking_shape, track_frame_pair, transform_tracking_shape, TrackingError,
     TrackingFrame, TrackingObservation, TrackingQuality, TrackingRegion, TrackingTransform,
 };
+pub use tritone::{tritone_frame_f32, TritoneError, TritoneGrade};
 pub use unsharp_mask::{
     apply_unsharp_mask_f32, sharpened_channel, unsharp_mask_gain,
     UNSHARP_MASK_AUTHOR_MAX_AMOUNT_PERCENT, UNSHARP_MASK_AUTHOR_MAX_RADIUS_PIXELS,

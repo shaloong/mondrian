@@ -898,6 +898,10 @@ pub enum EffectRenderOp {
     Vibrance {
         grade: crate::VibranceGrade,
     },
+    /// Tritone: a three-colour ramp sampled by the pixel's luminance.
+    Tritone {
+        grade: crate::TritoneGrade,
+    },
     /// ColorEmboss: per-channel relief computed from the Sobel gradient of
     /// the working-space colour.
     ColorEmboss {
@@ -1071,6 +1075,9 @@ impl std::fmt::Debug for EffectRenderOp {
             Self::Tint { grade } => formatter.debug_struct("Tint").field("grade", grade).finish(),
             Self::Vibrance { grade } => {
                 formatter.debug_struct("Vibrance").field("grade", grade).finish()
+            }
+            Self::Tritone { grade } => {
+                formatter.debug_struct("Tritone").field("grade", grade).finish()
             }
             Self::ColorEmboss { grade } => {
                 formatter.debug_struct("ColorEmboss").field("grade", grade).finish()
@@ -1571,6 +1578,22 @@ impl EffectRenderOp {
                     value.to_bits().hash(state);
                 }
             }
+            EffectRenderOp::Tritone { grade } => {
+                43u8.hash(state);
+                for value in grade.shadows() {
+                    value.to_bits().hash(state);
+                }
+                for value in grade.midtones() {
+                    value.to_bits().hash(state);
+                }
+                for value in grade.highlights() {
+                    value.to_bits().hash(state);
+                }
+                grade.blend_with_original().to_bits().hash(state);
+                for value in grade.luminance_coefficients() {
+                    value.to_bits().hash(state);
+                }
+            }
             EffectRenderOp::ColorEmboss { grade } => {
                 32u8.hash(state);
                 for value in grade.gpu_controls() {
@@ -1726,6 +1749,7 @@ impl EffectRenderOp {
             EffectRenderOp::Threshold { .. } => 1,
             EffectRenderOp::Tint { .. } => 1,
             EffectRenderOp::Vibrance { .. } => 1,
+            EffectRenderOp::Tritone { .. } => 1,
             EffectRenderOp::Mosaic { .. } => 2,
             EffectRenderOp::Posterize { .. } => 1,
             EffectRenderOp::MotionTile { .. } => 3,
@@ -2268,7 +2292,7 @@ impl EffectDefinition {
     }
 }
 
-fn builtin_effect_types() -> [EffectType; 41] {
+fn builtin_effect_types() -> [EffectType; 42] {
     [
         EffectType::BasicCorrection,
         EffectType::WhiteBalance,
@@ -2311,6 +2335,7 @@ fn builtin_effect_types() -> [EffectType; 41] {
         EffectType::BrushStrokes,
         EffectType::Tint,
         EffectType::Vibrance,
+        EffectType::Tritone,
     ]
 }
 
@@ -3888,6 +3913,52 @@ fn default_properties_for(effect_type: EffectType) -> PropertyBag {
                 Some(0.1),
             );
         }
+        EffectType::Tritone => {
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "highlights",
+                "三色调",
+                "高光",
+                PropertyValue::Color(Color { r: 1.0, g: 1.0, b: 1.0, a: 1.0 }),
+                None,
+                None,
+                None,
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "midtones",
+                "三色调",
+                "中间调",
+                PropertyValue::Color(Color { r: 0.5, g: 0.39, b: 0.27, a: 1.0 }),
+                None,
+                None,
+                None,
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "shadows",
+                "三色调",
+                "阴影",
+                PropertyValue::Color(Color { r: 0.0, g: 0.0, b: 0.0, a: 1.0 }),
+                None,
+                None,
+                None,
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "blend_with_original",
+                "三色调",
+                "与原始图像混合",
+                PropertyValue::Float(0.0),
+                Some(0.0),
+                Some(100.0),
+                Some(0.1),
+            );
+        }
         EffectType::ColorEmboss => {
             define_builtin_property(
                 &mut properties,
@@ -4521,6 +4592,7 @@ fn builtin_parameter_unit(effect_type: &EffectType, parameter: &str) -> Paramete
         (EffectType::Tint, "amount") => ParameterUnit::Percent,
         (EffectType::Vibrance, "vibrance") => ParameterUnit::Percent,
         (EffectType::Vibrance, "saturation") => ParameterUnit::Percent,
+        (EffectType::Tritone, "blend_with_original") => ParameterUnit::Percent,
         (EffectType::Bevel, "thickness") => ParameterUnit::Pixels,
         (EffectType::Bevel, "angle") => ParameterUnit::Degrees,
         (EffectType::Bevel, "intensity") => ParameterUnit::Normalized,
@@ -4698,6 +4770,10 @@ fn builtin_effect_execution_contract(effect_type: &EffectType) -> EffectExecutio
             ..cpu_linear
         },
         EffectType::Vibrance => EffectExecutionContract {
+            execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
+            ..cpu_linear
+        },
+        EffectType::Tritone => EffectExecutionContract {
             execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
             ..cpu_linear
         },
@@ -6042,6 +6118,48 @@ fn builtin_graph_builder_for(effect_type: &EffectType) -> Option<EffectGraphBuil
                 Ok(())
             }))
         }
+        EffectType::Tritone => {
+            let highlights_id = builtin_parameter_id(effect_type, "highlights");
+            let midtones_id = builtin_parameter_id(effect_type, "midtones");
+            let shadows_id = builtin_parameter_id(effect_type, "shadows");
+            let blend_id = builtin_parameter_id(effect_type, "blend_with_original");
+            Some(Arc::new(move |effect, context, graph| {
+                let colour = |parameter_id: &ParameterId,
+                              name: &str,
+                              fallback: [f32; 3]|
+                 -> Result<[f32; 3], EffectGraphBuildError> {
+                    match effect.evaluate_parameter(parameter_id, context.time) {
+                        Some(PropertyValue::Color(color)) => Ok([color.r, color.g, color.b]),
+                        Some(_) => Err(EffectGraphBuildError::InvalidAuthorState {
+                            effect_key: effect.effect_type.key(),
+                            effect_id: effect.id,
+                            reason: format!("tritone {name} must be a colour"),
+                        }),
+                        None => Ok(fallback),
+                    }
+                };
+                let highlights = colour(&highlights_id, "highlight", [1.0, 1.0, 1.0])?;
+                let midtones = colour(&midtones_id, "midtone", [0.5, 0.39, 0.27])?;
+                let shadows = colour(&shadows_id, "shadow", [0.0, 0.0, 0.0])?;
+                let blend = effect.evaluate_f32_parameter(&blend_id, context.time, 0.0) / 100.0;
+                let grade = crate::TritoneGrade::for_space(
+                    shadows,
+                    midtones,
+                    highlights,
+                    blend,
+                    context.working_color_space,
+                )
+                .map_err(|error| EffectGraphBuildError::InvalidAuthorState {
+                    effect_key: effect.effect_type.key(),
+                    effect_id: effect.id,
+                    reason: error.to_string(),
+                })?;
+                if !grade.is_identity() {
+                    graph.append_unary(EffectRenderOp::Tritone { grade });
+                }
+                Ok(())
+            }))
+        }
         EffectType::ColorEmboss => {
             let direction_id = builtin_parameter_id(effect_type, "direction");
             let relief_id = builtin_parameter_id(effect_type, "relief");
@@ -6400,6 +6518,7 @@ fn builtin_display_name(effect_type: &EffectType) -> &'static str {
         EffectType::BrushStrokes => "画笔描边",
         EffectType::Tint => "色调",
         EffectType::Vibrance => "自然饱和度",
+        EffectType::Tritone => "三色调",
         EffectType::ColorEmboss => "色彩浮雕",
         EffectType::Emboss => "浮雕",
         EffectType::External(_) => "外部效果",
@@ -7677,6 +7796,7 @@ mod tests {
             EffectType::BrushStrokes,
             EffectType::Tint,
             EffectType::Vibrance,
+            EffectType::Tritone,
         ]
         .into_iter()
         .map(|effect_type| effect_type.key())
@@ -11132,6 +11252,110 @@ mod tests {
             .expect("builds restored vibrance graph");
         let grade = vibrance_op(&graph).expect("vibrance op");
         assert_eq!(grade.vibrance(), -0.4);
+    }
+
+    fn tritone_op(graph: &EffectRenderGraph) -> Option<crate::TritoneGrade> {
+        graph.nodes.iter().find_map(|node| match &node.kind {
+            EffectGraphNodeKind::UnaryEffect { op: EffectRenderOp::Tritone { grade }, .. }
+            | EffectGraphNodeKind::DomainEffect { op: EffectRenderOp::Tritone { grade }, .. } => {
+                Some(*grade)
+            }
+            _ => None,
+        })
+    }
+
+    fn author_tritone(parameter: &str, value: PropertyValue) -> EffectNode {
+        let mut effect =
+            instantiate_effect_node(EffectType::Tritone).expect("registered tritone definition");
+        effect
+            .apply_property_mutation(PropertyMutation::SetStaticValue {
+                path: EffectType::Tritone.property_path(parameter),
+                value,
+            })
+            .expect("authors tritone parameter");
+        effect
+    }
+
+    #[test]
+    fn tritone_defaults_reach_the_operation() {
+        // The declared defaults are the neutral ramp: black stays black, mid grey
+        // picks up the sepia midtone and white stays white, fully replacing the
+        // source because the blend with the original starts at zero.
+        let effect =
+            instantiate_effect_node(EffectType::Tritone).expect("registered tritone definition");
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("builds tritone graph");
+        let grade = tritone_op(&graph).expect("tritone op");
+        assert_eq!(grade.highlights(), [1.0, 1.0, 1.0]);
+        assert_eq!(grade.midtones(), [0.5, 0.39, 0.27]);
+        assert_eq!(grade.shadows(), [0.0, 0.0, 0.0]);
+        assert_eq!(grade.blend_with_original(), 0.0);
+        assert!(!grade.is_identity());
+    }
+
+    #[test]
+    fn tritone_authored_state_reaches_the_operation() {
+        let mut effect = author_tritone(
+            "shadows",
+            PropertyValue::Color(Color { r: 0.05, g: 0.1, b: 0.3, a: 1.0 }),
+        );
+        for (parameter, value) in [
+            (
+                "highlights",
+                PropertyValue::Color(Color { r: 1.0, g: 0.95, b: 0.8, a: 1.0 }),
+            ),
+            ("blend_with_original", PropertyValue::Float(40.0)),
+        ] {
+            effect
+                .apply_property_mutation(PropertyMutation::SetStaticValue {
+                    path: EffectType::Tritone.property_path(parameter),
+                    value,
+                })
+                .expect("authors tritone parameter");
+        }
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("builds tritone graph");
+        let grade = tritone_op(&graph).expect("tritone op");
+        assert_eq!(grade.shadows(), [0.05, 0.1, 0.3]);
+        assert_eq!(grade.highlights(), [1.0, 0.95, 0.8]);
+        assert!((grade.blend_with_original() - 0.4).abs() < 1e-6);
+    }
+
+    #[test]
+    fn tritone_full_blend_compiles_to_identity() {
+        let effect = author_tritone("blend_with_original", PropertyValue::Float(100.0));
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("builds tritone graph");
+        assert!(tritone_op(&graph).is_none());
+    }
+
+    #[test]
+    fn tritone_rejects_author_values_outside_the_declared_ranges() {
+        for value in [PropertyValue::Float(-1.0), PropertyValue::Float(101.0)] {
+            let mut effect = instantiate_effect_node(EffectType::Tritone)
+                .expect("registered tritone definition");
+            effect
+                .apply_property_mutation(PropertyMutation::SetStaticValue {
+                    path: EffectType::Tritone.property_path("blend_with_original"),
+                    value,
+                })
+                .expect_err("rejects out of range tritone blend");
+        }
+    }
+
+    #[test]
+    fn tritone_authored_state_survives_project_serialization_round_trip() {
+        let effect = author_tritone(
+            "midtones",
+            PropertyValue::Color(Color { r: 0.2, g: 0.5, b: 0.1, a: 1.0 }),
+        );
+        let wire = serde_json::to_string(&effect).expect("serializes tritone effect");
+        let restored: EffectNode = serde_json::from_str(&wire).expect("restores tritone effect");
+        assert_eq!(restored, effect);
+        let graph = build_effect_render_graph(&[restored], tt(0), TEST_WORKING_SPACE)
+            .expect("builds restored tritone graph");
+        let grade = tritone_op(&graph).expect("tritone op");
+        assert_eq!(grade.midtones(), [0.2, 0.5, 0.1]);
     }
 }
 

@@ -1220,6 +1220,23 @@ fn apply_effects(input: vec4<f32>, position: vec2<f32>) -> vec4<f32> {
             let muted = 1.0 - vivid;
             let scale = (1.0 + effect.params.x * muted * muted) * (1.0 + effect.params.y);
             pixel = vec4<f32>(luminance + (pixel.rgb - luminance) * scale, pixel.a);
+        } else if (effect.header.x == 22u) {
+            // `TritoneGrade`: params is the blend amount followed by the
+            // working-space luminance coefficients; color.xyz and extra0.xy hold
+            // the shadow and mid ramp colours, extra0.zw and extra1.x the high
+            // ramp colour. The ramp clamps the position, not the source, so
+            // extended-range pixels keep their value.
+            let coefficients = vec3<f32>(effect.params.y, effect.params.z, effect.params.w);
+            let position = clamp(dot(pixel.rgb, coefficients), 0.0, 1.0);
+            let shadows = effect.color.xyz;
+            let midtones = vec3<f32>(effect.color.w, effect.extra0.x, effect.extra0.y);
+            let highlights = vec3<f32>(effect.extra0.z, effect.extra0.w, effect.extra1.x);
+            let ramp = select(
+                mix(midtones, highlights, position * 2.0 - 1.0),
+                mix(shadows, midtones, position * 2.0),
+                position <= 0.5
+            );
+            pixel = vec4<f32>(mix(ramp, pixel.rgb, effect.params.x), pixel.a);
         } else if (effect.header.x == 16u) {
             // `ShiftChannelsGrade`: header.y packs the four 4-bit source tags
             // (red, green, blue, alpha) and params.xyz carries the working-space
@@ -4368,6 +4385,16 @@ fn effect_uniforms(
                     extra1: [0.0; 4],
                 }
             }
+            EffectGpuPointOp::Tritone { grade } => {
+                let (params, color, extra0, extra1) = grade.gpu_controls();
+                GpuEffectUniform {
+                    header: [22, 0, 0, 0],
+                    params,
+                    color,
+                    extra0,
+                    extra1,
+                }
+            }
             EffectGpuPointOp::ChannelMixer { grade } => {
                 let (params, color, extra0, extra1) = grade.gpu_controls();
                 GpuEffectUniform {
@@ -7350,6 +7377,96 @@ mod tests {
         assert!(
             report.within_budget,
             "GPU vibrance accuracy budget exceeded: {report:#?}"
+        );
+    }
+    #[tokio::test]
+    async fn gpu_tritone_matches_the_cpu_reference_on_real_wgpu_device() {
+        use crate::color_accuracy::{
+            compare_linear_rgba, LinearAccuracyBudget, LinearRgbaAccuracyBudget,
+        };
+        use mondrian_effects::{
+            apply_compiled_effect_graph_rgba_f32, compile_reference_render_graph,
+            lower_effect_graph_to_gpu_plan, EffectGraphBuilderState, EffectRenderOp, TritoneGrade,
+        };
+
+        let Ok(context) = crate::GpuContext::new().await else {
+            eprintln!("skipping GPU tritone parity test: no GPU adapter available");
+            return;
+        };
+        // Both ramp halves, an extended-range pixel and one partially
+        // transparent pixel: the ramp must clamp the position, not the source.
+        let data = vec![
+            [0.0_f32, 0.0, 0.0, 1.0],
+            [0.18, 0.18, 0.18, 1.0],
+            [0.5, 0.5, 0.5, 1.0],
+            [0.9, 0.9, 0.9, 1.0],
+            [2.0, -0.5, 1.75, 1.0],
+            [0.35, 0.35, 0.35, 0.25],
+        ];
+        let frame = CpuColorFrame::working(WorkingRgbaF32Frame {
+            sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
+            alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
+            width: 3,
+            height: 2,
+            color_space: WorkingColorSpace::LinearRec709,
+            data,
+        });
+        let grade = TritoneGrade::for_space(
+            [0.05, 0.10, 0.30],
+            [0.50, 0.39, 0.27],
+            [1.0, 0.95, 0.80],
+            0.35,
+            WorkingColorSpace::LinearRec709,
+        )
+        .expect("valid tritone");
+        let mut builder = EffectGraphBuilderState::new();
+        builder.append_unary(EffectRenderOp::Tritone { grade });
+        let graph = compile_reference_render_graph(builder.finish()).expect("valid graph");
+        let plan = lower_effect_graph_to_gpu_plan(&graph).expect("supported point effect");
+        assert_eq!(plan.operations().len(), 1);
+        let expected = apply_compiled_effect_graph_rgba_f32(
+            mondrian_effects::EffectFloatFrameView::new(
+                mondrian_effects::EffectFrameExtent::new(3, 2),
+                mondrian_effects::EffectValueFormat::new(
+                    mondrian_effects::EffectWorkingPrecision::Float32,
+                    mondrian_effects::EffectColorDomain::SceneLinearRgb,
+                    mondrian_core::ColorFrameAlpha::StraightCoverage,
+                ),
+                mondrian_core::ImageSampling::UNIT_SQUARE,
+                &frame.rgba_f32().data,
+            ),
+            &graph,
+            0,
+        )
+        .expect("CPU float reference");
+        let layer = GpuCompositeLayer {
+            source: GpuCompositeLayerSource::CpuFrame(&frame),
+            opacity: 1.0,
+            blend_policy: mondrian_effects::EffectPassBlendPolicy::Blend(BlendMode::Normal),
+            transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+            effect_plan: Some(&plan),
+            frame_seed: 0,
+        };
+        let (actual, diagnostics) = readback_test_composite_with_diagnostics(
+            &context,
+            &[layer],
+            3,
+            2,
+            WorkingColorSpace::LinearRec709,
+        );
+        assert_eq!(diagnostics.execution.fused_point_operations, 1);
+        let report = compare_linear_rgba(
+            expected.pixels(),
+            &actual,
+            LinearRgbaAccuracyBudget {
+                rgb: LinearAccuracyBudget::finite(1.0e-6, 1.0e-7, 1.0e-7),
+                alpha: LinearAccuracyBudget::finite(1.0e-6, 1.0e-7, 1.0e-6),
+            },
+        )
+        .expect("comparable frames");
+        assert!(
+            report.within_budget,
+            "GPU tritone accuracy budget exceeded: {report:#?}"
         );
     }
     #[tokio::test]
