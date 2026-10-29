@@ -65,6 +65,7 @@ pub use processor_residency::{
     EffectProcessorRetention, EffectProcessorStopReason, EffectProcessorTransientMemoryRefusal,
     PreparedEffectProcessorInput,
 };
+pub mod mosaic;
 pub(crate) mod parallel;
 pub mod qualifier;
 pub mod shift_channels;
@@ -189,6 +190,10 @@ pub use mask::{
     MaskShapeKeyframe, MAX_MASK_PATH_POINTS,
 };
 pub use mask_raster::{rasterize_mask_shape, MaskRasterError, PreparedMaskRaster};
+pub use mosaic::{
+    apply_mosaic_f32_controlled, mosaic_frame_f32, MosaicError, MosaicGrade,
+    MOSAIC_MAX_BLOCK_PIXELS, MOSAIC_MIN_BLOCK_PIXELS,
+};
 pub use prepared::{
     EffectDependencyCheckError, EffectProgramDependencyIdentity, PreparedEffectInput,
     PreparedEffectProgram, PreparedEffectStack, PreparedGradeGraph,

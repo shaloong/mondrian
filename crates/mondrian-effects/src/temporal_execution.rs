@@ -2806,6 +2806,7 @@ fn render_op_name(op: &crate::EffectRenderOp) -> &'static str {
         crate::EffectRenderOp::ChannelMixer { .. } => "channel_mixer",
         crate::EffectRenderOp::FindEdges { .. } => "find_edges",
         crate::EffectRenderOp::Threshold { .. } => "threshold",
+        crate::EffectRenderOp::Mosaic { .. } => "mosaic",
         crate::EffectRenderOp::ColorEmboss { .. } => "color_emboss",
         crate::EffectRenderOp::Emboss { .. } => "emboss",
         crate::EffectRenderOp::DropShadow { .. } => "drop_shadow",

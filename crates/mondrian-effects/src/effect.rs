@@ -856,6 +856,10 @@ pub enum EffectRenderOp {
     FindEdges {
         grade: crate::FindEdgesGrade,
     },
+    /// Mosaic: one colour per block of the authored pixel grid.
+    Mosaic {
+        grade: crate::MosaicGrade,
+    },
     /// Threshold: black or white depending on the working-space luminance.
     Threshold {
         grade: crate::ThresholdGrade,
@@ -1007,6 +1011,9 @@ impl std::fmt::Debug for EffectRenderOp {
             }
             Self::FindEdges { grade } => {
                 formatter.debug_struct("FindEdges").field("grade", grade).finish()
+            }
+            Self::Mosaic { grade } => {
+                formatter.debug_struct("Mosaic").field("grade", grade).finish()
             }
             Self::Threshold { grade } => {
                 formatter.debug_struct("Threshold").field("grade", grade).finish()
@@ -1420,6 +1427,12 @@ impl EffectRenderOp {
                 grade.blend_with_original().to_bits().hash(state);
                 u8::from(grade.invert()).hash(state);
             }
+            EffectRenderOp::Mosaic { grade } => {
+                34u8.hash(state);
+                grade.horizontal().hash(state);
+                grade.vertical().hash(state);
+                u8::from(grade.sharp_colors()).hash(state);
+            }
             EffectRenderOp::Threshold { grade } => {
                 33u8.hash(state);
                 grade.level().to_bits().hash(state);
@@ -1580,6 +1593,7 @@ impl EffectRenderOp {
             EffectRenderOp::DropShadow { .. } => 6,
             EffectRenderOp::FindEdges { .. } => 4,
             EffectRenderOp::Threshold { .. } => 1,
+            EffectRenderOp::Mosaic { .. } => 2,
             EffectRenderOp::ColorEmboss { .. } => 4,
             EffectRenderOp::Emboss { .. } => 4,
             EffectRenderOp::HueSaturation { .. } => 2,
@@ -2115,7 +2129,7 @@ impl EffectDefinition {
     }
 }
 
-fn builtin_effect_types() -> [EffectType; 32] {
+fn builtin_effect_types() -> [EffectType; 33] {
     [
         EffectType::BasicCorrection,
         EffectType::WhiteBalance,
@@ -2149,6 +2163,7 @@ fn builtin_effect_types() -> [EffectType; 32] {
         EffectType::Emboss,
         EffectType::ColorEmboss,
         EffectType::Threshold,
+        EffectType::Mosaic,
     ]
 }
 
@@ -3277,6 +3292,41 @@ fn default_properties_for(effect_type: EffectType) -> PropertyBag {
                 None,
             );
         }
+        EffectType::Mosaic => {
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "horizontal",
+                "马赛克",
+                "水平块",
+                PropertyValue::Int(10),
+                Some(crate::MOSAIC_MIN_BLOCK_PIXELS as f64),
+                Some(crate::MOSAIC_MAX_BLOCK_PIXELS as f64),
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "vertical",
+                "马赛克",
+                "垂直块",
+                PropertyValue::Int(10),
+                Some(crate::MOSAIC_MIN_BLOCK_PIXELS as f64),
+                Some(crate::MOSAIC_MAX_BLOCK_PIXELS as f64),
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "sharp_colors",
+                "马赛克",
+                "使用颜色",
+                PropertyValue::Bool(false),
+                None,
+                None,
+                None,
+            );
+        }
         EffectType::Threshold => {
             define_builtin_property(
                 &mut properties,
@@ -4065,6 +4115,10 @@ fn builtin_effect_execution_contract(effect_type: &EffectType) -> EffectExecutio
                 horizontal_pixels: crate::FIND_EDGES_HALO_PIXELS,
                 vertical_pixels: crate::FIND_EDGES_HALO_PIXELS,
             },
+            ..cpu_linear
+        },
+        EffectType::Mosaic => EffectExecutionContract {
+            execution_modes: EffectExecutionModes::CPU_F32,
             ..cpu_linear
         },
         EffectType::Threshold => EffectExecutionContract {
@@ -4990,6 +5044,69 @@ fn builtin_graph_builder_for(effect_type: &EffectType) -> Option<EffectGraphBuil
                 Ok(())
             }))
         }
+        EffectType::Mosaic => {
+            let horizontal_id = builtin_parameter_id(effect_type, "horizontal");
+            let vertical_id = builtin_parameter_id(effect_type, "vertical");
+            let sharp_id = builtin_parameter_id(effect_type, "sharp_colors");
+            Some(Arc::new(move |effect, context, graph| {
+                let horizontal = match effect.evaluate_parameter(&horizontal_id, context.time) {
+                    Some(PropertyValue::Int(value)) => value,
+                    _ => {
+                        return Err(EffectGraphBuildError::InvalidAuthorState {
+                            effect_key: effect.effect_type.key(),
+                            effect_id: effect.id,
+                            reason: "mosaic horizontal block must be an integer".to_owned(),
+                        });
+                    }
+                };
+                let vertical = match effect.evaluate_parameter(&vertical_id, context.time) {
+                    Some(PropertyValue::Int(value)) => value,
+                    _ => {
+                        return Err(EffectGraphBuildError::InvalidAuthorState {
+                            effect_key: effect.effect_type.key(),
+                            effect_id: effect.id,
+                            reason: "mosaic vertical block must be an integer".to_owned(),
+                        });
+                    }
+                };
+                let sharp_colors = match effect.evaluate_parameter(&sharp_id, context.time) {
+                    Some(PropertyValue::Bool(value)) => value,
+                    _ => {
+                        return Err(EffectGraphBuildError::InvalidAuthorState {
+                            effect_key: effect.effect_type.key(),
+                            effect_id: effect.id,
+                            reason: "mosaic sharp colours flag must be a boolean".to_owned(),
+                        });
+                    }
+                };
+                let grade = crate::MosaicGrade::new(
+                    u32::try_from(horizontal).map_err(|_| {
+                        EffectGraphBuildError::InvalidAuthorState {
+                            effect_key: effect.effect_type.key(),
+                            effect_id: effect.id,
+                            reason: "mosaic horizontal block must be positive".to_owned(),
+                        }
+                    })?,
+                    u32::try_from(vertical).map_err(|_| {
+                        EffectGraphBuildError::InvalidAuthorState {
+                            effect_key: effect.effect_type.key(),
+                            effect_id: effect.id,
+                            reason: "mosaic vertical block must be positive".to_owned(),
+                        }
+                    })?,
+                    sharp_colors,
+                )
+                .map_err(|error| EffectGraphBuildError::InvalidAuthorState {
+                    effect_key: effect.effect_type.key(),
+                    effect_id: effect.id,
+                    reason: error.to_string(),
+                })?;
+                if !grade.is_identity() {
+                    graph.append_unary(EffectRenderOp::Mosaic { grade });
+                }
+                Ok(())
+            }))
+        }
         EffectType::Threshold => {
             let level_id = builtin_parameter_id(effect_type, "level");
             Some(Arc::new(move |effect, context, graph| {
@@ -5355,6 +5472,7 @@ fn builtin_display_name(effect_type: &EffectType) -> &'static str {
         EffectType::DropShadow => "投影",
         EffectType::FindEdges => "查找边缘",
         EffectType::Threshold => "阈值",
+        EffectType::Mosaic => "马赛克",
         EffectType::ColorEmboss => "色彩浮雕",
         EffectType::Emboss => "浮雕",
         EffectType::External(_) => "外部效果",
@@ -6623,6 +6741,7 @@ mod tests {
             EffectType::Emboss,
             EffectType::ColorEmboss,
             EffectType::Threshold,
+            EffectType::Mosaic,
         ]
         .into_iter()
         .map(|effect_type| effect_type.key())
@@ -9171,6 +9290,122 @@ mod tests {
         let graph = build_effect_render_graph(&[restored], tt(0), TEST_WORKING_SPACE)
             .expect("evaluate restored threshold");
         assert_eq!(threshold_op(&graph).expect("threshold op").level(), 0.25);
+    }
+    fn mosaic_op(graph: &EffectRenderGraph) -> Option<crate::MosaicGrade> {
+        graph.nodes.iter().find_map(|node| match &node.kind {
+            EffectGraphNodeKind::UnaryEffect { op: EffectRenderOp::Mosaic { grade }, .. }
+            | EffectGraphNodeKind::DomainEffect { op: EffectRenderOp::Mosaic { grade }, .. } => {
+                Some(*grade)
+            }
+            _ => None,
+        })
+    }
+
+    #[test]
+    fn mosaic_defaults_compile_to_the_listed_grid() {
+        let effect =
+            instantiate_effect_node(EffectType::Mosaic).expect("registered mosaic definition");
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("evaluate default mosaic");
+        let grade = mosaic_op(&graph).expect("the default grid quantises");
+        assert_eq!(grade.horizontal(), 10);
+        assert_eq!(grade.vertical(), 10);
+        assert!(!grade.sharp_colors());
+    }
+
+    #[test]
+    fn mosaic_authored_state_reaches_the_operation() {
+        let mut effect =
+            instantiate_effect_node(EffectType::Mosaic).expect("registered mosaic definition");
+        for (parameter, value) in [
+            ("horizontal", PropertyValue::Int(4)),
+            ("vertical", PropertyValue::Int(8)),
+            ("sharp_colors", PropertyValue::Bool(true)),
+        ] {
+            effect
+                .apply_property_mutation(PropertyMutation::SetStaticValue {
+                    path: EffectType::Mosaic.property_path(parameter),
+                    value,
+                })
+                .expect("author the mosaic grid");
+        }
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("evaluate authored mosaic");
+        let grade = mosaic_op(&graph).expect("mosaic op");
+        assert_eq!(grade.horizontal(), 4);
+        assert_eq!(grade.vertical(), 8);
+        assert!(grade.sharp_colors());
+    }
+
+    #[test]
+    fn mosaic_rejects_grids_outside_the_declared_window() {
+        let effect =
+            instantiate_effect_node(EffectType::Mosaic).expect("registered mosaic definition");
+        for value in [0_i64, 4_001] {
+            let mut effect = effect.clone();
+            assert!(
+                effect
+                    .apply_property_mutation(PropertyMutation::SetStaticValue {
+                        path: EffectType::Mosaic.property_path("horizontal"),
+                        value: PropertyValue::Int(value),
+                    })
+                    .is_err(),
+                "the numeric contract rejects a {value} pixel block"
+            );
+        }
+    }
+
+    #[test]
+    fn mosaic_averages_blocks_on_scene_linear_float_frames() {
+        let mut effect =
+            instantiate_effect_node(EffectType::Mosaic).expect("registered mosaic definition");
+        effect
+            .apply_property_mutation(PropertyMutation::SetStaticValue {
+                path: EffectType::Mosaic.property_path("horizontal"),
+                value: PropertyValue::Int(2),
+            })
+            .expect("author horizontal block");
+        effect
+            .apply_property_mutation(PropertyMutation::SetStaticValue {
+                path: EffectType::Mosaic.property_path("vertical"),
+                value: PropertyValue::Int(2),
+            })
+            .expect("author vertical block");
+        let compiled = compile_clip_effect_graph(&[effect], &[], tt(0), TEST_WORKING_SPACE)
+            .expect("compile mosaic");
+        let input = [[0.2, 0.2, 0.2, 1.0], [0.6, 0.6, 0.6, 1.0]];
+        let output = crate::apply_compiled_effect_graph_rgba_f32(emboss_view(&input), &compiled, 0)
+            .expect("execute mosaic");
+        let pixels = output.pixels();
+        assert!((pixels[0][0] - 0.4).abs() < 1.0e-6, "{:?}", pixels[0]);
+        assert!((pixels[1][0] - 0.4).abs() < 1.0e-6, "{:?}", pixels[1]);
+    }
+
+    #[test]
+    fn mosaic_authored_state_survives_project_serialization_round_trip() {
+        let mut effect =
+            instantiate_effect_node(EffectType::Mosaic).expect("registered mosaic definition");
+        for (parameter, value) in [
+            ("horizontal", PropertyValue::Int(3)),
+            ("vertical", PropertyValue::Int(5)),
+            ("sharp_colors", PropertyValue::Bool(true)),
+        ] {
+            effect
+                .apply_property_mutation(PropertyMutation::SetStaticValue {
+                    path: EffectType::Mosaic.property_path(parameter),
+                    value,
+                })
+                .expect("author the mosaic grid");
+        }
+        let encoded = serde_json::to_string(&effect).expect("serialize mosaic");
+        let restored: crate::EffectNode =
+            serde_json::from_str(&encoded).expect("deserialize mosaic");
+        assert_eq!(restored, effect);
+        let graph = build_effect_render_graph(&[restored], tt(0), TEST_WORKING_SPACE)
+            .expect("evaluate restored mosaic");
+        let grade = mosaic_op(&graph).expect("mosaic op");
+        assert_eq!((grade.horizontal(), grade.vertical()), (3, 5));
+        assert!(grade.sharp_colors());
     }
 }
 

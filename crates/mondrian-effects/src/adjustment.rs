@@ -212,6 +212,12 @@ pub(crate) fn apply_render_op(
                 parameter: "requires_float32",
             });
         }
+        EffectRenderOp::Mosaic { .. } => {
+            return Err(EffectExecutionError::InvalidRenderParameter {
+                op: "mosaic",
+                parameter: "requires_float32",
+            });
+        }
         EffectRenderOp::Threshold { .. } => {
             return Err(EffectExecutionError::InvalidRenderParameter {
                 op: "threshold",
@@ -668,6 +674,7 @@ pub(crate) const fn render_op_f32_scratch_frames(op: &EffectRenderOp) -> usize {
         EffectRenderOp::BoxBlur { .. } => 1,
         EffectRenderOp::UnsharpMask { .. } => 1,
         EffectRenderOp::Threshold { .. } => 0,
+        EffectRenderOp::Mosaic { .. } => 0,
         EffectRenderOp::ColorEmboss { .. } => 1,
         EffectRenderOp::Emboss { .. } => 1,
         EffectRenderOp::Sharpen { .. } => 2,
@@ -879,6 +886,13 @@ pub(crate) fn apply_render_op_f32_region_controlled<E>(
             Ok(true)
         }
         EffectRenderOp::FindEdges { grade } => crate::find_edges::apply_find_edges_f32_controlled(
+            working,
+            width as usize,
+            height as usize,
+            *grade,
+            checkpoint,
+        ),
+        EffectRenderOp::Mosaic { grade } => crate::mosaic::apply_mosaic_f32_controlled(
             working,
             width as usize,
             height as usize,
