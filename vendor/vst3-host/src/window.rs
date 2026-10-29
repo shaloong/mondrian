@@ -812,6 +812,13 @@ fn windows_editor_client_resize_requests(
 #[path = "window/windows_scoped.rs"]
 mod windows_scoped;
 
+#[cfg(target_os = "macos")]
+#[path = "window/macos_main.rs"]
+mod macos_main;
+
+#[cfg(target_os = "macos")]
+pub use macos_main::MacosPluginMainThread;
+
 #[cfg(target_os = "windows")]
 pub use windows_scoped::{
     WindowsEditorMainThread, WindowsMainThreadWake, WindowsMessageStep,

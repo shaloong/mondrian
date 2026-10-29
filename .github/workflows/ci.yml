@@ -401,6 +401,15 @@ jobs:
           CARGO_PROFILE_TEST_DEBUG: "0"
         run: cargo test --manifest-path vendor/vst3-host/Cargo.toml --locked --no-default-features --lib -j1 -- --test-threads=1
 
+      - name: Test actual macOS plugin main services
+        if: runner.os == 'macOS'
+        timeout-minutes: 5
+        env:
+          CARGO_TARGET_DIR: ${{ github.workspace }}/target
+          CARGO_INCREMENTAL: "0"
+          CARGO_PROFILE_DEV_DEBUG: "0"
+        run: cargo run --manifest-path vendor/vst3-host/Cargo.toml --locked --no-default-features --example macos_main_services -j1
+
       - name: 编译默认 App 产品入口
         env:
           CARGO_INCREMENTAL: "0"
