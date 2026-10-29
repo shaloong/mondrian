@@ -244,6 +244,40 @@ pub(crate) fn apply_emboss_f32_controlled<E>(
     Ok(true)
 }
 
+/// Applies the emboss kernel to a whole frame in place.
+///
+/// The frame owns its own border, so neighbours outside the frame are clamped
+/// to the edge pixels. Executors that supply an ROI halo call the region kernel
+/// instead and get true neighbours on that ring.
+pub fn emboss_frame_f32(
+    pixels: &mut [[f32; 4]],
+    width: usize,
+    height: usize,
+    grade: EmbossGrade,
+) -> bool {
+    let mut checkpoint = || Ok::<(), std::convert::Infallible>(());
+    matches!(
+        apply_emboss_f32_controlled(pixels, width, height, grade, &mut checkpoint),
+        Ok(true)
+    )
+}
+
+#[cfg(test)]
+fn emboss_frame_is_order_independent() {
+    // Two neighbouring highlights produce the same result whether the kernel is
+    // applied to the whole frame or to a padded region of it, because the read
+    // source is a snapshot rather than the partially written frame.
+    let mut once = vec![[0.25_f32, 0.25, 0.25, 1.0]; 6];
+    once[2] = [0.8, 0.8, 0.8, 1.0];
+    once[3] = [0.6, 0.6, 0.6, 1.0];
+    let mut twice = once.clone();
+    let grade = EmbossGrade::for_space(30.0, 2.0, 150.0, 0.0, WorkingColorSpace::LinearRec709)
+        .expect("grade");
+    assert!(emboss_frame_f32(&mut once, 6, 1, grade));
+    assert!(emboss_frame_f32(&mut twice, 6, 1, grade));
+    assert_eq!(once, twice);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
