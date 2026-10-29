@@ -677,6 +677,55 @@ mod tests {
         assert!((kernel.normalization() - 10.0).abs() <= 1.0e-6);
     }
 
+    /// Compare the recorded GPU box blur against the CPU kernel at the sizes
+    /// and radii that decide whether the GPU path is worth routing to.
+    ///
+    /// Run with `cargo test -p mondrian-renderer --lib report_spatial_gpu_throughput
+    /// -- --nocapture`. Numbers are wall-clock including upload and readback for
+    /// the GPU case, so they are an upper bound for a production loop that keeps
+    /// frames resident.
+    #[test]
+    fn report_spatial_gpu_throughput() {
+        let Ok(context) = block_on(crate::GpuContext::new()) else {
+            eprintln!("skipping GPU spatial throughput report: no GPU adapter available");
+            return;
+        };
+        for (width, height) in [(1280_u32, 720_u32), (1920, 1080), (3840, 2160)] {
+            let pixels = vec![[0.2_f32, 0.4, 0.6, 1.0]; (width * height) as usize];
+            for radius in [8.0_f32, 50.0] {
+                let mut cpu_pixels = pixels.clone();
+                let cpu_start = std::time::Instant::now();
+                assert!(box_blur::box_blur_frame_f32(
+                    &mut cpu_pixels,
+                    width as usize,
+                    height as usize,
+                    radius,
+                    1,
+                    BoxBlurDirection::HorizontalAndVertical,
+                    true,
+                ));
+                let cpu_elapsed = cpu_start.elapsed();
+                let gpu_start = std::time::Instant::now();
+                let _ = run_box_blur_on_gpu(
+                    &context,
+                    &pixels,
+                    width,
+                    height,
+                    radius,
+                    1,
+                    BoxBlurDirection::HorizontalAndVertical,
+                    true,
+                );
+                let gpu_elapsed = gpu_start.elapsed();
+                eprintln!(
+                    "box blur {width}x{height} r={radius}: cpu(1 thread) {:.1} ms, gpu(incl. upload+readback) {:.1} ms",
+                    cpu_elapsed.as_secs_f64() * 1000.0,
+                    gpu_elapsed.as_secs_f64() * 1000.0,
+                );
+            }
+        }
+    }
+
     #[test]
     fn box_blur_fractional_radius_matches_the_cpu_kernel() {
         let Ok(context) = block_on(crate::GpuContext::new()) else {
